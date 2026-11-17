@@ -52,9 +52,9 @@
 //!   that what the step integrates of a tone resolves its combined frequencies, not its beat (the forms' bandwidth with
 //!   the tones', spectral.rs).
 //! The step's time integral -- the kick -- is read on that state at the nodes of a
-//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: within the
-//! kick's share `QUADRATURE` of each component's size times the step, the old engine's rule -- no credit taken for a
-//! fast component's cancelling over the step, as the nodes follow the state), piece by piece between the step's jumps
+//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to the
+//! round-off of each component's size times the step -- no credit taken for a fast component's cancelling over the
+//! step, as the nodes follow the state; why not to a share, # The quadrature's tolerance), piece by piece between the step's jumps
 //! (# Jumps), and the survival's with it. These nodes meet
 //! no model and no hop. Their number still follows the
 //! bandwidth: the kick is a quotient by the norm, whose sum of exponentials under the forms' has no closed form (below).
@@ -93,14 +93,29 @@
 //! model contracts without forming G (`Middle::force`). With ρ_m the middle state's, (s_k, w_k, ρ_k) the quadrature's
 //! times from the middle, weights and densities, and ℓ_j the Lagrange polynomials of the step's three nodes s_j, they are
 //! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
-//! are in the Q_j, integrated within the kick's share, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
+//! are in the Q_j, integrated to the round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
-//! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
-//! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
-//! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). So does the survival's hazard, the same quotient (# Jumps): at
-//! rest from the bare ground state 2.5·10⁻⁸, 3.4·10⁻⁸ and 3.5·10⁻⁷ of ln N over a step at Δτ = 10, 50, 200, moving
-//! 1.6·10⁻⁵ of the hazard's integral at 200 -- a share that does not fall with the step, so that the doubling does not
-//! read it (tests). Without a decay nothing does.)
+//! of the size Γ/Δ times the excited share -- puts parts of the quotient at twice the forms' bandwidth and beyond (# The
+//! quadrature's tolerance). Taken to a share, the kick erred by a part of that ringing, measured 2·10⁻⁷ of the dipole
+//! kick at twenty linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200, and so did the survival's hazard, the same quotient
+//! (# Jumps): at rest from the bare ground state 2.5·10⁻⁸, 3.4·10⁻⁸ and 3.5·10⁻⁷ of ln N over a step at Δτ = 10, 50, 200,
+//! moving 1.6·10⁻⁵ of the hazard's integral at 200 -- a share that did not fall with the step, so that the doubling did
+//! not read it (tests). Without a decay nothing does.)
+//!
+//! # The quadrature's tolerance
+//! The nodes are laid to the round-off of each component, as the propagation takes Ĥ₀ (spectral.rs), not to a share of
+//! the target. Until 2026-11-17 they were laid at the kick's share `QUADRATURE` (the old engine's rule): an error per unit
+//! time that does not fall with the step and that the step's companion does not read -- a resonant two-level atom's
+//! survival over 4 µs without a jump (two states, the forms' bandwidth its Rabi frequency) erred by 7.9·10⁻², 2.4·10⁻² and
+//! 2.7·10⁻² of ln N = −76.6 at τ = 0.2, 0.1 and 0.05 µs, not falling, and by 1.2·10⁻⁵ at 0.025 µs, where the rule fell
+//! to its least; to the round-off by 1.9·10⁻⁴, 9.6·10⁻⁷, 2.4·10⁻⁸ and 2.2·10⁻⁹. Nor is a tolerance at what the
+//! propagation itself leaves enough: the kick's and the hazard's integrands are quotients by the norm, and a quotient of
+//! two sums of the forms' bandwidth B holds the norm's ringing at 2B, 3B, … -- its parts at the multiples of B fall with
+//! the ringing's relative size, not with the tolerance --, so that the Gauss rule's bound, which is of a component of
+//! bandwidth B, does not hold for it: laid at the propagation's remainder (10⁻⁷ a step on that atom at τ = 0.2 µs), the
+//! survival erred by 1.9·10⁻², the quotient's unresolved ringing; at 2B by 1.5·10⁻³; to the round-off by 1.9·10⁻⁴,
+//! falling with the step as above -- the rule's margin there takes the multiples of B (its error grows as (νw)^{2m}).
+//! How far the quotient reaches at a tolerance is not derived (BRIEF_TAU, tau.status.md).
 //!
 //! Why a quadrature and not a closed form. On the unnormalized state every form is a sum over the pairs of states of
 //! a slow factor times e^{−i(λ_b − λ_a*)s}, whose integral over the step is a closed form pair by pair (the moments
@@ -447,7 +462,7 @@ use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
 use crate::spectral::{Beat, Picture};
-use crate::units::{rounding, QUADRATURE, UNIT_ROUNDOFF};
+use crate::units::{rounding, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
 /// `Model` with the run's lights and the reference state. Each method is one model function; the integrator defines
@@ -1184,22 +1199,15 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
 // ---------------------------------------------------------------------------------------------------------------------
 // Quadrature within a tolerance.
 
-/// What a quadrature integrates its bandwidth to: the round-off (the path's moments, `Segment::moments`), or the kick's
-/// share (`QUADRATURE`: the kick's and the survival's quadratures on the propagation's states).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Within {
-    RoundOff,
-    Share,
-}
-
-/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes, weights) and its panel phases x_m: the largest ν w at which its
+/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes, weights) and its panel phase x_m: the largest ν w at which its
 /// error on a component e^{iνs} over a panel of width w, w (νw)^{2m} (m!)⁴/((2m + 1)((2m)!)³) (Davis & Rabinowitz
-/// 2.7.12), is within the tolerance times w -- the unit round-off, or the kick's share (`Within`): the panel a rule
-/// integrates an entire function of that bandwidth on to that tolerance of its size times the width.
+/// 2.7.12), is within the unit round-off times w (# The quadrature's tolerance): the panel a rule integrates an entire
+/// function of that bandwidth on to the round-off of its size times the width -- the path's moments
+/// (`Segment::moments`), the kick's and the survival's quadratures on the propagation's states.
 struct Rule {
     nodes: Vec<f64>,
     weights: Vec<f64>,
-    phases: [f64; 2],
+    phase: f64,
 }
 
 impl Rule {
@@ -1207,12 +1215,7 @@ impl Rule {
         let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
         let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
         let ln = ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
-        let phases = [UNIT_ROUNDOFF, QUADRATURE].map(|tolerance| ((tolerance.ln() + ln) / (2 * m) as f64).exp());
-        Rule { nodes, weights, phases }
-    }
-
-    fn phase(&self, within: Within) -> f64 {
-        self.phases[within as usize]
+        Rule { nodes, weights, phase: ((UNIT_ROUNDOFF.ln() + ln) / (2 * m) as f64).exp() }
     }
 }
 
@@ -1225,16 +1228,16 @@ fn rules() -> &'static [Rule] {
     RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
 }
 
-/// The rule and the panels over a width of an entire integrand of bandwidth ν within a tolerance (`Within`): the fewest
+/// The rule and the panels over a width of an entire integrand of bandwidth ν to the round-off (`Rule`): the fewest
 /// nodes (the smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m, of the
 /// rules of `nodes` nodes and more -- a rule of m nodes is exact for the polynomials of degree 2m − 1, which is what is
 /// asked of it where the bandwidth vanishes. Its node count is the propagation's states and the kick's sums
 /// (`propagate`, `count::impulse`). The rules are looked at from the smallest up as far as the first that takes one
 /// panel: every larger rule has more nodes than that one.
-fn plan(width: f64, bandwidth: f64, nodes: usize, within: Within) -> (&'static Rule, usize) {
+fn plan(width: f64, bandwidth: f64, nodes: usize) -> (&'static Rule, usize) {
     let mut least: Option<(&'static Rule, usize)> = None;
     for rule in rules().iter().filter(|rule| rule.nodes.len() >= nodes) {
-        let panels = ((bandwidth * width / rule.phase(within)).ceil() as usize).max(1);
+        let panels = ((bandwidth * width / rule.phase).ceil() as usize).max(1);
         if least.map_or(true, |(best, most)| rule.nodes.len() * panels < best.nodes.len() * most) {
             least = Some((rule, panels));
         }
@@ -1249,8 +1252,8 @@ fn plan(width: f64, bandwidth: f64, nodes: usize, within: Within) -> (&'static R
 /// nodes and more), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in
 /// their order (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's
 /// millions of nodes are never held at once.
-fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
-    let (rule, panels) = plan((b - a).abs(), bandwidth, nodes, within);
+fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+    let (rule, panels) = plan((b - a).abs(), bandwidth, nodes);
     let w = (b - a) / panels as f64;
     (0..panels).map(move |p| {
         let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == panels { b } else { a + (p + 1) as f64 * w });
@@ -1260,8 +1263,8 @@ fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl 
 
 /// The nodes and weights over [a, b] of an entire integrand of bandwidth ν within a tolerance, panel after panel
 /// (`panels`).
-fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, bandwidth, nodes, within).flat_map(|(_, nodes)| nodes)
+fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, f64)> {
+    panels(a, b, bandwidth, nodes).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1355,7 +1358,7 @@ impl Segment {
         if !(hi > lo) {
             return (one, two);
         }
-        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, Within::RoundOff) {
+        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS) {
             let k = self.at(t).1;
             for x in 0..3 {
                 one[x] += sign * w * k[x];
@@ -1667,7 +1670,7 @@ mod count {
 
 /// The node count of a quadrature over τ at a bandwidth (`plan`).
 fn nodes(tau: f64, bandwidth: f64) -> usize {
-    let (rule, panels) = plan(tau.abs(), bandwidth, FORMS, Within::Share);
+    let (rule, panels) = plan(tau.abs(), bandwidth, FORMS);
     rule.nodes.len() * panels
 }
 
@@ -1681,8 +1684,7 @@ fn root_states() -> f64 {
 /// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
 /// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
 /// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
-/// the time u it is launched from (none: no root priced); the strides' share at what that state forgets, h₀
-/// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
+/// the time u it is launched from (none: no root priced) --: the model's generator at the step's middle and, unless it
 /// is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes at the three
 /// nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums (`Sums`): the static
 /// group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each node at the phases
@@ -1744,7 +1746,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         hazard(decay, part, x.len()).max(0.0)
     });
     let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, rate);
+    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, start.map(|(x, _)| x));
     Ok(scale)
 }
 
@@ -1785,14 +1787,14 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 }
 
 /// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
-/// bandwidth within the kick's share (`Picture::between`: any time after the launch), their densities summed into
+/// bandwidth to the round-off (`Picture::between`: any time after the launch), their densities summed into
 /// `part` as the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a
 /// jump's root lies -- and, a span before the root, the kick's part of it. Returns it and the nodes taken.
 fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
-    for (u, w) in quadrature(from, to, bandwidth, FORMS, Within::Share) {
+    for (u, w) in quadrature(from, to, bandwidth, FORMS) {
         picture.between(u, &mut x[..n]);
         Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), part);
         nodes += 1;
@@ -2297,7 +2299,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     ///   any time from there on);
     /// - the frame's state read at the stops in the path's order, panel by panel: the nodes of a quadrature that
     ///   resolves the generator's own frequencies -- Gauss–Legendre from the piece's start to the step's end at the
-    ///   bandwidth of the forms on a state it propagates, within the kick's share (`panels`) --, each with its weight; the
+    ///   bandwidth of the forms on a state it propagates, to the round-off (`panels`) --, each with its weight; the
     ///   step's middle and its end, where the state is kept -- a node within the time's round-off of one of them is
     ///   it --, standing once the panel's survival is known. The times read are no stops: each is the state there from
     ///   the latest stop at or before it (`looked`), kept beside the stops and standing with them -- so the step is
@@ -2357,6 +2359,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let from = march.u;
             let launched = along.turned(&march.state.psi, from, true);
             picture.launch(from, &launched[..n]);
+            // The forms' bandwidth on the states this piece's state can hold (`spectral::Picture::launch`).
+            let bandwidth = picture.bandwidth;
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
             // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
             // the picture is moved or counted).
@@ -2371,7 +2375,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
-            for (b, nodes) in panels(from, h, bandwidth, FORMS, Within::Share) {
+            for (b, nodes) in panels(from, h, bandwidth, FORMS) {
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);
@@ -2521,7 +2525,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let size = n * n;
             if let Some(middle) = &middle {
                 if !done {
-                    for (u, w) in quadrature(march.u, h, 0.0, FORMS, Within::Share) {
+                    for (u, w) in quadrature(march.u, h, 0.0, FORMS) {
                         let s = u / h;
                         for (sum, l) in weights.iter_mut().zip([0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)]) {
                             *sum += w * l;
@@ -2537,7 +2541,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 let mut outside = [0.0; TONE];
                 if middle.is_some() {
                     for (a, b) in [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))) {
-                        for (u, w) in quadrature(a, b, tone.beat.abs(), FORMS, Within::Share) {
+                        for (u, w) in quadrature(a, b, tone.beat.abs(), FORMS) {
                             let (s, (sin, cos)) = (u / h, (tone.beat * u).sin_cos());
                             let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
                             for (k, part) in outside.iter_mut().enumerate() {
@@ -2814,7 +2818,7 @@ impl Price {
     /// The model's own part is the kept model's to scale (solve.rs `Formula::rate`).
     pub fn grown(&self, states: usize, ground: usize, bandwidth: f64) -> Price {
         let ratio = states as f64 / self.states as f64;
-        let quadrature = |bandwidth: f64| (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS, Within::Share).1);
+        let quadrature = |bandwidth: f64| (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS).1);
         let ((before, panels_before), (after, panels_after)) = (quadrature(self.bandwidth), quadrature(bandwidth));
         let (stopped, traced) = ((after + 2) as f64 / (before + 2) as f64, (1 + panels_after) as f64 / (1 + panels_before) as f64);
         let excited = states - ground;

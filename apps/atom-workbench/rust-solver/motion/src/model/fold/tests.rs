@@ -3514,11 +3514,14 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
 /// The decision times are the coarsest level's grid (DESIGN §11.3; adapt.rs # The decision times; BRIEF_STEP4A 4c,
 /// BRIEF_STEP4B (a)): a heavy two-level atom crossing a resonant standing wave (s = 0.3 a beam: 1.2 at the antinodes,
 /// where the fold with nothing explicit does not exist), no jump drawn (its survival the internal state's record), at the
-/// steps 0.2, 0.1, 0.05 and 0.025 µs, every level deciding at the ends of the cells of 0.4 µs alone, on its end state at
-/// its own point, the representation and the evaluation's choices held between. At 0.03–0.072 µm/µs: every level
+/// steps 0.2 µs to 0.00625 µs, halving, every level deciding at the ends of the cells of 0.4 µs alone, on its end state
+/// at its own point, the representation and the evaluation's choices held between. At 0.03–0.072 µm/µs: every level
 /// switches at the same decision times, no rise is forced between them, and the survival's differences between
-/// successive levels fall at the scheme's second order (their observed orders 2.3, 2.5; decided at the step's middle
-/// they were 2.9 and −1.8 with 7 of 16 levels' switch times alike, and with the series' sweeps the point's, 0.9 and 2.3).
+/// successive levels fall at the scheme's second order (their observed orders 2.30, 2.54, 1.68, 1.92; decided at the
+/// step's middle they were 2.9 and −1.8 over the first four levels with 7 of 16 levels' switch times alike, and with the
+/// series' sweeps the point's, 0.9 and 2.3; with the strides' exponentials truncated at a share, until 2026-11-17, the
+/// differences down to 0.0125 and to 0.00625 µs were 1.1·10⁻³ and 2.0·10⁻³, orders −3.7 and −0.8: spectral.rs,
+/// # The strides).
 /// At 0.10–0.24 µm/µs a cell crosses into where the fold does not exist: every switch is at a decision time or a rise a
 /// held middle asked for there (plan4 §2.4, R-b: counted and said), and no step is refused.
 #[test]
@@ -3538,7 +3541,7 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
     req.validate().unwrap();
     let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
     let hm = run.hbar_over_mass();
-    let taus = [0.2, 0.1, 0.05, 0.025];
+    let taus = [0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625];
     // A trajectory at the speed `speed` (its scale) and the step τ: the survival ln‖ψ‖² at the end, its switches' times
     // and whether each was a decision time, and the rises its held middles asked for.
     let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32) {
@@ -3587,6 +3590,78 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
         } else {
             assert!(forced > 0, "a fold that does not exist between two decisions rises");
         }
+    }
+}
+
+/// A resonant two-level atom crossing a standing wave on its explicit cluster, its survival against its flow at every
+/// step (BRIEF_TAU; spectral.rs, # The strides): the request of the grid's test (s = 0.3 a beam, heavy), the trap beam
+/// a plane wave over the path (its waist 10⁶ µm: its Gouy phase, 10⁻¹⁰ rad over the path at 10⁴ µm, put a floor of
+/// 4·10⁻⁹ under the errors), two slow trajectories from the bare ground state that hold the explicit cluster and draw
+/// no jump over 4 µs -- ln N = −76.6 and −74.4 --, at the steps 0.2 µs to 0.00625 µs. The exact survival is the flow
+/// of iψ̇ = Hψ, H = [[0, 2g cos kz], [2g cos kz, −iΓ/2]] on the path z₀ + vt (RK4, 4·10⁵ steps). At every level the
+/// error falls, and over the six it falls at the scheme's order at least (measured 1.1·10⁻⁷ to 2.8·10⁻¹¹ and
+/// 2.7·10⁻⁴ to 1.5·10⁻¹⁰: orders 2.4 and 4.2 on average). With the strides' exponentials truncated at the share of
+/// what the state forgets (until 2026-11-17) the first trajectory was within 10⁻⁷ at 0.2 to 0.025 µs, all on the
+/// decomposition, and 3.9·10⁻³ and 6.8·10⁻³ off at 0.0125 and 0.00625 µs, where the strides became the cheaper route.
+#[test]
+fn an_explicit_two_level_atom_s_survival_falls_to_its_flow_at_every_step() {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let (ee, s, end) = (1000.0, 0.3, 4.0);
+    let g = 0.5 * GAMMA * (s / 2.0_f64).sqrt();
+    let rays = [1.0, -1.0].map(|d| Ray { axis: 0, nu: ee, direction: [0.0, 0.0, d], couplings: vec![(17, 0, C64::real(g))] });
+    let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays, 1, true);
+    req.beams[0].waist = Some(1e6);
+    idle_decay(&mut req, GAMMA);
+    req.validate().unwrap();
+    let k = req.beams[0].wave_number;
+    let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    let hm = run.hbar_over_mass();
+    let taus = [0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625];
+    for (z0, v) in [(0.0, 0.01), (0.05, 0.012)] {
+        let exact = {
+            let f = |t: f64, y: [C64; 2]| -> [C64; 2] {
+                let c = 2.0 * g * (k * (z0 + v * t)).cos();
+                let hy = [y[1] * c, y[0] * c - C64::new(0.0, 0.5 * GAMMA) * y[1]];
+                [C64::new(hy[0].im, -hy[0].re), C64::new(hy[1].im, -hy[1].re)]
+            };
+            let steps = 400_000;
+            let dt = end / steps as f64;
+            let add = |y: [C64; 2], k: [C64; 2], s: f64| [y[0] + k[0] * s, y[1] + k[1] * s];
+            let mut y = [C64::ONE, C64::ZERO];
+            for j in 0..steps {
+                let t = j as f64 * dt;
+                let k1 = f(t, y);
+                let k2 = f(t + 0.5 * dt, add(y, k1, 0.5 * dt));
+                let k3 = f(t + 0.5 * dt, add(y, k2, 0.5 * dt));
+                let k4 = f(t + dt, add(y, k3, dt));
+                y = [0, 1].map(|a| y[a] + (k1[a] + k2[a] * 2.0 + k3[a] * 2.0 + k4[a]) * (dt / 6.0));
+            }
+            (y[0].norm_sqr() + y[1].norm_sqr()).ln()
+        };
+        let errors: Vec<f64> = taus
+            .iter()
+            .map(|&tau| {
+                let mut t = Trajectory::new(&run, 0, [0.0, 0.0, z0], [0.0, 0.0, v / hm], 7, 0);
+                t.threshold = 0.0;
+                let mut scratch = crate::step::Scratch::default();
+                for _ in 0..(end / tau).round() as usize {
+                    t = Midway::new(&run, &t, tau, None).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("no step refused").end;
+                    let c = run.cluster(t.cluster);
+                    assert!(c.states.len() > c.ground, "z₀ {z0}, τ {tau}: the explicit cluster held");
+                }
+                crate::linalg::norm_sqr(&t.psi).ln() - exact
+            })
+            .collect();
+        let order = (errors[0] / errors[taus.len() - 1]).abs().log2() / (taus.len() - 1) as f64;
+        println!("z₀ {z0} µm, v {v} µm/µs: ln N {exact:.6}, the errors {:?} over τ {taus:?}; the order over the six {order:.2}", errors.iter().map(|e| format!("{e:+.2e}")).collect::<Vec<_>>());
+        assert!(errors.windows(2).all(|e| e[1].abs() < e[0].abs()), "z₀ {z0}: the error falls at every level: {errors:?}");
+        assert!(order >= crate::units::ORDER as f64, "z₀ {z0}: the order over the six levels {order}");
     }
 }
 
