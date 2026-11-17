@@ -1014,7 +1014,7 @@ fn work_at<'a>(run: &'a Onefold, widest: Widest, rated: &'a [Pick<'a>]) -> impl 
         let rates: Vec<f64> = rated
             .par_iter()
             .map(|pick| match crate::step::priced(run, &pick.state.trajectory(), tau, &widest) {
-                Ok(stretches) => stretches.iter().map(|(cluster, price)| price.work(run.costs(*cluster))).sum::<f64>() / tau + pick.jumps * run.photon_work(),
+                Ok(stretches) => stretches.iter().map(|(_, price)| price.work(price.costs)).sum::<f64>() / tau + pick.jumps * stretches.first().map_or(0.0, |s| s.1.jump),
                 Err(_) => f64::INFINITY,
             })
             .collect();
@@ -1370,7 +1370,14 @@ fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Opt
 /// error is (`Booking::of`); the state's whole where its representation holds no decision on its cluster.
 fn booked_at(run: &Onefold, state: &State) -> Vec<Booking> {
     match run.profile(state.sample.cluster, &state.held) {
-        Some(profile) => profile.into_iter().map(Booking::of).collect(),
+        Some(profile) => {
+            let mut out: Vec<Booking> = profile.into_iter().map(Booking::of).collect();
+            // A cell with an unresolved step (unify2 §2.7): that account reads ρ = 1 at its states, said as it is.
+            if state.unresolved {
+                *out.last_mut().expect("the combination") = Booking::WHOLE;
+            }
+            out
+        }
         None => vec![Booking::WHOLE; READINGS.len() + 1],
     }
 }
@@ -2135,6 +2142,10 @@ struct State {
     held: crate::step::Held,
     dropped: f64,
     owed: f64,
+    /// Its next decision time, and whether a step of its cell was unresolved (step.rs `Trajectory::next`,
+    /// `Trajectory::unresolved_cell`: its account reads ρ = 1 there, `booked_at`).
+    next: f64,
+    unresolved: bool,
 }
 impl State {
     /// A trajectory's state as it stands.
@@ -2148,6 +2159,8 @@ impl State {
             held: t.held.clone(),
             dropped: t.dropped,
             owed: t.owed,
+            next: t.next,
+            unresolved: t.unresolved_cell,
         }
     }
 
@@ -2175,6 +2188,8 @@ impl State {
             owed: self.owed,
             model: [0.; crate::step::MODEL],
             unresolved_steps: 0,
+            next: self.next,
+            unresolved_cell: self.unresolved,
             held: self.held.clone(),
             forms: self.forms.clone(),
         }
@@ -2362,7 +2377,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// through at once.
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let sizes = [plan.times.len(), plan.reads.len()];
-    let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
+    let mut t = Trajectory::begun(model, start.state, start.r, start.kappa, SEED, index, plan.cell);
     // The time the run's fold is found not to exist for it (# Exits): at its start where its start lands nowhere.
     let nowhere = std::cell::Cell::new((!t.forms.held.iter().all(|x| x.is_finite()) || !t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite())).then_some(0.));
     let mut scratch = Scratch::default();
@@ -4216,7 +4231,7 @@ mod tests {
 
     /// A state at the time t of the trajectory `index` with `jumps` jumps: no step reads it (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, forms: crate::step::Forms::default(), held: crate::step::Held::default(), dropped: 0., owed: 0. }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, forms: crate::step::Forms::default(), held: crate::step::Held::default(), dropped: 0., owed: 0., next: 0., unresolved: false }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
@@ -4608,6 +4623,50 @@ mod tests {
         (KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt()
     }
 
+    /// The PGC3D_1ms trajectory that hung on 2cd4e77d (e2e.status R1: its decisions rose by the state's population read off
+    /// a forward that did not exist, up to all six nodes -- the tweezer's D1 F′ = 1, 2 among them, 25 THz off --, and a
+    /// stretch planned 1.56·10⁷ Taylor steps): the reference state at the trap's centre, three thermal speeds along z,
+    /// trajectory 9, τ = end/800, the cells 2τ. It runs to the plan's end (or its loss), each cell's decisions taking the
+    /// remedy their attribution names (unify2 §3.4; a fold that does not exist rises the node of the most mixing of the
+    /// part that diverges): the explicit states of every cluster it holds said, and none of the tweezer's line.
+    #[test]
+    fn the_pgc3d_trajectory_that_hung_runs_through_on_its_own_light_s_nodes() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let b = chief(&request);
+        let (request, run, trap) = scene_run("PGC3D_1ms", true, b);
+        let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+        let speed = thermal(&request, &run);
+        let mut plan = Plan::new(&[0., 100., 200.], trap.lab);
+        let tau = plan.end / 800.;
+        plan.cell = 2. * tau;
+        let kappa: V3 = [0., 0., 3. * speed];
+        let index = 9;
+        let mut t = Trajectory::begun(&run, b, trap.centre, kappa, SEED, index, plan.cell);
+        let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
+        let mut scratch = Scratch::default();
+        let started = std::time::Instant::now();
+        // The tweezer's line: the excited states its frequency drives from the ground (the request's couplings).
+        let trap_light = run.light().trap;
+        let tweezer: Vec<usize> = (0..crate::request::STATES - GROUND).filter(|&e| run.light().frequencies[trap_light].beams.iter().any(|&l| (0..GROUND).any(|g| request.beams[l].coupling[(GROUND + e, g)].abs() > 0.0))).collect();
+        let mut held: Vec<Vec<usize>> = vec![];
+        let mut ended = Ok(());
+        while t.time < plan.end && t.lost.is_none() {
+            let stop = t.time + 10.;
+            ended = adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &[], &mut |_, _| {}, &mut |_, _| {});
+            let explicit: Vec<usize> = run.cluster(t.cluster).states.iter().filter(|&&s| s >= GROUND).map(|&s| s - GROUND).collect();
+            if !held.contains(&explicit) {
+                held.push(explicit);
+            }
+            if ended.is_err() {
+                break;
+            }
+        }
+        eprintln!("the trajectory to {:.1} µs of {:.1} ({:?}; lost {:?}), {} jumps, {} unresolved steps, in {:.1} s; the explicit excited states of the clusters it held {held:?}; the tweezer's line {tweezer:?}", t.time, plan.end, ended, t.lost, t.jumps, t.unresolved_steps, started.elapsed().as_secs_f64());
+        assert!(ended.is_ok(), "it runs through");
+        assert!(held.iter().flatten().all(|e| !tweezer.contains(e)), "no node of the tweezer's line rises");
+    }
+
     /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its
     /// atoms at the trap's centre at rest and at one to three times the thermal speed along each lab axis, held (no jump,
     /// each its own representation: its start's), at two steps -- a trajectory's work a µs priced at every state is that
@@ -4633,7 +4692,8 @@ mod tests {
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap();
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap().work
             };
-            let made = over_the_run(&picks, picks.iter().map(|p| counted(&p.state.trajectory()) / tau + p.jumps * run.photon_work()), None);
+            let jump = |from: &Trajectory| crate::step::priced(&run, from, tau, &widest).unwrap().first().map_or(0.0, |s| s.1.jump);
+            let made = over_the_run(&picks, picks.iter().map(|p| counted(&p.state.trajectory()) / tau + p.jumps * jump(&p.state.trajectory())), None);
             let priced = work_at(&run, widest, &picks)(tau);
             eprintln!("R4_LIN_2 at {tau} µs: priced {priced:.6e}, counted {made:.6e} a µs");
             assert!((priced - made).abs() <= 1e-12 * made, "{tau}: {priced} against {made}");

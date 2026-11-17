@@ -399,7 +399,7 @@ impl Dynamics for Atom {
         u[0] = source;
         let amplitudes = [u; 3];
         draw(&[amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum::<f64>()])?;
-        Some(step::Emitted { landing: 0, wave_number: self.emission, amplitudes, kick })
+        Some(step::Emitted { landing: 0, wave_number: self.emission, amplitudes, kick, work: 0.0 })
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * self.hm * at.kappa.iter().map(|k| k * k).sum::<f64>() + self.trap.expansion(at.r).value
@@ -2546,10 +2546,10 @@ fn fitted(n: usize) -> super::Scratch {
 /// of a state at the middle (`Dynamics::readout`: an output's, not a step's). Returns the time of the step through its
 /// middle.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> f64 {
-    // The atoms whose middle rises (its fold does not exist there: `Midway::new`) are another cluster's: said, not timed.
-    let held: Vec<Trajectory> = starts.iter().filter(|s| step::Midway::new(model, s, tau, None).is_ok_and(|m| m.rises() == 0)).cloned().collect();
+    // The atoms whose middle does not exist (`Midway::new` refused) are said, not timed.
+    let held: Vec<Trajectory> = starts.iter().filter(|s| step::Midway::new(model, s, tau, None).is_ok()).cloned().collect();
     if held.len() < starts.len() {
-        eprintln!("{name}: {} of {} atoms' middles rise (their fold does not exist there)", starts.len() - held.len(), starts.len());
+        eprintln!("{name}: {} of {} atoms' middles do not exist", starts.len() - held.len(), starts.len());
     }
     if held.is_empty() {
         return 0.0;
@@ -3002,11 +3002,11 @@ fn a_scene_s_onefold_step_cost() {
 /// the tones and the counted hops' work.
 fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
     // A step between two decisions (adapt.rs # The decision times): the run's common one; a decision's own is apart. The
-    // atoms whose middle rises (its fold does not exist there: `Midway::new`) are another cluster's: said, not timed.
+    // atoms whose middle does not exist (`Midway::new` refused) are said, not timed.
     let midway = |from: &Trajectory| step::Midway::new(model, &Trajectory { threshold: 0.0, ..from.clone() }, tau, None).unwrap();
-    let held: Vec<Trajectory> = starts.iter().filter(|s| midway(s).rises() == 0).cloned().collect();
+    let held: Vec<Trajectory> = starts.iter().filter(|s| step::Midway::new(model, &Trajectory { threshold: 0.0, ..(*s).clone() }, tau, None).is_ok()).cloned().collect();
     if held.len() < starts.len() {
-        eprintln!("{name}: {} of {} atoms' middles rise (their fold does not exist there)", starts.len() - held.len(), starts.len());
+        eprintln!("{name}: {} of {} atoms' middles do not exist", starts.len() - held.len(), starts.len());
     }
     if held.is_empty() {
         return;
@@ -4043,7 +4043,7 @@ impl Dynamics for Lindblad {
         let third = (1.0_f64 / 3.0).sqrt();
         let u: step::Internal = self.jump_at(at.r).apply(psi).into_iter().map(|z| z * third).collect();
         draw(&[3.0 * crate::linalg::norm_sqr(&u)])?;
-        Some(step::Emitted { landing: 0, wave_number: 0.0, amplitudes: [u; 3], kick: [0.0; 3] })
+        Some(step::Emitted { landing: 0, wave_number: 0.0, amplitudes: [u; 3], kick: [0.0; 3], work: 0.0 })
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
         0.5 * RB * at.kappa.iter().map(|k| k * k).sum::<f64>()
@@ -4670,7 +4670,7 @@ impl Dynamics for Emitting {
         draw(&[psi[1].norm_sqr() + psi[2].norm_sqr()])?;
         let mut amplitudes: [step::Internal; 3] = std::array::from_fn(|_| step::Internal::zeros(psi.len()));
         (amplitudes[0][0], amplitudes[1][0]) = (psi[1], psi[2]);
-        Some(step::Emitted { landing: 0, wave_number: 8.0, amplitudes, kick: [0.0; 3] })
+        Some(step::Emitted { landing: 0, wave_number: 8.0, amplitudes, kick: [0.0; 3], work: 0.0 })
     }
     fn energy(&self, c: usize, at: &Point, psi: &[C64]) -> f64 {
         self.0.energy(c, at, psi)

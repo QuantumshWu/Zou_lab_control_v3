@@ -12,12 +12,21 @@
 //! critical points with the fold solved there by 1.3·10⁻² at D = 0.4 µs).
 //!
 //! # The samples
-//! m = max(3, ⌈ν_max D/π⌉ + 1) points evenly over the cell [0, D], made odd: its two ends and its middle (the coarse step's
-//! own three points) and no fewer than the light pattern's Nyquist count, its fastest beat along the path ν_max = max
-//! |(k_l − k_l′)·v| over two beams of one frequency at the cell's three points -- the only beat a column's inputs carry:
-//! a beam's own phase is its Doppler shift, exact in w_l, and two frequencies reach a column at two offsets, never one. π
-//! is the Nyquist spacing, two samples a period of the beat (the spectral routes' bound's origin): no tuned number. Every
-//! three consecutive samples are a panel (the coarse step's three points).
+//! m = max(p + 1, ⌈ν_max D/π⌉ + 1) points evenly over the cell [0, D], made odd, p = 2 the panels' degree
+//! (`Quadratic::POINTS` = p + 1 = 3; unify2 §10 item 4). Why p + 1 is the least, derived: what the look must see is an
+//! extremum of a bare input inside the cell -- the line's distance |d(t)| at its least, the pattern's intensity at its
+//! most, where a column's excitation x ∝ |N|²/|d|² peaks between two samples. An interpolant of degree one through two
+//! samples is monotone between them: its extremum is always an end, and a peak inside the cell is never seen (measured,
+//! the toy `lookahead.py`: the cell's ends alone missed 13–64 % of the cell's largest x). Degree two is the least whose
+//! interpolant has an extremum inside, at −b/2c (`Quadratic::critical`), and its p + 1 = 3 samples are the coarse step's
+//! own three points (its ends and its middle: the integrator's quadratic through the step's nodes, the same order). Degree
+//! two is also enough: along a cell the bare inputs are smooth on the step's scale (the step resolves them), so their
+//! cubic and higher terms are the step's own error order. Beyond that, no fewer than the light pattern's Nyquist count,
+//! its fastest beat along the path ν_max = max |(k_l − k_l′)·v| over two beams of one frequency at the cell's three points
+//! -- the only beat a column's inputs carry: a beam's own phase is its Doppler shift, exact in w_l, and two frequencies
+//! reach a column at two offsets, never one. π is the Nyquist spacing, two samples a period of the beat (the spectral
+//! routes' bound's origin). Every three consecutive samples are a panel (odd m: the panels tile the cell). No tuned
+//! number.
 //!
 //! # The critical points
 //! Every bare input is one quadratic over a panel (through its three samples): per column j, near block, kept row i and
@@ -142,9 +151,10 @@ fn solved<'a>(nb: &Near, cs: &'a [C64], i: usize, n: usize) -> &'a [C64] {
     &cs[k * n..(k + 1) * n]
 }
 
-/// The samples of a cell of width D whose pattern's fastest beat is ν (# The samples): max(3, ⌈νD/π⌉ + 1), odd.
+/// The samples of a cell of width D whose pattern's fastest beat is ν (# The samples): max(p + 1, ⌈νD/π⌉ + 1), odd -- p + 1
+/// a panel's points (`Quadratic::POINTS`), the least that sees an extremum inside the cell.
 pub(crate) fn samples(beat: f64, cell: f64) -> usize {
-    let m = ((beat * cell / std::f64::consts::PI).ceil() as usize + 1).max(3);
+    let m = ((beat * cell / std::f64::consts::PI).ceil() as usize + 1).max(Quadratic::POINTS);
     m + 1 - m % 2
 }
 
@@ -157,6 +167,9 @@ struct Quadratic {
 }
 
 impl Quadratic {
+    /// Its points, degree two plus one: the least degree whose interpolant has an extremum between its ends (# The samples).
+    const POINTS: usize = 3;
+
     /// Through (−1, y0), (0, y1), (1, y2).
     fn of(y0: C64, y1: C64, y2: C64) -> Quadratic {
         Quadratic { a: y1, b: (y2 - y0) * 0.5, c: (y0 + y2) * 0.5 - y1 }
@@ -247,6 +260,10 @@ impl Seen {
         let c = self.columns[j].c;
         self.near[b].shifts.iter().map(|&w| (c - C64::real(w) - kappa).abs()).fold(f64::INFINITY, f64::min)
     }
+    /// The far blocks' held response on column j, M_jj (§2.7: a far block left out reads its response).
+    pub(crate) fn far_response(&self, j: usize) -> f64 {
+        self.far_m.get(j).copied().unwrap_or(0.0)
+    }
 }
 
 /// The look over a cell (module documentation): the cell's width, the pattern's beat and the samples; the points seen, by
@@ -313,12 +330,18 @@ impl Look {
     }
     /// A near block's centring of column j at point k, x/(1 − x) (`centring`); zero where it centres no copy.
     pub(crate) fn centred(&self, k: usize, b: usize, j: usize) -> f64 {
-        let s = &self.seen[k];
+        self.centred_at(&self.seen[k], b, j)
+    }
+    /// The same at a point seen.
+    pub(crate) fn centred_at(&self, s: &Seen, b: usize, j: usize) -> f64 {
         self.centres[b].map_or(0.0, |(r0, z0)| centring(r0, z0, s.near[b].held, s.columns[j].c, &s.near[b].shifts))
     }
     /// A far block's centring of column j at point k (`centring`, as the forward reads it); zero where it is left out.
     pub(crate) fn centred_far(&self, k: usize, x: usize, j: usize) -> f64 {
-        let s = &self.seen[k];
+        self.centred_far_at(&self.seen[k], x, j)
+    }
+    /// The same at a point seen.
+    pub(crate) fn centred_far_at(&self, s: &Seen, x: usize, j: usize) -> f64 {
         let (r0, z0) = self.far_centres[x];
         if s.far[x].1.is_empty() { 0.0 } else { centring(r0, z0, s.far[x].0, s.columns[j].c, &s.far[x].1) }
     }
@@ -436,6 +459,12 @@ impl Fold {
         // The excitation's slope at every sample, by the fold one forward difference on: ε = √u h, the step of the least
         // error of a difference quotient (its truncation ε x″/2 against its rounding u x/ε, x varying on the samples'
         // scale h).
+        // A cell of no width (a decision's point alone, `Fold::worst`): its samples the point's, nothing between them.
+        if !(cell > 0.0) {
+            look.seen.truncate(1);
+            look.seen[0].chirp = vec![0.0; n];
+            return;
+        }
         let epsilon = crate::units::UNIT_ROUNDOFF.sqrt() * cell / (m - 1) as f64;
         for k in 0..m {
             let t = look.seen[k].t + epsilon;

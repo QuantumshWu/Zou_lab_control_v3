@@ -43,7 +43,6 @@
 //! (`decomposition` once, the sizes the same); a node risen or fallen (the target cluster's layout and sizes, `switch`
 //! once). No forward is made for a price, and none is kept. A held forward reads nothing (unify2 U1: the readings are a
 //! decision's, `Fold::accounts`), so the formula of a forward holding the evaluation has no reading in it.
-#![cfg_attr(not(test), allow(dead_code))] // Until the decision takes it (U3).
 use super::*;
 use crate::decide::COMPLEX;
 
@@ -85,6 +84,10 @@ pub(crate) struct NearSize {
     pub(crate) levels: Vec<usize>,
     pub(crate) omitted: Vec<bool>,
     pub(crate) all: usize,
+    /// Per level its K_qq − o's Schur parts' rows (`NearBasis::lfact`; none where it is singular) and its first row in the
+    /// stacked reference coupling (`NearBasis::rat`): what a decision reads of a level it leaves out (`Sizes::reading`).
+    pub(crate) level_parts: Vec<Vec<usize>>,
+    pub(crate) rat: Vec<usize>,
     /// Its coherence group (fold.rs `Fold::groups`).
     pub(crate) group: usize,
 }
@@ -333,6 +336,67 @@ impl Sizes {
         w[COMPRESSION] += (self.lit().count() * nn) as f64;
         w[NORMAL] = self.normal(route) + (2 * n * nn * (1 + self.layout.tones.len())) as f64;
         w
+    }
+
+    /// A decision's forward (`forward_within` deciding, on the decompositions it stands on), by phase: every part swept to
+    /// the most of `reads` (every row to it: a decision reads every part's ratio), every far block formed, and the accounts
+    /// read once per entry of `reads` -- the sweeps each read stood on, the series going on from the last between two
+    /// (`Fold::accounts`; `reading`). What it decomposes at the point is `decomposition`'s, `distant`'s and `site`'s; the
+    /// look over its cell is the look's own count (`look::Look::work`).
+    pub(crate) fn decision(&self, route: &Route, reads: &[usize]) -> [f64; 10] {
+        let most = reads.iter().copied().max().unwrap_or(2);
+        let mut every = self.clone();
+        every.far.iter_mut().for_each(|f| f.omitted = false);
+        every.near.iter_mut().for_each(|b| b.parts.iter_mut().for_each(|p| p.sweeps = most));
+        every.sweeps = most;
+        let mut w = every.forward(route);
+        w[READING] = reads.len() as f64 * (every.reading() + every.shares());
+        w
+    }
+
+    /// The walk's attribution at a read (proto.rs `shares_of`): every near block's kept response back from its Schur basis,
+    /// Σ_P s_P² a column.
+    pub(crate) fn shares(&self) -> f64 {
+        self.active().filter(|b| b.s() > 0).map(|b| b.parts.iter().map(|p| (p.rows * p.rows * self.n) as f64).sum::<f64>()).sum()
+    }
+
+    /// One read of a decision's accounts (`Fold::accounts`; the walk's attribution apart, `shares`): per near block the
+    /// levels it leaves out (`levels_left`), per
+    /// near block with a response its reuse and its centred copies row by row, per far block its centring and its leaving
+    /// out, and the ring per ground column over every near block's rows and lanes.
+    pub(crate) fn reading(&self) -> f64 {
+        let n = self.n;
+        let mut w: f64 = self.near.iter().map(|b| Sizes::levels_left(b, n)).sum();
+        w += self.active().map(|b| (b.s() * n * (b.lanes + b.parts_n() + 2)) as f64 / 4.0).sum::<f64>();
+        w += self.far.iter().map(|f| (f.terms + n) as f64 / 4.0).sum::<f64>();
+        w + self.near.iter().map(|b| b.s() * b.lanes).sum::<usize>() as f64 * self.ground as f64 / 4.0
+    }
+
+    /// A near block's levels left out read at a decision (proto.rs `bound_levels`, where every bound exists): the pairs'
+    /// forms on the levels, the kept rows' response and resolvent, per level its lanes' bounds, the stacked reference
+    /// coupling on the kept response, the levels' feeds, per level its first-order response on its Schur form (two
+    /// products and the back-substitution) and its lanes' remainder, and its potential's numerator.
+    fn levels_left(b: &NearSize, n: usize) -> f64 {
+        let q_of: Vec<usize> = (0..b.levels.len()).filter(|&q| b.omitted[q]).collect();
+        if q_of.is_empty() {
+            return 0.0;
+        }
+        let (nl, s, lanes, nq) = (b.levels.len(), b.s(), b.lanes, q_of.len());
+        let ln = lanes * n;
+        let mut w = (b.terms * nl * (nl + 2)) as f64;
+        w += (s * ln + ln * s / 4 + n * s + n * n / 4) as f64;
+        w += (nq * lanes * n * 3) as f64;
+        let stacked = q_of.iter().map(|&q| b.rat[q] + b.levels[q]).max().unwrap_or(0);
+        w += ((b.vectors * b.all + stacked * s) * n) as f64;
+        w += (nq * n * (nq + n)) as f64 / 4.0;
+        for &q in &q_of {
+            if !b.level_parts[q].is_empty() {
+                let m = b.levels[q];
+                w += 2.0 * b.level_parts[q].iter().map(|p| (p * p * n) as f64).sum::<f64>() + (2 * m * m * n) as f64;
+            }
+            w += (n * lanes) as f64;
+        }
+        w + (nq * n * b.vectors) as f64
     }
 
     /// S⁻¹ by Newton–Schulz (`inverse_root`) on the route's passes.
@@ -648,11 +712,11 @@ impl Sizes {
     }
 
     /// The once-only price of a switch to this representation (real multiply-adds): its decision's forward at the point
-    /// on decompositions made there (every block's: `decomposition`, `distant`), every part's sweeps to the decision's, the
-    /// state taken onto it (its left response) and its held forms -- the middle's tangent and the force of its static bar
-    /// and its tones' bars at the middle (run.rs `Middle::decide`).
+    /// on decompositions made there (every block's: `decomposition`, `distant`), every part swept twice and its accounts
+    /// read once (`decision`), the state taken onto it (its left response) and its held forms -- the middle's tangent and
+    /// the force of its static bar and its tones' bars at the middle (run.rs `Middle::decide`).
     pub(crate) fn switch(&self, route: &Route) -> f64 {
-        let forward: f64 = self.forward(route).iter().sum();
+        let forward: f64 = self.decision(route, &[self.sweeps.max(2)]).iter().sum();
         let made: f64 = self.site() + self.near.iter().map(|b| self.decomposition(b)).sum::<f64>() + self.far.iter().map(|f| self.distant(f)).sum::<f64>();
         let mut bars = vec![Cotangent { channel: 0, position: 0, tone: None }];
         bars.extend((0..self.layout.tones.len()).map(|m| Cotangent { channel: 1 + m, position: 0, tone: Some(m) }));
@@ -730,6 +794,11 @@ pub(crate) fn schur_count(m: usize) -> f64 {
 }
 
 impl Workspace {
+    /// The route predicted for the last forward's metric (`Route::predicted`).
+    pub(crate) fn route(&self) -> Route {
+        Route::predicted(self.step.metric.data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt(), self.n)
+    }
+
     /// The sizes of the representation the last forward stood on and of its evaluation (module documentation, # The
     /// sizes): its decompositions' parts in `cache`, each part's sweeps (`Near::upto`, within the forward's), the far
     /// blocks it left out; `sets` the landing sets (the ground states' partition).
@@ -767,6 +836,8 @@ impl Workspace {
                     levels: nb.levels.iter().map(Vec::len).collect(),
                     omitted: basis.map_or(vec![true; nl], |b| (0..nl).map(|q| !b.kept.contains(&q)).collect()),
                     all: nb.all,
+                    level_parts: basis.map_or(vec![vec![]; nl], |b| b.lfact.iter().map(|f| f.as_ref().map_or(vec![], |f| f.parts.iter().map(|p| p.0.len()).collect())).collect()),
+                    rat: basis.map_or(vec![0; nl], |b| b.rat.clone()),
                     group: fold.groups[nb.o],
                 }
             })
@@ -800,6 +871,8 @@ mod tests {
         multipart: usize,
         sparse: usize,
         normal: Vec<i64>,
+        decided: usize,
+        redecided: usize,
         decompositions: Vec<(f64, f64, f64, f64)>,
         lyapunov: Vec<i64>,
     }
@@ -928,7 +1001,7 @@ mod tests {
                 assert!(same(counted, formula), "{at}: the gradient counted {counted} against {formula}");
             }
             // The step's model and once-only parts at these sizes (real multiply-adds; the integrator's picture none here).
-            let picture = crate::step::Price { states: n, still: false, tau: 0.65, bandwidth: 0.0, nodes: 0, traces: 0, made: 0.0, stops: 0.0, sector: None, tones: 0, toned: [0.0; 2], centred: true, ended: true, middle: 0.0, scattering: 0.0 };
+            let picture = crate::step::Price { states: n, still: false, tau: 0.65, bandwidth: 0.0, nodes: 0, traces: 0, made: 0.0, stops: 0.0, sector: None, tones: 0, toned: [0.0; 2], centred: true, ended: true, middle: 0.0, scattering: 0.0, costs: [0.0; 3], jump: 0.0 };
             let step = sizes.step(&route, picture, 0.0);
             let dense: Vec<Span> = sizes.near.iter().flat_map(|b| b.parts.iter().map(|p| Span::dense(p.rows, p.sweeps))).collect();
             let reach: usize = sizes.near.iter().flat_map(|b| b.parts.iter().map(|p| p.reach)).sum();
@@ -1005,6 +1078,26 @@ mod tests {
             }
             tally.normal.push(route.normal as i64 - predicted.normal as i64);
             tally.lyapunov.push(lyapunov as i64 - 3 * predicted.lyapunov[0] as i64);
+            // A decision's forward at the point on what the held one stood on (`Sizes::decision`): where it read its accounts
+            // in one round and decomposed nothing at the point, item by item but S⁻¹'s passes (whole ones); else listed.
+            if k <= 3 {
+                let mut again = cache.clone();
+                let Some((counted, made, rounds, reads)) = fold.prototype(r, kappa, fold.thermal, &mut again, &mut ws).map(|s| (s.work, s.made, s.rounds, s.reads.clone())) else { continue };
+                if made > 0 || rounds > 1 {
+                    tally.redecided += 1;
+                    continue;
+                }
+                let sizes = ws.sizes(fold, &again, sets);
+                let x = ws.step.metric.data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+                let predicted = Route::predicted(x, n);
+                let formula = sizes.decision(&predicted, &reads);
+                for p in (0..10).filter(|&p| p != NORMAL) {
+                    assert!(same(counted[p], formula[p]), "{at}: the decision's forward's {} counted {} against the formula's {} (its reads at {reads:?} sweeps)", PHASES[p], counted[p], formula[p]);
+                }
+                let passes = (counted[NORMAL] - (formula[NORMAL] - sizes.normal(&predicted)) - if predicted.started { n3 } else { 0.0 }) / (3.0 * n3);
+                assert!(passes >= 1.0 && same(passes, passes.round()), "{at}: the decision's S⁻¹ count {} is no whole number of passes ({passes})", counted[NORMAL]);
+                tally.decided += 1;
+            }
         }
     }
 
@@ -1098,6 +1191,8 @@ mod tests {
             worst(&tally.normal),
             worst(&tally.lyapunov)
         );
+        println!("the decisions' forwards at the held points: {} equal item by item (one round, nothing decomposed there), {} listed apart (more rounds or a decomposition made: their sums)", tally.decided, tally.redecided);
+        assert!(tally.decided > 0, "a decision's forward checked");
         let sum = |f: &dyn Fn(&(f64, f64, f64, f64)) -> f64| tally.decompositions.iter().map(f).sum::<f64>();
         println!(
             "the decompositions made again ({} representations): the products {:.3e} and the fold's own matrices with the light at the point {:.3e} (equal), the Schur forms' QR {:.3e} against the estimate {:.3e} (complex multiply-adds in all)",

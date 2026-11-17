@@ -3519,6 +3519,77 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
     }
 }
 
+/// A scene's decisions take the remedy their accounts' attribution names (unify2 §3.4, §9 U3; B5: never by the state's
+/// population): on GMD1C_1ms's set, PGC3D_1ms's and R4_LIN_4's F = 1 sets with nothing explicit (`Choice::base`), a
+/// decision at each of 24 points of thermal orbits (`thermal_paths`, an atom at 0.1 m/s), the set's rises offered
+/// (`proto::Cell::nodes`). Of the decisions whose accounts read beyond the budget at the point (the evaluation found,
+/// `Step::ended`), by the kind that holds the most of the excess: GMD1C's are its levels left out -- a level joins (a
+/// decomposition made again with it) and nothing rises; R4 F = 1's three states rise (the D2 F′ = 2 node its series
+/// reads beyond the budget: Δ, the node's own drive, against the rows' distance); PGC3D F = 1's said. Every walk ends
+/// within the budget or with a rise.
+#[test]
+fn a_scene_s_decisions_take_the_attributed_remedy() {
+    use super::proto::{Cache, Cell, Taken};
+    let refs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs");
+    let path = |dir: &str, file: &str| refs.join(dir).join(file).to_string_lossy().into_owned();
+    let gmd = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\GMD1C_1ms.json".to_string();
+    let budget = unrate(crate::model::elim::share()).powi(2);
+    let kinds = ["series", "reuse", "centred", "left out", "ring"];
+    for (name, file, ground) in [("GMD1C_1ms", gmd, None), ("PGC3D_1ms", path("requests", "PGC3D_1ms.json"), Some(3)), ("R4_LIN_4", path("scenes", "R4_LIN_4.json"), Some(3))] {
+        if !std::path::Path::new(&file).exists() {
+            println!("{name}: its request is not at hand ({file}), skipped");
+            continue;
+        }
+        let req = crate::model::testing::scene(&file);
+        let choice = Choice::base(&req, vec![]).unwrap();
+        let sets = Fold::sets(&req, &choice).unwrap();
+        let set = sets.iter().find(|s| ground.is_none_or(|g| s.len() == g)).expect("the scene's set").clone();
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        let nodes: Vec<Taken> = Choice::candidates(&fold).into_iter().map(|(_, block, rows)| Taken { block, rows }).collect();
+        let kappa = kappa_of(&fold);
+        // Per dominant kind of the excess: (decisions, risen, joined, beyond after).
+        let mut tally = [[0usize; 4]; 5];
+        for orbit in thermal_paths(8) {
+            for r in orbit.iter().step_by(40).take(3) {
+                let mut ws = fold.prototype_workspace().unwrap();
+                ws.cell = Cell { nodes: nodes.clone(), sets: sets.clone(), ..Cell::default() };
+                let mut cache = Cache::default();
+                let exists = fold.prototype(*r, kappa, fold.thermal, &mut cache, &mut ws).map(|s| (s.ended, s.rise, s.grown, s.beyond));
+                let Some((ended, rise, grown, beyond)) = exists else {
+                    // Where the fold does not exist at the point its attribution names the node (`Fold::walk`).
+                    assert!(ws.cell.chosen.is_some(), "{name}: a fold that does not exist at {r:?} names its node");
+                    tally[0][0] += 1;
+                    tally[0][1] += 1;
+                    continue;
+                };
+                if ended.iter().sum::<f64>() <= budget {
+                    continue;
+                }
+                let k = (0..5).max_by(|&a, &b| ended[a].total_cmp(&ended[b])).unwrap();
+                tally[k][0] += 1;
+                tally[k][1] += usize::from(rise.is_some());
+                tally[k][2] += usize::from(grown > 0);
+                tally[k][3] += usize::from(beyond);
+                assert!(rise.is_some() || !beyond, "{name} at {r:?}: the walk ends within the budget or with a rise");
+            }
+        }
+        for (k, t) in tally.iter().enumerate().filter(|(_, t)| t[0] > 0) {
+            println!("{name} set {set:?}: beyond the budget by its {} {} times: risen {}, a level joined {}, beyond after {}", kinds[k], t[0], t[1], t[2], t[3]);
+        }
+        match name {
+            "GMD1C_1ms" => {
+                assert!(tally[3][0] > 0, "GMD1C: its levels left out read beyond the budget");
+                assert!(tally[3][1] == 0 && tally[3][2] == tally[3][0], "GMD1C: a level joins, nothing rises");
+            }
+            "R4_LIN_4" => {
+                let (beyond, risen) = tally.iter().fold((0, 0), |s, t| (s.0 + t[0], s.1 + t[1]));
+                assert!(beyond > 0 && risen == beyond, "R4 F = 1: its three states rise ({risen} of {beyond})");
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A resonant two-level atom at rest swept over saturations s = 0.1–0.6 (BRIEF_STEP3C item 1, BRIEF_LANDIMPL; DESIGN §11,
 /// M18, M15): its fold's series' ratio goes to one about s = 0.55 (proto.rs: none at and beyond it), and its ring reads
 /// beyond the share from s ≈ 0.24 (proto.rs # The ring; 3.0·10⁻² at s = 0.2, 7.9·10⁻² at 0.3): at s = 0.1 and 0.2 the
@@ -3570,10 +3641,12 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
 /// the first four levels with 7 of 16 levels' switch times alike, and with the series' sweeps the point's, 0.9 and 2.3;
 /// with the strides' exponentials truncated at a share, until 2026-11-17, the differences down to 0.0125 and to
 /// 0.00625 µs were 1.1·10⁻³ and 2.0·10⁻³, orders −3.7 and −0.8: spectral.rs, # The strides).
-/// At 0.10–0.24 µm/µs a cell crosses into where the fold does not exist: the held forward holds there, unresolved and
-/// booked (unify2 §2.7), no rise forced -- every level alike and at the second order too (unify2 U1: 2.06, 2.00, 2.00,
-/// 2.00, 40 of 40 alike, unresolved 9 ... 291 steps from the coarsest level to the finest; risen between decisions,
-/// plan4 R-b, 2.8 and −0.75 with 12 of 24 alike).
+/// At 0.10–0.24 µm/µs a cell crosses into where the fold does not exist: the decision at the cell's start sees it in its
+/// look over the cell (unify2 §4.2) and its walk raises the node there -- no step unresolved, every level alike and at
+/// the second order (U1, the held forward holding there unresolved: 2.06, 2.00, 2.00, 2.00, unresolved 9 ... 291 steps
+/// from the coarsest level to the finest; risen between decisions, plan4 R-b, 2.8 and −0.75 with 12 of 24 alike). No
+/// representation changes between the decision times: no such path (unify2 §4.3); the trajectories start with the look
+/// over their first cell (`Trajectory::begun`).
 #[test]
 fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_decision_times_alone() {
     use crate::step::{Dynamics, Midway, Trajectory};
@@ -3595,19 +3668,18 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
     // A trajectory at the speed `speed` (its scale) and the step τ: the survival ln‖ψ‖² at the end, its switches' times
     // and whether each was a decision time, and the rises its held middles asked for.
     let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32, usize, f64) {
-        let mut t = Trajectory::new(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, speed * (0.1 + 0.02 * i as f64) / hm], 7, i);
+        let mut t = Trajectory::begun(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, speed * (0.1 + 0.02 * i as f64) / hm], 7, i, cell);
         t.threshold = 0.0;
         let (per, steps) = ((cell / tau).round() as usize, (end / tau).round() as usize);
-        let (mut scratch, mut switches, mut rises) = (crate::step::Scratch::default(), vec![], 0);
+        let (mut scratch, mut switches, rises) = (crate::step::Scratch::default(), vec![], 0);
         for k in 1..=steps {
             let decision = (k % per == 0).then_some(cell);
             let before = t.cluster;
             let middle = Midway::new(&run, &t, tau, decision).expect("a step");
-            rises += middle.rises();
             t = middle.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).expect("no step refused").end;
             t.time = k as f64 * tau;
             if t.cluster != before {
-                switches.push((t.time, decision.is_some() || middle.rises() > 0));
+                switches.push((t.time, decision.is_some()));
             }
         }
         (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises, t.unresolved_steps, t.model[5])
@@ -3637,9 +3709,10 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
         }
         let orders: Vec<f64> = differences.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
         println!("speed {speed}: the survival's differences between successive levels {:?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}; unresolved steps per level {unresolved:?}, the model's error booked (ρ γ t, a trajectory's mean) {:?}", differences.iter().map(|d| format!("{d:.2e}")).collect::<Vec<_>>(), booked.iter().map(|b| format!("{b:.2e}")).collect::<Vec<_>>());
-        // At either speed (unify2 U1): a held forward holds -- where its series reads a ratio of one between two decisions
-        // it is unresolved there, booked, not risen --, so every level switches at the same decision times.
+        // At either speed (unify2 §4): every level switches at the same decision times, none between them (no such path),
+        // and the look at each cell's start sees where the fold ceases in the cell: no step unresolved.
         assert_eq!((apart, forced), (0, 0), "every level switches at the same decision times, none forced between");
+        assert!(unresolved.iter().all(|&u| u == 0), "no step unresolved: the look sees each cell's loss of existence at its start ({unresolved:?})");
         assert!(orders.iter().all(|&p| (1.5..3.0).contains(&p)), "the levels differ at the scheme's second order: {orders:?}");
     }
 }
@@ -3716,13 +3789,13 @@ fn an_explicit_two_level_atom_s_survival_falls_to_its_flow_at_every_step() {
     }
 }
 
-/// A jump's landing that does not exist rises and lands (BRIEF_COPIES item 1; step.rs `land`): a laser half a Γ below an
-/// excited state of ground state 5 (s = 0.2) that decays to ground state 0, which its own laser holds at resonance at
-/// s = 0.6 -- there the fold of 0's set with nothing explicit does not exist (its series' ratio at one) --: the photons of
-/// 5's set land in 0's, where the landing was no number (and the jump's loop, the bare state's photon and its landing
-/// again, went round on it). The landing rises the node that holds the most of the bare state (the rule of a
-/// trajectory's start) and lands there: at a point, and inside the steps of a run of the atom, every state a number and
-/// no step refused.
+/// A jump into a set whose fold does not exist there decides there and lands (BRIEF_COPIES item 1; unify2 §4.1: a jump
+/// into another set is a decision time; step.rs `Dynamics::entered`): a laser half a Γ below an excited state of ground
+/// state 5 (s = 0.2) that decays to ground state 0, which its own laser holds at resonance at s = 0.6 -- there the fold of
+/// 0's set with nothing explicit does not exist (its series' ratio at one) --: the photons of 5's set land in 0's. The
+/// landing on that fold is nowhere; the decision at the jump's point raises the node its attribution names (the part
+/// whose ratio is one, by its rows' response) and lands there: at a point, and inside the steps of a run of the atom,
+/// every state a number and no step refused.
 #[test]
 fn a_landing_that_does_not_exist_rises_and_lands() {
     use crate::step::{Dynamics, Landing, Midway, Trajectory};
@@ -3747,7 +3820,10 @@ fn a_landing_that_does_not_exist_rises_and_lands() {
     let at = crate::model::Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
     let held = crate::step::Held::default();
     let unit = |n: usize| -> Vec<C64> { (0..n).map(|i| if i == 0 { C64::ONE } else { C64::ZERO }).collect() };
-    assert_eq!(run.landed(folded, &at, None, &unit(1), &held), Landing::Risen(explicit), "no landing on 0's fold with nothing explicit: its rise");
+    assert_eq!(run.landed(folded, &at, None, &unit(1), &held), Landing::Nowhere, "no landing on 0's fold with nothing explicit");
+    let five = run.cluster_of(5);
+    let Some(Some((entered, _, _, _))) = run.entered(five, folded, &at, &unit(1), &held, 0.4) else { panic!("a jump from 5's set into 0's decides there") };
+    assert_eq!(entered, explicit, "the decision there raises the node");
     let Landing::On(landed) = run.landed(explicit, &at, None, &unit(run.cluster(explicit).states.len()), &held) else { panic!("the risen cluster's landing") };
     println!("the landing on the risen cluster: {:.4?}", &landed[..2]);
     // A jump at the point from 5's set.
@@ -3774,22 +3850,23 @@ fn a_landing_that_does_not_exist_rises_and_lands() {
 }
 
 /// The fall's criterion with its balance (BRIEF_STEP3C item 1, BRIEF_LANDIMPL item 2; DESIGN §11.4, run.rs # The nodes risen
-/// and fallen): a two-level atom's decisions (at Δ = −4Γ, s = 2: its fold within the share, its ring too) forced to flip --
-/// the explicit side priced dearer from the explicit cluster, cheaper from the folded one (the integrator's price is the
-/// decision's argument) --, the explicit state each time (1, 0): a fast part, its norm's change δp = 1 − ‖ψ′‖² the
-/// landing's (+0.014), what the fall books its ring E (proto.rs `Workspace::ring`, ≈ 2.5·10⁻⁴). Where an interval's share
-/// pays for a flip, (share − ρ)γΔt ≥ E, the node falls at every other decision; where it does not, the booked E stops the
-/// falls; and over all of it what the falls booked stays within the share of the time, ΣE ≤ Σ share·γΔt + the largest E.
+/// and fallen; unify2 §3.4, §6): a two-level atom's decisions (at Δ = −4Γ, s = 2: its fold within the share, its ring too)
+/// on its explicit cluster at the explicit state (1, 0), the fall priced by the formula over cells of 10⁶ steps (its saving
+/// pays for its switch), each fall followed by a decision on the folded side (within the share: no
+/// rise -- a rise is the walk's remedy alone --, its interval paid); the fall a fast part, its norm's change δp = 1 −
+/// ‖ψ′‖² the landing's (+0.014), what it books C_fall + |E_fall| (proto.rs `Workspace::ring`, ≈ 2.5·10⁻⁴). Where an
+/// interval's share pays for a fall, (share − ρ)γΔt ≥ C + |E|, the node falls at every decision on the explicit side;
+/// where it does not, the booked balance stops the falls; and over all of it what the falls booked stays within the
+/// share of the time, Σ(C + |E|) ≤ Σ share·γΔt + the largest.
 #[test]
 fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_them() {
-    use crate::step::{Dynamics, Middle as _, Offer};
+    use crate::step::{Dynamics, Middle as _};
     let share = crate::model::elim::share();
     let req = two_level(-4.0 * GAMMA, 2.0);
     let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
     let (folded, explicit) = two_level_clusters(&run, &req);
     let (r, t) = ([0.0; 3], 0.0);
-    let fewer = |o: &Offer| 1e9 * o.states as f64;
-    let more = |o: &Offer| 1e9 / o.states as f64;
+    let picture = 1e6;
     // The folded side's slow mode's decay rate γ; one fall of (1, 0) where the share pays for anything, its ring.
     let low = run.middle(folded, r, t, &crate::step::Held::default(), false);
     let path = low.path([0.0; 3], [0.0; 3]);
@@ -3799,7 +3876,7 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
     let n = run.cluster(explicit).states.len();
     let bare: Vec<C64> = (0..n).map(|i| if i == 0 { C64::ONE } else { C64::ZERO }).collect();
     let probe = run.middle(explicit, r, t, &crate::step::Held::default(), true);
-    let fell = probe.decide(&probe.path([0.0; 3], [0.0; 3]), &bare, 1e3 / gamma, 0.0, &fewer).switched.expect("a fall the share pays for");
+    let fell = probe.decide(&probe.path([0.0; 3], [0.0; 3]), &bare, 1e3 / gamma, 0.0, picture).switched.expect("a fall the share pays for");
     let (ring, norm) = (fell.dropped, 1.0 - crate::linalg::norm_sqr(&fell.psi));
     println!("the fall of (1, 0): its norm's change δp {norm:+.4e}, its ring {ring:.3e}");
     assert!(ring > 0.0 && ring < norm.abs(), "a fall books its ring, not its norm");
@@ -3809,7 +3886,7 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
         for _ in 0..20 {
             let high = run.middle(explicit, r, t, &crate::step::Held::default(), true);
             let path = high.path([0.0; 3], [0.0; 3]);
-            let fell = high.decide(&path, &bare, interval, owed, &fewer);
+            let fell = high.decide(&path, &bare, interval, owed, picture);
             owed = fell.owed;
             let Some(down) = fell.switched else { continue };
             owed = (owed + down.dropped).max(0.0);
@@ -3819,10 +3896,10 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
             largest = largest.max(down.dropped);
             let low = run.middle(folded, r, t, &crate::step::Held::default(), true);
             let path = low.path([0.0; 3], [0.0; 3]);
-            let rose = low.decide(&path, &down.psi, interval, owed, &more);
-            owed = (rose.owed + rose.switched.as_ref().map_or(0.0, |x| x.dropped)).max(0.0);
+            let stay = low.decide(&path, &down.psi, interval, owed, picture);
+            assert!(stay.switched.is_none(), "the folded side within the share: no rise");
+            owed = stay.owed;
             paid += share * gamma * 2.0 * interval;
-            assert_eq!(rose.switched.map(|x| x.cluster), Some(explicit), "the rise back");
         }
         println!("Δt {interval:.3e} µs (the share's pay {:.3e} an interval, the ring {ring:.3e}): {falls} falls of 20; booked {booked:.3e}, the share's {paid:.3e}", share * gamma * interval);
         assert!(if phase == 0 { falls == 20 } else { falls == 0 }, "falls where the share pays for them, none where not");

@@ -869,6 +869,13 @@ pub(crate) struct Step {
     /// Of `made`, those for a change of the kept levels.
     pub(crate) grown: usize,
     pub(crate) rounds: usize,
+    /// A decision's walk (`Fold::walk`): the sweeps each read of its accounts stood on (price.rs `Sizes::decision`), its
+    /// look's count (complex multiply-adds), whether a column stays beyond the budget with no remedy offered, and the rise
+    /// it chose (an index of the cell's nodes, `Cell::nodes`).
+    pub(crate) reads: Vec<usize>,
+    pub(crate) look: f64,
+    pub(crate) beyond: bool,
+    pub(crate) rise: Option<usize>,
     pub(crate) work: [f64; 10],
     pub(crate) ticks: [u64; 10],
     pub(crate) sweep_work: Vec<f64>,
@@ -946,6 +953,11 @@ pub(crate) struct Workspace {
     gradient: Gradient,
     /// The left response's whole at the last forward (`Fold::prototype_left`).
     landing: Landing,
+    /// What a decision prices and looks over (`Cell`; the run's, set before a decision), the look's buffers, and the last
+    /// forward's point (r, κ).
+    pub(crate) cell: Cell,
+    look: Option<Box<look::Look>>,
+    point: ([f64; 3], [f64; 3]),
     /// A column's rows of the ring's reading (`landing_ring`): the near blocks' kept rows and the far blocks.
     rings: Vec<Ring>,
 }
@@ -2785,6 +2797,10 @@ impl Fold {
                 made: 0,
                 grown: 0,
                 rounds: 0,
+                reads: vec![],
+                look: 0.0,
+                beyond: false,
+                rise: None,
                 work: [0.0; 10],
                 ticks: [0; 10],
                 sweep_work: vec![],
@@ -2794,6 +2810,9 @@ impl Fold {
             rotating,
             gradient: Gradient::default(),
             landing: Landing::default(),
+            cell: Cell::default(),
+            look: None,
+            point: ([0.0; 3], [0.0; 3]),
             rings: Vec::with_capacity(near_rows + far_len),
         })
     }
@@ -3594,6 +3613,7 @@ impl Fold {
         }
         ws.noded = false;
         ws.landing.made = None;
+        ws.point = (r, kappa);
         lap(PLACE, &mut clock, &mut tick);
         if cache.near.len() != ws.near.len() || cache.far.len() != ws.far.len() {
             cache.near = vec![None; ws.near.len()];
@@ -3616,6 +3636,8 @@ impl Fold {
         let mut evaluation = std::mem::take(&mut cache.evaluation);
         let (started, mut ended) = (evaluation.kinds, None);
         let mut rounds = 0;
+        ws.step.reads.clear();
+        (ws.step.look, ws.step.beyond, ws.cell.chosen) = (0.0, false, None);
         let (ratio, swept) = 'rounds: loop {
             rounds += 1;
             self.bases(r, kappa, cache, ws, &mut site, &mut work[REFRESH])?;
@@ -3642,8 +3664,9 @@ impl Fold {
                 }
                 // The decision's accounts and the evaluation they choose (# The decisions).
                 self.accounts(cache, ws, &evaluation, energy, done, &mut work[READING]);
+                ws.step.reads.push(done);
                 ended.get_or_insert_with(|| worst_kinds(&ws.accounts, &ws.den, n));
-                let next = self.allocate(cache, ws, &mut evaluation, energy, done, &mut work[READING]);
+                let next = self.walk(cache, ws, &mut evaluation, done, &mut work[READING]);
                 lap(READING, &mut clock, &mut tick);
                 match next {
                     Next::Done => break 'rounds (last_ratio(&ws.near, cache, &ws.den, done, n), done),
@@ -3747,6 +3770,7 @@ impl Fold {
         step.rounds = rounds;
         step.work = *work;
         step.ticks = tick;
+        ws.step.rise = ws.cell.chosen;
         cache.evaluation = evaluation;
         Some(())
     }
@@ -4110,137 +4134,226 @@ impl Fold {
         *work += near.iter().map(|nb| nb.s * nb.shifts.len()).sum::<usize>() as f64 * self.ground.len() as f64 / 4.0;
     }
 
-    /// The evaluation a decision's accounts choose within one budget, s² = unrate(share)² in every column read (unify2
-    /// §2.6; U1: the run's rule unchanged -- its accounts combined against the share --, prices and the walk U2's, U3's).
-    /// A part whose last ratio reads at or above one is read again on a third sweep; there still, the fold does not
-    /// exist at the point (the one exit). The accounts no remedy of the evaluation lowers -- the ring's, a centring or a
-    /// reuse already made again at the point -- hold their part of the budget; the others share what is left of it (the
-    /// whole budget where they hold it all: the run rises, the evaluation within the share still). While a column's
-    /// share is exceeded, the remedy of the account that holds the most of it: a series part one sweep more, a near block
-    /// made again at the point for its reuse or its centred copies, a far block for its centring (each once a decision),
-    /// a level left out joining, a far block left out taken in. A block made again lets go the kept levels that keep
-    /// every column within, the least first (not one joined in this decision). Then the cheaper evaluations that keep
-    /// every column within, the least first: a part one sweep less, a far block left out. Nothing to make again and no
-    /// sweep beyond those made: done -- its readings the step's (ρ = rate(√max_j Σ_k ρ²_kj), and by kind at that column).
+    /// The decision's walk on its accounts (unify2 §3.4; # The decisions): one budget, s² = unrate(share)² in every column
+    /// read, against each account's worst over the cell (`Fold::worst`: the point's reading times its profile along the
+    /// look, §2.7, §4.2). A part whose last ratio reads one is read on a third sweep; there still the fold does not exist
+    /// at the point -- the node its attribution names rises (`Cell::chosen`), none where none is offered.
+    ///
+    /// The menu: every account's remedies, each a pair (Δρ² in the column, Δ the cell's price) -- the price the formula of
+    /// the sizes the remedy leaves (price.rs `Sizes::step` over the cell's D/τ steps and its once-only: a decomposition
+    /// made again, a switch), no forward made for it: a series part one sweep more (its ratio's next term), a level left
+    /// out joining (its account none; its block decomposed again), a block decomposed again for its reuse or its centred
+    /// copies (theirs none at the point), a far block taken in (its centring's for its whole response), and every node P
+    /// may take (`Cell::nodes`: Q → P, the accounts attributed to it none -- a level's own, its rows' share of its block's
+    /// series, reuse, centring and ring, a far block's rows' share of its). While a column is beyond the budget, the
+    /// remedy that takes the most of that column's ρ² per unit price (a remedy that saves takes it at any price); the
+    /// rows' share is the response's, never the state's population (B5). A rise ends the walk (the run takes the state
+    /// onto its cluster, where that cluster's decision walks on). Then, every column within at its worst point, the
+    /// cheaper evaluations that keep it so, the least ρ² added per unit price saved first: a part one sweep less, a far
+    /// block left out; a block decomposed again lets go a kept level where what the cell saves pays for its decomposing
+    /// (its account its rows' response, the first order: unify2 §3.4). A tie by the accounts' and the nodes' fixed order.
+    /// Each remedy is taken at most once a decision (a part one sweep beyond those made, read before the next): the walk
+    /// ends. Its readings the step's (ρ = rate(√max_j Σ_k ρ²_kj) at the point, and by kind at that column).
     #[allow(clippy::too_many_arguments)]
-    fn allocate(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, energy: f64, done: usize, work: &mut f64) -> Next {
+    fn walk(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, done: usize, work: &mut f64) -> Next {
         let n = ws.n;
         let budget = unrate(crate::model::elim::share()).powi(2);
-        let Workspace { near, mid, h, den, scratch, per, accounts, decision, tm, .. } = &mut *ws;
-        let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
-        let read: Vec<usize> = (0..n).filter(|&j| den[j] > floor).collect();
-        let last = last_ratio(near, cache, den, done, n);
-        if last >= 1.0 {
-            return if done < 3 { Next::Sweeps(3) } else { Next::Nowhere };
+        let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
+        let read: Vec<usize> = (0..n).filter(|&j| ws.den[j] > floor).collect();
+        if last_ratio(&ws.near, cache, &ws.den, done, n) >= 1.0 {
+            if done < 3 {
+                return Next::Sweeps(3);
+            }
+            let chosen = self.failed(cache, ws, done, work);
+            ws.cell.chosen = chosen;
+            return Next::Nowhere;
         }
+        let mut worst = self.worst(cache, ws, evaluation, done, work);
+        // Where the look's pass 0 says the fold does not exist at the point itself (one P column: the fold's own root),
+        // the node holding that column's response rises, as where the series' ratio reads one.
+        if ws.look.as_ref().and_then(|l| l.ceases()).is_some_and(|(t, _)| t == 0.0) {
+            let mixing = mixings(&ws.near, &ws.far, cache, &ws.hbase, &ws.cell.nodes, n, work);
+            ws.cell.chosen = most_mixed(&mixing, &ws.cell.nodes, |_| true);
+            return Next::Nowhere;
+        }
+        let pricing = ws.cell.clone();
+        let size = ws.den.iter().sum::<f64>();
+        let shares = shares_of(&ws.near, cache, n, work);
+        let attributed = |a: &Account, node: &Hold| -> Vec<f64> {
+            match (a.item, node) {
+                (Item::Omitted { block, level }, Hold::Near { block: x, level: q }) if block == *x && level == *q => vec![1.0; n],
+                (Item::Series { block, part }, Hold::Near { block: x, level: q }) if block == *x => (0..n).map(|j| shares[block].part(*q, part, j)).collect(),
+                (Item::Reuse { block } | Item::Centred { block, far: false } | Item::Ring { block, far: false }, Hold::Near { block: x, level: q }) if block == *x => (0..n).map(|j| shares[block].level(*q, j)).collect(),
+                (Item::Centred { block, far: true } | Item::Left { block } | Item::Ring { block, far: true }, Hold::Far { block: x, share }) if block == *x => vec![*share; n],
+                _ => vec![0.0; n],
+            }
+        };
+        let holds: Vec<Option<Hold>> = pricing.nodes.iter().map(|node| hold_of(&ws.near, &ws.far, node)).collect();
+        // The prices: the sizes the decision's forward stands on with the evaluation held, the cell's (S⁻¹'s route by the
+        // metric's size, Σ_j W_j).
+        let sizes = held_sizes(ws.sizes(self, cache, &pricing.sets), evaluation);
+        let cell = |s: &price::Sizes| -> f64 { pricing.price(s, &price::Route::predicted(size, s.n)) };
+        let here = cell(&sizes);
+        let total = |worst: &[Vec<f64>], accounts: &[Account], j: usize| accounts.iter().zip(worst).filter(|(a, _)| a.on).map(|(_, w)| w[j]).sum::<f64>();
         let remedied = |a: &Account, decision: &Decision| match a.item {
             Item::Series { .. } | Item::Omitted { .. } | Item::Left { .. } => true,
             Item::Reuse { block } | Item::Centred { block, far: false } => !decision.fresh[block] && !decision.near[block],
             Item::Centred { block, far: true } => !decision.fresh_far[block] && !decision.far[block],
             Item::Ring { .. } => false,
         };
-        // Per column what the evaluation's accounts may hold: the budget less what the others hold, the whole where they
-        // hold it all; and what they hold.
-        let shares = |accounts: &[Account], decision: &Decision| -> (Vec<f64>, Vec<f64>) {
-            let (mut held, mut limit) = (vec![0.0; n], vec![0.0; n]);
-            for j in 0..n {
-                let fixed: f64 = accounts.iter().filter(|a| a.on && !remedied(a, decision)).map(|a| a.squares[j]).sum();
-                held[j] = accounts.iter().filter(|a| a.on && remedied(a, decision)).map(|a| a.squares[j]).sum();
-                limit[j] = if fixed > budget { budget } else { budget - fixed };
-            }
-            (held, limit)
-        };
-        let (mut held, mut limit) = shares(accounts, decision);
         let (mut more, mut again) = (done, false);
+        // While a column is beyond the budget: the remedy of the most ρ² per unit price there.
         loop {
-            let Some(&j) = read.iter().max_by(|&&a, &&b| (held[a] - limit[a]).total_cmp(&(held[b] - limit[b]))) else { break };
-            if held[j] <= limit[j] {
+            let Some(&j) = read.iter().max_by(|&&a, &&b| total(&worst, &ws.accounts, a).total_cmp(&total(&worst, &ws.accounts, b))) else { break };
+            if total(&worst, &ws.accounts, j) <= budget {
                 break;
             }
-            // A part goes one sweep beyond those made at a time: its next ratio read before the next.
-            let can = |a: &Account| remedied(a, decision) && !matches!(a.item, Item::Series { block, part } if evaluation.parts[block][part] > done);
-            let Some(k) = (0..accounts.len()).filter(|&k| accounts[k].on && accounts[k].squares[j] > 0.0 && can(&accounts[k])).max_by(|&a, &b| accounts[a].squares[j].total_cmp(&accounts[b].squares[j])) else { break };
-            match accounts[k].item {
-                Item::Series { block, part } => {
+            // (removed, price, remedy); the account's remedies, then the nodes'.
+            let mut best: Option<(f64, f64, Remedy)> = None;
+            let mut offer = |removed: f64, price: f64, remedy: Remedy| {
+                if !(removed > 0.0) {
+                    return;
+                }
+                let slope = |(r, p): (f64, f64)| if p <= 0.0 { f64::INFINITY } else { r / p };
+                let better = best.as_ref().is_none_or(|b| {
+                    let (s, t) = (slope((removed, price)), slope((b.0, b.1)));
+                    s > t || (s == t && removed > b.0)
+                });
+                if better {
+                    best = Some((removed, price, remedy));
+                }
+            };
+            // The evaluation's remedies lead to the budget only where what none of them lowers -- the ring, a reuse or a
+            // centring already made again here -- is within it: else the column's way within is a node's rise alone (the
+            // walk goes toward the feasible, unify2 §3.4: every node in P reads none). But a series part's own rest beyond
+            // the whole budget is read on (more sweeps) whatever the rest: its convergence is the fold's existence (§2.3),
+            // which two changes may not tell -- a resonant standing wave's ratio read 0.52 there, the fold's own 1.06.
+            let fixed: f64 = ws.accounts.iter().zip(&worst).filter(|(a, _)| a.on && !remedied(a, &ws.decision)).map(|(_, w)| w[j]).sum();
+            for (k, a) in ws.accounts.iter().enumerate() {
+                let w = worst[k][j];
+                let open = fixed <= budget || (matches!(a.item, Item::Series { .. }) && w > budget);
+                if !(open && a.on && w > 0.0 && remedied(a, &ws.decision)) {
+                    continue;
+                }
+                match a.item {
+                    Item::Series { block, part } if evaluation.parts[block][part] <= done => {
+                        let p = evaluation.parts[block][part] + 1;
+                        let next = self.series_worst(cache, ws, block, part, p, done, j);
+                        let mut s = sizes.clone();
+                        set_sweeps(&mut s, block, part, p);
+                        offer(w - next, cell(&s) - here, Remedy::Sweep(k));
+                    }
+                    Item::Series { .. } => {}
+                    Item::Reuse { block } | Item::Centred { block, far: false } => offer(w, pricing.once(sizes.decomposition(&sizes.near[block]) + sizes.site()), Remedy::Refresh(block)),
+                    Item::Centred { block, far: true } => offer(w, pricing.once(sizes.distant(&sizes.far[block]) + sizes.site()), Remedy::Distant(block)),
+                    Item::Omitted { block, level } => {
+                        let s = joined(&sizes, block, level);
+                        offer(w, cell(&s) - here + pricing.once(s.decomposition(&s.near[block]) + s.site()), Remedy::Join(block, level));
+                    }
+                    Item::Left { block } => {
+                        let Some(c) = ws.accounts.iter().position(|a| a.item == Item::Centred { block, far: true }) else { continue };
+                        let mut s = sizes.clone();
+                        s.far[block].omitted = false;
+                        offer(w - worst[c][j], cell(&s) - here, Remedy::TakeIn(block));
+                    }
+                    Item::Ring { .. } => {}
+                }
+            }
+            for (m, hold) in holds.iter().enumerate() {
+                let Some(hold) = hold else { continue };
+                let removed: f64 = ws.accounts.iter().zip(&worst).filter(|(a, _)| a.on).map(|(a, w)| w[j] * attributed(a, hold)[j]).sum();
+                let s = risen(&sizes, hold, &pricing.nodes[m]);
+                offer(removed, cell(&s) - here + s.switch(&price::Route::predicted(size, s.n)), Remedy::Rise(m));
+            }
+            let Some((_, _, remedy)) = best else { break };
+            match remedy {
+                Remedy::Sweep(k) => {
+                    let Item::Series { block, part } = ws.accounts[k].item else { unreachable!() };
                     let p = evaluation.parts[block][part] + 1;
                     evaluation.parts[block][part] = p;
                     more = more.max(p);
-                    let np = series_parts(&near[block], cache.near_at(block));
+                    let np = series_parts(&ws.near[block], cache.near_at(block));
+                    let Workspace { near, den, accounts, .. } = &mut *ws;
                     series_squares(&near[block], np, part, p, done, den, floor, n, &mut accounts[k].squares);
+                    worst[k] = (0..n).map(|j| self.series_worst(cache, ws, block, part, p, done, j)).collect();
                 }
-                Item::Reuse { block } | Item::Centred { block, far: false } => {
-                    decision.near[block] = true;
+                Remedy::Refresh(x) => {
+                    ws.decision.near[x] = true;
                     again = true;
                 }
-                Item::Centred { block, far: true } => {
-                    decision.far[block] = true;
+                Remedy::Distant(x) => {
+                    ws.decision.far[x] = true;
                     again = true;
                 }
-                Item::Omitted { block, level } => {
-                    let kept = decision.kept[block].get_or_insert_with(|| cache.near_at(block).kept.clone());
-                    kept.push(level);
+                Remedy::Join(x, q) => {
+                    let kept = ws.decision.kept[x].get_or_insert_with(|| cache.near_at(x).kept.clone());
+                    kept.push(q);
                     kept.sort_unstable();
-                    decision.joined[block].push(level);
+                    ws.decision.joined[x].push(q);
                     again = true;
                 }
-                Item::Left { block } => {
-                    evaluation.far[block] = false;
-                    for a in accounts.iter_mut() {
+                Remedy::TakeIn(x) => {
+                    evaluation.far[x] = false;
+                    for a in ws.accounts.iter_mut() {
                         match a.item {
-                            Item::Left { block: b } if b == block => a.on = false,
-                            Item::Centred { block: b, far: true } if b == block => a.on = true,
+                            Item::Left { block } if block == x => a.on = false,
+                            Item::Centred { block, far: true } if block == x => a.on = true,
                             _ => {}
                         }
                     }
                 }
-                Item::Ring { .. } => unreachable!(),
+                Remedy::Rise(m) => {
+                    ws.cell.chosen = Some(m);
+                    break;
+                }
             }
             // What a block made again leaves is its own (the reuse and its centred copies' none at the point, a level joined
             // none): read so until the forward made again reads it.
-            for a in accounts.iter_mut() {
+            for (a, w) in ws.accounts.iter_mut().zip(worst.iter_mut()) {
                 let gone = match a.item {
-                    Item::Reuse { block } | Item::Centred { block, far: false } => decision.near[block] || decision.kept[block].is_some(),
-                    Item::Centred { block, far: true } => decision.far[block],
-                    Item::Omitted { block, level } => decision.joined[block].contains(&level),
+                    Item::Reuse { block } | Item::Centred { block, far: false } => ws.decision.near[block] || ws.decision.kept[block].is_some(),
+                    Item::Centred { block, far: true } => ws.decision.far[block],
+                    Item::Omitted { block, level } => ws.decision.joined[block].contains(&level),
                     _ => false,
                 };
                 if gone {
                     a.squares.iter_mut().for_each(|x| *x = 0.0);
+                    w.iter_mut().for_each(|x| *x = 0.0);
                 }
             }
-            (held, limit) = shares(accounts, decision);
+        }
+        ws.step.beyond = ws.cell.chosen.is_none() && read.iter().any(|&j| total(&worst, &ws.accounts, j) > budget);
+        if ws.cell.chosen.is_some() {
+            return self.decided(ws, evaluation, &read, Next::Done);
         }
         if again {
-            // The blocks made again let go the kept levels that keep every column within (on the trial bounds of each left
-            // out with those already out: `bound_levels`), the least first; their parts' sweeps are the next round's (another
-            // decomposition's: `Evaluation::fit`).
-            let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
-            for x in 0..near.len() {
-                if !(decision.near[x] || decision.kept[x].is_some()) {
-                    continue;
-                }
-                if near[x].nd > 0 {
+            // A block made again lets go the kept levels whose response its cell does not pay for: each one's account its
+            // rows' response (the first order), where every column stays within and the cell's price falls, the least
+            // added per unit saved first (not one joined in this decision; a block with exact copies keeps every level).
+            let mut held: Vec<f64> = (0..n).map(|j| total(&worst, &ws.accounts, j)).collect();
+            for x in 0..ws.near.len() {
+                if !(ws.decision.near[x] || ws.decision.kept[x].is_some()) || ws.near[x].nd > 0 {
                     continue;
                 }
                 let basis = cache.near_at(x);
-                let mut trials: Vec<(f64, usize, Vec<f64>)> = vec![];
-                for &q in basis.kept.iter().filter(|q| !decision.joined[x].contains(q)) {
-                    let (om, sz, bk, sh) = &mut tm.trial;
-                    om.clear();
-                    om.extend_from_slice(&per[x].0);
-                    om[q] = true;
-                    if bound_levels(&near[x], basis, om, mid, h, sz, bk, sh, &mut scratch[x].bound, n, work).is_ok() {
-                        let squares: Vec<f64> = (0..n).map(|j| if den[j] > floor { (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j] + pot(2.0 * sh[q * n + j]) } else { 0.0 }).collect();
-                        trials.push((read.iter().map(|&j| squares[j]).fold(0.0, f64::max), q, squares));
-                    }
+                let mut kept = ws.decision.kept[x].clone().unwrap_or_else(|| basis.kept.clone());
+                let mut trials: Vec<(f64, usize, Vec<f64>, f64)> = vec![];
+                for &q in kept.iter().filter(|q| !ws.decision.joined[x].contains(q)) {
+                    let squares: Vec<f64> = (0..n).map(|j| if ws.den[j] > floor { shares[x].rows(q, j) / ws.den[j] } else { 0.0 }).collect();
+                    let s = left_out(&sizes, x, q);
+                    let price = cell(&s) - here + pricing.once(s.decomposition(&s.near[x]) - sizes.decomposition(&sizes.near[x]));
+                    let added = read.iter().map(|&j| squares[j]).fold(0.0, f64::max);
+                    trials.push((if price < 0.0 { added / -price } else { f64::INFINITY }, q, squares, price));
                 }
                 trials.sort_by(|a, b| a.0.total_cmp(&b.0));
-                for (_, q, squares) in trials {
-                    if read.iter().all(|&j| held[j] + squares[j] <= limit[j]) {
-                        let kept = decision.kept[x].get_or_insert_with(|| basis.kept.clone());
+                for (_, q, squares, price) in trials {
+                    if price < 0.0 && read.iter().all(|&j| held[j] + squares[j] <= budget) {
                         kept.retain(|&p| p != q);
                         read.iter().for_each(|&j| held[j] += squares[j]);
                     }
+                }
+                if kept != basis.kept || ws.decision.kept[x].is_some() {
+                    ws.decision.kept[x] = Some(kept);
                 }
             }
             return Next::Again;
@@ -4248,54 +4361,441 @@ impl Fold {
         if more > done {
             return Next::Sweeps(more);
         }
-        // The cheaper evaluations within the budget, the least first: a part one sweep less, a far block left out.
-        let mut trial = vec![0.0; n];
+        // The cheaper evaluations within the budget at every column's worst: the least ρ² added per unit saved first.
         loop {
+            let base = held_sizes(sizes.clone(), evaluation);
+            let here = cell(&base);
             let mut best: Option<(f64, usize, Vec<f64>)> = None;
-            for k in (0..accounts.len()).filter(|&k| accounts[k].on) {
-                match accounts[k].item {
+            for k in (0..ws.accounts.len()).filter(|&k| ws.accounts[k].on) {
+                let (trial, s) = match ws.accounts[k].item {
                     Item::Series { block, part } if evaluation.parts[block][part] >= 2 => {
-                        let np = series_parts(&near[block], cache.near_at(block));
-                        series_squares(&near[block], np, part, evaluation.parts[block][part] - 1, done, den, floor, n, &mut trial);
+                        let p = evaluation.parts[block][part] - 1;
+                        let mut s = base.clone();
+                        set_sweeps(&mut s, block, part, p);
+                        ((0..n).map(|j| self.series_worst(cache, ws, block, part, p, done, j)).collect::<Vec<f64>>(), s)
                     }
                     Item::Centred { block, far: true } => {
-                        let Some(left) = accounts.iter().find(|a| a.item == Item::Left { block }) else { continue };
-                        trial.copy_from_slice(&left.squares);
+                        let Some(l) = ws.accounts.iter().position(|a| a.item == Item::Left { block }) else { continue };
+                        let mut s = base.clone();
+                        s.far[block].omitted = true;
+                        (worst[l].clone(), s)
                     }
                     _ => continue,
+                };
+                let saved = here - cell(&s);
+                if !(saved > 0.0) || !read.iter().all(|&j| total(&worst, &ws.accounts, j) - worst[k][j] + trial[j] <= budget) {
+                    continue;
                 }
-                let fits = read.iter().all(|&j| held[j] - accounts[k].squares[j] + trial[j] <= limit[j]);
-                let worst = read.iter().map(|&j| held[j] - accounts[k].squares[j] + trial[j] - limit[j]).fold(f64::NEG_INFINITY, f64::max);
-                if fits && best.as_ref().is_none_or(|b| worst < b.0) {
-                    best = Some((worst, k, trial.clone()));
+                let added = read.iter().map(|&j| (trial[j] - worst[k][j]).max(0.0)).fold(0.0, f64::max) / saved;
+                if best.as_ref().is_none_or(|b| added < b.0) {
+                    best = Some((added, k, trial));
                 }
             }
-            let Some((_, k, squares)) = best else { break };
-            match accounts[k].item {
+            let Some((_, k, trial)) = best else { break };
+            match ws.accounts[k].item {
                 Item::Series { block, part } => {
                     evaluation.parts[block][part] -= 1;
-                    accounts[k].squares = squares;
+                    let p = evaluation.parts[block][part];
+                    let np = series_parts(&ws.near[block], cache.near_at(block));
+                    let Workspace { near, den, accounts, .. } = &mut *ws;
+                    series_squares(&near[block], np, part, p, done, den, floor, n, &mut accounts[k].squares);
+                    worst[k] = trial;
                 }
                 Item::Centred { block, .. } => {
                     evaluation.far[block] = true;
-                    accounts[k].on = false;
-                    accounts.iter_mut().filter(|a| a.item == Item::Left { block }).for_each(|a| a.on = true);
+                    ws.accounts[k].on = false;
+                    ws.accounts.iter_mut().filter(|a| a.item == Item::Left { block }).for_each(|a| a.on = true);
                 }
                 _ => unreachable!(),
             }
-            (held, limit) = shares(accounts, decision);
         }
-        // The decision's readings: ρ at its worst column, and its accounts by kind there (the books' profile).
-        let total = |j: usize| accounts.iter().filter(|a| a.on).map(|a| a.squares[j]).sum::<f64>();
+        ws.step.beyond = read.iter().any(|&j| total(&worst, &ws.accounts, j) > budget);
+        self.decided(ws, evaluation, &read, Next::Done)
+    }
+
+    /// The decision's readings (the books' profile, unify2 §2.7): ρ at its worst column read at the point, and its accounts
+    /// by kind there.
+    fn decided(&self, ws: &mut Workspace, evaluation: &mut Evaluation, read: &[usize], next: Next) -> Next {
+        let total = |j: usize| ws.accounts.iter().filter(|a| a.on).map(|a| a.squares[j]).sum::<f64>();
         let worst = read.iter().copied().max_by(|&a, &b| total(a).total_cmp(&total(b)));
         evaluation.kinds = [0.0; KINDS];
         if let Some(j) = worst {
-            for a in accounts.iter().filter(|a| a.on) {
+            for a in ws.accounts.iter().filter(|a| a.on) {
                 evaluation.kinds[a.item.kind()] += a.squares[j];
             }
         }
         evaluation.reading = worst.map_or(0.0, |j| rate(total(j).sqrt()));
-        Next::Done
+        next
+    }
+
+    /// A series part's account at p passes on column j, at its worst over the cell (`Fold::worst`'s profile, its ratio's
+    /// scale with the excitation along the look).
+    #[allow(clippy::too_many_arguments)]
+    fn series_worst(&self, cache: &Cache, ws: &Workspace, block: usize, part: usize, p: usize, done: usize, j: usize) -> f64 {
+        let n = ws.n;
+        let nb = &ws.near[block];
+        let np = series_parts(nb, cache.near_at(block));
+        let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
+        let mut out = vec![0.0; n];
+        series_squares(nb, np, part, p, done, &ws.den, floor, n, &mut out);
+        let r = ratio_of(nb, np, part, done - 1, &ws.den, n);
+        out[j] * ws.look.as_ref().map_or(1.0, |look| series_factor(look, r, p, j))
+    }
+
+    /// Every account's worst over the cell (unify2 §2.7, §4.2): its reading at the point times the largest ratio of its
+    /// profile along the look (`look::Look`, on the reference flow's path from the point over the cell, `Cell::path`):
+    /// the series ρ ∝ r^p/(1 − r), its ratio r scaling with the column's excitation x (unify2 §2.3: r = x for one P state;
+    /// none where the look's fold ceases); a centring ρ ∝ x/(1 − x) of its factor (`Look::centred`); a level left out ρ ∝
+    /// 1/|d| at its held energy; the reuse ρ ∝ the field's drift; a far block left out ρ² ∝ its response M_jj; the ring
+    /// ρ ∝ its block's excitation squared (its transient's error, second order at resonance: proto.rs # The ring). The rest
+    /// the point's. Where the look's fold ceases in the cell, every part of a block holding the column there reads
+    /// infinite (the node that holds it rises at the cell's start: unify2 §4.2). A cell with no path, its point's look alone
+    /// (its column's pass 0 there: the fold's existence at the point, exact for one P column).
+    fn worst(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, done: usize, work: &mut f64) -> Vec<Vec<f64>> {
+        let n = ws.n;
+        let mut worst: Vec<Vec<f64>> = ws.accounts.iter().map(|a| a.squares.clone()).collect();
+        let mut look = ws.look.take().unwrap_or_else(|| Box::new(self.look(ws)));
+        let (flow, from, width) = ws.cell.path.map_or((None, ws.point, 0.0), |p| (Some(p.flow), p.from, p.width));
+        self.prototype_look(&|t| flow.map_or(from, |f| f.advance(from, t)), width, cache, ws, &mut look);
+        ws.step.look += look.work;
+        *work += 0.0;
+        let seen = &look.seen;
+        let ratio = |of: &dyn Fn(&look::Seen) -> f64| -> f64 {
+            let at = of(&seen[0]);
+            if !(at > 0.0) {
+                return 1.0;
+            }
+            seen.iter().map(|s| of(s) / at).map(|x| if x.is_nan() { f64::INFINITY } else { x }).fold(1.0, f64::max)
+        };
+        let ceases = look.ceases();
+        for (k, a) in ws.accounts.iter().enumerate() {
+            for j in 0..n {
+                let v = a.squares[j];
+                let factor = match a.item {
+                    Item::Series { block, part } => {
+                        let nb = &ws.near[block];
+                        let np = series_parts(nb, cache.near_at(block));
+                        let r = ratio_of(nb, np, part, done - 1, &ws.den, n);
+                        let held = ceases.is_some_and(|(t, c)| c == j && seen.iter().find(|s| s.t == t).is_some_and(|s| s.near[block].part.get(j).is_some_and(|x| *x > 0.0)));
+                        if held {
+                            worst[k][j] = f64::INFINITY;
+                            continue;
+                        }
+                        series_factor(&look, r, evaluation.parts[block][part], j)
+                    }
+                    Item::Reuse { block } => ratio(&|s| s.near[block].drift).powi(2),
+                    Item::Centred { block, far: false } => ratio(&|s| look.centred_at(s, block, j)).powi(2),
+                    Item::Centred { block, far: true } => ratio(&|s| look.centred_far_at(s, block, j)).powi(2),
+                    Item::Omitted { block, level } => {
+                        let g = cache.near_at(block).gersh[level];
+                        let kappa = C64::new(0.5 * (g[0] + g[1]), -0.25 * (g[2] + g[3]));
+                        ratio(&|s| 1.0 / s.distance(block, j, kappa)).powi(2)
+                    }
+                    Item::Left { .. } => ratio(&|s| s.far_response(j)),
+                    Item::Ring { block, far: false } => ratio(&|s| s.near[block].part.get(j).copied().unwrap_or(0.0)).powi(4),
+                    Item::Ring { far: true, .. } => ratio(&|s| s.columns[j].x).powi(4),
+                };
+                if v > 0.0 {
+                    worst[k][j] = v * factor;
+                }
+            }
+        }
+        ws.look = Some(look);
+        worst
+    }
+
+    /// Where the fold does not exist at a decision's point (a part's ratio at one on its third sweep): the node of the
+    /// cell's (`Cell::nodes`) in a part that does not converge whose mixing is the largest (`mixings`: m = |a|/|Δ| of the
+    /// bare inputs, fold.rs `unfoldable`'s reading) -- the remedy by attribution to the part that diverges (unify2 §2.3,
+    /// §3.4), never by the amplitudes a forward that does not exist reads (B5: a node of the tweezer's, 25 THz off, rose so
+    /// and its step's work had no bound; e2e R1). None where no node is in such a part.
+    fn failed(&self, cache: &Cache, ws: &Workspace, done: usize, work: &mut f64) -> Option<usize> {
+        let n = ws.n;
+        let shares = shares_of(&ws.near, cache, n, work);
+        let mixing = mixings(&ws.near, &ws.far, cache, &ws.hbase, &ws.cell.nodes, n, work);
+        let diverging = |x: usize, part: usize| {
+            let nb = &ws.near[x];
+            let np = series_parts(nb, cache.near_at(x));
+            !nb.idle() && part < np && ratio_of(nb, np, part, done - 1, &ws.den, n) >= 1.0
+        };
+        most_mixed(&mixing, &ws.cell.nodes, |node| match hold_of(&ws.near, &ws.far, node) {
+            Some(Hold::Near { block, level }) => (0..shares[block].level.len()).any(|k| shares[block].level[k] == level && diverging(block, shares[block].section[k])),
+            _ => false,
+        })
+    }
+}
+
+/// The node of the largest mixing among those `held` (`Fold::failed`), a tie by the nodes' order; none of no mixing.
+fn most_mixed(mixing: &[f64], nodes: &[Taken], held: impl Fn(&Taken) -> bool) -> Option<usize> {
+    (0..mixing.len()).filter(|&m| mixing[m] > 0.0 && held(&nodes[m])).fold(None, |best: Option<usize>, m| if best.is_none_or(|b| mixing[m] > mixing[b]) { Some(m) } else { best })
+}
+
+/// Each node's mixing at the forward's point (`Cell::nodes`; fold.rs `unfoldable`'s reading m = |a|/|Δ|, frame-free):
+/// its level's kept rows' bare source on a column -- each lane's, from the decomposition's basis back (`Factored::from`) --
+/// over the level's distance from the column's bare energy H⁰_jj at that lane, the level's energy held at the reference
+/// (the centre of its Gershgorin intervals, `NearBasis::gersh`); the largest over the lanes and columns. Of the bare
+/// inputs alone: no series, so a forward that does not exist reads it as one that does. Zero for a node of a level left
+/// out or of a far block (in no part).
+fn mixings(near: &[Near], far: &[Far], cache: &Cache, hbase: &[C64], nodes: &[Taken], n: usize, work: &mut f64) -> Vec<f64> {
+    nodes
+        .iter()
+        .map(|node| {
+            let Some(Hold::Near { block, level }) = hold_of(near, far, node) else { return 0.0 };
+            let nb = &near[block];
+            if nb.idle() || nb.s == 0 {
+                return 0.0;
+            }
+            let basis = cache.near_at(block);
+            let rows: Vec<usize> = (0..nb.s).filter(|&k| nb.levels[level].contains(&basis.rows[k])).collect();
+            if rows.is_empty() {
+                return 0.0;
+            }
+            let g = basis.gersh[level];
+            let kappa = C64::new(0.5 * (g[0] + g[1]), -0.25 * (g[2] + g[3]));
+            let (s, ln) = (nb.s, nb.lanes * n);
+            let mut most = 0.0_f64;
+            for (l, &w) in nb.shifts.iter().enumerate() {
+                let phys = basis.f.from(&Mat::from_fn(s, n, |i, j| nb.vt[i * ln + l * n + j]), work);
+                for j in 0..n {
+                    let a = rows.iter().map(|&k| phys[(k, j)].norm_sqr()).sum::<f64>().sqrt();
+                    let d = (hbase[j * n + j] - C64::real(w) - kappa).abs();
+                    if a > 0.0 {
+                        most = most.max(if d > 0.0 { a / d } else { f64::INFINITY });
+                    }
+                }
+            }
+            most
+        })
+        .collect()
+}
+
+/// A node P may take (unify2 §3.1; run.rs `Rise`): the fold's block it is of and its rows there (excited rows of the
+/// block: one level of a near block, or rows of a far block).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Taken {
+    pub(crate) block: usize,
+    pub(crate) rows: Vec<usize>,
+}
+
+/// The reference flow's path over a decision's cell (unify2 §4.2: the look's): the flow, the decision's point (r, κ), the
+/// cell's width (µs).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Path {
+    pub(crate) flow: crate::step::Flow,
+    pub(crate) from: ([f64; 3], [f64; 3]),
+    pub(crate) width: f64,
+}
+
+/// What a decision prices and looks over (unify2 §3.3, §3.4, §4.2; run.rs `Middle::decide`): the steps its cell's price
+/// counts (the model's own counts each, no integrator picture: step.rs `Midway::decided` -- a price of the level's τ
+/// would make the representation the level's) and the jumps a step expects; the cell's path (none: no look); the landing
+/// sets; the nodes P may take; and the rise the walk chose (an index of `nodes`).
+#[derive(Clone, Default)]
+pub(crate) struct Cell {
+    pub(crate) steps: f64,
+    pub(crate) jumps: f64,
+    pub(crate) path: Option<Path>,
+    pub(crate) sets: Vec<Vec<usize>>,
+    pub(crate) nodes: Vec<Taken>,
+    pub(crate) chosen: Option<usize>,
+}
+
+impl Cell {
+    /// A cell's price on a representation's sizes (real multiply-adds): its steps, each at the model's price of a step
+    /// (price.rs `Sizes::step`: the middle's forward, the model's counts at the step's three nodes and its end, the light
+    /// scattered at the middle, the jumps' -- on no integrator picture of its own).
+    pub(crate) fn price(&self, sizes: &price::Sizes, route: &price::Route) -> f64 {
+        let picture = crate::step::Price { states: sizes.n, still: false, tau: 0.0, bandwidth: 0.0, nodes: 0, traces: 0, made: 0.0, stops: 0.0, sector: None, tones: 0, toned: [0.0; 2], centred: true, ended: true, middle: 0.0, scattering: 0.0, costs: [0.0; 3], jump: 0.0 };
+        self.steps.max(1.0) * sizes.step(route, picture, self.jumps)
+    }
+
+    /// A once-only count (complex multiply-adds) in the price's units (real ones).
+    pub(crate) fn once(&self, complex: f64) -> f64 {
+        crate::decide::COMPLEX * complex
+    }
+}
+
+/// A remedy of the walk (`Fold::walk`): an account's (by its index) or a node's rise (by its index of `Cell::nodes`).
+#[derive(Clone, Copy)]
+enum Remedy {
+    Sweep(usize),
+    Refresh(usize),
+    Distant(usize),
+    Join(usize, usize),
+    TakeIn(usize),
+    Rise(usize),
+}
+
+/// Where a node is in the workspace's layout: a near block's level, or a far block with the node's share of its rows.
+enum Hold {
+    Near { block: usize, level: usize },
+    Far { block: usize, share: f64 },
+}
+
+/// A node's place in the layout (`Hold`): the near block of its fold block and the level whose rows are its, or the far
+/// block of it.
+fn hold_of(near: &[Near], far: &[Far], node: &Taken) -> Option<Hold> {
+    if let Some(x) = near.iter().position(|nb| nb.o == node.block) {
+        let level = near[x].levels.iter().position(|rows| node.rows.iter().all(|r| rows.contains(r)))?;
+        return Some(Hold::Near { block: x, level });
+    }
+    let x = far.iter().position(|fb| fb.o == node.block)?;
+    Some(Hold::Far { block: x, share: node.rows.len() as f64 / far[x].m.max(1) as f64 })
+}
+
+/// A near block's response on its physical rows (`Shares`): its kept rows' Z back from the Schur basis (V Z, part by
+/// part), per column; what a node's rows hold of it.
+struct Shares {
+    /// Per kept row (of the basis' rows) |(VZ)_kj|², laid k·n + j; per kept row its level and its Schur part.
+    squares: Vec<f64>,
+    level: Vec<usize>,
+    section: Vec<usize>,
+    n: usize,
+}
+
+impl Shares {
+    /// Level q's rows' response on column j.
+    fn rows(&self, q: usize, j: usize) -> f64 {
+        (0..self.level.len()).filter(|&k| self.level[k] == q).map(|k| self.squares[k * self.n + j]).sum()
+    }
+    /// Level q's share of the block's response on column j.
+    fn level(&self, q: usize, j: usize) -> f64 {
+        let whole: f64 = (0..self.level.len()).map(|k| self.squares[k * self.n + j]).sum();
+        if whole > 0.0 { self.rows(q, j) / whole } else { 0.0 }
+    }
+    /// Series part p's response on column j.
+    fn whole(&self, p: usize, j: usize) -> f64 {
+        (0..self.level.len()).filter(|&k| self.section[k] == p).map(|k| self.squares[k * self.n + j]).sum()
+    }
+    /// Level q's share of series part p's response on column j.
+    fn part(&self, q: usize, p: usize, j: usize) -> f64 {
+        let whole = self.whole(p, j);
+        if whole > 0.0 { (0..self.level.len()).filter(|&k| self.level[k] == q && self.section[k] == p).map(|k| self.squares[k * self.n + j]).sum::<f64>() / whole } else { 0.0 }
+    }
+}
+
+/// Every near block's `Shares` on the forward it stands on (its count: the back-transform, Σ_P s_P² a column).
+fn shares_of(near: &[Near], cache: &Cache, n: usize, work: &mut f64) -> Vec<Shares> {
+    near.iter()
+        .enumerate()
+        .map(|(x, nb)| {
+            if nb.idle() || nb.s == 0 {
+                return Shares { squares: vec![], level: vec![], section: vec![], n };
+            }
+            let basis = cache.near_at(x);
+            let s = nb.s;
+            let phys = basis.f.from(&Mat { rows: s, cols: n, data: nb.ztot[..s * n].to_vec() }, work);
+            let level = basis.rows.iter().map(|&r| nb.levels.iter().position(|rows| rows.contains(&r)).unwrap_or(usize::MAX)).collect();
+            let mut part = vec![0; s];
+            for (idx, at, _) in &basis.f.parts {
+                for (a, &i) in idx.iter().enumerate() {
+                    part[i] = part_of(nb, basis, at + a);
+                }
+            }
+            Shares { squares: phys.data.iter().map(|z| z.norm_sqr()).collect(), level, section: part, n }
+        })
+        .collect()
+}
+
+/// The ratio's profile factor of a series part at p passes on column j (`Fold::worst`): the largest of
+/// [r_t^p/(1 − r_t)]²/[r^p/(1 − r)]² over the look's points, r_t = r x_t/x₀ the ratio scaled by the column's excitation;
+/// infinite where it reaches one or the look's fold does not exist there.
+fn series_factor(look: &look::Look, r: f64, p: usize, j: usize) -> f64 {
+    if !(r > 0.0) {
+        return 1.0;
+    }
+    let x0 = look.seen[0].columns[j].x;
+    let term = |r: f64| if r < 1.0 { r.powi(p as i32) / (1.0 - r) } else { f64::INFINITY };
+    let at = term(r);
+    look.seen
+        .iter()
+        .map(|s| if !s.columns[j].exists { f64::INFINITY } else if x0 > 0.0 { term(r * s.columns[j].x / x0) / at } else { 1.0 })
+        .fold(1.0, f64::max)
+        .powi(2)
+}
+
+/// The sizes the decision's forward stands on with an evaluation held (price.rs `Sizes`): each part's sweeps the
+/// evaluation's (a block with exact copies one series part over its Schur parts), the far blocks it leaves out.
+fn held_sizes(mut sizes: price::Sizes, evaluation: &Evaluation) -> price::Sizes {
+    for (b, parts) in sizes.near.iter_mut().zip(&evaluation.parts) {
+        for (k, p) in b.parts.iter_mut().enumerate() {
+            p.sweeps = parts.get(k).or(parts.first()).copied().unwrap_or(1);
+        }
+    }
+    for (f, &o) in sizes.far.iter_mut().zip(&evaluation.far) {
+        f.omitted = o;
+    }
+    sizes.sweeps = evaluation.most();
+    sizes
+}
+
+/// The sizes with a series part at p sweeps (a block with exact copies: every Schur part).
+fn set_sweeps(sizes: &mut price::Sizes, block: usize, part: usize, p: usize) {
+    let b = &mut sizes.near[block];
+    let whole = b.nd > 0;
+    for (k, s) in b.parts.iter_mut().enumerate() {
+        if whole || k == part {
+            s.sweeps = p;
+        }
+    }
+    sizes.sweeps = sizes.near.iter().flat_map(|b| b.parts.iter().map(|p| p.sweeps)).max().unwrap_or(1).max(1);
+}
+
+/// The sizes with a level joined (its rows a part of their own, dense: a decomposition not made yet, price.rs
+/// `Span::dense`, at the block's most sweeps).
+fn joined(sizes: &price::Sizes, block: usize, level: usize) -> price::Sizes {
+    let mut s = sizes.clone();
+    let b = &mut s.near[block];
+    let most = b.parts.iter().map(|p| p.sweeps).max().unwrap_or(sizes.sweeps.max(1));
+    b.parts.push(price::Span::dense(b.levels[level], most));
+    b.omitted[level] = false;
+    s
+}
+
+/// The sizes with a kept level left out (its rows out of its part, the part dense).
+fn left_out(sizes: &price::Sizes, block: usize, level: usize) -> price::Sizes {
+    let mut s = sizes.clone();
+    let b = &mut s.near[block];
+    let rows = b.levels[level];
+    if let Some(k) = b.parts.iter().position(|p| p.rows >= rows) {
+        let left = b.parts[k].rows - rows;
+        let sweeps = b.parts[k].sweeps;
+        if left == 0 {
+            b.parts.remove(k);
+        } else {
+            b.parts[k] = price::Span::dense(left, sweeps);
+        }
+    }
+    b.omitted[level] = true;
+    s
+}
+
+/// The sizes with a node risen (unify2 §3.3: the target's sizes from the standing ones alone): its rows P places, out of
+/// its block's levels (a kept level's out of its part) and in its block's explicit states (with their static lane).
+fn risen(sizes: &price::Sizes, hold: &Hold, node: &Taken) -> price::Sizes {
+    let mut s = sizes.clone();
+    let rows = node.rows.len();
+    s.n += rows;
+    match *hold {
+        Hold::Near { block, level } => {
+            let kept = !s.near[block].omitted[level];
+            let mut t = if kept { left_out(&s, block, level) } else { s.clone() };
+            let b = &mut t.near[block];
+            b.levels.remove(level);
+            b.omitted.remove(level);
+            b.level_parts.remove(level);
+            b.rat.remove(level);
+            b.all -= rows.min(b.all);
+            if b.explicit == 0 {
+                b.lanes += 1;
+            }
+            b.explicit += rows;
+            t
+        }
+        Hold::Far { block, .. } => {
+            s.far[block].m -= rows.min(s.far[block].m);
+            s
+        }
     }
 }
 
@@ -6189,6 +6689,44 @@ impl Workspace {
     }
 
     /// The last step's reading: a decision's ρ (rate units; `Step::reading`), a held forward's its decision's.
+    /// Whether the last decision's walk left a column beyond its budget with no remedy offered (`Fold::walk`).
+    pub(crate) fn step_beyond(&self) -> bool {
+        self.step.beyond
+    }
+
+    /// The node of the cell's (`Cell::nodes`) of the largest mixing at the last forward's point (`mixings`: a fold whose
+    /// landing does not exist at a decision's point -- N singular, an exceptional point --, its attribution by the bare
+    /// inputs, never by the state's population nor the response there). None where no node is in a part.
+    pub(crate) fn attributed(&self, cache: &Cache) -> Option<usize> {
+        let mixing = mixings(&self.near, &self.far, cache, &self.hbase, &self.cell.nodes, self.n, &mut 0.0);
+        most_mixed(&mixing, &self.cell.nodes, |_| true)
+    }
+
+    /// The price of an explicit node's fall over the decision's cell (unify2 §3.3, §3.4; real multiply-adds): the cell's
+    /// price on the sizes the fall leaves -- its P places `places` out of P, their level back in their block as one left
+    /// out --, less the standing one's (the evaluation held), with the switch to it once (`Sizes::switch`). None where no
+    /// near block holds the places.
+    pub(crate) fn fall_price(&self, fold: &Fold, cache: &Cache, places: &[usize]) -> Option<f64> {
+        let x = self.near.iter().position(|nb| !places.is_empty() && places.iter().all(|p| nb.xs.contains(p)))?;
+        let sizes = held_sizes(self.sizes(fold, cache, &self.cell.sets), &cache.evaluation);
+        let size = self.den.iter().sum::<f64>();
+        let rows = places.len();
+        let mut s = sizes.clone();
+        s.n -= rows.min(s.n);
+        let b = &mut s.near[x];
+        b.explicit -= rows.min(b.explicit);
+        if b.explicit == 0 && b.lanes > 0 {
+            b.lanes -= 1;
+        }
+        b.levels.push(rows);
+        b.omitted.push(true);
+        b.level_parts.push(vec![rows]);
+        b.rat.push(0);
+        b.all += rows;
+        let route = |n: usize| price::Route::predicted(size, n);
+        Some(self.cell.price(&s, &route(s.n)) - self.cell.price(&sizes, &route(sizes.n)) + s.switch(&route(s.n)))
+    }
+
     pub(crate) fn reading(&self) -> f64 {
         self.step.reading
     }

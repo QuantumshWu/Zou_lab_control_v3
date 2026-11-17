@@ -234,6 +234,11 @@ pub fn advance<D: Dynamics>(
     each: &mut dyn FnMut(&Segment, f64),
 ) -> Result<(), Refused> {
     let mut next = at.partition_point(|&time| time <= trajectory.time);
+    // The next decision time (# The decision times): the end of the cell the trajectory stands in, where its own is behind
+    // it (a jump into another set looks over the cell to it: step.rs `Trajectory::next`).
+    if trajectory.next <= trajectory.time {
+        trajectory.next = ((trajectory.time / path.cell).floor() + 1.0) * path.cell;
+    }
     while trajectory.lost.is_none() && trajectory.time < to && trajectory.time < stop {
         let rest = to - trajectory.time;
         // The step taken from here: τ or the run's rest -- the rest too where a step of τ would end within the grid's
