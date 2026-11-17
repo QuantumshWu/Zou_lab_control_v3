@@ -586,6 +586,8 @@ pub(crate) struct Workspace {
     scratch: Vec<Scratch>,
     tm: Temp,
     step: Step,
+    /// The last forward's count (complex multiply-adds), made or not (`Fold::prototype_within`): an attempt's measure.
+    spent: f64,
     /// The gradient's matrices' temporaries (`Fold::prototype_gradient`).
     gradient: Gradient,
 }
@@ -2299,6 +2301,7 @@ impl Fold {
                 sweep_work: vec![],
                 sweep_ticks: vec![],
             },
+            spent: 0.0,
             rotating,
             gradient: Gradient::default(),
         })
@@ -2930,10 +2933,18 @@ impl Fold {
 
     /// The prototype's step within a budget of counted complex multiply-adds (`prototype`). None -- the one exit -- where
     /// the fold does not exist there: a decomposition, a centring, the exact copies' complement or the metric singular, or
-    /// the series' ratio at or above one; and where its count passes `budget` before the series is within the share.
+    /// the series' ratio at or above one; and where its count passes `budget` before the series is within the share. Its
+    /// count, made or not, is the workspace's (`Workspace::spent`): an attempt is measured as a step is.
     pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace, budget: f64) -> Option<&'w Step> {
-        let n = ws.n;
         let mut work = [0.0_f64; 10];
+        let made = self.forward_within(r, kappa, cache, ws, budget, &mut work);
+        ws.spent = work.iter().sum();
+        made.map(|()| &ws.step)
+    }
+
+    /// `prototype_within`'s forward, its count by phase into `work`: the step into the workspace's `Step`.
+    fn forward_within(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, budget: f64, work: &mut [f64; 10]) -> Option<()> {
+        let n = ws.n;
         let mut tick = [0u64; 10];
         ws.step.sweep_work.clear();
         ws.step.sweep_ticks.clear();
@@ -3668,9 +3679,9 @@ impl Fold {
         step.made = cache.made - made_before;
         step.grown = cache.grown - grown_before;
         step.rounds = rounds;
-        step.work = work;
+        step.work = *work;
         step.ticks = tick;
-        Some(&ws.step)
+        Some(())
     }
 }
 
@@ -5537,6 +5548,11 @@ impl Workspace {
     /// Per near block at the last step: its kept rows, lanes and terms.
     pub(crate) fn kept_rows(&self) -> Vec<(usize, usize, usize)> {
         self.near.iter().map(|x| (x.s, x.lanes, x.terms.len())).collect()
+    }
+
+    /// The last forward's count, made or not (complex multiply-adds; `Fold::prototype_within`).
+    pub(crate) fn spent(&self) -> f64 {
+        self.spent
     }
 
     /// S⁻¹ at the last step's middle.
