@@ -1538,7 +1538,19 @@ impl crate::step::Middle for Middle<'_> {
         }
         // A fall, where every column is within over the cell and the formula says its cell saves.
         let within = exists && chain.is_empty() && !self.inner.borrow().beyond;
-        if let Some(to) = within.then(|| self.fall()).flatten() {
+        // The trial at the point first, no look: a side beyond the budget there, or asking a rise, is so over its cell too
+        // (the look's worst is the point's at the least) -- the fall is not taken, and no look is made for it.
+        let point = within.then(|| self.fall()).flatten().filter(|&to| {
+            let probe = run.middle(to, self.r, self.t, &Held(Some(Arc::new(self.leaves()))), true);
+            probe.priced(run.cell(to, self.r, path.kappa, 0.0, steps));
+            let holds = {
+                let theirs = probe.made(path, None, false);
+                theirs.exists && theirs.rise.is_none() && !theirs.beyond
+            };
+            out.work += probe.inner.borrow().made;
+            holds
+        });
+        if let Some(to) = point {
             let other = run.middle(to, self.r, self.t, &Held(Some(Arc::new(self.leaves()))), true);
             other.priced(run.cell(to, self.r, path.kappa, interval, steps));
             let (holds, rho) = {
