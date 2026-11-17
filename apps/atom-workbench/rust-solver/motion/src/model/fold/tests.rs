@@ -3360,3 +3360,73 @@ fn a_tone_s_forms_node_by_node_are_its_envelopes_differences() {
     }
     assert!(worst <= 1e-6, "a tone's forms node by node are its envelopes' differences: {worst:.2e}");
 }
+
+/// A held atom's mean force on the run (heavy: it does not move): `count` trajectories from the ground state 0 at r,
+/// each `steps` steps of τ, every kick the run makes (the steps' forms, the scattered light's force, the jumps');
+/// the mean of κ's change per µs and its standard error (1/µm/µs).
+fn held_mean_force(run: &run::Onefold, r: [f64; 3], count: u64, steps: usize, tau: f64) -> ([f64; 3], [f64; 3]) {
+    use crate::step::{Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let mut scratch = crate::step::Scratch::default();
+    let time = steps as f64 * tau;
+    let changes: Vec<[f64; 3]> = (0..count)
+        .map(|i| {
+            let mut t = Trajectory::new(run, 0, r, [0.0; 3], 11, i);
+            for _ in 0..steps {
+                t = Midway::new(run, &t, tau).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
+            }
+            t.kappa.map(|k| k / time)
+        })
+        .collect();
+    let mean: [f64; 3] = std::array::from_fn(|a| changes.iter().map(|c| c[a]).sum::<f64>() / count as f64);
+    let error = std::array::from_fn(|a| (changes.iter().map(|c| (c[a] - mean[a]).powi(2)).sum::<f64>() / ((count - 1) * count) as f64).sqrt());
+    (mean, error)
+}
+
+/// A two-level atom held in a running wave (BRIEF_STEP3C test table): its mean force is the master equation's radiation
+/// pressure, k Γ ρ_ee with ρ_ee = (s/2)/(1 + s + (2Δ/Γ)²), along the wave and nothing across it -- on resonance at s = 0.3
+/// and at Δ = −2Γ, s = 2 (each within four standard errors and the share).
+#[test]
+fn a_two_level_atom_s_mean_force_in_a_running_wave_is_the_master_equation_s() {
+    let share = crate::model::elim::share();
+    for (delta, s) in [(0.0, 0.3), (-2.0 * GAMMA, 2.0)] {
+        let req = two_level(delta, s);
+        let k = req.beams[0].wave_number;
+        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let (mean, error) = held_mean_force(&run, [0.0; 3], 48, 200, 0.1);
+        let master = k * GAMMA * 0.5 * s / (1.0 + s + (2.0 * delta / GAMMA).powi(2));
+        println!("Δ {:.1}Γ, s {s}: the run's mean force {mean:.3?} ± {error:.3?} 1/µm/µs against the master equation's {master:.3} along the wave", delta / GAMMA);
+        assert!((mean[2] - master).abs() <= 4.0 * error[2] + share * master, "Δ {delta}, s {s}: along the wave {} ± {} against {master}", mean[2], error[2]);
+        assert!((0..2).all(|a| mean[a].abs() <= 4.0 * error[a] + share * master), "nothing across the wave");
+    }
+}
+
+/// A two-level atom held in a standing wave (BRIEF_STEP3C test table): two counter-propagating beams of one frequency,
+/// the coupling 2g cos kz, s(z) = 4 s₁ cos² kz; at kz = π/8, red of the line (Δ = −2Γ, s₁ = 0.5) and on it (Δ = 0,
+/// s₁ = 0.1), the mean force along the wave is the master equation's dipole force −(Δ/2) s′(z)/(1 + s(z) + (2Δ/Γ)²) --
+/// the two beams' pressures cancel -- within four standard errors and the share of its size.
+#[test]
+fn a_two_level_atom_s_dipole_force_in_a_standing_wave_is_the_master_equation_s() {
+    let share = crate::model::elim::share();
+    for (delta, s1) in [(-2.0 * GAMMA, 0.5), (0.0, 0.1)] {
+        let (ee, g) = (1000.0, 0.5 * GAMMA * (s1 / 2.0_f64).sqrt());
+        let rays = [1.0, -1.0].map(|d| Ray { axis: 0, nu: ee + delta, direction: [0.0, 0.0, d], couplings: vec![(17, 0, C64::real(g))] });
+        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays, 1, true);
+        idle_decay(&mut req, GAMMA);
+        req.validate().unwrap();
+        let k = req.beams[0].wave_number;
+        let z = std::f64::consts::FRAC_PI_8 / k;
+        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let (mean, error) = held_mean_force(&run, [0.0, 0.0, z], 48, 200, 0.1);
+        let (s, slope) = (4.0 * s1 * (k * z).cos().powi(2), -4.0 * s1 * k * (2.0 * k * z).sin());
+        let master = -0.5 * delta * slope / (1.0 + s + (2.0 * delta / GAMMA).powi(2));
+        let scale = master.abs().max(k * GAMMA * 0.5 * s / (1.0 + s + (2.0 * delta / GAMMA).powi(2)));
+        println!("Δ {:.1}Γ, s₁ {s1}: the run's mean force {mean:.3?} ± {error:.3?} 1/µm/µs against the master equation's dipole force {master:.3}", delta / GAMMA);
+        assert!((mean[2] - master).abs() <= 4.0 * error[2] + share * scale, "Δ {delta}, s₁ {s1}: along the wave {} ± {} against {master}", mean[2], error[2]);
+    }
+}

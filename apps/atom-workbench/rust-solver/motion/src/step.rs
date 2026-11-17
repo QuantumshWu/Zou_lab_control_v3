@@ -630,8 +630,9 @@ pub trait Middle {
     fn made(&self) -> f64;
 
     /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
-    /// `force` contracts; and where `slope` is asked, their derivative along the path at s, dĜ_a/ds.
-    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>);
+    /// `force` contracts; and where `slope` is asked, their derivative along the path at s, dĜ_a/ds. With the counted
+    /// complex multiply-adds that made them (`optical_work`: priced where they are made).
+    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64;
 
     /// The cluster's optical sector on the path (# The optical sector's noise; model/optical.rs): None where the
     /// cluster has no explicit excited state.
@@ -749,21 +750,21 @@ struct Noise {
 /// The optical sector's operators at a step's middle along its path (# The optical sector's noise), made in the
 /// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path (`Middle::gradient`);
 /// K of the picture's generator at the middle, to the first order along the path with the picture's slope through the
-/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)², its ground states and its make's counted work (the
-/// stretch's `Price`, with the gradient and the forms: `optical_work`); None where the cluster has no optical sector; the
-/// step refused where its sector made no K (`Refused::Optical`).
+/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)², its ground states and its make's counted work with the
+/// gradient's as the model counted it (real multiply-adds; the stretch's `Price` with the forms: `optical_work`); None
+/// where the cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
 fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, usize, f64)>, Refused> {
     let Some(shape) = along.middle.optical(&along.path) else { return Ok(None) };
     let Noise { sector, gradient, slope } = noise;
-    along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
+    let matrices = along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
     sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope))).map_err(Refused::Optical)?;
-    Ok(Some(((shape.beat / shape.decay).powi(2), shape.ground, sector.work)))
+    Ok(Some(((shape.beat / shape.decay).powi(2), shape.ground, sector.work + COMPLEX * matrices)))
 }
 
-/// The counted work of the optical sector at a middle (`optical`) beside its sector's make (`Sector::cost`, `work`): the
-/// gradient's three matrices, each of the force's form's count, twice with their slope; and one `within`'s forms.
-fn optical_work(n: usize, force: f64, still: bool, work: f64) -> f64 {
-    COMPLEX * (if still { 3.0 } else { 6.0 } * force + Sector::forms(n)) + work
+/// The counted work of the optical sector at a middle (`optical`): its make with the gradient's matrices as they were
+/// counted (`work`: `Sector::cost`, `Middle::gradient`), and one `within`'s forms.
+fn optical_work(n: usize, work: f64) -> f64 {
+    COMPLEX * Sector::forms(n) + work
 }
 
 /// The optical sector's rate of a state x (unnormalized; model/optical.rs, # K_Q) from K_a and Ĝ_b on it (F = −Ĝ):
@@ -2681,7 +2682,7 @@ impl Price {
     /// forms), and on the stretch that reaches the step's end the end state's held forms.
     pub fn stepped(&self, costs: [f64; 3]) -> f64 {
         let (n, still) = (self.states, self.still);
-        let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, costs[1], still, make));
+        let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, make));
         let end = if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 };
         count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still, self.tones) + optical + end
     }

@@ -175,7 +175,7 @@ impl Middle for Parts {
     }
     /// Ĝ_a(s) = the Hermitian part of Σ_p e^{iΩ_p s} G_p,a (what `force` contracts), Ω_p the part's beat on the path,
     /// and its slope, the same of iΩ_p e^{iΩ_p s} G_p,a.
-    fn gradient(&self, velocity: &[f64; 3], s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+    fn gradient(&self, velocity: &[f64; 3], s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
         let n = self.states();
         let sum = |turned: bool, a: usize| -> Vec<C64> {
             let mut m = vec![C64::ZERO; n * n];
@@ -196,6 +196,7 @@ impl Middle for Parts {
                 *m = sum(true, a);
             }
         }
+        0.0
     }
     /// The two-level atom's optical sector (model/optical.rs) where it is asked: its one ground state, the excited
     /// state's decay over two, and the parts' fastest beat on the path where it beats.
@@ -2379,7 +2380,7 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn made(&self) -> f64 {
         self.middle.made()
     }
-    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
         self.middle.gradient(path, s, g, slope)
     }
     fn optical(&self, path: &M::Path) -> Option<step::Optical> {
@@ -2633,7 +2634,9 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, &s.held)[0]).sum::<f64>(),
             &mut || {
                 // As a step asks them (`step::optical`): at the middle, with their slope along the path where it is not still.
-                pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.gradient(path, 0.0, &mut g, (!p.through.generator.still()).then_some(&mut slope)));
+                pieces.iter().zip(&paths).for_each(|(p, path)| {
+                    p.through.generator.gradient(path, 0.0, &mut g, (!p.through.generator.still()).then_some(&mut slope));
+                });
                 g[0][0].re
             },
             &mut || {

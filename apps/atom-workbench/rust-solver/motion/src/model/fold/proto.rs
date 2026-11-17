@@ -5636,6 +5636,8 @@ impl Workspace {
     /// copies' Z_D x, its centred copies' T_C x where the metric holds them; a far block's R₀Bx --, an excited row's onto its
     /// state, a copy row's onto its ground state. The blocks apart (different offsets beat: their cross terms average out
     /// over the beat), as the metric M = 1 + Σ ε†ε holds them: the sum is x†Mx = ψ†ψ to the rounding. Returns the sum.
+    /// They are the slow modes' populations between two jumps (the fold's slow state and what follows it), not the
+    /// optical Bloch equations' ensemble ρ_ee: that holds each jump's transient over 1/Γ, which the landing leaves out.
     pub(crate) fn populations(&self, fold: &Fold, cache: &Cache, psi: &[C64], out: &mut [f64]) -> f64 {
         let x = self.step.normal.apply(psi);
         let mut sum = 0.0;

@@ -3187,7 +3187,9 @@ impl crate::step::Middle for Middle<'_> {
     /// in the same pass: along the path every factor of a term is a plane wave's or a tone's phase e^{iωs} or a sum of
     /// them, whose derivative is iω times each (`along`), a block's product by the product rule, the frames' turns
     /// e^{−iK_x·v s} theirs; the normalized generator is held along the path.
-    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+    /// Counted as three of the force's forms, six with the slope (`Middle::work`).
+    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
+        let counted = if slope.is_some() { 6.0 } else { 3.0 } * crate::step::Middle::work(self)[1];
         let (plan, n, point) = (&*self.plan, self.plan.states, self.point.borrow());
         let mut scratch = point.scratch.borrow_mut();
         let sloped = slope.is_some();
@@ -3280,6 +3282,7 @@ impl crate::step::Middle for Middle<'_> {
             }
             hermitian(m, n);
         }
+        counted
     }
 
     /// The cluster's optical sector on the path (optical.rs; step.rs, # The optical sector's noise): its ground states,

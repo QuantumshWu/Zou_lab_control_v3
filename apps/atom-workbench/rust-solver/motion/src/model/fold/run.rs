@@ -1188,7 +1188,7 @@ impl crate::step::Middle for Middle<'_> {
     /// parabola the propagation takes (spectral.rs `Picture::slope`): the static G's and each tone's envelope by their
     /// chord (Ĝ(h) − Ĝ(−h))/2h, each tone's phase by its derivative iν_m. In the set's frames, the lab's (no Doppler
     /// frame: `gauge`).
-    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) {
+    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
         assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
         let set = &self.run.sets.get(self.set);
         let n = self.states();
@@ -1199,28 +1199,29 @@ impl crate::step::Middle for Middle<'_> {
                 m.clear();
                 m.resize(n * n, C64::new(f64::NAN, f64::NAN));
             }
-            return;
+            return 0.0;
         }
         let Inner { eval, ws, .. } = &mut *inner;
         let ws = ws.as_mut().expect("a workspace");
         let phases = |u: f64, turned: bool| -> Vec<C64> { set.tones.iter().map(|&nu| C64::cis(nu * (self.t + u)) * if turned { C64::new(0.0, nu) } else { C64::ONE }).collect() };
-        set.fold.prototype_gradient(eval, ws, position(s), true, &phases(s, false), g);
+        let mut counted = set.fold.prototype_gradient(eval, ws, position(s), true, &phases(s, false), g);
         if let Some(slope) = slope {
             let h = ends.expect("the outer nodes");
             let mut minus: [Vec<C64>; 3] = Default::default();
-            set.fold.prototype_gradient(eval, ws, 1, true, &phases(0.0, false), &mut minus);
-            set.fold.prototype_gradient(eval, ws, 2, true, &phases(0.0, false), slope);
+            counted += set.fold.prototype_gradient(eval, ws, 1, true, &phases(0.0, false), &mut minus);
+            counted += set.fold.prototype_gradient(eval, ws, 2, true, &phases(0.0, false), slope);
             for (plus, minus) in slope.iter_mut().zip(&minus) {
                 plus.iter_mut().zip(minus).for_each(|(p, m)| *p = (*p - *m) / (2.0 * h));
             }
             if !set.tones.is_empty() {
                 let mut turned: [Vec<C64>; 3] = Default::default();
-                set.fold.prototype_gradient(eval, ws, 0, false, &phases(0.0, true), &mut turned);
+                counted += set.fold.prototype_gradient(eval, ws, 0, false, &phases(0.0, true), &mut turned);
                 for (o, t) in slope.iter_mut().zip(&turned) {
                     o.iter_mut().zip(t).for_each(|(o, t)| *o += *t);
                 }
             }
         }
+        counted
     }
 
     fn held(&self) -> Option<Held> {
@@ -1416,8 +1417,10 @@ impl crate::step::Dynamics for Onefold {
     }
 
     /// The fold's time-averaged populations of the state at the point (DESIGN §1.3; proto.rs `Workspace::populations`):
-    /// one forward there on the trajectory's representation, deciding nothing; a set with no light its states' own. Over
-    /// their sum, ψ†ψ by construction.
+    /// the populations of the slow modes between two jumps -- not the optical Bloch equations' ensemble ρ_ee, which holds
+    /// each jump's transient that the fold's landing leaves out (module documentation, # The rest of the model) --; one
+    /// forward there on the trajectory's representation, deciding nothing; a set with no light its states' own. Over their
+    /// sum, ψ†ψ by construction.
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> [f64; STATES] {
         let mut out = [0.0; STATES];
         let set = &self.sets.get(cluster);
