@@ -31,8 +31,9 @@ pub const CONFIDENCE: f64 = 2.0;
 /// given accuracy gives the step b/E = √(1/(1 + 2p)) of the target.
 pub const STEP_SHARE: f64 = square_root(1.0 / (1.0 + 2.0 * ORDER as f64));
 
-/// The kick's quadrature share (SPEC §2.2; step.rs, # The kick), the old engine's `QUADRATURE`: a step's quadrature errs
-/// on each component of its integrand by at most this share of the component's size times the step.
+/// The numerical share inside a step (SPEC §2.2), the old engine's `QUADRATURE`: what the strides may leave of the
+/// state over a step for the step to take them (spectral.rs, # The strides). No truncation inside a step is made at it
+/// (step.rs, # The quadrature's tolerance: until 2026-11-17 the kick's quadrature was laid at it).
 ///
 /// Derivation: the numerical tolerances inside a step take the square of the step's share of the square, (1/(1 + 2p))²
 /// = s⁴, of their target -- their work grows with the logarithm of the tolerance (a Gauss rule's nodes) or as a small

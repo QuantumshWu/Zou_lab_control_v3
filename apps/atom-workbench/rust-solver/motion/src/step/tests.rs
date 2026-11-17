@@ -1589,23 +1589,17 @@ fn the_stumpff_functions_are_their_series() {
 }
 
 /// Gauss–Legendre at its derived panel phases integrates e^{iνs} over [0, T] (`quadrature`), from a phase of 10⁻³ to
-/// 10³ and with a decay, against (e^{iνT} − 1)/(iν): to round-off, and within the kick's share of T (`QUADRATURE`, the
-/// component's size one) on the nodes the kick takes (`nodes`) -- fewer, the more the bandwidth is resolved.
+/// 10³ and with a decay, against (e^{iνT} − 1)/(iν), to round-off, on the nodes the kick takes (`nodes`).
 #[test]
 fn the_quadrature_integrates_a_bandwidth_within_its_tolerance() {
-    use super::Within;
     for (omega, decay, tau) in [(1.0, 0.0, 1e-3), (3.0, 0.0, 1.0), (40.0, 0.0, 0.7), (900.0, 0.0, 1.1), (60.0, 19.0, 0.3)] {
         let w = C64::new(omega, decay);
         let exact = ((C64::I * w * tau).exp() - C64::ONE) / (C64::I * w);
-        let mut counts = Vec::new();
-        for (within, tolerance) in [(Within::RoundOff, 1e-14), (Within::Share, crate::units::QUADRATURE)] {
-            let nodes: Vec<(f64, f64)> = super::quadrature(0.0, tau, w.abs(), super::FORMS, within).collect();
-            let sum: C64 = nodes.iter().map(|(s, weight)| (C64::I * w * *s).exp() * *weight).sum();
-            assert!((sum - exact).abs() <= tolerance * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", nodes.len());
-            counts.push(nodes.len());
-        }
-        assert!(counts[1] <= counts[0] && counts[1] == super::nodes(tau, w.abs()), "ω {omega}, γ {decay}, τ {tau}: {counts:?} nodes");
-        eprintln!("ω {omega}, γ {decay}, τ {tau}: {} nodes to round-off, {} within the share", counts[0], counts[1]);
+        let nodes: Vec<(f64, f64)> = super::quadrature(0.0, tau, w.abs(), super::FORMS).collect();
+        let sum: C64 = nodes.iter().map(|(s, weight)| (C64::I * w * *s).exp() * *weight).sum();
+        assert!((sum - exact).abs() <= 1e-14 * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", nodes.len());
+        assert_eq!(nodes.len(), super::nodes(tau, w.abs()), "the nodes the kick takes");
+        eprintln!("ω {omega}, γ {decay}, τ {tau}: {} nodes", nodes.len());
     }
 }
 
@@ -3015,7 +3009,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
         })
         .collect();
     // Each atom's stops: its quadrature's nodes over the step with their weights, then the middle and the end.
-    let stops: Vec<Vec<(f64, f64)>> = scratches.iter().map(|s| super::quadrature(-h, h, s.picture.bandwidth, super::FORMS, super::Within::Share).chain([(0.0, 0.0), (h, 0.0)]).collect()).collect();
+    let stops: Vec<Vec<(f64, f64)>> = scratches.iter().map(|s| super::quadrature(-h, h, s.picture.bandwidth, super::FORMS).chain([(0.0, 0.0), (h, 0.0)]).collect()).collect();
     let nodes = stops.iter().map(|s| (s.len() - 2) as f64).sum::<f64>() / count as f64;
     let mut x = [C64::ZERO; STATES];
     // A jump's crossings: each atom with its threshold halfway down its step's fall, the point a tenth of the step past
@@ -3051,7 +3045,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
             picture.launch(-h, &x0[..n]);
             sums.fill(0.0);
             weights.fill(0.0);
-            let (b, panel) = super::panels(-h, h, picture.bandwidth, super::FORMS, super::Within::Share).next().unwrap();
+            let (b, panel) = super::panels(-h, h, picture.bandwidth, super::FORMS).next().unwrap();
             let mut y = [C64::ZERO; STATES];
             for (u, w) in panel {
                 picture.advance(u, &mut y[..n]);
@@ -3186,7 +3180,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                     let super::Carved { picture, sums, weights, .. } = s.carve();
                     picture.launch(0.0, &x0[..n]);
                     let mut y = [C64::ZERO; STATES];
-                    for (u, w) in super::quadrature(0.0, h, picture.bandwidth, super::FORMS, super::Within::Share) {
+                    for (u, w) in super::quadrature(0.0, h, picture.bandwidth, super::FORMS) {
                         picture.advance(u, &mut y[..n]);
                         super::Sums { still: false, h, tones: &picture.beats }.gather(u, w, &y[..n], Some(&mut *weights), sums);
                     }
