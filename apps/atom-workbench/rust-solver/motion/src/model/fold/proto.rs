@@ -958,6 +958,8 @@ pub(crate) struct Workspace {
     pub(crate) cell: Cell,
     look: Option<Box<look::Look>>,
     point: ([f64; 3], [f64; 3]),
+    /// Whether this round of a decision made its look (`Fold::worst`: one look a round, its reads after the first on it).
+    looked: bool,
     /// A column's rows of the ring's reading (`landing_ring`): the near blocks' kept rows and the far blocks.
     rings: Vec<Ring>,
 }
@@ -2813,6 +2815,7 @@ impl Fold {
             cell: Cell::default(),
             look: None,
             point: ([0.0; 3], [0.0; 3]),
+            looked: false,
             rings: Vec::with_capacity(near_rows + far_len),
         })
     }
@@ -3640,6 +3643,7 @@ impl Fold {
         (ws.step.look, ws.step.beyond, ws.cell.chosen) = (0.0, false, None);
         let (ratio, swept) = 'rounds: loop {
             rounds += 1;
+            ws.looked = false;
             self.bases(r, kappa, cache, ws, &mut site, &mut work[REFRESH])?;
             if decide {
                 evaluation.fit(cache, &ws.near, &ws.far);
@@ -3663,7 +3667,11 @@ impl Fold {
                     break 'rounds (held_ratio(&ws.near, cache, &evaluation, &ws.whole, n), done);
                 }
                 // The decision's accounts and the evaluation they choose (# The decisions).
+                #[cfg(test)]
+                let since = std::time::Instant::now();
                 self.accounts(cache, ws, &evaluation, energy, done, &mut work[READING]);
+                #[cfg(test)]
+                PROF.with(|p| p.borrow_mut()[2] += since.elapsed().as_secs_f64());
                 ws.step.reads.push(done);
                 ended.get_or_insert_with(|| worst_kinds(&ws.accounts, &ws.den, n));
                 let next = self.walk(cache, ws, &mut evaluation, done, &mut work[READING]);
@@ -4156,6 +4164,16 @@ impl Fold {
     /// ends. Its readings the step's (ρ = rate(√max_j Σ_k ρ²_kj) at the point, and by kind at that column).
     #[allow(clippy::too_many_arguments)]
     fn walk(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, done: usize, work: &mut f64) -> Next {
+        #[cfg(test)]
+        let clock = std::time::Instant::now();
+        let next = self.walk_in(cache, ws, evaluation, done, work);
+        #[cfg(test)]
+        PROF.with(|p| p.borrow_mut()[0] += clock.elapsed().as_secs_f64());
+        next
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_in(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, done: usize, work: &mut f64) -> Next {
         let n = ws.n;
         let budget = unrate(crate::model::elim::share()).powi(2);
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
@@ -4170,8 +4188,8 @@ impl Fold {
         }
         let mut worst = self.worst(cache, ws, evaluation, done, work);
         // Where the look's pass 0 says the fold does not exist at the point itself (one P column: the fold's own root),
-        // the node holding that column's response rises, as where the series' ratio reads one.
-        if ws.look.as_ref().and_then(|l| l.ceases()).is_some_and(|(t, _)| t == 0.0) {
+        // the node of the most mixing rises, as where the series' ratio reads one.
+        if ws.cell.path.is_some() && ws.look.as_ref().and_then(|l| l.ceases()).is_some_and(|(t, _)| t == 0.0) {
             let mixing = mixings(&ws.near, &ws.far, cache, &ws.hbase, &ws.cell.nodes, n, work);
             ws.cell.chosen = most_mixed(&mixing, &ws.cell.nodes, |_| true);
             return Next::Nowhere;
@@ -4194,6 +4212,7 @@ impl Fold {
         let sizes = held_sizes(ws.sizes(self, cache, &pricing.sets), evaluation);
         let cell = |s: &price::Sizes| -> f64 { pricing.price(s, &price::Route::predicted(size, s.n)) };
         let here = cell(&sizes);
+        let mut risings: Vec<Option<f64>> = vec![None; pricing.nodes.len()];
         let total = |worst: &[Vec<f64>], accounts: &[Account], j: usize| accounts.iter().zip(worst).filter(|(a, _)| a.on).map(|(_, w)| w[j]).sum::<f64>();
         let remedied = |a: &Account, decision: &Decision| match a.item {
             Item::Series { .. } | Item::Omitted { .. } | Item::Left { .. } => true,
@@ -4262,8 +4281,14 @@ impl Fold {
             for (m, hold) in holds.iter().enumerate() {
                 let Some(hold) = hold else { continue };
                 let removed: f64 = ws.accounts.iter().zip(&worst).filter(|(a, _)| a.on).map(|(a, w)| w[j] * attributed(a, hold)[j]).sum();
-                let s = risen(&sizes, hold, &pricing.nodes[m]);
-                offer(removed, cell(&s) - here + s.switch(&price::Route::predicted(size, s.n)), Remedy::Rise(m));
+                if removed > 0.0 {
+                    // A node's price, its rise from the representation the decision stands on: once a walk.
+                    let price = *risings[m].get_or_insert_with(|| {
+                        let s = risen(&sizes, hold, &pricing.nodes[m]);
+                        cell(&s) - here + s.switch(&price::Route::predicted(size, s.n))
+                    });
+                    offer(removed, price, Remedy::Rise(m));
+                }
             }
             let Some((_, _, remedy)) = best else { break };
             match remedy {
@@ -4439,7 +4464,7 @@ impl Fold {
         let mut out = vec![0.0; n];
         series_squares(nb, np, part, p, done, &ws.den, floor, n, &mut out);
         let r = ratio_of(nb, np, part, done - 1, &ws.den, n);
-        out[j] * ws.look.as_ref().map_or(1.0, |look| series_factor(look, r, p, j))
+        out[j] * ws.look.as_ref().filter(|_| ws.cell.path.is_some()).map_or(1.0, |look| series_factor(look, r, p, j))
     }
 
     /// Every account's worst over the cell (unify2 §2.7, §4.2): its reading at the point times the largest ratio of its
@@ -4449,15 +4474,24 @@ impl Fold {
     /// 1/|d| at its held energy; the reuse ρ ∝ the field's drift; a far block left out ρ² ∝ its response M_jj; the ring
     /// ρ ∝ its block's excitation squared (its transient's error, second order at resonance: proto.rs # The ring). The rest
     /// the point's. Where the look's fold ceases in the cell, every part of a block holding the column there reads
-    /// infinite (the node that holds it rises at the cell's start: unify2 §4.2). A cell with no path, its point's look alone
-    /// (its column's pass 0 there: the fold's existence at the point, exact for one P column).
+    /// infinite (the node that holds it rises at the cell's start: unify2 §4.2). No look where the cell has no path (a
+    /// decision whose cell is not known): the point's readings; its existence the series' own (`Fold::walk`). One look a
+    /// round.
     fn worst(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, done: usize, work: &mut f64) -> Vec<Vec<f64>> {
         let n = ws.n;
         let mut worst: Vec<Vec<f64>> = ws.accounts.iter().map(|a| a.squares.clone()).collect();
+        let Some(path) = ws.cell.path else { return worst };
         let mut look = ws.look.take().unwrap_or_else(|| Box::new(self.look(ws)));
-        let (flow, from, width) = ws.cell.path.map_or((None, ws.point, 0.0), |p| (Some(p.flow), p.from, p.width));
-        self.prototype_look(&|t| flow.map_or(from, |f| f.advance(from, t)), width, cache, ws, &mut look);
-        ws.step.look += look.work;
+        if !ws.looked {
+            #[cfg(test)]
+            let clock = std::time::Instant::now();
+            let (flow, from) = (path.flow, path.from);
+            self.prototype_look(&|t| flow.advance(from, t), path.width, cache, ws, &mut look);
+            #[cfg(test)]
+            PROF.with(|p| p.borrow_mut()[1] += clock.elapsed().as_secs_f64());
+            ws.step.look += look.work;
+            ws.looked = true;
+        }
         *work += 0.0;
         let seen = &look.seen;
         let ratio = |of: &dyn Fn(&look::Seen) -> f64| -> f64 {
@@ -4567,6 +4601,12 @@ fn mixings(near: &[Near], far: &[Far], cache: &Cache, hbase: &[C64], nodes: &[Ta
             most
         })
         .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Diagnosis (U3): seconds in the walk (look included), the look, the accounts.
+    pub(crate) static PROF: std::cell::RefCell<[f64; 4]> = const { std::cell::RefCell::new([0.0; 4]) };
 }
 
 /// A node P may take (unify2 §3.1; run.rs `Rise`): the fold's block it is of and its rows there (excited rows of the
@@ -6705,9 +6745,31 @@ impl Workspace {
     /// The price of an explicit node's fall over the decision's cell (unify2 §3.3, §3.4; real multiply-adds): the cell's
     /// price on the sizes the fall leaves -- its P places `places` out of P, their level back in their block as one left
     /// out --, less the standing one's (the evaluation held), with the switch to it once (`Sizes::switch`). None where no
-    /// near block holds the places.
+    /// near block holds the places, or where the node's fold, predicted, does not exist. The prediction (unify2 §2.3, §3.4:
+    /// P → Q by the first order, no trial for it): the node's excitation folded, x̂ = Σ_{p,g} |a_pg|²/|Δ_pg|² of Ĥ_PP's
+    /// entries at the decision's point (its drives over the places' energy differences, decay with them) -- the series'
+    /// ratio is the excitation (r = x for one P state; summed over the ground columns, the trace, an upper bound of the
+    /// iteration's spectral radius) --: none where x̂ ≥ 1; else its level solved again in its block at the sweeps its
+    /// series asks to the budget, r̂^p/(1 − r̂) ≤ s (two at the least: a ratio is read from two). A node so driven that its
+    /// fold would not converge, or would sweep dearly, is not tried (R4_LIN_4's D2 F′ = 2 was tried at every cell, its
+    /// fold rising it again at once).
     pub(crate) fn fall_price(&self, fold: &Fold, cache: &Cache, places: &[usize]) -> Option<f64> {
         let x = self.near.iter().position(|nb| !places.is_empty() && places.iter().all(|p| nb.xs.contains(p)))?;
+        let (n, ng) = (self.n, fold.ground.len());
+        let h = &self.hbase;
+        let excitation: f64 = places
+            .iter()
+            .flat_map(|&p| (0..ng).map(move |g| (p, g)))
+            .map(|(p, g)| {
+                let a = h[p * n + g].abs().max(h[g * n + p].abs());
+                if a > 0.0 { (a / (h[p * n + p] - h[g * n + g]).abs()).powi(2) } else { 0.0 }
+            })
+            .sum();
+        if !(excitation < 1.0) {
+            return None;
+        }
+        let budget = unrate(crate::model::elim::share());
+        let sweeps = if excitation > 0.0 { ((budget * (1.0 - excitation)).ln() / excitation.ln()).ceil().max(2.0) as usize } else { 2 };
         let sizes = held_sizes(self.sizes(fold, cache, &self.cell.sets), &cache.evaluation);
         let size = self.den.iter().sum::<f64>();
         let rows = places.len();
@@ -6719,10 +6781,12 @@ impl Workspace {
             b.lanes -= 1;
         }
         b.levels.push(rows);
-        b.omitted.push(true);
+        b.omitted.push(false);
         b.level_parts.push(vec![rows]);
         b.rat.push(0);
         b.all += rows;
+        b.parts.push(price::Span::dense(rows, sweeps));
+        s.sweeps = s.sweeps.max(sweeps);
         let route = |n: usize| price::Route::predicted(size, n);
         Some(self.cell.price(&s, &route(s.n)) - self.cell.price(&sizes, &route(sizes.n)) + s.switch(&route(s.n)))
     }

@@ -2897,6 +2897,110 @@ fn a_scene_s_step_cost() {
     });
 }
 
+/// A scene's cell (U3's gate: a cell = D/τ held steps and one decision; run by name, alone: `SCENE=<a reference scene's name
+/// or a native request's path> TAU=<µs> … a_scene_s_cell_cost -- --ignored --nocapture --test-threads 1`): per state set,
+/// 16 atoms drawn as `a_scene_s_onefold_step_cost` draws them, each warmed one step and decided at its own point; then three
+/// rounds, atom after atom, its held step (no decision), a held forward alone (its middle), a decision's forward alone (a
+/// deciding middle's) and a decision at a cell's end of 2τ (the run's `Middle::decide`: its forward, its look over the
+/// cell, its walk, a fall's trial where its price says), each timed (µs, the atoms' mean); and the switches the decisions
+/// took. A cell of 2τ: two held steps and a decision.
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn a_scene_s_cell_cost() {
+    use crate::model::GROUND;
+    let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
+    let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
+    let request = scene(&name);
+    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
+    let mut p = [0.0; GROUND];
+    p[state] = 1.0;
+    let run = crate::model::fold::run::Onefold::new(&request, p).expect("the run on the fold at the atom");
+    let model = crate::model::Model::new(&request, &crate::field::Light::new(&request), &[]).unwrap();
+    let trap = model.trap(&p, &model.prepared()).expect("the prepared trap");
+    let kt = crate::units::KT_PER_UK * request.temperature_uk;
+    let hm = run.hbar_over_mass();
+    for set in 0..GROUND {
+        let Some(first) = (0..GROUND).find(|&g| run.cluster_of(g) == set) else { break };
+        let starts: Vec<Trajectory> = (0..16)
+            .filter_map(|i| {
+                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, set as u32);
+                let (r, kappa) = thermal(&trap, hm, kt, &mut stream);
+                let mut t = Trajectory::new(&run, first, r, kappa, 17, i);
+                t.threshold = f64::MIN_POSITIVE;
+                let mut warmed = step_of(&run, &t, tau, &mut step::Scratch::default()).ok()?.end;
+                warmed.threshold = f64::MIN_POSITIVE;
+                let middle = run.middle(warmed.cluster, warmed.r, warmed.time, &warmed.held, true);
+                let path = middle.path(warmed.kappa, warmed.kappa.map(|k| hm * k));
+                if middle.exists(&path) {
+                    if let Some(held) = middle.held() {
+                        warmed.held = held;
+                    }
+                }
+                drop(middle);
+                warmed.forms = run.forms(warmed.cluster, &warmed.point(), &warmed.psi, &warmed.held);
+                Some(warmed)
+            })
+            .collect();
+        let mut clusters: Vec<usize> = starts.iter().map(|t| t.cluster).collect();
+        clusters.sort();
+        clusters.dedup();
+        for cluster in clusters {
+            let these: Vec<Trajectory> = starts.iter().filter(|t| t.cluster == cluster).cloned().collect();
+            let label = format!("set {set} ({}, {} atoms) of {}", these[0].psi.len(), these.len(), std::path::Path::new(&name).file_stem().unwrap().to_string_lossy());
+            let (mut held, mut forward, mut deciding, mut decision, mut switched, mut count) = (0.0, 0.0, 0.0, 0.0, 0usize, 0usize);
+            crate::model::fold::run::PROF.with(|p| *p.borrow_mut() = [0.0; 4]);
+            let mut scratch = step::Scratch::default();
+            let mut these = these;
+            for _ in 0..3 {
+                for t in these.iter_mut() {
+                    let clock = std::time::Instant::now();
+                    let Ok(m) = step::Midway::new(&run, t, tau, None) else { continue };
+                    if m.attempt(t, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).is_err() {
+                        continue;
+                    }
+                    held += clock.elapsed().as_secs_f64();
+                    let clock = std::time::Instant::now();
+                    let middle = run.middle(t.cluster, t.r, t.time, &t.held, false);
+                    let _ = middle.exists(&middle.path(t.kappa, t.kappa.map(|k| hm * k)));
+                    drop(middle);
+                    forward += clock.elapsed().as_secs_f64();
+                    let clock = std::time::Instant::now();
+                    let middle = run.middle(t.cluster, t.r, t.time, &t.held, true);
+                    let _ = middle.exists(&middle.path(t.kappa, t.kappa.map(|k| hm * k)));
+                    drop(middle);
+                    deciding += clock.elapsed().as_secs_f64();
+                    let clock = std::time::Instant::now();
+                    let middle = run.middle(t.cluster, t.r, t.time, &t.held, true);
+                    let path = middle.path(t.kappa, t.kappa.map(|k| hm * k));
+                    let d = middle.decide(&path, &t.psi, 2.0 * tau, t.owed, 1.0);
+                    switched += usize::from(d.switched.is_some());
+                    // The decision's representation the atom's from here (its rounds after the first the steady state's).
+                    if let (Some(held), None) = (d.held, &d.switched) {
+                        t.held = held;
+                    }
+                    drop(middle);
+                    decision += clock.elapsed().as_secs_f64();
+                    count += 1;
+                }
+            }
+            let us = |x: f64| 1e6 * x / count.max(1) as f64;
+            let prof = crate::model::fold::run::PROF.with(|p| std::mem::take(&mut *p.borrow_mut()));
+            println!("{label}: in the decisions (its two kinds, per decision): the walk {:.1} µs (its look {:.1}), the accounts {:.1}", us(prof[0]) / 2.0, us(prof[1]) / 2.0, us(prof[2]) / 2.0);
+            println!(
+                "{label}: a held step {:.1} µs, a held forward {:.1}, a decision's forward {:.1} ({:.2} held forwards), a decision at a cell's end {:.1} ({:.2} held forwards); a cell of 2τ {:.1} µs ({:.2} held steps); switched at {switched} of {count} decisions",
+                us(held),
+                us(forward),
+                us(deciding),
+                deciding / forward,
+                us(decision),
+                decision / forward,
+                2.0 * us(held) + us(decision),
+                (2.0 * held + decision) / held
+            );
+        }
+    }
+}
+
 /// A scene's step on the fold at the atom (model/fold/run.rs; run by name, alone: `SCENE=<a reference scene's name or a
 /// native request's path> TAU=<µs> … a_scene_s_onefold_step_cost -- --ignored --nocapture --test-threads 1`): per state
 /// set, 16 atoms drawn as `scene_clusters` draws them (the prepared trap at the request's temperature, a random state of

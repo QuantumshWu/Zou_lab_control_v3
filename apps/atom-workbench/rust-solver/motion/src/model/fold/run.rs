@@ -147,6 +147,8 @@
 //! along the path is the parabola through the step's outer nodes the propagation takes, a tone's phase exact. A set of
 //! ground states alone has none: its fold's photons hold that part.
 use super::proto::{At, Bar, Cache, Cell, Moments, Taken, Workspace, KINDS};
+#[cfg(test)]
+pub(crate) use super::proto::PROF;
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::{Mat, C64};
@@ -619,7 +621,10 @@ impl Clusters {
     /// A workspace of a cluster, taken from its pool (made where none is free).
     fn take(&self, set: usize) -> Workspace {
         let taken = self.sets.get(set).pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
-        taken.unwrap_or_else(|| self.sets.get(set).fold.prototype_workspace().expect("the set's workspace"))
+        let mut ws = taken.unwrap_or_else(|| self.sets.get(set).fold.prototype_workspace().expect("the set's workspace"));
+        // A decision's cell is its own (`Middle::priced`, `Onefold::landed_at`): none from the workspace's last user.
+        ws.cell = Cell::default();
+        ws
     }
 
     fn give(&self, set: usize, ws: Workspace) {
