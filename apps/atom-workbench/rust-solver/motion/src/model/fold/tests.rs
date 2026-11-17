@@ -453,7 +453,7 @@ fn the_lambda_rows_are_the_exact_floquet_ones_with_the_copies_folded() {
 /// excited ones (±20, Γ = 38.1, each landing in one of them), two beams of frequencies ±(80 … 580) rad/µs with couplings of
 /// 5 … 40 rad/µs at random phases (each with probability 0.6); the copies decomposed; in a third of the trials the first
 /// excited state's level explicit at a component that drives it.
-fn random_system(state: &mut u64, trial: usize) -> (Request, Choice) {
+pub(super) fn random_system(state: &mut u64, trial: usize) -> (Request, Choice) {
     let mut u = || {
         *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = *state;
@@ -1656,7 +1656,7 @@ fn a_step_s_work_at_a_scene() {
 
 /// The prototype's choice (proto.rs) for the tests: the explicit nodes the run held fixed at the focus before step3c
 /// (`focus_choice`), so that the tests keep reaching the explicit sets they reached.
-fn proto_choice(req: &Request, name: &str) -> Choice {
+pub(super) fn proto_choice(req: &Request, name: &str) -> Choice {
     let choice = focus_choice(req);
     println!("{name}: the rule's ground sets {:?}", choice.sets);
     choice
@@ -2143,7 +2143,7 @@ fn proto_decay(generator: &Mat, jumps: &[[Mat; 3]]) -> f64 {
 /// laser B on |4⟩ at 0.4 rad/µs a standing wave along z, both on resonance: the Raman coupling is resonant, so |0⟩ and |4⟩
 /// are one set, in frames 100 rad/µs apart (ν_A − ν_B), and B's outside form between them, 0.8 rad/µs times its intensity
 /// over a beam's, an entry of H_GG at their frames' beat -- a tone at ±100 rad/µs whose envelope is B's standing wave.
-fn toned_lambda() -> Request {
+pub(super) fn toned_lambda() -> Request {
     let (e4, ee) = (100.0, 1000.0);
     let rays = [
         Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(0.5))] },

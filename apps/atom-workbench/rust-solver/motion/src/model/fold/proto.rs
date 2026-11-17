@@ -167,6 +167,8 @@
 use super::*;
 use crate::field::Amplitude;
 
+pub(crate) mod price;
+
 /// A pair of one frequency's field coefficients (frequency w, k, k'): its coefficient ε_k*ε_k'.
 type Pair = (usize, usize, usize);
 
