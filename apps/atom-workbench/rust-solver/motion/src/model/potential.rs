@@ -323,54 +323,10 @@ impl Model {
 
     /// The trap of V_L(r; p) for the ground populations p and the lights `lights` (module documentation, # The trap).
     pub fn trap(&self, p: &[f64; GROUND], lights: &Lights) -> Result<Trap, String> {
-        let length = self.shortest_length(lights);
-        let mut r = [0.0; 3];
-        let mut here = self.expand(r, p, lights, 2, None);
-        let mut radius = length;
-        loop {
-            let (values, vectors) = symmetric3_eigen(&here.quadratic.hessian);
-            let along = vectors.map(|e| dot3(e, here.quadratic.gradient));
-            let noise = here.noise();
-            let bowl = values.iter().all(|&l| l * length * length > noise);
-            let steps: [f64; 3] = std::array::from_fn(|i| {
-                if values[i] * length * length > noise {
-                    -along[i] / values[i]
-                } else if along[i] != 0.0 {
-                    -along[i].signum() * radius
-                } else if values[i] * length * length < -noise {
-                    radius
-                } else {
-                    0.0
-                }
-            });
-            let size = steps.iter().map(|x| x * x).sum::<f64>().sqrt();
-            loop {
-                let scale = if size > radius { radius / size } else { 1.0 };
-                let gain = -(0..3).map(|i| along[i] * steps[i] * scale + 0.5 * values[i] * (steps[i] * scale).powi(2)).sum::<f64>();
-                if !(gain > noise) {
-                    if !bowl {
-                        return Err("光镊不约束原子：原子的势能从焦点往下走，找不到局部极小".into());
-                    }
-                    let frequencies = values.map(|l| (l * self.hbar_over_mass).sqrt());
-                    let lab = std::array::from_fn(|a| (here.quadratic.hessian[a][a] * self.hbar_over_mass).sqrt());
-                    return Ok(Trap { centre: r, minimum: here.quadratic.value, axes: vectors, frequencies, lab });
-                }
-                let next: [f64; 3] = std::array::from_fn(|a| r[a] + (0..3).map(|i| steps[i] * scale * vectors[i][a]).sum::<f64>());
-                if self.light.outside(next) {
-                    return Err("光镊不约束原子：原子的势能从焦点往下走，一直走出了光镊的范围".into());
-                }
-                let there = self.expand(next, p, lights, 2, None);
-                if there.quadratic.value < here.quadratic.value {
-                    r = next;
-                    here = there;
-                    if scale < 1.0 {
-                        radius *= 2.0;
-                    }
-                    break;
-                }
-                radius = radius.min(size) * 0.5;
-            }
-        }
+        descend(self.shortest_length(lights), self.hbar_over_mass, &|r| self.light.outside(r), &|r| {
+            let e = self.expand(r, p, lights, 2, None);
+            (e.quadratic, e.noise())
+        })
     }
 
     /// The prepared potential's proven envelope for ground populations p (model.rs `Envelope`): |Q_l'l| = |[P_l'l]_p| of the
@@ -384,6 +340,61 @@ impl Model {
         let form: Vec<C64> = (0..n * n).map(|x| contract(&tone.pairs[x], p)).collect();
         let weights = (0..n * n).map(|x| form[x].abs() + near[x]).collect();
         Envelope { beams: f.beams.clone(), weights, form, near }
+    }
+}
+
+/// The trap of a potential (module documentation, # The trap): the descent from the focus to its local minimum, on its
+/// second-order expansion with the rounding of its value at a point (`expand`), from the light's shortest length `length`
+/// (µm) up, within the trap's region (`outside`: the trap light's region left); ħ/m `hbar_over_mass` makes the
+/// frequencies. The one algorithm of every trap: the old model's (`Model::trap`) and the fold's reference potential's
+/// (model/fold/run.rs `Reference`; solve.rs).
+pub(crate) fn descend(length: f64, hbar_over_mass: f64, outside: &dyn Fn([f64; 3]) -> bool, expand: &dyn Fn([f64; 3]) -> (Quadratic, f64)) -> Result<Trap, String> {
+    let mut r = [0.0; 3];
+    let mut here = expand(r);
+    let mut radius = length;
+    loop {
+        let (values, vectors) = symmetric3_eigen(&here.0.hessian);
+        let along = vectors.map(|e| dot3(e, here.0.gradient));
+        let noise = here.1;
+        let bowl = values.iter().all(|&l| l * length * length > noise);
+        let steps: [f64; 3] = std::array::from_fn(|i| {
+            if values[i] * length * length > noise {
+                -along[i] / values[i]
+            } else if along[i] != 0.0 {
+                -along[i].signum() * radius
+            } else if values[i] * length * length < -noise {
+                radius
+            } else {
+                0.0
+            }
+        });
+        let size = steps.iter().map(|x| x * x).sum::<f64>().sqrt();
+        loop {
+            let scale = if size > radius { radius / size } else { 1.0 };
+            let gain = -(0..3).map(|i| along[i] * steps[i] * scale + 0.5 * values[i] * (steps[i] * scale).powi(2)).sum::<f64>();
+            if !(gain > noise) {
+                if !bowl {
+                    return Err("光镊不约束原子：原子的势能从焦点往下走，找不到局部极小".into());
+                }
+                let frequencies = values.map(|l| (l * hbar_over_mass).sqrt());
+                let lab = std::array::from_fn(|a| (here.0.hessian[a][a] * hbar_over_mass).sqrt());
+                return Ok(Trap { centre: r, minimum: here.0.value, axes: vectors, frequencies, lab });
+            }
+            let next: [f64; 3] = std::array::from_fn(|a| r[a] + (0..3).map(|i| steps[i] * scale * vectors[i][a]).sum::<f64>());
+            if outside(next) {
+                return Err("光镊不约束原子：原子的势能从焦点往下走，一直走出了光镊的范围".into());
+            }
+            let there = expand(next);
+            if there.0.value < here.0.value {
+                r = next;
+                here = there;
+                if scale < 1.0 {
+                    radius *= 2.0;
+                }
+                break;
+            }
+            radius = radius.min(size) * 0.5;
+        }
     }
 }
 
