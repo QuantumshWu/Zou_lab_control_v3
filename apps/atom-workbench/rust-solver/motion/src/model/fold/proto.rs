@@ -2307,7 +2307,8 @@ fn inverse_root(x: &[C64], n: usize, y: &mut [C64], p: &mut [C64], q: &mut [C64]
 impl Fold {
     /// The prototype's layout for this fold (module documentation). Refused where a block holds what the prototype does
     /// not: an exact copy before an excited row, centred excited rows beside solved ones (the choice's to make solved), a
-    /// copy landing on a P frame (a static source), explicit states in a block whose rows are all centred, or copies there.
+    /// copy at a P place's frame whose static coupling to it cannot be folded (a kept copy's), explicit states in a block
+    /// whose rows are all centred, or copies there.
     pub(crate) fn prototype_workspace(&self) -> Result<Workspace, String> {
         let n = self.size();
         let ng = self.ground.len();
@@ -2449,12 +2450,17 @@ impl Fold {
                     vectors.extend((0..comp.basis.len()).map(|k| (c, k)));
                 }
             }
-            // The static split: its sources on the copies (a ground state at a copy's frame), none here.
+            // A copy at a P place's frame is reached from that place by their static coupling too (`Fold::lay`'s static split,
+            // BRIEF_COPIES item 4): one Floquet node, the copy of state t at θ_p, and P's own entry (t, p) at θ_t − θ_p
+            // (`Fold::turning`) its other end. Where that coupling can be folded P leaves the entry out as a copy left out --
+            // its peak reading within the share at every point, the light at its peak --, and the copy row is the block's
+            // without it, the same coupling left out once; where it cannot, P holds it as a tone and the node is P's (a kept
+            // copy), no row of a block.
             for r in &b.rows {
-                if let Row::Copy { component, .. } = *r {
+                if let Row::Copy { state, component } = *r {
                     let omega = b.offset.plus(-1, &self.components[component].beat);
-                    if (0..ng).any(|p| self.frames[p] == omega) {
-                        return Err(format!("块 {o}：原型不含落在 P 帧上的拷贝"));
+                    if (0..ng).any(|p| self.frames[p] == omega && self.ground_tone[state * GROUND + self.ground[p]]) {
+                        return Err(format!("块 {o}：原型不含落在 P 帧上、与该处静态耦合不能折叠的拷贝"));
                     }
                 }
             }

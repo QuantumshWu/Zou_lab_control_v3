@@ -522,6 +522,10 @@ pub(crate) struct Fold {
     /// Per entry (p, q) of P (n × n, row by row) whether it is a tone (module documentation, # Tones): two places of one
     /// kind and different frames whose coupling cannot be folded.
     pub(crate) turning: Vec<bool>,
+    /// Per two ground states (GROUND × GROUND) whether their static coupling cannot be folded (`turning`'s reading): a
+    /// copy at a P place's frame whose coupling to that place can be folded is a copy row, that coupling left out as P
+    /// leaves it out (proto.rs `prototype_workspace`; BRIEF_COPIES item 4).
+    pub(crate) ground_tone: Vec<bool>,
     pub(crate) blocks: Vec<Block>,
     /// Per block its coherence group (module documentation, # Tones), named by its least block: blocks whose explicit
     /// states P holds a tone between are one group, their jumps one operator.
@@ -651,19 +655,24 @@ impl Fold {
         // left out (its reading within the share).
         let n = ground.len() + explicit.len();
         let state = |p: usize| if p < ng { ground[p] } else { GROUND + explicit[p - ng] };
+        let cannot_fold = |s: usize, t: usize| {
+            let decayed = if s < GROUND { 0.0 } else { 0.5 * d[(s - GROUND, t - GROUND)].abs() };
+            let peak = request.hamiltonian[(s, t)].abs() + decayed + light.frequencies.iter().map(|f| f.norm * request.outside_forms[f.form].matrices.iter().map(|m| m[(s, t)].abs()).sum::<f64>()).sum::<f64>();
+            let delta = request.hamiltonian[(s, s)].re - request.hamiltonian[(t, t)].re;
+            unfoldable(peak / delta.abs(), crate::model::elim::share())
+        };
         let turning: Vec<bool> = (0..n * n)
             .map(|x| {
                 let (p, q) = (x / n, x % n);
                 if p == q || (p < ng) != (q < ng) || frames[p] == frames[q] {
                     return false;
                 }
-                let (s, t) = (state(p), state(q));
-                let decayed = if p < ng { 0.0 } else { 0.5 * d[(s - GROUND, t - GROUND)].abs() };
-                let peak = request.hamiltonian[(s, t)].abs() + decayed + light.frequencies.iter().map(|f| f.norm * request.outside_forms[f.form].matrices.iter().map(|m| m[(s, t)].abs()).sum::<f64>()).sum::<f64>();
-                let delta = request.hamiltonian[(s, s)].re - request.hamiltonian[(t, t)].re;
-                unfoldable(peak / delta.abs(), crate::model::elim::share())
+                cannot_fold(state(p), state(q))
             })
             .collect();
+        // Every two ground states' static coupling read the same way: a copy at a P place's frame is reached from that
+        // place by it too (`Fold::lay`'s static split).
+        let ground_tone: Vec<bool> = (0..GROUND * GROUND).map(|x| x / GROUND != x % GROUND && cannot_fold(x / GROUND, x % GROUND)).collect();
         // The excited states the outside forms couple (any frequency, any field components).
         let mut coupled = vec![false; EXCITED * EXCITED];
         for o in &outside {
@@ -817,6 +826,7 @@ impl Fold {
             frame_values,
             explicit,
             turning,
+            ground_tone,
             blocks,
             groups,
             base_ground: base.block(&all, &all),

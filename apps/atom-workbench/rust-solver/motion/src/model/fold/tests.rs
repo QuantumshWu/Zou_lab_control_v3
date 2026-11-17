@@ -3404,7 +3404,8 @@ fn the_loss_energy_stands_on_one_set_of_risen_nodes_for_both_light_sets() {
 /// `Choice::base`, `Block::far`): on sixty random systems, every candidate node of every set risen alone on the base
 /// choice of its set (`Choice::base_of`), no block is left far -- its rows all centred -- that holds an explicit state or a
 /// copy row, what a far form does not hold (GMD1C's (1, f2, 0) was refused so, every such block's rows centred around
-/// the risen node's). Said beside: the prototype's other refusals by their reason.
+/// the risen node's) -- and none refused for a copy at a P place's frame whose static coupling to it folds (BRIEF_COPIES
+/// item 4; 5 of 235 were).
 #[test]
 fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
     let mut state = 20261117u64;
@@ -3429,7 +3430,7 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
         }
     }
     println!("{made} risen clusters held by the prototype; refused: {refused:?}");
-    assert!(refused.keys().all(|why| !why.contains("全居中")), "no all-centred refusal");
+    assert!(refused.is_empty(), "every risen cluster held: no all-centred block with an explicit state or a copy, no copy at a P frame refused where its static coupling folds (BRIEF_COPIES item 4: 5 of 235 were)");
 }
 
 /// A two-level atom's ring reads what its landing leaves (proto.rs # The ring; landing.status 6): the ring's reading at the
@@ -3986,4 +3987,49 @@ fn a_two_level_atom_s_dipole_force_in_a_standing_wave_is_the_master_equation_s()
         println!("Δ {:.1}Γ, s₁ {s1}: the run's mean force {mean:.3?} ± {error:.3?} 1/µm/µs against the master equation's dipole force {master:.3}", delta / GAMMA);
         assert!((mean[2] - master).abs() <= 4.0 * error[2] + share * scale, "Δ {delta}, s₁ {s1}: along the wave {} ± {} against {master}", mean[2], error[2]);
     }
+}
+
+/// A scene's risen clusters hold their copies at a P place's frame (BRIEF_COPIES item 4; proto.rs `prototype_workspace`): of
+/// the request in SCENE, every candidate node of every set risen alone on its set's base choice (`Choice::base_of`), each
+/// fold whose copy rows hold one at a P place's frame -- tilt2 F=2's three were refused so with level 5 risen, the copy of a
+/// P state (3, 4, 5) at another P state's frame -- is held by the prototype where its static coupling to that place can be
+/// folded (P leaves the same coupling out of its entries), and each such coupling's mixing is said.
+#[test]
+#[ignore = "a check on a scene's request: run by name with SCENE"]
+fn a_scene_s_risen_clusters_hold_their_copies_at_a_p_frame() {
+    let name = std::env::var("SCENE").expect("SCENE: a request file's path");
+    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap();
+    let request = crate::request::Request::from_native(&line).unwrap();
+    let base = Choice::base(&request, vec![]).unwrap();
+    let (mut held, mut refused) = (0, 0);
+    for set in Fold::sets(&request, &base).unwrap().iter().filter(|s| s.len() > 1) {
+        let fold = Fold::new(&request, &base, set[0]).unwrap();
+        for (key, _, _) in Choice::candidates(&fold) {
+            let Ok(choice) = Choice::base_of(&request, vec![key], &|s| s == &set[..]) else { continue };
+            let Ok(risen) = Fold::new(&request, &choice, set[0]) else { continue };
+            let ng = risen.ground.len();
+            let mut on: Vec<(usize, usize)> = vec![];
+            for b in &risen.blocks {
+                for r in &b.rows {
+                    if let Row::Copy { state, component } = *r {
+                        let omega = b.offset.plus(-1, &risen.components[component].beat);
+                        on.extend((0..ng).filter(|&p| risen.frames[p] == omega).map(|p| (state, p)));
+                    }
+                }
+            }
+            if on.is_empty() {
+                continue;
+            }
+            match risen.prototype_workspace() {
+                Ok(_) => held += 1,
+                Err(why) => {
+                    refused += 1;
+                    println!("node {key:?} refused: {why}");
+                }
+            }
+            println!("node {key:?}: copies at a P frame {:?}, their static couplings foldable {}", on, on.iter().all(|&(t, p)| !risen.ground_tone[t * GROUND + risen.ground[p]]));
+        }
+    }
+    println!("{held} risen clusters with copies at a P frame held, {refused} refused");
+    assert!(held > 0 && refused == 0, "every one held");
 }
