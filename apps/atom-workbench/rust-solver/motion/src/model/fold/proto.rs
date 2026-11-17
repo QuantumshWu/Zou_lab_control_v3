@@ -2198,7 +2198,8 @@ fn lyapunov(x: &[C64], normal: &[C64], c: &[C64], n: usize, y: &mut [C64], e: &m
         if moved <= floor * size || size == 0.0 {
             return true;
         }
-        if moved >= last {
+        // No longer shrinking -- or not a number, which never converges: false.
+        if !(moved < last) {
             return false;
         }
         last = moved;

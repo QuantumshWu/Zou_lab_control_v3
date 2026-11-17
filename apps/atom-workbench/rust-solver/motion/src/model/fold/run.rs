@@ -151,7 +151,7 @@ use crate::field::Light;
 use crate::linalg::{Mat, C64};
 use crate::model::{Cluster, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
-use crate::step::{Decided, Dynamics as _, Emitted, Forms, Held, Internal, Middle as _, Offer, Optical, Switched};
+use crate::step::{Decided, Dynamics as _, Emitted, Forms, Held, Internal, Landing, Middle as _, Offer, Optical, Switched};
 use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -622,7 +622,10 @@ impl Clusters {
             let mut out = 0.0;
             for (sign, side) in [(1.0, self), (-1.0, other)] {
                 for k in (0..side.grounds.len()).filter(|&k| side.grounds[k].iter().any(|&s| p[s] != 0.0)) {
-                    let mine: Vec<Key> = nodes.iter().copied().filter(|key| side.sets.get(k).rises.iter().any(|r| r.key == *key)).collect();
+                    // The nodes this light set's set k holds: of its ground states, by its light's components (a node
+                    // that a risen cluster of it offers, whether its base does or not: each rise holds one more, so the
+                    // rises end).
+                    let mine: Vec<Key> = nodes.iter().copied().filter(|key| side.grounds[k].contains(&key.2) && side.sets.get(k).fold.components.iter().any(|c| c.part == key.1)).collect();
                     let cluster = side.cluster_with(k, mine).ok()?;
                     let set = side.sets.get(cluster);
                     let mut cache = Cache::default();
@@ -962,27 +965,30 @@ impl Middle<'_> {
         self.caches.as_ref().and_then(|c| c.chosen.get(k).copied().flatten()).unwrap_or(k)
     }
 
-    /// Where a jump's bare state f lands in this middle's set: its slow part S N⁻¹f along its fast one, S and N the
-    /// middle's (DESIGN §1.3, §13.2, the landing; the forward the step made at the path, its left response made where a
-    /// landing first asks for it, its count this middle's) -- the switch's formula with nothing following
-    /// (`Workspace::taken`: a fall at x_X = 0), its norm the jump clock's. The state itself where the set has no light; no
-    /// number where the landing does not exist.
-    pub(super) fn landing(&self, path: &Path, f: &[C64]) -> Internal {
-        if self.run.clusters.sets.get(self.set).fold.blocks.is_empty() {
-            return f.iter().copied().collect();
+    /// Where a jump's bare state f lands in this middle's set (`step::Landing`): its slow part S N⁻¹f along its fast one, S
+    /// and N the middle's (DESIGN §1.3, §13.2, the landing; the forward the step made at the path, its left response made
+    /// where a landing first asks for it, its count this middle's) -- the switch's formula with nothing following
+    /// (`Workspace::taken`: a fall at x_X = 0), its norm the jump clock's. The state itself where the set has no light.
+    /// Where the landing does not exist -- the forward, or the left response or N (`Workspace::taken`), the fold's one
+    /// exit --, the rule of a trajectory's start (`Clusters::rise`): the rise of the Q node that holds the most of f in
+    /// this forward (its last sweep's responses where it failed; `Clusters::risen`), none where no node is left.
+    pub(super) fn landing(&self, path: &Path, f: &[C64]) -> Landing {
+        let set = self.run.clusters.sets.get(self.set);
+        if set.fold.blocks.is_empty() {
+            return Landing::On(f.iter().copied().collect());
         }
         let mut inner = self.made(path, None, false);
-        if !inner.exists {
-            return f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect();
-        }
-        let Inner { eval, ws, made, .. } = &mut *inner;
+        let Inner { eval, ws, made, exists, .. } = &mut *inner;
         let ws = ws.as_mut().expect("a workspace");
-        let landed = ws.taken(&self.run.clusters.sets.get(self.set).fold, eval, f, &[], false);
-        *made += ws.left_work() * crate::decide::COMPLEX;
-        match landed {
-            Some((psi, _)) => psi.into_iter().collect(),
-            None => f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(),
+        if *exists {
+            let landed = ws.taken(&set.fold, eval, f, &[], false);
+            *made += ws.left_work() * crate::decide::COMPLEX;
+            if let Some((psi, _)) = landed {
+                return Landing::On(psi.into_iter().collect());
+            }
         }
+        let amplitudes = ws.amplitudes(&set.fold, eval, f);
+        self.run.clusters.risen(set, &amplitudes).map_or(Landing::Nowhere, Landing::Risen)
     }
 
     /// The trajectory's representation with this cluster's decompositions as this middle's decision made them, and the
@@ -1523,8 +1529,8 @@ impl crate::step::Dynamics for Onefold {
     }
 
     /// Where a jump's bare state lands (`Middle::landing`): on the landing set's middle in the step, or at a point on a
-    /// middle made there.
-    fn landed<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path)>, f: &[C64], held: &Held) -> Internal {
+    /// middle made there; risen where it does not exist (`step::Landing`).
+    fn landed<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path)>, f: &[C64], held: &Held) -> Landing {
         match on {
             Some((middle, path)) => middle.landing(path, f),
             None => {

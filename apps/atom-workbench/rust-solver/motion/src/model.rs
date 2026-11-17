@@ -1023,8 +1023,8 @@ impl crate::step::Dynamics for Run<'_> {
         let (plan, table) = &self.plans[cluster];
         self.model.emission_of(plan, *table, at, psi, draw)
     }
-    fn landed<'m>(&'m self, cluster: usize, at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path)>, f: &[C64], _held: &crate::step::Held) -> crate::step::Internal {
-        Run::landed(self, cluster, at, f)
+    fn landed<'m>(&'m self, cluster: usize, at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path)>, f: &[C64], _held: &crate::step::Held) -> crate::step::Landing {
+        crate::step::Landing::On(Run::landed(self, cluster, at, f))
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy_with(cluster, at, psi, self.tables)

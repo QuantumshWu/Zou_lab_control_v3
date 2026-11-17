@@ -3139,7 +3139,7 @@ fn a_two_level_atom_s_landing_is_its_fall_with_no_excited_amplitude() {
         low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
         high.generator(&path2, 0.0, &mut Mat::zeros(n, n));
         let f = C64::new(0.6, 0.8);
-        let landed = low.landing(&path, &[f]);
+        let crate::step::Landing::On(landed) = low.landing(&path, &[f]) else { panic!("the landing exists") };
         let bare: Vec<C64> = (0..n).map(|i| if i == 0 { f } else { C64::ZERO }).collect();
         let (fallen, dropped, _) = high.take_onto(&bare, folded, &low).expect("the fall");
         let apart = (landed[0] - fallen[0]).abs();
@@ -3462,7 +3462,8 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
         let low = run.middle(0, [0.0; 3], 0.0, &crate::step::Held::default(), false);
         let path = low.path([0.0; 3], [0.0; 3]);
         low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
-        let c = low.landing(&path, &[C64::ONE])[0].norm_sqr();
+        let crate::step::Landing::On(landed) = low.landing(&path, &[C64::ONE]) else { panic!("the landing exists") };
+        let c = landed[0].norm_sqr();
         let q = (1.0 - 2.0 * s).max(0.0).sqrt();
         println!("Δ {delta:+.1} s {s}: ‖S N⁻¹f‖² {c:.5} against {expected:.5} (the orthogonal (1 + q)/2 at resonance {:.5})", 0.5 * (1.0 + q));
         assert!((c - expected).abs() <= 2.0 * share * (expected - 1.0).abs(), "the landing's norm the slow mode's survival at the jump");
@@ -3507,6 +3508,63 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
         assert!((rate - master).abs() <= 4.0 * error + share * master, "s {s}: the photons' rate {rate} ± {error} against {master}");
         assert!(if s < 0.25 { explicit == 0 } else { explicit > 0 }, "s {s}: the fold stays where its ring is within the share, the node rises where not");
     }
+}
+
+/// A jump's landing that does not exist rises and lands (BRIEF_COPIES item 1; step.rs `land`): a laser half a Γ below an
+/// excited state of ground state 5 (s = 0.2) that decays to ground state 0, which its own laser holds at resonance at
+/// s = 0.6 -- there the fold of 0's set with nothing explicit does not exist (its series' ratio at one) --: the photons of
+/// 5's set land in 0's, where the landing was no number (and the jump's loop, the bare state's photon and its landing
+/// again, went round on it). The landing rises the node that holds the most of the bare state (the rule of a
+/// trajectory's start) and lands there: at a point, and inside the steps of a run of the atom, every state a number and
+/// no step refused.
+#[test]
+fn a_landing_that_does_not_exist_rises_and_lands() {
+    use crate::step::{Dynamics, Landing, Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let ee = 1000.0;
+    let g = |s: f64| C64::real(0.5 * GAMMA * (s / 2.0_f64).sqrt());
+    let rays = [
+        Ray { axis: 0, nu: ee - 0.5 * GAMMA, direction: [0.0, 0.0, 1.0], couplings: vec![(12, 5, g(0.2))] },
+        Ray { axis: 1, nu: ee, direction: [1.0, 0.0, 0.0], couplings: vec![(17, 0, g(0.6))] },
+    ];
+    let mut req = system(&[(0, 0.0), (5, 0.0)], &[(12, ee, GAMMA, 0), (17, ee, GAMMA, 0)], &rays, 2, true);
+    idle_decay(&mut req, GAMMA);
+    req.validate().unwrap();
+    let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    let (folded, explicit) = two_level_clusters(&run, &req);
+    assert_eq!(run.cluster_of(0), folded, "0's set its own");
+    let at = crate::model::Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
+    let held = crate::step::Held::default();
+    let unit = |n: usize| -> Vec<C64> { (0..n).map(|i| if i == 0 { C64::ONE } else { C64::ZERO }).collect() };
+    assert_eq!(run.landed(folded, &at, None, &unit(1), &held), Landing::Risen(explicit), "no landing on 0's fold with nothing explicit: its rise");
+    let Landing::On(landed) = run.landed(explicit, &at, None, &unit(run.cluster(explicit).states.len()), &held) else { panic!("the risen cluster's landing") };
+    println!("the landing on the risen cluster: {:.4?}", &landed[..2]);
+    // A jump at the point from 5's set.
+    let mut t = Trajectory::new(&run, 5, at.r, at.kappa, 3, 0);
+    let from = t.cluster;
+    crate::step::jump(&run, &mut t, None).expect("the jump");
+    println!("a jump from cluster {from} at the point lands in {} ({} states), its norm {:.4}", t.cluster, run.cluster(t.cluster).states.len(), crate::linalg::norm_sqr(&t.psi));
+    assert_eq!(t.cluster, explicit, "it lands on the risen cluster");
+    assert!(t.psi.iter().all(|z| z.is_finite()) && crate::linalg::norm_sqr(&t.psi) > 0.0, "a number");
+    // Inside the steps: a trajectory's photon from 5's set to 0's lands there, risen.
+    let (tau, steps) = (0.1, 100);
+    let mut scratch = crate::step::Scratch::default();
+    let mut moved = 0;
+    for i in 0..12 {
+        let mut t = Trajectory::new(&run, 5, at.r, at.kappa, 7, i);
+        for _ in 0..steps {
+            t = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("no step refused").end;
+            assert!(t.psi.iter().all(|z| z.is_finite()), "every state a number");
+        }
+        moved += usize::from(run.cluster(t.cluster).states.contains(&0));
+    }
+    println!("{moved} of 12 trajectories went from 5's set to 0's inside their steps");
+    assert!(moved > 0, "jumps land in 0's set inside the steps");
 }
 
 /// The fall's criterion with its balance (BRIEF_STEP3C item 1, BRIEF_LANDIMPL item 2; DESIGN §11.4, run.rs # The nodes risen

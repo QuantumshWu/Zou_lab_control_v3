@@ -3134,7 +3134,9 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                 let mut sum = 0.0;
                 for (t, e, a) in jumped.iter().zip(&emitted).zip(&alongs).filter_map(|((t, e), a)| e.as_ref().filter(|e| e.landing == t.cluster).map(|e| (t, e, a))) {
                     a.middle.forget_left();
-                    sum += model.landed(e.landing, &t.point(), Some((a.middle, &a.path)), &e.amplitudes[0], &t.held)[0].re;
+                    if let super::Landing::On(landed) = model.landed(e.landing, &t.point(), Some((a.middle, &a.path)), &e.amplitudes[0], &t.held) {
+                        sum += landed[0].re;
+                    }
                 }
                 sum
             },
