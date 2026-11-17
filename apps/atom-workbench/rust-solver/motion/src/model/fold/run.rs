@@ -250,7 +250,10 @@ impl Caches {
 /// The run's clusters (# The state sets), made where first asked for and kept: an append-only list whose entries stay
 /// where they are made (chunk c holds 2^c of them), so that a reference to one lives as long as the run; and every key
 /// asked for, its ground set and explicit nodes, with its cluster or why it was refused -- a refusal kept as a cluster
-/// is, so that no key is made twice.
+/// is, so that no key is made twice. A cluster is its key: its number is the run's handle of it, given in the order the
+/// trajectories' threads first ask (a ground set's base cluster that set's, made first), and nothing reads a number but
+/// to find its cluster or to tell two apart -- no order, no tie, no output --, so a request gives the same result to the
+/// bit whatever order its threads ask in. A cluster is made under the keys' lock: its making runs on no thread pool.
 struct Arena {
     chunks: [OnceLock<Box<[OnceLock<Set>]>>; 32],
     keys: Mutex<Vec<((usize, Vec<Key>), Result<usize, String>)>>,
@@ -308,6 +311,12 @@ pub(crate) struct Onefold {
     untrapped: OnceLock<Result<Clusters, String>>,
     photons: f64,
 }
+
+// The run is one object the trajectories' threads share (solve.rs `Hand::record`): Send + Sync, by the compiler.
+const _: () = {
+    const fn shared<T: Send + Sync>() {}
+    shared::<Onefold>();
+};
 
 impl Set {
     /// The cluster of ground set `k` (`ground`) with the explicit nodes `nodes` on a choice of nodes that keeps them

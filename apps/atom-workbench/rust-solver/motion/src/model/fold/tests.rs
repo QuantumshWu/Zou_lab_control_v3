@@ -3730,6 +3730,53 @@ fn r4_lin_4_s_thermal_paths_meet_no_point_where_their_fold_does_not_exist() {
     println!("R4_LIN_4: {steps} steps from F = 1, {explicit} steps' ends on an explicit cluster, {switched} switches, δp booked {dropped:.2e}");
 }
 
+/// The run is one object the trajectories' threads share (run.rs # The state sets; BRIEF_STEP4A 4b): R4_LIN_4's sixteen
+/// thermal paths from every ground state in turn, whose nodes rise and fall (clusters made where first asked for, in whatever order the
+/// threads ask), 60 steps each -- one after another on one run, and all at once on the threads of another: every
+/// trajectory's end the same to the bit, its cluster by its states (a cluster's number is its run's handle).
+#[test]
+fn a_run_s_trajectories_are_the_same_to_the_bit_on_one_thread_and_on_many() {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    use rayon::prelude::*;
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let req = crate::model::testing::scene("R4_LIN_4");
+    let thermal = (crate::units::KT_PER_UK * req.temperature_uk / crate::units::hbar_over_mass(req.mass_kg)).sqrt();
+    // A trajectory's path: the clusters it took (their numbers), and every number's bits -- each step's cluster's states,
+    // and at its end its place, momentum, time, clock, books and state.
+    let end = |run: &run::Onefold, i: u64| -> (Vec<usize>, Vec<u64>) {
+        let mut scratch = crate::step::Scratch::default();
+        let phase = 2.0 * std::f64::consts::PI * i as f64 / 16.0;
+        let kappa = [thermal * phase.cos(), thermal * (2.0 * phase).sin(), 0.5 * thermal * phase.sin()];
+        let mut t = Trajectory::new(run, i as usize % GROUND, [0.2 * phase.sin(), 0.1 * phase.cos(), 0.0], kappa, 3, i);
+        let (mut bits, mut visited) = (vec![], vec![t.cluster]);
+        for _ in 0..60 {
+            t = Midway::new(run, &t, 0.126).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step").end;
+            bits.extend(run.cluster(t.cluster).states.iter().map(|&s| s as u64));
+            visited.push(t.cluster);
+        }
+        visited.sort_unstable();
+        visited.dedup();
+        bits.extend(t.r.iter().chain(&t.kappa).chain([&t.time, &t.threshold, &t.dropped, &t.owed, &t.work]).map(|x| x.to_bits()));
+        bits.extend(t.psi.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
+        bits.extend([u64::from(t.jumps), t.lost.map_or(0, f64::to_bits)]);
+        (visited, bits)
+    };
+    let reference = [1.0 / GROUND as f64; GROUND];
+    let one = run::Onefold::new(&req, reference).unwrap();
+    let serial: Vec<(Vec<usize>, Vec<u64>)> = (0..16).map(|i| end(&one, i)).collect();
+    let many = run::Onefold::new(&req, reference).unwrap();
+    let parallel: Vec<(Vec<usize>, Vec<u64>)> = (0..16).into_par_iter().map(|i| end(&many, i)).collect();
+    println!("the clusters each path took: one thread {:?}; {} threads {:?}", serial.iter().map(|x| &x.0).collect::<Vec<_>>(), rayon::current_num_threads(), parallel.iter().map(|x| &x.0).collect::<Vec<_>>());
+    for (i, (a, b)) in serial.iter().zip(&parallel).enumerate() {
+        assert_eq!(a.1, b.1, "trajectory {i}");
+    }
+}
+
 
 
 
