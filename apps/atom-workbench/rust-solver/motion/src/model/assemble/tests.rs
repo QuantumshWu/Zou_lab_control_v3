@@ -1242,7 +1242,7 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
             if plan.fourth.as_ref().is_some_and(|fourth| fourth.bends() || fourth.held()) {
                 let (re, im): (Vec<C64>, Vec<C64>) = rho.iter().map(|z| (*z, C64::ZERO)).unzip();
                 for m in 0..beats.len() {
-                    let tone = middle.tone_force(&path, m, &re, &im);
+                    let tone = middle.tone_force(&path, m, &[(0.0, &re, &im)]);
                     assert!(tone.iter().all(|x| x.is_finite()), "{name}, cluster {cluster}: a pair's tone force is a number");
                 }
                 assert!(envelopes.iter().all(|(p, q)| p.data.iter().chain(&q.data).all(|z| z.re.is_finite() && z.im.is_finite())), "{name}, cluster {cluster}: the envelopes are numbers");
@@ -1265,7 +1265,7 @@ fn groups_along_a_path(name: &str, index: u64, model: &Model) -> (usize, usize) 
                 for (m, beat) in beats.iter().enumerate() {
                     let (sin, cos) = (beat * s).sin_cos();
                     let (re, im): (Vec<C64>, Vec<C64>) = rho.iter().map(|z| (*z * cos, *z * sin)).unzip();
-                    let tone = middle.tone_force(&path, m, &re, &im);
+                    let tone = middle.tone_force(&path, m, &[(s, &re, &im)]);
                     (0..3).for_each(|a| f[a] -= tone[a]);
                 }
                 f

@@ -3326,8 +3326,10 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     /// The pair's part of the force's forms: its first group's pieces on σ = re + i im, its partner's on σ† = re − i im
-    /// (`group_force`).
-    fn tone_force(&self, path: &Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+    /// (`group_force`), σ the nodes' sums summed (its envelopes are the same at every time of the path: `envelopes`).
+    fn tone_force(&self, path: &Path, m: usize, sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
+        let (re, im) = crate::step::summed(sums);
+        let (re, im) = (&re[..], &im[..]);
         let plan = &*self.plan;
         let group = &plan.groups[plan.firsts[m]];
         let mut out = self.group_force(path, group, re, im, 1.0);

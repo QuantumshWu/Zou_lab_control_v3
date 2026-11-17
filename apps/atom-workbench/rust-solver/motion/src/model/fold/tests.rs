@@ -3283,3 +3283,80 @@ fn a_request_whose_idle_excited_states_lie_at_a_laser_s_energy_is_run() {
     println!("after 20 steps: κ {:?}, ‖ψ‖² {:.6}", t.kappa, crate::linalg::norm_sqr(&t.psi));
     assert!(t.kappa.iter().all(|x| x.is_finite()) && t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite()), "the atom steps");
 }
+
+/// The force's tone part node by node (model/fold/run.rs `Middle::tone_force`; BRIEF_STEP3D item 3): on the Λ with a
+/// tone (`lambda_request`: B two counter-propagating beams, the form between |1⟩ and |2⟩ beating), an atom moving along
+/// B at k·v h = 0.6, random Hermitian sums σ_j = re_j + i im_j at the step's three nodes: the candidate's forms on them are
+/// the central differences of its envelopes there, Σ_j Re tr(G₊(s_j) σ_j + G₋(s_j) σ_j†) at r ± δ along each lab axis --
+/// one formula with the envelopes the propagation and the hazard take (`Middle::envelopes`).
+#[test]
+fn a_tone_s_forms_node_by_node_are_its_envelopes_differences() {
+    use crate::step::{Dynamics, Held, Middle};
+    let req = lambda_request(1.5, 0.4, -5e-6);
+    let mut p = [0.0; GROUND];
+    p[0] = 1.0;
+    let run = run::Onefold::new(&req, p).expect("the run");
+    let set = run.cluster_of(0);
+    let (k, h, t) = (req.beams[1].wave_number, 0.05, 0.37);
+    let velocity = [0.0, 0.0, 0.6 / (k * h)];
+    let r = [0.2, -0.1, 0.3];
+    let middle = |r: [f64; 3]| run.middle(set, r, t, &Held::default(), false);
+    let at = middle(r);
+    let n = at.states();
+    let path = at.path(velocity.map(|v| v / run.hbar_over_mass()), velocity);
+    let (mut beats, mut keys) = (vec![], vec![]);
+    at.beats(&path, &mut beats, &mut keys);
+    assert!(!beats.is_empty(), "the Λ's tone a candidate");
+    let mut state = 20261116u64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    };
+    let mut hermitian = || -> Vec<C64> {
+        let mut m = vec![C64::ZERO; n * n];
+        for a in 0..n {
+            for b in a..n {
+                let z = if a == b { C64::real(next()) } else { C64::new(next(), next()) };
+                (m[a * n + b], m[b * n + a]) = (z, z.conj());
+            }
+        }
+        m
+    };
+    let nodes = [-h, 0.0, h];
+    let sums: Vec<(Vec<C64>, Vec<C64>)> = nodes.iter().map(|_| (hermitian(), hermitian())).collect();
+    let given: Vec<(f64, &[C64], &[C64])> = nodes.iter().zip(&sums).map(|(&s, (re, im))| (s, &re[..], &im[..])).collect();
+    // Its envelopes at the nodes on the sums, Σ_j Re tr(G₊ σ_j + G₋ σ_j†), at a point.
+    let value = |r: [f64; 3], m: usize| -> f64 {
+        let other = middle(r);
+        let path = other.path(velocity.map(|v| v / run.hbar_over_mass()), velocity);
+        let mut out = 0.0;
+        for &(s, re, im) in &given {
+            let (mut plus, mut minus) = (Mat::zeros(n, n), Mat::zeros(n, n));
+            other.envelopes(&path, m, s, &mut plus, &mut minus);
+            for a in 0..n {
+                for b in 0..n {
+                    let sigma = re[b * n + a] + C64::I * im[b * n + a];
+                    let dagger = re[b * n + a] - C64::I * im[b * n + a];
+                    out += (plus[(a, b)] * sigma + minus[(a, b)] * dagger).re;
+                }
+            }
+        }
+        out
+    };
+    let delta = 1e-4;
+    let mut worst = 0.0_f64;
+    for m in 0..beats.len() {
+        let form = at.tone_force(&path, m, &given);
+        let difference: [f64; 3] = std::array::from_fn(|a| {
+            let (mut plus, mut minus) = (r, r);
+            plus[a] += delta;
+            minus[a] -= delta;
+            (value(plus, m) - value(minus, m)) / (2.0 * delta)
+        });
+        let size = difference.iter().map(|x| x.abs()).fold(1e-300, f64::max);
+        let apart = (0..3).map(|a| (form[a] - difference[a]).abs()).fold(0.0, f64::max) / size;
+        println!("candidate {m} (ν {:.4} rad/µs): the forms node by node {form:?}, the envelopes' differences {difference:?} ({apart:.2e} of their size)", beats[m]);
+        worst = worst.max(apart);
+    }
+    assert!(worst <= 1e-6, "a tone's forms node by node are its envelopes' differences: {worst:.2e}");
+}

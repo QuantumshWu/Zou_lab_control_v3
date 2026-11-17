@@ -582,9 +582,11 @@ pub trait Middle {
     fn envelopes(&self, _path: &Self::Path, _m: usize, _s: f64, _plus: &mut Mat, _minus: &mut Mat) {}
 
     /// The m-th candidate's part of `force`'s forms at its beat, per lab axis: Σ_k w_k Re tr(Ĝ_m(s_k) ρ_k) of the
-    /// tone's Hermitian part's gradient Ĝ_m(s) = e^{iν_m s} Ĝ_m⁺ + e^{−iν_m s} Ĝ_m⁻, given σ = Σ_k w_k e^{iν_m s_k} ρ_k =
-    /// `re` + i `im` (n × n row by row each, Hermitian).
-    fn tone_force(&self, _path: &Self::Path, _m: usize, _re: &[C64], _im: &[C64]) -> [f64; 3] {
+    /// tone's Hermitian part's gradient Ĝ_m(s) = e^{iν_m s} Ĝ_m⁺(s) + e^{−iν_m s} Ĝ_m⁻(s), its envelopes through the step's
+    /// nodes as the propagation takes them (`envelopes`): Σ_j Re tr(Ĝ_m⁺(s_j) σ_j + Ĝ_m⁻(s_j) σ_j†), given per node s_j
+    /// its sums σ_j = Σ_k w_k ℓ_j(s_k) e^{iν_m s_k} ρ_k = `re` + i `im` (n × n row by row each, Hermitian) as
+    /// (s_j, re, im) -- the step's three nodes, or the middle alone (a fixed point's: `forms_at`).
+    fn tone_force(&self, _path: &Self::Path, _m: usize, _sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
         [0.0; 3]
     }
 
@@ -1451,7 +1453,7 @@ pub fn forms_at<M: Middle>(middle: &M, fixed: &M::Path, rho: &[C64]) -> Forms {
         .iter()
         .enumerate()
         .map(|(m, &nu)| {
-            let (re, im) = (middle.tone_force(fixed, m, rho, &none), middle.tone_force(fixed, m, &none, rho));
+            let (re, im) = (middle.tone_force(fixed, m, &[(0.0, rho, &none)]), middle.tone_force(fixed, m, &[(0.0, &none, rho)]));
             let c: [C64; 3] = std::array::from_fn(|a| C64::new(re[a], -im[a]));
             for a in 0..3 {
                 held[a] -= c[a].re;
@@ -1460,6 +1462,18 @@ pub fn forms_at<M: Middle>(middle: &M, fixed: &M::Path, rho: &[C64]) -> Forms {
         })
         .collect();
     Forms { time: 0.0, held, tones }
+}
+
+/// The nodes' sums of a tone summed, Σ_j re_j and Σ_j im_j (`Middle::tone_force`): the whole σ, for a model whose
+/// envelopes are the same at every time of the path.
+pub fn summed(sums: &[(f64, &[C64], &[C64])]) -> (Vec<C64>, Vec<C64>) {
+    let size = sums.first().map_or(0, |x| x.1.len());
+    let (mut re, mut im) = (vec![C64::ZERO; size], vec![C64::ZERO; size]);
+    for (_, r, i) in sums {
+        re.iter_mut().zip(r.iter()).for_each(|(a, b)| *a += *b);
+        im.iter_mut().zip(i.iter()).for_each(|(a, b)| *a += *b);
+    }
+    (re, im)
 }
 
 /// A state's density matrix ρ = |x⟩⟨x|/⟨x|x⟩, ρ_ab = x_a x_b*/‖x‖², row by row: a mean ⟨x|G|x⟩/⟨x|x⟩ is tr(Gρ), which the
@@ -1535,7 +1549,7 @@ impl Scratch {
     fn fit(&mut self, n: usize, slots: usize) {
         self.picture.fit(n);
         self.slots = slots;
-        self.rest.resize((4 + 2 * (slots.saturating_sub(SUMS) / TONE)) * n * n, C64::ZERO);
+        self.rest.resize((4 + TONE * (slots.saturating_sub(SUMS) / TONE)) * n * n, C64::ZERO);
         self.sums.resize(4 * slots * 2 * n * row(n), 0.0);
         self.weights.resize(slots.max(SUMS), 0.0);
         self.kept.resize(slots.max(SUMS), 0.0);
@@ -2405,38 +2419,35 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 }
                 density(&middle[..n], held);
             }
-            // A tone's sums at its beat, its three nodes' together (`Sums`), less the middle state's at their weights: its
-            // σ = Σ_k w_k e^{iνu_k}(ρ_k − ρ_m) -- the weights' sums with what of the step lies outside this stretch,
-            // ∫e^{iνu}du over [−h, its start] and past its end.
-            let spare = &mut sum[..size];
-            for ((m, pair), tone) in tones.chunks_exact_mut(2 * size).enumerate().zip(&picture.beats) {
-                let integral = |a: f64, b: f64| [(tone.beat * b).sin() - (tone.beat * a).sin(), (tone.beat * a).cos() - (tone.beat * b).cos()];
-                let outside = [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))).fold([0.0; 2], |sum, (a, b)| {
-                    let part = integral(a, b);
-                    [sum[0] + part[0] / tone.beat, sum[1] + part[1] / tone.beat]
-                });
-                for (part, part_sum) in pair.chunks_exact_mut(size).enumerate() {
-                    let slots = (0..SUMS).map(|j| SUMS + TONE * m + 2 * j + part);
-                    let mut weight = outside[part];
-                    for (i, slot) in slots.enumerate() {
-                        weight += weights[slot];
-                        if i == 0 {
-                            whole(sums, slot, n, part_sum);
-                        } else {
-                            whole(sums, slot, n, spare);
-                            part_sum.iter_mut().zip(spare.iter()).for_each(|(q, z)| *q += *z);
+            // A tone's sums at its beat at each of the three nodes (`Sums`), less the middle state's at their weights: its
+            // σ_j = Σ_k w_k ℓ_j(u_k) e^{iνu_k}(ρ_k − ρ_m) -- the weights' sums with what of the step lies outside this
+            // stretch, ∫ℓ_j(u)e^{iνu}du over [−h, its start] and past its end by the kick's rule at the tone's beat.
+            for ((m, node_sums), tone) in tones.chunks_exact_mut(TONE * size).enumerate().zip(&picture.beats) {
+                let mut outside = [0.0; TONE];
+                if middle.is_some() {
+                    for (a, b) in [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))) {
+                        for (u, w) in quadrature(a, b, tone.beat.abs(), FORMS, Within::Share) {
+                            let (s, (sin, cos)) = (u / h, (tone.beat * u).sin_cos());
+                            let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
+                            for (k, part) in outside.iter_mut().enumerate() {
+                                *part += w * lagrange[k / 2] * if k % 2 == 0 { cos } else { sin };
+                            }
                         }
                     }
+                }
+                for (k, node_sum) in node_sums.chunks_exact_mut(size).enumerate() {
+                    let slot = SUMS + TONE * m + k;
+                    whole(sums, slot, n, node_sum);
                     if middle.is_some() {
-                        for (q, rho) in part_sum.iter_mut().zip(held.iter()) {
-                            *q -= *rho * weight;
+                        for (q, rho) in node_sum.iter_mut().zip(held.iter()) {
+                            *q -= *rho * (weights[slot] + outside[k]);
                         }
                     }
                 }
             }
             // The middle node's form and the shear of the middle state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
             // one pass of the model's forms (`Middle::centre`); the nodes' forms hold the exact tones' at the nodes, and
-            // each tone's sums at its beat take them out (`Middle::tone_force`).
+            // each tone's sums at its beat take them out node by node (`Middle::tone_force`).
             let shear = |omega: f64| tau * sinc(0.5 * omega * tau);
             for (j, (at, sum)) in [-h, 0.0, h].into_iter().zip(sum.chunks_exact_mut(size)).enumerate() {
                 whole(sums, j, n, sum);
@@ -2445,9 +2456,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         *q -= *rho * weights[j];
                     }
                 }
-                for (pair, tone) in tones.chunks_exact_mut(2 * size).zip(&picture.beats) {
+                for (node_sums, tone) in tones.chunks_exact_mut(TONE * size).zip(&picture.beats) {
                     let (sin, cos) = (tone.beat * at).sin_cos();
-                    let (re, im) = pair.split_at_mut(size);
+                    let (re, im) = node_sums[2 * j * size..2 * (j + 1) * size].split_at_mut(size);
                     for ((re, im), q) in re.iter_mut().zip(im.iter_mut()).zip(sum.iter()) {
                         *re -= *q * cos;
                         *im -= *q * sin;
@@ -2466,9 +2477,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             if let Some(forms) = forms_end {
                 march.state.forms = Forms { time: t_m, ..forms }.less(self.reference);
             }
-            for (pair, tone) in tones.chunks_exact(2 * size).zip(&picture.beats) {
-                let (re, im) = pair.split_at(size);
-                let form = along.middle.tone_force(&along.path, tone.candidate, re, im);
+            for (node_sums, tone) in tones.chunks_exact(TONE * size).zip(&picture.beats) {
+                let at: Vec<(f64, &[C64], &[C64])> = node_sums.chunks_exact(2 * size).zip([-h, 0.0, h]).map(|(pair, s)| (s, &pair[..size], &pair[size..])).collect();
+                let form = along.middle.tone_force(&along.path, tone.candidate, &at);
                 for a in 0..3 {
                     out[a] -= form[a];
                 }

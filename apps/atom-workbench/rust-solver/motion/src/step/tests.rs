@@ -155,11 +155,12 @@ impl Middle for Parts {
             }
         }
     }
-    fn tone_force(&self, _: &[f64; 3], m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+    fn tone_force(&self, _: &[f64; 3], m: usize, sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
+        let (re, im) = super::summed(sums);
         let (omega, wave) = self.pairs()[m];
         let mut out = [0.0; 3];
         for (key, sign) in [((omega, wave), 1.0), ((-omega, wave.map(|x| -x)), -1.0)] {
-            let sigma: Vec<C64> = re.iter().zip(im).map(|(r, i)| *r + *i * C64::new(0.0, sign)).collect();
+            let sigma: Vec<C64> = re.iter().zip(&im).map(|(r, i)| *r + *i * C64::new(0.0, sign)).collect();
             for p in self.of(key) {
                 for a in 0..3 {
                     out[a] += self.trace(&p.force[a], &sigma).re;
@@ -2390,8 +2391,8 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn envelopes(&self, path: &M::Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         self.middle.envelopes(path, m, s, plus, minus)
     }
-    fn tone_force(&self, path: &M::Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
-        self.middle.tone_force(path, m, re, im)
+    fn tone_force(&self, path: &M::Path, m: usize, sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
+        self.middle.tone_force(path, m, sums)
     }
     fn tone_work(&self, m: usize) -> [f64; 2] {
         self.middle.tone_work(m)

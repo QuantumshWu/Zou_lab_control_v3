@@ -282,9 +282,10 @@ impl Set {
                 bars.extend((0..beats.len()).flat_map(|m| (0..3).map(move |j| (m, j))).map(|(m, j)| bar(j, Some(m))));
                 let force = fold.prototype_force(&cache, &mut ws, &bars, 1).work;
                 // A candidate's envelopes: its tones' at the three nodes, and per cross decay its three products L†L there
-                // (GROUND × n each, `Middle::envelopes`); its forms: its tones' (a cross decay has no Hermitian part).
+                // (GROUND × n each, `Middle::envelopes`); its forms: its tones' at the three nodes (a cross decay has no
+                // Hermitian part).
                 let candidates = candidates(&beats, &crossing, |plus, minus, cross| {
-                    let one: Vec<Bar> = [plus, minus].iter().filter(|&&x| x).map(|_| bar(0, Some(0))).collect();
+                    let one: Vec<Bar> = [plus, minus].iter().filter(|&&x| x).flat_map(|_| (0..3).map(|j| bar(j, Some(0)))).collect();
                     let forms = if one.is_empty() { 0.0 } else { fold.prototype_force(&cache, &mut ws, &one, 1).work };
                     [(3 * one.len() * n * n + 9 * cross * (GROUND + 1) * n * n) as f64, forms]
                 });
@@ -1114,23 +1115,29 @@ impl crate::step::Middle for Middle<'_> {
         }
     }
 
-    /// Candidate m's forms on the integrator's sums σ = re + i im at its beat: its + tone's middle G_+ on e^{iνt_m}σ, its
-    /// − tone's on e^{−iνt_m}σ† (step.rs `Middle::tone_force`); a cross decay has no Hermitian part, and no form.
-    fn tone_force(&self, path: &Path, m: usize, re: &[C64], im: &[C64]) -> [f64; 3] {
+    /// Candidate m's forms on the integrator's sums σ_j = re + i im at its beat, node by node (step.rs
+    /// `Middle::tone_force`): at each node s_j its + tone's G_+(s_j) on e^{iνt_m}σ_j, its − tone's on e^{−iνt_m}σ_j† --
+    /// the envelopes the propagation takes through the nodes (`envelopes`) and the hazard with them (step.rs # Jumps), one
+    /// formula; a cross decay has no Hermitian part, and no form. One contraction (the outer nodes made at the sums'
+    /// offset where asked).
+    fn tone_force(&self, path: &Path, m: usize, sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
         let c = &self.run.sets.get(self.set).candidates[m];
         let n = self.states();
-        let members: Vec<(usize, Vec<C64>)> = [(c.plus, 1.0), (c.minus, -1.0)]
+        let members: Vec<(usize, usize, Vec<C64>)> = sums
             .iter()
-            .filter_map(|&(k, sign)| {
-                let phase = C64::cis(sign * c.beat * self.t);
-                k.map(|k| (k, (0..n * n).map(|i| (re[i] + C64::new(0.0, sign) * im[i]) * phase).collect()))
+            .flat_map(|&(s, re, im)| {
+                [(c.plus, 1.0), (c.minus, -1.0)].into_iter().filter_map(move |(k, sign)| {
+                    let phase = C64::cis(sign * c.beat * self.t);
+                    k.map(|k| (k, position(s), (0..n * n).map(|i| (re[i] + C64::new(0.0, sign) * im[i]) * phase).collect()))
+                })
             })
             .collect();
         if members.is_empty() {
             return [0.0; 3];
         }
-        let bars: Vec<Bar> = members.iter().map(|(k, x)| Bar { channel: 0, position: 0, tone: Some(*k), matrix: x }).collect();
-        real(self.forms(path, None, &bars, 1)[0])
+        let h = sums.iter().map(|x| x.0.abs()).fold(0.0, f64::max);
+        let bars: Vec<Bar> = members.iter().map(|(k, j, x)| Bar { channel: 0, position: *j, tone: Some(*k), matrix: x }).collect();
+        real(self.forms(path, (h != 0.0).then_some(h), &bars, 1)[0])
     }
 
     fn tone_work(&self, m: usize) -> [f64; 2] {
