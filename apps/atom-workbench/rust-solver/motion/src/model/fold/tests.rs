@@ -800,8 +800,8 @@ fn the_left_response_is_the_right_one_of_the_adjoint() {
                 }
                 let Ok(mut ws) = fold.prototype_workspace() else { continue };
                 let mut cache = super::proto::Cache::default();
-                let Some(step) = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws) else { continue };
-                let (x, most) = (step.metric.clone(), step.readings().combined());
+                let Some(step) = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws) else { continue };
+                let (x, most) = (step.metric.clone(), step.reading);
                 if !fold.prototype_left(&cache, &mut ws) {
                     continue;
                 }
@@ -846,7 +846,12 @@ fn the_left_response_is_the_right_one_of_the_adjoint() {
                 crate::linalg::solve(&inv, &piv, n, &mut lattice_n, n);
                 let gap = (0..n * n).map(|i| (ours.data[i] - lattice_n[i]).norm_sqr()).sum::<f64>().sqrt();
                 let trace: f64 = (0..n).map(|p| x[(p, p)].re).sum();
-                let bound = (unrate(most) + unrate(share)) * trace + 1e-9 * (1.0 + trace);
+                // The readings are estimates (unify2 §2.4): where they read within the share, N's error is within the share
+                // of both responses (T_L's series the adjoint iteration of T's, one ratio, its sweeps: unify2 U1).
+                if most > share {
+                    continue;
+                }
+                let bound = 2.0 * unrate(share) * trace + 1e-9 * (1.0 + trace);
                 ratios.push(gap / bound);
                 compared += 1;
                 if gap > bound {
@@ -902,6 +907,41 @@ fn a_lambda_swept_into_resonance_reads_beyond_the_share_before_its_fold_fails() 
     println!("beyond the share at d₀ = {beyond:?} rad/µs; the fold gone at {gone:?}");
     let (beyond, gone) = (beyond.expect("the reading passes the share"), gone.unwrap_or(-1.0));
     assert!(beyond > gone, "the reading passes the share before the fold stops existing");
+}
+
+/// A held forward whose evaluation is not of the decompositions it stands on decides there (unify2 §2.7, §4.3; psolve.status
+/// §6 (b): an evaluation's parts indexed another decomposition's, out of bounds on tilt0): R4_LIN_4's sets, decided at two
+/// points; on the second's decompositions with the first's evaluation (another decomposition's keys, its parts' places
+/// another's), and on the first's with a block's decomposition dropped, a held forward at the second point is the
+/// decision there to the bit, and no index leaves its decomposition's parts.
+#[test]
+fn a_held_forward_whose_evaluation_is_not_of_its_decompositions_decides_there() {
+    use super::proto::Cache;
+    let (req, choice, _, _) = r4(false);
+    let mut checked = 0;
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let Ok(mut ws) = fold.prototype_workspace() else { continue };
+        let ((a, b), kappa) = (([0.0; 3], [0.4, -0.3, 0.2]), kappa_of(&fold));
+        let (mut at_a, mut at_b) = (Cache::default(), Cache::default());
+        let (Some(sa), Some(sb)) = (fold.prototype(a, kappa, fold.thermal, &mut at_a, &mut ws).map(|s| s.sweeps), fold.prototype(b, kappa, fold.thermal, &mut at_b, &mut ws).map(|s| s.sweeps)) else { continue };
+        let mut grafted = at_b.clone();
+        grafted.graft(&at_a);
+        let mut forgotten = at_a.clone();
+        forgotten.forget(0);
+        for (what, cache) in [("b's decompositions, a's evaluation", grafted), ("a's with block 0's dropped", forgotten)] {
+            let (mut held, mut decided) = (cache.clone(), cache);
+            let h = fold.prototype_within(b, kappa, fold.thermal, &mut held, &mut ws, false).map(|s| s.generator.clone());
+            let d = fold.prototype_within(b, kappa, fold.thermal, &mut decided, &mut ws, true).map(|s| s.generator.clone());
+            println!("set {set:?}, {what} (the decisions' sweeps {sa}, {sb}): held and decided {}", if h.as_ref().map(|m| &m.data) == d.as_ref().map(|m| &m.data) { "the same" } else { "apart" });
+            assert_eq!(h.map(|m| m.data), d.map(|m| m.data), "{what}: a held forward on what it does not hold decides there");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
 }
 
 /// ⑦ The adjoint's force (DESIGN §1.3) against the high-precision difference of the contracted generator: at a point of
@@ -1734,12 +1774,13 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let mut w = 0.0;
     let last = f.stages.last().unwrap();
     let at_next = last.next(&f.eliminated, &f.h[1], &f.h[2], &mut w);
-    let step = fold.prototype(r, kappa, cache, ws).expect("the prototype at the point");
+    let step = fold.prototype(r, kappa, fold.thermal, cache, ws).expect("the prototype at the point");
     let (generator, normal, a) = (step.generator.clone(), step.normal.clone(), step.a.clone());
-    let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(step.omitted) + unrate(at_next) + 1e-10;
-    let (sweeps, made, series, reuse, far, omitted) = (step.sweeps, step.made, step.series, step.reuse, step.far, step.omitted);
-    let responses = ws.responses(fold, cache, super::proto::Side::Right);
+    let (sweeps, made, kinds) = (step.sweeps, step.made, step.kinds);
+    // What the accounts allow: per column every account's ρ summed (each its own error, linearly), the largest column's.
     let n = f.n;
+    let allowed = (0..n).map(|j| ws.accounts().iter().filter(|x| x.on).map(|x| x.squares[j].sqrt()).sum::<f64>()).fold(0.0, f64::max) + unrate(at_next) + 1e-10;
+    let responses = ws.responses(fold, cache, super::proto::Side::Right);
     let (mut diff, mut whole, mut copies) = (vec![0.0; n], vec![0.0; n], 0.0_f64);
     for (o, b) in fold.blocks.iter().enumerate() {
         let Some(mine) = &responses[o] else { continue };
@@ -1825,7 +1866,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     };
     let largest = cross.max_abs();
     let mixed = (0..n).flat_map(|p| (0..n).map(move |c| (p, c))).filter(|(p, c)| p != c).map(|(p, c)| cross[(p, c)].abs() * mixing(p, c)).fold(0.0, f64::max);
-    Against { diff: rho, allowed, parts: [unrate(series), unrate(reuse), unrate(far), unrate(at_next), unrate(omitted)], g, copies, decay: gap.max_abs() / scale, sweeps, made, tones: beats.len(), tone_a, tone_g, tone_decay, beating: [largest, mixed] }
+    Against { diff: rho, allowed, parts: [kinds[0].sqrt(), kinds[1].sqrt(), kinds[2].sqrt(), unrate(at_next), kinds[3].sqrt()], g, copies, decay: gap.max_abs() / scale, sweeps, made, tones: beats.len(), tone_a, tone_g, tone_decay, beating: [largest, mixed] }
 }
 
 /// The prototype against the fold at a point (proto.rs; BRIEF_PROTO.md gate 2), on a scene (`PROTO_SCENE`, a request's
@@ -1986,7 +2027,7 @@ fn a_prototype_s_step_at_a_scene() {
                     let mut cache = Cache::default();
                     for (k, r) in path.iter().enumerate() {
                         let clock = std::time::Instant::now();
-                        let s = fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
+                        let s = fold.prototype(*r, kappa, fold.thermal, &mut cache, &mut ws).expect("the prototype's step");
                         wall.push(clock.elapsed().as_secs_f64());
                         if k == 0 {
                             first += s.made;
@@ -1997,11 +2038,12 @@ fn a_prototype_s_step_at_a_scene() {
                             later_ticks += s.ticks[1];
                         }
                         let sw = s.sweeps;
-                        left[0] += s.left[0];
-                        left[1] += s.left[1];
                         grown += s.grown;
-                        most_omitted = most_omitted.max(s.omitted);
-                        let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.series, s.reuse, s.far, s.ring, s.ratio, s.copies]);
+                        most_omitted = most_omitted.max(s.kind(3));
+                        let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.kind(0), s.kind(1), s.kind(2), s.kind(4), s.ratio, 0.0]);
+                        let (levels, blocks) = ws.left_out();
+                        left[0] += levels;
+                        left[1] += blocks;
                         series_a.push(ws.kept_rows().iter().map(|&(sk, l, t)| (t * sk * sk + sw * 4 * sk * sk * l * n + 12 * sk * sk * n) as f64).sum::<f64>());
                         // The rest of the step's model: the outer nodes, the force (the three positions' cotangents), the
                         // photons of the state.
@@ -2114,7 +2156,7 @@ fn a_prototype_s_step_at_a_scene() {
             {
                 let mut cache = Cache::default();
                 for r in &paths[0] {
-                    fold.prototype(*r, kappa, &mut cache, &mut ws).expect("the prototype's step");
+                    fold.prototype(*r, kappa, fold.thermal, &mut cache, &mut ws).expect("the prototype's step");
                 }
                 println!("      ∂K̃'s entries at the rounding in the kept basis (rows, its pattern's blocks, the zeros' share), the first atom's last step: {:?}", ws.dk_zeros(&cache));
             }
@@ -2217,10 +2259,10 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                 // tr(X G) = Σ_ij X_ij G_ji.
                 let tr = |x: &Mat, g: &Mat| (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| x[(i, j)] * g[(j, i)]).sum::<C64>();
                 // Channel 0 and the tones' channels at the point moved by d.
-                let value = |d: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<C64>, (usize, Vec<(Vec<bool>, bool)>)) {
+                let value = |d: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<C64>, (usize, Vec<Vec<usize>>)) {
                     let r: [f64; 3] = std::array::from_fn(|a| r0[a] + d[a]);
                     let mut cache = Cache::default();
-                    let g0 = fold.prototype(r, kappa, &mut cache, ws).expect("the prototype").generator.clone();
+                    let g0 = fold.prototype(r, kappa, fold.thermal, &mut cache, ws).expect("the prototype").generator.clone();
                     fold.prototype_nodes(r, kappa, velocity, times, &cache, ws);
                     let real = |b: &Mat, g: &Mat| (0..b.data.len()).map(|i| (b.data[i].conj() * g.data[i]).re).sum::<f64>();
                     let mut f0 = real(&bars[0], &g0) + real(&bars[1], ws.node_generator(0)) + real(&bars[2], ws.node_generator(1));
@@ -2235,7 +2277,7 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                 };
                 let (_, centre) = value([0.0; 3], &mut ws);
                 let mut cache = Cache::default();
-                let g0 = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
+                let g0 = fold.prototype(r0, kappa, fold.thermal, &mut cache, &mut ws).unwrap().generator.clone();
                 fold.prototype_nodes(r0, kappa, velocity, times, &cache, &mut ws);
                 let decay: Vec<f64> = [None, Some(0), Some(1)]
                     .iter()
@@ -2347,11 +2389,11 @@ fn the_gradient_s_matrices_are_the_force_s_forms() {
                 let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
                 let velocity = kappa.map(|k| k * fold.hbar_over_mass);
                 let mut cache = Cache::default();
-                let middle = fold.prototype(r0, kappa, &mut cache, &mut ws).expect("the prototype").generator.clone();
+                let middle = fold.prototype(r0, kappa, fold.thermal, &mut cache, &mut ws).expect("the prototype").generator.clone();
                 fold.prototype_nodes(r0, kappa, velocity, [-0.325, 0.325], &cache, &mut ws);
                 fold.prototype_tangent(&cache, &mut ws);
                 exact += usize::from(ws.exact_rows() > 0);
-                copied += usize::from(ws.choices().1.iter().any(|x| x.1));
+                copied += usize::from(ws.layout().0.iter().any(|x| x.2 > 0));
                 explicit += usize::from(n > fold.ground.len());
                 for j in 0..3 {
                     let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
@@ -2471,9 +2513,9 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
                 let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
                 // Per class (block, landing set) and emission axis, u on the set's rows.
-                let amplitudes = |r: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<Vec<C64>>, (usize, Vec<(Vec<bool>, bool)>)) {
+                let amplitudes = |r: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<Vec<C64>>, (usize, Vec<Vec<usize>>)) {
                     let mut cache = Cache::default();
-                    fold.prototype(r, kappa, &mut cache, ws).expect("the prototype");
+                    fold.prototype(r, kappa, fold.thermal, &mut cache, ws).expect("the prototype");
                     let mut out = vec![];
                     for js in fold.prototype_jumps(&cache, ws, super::proto::At::Middle) {
                         for set in &sets {
@@ -2483,7 +2525,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                     (out, ws.choices())
                 };
                 let mut cache = Cache::default();
-                let g = fold.prototype(r0, kappa, &mut cache, &mut ws).unwrap().generator.clone();
+                let g = fold.prototype(r0, kappa, fold.thermal, &mut cache, &mut ws).unwrap().generator.clone();
                 fold.prototype_tangent(&cache, &mut ws);
                 let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0, super::proto::Moments::Every);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
@@ -3000,7 +3042,7 @@ fn the_readout_is_the_fold_s_populations_and_they_sum_to_the_norm() {
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
                 let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
                 let mut cache = Cache::default();
-                fold.prototype(r, kappa, &mut cache, &mut ws).unwrap();
+                fold.prototype(r, kappa, fold.thermal, &mut cache, &mut ws).unwrap();
                 let mut out = [0.0; STATES];
                 let sum = ws.populations(&fold, &cache, &psi, &mut out);
                 assert!((sum - norm).abs() <= 1e-12 * norm && (out.iter().sum::<f64>() - sum).abs() <= 1e-13 * norm, "{name} set {set:?} point {point}: the populations' sum {sum} against ψ†ψ {norm}");
@@ -3230,8 +3272,8 @@ fn random_systems_land_within_their_ring() {
             }
             let Ok(mut ws) = fold.prototype_workspace() else { continue };
             let mut cache = Cache::default();
-            let Some(step) = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws) else { continue };
-            let (readings, generator) = (step.readings(), step.generator.clone());
+            let Some(step) = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws) else { continue };
+            let (ring, series, reading, generator) = (step.kind(4), step.kind(0), step.reading, step.generator.clone());
             let n = fold.size();
             let jumps = fold.prototype_jumps(&cache, &ws, At::Middle);
             let (near, far) = ws.layout();
@@ -3347,12 +3389,12 @@ fn random_systems_land_within_their_ring() {
                 worst_tau = worst_tau.max((tau / tau_exact - 1.0).abs());
                 worst_tv = worst_tv.max(0.5 * (0..GROUND).map(|b| (next[b] / total - next_exact[b] / total_exact).abs()).sum::<f64>());
             }
-            let read = readings.ring + readings.series;
+            let read = ring + series;
             compared += 1;
-            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e}, next landing's total variation {worst_tv:.2e}; actual over read {:.2}", readings.ring, readings.series, worst_tau.max(worst_tv) / read));
-            if readings.combined() <= share {
+            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e}, next landing's total variation {worst_tv:.2e}; actual over read {:.2}", ring, series, worst_tau.max(worst_tv) / read));
+            if reading <= share {
                 within += 1;
-                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)", readings.combined());
+                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)", reading);
             }
         }
     }
@@ -3365,8 +3407,9 @@ fn random_systems_land_within_their_ring() {
 
 /// The loss energy where one light set's fold ceases to exist (BRIEF_LANDIMPL item 4; run.rs # The rest of the model,
 /// `Clusters::difference`): a two-level atom in a far trap light (Δ_t = −60Γ, Ω_t = 6Γ) and a cooling light 0.1Γ below
-/// its line, at rest at the focus, the cooling's saturation s = 0.8 and 0.9 -- with every light the fold exists at both
-/// (the trap moves the line), with the cooling alone it ceases between them. There its node rises in both light sets:
+/// its line, at rest at the focus, the cooling's saturation about where its fold alone first ceases to exist (by tenths:
+/// 0.8–0.9 on the forward that stopped at its rounds' cap, unify2 U1: where its series' last ratio reaches one) -- with
+/// every light the fold exists there (the trap moves the line). There its node rises in both light sets:
 /// V_run at s = 0.9 is the trap's own shift, the run's of the trap light alone, within the share of it; risen in the
 /// cooling's set alone (before), V_run dropped by that set's whole cooling shift there (−6.2 rad/µs against V_run's
 /// −4.3); now by the trap's change of the cooling's shift through the risen node alone (said).
@@ -3390,15 +3433,17 @@ fn the_loss_energy_stands_on_one_set_of_risen_nodes_for_both_light_sets() {
         let light = Light::new(&req);
         let off = super::run::lit(&req, &light, |w| w != light.trap);
         let fold = Fold::new(&off, &Choice::base(&off, vec![]).unwrap(), 0).unwrap();
-        let exists = fold.blocks.is_empty() || fold.prototype([0.0; 3], [0.0; 3], &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
+        let exists = fold.blocks.is_empty() || fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
         let set = run.cluster_of(0);
         let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
         (run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi), exists)
     };
     let (trap, _) = energy(0.0, false);
-    let ((below, held), (above, gone)) = (energy(0.8, true), energy(0.9, true));
-    println!("V_run at s = 0.8 {below:.4} rad/µs (the cooling's fold {}), at s = 0.9 {above:.4} ({}); the trap light's alone {trap:.4}: the step across {:.4}", if held { "exists" } else { "does not" }, if gone { "exists" } else { "does not" }, above - below);
-    assert!(held && !gone, "the cooling's fold ceases between s = 0.8 and 0.9");
+    // The first saturation (by tenths) where the cooling's fold alone does not exist.
+    let gone = (5..30).map(|k| 0.1 * k as f64).find(|&s| !energy(s, true).1).expect("the cooling's fold ceases");
+    let ((below, held), (above, there)) = (energy(gone - 0.1, true), energy(gone, true));
+    println!("V_run at s = {:.1} {below:.4} rad/µs (the cooling's fold {}), at s = {gone:.1} {above:.4} ({}); the trap light's alone {trap:.4}: the step across {:.4}", gone - 0.1, if held { "exists" } else { "does not" }, if there { "exists" } else { "does not" }, above - below);
+    assert!(held && !there, "the cooling's fold ceases between s = {:.1} and {gone:.1}", gone - 0.1);
     assert!((above - trap).abs() <= crate::model::elim::share() * trap.abs(), "risen in both, V_run is the trap's own shift");
 }
 
@@ -3445,9 +3490,10 @@ fn a_two_level_atom_s_ring_reads_its_landing() {
         let fold = Fold::new(&req, &Choice::base(&req, vec![]).unwrap(), 0).unwrap();
         let mut ws = fold.prototype_workspace().unwrap();
         let mut cache = super::proto::Cache::default();
-        let readings = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws).expect("the fold at the focus").readings();
-        println!("Δ {delta:+.1} s {s}: the ring {:.3e} against {expected:.2e} (the series' {:.1e})", readings.ring, readings.series);
-        assert!((readings.ring - expected).abs() <= 0.1 * expected, "the ring reads the landing's error");
+        let step = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws).expect("the fold at the focus");
+        let (ring, series) = (step.kind(4), step.kind(0));
+        println!("Δ {delta:+.1} s {s}: the ring {ring:.3e} against {expected:.2e} (the series' {series:.1e})");
+        assert!((ring - expected).abs() <= 0.1 * expected, "the ring reads the landing's error");
     }
 }
 
@@ -3519,13 +3565,15 @@ fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
 /// steps 0.2 µs to 0.00625 µs, halving, every level deciding at the ends of the cells of 0.4 µs alone, on its end state
 /// at its own point, the representation and the evaluation's choices held between. At 0.03–0.072 µm/µs: every level
 /// switches at the same decision times, no rise is forced between them, and the survival's differences between
-/// successive levels fall at the scheme's second order (their observed orders 2.30, 2.54, 1.68, 1.92; decided at the
-/// step's middle they were 2.9 and −1.8 over the first four levels with 7 of 16 levels' switch times alike, and with the
-/// series' sweeps the point's, 0.9 and 2.3; with the strides' exponentials truncated at a share, until 2026-11-17, the
-/// differences down to 0.0125 and to 0.00625 µs were 1.1·10⁻³ and 2.0·10⁻³, orders −3.7 and −0.8: spectral.rs,
-/// # The strides).
-/// At 0.10–0.24 µm/µs a cell crosses into where the fold does not exist: every switch is at a decision time or a rise a
-/// held middle asked for there (plan4 §2.4, R-b: counted and said), and no step is refused.
+/// successive levels fall at the scheme's second order (their observed orders 2.09, 1.94, 1.99, 2.00, 40 of 40 levels'
+/// switch times alike; 2.30, 2.54, 1.68, 1.92 before unify2 U1; decided at the step's middle they were 2.9 and −1.8 over
+/// the first four levels with 7 of 16 levels' switch times alike, and with the series' sweeps the point's, 0.9 and 2.3;
+/// with the strides' exponentials truncated at a share, until 2026-11-17, the differences down to 0.0125 and to
+/// 0.00625 µs were 1.1·10⁻³ and 2.0·10⁻³, orders −3.7 and −0.8: spectral.rs, # The strides).
+/// At 0.10–0.24 µm/µs a cell crosses into where the fold does not exist: the held forward holds there, unresolved and
+/// booked (unify2 §2.7), no rise forced -- every level alike and at the second order too (unify2 U1: 2.06, 2.00, 2.00,
+/// 2.00, 40 of 40 alike, unresolved 9 ... 291 steps from the coarsest level to the finest; risen between decisions,
+/// plan4 R-b, 2.8 and −0.75 with 12 of 24 alike).
 #[test]
 fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_decision_times_alone() {
     use crate::step::{Dynamics, Midway, Trajectory};
@@ -3546,7 +3594,7 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
     let taus = [0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625];
     // A trajectory at the speed `speed` (its scale) and the step τ: the survival ln‖ψ‖² at the end, its switches' times
     // and whether each was a decision time, and the rises its held middles asked for.
-    let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32) {
+    let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32, usize, f64) {
         let mut t = Trajectory::new(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, speed * (0.1 + 0.02 * i as f64) / hm], 7, i);
         t.threshold = 0.0;
         let (per, steps) = ((cell / tau).round() as usize, (end / tau).round() as usize);
@@ -3562,17 +3610,20 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
                 switches.push((t.time, decision.is_some() || middle.rises() > 0));
             }
         }
-        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises)
+        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises, t.unresolved_steps, t.model[5])
     };
     for speed in [0.3, 1.0] {
         let (mut differences, mut same, mut apart, mut forced) = (vec![0.0; taus.len() - 1], 0, 0, 0u32);
+        let (mut unresolved, mut booked) = (vec![0usize; taus.len()], vec![0.0; taus.len()]);
         for i in 0..8 {
             let levels: Vec<_> = taus.iter().map(|&tau| path(i, speed, tau)).collect();
-            for (tau, level) in taus.iter().zip(&levels) {
+            for (k, (tau, level)) in taus.iter().zip(&levels).enumerate() {
                 assert!(level.1.iter().all(|x| x.1), "speed {speed}, trajectory {i} at τ {tau}: a switch off the decision times without a rise asked for: {:?}", level.1);
                 forced += level.2;
+                unresolved[k] += level.3;
+                booked[k] += level.4 / 8.0;
             }
-            let times = |l: &(f64, Vec<(f64, bool)>, u32)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
+            let times = |l: &(f64, Vec<(f64, bool)>, u32, usize, f64)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
             for pair in levels.windows(2) {
                 if times(&pair[0]) == times(&pair[1]) {
                     same += 1;
@@ -3585,13 +3636,11 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
             }
         }
         let orders: Vec<f64> = differences.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
-        println!("speed {speed}: the survival's differences between successive levels {:?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}", differences.iter().map(|d| format!("{d:.2e}")).collect::<Vec<_>>());
-        if speed < 1.0 {
-            assert_eq!((apart, forced), (0, 0), "every level switches at the same decision times, none forced between");
-            assert!(orders.iter().all(|&p| (1.5..3.0).contains(&p)), "the levels differ at the scheme's second order: {orders:?}");
-        } else {
-            assert!(forced > 0, "a fold that does not exist between two decisions rises");
-        }
+        println!("speed {speed}: the survival's differences between successive levels {:?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}; unresolved steps per level {unresolved:?}, the model's error booked (ρ γ t, a trajectory's mean) {:?}", differences.iter().map(|d| format!("{d:.2e}")).collect::<Vec<_>>(), booked.iter().map(|b| format!("{b:.2e}")).collect::<Vec<_>>());
+        // At either speed (unify2 U1): a held forward holds -- where its series reads a ratio of one between two decisions
+        // it is unresolved there, booked, not risen --, so every level switches at the same decision times.
+        assert_eq!((apart, forced), (0, 0), "every level switches at the same decision times, none forced between");
+        assert!(orders.iter().all(|&p| (1.5..3.0).contains(&p)), "the levels differ at the scheme's second order: {orders:?}");
     }
 }
 
@@ -4001,7 +4050,7 @@ fn the_loss_energy_rises_where_a_light_set_s_fold_does_not_exist() {
         p[0] = 1.0;
         let run = super::run::Onefold::new(&req, p).expect("the run");
         let fold = Fold::new(&req, &Choice::base(&req, vec![]).unwrap(), 0).unwrap();
-        let exists = fold.prototype([0.0; 3], [0.0; 3], &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
+        let exists = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
         let set = run.cluster_of(0);
         let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
         let energy = run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi);

@@ -3013,6 +3013,8 @@ impl State {
             booked: [0.; 3],
             dropped: 0.,
             owed: 0.,
+            model: [0.; crate::step::MODEL],
+            unresolved_steps: 0,
             held: crate::step::Held::default(),
             forms: self.forms.clone(),
         }

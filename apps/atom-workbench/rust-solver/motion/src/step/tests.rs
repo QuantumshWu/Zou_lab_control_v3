@@ -2901,9 +2901,10 @@ fn a_scene_s_step_cost() {
 /// native request's path> TAU=<µs> … a_scene_s_onefold_step_cost -- --ignored --nocapture --test-threads 1`): per state
 /// set, 16 atoms drawn as `scene_clusters` draws them (the prepared trap at the request's temperature, a random state of
 /// the cluster its start took -- `Dynamics::started`: the set's with nothing explicit, or its nodes risen --, no jump),
-/// each first taken one step so that it stands on its own decompositions (its first step makes them), then its next
-/// step timed as `cost` times the old model's -- the step, model and integrator together --, per cluster the atoms
-/// started in.
+/// each first taken one step so that it stands on its own decompositions (its first step makes them), then decided at its
+/// own point (unify2 §10 item 9, U1: the evaluation a held step holds is the one a decision there chooses, not one made at
+/// another point -- the decision's forward's count and the held one's said), then its next step timed as `cost` times
+/// the old model's -- the step, model and integrator together --, per cluster the atoms started in.
 #[test]
 #[ignore = "a measurement, not a check: run by name"]
 fn a_scene_s_onefold_step_cost() {
@@ -2923,6 +2924,7 @@ fn a_scene_s_onefold_step_cost() {
     for set in 0..GROUND {
         let first = (0..GROUND).find(|&g| run.cluster_of(g) == set);
         let Some(first) = first else { break };
+        let decided: std::cell::RefCell<Vec<(usize, f64, [f64; 5])>> = std::cell::RefCell::new(vec![]);
         let starts: Vec<Trajectory> = (0..16)
             .map(|i| {
                 let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, set as u32);
@@ -2942,6 +2944,17 @@ fn a_scene_s_onefold_step_cost() {
                     psi.iter().map(|z| *z / norm).collect()
                 };
                 let mut start = Trajectory { psi, threshold: f64::MIN_POSITIVE, ..warmed };
+                // A decision at the start's own point: the representation and evaluation its held steps hold.
+                let middle = run.middle(start.cluster, start.r, start.time, &start.held, true);
+                let path = middle.path(start.kappa, start.kappa.map(|k| run.hbar_over_mass() * k));
+                if middle.exists(&path) {
+                    let kinds = middle.books(&path, &start.psi).map_or([0.0; 5], |b| b.0);
+                    if let Some(held) = middle.held() {
+                        decided.borrow_mut().push((start.cluster, middle.made(), kinds));
+                        start.held = held;
+                    }
+                }
+                drop(middle);
                 start.forms = run.forms(start.cluster, &start.point(), &start.psi, &start.held);
                 start
             })
@@ -2952,6 +2965,23 @@ fn a_scene_s_onefold_step_cost() {
         for cluster in clusters {
             let these: Vec<Trajectory> = starts.iter().filter(|t| t.cluster == cluster).cloned().collect();
             let label = format!("set {set} ({}, {} atoms) of {}", these[0].psi.len(), these.len(), std::path::Path::new(&name).file_stem().unwrap().to_string_lossy());
+            // The decisions' forwards' counts against a held forward's on each atom's own decision (real multiply-adds).
+            let forwards: Vec<f64> = decided.borrow().iter().filter(|d| d.0 == cluster).map(|d| d.1).collect();
+            // Their accounts by kind at their worst column (ρ, amplitude units): the mean over the atoms.
+            let kinds: Vec<[f64; 5]> = decided.borrow().iter().filter(|d| d.0 == cluster).map(|d| d.2).collect();
+            let mean_kinds: Vec<String> = (0..5).map(|k| format!("{:.1e}", kinds.iter().map(|x| x[k].sqrt()).sum::<f64>() / kinds.len().max(1) as f64)).collect();
+            println!("{label}: the decisions' accounts (series, reuse, centred, left out, ring; ρ, the atoms' mean) {mean_kinds:?}");
+            let held: Vec<f64> = these
+                .iter()
+                .map(|t| {
+                    let middle = run.middle(t.cluster, t.r, t.time, &t.held, false);
+                    let path = middle.path(t.kappa, t.kappa.map(|k| run.hbar_over_mass() * k));
+                    let _ = middle.exists(&path);
+                    middle.made()
+                })
+                .collect();
+            let mean = |x: &[f64]| x.iter().sum::<f64>() / x.len().max(1) as f64;
+            println!("{label}: a decision's forward {:.0} real multiply-adds, a held forward on its evaluation {:.0} (each atom's own: {:?})", mean(&forwards), mean(&held), held.iter().map(|x| x.round()).collect::<Vec<_>>());
             cost(&label, &run, &these, tau);
             parts(&label, &run, &these, tau);
         }

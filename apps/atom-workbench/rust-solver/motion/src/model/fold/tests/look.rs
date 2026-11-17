@@ -150,7 +150,7 @@ fn look_along(req: &Request, drive: &[(usize, f64)], line: &dyn Fn(&[Amplitude])
         let exact = refined(&|t| truth(path(t).0).1, cell, &fine.iter().map(|x| x.0).collect::<Vec<_>>());
         let ratio = refined(&|t| truth(path(t).0).2, cell, &fine.iter().map(|x| x.1).collect::<Vec<_>>());
         tally.ends = tally.ends.max(exact - fine[0].0.max(fine[399].0));
-        if fold.prototype(rd, kappa, &mut cache, &mut ws).is_none() {
+        if fold.prototype(rd, kappa, fold.thermal, &mut cache, &mut ws).is_none() {
             tally.at_point += 1;
             continue;
         }
@@ -346,7 +346,7 @@ fn a_multilevel_cell_s_lookahead_holds_its_off_diagonal_part() {
         for c in 0..cells {
             let rd: [f64; 3] = std::array::from_fn(|a| start[a] + direction[a] * speed * cell * c as f64);
             let path = move |t: f64| -> ([f64; 3], [f64; 3]) { (std::array::from_fn(|a| rd[a] + direction[a] * speed * t), kappa) };
-            let Some(step) = fold.prototype(rd, kappa, &mut cache, &mut ws) else {
+            let Some(step) = fold.prototype(rd, kappa, fold.thermal, &mut cache, &mut ws) else {
                 absent += 1;
                 continue;
             };
@@ -359,7 +359,7 @@ fn a_multilevel_cell_s_lookahead_holds_its_off_diagonal_part() {
             let mut most = vec![0.0_f64; n];
             for s in &look.seen {
                 let (r, k) = path(s.t);
-                let Some(step) = fold.prototype(r, k, &mut exact, &mut truth) else {
+                let Some(step) = fold.prototype(r, k, fold.thermal, &mut exact, &mut truth) else {
                     missing += usize::from(look.exists());
                     continue;
                 };
@@ -376,7 +376,7 @@ fn a_multilevel_cell_s_lookahead_holds_its_off_diagonal_part() {
             // The cells' largest per column against 41 points of the forward.
             for k in 0..=40 {
                 let (r, kk) = path(cell * k as f64 / 40.0);
-                if fold.prototype(r, kk, &mut exact, &mut truth).is_some() {
+                if fold.prototype(r, kk, fold.thermal, &mut exact, &mut truth).is_some() {
                     for (j, &(_, x)) in truth.columns(ground).iter().enumerate() {
                         most[j] = most[j].max(x);
                     }

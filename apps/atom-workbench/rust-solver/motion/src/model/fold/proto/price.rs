@@ -7,21 +7,22 @@
 //! # The sizes (`Sizes`)
 //! A representation is its key (the set's P places, n) and its evaluation: per near block (`NearSize`) its kept rows by
 //! Schur part s_P with each part's triangle's reach Σ_{i∈P} (end_i − i) (s_P(s_P + 1)/2 where its Schur form is dense: a
-//! candidate not yet decomposed is priced so, `Span::dense`) and whether the evaluation holds the part at the first sweep's
-//! order, its lanes L, beam splits, source vectors, terms (and of them those whose coefficient moved off the
-//! decomposition's), explicit states, exact copies n_d with their coupling vectors, centred copies' rows n_c by copy
-//! vector (and whether they are in the compression), its levels' rows and which are left out; per far block (`FarSize`)
-//! its source vectors v, rows, splits, terms, and whether the point leaves it out; the light's layout (`Layout`: the
-//! frequencies' beams × rank, the pairs, Ĥ_PP's form entries, the drives' entries, each tone's entries, the fold's own
-//! forms and drives); the series' sweeps; the coherence groups and the landing sets.
+//! candidate not yet decomposed is priced so, `Span::dense`) and the sweeps the evaluation gives the part (proto.rs
+//! `Evaluation`: one is the first sweep's order), its lanes L, beam splits, source vectors, terms (and of them those
+//! whose coefficient moved off the decomposition's), explicit states, exact copies n_d with their coupling vectors,
+//! centred copies' rows n_c by copy vector (always in the compression, unify2 §2.2), its levels' rows and which are left
+//! out; per far block (`FarSize`) its source vectors v, rows, splits, terms, and whether the evaluation leaves it out;
+//! the light's layout (`Layout`: the frequencies' beams × rank, the pairs, Ĥ_PP's form entries, the drives' entries, each
+//! tone's entries, the fold's own forms and drives); the series' sweeps (its parts' most); the coherence groups and the
+//! landing sets.
 //!
 //! # What is not a size (`Route`)
-//! Three counts are iterations to the rounding, set by a norm, not by a size: S⁻¹'s Newton–Schulz passes (by ‖X‖_F,
-//! `Route::newton_schulz`: the scalar iteration on the largest eigenvalue it bounds), the Lyapunov map's passes on each
-//! axis (by its contraction ‖E‖ ≤ (s − 1)/(s + 1), s = √(1 + ‖X‖_F): `Route::lyapunov`) and the left series' sweeps (the
-//! right's, at least two: with no decay the two are one iteration). They are the formula's inputs, predicted from the
-//! metric's norm; the test lists what the forward took. A Schur form's QR iterations likewise (`schur_count`: two an
-//! eigenvalue). The integrator's picture (its decomposition's route, following, hops) is the integrator's (step.rs
+//! Two counts are iterations to the rounding, set by a norm, not by a size: S⁻¹'s Newton–Schulz passes (by ‖X‖_F,
+//! `Route::newton_schulz`: the scalar iteration on the largest eigenvalue it bounds) and the Lyapunov map's passes on each
+//! axis (by its contraction ‖E‖ ≤ (s − 1)/(s + 1), s = √(1 + ‖X‖_F): `Route::lyapunov`). They are the formula's inputs,
+//! predicted from the metric's norm; the test lists what the forward took. The left series sweeps each row as the right's
+//! (proto.rs `left_within`, unify2 U1): a size, the right's sweeps. A Schur form's QR iterations are iterations likewise
+//! (`schur_count`: two an eigenvalue; a block's kept rows' and each of its levels', `NearBasis::lfact`). The integrator's picture (its decomposition's route, following, hops) is the integrator's (step.rs
 //! `Price::made`, `Price::stops`), given to `Sizes::step` as it is: its count::* terms are step.rs's own formula
 //! (`Price::stepped`).
 //!
@@ -36,29 +37,30 @@
 //! # How the decision takes it (U3; unify2 §3.4)
 //! Every option of the convex-hull walk is a pair (Δρ², Δ the cell's price): the price of the representation the option
 //! leaves, `cell(...)` on its `Sizes`, less the standing one's -- the standing `Sizes` read off the decision's forward
-//! (`Workspace::sizes`), the option's made from it by its sizes alone: a sweep more or less (`sweeps`); a part held or
-//! solved (`Span::frozen`); a level solved or left out (its rows into or out of `parts` -- the parts it couples to merged,
-//! priced dense -- and `omitted`, with `decomposition` once); centred copies' rows in or out (`copied`); a far block left
-//! out or not (`omitted`); a refresh (`decomposition` once, the sizes the same); a node risen or fallen (the target
-//! cluster's layout and sizes, `switch` once). No forward is made for a price, and none is kept.
+//! (`Workspace::sizes`), the option's made from it by its sizes alone: a part's sweep more or less (`Span::sweeps`, and
+//! `sweeps` their most); a level solved or left out (its rows into or out of `parts` -- the parts it couples to merged,
+//! priced dense -- and `omitted`, with `decomposition` once); a far block left out or not (`omitted`); a refresh
+//! (`decomposition` once, the sizes the same); a node risen or fallen (the target cluster's layout and sizes, `switch`
+//! once). No forward is made for a price, and none is kept. A held forward reads nothing (unify2 U1: the readings are a
+//! decision's, `Fold::accounts`), so the formula of a forward holding the evaluation has no reading in it.
 #![cfg_attr(not(test), allow(dead_code))] // Until the decision takes it (U3).
 use super::*;
 use crate::decide::COMPLEX;
 
 /// A Schur part of a near block's kept rows: its rows s_P, its triangle's reach Σ_{i∈P} (end_i − i) (the rows' entries
-/// to the right of the diagonal and the diagonal: K̂Z's and the triangular solve's), and whether the evaluation holds it
-/// at the first sweep's order (proto.rs `freeze`).
+/// to the right of the diagonal and the diagonal: K̂Z's and the triangular solve's), and the sweeps the evaluation gives
+/// it (proto.rs `Evaluation`, `Near::upto`: its series part's; one is the first sweep's order).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Span {
     pub(crate) rows: usize,
     pub(crate) reach: usize,
-    pub(crate) frozen: bool,
+    pub(crate) sweeps: usize,
 }
 
 impl Span {
-    /// A part not yet decomposed, priced dense (its triangle full: s_P(s_P + 1)/2), not frozen.
-    pub(crate) fn dense(rows: usize) -> Span {
-        Span { rows, reach: rows * (rows + 1) / 2, frozen: false }
+    /// A part not yet decomposed, priced dense (its triangle full: s_P(s_P + 1)/2), at `sweeps` sweeps.
+    pub(crate) fn dense(rows: usize, sweeps: usize) -> Span {
+        Span { rows, reach: rows * (rows + 1) / 2, sweeps }
     }
 }
 
@@ -75,10 +77,10 @@ pub(crate) struct NearSize {
     pub(crate) explicit: usize,
     pub(crate) nd: usize,
     pub(crate) exact: usize,
-    /// The centred copies' rows n_c, and per copy vector its group's rows; whether they are in the compression.
+    /// The centred copies' rows n_c (always in the compression where the block has a response, unify2 §2.2), and per
+    /// copy vector its group's rows.
     pub(crate) nc: usize,
     pub(crate) copies: Vec<usize>,
-    pub(crate) copied: bool,
     /// Per level its rows, whether the point leaves it out; every excited row (`all`).
     pub(crate) levels: Vec<usize>,
     pub(crate) omitted: Vec<bool>,
@@ -108,19 +110,19 @@ impl NearSize {
         self.parts.iter().map(|p| p.reach).sum()
     }
 
-    /// Its triangle's reach over the parts a right sweep k solves (every one at the first; then those not frozen).
+    /// Its triangle's reach over the parts a right sweep k solves (those whose sweeps go beyond k, `Near::upto`).
     fn reach_at(&self, k: usize) -> usize {
-        self.parts.iter().filter(|p| k == 0 || !p.frozen).map(|p| p.reach).sum()
+        self.parts.iter().filter(|p| k < p.sweeps).map(|p| p.reach).sum()
+    }
+
+    /// Its centred copies' rows in the compression (proto.rs `Near::copied`).
+    fn copied(&self) -> bool {
+        self.nc > 0 && !self.idle()
     }
 
     /// Σ over the copy vectors of their groups' rows (`copies_of`: rows · s · n each).
     fn copy_rows(&self) -> usize {
         self.copies.iter().sum()
-    }
-
-    /// The omitted levels: their count and their rows.
-    fn left_out(&self) -> (usize, usize) {
-        self.levels.iter().zip(&self.omitted).filter(|x| *x.1).fold((0, 0), |(q, r), (rows, _)| (q + 1, r + rows))
     }
 }
 
@@ -165,13 +167,12 @@ pub(crate) struct Sizes {
 }
 
 /// The counts that are iterations to the rounding (module documentation, # What is not a size): S⁻¹'s Newton–Schulz
-/// passes and whether it starts from the series (‖X‖_F ≤ 1), the Lyapunov map's passes per axis, the left series' sweeps.
+/// passes and whether it starts from the series (‖X‖_F ≤ 1), the Lyapunov map's passes per axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Route {
     pub(crate) started: bool,
     pub(crate) normal: usize,
     pub(crate) lyapunov: [usize; 3],
-    pub(crate) left: usize,
 }
 
 /// A bar of a contraction (proto.rs `Bar`, its matrix aside): its channel, position, tone.
@@ -191,12 +192,12 @@ pub(crate) enum Asked {
 }
 
 impl Route {
-    /// The route predicted from the metric less one's Frobenius norm on n places and the right's sweeps (module
-    /// documentation, # What is not a size).
-    pub(crate) fn predicted(x: f64, n: usize, sweeps: usize) -> Route {
+    /// The route predicted from the metric less one's Frobenius norm on n places (module documentation, # What is not a
+    /// size).
+    pub(crate) fn predicted(x: f64, n: usize) -> Route {
         let (started, normal) = Route::newton_schulz(x, n);
         let each = Route::lyapunov(x, n);
-        Route { started, normal, lyapunov: [each; 3], left: sweeps.max(2) }
+        Route { started, normal, lyapunov: [each; 3] }
     }
 
     /// `inverse_root`'s start and passes on the largest eigenvalue ‖X‖_F bounds: from the series' second order where ‖X‖_F
@@ -287,35 +288,9 @@ impl Sizes {
         self.active().map(|b| Sizes::sweep_block(b, self.n, k, side)).sum()
     }
 
-    /// A block's omitted levels bounded (`bound_levels`, where it bounds them).
-    fn bound_levels(b: &NearSize, n: usize) -> f64 {
-        let (nq, stacked) = b.left_out();
-        if nq == 0 {
-            return 0.0;
-        }
-        let (nl, terms, s, lanes) = (b.levels.len(), b.terms, b.s(), b.lanes);
-        let ln = lanes * n;
-        let mut w = (terms * nl * (nl + 2)) as f64;
-        w += (s * ln + ln * s / 4 + n * s + n * n / 4) as f64;
-        w += (nq * lanes * n * 3) as f64;
-        w += ((b.vectors * b.all + stacked * s) * n) as f64;
-        w += (nq * n * (nq + n)) as f64 / 4.0;
-        w += (nq * n * lanes) as f64;
-        w + (nq * n * b.vectors) as f64
-    }
-
-    /// The levels and far blocks the point leaves out, read on what the evaluation holds (`omit` holding), and the parts the
-    /// first sweep holds (`freeze`).
-    pub(crate) fn bounds(&self) -> f64 {
-        let n = self.n;
-        let levels: usize = self.near.iter().map(|b| b.levels.len()).sum();
-        let omitted: f64 = self.near.iter().map(|b| Sizes::bound_levels(b, n)).sum::<f64>() + (n * levels) as f64;
-        let frozen: usize = self.near.iter().filter(|b| b.nd == 0).map(|b| b.lanes * b.s() * n).sum();
-        omitted + frozen as f64
-    }
-
-    /// A forward holding the representation and its evaluation (`forward_within` with `hold`, its decompositions
-    /// standing), by phase (proto.rs `PHASES`).
+    /// A forward holding the representation and its evaluation (`forward_within` not deciding, its decompositions
+    /// standing), by phase (proto.rs `PHASES`): no reading (a decision's), the far blocks the evaluation leaves out not
+    /// formed.
     pub(crate) fn forward(&self, route: &Route) -> [f64; 10] {
         let n = self.n;
         let nn = n * n;
@@ -341,23 +316,12 @@ impl Sizes {
                 }
             }
         }
-        for f in &self.far {
+        for f in self.lit() {
             w[FAR] += (f.v * f.v + 2 * f.v * f.v * nn + nn) as f64;
         }
-        w[SERIES] = (0..self.sweeps).map(|k| self.sweep(k, Side::Right)).sum::<f64>() + self.bounds();
-        for b in self.active() {
-            w[READING] += (b.s() * n * (b.lanes + b.parts_n() + 2)) as f64 / 4.0;
-        }
-        for f in self.lit() {
-            w[READING] += (f.terms + n) as f64 / 4.0;
-        }
-        w[READING] += self.near.iter().map(|b| b.s() * b.lanes).sum::<usize>() as f64 * self.ground as f64 / 4.0;
-        for b in self.active().filter(|b| b.nc > 0) {
-            let s = b.s();
-            w[COPIES] += (b.copies.len() + s * n / 4) as f64;
-            if b.copied {
-                w[COPIES] += (b.copy_rows() * s * n + b.nc * nn) as f64;
-            }
+        w[SERIES] = (0..self.sweeps).map(|k| self.sweep(k, Side::Right)).sum::<f64>();
+        for b in self.active().filter(|b| b.copied()) {
+            w[COPIES] += (b.copy_rows() * b.s() * n + b.nc * nn) as f64;
         }
         for b in self.active() {
             let (s, nd) = (b.s(), b.nd);
@@ -377,15 +341,16 @@ impl Sizes {
         (if route.started { n3 } else { 0 } + 3 * n3 * route.normal) as f64
     }
 
-    /// The left response at the last forward (`left_within`): its inputs, its sweeps, N = 1 + T_L†T and its factors.
-    pub(crate) fn left(&self, route: &Route) -> f64 {
+    /// The left response at the last forward (`left_within`): its inputs, its sweeps (the right's), N = 1 + T_L†T and its
+    /// factors.
+    pub(crate) fn left(&self) -> f64 {
         let n = self.n;
         let nn = n * n;
         let mut w: f64 = self.active().map(|b| ((b.nd * (b.s() + n)) * 2 + b.nd * b.nd + nn) as f64 / 4.0).sum();
-        w += (0..route.left).map(|k| self.sweep(k, Side::Left)).sum::<f64>();
+        w += (0..self.sweeps).map(|k| self.sweep(k, Side::Left)).sum::<f64>();
         for b in self.active() {
             w += ((b.s() + b.nd) * nn) as f64;
-            if b.copied {
+            if b.copied() {
                 w += (b.copy_rows() * b.s() * n + b.nc * nn) as f64;
             }
         }
@@ -421,7 +386,7 @@ impl Sizes {
                     one += (2 * n * nd * n) as f64;
                 }
             }
-            if b.copied {
+            if b.copied() {
                 one += (b.copy_rows() * s * n + b.nc * nn) as f64;
             }
         }
@@ -469,7 +434,7 @@ impl Sizes {
         }
         for b in self.active() {
             w[5] += (2 * b.s() * n * n3) as f64;
-            if b.copied {
+            if b.copied() {
                 w[5] += (3 * 2 * b.copy_rows() * b.s() * n) as f64;
             }
         }
@@ -515,7 +480,7 @@ impl Sizes {
                 if bar.position == 0 {
                     w += (3 * (s + nd) * n) as f64;
                 } else {
-                    if b.copied {
+                    if b.copied() {
                         w += (2 * b.copy_rows() * s * n) as f64;
                     }
                     w += (3 * b.lanes * (s + nd) * n) as f64;
@@ -557,7 +522,7 @@ impl Sizes {
                             w += (b.exact * n * nd + 4 * nd * nn) as f64;
                         }
                     }
-                    if b.copied {
+                    if b.copied() {
                         w += (2 * b.copy_rows() * s * n + 2 * b.nc * nn + nn) as f64;
                     }
                 }
@@ -666,14 +631,14 @@ impl Sizes {
         let forward: f64 = self.forward(route).iter().sum();
         picture.middle = COMPLEX * forward;
         picture.scattering = COMPLEX * self.photons(Asked::Every, false);
-        picture.work(self.costs(route)) + jumps * self.jump(route)
+        picture.work(self.costs(route)) + jumps * self.jump()
     }
 
     /// A jump's price (real multiply-adds): its place, its drawn class's photons there (the dearest class's: the sizes do not
     /// say which a jump draws), its landing's left response.
-    pub(crate) fn jump(&self, route: &Route) -> f64 {
+    pub(crate) fn jump(&self) -> f64 {
         let dearest = self.slots().into_iter().flat_map(|group| self.sets.iter().map(move |&set| Asked::Drawn { group, set })).map(|asked| self.photons(asked, true)).fold(0.0, f64::max);
-        COMPLEX * (self.place() + dearest + self.left(route))
+        COMPLEX * (self.place() + dearest + self.left())
     }
 
     /// A cell's price (real multiply-adds, unify2 §3.3): its steps at the step's price, D/τ of them, and the once-only
@@ -692,14 +657,20 @@ impl Sizes {
         let mut bars = vec![Cotangent { channel: 0, position: 0, tone: None }];
         bars.extend((0..self.layout.tones.len()).map(|m| Cotangent { channel: 1 + m, position: 0, tone: Some(m) }));
         let held = self.tangent(route).iter().sum::<f64>() + self.force(&bars);
-        COMPLEX * (forward + made + self.left(route) + held)
+        COMPLEX * (forward + made + self.left() + held)
     }
 
     /// A near block's decomposition at a point (complex multiply-adds): the fold's own matrices at the block
-    /// (`effective`), its kept rows' Schur form part by part (`schur_count`) and every product on its basis (`basis`). The
-    /// light at the point the decompositions share is `site`'s.
+    /// (`effective`), its Schur forms (`schur_forms`) and every product on its basis (`basis`). The light at the point the
+    /// decompositions share is `site`'s.
     pub(crate) fn decomposition(&self, b: &NearSize) -> f64 {
-        self.effective(b) + b.parts.iter().map(|p| schur_count(p.rows)).sum::<f64>() + self.basis(b)
+        self.effective(b) + self.schur_forms(b) + self.basis(b)
+    }
+
+    /// A near block's Schur forms at their estimate (`schur_count`): its kept rows' part by part and each level's K_qq − o
+    /// (`NearBasis::lfact`, the omitted levels' estimate's).
+    pub(crate) fn schur_forms(&self, b: &NearSize) -> f64 {
+        b.parts.iter().map(|p| schur_count(p.rows)).chain(b.levels.iter().map(|&rows| schur_count(rows))).sum()
     }
 
     /// A near block's basis, its products (`near_basis` less its Schur forms; fold.rs `Factored::to`, `from`: Σ_P s_P² a
@@ -760,8 +731,8 @@ pub(crate) fn schur_count(m: usize) -> f64 {
 
 impl Workspace {
     /// The sizes of the representation the last forward stood on and of its evaluation (module documentation, # The
-    /// sizes): its decompositions' parts in `cache`, the parts its sweeps held, the far blocks it left out, the centred
-    /// copies' rows it took in; `sets` the landing sets (the ground states' partition).
+    /// sizes): its decompositions' parts in `cache`, each part's sweeps (`Near::upto`, within the forward's), the far
+    /// blocks it left out; `sets` the landing sets (the ground states' partition).
     pub(crate) fn sizes(&self, fold: &Fold, cache: &Cache, sets: &[Vec<usize>]) -> Sizes {
         let layout = Layout {
             beams: fold.light.frequencies.iter().map(|f| f.beams.len() * f.rank()).sum(),
@@ -779,8 +750,8 @@ impl Workspace {
             .enumerate()
             .map(|(x, nb)| {
                 let nl = nb.levels.len();
-                let basis = cache.at_near.get(x).copied().flatten().map(|at| &cache.near[x][at]);
-                let parts = basis.map_or(vec![], |b| b.f.parts.iter().map(|(idx, at, _)| Span { rows: idx.len(), reach: (*at..at + idx.len()).map(|i| b.f.ends[i] - i).sum(), frozen: !nb.active[*at] }).collect());
+                let basis = cache.near.get(x).and_then(Option::as_deref);
+                let parts = basis.map_or(vec![], |b| b.f.parts.iter().map(|(idx, at, _)| Span { rows: idx.len(), reach: (*at..at + idx.len()).map(|i| b.f.ends[i] - i).sum(), sweeps: nb.upto[*at].min(self.step.sweeps) }).collect());
                 NearSize {
                     parts,
                     lanes: nb.lanes,
@@ -793,7 +764,6 @@ impl Workspace {
                     exact: nb.exact.len(),
                     nc: nb.nc,
                     copies: nb.copies.iter().map(|&(_, _, gi)| nb.groups[gi].1.len()).collect(),
-                    copied: nb.copied_in,
                     levels: nb.levels.iter().map(Vec::len).collect(),
                     omitted: basis.map_or(vec![true; nl], |b| (0..nl).map(|q| !b.kept.contains(&q)).collect()),
                     all: nb.all,
@@ -832,7 +802,6 @@ mod tests {
         normal: Vec<i64>,
         decompositions: Vec<(f64, f64, f64, f64)>,
         lyapunov: Vec<i64>,
-        left: Vec<i64>,
     }
 
     /// A decision's forward at r0 and three forwards holding it along the path (`the_price_formula_is_the_counted_work`),
@@ -851,7 +820,7 @@ mod tests {
         let velocity = kappa.map(|k| k * fold.hbar_over_mass);
         let mut cache = Cache::default();
         let r0 = [0.05, -0.03, 0.02];
-        let Some(decided) = fold.prototype(r0, kappa, &mut cache, &mut ws).map(|s| (s.work, s.made, s.rounds, s.sweeps)) else {
+        let Some(decided) = fold.prototype(r0, kappa, fold.thermal, &mut cache, &mut ws).map(|s| (s.work, s.made, s.rounds, s.sweeps)) else {
             println!("{label}: the fold does not exist at the decision's point");
             return;
         };
@@ -859,7 +828,7 @@ mod tests {
         let sizes = ws.sizes(fold, &cache, sets);
         if verbose {
             let x = ws.step.metric.data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-            let formula = sizes.forward(&Route::predicted(x, n, sizes.sweeps));
+            let formula = sizes.forward(&Route::predicted(x, n));
             let made: f64 = sizes.near.iter().map(|b| sizes.decomposition(b)).sum::<f64>() + sizes.far.iter().map(|f| sizes.distant(f)).sum::<f64>();
             println!(
                 "{label}: near (s, parts, L, nd, nc, explicit) {:?}, far (v, m, left out) {:?}; the decision's forward ({} decompositions made, {} rounds, {} sweeps): counted {:.0} (its decompositions' {:.0}), the formula holding it {:.0}, every block decomposed once {made:.0} (QR at two iterations an eigenvalue; the fold's own matrices apart)",
@@ -873,25 +842,24 @@ mod tests {
                 formula.iter().sum::<f64>() - formula[REFRESH]
             );
         }
-        // Three points holding the decision's evaluation, and a fourth holding one it did not make: every centred copy's
-        // rows in the compression, every far block left out, every part of a block without exact copies held at the first
-        // sweep's order (the formula prices any evaluation; the scenes' decisions reach none of these at their points).
+        // Three points holding the decision's evaluation, and a fourth holding one it did not make: every far block left
+        // out, every part of a block without exact copies at the first sweep's order (the formula prices any evaluation;
+        // the scenes' decisions reach none of these at their points).
         for k in 1..=4 {
             let r: [f64; 3] = std::array::from_fn(|a| r0[a] + k as f64 * [0.02, 0.01, -0.015][a]);
             let at = format!("{label} point {k}{}", if k == 4 { " (an evaluation forced)" } else { "" });
             if k == 4 {
                 let e = &mut cache.evaluation;
-                e.copied.iter_mut().zip(&ws.near).for_each(|(c, nb)| *c = nb.nc > 0);
                 e.far.iter_mut().for_each(|f| *f = true);
-                e.active.iter_mut().zip(&ws.near).filter(|(_, nb)| nb.nd == 0).for_each(|(a, _)| a.iter_mut().for_each(|x| *x = false));
+                e.parts.iter_mut().zip(&ws.near).filter(|(_, nb)| nb.nd == 0).for_each(|(p, _)| p.iter_mut().for_each(|x| *x = 1));
             }
-            let Some(counted) = fold.prototype_within(r, kappa, &mut cache, &mut ws, f64::INFINITY, true).map(|s| s.work) else {
+            let Some(counted) = fold.prototype_within(r, kappa, fold.thermal, &mut cache, &mut ws, false).map(|s| s.work) else {
                 println!("{at}: does not exist on what it holds");
                 continue;
             };
             let sizes = ws.sizes(fold, &cache, sets);
             let x = ws.step.metric.data.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-            let predicted = Route::predicted(x, n, sizes.sweeps);
+            let predicted = Route::predicted(x, n);
             let n3 = (n * n * n) as f64;
             // The forward, phase by phase; S⁻¹'s passes read off its phase's rest (whole counts of 3n³).
             let formula = sizes.forward(&predicted);
@@ -946,12 +914,10 @@ mod tests {
                 let asked = Asked::Drawn { group: slots[class.slot], set: sets[class.landing].len() };
                 assert!(same(drawn.work, sizes.photons(asked, true)), "{at}: class {c}'s photons counted {} against {}", drawn.work, sizes.photons(asked, true));
             }
-            // The left response: its sweeps read off its count (the formula at each count of sweeps).
-            let mut left = None;
+            // The left response: every row swept as the right's (its sweeps a size).
             if fold.prototype_left(&cache, &mut ws) {
                 let work = ws.left_work();
-                let sweeps = (2..200).find(|&l| same(work, sizes.left(&Route { left: l, ..route }))).unwrap_or_else(|| panic!("{at}: the left response's count {work} at no count of sweeps (the formula at the predicted {}: {})", predicted.left, sizes.left(&predicted)));
-                left = Some(sweeps);
+                assert!(same(work, sizes.left()), "{at}: the left response counted {work} against {}", sizes.left());
             }
             // The gradient's matrices at the middle, where the set holds explicit states (the optical sector's).
             if !fold.explicit.is_empty() {
@@ -964,18 +930,19 @@ mod tests {
             // The step's model and once-only parts at these sizes (real multiply-adds; the integrator's picture none here).
             let picture = crate::step::Price { states: n, still: false, tau: 0.65, bandwidth: 0.0, nodes: 0, traces: 0, made: 0.0, stops: 0.0, sector: None, tones: 0, toned: [0.0; 2], centred: true, ended: true, middle: 0.0, scattering: 0.0 };
             let step = sizes.step(&route, picture, 0.0);
-            let dense: Vec<Span> = sizes.near.iter().flat_map(|b| b.parts.iter().map(|p| Span::dense(p.rows))).collect();
+            let dense: Vec<Span> = sizes.near.iter().flat_map(|b| b.parts.iter().map(|p| Span::dense(p.rows, p.sweeps))).collect();
             let reach: usize = sizes.near.iter().flat_map(|b| b.parts.iter().map(|p| p.reach)).sum();
             let full: usize = dense.iter().map(|p| p.reach).sum();
             if verbose {
                 println!(
-                    "{at}: equal; ‖X‖_F {x:.2e}: S⁻¹ {} passes (predicted {}), Lyapunov {lyapunov} over the axes (predicted {}), left sweeps {left:?} (predicted {}); the Schur forms' reach {reach} of {full} dense; a step (its model, the picture aside) {step:.0}, its node counts {:?}, a jump {:.0}, a switch to it {:.0}, a cell of two steps with every block decomposed {:.0} (real multiply-adds)",
+                    "{at}: equal; ‖X‖_F {x:.2e}: S⁻¹ {} passes (predicted {}), Lyapunov {lyapunov} over the axes (predicted {}), sweeps {} (parts {:?}); the Schur forms' reach {reach} of {full} dense; a step (its model, the picture aside) {step:.0}, its node counts {:?}, a jump {:.0}, a switch to it {:.0}, a cell of two steps with every block decomposed {:.0} (real multiply-adds)",
                     route.normal,
                     predicted.normal,
                     3 * predicted.lyapunov[0],
-                    predicted.left,
+                    sizes.sweeps,
+                    sizes.near.iter().map(|b| b.parts.iter().map(|p| p.sweeps).collect::<Vec<_>>()).collect::<Vec<_>>(),
                     sizes.costs(&route).map(|c| (COMPLEX * c).round()),
-                    sizes.jump(&route),
+                    sizes.jump(),
                     sizes.switch(&route),
                     sizes.cell(&route, picture, 0.0, 2.0, COMPLEX * sizes.near.iter().map(|b| sizes.decomposition(b)).sum::<f64>())
                 );
@@ -983,8 +950,8 @@ mod tests {
             tally.points += 1;
             tally.explicit += usize::from(!fold.explicit.is_empty());
             tally.exact += usize::from(sizes.near.iter().any(|b| b.nd > 0));
-            tally.copied += usize::from(sizes.near.iter().any(|b| b.copied));
-            tally.frozen += usize::from(sizes.near.iter().any(|b| b.parts.iter().any(|p| p.frozen)));
+            tally.copied += usize::from(sizes.near.iter().any(|b| b.copied()));
+            tally.frozen += usize::from(sizes.near.iter().any(|b| b.parts.iter().any(|p| p.sweeps < sizes.sweeps)));
             tally.omitted += usize::from(sizes.far.iter().any(|f| f.omitted));
             tally.left_out += usize::from(sizes.near.iter().any(|b| !b.idle() && b.omitted.iter().any(|&o| o)));
             tally.tones += usize::from(tones > 0);
@@ -999,20 +966,28 @@ mod tests {
                 assert!(same(site_work, sizes.site()), "{at}: the light at the point counted {site_work} against {}", sizes.site());
                 let (mut own, mut products, mut qr, mut estimate) = (site_work, 0.0, 0.0, 0.0);
                 for (x, nb) in ws.near.iter().enumerate() {
-                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                    let basis = cache.near_at(x);
                     let (mut laid_work, mut basis_work, mut schur_work) = (0.0, 0.0, 0.0);
                     let laid = fold.lay(nb.o, &site, &mut laid_work);
                     let Some(e) = fold.effective(nb.o, &laid, &mut laid_work) else { continue };
                     if fold.near_basis(nb, &ws, &laid, &e, &basis.kept, &mut basis_work).is_none() {
                         continue;
                     }
+                    // Its Schur forms, as `near_basis` makes them: the kept rows' and each level's K_qq − o.
                     let er: Vec<usize> = (0..nb.all).collect();
-                    Factored::of(&e.k.block(&er, &er).block(&basis.rows, &basis.rows), &mut schur_work).unwrap();
+                    let kall = e.k.block(&er, &er);
+                    Factored::of(&kall.block(&basis.rows, &basis.rows), &mut schur_work).unwrap();
+                    for rq in &nb.levels {
+                        let mut k = kall.block(rq, rq);
+                        for i in 0..rq.len() {
+                            k[(i, i)] -= C64::real(fold.blocks[nb.o].value);
+                        }
+                        let _ = Factored::of(&k, &mut schur_work);
+                    }
                     let b = &sizes.near[x];
                     assert!(same(laid_work, sizes.effective(b)), "{at}: block {x}'s own matrices counted {laid_work} against {}", sizes.effective(b));
                     assert!(same(basis_work - schur_work, sizes.basis(b)), "{at}: block {x}'s basis counted {basis_work} (its Schur forms {schur_work}) against the formula's {}", sizes.basis(b));
-                    let mine: f64 = b.parts.iter().map(|p| schur_count(p.rows)).sum();
-                    (own, products, qr, estimate) = (own + laid_work, products + sizes.basis(b), qr + schur_work, estimate + mine);
+                    (own, products, qr, estimate) = (own + laid_work, products + sizes.basis(b), qr + schur_work, estimate + sizes.schur_forms(b));
                 }
                 for (x, fb) in ws.far.iter().enumerate() {
                     let mut basis_work = 0.0;
@@ -1030,9 +1005,6 @@ mod tests {
             }
             tally.normal.push(route.normal as i64 - predicted.normal as i64);
             tally.lyapunov.push(lyapunov as i64 - 3 * predicted.lyapunov[0] as i64);
-            if let Some(l) = left {
-                tally.left.push(l as i64 - predicted.left as i64);
-            }
         }
     }
 
@@ -1112,7 +1084,7 @@ mod tests {
         }
         let worst = |x: &[i64]| (x.iter().copied().min().unwrap_or(0), x.iter().copied().max().unwrap_or(0));
         println!(
-            "{} points equal item by item ({scenes} on the scenes): {} with explicit states, {} with exact copies, {} with centred copies' rows in, {} with parts held at the first order, {} with far blocks left out, {} with levels left out of a solved block, {} with tones, {} with several Schur parts, {} with a Schur form's zeros; the iterations' misses of their prediction (least, most): S⁻¹ {:?}, Lyapunov over the axes {:?}, left {:?}",
+            "{} points equal item by item ({scenes} on the scenes): {} with explicit states, {} with exact copies, {} with centred copies' rows in, {} with parts swept fewer times than the most, {} with far blocks left out, {} with levels left out of a solved block, {} with tones, {} with several Schur parts, {} with a Schur form's zeros; the iterations' misses of their prediction (least, most): S⁻¹ {:?}, Lyapunov over the axes {:?}",
             tally.points,
             tally.explicit,
             tally.exact,
@@ -1124,8 +1096,7 @@ mod tests {
             tally.multipart,
             tally.sparse,
             worst(&tally.normal),
-            worst(&tally.lyapunov),
-            worst(&tally.left)
+            worst(&tally.lyapunov)
         );
         let sum = |f: &dyn Fn(&(f64, f64, f64, f64)) -> f64| tally.decompositions.iter().map(f).sum::<f64>();
         println!(

@@ -49,12 +49,13 @@
 //! # What is held: the off-diagonal part
 //! The forward's last sweep solved, lane by lane and row by row, (c_j − w_l − κ_i) Z_lij = V_lij + O_lij at its column
 //! energies c (H⁽ᴷ⁻¹⁾'s diagonal): O the source the rest of the equation adds to the lane's own -- the other columns'
-//! −(ZΔ)_ij (the Raman part), a Schur form's triangular coupling Σ_m T_im Z_lmj, the exact copies' Woodbury rows (a row the
-//! first sweep froze: what its sweep added, at that sweep's column energies). The look holds O as the sweep made it,
+//! −(ZΔ)_ij (the Raman part), a Schur form's triangular coupling Σ_m T_im Z_lmj, the exact copies' Woodbury rows (a row
+//! whose part's sweeps ended before the last, `Near::upto`: what its own last sweep added, at that sweep's column
+//! energies). The look holds O as the sweep made it,
 //! O = Z(c − w − κ) − V at the decision, and the exact copies' emission into the explicit states (Ê_D Z_D)_jj on their
 //! columns' bare energy; it solves the diagonal again on the sources V + O. At the decision its Σ_j at the sweep's
 //! energies is the forward's H_jj to the rounding (`Look::identity`), and its root the series' fixed point (neither its
-//! last sweep's -- the series' rest is not held -- nor a frozen row's first order). One column: O = 0, the look is the
+//! last sweep's -- the series' rest is not held -- nor the order of a part's fewer sweeps). One column: O = 0, the look is the
 //! fold itself; several: what moves of O along the cell is the error (measured: the tests).
 //!
 //! # The profiles (unify2 §2.7)
@@ -132,6 +133,13 @@ pub(super) fn sourced(splits: &[(usize, usize)], vectors: &[(usize, usize)], xs:
     if !xs.is_empty() {
         scatter(stat, vt, s, ln, (lanes - 1) * n, n);
     }
+}
+
+/// The column energies of the sweep that solved row i of a near block last: the sweep its part's sweeps reach
+/// (`Near::upto`) of those the forward made (`Workspace::cs`, n a sweep) -- at a decision every row's last, the forward's.
+fn solved<'a>(nb: &Near, cs: &'a [C64], i: usize, n: usize) -> &'a [C64] {
+    let k = nb.upto[i].min(cs.len() / n) - 1;
+    &cs[k * n..(k + 1) * n]
 }
 
 /// The samples of a cell of width D whose pattern's fastest beat is ν (# The samples): max(3, ⌈νD/π⌉ + 1), odd.
@@ -363,8 +371,8 @@ impl Fold {
         look.cell = cell;
         look.beat = self.beat(&[path(0.0), path(0.5 * cell), path(cell)]);
         look.samples = samples(look.beat, cell);
-        look.centres = (0..ws.near.len()).map(|x| cache.at_near[x].filter(|_| ws.near[x].nc > 0).map(|i| (cache.near[x][i].r0, cache.near[x][i].z0))).collect();
-        look.far_centres = (0..ws.far.len()).map(|x| cache.at_far[x].map_or((0.0, 0.0), |i| (cache.far[x][i].r0, cache.far[x][i].z0))).collect();
+        look.centres = (0..ws.near.len()).map(|x| cache.near[x].as_deref().filter(|_| ws.near[x].nc > 0).map(|b| (b.r0, b.z0))).collect();
+        look.far_centres = (0..ws.far.len()).map(|x| cache.far[x].as_deref().map_or((0.0, 0.0), |b| (b.r0, b.z0))).collect();
         // What is held (# What is held): per near block the source its last sweep added, O = Z(c − w − κ) − V at the
         // sweep's column energies, and per column the exact copies' emission into the explicit states.
         look.held = ws
@@ -375,8 +383,8 @@ impl Fold {
                 let rows = if nb.idle() { 0 } else { nb.s };
                 let mut o = vec![C64::ZERO; rows * ln];
                 for (i, &kappa) in nb.kappa[..rows].iter().enumerate() {
-                    // A row the first sweep froze was solved there alone, at its column energies.
-                    let c = if nb.active[i] { &ws.c[..] } else { &ws.cs[..n] };
+                    // A row was solved last at the sweep its part's sweeps reach, at that sweep's column energies.
+                    let c = solved(nb, &ws.cs, i, n);
                     for (l, &w) in nb.shifts.iter().enumerate() {
                         for j in 0..n {
                             let k = i * ln + l * n + j;
@@ -402,14 +410,14 @@ impl Fold {
             look.seen.push(seen);
         }
         // The identity at the decision: the forward's last sweep's diagonal, H_jj = a_j + (Ê_D Z_D)_jj + Σ_j(c_j).
-        // Each row at the column energies of the sweep that solved it last (a frozen row: the first).
+        // Each row at the column energies of the sweep that solved it last (its part's sweeps, `Near::upto`).
         look.identity = (0..n)
             .map(|j| {
                 let (mut sigma, mut size) = (C64::ZERO, 0.0);
                 for (nb, inp) in ws.near.iter().zip(&look.seen[0].near).filter(|(nb, _)| !nb.idle()) {
                     let ln = nb.lanes * n;
                     for (i, &kappa) in inp.kappa.iter().enumerate() {
-                        let c = if nb.active[i] { ws.c[j] } else { ws.cs[j] };
+                        let c = solved(nb, &ws.cs, i, n)[j];
                         for (l, &w) in inp.shifts.iter().enumerate() {
                             let q = inp.num[i * ln + l * n + j] / (c - C64::real(w) - kappa);
                             sigma += q;
@@ -467,7 +475,7 @@ impl Fold {
                 seen.near.push(inputs);
                 continue;
             }
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let (s, lanes, nd) = (nb.s, nb.lanes, nb.nd);
             let ln = lanes * n;
             inputs.kappa = vec![C64::ZERO; s];
@@ -517,7 +525,7 @@ impl Fold {
                 seen.far.push((0.0, vec![]));
                 continue;
             }
-            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let basis = cache.far_at(x);
             let v = fb.vectors.len();
             for a in 0..v {
                 for b in 0..v {

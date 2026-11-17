@@ -32,17 +32,18 @@
 //!    fell short), Δ = H − diag(c) the
 //!    series' part, H made again from the sweep's Z: each sweep adds the next order of Δ and of the self-consistency at
 //!    once. Its change, column by column over every row of every block (each mode with its own column: no norm of the
-//!    whole), reads it: the next change is the last times their ratio, what the rest add the last times r/(1 − r). Two
-//!    sweeps at the least (a ratio is read from two changes), then until the rest reads within the share.
+//!    whole), reads it per Schur part: the next change is the last times their ratio, what the rest add the last times
+//!    r/(1 − r) (`series_squares`). Each part sweeps as the evaluation gives it (# The decisions), a decision every
+//!    part twice at the least (a ratio is read from two changes).
 //!    The diagonal's reciprocals (c_j − w_l − κ_i)⁻¹ are a sweep's own (its c), made once, four to a vector division
-//!    (linalg.rs `reciprocals`), and kept: the tangent's sweeps and the freeze take them, the nodes solve nothing.
-//! 6. The readings of what is held: the reuse's (fold.rs # One decomposition along the path, row by row, on the response
-//!    the step uses, Z = Σ_l Z_l, at the beams' mean Doppler shift, with the beams' spread as a remainder; R₀'s own change
-//!    with it) and the far blocks' (‖R₀‖ times the distance of the energies and the forms from the reference). Beyond the
-//!    share the nearest kept decomposition, then a new one (fold.rs `Path`'s rule) -- at a decision (# The decisions).
+//!    (linalg.rs `reciprocals`), and kept: the tangent's sweeps take them, the nodes solve nothing.
+//! 6. At a decision, the accounts of what is held (`Fold::accounts`): the reuse's (fold.rs # One decomposition along the
+//!    path, row by row, on the response the step uses, Z = Σ_l Z_l, at the beams' mean Doppler shift, with the beams'
+//!    spread as a remainder), the centred copies' R₀ held, and the far blocks' (‖R₀‖ times the distance of the energies
+//!    and the forms from the reference); their remedy a decomposition made again at the point (# The decisions).
 //! 7. The copies' rows T_C = R₀Ĥ_CS VZ: their own part of the compression (z₀T_C†T_C, T_C†T_C; their dressing is the kept
-//!    decomposition's) only where it reads beyond the share (‖T_C‖, a copy row's absolute unit). The compression
-//!    A = H + Σ(Ṽ†Z)† + Z†(T + δκ − o)Z (+ z₀T_C†T_C) + z₀ M_far, M = Σ Z†Z (+ T_C†T_C) + M_far (less one);
+//!    decomposition's) always (unify2 §2.2: a block's centred copies' rows no choice). The compression
+//!    A = H + Σ(Ṽ†Z)† + Z†(T + δκ − o)Z + z₀T_C†T_C + z₀ M_far, M = Σ Z†Z + T_C†T_C + M_far (less one);
 //!    S⁻¹ = (1 + M)^{−1/2} to the rounding (`inverse_root`), G = S⁻¹AS⁻¹. Its anti-Hermitian part is −(i/2)Σε†Dε by
 //!    construction: Z†TZ's is Z†V†DVZ (T the Schur form of K_ref, whose anti-Hermitian part is −D/2; V†DV is not stored
 //!    apart), the far forms' T†DT (R₀ − R₀† = −iR₀†DR₀).
@@ -65,7 +66,9 @@
 //! # The levels kept and left out (DESIGN §1.1, §1.8; BRIEF_PROTO4 items 1, 2)
 //! A near block's excited levels are kept or left out; the kept ones are one Schur form (whatever couples them is in the
 //! decomposition, no series across them), the omitted ones are neither decomposed nor solved. Their coupling R to the kept
-//! rows enters their reading alone (`bound_levels`), a bound read after the first sweep without solving them: per level q,
+//! rows enters their reading alone (`bound_levels`), at a decision without solving them: its leading term an estimate,
+//! the level's first-order response (c_j − w̄ − K_qq)⁻¹[Σ_a e_a U_a,q + K_qK Z_K]_j on K_qq's Schur form at the reference,
+//! its phases kept (unify2 §2.4: the bound below lost them), the rest of it bounds: per level q,
 //! lane l and column j, with g = 1/dist(c_j − w_l, W(K_qq − o)) -- W the numerical range, its Gershgorin rectangle at the
 //! reference widened by Σ_t |δc_t| ‖N_t,qq‖ and R₀'s change: ‖(z − K)⁻¹‖ ≤ 1/dist(z, W(K)) for any K, normal or not --,
 //! ‖z_q‖ ≤ g (‖W_q‖ + ‖R_qK‖ ‖Z_K‖ + Σ_p∈Q ‖R_qp‖ x_p + Σ_i |Δ_ij| x_i) (the last two by their largest, a contraction), and
@@ -78,22 +81,28 @@
 //! cancels there), the remainder on the lanes' bounds above; the lanes' bounds summed are the same identity's pivot at
 //! infinity, which the mean's exceeds by at most (1 + ε)/(1 − ε), ε = max_l |w_l − w̄| g_l (≤ 2.2·10⁻³ on the scenes, and
 //! the mean's below it at every point measured). A block with nothing kept and no explicit state is idle: no response, no
-//! work but its bound. Beyond the share levels join, the largest first, and the block is decomposed again at the point;
-//! where a decomposition is made its kept levels leave while the same bounds read within. At an atom's first step nothing is kept (a block with exact copies keeps every
-//! level: they couple all of them through the P layer).
+//! work but its bound. Which levels are kept is a decision's (# The decisions): at an atom's first nothing is kept (a
+//! block with exact copies keeps every level: they couple all of them through the P layer).
 //!
-//! # The decisions (DESIGN §11.3; BRIEF_STEP4A 4c)
-//! The representation -- the decompositions kept, a block's levels kept or left out -- changes at the run's decision
-//! times alone (run.rs # The representation and the decision times): a forward there makes it again as its readings ask
-//! (`prototype`); between two a forward holds (`prototype_within`): it stands on what the atom holds and reads it, a
-//! reading beyond the share read and not acted on until the next decision. What it lacks -- a block with no
-//! decomposition, an omitted level of no bound -- it makes as any forward does: that is no choice. The evaluation's
-//! choices -- the series' sweeps, the parts the first sweep leaves at its order, the far blocks the point leaves out, the
-//! centred copies' rows in the compression -- are the decision's too and held between (`Evaluation`), their readings
-//! read: each made at every point turned the generator by up to its reading where the point crossed the threshold, at
-//! points that differ between two levels of a trajectory -- a first-order offset between the levels (plan4 R-c; measured:
-//! a resonant standing wave's survival at four levels, its observed order 0.9 with the sweeps the point's, 2.3–2.5 with
-//! the decision's, BRIEF_STEP4B (a)).
+//! # The decisions (DESIGN §11.3; unify2 §2, U1)
+//! The representation -- the decompositions kept, a block's levels kept or left out -- and the evaluation -- per near
+//! block per series part its sweeps (a part of one is at the first sweep's order), per far block whether it is left out
+//! (`Evaluation`) -- change at the run's decision times alone (run.rs # The representation and the decision times). A
+//! held forward (`prototype_within`) evaluates what the atom holds as given: no reading, no stop of its own, nothing
+//! changed; where a part of two sweeps or more reads a ratio at or above one it is unresolved there (`Step::unresolved`:
+//! booked at ρ = 1, counted -- unify2 §2.7). What it lacks -- a block with no decomposition, the evaluation -- it makes
+//! as a decision does: that is no choice. A decision's forward (`prototype`) sweeps every part to K, twice at the least,
+//! every far block in, and reads its accounts (`Fold::accounts`): per column ρ_j² = Σ_k ρ_kj², each account attributed
+//! to its order or node, in one measure -- the rate channel against the column's whole excited response W_j, the
+//! potential channel against the atom's mechanical energy (unify2 §2.1) --; its evaluation is chosen within one budget,
+//! unrate(share)² per column (`Fold::allocate`): remedies by attribution while a column is beyond it (more sweeps, a
+//! level joining, a block made again at the point, a far block taken in), the cheaper evaluations that keep it within
+//! after (a part one sweep less, a far block left out) -- more sweeps, or the decompositions it asks for made and the
+//! forward again, until it asks for nothing more. No account stops a forward of its own. Each choice made at every
+//! point turned the generator by up to its reading where the point crossed the threshold, at points that differ between
+//! two levels of a trajectory -- a first-order offset between the levels (plan4 R-c; measured: a resonant standing
+//! wave's survival at four levels, its observed order 0.9 with the sweeps the point's, 2.3–2.5 with the decision's,
+//! BRIEF_STEP4B (a)).
 //!
 //! # The landing (DESIGN §9 M15; landing.status 2–4)
 //! A jump's landing and a node's fall take a state onto the fold's slow span along its fast one (`Workspace::taken`): the
@@ -231,11 +240,10 @@ struct Near {
     pnode: [Parts; 2],
     o: usize,
     /// The kept rows of the basis it stands on (`fit`), of all its excited rows `all`; per excited level its rows (of
-    /// `all`); the kept levels the next decomposition is to hold (`omit`'s, where they change).
+    /// `all`).
     s: usize,
     all: usize,
     levels: Vec<Vec<usize>>,
-    wanted: Option<Vec<usize>>,
     /// The step's centred copies (module documentation, 6; `centring`): the forms' change of their matrix z₀ − Ĥ_CC held at
     /// the reference, Σ_t |δc_t| ‖N_t,CC‖, and the factor ε_R,j's largest over the columns (the omission bound's).
     held: f64,
@@ -266,9 +274,10 @@ struct Near {
     prod: Vec<C64>,
     bloch: Vec<C64>,
     tc: Vec<C64>,
-    active: Vec<bool>,
-    q: Vec<f64>,
-    reading: f64,
+    /// Per row the sweeps of its series part (`Evaluation`; every row's at a decision); per sweep and part the change's
+    /// square per column (`Fold::sweeps`, laid (sweep, part, column)).
+    upto: Vec<usize>,
+    hist: Vec<f64>,
     // Each sweep's, for the force (`Fold::prototype_force`): per split its diagonal's inverse and its response, and the
     // response summed over the splits.
     invs: Vec<C64>,
@@ -283,7 +292,6 @@ struct Near {
     dzplace: Vec<C64>,
     vnode: [Vec<C64>; 2],
     tcnode: [Vec<C64>; 2],
-    copied_in: bool,
     // The exact copies (module documentation, # The exact copies): their rows nd (laid after the solved excited ones, in
     // their own coordinates), per row its (state, component), their coupling vectors (component, k); the step's K̂_ED
     // (ne × nd), K̂_DE (nd × ne), K̂_DD (nd × nd, less o); per split their response (nd × n) and summed, each sweep's
@@ -355,6 +363,12 @@ impl Near {
         self.s == 0 && self.xs.is_empty()
     }
 
+    /// Whether its centred copies' rows are in the compression and the metric: wherever it has any and a response
+    /// (unify2 §2.2: always, no reading of their own).
+    fn copied(&self) -> bool {
+        self.nc > 0 && !self.idle()
+    }
+
     /// The step's buffers for a basis of `s` kept rows (of `all`: within the capacity the workspace gave them).
     fn fit(&mut self, s: usize, n: usize) {
         let (ln, nd) = (self.lanes * n, self.nd);
@@ -382,8 +396,7 @@ impl Near {
         for v in [&mut self.ked, &mut self.kde, e0, e1, d0, d1] {
             v.resize(s * nd, C64::ZERO);
         }
-        self.q.resize(s + 1, 0.0);
-        self.active.resize(s, true);
+        self.upto.resize(s, usize::MAX);
         self.tg.fit(s, n, self.lanes, nd, self.nc);
     }
 }
@@ -444,10 +457,9 @@ struct Far {
     products: Vec<C64>,
     hf: Vec<C64>,
     mf: Vec<C64>,
-    reading: f64,
     /// Its rows' largest decay (rad/µs; the ring's, `landing_ring`).
     decay: f64,
-    /// Whether the point leaves the block out (`omit`).
+    /// Whether the forward leaves the block out (the evaluation's, between decisions).
     omitted: bool,
     /// Temporaries (BRIEF_PROTO5 item 1): the pairs' products at a node and their gradients (v², 3v²), the latter on the
     /// stacked forms (3 × n²), the force's ⟨Ā, F_ab + z₀G_ab⟩ (v²), the photons' emission's u-column on ζ (3 GROUND·v) and a
@@ -459,23 +471,31 @@ struct Far {
     pv: Vec<C64>,
 }
 
+/// The keys of the near decompositions made (`NearBasis::key`): one each, never again in a process.
+static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A near block's decomposition (module documentation, # What is kept).
 struct NearBasis {
+    /// Its key (`KEYS`): what an evaluation's parts are of (`Evaluation::keys`) -- by the decomposition, not by its parts'
+    /// places, which another decomposition of the block lays otherwise.
+    key: u64,
     at: Vec<C64>,
-    weights: Vec<f64>,
     /// The kept levels (of `Near::levels`) and their rows (of the block's excited rows, ascending): the rows of `f`.
     kept: Vec<usize>,
     rows: Vec<usize>,
     f: Factored,
-    /// ‖the Schur form's strict upper part‖_F with what it dropped (the kept part's departure from normality, `omit`'s
+    /// ‖the Schur form's strict upper part‖_F with what it dropped (the kept part's departure from normality, the levels' bound
     /// resolvent bound).
     nu: f64,
-    /// Every level's data for the omission bound (`omit`), L levels, at the reference: per level the Gershgorin intervals of
+    /// Every level's data for the omission bound (`bound_levels`), L levels, at the reference: per level the Gershgorin intervals of
     /// K_qq − o's Hermitian part and of its decay i(K_qq − K_qq†) (a_lo, a_hi, b_lo, b_hi); per term ‖N_t,qq‖_F (T × L);
     /// ‖K_qp‖_F of the reference and per term ‖N_t,qp‖_F ((T + 1) × L × L); per term the dressing's rows' norm on the
     /// level (T × L, R₀'s change); per level the beams' sources' and the source vectors' column norms (L × splits × n,
     /// L × v × n); the static source's and the explicit rows' emission's column norms ((T + 1) × L × n each).
     gersh: Vec<[f64; 4]>,
+    /// Every level's K_qq − o at the reference in its Schur form (`Factored`; none where it is singular): its omission's
+    /// first-order response, an estimate (`bound_levels`; unify2 §2.4).
+    lfact: Vec<Option<Factored>>,
     lterm: Vec<f64>,
     lpair: Vec<f64>,
     ldress: Vec<f64>,
@@ -501,7 +521,6 @@ struct NearBasis {
     beams: Vec<C64>,
     vectors: Vec<Vec<C64>>,
     copies: Vec<Vec<C64>>,
-    copied_rows: Vec<f64>,
     z0: f64,
     r0: f64,
     /// Per term V†N_tV on the parts' entries (s × s, zero across parts: the tangent's ∂K̃); the emission on the block's rows
@@ -541,7 +560,6 @@ struct NearBasis {
 /// U_a†R₀†R₀U_b (n × n), stacked (v² × n², row a·v + b: the forms in e_a*e_b one product); its R₀ (the tests' response) and ‖R₀‖; the forms' size on its rows per term (R₀'s change).
 struct FarBasis {
     at: Vec<C64>,
-    weights: Vec<f64>,
     f: Vec<C64>,
     g: Vec<C64>,
     /// F + z₀G stacked (v² × n²): the force's forms.
@@ -557,42 +575,270 @@ struct FarBasis {
     emitted: Vec<C64>,
 }
 
-/// An atom's kept decompositions, per block (near and far apart): the kept ones and the one it stands on; the
-/// decompositions made and the kept ones taken up again. A value: its decompositions shared, so that a copy is cheap and a
-/// copy's own decompositions are its own (a trajectory's representation, model/run.rs).
+/// An atom's representation of a set (# The decisions; a value: its decompositions shared, so that a copy is cheap and a
+/// copy's own decompositions are its own -- a trajectory's representation, model/run.rs): per block the decomposition it
+/// stands on (near and far apart), the decompositions made, and the evaluation its last decision chose.
 #[derive(Default, Clone)]
 pub(crate) struct Cache {
-    near: Vec<Vec<std::sync::Arc<NearBasis>>>,
-    far: Vec<Vec<std::sync::Arc<FarBasis>>>,
-    at_near: Vec<Option<usize>>,
-    at_far: Vec<Option<usize>>,
+    near: Vec<Option<std::sync::Arc<NearBasis>>>,
+    far: Vec<Option<std::sync::Arc<FarBasis>>>,
     pub(crate) made: usize,
-    pub(crate) looked: usize,
-    /// Of `made`, those made because the kept levels changed (`omit`'s).
+    /// Of `made`, those made because the kept levels changed.
     pub(crate) grown: usize,
-    /// The evaluation's choices its last decision made (# The decisions).
     evaluation: Evaluation,
 }
 
-/// The evaluation's choices a decision makes by its readings (# The decisions): the series' sweeps, per near block the
-/// rows the first sweep leaves at its order (`freeze`), per far block whether the point leaves it out (`omit`), per near
-/// block whether its centred copies' rows are in the compression -- held between two decisions with the representation,
-/// so that the fold is one smooth function of the point there (each choice made per point turned the generator by a
-/// reading's step where the point crossed its threshold: a first-order offset between two levels' points, measured,
-/// BRIEF_STEP4B (a)). Empty where no decision made it (a holding forward then decides it: it lacks it).
-#[derive(Default, Clone)]
-struct Evaluation {
-    sweeps: usize,
-    active: Vec<Vec<bool>>,
-    far: Vec<bool>,
-    copied: Vec<bool>,
+impl Cache {
+    /// Near block x's decomposition dropped (a test's: a held forward that lacks it).
+    #[cfg(test)]
+    pub(crate) fn forget(&mut self, x: usize) {
+        self.near[x] = None;
+    }
+
+    /// Another's evaluation on these decompositions (a test's: an evaluation not of the decompositions it is held on).
+    #[cfg(test)]
+    pub(crate) fn graft(&mut self, other: &Cache) {
+        self.evaluation = other.evaluation.clone();
+    }
+
+    /// The decomposition near block x stands on.
+    fn near_at(&self, x: usize) -> &NearBasis {
+        self.near[x].as_deref().expect("a near block's decomposition")
+    }
+
+    /// The decomposition far block x stands on.
+    fn far_at(&self, x: usize) -> &FarBasis {
+        self.far[x].as_deref().expect("a far block's decomposition")
+    }
 }
 
-/// A step's result: A, the metric less one, S⁻¹, G (n × n); the sweeps; the readings (rate units): the series' rest,
-/// the largest of the near blocks' reuse (their centred copies' held resolvent against the exact one at every column's
-/// energy with it, `centring`) and of the far blocks' held response against the exact one there; the last changes'
-/// largest ratio; the work (complex multiply-adds) and the ticks by phase
-/// (`PHASES`), and per sweep.
+/// The evaluation a decision chooses by its accounts (# The decisions; unify2 §3.2): per near block per series part its
+/// sweeps (≥ 1: a part of one is at the first sweep's order; `series_parts`), per far block whether it is left out -- held
+/// between two decisions with the representation (each made per point turned the generator by up to its reading where the
+/// point crossed a threshold: a first-order offset between two levels, BRIEF_STEP4B (a)). With the decision's readings: ρ
+/// (rate units) and per kind its accounts' ρ² at the worst column (`KINDS`; the books' profile, unify2 §2.7).
+#[derive(Default, Clone)]
+struct Evaluation {
+    parts: Vec<Vec<usize>>,
+    keys: Vec<u64>,
+    far: Vec<bool>,
+    reading: f64,
+    kinds: [f64; KINDS],
+}
+
+impl Evaluation {
+    /// The largest part's sweeps (one at the least).
+    fn most(&self) -> usize {
+        self.parts.iter().flatten().copied().max().unwrap_or(1).max(1)
+    }
+
+    /// Whether it is of the decompositions a forward stands on: per near block its parts' those of the block's basis (by
+    /// its key, `NearBasis::key`), per far block one.
+    fn fits(&self, cache: &Cache, far: usize) -> bool {
+        self.parts.len() == cache.near.len() && self.far.len() == far && cache.near.iter().zip(&self.keys).all(|(b, k)| b.as_ref().is_some_and(|b| b.key == *k))
+    }
+
+    /// Fitted to the decompositions a decision stands on: a near block's parts that are not its basis' (another key) made
+    /// again at the largest sweeps held (two at the least), the far blocks all in where it holds none.
+    fn fit(&mut self, cache: &Cache, near: &[Near], far: &[Far]) {
+        let most = self.parts.iter().flatten().copied().max().unwrap_or(2).max(2);
+        self.parts.resize(near.len(), vec![]);
+        self.keys.resize(near.len(), u64::MAX);
+        for (x, nb) in near.iter().enumerate() {
+            let basis = cache.near_at(x);
+            if self.keys[x] != basis.key {
+                (self.parts[x], self.keys[x]) = (vec![most; series_parts(nb, basis)], basis.key);
+            }
+        }
+        if self.far.len() != far.len() {
+            self.far = vec![false; far.len()];
+        }
+    }
+}
+
+/// A decision's state over its rounds (# The decisions): per near block the kept levels it asks of the next decomposition,
+/// whether it is made again at the point, whether it was made at the point in this decision, the levels it joined in this
+/// decision (they do not leave in it); per far block whether made again, whether made at the point.
+#[derive(Default)]
+struct Decision {
+    kept: Vec<Option<Vec<usize>>>,
+    near: Vec<bool>,
+    fresh: Vec<bool>,
+    joined: Vec<Vec<usize>>,
+    far: Vec<bool>,
+    fresh_far: Vec<bool>,
+}
+
+impl Decision {
+    /// A decision's start on `near` near blocks and `far` far ones.
+    fn start(&mut self, near: usize, far: usize) {
+        self.kept = vec![None; near];
+        self.near = vec![false; near];
+        self.fresh = vec![false; near];
+        self.joined = vec![vec![]; near];
+        self.far = vec![false; far];
+        self.fresh_far = vec![false; far];
+    }
+
+    /// None (a held forward asks for nothing).
+    fn clear(&mut self) {
+        for v in [&mut self.near, &mut self.fresh, &mut self.far, &mut self.fresh_far] {
+            v.clear();
+        }
+        self.kept.clear();
+        self.joined.clear();
+    }
+}
+
+/// What a decision does next (`Fold::allocate`): done, more sweeps (all of them), the decompositions it asks for made at
+/// the point and the forward again, or nothing: the fold does not exist at the point.
+enum Next {
+    Done,
+    Sweeps(usize),
+    Again,
+    Nowhere,
+}
+
+/// The accounts' kinds (unify2 §2.2): the series' order, the reuse's, the centred rows', the nodes left out (excited
+/// levels, far blocks), the ring's.
+pub(crate) const KINDS: usize = 5;
+
+/// What an account is of (unify2 §2.2): an order -- a near block's series part (its sweeps), a near block's decomposition (its
+/// age: the reuse) -- or a node: a block's centred rows (a near block's centred copies, a far block's levels), an excited
+/// level a near block leaves out, a far block left out, a block's rows' share of the ring. Blocks by the workspace's
+/// order (near, far).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Item {
+    Series { block: usize, part: usize },
+    Reuse { block: usize },
+    Centred { block: usize, far: bool },
+    Omitted { block: usize, level: usize },
+    Left { block: usize },
+    Ring { block: usize, far: bool },
+}
+
+impl Item {
+    /// Its kind (`KINDS`).
+    pub(crate) fn kind(&self) -> usize {
+        match self {
+            Item::Series { .. } => 0,
+            Item::Reuse { .. } => 1,
+            Item::Centred { .. } => 2,
+            Item::Omitted { .. } | Item::Left { .. } => 3,
+            Item::Ring { .. } => 4,
+        }
+    }
+}
+
+/// One account of a decision (unify2 §2.1): per column its ρ² -- the rate channel |δT|²/W_j, the potential channel
+/// unrate(|δV|/2E)² --, and whether the evaluation holds it (an alternative it may take is read with it: a far block's
+/// centring and the block left out).
+#[derive(Clone, Debug)]
+pub(crate) struct Account {
+    pub(crate) item: Item,
+    pub(crate) squares: Vec<f64>,
+    pub(crate) on: bool,
+}
+
+/// A near block's series parts (unify2 §3.2): its basis' Schur parts, one where it has exact copies (they couple its parts
+/// through the P layer: the block goes on whole).
+fn series_parts(nb: &Near, basis: &NearBasis) -> usize {
+    if nb.nd > 0 { 1 } else { basis.f.parts.len().max(1) }
+}
+
+/// The series part of a near block's row i (`series_parts`).
+fn part_of(nb: &Near, basis: &NearBasis, i: usize) -> usize {
+    if nb.nd > 0 { 0 } else { basis.part[i] }
+}
+
+/// A series part's account at p sweeps (unify2 §2.2, §2.4), the rows swept `done` times at the decision (two at the least):
+/// per column read the rest after its p-th sweep, Σ_k>p Δ_k -- the next change where it was made, Δ_p/(1 − r) with r =
+/// Δ_p/Δ_{p−1}, else the last one's geometric tail, Δ_{K−1} r^{p−K+1}/(1 − r) with r = Δ_{K−1}/Δ_{K−2} (K = `done`) -- on
+/// the rate channel against W_j (`den`); none within the rows' rounding (`ratio_of`). ∞ where r reaches one (a part at its
+/// first sweep's order reads its second change against its first: the decision sweeps every part twice at the least).
+/// No potential channel: the compression A = Ψ†HΨ is stationary in the response about the exact one where the block is
+/// Hermitian -- a truncation's δZ moves the diagonal of G at second order, and with the decay D at first by Im(Z†DδZ)
+/// alone (said, not read: unify2 §2.1 reads 2Re(V†δT), the Bloch generator's; to be settled with U5).
+#[allow(clippy::too_many_arguments)]
+fn series_squares(nb: &Near, np: usize, part: usize, p: usize, done: usize, den: &[f64], floor: f64, n: usize, out: &mut [f64]) {
+    let (k, power) = if p < done { (p, 0) } else { (done - 1, (p + 1 - done) as i32) };
+    let r = ratio_of(nb, np, part, k, den, n);
+    for j in 0..n {
+        out[j] = 0.0;
+        if den[j] <= floor {
+            continue;
+        }
+        let last = nb.hist[(k * np + part) * n + j];
+        if r == 0.0 || last == 0.0 {
+            continue;
+        }
+        if r >= 1.0 {
+            out[j] = f64::INFINITY;
+            continue;
+        }
+        let size = last * (r.powi(power) / (1.0 - r)).powi(2);
+        out[j] = if rounded(size, den[j], n, nb.s, nb.lanes) { 0.0 } else { size / den[j] };
+    }
+}
+
+/// Whether a change's square is within the rounding of a column's response of the whole W_j (each of its s rows a sum
+/// over L lanes of sums of about n + s + 1 products: Σ_i of their rounding's square, s rounding(L(n + s + 1))² W_j).
+fn rounded(change: f64, whole: f64, n: usize, s: usize, lanes: usize) -> bool {
+    change <= s.max(1) as f64 * crate::units::rounding(lanes.max(1) * (n + s + 1)).powi(2) * whole
+}
+
+/// The ratio of a series part's changes at sweep k and k − 1 (`Near::hist`; `den` the columns' W): over its columns -- the
+/// series' ratio is its iteration's, one for all its columns (DESIGN §1.5: a column it reaches late through the Bloch
+/// generator, or whose first terms cancel, reads no ratio of its own) --; none where the change is within the columns'
+/// rounding (converged) or the part had none before (it starts at this sweep).
+fn ratio_of(nb: &Near, np: usize, part: usize, k: usize, den: &[f64], n: usize) -> f64 {
+    let (a, b) = (0..n).fold((0.0, 0.0), |(a, b), j| (a + nb.hist[(k * np + part) * n + j], b + nb.hist[((k - 1) * np + part) * n + j]));
+    if rounded(a, den.iter().sum(), n, nb.s, nb.lanes) || b == 0.0 { 0.0 } else { (a / b).sqrt() }
+}
+
+/// The accounts held (`Account::on`) by kind at their worst column read (ρ², `KINDS`).
+fn worst_kinds(accounts: &[Account], den: &[f64], n: usize) -> [f64; KINDS] {
+    let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
+    let total = |j: usize| accounts.iter().filter(|a| a.on).map(|a| a.squares[j]).sum::<f64>();
+    let mut kinds = [0.0; KINDS];
+    if let Some(j) = (0..n).filter(|&j| den[j] > floor).max_by(|&a, &b| total(a).total_cmp(&total(b))) {
+        for a in accounts.iter().filter(|a| a.on) {
+            kinds[a.item.kind()] += a.squares[j];
+        }
+    }
+    kinds
+}
+
+/// The largest of every part's last ratio, its rows swept `done` times (`ratio_of`).
+fn last_ratio(near: &[Near], cache: &Cache, den: &[f64], done: usize, n: usize) -> f64 {
+    let mut last = 0.0_f64;
+    for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
+        let np = series_parts(nb, cache.near_at(x));
+        for part in 0..np {
+            last = last.max(ratio_of(nb, np, part, done - 1, den, n));
+        }
+    }
+    last
+}
+
+/// A held forward's largest ratio (unify2 §2.7): of every part of two sweeps or more, its last two changes' (`ratio_of`); at
+/// or above one the forward is unresolved there (booked at ρ = 1, counted).
+fn held_ratio(near: &[Near], cache: &Cache, evaluation: &Evaluation, whole: &[f64], n: usize) -> f64 {
+    let mut most = 0.0_f64;
+    for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
+        let np = series_parts(nb, cache.near_at(x));
+        for (part, &p) in evaluation.parts[x].iter().enumerate().filter(|(_, p)| **p >= 2) {
+            most = most.max(ratio_of(nb, np, part, p - 1, whole, n));
+        }
+    }
+    most
+}
+
+/// A step's result: A, the metric less one, S⁻¹, G (n × n); the sweeps; a decision's readings (its accounts in the
+/// workspace, `Workspace::accounts`): the fold's error ρ = rate(√max_j Σ_k ρ²_kj) (rate units) and by kind its accounts'
+/// ρ² at that column -- a held forward's are its decision's (the books' profile, unify2 §2.7) --; whether a held
+/// forward's series reads a ratio at or above one (unresolved: booked at ρ = 1, counted) and that ratio; the
+/// decompositions made, the rounds; the work (complex multiply-adds) and the ticks by phase (`PHASES`), and per sweep.
 pub(crate) struct Step {
     pub(crate) a: Mat,
     pub(crate) metric: Mat,
@@ -601,15 +847,14 @@ pub(crate) struct Step {
     /// The tones' G_m = S⁻¹A_mS⁻¹ (module documentation, # The tones; `Workspace::tones`' order).
     pub(crate) tones: Vec<Mat>,
     pub(crate) sweeps: usize,
-    pub(crate) series: f64,
-    pub(crate) reuse: f64,
-    pub(crate) far: f64,
-    pub(crate) copies: f64,
-    /// What the nodes left out at the point leave (rate units), and their count (near parts, far blocks).
-    pub(crate) omitted: f64,
-    /// The ring's: what a bare state's landing leaves, its transient (rate units; module documentation, # The ring).
-    pub(crate) ring: f64,
-    pub(crate) left: [usize; 2],
+    pub(crate) reading: f64,
+    pub(crate) kinds: [f64; KINDS],
+    /// A decision's books' ends (unify2 §2.7): the evaluation it found's accounts by kind at the cell's start (its decision's,
+    /// `kinds` there) and here, before it chose (ρ² at its worst column) -- the cell's profile, its end measured; a held
+    /// forward's both its decision's.
+    pub(crate) started: [f64; KINDS],
+    pub(crate) ended: [f64; KINDS],
+    pub(crate) unresolved: bool,
     pub(crate) ratio: f64,
     pub(crate) made: usize,
     /// Of `made`, those for a change of the kept levels.
@@ -620,32 +865,10 @@ pub(crate) struct Step {
     pub(crate) sweep_work: Vec<f64>,
     pub(crate) sweep_ticks: Vec<u64>,
 }
-
-/// A step's readings (rate units; `Step`): the series' rest, the reuse's, the far blocks' held forms, what the nodes
-/// left out leave, the ring's.
-#[derive(Clone, Copy)]
-pub(crate) struct Readings {
-    pub(crate) series: f64,
-    pub(crate) reuse: f64,
-    pub(crate) far: f64,
-    pub(crate) omitted: f64,
-    pub(crate) ring: f64,
-}
-
-impl Readings {
-    /// The fold's error at the point (run.rs # The nodes risen and fallen, ρ): the readings' relative errors combined as
-    /// one component's are, ρ² = Σ_k ρ_k² (DESIGN §1.5), in rate units -- the one combination of the point's rule and of
-    /// the run's books. A reading that is no number is beyond every share (the one exit).
-    pub(crate) fn combined(&self) -> f64 {
-        let squares: f64 = [self.series, self.reuse, self.far, self.omitted, self.ring].into_iter().map(|x| if x.is_nan() { f64::INFINITY } else { unrate(x).powi(2) }).sum();
-        rate(squares.sqrt())
-    }
-}
-
 impl Step {
-    /// Its readings.
-    pub(crate) fn readings(&self) -> Readings {
-        Readings { series: self.series, reuse: self.reuse, far: self.far, omitted: self.omitted, ring: self.ring }
+    /// Its accounts of kind k at its decision's worst column (`KINDS`), as a rate.
+    pub(crate) fn kind(&self, k: usize) -> f64 {
+        rate(self.kinds[k].sqrt())
     }
 }
 
@@ -692,15 +915,16 @@ pub(crate) struct Workspace {
     delta: Vec<C64>,
     c: Vec<C64>,
     change: Vec<f64>,
-    previous: Vec<f64>,
     whole: Vec<f64>,
     eigen: Mat,
     vectors: Mat,
     temp: Mat,
-    renew: Vec<(bool, usize)>,
-    order: Vec<(f64, usize, usize)>,
-    /// The omission bounds per near block (`omit`'s, kept from step to step).
+    /// The omission bounds per near block (`Fold::accounts`), a decision's state (`Decision`), its accounts and the
+    /// columns' whole excited responses W_j they are read against.
     per: Vec<Bounds>,
+    decision: Decision,
+    accounts: Vec<Account>,
+    den: Vec<f64>,
     /// Per near block its matrices at the point where a decomposition is made there (`Fold::lay`, `Fold::effective`).
     here: Vec<Option<(Laid, Effective)>>,
     /// The step's temporaries: per near block (`Scratch`) and those of the whole (`Temp`).
@@ -973,9 +1197,8 @@ struct BoundTemps {
 /// tangent, ∂H, ∂X (n × 3n), ∂Δ (n × n), ∂c (3 × n), a product's (3 × n × n), two n × n; the force's Ā_j (three), N̄, Ā†,
 /// X̄, Ā*, a work n × n, per component and vector ḡ_e, the diagonal's gradient (n × 3); the photons' ζ, ∂ζ (n × 3), [ζ | ∂ζ] (n × 4),
 /// a block's columns of [u | ∂u] (3 GROUND × at most 4), a class's rows of them and their Gram matrix (4 × 4), the
-/// classes' rates (before and after the norm) and per group its rows' runs of the drawn class (made once, then kept); the
-/// omission's columns' denominators and a trial's (n), a block's bounds on trial (`Bounds`, the largest levels × n), the
-/// levels' and far blocks' order; the near blocks' rows stacked (BRIEF_PROTO5 item 2: every block's rows of a product's two
+/// classes' rates (before and after the norm) and per group its rows' runs of the drawn class (made once, then kept); a
+/// block's bounds on trial (`Bounds`, the largest levels × n: a level's leaving, `Fold::allocate`); the near blocks' rows stacked (BRIEF_PROTO5 item 2: every block's rows of a product's two
 /// factors, 2 × the rows in all × n each; the force's product on them, 2 × the rows in all × n).
 struct Temp {
     dhbase: Vec<C64>,
@@ -1003,19 +1226,16 @@ struct Temp {
     raw: Vec<f64>,
     rates: Vec<f64>,
     runs: Vec<Vec<(usize, usize)>>,
-    den: Vec<f64>,
-    d: Vec<f64>,
     trial: Bounds,
-    units: Vec<(f64, usize)>,
     sl: Vec<C64>,
     sr: Vec<C64>,
     fo1: Vec<C64>,
 }
 
 impl Temp {
-    /// For n columns, the components' vectors `vectors` (per component its basis' size), the largest levels of a block, the
-    /// blocks' levels in all, the far blocks and the near blocks' excited rows in all.
-    fn new(n: usize, vectors: &[usize], levels: usize, all: usize, far: usize, rows: usize) -> Temp {
+    /// For n columns, the components' vectors `vectors` (per component its basis' size), the largest levels of a block and
+    /// the near blocks' excited rows in all.
+    fn new(n: usize, vectors: &[usize], levels: usize, rows: usize) -> Temp {
         let z = |x: usize| vec![C64::ZERO; x];
         let nn = n * n;
         Temp {
@@ -1044,10 +1264,7 @@ impl Temp {
             raw: vec![],
             rates: vec![],
             runs: vec![],
-            den: vec![0.0; n],
-            d: vec![0.0; n],
             trial: (Vec::with_capacity(levels), vec![0.0; levels * n], vec![0.0; levels * n], vec![0.0; levels * n]),
-            units: Vec::with_capacity(all.max(far)),
             sl: z(2 * rows * n),
             sr: z(2 * rows * n),
             fo1: z(2 * rows * n),
@@ -1065,74 +1282,6 @@ fn unrate(r: f64) -> f64 {
     (1.0 + r).sqrt() - 1.0
 }
 
-/// The series' order, mode by mode (module documentation, 5): after the first sweep the next one moves a Schur part P of a
-/// block by at most q_P a_j in column j -- the next change is the diagonal times the first sweep's residual against the
-/// Bloch generator H¹ it gives, −Z¹(H¹ − c⁰), so row by row against column by column (Cauchy–Schwarz) and beam by beam,
-/// q_P = Σ_l (Σ_{i∈P} max_j |c⁰_j − w_l − κ_i|⁻² ‖Z¹_l,i‖²)^½ and a_j = ‖(H¹ − c⁰)_:,j‖. The parts of the smallest next order
-/// stay at the first sweep's while what they leave together, (Σ q_P²)^½ max_j a_j/‖Z_j‖, reads within the share (all
-/// blocks' parts on one share); the others go on.
-/// Returns what the held parts leave (ρ). The budget is the share's ρ less what the levels left out leave (`omit`): one
-/// share for both. Between two decisions the parts the decision left at the first sweep's order (`held`) stay so, read.
-#[allow(clippy::too_many_arguments)]
-fn freeze(near: &mut [Near], cache: &Cache, h: &[C64], c: &[C64], whole: &[f64], order: &mut Vec<(f64, usize, usize)>, budget: f64, held: Option<&[Vec<bool>]>, n: usize, work: &mut f64) -> f64 {
-    // The first sweep's reciprocals are its column energies' c⁰ (`Near::invs` from 0).
-    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-    let mut most = 0.0_f64;
-    for j in (0..n).filter(|&j| whole[j] > floor) {
-        let a2: f64 = (0..n).map(|i| (h[i * n + j] - if i == j { c[j] } else { C64::ZERO }).norm_sqr()).sum();
-        most = most.max((a2 / whole[j]).sqrt());
-    }
-    order.clear();
-    for (x, nb) in near.iter_mut().enumerate() {
-        let basis = &cache.near[x][cache.at_near[x].unwrap()];
-        let s = nb.s;
-        let ln = nb.lanes * n;
-        // The exact copies couple every part of their block through the P layer: the reading bounds a part's own next
-        // order, not the copies' through it, so such a block goes on whole.
-        if nb.nd > 0 {
-            continue;
-        }
-        for (pi, (idx, at, _)) in basis.f.parts.iter().enumerate() {
-            let mut q = 0.0;
-            for sp in 0..nb.shifts.len() {
-                let mut sum = 0.0;
-                for i in *at..at + idx.len() {
-                    // max_j |c⁰_j − w_l − κ_i|⁻²: the first sweep's reciprocals (`Near::invs`), not made again.
-                    let most = nb.invs[i * ln + sp * n..i * ln + sp * n + n].iter().map(|v| v.norm_sqr()).fold(0.0, f64::max);
-                    let row: f64 = nb.z[i * ln + sp * n..i * ln + sp * n + n].iter().map(|z| z.norm_sqr()).sum();
-                    sum += row * most;
-                }
-                q += sum.sqrt();
-            }
-            nb.q[pi] = q;
-            order.push((q, x, pi));
-        }
-        *work += (nb.shifts.len() * s * n) as f64;
-    }
-    order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let mut sum = 0.0;
-    for &(q, x, pi) in order.iter() {
-        let first = cache.near[x][cache.at_near[x].unwrap()].f.parts[pi].1;
-        let frozen = match held {
-            Some(rows) => !rows[x][first],
-            None => (sum + q * q).sqrt() * most <= budget,
-        };
-        if !frozen {
-            if held.is_none() {
-                break;
-            }
-            continue;
-        }
-        sum += q * q;
-        let nb = &mut near[x];
-        let (idx, at, _) = &cache.near[x][cache.at_near[x].unwrap()].f.parts[pi];
-        for i in *at..at + idx.len() {
-            nb.active[i] = false;
-        }
-    }
-    sum.sqrt() * most
-}
-
 /// The distance of z from the rectangle [a_lo − r, a_hi + r] × [−b_hi/2 − r, −b_lo/2 + r] (a level's numerical range
 /// widened by r, `bound_levels`), zero inside.
 fn outside(z: C64, g: &[f64; 4], r: f64) -> f64 {
@@ -1141,7 +1290,9 @@ fn outside(z: C64, g: &[f64; 4], r: f64) -> f64 {
     (x * x + y * y).sqrt()
 }
 
-/// One block's omitted levels bounded (module documentation, # The levels kept and left out): per level q of `omitted` and
+/// One block's omitted levels read (module documentation, # The levels kept and left out; unify2 §2.4): the leading term an
+/// estimate -- the level's first-order response to its whole source at the lanes' mean on K_qq's Schur form at the
+/// reference (`NearBasis::lfact`), and its emission's on it the potential's numerator --, the rest bounds as follows. Per level q of `omitted` and
 /// column j the bound N_q,j on its response (`sizes`, L × n), δ_q,j on what its absence leaves of the kept rows' (`backs`),
 /// and its potential's numerator (`shifts`), at the Bloch generator H (its diagonal the column energies c, the rest Δ). One
 /// bound (BRIEF_PROTO5 item 6): the lanes' responses summed by the resolvent identity about their mean Doppler shift w̄,
@@ -1386,6 +1537,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         cq.iter_mut().zip(dq.iter()).for_each(|(u, d)| *u += *d);
     }
     *work += (nq * n * (nq + n)) as f64 / 4.0;
+    // Per omitted level and column its response's estimate and its emission's on it (unify2 §2.4): ‖z_j‖ and |Re(src_j†z_j)|.
+    let mut estimates = vec![(0.0, 0.0); nq * n];
     for (k, &q) in q_of.iter().enumerate() {
         let (rows, r0) = (&nb.levels[q], basis.rat[q]);
         let m = rows.len();
@@ -1395,6 +1548,30 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             if s > 0 {
                 v[a * n..(a + 1) * n].iter_mut().zip(&rz[(r0 + a) * n..(r0 + a + 1) * n]).for_each(|(x, y)| *x += *y);
             }
+        }
+        // The level's first-order response at the lanes' mean, z_q,j = (c_j − w̄ − K_qq)⁻¹ v_j -- the whole source and the
+        // reference's coupling to the kept response, their phases kept --, on K_qq's Schur form V T V† (back-substitution,
+        // V unitary: ‖z‖ = ‖x‖, src†z = (V†src)†x), and its emission's on it (the source's own rows: Ê = Ṽ† on a ground
+        // column). Where the level's form is singular its bound stands.
+        if let Some(f) = basis.lfact[q].as_ref() {
+            let (y, ys) = (f.to(&Mat { rows: m, cols: n, data: v.to_vec() }, work), f.to(&Mat::from_fn(m, n, |a, j| vall[rows[a] * n + j]), work));
+            for j in 0..n {
+                let z = c[j] - C64::real(mean);
+                let mut x = vec![C64::ZERO; m];
+                for i in (0..m).rev() {
+                    let mut acc = y[(i, j)];
+                    for l in i + 1..f.ends[i] {
+                        acc += f.t[(i, l)] * x[l];
+                    }
+                    x[i] = acc / (z - f.t[(i, i)]);
+                }
+                let size = x.iter().map(|w| w.norm_sqr()).sum::<f64>().sqrt();
+                let shift = if nb.xcol[j] { f64::NAN } else { (0..m).map(|i| ys[(i, j)].conj() * x[i]).sum::<C64>().re.abs() };
+                estimates[k * n + j] = (size, shift);
+            }
+            *work += (2 * m * m * n) as f64;
+        } else {
+            estimates[k * n..(k + 1) * n].iter_mut().for_each(|e| *e = (f64::NAN, f64::NAN));
         }
         let dr = (0..nl).filter(|&p| !omitted[p]).map(|p| (pair[q * nl + p] - basis.lpair[q * nl + p]).powi(2)).sum::<f64>().sqrt();
         for j in 0..n {
@@ -1415,8 +1592,9 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
                 spread += a * (src[k * ln + sp * n + j] + rqk[k] * zk[sp * n + j]);
                 most = most.max(a);
             }
-            let feed = vj + dr * zt[j] + stat_d + spread + (1.0 + most) * coupled[k * n + j];
-            let size = if feed > 0.0 { gb * feed } else { 0.0 };
+            let rest = dr * zt[j] + stat_d + spread + (1.0 + most) * coupled[k * n + j];
+            let est = estimates[k * n + j].0;
+            let size = if est.is_nan() { if vj + rest > 0.0 { gb * (vj + rest) } else { 0.0 } } else { est + if rest > 0.0 { gb * rest } else { 0.0 } };
             if !size.is_finite() {
                 // No bound: the column's energy on the level's widened numerical range at the pivot.
                 return Err(q);
@@ -1440,8 +1618,9 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     for (u, &(cc, k)) in ea.iter_mut().zip(&nb.vectors) {
         *u = at.e[cc][k].norm_sqr().sqrt();
     }
-    for &q in q_of {
+    for (k, &q) in q_of.iter().enumerate() {
         for j in 0..n {
+            let (est, shift) = estimates[k * n + j];
             let eq = if nb.xcol[j] {
                 let mut v = basis.lemit[q * n + j];
                 for t in 0..terms {
@@ -1451,7 +1630,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             } else {
                 ea.iter().enumerate().map(|(a, e)| e * basis.lvec[(q * nb.vectors.len() + a) * n + j]).sum()
             };
-            shifts[q * n + j] = eq * sizes[q * n + j] + if backs[q * n + j] > 0.0 { ek[j] * backs[q * n + j] } else { 0.0 };
+            let own = if shift.is_nan() { eq * sizes[q * n + j] } else { shift + eq * (sizes[q * n + j] - est) };
+            shifts[q * n + j] = own + if backs[q * n + j] > 0.0 { ek[j] * backs[q * n + j] } else { 0.0 };
         }
         *work += (n * nb.vectors.len()) as f64;
     }
@@ -1461,185 +1641,6 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
 /// A block's levels' bounds at a point (`bound_levels`): per level whether it is left out, N, δ and the potential's
 /// numerator (L × n each).
 type Bounds = (Vec<bool>, Vec<f64>, Vec<f64>, Vec<f64>);
-
-/// The omitted levels' reading with the columns' denominators `den` (module documentation, # The levels left out): per
-/// column (√(Σ N²) + Σ δ)²/W_j and pot(2 Σ shifts) over every block's omitted levels, the largest (ρ).
-fn read_omitted(per: &[Bounds], den: &[f64], thermal: f64, n: usize) -> f64 {
-    let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
-    let total: f64 = den.iter().sum::<f64>() + per.iter().map(|p| (0..p.0.len()).filter(|&q| p.0[q]).map(|q| p.1[q * n..(q + 1) * n].iter().map(|x| x * x).sum::<f64>()).sum::<f64>()).sum::<f64>();
-    let floor = (crate::units::rounding(n) * total.sqrt()).powi(2);
-    let mut most = 0.0_f64;
-    for j in 0..n {
-        let (mut sq, mut back, mut dv) = (0.0, 0.0, 0.0);
-        for (om, sz, bk, sh) in per {
-            for q in (0..om.len()).filter(|&q| om[q]) {
-                sq += sz[q * n + j].powi(2);
-                back += bk[q * n + j];
-                dv += sh[q * n + j];
-            }
-        }
-        let size = (sq.sqrt() + back).powi(2);
-        if size + den[j] <= floor {
-            continue;
-        }
-        let w = if size > 0.0 { size / den[j] } else { 0.0 };
-        most = most.max(w.max(pot(2.0 * dv)));
-    }
-    most.sqrt()
-}
-
-//// The levels and far blocks the point leaves out (module documentation, # The levels left out), read after the first sweep
-/// without solving the omitted levels: their bounds (`bound_levels`) read together (`read_omitted`) against each column's
-/// whole excited response W_j -- the kept rows' and the far blocks', at most the whole column's, so the reading only
-/// grows. Within the share: the far blocks of the smallest reading go too while the whole stays within (their M_F,jj and
-/// H_F,jj exact), out of H. Beyond it: levels join, the largest first (its bound's share of its column, the joined ones'
-/// bounds counted in the columns as their responses), until the bounds read within; their blocks' `wanted` say the kept
-/// levels the next decomposition holds -- not where `hold` (between two decisions: the reading is read, and the far
-/// blocks left out are the decision's); a level of no bound joins whatever (no reading of it exists). Returns the ρ left
-/// out and whether levels joined.
-#[allow(clippy::too_many_arguments)]
-fn omit(near: &mut [Near], far: &mut [Far], scratch: &mut [Scratch], tm: &mut Temp, cache: &Cache, at: &Placed, hbase: &mut [C64], h: &mut [C64], whole: &mut [f64], per: &mut [Bounds], tally: &mut [usize; 2], share: f64, thermal: f64, n: usize, hold: Option<&[bool]>, work: &mut f64) -> (f64, bool) {
-    let pot = |dv: f64| ((1.0 + dv / (2.0 * thermal)).sqrt() - 1.0).powi(2);
-    let limit = unrate(share);
-    // The bounds' vectors kept in the workspace from step to step (`Workspace::per`, one per near block).
-    let mut grow = false;
-    for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
-        let basis = &cache.near[x][cache.at_near[x].unwrap()];
-        let nl = nb.levels.len();
-        // The centred copies' factor at this sweep's energies, its largest (the levels' bound's and its departure from
-        // normality's, `bound_levels`).
-        nb.epsr = if nb.nc > 0 { (0..n).map(|j| centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts)).fold(0.0, f64::max) } else { 0.0 };
-        let (omitted, sz, bk, sh) = &mut per[x];
-        for (q, o) in omitted[..nl].iter_mut().enumerate() {
-            *o = !basis.kept.contains(&q);
-        }
-        if let Err(q) = bound_levels(nb, basis, omitted, at, h, sz, bk, sh, &mut sc.bound, n, work) {
-            // No bound: the level that holds it the most joins.
-            let mut kept = basis.kept.clone();
-            kept.push(q);
-            kept.sort_unstable();
-            nb.wanted = Some(kept);
-            grow = true;
-        }
-    }
-    if grow {
-        return (f64::INFINITY, true);
-    }
-    let mut rho = read_omitted(per, whole, thermal, n);
-    *work += (n * per.iter().map(|p| p.0.len()).sum::<usize>()) as f64;
-    let den = &mut tm.den[..n];
-    den.copy_from_slice(&whole[..n]);
-    if rho > limit && hold.is_none() {
-        while rho > limit {
-            let mut best: Option<(f64, usize, usize)> = None;
-            for (x, (om, sz, ..)) in per.iter().enumerate() {
-                for q in (0..om.len()).filter(|&q| om[q]) {
-                    let key = (0..n).map(|j| sz[q * n + j].powi(2) / (den[j] + sz[q * n + j].powi(2)).max(f64::MIN_POSITIVE)).fold(0.0, f64::max);
-                    if best.is_none_or(|b| key > b.0) {
-                        best = Some((key, x, q));
-                    }
-                }
-            }
-            let Some((_, x, q)) = best else { break };
-            for j in 0..n {
-                den[j] += per[x].1[q * n + j].powi(2);
-            }
-            per[x].0[q] = false;
-            rho = read_omitted(per, den, thermal, n);
-        }
-        // The blocks the joins decompose again: their kept levels that may leave leave with them (`leave`).
-        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
-            let kept: Vec<usize> = (0..per[x].0.len()).filter(|&q| !per[x].0[q]).collect();
-            if kept != basis.kept {
-                leave(nb, sc, basis, per, x, tm, at, h, limit, thermal, n, work);
-                nb.wanted = Some((0..per[x].0.len()).filter(|&q| !per[x].0[q]).collect());
-            }
-        }
-        return (rho, true);
-    }
-    tally[0] += per.iter().map(|p| p.0.iter().filter(|&&o| o).count()).sum::<usize>();
-    // The far blocks of the smallest reading go too while the whole reads within: each its exact M_F,jj and H_F,jj.
-    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-    tm.units.clear();
-    tm.units.extend(far.iter().enumerate().map(|(x, fb)| ((0..n).filter(|&j| whole[j] > floor).map(|j| (fb.mf[j * n + j].re / whole[j]).max(pot(2.0 * fb.hf[j * n + j].re.abs()))).fold(0.0, f64::max), x)));
-    tm.units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    for &(w, x) in &tm.units {
-        match hold {
-            Some(left) if !left[x] => continue,
-            None if (rho * rho + w).sqrt() > limit => break,
-            _ => {}
-        }
-        rho = (rho * rho + w).sqrt();
-        tally[1] += 1;
-        let fb = &mut far[x];
-        fb.omitted = true;
-        for ((a, b), f) in hbase.iter_mut().zip(h.iter_mut()).zip(&fb.hf) {
-            *a -= *f;
-            *b -= *f;
-        }
-        for j in 0..n {
-            whole[j] -= fb.mf[j * n + j].re;
-        }
-    }
-    whole.iter_mut().for_each(|w| *w = w.max(0.0));
-    (rho, false)
-}
-
-/// A block's kept levels that may leave, read where its decomposition is made again for the fold's accuracy -- a level
-/// joins (`omit`), or its reuse reads beyond the share (`Fold::prototype`, 6) -- and nowhere else: a decomposition is made
-/// for the accuracy alone, and what may leave leaves with the next one so made (DESIGN §1.1, 2026-11-16). On the block's
-/// standing basis at the point, the smallest first, a level leaves while the omitted levels' bounds -- each with the whole
-/// kept response, its own in it, and the column less its bound (`Temp::den`, the joined levels' bounds counted as their
-/// responses) -- read within: a trial stands in the block's bounds in place (`Temp::trial` swapped in) and is swapped back
-/// where it reads beyond. The levels joining at the point (kept in `per` and not in the basis) are bounded as left out in
-/// every trial -- their bound feeds the others' as their response will -- and not read (they are kept). A block with exact
-/// copies keeps every level. Leaves the result in `per[x]`'s flags.
-#[allow(clippy::too_many_arguments)]
-fn leave(nb: &Near, sc: &mut Scratch, basis: &NearBasis, per: &mut [Bounds], x: usize, tm: &mut Temp, at: &Placed, h: &[C64], limit: f64, thermal: f64, n: usize, work: &mut f64) {
-    if nb.nd > 0 {
-        return;
-    }
-    let nl = nb.levels.len();
-    let joining: Vec<usize> = (0..nl).filter(|&q| !per[x].0[q] && !basis.kept.contains(&q)).collect();
-    let Temp { den, d, trial, units, .. } = tm;
-    let den = &mut den[..n];
-    let trial_of = |q: usize, flags: &[bool], trial: &mut Bounds, sc: &mut Scratch, work: &mut f64| -> bool {
-        let (om, sz, bk, sh) = trial;
-        om.clear();
-        om.extend_from_slice(flags);
-        om[q] = true;
-        joining.iter().for_each(|&p| om[p] = true);
-        let ok = bound_levels(nb, basis, om, at, h, sz, bk, sh, &mut sc.bound, n, work).is_ok();
-        joining.iter().for_each(|&p| om[p] = false);
-        ok
-    };
-    units.clear();
-    for &q in &basis.kept {
-        if trial_of(q, &per[x].0, trial, sc, work) {
-            let (_, sz, bk, _) = &*trial;
-            units.push(((0..n).map(|j| (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j].max(f64::MIN_POSITIVE)).fold(0.0, f64::max), q));
-        }
-    }
-    units.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    for u in 0..units.len() {
-        let q = units[u].1;
-        let flags = per[x].0.clone();
-        if !trial_of(q, &flags, trial, sc, work) {
-            continue;
-        }
-        let d = &mut d[..n];
-        for j in 0..n {
-            d[j] = (den[j] - trial.1[q * n + j].powi(2)).max(0.0);
-        }
-        std::mem::swap(&mut per[x], trial);
-        if read_omitted(per, d, thermal, n) <= limit {
-            den.copy_from_slice(d);
-        } else {
-            std::mem::swap(&mut per[x], trial);
-        }
-    }
-}
 
 /// A near block's copies' rows T_C = Σ_a e_a* (R₀U_a†V Z + R₀U_a(X, C)†) into `nb.tc` (module documentation, 7).
 fn copy_rows(nb: &mut Near, basis: &NearBasis, e: &[Vec<C64>], n: usize, work: &mut f64) {
@@ -1872,7 +1873,7 @@ fn copies_apply(s: usize, nd: usize, kde: &[C64], pj: &[C64], cinv: &[C64], rd: 
 /// Z_l Δ), every split at once, row by row (# The beams side by side) -- K̂ the kept Schur form with the step's diagonal
 /// κ, upper triangular on the right (its rows from the last), its adjoint on the left (κ̄, conj(T_li): from the first) --,
 /// the exact copies by Woodbury (`copies_factor`, `copies_apply`), their own source the series' part alone, split by
-/// split. After the first sweep the rows the right's freeze holds keep their response, on either side (`freeze`). Its change and whole
+/// split. After the first sweep the rows of a part of one sweep keep their response, on either side (`Near::upto`). Its change and whole
 /// response column by column onto `change` and `whole`; its part of the Bloch generator, Ê Z (+ the explicit states'
 /// dressing, Ê_D Z_D), into its `bloch`. The right's sweeps are kept for the force (`Near::invs`, `zs`, ...). False where
 /// an exact copies' complement is singular.
@@ -1882,7 +1883,8 @@ fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, s
     let (ln, right) = (splits * n, side == Side::Right);
     let block = s * ln;
     let (t, ends) = (&basis.f.t, &basis.f.ends);
-    let Near { shifts, active, vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs, zs, ztots, zds, zdtots, left, .. } = nb;
+    let np = series_parts(nb, basis);
+    let Near { shifts, upto, vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs, zs, ztots, zds, zdtots, left, hist, .. } = nb;
     // The orientation's inputs, responses and temporaries; the right's reciprocals and copies' factors laid after the
     // earlier sweeps' (the force's), the left's in place.
     let (at, pat, cat) = if right { (invs.len(), pjs.len(), cinvs.len()) } else { (0, 0, 0) };
@@ -1896,7 +1898,8 @@ fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, s
     invs.resize(at + block, C64::ZERO);
     pjs.resize(pat + splits * n * nd * s, C64::ZERO);
     cinvs.resize(cat + splits * n * nd * nd, C64::ZERO);
-    let going = |i: usize| sweep == 0 || active[i];
+    // A row goes while its part's sweeps do (`Near::upto`), on either side alike (with no decay the two are one iteration).
+    let going = |i: usize| sweep < upto[i];
     zold.copy_from_slice(ztot);
     zdtot.fill(C64::ZERO);
     rhs.copy_from_slice(vt);
@@ -1911,7 +1914,7 @@ fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, s
         *work += (s * ln * n) as f64;
     }
     // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy (the sweep's: H's diagonal moves with every sweep),
-    // four to a vector division (BRIEF_PROTO5 item 3); the right's kept for the tangent's sweeps and the freeze.
+    // four to a vector division (BRIEF_PROTO5 item 3); the right's kept for the tangent's sweeps.
     for i in (0..s).filter(|&i| going(i)) {
         for (sp, &wl) in shifts.iter().enumerate() {
             crate::linalg::reciprocals(c, wl, kappa[i], &mut invs[at + i * ln + sp * n..at + i * ln + sp * n + n]);
@@ -1996,12 +1999,22 @@ fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, s
         zds.extend_from_slice(zd);
         zdtots.extend_from_slice(zdtot);
     }
-    // The change and the whole response, column by column.
+    // The change and the whole response, column by column; on the right per series part its change's square (`Near::hist`).
+    let base = sweep * np * n;
+    if right {
+        hist.resize(base + np * n, 0.0);
+        hist[base..].fill(0.0);
+    }
     for i in 0..s {
+        let part = if nd > 0 { 0 } else { basis.part[i] };
         for j in 0..n {
             let zn = ztot[i * n + j];
             if going(i) {
-                change[j] += (zn - zold[i * n + j]).norm_sqr();
+                let d2 = (zn - zold[i * n + j]).norm_sqr();
+                change[j] += d2;
+                if right {
+                    hist[base + part * n + j] += d2;
+                }
             }
             whole[j] += zn.norm_sqr();
         }
@@ -2038,7 +2051,7 @@ fn sweep_all(near: &mut [Near], scratch: &mut [Scratch], far: &[Far], cache: &Ca
         if nb.idle() {
             continue;
         }
-        let basis = &cache.near[x][cache.at_near[x].unwrap()];
+        let basis = cache.near_at(x);
         if !sweep_block(nb, sc, basis, side, sweep, c, delta, change, whole, n, work) {
             return false;
         }
@@ -2136,7 +2149,7 @@ fn landing_ring(near: &[Near], far: &[Far], cache: &Cache, h: &[C64], j: usize, 
         rows.extend((0..nb.s).map(|i| Ring::landing(nb.ztot[i * n + j].norm_sqr(), -2.0 * nb.kappa[i].im, distances(c, &nb.shifts, nb.kappa[i]))));
     }
     for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
-        rows.push(Ring::landing(fb.mf[j * n + j].re, fb.decay, distances(c, &[], far_row(c, fb.decay, cache.far[x][cache.at_far[x].unwrap()].r0))));
+        rows.push(Ring::landing(fb.mf[j * n + j].re, fb.decay, distances(c, &[], far_row(c, fb.decay, cache.far_at(x).r0))));
     }
     ring(rows, -2.0 * c.im, 1.0)
 }
@@ -2605,7 +2618,6 @@ impl Fold {
                     s,
                     all: ne,
                     levels,
-                    wanted: None,
                     held: 0.0,
                     epsr: 0.0,
                     nc,
@@ -2628,9 +2640,8 @@ impl Fold {
                     bloch: z(n * n),
                     tc: z(nc * n),
                     xcol: (0..n).map(|p| xs.contains(&p)).collect(),
-                    active: vec![true; s],
-                    q: vec![0.0; s + 1],
-                    reading: 0.0,
+                    upto: vec![usize::MAX; s],
+                    hist: vec![],
                     invs: vec![],
                     zs: vec![],
                     ztots: vec![],
@@ -2640,7 +2651,6 @@ impl Fold {
                     dzplace: z(3 * s * n),
                     vnode: [z(s * n), z(s * n)],
                     tcnode: [z(nc * n), z(nc * n)],
-                    copied_in: false,
                     splits,
                     xs,
                     vectors,
@@ -2665,7 +2675,6 @@ impl Fold {
                     products: vec![C64::ZERO; v * v],
                     hf: vec![C64::ZERO; n * n],
                     mf: vec![C64::ZERO; n * n],
-                    reading: 0.0,
                     decay: b.rows.iter().filter_map(|r| if let Row::Excited(e) = *r { Some(-2.0 * self.base_excited[(e, e)].im) } else { None }).fold(0.0, f64::max),
                     omitted: false,
                     vectors,
@@ -2690,9 +2699,8 @@ impl Fold {
         let levels = near.iter().map(|x| x.levels.len()).max().unwrap_or(0);
         let scratch: Vec<Scratch> = near.iter().map(|x| Scratch::new(x.all, n, x.lanes, x.nd, x.nc, x.levels.len(), x.terms.len(), x.vectors.len())).collect();
         let per: Vec<Bounds> = near.iter().map(|x| (vec![false; x.levels.len()], vec![0.0; levels * n], vec![0.0; levels * n], vec![0.0; levels * n])).collect();
-        let tm = Temp::new(n, &self.components.iter().map(|c| c.basis.len()).collect::<Vec<_>>(), levels, near.iter().map(|x| x.levels.len()).sum(), far.len(), near.iter().map(|x| x.all).sum());
+        let tm = Temp::new(n, &self.components.iter().map(|c| c.basis.len()).collect::<Vec<_>>(), levels, near.iter().map(|x| x.all).sum());
         let z = |r: usize, c: usize| Mat::zeros(r, c);
-        let near_parts: usize = near.iter().map(|x| x.s).sum();
         let placed = Placed {
             amplitudes: vec![Amplitude { value: C64::ZERO, gradient: [C64::ZERO; 3], hessian: [[C64::ZERO; 3]; 3] }; self.light.beams.len()],
             eps: vec![[C64::ZERO; 3]; self.light.frequencies.len()],
@@ -2741,17 +2749,17 @@ impl Fold {
             delta: vec![C64::ZERO; n * n],
             c: vec![C64::ZERO; n],
             change: vec![0.0; n],
-            previous: vec![0.0; n],
             whole: vec![0.0; n],
             eigen: z(n, n),
             vectors: z(n, n),
             temp: z(n, n),
-            renew: vec![],
             per,
+            decision: Decision::default(),
+            accounts: vec![],
+            den: vec![0.0; n],
             here: (0..near_len).map(|_| None).collect(),
             scratch,
             tm,
-            order: Vec::with_capacity(near_parts),
             step: Step {
                 a: z(n, n),
                 metric: z(n, n),
@@ -2759,13 +2767,11 @@ impl Fold {
                 generator: z(n, n),
                 tones: rotating.iter().map(|_| z(n, n)).collect(),
                 sweeps: 0,
-                series: 0.0,
-                reuse: 0.0,
-                far: 0.0,
-                copies: 0.0,
-                omitted: 0.0,
-                ring: 0.0,
-                left: [0; 2],
+                reading: 0.0,
+                kinds: [0.0; KINDS],
+                started: [0.0; KINDS],
+                ended: [0.0; KINDS],
+                unresolved: false,
                 ratio: 0.0,
                 made: 0,
                 grown: 0,
@@ -3042,6 +3048,17 @@ impl Fold {
             }
             gersh[q] = [a[0], a[1], d[0], d[1]];
         }
+        let lfact: Vec<Option<Factored>> = nb
+            .levels
+            .iter()
+            .map(|rq| {
+                let mut k = kall.block(rq, rq);
+                for i in 0..rq.len() {
+                    k[(i, i)] -= C64::real(b.value);
+                }
+                Factored::of(&k, work)
+            })
+            .collect();
         *work += (ne * ne * (terms_n + 1)) as f64;
         let at: Vec<C64> = nb.terms.iter().map(|&t| ws.mid.coef[t]).collect();
         let within: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] == part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
@@ -3067,7 +3084,6 @@ impl Fold {
             f.to(&c.adjoint(), work).adjoint()
         });
         let emit: Vec<C64> = (0..3 * GROUND).flat_map(|r| (0..s).map(|a| per[r % 3][(r / 3, a)]).collect::<Vec<_>>()).collect();
-        let weights = terms.iter().map(|x| x.0).collect();
         let mut diag = vec![C64::ZERO; terms.len() * s];
         let mut norms = vec![0.0; terms.len() * s * parts];
         let mut dressed = vec![0.0; terms.len() * s];
@@ -3139,7 +3155,6 @@ impl Fold {
         // The copies' rows: per copy vector R₀(C_g, C_g) U_k(S, C_g)† V.
         let vfull = f.from(&Mat::identity(s), work);
         let copies: Vec<Vec<C64>> = nb.copies.iter().map(|&(g, k, gi)| r0.block(&nb.groups[gi].1, &nb.groups[gi].1).product(&u_ec(g, k, &nb.groups[gi].1).block(&kr, &(0..nb.groups[gi].1.len()).collect::<Vec<_>>()).adjoint()).product(&vfull).data).collect();
-        let copied_rows = copies.iter().map(|y: &Vec<C64>| y.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()).collect();
         // The exact copies (their block keeps every level): their coupling vectors V†U_k(E, D of g), K̂_ED and K̂_DE at the
         // reference less their bare drives (the dressing through the centred rows, held), K̂_DD, its forms per term.
         let couple: Vec<Vec<C64>> = nb
@@ -3264,13 +3279,14 @@ impl Fold {
         let xemitc: Vec<C64> = Mat::from_fn(3 * GROUND, n, |r, p| nb.xs.iter().position(|&x| x == p).map_or(C64::ZERO, |jx| self.emission[r % 3][(r / 3, xstates[jx])])).data;
         let _ = level;
         Some(NearBasis {
+            key: KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             at,
-            weights,
             kept: kept.to_vec(),
             rows: kr,
             f,
             nu,
             gersh,
+            lfact,
             lterm,
             lpair,
             ldress,
@@ -3290,7 +3306,6 @@ impl Fold {
             beams,
             vectors,
             copies,
-            copied_rows,
             z0: laid.z0,
             r0: r0.frobenius(),
             within,
@@ -3364,7 +3379,7 @@ impl Fold {
             })
             .collect::<Vec<f64>>();
         let fg = f.iter().zip(&g).map(|(a, b)| *a + *b * laid.z0).collect();
-        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), weights: copied.clone(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted })
+        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted })
     }
 
     /// The forms Ĥ_PP's pairs and the far blocks hold at the focus, on P's diagonal at the weights `weight` (one per
@@ -3403,21 +3418,22 @@ impl Fold {
         Some(out)
     }
 
-    /// The prototype's step at a point (r, κ) on an atom's kept decompositions (module documentation), a decision's: A, M,
-    /// S⁻¹, G in the workspace's `Step`. None where the fold does not exist there (`prototype_within`).
-    pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {
-        self.prototype_within(r, kappa, cache, ws, f64::INFINITY, false)
+    /// The prototype's step at a point (r, κ) on an atom's representation, a decision's (# The decisions): its forward and
+    /// its accounts, the evaluation they choose, A, M, S⁻¹, G in the workspace's `Step`. `energy` is the atom's mechanical
+    /// energy there (rad/µs, the potential channel's unit: unify2 §2.1). None where the fold does not exist there
+    /// (`prototype_within`).
+    pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {
+        self.prototype_within(r, kappa, energy, cache, ws, true)
     }
 
-    /// The prototype's step within a budget of counted complex multiply-adds (`prototype`). None -- the one exit -- where
-    /// the fold does not exist there: a decomposition, a centring, the exact copies' complement or the metric singular, or
-    /// the series' ratio at or above one; and where its count passes `budget` before the series is within the share. Its
-    /// count, made or not, is the workspace's (`Workspace::spent`): an attempt is measured as a step is. Where `hold`
-    /// (between two decisions, # The decisions) it changes nothing it holds -- no level joins or leaves, no decomposition
-    /// is made again -- and reads what it holds; what it lacks it makes as any forward does.
-    pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace, budget: f64, hold: bool) -> Option<&'w Step> {
+    /// The prototype's step at a point: a decision's where `decide` (`prototype`), else a held one -- the evaluation the
+    /// atom holds, evaluated as given: no reading, nothing changed (# The decisions); what it lacks it makes as a decision
+    /// does. None -- the one exit -- where the fold does not exist there: a decomposition, a centring, the exact copies'
+    /// complement or the metric singular, or a response that is no number. Its count, made or not, is the workspace's
+    /// (`Workspace::spent`).
+    pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &mut Cache, ws: &'w mut Workspace, decide: bool) -> Option<&'w Step> {
         let mut work = [0.0_f64; 10];
-        let made = self.forward_within(r, kappa, cache, ws, budget, hold, &mut work);
+        let made = self.forward_within(r, kappa, energy, cache, ws, decide, &mut work);
         ws.spent = work.iter().sum();
         made.map(|()| &ws.step)
     }
@@ -3425,8 +3441,8 @@ impl Fold {
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
     /// the same series (`sweep_all`, `Side::Left`) on the adjoint's inputs, per near block the Schur form's adjoint, the
     /// explicit columns' source and rows' emission exchanged, the explicit states' dressing and the exact copies' blocks
-    /// by their adjoints, on Ĥ_PP† with the far blocks' forms, the right's freeze held alike --, as many sweeps as the
-    /// right's at the least (with no decay one iteration: T_L = T), then until its rest reads within the share; and
+    /// by their adjoints, on Ĥ_PP† with the far blocks' forms --, each row swept as the right's (`Near::upto`; the adjoint's
+    /// iteration has the right's spectrum; with no decay one iteration: T_L = T); and
     /// N = 1 + T_L†T: the near blocks' Z̃†Z (their bases unitary), the exact copies' Z̃_D†Z_D, the centred
     /// copies' rows' T̃_C†T_C where the metric holds them (R₀ Hermitian there: a copy does not decay), the far blocks'
     /// (R₀†B)†R₀B = Σ e_a*e_b U_a†R₀²U_b; factored. Made once a forward, where a landing or a fall first asks for it (a
@@ -3446,7 +3462,7 @@ impl Fold {
 
     /// `prototype_left`'s series and N, its count into `work`.
     fn left_within(&self, cache: &Cache, ws: &mut Workspace, work: &mut f64) -> Option<()> {
-        let (n, share) = (ws.n, crate::model::elim::share());
+        let n = ws.n;
         let nn = n * n;
         let Workspace { near, far, hbase, scratch, landing, mid, step, .. } = ws;
         // The adjoint's inputs, block by block, and its responses from none.
@@ -3495,24 +3511,20 @@ impl Fold {
             v.clear();
             v.resize(n, 0.0);
         }
-        // The sweeps (module documentation, 5): as many as the right's at the least (its freeze held alike: with no decay
-        // the two are one iteration, T_L = T to the rounding), then until the rest reads within the share; a ratio at or
-        // above one after the second change, or a response that is not a number, is none.
-        let (mut sweep, least) = (0, step.sweeps.max(2));
-        loop {
+        // The sweeps (module documentation, 5): each row as the right's -- the adjoint's iteration has the right's spectrum,
+        // one ratio, so its error at the right's sweeps is the right's order (with no decay the two are one iteration, T_L
+        // = T to the rounding) --; a ratio at or above one after the second change, or a response that is not a number,
+        // is none.
+        for sweep in 0..step.sweeps {
             if !sweep_all(near, scratch, far, cache, Side::Left, sweep, base, h, c, delta, change, whole, self.ground.len(), n, work) {
                 return None;
             }
-            sweep += 1;
             if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
                 return None;
             }
-            let (rest, most) = rest_of(change, previous, whole, n);
+            let (_, most) = rest_of(change, previous, whole, n);
             previous.copy_from_slice(change);
-            if sweep >= least && rest <= share {
-                break;
-            }
-            if sweep >= 3 && most >= 1.0 {
+            if sweep >= 2 && most >= 1.0 {
                 return None;
             }
         }
@@ -3528,8 +3540,8 @@ impl Fold {
                 crate::linalg::adjoint_product_onto(&nb.left.zdtot, &nb.zdtot, (n, nd, n), metric);
             }
             *work += ((s + nd) * nn) as f64;
-            if nb.copied_in {
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            if nb.copied() {
+                let basis = cache.near_at(x);
                 let Near { copies, groups, left, tc, .. } = &mut *nb;
                 zeroed(&mut left.tc, nc * n);
                 copies_of(copies, groups, basis, &|g, k| mid.e[g][k], &left.ztot, true, &mut left.tc, s, n, work);
@@ -3539,7 +3551,7 @@ impl Fold {
         }
         for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
             let v = fb.vectors.len();
-            crate::linalg::fused_product_onto(&fb.products, &cache.far[x][cache.at_far[x].unwrap()].nf, (1, v * v, nn), metric);
+            crate::linalg::fused_product_onto(&fb.products, &cache.far_at(x).nf, (1, v * v, nn), metric);
             *work += (v * v * nn) as f64;
         }
         lu.clone_from(metric);
@@ -3551,12 +3563,13 @@ impl Fold {
         regular.then_some(())
     }
 
-    /// `prototype_within`'s forward, its count by phase into `work`: the step into the workspace's `Step`.
+    /// `prototype_within`'s forward, its count by phase into `work`: the step into the workspace's `Step`; at a decision its
+    /// rounds (# The decisions): the decision's forward on the representation, its accounts (`Fold::accounts`), the
+    /// evaluation they choose (`allocate`) -- more sweeps, or the decompositions it asks for made at the point and the
+    /// forward again --, until it asks for nothing more.
     #[allow(clippy::too_many_arguments)]
-    fn forward_within(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, budget: f64, hold: bool, work: &mut [f64; 10]) -> Option<()> {
+    fn forward_within(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &mut Cache, ws: &mut Workspace, decide: bool, work: &mut [f64; 10]) -> Option<()> {
         let n = ws.n;
-        // What a forward asks of the next round is its own (a pooled workspace holds nothing of another's: `Near::wanted`).
-        ws.near.iter_mut().for_each(|nb| nb.wanted = None);
         let mut tick = [0u64; 10];
         ws.step.sweep_work.clear();
         ws.step.sweep_ticks.clear();
@@ -3573,442 +3586,76 @@ impl Fold {
         ws.noded = false;
         ws.landing.made = None;
         lap(PLACE, &mut clock, &mut tick);
-        let share = crate::model::elim::share();
-        if cache.at_near.len() != ws.near.len() || cache.at_far.len() != ws.far.len() {
-            cache.near = (0..ws.near.len()).map(|_| vec![]).collect();
-            cache.at_near = vec![None; ws.near.len()];
-            cache.far = (0..ws.far.len()).map(|_| vec![]).collect();
-            cache.at_far = vec![None; ws.far.len()];
+        if cache.near.len() != ws.near.len() || cache.far.len() != ws.far.len() {
+            cache.near = vec![None; ws.near.len()];
+            cache.far = vec![None; ws.far.len()];
+            cache.evaluation = Evaluation::default();
         }
-        // A forward that lacks a block's decomposition, or the evaluation's choices, makes them (its first) as a decision
-        // does.
-        let hold = hold && cache.at_near.iter().chain(&cache.at_far).all(Option::is_some) && cache.evaluation.sweeps > 0;
-        ws.renew.clear();
-        let made_before = cache.made;
-        let grown_before = cache.grown;
-        let mut round = 0;
-        let mut refreshes = 0;
-        let mut site: Option<Site> = None;
-        // Per near block its matrices at the point, once for every decomposition made here (`Fold::lay`, `Fold::effective`).
+        // What a forward lacks -- a block's decomposition, an evaluation of the decompositions it stands on (by their keys:
+        // one chosen on another decomposition indexes parts this one lays otherwise) -- it makes as a decision does, there:
+        // that is no choice.
+        let lacks = cache.near.iter().any(Option::is_none) || cache.far.iter().any(Option::is_none) || !cache.evaluation.fits(cache, ws.far.len());
+        let decide = decide || lacks;
+        let (made_before, grown_before) = (cache.made, cache.grown);
         ws.here.iter_mut().for_each(|x| *x = None);
-        let (sweeps, series, ratio, rounds, omitted, tally, ring) = loop {
-            let made = cache.made;
-            // The bases (module documentation, 6): the atom's own; beyond the share the nearest kept, then a new one. A near
-            // block's kept levels: those `omit` wants, else its standing basis's; at an atom's first step none (a block with
-            // exact copies keeps every level: the copies couple them all through the P layer).
-            for kind in [false, true] {
-                let count = if kind { ws.far.len() } else { ws.near.len() };
-                for x in 0..count {
-                    let tries = ws.renew.iter().filter(|y| **y == (kind, x)).count();
-                    let standing = if kind { cache.at_far[x] } else { cache.at_near[x] };
-                    let wanted = if kind { None } else { ws.near[x].wanted.take() };
-                    let same = standing.map(|at| kind || wanted.as_ref().is_none_or(|w| cache.near[x][at].kept == *w));
-                    if let (Some(at), 0, Some(true)) = (standing, tries, same) {
-                        if !kind {
-                            let s = cache.near[x][at].rows.len();
-                            ws.near[x].fit(s, n);
-                        }
-                        continue;
-                    }
-                    let want: Vec<usize> = match (kind, wanted, standing) {
-                        (true, ..) => vec![],
-                        (false, Some(w), _) => w,
-                        (false, None, Some(at)) => cache.near[x][at].kept.clone(),
-                        (false, None, None) => (0..if ws.near[x].nd > 0 { ws.near[x].levels.len() } else { 0 }).collect(),
-                    };
-                    let (terms, kept): (&[usize], Vec<(usize, &[C64], &[f64])>) = if kind {
-                        (&ws.far[x].terms, cache.far[x].iter().enumerate().map(|(i, b)| (i, &b.at[..], &b.weights[..])).collect())
-                    } else {
-                        (&ws.near[x].terms, cache.near[x].iter().enumerate().filter(|(_, b)| b.kept == want).map(|(i, b)| (i, &b.at[..], &b.weights[..])).collect())
-                    };
-                    let nearest = |but: Option<usize>, work: &mut f64| -> Option<usize> {
-                        let mut best: Option<(usize, f64)> = None;
-                        for &(i, at, weights) in kept.iter().filter(|(i, ..)| Some(*i) != but) {
-                            let d: f64 = terms.iter().enumerate().map(|(t, &p)| (ws.mid.coef[p] - at[t]).abs() * weights[t]).sum();
-                            *work += terms.len() as f64;
-                            if best.is_none_or(|b| d < b.1) {
-                                best = Some((i, d));
-                            }
-                        }
-                        best.map(|b| b.0)
-                    };
-                    let chosen = match tries {
-                        0 => nearest(None, &mut work[REFRESH]),
-                        1 => nearest(standing, &mut work[REFRESH]),
-                        _ => None,
-                    };
-                    if chosen.is_some() && chosen != standing {
-                        cache.looked += 1;
-                    }
-                    let at = match chosen {
-                        Some(at) => at,
-                        None => {
-                            if site.is_none() {
-                                site = Some(self.site(r, kappa, &mut work[REFRESH]));
-                            }
-                            let site = site.as_ref().unwrap();
-                            if kind {
-                                let basis = self.far_basis(&ws.far[x], ws, site, &mut work[REFRESH])?;
-                                cache.far[x].push(std::sync::Arc::new(basis));
-                                cache.far[x].len() - 1
-                            } else {
-                                if ws.here[x].is_none() {
-                                    let laid = self.lay(ws.near[x].o, site, &mut work[REFRESH]);
-                                    let e = self.effective(ws.near[x].o, &laid, &mut work[REFRESH])?;
-                                    ws.here[x] = Some((laid, e));
-                                }
-                                let (laid, e) = ws.here[x].as_ref().unwrap();
-                                let basis = self.near_basis(&ws.near[x], ws, laid, e, &want, &mut work[REFRESH])?;
-                                cache.near[x].push(std::sync::Arc::new(basis));
-                                cache.near[x].len() - 1
-                            }
-                        }
-                    };
-                    if chosen.is_none() {
-                        cache.made += 1;
-                        if same == Some(false) {
-                            cache.grown += 1;
-                        }
-                    }
-                    if kind {
-                        cache.at_far[x] = Some(at);
-                    } else {
-                        cache.at_near[x] = Some(at);
-                        let s = cache.near[x][at].rows.len();
-                        ws.near[x].fit(s, n);
-                    }
-                }
+        let mut site: Option<Site> = None;
+        if decide {
+            ws.decision.start(ws.near.len(), ws.far.len());
+        } else {
+            ws.decision.clear();
+        }
+        let mut evaluation = std::mem::take(&mut cache.evaluation);
+        let (started, mut ended) = (evaluation.kinds, None);
+        let mut rounds = 0;
+        let (ratio, swept) = 'rounds: loop {
+            rounds += 1;
+            self.bases(r, kappa, cache, ws, &mut site, &mut work[REFRESH])?;
+            if decide {
+                evaluation.fit(cache, &ws.near, &ws.far);
             }
             lap(REFRESH, &mut clock, &mut tick);
-            if work.iter().sum::<f64>() > budget {
-                return None;
-            }
-            // The near blocks: the diagonal to first order and what it leaves; their sources (module documentation, 2, 3).
-            let Workspace { near, far, mid, hbase, h, delta, c, change, previous, whole, step, order, cs, deltas, per, scratch, tm, renew, rings, .. } = &mut *ws;
-            let Placed { coef, f, w, e, hpp, .. } = &*mid;
-            for (x, nb) in near.iter_mut().enumerate() {
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                let s = nb.s;
-                let fa = &basis.f;
-                let parts = fa.parts.len().max(1);
-                look::moved(basis, nb.value, &nb.terms, coef, &mut nb.kappa, &mut nb.delta, &mut work[DIAGONAL]);
-                for i in 0..s {
-                    for g in 0..parts {
-                        nb.off[i * parts + g] = if g == basis.part[i] { fa.dropped[g] } else { 0.0 };
-                    }
-                    nb.rho[i] = 0.0;
-                    nb.rhox[i] = 0.0;
-                }
-                let mut dm = 0.0;
-                for (t, &d) in nb.delta.iter().enumerate() {
-                    if d == C64::ZERO {
-                        continue;
-                    }
-                    let size = d.abs();
-                    dm += size * basis.copied[t];
-                    for (o, x) in nb.off[..s * parts].iter_mut().zip(&basis.norms[t * s * parts..(t + 1) * s * parts]) {
-                        *o += size * x;
-                    }
-                    work[DIAGONAL] += (s * parts) as f64;
-                }
-                // The exact copies' couplings and K̂_DD at the point (exact in the light, the dressing's held).
-                if nb.nd > 0 {
-                    let (mut ked, mut kde) = (std::mem::take(&mut nb.ked), std::mem::take(&mut nb.kde));
-                    copy_couplings(nb, basis, e, &mut ked, &mut kde);
-                    (nb.ked, nb.kde) = (ked, kde);
-                    nb.kdd.copy_from_slice(&basis.kdd0);
-                    for (t, &p) in nb.terms.iter().enumerate() {
-                        let d = coef[p] - basis.at[t];
-                        if d != C64::ZERO {
-                            crate::linalg::mul_add(false, &mut nb.kdd, d, &basis.ddterms[t]);
-                        }
-                    }
-                    work[DIAGONAL] += (2 * nb.exact.len() * s * nb.nd + nb.terms.len() * nb.nd * nb.nd) as f64;
-                }
-                // The centred copies' dressing on the rows, ρ_i = Σ_t |c_t| ‖(V†N_t,dress V)_i‖, and the forms' change of their held
-                // matrix: the factor ε_R,j is the columns' (`centring`).
-                (nb.held, nb.epsr) = (dm, 0.0);
-                if nb.nc > 0 {
-                    for (t, &p) in nb.terms.iter().enumerate() {
-                        let size = coef[p].abs();
-                        for i in 0..s {
-                            nb.rho[i] += size * basis.dressed[t * s + i];
-                            nb.rhox[i] += size * basis.dressedx[t * s + i];
-                        }
-                    }
-                    work[DIAGONAL] += (nb.terms.len() * s) as f64 / 4.0;
-                }
-            }
-            lap(DIAGONAL, &mut clock, &mut tick);
-            for (x, nb) in near.iter_mut().enumerate() {
-                if nb.idle() {
-                    continue;
-                }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                let s = nb.s;
-                let Near { splits, vectors, xs, exact, lanes, nd, delta, shifts, vt, vtot, stat, emit, hx, b0d, exd, .. } = &mut *nb;
-                look::sourced(splits, vectors, xs, exact, *lanes, *nd, basis, f, w, e, delta, shifts, vt, vtot, stat, emit, hx, b0d, exd, s, n, &mut work[SOURCES]);
-            }
-            lap(SOURCES, &mut clock, &mut tick);
-            // The far blocks' pair forms (module documentation, 4): H_far = Σ e_a*e_b U_a†R₀U_b, M_far likewise.
-            hbase.copy_from_slice(hpp);
-            for (x, fb) in far.iter_mut().enumerate() {
-                let basis = &cache.far[x][cache.at_far[x].unwrap()];
-                let v = fb.vectors.len();
-                for a in 0..v {
-                    for b in 0..v {
-                        let (ca, ka) = fb.vectors[a];
-                        let (cb, kb) = fb.vectors[b];
-                        fb.products[a * v + b] = e[ca][ka].conj() * e[cb][kb];
-                    }
-                }
-                fused_product_into(&fb.products, &basis.f, (1, v * v, n * n), &mut fb.hf);
-                fused_product_into(&fb.products, &basis.g, (1, v * v, n * n), &mut fb.mf);
-                for (h, x) in hbase.iter_mut().zip(&fb.hf) {
-                    *h += *x;
-                }
-                for (t, &p) in fb.terms.iter().enumerate() {
-                    fb.delta[t] = coef[p] - basis.at[t];
-                }
-                work[FAR] += (v * v + 2 * v * v * n * n + n * n) as f64;
-            }
+            self.ready(cache, ws, &evaluation, decide, work);
             lap(FAR, &mut clock, &mut tick);
-            // The series (module documentation, 5).
-            h.copy_from_slice(hbase);
-            for nb in near.iter_mut() {
-                nb.bloch.fill(C64::ZERO);
-                nb.ztot.fill(C64::ZERO);
-                nb.active.fill(true);
-                nb.invs.clear();
-                nb.zs.clear();
-                nb.ztots.clear();
-                nb.zd.fill(C64::ZERO);
-                nb.zdtot.fill(C64::ZERO);
-                nb.zds.clear();
-                nb.zdtots.clear();
-                nb.pjs.clear();
-                nb.cinvs.clear();
-            }
-            cs.clear();
-            deltas.clear();
-            previous.fill(0.0);
-            let mut sweep = 0;
-            let (mut frozen, mut omitted) = (0.0_f64, 0.0_f64);
-            let mut tally = [0usize; 2];
-            for fb in far.iter_mut() {
-                fb.omitted = false;
-            }
-            let outcome = loop {
-                let (t0, w0) = (ticks(), work[SERIES]);
-                if !sweep_all(near, scratch, far, cache, Side::Right, sweep, hbase, h, c, delta, change, whole, self.ground.len(), n, &mut work[SERIES]) {
-                    return None;
-                }
-                cs.extend_from_slice(c);
-                deltas.extend_from_slice(delta);
-                // After the first sweep the levels and far blocks the point leaves out (`omit`, read on bounds): beyond the
-                // share levels join, a new round on new decompositions.
-                if sweep == 0 {
-                    let (rho, grow) = omit(near, far, scratch, tm, cache, mid, hbase, h, whole, per, &mut tally, share, self.thermal, n, hold.then_some(&cache.evaluation.far[..]), &mut work[SERIES]);
-                    if grow {
-                        break None;
-                    }
-                    omitted = rho;
-                }
-                sweep += 1;
-                if sweep == 1 {
-                    frozen = freeze(near, cache, h, c, whole, order, unrate(share) - omitted, hold.then_some(&cache.evaluation.active[..]), n, &mut work[SERIES]);
-                }
-                // A response that is not a number is none: a row and a column at one complex energy (a pole of the
-                // series: their mixing has no bound) or an overflow -- the fold does not exist here (the one exit). Read
-                // as the rest is, a column of no number would pass as one that converged.
-                if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
-                    return None;
-                }
-                let (rest, most) = rest_of(change, previous, whole, n);
-                previous.copy_from_slice(change);
-                step.sweep_ticks.push(ticks() - t0);
-                step.sweep_work.push(work[SERIES] - w0);
-                // Two sweeps at the least; then within the share -- between two decisions, the decision's sweeps (# The
-                // decisions). No longer converging -- a ratio at or above one after the
-                // second change: the self-consistency or the series does not exist here -- is the fold's one exit where it
-                // does not exist (None, as a singular decomposition, centring, copies' complement or metric); so is a
-                // forward dearer than its budget (the cheapest evaluation within the share is another's: run.rs # The
-                // nodes risen and fallen).
-                if sweep >= 2 && if hold { sweep >= cache.evaluation.sweeps } else { rest <= share } {
-                    // Held, a series whose ratio reads at or above one at the decision's sweeps does not exist on what
-                    // the atom holds.
-                    if hold && most >= 1.0 {
-                        return None;
-                    }
-                    break Some((rate(unrate(rest) + frozen), most, omitted));
-                }
-                if (sweep >= 3 && most >= 1.0) || work.iter().sum::<f64>() > budget {
-                    return None;
-                }
-            };
-            lap(SERIES, &mut clock, &mut tick);
-            let Some((series, ratio, omitted)) = outcome else {
-                round += 1;
-                if round > 3 + ws.near.iter().map(|x| x.levels.len()).sum::<usize>() {
-                    return None;
-                }
-                continue;
-            };
-            // The readings of what is held (module documentation, 6), at the columns' energies H_jj. The reuse's first-order
-            // error of the response the step uses, Z = Σ_l Z_l: Σ_l R_l δK̃ Z_l = R̄ δK̃ Z + Σ_l (R_l − R̄) δK̃ Z_l, R̄ at the
-            // beams' mean Doppler shift w̄ -- row by row, row i of δK̃Z at most Σ_P off_iP ‖Z_P∖i‖ (+ ρ_i‖Z‖), the beams'
-            // rest at most W|R̄|²/(1 − W|R̄|) (W the largest |w_l − w̄|) times (Σ_P off_iP + ρ_i) Σ_l ‖Z_l‖. Read on the
-            // beams one by one against their sum, the reading would grow where the beams' responses cancel (a standing
-            // wave's node) though the error cancels with them.
-            // Column by column, the rows outer (BRIEF_PROTO5 item 3): per part Σ_i∈P |Z_ij|² and per lane Σ_i |Z_l,ij|² over the
-            // rows in turn, then row by row its error, its square summed per column.
-            for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
-                nb.reading = 0.0;
-                if nb.idle() {
-                    continue;
-                }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                let s = nb.s;
-                let parts = basis.f.parts.len().max(1);
-                let beams = nb.lanes;
-                let ln = beams * n;
-                let mean = nb.shifts.iter().sum::<f64>() / beams.max(1) as f64;
-                let spread = nb.shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
-                let RowTemps { part: pn, lane, each, total, acc, eps } = &mut sc.rows;
-                let (pn, lane, each, total, acc) = (&mut pn[..parts * n], &mut lane[..ln], &mut each[..n], &mut total[..n], &mut acc[..n]);
-                pn.fill(0.0);
-                lane.fill(0.0);
-                for i in 0..s {
-                    let g = basis.part[i];
-                    for (u, z) in pn[g * n..(g + 1) * n].iter_mut().zip(&nb.ztot[i * n..(i + 1) * n]) {
-                        *u += z.norm_sqr();
-                    }
-                    for (u, z) in lane.iter_mut().zip(&nb.z[i * ln..(i + 1) * ln]) {
-                        *u += z.norm_sqr();
-                    }
-                }
-                each.fill(0.0);
-                for sp in 0..beams {
-                    for (e, l) in each.iter_mut().zip(&lane[sp * n..(sp + 1) * n]) {
-                        *e += l.sqrt();
-                    }
-                }
-                total.fill(0.0);
-                for g in 0..parts {
-                    for (t, u) in total.iter_mut().zip(&pn[g * n..(g + 1) * n]) {
-                        *t += *u;
-                    }
-                }
-                acc.fill(0.0);
-                // The centred copies' factor at every column's energy (`centring`).
-                let eps = &mut eps[..n];
-                for (j, x) in eps.iter_mut().enumerate() {
-                    *x = if nb.nc > 0 { centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
-                }
-                let most = eps.iter().copied().fold(0.0, f64::max);
-                for i in 0..s {
-                    let own = basis.part[i];
-                    let mut all = most * nb.rho[i];
-                    for g in 0..parts {
-                        all += nb.off[i * parts + g];
-                    }
-                    let kappa = nb.kappa[i];
-                    for j in 0..n {
-                        let mut e = if eps[j] > 0.0 { eps[j] * (nb.rho[i] * total[j].sqrt() + if nb.xcol[j] { nb.rhox[i] } else { 0.0 }) } else { 0.0 };
-                        for g in 0..parts {
-                            let off = nb.off[i * parts + g];
-                            if off > 0.0 {
-                                e += off * if g == own { (pn[g * n + j] - nb.ztot[i * n + j].norm_sqr()).max(0.0) } else { pn[g * n + j] }.sqrt();
-                            }
-                        }
-                        let gap = (h[j * n + j] - C64::real(mean) - kappa).norm_sqr().sqrt();
-                        let rest = if spread < gap { all * each[j] * spread / (gap * (gap - spread)) } else { f64::INFINITY };
-                        let err = if e > 0.0 || rest > 0.0 { e / gap + rest } else { 0.0 };
-                        acc[j] += err * err;
-                    }
-                }
-                work[READING] += (s * n * (beams + parts + 2)) as f64 / 4.0;
-                let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-                nb.reading = (0..n).filter(|&j| whole[j] > floor).map(|j| rate((acc[j] / whole[j]).sqrt())).fold(0.0, f64::max);
-            }
-            for (x, fb) in far.iter_mut().enumerate() {
-                if fb.omitted {
-                    fb.reading = 0.0;
-                    continue;
-                }
-                // Its response R₀B held at the reference (its centre z₀ and forms) against the exact one at every column's
-                // energy and lane: one factor (`centring`), the centring and the drift.
-                let basis = &cache.far[x][cache.at_far[x].unwrap()];
-                let held = fb.delta.iter().zip(&basis.copied).map(|(d, c)| d.abs() * c).sum::<f64>();
-                let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| w[cc][j]).chain([0.0]).collect();
-                fb.reading = (0..n).map(|j| rate(centring(basis.r0, basis.z0, held, h[j * n + j], &shifts))).fold(0.0, f64::max);
-                work[READING] += (fb.terms.len() + n) as f64 / 4.0;
-            }
-            // The ring's reading (module documentation, # The ring): per ground column -- a jump lands on a ground state --
-            // the transient a bare state's landing leaves, to first order on the right response.
-            let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-            let ring = (0..self.ground.len()).filter(|&j| whole[j] > floor).map(|j| landing_ring(near, far, cache, h, j, n, rings)).fold(0.0, f64::max);
-            work[READING] += near.iter().map(|nb| nb.s * nb.shifts.len()).sum::<usize>() as f64 * self.ground.len() as f64 / 4.0;
-            lap(READING, &mut clock, &mut tick);
-            // Frozen, a reading beyond the share is read, not acted on (# The decisions).
-            let before = renew.len();
-            for (x, nb) in near.iter().enumerate() {
-                if nb.reading > share && !hold {
-                    renew.push((false, x));
+            // The series (module documentation, 5): each row to its part's sweeps as the evaluation gives them; at a
+            // decision every row to K -- two at the least (a ratio is read from two changes), the evaluation's most.
+            let (mut done, mut target) = (0, if decide { evaluation.most().max(2) } else { evaluation.most() });
+            for (x, nb) in ws.near.iter_mut().enumerate() {
+                let basis = cache.near_at(x);
+                for i in 0..nb.s {
+                    nb.upto[i] = if decide { usize::MAX } else { evaluation.parts[x][part_of(nb, basis, i)] };
                 }
             }
-            for (x, fb) in far.iter().enumerate() {
-                if fb.reading > share && !hold {
-                    renew.push((true, x));
+            loop {
+                done = self.sweeps(cache, ws, done, target, work)?;
+                lap(SERIES, &mut clock, &mut tick);
+                if !decide {
+                    break 'rounds (held_ratio(&ws.near, cache, &evaluation, &ws.whole, n), done);
+                }
+                // The decision's accounts and the evaluation they choose (# The decisions).
+                self.accounts(cache, ws, &evaluation, energy, done, &mut work[READING]);
+                ended.get_or_insert_with(|| worst_kinds(&ws.accounts, &ws.den, n));
+                let next = self.allocate(cache, ws, &mut evaluation, energy, done, &mut work[READING]);
+                lap(READING, &mut clock, &mut tick);
+                match next {
+                    Next::Done => break 'rounds (last_ratio(&ws.near, cache, &ws.den, done, n), done),
+                    Next::Sweeps(more) => target = more,
+                    Next::Again => continue 'rounds,
+                    Next::Nowhere => return None,
                 }
             }
-            if renew.len() == before || refreshes == 2 || cache.made > made {
-                break (sweep, series, ratio, round + 1, omitted, tally, ring);
-            }
-            // The near blocks decomposed again for their reuse: their kept levels that may leave leave with it (`leave`, on
-            // the bounds `omit` read at this round's first sweep).
-            for &(kind, x) in &renew[before..] {
-                if !kind {
-                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                    leave(&near[x], &mut scratch[x], basis, per, x, tm, mid, h, unrate(share), self.thermal, n, &mut work[READING]);
-                    let kept: Vec<usize> = (0..per[x].0.len()).filter(|&q| !per[x].0[q]).collect();
-                    if kept != basis.kept {
-                        near[x].wanted = Some(kept);
-                    }
-                }
-            }
-            round += 1;
-            refreshes += 1;
         };
-        // The copies' rows and the compression (module documentation, 7).
+        // The copies' rows and the compression (module documentation, 7): a block's centred copies' rows always in it.
         let Workspace { near, far, h, step, eigen, vectors, temp, mid, scratch, tm, .. } = &mut *ws;
         let e = &mid.e;
         let (a, metric) = (&mut step.a, &mut step.metric);
         a.data.copy_from_slice(h);
         metric.data.fill(C64::ZERO);
-        let mut copies_read = 0.0_f64;
         for (x, nb) in near.iter_mut().enumerate() {
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
             nb.tc.fill(C64::ZERO);
-            nb.copied_in = false;
-            if nb.idle() {
+            if !nb.copied() {
                 continue;
             }
-            if nb.nc == 0 {
-                continue;
-            }
-            // Their rows' own part of the compression (their metric T_C†T_C and z₀T_C†T_C; their dressing is the kept
-            // decomposition's) left out where it reads within the share: ‖T_C,j‖ ≤ Σ_a |e_a| ‖R₀U_a†V‖ ‖Z_j‖, a copy row's
-            // error absolute (a population's amplitude per unit P amplitude, DESIGN §1.5).
-            let size: f64 = nb.copies.iter().zip(&basis.copied_rows).map(|(&(g, k, _), y)| e[g][k].abs() * y).sum();
-            let most = (0..n).map(|j| (0..nb.s).map(|i| nb.ztot[i * n + j].norm_sqr()).sum::<f64>()).fold(0.0, f64::max).sqrt();
-            let read = rate(size * most);
-            copies_read = copies_read.max(read);
-            work[COPIES] += (nb.copies.len() + nb.s * n / 4) as f64;
-            if !(if hold { cache.evaluation.copied[x] } else { read > share }) {
-                continue;
-            }
-            nb.copied_in = true;
+            let basis = cache.near_at(x);
             copy_rows(nb, basis, e, n, &mut work[COPIES]);
             for k in 0..nb.nc {
                 for i in 0..n {
@@ -4035,7 +3682,7 @@ impl Fold {
             if nb.idle() {
                 continue;
             }
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let s = nb.s;
             let y = &mut sc.y[..s * n];
             schur_on(&nb.kappa, &basis.f.t, &basis.f.ends, &nb.ztot, y, s, n, &mut work[COMPRESSION]);
@@ -4060,7 +3707,7 @@ impl Fold {
         crate::linalg::adjoint_product_onto(zs, ws_, (n, total, n), &mut a.data);
         crate::linalg::adjoint_product_onto(zs, zs, (n, total, n), &mut metric.data);
         for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
-            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let basis = cache.far_at(x);
             for ((am, mm), mf) in a.data.iter_mut().zip(metric.data.iter_mut()).zip(&fb.mf) {
                 *am += *mf * basis.z0;
                 *mm += *mf;
@@ -4081,24 +3728,565 @@ impl Fold {
         }
         work[NORMAL] += (2 * n * n * n * (1 + step.tones.len())) as f64;
         lap(NORMAL, &mut clock, &mut tick);
-        step.sweeps = sweeps;
-        if !hold {
-            cache.evaluation = Evaluation { sweeps, active: near.iter().map(|nb| nb.active.clone()).collect(), far: far.iter().map(|fb| fb.omitted).collect(), copied: near.iter().map(|nb| nb.copied_in).collect() };
-        }
-        step.series = series;
+        step.sweeps = swept;
         step.ratio = ratio;
-        step.reuse = near.iter().map(|x| x.reading).fold(0.0, f64::max);
-        step.far = far.iter().map(|x| x.reading).fold(0.0, f64::max);
-        step.copies = copies_read;
-        step.omitted = rate(omitted);
-        step.ring = ring;
-        step.left = tally;
+        step.unresolved = !decide && ratio >= 1.0;
+        (step.reading, step.kinds) = (evaluation.reading, evaluation.kinds);
+        (step.started, step.ended) = (started, ended.unwrap_or(evaluation.kinds));
         step.made = cache.made - made_before;
         step.grown = cache.grown - grown_before;
         step.rounds = rounds;
         step.work = *work;
         step.ticks = tick;
+        cache.evaluation = evaluation;
         Some(())
+    }
+
+    /// The decompositions a forward stands on (module documentation, 6): the atom's own; where it has none, or where a
+    /// decision asks (`Decision`: a near block's kept levels changed, a block made again at the point for its reuse or its
+    /// centring), made at the point (its kept levels the decision's, at an atom's first none -- a block with exact copies
+    /// keeps every level: they couple all of them through the P layer).
+    fn bases(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, site: &mut Option<Site>, work: &mut f64) -> Option<()> {
+        let n = ws.n;
+        for x in 0..ws.far.len() {
+            let again = ws.decision.far.get(x).is_some_and(|&a| a);
+            if cache.far[x].is_some() && !again {
+                continue;
+            }
+            let site = site.get_or_insert_with(|| self.site(r, kappa, work));
+            let basis = self.far_basis(&ws.far[x], ws, site, work)?;
+            cache.far[x] = Some(std::sync::Arc::new(basis));
+            cache.made += 1;
+            if let Some(a) = ws.decision.far.get_mut(x) {
+                *a = false;
+                ws.decision.fresh_far[x] = true;
+            }
+        }
+        for x in 0..ws.near.len() {
+            let wanted = ws.decision.kept.get_mut(x).and_then(Option::take);
+            let again = ws.decision.near.get(x).is_some_and(|&a| a);
+            if let Some(b) = &cache.near[x] {
+                if !again && wanted.as_ref().is_none_or(|w| *w == b.kept) {
+                    let s = b.rows.len();
+                    ws.near[x].fit(s, n);
+                    continue;
+                }
+            }
+            let want = wanted.unwrap_or_else(|| cache.near[x].as_ref().map_or_else(|| (0..if ws.near[x].nd > 0 { ws.near[x].levels.len() } else { 0 }).collect(), |b| b.kept.clone()));
+            if cache.near[x].as_ref().is_some_and(|b| b.kept != want) {
+                cache.grown += 1;
+            }
+            if ws.here[x].is_none() {
+                let site = site.get_or_insert_with(|| self.site(r, kappa, work));
+                let laid = self.lay(ws.near[x].o, site, work);
+                let e = self.effective(ws.near[x].o, &laid, work)?;
+                ws.here[x] = Some((laid, e));
+            }
+            let (laid, e) = ws.here[x].as_ref().unwrap();
+            let basis = self.near_basis(&ws.near[x], ws, laid, e, &want, work)?;
+            let s = basis.rows.len();
+            cache.near[x] = Some(std::sync::Arc::new(basis));
+            cache.made += 1;
+            ws.near[x].fit(s, n);
+            if let Some(a) = ws.decision.near.get_mut(x) {
+                *a = false;
+                ws.decision.fresh[x] = true;
+            }
+        }
+        Some(())
+    }
+
+    /// A forward's diagonal, sources and far forms at the point (module documentation, 2–4): the near blocks' diagonal to
+    /// first order and what it leaves, their sources; the far blocks' pair forms into Ĥ_PP's base -- at a decision every far
+    /// block's, between decisions those the evaluation holds (a far block left out is no part of it).
+    fn ready(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, decide: bool, work: &mut [f64; 10]) {
+        let n = ws.n;
+        let Workspace { near, far, mid, hbase, .. } = &mut *ws;
+        let Placed { coef, f, w, e, hpp, .. } = &*mid;
+        for (x, nb) in near.iter_mut().enumerate() {
+            let basis = cache.near_at(x);
+            let s = nb.s;
+            let fa = &basis.f;
+            let parts = fa.parts.len().max(1);
+            look::moved(basis, nb.value, &nb.terms, coef, &mut nb.kappa, &mut nb.delta, &mut work[DIAGONAL]);
+            for i in 0..s {
+                for g in 0..parts {
+                    nb.off[i * parts + g] = if g == basis.part[i] { fa.dropped[g] } else { 0.0 };
+                }
+                nb.rho[i] = 0.0;
+                nb.rhox[i] = 0.0;
+            }
+            let mut dm = 0.0;
+            for (t, &d) in nb.delta.iter().enumerate() {
+                if d == C64::ZERO {
+                    continue;
+                }
+                let size = d.abs();
+                dm += size * basis.copied[t];
+                for (o, x) in nb.off[..s * parts].iter_mut().zip(&basis.norms[t * s * parts..(t + 1) * s * parts]) {
+                    *o += size * x;
+                }
+                work[DIAGONAL] += (s * parts) as f64;
+            }
+            // The exact copies' couplings and K̂_DD at the point (exact in the light, the dressing's held).
+            if nb.nd > 0 {
+                let (mut ked, mut kde) = (std::mem::take(&mut nb.ked), std::mem::take(&mut nb.kde));
+                copy_couplings(nb, basis, e, &mut ked, &mut kde);
+                (nb.ked, nb.kde) = (ked, kde);
+                nb.kdd.copy_from_slice(&basis.kdd0);
+                for (t, &p) in nb.terms.iter().enumerate() {
+                    let d = coef[p] - basis.at[t];
+                    if d != C64::ZERO {
+                        crate::linalg::mul_add(false, &mut nb.kdd, d, &basis.ddterms[t]);
+                    }
+                }
+                work[DIAGONAL] += (2 * nb.exact.len() * s * nb.nd + nb.terms.len() * nb.nd * nb.nd) as f64;
+            }
+            // The centred copies' dressing on the rows, ρ_i = Σ_t |c_t| ‖(V†N_t,dress V)_i‖, and the forms' change of their held
+            // matrix: the factor ε_R,j is the columns' (`centring`).
+            (nb.held, nb.epsr) = (dm, 0.0);
+            if nb.nc > 0 {
+                for (t, &p) in nb.terms.iter().enumerate() {
+                    let size = coef[p].abs();
+                    for i in 0..s {
+                        nb.rho[i] += size * basis.dressed[t * s + i];
+                        nb.rhox[i] += size * basis.dressedx[t * s + i];
+                    }
+                }
+                work[DIAGONAL] += (nb.terms.len() * s) as f64 / 4.0;
+            }
+        }
+        for (x, nb) in near.iter_mut().enumerate() {
+            if nb.idle() {
+                continue;
+            }
+            let basis = cache.near_at(x);
+            let s = nb.s;
+            let Near { splits, vectors, xs, exact, lanes, nd, delta, shifts, vt, vtot, stat, emit, hx, b0d, exd, .. } = &mut *nb;
+            look::sourced(splits, vectors, xs, exact, *lanes, *nd, basis, f, w, e, delta, shifts, vt, vtot, stat, emit, hx, b0d, exd, s, n, &mut work[SOURCES]);
+        }
+        // The far blocks' pair forms (module documentation, 4): H_far = Σ e_a*e_b U_a†R₀U_b, M_far likewise.
+        hbase.copy_from_slice(hpp);
+        for (x, fb) in far.iter_mut().enumerate() {
+            fb.omitted = !decide && evaluation.far[x];
+            if fb.omitted {
+                continue;
+            }
+            let basis = cache.far_at(x);
+            let v = fb.vectors.len();
+            for a in 0..v {
+                for b in 0..v {
+                    let (ca, ka) = fb.vectors[a];
+                    let (cb, kb) = fb.vectors[b];
+                    fb.products[a * v + b] = e[ca][ka].conj() * e[cb][kb];
+                }
+            }
+            fused_product_into(&fb.products, &basis.f, (1, v * v, n * n), &mut fb.hf);
+            fused_product_into(&fb.products, &basis.g, (1, v * v, n * n), &mut fb.mf);
+            for (h, x) in hbase.iter_mut().zip(&fb.hf) {
+                *h += *x;
+            }
+            for (t, &p) in fb.terms.iter().enumerate() {
+                fb.delta[t] = coef[p] - basis.at[t];
+            }
+            work[FAR] += (v * v + 2 * v * v * n * n + n * n) as f64;
+        }
+    }
+
+    /// The series' sweeps `done` to `target` (module documentation, 5), on from where the forward stands (none done: from
+    /// the base, every response none); each row while its part's sweeps go (`Near::upto`), each sweep's change per part
+    /// kept (`Near::hist`). The sweeps
+    /// done; None where an exact copies' complement is singular or a response is no number.
+    fn sweeps(&self, cache: &Cache, ws: &mut Workspace, done: usize, target: usize, work: &mut [f64; 10]) -> Option<usize> {
+        let n = ws.n;
+        let Workspace { near, far, hbase, h, delta, c, change, whole, cs, deltas, scratch, step, .. } = &mut *ws;
+        if done == 0 {
+            h.copy_from_slice(hbase);
+            for nb in near.iter_mut() {
+                nb.bloch.fill(C64::ZERO);
+                nb.ztot.fill(C64::ZERO);
+                nb.invs.clear();
+                nb.zs.clear();
+                nb.ztots.clear();
+                nb.zd.fill(C64::ZERO);
+                nb.zdtot.fill(C64::ZERO);
+                nb.zds.clear();
+                nb.zdtots.clear();
+                nb.pjs.clear();
+                nb.cinvs.clear();
+                nb.hist.clear();
+            }
+            cs.clear();
+            deltas.clear();
+        }
+        for sweep in done..target {
+            let (t0, w0) = (ticks(), work[SERIES]);
+            if !sweep_all(near, scratch, far, cache, Side::Right, sweep, hbase, h, c, delta, change, whole, self.ground.len(), n, &mut work[SERIES]) {
+                return None;
+            }
+            cs.extend_from_slice(c);
+            deltas.extend_from_slice(delta);
+            step.sweep_ticks.push(ticks() - t0);
+            step.sweep_work.push(work[SERIES] - w0);
+            // A response that is not a number is none: a row and a column at one complex energy (a pole of the series:
+            // their mixing has no bound) or an overflow -- the fold does not exist here (the one exit).
+            if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
+                return None;
+            }
+        }
+        Some(target.max(done))
+    }
+
+    /// The decision's accounts (unify2 §2.1, §2.2) on the forward it stands on, every row swept `done` times: per column the
+    /// error each approximation of the evaluation leaves, attributed to its order or node -- each series part at its sweeps
+    /// (`series_squares`), each near block's reuse and its centred copies (`centring`), each excited level a near block
+    /// leaves out (`bound_levels`), each far block's centring and its leaving out, each block's share of the ring --, in
+    /// one measure: the rate channel against the column's whole excited response W_j (the kept rows', the far blocks', the
+    /// levels left out by their bounds: one denominator), the potential channel against the atom's energy (δV/2E: a level's
+    /// and a far block's light shift). Into the workspace's `accounts`, W_j into `den`.
+    #[allow(clippy::too_many_arguments)]
+    fn accounts(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, energy: f64, done: usize, work: &mut f64) {
+        let n = ws.n;
+        let Workspace { near, far, mid, h, whole, scratch, per, accounts, rings, den, .. } = &mut *ws;
+        accounts.clear();
+        // The levels left out, on their bounds; W_j with their responses (a column's whole).
+        let mut failed = vec![None; near.len()];
+        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
+            let basis = cache.near_at(x);
+            nb.epsr = if nb.nc > 0 { (0..n).map(|j| centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts)).fold(0.0, f64::max) } else { 0.0 };
+            let (omitted, sz, bk, sh) = &mut per[x];
+            for (q, o) in omitted[..nb.levels.len()].iter_mut().enumerate() {
+                *o = !basis.kept.contains(&q);
+            }
+            failed[x] = bound_levels(nb, basis, omitted, mid, h, sz, bk, sh, &mut sc.bound, n, work).err();
+        }
+        den.clear();
+        den.extend_from_slice(&whole[..n]);
+        for ((om, sz, ..), fail) in per.iter().zip(&failed) {
+            if fail.is_none() {
+                for q in (0..om.len()).filter(|&q| om[q]) {
+                    for j in 0..n {
+                        den[j] += sz[q * n + j].powi(2);
+                    }
+                }
+            }
+        }
+        let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
+        let read = |j: usize| den[j] > floor;
+        let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
+        for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
+            let basis = cache.near_at(x);
+            let (om, sz, bk, sh) = &per[x];
+            for q in (0..nb.levels.len()).filter(|&q| om[q]) {
+                let squares = (0..n)
+                    .map(|j| match failed[x] {
+                        _ if !read(j) => 0.0,
+                        Some(f) => if f == q { f64::INFINITY } else { 0.0 },
+                        None => (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j] + pot(2.0 * sh[q * n + j]),
+                    })
+                    .collect();
+                accounts.push(Account { item: Item::Omitted { block: x, level: q }, squares, on: true });
+            }
+            if nb.idle() {
+                continue;
+            }
+            let np = series_parts(nb, basis);
+            for part in 0..np {
+                let mut squares = vec![0.0; n];
+                series_squares(nb, np, part, evaluation.parts[x][part], done, den, floor, n, &mut squares);
+                accounts.push(Account { item: Item::Series { block: x, part }, squares, on: true });
+            }
+            // The reuse's first-order error of the response the step uses, Z = Σ_l Z_l: Σ_l R_l δK̃ Z_l = R̄ δK̃ Z + Σ_l (R_l −
+            // R̄) δK̃ Z_l, R̄ at the beams' mean Doppler shift w̄ -- row by row, row i of δK̃Z at most Σ_P off_iP ‖Z_P∖i‖, the beams'
+            // rest at most W|R̄|²/(1 − W|R̄|) (W the largest |w_l − w̄|) times Σ_P off_iP Σ_l ‖Z_l‖; the centred copies' R₀ held,
+            // likewise with ε_R,j ρ_i (`centring`) in place of the parts' change. Read on the beams one by one against their
+            // sum, the reading would grow where the beams' responses cancel (a standing wave's node) though the error cancels.
+            let s = nb.s;
+            let parts = basis.f.parts.len().max(1);
+            let beams = nb.lanes;
+            let ln = beams * n;
+            let mean = nb.shifts.iter().sum::<f64>() / beams.max(1) as f64;
+            let spread = nb.shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
+            let RowTemps { part: pn, lane, each, total, acc, eps } = &mut sc.rows;
+            let (pn, lane, each, total, acc) = (&mut pn[..parts * n], &mut lane[..ln], &mut each[..n], &mut total[..n], &mut acc[..n]);
+            pn.fill(0.0);
+            lane.fill(0.0);
+            for i in 0..s {
+                let g = basis.part[i];
+                for (u, z) in pn[g * n..(g + 1) * n].iter_mut().zip(&nb.ztot[i * n..(i + 1) * n]) {
+                    *u += z.norm_sqr();
+                }
+                for (u, z) in lane.iter_mut().zip(&nb.z[i * ln..(i + 1) * ln]) {
+                    *u += z.norm_sqr();
+                }
+            }
+            each.fill(0.0);
+            for sp in 0..beams {
+                for (e, l) in each.iter_mut().zip(&lane[sp * n..(sp + 1) * n]) {
+                    *e += l.sqrt();
+                }
+            }
+            total.fill(0.0);
+            for g in 0..parts {
+                for (t, u) in total.iter_mut().zip(&pn[g * n..(g + 1) * n]) {
+                    *t += *u;
+                }
+            }
+            let eps = &mut eps[..n];
+            for (j, x) in eps.iter_mut().enumerate() {
+                *x = if nb.nc > 0 { centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
+            }
+            let most = eps.iter().copied().fold(0.0, f64::max);
+            let mut centred = vec![0.0; n];
+            acc.fill(0.0);
+            for i in 0..s {
+                let own = basis.part[i];
+                let all: f64 = nb.off[i * parts..(i + 1) * parts].iter().sum();
+                let kappa = nb.kappa[i];
+                for j in 0..n {
+                    let held = if eps[j] > 0.0 { eps[j] * (nb.rho[i] * total[j].sqrt() + if nb.xcol[j] { nb.rhox[i] } else { 0.0 }) } else { 0.0 };
+                    let mut e = 0.0;
+                    for g in 0..parts {
+                        let off = nb.off[i * parts + g];
+                        if off > 0.0 {
+                            e += off * if g == own { (pn[g * n + j] - nb.ztot[i * n + j].norm_sqr()).max(0.0) } else { pn[g * n + j] }.sqrt();
+                        }
+                    }
+                    let gap = (h[j * n + j] - C64::real(mean) - kappa).norm_sqr().sqrt();
+                    let rest = |size: f64| if size == 0.0 { 0.0 } else if spread < gap { size * each[j] * spread / (gap * (gap - spread)) } else { f64::INFINITY };
+                    let (reuse, copies) = (e / gap + rest(all), held / gap + rest(most * nb.rho[i]));
+                    acc[j] += reuse * reuse;
+                    centred[j] += copies * copies;
+                }
+            }
+            *work += (s * n * (beams + parts + 2)) as f64 / 4.0;
+            accounts.push(Account { item: Item::Reuse { block: x }, squares: (0..n).map(|j| if read(j) { acc[j] / den[j] } else { 0.0 }).collect(), on: true });
+            if nb.nc > 0 {
+                accounts.push(Account { item: Item::Centred { block: x, far: false }, squares: (0..n).map(|j| if read(j) { centred[j] / den[j] } else { 0.0 }).collect(), on: true });
+            }
+        }
+        // The far blocks: their response R₀B held at the reference (its centre z₀ and forms) against the exact one at every
+        // column's energy and lane (one factor, `centring`: the centring and the drift) times the block's own response, and
+        // the block left out -- its whole response and light shift, H_F,jj and M_F,jj exact.
+        for (x, fb) in far.iter().enumerate() {
+            let basis = cache.far_at(x);
+            let held = fb.delta.iter().zip(&basis.copied).map(|(d, c)| d.abs() * c).sum::<f64>();
+            let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| mid.w[cc][j]).chain([0.0]).collect();
+            let centred = (0..n).map(|j| if read(j) { centring(basis.r0, basis.z0, held, h[j * n + j], &shifts).powi(2) * fb.mf[j * n + j].re / den[j] } else { 0.0 }).collect();
+            let left = (0..n).map(|j| if read(j) { fb.mf[j * n + j].re / den[j] + pot(2.0 * fb.hf[j * n + j].re.abs()) } else { 0.0 }).collect();
+            accounts.push(Account { item: Item::Centred { block: x, far: true }, squares: centred, on: !evaluation.far[x] });
+            accounts.push(Account { item: Item::Left { block: x }, squares: left, on: evaluation.far[x] });
+            *work += (fb.terms.len() + n) as f64 / 4.0;
+        }
+        // The ring (module documentation, # The ring): per ground column -- a jump lands on a ground state -- the transient a
+        // bare state's landing leaves, to first order on the right response; each block's share its rows' share of the
+        // column's excited response.
+        let at = accounts.len();
+        for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
+            let _ = nb;
+            accounts.push(Account { item: Item::Ring { block: x, far: false }, squares: vec![0.0; n], on: true });
+        }
+        for x in 0..far.len() {
+            accounts.push(Account { item: Item::Ring { block: x, far: true }, squares: vec![0.0; n], on: true });
+        }
+        for j in (0..self.ground.len()).filter(|&j| read(j)) {
+            let ring = unrate(landing_ring(near, far, cache, h, j, n, rings)).powi(2);
+            let mut shares: Vec<f64> = near.iter().filter(|nb| !nb.idle()).map(|nb| (0..nb.s).map(|i| nb.ztot[i * n + j].norm_sqr()).sum::<f64>()).collect();
+            shares.extend(far.iter().map(|fb| fb.mf[j * n + j].re));
+            let sum: f64 = shares.iter().sum();
+            for (a, w) in accounts[at..].iter_mut().zip(&shares) {
+                a.squares[j] = if sum > 0.0 { ring * w / sum } else { 0.0 };
+            }
+        }
+        *work += near.iter().map(|nb| nb.s * nb.shifts.len()).sum::<usize>() as f64 * self.ground.len() as f64 / 4.0;
+    }
+
+    /// The evaluation a decision's accounts choose within one budget, s² = unrate(share)² in every column read (unify2
+    /// §2.6; U1: the run's rule unchanged -- its accounts combined against the share --, prices and the walk U2's, U3's).
+    /// A part whose last ratio reads at or above one is read again on a third sweep; there still, the fold does not
+    /// exist at the point (the one exit). The accounts no remedy of the evaluation lowers -- the ring's, a centring or a
+    /// reuse already made again at the point -- hold their part of the budget; the others share what is left of it (the
+    /// whole budget where they hold it all: the run rises, the evaluation within the share still). While a column's
+    /// share is exceeded, the remedy of the account that holds the most of it: a series part one sweep more, a near block
+    /// made again at the point for its reuse or its centred copies, a far block for its centring (each once a decision),
+    /// a level left out joining, a far block left out taken in. A block made again lets go the kept levels that keep
+    /// every column within, the least first (not one joined in this decision). Then the cheaper evaluations that keep
+    /// every column within, the least first: a part one sweep less, a far block left out. Nothing to make again and no
+    /// sweep beyond those made: done -- its readings the step's (ρ = rate(√max_j Σ_k ρ²_kj), and by kind at that column).
+    #[allow(clippy::too_many_arguments)]
+    fn allocate(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, energy: f64, done: usize, work: &mut f64) -> Next {
+        let n = ws.n;
+        let budget = unrate(crate::model::elim::share()).powi(2);
+        let Workspace { near, mid, h, den, scratch, per, accounts, decision, tm, .. } = &mut *ws;
+        let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
+        let read: Vec<usize> = (0..n).filter(|&j| den[j] > floor).collect();
+        let last = last_ratio(near, cache, den, done, n);
+        if last >= 1.0 {
+            return if done < 3 { Next::Sweeps(3) } else { Next::Nowhere };
+        }
+        let remedied = |a: &Account, decision: &Decision| match a.item {
+            Item::Series { .. } | Item::Omitted { .. } | Item::Left { .. } => true,
+            Item::Reuse { block } | Item::Centred { block, far: false } => !decision.fresh[block] && !decision.near[block],
+            Item::Centred { block, far: true } => !decision.fresh_far[block] && !decision.far[block],
+            Item::Ring { .. } => false,
+        };
+        // Per column what the evaluation's accounts may hold: the budget less what the others hold, the whole where they
+        // hold it all; and what they hold.
+        let shares = |accounts: &[Account], decision: &Decision| -> (Vec<f64>, Vec<f64>) {
+            let (mut held, mut limit) = (vec![0.0; n], vec![0.0; n]);
+            for j in 0..n {
+                let fixed: f64 = accounts.iter().filter(|a| a.on && !remedied(a, decision)).map(|a| a.squares[j]).sum();
+                held[j] = accounts.iter().filter(|a| a.on && remedied(a, decision)).map(|a| a.squares[j]).sum();
+                limit[j] = if fixed > budget { budget } else { budget - fixed };
+            }
+            (held, limit)
+        };
+        let (mut held, mut limit) = shares(accounts, decision);
+        let (mut more, mut again) = (done, false);
+        loop {
+            let Some(&j) = read.iter().max_by(|&&a, &&b| (held[a] - limit[a]).total_cmp(&(held[b] - limit[b]))) else { break };
+            if held[j] <= limit[j] {
+                break;
+            }
+            // A part goes one sweep beyond those made at a time: its next ratio read before the next.
+            let can = |a: &Account| remedied(a, decision) && !matches!(a.item, Item::Series { block, part } if evaluation.parts[block][part] > done);
+            let Some(k) = (0..accounts.len()).filter(|&k| accounts[k].on && accounts[k].squares[j] > 0.0 && can(&accounts[k])).max_by(|&a, &b| accounts[a].squares[j].total_cmp(&accounts[b].squares[j])) else { break };
+            match accounts[k].item {
+                Item::Series { block, part } => {
+                    let p = evaluation.parts[block][part] + 1;
+                    evaluation.parts[block][part] = p;
+                    more = more.max(p);
+                    let np = series_parts(&near[block], cache.near_at(block));
+                    series_squares(&near[block], np, part, p, done, den, floor, n, &mut accounts[k].squares);
+                }
+                Item::Reuse { block } | Item::Centred { block, far: false } => {
+                    decision.near[block] = true;
+                    again = true;
+                }
+                Item::Centred { block, far: true } => {
+                    decision.far[block] = true;
+                    again = true;
+                }
+                Item::Omitted { block, level } => {
+                    let kept = decision.kept[block].get_or_insert_with(|| cache.near_at(block).kept.clone());
+                    kept.push(level);
+                    kept.sort_unstable();
+                    decision.joined[block].push(level);
+                    again = true;
+                }
+                Item::Left { block } => {
+                    evaluation.far[block] = false;
+                    for a in accounts.iter_mut() {
+                        match a.item {
+                            Item::Left { block: b } if b == block => a.on = false,
+                            Item::Centred { block: b, far: true } if b == block => a.on = true,
+                            _ => {}
+                        }
+                    }
+                }
+                Item::Ring { .. } => unreachable!(),
+            }
+            // What a block made again leaves is its own (the reuse and its centred copies' none at the point, a level joined
+            // none): read so until the forward made again reads it.
+            for a in accounts.iter_mut() {
+                let gone = match a.item {
+                    Item::Reuse { block } | Item::Centred { block, far: false } => decision.near[block] || decision.kept[block].is_some(),
+                    Item::Centred { block, far: true } => decision.far[block],
+                    Item::Omitted { block, level } => decision.joined[block].contains(&level),
+                    _ => false,
+                };
+                if gone {
+                    a.squares.iter_mut().for_each(|x| *x = 0.0);
+                }
+            }
+            (held, limit) = shares(accounts, decision);
+        }
+        if again {
+            // The blocks made again let go the kept levels that keep every column within (on the trial bounds of each left
+            // out with those already out: `bound_levels`), the least first; their parts' sweeps are the next round's (another
+            // decomposition's: `Evaluation::fit`).
+            let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
+            for x in 0..near.len() {
+                if !(decision.near[x] || decision.kept[x].is_some()) {
+                    continue;
+                }
+                if near[x].nd > 0 {
+                    continue;
+                }
+                let basis = cache.near_at(x);
+                let mut trials: Vec<(f64, usize, Vec<f64>)> = vec![];
+                for &q in basis.kept.iter().filter(|q| !decision.joined[x].contains(q)) {
+                    let (om, sz, bk, sh) = &mut tm.trial;
+                    om.clear();
+                    om.extend_from_slice(&per[x].0);
+                    om[q] = true;
+                    if bound_levels(&near[x], basis, om, mid, h, sz, bk, sh, &mut scratch[x].bound, n, work).is_ok() {
+                        let squares: Vec<f64> = (0..n).map(|j| if den[j] > floor { (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j] + pot(2.0 * sh[q * n + j]) } else { 0.0 }).collect();
+                        trials.push((read.iter().map(|&j| squares[j]).fold(0.0, f64::max), q, squares));
+                    }
+                }
+                trials.sort_by(|a, b| a.0.total_cmp(&b.0));
+                for (_, q, squares) in trials {
+                    if read.iter().all(|&j| held[j] + squares[j] <= limit[j]) {
+                        let kept = decision.kept[x].get_or_insert_with(|| basis.kept.clone());
+                        kept.retain(|&p| p != q);
+                        read.iter().for_each(|&j| held[j] += squares[j]);
+                    }
+                }
+            }
+            return Next::Again;
+        }
+        if more > done {
+            return Next::Sweeps(more);
+        }
+        // The cheaper evaluations within the budget, the least first: a part one sweep less, a far block left out.
+        let mut trial = vec![0.0; n];
+        loop {
+            let mut best: Option<(f64, usize, Vec<f64>)> = None;
+            for k in (0..accounts.len()).filter(|&k| accounts[k].on) {
+                match accounts[k].item {
+                    Item::Series { block, part } if evaluation.parts[block][part] >= 2 => {
+                        let np = series_parts(&near[block], cache.near_at(block));
+                        series_squares(&near[block], np, part, evaluation.parts[block][part] - 1, done, den, floor, n, &mut trial);
+                    }
+                    Item::Centred { block, far: true } => {
+                        let Some(left) = accounts.iter().find(|a| a.item == Item::Left { block }) else { continue };
+                        trial.copy_from_slice(&left.squares);
+                    }
+                    _ => continue,
+                }
+                let fits = read.iter().all(|&j| held[j] - accounts[k].squares[j] + trial[j] <= limit[j]);
+                let worst = read.iter().map(|&j| held[j] - accounts[k].squares[j] + trial[j] - limit[j]).fold(f64::NEG_INFINITY, f64::max);
+                if fits && best.as_ref().is_none_or(|b| worst < b.0) {
+                    best = Some((worst, k, trial.clone()));
+                }
+            }
+            let Some((_, k, squares)) = best else { break };
+            match accounts[k].item {
+                Item::Series { block, part } => {
+                    evaluation.parts[block][part] -= 1;
+                    accounts[k].squares = squares;
+                }
+                Item::Centred { block, .. } => {
+                    evaluation.far[block] = true;
+                    accounts[k].on = false;
+                    accounts.iter_mut().filter(|a| a.item == Item::Left { block }).for_each(|a| a.on = true);
+                }
+                _ => unreachable!(),
+            }
+            (held, limit) = shares(accounts, decision);
+        }
+        // The decision's readings: ρ at its worst column, and its accounts by kind there (the books' profile).
+        let total = |j: usize| accounts.iter().filter(|a| a.on).map(|a| a.squares[j]).sum::<f64>();
+        let worst = read.iter().copied().max_by(|&a, &b| total(a).total_cmp(&total(b)));
+        evaluation.kinds = [0.0; KINDS];
+        if let Some(j) = worst {
+            for a in accounts.iter().filter(|a| a.on) {
+                evaluation.kinds[a.item.kind()] += a.squares[j];
+            }
+        }
+        evaluation.reading = worst.map_or(0.0, |j| rate(total(j).sqrt()));
+        Next::Done
     }
 }
 
@@ -4266,7 +4454,7 @@ impl Fold {
             let a = &mut node.a.data;
             a.copy_from_slice(&at.hpp);
             for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
-                let basis = &cache.far[x][cache.at_far[x].unwrap()];
+                let basis = cache.far_at(x);
                 let v = fb.vectors.len();
                 let (hf, mf) = (&mut node.hf[x], &mut node.mf[x]);
                 let p = &mut fb.pnode[..v * v];
@@ -4292,7 +4480,7 @@ impl Fold {
                 if nb.idle() {
                     continue;
                 }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let basis = cache.near_at(x);
                 let s = nb.s;
                 // The beams' lanes turn with their factors; the static lane is held (its ratio one).
                 for (sp, &(cc, jj)) in nb.splits.iter().enumerate() {
@@ -4354,7 +4542,7 @@ impl Fold {
                         explicit_copies(&nb.pnode[j].exd, &nb.pnode[j].b0d, &nb.zdnode[j], a, nd, n, &mut work);
                     }
                 }
-                if nb.copied_in {
+                if nb.copied() {
                     copies_of(&nb.copies, &nb.groups, basis, &|g, k| at.e[g][k], &nb.znode[j], true, &mut nb.tcnode[j], s, n, &mut work);
                     let tc = &nb.tcnode[j];
                     for k in 0..nb.nc {
@@ -4553,7 +4741,7 @@ impl Fold {
             // The far forms: Re⟨Ā, Σ ∂p_ab F_ab⟩ + z₀ Re⟨Ā, Σ ∂p_ab G_ab⟩ (the metric's in X̄ already).
             abc.iter_mut().zip(ab.iter()).for_each(|(a, z)| *a = z.conj());
             for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
-                let basis = &cache.far[x][cache.at_far[x].unwrap()];
+                let basis = cache.far_at(x);
                 let v = fb.vectors.len();
                 // ⟨Ā, F_ab + z₀G_ab⟩ for every pair (a, b): one product of the stacked forms on Ā*.
                 let ks = &mut fb.ks[..v * v];
@@ -4581,7 +4769,7 @@ impl Fold {
                     if nb.idle() {
                         continue;
                     }
-                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                    let basis = cache.near_at(x);
                     let s = nb.s;
                     let (z, v): (&[C64], &[C64]) = if j == 0 { (&nb.ztot, &nb.vtot) } else { (&nb.znode[j - 1], &nb.vnode[j - 1]) };
                     let (emit, stat): (&[C64], &[C64]) = if j == 0 { (&nb.emit, &nb.stat) } else { (&nb.pnode[j - 1].emit, &nb.pnode[j - 1].stat) };
@@ -4603,7 +4791,7 @@ impl Fold {
                 if nb.idle() {
                     continue;
                 }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let basis = cache.near_at(x);
                 let (s, nd, splits) = (nb.s, nb.nd, nb.lanes);
                 let sn = s * n;
                 let z: &[C64] = if j == 0 { &nb.ztot } else { &nb.znode[j - 1] };
@@ -4681,7 +4869,7 @@ impl Fold {
                 }
                 // The centred copies' rows: T̄_C = z₀ T_C (Ā + Ā†) = 2z₀ T_C Ā, onto Z and e.
                 let tcb = &mut tcbar[..nb.nc * n];
-                if nb.copied_in {
+                if nb.copied() {
                     let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
                     (0..nn).for_each(|i| wz[i] = ab[i] * (2.0 * basis.z0));
                     tcb.fill(C64::ZERO);
@@ -4723,14 +4911,14 @@ impl Fold {
                 if j == 0 {
                     for a in 0..3 {
                         fp[a] += inner(zb, &t.dztot, s, n, 3 * n, a * n).re + re(zdb, &t.ddztot[a]);
-                        if nb.copied_in {
+                        if nb.copied() {
                             fp[a] += re(tcb, &t.dtc[a]);
                         }
                     }
                     work += (3 * (s + nd) * n) as f64;
                 } else {
                     // The centred copies' rows at a node: T_C(s) of Z(s) and e(s): onto Z(s) and e(s) by `copies_back`.
-                    if nb.copied_in {
+                    if nb.copied() {
                         for g in ge.iter_mut() {
                             g.fill(C64::ZERO);
                         }
@@ -4818,7 +5006,7 @@ impl Fold {
             if nb.nc == 0 {
                 continue;
             }
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let z0g = centre_gradient(&nb.centre);
             for a in 0..3 {
                 let change = z0g[a].abs() + nb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
@@ -4826,7 +5014,7 @@ impl Fold {
             }
         }
         for (x, fb) in far.iter().enumerate() {
-            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let basis = cache.far_at(x);
             let z0g = centre_gradient(&fb.centre);
             for a in 0..3 {
                 let change = z0g[a].abs() + fb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
@@ -4893,7 +5081,7 @@ impl Fold {
             }
             // The far blocks' forms: Σ ∂p_ab (F_ab + z₀G_ab), the axes' pairs (3 × v²) on the stacked forms (v² × n²).
             for (xf, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
-                let basis = &cache.far[xf][cache.at_far[xf].unwrap()];
+                let basis = cache.far_at(xf);
                 let v = fb.vectors.len();
                 let dp = zeroed(dp, 3 * v * v);
                 for ia in 0..v {
@@ -4913,7 +5101,7 @@ impl Fold {
                 if nb.idle() {
                     continue;
                 }
-                let basis = &cache.near[xn][cache.at_near[xn].unwrap()];
+                let basis = cache.near_at(xn);
                 let (s, nd, lanes, explicit) = (nb.s, nb.nd, nb.lanes, !nb.xs.is_empty());
                 let (sn, ln, m) = (s * n, lanes * n, 3 * lanes * n);
                 let tg = &nb.tg;
@@ -5045,7 +5233,7 @@ impl Fold {
                         }
                     }
                     // The centred copies' rows: z₀(∂T_C†T_C + T_C†∂T_C), ∂T_C of ∂Z and of the position's ∂e.
-                    if nb.copied_in {
+                    if nb.copied() {
                         let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
                         let (dtc, extra) = (zeroed(dtc, nb.nc * n), zeroed(extra, nb.nc * n));
                         copies_of(&nb.copies, &nb.groups, basis, &|g, k| at.e[g][k], dza, false, dtc, s, n, &mut work);
@@ -5150,7 +5338,7 @@ impl Fold {
             work[0] += (6 * direct.len()) as f64;
         }
         for (x, fb) in far.iter_mut().enumerate().filter(|(_, fb)| !fb.omitted) {
-            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let basis = cache.far_at(x);
             let v = fb.vectors.len();
             // The pairs' gradients (3 × v²) on the stacked forms (v² × n²), one product each.
             let dp = &mut fb.dp[..3 * v * v];
@@ -5180,7 +5368,7 @@ impl Fold {
             if nb.idle() {
                 continue;
             }
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let s = nb.s;
             let nd = nb.nd;
             let tg = &mut nb.tg;
@@ -5307,7 +5495,7 @@ impl Fold {
                 if nb.idle() {
                     continue;
                 }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let basis = cache.near_at(x);
                 let s = nb.s;
                 let splits = nb.lanes;
                 let (ln, bn) = (splits * n, nb.splits.len() * n);
@@ -5315,7 +5503,7 @@ impl Fold {
                 let (t, ends) = (&basis.f.t, &basis.f.ends);
                 let at = k * s * ln;
                 let nd = nb.nd;
-                let Near { tg, zs, invs, zds, pjs, cinvs, kde, active, splits: beams, .. } = &mut *nb;
+                let Near { tg, zs, invs, zds, pjs, cinvs, kde, upto, splits: beams, .. } = &mut *nb;
                 let (zk, inv) = (&zs[at..at + s * ln], &invs[at..at + s * ln]);
                 // The sources: ∂f_l Ỹ_l − Z_l ∂c, every axis and split of a row side by side.
                 if k == 0 {
@@ -5410,7 +5598,7 @@ impl Fold {
                 // The triangular solves, every axis and split of a row at once: (c_j − w_l − T)⁻¹ the forward's.
                 {
                     let dz = &mut tg.dz;
-                    for i in (0..s).rev().filter(|&i| k == 0 || active[i]) {
+                    for i in (0..s).rev().filter(|&i| k < upto[i]) {
                         let (head, tail) = dz.split_at_mut((i + 1) * m);
                         let r = &mut rhs[i * m..(i + 1) * m];
                         for l2 in i + 1..ends[i] {
@@ -5555,6 +5743,7 @@ impl Fold {
                 }
             }
             work[5] += (2 * s * n * n3) as f64;
+            let copied = nb.copied();
             let tg = &mut nb.tg;
             for a in 0..3 {
                 for d in 0..nb.nd {
@@ -5564,8 +5753,8 @@ impl Fold {
                         crate::linalg::mul_add(false, &mut dx[p * n3 + a * n..p * n3 + a * n + n], zp, &tg.ddztot[a][d * n..d * n + n]);
                     }
                 }
-                if nb.copied_in {
-                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                if copied {
+                    let basis = cache.near_at(x);
                     let (dza, dtc, extra) = (&mut sc.zb[..s * n], &mut sc.tc1[..nb.nc * n], &mut sc.tc2[..nb.nc * n]);
                     gather(&tg.dztot, dza, s, n3, a * n, n);
                     copies_of(&nb.copies, &nb.groups, basis, &|g, k| mid.e[g][k], dza, false, dtc, s, n, &mut work[5]);
@@ -5716,7 +5905,7 @@ impl Fold {
                 if ranges.is_empty() {
                     continue;
                 }
-                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let basis = cache.near_at(x);
                 let (s, ln) = (nb.s, nb.lanes * n);
                 // At a jump's place the response's tangent ∂Z(s) = Σ_l ρ_l ∂Z_l, the middle's turned lane by lane as Z(s) is
                 // (`prototype_place`).
@@ -5771,7 +5960,7 @@ impl Fold {
                 if ranges.is_empty() {
                     continue;
                 }
-                let basis = &cache.far[x][cache.at_far[x].unwrap()];
+                let basis = cache.far_at(x);
                 let v = fb.vectors.len();
                 // Every vector's C_qR₀U_a on the right factor (rows (b, a, q)), one product a run; its u-column kept from
                 // the first pass.
@@ -5886,7 +6075,7 @@ impl Fold {
         };
         let mut out = vec![];
         for (x, nb) in ws.near.iter().enumerate() {
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let z = match position {
                 At::Middle => &nb.ztot,
                 At::Node(j) => &nb.znode[j],
@@ -5905,7 +6094,7 @@ impl Fold {
                 out.push(std::array::from_fn(|_| Mat::zeros(GROUND, n)));
                 continue;
             }
-            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let basis = cache.far_at(x);
             out.push(std::array::from_fn(|q| {
                 let mut m = Mat::zeros(GROUND, n);
                 for (ia, &(cc, k)) in fb.vectors.iter().enumerate() {
@@ -5941,7 +6130,7 @@ impl Workspace {
             if nb.s == 0 {
                 continue;
             }
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let s = nb.s;
             let mut sum = vec![0.0_f64; s * s];
             let mut size = 0.0;
@@ -5990,9 +6179,19 @@ impl Workspace {
         Mat { rows: self.n, cols: self.n, data: self.landing.n.clone() }
     }
 
-    /// The last step's readings.
-    pub(crate) fn readings(&self) -> Readings {
-        self.step.readings()
+    /// The last step's reading: a decision's ρ (rate units; `Step::reading`), a held forward's its decision's.
+    pub(crate) fn reading(&self) -> f64 {
+        self.step.reading
+    }
+
+    /// The last decision's accounts (`Fold::accounts`).
+    pub(crate) fn accounts(&self) -> &[Account] {
+        &self.accounts
+    }
+
+    /// What the last forward left out: the near blocks' excited rows not kept, the far blocks left out.
+    pub(crate) fn left_out(&self) -> (usize, usize) {
+        (self.near.iter().map(|x| x.all - x.s).sum(), self.far.iter().filter(|x| x.omitted).count())
     }
 
     /// G at the last step's middle.
@@ -6039,10 +6238,10 @@ impl Workspace {
         self.near.iter().map(|x| x.nd).sum()
     }
 
-    /// The step's discrete choices (what the force's difference holds fixed): its sweeps, and per near block its rows
-    /// going on after the first sweep and whether its copies' rows are in.
-    pub(crate) fn choices(&self) -> (usize, Vec<(Vec<bool>, bool)>) {
-        (self.step.sweeps, self.near.iter().map(|x| (x.active.clone(), x.copied_in)).collect())
+    /// The step's discrete choices (what the force's difference holds fixed): its sweeps, and per near block its rows'
+    /// sweeps.
+    pub(crate) fn choices(&self) -> (usize, Vec<Vec<usize>>) {
+        (self.step.sweeps, self.near.iter().map(|x| x.upto[..x.s].to_vec()).collect())
     }
 
     /// Per block of the fold its right response on its Q rows at the last step (the left one where `side` is
@@ -6054,7 +6253,7 @@ impl Workspace {
         let mut out: Vec<Option<Mat>> = (0..fold.blocks.len()).map(|_| None).collect();
         let mut w = 0.0;
         for (x, nb) in self.near.iter().enumerate() {
-            let basis = &cache.near[x][cache.at_near[x].unwrap()];
+            let basis = cache.near_at(x);
             let (ztot, zdtot) = if side == Side::Right || nb.idle() { (&nb.ztot, &nb.zdtot) } else { (&nb.left.ztot, &nb.left.zdtot) };
             let z = Mat { rows: nb.s, cols: n, data: ztot.clone() };
             let ts = basis.f.from(&z, &mut w);
@@ -6081,7 +6280,7 @@ impl Workspace {
                 out[fb.o] = Some(Mat::zeros(fb.m, n));
                 continue;
             }
-            let basis = &cache.far[x][cache.at_far[x].unwrap()];
+            let basis = cache.far_at(x);
             let b = &fold.blocks[fb.o];
             let rows: Vec<usize> = b.rows.iter().map(|r| if let Row::Excited(x) = *r { x } else { unreachable!() }).collect();
             let mut src = Mat::zeros(fb.m, n);
@@ -6137,8 +6336,7 @@ impl Workspace {
         for (k, nb) in self.near.iter().enumerate() {
             let rows = &mut out[nb.o];
             *rows = vec![C64::ZERO; nb.all + nb.nd + nb.nc];
-            let Some(at) = cache.at_near.get(k).copied().flatten().filter(|_| !nb.idle()) else { continue };
-            let basis = &cache.near[k][at];
+            let Some(basis) = cache.near.get(k).and_then(Option::as_deref).filter(|_| !nb.idle()) else { continue };
             // The kept rows in the block's row order (V on Zx), the exact copies' after the excited rows, the centred
             // copies' after those.
             let vzx = basis.f.from(&Mat { rows: nb.s, cols: 1, data: apply(nb.s, &nb.ztot) }, &mut w);
@@ -6146,14 +6344,13 @@ impl Workspace {
                 rows[r] = vzx[(a, 0)];
             }
             rows[nb.all..nb.all + nb.nd].copy_from_slice(&apply(nb.nd, &nb.zdtot));
-            if nb.copied_in {
+            if nb.copied() {
                 rows[nb.all + nb.nd..].copy_from_slice(&apply(nb.nc, &nb.tc));
             }
         }
         for (k, fb) in self.far.iter().enumerate() {
             out[fb.o] = vec![C64::ZERO; fb.m];
-            let Some(at) = cache.at_far.get(k).copied().flatten().filter(|_| !fb.omitted) else { continue };
-            let basis = &cache.far[k][at];
+            let Some(basis) = cache.far.get(k).and_then(Option::as_deref).filter(|_| !fb.omitted) else { continue };
             let b = &fold.blocks[fb.o];
             // B x on the block's rows (its sources' components at the middle's light), then R₀.
             let mut bx = Mat::zeros(fb.m, 1);
@@ -6236,8 +6433,7 @@ impl Workspace {
         };
         let h = &self.h;
         for (k, nb) in self.near.iter().enumerate() {
-            let Some(at) = cache.at_near.get(k).copied().flatten() else { continue };
-            let basis = &cache.near[k][at];
+            let Some(basis) = cache.near.get(k).and_then(Option::as_deref) else { continue };
             let mut dk = Mat::zeros(nb.s, 1);
             for &(_, r, dz) in d.iter().filter(|g| g.0 == nb.o) {
                 match basis.rows.iter().position(|&q| q == r) {
@@ -6264,7 +6460,7 @@ impl Workspace {
             let (right, left) = (self.responses(fold, cache, Side::Right), self.responses(fold, cache, Side::Left));
             for (k, fb) in self.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
                 let (t, tl) = (right[fb.o].as_ref().expect("a far block's response"), left[fb.o].as_ref().expect("its left response"));
-                let r0 = cache.far[k][cache.at_far[k].unwrap()].r0;
+                let r0 = cache.far_at(k).r0;
                 for r in 0..fb.m {
                     let beta = (0..n).map(|j| t[(r, j)] * y[j]).sum::<C64>() + d.iter().filter(|g| g.0 == fb.o && g.1 == r).map(|g| g.2).sum::<C64>();
                     let kappa = |j: usize| distances(h[j * n + j], &[], far_row(h[j * n + j], fb.decay, r0));

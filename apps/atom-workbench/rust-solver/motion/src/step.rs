@@ -695,7 +695,14 @@ pub trait Middle {
     /// switch drops is booked where the integrator takes it: `Midway::decided`), and the work it counted. Here it keeps ψ
     /// as it is.
     fn decide(&self, _path: &Self::Path, _psi: &[C64], _interval: f64, owed: f64, _price: &dyn Fn(&Offer) -> f64) -> Decided {
-        Decided { owed, held: None, switched: None, work: 0.0 }
+        Decided { owed, held: None, switched: None, work: 0.0, booked: [0.0; MODEL] }
+    }
+
+    /// The model's error at this middle for the state ψ (unify2 §2.7): its decision's accounts by kind (ρ², `MODEL`'s first
+    /// five; held between two decisions: the books' profile), whether its forward is unresolved, and the state's decay
+    /// rate there (i⟨ψ|G − G†|ψ⟩/‖ψ‖², 1/µs). None for a model of no fold.
+    fn books(&self, _path: &Self::Path, _psi: &[C64]) -> Option<([f64; 5], bool, f64)> {
+        None
     }
 
     /// Whether the generator exists along the path (its fold at the point: DESIGN §11.3). Here everywhere.
@@ -707,7 +714,7 @@ pub trait Middle {
     /// trajectory's state ψ (# The decision times): no decision -- the side that does not exist is beyond every share,
     /// so its rise, whatever its price (`decide`'s); nothing where no node is left. Here nothing.
     fn risen(&self, _path: &Self::Path, _psi: &[C64], owed: f64) -> Decided {
-        Decided { owed, held: None, switched: None, work: 0.0 }
+        Decided { owed, held: None, switched: None, work: 0.0, booked: [0.0; MODEL] }
     }
 }
 
@@ -731,7 +738,14 @@ pub struct Decided {
     pub held: Option<Held>,
     pub switched: Option<Switched>,
     pub work: f64,
+    /// What the cell it ends books beyond its profile (`Trajectory::model`): its end measured at the decision, the
+    /// difference from its start's taken linearly over the cell.
+    pub booked: [f64; MODEL],
 }
+
+/// The model's books' columns (`Trajectory::model`; model/fold/proto.rs `KINDS`): the series', the reuse's, the centred
+/// rows', the nodes left out, the ring's, their whole ρ, and the unresolved steps' (ρ = 1).
+pub const MODEL: usize = 7;
 
 /// A state taken onto another cluster at a decision time (DESIGN §11.1): the cluster, the state on it at the point (its
 /// norm the slow part's: the jump clock's), what the switch leaves booked -- the ring of its fast part, its transient's
@@ -957,6 +971,12 @@ pub struct Trajectory {
     /// (`Middle::decide`).
     pub dropped: f64,
     pub owed: f64,
+    /// The model's error booked along it (unify2 §2.7; `MODEL`): per kind and whole Σ ρ γ τ over its steps (ρ its
+    /// decision's reading, rate units, held over the cell: the profile; each decision books its cell's measured end
+    /// linearly, `Decided::booked`; γ the state's decay rate at the step's middle), the unresolved steps' at ρ = 1; and
+    /// their count.
+    pub model: [f64; MODEL],
+    pub unresolved_steps: usize,
     /// The model's representation of its folds for this trajectory (`Held`).
     pub held: Held,
     /// Its state's held forms where the model last evaluated it (module documentation, # The path's momentum): its next
@@ -1000,6 +1020,8 @@ impl Trajectory {
             booked: [0.0; 3],
             dropped: 0.0,
             owed: 0.0,
+            model: [0.0; MODEL],
+            unresolved_steps: 0,
             held,
             forms,
         };
@@ -2207,6 +2229,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             end.booked[1] += trace(&added);
         }
         end.booked[2] += step * trace(&scattered.diffusion);
+        // The model's error over the step (unify2 §2.7): the middle's decision's accounts at the state's decay rate there.
+        if let Some((kinds, unresolved, gamma)) = self.generator.books(&self.generator.path(kappa_m, kappa_m.map(|k| hm * k)), &from.psi) {
+            let rate = |rho2: f64| 2.0 * rho2.sqrt() + rho2;
+            for (b, k) in end.model.iter_mut().zip(kinds) {
+                *b += rate(k) * gamma * step;
+            }
+            end.model[5] += rate(kinds.iter().sum()) * gamma * step;
+            if unresolved {
+                end.model[6] += gamma * step;
+                end.unresolved_steps += 1;
+            }
+        }
         let spread = factor(&rate, size, scattered.links);
         let through = |w: &[f64; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..3).map(|c| spread[a][c] * w[c]).sum()) };
         let (push, shift) = spreading(&flow, tau, through(&brownian.increment), through(&brownian.moment));
@@ -2272,6 +2306,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let path = middle.path(kappa, velocity);
         let decided = middle.decide(&path, &state.psi, interval, state.owed, &price);
         state.owed = decided.owed;
+        state.model.iter_mut().zip(decided.booked).for_each(|(b, x)| *b += x);
         if let Some(held) = decided.held {
             state.held = held;
         }
