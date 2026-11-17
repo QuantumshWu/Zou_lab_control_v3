@@ -1746,7 +1746,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         hazard(decay, part, x.len()).max(0.0)
     });
     let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots);
+    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, start.map(|(x, _)| x));
     Ok(scale)
 }
 
@@ -2359,6 +2359,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let from = march.u;
             let launched = along.turned(&march.state.psi, from, true);
             picture.launch(from, &launched[..n]);
+            // The forms' bandwidth on the states this piece's state can hold (`spectral::Picture::launch`).
+            let bandwidth = picture.bandwidth;
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
             // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
             // the picture is moved or counted).

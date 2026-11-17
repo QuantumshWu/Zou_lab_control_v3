@@ -3680,7 +3680,7 @@ fn a_scene_s_step_error_by_the_split() {
                         along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
                         along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
                     }
-                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0);
+                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0, None);
                     if i == 0 {
                         for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
                             let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();

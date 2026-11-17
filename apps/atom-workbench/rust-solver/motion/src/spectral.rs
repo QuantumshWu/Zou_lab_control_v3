@@ -253,7 +253,11 @@
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
 //! times the step are. The step's forms are read on the state at times of a quadrature (step.rs `propagate`), and
-//! their number still follows the forms' bandwidth -- max|λ_a* − λ_b|; of a tone's forms, summed at its beat
+//! their number still follows the forms' bandwidth -- max|λ_a* − λ_b| over the states the propagated state can hold
+//! (`Picture::reach`: those its launch holds and those the generator couples them to; an excited state no light
+//! drives stays empty, and no form holds its frequencies -- until 2026-11-17 an explicit cluster's six idle excited
+//! states, a thousand rad/µs off and empty, set its bandwidth at 1010 rad/µs where its two live states' was 30); of a
+//! tone's forms, summed at its beat
 //! (step.rs `Sums`), the combined frequencies max|λ_a* − λ_b ± ν| -- a tone far from every pair's frequency asks the
 //! quadrature its combined frequency, not its beat: tilt2's loop's weak edge beats at 26 rad/µs and its pairs at
 //! 0.4–1.2 --; and where a beating class is followed the beats' spread with it, the following moving the state's
@@ -313,7 +317,8 @@
 //! - where the split takes an entry by no route of the decomposition (# The split: its following has no sum and its
 //!   hops leave more than the following would): a step far too long for the change it holds, which the strides take
 //!   bounded -- inaccurate, as any route is there; the check reads it.
-//! Without the decomposition the forms' bandwidth is its bound 2(ρ + γ), a tone's members mixing the states'
+//! Without the decomposition the forms' bandwidth is its bound 2(ρ + γ) on the reached states' block -- the strides'
+//! exponents are of that block alone, the empty states not taken --, a tone's members mixing the states'
 //! frequencies by twice its beat besides, and the strides' nodes are laid at it.
 
 use crate::linalg::{self, combine, C64, Mat, LANES};
@@ -522,6 +527,15 @@ pub struct Picture {
     /// by.
     bounds: [f64; 2],
     slopes: [f64; 3],
+    /// The states the propagated state can hold (`reach`): every state a launched state holds and every state the
+    /// generator couples them to, at any node or by any tone -- the others stay empty, and nothing of them is in the
+    /// forms. Their indices; whether each of Ĥ₀'s eigenvectors is theirs (the larger part of it on them); the generator's
+    /// coupling of two states at any node or by any tone (n²); and a work matrix on them.
+    reached: Vec<bool>,
+    within: Vec<usize>,
+    held: Vec<bool>,
+    coupled: Vec<bool>,
+    block: Mat,
     /// The bandwidth of the forms ⟨x|·|x⟩ on a state propagated by Ĥ₀ and followed (rad/µs): max|λ_a* − λ_b| -- their
     /// frequencies and decay rates -- and the followed classes' beats' spread; without the decomposition its bound
     /// 2(ρ + γ) with the beats' twice.
@@ -580,6 +594,11 @@ impl Default for Picture {
             spread: 0.0,
             bounds: [0.0; 2],
             slopes: [0.0; 3],
+            reached: Vec::new(),
+            within: Vec::new(),
+            held: Vec::new(),
+            coupled: Vec::new(),
+            block: none(),
             bandwidth: 0.0,
             work: 0.0,
             counted: Vec::new(),
@@ -857,6 +876,9 @@ impl Picture {
                 v.resize(length, C64::ZERO);
             }
             self.hopped.resize(size, false);
+            self.coupled.resize(size, false);
+            self.reached.resize(n, false);
+            self.held.resize(n, false);
             self.pivots.resize(n, 0);
             for class in &mut self.classes {
                 class.fit(n);
@@ -1017,8 +1039,9 @@ impl Picture {
     /// eigenbasis and their following (`follow`). `stops` gives the stops a step takes at a bandwidth of its forms (its
     /// quadrature's nodes, its middle and its end), `roots` the states a jump's root is expected to read besides
     /// (step.rs `pictured`): what each route is priced at -- a stride per state, or a state at a time through the
-    /// decomposition. `work` begins anew with what this counted.
-    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64) {
+    /// decomposition; `start` the state the step is launched with (none: any), whose reached states (`reach`) the
+    /// forms' bandwidth and the strides' exponents are of. `work` begins anew with what this counted.
+    pub fn prepare(&mut self, half: f64, still: bool, stops: impl Fn(f64) -> usize, roots: f64, start: Option<&[C64]>) {
         assert!(!still || self.beats.is_empty(), "exact tones on a still path");
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
@@ -1050,8 +1073,12 @@ impl Picture {
         for i in 0..n {
             self.matrix[(i, i)] -= scalar;
         }
-        let linalg::Bounds { rho, gamma, .. } = linalg::bounds(&self.matrix, &mut self.vectors);
-        self.bounds = [rho, gamma];
+        self.connect(still);
+        self.reached.fill(false);
+        self.within.clear();
+        self.reach(start);
+        self.bounded();
+        let [rho, gamma] = self.bounds;
         // The strides' price at their nodes, where their error is within the share, against the decomposition's route
         // as last counted (the changes as given: the strides take them so). A tone's members mix the states' frequencies
         // by its beat: the strides' bandwidth with the beats' twice.
@@ -1072,8 +1099,6 @@ impl Picture {
                 for (l, value) in self.lambda.iter_mut().zip(&e.values) {
                     *l = *value + scalar;
                 }
-                // |λ_a* − λ_b| is the pair's whichever way round.
-                self.bandwidth = self.lambda.iter().enumerate().flat_map(|(a, first)| self.lambda[a..].iter().map(move |second| (first.conj() - *second).abs())).fold(0.0, f64::max);
                 self.work += e.work;
                 lay(&e.vectors.data, n, &mut self.right);
                 lay(&e.inverse.data, n, &mut self.left);
@@ -1107,28 +1132,112 @@ impl Picture {
                     self.work += ((4 + 12 * self.beats.len()) * n * n * n) as f64;
                 }
             }
-            false => self.bandwidth = bound,
+            false => {}
         }
         if self.through && self.moving {
             self.follow();
-            // An entry no route of the decomposition takes (`followed`): the step by the strides, at their bandwidth.
-            if !self.routed {
-                (self.through, self.bandwidth) = (false, bound);
-            }
+            // An entry no route of the decomposition takes (`followed`): the step by the strides.
+            self.through = self.routed;
         }
+        self.spanned();
         if self.through {
             if self.moving {
                 self.slopes = self.hopping();
-                // A followed class moves the state's frequencies by its beat: the forms' bandwidth with the beats' spread;
-                // and a tone's forms are summed at its beat (step.rs `Sums`), e^{±iνu} on the state's pairs: their combined
-                // frequencies, |λ_a* − λ_b ± ν|.
-                let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
-                let lambda = &self.lambda;
-                let combined = self.beats.iter().flat_map(|tone| [tone.beat, -tone.beat]).flat_map(|beat| lambda.iter().enumerate().flat_map(move |(a, first)| lambda[a..].iter().map(move |second| (first.conj() - *second + C64::real(beat)).abs()))).fold(self.bandwidth, f64::max);
-                self.bandwidth = combined + high - low;
             }
             self.counted[n] = Some([self.work + self.price(stops(self.bandwidth)), self.state_price()]);
         }
+    }
+
+    /// The generator's coupling (`coupled`): two states coupled by Ĥ₀, by the static group's change or by a tone's member
+    /// at any node -- every matrix the propagation takes, as prepared.
+    fn connect(&mut self, still: bool) {
+        let n = self.n;
+        let Picture { coupled, base, ends, beats, .. } = self;
+        coupled.fill(false);
+        let changes = ends.iter().filter(|_| !still);
+        for m in std::iter::once(&*base).chain(changes).chain(beats.iter().flat_map(|tone| tone.members.iter().flatten())) {
+            for (k, z) in m.data.iter().enumerate() {
+                if *z != C64::ZERO && k / n != k % n {
+                    coupled[k] = true;
+                    coupled[(k % n) * n + k / n] = true;
+                }
+            }
+        }
+    }
+
+    /// Adds to the reached states (`reached`, `within`) those a launched state x holds -- every state where there is no
+    /// x -- and every state the generator couples them to (`coupled`), as far as it couples: the states the propagated
+    /// state can hold until another launch. Whether any was added.
+    fn reach(&mut self, x: Option<&[C64]>) -> bool {
+        let (n, before) = (self.n, self.within.len());
+        for a in 0..n {
+            if !self.reached[a] && x.is_none_or(|x| x[a] != C64::ZERO) {
+                self.reached[a] = true;
+                self.within.push(a);
+            }
+        }
+        let mut next = before;
+        while next < self.within.len() {
+            let a = self.within[next];
+            next += 1;
+            for b in 0..n {
+                if self.coupled[a * n + b] && !self.reached[b] {
+                    self.reached[b] = true;
+                    self.within.push(b);
+                }
+            }
+        }
+        self.within.sort_unstable();
+        self.within.len() > before
+    }
+
+    /// Ĥ₀'s bounds less its scalar part on the reached states' block (`bounds`, `linalg::bounds`: the strides' exponents
+    /// are on those states alone, `stride`).
+    fn bounded(&mut self) {
+        let m = self.within.len();
+        (self.block.rows, self.block.cols) = (m, m);
+        self.block.data.resize(m * m, C64::ZERO);
+        for (r, &i) in self.within.iter().enumerate() {
+            for (c, &j) in self.within.iter().enumerate() {
+                self.block.data[r * m + c] = self.matrix[(i, j)];
+            }
+        }
+        let linalg::Bounds { rho, gamma, .. } = linalg::bounds(&self.block, &mut self.vectors);
+        self.bounds = [rho, gamma];
+    }
+
+    /// The bandwidth of the forms ⟨x|·|x⟩ on a state the step propagates (module documentation, # What follows the
+    /// generator's own frequencies), on the reached states alone -- the others are empty, and no form holds their
+    /// frequencies: through the decomposition max|λ_a* − λ_b| over the eigenvectors that are theirs (`held`: the larger
+    /// part of an eigenvector on them; one of an eigenvalue two blocks share may mix them, at the same frequencies
+    /// either way), and where the generator moves each tone's combined frequencies |λ_a* − λ_b ± ν| (its forms are
+    /// summed at its beat, step.rs `Sums`) with the followed classes' beats' spread (a followed class moves the state's
+    /// frequencies by its beat); without the decomposition the bound of their block, 2(ρ + γ), with twice the beats (a
+    /// tone's members mix the states' frequencies by its beat).
+    fn spanned(&mut self) {
+        let beat = self.beats.iter().map(|tone| tone.beat.abs()).fold(0.0, f64::max);
+        if !self.through {
+            self.bandwidth = 2.0 * (self.bounds[0] + self.bounds[1]) + 2.0 * beat;
+            return;
+        }
+        let n = self.n;
+        let all = self.within.len() == n;
+        for a in 0..n {
+            let (on, off) = (0..n).filter(|_| !all).fold((0.0, 0.0), |(on, off), i| {
+                let p = self.basis.vectors[(i, a)].norm_sqr();
+                if self.reached[i] { (on + p, off) } else { (on, off + p) }
+            });
+            self.held[a] = on >= off;
+        }
+        let (lambda, held) = (&self.lambda, &self.held);
+        // |λ_a* − λ_b + ν| is the pair's whichever way round.
+        let pairs = move |beat: f64| (0..n).filter(move |&a| held[a]).flat_map(move |a| (a..n).filter(move |&b| held[b]).map(move |b| (lambda[a].conj() - lambda[b] + C64::real(beat)).abs()));
+        let mut bandwidth = pairs(0.0).fold(0.0, f64::max);
+        if self.moving {
+            let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
+            bandwidth = self.beats.iter().flat_map(|tone| [tone.beat, -tone.beat]).flat_map(pairs).fold(bandwidth, f64::max) + high - low;
+        }
+        self.bandwidth = bandwidth;
     }
 
     /// The Frobenius norms of D's constants, slopes and curvatures as given, summed over the static group and the tones'
@@ -1612,51 +1721,59 @@ impl Picture {
     /// their phases --, each of its two exponentials on the vector by Taylor's series to the round-off of the state --
     /// the two planned at once, at the larger of their bounds, and their scalar parts' factor taken once.
     fn stride(&mut self, state: &mut [C64], u: f64, w: f64) {
+        // On the reached states alone (`reach`): the others are empty and nothing couples them to these.
+        let m = self.within.len();
+        let size = m * m;
         let n = self.n;
-        let size = n * n;
         // Ĥ at the stride's two Gauss nodes c = ½ ∓ √3/6, the weights ¼ ± √3/6: the two exponents' matrices.
         let r = 3.0_f64.sqrt() / 6.0;
         let (u1, u2) = (u + (0.5 - r) * w, u + (0.5 + r) * w);
         let t = C64::new(0.0, -w);
         let (matrices, _) = self.product.split_at_mut(2 * size);
+        let within = &self.within;
+        let entries = move || within.iter().flat_map(move |&i| within.iter().map(move |&j| i * n + j));
         let mut bounds = [(C64::ZERO, [0.0; 2]); 2];
         for (([w1, w2], matrix), bound) in [[0.25 + r, 0.25 - r], [0.25 - r, 0.25 + r]].into_iter().zip(matrices.chunks_exact_mut(size)).zip(&mut bounds) {
             if self.moving {
                 let (first, second) = (w1 * u1 + w2 * u2, w1 * u1 * u1 + w2 * u2 * u2);
-                for (((z, c), a), b) in matrix.iter_mut().zip(&self.base.data).zip(&self.ends[0].data).zip(&self.ends[1].data) {
-                    *z = *c * (w1 + w2) + *a * first + *b * second;
+                for (z, k) in matrix.iter_mut().zip(entries()) {
+                    *z = self.base.data[k] * (w1 + w2) + self.ends[0].data[k] * first + self.ends[1].data[k] * second;
                 }
                 for tone in &self.beats {
                     for (member, beat) in tone.members.iter().zip([tone.beat, -tone.beat]) {
                         let (p1, p2) = (C64::cis(beat * u1) * w1, C64::cis(beat * u2) * w2);
                         let q = [p1 + p2, p1 * u1 + p2 * u2, p1 * (u1 * u1) + p2 * (u2 * u2)];
-                        for (((z, c), a), b) in matrix.iter_mut().zip(&member[0].data).zip(&member[1].data).zip(&member[2].data) {
-                            *z += *c * q[0] + *a * q[1] + *b * q[2];
+                        for (z, k) in matrix.iter_mut().zip(entries()) {
+                            *z += member[0].data[k] * q[0] + member[1].data[k] * q[1] + member[2].data[k] * q[2];
                         }
                     }
                 }
             } else {
-                for (z, c) in matrix.iter_mut().zip(&self.base.data) {
-                    *z = *c * (w1 + w2);
+                for (z, k) in matrix.iter_mut().zip(entries()) {
+                    *z = self.base.data[k] * (w1 + w2);
                 }
             }
-            *bound = linalg::taylor_bound(matrix, n, t);
+            *bound = linalg::taylor_bound(matrix, m, t);
         }
         // An exponent of no finite bound makes no state: the stride's state is no number, and the step that took it is
         // refused at its end (step.rs `Refused::Overflow`; its generators are numbers, `pictured`, so only an
         // overflow gets here).
-        let Some(plan) = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), UNIT_ROUNDOFF, n) else {
+        let Some(plan) = linalg::Taylor::plan(bounds[0].1[0].max(bounds[1].1[0]), bounds[0].1[1].max(bounds[1].1[1]), UNIT_ROUNDOFF, m) else {
             state.fill(C64::new(f64::NAN, f64::NAN));
             return;
         };
+        let reached = &mut self.coordinates[..m];
+        for (x, &i) in reached.iter_mut().zip(within) {
+            *x = state[i];
+        }
         for (matrix, (scalar, _)) in matrices.chunks_exact(size).zip(bounds) {
-            linalg::taylor_series(matrix, n, scalar, t, state, plan);
+            linalg::taylor_series(matrix, m, scalar, t, reached, plan);
         }
         let phase = (t * (bounds[0].0 + bounds[1].0)).exp();
-        for x in state.iter_mut() {
-            *x *= phase;
+        for (x, &i) in reached.iter().zip(within) {
+            state[i] = *x * phase;
         }
-        self.work += 2.0 * ((4 * size) as f64 + plan.work(n)) + (12 * size * self.beats.len()) as f64;
+        self.work += 2.0 * ((4 * size) as f64 + plan.work(m)) + (12 * size * self.beats.len()) as f64;
     }
 
     /// Launches the picture from the frame's state x at the time `from` of the step (from the middle; the step's
@@ -1668,6 +1785,12 @@ impl Picture {
     pub fn launch(&mut self, from: f64, x: &[C64]) {
         let (n, h) = (self.n, self.half);
         self.origin = from;
+        // A state that holds what the reached states do not (a jump's landing elsewhere): they grow with it, and the
+        // forms' bandwidth and the strides' exponents with them.
+        if self.reach(Some(x)) {
+            self.bounded();
+            self.spanned();
+        }
         if !self.through {
             for stop in self.stops.chunks_exact_mut(n) {
                 stop.copy_from_slice(x);
@@ -1840,11 +1963,11 @@ impl Picture {
     /// (`linalg::Taylor`) at the bound of its exponent, half of Ĥ₀'s bounds and D's farthest over w, to the round-off
     /// (`stride`); and per exponential its matrix (three numbers an entry) and its bound's pass.
     fn strided(&self, stops: usize) -> f64 {
-        let (n, h) = (self.n, self.half.abs());
+        let (m, h) = (self.within.len(), self.half.abs());
         let w = 2.0 * h / stops as f64;
         let bound = 0.5 * (self.bounds[0] + self.bounds[1]) * w + self.moved(h - w, w);
         // A bound that is no number prices no route.
-        linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, UNIT_ROUNDOFF, n).map_or(f64::INFINITY, |plan| stops as f64 * 2.0 * ((4 * n * n) as f64 + plan.work(n)))
+        linalg::Taylor::plan(bound, 0.5 * self.bounds[1] * w, UNIT_ROUNDOFF, m).map_or(f64::INFINITY, |plan| stops as f64 * 2.0 * ((4 * m * m) as f64 + plan.work(m)))
     }
 }
 
@@ -1910,7 +2033,7 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = base.clone();
         picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
-        picture.prepare(half, !moving, |_| 2, 0.0);
+        picture.prepare(half, !moving, |_| 2, 0.0, None);
         picture
     }
 
@@ -1963,7 +2086,7 @@ pub(crate) mod tests {
             picture.base = base.clone();
             picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
             let stops = |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2;
-            picture.prepare(half, false, stops, 0.0);
+            picture.prepare(half, false, stops, 0.0, None);
             assert!(!picture.through, "half {half}: the strides taken");
             let count = stops(picture.bandwidth);
             picture.launch(-half, &start);
@@ -2434,7 +2557,7 @@ pub(crate) mod tests {
         picture.counted[n] = Some([f64::MAX, 0.0]);
         picture.base = base.clone();
         picture.ends = [-half, half].map(|u| Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * u + b[(i, j)] * (u * u)));
-        picture.prepare(half, false, |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2, 0.0);
+        picture.prepare(half, false, |bandwidth: f64| ((bandwidth * 2.0 * half).ceil() as usize).max(2) + 2, 0.0, None);
         assert!(!picture.through, "a folded cluster's strides");
         found.push(("strides of a folded cluster", static_outputs(&mut picture)));
         let gamma = 38.117;
@@ -2492,7 +2615,7 @@ pub(crate) mod tests {
             |m, _, plus, minus| (*plus, *minus) = (tones[m].plus.clone(), tones[m].minus.clone()),
         );
         assert_eq!(picture.beats.len(), tones.len(), "every candidate a tone");
-        picture.prepare(half, false, |_| 2, 0.0);
+        picture.prepare(half, false, |_| 2, 0.0, None);
         picture
     }
 
@@ -2509,7 +2632,7 @@ pub(crate) mod tests {
             let partners = [-half, 0.0, half].map(|_| t.minus.clone());
             picture.beats.push(Beat { beat: t.beat, key: (0..tones.len()).map(|j| i64::from(j == m)).collect(), candidate: m, members: [members, partners] });
         }
-        picture.prepare(half, false, |_| 2, 0.0);
+        picture.prepare(half, false, |_| 2, 0.0, None);
         picture
     }
 
@@ -2521,7 +2644,7 @@ pub(crate) mod tests {
         picture.fit(n);
         picture.base = toned(group, tones, 0.0);
         picture.ends = [-half, half].map(|u| toned(group, tones, u));
-        picture.prepare(half, false, |_| 2, 0.0);
+        picture.prepare(half, false, |_| 2, 0.0, None);
         picture
     }
 
@@ -2670,7 +2793,7 @@ pub(crate) mod tests {
                     },
                 );
                 assert_eq!(picture.beats.len(), 1, "the candidate a tone");
-                picture.prepare(half, false, |_| 2, 0.0);
+                picture.prepare(half, false, |_| 2, 0.0, None);
                 picture
             };
             let (mut nodes, mut held) = (picture_of(true), picture_of(false));
@@ -2679,7 +2802,7 @@ pub(crate) mod tests {
             static_group.fit(n);
             static_group.base = alone(0.0);
             static_group.ends = [-half, half].map(alone);
-            static_group.prepare(half, false, |_| 2, 0.0);
+            static_group.prepare(half, false, |_| 2, 0.0, None);
             let within = beating_remainders(&nodes, 1);
             let times = [-0.3 * half, 0.5 * half, half];
             let (mut e_nodes, mut e_held, mut e_static) = (0.0_f64, 0.0_f64, 0.0_f64);
@@ -2763,7 +2886,7 @@ pub(crate) mod tests {
                 picture.fit(n);
                 picture.base = shifted(0.0);
                 picture.ends = [-h, h].map(shifted);
-                picture.prepare(h, false, |_| 2, 0.0);
+                picture.prepare(h, false, |_| 2, 0.0, None);
                 picture
             };
             let through = |picture: &mut Picture, x: &[C64]| {
