@@ -302,7 +302,13 @@
 //! `an_explicit_two_level_atom_s_survival_falls_to_its_flow_at_every_step`) was within 10⁻⁷ of its flow at τ = 0.2 to
 //! 0.025 µs, all on the decomposition, and 4·10⁻³ and 7·10⁻³ off ln N = −76.6 at 0.0125 and 0.00625, where the strides
 //! became the cheaper route on 265 of 320 steps and on every step; on the strides alone 10⁻⁴ to 9·10⁻³ at every
-//! step; summed to round-off 10⁻⁸ to 10⁻¹⁰.) A step takes the strides
+//! step; summed to round-off 10⁻⁸ to 10⁻¹⁰. Truncated instead at half of the stride's own Magnus remainder -- w⁵ times
+//! its coefficient of the norms on the reached states' block, a truncation of the method's order -- the survival above
+//! was the round-off's to three digits, but the fourth-order step test (step/tests.rs, without a decay at Δτ = 1 over
+//! 0.0625 µs) fell 8.6 between four and eight steps, not 16: the strides, cheaper so, took the coarser level, its error
+//! 4.1·10⁻⁷ for the decomposition's 1.3·10⁻⁶ -- the two routes' remainders, where the levels should differ by the
+//! order alone. On the whole matrix's norms, the idle states' spread in them, it was 3·10⁻⁸ off at 0.0125 µs after
+//! 5·10⁻⁹ at 0.025. So each series is summed to round-off (tau.status.md).) A step takes the strides
 //! - where they cost less than the decomposition's route as it was last counted on this picture for as many states
 //!   (its preparation and its states at its stops: `Picture::counted`), each with the states a jump's root is expected
 //!   to read -- a stride each, against a state at a time through the decomposition (step.rs `pictured`) --, and the
