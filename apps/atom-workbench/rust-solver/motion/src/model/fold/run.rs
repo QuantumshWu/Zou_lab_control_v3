@@ -865,6 +865,12 @@ struct Inner {
     made: f64,
     counted: f64,
     reading: f64,
+    /// The last forward's accounts by kind (ρ²; proto.rs `Step::kinds`), its cell's ends (`Step::started`, `Step::ended`)
+    /// and whether it is unresolved.
+    kinds: [f64; 5],
+    started: [f64; 5],
+    ended: [f64; 5],
+    unresolved: bool,
 }
 
 /// A path through a middle: its momentum and velocity.
@@ -898,7 +904,7 @@ impl Middle<'_> {
                 *eval = (**committed).clone();
                 let made = fold.prototype_within(self.r, path.kappa, energy, eval, ws, decide).map(|step| {
                     generator.data.copy_from_slice(&step.generator.data);
-                    step.reading
+                    (step.reading, step.kinds, step.started, step.ended, step.unresolved)
                 });
                 (made, ws.spent() * crate::decide::COMPLEX, eval.made > committed.made)
             };
@@ -915,8 +921,8 @@ impl Middle<'_> {
             inner.decided |= kept;
             inner.exists = made.is_some();
             (inner.made, inner.counted) = (inner.made + spent, spent);
-            if let Some(reading) = made {
-                inner.reading = reading;
+            if let Some((reading, kinds, started, ended, unresolved)) = made {
+                (inner.reading, inner.kinds, inner.started, inner.ended, inner.unresolved) = (reading, kinds, started, ended, unresolved);
             }
             (inner.current, inner.nodes, inner.tangent) = (Some((path.kappa, path.velocity)), None, false);
         }
@@ -1395,6 +1401,15 @@ impl crate::step::Middle for Middle<'_> {
         }
     }
 
+    fn books(&self, path: &Path, psi: &[C64]) -> Option<([f64; 5], bool, f64)> {
+        let inner = self.made(path, None, false);
+        if !inner.exists || self.run.clusters.sets.get(self.set).fold.blocks.is_empty() {
+            return None;
+        }
+        let gamma = -2.0 * psi.iter().zip(inner.generator.apply(psi)).map(|(a, b)| a.conj() * b).sum::<C64>().im / crate::linalg::norm_sqr(psi);
+        Some((inner.kinds, inner.unresolved, gamma))
+    }
+
     fn held(&self) -> Option<Held> {
         if !self.inner.borrow().decided {
             return None;
@@ -1426,7 +1441,7 @@ impl crate::step::Middle for Middle<'_> {
     /// only where the other side reads within the share and the balance, the fall's ring E and its fold's ργΔt are within
     /// the share's γΔt. Nothing where this middle does not decide, holds no light, or its fold does not exist here.
     fn decide(&self, path: &Path, psi: &[C64], interval: f64, owed: f64, price: &dyn Fn(&Offer) -> f64) -> Decided {
-        let mut out = Decided { owed, held: None, switched: None, work: 0.0 };
+        let mut out = Decided { owed, held: None, switched: None, work: 0.0, booked: [0.0; crate::step::MODEL] };
         let (run, set) = (self.run, self.run.clusters.sets.get(self.set));
         if !self.decide || set.fold.blocks.is_empty() || !self.made(path, None, false).exists {
             return out;
@@ -1439,6 +1454,15 @@ impl crate::step::Middle for Middle<'_> {
             (inner.ws.as_ref().expect("a workspace").normal().apply(psi), rate(&inner.generator, psi), inner.reading, inner.made)
         };
         out.owed = (owed - (share - reading.min(share)) * gamma * interval).max(0.0);
+        // The cell this decision ends (unify2 §2.7): its end measured, the difference from its start's booked linearly.
+        {
+            let (started, ended) = { let inner = self.inner.borrow(); (inner.started, inner.ended) };
+            let rate = |rho2: f64| 2.0 * rho2.sqrt() + rho2;
+            for k in 0..5 {
+                out.booked[k] = 0.5 * (rate(ended[k]) - rate(started[k])) * gamma * interval;
+            }
+            out.booked[5] = 0.5 * (rate(ended.iter().sum()) - rate(started.iter().sum())) * gamma * interval;
+        }
         let here = price(&set.offer(made));
         let restart = |o: &Offer| o.made + crate::decide::COMPLEX * o.costs[2];
         let offers = self.offers(&x);
@@ -1539,6 +1563,10 @@ impl crate::step::Dynamics for Onefold {
                 made: 0.0,
                 counted: 0.0,
                 reading: 0.0,
+                kinds: [0.0; 5],
+                started: [0.0; 5],
+                ended: [0.0; 5],
+                unresolved: false,
             }),
         }
     }

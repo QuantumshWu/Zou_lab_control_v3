@@ -762,6 +762,31 @@ fn ratio_of(nb: &Near, np: usize, part: usize, k: usize, den: &[f64], n: usize) 
     if rounded(a, den.iter().sum(), n, nb.s, nb.lanes) || b == 0.0 { 0.0 } else { (a / b).sqrt() }
 }
 
+/// The accounts held (`Account::on`) by kind at their worst column read (ρ², `KINDS`).
+fn worst_kinds(accounts: &[Account], den: &[f64], n: usize) -> [f64; KINDS] {
+    let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
+    let total = |j: usize| accounts.iter().filter(|a| a.on).map(|a| a.squares[j]).sum::<f64>();
+    let mut kinds = [0.0; KINDS];
+    if let Some(j) = (0..n).filter(|&j| den[j] > floor).max_by(|&a, &b| total(a).total_cmp(&total(b))) {
+        for a in accounts.iter().filter(|a| a.on) {
+            kinds[a.item.kind()] += a.squares[j];
+        }
+    }
+    kinds
+}
+
+/// The largest of every part's last ratio, its rows swept `done` times (`ratio_of`).
+fn last_ratio(near: &[Near], cache: &Cache, den: &[f64], done: usize, n: usize) -> f64 {
+    let mut last = 0.0_f64;
+    for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
+        let np = series_parts(nb, cache.near_at(x));
+        for part in 0..np {
+            last = last.max(ratio_of(nb, np, part, done - 1, den, n));
+        }
+    }
+    last
+}
+
 /// A held forward's largest ratio (unify2 §2.7): of every part of two sweeps or more, its last two changes' (`ratio_of`); at
 /// or above one the forward is unresolved there (booked at ρ = 1, counted).
 fn held_ratio(near: &[Near], cache: &Cache, evaluation: &Evaluation, whole: &[f64], n: usize) -> f64 {
@@ -790,6 +815,11 @@ pub(crate) struct Step {
     pub(crate) sweeps: usize,
     pub(crate) reading: f64,
     pub(crate) kinds: [f64; KINDS],
+    /// A decision's books' ends (unify2 §2.7): the evaluation it found's accounts by kind at the cell's start (its decision's,
+    /// `kinds` there) and here, before it chose (ρ² at its worst column) -- the cell's profile, its end measured; a held
+    /// forward's both its decision's.
+    pub(crate) started: [f64; KINDS],
+    pub(crate) ended: [f64; KINDS],
     pub(crate) unresolved: bool,
     pub(crate) ratio: f64,
     pub(crate) made: usize,
@@ -2674,6 +2704,8 @@ impl Fold {
                 sweeps: 0,
                 reading: 0.0,
                 kinds: [0.0; KINDS],
+                started: [0.0; KINDS],
+                ended: [0.0; KINDS],
                 unresolved: false,
                 ratio: 0.0,
                 made: 0,
@@ -3493,6 +3525,7 @@ impl Fold {
             ws.decision.clear();
         }
         let mut evaluation = std::mem::take(&mut cache.evaluation);
+        let (started, mut ended) = (evaluation.kinds, None);
         let mut rounds = 0;
         let (ratio, swept) = 'rounds: loop {
             rounds += 1;
@@ -3520,10 +3553,11 @@ impl Fold {
                 }
                 // The decision's accounts and the evaluation they choose (# The decisions).
                 self.accounts(cache, ws, &evaluation, energy, done, &mut work[READING]);
+                ended.get_or_insert_with(|| worst_kinds(&ws.accounts, &ws.den, n));
                 let next = self.allocate(cache, ws, &mut evaluation, energy, done, &mut work[READING]);
                 lap(READING, &mut clock, &mut tick);
                 match next {
-                    Next::Done => break 'rounds (0.0, done),
+                    Next::Done => break 'rounds (last_ratio(&ws.near, cache, &ws.den, done, n), done),
                     Next::Sweeps(more) => target = more,
                     Next::Again => continue 'rounds,
                     Next::Nowhere => return None,
@@ -3616,8 +3650,9 @@ impl Fold {
         lap(NORMAL, &mut clock, &mut tick);
         step.sweeps = swept;
         step.ratio = ratio;
-        step.unresolved = ratio >= 1.0;
+        step.unresolved = !decide && ratio >= 1.0;
         (step.reading, step.kinds) = (evaluation.reading, evaluation.kinds);
+        (step.started, step.ended) = (started, ended.unwrap_or(evaluation.kinds));
         step.made = cache.made - made_before;
         step.grown = cache.grown - grown_before;
         step.rounds = rounds;
@@ -4033,14 +4068,7 @@ impl Fold {
         let Workspace { near, mid, h, den, scratch, per, accounts, decision, tm, .. } = &mut *ws;
         let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
         let read: Vec<usize> = (0..n).filter(|&j| den[j] > floor).collect();
-        // The last ratio of every part, in every column read.
-        let mut last = 0.0_f64;
-        for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
-            let np = series_parts(nb, cache.near_at(x));
-            for part in 0..np {
-                last = last.max(ratio_of(nb, np, part, done - 1, den, n));
-            }
-        }
+        let last = last_ratio(near, cache, den, done, n);
         if last >= 1.0 {
             return if done < 3 { Next::Sweeps(3) } else { Next::Nowhere };
         }

@@ -3553,7 +3553,7 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
     let taus = [0.2, 0.1, 0.05, 0.025];
     // A trajectory at the speed `speed` (its scale) and the step τ: the survival ln‖ψ‖² at the end, its switches' times
     // and whether each was a decision time, and the rises its held middles asked for.
-    let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32) {
+    let path = |i: u64, speed: f64, tau: f64| -> (f64, Vec<(f64, bool)>, u32, usize, f64) {
         let mut t = Trajectory::new(&run, 0, [0.0, 0.0, 0.05 * i as f64], [0.0, 0.0, speed * (0.1 + 0.02 * i as f64) / hm], 7, i);
         t.threshold = 0.0;
         let (per, steps) = ((cell / tau).round() as usize, (end / tau).round() as usize);
@@ -3569,17 +3569,20 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
                 switches.push((t.time, decision.is_some() || middle.rises() > 0));
             }
         }
-        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises)
+        (crate::linalg::norm_sqr(&t.psi).ln(), switches, rises, t.unresolved_steps, t.model[5])
     };
     for speed in [0.3, 1.0] {
         let (mut differences, mut same, mut apart, mut forced) = (vec![0.0; taus.len() - 1], 0, 0, 0u32);
+        let (mut unresolved, mut booked) = (vec![0usize; taus.len()], vec![0.0; taus.len()]);
         for i in 0..8 {
             let levels: Vec<_> = taus.iter().map(|&tau| path(i, speed, tau)).collect();
-            for (tau, level) in taus.iter().zip(&levels) {
+            for (k, (tau, level)) in taus.iter().zip(&levels).enumerate() {
                 assert!(level.1.iter().all(|x| x.1), "speed {speed}, trajectory {i} at τ {tau}: a switch off the decision times without a rise asked for: {:?}", level.1);
                 forced += level.2;
+                unresolved[k] += level.3;
+                booked[k] += level.4 / 8.0;
             }
-            let times = |l: &(f64, Vec<(f64, bool)>, u32)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
+            let times = |l: &(f64, Vec<(f64, bool)>, u32, usize, f64)| -> Vec<i64> { l.1.iter().map(|x| (x.0 / cell * 1e6).round() as i64).collect() };
             for pair in levels.windows(2) {
                 if times(&pair[0]) == times(&pair[1]) {
                     same += 1;
@@ -3592,7 +3595,7 @@ fn a_two_level_atom_crossing_a_standing_wave_switches_at_its_coarsest_level_s_de
             }
         }
         let orders: Vec<f64> = differences.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
-        println!("speed {speed}: the survival's differences between successive levels {:?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}", differences.iter().map(|d| format!("{d:.2e}")).collect::<Vec<_>>());
+        println!("speed {speed}: the survival's differences between successive levels {:?}, orders {orders:.2?}; levels' switch times alike {same}, apart {apart}; rises a held middle asked for {forced}; unresolved steps per level {unresolved:?}, the model's error booked (ρ γ t, a trajectory's mean) {:?}", differences.iter().map(|d| format!("{d:.2e}")).collect::<Vec<_>>(), booked.iter().map(|b| format!("{b:.2e}")).collect::<Vec<_>>());
         // At either speed (unify2 U1): a held forward holds -- where its series reads a ratio of one between two decisions
         // it is unresolved there, booked, not risen --, so every level switches at the same decision times.
         assert_eq!((apart, forced), (0, 0), "every level switches at the same decision times, none forced between");
