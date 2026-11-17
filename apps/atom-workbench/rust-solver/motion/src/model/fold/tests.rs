@@ -1600,11 +1600,47 @@ fn a_step_s_work_at_a_scene() {
     }
 }
 
-/// The prototype's choice (proto.rs): the run's (`Choice::running`).
+/// The prototype's choice (proto.rs) for the tests: the explicit nodes the run held fixed at the focus before step3c
+/// (`focus_choice`), so that the tests keep reaching the explicit sets they reached.
 fn proto_choice(req: &Request, name: &str) -> Choice {
-    let choice = Choice::running(req).unwrap();
+    let choice = focus_choice(req);
     println!("{name}: the rule's ground sets {:?}", choice.sets);
     choice
+}
+
+/// A fixture (the run's choice before BRIEF_STEP3C item 1, the run's own now made per point, run.rs # The nodes risen and
+/// fallen): the base choice (`Choice::base`) with, to the fixed point, the excited nodes whose reading at the focus is
+/// beyond the share kept in P, and where the fold does not exist there the one that reads the most.
+fn focus_choice(request: &Request) -> Choice {
+    let share = crate::model::elim::share();
+    let mut explicit: Vec<(usize, Part, usize)> = vec![];
+    loop {
+        let choice = Choice::base(request, explicit.clone()).unwrap();
+        let mut kept = vec![];
+        for set in Fold::sets(request, &choice).unwrap() {
+            let fold = Fold::new(request, &choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let Some(f) = fold.read_at([0.0; 3]) else { continue };
+            let exists = f.excitation < 1.0 && f.ratio < 1.0;
+            let mut nodes: Vec<(usize, usize, f64)> = f.readings.iter().filter_map(|r| if let Node::Excited(level) = r.node { Some((r.block, level, r.total())) } else { None }).collect();
+            nodes.sort_by(|a, b| b.2.total_cmp(&a.2));
+            let beyond: Vec<(usize, usize, f64)> = nodes.iter().copied().filter(|x| x.2 > share).collect();
+            let chosen = if !beyond.is_empty() { beyond } else if !exists { nodes.into_iter().take(1).collect() } else { vec![] };
+            for (o, level, _) in chosen {
+                let Some(&(p, c)) = fold.blocks[o].sources.first() else { continue };
+                let key = (level, fold.components[c].part, fold.ground[p]);
+                if !explicit.contains(&key) && !kept.contains(&key) {
+                    kept.push(key);
+                }
+            }
+        }
+        if kept.is_empty() {
+            return choice;
+        }
+        explicit.extend(kept);
+    }
 }
 
 /// The rate's inverse: the relative amplitude error ρ of a reading r = 2ρ + ρ².
@@ -2300,9 +2336,10 @@ fn the_gradient_s_matrices_are_the_force_s_forms() {
     assert!(checked >= 8 && toned >= 1 && explicit >= 2, "{checked} points checked, {toned} with tones, {explicit} explicit");
 }
 
-/// Steps of R4_LIN_4's run on each of its sets, moving (BRIEF_STEP3 item 3): its F = 1 set holds explicit states, and its
-/// steps make the optical sector's K of the gradient's matrices with their slope along the path -- not refused
-/// (`Refused::Optical`), the covariance booked and a number; its F = 2 set holds none and books none.
+/// Steps of R4_LIN_4's run from each of its ground sets, moving (BRIEF_STEP3 item 3): a step on a cluster that holds
+/// explicit states (its F = 1 set's, its node risen where its fold does not exist: BRIEF_STEP3C item 1) makes the optical
+/// sector's K of the gradient's matrices with their slope along the path -- not refused (`Refused::Optical`), the
+/// covariance booked and a number; a step on one that holds none books none.
 #[test]
 fn an_explicit_set_s_step_makes_its_optical_sector() {
     struct Anywhere;
@@ -2317,25 +2354,28 @@ fn an_explicit_set_s_step_makes_its_optical_sector() {
     let mut scratch = crate::step::Scratch::default();
     let mut explicit = 0;
     for set in 0..2 {
-        let cluster = crate::step::Dynamics::cluster(&run, set).clone();
-        let holds = cluster.states.len() > cluster.ground;
-        let mut t = crate::step::Trajectory::new(&run, cluster.states[0], [0.05, -0.03, 0.02], [speed, 0.4 * speed, -0.7 * speed], 7, set as u64);
-        // The steps that stay in the set: each books its covariance where the set holds explicit states, none where not.
+        let first = crate::step::Dynamics::cluster(&run, set).states[0];
+        let mut t = crate::step::Trajectory::new(&run, first, [0.05, -0.03, 0.02], [speed, 0.4 * speed, -0.7 * speed], 7, set as u64);
+        // The steps that stay on their cluster with no jump: each books its covariance where the cluster holds explicit
+        // states, none where not.
         let mut stayed = 0;
         for _ in 0..8 {
-            let (before, start) = (t.booked, t.cluster);
+            let (before, start, jumps) = (t.booked, t.cluster, t.jumps);
             let middle = crate::step::Midway::new(&run, &t, 0.126).expect("the reference's fixed point");
             t = middle.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).expect("a step, its optical sector made").end;
             assert!(t.booked[..2].iter().all(|x| x.is_finite()) && t.pending.iter().flatten().all(|x| x.is_finite()), "the optical sector's covariance a number");
-            if start == set && t.cluster == set && t.jumps == 0 {
-                assert_eq!(t.booked[1] != before[1], holds, "the optical sector where the set holds explicit states");
+            let cluster = crate::step::Dynamics::cluster(&run, start);
+            let holds = cluster.states.len() > cluster.ground;
+            if t.cluster == start && t.jumps == jumps {
+                assert_eq!(t.booked[1] != before[1], holds, "the optical sector where the cluster holds explicit states");
                 stayed += 1;
+                explicit += usize::from(holds);
             }
         }
-        println!("set {set} ({} states, {} ground): {stayed} steps in it before its first jump; booked over 8 steps ε_Q tr C {:.3e}, tr C {:.3e}", cluster.states.len(), cluster.ground, t.booked[0], t.booked[1]);
-        explicit += usize::from(holds && stayed > 0);
+        let cluster = crate::step::Dynamics::cluster(&run, t.cluster);
+        println!("from set {set}: {stayed} steps on their cluster with no jump; at the end on {} states ({} ground); booked over 8 steps ε_Q tr C {:.3e}, tr C {:.3e}", cluster.states.len(), cluster.ground, t.booked[0], t.booked[1]);
     }
-    assert!(explicit >= 1, "R4_LIN_4's F = 1 set explicit, its trajectory there");
+    assert!(explicit >= 1, "a step on R4_LIN_4's F = 1 set with its node risen");
 }
 
 /// The prototype's photons (proto.rs `Fold::prototype_photons`, BRIEF_PROTO2 item 2) of a random state at the step's middle:
@@ -2695,14 +2735,21 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
     let steps = (time / tau).round() as usize;
     let mut shares = vec![];
     let mut scratch = crate::step::Scratch::default();
+    let (mut explicit, mut switches, mut dropped) = (0, 0, 0.0);
     for i in 0..count {
         let mut t = Trajectory::new(&run, 0, at, [0.0; 3], 11, i);
         for _ in 0..steps {
+            let before = t.cluster;
             t = Midway::new(&run, &t, tau).unwrap().attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap().end;
+            let c = run.cluster(t.cluster);
+            explicit += usize::from(c.states.len() > c.ground);
+            switches += usize::from(t.cluster != before && run.cluster(before).ground == c.ground);
         }
+        dropped += t.dropped;
         let rows = run.readout(t.cluster, &t.point(), &t.psi, &t.held);
         shares.push(rows[0] / (rows[0] + rows[4]));
     }
+    println!("the run's steps' ends: {explicit} of {} explicit, {switches} switches, the switches' δp {dropped:.3e} over the trajectories", count as usize * steps);
     let mean = shares.iter().sum::<f64>() / count as f64;
     let error = (shares.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (count * (count - 1)) as f64).sqrt();
     (mean, error, finer, (exact - finer).abs(), be.norm_sqr() / (ae.norm_sqr() + be.norm_sqr()))
@@ -2748,8 +2795,9 @@ fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
 /// nothing), an excited state e at 1000 rad/µs in its frame (Γ = 38 rad/µs: 1 to |1⟩, the rest to |2⟩), A on |1⟩ → e
 /// (10 rad/µs) on its resonance, and a second excited level e′ (D1's F′ = 1, e being D2's) 10 rad/µs above e decaying
 /// to |1⟩ at 25 rad/µs on e's axis, driven from |1⟩ by a laser C (10 rad/µs) on its resonance. Both excited levels in P,
-/// each at its offset (a tiered choice), the offsets 10 rad/µs apart; D_ee′ = 5 rad/µs, so P holds a tone between them
-/// (its mixing |D_ee′|/2 over their 10 rad/µs, 0.25, beyond the share):
+/// each at its offset (a tiered choice), the offsets 100 rad/µs apart; D_ee′ = 10 rad/µs, so P holds a tone between them
+/// (its mixing |D_ee′|/2 over their 100 rad/µs, 0.05, beyond the share; at 10 rad/µs apart the copies of the ground state
+/// the two drives make at ±10 rad/µs mix at 1 and the fold does not exist -- its series' ratio 58 --, BRIEF_STEP3C item 1):
 /// their blocks are one coherence group. At the step's three positions and at times across the beat, for random states
 /// of the set: the photons' rate at the jump's place (`Middle::emitted`'s classes, the light turned there) is the hazard
 /// ψ†i(G − G†)ψ/ψ†ψ of the generator at that node (`Middle::generator`) to the rounding: the decay is the jumps' product at
@@ -2761,12 +2809,12 @@ fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
     let (gamma, ee, e2) = (38.0, 1000.0, 100.0);
     let rays = [
         Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(10.0))] },
-        Ray { axis: 1, nu: ee + 10.0, direction: [1.0, 0.0, 0.0], couplings: vec![(0, 0, C64::real(10.0))] },
+        Ray { axis: 1, nu: ee + 100.0, direction: [1.0, 0.0, 0.0], couplings: vec![(0, 0, C64::real(10.0))] },
     ];
-    let mut req = system(&[(0, 0.0), (4, e2)], &[(17, ee, gamma, 0), (0, ee + 10.0, gamma, 0)], &rays, 2, true);
+    let mut req = system(&[(0, 0.0), (4, e2)], &[(17, ee, gamma, 0), (0, ee + 100.0, gamma, 0)], &rays, 2, true);
     req.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
-    req.emission[0][(0, GROUND + 17)] = C64::real(1.0);
-    req.emission[1][(4, GROUND + 17)] = C64::real((gamma - 1.0).sqrt());
+    req.emission[0][(0, GROUND + 17)] = C64::real(2.0);
+    req.emission[1][(4, GROUND + 17)] = C64::real((gamma - 4.0).sqrt());
     req.emission[0][(0, GROUND)] = C64::real(25.0_f64.sqrt());
     req.validate().unwrap();
     let mut p = [0.0; GROUND];
@@ -2847,7 +2895,7 @@ fn the_readout_is_the_fold_s_populations_and_they_sum_to_the_norm() {
     let mut explicit_checked = 0;
     for name in [pgc, "R4_LIN_4".to_string()] {
         let req = crate::model::testing::scene(&name);
-        let choice = Choice::running(&req).unwrap();
+        let choice = focus_choice(&req);
         let mut p = [0.0; GROUND];
         p[0] = 1.0;
         let run = super::run::Onefold::of(&req, &choice, p).unwrap();
@@ -2927,3 +2975,195 @@ fn a_two_level_atom_s_readout_is_its_slow_mode_s_population() {
         assert!((rows[GROUND + 17] - slow).abs() <= crate::model::elim::share() * slow, "the readout {} against the slow mode's {slow}", rows[GROUND + 17]);
     }
 }
+
+
+/// A two-level atom's request at rest (heavy): its excited state at 1000 rad/µs, its laser at the detuning `delta` with the
+/// saturation s = 2Ω²/Γ² (the coupling Ω/2 = (Γ/2)√(s/2)); its idle excited states decaying (`idle_decay`).
+fn two_level(delta: f64, s: f64) -> Request {
+    let (ee, g) = (1000.0, 0.5 * GAMMA * (s / 2.0_f64).sqrt());
+    let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &[Ray { axis: 0, nu: ee + delta, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(g))] }], 1, true);
+    idle_decay(&mut req, GAMMA);
+    req.validate().unwrap();
+    req
+}
+
+/// The idle excited states of a synthetic request made to decay at Γ, as every request the app makes has them (an
+/// explicit level's optical sector relaxes in every direction, step.rs # The optical sector's noise): each by a channel --
+/// a ground state and a polarization -- no other state uses while one is free, so that no idle state shares a channel
+/// with a live one (BRIEF_STEP3C item 1: through one shared channel the idle states made one mode decaying at their sum
+/// and the rest none, and a fold's landing read that mode).
+fn idle_decay(req: &mut Request, gamma: f64) {
+    let used = |req: &Request, b: usize, q: usize| (0..EXCITED).any(|e| req.emission[q][(b, GROUND + e)] != C64::ZERO);
+    let idle: Vec<usize> = (0..EXCITED).filter(|&e| (0..3).all(|q| (0..GROUND).all(|b| req.emission[q][(b, GROUND + e)] == C64::ZERO))).collect();
+    let mut free: Vec<(usize, usize)> = (0..GROUND).rev().flat_map(|b| (0..3).map(move |q| (b, q))).filter(|&(b, q)| !used(req, b, q)).collect();
+    let last = *free.last().expect("a free channel");
+    for e in idle {
+        let (b, q) = free.pop().unwrap_or(last);
+        req.emission[q][(b, GROUND + e)] = C64::real(gamma.sqrt());
+    }
+}
+
+/// A run's two-level clusters (BRIEF_STEP3C item 1): the ground set's with nothing explicit and with its excited node risen.
+fn two_level_clusters(run: &run::Onefold, req: &Request) -> (usize, usize) {
+    let fold = Fold::new(req, &Choice::base(req, vec![]).unwrap(), 0).unwrap();
+    let key = Choice::candidates(&fold)[0].0;
+    (0, run.cluster_with(0, vec![key]).expect("the explicit cluster"))
+}
+
+/// A jump's landing is a fall with no explicit amplitude (BRIEF_STEP3C item 1; DESIGN §11.1, run.rs # The nodes risen and
+/// fallen: one formula, `Workspace::taken`): a two-level atom with the light on, the state (f, 0) of its explicit cluster --
+/// nothing in Q there, S = 1 -- taken onto its folded cluster at the same middle is S⁻¹f, the landing of the bare state f
+/// there, to the rounding; what the fall drops is the landing's norm's complement, 1 − ‖S⁻¹f‖² (f a unit vector).
+#[test]
+fn a_two_level_atom_s_landing_is_its_fall_with_no_excited_amplitude() {
+    use crate::step::{Dynamics, Middle as _};
+    for (delta, s) in [(-GAMMA, 0.1), (-GAMMA, 1.0), (-0.5 * GAMMA, 10.0)] {
+        let req = two_level(delta, s);
+        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let (folded, explicit) = two_level_clusters(&run, &req);
+        let (r, t) = ([0.1, 0.0, 0.0], 0.3);
+        let (low, high) = (run.middle(folded, r, t, &crate::step::Held::default(), false), run.middle(explicit, r, t, &crate::step::Held::default(), false));
+        let (path, path2) = (low.path([0.0; 3], [0.0; 3]), high.path([0.0; 3], [0.0; 3]));
+        let n = run.cluster(explicit).states.len();
+        low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
+        high.generator(&path2, 0.0, &mut Mat::zeros(n, n));
+        let f = C64::new(0.6, 0.8);
+        let landed = low.landing(&path, &[f]);
+        let bare: Vec<C64> = (0..n).map(|i| if i == 0 { f } else { C64::ZERO }).collect();
+        let (fallen, dropped) = high.take_onto(&bare, folded, &low);
+        let apart = (landed[0] - fallen[0]).abs();
+        println!("Δ {delta:+.1} s {s}: the landing {:?} and the fall at x_X = 0 {:?} apart {apart:.1e}; dropped {dropped:.6}, 1 − ‖S⁻¹f‖² {:.6}", landed[0], fallen[0], 1.0 - landed[0].norm_sqr());
+        assert!(apart <= 1e-14, "the fall at no explicit amplitude is the landing");
+        assert!((dropped - (1.0 - landed[0].norm_sqr())).abs() <= 1e-14, "it drops the landing's norm's complement");
+    }
+}
+
+/// A resonant two-level atom at rest swept over saturations s = 0.1–0.6 (BRIEF_STEP3C item 1; DESIGN §11, M18): its fold's
+/// series' ratio goes to one about s = 0.55 (proto.rs: none at and beyond it), its count without bound, so the node rises
+/// before: at every s every step's middle exists (no step refused), and the run's photons per µs are the master
+/// equation's Γρ_ee = (Γ/2)s/(1 + s) within four of their standard errors and the share -- continuous in s, whichever side
+/// a step stands on (said: the steps' ends on the explicit cluster).
+#[test]
+fn a_resonant_two_level_atom_rises_before_its_fold_ceases_to_exist() {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let share = crate::model::elim::share();
+    let (tau, steps, count) = (0.1, 100, 12);
+    for s in [0.1, 0.3, 0.5, 0.55, 0.6] {
+        let req = two_level(0.0, s);
+        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let mut scratch = crate::step::Scratch::default();
+        let (mut jumps, mut explicit, mut dropped) = (0u64, 0usize, 0.0);
+        for i in 0..count {
+            let mut t = Trajectory::new(&run, 0, [0.0; 3], [0.0; 3], 5, i);
+            for _ in 0..steps {
+                t = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
+                let c = run.cluster(t.cluster);
+                explicit += usize::from(c.states.len() > c.ground);
+            }
+            jumps += u64::from(t.jumps);
+            dropped += t.dropped;
+        }
+        let time = (count as usize * steps) as f64 * tau;
+        let (rate, error, master) = (jumps as f64 / time, (jumps as f64).sqrt() / time, 0.5 * GAMMA * s / (1.0 + s));
+        println!("s {s:.2}: {rate:.4} ± {error:.4} photons/µs against the master equation's {master:.4}; {explicit} of {} steps' ends explicit; δp booked {dropped:.2e}", count as usize * steps);
+        assert!((rate - master).abs() <= 4.0 * error + share * master, "s {s}: the photons' rate {rate} ± {error} against {master}");
+    }
+}
+
+/// The fall's criterion with its balance (BRIEF_STEP3C item 1; DESIGN §11.4, run.rs # The nodes risen and fallen): a
+/// two-level atom's decisions (at Δ = −4Γ, s = 2: its fold within the share, its landing's reading too) forced to flip -- the explicit side priced dearer from the explicit cluster, cheaper from the
+/// folded one (the integrator's price is the decision's argument) --, the explicit state each time (1, 0) (a fast part,
+/// δp the landing's deficit). Where an interval's share pays for a flip, (share − ρ)γΔt ≥ δp, the node falls at every
+/// other decision; where it does not, the booked δp stops the falls; and over all of it what the falls booked stays
+/// within the share of the time, Σδp ≤ Σ share·γΔt + the largest δp.
+#[test]
+fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_them() {
+    use crate::step::{Dynamics, Middle as _, Offer};
+    let share = crate::model::elim::share();
+    let req = two_level(-4.0 * GAMMA, 2.0);
+    let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    let (folded, explicit) = two_level_clusters(&run, &req);
+    let (r, t) = ([0.0; 3], 0.0);
+    let fewer = |o: &Offer| 1e9 * o.states as f64;
+    let more = |o: &Offer| 1e9 / o.states as f64;
+    // The pay of one interval of Δt on the folded side: its slow mode's decay rate γ and its reading ρ.
+    let low = run.middle(folded, r, t, &crate::step::Held::default(), false);
+    let path = low.path([0.0; 3], [0.0; 3]);
+    let mut g = Mat::zeros(1, 1);
+    low.generator(&path, 0.0, &mut g);
+    let gamma = -2.0 * g[(0, 0)].im;
+    let (landed, _) = (low.landing(&path, &[C64::ONE]), ());
+    let deficit = 1.0 - landed[0].norm_sqr();
+    let (mut owed, mut booked, mut paid, mut largest) = (0.0, 0.0, 0.0, 0.0_f64);
+    let n = run.cluster(explicit).states.len();
+    let bare: Vec<C64> = (0..n).map(|i| if i == 0 { C64::ONE } else { C64::ZERO }).collect();
+    for (phase, interval) in [(0, 20.0 * deficit / (share * gamma)), (1, 0.5 * deficit / (share * gamma))] {
+        let mut falls = 0;
+        for _ in 0..20 {
+            let high = run.middle(explicit, r, t, &crate::step::Held::default(), true);
+            let path = high.path([0.0; 3], [0.0; 3]);
+            let fell = high.decide(&path, &bare, interval, owed, &fewer);
+            owed = fell.owed;
+            let Some(down) = fell.switched else { continue };
+            assert_eq!(down.cluster, folded, "the fall to the folded cluster");
+            falls += 1;
+            booked += down.dropped;
+            largest = largest.max(down.dropped);
+            let low = run.middle(folded, r, t, &crate::step::Held::default(), true);
+            let path = low.path([0.0; 3], [0.0; 3]);
+            let rose = low.decide(&path, &down.psi, interval, owed, &more);
+            owed = rose.owed;
+            paid += share * gamma * 2.0 * interval;
+            assert_eq!(rose.switched.map(|x| x.cluster), Some(explicit), "the rise back");
+        }
+        println!("Δt {interval:.3} µs (the share's pay {:.3e} an interval, δp {deficit:.3e}): {falls} falls of 20; booked {booked:.3e}, the share's {paid:.3e}", share * gamma * interval);
+        assert!(if phase == 0 { falls == 20 } else { falls == 0 }, "falls where the share pays for them, none where not");
+    }
+    assert!(booked <= paid + largest, "the booked drops within the share of the time");
+}
+
+/// R4_LIN_4's F = 1 set along thermal paths (BRIEF_STEP3C item 1): its fold does not exist at the focus (its series'
+/// ratio 1.1 there; before, the run held its F′ = 2 node explicit for the whole run), and along the paths its ratio goes
+/// up to 1.87; on the run's per-point decisions every step's middle exists -- no step is refused, its node rising before
+/// -- and the steps stand on both sides (said).
+#[test]
+fn r4_lin_4_s_thermal_paths_meet_no_point_where_their_fold_does_not_exist() {
+    use crate::step::{Dynamics, Midway, Trajectory};
+    struct Anywhere;
+    impl crate::step::Domain for Anywhere {
+        fn runaway(&self, _: f64) -> bool {
+            false
+        }
+    }
+    let req = crate::model::testing::scene("R4_LIN_4");
+    let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    let hm = crate::units::hbar_over_mass(req.mass_kg);
+    let thermal = (crate::units::KT_PER_UK * req.temperature_uk / hm).sqrt();
+    let mut scratch = crate::step::Scratch::default();
+    let (mut steps, mut explicit, mut switched, mut dropped) = (0, 0, 0, 0.0);
+    let first = run.cluster(0).states[0];
+    for i in 0..8u64 {
+        let phase = 2.0 * std::f64::consts::PI * i as f64 / 8.0;
+        let kappa = [thermal * phase.cos(), thermal * (2.0 * phase).sin(), 0.5 * thermal * phase.sin()];
+        let mut t = Trajectory::new(&run, first, [0.2 * phase.sin(), 0.1 * phase.cos(), 0.0], kappa, 3, i);
+        for _ in 0..60 {
+            let before = t.cluster;
+            t = Midway::new(&run, &t, 0.126).and_then(|m| m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("every step's middle exists").end;
+            let c = run.cluster(t.cluster);
+            steps += 1;
+            explicit += usize::from(c.states.len() > c.ground);
+            switched += usize::from(t.cluster != before && run.cluster(before).ground == c.ground && run.cluster(before).states[0] == c.states[0]);
+        }
+        dropped += t.dropped;
+    }
+    println!("R4_LIN_4: {steps} steps from F = 1, {explicit} steps' ends on an explicit cluster, {switched} switches, δp booked {dropped:.2e}");
+}
+
+
+

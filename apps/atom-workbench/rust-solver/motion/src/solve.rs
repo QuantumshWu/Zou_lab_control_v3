@@ -2938,6 +2938,8 @@ impl State {
             work: 0.,
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
+            dropped: 0.,
+            owed: 0.,
             held: crate::step::Held::default(),
             forms: self.forms.clone(),
         }

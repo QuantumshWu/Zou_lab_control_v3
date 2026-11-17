@@ -82,6 +82,17 @@
 //! where a decomposition is made its kept levels leave while the same bounds read within. At an atom's first step nothing is kept (a block with exact copies keeps every
 //! level: they couple all of them through the P layer).
 //!
+//! # The landing's reading (DESIGN §9 M15; BRIEF_STEP3C item 1)
+//! A jump's landing and a node's fall project a state onto the fold's span along the right response T (`Workspace::taken`,
+//! S⁻¹Φ†Ψ), where the state's fast part decays along the left one T̃ -- the same equation with K† for K: the slow
+//! amplitude is (1 + T̃†T)⁻¹ of the bare state, not M⁻¹. Their difference solves the same equation with the decay as its
+//! source, T̃ − T ≈ R(iDT), so a column's slow amplitude errs by at most (T̃ − T)†T: Σ_i |Z_ij|² Γ_i/d_ij over a near
+//! block's kept rows (Γ_i the row's decay, −2 Im κ_i; d_ij its distance from the column's energy at the nearest beam),
+//! Γ‖R₀‖(M_far)_jj over a far block's (Γ its rows' largest decay), per unit P amplitude, summed over the blocks: x·Γ/|Δ|
+//! off resonance (M15), first order in the excitation x at it (a resonant two-level atom's landing norm 1/(1 + |T|²)
+//! against its survival's 1.48 at s = 0.2). No sweep moves it: where it reads beyond the share the fold is not within it
+//! there (the run's # The nodes risen and fallen: the node rises).
+//!
 //! # The nodes (DESIGN §4.2)
 //! The integrator's outer nodes s = ±τ/2 (`Fold::prototype_nodes`): the decomposition, H, S and every split's response per
 //! unit amplitude held over the step, the field turned -- Z_l(s) = (f_l(s)/f_l) Z_l, Ṽ(s) = Σ_a e_a(s) Y_a, Ĥ_PP(s) and
@@ -357,6 +368,8 @@ struct Far {
     mf: Vec<C64>,
     reading: f64,
     centring: f64,
+    /// Its rows' largest decay (rad/µs; the landing's reading, `Step::landing`).
+    decay: f64,
     /// Whether the point leaves the block out (`omit`).
     omitted: bool,
     /// Temporaries (BRIEF_PROTO5 item 1): the pairs' products at a node and their gradients (v², 3v²), the latter on the
@@ -499,6 +512,8 @@ pub(crate) struct Step {
     pub(crate) copies: f64,
     /// What the nodes left out at the point leave (rate units), and their count (near parts, far blocks).
     pub(crate) omitted: f64,
+    /// The landing's left and right responses apart (rate units; module documentation, # The landing's reading).
+    pub(crate) landing: f64,
     pub(crate) left: [usize; 2],
     pub(crate) ratio: f64,
     pub(crate) made: usize,
@@ -556,6 +571,8 @@ pub(crate) struct Workspace {
     change: Vec<f64>,
     previous: Vec<f64>,
     whole: Vec<f64>,
+    /// Per column the landing's reading (`Step::landing`).
+    landed: Vec<f64>,
     eigen: Mat,
     vectors: Mat,
     temp: Mat,
@@ -2171,6 +2188,7 @@ impl Fold {
                     mf: vec![C64::ZERO; n * n],
                     reading: 0.0,
                     centring: 0.0,
+                    decay: b.rows.iter().filter_map(|r| if let Row::Excited(e) = *r { Some(-2.0 * self.base_excited[(e, e)].im) } else { None }).fold(0.0, f64::max),
                     omitted: false,
                     vectors,
                     pnode: vec![C64::ZERO; v * v],
@@ -2247,6 +2265,7 @@ impl Fold {
             change: vec![0.0; n],
             previous: vec![0.0; n],
             whole: vec![0.0; n],
+            landed: vec![0.0; n],
             eigen: z(n, n),
             vectors: z(n, n),
             temp: z(n, n),
@@ -2269,6 +2288,7 @@ impl Fold {
                 centring: 0.0,
                 copies: 0.0,
                 omitted: 0.0,
+                landing: 0.0,
                 left: [0; 2],
                 ratio: 0.0,
                 made: 0,
@@ -2867,8 +2887,15 @@ impl Fold {
     }
 
     /// The prototype's step at a point (r, κ) on an atom's kept decompositions (module documentation): A, M, S⁻¹, G in the
-    /// workspace's `Step`. None where a decomposition or a centring is singular.
+    /// workspace's `Step`. None where the fold does not exist there (`prototype_within`).
     pub(crate) fn prototype<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace) -> Option<&'w Step> {
+        self.prototype_within(r, kappa, cache, ws, f64::INFINITY)
+    }
+
+    /// The prototype's step within a budget of counted complex multiply-adds (`prototype`). None -- the one exit -- where
+    /// the fold does not exist there: a decomposition, a centring, the exact copies' complement or the metric singular, or
+    /// the series' ratio at or above one; and where its count passes `budget` before the series is within the share.
+    pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &'w mut Workspace, budget: f64) -> Option<&'w Step> {
         let n = ws.n;
         let mut work = [0.0_f64; 10];
         let mut tick = [0u64; 10];
@@ -2901,7 +2928,7 @@ impl Fold {
         let mut site: Option<Site> = None;
         // Per near block its matrices at the point, once for every decomposition made here (`Fold::lay`, `Fold::effective`).
         ws.here.iter_mut().for_each(|x| *x = None);
-        let (sweeps, series, ratio, rounds, omitted, tally) = loop {
+        let (sweeps, series, ratio, rounds, omitted, tally, landing) = loop {
             let made = cache.made;
             // The bases (module documentation, 6): the atom's own; beyond the share the nearest kept, then a new one. A near
             // block's kept levels: those `omit` wants, else its standing basis's; at an atom's first step none (a block with
@@ -2990,8 +3017,11 @@ impl Fold {
                 }
             }
             lap(REFRESH, &mut clock, &mut tick);
+            if work.iter().sum::<f64>() > budget {
+                return None;
+            }
             // The near blocks: the diagonal to first order and what it leaves; their sources (module documentation, 2, 3).
-            let Workspace { near, far, mid, hbase, h, delta, c, change, previous, whole, step, order, cs, deltas, per, scratch, tm, renew, .. } = &mut *ws;
+            let Workspace { near, far, mid, hbase, h, delta, c, change, previous, whole, landed, step, order, cs, deltas, per, scratch, tm, renew, .. } = &mut *ws;
             let Placed { coef, f, w, e, hpp, .. } = &*mid;
             for (x, nb) in near.iter_mut().enumerate() {
                 let basis = &cache.near[x][cache.at_near[x].unwrap()];
@@ -3304,11 +3334,18 @@ impl Fold {
                 if sweep == 1 {
                     frozen = freeze(near, cache, h, c, whole, order, unrate(share) - omitted, n, &mut work[SERIES]);
                 }
-                // The rest: the last change times r/(1 − r), r the ratio of the last two changes (none after the first).
+                // The rest: the last change times r/(1 − r), r the ratio of the last two changes (none after the first; a
+                // column that did not change has converged, r = 0).
                 let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
                 let (mut rest, mut most) = (0.0_f64, 0.0_f64);
                 for j in (0..n).filter(|&j| whole[j] > floor) {
-                    let ratio = if previous[j] > 0.0 { (change[j] / previous[j]).sqrt() } else { f64::INFINITY };
+                    let ratio = if change[j] == 0.0 {
+                        0.0
+                    } else if previous[j] > 0.0 {
+                        (change[j] / previous[j]).sqrt()
+                    } else {
+                        f64::INFINITY
+                    };
                     most = most.max(ratio);
                     let x = if ratio < 1.0 { change[j].sqrt() * ratio / (1.0 - ratio) } else { f64::INFINITY };
                     rest = rest.max(rate(x / whole[j].sqrt()));
@@ -3316,10 +3353,16 @@ impl Fold {
                 previous.copy_from_slice(change);
                 step.sweep_ticks.push(ticks() - t0);
                 step.sweep_work.push(work[SERIES] - w0);
-                // Two sweeps at the least; then within the share, or no longer converging (a ratio at or above one after
-                // the second change: the self-consistency or the series does not exist here).
-                if sweep >= 2 && (rest <= share || (sweep >= 3 && most >= 1.0)) {
+                // Two sweeps at the least; then within the share. No longer converging -- a ratio at or above one after the
+                // second change: the self-consistency or the series does not exist here -- is the fold's one exit where it
+                // does not exist (None, as a singular decomposition, centring, copies' complement or metric); so is a
+                // forward dearer than its budget (the cheapest evaluation within the share is another's: run.rs # The
+                // nodes risen and fallen).
+                if sweep >= 2 && rest <= share {
                     break Some((rate(unrate(rest) + frozen), most, omitted));
+                }
+                if (sweep >= 3 && most >= 1.0) || work.iter().sum::<f64>() > budget {
+                    return None;
                 }
             };
             lap(SERIES, &mut clock, &mut tick);
@@ -3418,6 +3461,33 @@ impl Fold {
                 fb.centring = read(energies);
                 work[READING] += fb.terms.len() as f64 / 4.0;
             }
+            // The landing's reading (module documentation, # The landing's reading): per column, Σ_i |Z_ij|² Γ_i/d_ij over
+            // a near block's rows, Γ‖R₀‖(M_far)_jj over a far block's, summed over the blocks.
+            landed.fill(0.0);
+            for nb in near.iter().filter(|nb| !nb.idle()) {
+                for i in 0..nb.s {
+                    let decay = -2.0 * nb.kappa[i].im;
+                    if !(decay > 0.0) {
+                        continue;
+                    }
+                    for j in 0..n {
+                        let z = nb.ztot[i * n + j].norm_sqr();
+                        if z > 0.0 {
+                            let d = nb.shifts.iter().map(|&w| (h[j * n + j] - C64::real(w) - nb.kappa[i]).abs()).fold(f64::INFINITY, f64::min);
+                            landed[j] += z * decay / d;
+                        }
+                    }
+                }
+                work[READING] += (nb.s * n * nb.shifts.len()) as f64 / 4.0;
+            }
+            for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+                let r0 = cache.far[x][cache.at_far[x].unwrap()].r0;
+                for (j, l) in landed.iter_mut().enumerate() {
+                    *l += fb.decay * r0 * fb.mf[j * n + j].re;
+                }
+            }
+            let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+            let landing = (0..n).filter(|&j| whole[j] > floor).map(|j| rate(landed[j])).fold(0.0, f64::max);
             lap(READING, &mut clock, &mut tick);
             let before = renew.len();
             for (x, nb) in near.iter().enumerate() {
@@ -3431,7 +3501,7 @@ impl Fold {
                 }
             }
             if renew.len() == before || refreshes == 2 || cache.made > made {
-                break (sweep, series, ratio, round + 1, omitted, tally);
+                break (sweep, series, ratio, round + 1, omitted, tally, landing);
             }
             // The near blocks decomposed again for their reuse: their kept levels that may leave leave with it (`leave`, on
             // the bounds `omit` read at this round's first sweep).
@@ -3557,6 +3627,7 @@ impl Fold {
         step.centring = far.iter().map(|x| x.centring).fold(0.0, f64::max);
         step.copies = copies_read;
         step.omitted = rate(omitted);
+        step.landing = landing;
         step.left = tally;
         step.made = cache.made - made_before;
         step.grown = cache.grown - grown_before;
@@ -5530,46 +5601,53 @@ impl Workspace {
     /// state, a copy row's onto its ground state. The blocks apart (different offsets beat: their cross terms average out
     /// over the beat), as the metric M = 1 + Σ ε†ε holds them: the sum is x†Mx = ψ†ψ to the rounding. Returns the sum.
     pub(crate) fn populations(&self, fold: &Fold, cache: &Cache, psi: &[C64], out: &mut [f64]) -> f64 {
-        let n = self.n;
-        let mut w = 0.0;
-        let x = self.step.normal.product(&Mat { rows: n, cols: 1, data: psi.to_vec() });
-        let state = |p: usize| if p < fold.ground.len() { fold.ground[p] } else { GROUND + fold.explicit[p - fold.ground.len()] };
+        let x = self.step.normal.apply(psi);
         let mut sum = 0.0;
         let mut onto = |state: usize, z: C64| {
             out[state] += z.norm_sqr();
             sum += z.norm_sqr();
         };
-        for (p, z) in x.data.iter().enumerate() {
-            onto(state(p), *z);
+        for (p, z) in x.iter().enumerate() {
+            onto(fold.place_state(p), *z);
         }
-        let row_state = |o: usize, r: usize| match fold.blocks[o].rows[r] {
-            Row::Excited(e) => GROUND + e,
-            Row::Copy { state, .. } => state,
-        };
-        let apply = |rows: usize, m: &[C64]| -> Vec<C64> { (0..rows).map(|i| m[i * n..(i + 1) * n].iter().zip(&x.data).map(|(a, b)| *a * *b).sum()).collect() };
-        for (k, nb) in self.near.iter().enumerate() {
-            if nb.idle() {
-                continue;
+        for (o, rows) in self.amplitudes(fold, cache, &x).iter().enumerate() {
+            for (r, z) in rows.iter().enumerate() {
+                onto(fold.row_state(o, r), *z);
             }
-            let basis = &cache.near[k][cache.at_near[k].unwrap()];
+        }
+        sum
+    }
+
+    /// The excited amplitude εx the P amplitudes x give on every block's Q rows at the last step's middle (DESIGN §1.3):
+    /// per block of the fold its rows' amplitudes in the block's row order, as the metric M = 1 + Σ ε†ε holds them -- a
+    /// near block's kept rows VZx (its omitted levels' zero), its exact copies' Z_D x, its centred copies' T_C x where the
+    /// metric holds them (zero where not); a far block's R₀Bx --; none of a block the prototype does not hold. The
+    /// readout's populations and a switch's (`Workspace::taken`) are of them.
+    pub(crate) fn amplitudes(&self, fold: &Fold, cache: &Cache, x: &[C64]) -> Vec<Vec<C64>> {
+        let n = self.n;
+        let mut w = 0.0;
+        let mut out: Vec<Vec<C64>> = fold.blocks.iter().map(|_| vec![]).collect();
+        let apply = |rows: usize, m: &[C64]| -> Vec<C64> { (0..rows).map(|i| m[i * n..(i + 1) * n].iter().zip(x).map(|(a, b)| *a * *b).sum()).collect() };
+        for (k, nb) in self.near.iter().enumerate() {
+            let rows = &mut out[nb.o];
+            *rows = vec![C64::ZERO; nb.all + nb.nd + nb.nc];
+            let Some(at) = cache.at_near.get(k).copied().flatten().filter(|_| !nb.idle()) else { continue };
+            let basis = &cache.near[k][at];
             // The kept rows in the block's row order (V on Zx), the exact copies' after the excited rows, the centred
             // copies' after those.
-            let zx = Mat { rows: nb.s, cols: 1, data: apply(nb.s, &nb.ztot) };
-            let vzx = basis.f.from(&zx, &mut w);
+            let vzx = basis.f.from(&Mat { rows: nb.s, cols: 1, data: apply(nb.s, &nb.ztot) }, &mut w);
             for (a, &r) in basis.rows.iter().enumerate() {
-                onto(row_state(nb.o, r), vzx[(a, 0)]);
+                rows[r] = vzx[(a, 0)];
             }
-            for (d, z) in apply(nb.nd, &nb.zdtot).into_iter().enumerate() {
-                onto(row_state(nb.o, nb.all + d), z);
-            }
+            rows[nb.all..nb.all + nb.nd].copy_from_slice(&apply(nb.nd, &nb.zdtot));
             if nb.copied_in {
-                for (c, z) in apply(nb.nc, &nb.tc).into_iter().enumerate() {
-                    onto(row_state(nb.o, nb.all + nb.nd + c), z);
-                }
+                rows[nb.all + nb.nd..].copy_from_slice(&apply(nb.nc, &nb.tc));
             }
         }
-        for (k, fb) in self.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
-            let basis = &cache.far[k][cache.at_far[k].unwrap()];
+        for (k, fb) in self.far.iter().enumerate() {
+            out[fb.o] = vec![C64::ZERO; fb.m];
+            let Some(at) = cache.at_far.get(k).copied().flatten().filter(|_| !fb.omitted) else { continue };
+            let basis = &cache.far[k][at];
             let b = &fold.blocks[fb.o];
             // B x on the block's rows (its sources' components at the middle's light), then R₀.
             let mut bx = Mat::zeros(fb.m, 1);
@@ -5577,15 +5655,39 @@ impl Workspace {
                 for &(p, _) in b.sources.iter().filter(|s| s.1 == c) {
                     for a in 0..fb.m {
                         let Row::Excited(e) = b.rows[a] else { unreachable!("a far block's rows are excited") };
-                        bx[(a, 0)] += self.mid.e[c][kk] * fold.components[c].basis[kk][(e, fold.ground[p])] * x.data[p];
+                        bx[(a, 0)] += self.mid.e[c][kk] * fold.components[c].basis[kk][(e, fold.ground[p])] * x[p];
                     }
                 }
             }
-            for (a, z) in basis.resolvent.product(&bx).data.into_iter().enumerate() {
-                onto(row_state(fb.o, a), z);
+            out[fb.o] = basis.resolvent.product(&bx).data;
+        }
+        out
+    }
+
+    /// A state taken onto this fold at the last step's middle (DESIGN §11.1, §1.3; run.rs # The nodes risen and fallen):
+    /// the lifted state Ψ -- P amplitudes x, the Q rows `given` (block, row, amplitude) their own amplitudes, every other Q
+    /// row following T (`follow`) or nothing (a bare state's) -- projected onto the fold's span and normalized,
+    /// ψ = S⁻¹Φ†Ψ, Φ†Ψ = x + Σ_following T_r†(Tx)_r + Σ_given T_r† a_r. One formula: a node's rise (its rows P amplitudes
+    /// T_X x, every Q row following: Mx), its fall (its rows given their explicit amplitudes x_X: S⁻¹(Mx + T_X†(x_X −
+    /// T_X x)), `Folded::fall`'s), and a jump's landing (a bare state, nothing following: S⁻¹f).
+    pub(crate) fn taken(&self, fold: &Fold, cache: &Cache, x: &[C64], given: &[(usize, usize, C64)], follow: bool) -> Vec<C64> {
+        let mut overlap = x.to_vec();
+        if follow {
+            for (o, a) in overlap.iter_mut().zip(self.step.metric.apply(x)) {
+                *o += a;
             }
         }
-        sum
+        if !given.is_empty() {
+            let (t, tx) = (self.responses(fold, cache), self.amplitudes(fold, cache, x));
+            for &(o, r, a) in given {
+                let t = t[o].as_ref().expect("a given row is a held block's");
+                let d = if follow { a - tx[o][r] } else { a };
+                for (j, z) in overlap.iter_mut().enumerate() {
+                    *z += t[(r, j)].conj() * d;
+                }
+            }
+        }
+        self.step.normal.apply(&overlap)
     }
 
     /// The blocks the prototype holds: (near: (block, rows s, copies nc, beam splits, terms), far: (block, rows, terms)).

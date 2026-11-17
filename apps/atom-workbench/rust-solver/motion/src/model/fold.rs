@@ -407,66 +407,59 @@ impl Choice {
         Ok(choice)
     }
 
-    /// The run's choice of nodes (DESIGN §3.2; the prototype's, proto.rs): the rule's tiers at the focus (`tiered`), and in
-    /// every block that solves any row its centred excited rows solved too (a mode of the kept decomposition, not a pass);
-    /// the blocks whose rows are all centred keep them so; every excited level of a block with rows, and of a block with none
-    /// at the focus, read at every point (proto.rs # The levels kept and left out). And the rule's explicit nodes, to the
-    /// fixed point: an excited node whose reading at the focus is beyond the share stays in P (its level at its block's
-    /// offset); where the fold does not exist there (the excitation or the passes' ratio at or above one) the excited node
-    /// that reads the most does, whatever its reading.
-    pub(crate) fn running(request: &Request) -> Result<Choice, String> {
-        let share = crate::model::elim::share();
-        let mut explicit: Vec<(usize, Part, usize)> = vec![];
-        loop {
-            let mut choice = Choice::tiered(request, explicit.clone())?;
-            let mut kept = vec![];
-            for set in Fold::sets(request, &choice)? {
-                let fold = Fold::new(request, &choice, set[0])?;
-                let mut add = vec![];
-                for b in fold.blocks.iter().filter(|b| b.solved > 0) {
-                    for r in &b.rows[b.solved..] {
-                        if let Row::Excited(x) = *r {
-                            for &(p, c) in &b.sources {
-                                add.push(((fold.components[c].part, fold.ground[p], fold.excited_level[x]), Status::Decomposed));
-                            }
+    /// The run's choice of nodes with the explicit levels `explicit` kept in P (DESIGN §3.2, §11; the prototype's, proto.rs):
+    /// the rule's tiers at the focus (`tiered`), and in every block that solves any row its centred excited rows solved too
+    /// (a mode of the kept decomposition, not a pass); the blocks whose rows are all centred keep them so; every excited
+    /// level of a block with rows, and of a block with none at the focus, read at every point (proto.rs # The levels kept
+    /// and left out). Which excited nodes are explicit is the run's at every point, not the focus's (run.rs # The nodes
+    /// risen and fallen).
+    pub(crate) fn base(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
+        let mut choice = Choice::tiered(request, explicit)?;
+        for set in Fold::sets(request, &choice)? {
+            let fold = Fold::new(request, &choice, set[0])?;
+            let mut add = vec![];
+            for b in fold.blocks.iter().filter(|b| b.solved > 0) {
+                for r in &b.rows[b.solved..] {
+                    if let Row::Excited(x) = *r {
+                        for &(p, c) in &b.sources {
+                            add.push(((fold.components[c].part, fold.ground[p], fold.excited_level[x]), Status::Decomposed));
                         }
                     }
                 }
-                choice.excited.extend(add);
-                for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
-                    let status = if b.solved > 0 { Status::Decomposed } else { Status::Centred };
-                    for &(p, c) in &b.sources {
-                        for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && x.0 .0 == fold.components[c].part && x.0 .1 == fold.ground[p]) {
-                            x.1 = status;
-                        }
-                    }
-                }
-                for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && set.contains(&x.0 .1)) {
-                    x.1 = Status::Decomposed;
-                }
-                let fold = Fold::new(request, &choice, set[0])?;
-                if fold.blocks.is_empty() {
-                    continue;
-                }
-                let Some(f) = fold.read_at([0.0; 3]) else { continue };
-                let exists = f.excitation < 1.0 && f.ratio < 1.0;
-                let mut nodes: Vec<(usize, usize, f64)> = f.readings.iter().filter_map(|r| if let Node::Excited(level) = r.node { Some((r.block, level, r.total())) } else { None }).collect();
-                nodes.sort_by(|a, b| b.2.total_cmp(&a.2));
-                let beyond: Vec<(usize, usize, f64)> = nodes.iter().copied().filter(|x| x.2 > share).collect();
-                let chosen = if !beyond.is_empty() { beyond } else if !exists { nodes.into_iter().take(1).collect() } else { vec![] };
-                for (o, level, _) in chosen {
-                    let Some(&(p, c)) = fold.blocks[o].sources.first() else { continue };
-                    let key = (level, fold.components[c].part, fold.ground[p]);
-                    if !explicit.contains(&key) && !kept.contains(&key) {
-                        kept.push(key);
+            }
+            choice.excited.extend(add);
+            for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
+                let status = if b.solved > 0 { Status::Decomposed } else { Status::Centred };
+                for &(p, c) in &b.sources {
+                    for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && x.0 .0 == fold.components[c].part && x.0 .1 == fold.ground[p]) {
+                        x.1 = status;
                     }
                 }
             }
-            if kept.is_empty() {
-                return Ok(choice);
+            for x in choice.excited.iter_mut().filter(|x| x.1 == Status::Omitted && set.contains(&x.0 .1)) {
+                x.1 = Status::Decomposed;
             }
-            explicit.extend(kept);
         }
+        Ok(choice)
+    }
+
+    /// The excited nodes of a fold that may be kept in P (DESIGN §11.1): per block with sources, each excited level among
+    /// its Q rows -- its key (level, the absorbed component's part, its first source's ground state; `Choice::explicit`)
+    /// with the block and its rows.
+    pub(crate) fn candidates(fold: &Fold) -> Vec<((usize, Part, usize), usize, Vec<usize>)> {
+        let mut out: Vec<((usize, Part, usize), usize, Vec<usize>)> = vec![];
+        for (o, b) in fold.blocks.iter().enumerate() {
+            let Some(&(p, c)) = b.sources.first() else { continue };
+            for (r, row) in b.rows.iter().enumerate() {
+                let Row::Excited(x) = *row else { continue };
+                let key = (fold.excited_level[x], fold.components[c].part, fold.ground[p]);
+                match out.iter_mut().find(|n| n.0 == key) {
+                    Some(n) => n.2.push(r),
+                    None => out.push((key, o, vec![r])),
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1108,7 +1101,7 @@ impl Fold {
     }
 
     /// The fold at a point at rest on a fresh path (its decompositions made there), with its jumps and its readings: what
-    /// the choice of nodes reads at the focus (`Choice::tiered`, `Choice::running`).
+    /// the choice of nodes reads at the focus (`Choice::tiered`, `Choice::base`).
     pub(crate) fn read_at(&self, r: [f64; 3]) -> Option<Folded> {
         let mut f = self.at(r, [0.0; 3], &mut Path::default())?;
         self.jumps(&mut f);
@@ -2125,6 +2118,23 @@ pub(crate) struct Folded {
 }
 
 impl Fold {
+    /// The model's state of P place p (a ground state's index, an explicit one's GROUND + its own).
+    pub(crate) fn place_state(&self, p: usize) -> usize {
+        if p < self.ground.len() {
+            self.ground[p]
+        } else {
+            GROUND + self.explicit[p - self.ground.len()]
+        }
+    }
+
+    /// The model's state of block o's row r: an excited row's, a copy row's ground state.
+    pub(crate) fn row_state(&self, o: usize, r: usize) -> usize {
+        match self.blocks[o].rows[r] {
+            Row::Excited(e) => GROUND + e,
+            Row::Copy { state, .. } => state,
+        }
+    }
+
     /// A node's rows in its block (DESIGN §11.1): of an excited level or a ground level's copy by a component.
     pub(crate) fn node_rows(&self, block: usize, node: Node) -> Vec<usize> {
         let b = &self.blocks[block];
