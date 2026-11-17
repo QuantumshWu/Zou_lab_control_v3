@@ -82,16 +82,22 @@
 //! where a decomposition is made its kept levels leave while the same bounds read within. At an atom's first step nothing is kept (a block with exact copies keeps every
 //! level: they couple all of them through the P layer).
 //!
-//! # The landing's reading (DESIGN §9 M15; BRIEF_STEP3C item 1)
-//! A jump's landing and a node's fall project a state onto the fold's span along the right response T (`Workspace::taken`,
-//! S⁻¹Φ†Ψ), where the state's fast part decays along the left one T̃ -- the same equation with K† for K: the slow
-//! amplitude is (1 + T̃†T)⁻¹ of the bare state, not M⁻¹. Their difference solves the same equation with the decay as its
-//! source, T̃ − T ≈ R(iDT), so a column's slow amplitude errs by at most (T̃ − T)†T: Σ_i |Z_ij|² Γ_i/d_ij over a near
-//! block's kept rows (Γ_i the row's decay, −2 Im κ_i; d_ij its distance from the column's energy at the nearest beam),
-//! Γ‖R₀‖(M_far)_jj over a far block's (Γ its rows' largest decay), per unit P amplitude, summed over the blocks: x·Γ/|Δ|
-//! off resonance (M15), first order in the excitation x at it (a resonant two-level atom's landing norm 1/(1 + |T|²)
-//! against its survival's 1.48 at s = 0.2). No sweep moves it: where it reads beyond the share the fold is not within it
-//! there (the run's # The nodes risen and fallen: the node rises).
+//! # The landing (DESIGN §9 M15; landing.status 2–4)
+//! A jump's landing and a node's fall take a state onto the fold's slow span along its fast one (`Workspace::taken`): the
+//! fast span is [−L; 1], L the left slow span's rows (Ψ_L† = [1, L], Ψ_L†H_NH = H_s′Ψ_L†), so the slow part of a state Ψ
+//! is Φa, a = N⁻¹Φ_L†Ψ, N = Ψ_L†Φ = 1 + T_L†T, T_L = L† the left response -- the right response of H_NH†, the same
+//! series on the adjoint's inputs (`Fold::prototype_left`, `Side::Left`; with no decay T_L = T, N = M). On the slow span
+//! the fold's G is exact whatever the projection (a state there evolves as e^{−iGt}); the projection decides what a state
+//! off it -- a jump's bare state, a fall's explicit amplitudes -- becomes: along the fast span, the slow part's norm
+//! ‖S a‖² is the long-time survival carried back to the switch (c > 1 near resonance: the fast part's antibunching, a
+//! dead time; c < 1 off it: its ringing's photon at once), the jump clock's as it is (step.rs `jump`), not normalized. The
+//! orthogonal projection S⁻¹Φ†Ψ it replaces erred at first order in the excitation (M15: the landing norm 1/(1 + |T|²)
+//! against the survival's 1.48 for a resonant two-level atom at s = 0.2). Made once a forward, where a landing or a fall
+//! first asks for it, and held with the step's S (DESIGN M16). Its reading -- the left and right responses apart to first
+//! order, Σ_i |Z_ij|² Γ_i/d_ij over a near block's kept rows (Γ_i the row's decay, −2 Im κ_i; d_ij its distance from the
+//! column's energy at the nearest beam), Γ‖R₀‖(M_far)_jj over a far block's (Γ its rows' largest decay), per unit P
+//! amplitude, summed over the blocks (`Step::landing`) -- is the run's: where it reads beyond the share the node rises
+//! (run.rs # The nodes risen and fallen).
 //!
 //! # The nodes (DESIGN §4.2)
 //! The integrator's outer nodes s = ±τ/2 (`Fold::prototype_nodes`): the decomposition, H, S and every split's response per
@@ -269,6 +275,48 @@ struct Near {
     kdenode: [Vec<C64>; 2],
     /// The step's tangent (`Fold::prototype_tangent`).
     tg: Tangent,
+    /// The left response's series (`Fold::prototype_left`).
+    left: Left,
+}
+
+/// One orientation of the series (module documentation, 5; # The landing): the right response T of H_NH -- the step's --,
+/// or the left one T_L, the right response of H_NH† (`Fold::prototype_left`): the same equation, K† for K -- the Schur
+/// form's adjoint, κ̄ on its diagonal and conj(T_li) below it, its rows solved from the first --, the explicit columns'
+/// source and the explicit rows' emission exchanged (𝒦_XQ† for 𝒦_QX, 𝒦_QX† for 𝒦_XQ: their decay's cross terms change
+/// sign), the explicit states' dressing and the exact copies' blocks by their adjoints; the ground columns' sources and
+/// the ground rows' emission (the light's coupling, Hermitian) and the lanes' Doppler shifts as they are.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Side {
+    Right,
+    Left,
+}
+
+/// A near block's left series (`Side::Left`, `Fold::prototype_left`): its inputs of H_NH† -- the lanes' sources, the
+/// diagonal, the emission, the explicit states' dressing, the exact copies' static source, emission and blocks --, its
+/// responses and the sweep's temporaries, laid as the right ones are (`Near`); sized where first made.
+#[derive(Default)]
+struct Left {
+    vt: Vec<C64>,
+    kappa: Vec<C64>,
+    emit: Vec<C64>,
+    hx: Vec<C64>,
+    b0d: Vec<C64>,
+    exd: Vec<C64>,
+    ked: Vec<C64>,
+    kde: Vec<C64>,
+    kdd: Vec<C64>,
+    z: Vec<C64>,
+    ztot: Vec<C64>,
+    zold: Vec<C64>,
+    rhs: Vec<C64>,
+    prod: Vec<C64>,
+    zd: Vec<C64>,
+    zdtot: Vec<C64>,
+    bloch: Vec<C64>,
+    tc: Vec<C64>,
+    invs: Vec<C64>,
+    pjs: Vec<C64>,
+    cinvs: Vec<C64>,
 }
 
 impl Near {
@@ -469,6 +517,8 @@ struct FarBasis {
     g: Vec<C64>,
     /// F + z₀G stacked (v² × n²): the force's forms.
     fg: Vec<C64>,
+    /// U_a†R₀²U_b stacked (v² × n²): its rows' left response R₀†B against the right one, (R₀†B)†R₀B (`Fold::prototype_left`).
+    nf: Vec<C64>,
     copied: Vec<f64>,
     resolvent: Mat,
     z0: f64,
@@ -524,6 +574,31 @@ pub(crate) struct Step {
     pub(crate) ticks: [u64; 10],
     pub(crate) sweep_work: Vec<f64>,
     pub(crate) sweep_ticks: Vec<u64>,
+}
+
+/// A step's readings (rate units; `Step`): the series' rest, the reuse's, the far blocks' held forms, what the nodes
+/// left out leave, the landing's.
+#[derive(Clone, Copy)]
+pub(crate) struct Readings {
+    pub(crate) series: f64,
+    pub(crate) reuse: f64,
+    pub(crate) far: f64,
+    pub(crate) omitted: f64,
+    pub(crate) landing: f64,
+}
+
+impl Readings {
+    /// The largest: the fold's error at the point (run.rs # The nodes risen and fallen, ρ).
+    pub(crate) fn most(&self) -> f64 {
+        [self.series, self.reuse, self.far, self.omitted, self.landing].into_iter().fold(0.0, f64::max)
+    }
+}
+
+impl Step {
+    /// Its readings.
+    pub(crate) fn readings(&self) -> Readings {
+        Readings { series: self.series, reuse: self.reuse, far: self.far, omitted: self.omitted, landing: self.landing }
+    }
 }
 
 /// The prototype's layout and buffers, once per fold (`Fold::prototype_workspace`).
@@ -590,6 +665,28 @@ pub(crate) struct Workspace {
     spent: f64,
     /// The gradient's matrices' temporaries (`Fold::prototype_gradient`).
     gradient: Gradient,
+    /// The left response's whole at the last forward (`Fold::prototype_left`).
+    landing: Landing,
+}
+
+/// The left response's whole (`Fold::prototype_left`; module documentation, # The landing): its series' Bloch generator
+/// H̃ and its base Ĥ_PP† (the far blocks' forms with it), a sweep's column energies and part, the columns' changes and
+/// whole (n × n, n each); N = 1 + T_L†T (n × n) and its factors; whether it was made at the last forward (None: not
+/// asked for yet) and its count (complex multiply-adds).
+#[derive(Default)]
+struct Landing {
+    hbase: Vec<C64>,
+    h: Vec<C64>,
+    c: Vec<C64>,
+    delta: Vec<C64>,
+    change: Vec<f64>,
+    previous: Vec<f64>,
+    whole: Vec<f64>,
+    n: Vec<C64>,
+    lu: Vec<C64>,
+    piv: Vec<usize>,
+    made: Option<bool>,
+    work: f64,
 }
 
 /// The temporaries of the gradient's matrices (`Fold::prototype_gradient`): ∂A on the three axes, the far pairs' gradients,
@@ -1638,20 +1735,31 @@ fn copy_couplings(nb: &Near, basis: &NearBasis, e: &[Vec<C64>], ked: &mut [C64],
 
 /// The exact copies' Woodbury factors for one split (module documentation, # The exact copies): per column j
 /// P_j = A_j⁻¹K̂_ED (A_j = c_j − w − K̂_EE triangular in the kept basis, its inverse diagonal `inv`, s × n) into `pj`
-/// (n × nd × s) and C_j⁻¹ (C_j = (c_j − w) − K̂_DD − K̂_DE P_j) into `cinv` (n × nd × nd). False where a C_j is singular.
+/// (n × nd × s) and C_j⁻¹ (C_j = (c_j − w) − K̂_DD − K̂_DE P_j) into `cinv` (n × nd × nd), A_j of the orientation `side`
+/// (its upper triangle's rows from the last, its adjoint's lower one from the first). False where a C_j is singular.
 #[allow(clippy::too_many_arguments)]
-fn copies_factor(s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], basis: &NearBasis, c: &[C64], w: f64, inv: &[C64], pj: &mut [C64], cinv: &mut [C64], p: &mut [C64], lu: &mut [C64], piv: &mut [usize], n: usize, work: &mut f64) -> bool {
+fn copies_factor(side: Side, s: usize, nd: usize, ked: &[C64], kde: &[C64], kdd: &[C64], basis: &NearBasis, c: &[C64], w: f64, inv: &[C64], pj: &mut [C64], cinv: &mut [C64], p: &mut [C64], lu: &mut [C64], piv: &mut [usize], n: usize, work: &mut f64) -> bool {
     let (t, ends) = (&basis.f.t, &basis.f.ends);
     let (p, lu, piv) = (&mut p[..s], &mut lu[..nd * nd], &mut piv[..nd]);
     for j in 0..n {
         let (pj, cinv) = (&mut pj[j * nd * s..(j + 1) * nd * s], &mut cinv[j * nd * nd..(j + 1) * nd * nd]);
         for d in 0..nd {
-            for i in (0..s).rev() {
-                let mut acc = ked[i * nd + d];
-                for l in i + 1..ends[i] {
-                    acc += t[(i, l)] * p[l];
+            if side == Side::Right {
+                for i in (0..s).rev() {
+                    let mut acc = ked[i * nd + d];
+                    for l in i + 1..ends[i] {
+                        acc += t[(i, l)] * p[l];
+                    }
+                    p[i] = acc * inv[i * n + j];
                 }
-                p[i] = acc * inv[i * n + j];
+            } else {
+                for i in 0..s {
+                    let mut acc = ked[i * nd + d];
+                    for l in (basis.f.parts[basis.part[i]].1..i).filter(|&l| ends[l] > i) {
+                        acc += t[(l, i)].conj() * p[l];
+                    }
+                    p[i] = acc * inv[i * n + j];
+                }
             }
             pj[d * s..(d + 1) * s].copy_from_slice(p);
         }
@@ -1694,6 +1802,221 @@ fn copies_apply(s: usize, nd: usize, kde: &[C64], pj: &[C64], cinv: &[C64], rd: 
         }
         *work += (2 * nd * s + nd * nd) as f64;
     }
+}
+
+/// One sweep of a near block's series (module documentation, 5) in an orientation (`Side`): Z_l ← (c − w_l − K̂)⁻¹(Ṽ_l −
+/// Z_l Δ), every split at once, row by row (# The beams side by side) -- K̂ the kept Schur form with the step's diagonal
+/// κ, upper triangular on the right (its rows from the last), its adjoint on the left (κ̄, conj(T_li): from the first) --,
+/// the exact copies by Woodbury (`copies_factor`, `copies_apply`), their own source the series' part alone, split by
+/// split. After the first sweep the rows the right's freeze holds keep their response, on either side (`freeze`). Its change and whole
+/// response column by column onto `change` and `whole`; its part of the Bloch generator, Ê Z (+ the explicit states'
+/// dressing, Ê_D Z_D), into its `bloch`. The right's sweeps are kept for the force (`Near::invs`, `zs`, ...). False where
+/// an exact copies' complement is singular.
+#[allow(clippy::too_many_arguments)]
+fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, sweep: usize, c: &[C64], delta: &[C64], change: &mut [f64], whole: &mut [f64], n: usize, work: &mut f64) -> bool {
+    let (s, splits, nd, statics, explicit) = (nb.s, nb.lanes, nb.nd, nb.splits.len(), !nb.xs.is_empty());
+    let (ln, right) = (splits * n, side == Side::Right);
+    let block = s * ln;
+    let (t, ends) = (&basis.f.t, &basis.f.ends);
+    let Near { shifts, active, vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs, zs, ztots, zds, zdtots, left, .. } = nb;
+    // The orientation's inputs, responses and temporaries; the right's reciprocals and copies' factors laid after the
+    // earlier sweeps' (the force's), the left's in place.
+    let (at, pat, cat) = if right { (invs.len(), pjs.len(), cinvs.len()) } else { (0, 0, 0) };
+    #[rustfmt::skip]
+    let (vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs) = if right {
+        (&**vt, &**kappa, &**ked, &**kde, &**kdd, &**b0d, &**emit, &**hx, &**exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs)
+    } else {
+        let Left { vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs, .. } = left;
+        (&**vt, &**kappa, &**ked, &**kde, &**kdd, &**b0d, &**emit, &**hx, &**exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs)
+    };
+    invs.resize(at + block, C64::ZERO);
+    pjs.resize(pat + splits * n * nd * s, C64::ZERO);
+    cinvs.resize(cat + splits * n * nd * nd, C64::ZERO);
+    let going = |i: usize| sweep == 0 || active[i];
+    zold.copy_from_slice(ztot);
+    zdtot.fill(C64::ZERO);
+    rhs.copy_from_slice(vt);
+    if sweep > 0 {
+        // −Z^{k−1}Δ.
+        fused_product_into(z, delta, (s * splits, n, n), prod);
+        for i in (0..s).filter(|&i| going(i)) {
+            for (r, p) in rhs[i * ln..(i + 1) * ln].iter_mut().zip(&prod[i * ln..(i + 1) * ln]) {
+                *r -= *p;
+            }
+        }
+        *work += (s * ln * n) as f64;
+    }
+    // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy (the sweep's: H's diagonal moves with every sweep),
+    // four to a vector division (BRIEF_PROTO5 item 3); the right's kept for the tangent's sweeps and the freeze.
+    for i in (0..s).filter(|&i| going(i)) {
+        for (sp, &wl) in shifts.iter().enumerate() {
+            crate::linalg::reciprocals(c, wl, kappa[i], &mut invs[at + i * ln + sp * n..at + i * ln + sp * n + n]);
+        }
+    }
+    *work += block as f64;
+    if right {
+        for i in (0..s).rev().filter(|&i| going(i)) {
+            let (head, tail) = z.split_at_mut((i + 1) * ln);
+            let r = &mut rhs[i * ln..(i + 1) * ln];
+            for l in i + 1..ends[i] {
+                crate::linalg::mul_add(false, r, t[(i, l)], &tail[(l - i - 1) * ln..(l - i) * ln]);
+            }
+            *work += ((ends[i] - i - 1) * ln + ln) as f64;
+            for ((z, x), v) in head[i * ln..].iter_mut().zip(r.iter()).zip(&invs[at + i * ln..at + (i + 1) * ln]) {
+                *z = *x * *v;
+            }
+        }
+    } else {
+        for i in 0..s {
+            let (head, tail) = z.split_at_mut(i * ln);
+            let r = &mut rhs[i * ln..(i + 1) * ln];
+            for l in (basis.f.parts[basis.part[i]].1..i).filter(|&l| ends[l] > i) {
+                crate::linalg::mul_add(false, r, t[(l, i)].conj(), &head[l * ln..(l + 1) * ln]);
+                *work += ln as f64;
+            }
+            *work += ln as f64;
+            for ((z, x), v) in tail[..ln].iter_mut().zip(r.iter()).zip(&invs[i * ln..(i + 1) * ln]) {
+                *z = *x * *v;
+            }
+        }
+    }
+    if nd > 0 {
+        let CopyTemps { rd, ze, inv, zdn, p, lu, piv, rhs: rhd, .. } = &mut sc.copies;
+        for sp in 0..splits {
+            let wl = shifts[sp];
+            // The static lane's own source on the copies' rows (the explicit columns').
+            let rd = &mut rd[..nd * n];
+            if sp == statics {
+                rd.copy_from_slice(b0d);
+            } else {
+                rd.fill(C64::ZERO);
+            }
+            let zdl = &mut zd[sp * nd * n..(sp + 1) * nd * n];
+            if sweep > 0 {
+                for a in 0..nd {
+                    for k in 0..n {
+                        let x = zdl[a * n + k];
+                        if x != C64::ZERO {
+                            crate::linalg::mul_add(true, &mut rd[a * n..a * n + n], x, &delta[k * n..k * n + n]);
+                        }
+                    }
+                }
+            }
+            let (pj, cinv) = (&mut pjs[pat + sp * n * nd * s..pat + (sp + 1) * n * nd * s], &mut cinvs[cat + sp * n * nd * nd..cat + (sp + 1) * n * nd * nd]);
+            let (zle, inv, zdn) = (&mut ze[..s * n], &mut inv[..s * n], &mut zdn[..nd * n]);
+            gather(z, zle, s, ln, sp * n, n);
+            gather(&invs[at..at + block], inv, s, ln, sp * n, n);
+            if !copies_factor(side, s, nd, ked, kde, kdd, basis, c, wl, inv, pj, cinv, p, lu, piv, n, work) {
+                return false;
+            }
+            copies_apply(s, nd, kde, pj, cinv, rd, zle, zdn, rhd, n, work);
+            scatter(zle, z, s, ln, sp * n, n);
+            zdl.copy_from_slice(zdn);
+            for (a, b) in zdtot.iter_mut().zip(zdn.iter()) {
+                *a += *b;
+            }
+        }
+    }
+    for i in (0..s).filter(|&i| going(i)) {
+        let zt = &mut ztot[i * n..i * n + n];
+        zt.fill(C64::ZERO);
+        for sp in 0..splits {
+            for (a, b) in zt.iter_mut().zip(&z[i * ln + sp * n..i * ln + sp * n + n]) {
+                *a += *b;
+            }
+        }
+    }
+    if right {
+        zs.extend_from_slice(z);
+        ztots.extend_from_slice(ztot);
+        zds.extend_from_slice(zd);
+        zdtots.extend_from_slice(zdtot);
+    }
+    // The change and the whole response, column by column.
+    for i in 0..s {
+        for j in 0..n {
+            let zn = ztot[i * n + j];
+            if going(i) {
+                change[j] += (zn - zold[i * n + j]).norm_sqr();
+            }
+            whole[j] += zn.norm_sqr();
+        }
+    }
+    // The block's part of the Bloch generator: Ê Z (+ the copies' emission Ê_D Z_D, the explicit states' dressing).
+    crate::linalg::adjoint_product(emit, ztot, (n, s, n), bloch);
+    if explicit {
+        bloch.iter_mut().zip(hx).for_each(|(b, x)| *b += *x);
+        if nd > 0 {
+            crate::linalg::fused_product_onto(exd, zdtot, (n, nd, n), bloch);
+        }
+    }
+    *work += (n * s * n + splits * s * n) as f64;
+    true
+}
+
+/// One sweep of the series over the blocks (module documentation, 5) in an orientation (`Side`): the columns' energies c,
+/// the Bloch generator H's diagonal (each column at its own), and the series' part Δ off it; every near block's sweep
+/// (`sweep_block`), the far blocks' held whole response and the explicit columns' unit row (DESIGN §1.3, ε = E + T: the
+/// rate's unit of its column) onto `whole`; H again from the sweep's responses on its base. False where an exact copies'
+/// complement is singular.
+#[allow(clippy::too_many_arguments)]
+fn sweep_all(near: &mut [Near], scratch: &mut [Scratch], far: &[Far], cache: &Cache, side: Side, sweep: usize, hbase: &[C64], h: &mut [C64], c: &mut [C64], delta: &mut [C64], change: &mut [f64], whole: &mut [f64], ground: usize, n: usize, work: &mut f64) -> bool {
+    for j in 0..n {
+        c[j] = h[j * n + j];
+    }
+    delta.copy_from_slice(h);
+    for j in 0..n {
+        delta[j * n + j] = C64::ZERO;
+    }
+    change.fill(0.0);
+    whole.fill(0.0);
+    for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
+        if nb.idle() {
+            continue;
+        }
+        let basis = &cache.near[x][cache.at_near[x].unwrap()];
+        if !sweep_block(nb, sc, basis, side, sweep, c, delta, change, whole, n, work) {
+            return false;
+        }
+    }
+    for fb in far.iter().filter(|fb| !fb.omitted) {
+        for j in 0..n {
+            whole[j] += fb.mf[j * n + j].re;
+        }
+    }
+    for w in whole[ground..].iter_mut() {
+        *w += 1.0;
+    }
+    h.copy_from_slice(hbase);
+    for nb in near.iter().filter(|nb| !nb.idle()) {
+        let bloch = if side == Side::Right { &nb.bloch } else { &nb.left.bloch };
+        for (a, b) in h.iter_mut().zip(bloch) {
+            *a += *b;
+        }
+    }
+    true
+}
+
+/// The series' rest read from its last two changes (module documentation, 5), column by column over the columns whose
+/// whole response is above the rounding's: the last change times r/(1 − r), r the ratio of the last two changes (none
+/// after the first; a column that did not change has converged, r = 0), relative to the column, in rate units; and the
+/// largest ratio.
+fn rest_of(change: &[f64], previous: &[f64], whole: &[f64], n: usize) -> (f64, f64) {
+    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
+    let (mut rest, mut most) = (0.0_f64, 0.0_f64);
+    for j in (0..n).filter(|&j| whole[j] > floor) {
+        let ratio = if change[j] == 0.0 {
+            0.0
+        } else if previous[j] > 0.0 {
+            (change[j] / previous[j]).sqrt()
+        } else {
+            f64::INFINITY
+        };
+        most = most.max(ratio);
+        let x = if ratio < 1.0 { change[j].sqrt() * ratio / (1.0 - ratio) } else { f64::INFINITY };
+        rest = rest.max(rate(x / whole[j].sqrt()));
+    }
+    (rest, most)
 }
 
 /// The exact copies' part of a compression: Z_E†K̂_ED Z_D + Z_D†K̂_DE Z_E + Z_D†K̂_DD Z_D into `a`, Z_D†Z_D into `metric`.
@@ -2172,6 +2495,7 @@ impl Fold {
                     groups,
                     copies,
                     tg: Tangent::default(),
+                    left: Left::default(),
                 });
             } else {
                 if b.rows.iter().any(|r| matches!(r, Row::Copy { .. })) {
@@ -2305,6 +2629,7 @@ impl Fold {
             spent: 0.0,
             rotating,
             gradient: Gradient::default(),
+            landing: Landing::default(),
         })
     }
 
@@ -2860,14 +3185,16 @@ impl Fold {
         let es: Vec<usize> = (0..GROUND).collect();
         let per: Vec<[Mat; 3]> = ru.iter().map(|x| std::array::from_fn(|q| self.emission[q].block(&es, &rows).product(x))).collect();
         let emitted: Vec<C64> = (0..GROUND).flat_map(|b| per.iter().flat_map(move |m| (0..3).flat_map(move |q| (0..n).map(move |p| m[q][(b, p)])))).collect();
-        let (mut f, mut g) = (vec![], vec![]);
+        let lu: Vec<Mat> = u.iter().map(|x| r0.adjoint().product(x)).collect();
+        let (mut f, mut g, mut nf) = (vec![], vec![], vec![]);
         for a in 0..u.len() {
             for bb in 0..u.len() {
                 f.extend(u[a].adjoint_product(&ru[bb]).data);
                 g.extend(ru[a].adjoint_product(&ru[bb]).data);
+                nf.extend(lu[a].adjoint_product(&ru[bb]).data);
             }
         }
-        *work += (u.len() * fb.m * fb.m * n + 2 * u.len() * u.len() * fb.m * n * n) as f64;
+        *work += (2 * u.len() * fb.m * fb.m * n + 3 * u.len() * u.len() * fb.m * n * n) as f64;
         let copied = fb
             .terms
             .iter()
@@ -2887,7 +3214,7 @@ impl Fold {
             })
             .collect::<Vec<f64>>();
         let fg = f.iter().zip(&g).map(|(a, b)| *a + *b * laid.z0).collect();
-        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), weights: copied.clone(), f, g, fg, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted })
+        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), weights: copied.clone(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted })
     }
 
     /// The forms Ĥ_PP's pairs and the far blocks hold at the focus, on P's diagonal at the weights `weight` (one per
@@ -2943,6 +3270,135 @@ impl Fold {
         made.map(|()| &ws.step)
     }
 
+    /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
+    /// the same series (`sweep_all`, `Side::Left`) on the adjoint's inputs, per near block the Schur form's adjoint, the
+    /// explicit columns' source and rows' emission exchanged, the explicit states' dressing and the exact copies' blocks
+    /// by their adjoints, on Ĥ_PP† with the far blocks' forms, the right's freeze held alike --, as many sweeps as the
+    /// right's at the least (with no decay one iteration: T_L = T), then until its rest reads within the share; and
+    /// N = 1 + T_L†T: the near blocks' Z̃†Z (their bases unitary), the exact copies' Z̃_D†Z_D, the centred
+    /// copies' rows' T̃_C†T_C where the metric holds them (R₀ Hermitian there: a copy does not decay), the far blocks'
+    /// (R₀†B)†R₀B = Σ e_a*e_b U_a†R₀²U_b; factored. Made once a forward, where a landing or a fall first asks for it (a
+    /// step's further landings at its middle take it again), its count the workspace's (`Workspace::left_work`). False
+    /// where it does not exist -- its series not converging, an exact copies' complement singular, N singular to the
+    /// rounding (the left and right slow spans not complementary: an exceptional point) --: the fold's one exit.
+    pub(crate) fn prototype_left(&self, cache: &Cache, ws: &mut Workspace) -> bool {
+        if let Some(made) = ws.landing.made {
+            return made;
+        }
+        let mut work = 0.0;
+        let made = self.left_within(cache, ws, &mut work).is_some();
+        ws.landing.made = Some(made);
+        ws.landing.work += work;
+        made
+    }
+
+    /// `prototype_left`'s series and N, its count into `work`.
+    fn left_within(&self, cache: &Cache, ws: &mut Workspace, work: &mut f64) -> Option<()> {
+        let (n, share) = (ws.n, crate::model::elim::share());
+        let nn = n * n;
+        let Workspace { near, far, hbase, scratch, landing, mid, step, .. } = ws;
+        // The adjoint's inputs, block by block, and its responses from none.
+        for nb in near.iter_mut().filter(|nb| !nb.idle()) {
+            let (s, lanes, nd, statics) = (nb.s, nb.lanes, nb.nd, nb.splits.len());
+            let ln = lanes * n;
+            let Near { left, kappa, vt, emit, stat, hx, ked, kde, kdd, b0d, exd, xcol, xs, .. } = &mut *nb;
+            left.kappa.clear();
+            left.kappa.extend(kappa.iter().map(|k| k.conj()));
+            left.vt.clone_from(vt);
+            left.emit.clone_from(emit);
+            let adjoint = |m: &[C64], r: usize, c: usize, out: &mut Vec<C64>| {
+                out.clear();
+                out.extend((0..c).flat_map(|i| (0..r).map(move |j| m[j * c + i].conj())));
+            };
+            if !xs.is_empty() {
+                for i in 0..s {
+                    for j in (0..n).filter(|&j| xcol[j]) {
+                        left.vt[i * ln + statics * n + j] = emit[i * n + j];
+                        left.emit[i * n + j] = stat[i * n + j];
+                    }
+                }
+                adjoint(hx, n, n, &mut left.hx);
+                adjoint(exd, n, nd, &mut left.b0d);
+                adjoint(b0d, nd, n, &mut left.exd);
+            }
+            adjoint(kde, nd, s, &mut left.ked);
+            adjoint(ked, s, nd, &mut left.kde);
+            adjoint(kdd, nd, nd, &mut left.kdd);
+            for (v, len) in [(&mut left.z, s * ln), (&mut left.ztot, s * n), (&mut left.zold, s * n), (&mut left.rhs, s * ln), (&mut left.prod, s * ln), (&mut left.zd, lanes * nd * n), (&mut left.zdtot, nd * n), (&mut left.bloch, nn)] {
+                zeroed(v, len);
+            }
+            *work += ((nd * (s + n)) * 2 + nd * nd + nn) as f64 / 4.0;
+        }
+        let Landing { hbase: base, h, c, delta, change, previous, whole, n: metric, lu, piv, .. } = landing;
+        zeroed(base, nn);
+        for i in 0..n {
+            for j in 0..n {
+                base[i * n + j] = hbase[j * n + i].conj();
+            }
+        }
+        h.clone_from(base);
+        zeroed(c, n);
+        zeroed(delta, nn);
+        for v in [&mut *change, &mut *previous, &mut *whole] {
+            v.clear();
+            v.resize(n, 0.0);
+        }
+        // The sweeps (module documentation, 5): as many as the right's at the least (its freeze held alike: with no decay
+        // the two are one iteration, T_L = T to the rounding), then until the rest reads within the share; a ratio at or
+        // above one after the second change, or a response that is not a number, is none.
+        let (mut sweep, least) = (0, step.sweeps.max(2));
+        loop {
+            if !sweep_all(near, scratch, far, cache, Side::Left, sweep, base, h, c, delta, change, whole, self.ground.len(), n, work) {
+                return None;
+            }
+            sweep += 1;
+            if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
+                return None;
+            }
+            let (rest, most) = rest_of(change, previous, whole, n);
+            previous.copy_from_slice(change);
+            if sweep >= least && rest <= share {
+                break;
+            }
+            if sweep >= 3 && most >= 1.0 {
+                return None;
+            }
+        }
+        // N = 1 + T_L†T over the blocks.
+        zeroed(metric, nn);
+        for p in 0..n {
+            metric[p * n + p] = C64::ONE;
+        }
+        for (x, nb) in near.iter_mut().enumerate().filter(|(_, nb)| !nb.idle()) {
+            let (s, nd, nc) = (nb.s, nb.nd, nb.nc);
+            crate::linalg::adjoint_product_onto(&nb.left.ztot, &nb.ztot, (n, s, n), metric);
+            if nd > 0 {
+                crate::linalg::adjoint_product_onto(&nb.left.zdtot, &nb.zdtot, (n, nd, n), metric);
+            }
+            *work += ((s + nd) * nn) as f64;
+            if nb.copied_in {
+                let basis = &cache.near[x][cache.at_near[x].unwrap()];
+                let Near { copies, groups, left, tc, .. } = &mut *nb;
+                zeroed(&mut left.tc, nc * n);
+                copies_of(copies, groups, basis, &|g, k| mid.e[g][k], &left.ztot, true, &mut left.tc, s, n, work);
+                crate::linalg::adjoint_product_onto(&left.tc, tc, (n, nc, n), metric);
+                *work += (nc * nn) as f64;
+            }
+        }
+        for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
+            let v = fb.vectors.len();
+            crate::linalg::fused_product_onto(&fb.products, &cache.far[x][cache.at_far[x].unwrap()].nf, (1, v * v, nn), metric);
+            *work += (v * v * nn) as f64;
+        }
+        lu.clone_from(metric);
+        piv.clear();
+        piv.resize(n, 0);
+        let size = metric.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+        *work += (n * nn) as f64 / 3.0;
+        let regular = crate::linalg::factor(lu, piv, n) && (0..n).all(|k| lu[k * n + k].abs() > crate::units::rounding(n) * size);
+        regular.then_some(())
+    }
+
     /// `prototype_within`'s forward, its count by phase into `work`: the step into the workspace's `Step`.
     fn forward_within(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, budget: f64, work: &mut [f64; 10]) -> Option<()> {
         let n = ws.n;
@@ -2960,6 +3416,7 @@ impl Fold {
             self.proto_place(r, kappa, mid, pairs, pp, base, lin, rotating, proj, &mut work[PLACE]);
         }
         ws.noded = false;
+        ws.landing.made = None;
         lap(PLACE, &mut clock, &mut tick);
         let share = crate::model::elim::share();
         if cache.at_near.len() != ws.near.len() || cache.at_far.len() != ws.far.len() {
@@ -3216,159 +3673,11 @@ impl Fold {
             }
             let outcome = loop {
                 let (t0, w0) = (ticks(), work[SERIES]);
-                // The columns' energies (H's diagonal, each column at its own) and the series' part of H (off it).
-                for j in 0..n {
-                    c[j] = h[j * n + j];
-                }
-                delta.copy_from_slice(h);
-                for j in 0..n {
-                    delta[j * n + j] = C64::ZERO;
+                if !sweep_all(near, scratch, far, cache, Side::Right, sweep, hbase, h, c, delta, change, whole, self.ground.len(), n, &mut work[SERIES]) {
+                    return None;
                 }
                 cs.extend_from_slice(c);
                 deltas.extend_from_slice(delta);
-                change.fill(0.0);
-                whole.fill(0.0);
-                for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
-                    if nb.idle() {
-                        continue;
-                    }
-                    let basis = &cache.near[x][cache.at_near[x].unwrap()];
-                    let s = nb.s;
-                    let (t, ends) = (&basis.f.t, &basis.f.ends);
-                    // Only the rows still going on move: the held ones keep their response. Every split at once, row by row
-                    // (module documentation, # The beams side by side).
-                    nb.zold.copy_from_slice(&nb.ztot);
-                    let splits = nb.lanes;
-                    let ln = splits * n;
-                    let block = s * ln;
-                    let at = nb.invs.len();
-                    nb.invs.resize(at + block, C64::ZERO);
-                    let nd = nb.nd;
-                    let (pat, cat) = (nb.pjs.len(), nb.cinvs.len());
-                    nb.pjs.resize(pat + splits * n * nd * s, C64::ZERO);
-                    nb.cinvs.resize(cat + splits * n * nd * nd, C64::ZERO);
-                    nb.zdtot.fill(C64::ZERO);
-                    let rhs = &mut nb.rhs;
-                    rhs.copy_from_slice(&nb.vt);
-                    if sweep > 0 {
-                        // −Z^{k−1}Δ.
-                        fused_product_into(&nb.z, delta, (s * splits, n, n), &mut nb.prod);
-                        for i in (0..s).filter(|&i| nb.active[i]) {
-                            for (r, p) in rhs[i * ln..(i + 1) * ln].iter_mut().zip(&nb.prod[i * ln..(i + 1) * ln]) {
-                                *r -= *p;
-                            }
-                        }
-                        work[SERIES] += (s * ln * n) as f64;
-                    }
-                    // The diagonal: (c_j − w_l − κ_i)⁻¹, each column at its own energy (the sweep's: H's diagonal moves with every
-                    // sweep), four to a vector division (BRIEF_PROTO5 item 3); kept for the tangent's sweeps and the freeze.
-                    for i in (0..s).filter(|&i| nb.active[i]) {
-                        for (sp, &wl) in nb.shifts.iter().enumerate() {
-                            crate::linalg::reciprocals(c, wl, nb.kappa[i], &mut nb.invs[at + i * ln + sp * n..at + i * ln + sp * n + n]);
-                        }
-                    }
-                    work[SERIES] += block as f64;
-                    let zl = &mut nb.z;
-                    for i in (0..s).rev().filter(|&i| nb.active[i]) {
-                        let (head, tail) = zl.split_at_mut((i + 1) * ln);
-                        let r = &mut rhs[i * ln..(i + 1) * ln];
-                        for l in i + 1..ends[i] {
-                            crate::linalg::mul_add(false, r, t[(i, l)], &tail[(l - i - 1) * ln..(l - i) * ln]);
-                        }
-                        work[SERIES] += ((ends[i] - i - 1) * ln + ln) as f64;
-                        for ((z, x), v) in head[i * ln..].iter_mut().zip(r.iter()).zip(&nb.invs[at + i * ln..at + (i + 1) * ln]) {
-                            *z = *x * *v;
-                        }
-                    }
-                    // The exact copies by Woodbury (`copies_factor`, `copies_apply`), their own source the series' part alone,
-                    // split by split.
-                    if nd > 0 {
-                        let CopyTemps { rd, ze, inv, zdn, p, lu, piv, rhs: rhd, .. } = &mut sc.copies;
-                        for sp in 0..splits {
-                            let wl = nb.shifts[sp];
-                            // The static lane's own source on the copies' rows (the explicit columns').
-                            let rd = &mut rd[..nd * n];
-                            if sp == nb.splits.len() {
-                                rd.copy_from_slice(&nb.b0d);
-                            } else {
-                                rd.fill(C64::ZERO);
-                            }
-                            let zdl = &mut nb.zd[sp * nd * n..(sp + 1) * nd * n];
-                            if sweep > 0 {
-                                for a in 0..nd {
-                                    for k in 0..n {
-                                        let x = zdl[a * n + k];
-                                        if x != C64::ZERO {
-                                            crate::linalg::mul_add(true, &mut rd[a * n..a * n + n], x, &delta[k * n..k * n + n]);
-                                        }
-                                    }
-                                }
-                            }
-                            let (pj, cinv) = (&mut nb.pjs[pat + sp * n * nd * s..pat + (sp + 1) * n * nd * s], &mut nb.cinvs[cat + sp * n * nd * nd..cat + (sp + 1) * n * nd * nd]);
-                            let (zle, inv, zdn) = (&mut ze[..s * n], &mut inv[..s * n], &mut zdn[..nd * n]);
-                            gather(&nb.z, zle, s, ln, sp * n, n);
-                            gather(&nb.invs[at..at + block], inv, s, ln, sp * n, n);
-                            if !copies_factor(s, nd, &nb.ked, &nb.kde, &nb.kdd, basis, c, wl, inv, pj, cinv, p, lu, piv, n, &mut work[SERIES]) {
-                                return None;
-                            }
-                            copies_apply(s, nd, &nb.kde, pj, cinv, rd, zle, zdn, rhd, n, &mut work[SERIES]);
-                            scatter(zle, &mut nb.z, s, ln, sp * n, n);
-                            zdl.copy_from_slice(zdn);
-                            for (a, b) in nb.zdtot.iter_mut().zip(zdn.iter()) {
-                                *a += *b;
-                            }
-                        }
-                    }
-                    for i in (0..s).filter(|&i| nb.active[i]) {
-                        let zt = &mut nb.ztot[i * n..i * n + n];
-                        zt.fill(C64::ZERO);
-                        for sp in 0..splits {
-                            for (a, b) in zt.iter_mut().zip(&nb.z[i * ln + sp * n..i * ln + sp * n + n]) {
-                                *a += *b;
-                            }
-                        }
-                    }
-                    nb.zs.extend_from_slice(&nb.z);
-                    nb.ztots.extend_from_slice(&nb.ztot);
-                    nb.zds.extend_from_slice(&nb.zd);
-                    nb.zdtots.extend_from_slice(&nb.zdtot);
-                    // The change and the whole response, column by column; the Bloch generator's part Ṽ†Z.
-                    for i in 0..s {
-                        for j in 0..n {
-                            let zn = nb.ztot[i * n + j];
-                            if nb.active[i] {
-                                change[j] += (zn - nb.zold[i * n + j]).norm_sqr();
-                            }
-                            whole[j] += zn.norm_sqr();
-                        }
-                    }
-                    // The block's part of the Bloch generator: Ê Z (+ the copies' emission Ê_D Z_D, the explicit states'
-                    // dressing).
-                    crate::linalg::adjoint_product(&nb.emit, &nb.ztot, (n, s, n), &mut nb.bloch);
-                    if !nb.xs.is_empty() {
-                        nb.bloch.iter_mut().zip(&nb.hx).for_each(|(b, x)| *b += *x);
-                        if nd > 0 {
-                            crate::linalg::fused_product_onto(&nb.exd, &nb.zdtot, (n, nd, n), &mut nb.bloch);
-                        }
-                    }
-                    work[SERIES] += (n * s * n + splits * s * n) as f64;
-                }
-                for fb in far.iter().filter(|fb| !fb.omitted) {
-                    for j in 0..n {
-                        whole[j] += fb.mf[j * n + j].re;
-                    }
-                }
-                // An explicit state's column: its excited amplitude ε holds its own unit row (DESIGN §1.3, ε = E + T), the
-                // rate's unit of its column.
-                for w in whole[self.ground.len()..].iter_mut() {
-                    *w += 1.0;
-                }
-                h.copy_from_slice(hbase);
-                for nb in near.iter() {
-                    for (a, b) in h.iter_mut().zip(&nb.bloch) {
-                        *a += *b;
-                    }
-                }
                 // After the first sweep the levels and far blocks the point leaves out (`omit`, read on bounds): beyond the
                 // share levels join, a new round on new decompositions.
                 if sweep == 0 {
@@ -3388,22 +3697,7 @@ impl Fold {
                 if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
                     return None;
                 }
-                // The rest: the last change times r/(1 − r), r the ratio of the last two changes (none after the first; a
-                // column that did not change has converged, r = 0).
-                let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-                let (mut rest, mut most) = (0.0_f64, 0.0_f64);
-                for j in (0..n).filter(|&j| whole[j] > floor) {
-                    let ratio = if change[j] == 0.0 {
-                        0.0
-                    } else if previous[j] > 0.0 {
-                        (change[j] / previous[j]).sqrt()
-                    } else {
-                        f64::INFINITY
-                    };
-                    most = most.max(ratio);
-                    let x = if ratio < 1.0 { change[j].sqrt() * ratio / (1.0 - ratio) } else { f64::INFINITY };
-                    rest = rest.max(rate(x / whole[j].sqrt()));
-                }
+                let (rest, most) = rest_of(change, previous, whole, n);
                 previous.copy_from_slice(change);
                 step.sweep_ticks.push(ticks() - t0);
                 step.sweep_work.push(work[SERIES] - w0);
@@ -5557,6 +5851,22 @@ impl Workspace {
         self.near.iter().map(|x| (x.s, x.lanes, x.terms.len())).collect()
     }
 
+    /// The left response forgotten (run.rs `Middle::forget_left`).
+    #[cfg(test)]
+    pub(crate) fn forget_left(&mut self) {
+        self.landing.made = None;
+    }
+
+    /// N = 1 + T_L†T at the last forward (`Fold::prototype_left` made).
+    pub(crate) fn left_metric(&self) -> Mat {
+        Mat { rows: self.n, cols: self.n, data: self.landing.n.clone() }
+    }
+
+    /// The last step's readings.
+    pub(crate) fn readings(&self) -> Readings {
+        self.step.readings()
+    }
+
     /// G at the last step's middle.
     pub(crate) fn generator(&self) -> &Mat {
         &self.step.generator
@@ -5607,19 +5917,21 @@ impl Workspace {
         (self.step.sweeps, self.near.iter().map(|x| (x.active.clone(), x.copied_in)).collect())
     }
 
-    /// Per block of the fold its response on its Q rows at the last step, x coordinates, in the block's row order (the
-    /// tests' comparison with `Fold::at`): a near block's solved rows VZ and its copies' T_C, a far block's R₀B; None for
-    /// the blocks the prototype does not hold (no rows).
-    pub(crate) fn responses(&self, fold: &Fold, cache: &Cache) -> Vec<Option<Mat>> {
+    /// Per block of the fold its right response on its Q rows at the last step (the left one where `side` is
+    /// `Side::Left`, `Fold::prototype_left` made), x coordinates, in the block's row order (the tests' comparison with
+    /// `Fold::at`; a switch's given rows, `taken`): a near block's solved rows VZ and its copies' T_C, a far block's R₀B
+    /// (R₀†B); None for the blocks the prototype does not hold (no rows).
+    pub(crate) fn responses(&self, fold: &Fold, cache: &Cache, side: Side) -> Vec<Option<Mat>> {
         let n = self.n;
         let mut out: Vec<Option<Mat>> = (0..fold.blocks.len()).map(|_| None).collect();
         let mut w = 0.0;
         for (x, nb) in self.near.iter().enumerate() {
             let basis = &cache.near[x][cache.at_near[x].unwrap()];
-            let z = Mat { rows: nb.s, cols: n, data: nb.ztot.clone() };
+            let (ztot, zdtot) = if side == Side::Right || nb.idle() { (&nb.ztot, &nb.zdtot) } else { (&nb.left.ztot, &nb.left.zdtot) };
+            let z = Mat { rows: nb.s, cols: n, data: ztot.clone() };
             let ts = basis.f.from(&z, &mut w);
             let mut tc = vec![C64::ZERO; nb.nc * n];
-            copies_of(&nb.copies, &nb.groups, basis, &|g, k| self.mid.e[g][k], &nb.ztot, true, &mut tc, nb.s, n, &mut w);
+            copies_of(&nb.copies, &nb.groups, basis, &|g, k| self.mid.e[g][k], ztot, true, &mut tc, nb.s, n, &mut w);
             let (ne, nd) = (nb.all, nb.nd);
             // The kept rows' response on their rows of the block, the omitted levels' zero.
             let mut place = vec![usize::MAX; ne];
@@ -5630,7 +5942,7 @@ impl Workspace {
                 if i < ne {
                     if place[i] == usize::MAX { C64::ZERO } else { ts[(place[i], j)] }
                 } else if i < ne + nd {
-                    nb.zdtot[(i - ne) * n + j]
+                    zdtot[(i - ne) * n + j]
                 } else {
                     tc[(i - ne - nd) * n + j]
                 }
@@ -5653,7 +5965,7 @@ impl Workspace {
                     }
                 }
             }
-            out[fb.o] = Some(basis.resolvent.product(&src));
+            out[fb.o] = Some(if side == Side::Right { basis.resolvent.product(&src) } else { basis.resolvent.adjoint().product(&src) });
         }
         out
     }
@@ -5730,30 +6042,41 @@ impl Workspace {
         out
     }
 
-    /// A state taken onto this fold at the last step's middle (DESIGN §11.1, §1.3; run.rs # The nodes risen and fallen):
-    /// the lifted state Ψ -- P amplitudes x, the Q rows `given` (block, row, amplitude) their own amplitudes, every other Q
-    /// row following T (`follow`) or nothing (a bare state's) -- projected onto the fold's span and normalized,
-    /// ψ = S⁻¹Φ†Ψ, Φ†Ψ = x + Σ_following T_r†(Tx)_r + Σ_given T_r† a_r. One formula: a node's rise (its rows P amplitudes
-    /// T_X x, every Q row following: Mx), its fall (its rows given their explicit amplitudes x_X: S⁻¹(Mx + T_X†(x_X −
-    /// T_X x)), `Folded::fall`'s), and a jump's landing (a bare state, nothing following: S⁻¹f).
-    pub(crate) fn taken(&self, fold: &Fold, cache: &Cache, x: &[C64], given: &[(usize, usize, C64)], follow: bool) -> Vec<C64> {
-        let mut overlap = x.to_vec();
-        if follow {
-            for (o, a) in overlap.iter_mut().zip(self.step.metric.apply(x)) {
-                *o += a;
-            }
+    /// A state taken onto this fold at the last step's middle (DESIGN §11.1, §1.3; run.rs # The nodes risen and fallen;
+    /// module documentation, # The landing): the lifted state Ψ -- P amplitudes x, the Q rows `given` (block, row,
+    /// amplitude) their own amplitudes, every other Q row following T (`follow`) or nothing (a bare state's) -- projected
+    /// onto the fold's slow span along its fast one, a = N⁻¹Φ_L†Ψ, Φ_L†Ψ = x + Σ_following T_L,r†(Tx)_r + Σ_given
+    /// T_L,r†a_r, N = 1 + T_L†T (`Fold::prototype_left`), and ψ = S a = S⁻¹(1 + X)a -- not normalized: its norm is the
+    /// slow part's, the long-time survival carried back to the switch (the jump clock's, step.rs `jump`). One formula: a
+    /// node's rise (its rows P amplitudes T_X x, every Q row following: N x, so S x, exact), its fall (its rows given
+    /// their explicit amplitudes: x + N⁻¹T_L,X†(x_X − T_X x)), and a jump's landing (a bare state, nothing following:
+    /// S N⁻¹f). With a, the slow part's P amplitudes. None where the left response does not exist (the fold's one exit).
+    pub(crate) fn taken(&mut self, fold: &Fold, cache: &Cache, x: &[C64], given: &[(usize, usize, C64)], follow: bool) -> Option<(Vec<C64>, Vec<C64>)> {
+        if !fold.prototype_left(cache, self) {
+            return None;
         }
+        let n = self.n;
+        let nm = &self.landing.n;
+        let mut overlap: Vec<C64> = if follow { (0..n).map(|i| nm[i * n..(i + 1) * n].iter().zip(x).map(|(a, b)| *a * *b).sum()).collect() } else { x.to_vec() };
         if !given.is_empty() {
-            let (t, tx) = (self.responses(fold, cache), self.amplitudes(fold, cache, x));
+            let (tl, tx) = (self.responses(fold, cache, Side::Left), self.amplitudes(fold, cache, x));
             for &(o, r, a) in given {
-                let t = t[o].as_ref().expect("a given row is a held block's");
+                let t = tl[o].as_ref().expect("a given row is a held block's");
                 let d = if follow { a - tx[o][r] } else { a };
                 for (j, z) in overlap.iter_mut().enumerate() {
                     *z += t[(r, j)].conj() * d;
                 }
             }
         }
-        self.step.normal.apply(&overlap)
+        crate::linalg::solve(&self.landing.lu, &self.landing.piv, n, &mut overlap, 1);
+        let lifted: Vec<C64> = overlap.iter().zip(self.step.metric.apply(&overlap)).map(|(a, m)| *a + m).collect();
+        Some((self.step.normal.apply(&lifted), overlap))
+    }
+
+    /// The left response's count at the last forward not yet taken (complex multiply-adds; `Fold::prototype_left`): a
+    /// landing's or a fall's, priced where it is made.
+    pub(crate) fn left_work(&mut self) -> f64 {
+        std::mem::take(&mut self.landing.work)
     }
 
     /// The blocks the prototype holds: (near: (block, rows s, copies nc, beam splits, terms), far: (block, rows, terms)).

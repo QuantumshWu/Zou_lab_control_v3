@@ -2134,50 +2134,6 @@ impl Fold {
             Row::Copy { state, .. } => state,
         }
     }
-
-    /// A node's rows in its block (DESIGN §11.1): of an excited level or a ground level's copy by a component.
-    pub(crate) fn node_rows(&self, block: usize, node: Node) -> Vec<usize> {
-        let b = &self.blocks[block];
-        (0..b.rows.len())
-            .filter(|&i| match (b.rows[i], node) {
-                (Row::Excited(x), Node::Excited(level)) => self.excited_level[x] == level,
-                (Row::Copy { state, component }, Node::Copy { level, component: g }) => component == g && self.ground_level[state] == level,
-                _ => false,
-            })
-            .collect()
-    }
-}
-
-impl Folded {
-    /// The rise of a node (DESIGN §11.1): its amplitude x_X = T_X x of the P state x (Bloch coordinates, x = S⁻¹y), its
-    /// rows `rows` of its block's response -- exact: the metric held T_X†T_X x as the explicit amplitude's square.
-    pub(crate) fn rise(&self, block: usize, rows: &[usize], x: &[C64]) -> Vec<C64> {
-        let t = &self.stages.last().unwrap().responses[block];
-        rows.iter().map(|&i| (0..self.n).map(|j| t[(i, j)] * x[j]).sum()).collect()
-    }
-
-    /// The fall of risen nodes (DESIGN §11.1): the state Ψ -- P's x, each risen node its own amplitude (block, rows, x_X), every
-    /// other Q row following T -- projected onto the fold's span and normalized, y = S⁻¹Φ†Ψ = S⁻¹(M x + Σ T_X†(x_X − T_X x)),
-    /// with the fast part it drops, δp = ‖Ψ‖² − ‖y‖² (what does not follow T; zero where every x_X = T_X x).
-    pub(crate) fn fall(&self, x: &[C64], risen: &[(usize, Vec<usize>, Vec<C64>)]) -> (Vec<C64>, f64) {
-        let n = self.n;
-        let mut overlap: Vec<C64> = self.metric.apply(x).iter().zip(x).map(|(m, a)| *m + *a).collect();
-        let mut norm: f64 = x.iter().zip(&overlap).map(|(a, b)| (a.conj() * *b).re).sum();
-        let t = &self.stages.last().unwrap().responses;
-        for (block, rows, amplitude) in risen {
-            let following = self.rise(*block, rows, x);
-            for ((&i, a), f) in rows.iter().zip(amplitude).zip(&following) {
-                let d = *a - *f;
-                for j in 0..n {
-                    overlap[j] += t[*block][(i, j)].conj() * d;
-                }
-                norm += a.norm_sqr() - f.norm_sqr();
-            }
-        }
-        let y = self.normal.apply(&overlap);
-        let kept: f64 = y.iter().map(|z| z.norm_sqr()).sum();
-        (y, norm - kept)
-    }
 }
 
 impl Fold {

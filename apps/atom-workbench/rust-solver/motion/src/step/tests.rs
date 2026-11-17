@@ -3121,6 +3121,7 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                     .zip(cached.iter().zip(&kappas))
                     .map(|((t, a), (m, k))| {
                         let mut t = t.clone();
+                        a.middle.forget_left();
                         let mut places = super::Places { model, point: (m.reached.0, t.time - s), path: (*k, k.map(|k| hm * k)), s, own: (t.cluster, a.middle, &a.path), other: None };
                         super::jump(model, &mut t, Some(&mut places)).unwrap();
                         t.kappa[0]
@@ -3128,7 +3129,15 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                     .sum::<f64>()
             },
             &mut || jumped.iter().zip(&alongs).map(|(t, a)| model.emit(t.cluster, &t.point(), Some((a.middle, &a.path, s)), &t.psi, &t.held, &mut draw).map_or(0.0, |e| e.wave_number)).sum::<f64>(),
-            &mut || jumped.iter().zip(&emitted).zip(&alongs).filter_map(|((t, e), a)| e.as_ref().filter(|e| e.landing == t.cluster).map(|e| (t, e, a))).map(|(t, e, a)| model.landed(e.landing, &t.point(), Some((a.middle, &a.path)), &e.amplitudes[0], &t.held)[0].re).sum::<f64>(),
+            &mut || {
+                // Each landing on its step's middle as a jump makes it: its left response made afresh (the step's first).
+                let mut sum = 0.0;
+                for (t, e, a) in jumped.iter().zip(&emitted).zip(&alongs).filter_map(|((t, e), a)| e.as_ref().filter(|e| e.landing == t.cluster).map(|e| (t, e, a))) {
+                    a.middle.forget_left();
+                    sum += model.landed(e.landing, &t.point(), Some((a.middle, &a.path)), &e.amplitudes[0], &t.held)[0].re;
+                }
+                sum
+            },
             &mut || {
                 let mut sum = 0.0;
                 for (s, r) in scratches.borrow_mut().iter_mut().zip(roots.borrow_mut().iter_mut()) {

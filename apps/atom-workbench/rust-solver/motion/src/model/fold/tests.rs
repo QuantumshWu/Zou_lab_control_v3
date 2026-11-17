@@ -776,6 +776,90 @@ fn sixty_random_systems_are_their_dense_sambe_within_the_read_truncation() {
     assert!(compared >= 40, "{compared} compared");
 }
 
+/// The left response is the right one of the adjoint (proto.rs # The landing; landing.status 2): on sixty random systems
+/// (`random_system`), the prototype's N = 1 + T_L†T at the focus against the Sambe lattice's slow spans to the fold's
+/// order, N⁻¹ = R_P Y_P -- its P-like modes' right eigenvectors' P rows and left ones' P columns --, within the readings
+/// of both responses (T's and T_L's relative errors, ρ = unrate of each, on T_L†T: (ρ + ρ_L) tr(M − 1)); and with no
+/// decay N = M (T_L = T, one iteration) to the rounding.
+#[test]
+fn the_left_response_is_the_right_one_of_the_adjoint() {
+    let share = crate::model::elim::share();
+    let mut state = 20261116u64;
+    let (mut compared, mut ratios, mut hermitian) = (0, vec![], 0.0_f64);
+    for trial in 0..60 {
+        let (req, choice) = random_system(&mut state, trial);
+        let mut still = req.clone();
+        still.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
+        for (request, decays) in [(&req, true), (&still, false)] {
+            for set in Fold::sets(request, &choice).unwrap() {
+                let fold = Fold::new(request, &choice, set[0]).unwrap();
+                if fold.blocks.is_empty() {
+                    continue;
+                }
+                let Ok(mut ws) = fold.prototype_workspace() else { continue };
+                let mut cache = super::proto::Cache::default();
+                let Some(step) = fold.prototype([0.0; 3], [0.0; 3], &mut cache, &mut ws) else { continue };
+                let (x, most) = (step.metric.clone(), step.readings().most());
+                if !fold.prototype_left(&cache, &mut ws) {
+                    continue;
+                }
+                let n = fold.size();
+                let ours = ws.left_metric();
+                if !decays {
+                    let gap = (0..n * n).map(|i| (ours.data[i] - x.data[i] - if i % (n + 1) == 0 { C64::ONE } else { C64::ZERO }).abs()).fold(0.0, f64::max);
+                    hermitian = hermitian.max(gap / (1.0 + x.frobenius()));
+                    continue;
+                }
+                // The lattice to the fold's own order (M6: its second; beyond it the truncation's reading, which the
+                // prototype's responses hold alike on both sides), so that what is compared is the series.
+                let l = lattice(&fold, [0.0; 3], 2, &|_| true);
+                let Some(e) = crate::linalg::eigen(&l.m) else { continue };
+                // The P places' nodes: the ground states at offset zero, each explicit state at its offset (`exact`).
+                let value = |k: &[i64]| k.iter().zip(&fold.components).map(|(&m, c)| m as f64 * c.nu).sum::<f64>();
+                let p0: Vec<usize> = (0..n)
+                    .map(|p| {
+                        let (state, offset) = if p < fold.ground.len() { (fold.ground[p], 0.0) } else { (GROUND + fold.explicit[p - fold.ground.len()], fold.frame_values[p]) };
+                        l.nodes.iter().position(|(s, k)| *s == state && (value(k) - offset).abs() <= 1e-9 * (1.0 + offset.abs())).expect("a P place's node")
+                    })
+                    .collect();
+                let size = l.m.rows;
+                let weight = |k: usize| p0.iter().map(|&i| e.vectors[(i, k)].norm_sqr()).sum::<f64>() / (0..size).map(|i| e.vectors[(i, k)].norm_sqr()).sum::<f64>();
+                let mut modes: Vec<usize> = (0..size).collect();
+                modes.sort_by(|&a, &b| weight(b).total_cmp(&weight(a)));
+                modes.truncate(n);
+                // Y = R⁻¹ (its rows the left eigenvectors), N⁻¹ = R_P Y_P, N.
+                let mut lu = e.vectors.data.clone();
+                let mut piv = vec![0; size];
+                if !crate::linalg::factor(&mut lu, &mut piv, size) {
+                    continue;
+                }
+                let mut y: Vec<C64> = (0..size * size).map(|i| if i % (size + 1) == 0 { C64::ONE } else { C64::ZERO }).collect();
+                crate::linalg::solve(&lu, &piv, size, &mut y, size);
+                let mut inv: Vec<C64> = (0..n * n).map(|i| (0..n).map(|k| e.vectors[(p0[i / n], modes[k])] * y[modes[k] * size + p0[i % n]]).sum()).collect();
+                let mut piv = vec![0; n];
+                let mut lattice_n: Vec<C64> = (0..n * n).map(|i| if i % (n + 1) == 0 { C64::ONE } else { C64::ZERO }).collect();
+                if !crate::linalg::factor(&mut inv, &mut piv, n) {
+                    continue;
+                }
+                crate::linalg::solve(&inv, &piv, n, &mut lattice_n, n);
+                let gap = (0..n * n).map(|i| (ours.data[i] - lattice_n[i]).norm_sqr()).sum::<f64>().sqrt();
+                let trace: f64 = (0..n).map(|p| x[(p, p)].re).sum();
+                let bound = (unrate(most) + unrate(share)) * trace + 1e-9 * (1.0 + trace);
+                ratios.push(gap / bound);
+                compared += 1;
+                if gap > bound {
+                    println!("   trial {trial}: N {:.5?}, the lattice's {:.5?}; readings {most:.2e}, tr(M − 1) {trace:.3e}", (0..n).map(|p| ours.data[p * n + p]).collect::<Vec<_>>(), (0..n).map(|p| lattice_n[p * n + p]).collect::<Vec<_>>());
+                }
+                assert!(gap <= bound, "trial {trial}: N {gap:.3e} from the lattice's, the readings' bound {bound:.3e}");
+            }
+        }
+    }
+    ratios.sort_by(f64::total_cmp);
+    println!("{compared} systems' N against the dense lattice: gap over bound median {:.3e}, largest {:.3e}; with no decay N − M at most {hermitian:.1e} (relative)", ratios[ratios.len() / 2], ratios[ratios.len() - 1]);
+    assert!(compared >= 40, "{compared} compared");
+    assert!(hermitian <= 1e-13, "with no decay N = M to the rounding");
+}
+
 /// ⑥ The closed Λ (g11 = 60, g22 = 50, Ω = 400; copies decomposed, lab frames) swept in its two-photon detuning from 40 to 0
 /// rad/µs: the readings' total moves without a cliff (a step of 0.5 rad/µs changes it by less than (d/(d − ½))⁶, the
 /// steepest power its parts make -- the next pass's δT, three resolvent factors of the copy at d, squared --, for d ≥ 2, at
@@ -1131,36 +1215,6 @@ fn the_tweezer_s_excited_shift_is_summed_to_all_orders() {
     assert!((ours - exact).abs() <= bound + 1e-9 * exact.abs(), "summed to all orders, within the read bound");
     assert!((first - r_exact).abs() > 0.5 * r_exact, "the first order misses it");
 }
-
-/// The rise and the fall (DESIGN §11.1) on a random system's excited node: rising a normalized state's x = S⁻¹y and falling
-/// it back gives y and δp = 0 to the rounding; an amplitude off T_X x by d falls with δp = ‖d‖² less what the fold's span
-/// takes of it (between zero and ‖d‖²).
-#[test]
-fn a_node_rises_and_falls_back_exactly_and_reads_what_it_drops() {
-    let mut state = 41u64;
-    let (req, choice) = random_system(&mut state, 1);
-    let fold = Fold::new(&req, &choice, 0).unwrap();
-    let f = fold_at(&fold, [0.0; 3], [0.0; 3]).unwrap();
-    let (o, rows) = (0..fold.blocks.len())
-        .find_map(|o| {
-            let level = fold.blocks[o].rows.iter().find_map(|r| if let Row::Excited(x) = r { Some(fold.excited_level[*x]) } else { None })?;
-            Some((o, fold.node_rows(o, Node::Excited(level))))
-        })
-        .unwrap();
-    let y: Vec<C64> = (0..f.n).map(|i| C64::new(1.0 + i as f64, 0.5 - i as f64) / (f.n as f64 * 3.0)).collect();
-    let x = f.normal.apply(&y);
-    let risen = f.rise(o, &rows, &x);
-    let (back, dropped) = f.fall(&x, &[(o, rows.clone(), risen.clone())]);
-    let gap: f64 = back.iter().zip(&y).map(|(a, b)| (*a - *b).abs()).fold(0.0, f64::max);
-    println!("rise and fall: {gap:.2e} from y, δp {dropped:.2e}");
-    assert!(gap <= 1e-13 && dropped.abs() <= 1e-13, "the fall of an exact rise");
-    let off: Vec<C64> = risen.iter().map(|a| *a + C64::new(0.01, -0.02)).collect();
-    let (_, dropped) = f.fall(&x, &[(o, rows.clone(), off)]);
-    let size = rows.len() as f64 * (0.01f64 * 0.01 + 0.02 * 0.02);
-    println!("an amplitude off by ‖d‖² = {size:.2e}: δp {dropped:.3e}");
-    assert!(dropped > 0.0 && dropped <= size * (1.0 + 1e-9), "the fast part dropped");
-}
-
 
 /// The work of a fold along a path in a scene (not a test of the fold: the step's count for the gate, DESIGN §8; FOLD_SCENE a
 /// reference scene's name or a native request's path). The rule's sets, frames and parts (`Choice::of`); every copy
@@ -1682,7 +1736,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
     let (generator, normal, a) = (step.generator.clone(), step.normal.clone(), step.a.clone());
     let allowed = unrate(step.series) + unrate(step.reuse) + unrate(step.far) + unrate(step.omitted) + unrate(at_next) + 1e-10;
     let (sweeps, made, series, reuse, far, omitted) = (step.sweeps, step.made, step.series, step.reuse, step.far, step.omitted);
-    let responses = ws.responses(fold, cache);
+    let responses = ws.responses(fold, cache, super::proto::Side::Right);
     let n = f.n;
     let (mut diff, mut whole, mut copies) = (vec![0.0; n], vec![0.0; n], 0.0_f64);
     for (o, b) in fold.blocks.iter().enumerate() {
@@ -3066,9 +3120,11 @@ fn two_level_clusters(run: &run::Onefold, req: &Request) -> (usize, usize) {
 }
 
 /// A jump's landing is a fall with no explicit amplitude (BRIEF_STEP3C item 1; DESIGN §11.1, run.rs # The nodes risen and
-/// fallen: one formula, `Workspace::taken`): a two-level atom with the light on, the state (f, 0) of its explicit cluster --
-/// nothing in Q there, S = 1 -- taken onto its folded cluster at the same middle is S⁻¹f, the landing of the bare state f
-/// there, to the rounding; what the fall drops is the landing's norm's complement, 1 − ‖S⁻¹f‖² (f a unit vector).
+/// fallen: one formula, `Workspace::taken`; proto.rs # The landing): a two-level atom with the light on, the state (f, 0) of
+/// its explicit cluster -- nothing in Q there, S = 1 -- taken onto its folded cluster at the same middle is S N⁻¹f, the
+/// landing of the bare state f there, to the rounding; what the fall drops is the landing's norm's complement,
+/// 1 − ‖S N⁻¹f‖² (f a unit vector). A state that follows T -- the folded state ψ risen, (x, T_X x) -- falls back to ψ
+/// and drops nothing, to the rounding.
 #[test]
 fn a_two_level_atom_s_landing_is_its_fall_with_no_excited_amplitude() {
     use crate::step::{Dynamics, Middle as _};
@@ -3085,11 +3141,36 @@ fn a_two_level_atom_s_landing_is_its_fall_with_no_excited_amplitude() {
         let f = C64::new(0.6, 0.8);
         let landed = low.landing(&path, &[f]);
         let bare: Vec<C64> = (0..n).map(|i| if i == 0 { f } else { C64::ZERO }).collect();
-        let (fallen, dropped) = high.take_onto(&bare, folded, &low);
+        let (fallen, dropped, _) = high.take_onto(&bare, folded, &low).expect("the fall");
         let apart = (landed[0] - fallen[0]).abs();
         println!("Δ {delta:+.1} s {s}: the landing {:?} and the fall at x_X = 0 {:?} apart {apart:.1e}; dropped {dropped:.6}, 1 − ‖S⁻¹f‖² {:.6}", landed[0], fallen[0], 1.0 - landed[0].norm_sqr());
         assert!(apart <= 1e-14, "the fall at no explicit amplitude is the landing");
         assert!((dropped - (1.0 - landed[0].norm_sqr())).abs() <= 1e-14, "it drops the landing's norm's complement");
+        let (risen, up, _) = low.take_onto(&[f], explicit, &high).expect("the rise");
+        let (back, down, _) = high.take_onto(&risen, folded, &low).expect("the fall back");
+        println!("   the folded state risen ({:.4?}) and fallen back: {:.1e} from it, dropped {up:.1e} and {down:.1e}", risen, (back[0] - f).abs());
+        assert!((back[0] - f).abs() <= 1e-14 && up.abs() <= 1e-14 && down.abs() <= 1e-14, "a state that follows T falls back to itself");
+    }
+}
+
+/// A jump's landing on the fold carries the slow mode's survival back to the jump (proto.rs # The landing; landing.status
+/// 3): a resonant two-level atom at rest, ‖S N⁻¹f‖² = (1 + q)/(2q²), q = √(1 − 2s) -- 1.18402, 1.47883, 2.04057, 3.61803
+/// at s = 0.1–0.4 --, within twice the share of c − 1 (the series' rest on T and on T_L); off resonance (Δ = −4Γ, s = 2)
+/// 0.98611. The orthogonal projection's (1 + q)/2 said beside.
+#[test]
+fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
+    use crate::step::{Dynamics, Middle as _};
+    let share = crate::model::elim::share();
+    for (delta, s, expected) in [(0.0, 0.1, 1.18402), (0.0, 0.2, 1.47883), (0.0, 0.3, 2.04057), (0.0, 0.4, 3.61803), (-4.0 * GAMMA, 2.0, 0.98611)] {
+        let req = two_level(delta, s);
+        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let low = run.middle(0, [0.0; 3], 0.0, &crate::step::Held::default(), false);
+        let path = low.path([0.0; 3], [0.0; 3]);
+        low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
+        let c = low.landing(&path, &[C64::ONE])[0].norm_sqr();
+        let q = (1.0 - 2.0 * s).max(0.0).sqrt();
+        println!("Δ {delta:+.1} s {s}: ‖S N⁻¹f‖² {c:.5} against {expected:.5} (the orthogonal (1 + q)/2 at resonance {:.5})", 0.5 * (1.0 + q));
+        assert!((c - expected).abs() <= 2.0 * share * (expected - 1.0).abs(), "the landing's norm the slow mode's survival at the jump");
     }
 }
 
@@ -3166,6 +3247,7 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
             let fell = high.decide(&path, &bare, interval, owed, &fewer);
             owed = fell.owed;
             let Some(down) = fell.switched else { continue };
+            owed = (owed + down.dropped).max(0.0);
             assert_eq!(down.cluster, folded, "the fall to the folded cluster");
             falls += 1;
             booked += down.dropped;
@@ -3173,7 +3255,7 @@ fn a_flipping_node_s_booked_drops_stop_its_falls_where_the_share_does_not_pay_th
             let low = run.middle(folded, r, t, &crate::step::Held::default(), true);
             let path = low.path([0.0; 3], [0.0; 3]);
             let rose = low.decide(&path, &down.psi, interval, owed, &more);
-            owed = rose.owed;
+            owed = (rose.owed + rose.switched.as_ref().map_or(0.0, |x| x.dropped)).max(0.0);
             paid += share * gamma * 2.0 * interval;
             assert_eq!(rose.switched.map(|x| x.cluster), Some(explicit), "the rise back");
         }
