@@ -66,7 +66,9 @@
 //! # The levels kept and left out (DESIGN §1.1, §1.8; BRIEF_PROTO4 items 1, 2)
 //! A near block's excited levels are kept or left out; the kept ones are one Schur form (whatever couples them is in the
 //! decomposition, no series across them), the omitted ones are neither decomposed nor solved. Their coupling R to the kept
-//! rows enters their reading alone (`bound_levels`), a bound read after the first sweep without solving them: per level q,
+//! rows enters their reading alone (`bound_levels`), at a decision without solving them: its leading term an estimate,
+//! the level's first-order response (c_j − w̄ − K_qq)⁻¹[Σ_a e_a U_a,q + K_qK Z_K]_j on K_qq's Schur form at the reference,
+//! its phases kept (unify2 §2.4: the bound below lost them), the rest of it bounds: per level q,
 //! lane l and column j, with g = 1/dist(c_j − w_l, W(K_qq − o)) -- W the numerical range, its Gershgorin rectangle at the
 //! reference widened by Σ_t |δc_t| ‖N_t,qq‖ and R₀'s change: ‖(z − K)⁻¹‖ ≤ 1/dist(z, W(K)) for any K, normal or not --,
 //! ‖z_q‖ ≤ g (‖W_q‖ + ‖R_qK‖ ‖Z_K‖ + Σ_p∈Q ‖R_qp‖ x_p + Σ_i |Δ_ij| x_i) (the last two by their largest, a contraction), and
@@ -482,6 +484,9 @@ struct NearBasis {
     /// level (T × L, R₀'s change); per level the beams' sources' and the source vectors' column norms (L × splits × n,
     /// L × v × n); the static source's and the explicit rows' emission's column norms ((T + 1) × L × n each).
     gersh: Vec<[f64; 4]>,
+    /// Every level's K_qq − o at the reference in its Schur form (`Factored`; none where it is singular): its omission's
+    /// first-order response, an estimate (`bound_levels`; unify2 §2.4).
+    lfact: Vec<Option<Factored>>,
     lterm: Vec<f64>,
     lpair: Vec<f64>,
     ldress: Vec<f64>,
@@ -1256,7 +1261,9 @@ fn outside(z: C64, g: &[f64; 4], r: f64) -> f64 {
     (x * x + y * y).sqrt()
 }
 
-/// One block's omitted levels bounded (module documentation, # The levels kept and left out): per level q of `omitted` and
+/// One block's omitted levels read (module documentation, # The levels kept and left out; unify2 §2.4): the leading term an
+/// estimate -- the level's first-order response to its whole source at the lanes' mean on K_qq's Schur form at the
+/// reference (`NearBasis::lfact`), and its emission's on it the potential's numerator --, the rest bounds as follows. Per level q of `omitted` and
 /// column j the bound N_q,j on its response (`sizes`, L × n), δ_q,j on what its absence leaves of the kept rows' (`backs`),
 /// and its potential's numerator (`shifts`), at the Bloch generator H (its diagonal the column energies c, the rest Δ). One
 /// bound (BRIEF_PROTO5 item 6): the lanes' responses summed by the resolvent identity about their mean Doppler shift w̄,
@@ -1501,6 +1508,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         cq.iter_mut().zip(dq.iter()).for_each(|(u, d)| *u += *d);
     }
     *work += (nq * n * (nq + n)) as f64 / 4.0;
+    // Per omitted level and column its response's estimate and its emission's on it (unify2 §2.4): ‖z_j‖ and |Re(src_j†z_j)|.
+    let mut estimates = vec![(0.0, 0.0); nq * n];
     for (k, &q) in q_of.iter().enumerate() {
         let (rows, r0) = (&nb.levels[q], basis.rat[q]);
         let m = rows.len();
@@ -1510,6 +1519,30 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             if s > 0 {
                 v[a * n..(a + 1) * n].iter_mut().zip(&rz[(r0 + a) * n..(r0 + a + 1) * n]).for_each(|(x, y)| *x += *y);
             }
+        }
+        // The level's first-order response at the lanes' mean, z_q,j = (c_j − w̄ − K_qq)⁻¹ v_j -- the whole source and the
+        // reference's coupling to the kept response, their phases kept --, on K_qq's Schur form V T V† (back-substitution,
+        // V unitary: ‖z‖ = ‖x‖, src†z = (V†src)†x), and its emission's on it (the source's own rows: Ê = Ṽ† on a ground
+        // column). Where the level's form is singular its bound stands.
+        if let Some(f) = basis.lfact[q].as_ref() {
+            let (y, ys) = (f.to(&Mat { rows: m, cols: n, data: v.to_vec() }, work), f.to(&Mat::from_fn(m, n, |a, j| vall[rows[a] * n + j]), work));
+            for j in 0..n {
+                let z = c[j] - C64::real(mean);
+                let mut x = vec![C64::ZERO; m];
+                for i in (0..m).rev() {
+                    let mut acc = y[(i, j)];
+                    for l in i + 1..f.ends[i] {
+                        acc += f.t[(i, l)] * x[l];
+                    }
+                    x[i] = acc / (z - f.t[(i, i)]);
+                }
+                let size = x.iter().map(|w| w.norm_sqr()).sum::<f64>().sqrt();
+                let shift = if nb.xcol[j] { f64::NAN } else { (0..m).map(|i| ys[(i, j)].conj() * x[i]).sum::<C64>().re.abs() };
+                estimates[k * n + j] = (size, shift);
+            }
+            *work += (2 * m * m * n) as f64;
+        } else {
+            estimates[k * n..(k + 1) * n].iter_mut().for_each(|e| *e = (f64::NAN, f64::NAN));
         }
         let dr = (0..nl).filter(|&p| !omitted[p]).map(|p| (pair[q * nl + p] - basis.lpair[q * nl + p]).powi(2)).sum::<f64>().sqrt();
         for j in 0..n {
@@ -1530,8 +1563,9 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
                 spread += a * (src[k * ln + sp * n + j] + rqk[k] * zk[sp * n + j]);
                 most = most.max(a);
             }
-            let feed = vj + dr * zt[j] + stat_d + spread + (1.0 + most) * coupled[k * n + j];
-            let size = if feed > 0.0 { gb * feed } else { 0.0 };
+            let rest = dr * zt[j] + stat_d + spread + (1.0 + most) * coupled[k * n + j];
+            let est = estimates[k * n + j].0;
+            let size = if est.is_nan() { if vj + rest > 0.0 { gb * (vj + rest) } else { 0.0 } } else { est + if rest > 0.0 { gb * rest } else { 0.0 } };
             if !size.is_finite() {
                 // No bound: the column's energy on the level's widened numerical range at the pivot.
                 return Err(q);
@@ -1555,8 +1589,9 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     for (u, &(cc, k)) in ea.iter_mut().zip(&nb.vectors) {
         *u = at.e[cc][k].norm_sqr().sqrt();
     }
-    for &q in q_of {
+    for (k, &q) in q_of.iter().enumerate() {
         for j in 0..n {
+            let (est, shift) = estimates[k * n + j];
             let eq = if nb.xcol[j] {
                 let mut v = basis.lemit[q * n + j];
                 for t in 0..terms {
@@ -1566,7 +1601,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             } else {
                 ea.iter().enumerate().map(|(a, e)| e * basis.lvec[(q * nb.vectors.len() + a) * n + j]).sum()
             };
-            shifts[q * n + j] = eq * sizes[q * n + j] + if backs[q * n + j] > 0.0 { ek[j] * backs[q * n + j] } else { 0.0 };
+            let own = if shift.is_nan() { eq * sizes[q * n + j] } else { shift + eq * (sizes[q * n + j] - est) };
+            shifts[q * n + j] = own + if backs[q * n + j] > 0.0 { ek[j] * backs[q * n + j] } else { 0.0 };
         }
         *work += (n * nb.vectors.len()) as f64;
     }
@@ -2983,6 +3019,17 @@ impl Fold {
             }
             gersh[q] = [a[0], a[1], d[0], d[1]];
         }
+        let lfact: Vec<Option<Factored>> = nb
+            .levels
+            .iter()
+            .map(|rq| {
+                let mut k = kall.block(rq, rq);
+                for i in 0..rq.len() {
+                    k[(i, i)] -= C64::real(b.value);
+                }
+                Factored::of(&k, work)
+            })
+            .collect();
         *work += (ne * ne * (terms_n + 1)) as f64;
         let at: Vec<C64> = nb.terms.iter().map(|&t| ws.mid.coef[t]).collect();
         let within: Vec<C64> = terms.iter().flat_map(|x| Mat::from_fn(s, s, |i, j| if part[i] == part[j] { x.1[(i, j)] } else { C64::ZERO }).data).collect();
@@ -3209,6 +3256,7 @@ impl Fold {
             f,
             nu,
             gersh,
+            lfact,
             lterm,
             lpair,
             ldress,
