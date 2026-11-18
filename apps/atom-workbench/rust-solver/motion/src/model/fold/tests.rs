@@ -3492,7 +3492,7 @@ fn the_landing_s_kick_is_the_cycle_s_conditional_mean() {
         let mut decided = Cache::default();
         let reading = fold.prototype([0.0, 0.0, z0], [0.0; 3], fold.thermal, &mut decided, &mut ws).expect("the fold there").reading;
         let mut cache = decided.clone();
-        let mut landed_at = |z: f64, ws: &mut super::proto::Workspace, cache: &mut Cache| -> (Vec<C64>, Vec<C64>) {
+        let landed_at = |z: f64, ws: &mut super::proto::Workspace, cache: &mut Cache| -> (Vec<C64>, Vec<C64>) {
             *cache = decided.clone();
             fold.prototype_within([0.0, 0.0, z], [0.0; 3], fold.thermal, cache, ws, false).expect("the held fold there");
             ws.taken(&fold, cache, &[C64::ONE], &[], false).expect("the landing")

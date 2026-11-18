@@ -36,6 +36,18 @@
 //! pattern, tilt0's at-once photons put its F = 2 populations off). Where the slow part is dark until τ* (θ′ its whole
 //! norm), that jump is at once (step.rs `jump`). The jump operators enter through the bare state alone: f = P_set L_q(t*)ψ,
 //! every block's at its exact phase (dragchk.status 第二项).
+//!
+//! # The kick (pland.status # 第三轮, # 第四轮（续） §1)
+//! The cycle's momentum conditional on its length τ is the photon's at the jump with the tangent from the landing, E[R | τ]
+//! = Im⟨Ψ(τ)|D|∂Ψ(τ)⟩/p(τ); on the modes g p = −Re Σ_jk d_j H′_jk c_k E_jk(τ) (`Transient::conditional`), H′ = ℓ†∂H_h r per
+//! lab axis (`Transient::mode_forces`; ∂H_h the bare gradient from the step's tangent, a far block's R₀ held as the step
+//! holds it). The step gives the slow part as it goes (the continuous force over τ, the photon's mean at the jump): g_s,
+//! the same sums with the slow modes' d and p and the long-time E -- F_cτ + b̄ + K_∞ for one slow mode. The landing books
+//! the rest at once, one number per axis: K_∞ + δg(τ*), δg = g − g_s at the τ* the clock knows, K_∞ = Im(ψ₀†∂ψ₀)/‖ψ₀‖² the
+//! landed slow state's own gradient (∂a = κ_sf − N⁻¹T_L†(∂T a), κ_sf = N⁻¹∂T_L†β by the left Riccati equation, its
+//! generator N H_s N⁻¹). The jump that takes the owed photon draws its class by the whole state's rates, so its kick's
+//! mean over the classes is moved to the slow photon's, g_s's (run.rs `Middle::transient`); at once the landing books
+//! g(τ*) whole.
 use super::*;
 use crate::linalg::Eigen;
 
