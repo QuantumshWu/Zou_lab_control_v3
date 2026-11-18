@@ -66,7 +66,14 @@
 //! excited rows are the near light's and change every step. The block is the same, its elimination order the other one --
 //! the excited rows first, in the kept basis (their resolvent triangular there), then the copies by their n_D × n_D Schur
 //! complement (c − K_DD) − Ỹ′(c − T_E)⁻¹Ỹ at every energy c (Woodbury), Ỹ = V_E†K_ED V_D and Ỹ′ = V_D†K_DE V_E taken at the
-//! point. The same block solve as one decomposition of the whole, exactly.
+//! point. The same block solve as one decomposition of the whole, exactly. What an energy's solves share -- the
+//! triangle's solves of Ỹ and the complement's inverse (`Woodbury`) -- is made once per energy and taken by every
+//! right-hand side there: a pass's columns at one energy, the readings' copies at a column's energy.
+//!
+//! # The blocks side by side
+//! Given the static P generator a pass solves each block alone, and the readings read each block alone: the blocks are
+//! solved and read on the threads at once (`each`), each block's arithmetic its own and what they make put together in
+//! the blocks' order -- the same numbers whatever the threads.
 //!
 //! # The compression
 //! With Φ = [1; T_o] on the lifted space, A = Φ†ĤΦ = Ĥ_PP + Σ_o (Ĥ_Po T_o + T_o†Ĥ_oP + T_o†Ĥ_oo T_o) and M = 1 + Σ_o T_o†T_o
@@ -125,7 +132,7 @@ use super::far::{decay, outside_form, Axes, Bases, EXCITED};
 use super::{Beat, Component as Part};
 use crate::field::{Amplitude, Light};
 use crate::linalg::{hermitian_eigen, schur, Mat, C64};
-use std::rc::Rc;
+use std::sync::Arc;
 use crate::request::{Manifold, Request, GROUND, STATES};
 
 mod step;
@@ -377,7 +384,7 @@ impl Choice {
                 if fold.blocks.is_empty() {
                     break;
                 }
-                let f = fold.read_at([0.0; 3]).ok_or("焦点处的折叠不存在")?;
+                let f = fold.tiers_at([0.0; 3]).ok_or("焦点处的折叠不存在")?;
                 let mut changed = false;
                 // A block's copies left out together: their omission readings summed, the smallest first, as its excited
                 // levels' (each alone within the share, tilt0's three tweezer copies left out together were not:
@@ -1280,6 +1287,17 @@ impl Fold {
         Some(f)
     }
 
+    /// The fold at a point at rest on a fresh path with the readings the tiers take (`Choice::tiered`: each node's
+    /// centring and omission): `read_at`'s fold and readings in their order, those the tiers do not take and that cost the
+    /// most -- the next pass's, the tones' sidebands, the copies' reabsorption -- left at nothing, and no jumps.
+    pub(crate) fn tiers_at(&self, r: [f64; 3]) -> Option<Folded> {
+        let mut f = self.at(r, [0.0; 3], &mut Path::default())?;
+        let mut work = 0.0;
+        f.readings = self.readings(&f, 0.0, false, &mut work);
+        f.reading_work = work;
+        Some(f)
+    }
+
     /// The jumps at a fold (module documentation, # The compression): per block C_q ε_o S⁻¹ -- where a jump is drawn, not
     /// every step (the decay is G's own); their work added to the fold's.
     pub(crate) fn jumps(&self, f: &mut Folded) {
@@ -1301,7 +1319,7 @@ impl Fold {
     /// beside them: at the analysis times, not every step.
     pub(crate) fn read(&self, f: &mut Folded, pattern: f64) {
         let mut work = 0.0;
-        f.readings = self.readings(f, pattern, &mut work);
+        f.readings = self.readings(f, pattern, true, &mut work);
         f.reading_work = work;
     }
 
@@ -1329,21 +1347,28 @@ impl Fold {
         let n = self.size();
         let triangle = if diagonal { Triangle { t: h.clone(), u: Mat::identity(n) } } else { Triangle::of(h, work)? };
         let (mut splits, mut sources, mut responses, mut sizes) = (vec![], vec![], vec![], vec![]);
-        for (l, e) in laid.iter().zip(eliminated) {
-            // The ranks in H's Schur basis (H diagonal: as they are).
-            let turned: Option<Vec<Vec<Mat>>> = (!diagonal).then(|| e.ranks.iter().map(|(_, per)| per.iter().map(|w| mul(w, &triangle.u, work)).collect()).collect());
-            let (mut per, mut src) = (vec![], vec![]);
-            let mut total = Mat::zeros(e.solved, n);
-            for (split, &w) in l.shifts.iter().enumerate() {
+        // Each block's splits alone on the threads (module documentation, # The blocks side by side), put together in
+        // their order: the ranks in H's Schur basis (H diagonal: as they are), each split's source and solution (none
+        // where the static split has no source), each block's response.
+        let turned: Vec<(Option<Vec<Vec<Mat>>>, f64)> = each(laid.len(), &|o| {
+            let mut spent = 0.0;
+            let turned = (!diagonal).then(|| eliminated[o].ranks.iter().map(|(_, per)| per.iter().map(|w| mul(w, &triangle.u, &mut spent)).collect()).collect());
+            (turned, spent)
+        });
+        let tasks: Vec<(usize, usize)> = laid.iter().enumerate().flat_map(|(o, l)| (0..l.shifts.len()).map(move |split| (o, split))).collect();
+        let solved: Vec<(Option<(Mat, Mat)>, f64)> = each(tasks.len(), &|t| {
+            let (o, split) = tasks[t];
+            let (l, e) = (&laid[o], &eliminated[o]);
+            let turned = &turned[o].0;
+            let w = l.shifts[split];
+            let mut spent = 0.0;
+            let work = &mut spent;
+            {
                 let b = match l.beams[split] {
                     None => match &e.to_static {
                         Some(x) if diagonal => x.clone(),
                         Some(x) => mul(x, &triangle.u, work),
-                        None => {
-                            per.push(Mat::zeros(e.solved, n));
-                            src.push(Mat::zeros(e.solved, n));
-                            continue;
-                        }
+                        None => return (None, spent),
                     },
                     Some((c, j)) => {
                         let comp = &self.components[c];
@@ -1365,16 +1390,48 @@ impl Fold {
                     }
                 };
                 let z = e.sylvester(&triangle.t, w, &b, work);
-                plus(&mut total, &z);
-                per.push(z);
-                src.push(b);
+                (Some((b, z)), spent)
+            }
+        });
+        let mut each_split: Vec<Vec<Option<(Mat, Mat)>>> = laid.iter().map(|_| vec![]).collect();
+        for (&(o, split), (x, spent)) in tasks.iter().zip(solved) {
+            if split == 0 {
+                *work += turned[o].1;
+            }
+            *work += spent;
+            each_split[o].push(x);
+        }
+        let blocks: Vec<(Vec<Mat>, Vec<Mat>, Mat, Vec<f64>, f64)> = each(laid.len(), &|o| {
+            let (l, e) = (&laid[o], &eliminated[o]);
+            let mut spent = 0.0;
+            let work = &mut spent;
+            let (mut per, mut src) = (vec![], vec![]);
+            let mut total = Mat::zeros(e.solved, n);
+            for x in &each_split[o] {
+                match x {
+                    None => {
+                        per.push(Mat::zeros(e.solved, n));
+                        src.push(Mat::zeros(e.solved, n));
+                    }
+                    Some((b, z)) => {
+                        plus(&mut total, z);
+                        per.push(z.clone());
+                        src.push(b.clone());
+                    }
+                }
             }
             let t = e.from(&total, work);
             let t = if diagonal { t } else { mul_by_adj(&t, &triangle.u, work) };
-            responses.push(e.rows(l, &t, work));
+            let response = e.rows(l, &t, work);
+            let size = (0..n).map(|j| (0..total.rows).map(|k| total[(k, j)].norm_sqr()).sum::<f64>()).collect();
+            (per, src, response, size, spent)
+        });
+        for (per, src, response, size, spent) in blocks {
+            *work += spent;
+            responses.push(response);
             splits.push(per);
             sources.push(src);
-            sizes.push((0..n).map(|j| (0..total.rows).map(|k| total[(k, j)].norm_sqr()).sum::<f64>()).collect());
+            sizes.push(size);
         }
         Some(Stage { triangle, splits, sources, responses, errors: vec![], sizes })
     }
@@ -1692,8 +1749,8 @@ struct Basis {
     rows: Vec<Row>,
     own: Option<usize>,
     k: Mat,
-    factored: Rc<Factored>,
-    ranks: Vec<Option<Rc<Vec<(usize, Vec<Mat>)>>>>,
+    factored: Arc<Factored>,
+    ranks: Vec<Option<Arc<Vec<(usize, Vec<Mat>)>>>>,
 }
 
 /// A block's matrices at the point before its decomposition: K_eff + o on its solved rows (its centred rows eliminated at
@@ -1714,17 +1771,28 @@ struct Eliminated {
     solved: usize,
     resolvent: Mat,
     basis: usize,
-    factored: Rc<Factored>,
+    factored: Arc<Factored>,
     diag: Vec<C64>,
     off: Vec<Vec<f64>>,
     to_static: Option<Mat>,
     to_dressed: Vec<Option<Mat>>,
-    ranks: Rc<Vec<(usize, Vec<Mat>)>>,
+    ranks: Arc<Vec<(usize, Vec<Mat>)>>,
     /// The exact copies: their count (the solved rows' last), and in the basis their couplings with the excited rows,
     /// Ỹ = V_E†K_ED V_D and Ỹ′ = V_D†K_DE V_E (module documentation, # The exact copies).
     exact: usize,
     coupling: Mat,
     back_coupling: Mat,
+}
+
+/// What a block's solves with exact copies share at one energy c (module documentation, # The exact copies; `Eliminated::
+/// column`): the triangle's solves of the couplings into the excited rows, the couplings out of them as the system takes
+/// them, and the copies' Schur complement's inverse (None where it is singular).
+struct Woodbury {
+    c: C64,
+    adjoint: bool,
+    p: Vec<Vec<C64>>,
+    cc: Mat,
+    inverse: Option<Mat>,
 }
 
 impl Eliminated {
@@ -1740,12 +1808,35 @@ impl Eliminated {
         }
         self.column(c, r, false, work)
     }
+
+    /// `back` at the energy c with its shared solves `at` (made where none yet: `Woodbury`), the same numbers.
+    fn back_at(&self, at: &mut Option<Woodbury>, c: C64, r: &[C64], work: &mut f64) -> Vec<C64> {
+        if self.exact == 0 {
+            return self.factored.back(&self.diag, c, r, work);
+        }
+        let w = at.get_or_insert_with(|| self.factor(c, false, work));
+        self.apply(w, r, work)
+    }
+
+    /// An energy's shared solves, the one of `factors` at c to the bit or made and kept there.
+    fn factor_of<'f>(&self, factors: &'f mut Vec<Woodbury>, c: C64, adjoint: bool, work: &mut f64) -> &'f Woodbury {
+        let same = |w: &Woodbury| w.c.re.to_bits() == c.re.to_bits() && w.c.im.to_bits() == c.im.to_bits();
+        match factors.iter().position(same) {
+            Some(at) => &factors[at],
+            None => {
+                factors.push(self.factor(c, adjoint, work));
+                factors.last().unwrap()
+            }
+        }
+    }
+
     fn sylvester(&self, th: &Mat, w: f64, b: &Mat, work: &mut f64) -> Mat {
         if self.exact == 0 {
             return sylvester(&self.factored.t, &self.diag, &self.factored.ends, th, w, b, work);
         }
         let (m, n) = (b.rows, b.cols);
         let mut z = Mat::zeros(m, n);
+        let mut factors: Vec<Woodbury> = vec![];
         for j in 0..n {
             let mut rhs: Vec<C64> = (0..m).map(|k| b[(k, j)]).collect();
             for i in 0..j {
@@ -1754,7 +1845,8 @@ impl Eliminated {
                     (0..m).for_each(|k| rhs[k] -= z[(k, i)] * t);
                 }
             }
-            let col = self.column(th[(j, j)] - C64::real(w), &rhs, false, work);
+            let at = self.factor_of(&mut factors, th[(j, j)] - C64::real(w), false, work);
+            let col = self.apply(at, &rhs, work);
             (0..m).for_each(|k| z[(k, j)] = col[k]);
         }
         *work += (m * n * n.saturating_sub(1) / 2) as f64;
@@ -1790,10 +1882,16 @@ impl Eliminated {
     /// One column of the block's solve with exact copies (module documentation, # The exact copies): (c − K)z = r, or
     /// (c − K†)z = r, the excited rows first, then the copies' Schur complement.
     fn column(&self, c: C64, r: &[C64], adjoint: bool, work: &mut f64) -> Vec<C64> {
+        let at = self.factor(c, adjoint, work);
+        self.apply(&at, r, work)
+    }
+
+    /// The energy c's shared solves (`Woodbury`; `column`): the triangle's solves of the couplings into the excited rows,
+    /// and the copies' Schur complement's inverse.
+    fn factor(&self, c: C64, adjoint: bool, work: &mut f64) -> Woodbury {
         let (ne, nd) = (self.solved - self.exact, self.exact);
         // (B, C): the couplings into the excited rows and out of them, as the system takes them.
         let (b, cc) = if adjoint { (self.back_coupling.adjoint(), self.coupling.adjoint()) } else { (self.coupling.clone(), self.back_coupling.clone()) };
-        let y = self.triangle_on(c, &r[..ne], 0, ne, adjoint, work);
         let p: Vec<Vec<C64>> = (0..nd).map(|a| self.triangle_on(c, &(0..ne).map(|k| b[(k, a)]).collect::<Vec<_>>(), 0, ne, adjoint, work)).collect();
         let t = &self.factored.t;
         let schur = Mat::from_fn(nd, nd, |a, d| {
@@ -1808,13 +1906,21 @@ impl Eliminated {
             own - (0..ne).map(|k| cc[(a, k)] * p[d][k]).sum::<C64>()
         });
         *work += (nd * nd * ne) as f64;
-        let rhs = Mat::from_fn(nd, 1, |a, _| r[ne + a] + (0..ne).map(|k| cc[(a, k)] * y[k]).sum::<C64>());
-        let x = match inverse(&schur, work) {
-            Some(inv) => mul(&inv, &rhs, work),
+        let inverse = inverse(&schur, work);
+        Woodbury { c, adjoint, p, cc, inverse }
+    }
+
+    /// The column of the right-hand side r at an energy's shared solves `at` (`column`).
+    fn apply(&self, at: &Woodbury, r: &[C64], work: &mut f64) -> Vec<C64> {
+        let (ne, nd) = (self.solved - self.exact, self.exact);
+        let y = self.triangle_on(at.c, &r[..ne], 0, ne, at.adjoint, work);
+        let rhs = Mat::from_fn(nd, 1, |a, _| r[ne + a] + (0..ne).map(|k| at.cc[(a, k)] * y[k]).sum::<C64>());
+        let x = match &at.inverse {
+            Some(inv) => mul(inv, &rhs, work),
             None => Mat::from_fn(nd, 1, |_, _| C64::new(f64::NAN, f64::NAN)),
         };
         let mut out = y;
-        for (a, pa) in p.iter().enumerate() {
+        for (a, pa) in at.p.iter().enumerate() {
             for k in 0..ne {
                 out[k] += pa[k] * x[(a, 0)];
             }
@@ -1849,6 +1955,7 @@ impl Eliminated {
         }
         let (m, n) = (b.rows, b.cols);
         let mut z = Mat::zeros(m, n);
+        let mut factors: Vec<Woodbury> = vec![];
         for j in (0..n).rev() {
             let mut rhs: Vec<C64> = (0..m).map(|k| b[(k, j)]).collect();
             for i in j + 1..n {
@@ -1857,7 +1964,8 @@ impl Eliminated {
                     (0..m).for_each(|k| rhs[k] -= z[(k, i)] * t);
                 }
             }
-            let col = self.column(th[(j, j)].conj() - C64::real(w), &rhs, true, work);
+            let at = self.factor_of(&mut factors, th[(j, j)].conj() - C64::real(w), true, work);
+            let col = self.apply(at, &rhs, work);
             (0..m).for_each(|k| z[(k, j)] = col[k]);
         }
         *work += (m * n * n.saturating_sub(1) / 2) as f64;
@@ -1965,7 +2073,7 @@ impl Fold {
         let at = match chosen {
             Some(at) => at,
             None => {
-                let factored = Rc::new(Factored::of(&k, work)?);
+                let factored = Arc::new(Factored::of(&k, work)?);
                 path.made += 1;
                 for (idx, _, _) in &factored.parts {
                     let mut x = crate::linalg::Eigen::default();
@@ -2033,7 +2141,7 @@ impl Fold {
                     .collect();
                 ranks.push((ci, per));
             }
-            path.bases[at].ranks[o] = Some(Rc::new(ranks));
+            path.bases[at].ranks[o] = Some(Arc::new(ranks));
         }
         let ranks = path.bases[at].ranks[o].clone().unwrap();
         let to_static = e.source.as_ref().map(|x| factored.to(x, work));
@@ -2057,6 +2165,34 @@ impl Fold {
         };
         Some(Eliminated { solved: b.solved, resolvent: e.resolvent, basis: at, factored: path.bases[at].factored.clone(), diag, off, to_static, to_dressed, ranks, exact: nd, coupling, back_coupling })
     }
+}
+
+/// f of 0..count on the threads at once (module documentation, # The blocks side by side), in their order.
+fn each<T: Send>(count: usize, f: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(count);
+    if threads <= 1 {
+        return (0..count).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = vec![];
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= count {
+                            break mine;
+                        }
+                        mine.push((i, f(i)));
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().expect("a block's thread")).collect()
+    });
+    out.sort_by_key(|x| x.0);
+    out.into_iter().map(|x| x.1).collect()
 }
 
 /// A square matrix's inverse by LU (None where it is singular).
@@ -2308,8 +2444,10 @@ impl Fold {
 }
 
 impl Fold {
-    /// The readings at a fold (DESIGN §3.1; `Reading`).
-    fn readings(&self, f: &Folded, pattern: f64, work: &mut f64) -> Vec<Reading> {
+    /// The readings at a fold (DESIGN §3.1; `Reading`); not `all`, without the next pass's, the tones' sidebands and the
+    /// copies' reabsorption (`tiers_at`): the next pass's readings made at nothing in its order -- it makes every solved
+    /// row's first --, the others making no reading another does not, so the readings' order is the same.
+    fn readings(&self, f: &Folded, pattern: f64, all: bool, work: &mut f64) -> Vec<Reading> {
         let n = f.n;
         let last = f.stages.last().unwrap();
         let tri = &last.triangle;
@@ -2419,8 +2557,15 @@ impl Fold {
             };
             *slot = slot.max(value);
         };
+        // A block's readings as made on its thread (node, kind, value), put in the blocks' order (module documentation,
+        // # The blocks side by side).
+        let replay = |o: usize, puts: Vec<(Node, usize, f64)>, out: &mut Vec<Reading>| {
+            for (nd, kind, value) in puts {
+                put(o, nd, kind, value, out);
+            }
+        };
         // The error vector of a block's solved rows (in K_eff's Schur coordinates) back on its rows, split by node.
-        let split = |o: usize, v: &[C64], j: usize, kind: usize, scale: f64, out: &mut Vec<Reading>, work: &mut f64| {
+        let split = |o: usize, v: &[C64], j: usize, kind: usize, scale: f64, out: &mut Vec<(Node, usize, f64)>, work: &mut f64| {
             let e = &f.eliminated[o];
             let b = &self.blocks[o];
             let back = e.from(&Mat::from_fn(v.len(), 1, |i, _| v[i]), work).data;
@@ -2435,7 +2580,7 @@ impl Fold {
             for (nd, x) in parts {
                 if per(nd, j) > 0.0 {
                     let pop = if matches!(nd, Node::Excited(_)) { populations(o, &|i| i < back.len() && node(b, i) == nd, &|i| back.get(i).copied().unwrap_or(C64::ZERO), j) } else { 0.0 };
-                    put(o, nd, kind, scale * (x / per(nd, j)).max(pop), out);
+                    out.push((nd, kind, scale * (x / per(nd, j)).max(pop)));
                 }
             }
         };
@@ -2444,7 +2589,24 @@ impl Fold {
         let mut dh = f.h[2].clone();
         dh.add_scaled(-C64::ONE, &f.h[1]);
         let dht = mul(&mul_adj(&tri.u, &dh, work), &tri.u, work);
-        for (o, e) in f.eliminated.iter().enumerate() {
+        let nexts: Vec<(Vec<(Node, usize, f64)>, f64)> = each(f.eliminated.len(), &|o| {
+            let e = &f.eliminated[o];
+            let (mut puts, mut spent) = (vec![], 0.0);
+            if !all {
+                // The readings its split makes, in its order (every solved row's node where its unit is not nothing).
+                let b = &self.blocks[o];
+                let mut nodes: Vec<Node> = vec![];
+                for i in 0..e.solved {
+                    if !nodes.contains(&node(b, i)) {
+                        nodes.push(node(b, i));
+                    }
+                }
+                for j in 0..n {
+                    puts.extend(nodes.iter().filter(|&&nd| per(nd, j) > 0.0).map(|&nd| (nd, 0, 0.0)));
+                }
+                return (puts, spent);
+            }
+            let work = &mut spent;
             let mut dz = Mat::zeros(e.solved, n);
             for (k, zt) in last.splits[o].iter().enumerate() {
                 let src = mul(zt, &dht, work).scaled(-C64::ONE);
@@ -2452,8 +2614,13 @@ impl Fold {
             }
             for j in 0..n {
                 let col: Vec<C64> = (0..e.solved).map(|i| dz[(i, j)]).collect();
-                split(o, &col, j, 0, 1.0, &mut out, work);
+                split(o, &col, j, 0, 1.0, &mut puts, work);
             }
+            (puts, spent)
+        });
+        for (o, (puts, spent)) in nexts.into_iter().enumerate() {
+            *work += spent;
+            replay(o, puts, &mut out);
         }
         // An excited node left out of its block, read in both of the readings' units, the larger: its response's share of the
         // column's whole excited response (the rates'), and the potential it carries, ΔV_j = 2|Re(U†Ĥ_P,node T_node U)_jj|
@@ -2528,13 +2695,15 @@ impl Fold {
                             best = (size, d);
                         }
                     }
-                    split(o, &best.1, j, 1, 1.0, &mut out, work);
+                    let mut puts = vec![];
+                    split(o, &best.1, j, 1, 1.0, &mut puts, work);
+                    replay(o, puts, &mut out);
                 }
             }
         }
         // The tones' sidebands: each tone's entry (q, p) in H's Schur basis, δ = t_pp − Ω − t_qq, its mixing w, and the error
         // √w [T(t_qq) − T(t_pp − Ω)] u_q on every block.
-        for tone in &f.tones {
+        for tone in f.tones.iter().filter(|_| all) {
             let at = mul(&mul_adj(&tri.u, &tone.a, work), &tri.u, work);
             for p in 0..n {
                 for q in 0..n {
@@ -2548,7 +2717,9 @@ impl Fold {
                         let base = respond(o, &tilde[o], &|_| C64::ZERO, q, work);
                         let shifted = respond(o, &tilde[o], &|_| delta, q, work);
                         let d: Vec<C64> = shifted.iter().zip(&base).map(|(x, y)| *x - *y).collect();
-                        split(o, &d, q, 2, w, &mut out, work);
+                        let mut puts = vec![];
+                        split(o, &d, q, 2, w, &mut puts, work);
+                        replay(o, puts, &mut out);
                     }
                 }
             }
@@ -2560,7 +2731,7 @@ impl Fold {
             self.forms(&self.others, &f.site.a, &mut g, &mut e, work);
             e
         };
-        let bare = bare.decompose(&full).then_some(bare);
+        let bare = (all && bare.decompose(&full)).then_some(bare);
         if let Some(b) = &bare {
             *work += b.work;
         }
@@ -2592,8 +2763,13 @@ impl Fold {
         };
         // The copies: the evaluation order's error by the block perturbation δK on the solved rows, R(z_j) δK T_j (one
         // function for centring, its prospect and omission), and on the block's explicit places (`explicit_dressing`); the
-        // reabsorption a third order would add; the mixing.
-        for (o, b) in self.blocks.iter().enumerate() {
+        // reabsorption a third order would add; the mixing. The blocks side by side; per block and column the solves at
+        // its energy t_jj shared by every copy read there (`Woodbury`).
+        let copies: Vec<(Vec<(Node, usize, f64)>, f64)> = each(self.blocks.len(), &|o| {
+            let b = &self.blocks[o];
+            let (mut puts, mut spent) = (vec![], 0.0);
+            let work = &mut spent;
+            let mut at_z: Vec<Option<Woodbury>> = (0..n).map(|_| None).collect();
             let l = &f.laid[o];
             let e = &f.eliminated[o];
             let groups: Vec<usize> = {
@@ -2649,7 +2825,7 @@ impl Fold {
                             let dk = mul(&v, &mul(dr, &mul_adj(&v, &col, work), work), work);
                             let src = Mat::from_fn(e.solved, 1, |i, _| if i < exc.len() { dk[(i, 0)] } else { C64::ZERO });
                             let st = e.to(&src, work);
-                            let zz = e.back(z, &st.data, work);
+                            let zz = e.back_at(&mut at_z[j], z, &st.data, work);
                             let back = e.from(&Mat::from_fn(zz.len(), 1, |i, _| zz[i]), work).data;
                             let rate_unit: f64 = back.iter().enumerate().map(|(i, x)| match per(node(b, i), j) { d if d > 0.0 => x.norm_sqr() / d, _ => 0.0 }).sum();
                             sizes[k] = rate_unit.max(populations(o, &|i| matches!(b.rows[i], Row::Excited(_)), &|i| back.get(i).copied().unwrap_or(C64::ZERO), j));
@@ -2658,11 +2834,11 @@ impl Fold {
                             }
                         }
                         let nd = Node::Copy { level, component: g };
-                        put(o, nd, 6, sizes[0], &mut out);
-                        put(o, nd, 7, sizes[1], &mut out);
+                        puts.push((nd, 6, sizes[0]));
+                        puts.push((nd, 7, sizes[1]));
                         match status {
-                            Status::Centred => put(o, nd, 3, sizes[0], &mut out),
-                            Status::Omitted => put(o, nd, 3, sizes[1], &mut out),
+                            Status::Centred => puts.push((nd, 3, sizes[0])),
+                            Status::Omitted => puts.push((nd, 3, sizes[1])),
                             _ => {}
                         }
                         // The copy's amplitude (its rows of T, or R(z)V†T on an omitted one) and its mixing.
@@ -2673,7 +2849,7 @@ impl Fold {
                             states.iter().map(|&s| (0..b.rows.len()).find(|&i| b.rows[i] == Row::Copy { state: s, component: g }).map_or(C64::ZERO, |i| tu[o][(i, j)])).collect()
                         };
                         let c2: f64 = amp.iter().map(|x| x.norm_sqr()).sum();
-                        put(o, Node::Copy { level, component: g }, 5, 0.5 * (1.0 - 1.0 / (1.0 + 4.0 * c2).sqrt()), &mut out);
+                        puts.push((Node::Copy { level, component: g }, 5, 0.5 * (1.0 - 1.0 / (1.0 + 4.0 * c2).sqrt())));
                         // The reabsorption: from the copy at ω, any other component h to the excited states at ω + ν_h, on
                         // the bare excited block (no lattice node holds it): ‖(z + ω + ν_h − 𝒦)⁻¹ V_h c‖².
                         if status != Status::Omitted {
@@ -2689,13 +2865,18 @@ impl Fold {
                                 let third = Mat::from_fn(EXCITED, 1, |x, _| src[(x, 0)] / (at - bare.values[x]));
                                 let size: f64 = mul(&bare.vectors, &third, work).data.iter().map(|x| x.norm_sqr()).sum();
                                 if whole[j] > 0.0 {
-                                    put(o, Node::Copy { level, component: g }, 4, size / whole[j], &mut out);
+                                    puts.push((Node::Copy { level, component: g }, 4, size / whole[j]));
                                 }
                             }
                         }
                     }
                 }
             }
+            (puts, spent)
+        });
+        for (o, (puts, spent)) in copies.into_iter().enumerate() {
+            *work += spent;
+            replay(o, puts, &mut out);
         }
         out
     }

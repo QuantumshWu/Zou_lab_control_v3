@@ -4091,3 +4091,48 @@ fn the_tiering_s_rounds_timed() {
         println!("  at {at:.3} s (passes {}), jumps {jumps:.3} s, readings {read:.3} s; work {:.3e}, reading work {:.3e}; phases {:?}", f.passes, f.work, f.reading_work, f.phases);
     }
 }
+
+/// Diagnostic (开头提速 E item 5; DECIDE_REQ a request's path, DECIDE_NODES a file of lines "set k ...; nodes [...]
+/// driven [...]" in the keys' Debug form, DECIDE_LINES the lines to take, e.g. "2,8,12"): each line's set's choice
+/// (`Choice::base_of` on that set, its explicit nodes and drives) laid out in full -- every copy's and excited node's
+/// status in the choice's order -- and its seconds: the tiers compared to the bit between two builds.
+#[test]
+#[ignore]
+fn the_given_nodes_tiers_laid_out() {
+    let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
+    let text = std::fs::read_to_string(std::env::var("DECIDE_NODES").expect("DECIDE_NODES")).unwrap();
+    let take: Vec<usize> = std::env::var("DECIDE_LINES").expect("DECIDE_LINES").split(',').map(|x| x.trim().parse().unwrap()).collect();
+    let keys = |s: &str| -> Vec<(usize, Part, usize)> {
+        s.split("), (")
+            .filter(|x| x.contains("frequency"))
+            .map(|x| {
+                let nums: Vec<String> = x.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
+                let level = nums[0].parse().unwrap();
+                let at = nums.iter().position(|w| w == "frequency").unwrap();
+                let frequency = nums[at + 1].parse().unwrap();
+                let counter = nums[at + 3] == "true";
+                let source = nums[at + 4].parse().unwrap();
+                (level, Part { frequency, counter }, source)
+            })
+            .collect()
+    };
+    let grounds = Fold::sets(&req, &Choice::of(&req, crate::model::elim::share()).unwrap()).unwrap();
+    for (i, line) in text.lines().enumerate().filter(|(i, _)| take.contains(&(i + 1))) {
+        let k: usize = line.split("set ").nth(1).unwrap().split(':').next().unwrap().trim().parse().unwrap();
+        let after = line.split("; nodes ").nth(1).unwrap();
+        let (nodes, driven) = after.split_once(" driven ").unwrap();
+        let (nodes, driven) = (keys(nodes), keys(driven));
+        let clock = std::time::Instant::now();
+        let choice = Choice::base_of(&req, nodes.clone(), driven.clone(), &|set| set == &grounds[k][..]);
+        let seconds = clock.elapsed().as_secs_f64();
+        match choice {
+            Ok(c) => {
+                let mine = |s: usize| grounds[k].contains(&s);
+                let copies: Vec<String> = c.copies.iter().filter(|x| mine(x.0 .1)).map(|x| format!("{:?}", x)).collect();
+                let excited: Vec<String> = c.excited.iter().filter(|x| mine(x.0 .1)).map(|x| format!("{:?}", x)).collect();
+                println!("line {} set {k} ({} nodes, {} driven; {seconds:.2} s): copies {copies:?} excited {excited:?}", i + 1, nodes.len(), driven.len());
+            }
+            Err(e) => println!("line {} set {k}: refused {e} ({seconds:.2} s)", i + 1),
+        }
+    }
+}
