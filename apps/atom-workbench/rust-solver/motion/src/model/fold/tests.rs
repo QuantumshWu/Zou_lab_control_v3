@@ -13,9 +13,9 @@ mod losschk;
 
 const GAMMA: f64 = 38.1;
 
-/// The rule's choice of a request (`Choice::of`) at the model's share.
+/// The skeleton of a request by the decision's rule at the focus (decide.rs `focus`): its sets and frames.
 fn rule(request: &Request) -> Choice {
-    Choice::of(request, super::super::elim::share()).unwrap()
+    super::decide::focus(request).unwrap()
 }
 
 /// Every node folded, every copy centred, at the frames `frames`, the rule's sets and parts.
@@ -1261,7 +1261,7 @@ fn the_tweezer_s_excited_shift_is_summed_to_all_orders() {
 }
 
 /// The work of a fold along a path in a scene (not a test of the fold: the step's count for the gate, DESIGN §8; FOLD_SCENE a
-/// reference scene's name or a native request's path). The rule's sets, frames and parts (`Choice::of`); every copy
+/// reference scene's name or a native request's path). The focus's sets, frames and parts (decide.rs `focus`); every copy
 /// decomposed (exact: a centring can be singular, a copy at the centre itself), then each at the cheapest evaluation its
 /// readings allow within the share (left out, centred, decomposed: M18), to its fixed point, at the focus; then per set one
 /// path of 100 steps of 30 nm through the focus on one `Path`: per step the complex multiply-adds of the fold and of the
@@ -1417,7 +1417,7 @@ fn a_fold_s_work_at_a_scene() {
 }
 
 /// A scene's evaluation tiers at its focus (the measurements' choice, M18): the rule's sets, frames and parts
-/// (`Choice::of`); every copy decomposed (exact: a centring can be singular, a copy at the centre itself), then each at the
+/// (decide.rs `focus`); every copy decomposed (exact: a centring can be singular, a copy at the centre itself), then each at the
 /// cheapest evaluation its readings allow within the share (left out, centred, decomposed), and the excited parts whose
 /// omission reads within it left out, to the fixed point.
 fn tiers(req: &Request, name: &str) -> Choice {
@@ -1876,7 +1876,7 @@ fn proto_against(fold: &Fold, ws: &mut super::proto::Workspace, cache: &mut supe
             .iter()
             .map(|t| {
                 let delta = (t.value + f.generator[(p, p)].re - f.generator[(c, c)].re).abs();
-                admixture(t.generator[(p, c)].abs() / delta).sqrt()
+                super::decide::admixture_of(t.generator[(p, c)].abs() / delta).sqrt()
             })
             .fold(0.0, f64::max)
     };
@@ -3383,7 +3383,7 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
         for set in Fold::sets(&req, &base).unwrap() {
             let Ok(fold) = Fold::new(&req, &base, set[0]) else { continue };
             for (key, _, _) in Choice::candidates(&fold) {
-                let Ok(choice) = Choice::base_of(&req, vec![key], vec![], &|x| x == &set[..]) else { continue };
+                let Ok(choice) = Choice::base_of(&req, &base, vec![key], vec![], &|x| x == &set[..]) else { continue };
                 let Ok(risen) = Fold::new(&req, &choice, set[0]) else { continue };
                 for b in &risen.blocks {
                     let centred = b.solved == 0 && !b.rows.is_empty();
@@ -3584,11 +3584,12 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
 }
 
 /// A scene's decisions take the remedy their accounts' attribution names (unify2 §3.4, §9 U3; B5: never by the state's
-/// population): on GMD1C_1ms's set, PGC3D_1ms's and R4_LIN_4's F = 1 sets with nothing explicit (`Choice::base`), a
+/// population): on GMD1C_1ms's set, PGC3D_1ms's and R4_LIN_4's sets of F = 1 m = −1 with nothing explicit (`Choice::base`;
+/// PGC3D's F = 1 whole, R4's its m = ±1, the σ± light's Raman ladder), a
 /// decision at each of 24 points of thermal orbits (`thermal_paths`, an atom at 0.1 m/s), the set's rises offered
 /// (`proto::Cell::nodes`). Of the decisions whose accounts read beyond the budget at the point (the evaluation found,
 /// `Step::ended`), by the kind that holds the most of the excess: GMD1C's are its levels left out -- a level joins (a
-/// decomposition made again with it) and nothing rises; R4 F = 1's three states rise (the D2 F′ = 2 node its series
+/// decomposition made again with it) and nothing rises; R4 F = 1's states rise (the D2 F′ = 2 node its series
 /// reads beyond the budget: Δ, the node's own drive, against the rows' distance); PGC3D F = 1's said. Every walk ends
 /// within the budget or with a rise.
 #[test]
@@ -3599,7 +3600,7 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
     let gmd = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\GMD1C_1ms.json".to_string();
     let budget = unrate(crate::model::elim::share()).powi(2);
     let kinds = ["series", "reuse", "centred", "left out", "ring"];
-    for (name, file, ground) in [("GMD1C_1ms", gmd, None), ("PGC3D_1ms", path("requests", "PGC3D_1ms.json"), Some(3)), ("R4_LIN_4", path("scenes", "R4_LIN_4.json"), Some(3))] {
+    for (name, file, ground) in [("GMD1C_1ms", gmd, None), ("PGC3D_1ms", path("requests", "PGC3D_1ms.json"), Some(0)), ("R4_LIN_4", path("scenes", "R4_LIN_4.json"), Some(0))] {
         if !std::path::Path::new(&file).exists() {
             println!("{name}: its request is not at hand ({file}), skipped");
             continue;
@@ -3607,7 +3608,7 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
         let req = crate::model::testing::scene(&file);
         let choice = Choice::base(&req, vec![], vec![]).unwrap();
         let sets = Fold::sets(&req, &choice).unwrap();
-        let set = sets.iter().find(|s| ground.is_none_or(|g| s.len() == g)).expect("the scene's set").clone();
+        let set = sets.iter().find(|s| ground.is_none_or(|g| s.contains(&g))).expect("the scene's set").clone();
         let fold = Fold::new(&req, &choice, set[0]).unwrap();
         let nodes: Vec<Taken> = Choice::candidates(&fold).into_iter().map(|(_, block, rows)| Taken { block, rows }).collect();
         let kappa = kappa_of(&fold);
@@ -3629,7 +3630,7 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
                 if ended.iter().sum::<f64>() <= budget {
                     continue;
                 }
-                let k = (0..5).max_by(|&a, &b| ended[a].total_cmp(&ended[b])).unwrap();
+                let k = (0..ended.len()).max_by(|&a, &b| ended[a].total_cmp(&ended[b])).unwrap();
                 tally[k][0] += 1;
                 tally[k][1] += usize::from(rise.is_some());
                 tally[k][2] += usize::from(grown > 0);
@@ -3647,7 +3648,7 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
             }
             "R4_LIN_4" => {
                 let (beyond, risen) = tally.iter().fold((0, 0), |s, t| (s.0 + t[0], s.1 + t[1]));
-                assert!(beyond > 0 && risen == beyond, "R4 F = 1: its three states rise ({risen} of {beyond})");
+                assert!(beyond > 0 && risen == beyond, "R4 F = 1: its states rise ({risen} of {beyond})");
             }
             _ => {}
         }
@@ -4058,7 +4059,7 @@ fn a_scene_s_risen_clusters_hold_their_copies_at_a_p_frame() {
     for set in Fold::sets(&request, &base).unwrap().iter().filter(|s| s.len() > 1) {
         let fold = Fold::new(&request, &base, set[0]).unwrap();
         for (key, _, _) in Choice::candidates(&fold) {
-            let Ok(choice) = Choice::base_of(&request, vec![key], vec![], &|s| s == &set[..]) else { continue };
+            let Ok(choice) = Choice::base_of(&request, &base, vec![key], vec![], &|s| s == &set[..]) else { continue };
             let Ok(risen) = Fold::new(&request, &choice, set[0]) else { continue };
             let ng = risen.ground.len();
             let mut on: Vec<(usize, usize)> = vec![];
@@ -4143,7 +4144,6 @@ fn the_base_choice_s_omitted_copies() {
 fn the_tiering_s_rounds_timed() {
     let path = std::env::var("DECIDE_REQ").expect("DECIDE_REQ");
     let req = crate::model::testing::scene(&path);
-    let share = crate::model::elim::share();
     let parts: Vec<Part> = components(&req, &Light::new(&req), &Axes::new(&req).unwrap()).unwrap().iter().map(|c| c.part).collect();
     let mut copies = vec![];
     for &a in &parts {
@@ -4155,7 +4155,7 @@ fn the_tiering_s_rounds_timed() {
             }
         }
     }
-    let choice = Choice { copies, ..Choice::of(&req, share).unwrap() };
+    let choice = Choice { copies, ..super::decide::focus(&req).unwrap() };
     for set in Fold::sets(&req, &choice).unwrap() {
         let clock = std::time::Instant::now();
         let fold = Fold::new(&req, &choice, set[0]).unwrap();
@@ -4177,77 +4177,4 @@ fn the_tiering_s_rounds_timed() {
     }
 }
 
-/// Diagnostic (开头提速 E item 5; DECIDE_REQ a request's path, DECIDE_NODES a file of lines "set k ...; nodes [...]
-/// driven [...]" in the keys' Debug form, DECIDE_LINES the lines to take, e.g. "2,8,12"): each line's set's choice
-/// (`Choice::base_of` on that set, its explicit nodes and drives) laid out in full -- every copy's and excited node's
-/// status in the choice's order -- and its seconds: the tiers compared to the bit between two builds.
-#[test]
-#[ignore]
-fn the_given_nodes_tiers_laid_out() {
-    let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
-    let text = std::fs::read_to_string(std::env::var("DECIDE_NODES").expect("DECIDE_NODES")).unwrap();
-    let take: Vec<usize> = std::env::var("DECIDE_LINES").expect("DECIDE_LINES").split(',').map(|x| x.trim().parse().unwrap()).collect();
-    let keys = |s: &str| -> Vec<(usize, Part, usize)> {
-        s.split("), (")
-            .filter(|x| x.contains("frequency"))
-            .map(|x| {
-                let nums: Vec<String> = x.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
-                let level = nums[0].parse().unwrap();
-                let at = nums.iter().position(|w| w == "frequency").unwrap();
-                let frequency = nums[at + 1].parse().unwrap();
-                let counter = nums[at + 3] == "true";
-                let source = nums[at + 4].parse().unwrap();
-                (level, Part { frequency, counter }, source)
-            })
-            .collect()
-    };
-    let grounds = Fold::sets(&req, &Choice::of(&req, crate::model::elim::share()).unwrap()).unwrap();
-    for (i, line) in text.lines().enumerate().filter(|(i, _)| take.contains(&(i + 1))) {
-        let k: usize = line.split("set ").nth(1).unwrap().split(':').next().unwrap().trim().parse().unwrap();
-        let after = line.split("; nodes ").nth(1).unwrap();
-        let (nodes, driven) = after.split_once(" driven ").unwrap();
-        let (nodes, driven) = (keys(nodes), keys(driven));
-        let clock = std::time::Instant::now();
-        let choice = if driven.is_empty() { Choice::base_of(&req, nodes.clone(), vec![], &|set| set == &grounds[k][..]) } else { Err("drives are no choice since E2".into()) };
-        let seconds = clock.elapsed().as_secs_f64();
-        match choice {
-            Ok(c) => {
-                let mine = |s: usize| grounds[k].contains(&s);
-                let copies: Vec<String> = c.copies.iter().filter(|x| mine(x.0 .1)).map(|x| format!("{:?}", x)).collect();
-                let excited: Vec<String> = c.excited.iter().filter(|x| mine(x.0 .1)).map(|x| format!("{:?}", x)).collect();
-                println!("line {} set {k} ({} nodes, {} driven; {seconds:.2} s): copies {copies:?} excited {excited:?}", i + 1, nodes.len(), driven.len());
-            }
-            Err(e) => println!("line {} set {k}: refused {e} ({seconds:.2} s)", i + 1),
-        }
-    }
-}
 
-/// Diagnostic (驱动按规则 E2; DECIDE_REQ a request's path): the run's decided folds, per set, every explicit state's drive
-/// at every other block offset -- its peak strength over its beat, m = a/|Δ|, and its reading rate(√w(m)) against the
-/// share (`Fold::build`'s `toned`): folded within, a tone beyond.
-#[test]
-#[ignore]
-fn the_decided_drives_read() {
-    let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
-    let initial = crate::solve::components(&req);
-    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
-    let run = run::Onefold::new(&req, crate::solve::alone(initial[chief].0)).unwrap();
-    let choice = run.choice().clone();
-    let share = crate::model::elim::share();
-    for set in Fold::sets(&req, &choice).unwrap() {
-        let fold = Fold::new(&req, &choice, set[0]).unwrap();
-        let ng = fold.ground.len();
-        for (j, &x) in fold.explicit.iter().enumerate() {
-            for b in fold.blocks.iter().filter(|b| b.offset != fold.frames[ng + j]) {
-                let peak: f64 = b.sources.iter().map(|&(p, c)| fold.components[c].couplings.iter().map(|m| m[(x, fold.ground[p])].abs()).sum::<f64>()).sum();
-                if peak == 0.0 {
-                    continue;
-                }
-                let beat = b.value - fold.frame_values[ng + j];
-                let m = peak / beat.abs();
-                let reading = rate(admixture(m).sqrt());
-                println!("set {set:?} explicit {x} (level {}) at block {:.4}: peak {peak:.4} beat {beat:.4} m {m:.3e} reading {reading:.3e} {}", fold.excited_level[x], b.value, if reading > share { "tone" } else { "folded" });
-            }
-        }
-    }
-}

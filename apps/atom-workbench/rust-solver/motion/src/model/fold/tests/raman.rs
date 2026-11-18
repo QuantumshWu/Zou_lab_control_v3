@@ -2,15 +2,14 @@
 use super::super::proto::Cache;
 use super::*;
 
-/// Diagnostic (RAMAN_REQ a native request's path): the components, the ground levels, the rule's Raman edges of mixing
-/// beyond 1 with their mismatch, the rule's sets and frames, and per run set its blocks' offsets and sources, the static
+/// Diagnostic (RAMAN_REQ a native request's path): the components, the ground levels, the decision's G terms at the focus
+/// of mixing beyond 1 with their readings, the sets and frames they make there, and per run set its blocks' offsets and sources, the static
 /// G's ground entries at the focus and its tones.
 #[test]
 #[ignore]
 fn raman_diagnostic() {
     let path = std::env::var("RAMAN_REQ").expect("RAMAN_REQ");
     let req = crate::model::testing::scene(&path);
-    let share = crate::model::elim::share();
     let labels = req.levels().unwrap();
     let light = Light::new(&req);
     let axes = Axes::new(&req).unwrap();
@@ -23,23 +22,16 @@ fn raman_diagnostic() {
     for s in 0..GROUND {
         println!("ground {s}: F={} m={} E={:.5}", labels[s].f, labels[s].m, e[s]);
     }
-    let d = decay(&req);
-    let peak: Vec<Mat> = comps.iter().map(|c| Mat::from_fn(EXCITED, GROUND, |x, g| C64::real(c.couplings.iter().map(|m| m[(x, g)].abs()).sum()))).collect();
-    for (f, cf) in comps.iter().enumerate() {
-        for (g, cg) in comps.iter().enumerate() {
-            for s in 0..GROUND {
-                for t in (0..GROUND).filter(|&t| t != s) {
-                    let a: f64 = (0..EXCITED).map(|x| peak[g][(x, t)].re * peak[f][(x, s)].re / C64::new(e[s] + cf.nu - e[GROUND + x], 0.5 * d[(x, x)].re).abs()).sum();
-                    let delta = e[t] - e[s] - (cf.nu - cg.nu);
-                    if a > 0.0 && a / delta.abs() > 1.0 {
-                        println!("edge {t} <- {s} by {f} then {g}: a {a:.4} Δ {delta:.5} m {:.3e} unfoldable {}", a / delta.abs(), unfoldable(a / delta.abs(), share));
-                    }
-                }
-            }
+    // The decision's G terms at the focus (decide.rs # The terms, G): every link of mixing beyond 1, its reading.
+    let focus = super::super::decide::Local::focus(&light);
+    let share = crate::model::elim::share();
+    for ((a, b, beat), m, reading) in super::super::decide::links_at(&req, &focus).unwrap() {
+        if m > 1.0 {
+            println!("link {a} <- {b} at {beat:?}: m {m:.3e} reading {reading:.3e} {}", if reading > share { "kept" } else { "folded" });
         }
     }
-    let choice = Choice::of(&req, share).unwrap();
-    println!("rule's sets {:?}", choice.sets);
+    let choice = super::super::decide::focus(&req).unwrap();
+    println!("the focus's sets {:?}", choice.sets);
     for s in 0..GROUND {
         println!("frame {s}: {:?} = {:.5}", choice.frames[s], axes.omega(&choice.frames[s]));
     }

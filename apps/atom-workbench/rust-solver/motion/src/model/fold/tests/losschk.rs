@@ -64,7 +64,7 @@ fn tilt0_held_at_trap_intensities() {
             let y = if scaling { 0.0 } else { waist * (-(s.ln()) / 2.0).max(0.0).sqrt() };
             let held = scaling.then(|| {
                 let r = scaled(&req, &light, s);
-                let choice = if rep == "base" { Choice::base(&r, vec![], vec![]) } else { Choice::base_of(&r, explicit.clone(), vec![], &|_| true) };
+                let choice = if rep == "base" { Choice::base(&r, vec![], vec![]) } else { Choice::base_of(&r, run.choice(), explicit.clone(), vec![], &|_| true) };
                 run::Onefold::of(&r, &choice.unwrap(), reference).unwrap()
             });
             let run = held.as_ref().unwrap_or(&run);

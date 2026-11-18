@@ -358,28 +358,30 @@ impl Set {
 }
 
 impl Onefold {
-    /// The run of a request (module documentation), the splitting's reference state's ground populations `reference`:
-    /// every ground set's cluster with nothing explicit first (`Choice::base`), then the start's decision's. Each set's
-    /// choice is made once, by the decision's search, and the run's choice is theirs (decide.rs `Search::merged`): the
-    /// rule's ground sets are its structure's (`Choice::of`; the tiers keep no copy, which alone would join two sets,
-    /// `Fold::sets`), its light the request's.
+    /// The run of a request (module documentation), the splitting's reference state's ground populations `reference`: the
+    /// start's decision's (decide.rs), its ground sets, frames, explicit nodes, terms and tiers -- each set's choice made
+    /// once, by the decision's search, the run's choice theirs (decide.rs `Search::merged`) --, its light the request's.
     pub(crate) fn new(request: &Request, reference: [f64; GROUND]) -> Result<Onefold, String> {
         let light = Light::new(request);
-        let grounds = Fold::sets(request, &Choice::of(request, crate::model::elim::share())?)?;
-        let mut search = super::decide::Search::new(request, &light, &grounds, 0.0, 0.0);
-        let base = Onefold::of(request, &search.merged(&vec![(vec![], vec![]); grounds.len()])?, reference)?;
         // The start's decision (decide.rs): the worst case over the local physics, an atom held by the trap at most its
         // depth's kinetic energy; every reading in the potential channel's floor.
-        let depth = (-base.bottom).max(0.0);
-        search.bound(base.clusters.floor, (2.0 * depth / base.hbar_over_mass).sqrt());
+        let hbar_over_mass = crate::units::hbar_over_mass(request.mass_kg);
+        let (floor, bottom) = Onefold::scales(&light, hbar_over_mass, &Reference::of(&Reference::states(request, &light)?, &reference));
+        let depth = (-bottom).max(0.0);
+        let mut search = super::decide::Search::new(request, &light, floor, (2.0 * depth / hbar_over_mass).sqrt())?;
         let decision = search.decide()?;
-        let mut run = if decision.decided().iter().all(|d| d.0.is_empty() && d.1.is_empty()) {
-            base
-        } else {
-            Onefold::of(request, &search.merged(&decision.decided())?, reference)?
-        };
+        let mut run = Onefold::of(request, &search.merged(&decision.decided())?, reference)?;
         run.decision = decision;
         Ok(run)
+    }
+
+    /// The potential channel's floor, k_B T_sc (unify2 §2.1; estimate.rs `semiclassical`): the larger of 30 recoils at the
+    /// beams' mean k² and the reference's zero point ħω̄/2 at the focus; and the reference's value there (rad/µs).
+    fn scales(light: &Light, hbar_over_mass: f64, reference: &Reference) -> (f64, f64) {
+        let k2 = light.beams.iter().map(|b| b.wave_number * b.wave_number).sum::<f64>() / light.beams.len().max(1) as f64;
+        let at = reference.at(light, [0.0; 3]);
+        let zero_point = (0..3).map(|a| (hbar_over_mass * at.hessian[a][a]).max(0.0).sqrt()).sum::<f64>() / 6.0;
+        ((crate::units::SUB_DOPPLER_RECOILS * hbar_over_mass * k2).max(zero_point), at.value)
     }
 
     /// The start's decision's explicit nodes (tests).
@@ -431,6 +433,8 @@ impl Onefold {
                 kinds(&|t| matches!(t, super::Term::Cross(..))),
                 sd.terms_worst
             );
+            out += &format!("    基态间超份额的耦合（G 项，静态）：{} 条；份额内的最大读数 {:.4e}
+", sd.links, sd.links_worst);
             if !sd.refused_terms.is_empty() {
                 out += &format!("    要求保留而簇做不成的项 {:?}\n", sd.refused_terms.iter().map(|(t, c)| format!("{t:?}：{c} 点")).collect::<Vec<_>>());
             }
@@ -481,18 +485,13 @@ impl Onefold {
         let hbar_over_mass = crate::units::hbar_over_mass(request.mass_kg);
         let states = Reference::states(request, &light)?;
         let reference = Reference::of(&states, &reference);
-        // The potential channel's floor, k_B T_sc (unify2 §2.1; estimate.rs `semiclassical`): the larger of 30 recoils at
-        // the beams' mean k² and the reference's zero point ħω̄/2 at the focus (rad/µs).
-        let k2 = light.beams.iter().map(|b| b.wave_number * b.wave_number).sum::<f64>() / light.beams.len().max(1) as f64;
-        let at = reference.at(&light, [0.0; 3]);
-        let zero_point = (0..3).map(|a| (hbar_over_mass * at.hessian[a][a]).max(0.0).sqrt()).sum::<f64>() / 6.0;
-        let floor = (crate::units::SUB_DOPPLER_RECOILS * hbar_over_mass * k2).max(zero_point);
+        let (floor, bottom) = Onefold::scales(&light, hbar_over_mass, &reference);
         let run = Onefold {
             clusters: Clusters::new(request, choice, floor)?,
             hbar_over_mass,
             frame: axes.omega(&axes.frame()),
             energies,
-            bottom: at.value,
+            bottom,
             reference,
             states,
             untrapped: OnceLock::new(),
@@ -680,7 +679,7 @@ impl Clusters {
         self.sets.index((k, nodes.clone()), || {
             let mut explicit: Vec<Key> = self.base.explicit.iter().copied().filter(|x| !self.grounds[k].contains(&x.2)).collect();
             explicit.extend(nodes.iter().copied());
-            let choice = Choice::base_of(&self.request, explicit, self.base.toned.clone(), &|set| set == &self.grounds[k][..])?;
+            let choice = Choice::base_of(&self.request, &self.base, explicit, self.base.toned.clone(), &|set| set == &self.grounds[k][..])?;
             Set::new(&self.request, &choice, k, &self.grounds[k])
         })
     }
@@ -841,13 +840,14 @@ pub(crate) struct Reference {
 
 impl Reference {
     /// Every ground state's reference alone, in the ground states' order: the held forms of the folds of the request
-    /// with the trap's frequency alone lit (`lit`) at the focus, each ground set's with nothing explicit
-    /// (`Choice::base`), at each of its ground places alone (`Fold::prototype_held`), each term laid on its beam pairs.
+    /// with the trap's frequency alone lit (`lit`) at the focus, each ground state alone with every block far
+    /// (`Choice::far`), its held forms (`Fold::prototype_held`), each term laid on its beam pairs.
     /// Refused where a far block does not exist at the focus.
     pub(crate) fn states(request: &Request, light: &Light) -> Result<Vec<Reference>, String> {
         let prepared = lit(request, light, |w| w == light.trap);
-        // Nothing explicit and no term kept: the reference reads the held forms at the focus, which no term changes.
-        let choice = Choice::base(&prepared, vec![], vec![])?;
+        // Each ground state alone, nothing explicit, no term kept, every block far (`Choice::far`): the reference reads the
+        // trap light's far forms at the focus.
+        let choice = Choice::far(&prepared, &Choice::skeleton(&prepared, &[])?)?;
         let mut out: Vec<Reference> = (0..GROUND).map(|_| Reference { pairs: vec![] }).collect();
         for set in Fold::sets(&prepared, &choice)? {
             let fold = Fold::new(&prepared, &choice, set[0])?;
@@ -1732,8 +1732,9 @@ impl crate::step::Dynamics for Onefold {
         let p = self.populations(cluster, psi);
         let untrapped = self.untrapped.get_or_init(|| {
             let request = lit(&self.clusters.request, &self.light, |w| w != self.light.trap);
-            // The run's terms: both light sets on one set of explicit nodes and kept terms (`Clusters::difference`).
-            Clusters::new(&request, &Choice::base(&request, vec![], self.clusters.base.toned.clone())?, self.clusters.floor)
+            // The run's skeleton and terms: both light sets on one set of explicit nodes and kept terms
+            // (`Clusters::difference`).
+            Clusters::new(&request, &Choice::base_of(&request, &self.clusters.base, vec![], self.clusters.base.toned.clone(), &|_| true)?, self.clusters.floor)
         });
         let potential = untrapped.as_ref().ok().and_then(|u| self.clusters.difference(u, at.r, &p)).unwrap_or(f64::NAN);
         kinetic + potential

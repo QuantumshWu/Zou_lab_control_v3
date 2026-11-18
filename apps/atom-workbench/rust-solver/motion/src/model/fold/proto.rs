@@ -166,7 +166,8 @@
 //!
 //! The drives at another offset: an explicit state is one object at one frame (fold.rs `Fold::build`); its copy at
 //! another block's offset is a Floquet node under the one rule. Where that block's sources drive it beyond the share
-//! (their peak strength over the beat, `unfoldable`; `Fold::driven`) the block does not hold it, and the drive is an
+//! (the start's decision's reading of the copy, decide.rs # The terms, `Term::Drive`; `Fold::driven`) the block does not
+//! hold it, and the drive is an
 //! entry of Ĥ_PP linear in the component's coefficients (as `lin`, the drives at its own offset), turning at
 //! θ_x − θ_q − ν_g, its conjugate at the opposite beat: a tone (`Rotating::lin`: its A_m, its gradient by ∂e). Within
 //! the share the copy is the block's Q row, folded with its light shift and its gradient (losschk.status.md: the
@@ -4403,7 +4404,7 @@ impl Fold {
 
     /// Where the fold does not exist at a decision's point (a part's ratio at one on its third sweep): the node of the
     /// cell's (`Cell::nodes`) in a part that does not converge whose mixing is the largest (`mixings`: m = |a|/|Δ| of the
-    /// bare inputs, fold.rs `unfoldable`'s reading) -- the remedy by attribution to the part that diverges (unify2 §2.3,
+    /// bare inputs, the mixing decide.rs reads) -- the remedy by attribution to the part that diverges (unify2 §2.3,
     /// §3.4), never by the amplitudes a forward that does not exist reads (B5: a node of the tweezer's, 25 THz off, rose so
     /// and its step's work had no bound; e2e R1). None where no node is in such a part.
     fn failed(&self, cache: &Cache, ws: &Workspace, done: usize, work: &mut f64) -> Option<usize> {
@@ -4427,7 +4428,7 @@ fn most_mixed(mixing: &[f64], nodes: &[Taken], held: impl Fn(&Taken) -> bool) ->
     (0..mixing.len()).filter(|&m| mixing[m] > 0.0 && held(&nodes[m])).fold(None, |best: Option<usize>, m| if best.is_none_or(|b| mixing[m] > mixing[b]) { Some(m) } else { best })
 }
 
-/// Each node's mixing at the forward's point (`Cell::nodes`; fold.rs `unfoldable`'s reading m = |a|/|Δ|, frame-free):
+/// Each node's mixing at the forward's point (`Cell::nodes`; m = |a|/|Δ|, frame-free, as decide.rs reads a term):
 /// its level's kept rows' bare source on a column -- each lane's, from the decomposition's basis back (`Factored::from`) --
 /// over the level's distance from the column's bare energy H⁰_jj at that lane, the level's energy held at the reference
 /// (the centre of its Gershgorin intervals, `NearBasis::gersh`); the largest over the lanes and columns. Of the bare

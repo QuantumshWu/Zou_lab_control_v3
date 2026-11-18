@@ -16,9 +16,10 @@
 //! Every coupling e (light joining s to s′, or a fold's Raman coupling) has a mismatch Δ_e = E_s − E_s′ − ω_e and a
 //! strength a_e that no frame changes; a frame only shares Δ_e out between the two diagonals and the edge's residual, and a
 //! loop's residuals sum to its beat whatever the frames. The one frame-free weight is the mixing m_e = |a_e|/|Δ_e|, and one
-//! rule decides with it (`Choice::of`): a coupling whose mixing w(m) = ½(1 − 1/√(1 + 4m²)) -- a copy's population, the
-//! copies' own reading -- is beyond the share cannot be folded, is static, and joins its two ends; one within it is a copy,
-//! folded with its residual by (ii). The sets are the connected parts of the couplings that cannot be folded -- a forest,
+//! rule decides with it, the start's decision's at every point of the local physics (decide.rs # The terms, G): a
+//! coupling whose mixing w(m) = ½(1 − 1/√(1 + 4m²)) -- a copy's population, the copies' own reading -- is beyond the share
+//! cannot be folded, is static, and joins its two ends; one within it is a copy, folded with its residual by (ii). The
+//! skeleton lays what the decision keeps (`Choice::skeleton`). The sets are the connected parts of the couplings that cannot be folded -- a forest,
 //! not one tree over all states (a tree over all would make the 6.8 GHz couplings of F = 1 and F = 2 static: a set whose
 //! diagonal spans GHz, the root of the per-state references and their r² mixed forms). Inside a set the mixing's maximum
 //! spanning tree is static (cluster.rs `frames`); its other couplings carry their loops' beats, the integrator's. Each set's
@@ -83,9 +84,8 @@
 //!
 //! # Tones
 //! What stays in P and is not static: an entry between P states of different frames (H_GG, or 𝒦 between explicit states of two
-//! offsets, its Hermitian part) at θ_t − θ_s whose coupling cannot be folded (`Fold::turning`: its peak strength over the
-//! states' energy difference read as the sets are, `unfoldable`; one that can is a copy left out, its population within
-//! the share); a
+//! offsets, its Hermitian part) at θ_t − θ_s whose coupling cannot be folded (`Fold::turning`: the start's decision keeps
+//! it, `Term::Pair`; one it does not is averaged and folded); a
 //! kept copy's emission Γ_t†V_g†ε_o at θ_t − ω and its partner; and the beat of the two blocks a kept copy relates,
 //! ε_o'†(𝒦 − ν̄)ε_o at o' − o (o' = θ_t + ν_g; ν̄ the columns' offsets from their own frames, gauge invariant, `Fold::cross`):
 //! the copy's excited node is reached both from block o and from its state's sideband through its own block, one Floquet node, so their interference (the rate's, with
@@ -101,8 +101,8 @@
 //! m + 1 with one photon frequency: the ground coherence the rotating polarization pumps, its friction (BRIEF_RAMAN). The
 //! decay between jumps is Σ_q L_q†L_q: each block's own, L_o†L_o, static in G; and between two blocks their cross
 //! products L_o†L_o′ at e^{i(o − o′)t}, terms of the generator that turn as the Hamiltonian's tones do, under the one
-//! rule (FOLDAPI §2; `Fold::beating`): the term's size a over its beat |o − o′|, read as `Choice::of` reads a coupling
-//! (`unfoldable`) -- within the share it is averaged out (its mean, nothing, kept; its reading the rest), beyond it a tone
+//! rule (FOLDAPI §2; `Fold::beating`): the term's size a over its beat |o − o′|, read by the start's decision as every
+//! term is (decide.rs # The terms) -- within the share it is averaged out (its mean, nothing, kept; its reading the rest), beyond it a tone
 //! of the integrator (the run's candidates), so that where every cross term is a tone the decay is the jumps' product at
 //! every time by construction, positive semidefinite (BRIEF_WIRE3 item 3). GMD1C's cross decay of its F = 1 and F = 2
 //! blocks turns at the hyperfine 42943 rad/µs and is averaged; tilt0's of its two beams' blocks, at 26 rad/µs, is a tone.
@@ -226,7 +226,8 @@ pub(crate) enum Row {
     Copy { state: usize, component: usize },
 }
 
-/// The run's choice of nodes (DESIGN §1.1, §3, §11): the ground states' frames and sets (the rule's, `Choice::of`), the
+/// The run's choice of nodes (DESIGN §1.1, §3, §11): the ground states' frames and sets (the decision's skeleton,
+/// `Choice::skeleton`), the
 /// explicit excited levels (a level at the offset component `part` reaches from ground state `ground`: an excited node kept
 /// in P), and every other Q node's tier (the same tiers for every node, module documentation # Blocks), keyed by an
 /// absorbed component and one of the block's own sources (the block): a copy's by the emitting component and its ground
@@ -267,23 +268,6 @@ impl Term {
     }
 }
 
-/// Whether a coupling of mixing m = |a|/|Δ| (its strength over its mismatch, both frame-free) cannot be folded (DESIGN
-/// §1.1): its copy's population w(m) beyond the share in rate. The one reading of a coupling: the sets' (`Choice::of`)
-/// and the tones' (`Fold::turning`).
-fn unfoldable(m: f64, share: f64) -> bool {
-    rate(admixture(m).sqrt()) > share
-}
-
-/// A copy's population at mixing m, the dressed two-state admixture ½(1 − 1/√(1 + 4m²)) (½ where m is infinite: a
-/// coupling at no mismatch).
-fn admixture(m: f64) -> f64 {
-    if m.is_finite() {
-        0.5 * (1.0 - 1.0 / (1.0 + 4.0 * m * m).sqrt())
-    } else {
-        0.5
-    }
-}
-
 /// The parts of `n` states joined by the edges (a, b) (union by the least), each in increasing order.
 fn connected(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
     let mut part: Vec<usize> = (0..n).collect();
@@ -314,50 +298,19 @@ fn connected(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
 }
 
 impl Choice {
-    /// The rule's structure of a request (module documentation, # P, sets and frames) at its peak light (every beam at its
-    /// focus value, in phase), every node folded and every copy centred, with the share `share`: the ground states' couplings
-    /// -- through an excited state, absorbing f and emitting g, a = Σ_x |V_g[x,t]| |V_f[x,s]| / |E_s + ν_f − 𝒦_xx|, at the
-    /// mismatch Δ = E_t − E_s − (ν_f − ν_g); and the outside forms', Σ_ω Σ_i |O_ω,i[t,s]| N_ω at Δ = E_t − E_s -- of an
-    /// admixture beyond the share join their ends into a set, and the mixing's maximum spanning tree of those is static,
-    /// each set then moved by the exact frequency (zero or a beat ν_f − ν_g) nearest its diagonal's mean.
-    pub(crate) fn of(request: &Request, share: f64) -> Result<Choice, String> {
+    /// The skeleton of a request (module documentation, # P, sets and frames) on the static couplings of ground states the
+    /// start's decision keeps (`links`: a ← b at the exact beat β, static in the frames where θ_a − θ_b = β, with its
+    /// strength m, its largest mixing over the decision's points; decide.rs # The terms, G): the sets are the links'
+    /// connected parts, the frames along their maximum spanning tree by strength (cluster.rs `frames`), each set then moved
+    /// by the exact frequency (zero or a beat ν_f − ν_g of two components) nearest its diagonal's mean. It reads nothing:
+    /// which couplings are static is the decision's.
+    pub(crate) fn skeleton(request: &Request, links: &[(usize, usize, Beat, f64)]) -> Result<Choice, String> {
         let light = Light::new(request);
         let axes = Axes::new(request)?;
         let components = components(request, &light, &axes)?;
         let e: Vec<f64> = (0..STATES).map(|s| request.hamiltonian[(s, s)].re).collect();
-        let d = decay(request);
-        let peak: Vec<Mat> = components
-            .iter()
-            .map(|c| Mat::from_fn(EXCITED, GROUND, |x, g| C64::real(c.couplings.iter().map(|m| m[(x, g)].abs()).sum())))
-            .collect();
-        let forms = |a: usize, b: usize| -> f64 {
-            light.frequencies.iter().map(|f| f.norm * request.outside_forms[f.form].matrices.iter().map(|m| m[(a, b)].abs()).sum::<f64>()).sum()
-        };
-        let mut edges: Vec<(usize, usize, Beat, f64)> = vec![];
-        for (f, cf) in components.iter().enumerate() {
-            for (g, cg) in components.iter().enumerate() {
-                for s in 0..GROUND {
-                    for t in (0..GROUND).filter(|&t| t != s) {
-                        let a: f64 = (0..EXCITED).map(|x| peak[g][(x, t)].re * peak[f][(x, s)].re / C64::new(e[s] + cf.nu - e[GROUND + x], 0.5 * d[(x, x)].re).abs()).sum();
-                        if a > 0.0 {
-                            let delta = e[t] - e[s] - (cf.nu - cg.nu);
-                            edges.push((t, s, cf.beat.plus(-1, &cg.beat), a / delta.abs()));
-                        }
-                    }
-                }
-            }
-        }
-        for s in 0..GROUND {
-            for t in (0..GROUND).filter(|&t| t != s) {
-                let a = forms(t, s) + request.hamiltonian[(t, s)].abs();
-                if a > 0.0 {
-                    edges.push((t, s, axes.zero(), a / (e[t] - e[s]).abs()));
-                }
-            }
-        }
-        let kept: Vec<(usize, usize, Beat, f64)> = edges.into_iter().filter(|x| unfoldable(x.3, share)).collect();
-        let sets = connected(GROUND, &kept.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>());
-        let mut frames = super::cluster::frames(GROUND, &kept, &axes.zero());
+        let sets = connected(GROUND, &links.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>());
+        let mut frames = super::cluster::frames(GROUND, links, &axes.zero());
         let mut candidates = vec![axes.zero()];
         for cf in &components {
             for cg in &components {
@@ -374,20 +327,51 @@ impl Choice {
         Ok(Choice { frames, sets, explicit: vec![], copies: vec![], excited: vec![], toned: vec![] })
     }
 
+    /// Every block far on a skeleton (module documentation, # Blocks; `Block::far`): every copy left out, every excited
+    /// node centred -- each set's states dressed by the light's far forms alone, no copy and nothing solved. The
+    /// reference's (run.rs `Reference::states`): a reference is exact for any potential (step.rs # The reference), so its
+    /// layout reads nothing.
+    pub(crate) fn far(request: &Request, skeleton: &Choice) -> Result<Choice, String> {
+        let parts: Vec<Part> = components(request, &Light::new(request), &Axes::new(request)?)?.iter().map(|c| c.part).collect();
+        let labels = request.levels()?;
+        let mut levels: Vec<(Manifold, u8)> = vec![];
+        for s in GROUND..STATES {
+            if !levels.contains(&(labels[s].manifold, labels[s].f)) {
+                levels.push((labels[s].manifold, labels[s].f));
+            }
+        }
+        let mut copies = vec![];
+        let mut excited = vec![];
+        for &a in &parts {
+            for s in 0..GROUND {
+                for &e in &parts {
+                    for f in [1, 2] {
+                        copies.push(((a, s, e, f), Status::Omitted));
+                    }
+                }
+                for level in 0..levels.len() {
+                    excited.push(((a, s, level), Status::Centred));
+                }
+            }
+        }
+        Ok(Choice { copies, excited, ..skeleton.clone() })
+    }
+
     /// The rule's tiers at the focus with the explicit levels `explicit` kept in P (M18, the evaluation order's rule): the
-    /// rule's sets, frames and parts (`Choice::of`); every copy decomposed (exact: a centring can be singular, a copy at the
+    /// skeleton's sets and frames (`Choice::skeleton`); every copy decomposed (exact: a centring can be singular, a copy at the
     /// centre itself), then each at the cheapest evaluation its readings allow within the share: of a block's copies, and of
     /// its excited levels, those whose omission readings sum within the share left out (the smallest first), of the others
     /// those whose centring reads within it centred, the rest decomposed or solved -- to the fixed point (at most four
     /// rounds a set). The readings are in both units, the larger (`Fold::readings`): the column's whole emission and its
     /// emission out of the set (the populations').
+    #[cfg(test)]
     pub(crate) fn tiered(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>) -> Result<Choice, String> {
-        Choice::tiered_of(request, explicit, toned, &|_| true)
+        Choice::tiered_of(request, &decide::focus(request)?, explicit, toned, &|_| true)
     }
 
     /// `tiered` on the sets `of` picks alone (the others' statuses left unread: no key of theirs is another set's, so a set's
     /// fold is the same).
-    fn tiered_of(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+    fn tiered_of(request: &Request, skeleton: &Choice, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
         let share = crate::model::elim::share();
         let parts: Vec<Part> = components(request, &Light::new(request), &Axes::new(request)?)?.iter().map(|c| c.part).collect();
         let mut copies = vec![];
@@ -400,7 +384,7 @@ impl Choice {
                 }
             }
         }
-        let mut choice = Choice { copies, explicit, toned, ..Choice::of(request, share)? };
+        let mut choice = Choice { copies, explicit, toned, frames: skeleton.frames.clone(), sets: skeleton.sets.clone(), excited: vec![] };
         for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             for _ in 0..4 {
                 let fold = Fold::new(request, &choice, set[0])?;
@@ -478,14 +462,15 @@ impl Choice {
     /// every excited level of a block with rows, and of a block with none at the focus, read at every point (proto.rs # The
     /// levels kept and left out). Which excited nodes are explicit is the run's at every point, not the focus's (run.rs #
     /// The nodes risen and fallen).
+    #[cfg(test)]
     pub(crate) fn base(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>) -> Result<Choice, String> {
-        Choice::base_of(request, explicit, toned, &|_| true)
+        Choice::base_of(request, &decide::focus(request)?, explicit, toned, &|_| true)
     }
 
     /// `base` on the sets `of` picks alone (`tiered_of`): a cluster's choice reads its own ground set's tiers, not every
     /// set's (model/fold/run.rs `Clusters::cluster_with`).
-    pub(crate) fn base_of(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
-        let mut choice = Choice::tiered_of(request, explicit, toned, of)?;
+    pub(crate) fn base_of(request: &Request, skeleton: &Choice, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+        let mut choice = Choice::tiered_of(request, skeleton, explicit, toned, of)?;
         for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             let fold = Fold::new(request, &choice, set[0])?;
             let mut add = vec![];

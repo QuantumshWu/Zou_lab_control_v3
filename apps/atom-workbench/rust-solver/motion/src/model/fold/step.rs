@@ -1723,8 +1723,7 @@ mod tests {
     #[test]
     fn the_reused_diagonal_is_the_change_s_first_order_and_the_reading_bounds_the_rest() {
         let req = crate::model::testing::scene("R4_LIN_4");
-        let share = crate::model::elim::share();
-        let rule = Choice::of(&req, share).unwrap();
+        let rule = super::super::decide::focus(&req).unwrap();
         let light = Light::new(&req);
         let axes = Axes::new(&req).unwrap();
         let parts: Vec<Part> = components(&req, &light, &axes).unwrap().iter().map(|c| c.part).collect();
