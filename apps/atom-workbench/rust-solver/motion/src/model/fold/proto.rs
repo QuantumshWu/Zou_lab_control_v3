@@ -777,8 +777,8 @@ fn part_of(nb: &Near, basis: &NearBasis, i: usize) -> usize {
     if nb.nd > 0 { 0 } else { basis.part[i] }
 }
 
-/// A series part's account at p sweeps (unify2 §2.2, §2.4), the rows swept `done` times at the decision (two at the least,
-/// one past every part's evaluated sweeps: `Fold::walk`): per column the rest after its p-th sweep, Σ_k≥p Δ_k, an estimate
+/// A series part's account at p sweeps (unify2 §2.2, §2.4), the rows swept `done` times at the decision (two at the least):
+/// per column the rest after its p-th sweep, Σ_k≥p Δ_k, an estimate
 /// -- the changes made, Δ_p … Δ_{K−1} (K = `done`), summed, and their geometric tail Δ_{K−1} r/(1 − r) on the last ratio
 /// r = Δ_{K−1}/Δ_{K−2}; past the changes made the tail alone, Δ_{K−1} r^{p−K+1}/(1 − r) -- on the rate channel against W_j
 /// (`den`); none within the rows' rounding. A part whose changes start at its last one (reached late, through the Bloch
@@ -3767,10 +3767,7 @@ impl Fold {
             lap(FAR, &mut clock, &mut tick);
             // The series (module documentation, 5): each row to its part's sweeps as the evaluation gives them; at a
             // decision every row to K -- two at the least (a ratio is read from two changes), the evaluation's most.
-            // A decision sweeps one past every part's evaluated sweeps: the rest after them is read on the change made
-            // past them (`series_squares`), not on a ratio of the two before (a series' third change may exceed what
-            // its first two say: parts that drive one another through the Bloch generator, readings.status.md).
-            let (mut done, mut target) = (0, if decide { (evaluation.most() + 1).max(2) } else { evaluation.most() });
+            let (mut done, mut target) = (0, if decide { evaluation.most().max(2) } else { evaluation.most() });
             for (x, nb) in ws.near.iter_mut().enumerate() {
                 let basis = cache.near_at(x);
                 for i in 0..nb.s {
@@ -4485,8 +4482,8 @@ impl Fold {
             }
             return Next::Again;
         }
-        if evaluation.most() + 1 > done {
-            return Next::Sweeps(evaluation.most() + 1);
+        if evaluation.most() > done {
+            return Next::Sweeps(evaluation.most());
         }
         // The cheaper evaluations within the budget at every column -- a part one sweep less, a far block left out, each
         // cheaper by its own count --: the least ρ² added first.
