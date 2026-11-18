@@ -474,12 +474,6 @@ impl Onefold {
                 None => out += "    最坏点：无\n",
             }
             out += &format!("    超份额而无结点可升的点 {}，折叠不存在且无结点可升的点 {}\n", sd.beyond, sd.nowhere);
-            out += &format!("    同态结点对的度规交叉读数：最大 {:.3e}（份额内的混入上限 {:.3e}），超份额的读数 {} 次", sd.crossed.0, crate::model::elim::share() / 2.0, sd.crossed_beyond);
-            if let Some(at) = &sd.crossed.1 {
-                let v: Vec<f64> = at.kappa.iter().map(|k| k * self.hbar_over_mass).collect();
-                out += &format!("，最大处 s {:.3} v [{:.3}, {:.3}, {:.3}] m/s", at.s, v[0], v[1], v[2]);
-            }
-            out += "\n";
             if !sd.refused.is_empty() {
                 let refused: Vec<String> = sd
                     .refused
