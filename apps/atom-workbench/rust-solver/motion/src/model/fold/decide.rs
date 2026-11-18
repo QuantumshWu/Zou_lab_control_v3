@@ -35,7 +35,10 @@
 //! placement alone (`Search::placed`: a node holding a state explicit at another offset is that state's drive there,
 //! `Choice::driven`), and only each set's last decision of the round is made, the sets' at once; where it cannot be made
 //! the keys join one by one again, each made (`Search::join`) -- the same as joining them one by one wherever every one
-//! of them can be made with those before it.
+//! of them can be made with those before it. What a point asks of a set's decision is the point's and the decision's
+//! alone: a point read again on a set whose nodes did not change since it was read there -- the other sets of a point
+//! read again for one set's join, the final reading of a point whose last round was on the final decision -- answers
+//! what it answered (`Search::asked`), not read again.
 //!
 //! # The report (`Decision`)
 //! Per set its explicit nodes, the worst point and its reading on the final decision (rate units: the bound), the
@@ -45,6 +48,7 @@ use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::C64;
 use crate::request::Request;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// An explicit excited node (run.rs `Key`, `Choice::explicit`): its level, the absorbed component, a source's ground state.
@@ -60,6 +64,11 @@ pub(crate) struct Local {
 }
 
 impl Local {
+    /// Its coordinates' bits: the point's identity (`Search::asked`).
+    fn bits(&self) -> Vec<u64> {
+        std::iter::once(self.s).chain(self.phases.iter().copied()).chain(self.kappa).map(f64::to_bits).collect()
+    }
+
     /// Every beam's factor on its amplitude (fold.rs `Fold::local`): √s for the trap's beams, times its phase.
     fn factors(&self, light: &Light) -> Vec<C64> {
         (0..light.beams.len())
@@ -224,6 +233,7 @@ impl Sobol {
 /// What a point asks of one set's decision: nothing (its reading, rate units; whether it stays beyond the share with no
 /// node offered; its same-state pairs' metric cross reading, `Search::crossed`), a node (its key), or nothing where its
 /// fold does not exist and no node is left to raise.
+#[derive(Clone)]
 enum Asked {
     Within(f64, bool, f64),
     Node(Key),
@@ -315,13 +325,16 @@ pub(crate) struct Search<'a> {
     most: f64,
     built: Mutex<Vec<((usize, (Vec<Key>, Vec<Key>)), Slot)>>,
     of: OnceLock<Result<Choice, String>>,
+    /// What each point asked of each set's decision (module documentation, # What is made once), by the point's bits
+    /// (`Local::bits`), the set and its nodes.
+    asked: Mutex<HashMap<(Vec<u64>, usize, (Vec<Key>, Vec<Key>)), Asked>>,
 }
 
 impl<'a> Search<'a> {
     /// The search of a request's run (module documentation): its light, its ground sets, the potential channel's floor
     /// (rad/µs) and the largest momentum an atom held by the trap has (rad/µm).
     pub(crate) fn new(request: &'a Request, light: &'a Light, grounds: &'a [Vec<usize>], floor: f64, most: f64) -> Search<'a> {
-        Search { request, light, grounds, floor, most, built: Default::default(), of: OnceLock::new() }
+        Search { request, light, grounds, floor, most, built: Default::default(), of: OnceLock::new(), asked: Default::default() }
     }
 
     /// Set k's fold with the explicit nodes and drives `nodes` (`Built`: `Choice::base_of`, its own set's tiers; the fold
@@ -410,8 +423,21 @@ impl<'a> Search<'a> {
                 .chunks(chunk.max(1))
                 .map(|part| {
                     scope.spawn(move || {
-                        let mut held: Vec<Option<(Fold, Workspace)>> = built.iter().map(|b| b.as_ref().ok().map(|b| b.take())).collect();
-                        let out = part.iter().map(|local| (0..nodes.len()).map(|k| self.ask(&built[k], held[k].as_mut(), local)).collect::<Vec<Asked>>()).collect::<Vec<_>>();
+                        // The thread's copies, taken where a point is read on them first.
+                        let mut held: Vec<Option<(Fold, Workspace)>> = built.iter().map(|_| None).collect();
+                        let mut answer = |k: usize, local: &Local| -> Asked {
+                            let key = (local.bits(), k, nodes[k].clone());
+                            if let Some(a) = self.asked.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+                                return a.clone();
+                            }
+                            if held[k].is_none() {
+                                held[k] = built[k].as_ref().ok().map(|b| b.take());
+                            }
+                            let a = self.ask(&built[k], held[k].as_mut(), local);
+                            self.asked.lock().unwrap_or_else(|e| e.into_inner()).insert(key, a.clone());
+                            a
+                        };
+                        let out = part.iter().map(|local| (0..nodes.len()).map(|k| answer(k, local)).collect::<Vec<Asked>>()).collect::<Vec<_>>();
                         for (b, h) in built.iter().zip(held) {
                             if let (Ok(b), Some(h)) = (b, h) {
                                 b.give(h);
