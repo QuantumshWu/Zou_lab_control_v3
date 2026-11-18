@@ -804,6 +804,7 @@ struct Noise {
 /// gradient's as the model counted it (real multiply-adds; the stretch's `Price` with the forms: `optical_work`); None
 /// where the cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
 fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, usize, f64)>, Refused> {
+    let _p = crate::prof::scope(crate::prof::OPTICAL);
     let Some(shape) = along.middle.optical(&along.path) else { return Ok(None) };
     let Noise { sector, gradient, slope } = noise;
     let matrices = along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
@@ -1748,18 +1749,22 @@ fn root_states() -> f64 {
 /// the moduli the decay's entries can reach (the static group's and each tone's two at once); a generator at a node
 /// that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
 fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<(&[C64], f64)>) -> Result<f64, Refused> {
+    let _p = crate::prof::scope(crate::prof::PICTURED);
     let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
     let picture = &mut scratch.picture;
     picture.fit(n);
+    let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
     along.middle.generator(&along.path, 0.0, &mut picture.base);
     if !still {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
+    drop(_g);
     let numbers = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
     if !(numbers(&picture.base) && (still || picture.ends.iter().all(numbers))) {
         return Err(Refused::Overflow);
     }
+    let _s = crate::prof::scope(crate::prof::PIC_SEPARATE);
     picture.separate(
         h,
         |beats, keys| {
@@ -1769,6 +1774,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         },
         |m, s, plus, minus| along.middle.envelopes(&along.path, m, s, plus, minus),
     );
+    drop(_s);
     if !picture.beats.iter().flat_map(|tone| tone.members.iter().flatten()).all(numbers) {
         return Err(Refused::Overflow);
     }
@@ -1802,6 +1808,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         hazard(decay, part, x.len()).max(0.0)
     });
     let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
+    let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
     picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, start.map(|(x, _)| x));
     Ok(scale)
 }
@@ -1847,6 +1854,7 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 /// `part` as the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a
 /// jump's root lies -- and, a span before the root, the kick's part of it. Returns it and the nodes taken.
 fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
+    let _p = crate::prof::scope(crate::prof::FALLEN);
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
@@ -1918,6 +1926,7 @@ impl Sums<'_> {
 /// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::between`), its
 /// density through `part` (`Sums::gather` at the weight one, `hazard`).
 fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], part: &mut [f64]) -> f64 {
+    let _p = crate::prof::scope(crate::prof::HAZARD_AT);
     let n = picture.states();
     part.fill(0.0);
     let mut x = [C64::ZERO; STATES];
@@ -1934,6 +1943,7 @@ fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], 
 /// nodes are the step's alone, and so is the picture's count of its work, which the reads leave as they found it.
 /// Returns the next time to read.
 fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f64, f64), u: f64, met: &mut Vec<(Stop, f64, [C64; STATES])>) -> usize {
+    let _p = crate::prof::scope(crate::prof::LOOKED);
     let n = picture.states();
     let ahead = |v: f64| (v + h) / (2.0 * h);
     let work = picture.work;
@@ -1966,6 +1976,7 @@ fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f6
 /// panel holds no root, and its sums are the spans'. Returns the root (none in the panel), ∫h from the panel's start to
 /// the latest time below, the nodes taken and the hazard's traces.
 fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
+    let _p = crate::prof::scope(crate::prof::ROOT);
     let after = |u: f64, v: f64| (v - u) * (b - a) > 0.0;
     // (time, ∫h from the panel's start) at the latest time below the root.
     let (mut below, mut nodes, mut traces) = ((a, 0.0), 0, 0);
@@ -2167,6 +2178,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// decision times (unify2 §4.3): where the generator does not exist along the step's path -- a held forward that is
     /// no number --, the step is refused as a jump with no photon is (`Refused::Emission`).
     pub fn new(model: &'a D, from: &Trajectory, tau: f64, decision: Option<f64>) -> Result<Midway<'a, D>, Refused> {
+        let _p = crate::prof::scope(crate::prof::STEP_NEW);
         let half = 0.5 * tau;
         let (flow, reached) = middle(model, from.r, from.kappa, half)?;
         let hm = model.hbar_over_mass();
@@ -2190,6 +2202,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// trajectory's. A jump the model gives no photon is refused (`jump`); so is a stretch whose first state scatters
     /// beyond every state of the atom (`Domain::runaway`; module documentation, # The domain).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
+        let _p = crate::prof::scope(crate::prof::ATTEMPT);
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
@@ -2205,7 +2218,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             if done {
                 break;
             }
-            landed = Some(next.unwrap_or_else(|| self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, false)));
+            landed = Some(next.unwrap_or_else(|| {
+                let _p = crate::prof::scope(crate::prof::STEP_OTHER_MIDDLE);
+                self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, false)
+            }));
         }
         let March { state: mut end, read, impulse, scattered, optical, mut work, prices, mut made, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
@@ -2289,6 +2305,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// representation itself is the run's, fixed: model/fold/run.rs # The representation), the cell's books' end; the next
     /// decision time, a cell on, and the cell's unresolved steps none; its counted work, the decision's forward with it.
     fn decided(&self, state: &mut Trajectory, interval: f64) -> Result<f64, Refused> {
+        let _p = crate::prof::scope(crate::prof::DECIDED);
         let (kappa, velocity) = (state.kappa, state.kappa.map(|k| self.hbar_over_mass * k));
         let middle = self.model.middle(state.cluster, state.r, state.time, &state.held, true);
         let path = middle.path(kappa, velocity);
@@ -2333,6 +2350,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// stretch reads the scattered light there and the optical sector's rate, on the middle state.
     #[allow(clippy::too_many_arguments)]
     fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch, domain: &dyn Domain) -> Result<(bool, Option<D::Middle<'a>>), Refused> {
+        let _p = crate::prof::scope(crate::prof::STRETCH);
         let (tau, hm) = (self.tau, self.hbar_over_mass);
         let h = 0.5 * tau;
         let velocity = kappa_m.map(|k| hm * k);
@@ -2368,7 +2386,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             // A piece: from the state the march stands at, the sums and the weights as they are, the survival from ‖ψ‖².
             let from = march.u;
             let launched = along.turned(&march.state.psi, from, true);
-            picture.launch(from, &launched[..n]);
+            {
+                let _p = crate::prof::scope(crate::prof::LAUNCH);
+                picture.launch(from, &launched[..n]);
+            }
             // The forms' bandwidth on the states this piece's state can hold (`spectral::Picture::launch`).
             let bandwidth = picture.bandwidth;
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
@@ -2417,13 +2438,17 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                         (None, None) => break,
                     };
-                    picture.advance(u, &mut x[..n]);
+                    {
+                        let _p = crate::prof::scope(crate::prof::ADVANCE);
+                        picture.advance(u, &mut x[..n]);
+                    }
                     read = looked(picture, reads, read, (start, h), u, met);
                     if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
                         predicted = Some(last);
                     }
                     if let (Some(w), None) = (weight, predicted) {
                         counted += 1;
+                        let _p = crate::prof::scope(crate::prof::GATHER);
                         Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), sums);
                     }
                     last = u;
@@ -2493,7 +2518,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             state.psi = at(&x[..n], crossed, target);
             (state.r, state.kappa, state.time) = (std::array::from_fn(|a| self.reached.0[a] + velocity[a] * crossed), kappa_m, start + (crossed + h));
             let mut places = Places { model: self.model, point: (self.reached.0, start + h), path: (kappa_m, velocity), s: crossed, own: (cluster, generator, &along.path), other: None };
-            jump(self.model, state, Some(&mut places))?;
+            {
+                let _p = crate::prof::scope(crate::prof::JUMP);
+                jump(self.model, state, Some(&mut places))?;
+            }
             next = places.other.filter(|other| other.0 == state.cluster).map(|other| other.1);
             let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
             march.made.push(Made { kick: Some(kick), state: state.clone() });
@@ -2593,6 +2621,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let (s0, rest) = sum.split_at(size);
             let (s1, s2) = rest.split_at(size);
             let fixed = end.as_ref().map(|_| along.middle.path(kappa_m, [0.0; 3]));
+            let _pn = crate::prof::scope(crate::prof::NODES_CALL);
             let (forms, forms_end) = along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64)), end.as_deref().zip(fixed.as_ref()));
             for form in forms {
                 for a in 0..3 {
@@ -2602,6 +2631,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             if let Some(forms) = forms_end {
                 march.state.forms = Forms { time: t_m, ..forms }.less(self.reference);
             }
+            drop(_pn);
             for (node_sums, tone) in tones.chunks_exact(TONE * size).zip(&picture.beats) {
                 let at: Vec<(f64, &[C64], &[C64])> = node_sums.chunks_exact(2 * size).zip([-h, 0.0, h]).map(|(pair, s)| (s, &pair[..size], &pair[size..])).collect();
                 let form = along.middle.tone_force(&along.path, tone.candidate, &at);
@@ -2616,6 +2646,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         let (mut scattering, mut sector) = (0.0, None);
         if let Some(middle) = &middle {
+            let _p = crate::prof::scope(crate::prof::MID_STEP_MIDDLE);
             let (scattered, made) = along.middle.scattering(&along.path, &middle[..n]);
             (march.scattered, scattering) = (Some(scattered), made);
             if let Some((epsilon, ground, made)) = optical(&along, picture, still, noise)? {

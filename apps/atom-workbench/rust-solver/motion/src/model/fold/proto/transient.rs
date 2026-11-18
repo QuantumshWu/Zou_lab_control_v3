@@ -387,15 +387,26 @@ impl Workspace {
     /// modes do not exist (`Workspace::transient`).
     pub(crate) fn clock(&self, fold: &Fold, cache: &Cache, psi: &[C64], a: &[C64], theta: f64, t: f64) -> Option<Clock> {
         assert!(self.tangent, "the step's tangent");
+        let _p = crate::prof::scope(crate::prof::TR_MODES);
         let tr = self.transient(fold, cache, a)?;
+        drop(_p);
         let (n, d) = (self.n, tr.size());
+        let _p = crate::prof::scope(crate::prof::TR_CROSSING);
         let (crossed, evaluations) = tr.crossing(theta);
+        drop(_p);
+        let _p = crate::prof::scope(crate::prof::TR_FORCES);
         let forces = fold.transient_forces(self, &tr);
+        drop(_p);
+        let _p = crate::prof::scope(crate::prof::TR_MODE_FORCES);
         let hprime = tr.mode_forces(self, &forces);
+        drop(_p);
         let mut work = tr.work + (evaluations * 2 * d * d) as f64 + 3.0 * (6 * d * d * d) as f64;
         // K_∞ = Im(ψ₀†∂ψ₀)/‖ψ₀‖², ∂ψ₀ = ∂S a + S∂a, S∂a = S⁻¹(1 + M)∂a, ∂a = κ_sf − N⁻¹T_L†(∂T a), κ_sf on the slow modes
         // Σ_k H′_jk c_k/(λ_j − λ_k) over the fast k.
+        let _p = crate::prof::scope(crate::prof::TR_LEFT);
         let left = self.left_tangent(cache, &tr, &forces, a);
+        drop(_p);
+        let _p = crate::prof::scope(crate::prof::TR_KICK);
         let mut metric = self.step.metric.clone();
         for k in 0..n {
             metric[(k, k)] += C64::ONE;
@@ -414,17 +425,22 @@ impl Workspace {
             kick[ax] = dot(psi, &dpsi).im / size;
         }
         work += (3 * (n * (d + 2 * n) + 2 * n * n)) as f64;
+        drop(_p);
         let Some(wait) = crossed else { return Some(Clock { threshold: theta, owed: None, once: false, kick, work }) };
         let [_, slow, _, rate] = tr.survival(wait);
         let z = tr.fast(wait);
+        let _p = crate::prof::scope(crate::prof::TR_FAST_PHOTON);
         let u = self.fast_photon(fold, cache, &tr, &z, t + wait);
+        drop(_p);
         // The fast part's photon where it is beyond the rounding of the slow photon's (its hazard p_s at τ*).
         let floor = crate::units::rounding(d).powi(2) * rate.max(0.0);
         let owed = (crate::linalg::norm_sqr(&u) > floor).then_some(u);
         // The cycle's conditional mean g(τ*) and its slow part's g_s(τ*) (# The kick): the landing books K_∞ + g − g_s; at
         // once (the slow part dark until τ*: no step, no slow photon) g alone.
         let once = slow >= size;
+        let _p = crate::prof::scope(crate::prof::TR_CONDITIONAL);
         let (whole, part) = tr.conditional(&hprime, wait);
+        drop(_p);
         work += (2 * d * d + 3 * GROUND * d + 9 * d * d) as f64;
         for ax in 0..3 {
             kick[ax] = if once { whole[ax] } else if let Some(part) = part { kick[ax] + whole[ax] - part[ax] } else { kick[ax] };

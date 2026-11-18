@@ -2929,6 +2929,7 @@ impl Fold {
     /// ones' bound (`bound_levels`), from the fold's own matrices there (`Fold::lay`, `Fold::effective`).
     #[allow(clippy::too_many_arguments)]
     fn near_basis(&self, nb: &Near, ws: &Workspace, laid: &Laid, e: &Effective, kept: &[usize], work: &mut f64) -> Option<NearBasis> {
+        let _p = crate::prof::scope(crate::prof::FWD_NEAR_BASIS);
         let (n, ne, nc, nd) = (ws.n, nb.all, nb.nc, nb.nd);
         let b = &self.blocks[nb.o];
         let nl = nb.levels.len();
@@ -2980,6 +2981,7 @@ impl Fold {
         let terms_n = nb.terms.len();
         let (mut lterm, mut lpair, mut ldress) = (vec![0.0; terms_n * nl], vec![0.0; (terms_n + 1) * nl * nl], vec![0.0; terms_n * nl]);
         let (mut lstat, mut lemit) = (vec![0.0; (terms_n + 1) * nl * n], vec![0.0; (terms_n + 1) * nl * n]);
+        let _pt = crate::prof::scope(crate::prof::NB_TERMS);
         let mut terms = vec![];
         for (ti, &t) in nb.terms.iter().enumerate() {
             let (w, k, kk) = ws.pairs[t];
@@ -3065,6 +3067,7 @@ impl Fold {
             }
             terms.push((whole.frobenius(), tw, td, cc.frobenius(), st, et, dress_xx, tdx));
         }
+        drop(_pt);
         // The reference's: the level pairs' coupling and each level's Gershgorin intervals of K_qq − o's Hermitian part and
         // of its decay.
         let mut gersh = vec![[0.0; 4]; nl];
@@ -3374,6 +3377,7 @@ impl Fold {
 
     /// A far block's pair forms at the point (module documentation, # What is kept).
     fn far_basis(&self, fb: &Far, ws: &Workspace, site: &Site, work: &mut f64) -> Option<FarBasis> {
+        let _p = crate::prof::scope(crate::prof::FWD_FAR_BASIS);
         let n = ws.n;
         let b = &self.blocks[fb.o];
         let laid = self.lay(fb.o, site, work);
@@ -3474,6 +3478,7 @@ impl Fold {
     /// complement or the metric singular, or a response that is no number. Its count, made or not, is the workspace's
     /// (`Workspace::spent`).
     pub(crate) fn prototype_within<'w>(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &mut Cache, ws: &'w mut Workspace, decide: bool) -> Option<&'w Step> {
+        let _p = crate::prof::scope(if decide { crate::prof::FWD_DECIDING } else { crate::prof::FWD_HELD });
         let mut work = [0.0_f64; 10];
         let made = self.forward_within(r, kappa, energy, cache, ws, decide, &mut work);
         ws.spent = work.iter().sum();
@@ -3798,6 +3803,7 @@ impl Fold {
     /// centring), made at the point (its kept levels the decision's, at an atom's first none -- a block with exact copies
     /// keeps every level: they couple all of them through the P layer).
     fn bases(&self, r: [f64; 3], kappa: [f64; 3], cache: &mut Cache, ws: &mut Workspace, site: &mut Option<Site>, work: &mut f64) -> Option<()> {
+        let _p = crate::prof::scope(crate::prof::FWD_BASES);
         let n = ws.n;
         for x in 0..ws.far.len() {
             let again = ws.decision.far.get(x).is_some_and(|&a| a);
@@ -3997,6 +4003,7 @@ impl Fold {
     /// and a far block's light shift). Into the workspace's `accounts`, W_j into `den`.
     #[allow(clippy::too_many_arguments)]
     fn accounts(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, energy: f64, done: usize, work: &mut f64) {
+        let _p = crate::prof::scope(crate::prof::FWD_ACCOUNTS);
         let n = ws.n;
         let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, .. } = &mut *ws;
         accounts.clear();
@@ -4861,6 +4868,7 @@ impl Fold {
     /// vector, so its lane's tangent turns with its factor exactly; the responses' own change (through Ĥ_PP, K̃, Ṽ) is the
     /// middle's. After `prototype` on the same cache. Returns the work.
     pub(crate) fn prototype_place(&self, r: [f64; 3], kappa: [f64; 3], velocity: [f64; 3], s: f64, ws: &mut Workspace) -> f64 {
+        let _p = crate::prof::scope(crate::prof::P_PLACE);
         let n = ws.n;
         let mut work = 0.0;
         let Workspace { mid, near, proj, place, .. } = &mut *ws;
@@ -6105,6 +6113,7 @@ impl Fold {
     /// a jump's place with the blocks' tangent turned there. The tangent is asked where a
     /// moment is.
     pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &mut Workspace, psi: &[C64], sets: &[Vec<usize>], position: At, t: f64, moments: Moments) -> Photons {
+        let _p = crate::prof::scope(crate::prof::P_PHOTONS);
         let n = ws.n;
         let g3 = 3 * GROUND;
         let mut work = 0.0;
@@ -6355,6 +6364,7 @@ impl Fold {
     /// the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The jumps). A jump's own
     /// amplitudes on its state are its photons' (`Fold::prototype_photons`, `Workspace::jumped`).
     pub(crate) fn prototype_jumps(&self, cache: &Cache, ws: &Workspace, position: At) -> Vec<[Mat; 3]> {
+        let _p = crate::prof::scope(crate::prof::P_JUMPS);
         let n = ws.n;
         let normal = &ws.step.normal;
         let e = match position {

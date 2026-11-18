@@ -742,6 +742,7 @@ fn forms_on(fold: &Fold, cache: &Cache, ws: &mut Workspace, tones: &[f64], t: f6
 /// coefficient Ĥ_PP's averaged entries' G_ν there (proto.rs `Workspace::averaged_at`) and its cross decays' −(i/2) Σ_q
 /// L_o,q†L_o′,q (the jumps there, where the set has a cross decay averaged).
 fn folded_part(set: &Set, ws: &Workspace, jumps: Option<&[[Mat; 3]]>) -> Mat {
+    let _p = crate::prof::scope(crate::prof::FOLDED_PART);
     let n = set.fold.size();
     let mut out = Mat::zeros(n, n);
     for f in &set.folded {
@@ -1022,6 +1023,7 @@ impl Middle<'_> {
         if inner.current != Some((path.kappa, path.velocity)) {
             let fold = &self.run.clusters.sets.get(self.set).fold;
             let decide = self.decide && !inner.decided;
+            let _p = crate::prof::scope(if decide { crate::prof::MID_FWD_DECIDE } else { crate::prof::MID_FORWARD });
             let energy = self.run.mechanical(self.r, path.kappa);
             let Inner { committed, eval, ws, generator, .. } = &mut *inner;
             let ws = ws.as_mut().expect("a workspace");
@@ -1074,11 +1076,13 @@ impl Middle<'_> {
         }
         if let Some(h) = h.filter(|&h| inner.nodes != Some(h)) {
             let Inner { eval, ws, .. } = &mut *inner;
+            let _p = crate::prof::scope(crate::prof::MID_P_NODES);
             fold.prototype_nodes(self.r, path.kappa, path.velocity, [-h, h], eval, ws.as_mut().unwrap());
             (inner.nodes, inner.half, inner.tangent) = (Some(h), Some(h), false);
         }
         if tangent && !inner.tangent {
             let Inner { eval, ws, .. } = &mut *inner;
+            let _p = crate::prof::scope(crate::prof::MID_P_TANGENT);
             fold.prototype_tangent(eval, ws.as_mut().unwrap());
             inner.tangent = true;
         }
@@ -1094,6 +1098,7 @@ impl Middle<'_> {
             return vec![[C64::new(f64::NAN, f64::NAN); 3]; channels];
         }
         let Inner { eval, ws, .. } = &mut *inner;
+        let _p = crate::prof::scope(crate::prof::MID_P_FORCE);
         fold.prototype_force(eval, ws.as_mut().unwrap(), bars, channels).forms
     }
 
@@ -1106,6 +1111,7 @@ impl Middle<'_> {
     /// (module documentation, # The jumps' phase), and the photon's frequency. None where the set has no light (no
     /// blocks), the fold does not exist there, or `draw` picks none.
     pub(crate) fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let _p = crate::prof::scope(crate::prof::MID_EMITTED);
         let (run, set) = (self.run, &self.run.clusters.sets.get(self.set));
         let fold = &set.fold;
         if fold.blocks.is_empty() {
@@ -1147,6 +1153,7 @@ impl Middle<'_> {
     /// phase); its kick the class's of the state's own photon (`Fold::prototype_photons`, every class's moments). None
     /// where the set has no light, the fold does not exist there, or `draw` picks none.
     pub(crate) fn transient(&self, path: &Path, s: f64, psi: &[C64], owed: &Owed, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let _p = crate::prof::scope(crate::prof::MID_TRANSIENT);
         let (run, set) = (self.run, &self.run.clusters.sets.get(self.set));
         let fold = &set.fold;
         if fold.blocks.is_empty() {
@@ -1208,6 +1215,7 @@ impl Middle<'_> {
     /// modes, the fold's one exit: a jump into another set is a decision there (`Onefold::landed_at`), one into this set
     /// lands on what the cell's look saw exist (unify2 §4.1, §4.3).
     pub(super) fn landing(&self, path: &Path, f: &[C64], threshold: f64, t: f64) -> Landing {
+        let _p = crate::prof::scope(crate::prof::MID_LANDING);
         let set = self.run.clusters.sets.get(self.set);
         if set.fold.blocks.is_empty() {
             return Landing::On(Landed::plain(f.iter().copied().collect(), threshold));
@@ -1216,9 +1224,12 @@ impl Middle<'_> {
         let Inner { eval, ws, made, exists, .. } = &mut *inner;
         let ws = ws.as_mut().expect("a workspace");
         if *exists {
+            let _t = crate::prof::scope(crate::prof::LAND_TAKEN);
             let landed = ws.taken(&set.fold, eval, f, &[], false);
+            drop(_t);
             *made += ws.left_work() * crate::decide::COMPLEX;
             if let Some((psi, a)) = landed {
+                let _c = crate::prof::scope(crate::prof::LAND_CLOCK);
                 if let Some(clock) = ws.clock(&set.fold, eval, &psi, &a, threshold, t) {
                     *made += clock.work * crate::decide::COMPLEX;
                     return Landing::On(landed_of(psi.into_iter().collect(), clock));
@@ -1290,6 +1301,7 @@ impl crate::step::Middle for Middle<'_> {
     /// The static G at the time s from the middle and every tone at its phase there, G + Σ_m e^{iν_m(t_m + s)} G_m(s)
     /// (module documentation, # The tones).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
+        let _p = crate::prof::scope(crate::prof::MID_GENERATOR);
         let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
         if !inner.exists {
             h.data.fill(C64::new(f64::NAN, f64::NAN));
@@ -1334,6 +1346,7 @@ impl crate::step::Middle for Middle<'_> {
 
     /// The static G's form at the time s and every tone's there at its exact phase, one contraction.
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
+        let _p = crate::prof::scope(crate::prof::MID_FORCE);
         let j = position(s);
         let phased: Vec<Vec<C64>> = (0..self.run.clusters.sets.get(self.set).tones.len()).map(|m| self.phased(m, s, rho)).collect();
         let mut bars = vec![Bar { channel: 0, position: j, tone: None, matrix: rho }];
@@ -1344,6 +1357,7 @@ impl crate::step::Middle for Middle<'_> {
     /// The static G's at zero, each tone's at its beat ν_m: the middle's G_m at its phase e^{iν_m t_m} (module
     /// documentation, # The tones), each its own channel of one contraction.
     fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
+        let _p = crate::prof::scope(crate::prof::MID_TONES);
         let tones = &self.run.clusters.sets.get(self.set).tones;
         let phased: Vec<Vec<C64>> = (0..tones.len()).map(|m| self.phased(m, 0.0, rho)).collect();
         let mut bars = vec![Bar { channel: 0, position: 0, tone: None, matrix: rho }];
@@ -1360,6 +1374,7 @@ impl crate::step::Middle for Middle<'_> {
     /// middle, the static G's on a channel of its own and each tone's complex amplitude, referenced to the middle's time,
     /// on one each (# The held forms) -- in one contraction.
     fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Path)>) -> ([[f64; 3]; 3], Option<Forms>) {
+        let _p = crate::prof::scope(crate::prof::MID_NODES);
         // The tones are the light's beats in time (the path's turns are its envelopes'): the middle's own, no path at rest.
         let end = end.map(|(rho, _)| rho);
         let tones = &self.run.clusters.sets.get(self.set).tones;
@@ -1387,6 +1402,7 @@ impl crate::step::Middle for Middle<'_> {
 
     /// The candidates' beats and keys (module documentation, # The tones).
     fn beats(&self, _: &Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
+        let _p = crate::prof::scope(crate::prof::MID_BEATS);
         for c in &self.run.clusters.sets.get(self.set).candidates {
             beats.push(c.beat);
             keys.push(c.key.clone());
@@ -1396,6 +1412,7 @@ impl crate::step::Middle for Middle<'_> {
     /// Candidate m's members at the time s from the middle (`Candidate`): e^{iνt_m} times its tone G_+(s) and its cross
     /// decays at ν there, −(i/2) Σ_q L_o,q†L_o′,q (# The jumps' coherence), and e^{−iνt_m} times the same at −ν (none: zero).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
+        let _p = crate::prof::scope(crate::prof::MID_ENVELOPES);
         let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
         let set = self.run.clusters.sets.get(self.set);
         let c = &set.candidates[m];
@@ -1438,6 +1455,7 @@ impl crate::step::Middle for Middle<'_> {
     /// formula; a cross decay has no Hermitian part, and no form. One contraction (the outer nodes made at the sums'
     /// offset where asked).
     fn tone_force(&self, path: &Path, m: usize, sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
+        let _p = crate::prof::scope(crate::prof::MID_TONE_FORCE);
         let c = &self.run.clusters.sets.get(self.set).candidates[m];
         let n = self.states();
         let members: Vec<(usize, usize, Vec<C64>)> = sums
@@ -1464,6 +1482,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
+        let _p = crate::prof::scope(crate::prof::MID_SCATTERING);
         let fold = &self.run.clusters.sets.get(self.set).fold;
         let mut inner = self.made(path, None, true);
         if !inner.exists {
@@ -1498,6 +1517,7 @@ impl crate::step::Middle for Middle<'_> {
     /// largest (k_l − k_m)·v over its light's beams. None where the set holds no explicit state (a fold's photons hold that
     /// part: step.rs # The optical sector's noise).
     fn optical(&self, path: &Path) -> Option<Optical> {
+        let _p = crate::prof::scope(crate::prof::MID_OPTICAL);
         let set = &self.run.clusters.sets.get(self.set);
         let decay = set.optical?;
         let (most, least) = set.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(x), least.min(x)));
@@ -1512,6 +1532,7 @@ impl crate::step::Middle for Middle<'_> {
     /// chord (Ĝ(h) − Ĝ(−h))/2h, each tone's phase by its derivative iν_m. In the set's frames, the lab's (no Doppler
     /// frame: `gauge`).
     fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
+        let _p = crate::prof::scope(crate::prof::MID_GRADIENT);
         assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
         let set = &self.run.clusters.sets.get(self.set);
         let n = self.states();
@@ -1556,6 +1577,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn books(&self, path: &Path, psi: &[C64]) -> Option<([f64; KINDS], bool, f64)> {
+        let _p = crate::prof::scope(crate::prof::MID_BOOKS);
         let inner = self.made(path, None, false);
         if !inner.exists || self.run.clusters.sets.get(self.set).fold.blocks.is_empty() {
             return None;
@@ -1572,6 +1594,7 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn exists(&self, path: &Path) -> bool {
+        let _p = crate::prof::scope(crate::prof::MID_EXISTS);
         self.run.clusters.sets.get(self.set).fold.blocks.is_empty() || self.made(path, None, false).exists
     }
 
@@ -1581,6 +1604,7 @@ impl crate::step::Middle for Middle<'_> {
     /// there, is counted (adapt.rs `counted`): the representation is the start's (# The representation). Nothing where this middle
     /// does not decide or holds no light.
     fn decide(&self, path: &Path, psi: &[C64], interval: f64) -> Decided {
+        let _p = crate::prof::scope(crate::prof::MID_DECIDE);
         let mut out = Decided { held: None, work: 0.0, booked: [0.0; crate::step::MODEL] };
         let set = self.run.clusters.sets.get(self.set);
         if !self.decide || set.fold.blocks.is_empty() {
@@ -1631,6 +1655,7 @@ impl crate::step::Dynamics for Onefold {
     }
 
     fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &Held, decide: bool) -> Middle<'_> {
+        let _p = crate::prof::scope(crate::prof::DYN_MIDDLE);
         let committed = self.cache(held, cluster);
         let n = self.clusters.sets.get(cluster).fold.size();
         let ws = (!self.clusters.sets.get(cluster).fold.blocks.is_empty()).then(|| self.clusters.take(cluster));
@@ -1667,6 +1692,7 @@ impl crate::step::Dynamics for Onefold {
     /// A jump's photon (`Middle::emitted`): on the step's middle at the jump's time from it, or at a point (a trajectory's
     /// start) on a middle made there, at its own time.
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let _p = crate::prof::scope(crate::prof::DYN_EMIT);
         match on {
             Some((middle, path, s)) => middle.emitted(path, s, psi, draw),
             None => {
@@ -1680,6 +1706,7 @@ impl crate::step::Dynamics for Onefold {
     /// A jump's photon with what its landing's transient owes it (`Middle::transient`): on the step's middle at the jump's
     /// time, or at a point on a middle made there.
     fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, psi: &[C64], owed: &Owed, held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let _p = crate::prof::scope(crate::prof::DYN_TRANSIENT);
         match on {
             Some((middle, path, s)) => middle.transient(path, s, psi, owed, draw),
             None => {
@@ -1692,6 +1719,7 @@ impl crate::step::Dynamics for Onefold {
 
     /// The held forms at a point, deciding nothing (# The held forms): on one evaluation there.
     fn forms(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> Forms {
+        let _p = crate::prof::scope(crate::prof::DYN_FORMS);
         if self.clusters.sets.get(cluster).fold.blocks.is_empty() {
             return self.held_forms(cluster, at, psi, None, false).1;
         }
@@ -1703,6 +1731,7 @@ impl crate::step::Dynamics for Onefold {
     /// (`Onefold::landed_at`) --, and its decompositions made there its representation (# The representation and the
     /// decision times).
     fn started(&self, cluster: usize, at: &Point, f: &[C64], _cell: f64, threshold: f64) -> (usize, Landed, Forms, Held) {
+        let _p = crate::prof::scope(crate::prof::DYN_STARTED);
         let k = self.clusters.sets.get(cluster).ground_set;
         let from = self.clusters.sets.get(cluster).cluster.states.clone();
         match self.landed_at(k, at, f, &from, &Held::default(), threshold) {
@@ -1714,6 +1743,7 @@ impl crate::step::Dynamics for Onefold {
     /// Where a jump's bare state lands in its own set against the threshold θ (`Middle::landing`): on the landing set's
     /// middle in the step, or at a point on a middle made there; nowhere where it does not exist (`step::Landing`).
     fn landed<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path)>, f: &[C64], held: &Held, threshold: f64) -> Landing {
+        let _p = crate::prof::scope(crate::prof::DYN_LANDED);
         match on {
             Some((middle, path)) => middle.landing(path, f, threshold, at.t),
             None => {
@@ -1728,6 +1758,7 @@ impl crate::step::Dynamics for Onefold {
     /// explicit nodes, risen where either fold does not exist at the point (`Clusters::difference`); NaN only where no node
     /// is left to rise, or the request with the trap's light off makes no clusters.
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
+        let _p = crate::prof::scope(crate::prof::DYN_ENERGY);
         let kinetic = 0.5 * self.hbar_over_mass * at.kappa.iter().map(|k| k * k).sum::<f64>();
         let p = self.populations(cluster, psi);
         let untrapped = self.untrapped.get_or_init(|| {
@@ -1743,6 +1774,7 @@ impl crate::step::Dynamics for Onefold {
     /// Outside the trap's region with the loss energy above its far value, zero (module documentation, # The rest of the
     /// model).
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
+        let _p = crate::prof::scope(crate::prof::DYN_LOST);
         self.light.outside(at.r) && self.energy(cluster, at, psi) > 0.0
     }
 
@@ -1752,6 +1784,7 @@ impl crate::step::Dynamics for Onefold {
     /// forward there on the trajectory's representation, deciding nothing; a set with no light its states' own. Over their
     /// sum, ψ†ψ by construction.
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> [f64; STATES] {
+        let _p = crate::prof::scope(crate::prof::DYN_READOUT);
         let mut out = [0.0; STATES];
         let set = &self.clusters.sets.get(cluster);
         let total = if set.fold.blocks.is_empty() {
@@ -1770,6 +1803,7 @@ impl crate::step::Dynamics for Onefold {
     /// next decision (`until`), its rises taken, the bare state landed on it (`Onefold::landed_at`). None where the jump
     /// stays in the emitting cluster's set (its landing the step's: `landed`).
     fn entered(&self, from: usize, cluster: usize, at: &Point, f: &[C64], held: &Held, _until: f64, threshold: f64) -> Option<Option<(usize, Internal, Landed, Held)>> {
+        let _p = crate::prof::scope(crate::prof::DYN_ENTERED);
         let k = self.clusters.sets.get(cluster).ground_set;
         if k == self.clusters.sets.get(from).ground_set {
             return None;

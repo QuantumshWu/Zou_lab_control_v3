@@ -1838,6 +1838,11 @@ fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Cont
         let lowest = context.plan.end / below > MOST_STEPS as f64;
         let upward = !levels.above_pilot && above(context.tau) && !levels.above_unread;
         let verdict = verdict(&read, levels.above.as_ref(), pilot, upward);
+        crate::prof::note(|| {
+            let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
+            let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
+            format!("ladder tau {} pilot {pilot} members {members} groups {} verdict {verdict:?} screen {} looks [{}] above [{}]", context.tau, numbers.len(), screen(&read), looks.join(" "), above.join(" "))
+        });
         // A rung its reads do not leave takes its course by the run's work from here: without its prices the check
         // stops there (`Settled::Pending`).
         if prices.is_none() && !screen(&read) {
@@ -1852,6 +1857,10 @@ fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Cont
             below: levels.half.as_ref().map_or(0., |_| groups as f64),
         };
         if let (Verdict::Stands | Verdict::Above, Some(prices)) = (verdict, prices) {
+            crate::prof::note(|| {
+                let w: Vec<String> = [0.25, 0.5, 1., 2., 4.].iter().map(|f| format!("w({:.4})={:.4e}", f * context.tau, (prices.work)(f * context.tau))).collect();
+                format!("ladder tau {} prices product {:.1} {:?} staying {:.4e} descending {:.4e} course {:?} [{}]", context.tau, prices.product, holding, staying(prices, context.tau, holding), descending(prices, context.tau, context.plan.end, holding), course(prices, context.tau, context.plan.end, holding, upward && levels.above.is_none()), w.join(" "))
+            });
             match course(prices, context.tau, context.plan.end, holding, upward && levels.above.is_none()) {
                 Course::Third if pilot => {
                     // The third level above on the pilot's trajectories: the rung above's coarser level, at 4τ, against
@@ -2379,6 +2388,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// `advance`: a stop is no step's end) --, and its states are made again from them (`replay`); else it is advanced
 /// through at once.
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
+    let _p = crate::prof::scope(crate::prof::SOLVE_TRAJECTORY);
     let sizes = [plan.times.len(), plan.reads.len()];
     let mut t = Trajectory::begun(model, start.state, start.r, start.kappa, SEED, index, plan.cell);
     // The time the run's fold is found not to exist for it (# Exits): at its start where its start lands nowhere.
@@ -2401,6 +2411,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         // The atom at the time's instant; from the first time on its κ and κ² are its window's means (`mean`).
         // An unresolved one is booked whole (`apart`). Where the run's fold does not exist for it: no outcome from then
         // on, and at t = 0 its own state's populations.
+        let _p = crate::prof::scope(crate::prof::SOLVE_RECORD);
         let mut rows = [0.; STATES];
         if nowhere.get().is_none() {
             rows = model.readout(t.cluster, &t.point(), &t.psi, &t.held);

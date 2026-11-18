@@ -149,7 +149,7 @@ pub(crate) fn counted(tally: bool) -> String {
         g[ABSENT],
         f64::from_bits(g[FOLDED]),
         g[FOLDED_BEYOND]
-    )
+    ) + &crate::prof::report()
 }
 
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
