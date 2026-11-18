@@ -13,7 +13,8 @@
 //!   Schur form with the step's diagonal κ, each block in its own frame (its offset's: the node space, where the generator is
 //!   static), at no Doppler shift (the atom's own frame at rest; a moving atom's lanes turn its slow amplitude against the
 //!   fast one at w_l, a relative kv/Γ of the transient: transient.status, # Assumptions);
-//! - a far block's rows at its own order, the order its response is held at (proto.rs # The far coordinates: R₀ at its
+//! - a far block's rows (where its transient is not folded: # The far transients folded) at its own order, the order its
+//!   response is held at (proto.rs # The far coordinates: R₀ at its
 //!   centre): its fast part β_f = −R₀Ba keeps its direction β̂ = β_f/‖β_f‖ -- one row, K = z₀ − β̂†R₀⁻¹β̂, V = β̂†B, T and
 //!   T_L the rows β̂†R₀B, β̂†R₀†B --, exact for a one-row block (a two-level atom off its line), its block's turning within
 //!   the decay left out (the far block's own centring order). R₀ is held as the step holds it.
@@ -37,6 +38,20 @@
 //! norm), that jump is at once (step.rs `jump`). The jump operators enter through the bare state alone: f = P_set L_q(t*)ψ,
 //! every block's at its exact phase (dragchk.status 第二项).
 //!
+//! # The far transients folded (cost.status.md K3.1; FOLDAPI §2, §7.6: a term within the share is folded)
+//! A far block's fast part β_f = −T_f a is its mixing: its slow part's excitation T_f a beats with it, so every term it
+//! adds to N(τ) is of its weight w_f = ‖β_f‖² (a two-level atom off its line: p − p_s = Γw_f(e^{−Γτ} − 2e^{−Γτ/2}cos Δτ)),
+//! none of √w_f, over its ~1/Γ; its static part is the slow span's (S N⁻¹f, the metric's T_f†T_f). Folded, its row is
+//! not among the fast ones and the clock starts at N(0) = 1 − Σw_f + O(w_f Γ/Δ_f): the exact N(τ) less the folded rows'
+//! terms, the same past their transient. A threshold θ above N(0) -- the probability Σw_f, that of the folded
+//! transients' photons -- is their jump at once, its photon the whole state's at the landing, the folded rows' slow
+//! excitation T_f a with the near rows' (their fast part owed cancels the near slow part's: the bare state has no Q
+//! amplitude): the far transient's photon, its pattern C_qβ_f. What folding moves: those jumps' times by ≲ 1/Γ and the
+//! momentum over them, a cycle's mean length by w_f p/Γ ≤ w_f of itself. The lightest are folded while their weights'
+//! sum is within the share (`Workspace::transient`), the rest keep a row. The slow state's own gradient keeps a folded
+//! block's part of ∂a = −N⁻¹(∂N)a whole: N⁻¹∂T_L,f†β_f, the part κ_sf would take through its row, directly (R₀ held:
+//! ∂T_L,f = R₀†∂B; `left_tangent`).
+//!
 //! # The kick (pland.status # 第三轮, # 第四轮（续） §1)
 //! The cycle's momentum conditional on its length τ is the photon's at the jump with the tangent from the landing, E[R | τ]
 //! = Im⟨Ψ(τ)|D|∂Ψ(τ)⟩/p(τ); on the modes g p = −Re Σ_jk d_j H′_jk c_k E_jk(τ) (`Transient::conditional`), H′ = ℓ†∂H_h r per
@@ -54,7 +69,7 @@ use crate::linalg::Eigen;
 /// A far block the step holds (module documentation): its index, its source B at the middle's light (m × n), its R₀
 /// (m × m), its responses T_f = R₀B and T_L,f = R₀†B (m × n: the slow modes' whole); and of the landing, its fast part's
 /// direction β̂ = β_f/‖β_f‖ and size ‖β_f‖, its row's K and the row's place among the fast rows -- none where the fast
-/// part is zero.
+/// part is zero or folded.
 struct FarRow {
     x: usize,
     b: Mat,
@@ -68,7 +83,7 @@ struct FarRow {
 }
 
 /// The landing's transient on its modes (module documentation): the P places n, the fast rows -- the near blocks' kept rows
-/// (per block its index, first row and rows) then one per far block whose fast part is not zero (`FarRow`) --; T, T_L and V on the
+/// (per block its index, first row and rows) then one per far block whose fast part is not zero and not folded (`FarRow`) --; T, T_L and V on the
 /// rows (rows × n); the two eigendecompositions (H_s's, K_f's); the eigenvalues (the slow n first), the coefficients c of
 /// the switched state, the Gram G of the modes; the slow part's P amplitudes a; the count of its making (complex
 /// multiply-adds).
@@ -142,9 +157,8 @@ impl Workspace {
         }
         let s = at;
         // The far blocks: per far block held, its source at the middle's light, T_f = R₀B, T_L,f = R₀†B, β_f = −T_f a and
-        // w_f = −Ba; a row where β_f is not zero.
+        // w_f = −Ba; a row where β_f is not zero and its transient is not folded (# The far transients folded).
         let mut far = vec![];
-        let mut rows = s;
         for (x, fb) in self.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = cache.far_at(x);
             let b = far_source(fold, fb, n, &|c, k| self.mid.e[c][k]);
@@ -155,10 +169,24 @@ impl Workspace {
             let size = crate::linalg::norm_sqr(&beta).sqrt();
             work += (2 * fb.m * fb.m * n + 3 * fb.m * n) as f64;
             // K = z₀ − β̂†R₀⁻¹β̂, R₀⁻¹β_f = w_f = −Ba.
-            let (k, at) = if size > 0.0 { (C64::real(basis.z0) + dot(&beta, &ba) / (size * size), Some(rows)) } else { (C64::ZERO, None) };
-            rows += usize::from(at.is_some());
+            let k = if size > 0.0 { C64::real(basis.z0) + dot(&beta, &ba) / (size * size) } else { C64::ZERO };
             let hat = beta.iter().map(|z| if size > 0.0 { *z / size } else { C64::ZERO }).collect();
-            far.push(FarRow { x, b, r0, tf, tlf, hat, size, k, at });
+            far.push(FarRow { x, b, r0, tf, tlf, hat, size, k, at: None });
+        }
+        // The far transients folded, the lightest first while their weights' sum ‖β_f‖² is within the share; a row each of
+        // the rest.
+        let mut order: Vec<usize> = (0..far.len()).filter(|&i| far[i].size > 0.0).collect();
+        order.sort_by(|&i, &j| far[i].size.total_cmp(&far[j].size));
+        let (mut folded, share) = (0.0, crate::model::elim::share());
+        let mut kept = vec![false; far.len()];
+        for i in order {
+            folded += far[i].size * far[i].size;
+            kept[i] = folded > share;
+        }
+        let mut rows = s;
+        for (row, _) in far.iter_mut().zip(&kept).filter(|x| *x.1) {
+            row.at = Some(rows);
+            rows += 1;
         }
         let (mut t, mut tl, mut v, mut k) = (Mat::zeros(rows, n), Mat::zeros(rows, n), Mat::zeros(rows, n), Mat::zeros(rows, rows));
         for &(x, o, sb) in &blocks {
@@ -391,6 +419,18 @@ impl Workspace {
         let tr = self.transient(fold, cache, a)?;
         drop(_p);
         let (n, d) = (self.n, tr.size());
+        // θ above the clock's start N(0) -- the bare state's norm less the folded far transients' --: their photon, at once
+        // (# The far transients folded), the whole state's at the landing -- the slow state's own with the near rows'
+        // fast part owed --, the slow state's norm its threshold, no momentum booked.
+        let size = crate::linalg::norm_sqr(psi);
+        let [start, _, _, rate] = tr.survival(0.0);
+        if theta > start {
+            let u = self.fast_photon(fold, cache, &tr, &tr.fast(0.0), t);
+            let floor = crate::units::rounding(d).powi(2) * rate.max(0.0);
+            let owed = (crate::linalg::norm_sqr(&u) > floor).then_some(u);
+            let work = tr.work + (2 * d * d + 3 * GROUND * d) as f64;
+            return Some(Clock { threshold: size, owed, once: true, kick: [0.0; 3], work });
+        }
         let _p = crate::prof::scope(crate::prof::TR_CROSSING);
         let (crossed, evaluations) = tr.crossing(theta);
         drop(_p);
@@ -411,7 +451,6 @@ impl Workspace {
         for k in 0..n {
             metric[(k, k)] += C64::ONE;
         }
-        let size = crate::linalg::norm_sqr(psi);
         let mut kick = [0.0; 3];
         for (ax, hp) in hprime.iter().enumerate() {
             let kappa: Vec<C64> = (0..n).map(|j| (n..d).map(|k| hp[(j, k)] * tr.c[k] / (tr.values[j] - tr.values[k])).sum()).collect();
@@ -476,10 +515,17 @@ impl Workspace {
             }
             let _ = cache.near_at(x);
         }
+        // A far block folded (no row: its part of κ_sf is none of the modes'): −∂T_L,f†β_f = −‖β_f‖ ∂B†R₀β̂ with it, the
+        // whole ∂N_f a = ∂(B†R₀R₀B)a of its slow state, R₀ held.
         for (row, db) in tr.far.iter().zip(&forces.far) {
+            let folded = (row.at.is_none() && row.size > 0.0).then(|| row.r0.apply(&row.hat));
             for (ax, o) in out.iter_mut().enumerate() {
                 let onto = row.tlf.adjoint().apply(&row.r0.apply(&db[ax].apply(a)));
                 o.iter_mut().zip(onto).for_each(|(u, v)| *u += v);
+                if let Some(rh) = &folded {
+                    let back = db[ax].adjoint().apply(rh);
+                    o.iter_mut().zip(back).for_each(|(u, v)| *u -= v * row.size);
+                }
             }
         }
         out
@@ -602,10 +648,11 @@ impl Transient {
                     dm[(r, y)] = -(0..n).map(|j| lifted[j] * tlh[(j, y)]).sum::<C64>();
                 }
             }
-            let (hss, hsf) = (solve_n(&amat), solve_n(&bm));
+            let hss = solve_n(&amat);
             let mut out = Mat::zeros(d, d);
             put(&mut out, &self.slow.inverse.product(&hss).product(&self.slow.vectors), 0, 0);
             if rows > 0 {
+                let hsf = solve_n(&bm);
                 let (mut hfs, mut hff) = (cm, dm);
                 hfs.add_scaled(-C64::ONE, &self.t.product(&hss));
                 hff.add_scaled(-C64::ONE, &self.t.product(&hsf));
@@ -788,8 +835,23 @@ impl Transient {
         let d = self.size();
         let cm = Mat::from_fn(d, d, |j, i| self.c[j] * self.c[i].conj() / (C64::I * (self.values[j] - self.values[i].conj())));
         let mut out = Mat::zeros(3 * GROUND, 3 * GROUND);
-        for (_, e) in &self.emissions(fold, ws, cache) {
+        let emissions = self.emissions(fold, ws, cache);
+        for (_, e) in &emissions {
             out.add_scaled(C64::ONE, &e.product(&cm).product(&e.adjoint()));
+        }
+        // The folded far transients' jumps at once, 1 − N(0) of them (# The far transients folded): the whole state's photon
+        // at the landing, each offset's apart.
+        let start = self.survival(0.0)[0];
+        if start < 1.0 {
+            let mut once = Mat::zeros(3 * GROUND, 3 * GROUND);
+            for (_, e) in &emissions {
+                let u = Mat { rows: 3 * GROUND, cols: 1, data: e.apply(&self.c) };
+                once.add_scaled(C64::ONE, &u.product(&u.adjoint()));
+            }
+            let trace: f64 = (0..3 * GROUND).map(|i| once[(i, i)].re).sum();
+            if trace > 0.0 {
+                out.add_scaled(C64::real((1.0 - start) / trace), &once);
+            }
         }
         out
     }
