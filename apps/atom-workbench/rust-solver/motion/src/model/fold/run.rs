@@ -159,6 +159,21 @@ use crate::step::{Decided, Dynamics as _, Emitted, Forms, Held, Internal, Landin
 use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// PROTOTYPE: a decision's time and states, counted when it ends (adapt.rs `PC`).
+struct Timed(std::time::Instant, usize);
+impl Drop for Timed {
+    fn drop(&mut self) {
+        crate::adapt::pc_add(2, 1);
+        crate::adapt::pc_add(3, self.0.elapsed().as_nanos() as u64);
+        crate::adapt::pc_add(4, self.1 as u64);
+    }
+}
+
+/// PROTOTYPE: decision times at which the fold did not exist on the fixed representation (a forced rise).
+static FORCED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// PROTOTYPE: decision times at which the fixed representation read beyond the share (kept: nothing remedies it).
+static BEYOND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// An explicit excited node: its level, the absorbed component's part and a source's ground state (`Choice::explicit`).
 type Key = (usize, crate::model::Component, usize);
 
@@ -1495,7 +1510,16 @@ impl crate::step::Middle for Middle<'_> {
         let share = crate::model::elim::share();
         // A state's decay rate on a generator, i⟨ψ|G − G†|ψ⟩/‖ψ‖².
         let rate = |g: &Mat, psi: &[C64]| -2.0 * psi.iter().zip(g.apply(psi)).map(|(a, b)| a.conj() * b).sum::<C64>().im / crate::linalg::norm_sqr(psi);
-        self.priced(run.cell(self.set, self.r, path.kappa, interval, steps));
+        // PROTOTYPE (fixed representation, `ATOM_PROTO_DECIDE=start`): the decision times stay -- the forward made there
+        // reads and makes its decompositions again at the point as its readings ask, the trajectory's from here --, but
+        // the representation does not move by price: no cell, no look, no walk's rise, no fall. Only a fold that does not
+        // exist on the representation still rises (counted: `FORCED`).
+        let fixed = *crate::adapt::START_ONLY;
+        let clock = std::time::Instant::now();
+        let _timed = Timed(clock, set.cluster.states.len());
+        if !fixed {
+            self.priced(run.cell(self.set, self.r, path.kappa, interval, steps));
+        }
         let exists = self.made(path, None, false).exists;
         if exists {
             let inner = self.inner.borrow();
@@ -1507,6 +1531,22 @@ impl crate::step::Middle for Middle<'_> {
                 out.booked[k] = 0.5 * (r(inner.ended[k]) - r(inner.started[k])) * gamma * interval;
             }
             out.booked[5] = 0.5 * (r(inner.ended.iter().sum()) - r(inner.started.iter().sum())) * gamma * interval;
+        }
+        if fixed && exists {
+            if self.inner.borrow().beyond {
+                let n = BEYOND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    eprintln!("proto: the fixed representation reads beyond the share at a decision time ({n} so far)");
+                }
+            }
+            out.held = Some(Held(Some(Arc::new(self.leaves()))));
+            return out;
+        }
+        if fixed {
+            let n = FORCED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n.is_power_of_two() {
+                eprintln!("proto: a fold that does not exist on the fixed representation at a decision time ({n} so far)");
+            }
         }
         // The walk's rises, cluster after cluster.
         let mut chain: Vec<Middle<'_>> = vec![];
