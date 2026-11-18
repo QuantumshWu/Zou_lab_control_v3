@@ -412,8 +412,34 @@ fn the_run(req: &crate::request::Request, reference: [f64; GROUND]) -> run::Onef
     // DRAG_EXPLICIT ("level,frequency,ground;..."): the representation those explicit nodes give (co-rotating components),
     // no decision -- a measurement of a representation by hand.
     if let Some(keys) = explicit_keys() {
-        println!("DRAG_EXPLICIT {keys:?}");
-        return run::Onefold::of(req, &Choice::base(req, keys, vec![]).expect("the choice"), reference).expect("the run");
+        // DRAG_DECIDED_TONES: with the start's decision's tones (its toned terms: tilt0's ±26.37 cross decays), not none.
+        let toned = if std::env::var("DRAG_DECIDED_TONES").is_ok() { run::Onefold::new(req, reference).expect("the run").choice().toned.clone() } else { vec![] };
+        println!("DRAG_EXPLICIT {keys:?}, toned {toned:?}");
+        return run::Onefold::of(req, &Choice::base(req, keys, toned).expect("the choice"), reference).expect("the run");
+    }
+    // DRAG_TONE_BEAT (rad/µs): the start's decision with every cross decay at that beat it averages and folds (two blocks
+    // with a common landing, `Fold::crossing`, not `Fold::beating`) a tone instead (readings.status.md RD5: tilt0's F = 2
+    // sets' 26.37 rad/µs term).
+    if let Ok(beat) = std::env::var("DRAG_TONE_BEAT") {
+        let beat: f64 = beat.trim().parse().unwrap();
+        let mut choice = run::Onefold::new(req, reference).expect("the run").choice().clone();
+        for set in choice.sets.clone() {
+            let Ok(fold) = Fold::new(req, &choice, set[0]) else { continue };
+            let nb = fold.blocks.len();
+            for a in 0..nb {
+                for b in (0..nb).filter(|&b| b != a && fold.crossing[a * nb + b] && !fold.beating(a, b)) {
+                    let (x, y) = (&fold.blocks[a], &fold.blocks[b]);
+                    if ((x.value - y.value).abs() - beat).abs() < 1e-3 * beat {
+                        let term = super::super::Term::cross(set[0], &x.offset, &y.offset);
+                        if !choice.toned.contains(&term) {
+                            println!("DRAG_TONE_BEAT set {set:?}: blocks {a} ({:+.4}, far {}) and {b} ({:+.4}, far {}) -- {term:?}", x.value, x.far(), y.value, y.far());
+                            choice.toned.push(term);
+                        }
+                    }
+                }
+            }
+        }
+        return run::Onefold::of(req, &choice, reference).expect("the run");
     }
     if std::env::var("DRAG_KEEP_FREQ").is_err() {
         // The production run: the start's decision (decide.rs) on the base choice.
