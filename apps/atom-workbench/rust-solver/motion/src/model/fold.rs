@@ -730,17 +730,21 @@ impl Fold {
             let theirs: Vec<usize> = mine.iter().map(|&p| explicit[p - ng]).collect();
             // The excited Q rows: the excited states a source or an explicit state of the block reaches, closed under 𝒦's
             // couplings (the request's and the outside forms'), each at its level's tier (solved unless chosen otherwise).
+            // An explicit state is one object at one frame (FOLDAPI A, coordinator 2026-11-18): no other block holds it,
+            // nor reaches through it -- another component's drive of it is an entry of Ĥ_PP that turns (proto.rs
+            // # The tones: the drives at another offset).
+            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x);
             let mut reached = vec![false; EXCITED];
             for &(p, c) in &sources {
                 for m in &components[c].couplings {
-                    (0..EXCITED).filter(|&x| m[(x, ground[p])] != C64::ZERO).for_each(|x| reached[x] = true);
+                    (0..EXCITED).filter(|&x| m[(x, ground[p])] != C64::ZERO && !foreign(x)).for_each(|x| reached[x] = true);
                 }
             }
             theirs.iter().for_each(|&x| reached[x] = true);
             loop {
                 let before = reached.iter().filter(|&&r| r).count();
                 for x in 0..EXCITED {
-                    for y in 0..EXCITED {
+                    for y in (0..EXCITED).filter(|&y| !foreign(y)) {
                         if reached[x] && !reached[y] && (base_excited[(x, y)] != C64::ZERO || base_excited[(y, x)] != C64::ZERO || coupled[x * EXCITED + y]) {
                             reached[y] = true;
                         }

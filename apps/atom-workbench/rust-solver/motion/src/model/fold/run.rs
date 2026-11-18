@@ -436,6 +436,12 @@ impl Onefold {
         Ok(run)
     }
 
+    /// The start's decision's explicit nodes (tests).
+    #[cfg(test)]
+    pub(crate) fn explicit(&self) -> Vec<Key> {
+        self.decision.explicit()
+    }
+
     /// The start's decision's report (FOLDAPI §3, §7.5; decide.rs): per ground set its explicit nodes, its tones and the
     /// terms averaged and folded (their beats, rad/µs), its worst point and the reading there (the bound), the points
     /// beyond the share with no node offered; the search's points, rounds and time.

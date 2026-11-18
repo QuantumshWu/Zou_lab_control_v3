@@ -382,14 +382,29 @@ impl<'a> Search<'a> {
             let nodes: Vec<Vec<Key>> = decision.sets.iter().map(|s| s.nodes.clone()).collect();
             let asked = self.round(&open.iter().map(|&i| points[i].clone()).collect::<Vec<_>>(), &nodes);
             decision.points += open.len();
-            // The nodes asked, per set, in their keys' order: each joins where its cluster can be made.
+            // The nodes asked, per set: an excited level is one object at one frame (fold.rs `Fold::build`), so of the keys
+            // asked for one level the one the most points ask for (its frame the component that drives it at the most
+            // points; a tie by the keys' order), in the levels' order; each joins where its cluster can be made.
             for k in 0..sets {
-                let mut keys: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
-                keys.sort();
-                keys.dedup();
-                for key in keys {
+                let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
+                asks.sort();
+                let mut keys: Vec<(Key, usize)> = vec![];
+                for key in asks {
+                    match keys.iter_mut().find(|x| x.0 == key) {
+                        Some(x) => x.1 += 1,
+                        None => keys.push((key, 1)),
+                    }
+                }
+                let mut chosen: Vec<Key> = vec![];
+                for &(key, count) in &keys {
+                    let best = keys.iter().filter(|x| x.0 .0 == key.0).all(|x| x.1 < count || (x.1 == count && x.0 >= key));
+                    if best {
+                        chosen.push(key);
+                    }
+                }
+                for key in chosen {
                     let set = &mut decision.sets[k];
-                    if set.nodes.contains(&key) || set.refused.iter().any(|r| r.0 == key) {
+                    if set.nodes.iter().any(|n| n.0 == key.0) || set.refused.iter().any(|r| r.0 == key) {
                         continue;
                     }
                     let mut more = set.nodes.clone();
@@ -416,7 +431,7 @@ impl<'a> Search<'a> {
                             set.crossed_beyond += usize::from(super::unfoldable(cross, crate::model::elim::share()));
                         }
                         Asked::Nowhere => out[i][k] = (f64::INFINITY, false, false, true),
-                        Asked::Node(key) if decision.sets[k].nodes.contains(&key) => more = true,
+                        Asked::Node(key) if decision.sets[k].nodes.iter().any(|n| n.0 == key.0) => more = true,
                         Asked::Node(key) => {
                             out[i][k] = (f64::INFINITY, false, true, false);
                             if let Some(r) = decision.sets[k].refused.iter_mut().find(|r| r.0 == key) {

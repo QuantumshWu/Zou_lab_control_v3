@@ -171,6 +171,14 @@
 //! A tone is Hermitian: an explicit pair's entry is 𝒦's less its decay (`Fold::hermitian_excited`), the decay between two
 //! offsets being their group's jumps' cross products (fold.rs # Tones; model/fold/run.rs, # The jumps' coherence).
 //!
+//! The drives at another offset: an explicit state is one object at one frame (fold.rs `Fold::build`: no other block
+//! holds it). A component that reaches it from a ground place at another offset drives it by an entry of Ĥ_PP linear in
+//! the component's coefficients (as `lin`, the drives at its own offset), turning at θ_x − θ_q − ν_g, its conjugate at
+//! the opposite beat; read as `Choice::of` reads a coupling (its peak strength over its beat, `unfoldable`), it is a
+//! tone beyond the share (`Rotating::lin`: its A_m, its gradient by ∂e) and an averaged entry within it, folded (run.rs
+//! # The averaged terms folded). tilt0's probe, 26.37 rad/µs from its PGC light, drives F' = 3 so: its two Floquet copies
+//! would overlap within Γ.
+//!
 //! The copies a block solves exactly (the P layer's Woodbury) are the solved rows after its excited ones; a block with no
 //! Q rows is a near block of none, its explicit states' own ε rows alone (BRIEF_WIRE2 item 2).
 use super::*;
@@ -186,13 +194,14 @@ type Pair = (usize, usize, usize);
 type Lin = Vec<(usize, usize, Vec<(usize, C64)>, Vec<(usize, C64)>)>;
 
 /// A tone of Ĥ_PP (module documentation, # The tones): its entries at one exact beat θ_p − θ_q (its value, rad/µs), laid
-/// as the static part's (`Workspace::base`, `pp`): what the forms leave of them (flat index, value) and per pair the
-/// forms' entries.
+/// as the static part's (`Workspace::base`, `pp`, `lin`): what the forms leave of them (flat index, value), per pair the
+/// forms' entries, and the drives between ground and explicit places at another offset (`Lin`).
 struct Rotating {
     beat: Beat,
     value: f64,
     base: Vec<(usize, C64)>,
     pp: Vec<(usize, Vec<(usize, C64)>)>,
+    lin: Lin,
 }
 
 /// The step's phases, as BRIEF_PROTO.md splits its time.
@@ -2477,6 +2486,45 @@ impl Fold {
                 }
             }
         }
+        // The drives between a ground place and an explicit one at another offset (an explicit state is one object at one
+        // frame: fold.rs `Fold::build`): the entry (x, q) of component g turns at θ_x − θ_q − ν_g, its conjugate at the
+        // opposite beat. Each is read as `Choice::of` reads a coupling -- its peak strength Σ_l |V_l[x, q]| over its beat --
+        // and by the one rule is a tone beyond the share, an averaged entry within it (`unfoldable`; folded, run.rs # The
+        // averaged terms folded). Per (beat, component, vector): its entries at e_k, or at e_k* for the conjugate.
+        let mut drives: Vec<(Beat, f64, bool, usize, usize, bool, usize, C64)> = vec![];
+        for (g, comp) in self.components.iter().enumerate() {
+            for px in ng..n {
+                let x = self.explicit[px - ng];
+                for q in (0..ng).filter(|&q| self.frames[q].plus(1, &comp.beat) != self.frames[px]) {
+                    let peak: f64 = comp.couplings.iter().map(|m| m[(x, self.ground[q])].abs()).sum();
+                    if peak == 0.0 {
+                        continue;
+                    }
+                    let beat = self.frames[px].plus(-1, &self.frames[q].plus(1, &comp.beat));
+                    let value = self.frame_values[px] - self.frame_values[q] - comp.nu;
+                    let tone = super::unfoldable(peak / value.abs(), crate::model::elim::share());
+                    for k in 0..comp.basis.len() {
+                        let v = comp.basis[k][(x, self.ground[q])];
+                        if v != C64::ZERO {
+                            drives.push((beat.clone(), value, tone, g, k, false, px * n + q, v));
+                            drives.push((beat.negated(), -value, tone, g, k, true, q * n + px, v.conj()));
+                        }
+                    }
+                }
+            }
+        }
+        let drive_into = |list: &mut Vec<Rotating>, (beat, value, g, k, conj, i, v): (Beat, f64, usize, usize, bool, usize, C64)| {
+            let m = list.iter().position(|r| r.beat == beat).unwrap_or_else(|| {
+                list.push(Rotating { value, beat, base: vec![], pp: vec![], lin: vec![] });
+                list.len() - 1
+            });
+            let lin = &mut list[m].lin;
+            let at = lin.iter().position(|y| y.0 == g && y.1 == k).unwrap_or_else(|| {
+                lin.push((g, k, vec![], vec![]));
+                lin.len() - 1
+            });
+            if conj { lin[at].3.push((i, v)) } else { lin[at].2.push((i, v)) }
+        };
         // The tones (module documentation, # The tones): Ĥ_PP's entries between places of one kind and different frames whose
         // coupling cannot be folded (`Fold::turning`), by their beat, laid as its static part -- what the forms leave of
         // them, and per pair the forms'.
@@ -2485,7 +2533,7 @@ impl Fold {
         let tone_of = |x: usize, rotating: &mut Vec<Rotating>| -> usize {
             let beat = self.frames[x / n].plus(-1, &self.frames[x % n]);
             rotating.iter().position(|r| r.beat == beat).unwrap_or_else(|| {
-                rotating.push(Rotating { value: self.frame_values[x / n] - self.frame_values[x % n], beat, base: vec![], pp: vec![] });
+                rotating.push(Rotating { value: self.frame_values[x / n] - self.frame_values[x % n], beat, base: vec![], pp: vec![], lin: vec![] });
                 rotating.len() - 1
             })
         };
@@ -2515,6 +2563,9 @@ impl Fold {
                 }
             }
         }
+        for d in drives.iter().filter(|d| d.2) {
+            drive_into(&mut rotating, (d.0.clone(), d.1, d.3, d.4, d.5, d.6, d.7));
+        }
         rotating.sort_by(|a, b| a.value.total_cmp(&b.value));
         // The entries the rule averages out, laid as the tones are (their static part and per pair the forms').
         let mut averaged: Vec<Rotating> = vec![];
@@ -2526,6 +2577,9 @@ impl Fold {
                 let m = tone_of(x, &mut averaged);
                 averaged[m].base.push((x, h));
             }
+        }
+        for d in drives.iter().filter(|d| !d.2) {
+            drive_into(&mut averaged, (d.0.clone(), d.1, d.3, d.4, d.5, d.6, d.7));
         }
         for (t, &pair) in pairs.iter().enumerate() {
             let m = contract(
@@ -2952,6 +3006,16 @@ impl Fold {
                     a[i] += x * v;
                 }
                 *work += entries.len() as f64;
+            }
+            for (g, k, direct, conj) in &tone.lin {
+                let e = at.e[*g][*k];
+                for &(i, v) in direct {
+                    a[i] += e * v;
+                }
+                for &(i, v) in conj {
+                    a[i] += e.conj() * v;
+                }
+                *work += (direct.len() + conj.len()) as f64;
             }
         }
         for (x, &(w, k, kk)) in at.dc.iter_mut().zip(pairs) {
@@ -5245,6 +5309,14 @@ impl Fold {
                 }
                 work += entries.len() as f64;
             }
+            for (g, kk, direct, conj) in &rotating[m].lin {
+                let kd: C64 = direct.iter().map(|&(i, v)| v * w[(i % n) * n + i / n]).sum();
+                let kc: C64 = conj.iter().map(|&(i, v)| v * w[(i % n) * n + i / n]).sum();
+                for d in 0..3 {
+                    forms[b.channel][d] += kd * at.de[*g][*kk][d] + kc * at.de[*g][*kk][d].conj();
+                }
+                work += (direct.len() + conj.len()) as f64;
+            }
             multiply(a, u, &mut temp.data, n);
             multiply(x, normal, &mut eigen.data, n);
             crate::linalg::fused_product_onto(&eigen.data, a, (n, n, n), &mut temp.data);
@@ -5853,6 +5925,18 @@ impl Fold {
                     }
                 }
                 work += (3 * entries.len()) as f64;
+            }
+            for (g, k, direct, conj) in &rot.lin {
+                for a in 0..3 {
+                    let d = at.de[*g][*k][a];
+                    for &(i, v) in direct {
+                        da[a * nn + i] += c * d * v;
+                    }
+                    for &(i, v) in conj {
+                        da[a * nn + i] += c * d.conj() * v;
+                    }
+                }
+                work += (3 * (direct.len() + conj.len())) as f64;
             }
         }
         // The generator the position holds -- G, and the tones' G_m at their coefficients -- and the top: S⁻¹∂AS⁻¹ less
@@ -6880,6 +6964,15 @@ impl Workspace {
             let x = self.mid.coef[*t];
             for &(i, v) in entries {
                 a[i] += x * v;
+            }
+        }
+        for (g, k, direct, conj) in &tone.lin {
+            let e = self.mid.e[*g][*k];
+            for &(i, v) in direct {
+                a[i] += e * v;
+            }
+            for &(i, v) in conj {
+                a[i] += e.conj() * v;
             }
         }
         let (mut temp, mut g) = (vec![C64::ZERO; n * n], Mat::zeros(n, n));

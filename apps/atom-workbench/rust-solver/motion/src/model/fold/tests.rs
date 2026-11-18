@@ -1699,8 +1699,16 @@ fn a_step_s_work_at_a_scene() {
 
 /// The prototype's choice (proto.rs) for the tests: the explicit nodes the run held fixed at the focus before step3c
 /// (`focus_choice`), so that the tests keep reaching the explicit sets they reached.
+/// tilt0 (the scratchpad's request, where it is at hand): its F = 2 sets' F' = 3 explicit at the PGC light's offset at
+/// the focus, the probe's drive of it an entry of Ĥ_PP that turns (proto.rs # The tones: the drives at another offset).
+fn tilt0() -> Option<(String, Request)> {
+    let file = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\tilt0.json";
+    std::path::Path::new(file).exists().then(|| ("tilt0".to_string(), crate::model::testing::scene(file)))
+}
+
 pub(super) fn proto_choice(req: &Request, name: &str) -> Choice {
-    let choice = focus_choice(req);
+    // tilt0 on the start's decision (decide.rs): its F' = 3 explicit at the PGC light's offset, the probe's drive a tone.
+    let choice = if name == "tilt0" { Choice::base(req, run::Onefold::new(req, [1.0 / GROUND as f64; GROUND]).unwrap().explicit()).unwrap() } else { focus_choice(req) };
     println!("{name}: the rule's ground sets {:?}", choice.sets);
     choice
 }
@@ -2220,7 +2228,7 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
     use super::proto::{Bar, Cache};
     let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
     let (mut checked, mut toned) = (0, 0);
-    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))] {
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))].into_iter().chain(tilt0()) {
         let choice = proto_choice(&req, &name);
         let mut seed = 23u64;
         let mut u = || {
@@ -2360,7 +2368,7 @@ fn the_gradient_s_matrices_are_the_force_s_forms() {
     let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
     let (mut checked, mut toned, mut exact, mut copied, mut explicit, mut worst) = (0, 0, 0, 0, 0, 0.0_f64);
     let scenes = ["R4_LIN_4", "R6_RAMAN_CO", "R6_RAMAN_COUNTER", "R5_PUMP", "R1_TWEEZER"].map(|x| (x.to_string(), crate::model::testing::scene(x)));
-    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))].into_iter().chain(scenes) {
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))].into_iter().chain(scenes).chain(tilt0()) {
         let choice = proto_choice(&req, &name);
         let mut seed = 29u64;
         let mut u = || {
