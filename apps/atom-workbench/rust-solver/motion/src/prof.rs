@@ -88,6 +88,7 @@ pub const SP_STRIDE: usize = 79;
 pub const SP_BETWEEN: usize = 80;
 pub const MID_STEP_MIDDLE: usize = 81;
 pub const LAND_RESPONSES: usize = 82;
+pub const MID_READOUT: usize = 83;
 pub const SLOTS: usize = 96;
 
 pub const NAMES: [&str; SLOTS] = {
@@ -175,6 +176,7 @@ pub const NAMES: [&str; SLOTS] = {
     n[SP_BETWEEN] = "spectral: between";
     n[MID_STEP_MIDDLE] = "step: the step's middle (scattered, optical, centre)";
     n[LAND_RESPONSES] = "run: landing left responses";
+    n[MID_READOUT] = "run: Middle::readout (a read on the step)";
     n
 };
 

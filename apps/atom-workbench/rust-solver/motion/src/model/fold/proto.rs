@@ -6674,6 +6674,13 @@ impl Workspace {
     /// They are the slow modes' populations between two jumps (the fold's slow state and what follows it), not the
     /// optical Bloch equations' ensemble ρ_ee: that holds each jump's transient over 1/Γ, which the landing leaves out.
     pub(crate) fn populations(&self, fold: &Fold, cache: &Cache, psi: &[C64], out: &mut [f64]) -> f64 {
+        self.populations_at(fold, cache, psi, false, out)
+    }
+
+    /// `populations` at the last place a step's propagation stood at (`Fold::prototype_place`: the light there, every near
+    /// block's response Z(s) = Σ_l ρ_l Z_l with its lanes turned to it, S the middle's -- the step's own model of the
+    /// state between its nodes, as its outer nodes and its jumps take it) where `placed`, else at the middle.
+    pub(crate) fn populations_at(&self, fold: &Fold, cache: &Cache, psi: &[C64], placed: bool, out: &mut [f64]) -> f64 {
         let x = self.step.normal.apply(psi);
         let mut sum = 0.0;
         let mut onto = |state: usize, z: C64| {
@@ -6683,7 +6690,7 @@ impl Workspace {
         for (p, z) in x.iter().enumerate() {
             onto(fold.place_state(p), *z);
         }
-        for (o, rows) in self.amplitudes(fold, cache, &x).iter().enumerate() {
+        for (o, rows) in self.amplitudes_at(fold, cache, &x, placed).iter().enumerate() {
             for (r, z) in rows.iter().enumerate() {
                 onto(fold.row_state(o, r), *z);
             }
@@ -6697,7 +6704,14 @@ impl Workspace {
     /// metric holds them (zero where not); a far block's R₀Bx --; none of a block the prototype does not hold. The
     /// readout's populations and a switch's (`Workspace::taken`) are of them.
     pub(crate) fn amplitudes(&self, fold: &Fold, cache: &Cache, x: &[C64]) -> Vec<Vec<C64>> {
+        self.amplitudes_at(fold, cache, x, false)
+    }
+
+    /// `amplitudes` at the last place (`populations_at`) where `placed`: the near blocks' kept rows on Z(s), the far blocks'
+    /// B at the light there; the copies' rows the middle's.
+    fn amplitudes_at(&self, fold: &Fold, cache: &Cache, x: &[C64], placed: bool) -> Vec<Vec<C64>> {
         let n = self.n;
+        let light = if placed { &self.place } else { &self.mid };
         let mut w = 0.0;
         let mut out: Vec<Vec<C64>> = fold.blocks.iter().map(|_| vec![]).collect();
         let apply = |rows: usize, m: &[C64]| -> Vec<C64> { (0..rows).map(|i| m[i * n..(i + 1) * n].iter().zip(x).map(|(a, b)| *a * *b).sum()).collect() };
@@ -6707,7 +6721,7 @@ impl Workspace {
             let Some(basis) = cache.near.get(k).and_then(Option::as_deref).filter(|_| !nb.idle()) else { continue };
             // The kept rows in the block's row order (V on Zx), the exact copies' after the excited rows, the centred
             // copies' after those.
-            let vzx = basis.f.from(&Mat { rows: nb.s, cols: 1, data: apply(nb.s, &nb.ztot) }, &mut w);
+            let vzx = basis.f.from(&Mat { rows: nb.s, cols: 1, data: apply(nb.s, if placed { &nb.zplace } else { &nb.ztot }) }, &mut w);
             for (a, &r) in basis.rows.iter().enumerate() {
                 rows[r] = vzx[(a, 0)];
             }
@@ -6726,7 +6740,7 @@ impl Workspace {
                 for &(p, _) in b.sources.iter().filter(|s| s.1 == c) {
                     for a in 0..fb.m {
                         let Row::Excited(e) = b.rows[a] else { unreachable!("a far block's rows are excited") };
-                        bx[(a, 0)] += self.mid.e[c][kk] * fold.components[c].basis[kk][(e, fold.ground[p])] * x[p];
+                        bx[(a, 0)] += light.e[c][kk] * fold.components[c].basis[kk][(e, fold.ground[p])] * x[p];
                     }
                 }
             }

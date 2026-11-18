@@ -1535,6 +1535,33 @@ impl crate::step::Middle for Middle<'_> {
     /// least of its explicit excited states' decay over two --, and the light pattern's fastest beat along the path, the
     /// largest (k_l − k_m)·v over its light's beams. None where the set holds no explicit state (a fold's photons hold that
     /// part: step.rs # The optical sector's noise).
+    /// The rows as shown of ψ at the time s from the middle (step.rs `Middle::readout`): the fold's time-averaged populations
+    /// (`Dynamics::readout`'s, proto.rs `Workspace::populations`) on the middle's forward with the light and the near blocks'
+    /// responses turned to the place (`Fold::prototype_place`, S the middle's) -- the step's own model of the state between
+    /// its nodes, as its outer nodes and its jumps' photons take it: no forward at the place. A set with no light its
+    /// states' own; none where the fold does not exist on the middle.
+    fn readout(&self, path: &Path, s: f64, psi: &[C64]) -> Option<[f64; STATES]> {
+        let _p = crate::prof::scope(crate::prof::MID_READOUT);
+        let set = self.run.clusters.sets.get(self.set);
+        let mut out = [0.0; STATES];
+        let total = if set.fold.blocks.is_empty() {
+            for (z, &st) in psi.iter().zip(&set.cluster.states) {
+                out[st] = z.norm_sqr();
+            }
+            crate::linalg::norm_sqr(psi)
+        } else {
+            let mut inner = self.made(path, None, false);
+            if !inner.exists {
+                return None;
+            }
+            let Inner { eval, ws, .. } = &mut *inner;
+            let ws = ws.as_mut().expect("a workspace");
+            set.fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
+            ws.populations_at(&set.fold, eval, psi, true, &mut out)
+        };
+        Some(out.map(|x| x / total))
+    }
+
     fn optical(&self, path: &Path) -> Option<Optical> {
         let _p = crate::prof::scope(crate::prof::MID_OPTICAL);
         let set = &self.run.clusters.sets.get(self.set);

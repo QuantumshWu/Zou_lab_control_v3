@@ -2414,14 +2414,14 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     let times: Vec<f64> = at.iter().map(|a| a.0).collect();
     // The steps taken, and the start of the last one counted.
     let (mut steps, mut counted) = (0, None);
-    let mut record = |places: [Option<usize>; 2], t: &Trajectory| {
+    let mut record = |places: [Option<usize>; 2], t: &Trajectory, shown: Option<&[f64; STATES]>| {
         // The atom at the time's instant; from the first time on its κ and κ² are its window's means (`mean`).
         // An unresolved one is booked whole (`apart`). Where the run's fold does not exist for it: no outcome from then
         // on, and at t = 0 its own state's populations.
         let _p = crate::prof::scope(crate::prof::SOLVE_RECORD);
         let mut rows = [0.; STATES];
         if nowhere.get().is_none() {
-            rows = model.readout(t.cluster, &t.point(), &t.psi, &t.held);
+            rows = shown.copied().unwrap_or_else(|| model.readout(t.cluster, &t.point(), &t.psi, &t.held));
             if !rows.iter().all(|x| x.is_finite()) || (domain.light.outside(t.r) && !model.energy(t.cluster, &t.point(), &t.psi).is_finite()) {
                 nowhere.set(Some(t.time));
             }
@@ -2448,14 +2448,14 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             windows[1].record(k, held);
         }
     };
-    record([Some(0), Some(0)], &t);
+    record([Some(0), Some(0)], &t, None);
     // The first output and the first time read the trajectory does not reach held; whether the scheme could not
     // advance it, and whether it stopped where a state scattered beyond every state of the atom.
     let mut reached = [1, 1];
     let mut unmade = None;
     let (failed, runaway, refused) = {
-        let mut read = |i: usize, t: &Trajectory| {
-            record(at[i].1, t);
+        let mut read = |i: usize, t: &Trajectory, shown: Option<&[f64; STATES]>| {
+            record(at[i].1, t, shown);
             for (reached, place) in reached.iter_mut().zip(at[i].1) {
                 if let Some(k) = place {
                     *reached = k + 1;
@@ -2499,10 +2499,10 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     if runaway {
         t.unresolved = true;
         for k in reached[0]..sizes[0] {
-            record([Some(k), None], &t);
+            record([Some(k), None], &t, None);
         }
         for k in reached[1]..sizes[1] {
-            record([None, Some(k)], &t);
+            record([None, Some(k)], &t, None);
         }
         reached = sizes;
     }
@@ -2556,7 +2556,7 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
             Some(going) if going.0.time >= from.trajectory.time => going,
             _ => (from.trajectory.clone(), from.path.clone(), Scratch::resumed(&from.carry)),
         };
-        let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s| (states[k], reached) = (Some(State::of(s)), k + 1), &mut |_, _| {});
+        let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s, _| (states[k], reached) = (Some(State::of(s)), k + 1), &mut |_, _| {});
         match advanced {
             Ok(()) if trajectory.lost.is_none() => going = Some((trajectory, path, scratch)),
             Err(Refused::Runaway) => {
@@ -4683,7 +4683,7 @@ mod tests {
         let mut ended = Ok(());
         while t.time < plan.end && t.lost.is_none() {
             let stop = t.time + 10.;
-            ended = adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &[], &mut |_, _| {}, &mut |_, _| {});
+            ended = adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &[], &mut |_, _, _| {}, &mut |_, _| {});
             let explicit: Vec<usize> = run.cluster(t.cluster).states.iter().filter(|&&s| s >= GROUND).map(|&s| s - GROUND).collect();
             if !held.contains(&explicit) {
                 held.push(explicit);
@@ -4958,7 +4958,7 @@ mod tests {
                     let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
                     let mut direct: Vec<Option<State>> = vec![None; plan.reads.len()];
                     direct[0] = Some(State::of(&t));
-                    let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &plan.reads, &mut |k, s| direct[k] = Some(State::of(s)), &mut |_, _| {});
+                    let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &plan.reads, &mut |k, s, _| direct[k] = Some(State::of(s)), &mut |_, _| {});
                     assert!(advanced.is_ok(), "{name} at {factor} × along {a}: {advanced:?}");
                     if t.lost.is_some() {
                         lost += 1;

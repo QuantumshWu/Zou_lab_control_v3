@@ -676,6 +676,13 @@ pub trait Middle {
     /// complex multiply-adds that made them (`optical_work`: priced where they are made).
     fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64;
 
+    /// The rows as shown (the model's readout, `Dynamics::readout`) of the cluster's state ψ at the time s from the middle
+    /// along the path, on the step's own model there -- what the step propagates between its nodes --, read where the
+    /// step stands (adapt.rs, # The reads); none where the model reads it at the point instead (`Dynamics::readout`).
+    fn readout(&self, _path: &Self::Path, _s: f64, _psi: &[C64]) -> Option<[f64; STATES]> {
+        None
+    }
+
     /// The cluster's optical sector on the path (# The optical sector's noise; model/optical.rs): None where the
     /// cluster has no explicit excited state.
     fn optical(&self, _path: &Self::Path) -> Option<Optical> {
@@ -2079,12 +2086,14 @@ impl Step {
 }
 
 /// A state made inside a step: the trajectory's after a jump -- with the jump's kick (1/µm) --, or a reading at a time
-/// read. The internal state, the cluster, the time and the trajectory's counters are the propagation's there; the
-/// position and the momentum are the caller's to set on the step's path (`Segment::after`, `Segment::place`).
+/// read with its rows as shown, read on the step's middle where its model reads them there (`Middle::readout`). The
+/// internal state, the cluster, the time and the trajectory's counters are the propagation's there; the position and the
+/// momentum are the caller's to set on the step's path (`Segment::after`, `Segment::place`).
 #[derive(Clone, Debug)]
 pub struct Made {
     pub kick: Option<[f64; 3]>,
     pub state: Trajectory,
+    pub rows: Option<[f64; STATES]>,
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
@@ -2168,6 +2177,9 @@ struct March {
     work: f64,
     prices: Vec<(usize, Price)>,
     made: Vec<Made>,
+    /// The end state's rows as shown on the middle of the stretch that reaches the step's end in its own cluster, where
+    /// times are read at the end (`Middle::readout`).
+    ended: Option<[f64; STATES]>,
 }
 
 impl<'a, D: Dynamics> Midway<'a, D> {
@@ -2208,7 +2220,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n, SUMS);
         let kappa_m = predicted(&from.forms, kappa_h, tau, from.time + h);
-        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new() };
+        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new(), ended: None };
         // The three nodes' weights' sums over the step, its stretches' together.
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
@@ -2223,7 +2235,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, false)
             }));
         }
-        let March { state: mut end, read, impulse, scattered, optical, mut work, prices, mut made, .. } = march;
+        let March { state: mut end, read, impulse, scattered, optical, mut work, prices, mut made, ended, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
         // optical sector's drawn covariance -- the middle state's rate over the step with what was pending (# The
         // optical sector's noise) --, their factor on the Brownian path's increment (the momentum) and on its first
@@ -2293,7 +2305,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             work += self.decided(&mut end, interval)?;
         }
         // A time read at the step's end is the end itself.
-        made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() } }));
+        made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() }, rows: ended }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
         Ok(Step { end, segment, made, work, prices, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
     }
@@ -2496,7 +2508,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         Stop::Middle => (middle, march.passed) = (Some(state), true),
                         Stop::Read => {
                             let state = Trajectory { psi: along.turned(&state[..n], u, false)[..n].iter().copied().collect(), time: reads[march.read], ..march.state.clone() };
-                            march.made.push(Made { kick: None, state });
+                            let rows = along.middle.readout(&along.path, u, &state.psi);
+                            march.made.push(Made { kick: None, state, rows });
                             march.read += 1;
                         }
                         Stop::End => {}
@@ -2524,7 +2537,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             next = places.other.filter(|other| other.0 == state.cluster).map(|other| other.1);
             let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
-            march.made.push(Made { kick: Some(kick), state: state.clone() });
+            march.made.push(Made { kick: Some(kick), state: state.clone(), rows: None });
             march.u = crossed;
             if !(ahead(crossed) < 1.0) {
                 break true;
@@ -2537,6 +2550,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // in its own cluster, its density at the middle (the frame's there is the lab's), with the kick's forms, less the
         // step's reference gradient; where a jump at the end left it in another, that cluster's at the jump's point.
         let ended = done && march.state.cluster == cluster;
+        if ended && march.read < reads.len() {
+            march.ended = along.middle.readout(&along.path, h, &march.state.psi);
+        }
         let end: Option<Vec<C64>> = ended.then(|| {
             let mut rho = vec![C64::ZERO; n * n];
             density(&march.state.psi, &mut rho);

@@ -277,7 +277,7 @@ pub fn advance<D: Dynamics>(
     to: f64,
     stop: f64,
     at: &[f64],
-    read: &mut dyn FnMut(usize, &Trajectory),
+    read: &mut dyn FnMut(usize, &Trajectory, Option<&[f64; crate::request::STATES]>),
     each: &mut dyn FnMut(&Segment, f64),
 ) -> Result<(), Refused> {
     let mut next = at.partition_point(|&time| time <= trajectory.time);
@@ -340,10 +340,10 @@ pub fn advance<D: Dynamics>(
                 None => {
                     piece.place(&mut made.state);
                     if time < end {
-                        read(next, &made.state);
+                        read(next, &made.state, made.rows.as_ref());
                         next += 1;
                     } else {
-                        ending.push(made.state);
+                        ending.push((made.state, made.rows));
                     }
                 }
             }
@@ -355,8 +355,8 @@ pub fn advance<D: Dynamics>(
         trajectory.time = end;
         test_loss(model, trajectory);
         if trajectory.lost.is_none() {
-            for state in &ending {
-                read(next, state);
+            for (state, rows) in &ending {
+                read(next, state, rows.as_ref());
                 next += 1;
             }
         }
