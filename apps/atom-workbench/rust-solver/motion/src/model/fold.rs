@@ -42,6 +42,29 @@
 //! excited level's explicit place); one evaluation path whatever the choice, and each choice's error read by the same
 //! function (`Reading`, DESIGN §1.2, M18). An excited node's centring moves its response by exactly (z₀ − z)R_N(z₀)T_N.
 //!
+//! # What the structure is built of (不靠零 J2)
+//! Every structural choice of the fold reads the request's matrices entry by entry -- which excited states a component
+//! drives from a ground state (a block's sources, its rows, the states a node holds, its copies), which excited states 𝒦
+//! couples (the outside forms, the decay D), on which ground states a block lands (the emission C_q) -- and one rule
+//! decides (`Pattern`): an entry e of a matrix M is in the structure where |e|² > γ_n max|M|², γ_n = units::rounding(n)
+//! with n the model's states, M the coupling whose products make the sum e joins: a component's couplings (its beams'
+//! at their focus amplitudes: the block's source columns), 𝒦's couplings of two excited states (every frequency's
+//! outside form at its beams' largest field, Σ_l |E_l,p| per spherical component, and −(i/2)D: one 𝒦 at a block), each
+//! emission operator C_q (a landing). What an
+//! entry alone brings -- a row it alone reaches, a state it alone drives at an offset, a landing it alone makes -- enters
+//! everything the fold makes (the response, the generator, the metric, the jumps, the force) through products of two of
+//! its matrix's entries (a light shift Σ|X_xs|²R_x, a rate, a landing C C*, a coupling of two excited states through
+//! it): second order in e. A sum of such products rounds at γ_n of its largest term, max|M|² in the same resolvent; an
+//! entry within γ_n max|M|² changes no sum its matrix makes beyond that sum's rounding. [Assumption: its row's resolvent
+//! is not beyond the largest term's -- the light is tuned to allowed transitions; an entry 10⁻⁹ of its matrix, tilt2's
+//! largest, stays below the rule's 6·10⁻⁸ by 4·10³ in the products.] Where its row is reached otherwise, the entry is in
+//! the arithmetic as it is (a first-order cross term with that path): the rule decides what is built, not values. The
+//! request's own zeros are the rule's case (|0|² is never beyond), so a matrix with dust where the selection rules
+//! give zero is the same structure: tilt2's request, in the trap light's dressed basis at the focus, carries 10⁻⁷ to
+//! 10⁻⁴⁵ there, and every block held all 24 excited states, every node all of its level's m′. The computed sums' own
+//! zeros are the same rule at first order (far.rs `decay`: an entry within the rounding of its products' moduli;
+//! `Factored`: a Schur form's entry within its decomposition's rounding).
+//!
 //! # One linear solve per pass
 //! For the static P generator H (x coordinates), each block's response T_o (Q rows × n) solves, per source split (a beam with
 //! its Doppler shift w, or the static part), the Sylvester equation T H − (K_eff + w) T = B -- each eigenstate at its own
@@ -183,8 +206,26 @@ fn rate(rho: f64) -> f64 {
     2.0 * rho + rho * rho
 }
 
+/// A matrix's structure (module documentation, # What the structure is built of): its entries beyond γ_n max|M|², n the
+/// length of the products they enter.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Pattern(f64);
+
+impl Pattern {
+    /// The pattern of a matrix (or a field) with entries `entries` whose products are n long.
+    pub(crate) fn of<'a>(entries: impl IntoIterator<Item = &'a C64>, n: usize) -> Pattern {
+        Pattern(crate::units::rounding(n) * entries.into_iter().map(|z| z.norm_sqr()).fold(0.0, f64::max))
+    }
+
+    /// Whether an entry of the matrix is in the structure.
+    pub(crate) fn has(self, z: C64) -> bool {
+        z.norm_sqr() > self.0
+    }
+}
+
 /// One component of the light (module documentation): its part, exact frequency and value, and per beam (request
-/// indices) its coupling at the focus (EXCITED × GROUND) and the momentum its absorption gives.
+/// indices) its coupling at the focus (EXCITED × GROUND), the coupling's structure (`Pattern`) and the momentum its
+/// absorption gives.
 #[derive(Clone)]
 pub(crate) struct Component {
     pub(crate) part: Part,
@@ -192,6 +233,7 @@ pub(crate) struct Component {
     pub(crate) nu: f64,
     beams: Vec<usize>,
     couplings: Vec<Mat>,
+    pattern: Pattern,
     kicks: Vec<[f64; 3]>,
     /// Its couplings on its field's basis U_k (EXCITED × GROUND, far.rs `Bases`) and per beam its coefficients on them
     /// (γ_lk, conjugated counter-rotating): X_l = Σ_k gamma[l][k] U_k.
@@ -200,6 +242,12 @@ pub(crate) struct Component {
 }
 
 impl Component {
+    /// Whether the component drives excited state x from ground state s: a beam's coupling there is in its structure
+    /// (`Pattern`).
+    pub(crate) fn drives(&self, x: usize, s: usize) -> bool {
+        self.couplings.iter().any(|m| self.pattern.has(m[(x, s)]))
+    }
+
     /// A beam's factor in it: a_l, or a_l* counter-rotating.
     fn factor(&self, a: C64) -> C64 {
         if self.part.counter {
@@ -445,7 +493,7 @@ impl Choice {
     /// raise: its copy here is the one rule's (`Fold::build`, `toned`; FOLDAPI §2).
     pub(crate) fn candidates(fold: &Fold) -> Vec<((usize, Part, usize), usize, Vec<usize>)> {
         let holds = |b: &Block, level: usize| {
-            (0..EXCITED).filter(|&x| fold.excited_level[x] == level && !fold.explicit.contains(&x)).any(|x| b.sources.iter().any(|&(p, c)| fold.components[c].couplings.iter().any(|m| m[(x, fold.ground[p])] != C64::ZERO)))
+            (0..EXCITED).filter(|&x| fold.excited_level[x] == level && !fold.explicit.contains(&x)).any(|x| b.sources.iter().any(|&(p, c)| fold.components[c].drives(x, fold.ground[p])))
         };
         let mut out: Vec<((usize, Part, usize), usize, Vec<usize>)> = vec![];
         for (o, b) in fold.blocks.iter().enumerate() {
@@ -560,13 +608,14 @@ fn components(request: &Request, light: &Light, axes: &Axes) -> Result<Vec<Compo
             let part = Part { frequency, counter };
             let beat = axes.component(light, part);
             let couplings: Vec<Mat> = f.beams.iter().map(|&l| (if counter { &request.beams[l].counter_coupling } else { &request.beams[l].coupling }).block(&excited, &ground)).collect();
-            if couplings.iter().all(|m| m.data.iter().all(|z| *z == C64::ZERO)) {
+            let pattern = Pattern::of(couplings.iter().flat_map(|m| &m.data), STATES);
+            if !couplings.iter().any(|m| m.data.iter().any(|z| pattern.has(*z))) {
                 continue;
             }
             let kicks = f.beams.iter().map(|&l| light.beams[l].wave_vector().map(|k| if counter { -k } else { k })).collect();
             let basis = (if counter { &bases.counter } else { &bases.co }).iter().map(|u| u.block(&excited, &ground)).collect();
             let gamma = f.coefficients.iter().map(|g| g.iter().map(|z| if counter { z.conj() } else { *z }).collect()).collect();
-            out.push(Component { part, nu: axes.omega(&beat), beat, beams: f.beams.clone(), couplings, kicks, basis, gamma });
+            out.push(Component { part, nu: axes.omega(&beat), beat, beams: f.beams.clone(), couplings, pattern, kicks, basis, gamma });
         }
     }
     Ok(out)
@@ -642,34 +691,33 @@ impl Fold {
         let d = decay(request);
         let mut base_excited = base.block(&excited, &excited);
         base_excited.add_scaled(C64::new(0.0, -0.5), &d);
-        // The excited states the outside forms couple: each frequency's form on the field components its beams have (a
-        // beam's polarization is the same everywhere, field.rs: paraxial), E_p* E_q for p, q among them -- not a component
-        // no beam of it has (tilt0's π tweezer couples no m′ to m′ ± 2: such a row would be a copy at an offset that drives it
-        // only through a zero, near resonant with an explicit state's column there).
-        let mut coupled = vec![false; EXCITED * EXCITED];
+        // The excited states 𝒦 couples (# What the structure is built of): H0 and what it holds are diagonal, so its entries
+        // off the diagonal are the forms' and −(i/2)D's, each form at its frequency's largest field -- per spherical
+        // component the sum of its beams' at the focus, |E_p| ≤ Σ_l |E_l,p| at any point (a beam's polarization is the same
+        // everywhere, field.rs: paraxial): a component no beam has gives nothing (tilt0's π tweezer couples no m′ to m′ ± 2:
+        // such a row would be a copy at an offset that drives it only through a zero, near resonant with an explicit
+        // state's column there), and tilt2's probe, 2° off the axis, couples m′ to m′ ± 1 at 10⁻⁷ of the trap's form.
+        let mut most = Mat::from_fn(EXCITED, EXCITED, |x, y| if x == y { C64::ZERO } else { C64::real(0.5 * d[(x, y)].abs()) });
         for (o, f) in outside.iter().zip(&light.frequencies) {
-            let has: Vec<bool> = (0..3).map(|p| f.fields.iter().any(|e| e[p] != C64::ZERO)).collect();
-            for (p, row) in o.iter().enumerate().filter(|(p, _)| has[*p]) {
-                for (_, m) in row.iter().enumerate().filter(|(q, _)| has[*q]) {
+            let field: [f64; 3] = std::array::from_fn(|p| f.fields.iter().map(|e| e[p].abs()).sum());
+            for (p, row) in o.iter().enumerate() {
+                for (q, m) in row.iter().enumerate() {
                     for x in 0..EXCITED {
-                        for y in 0..EXCITED {
-                            if m[(GROUND + x, GROUND + y)] != C64::ZERO {
-                                coupled[x * EXCITED + y] = true;
-                                coupled[y * EXCITED + x] = true;
-                            }
+                        for y in (0..EXCITED).filter(|&y| y != x) {
+                            most[(x, y)] += C64::real(field[p] * field[q] * m[(GROUND + x, GROUND + y)].abs());
                         }
                     }
                 }
             }
         }
+        let pattern = Pattern::of(&most.data, STATES);
+        let coupled: Vec<bool> = (0..EXCITED * EXCITED).map(|x| pattern.has(most.data[x]) || pattern.has(most[(x % EXCITED, x / EXCITED)])).collect();
         // The excited states an offset drives: a component from a ground state of the set reaches them there.
         let driven_at = |offset: &Beat| -> Vec<bool> {
             let mut out = vec![false; EXCITED];
             for &s in ground {
                 for c in components.iter().filter(|c| state_frames[s].plus(1, &c.beat) == *offset) {
-                    for m in &c.couplings {
-                        (0..EXCITED).filter(|&x| m[(x, s)] != C64::ZERO).for_each(|x| out[x] = true);
-                    }
+                    (0..EXCITED).filter(|&x| c.drives(x, s)).for_each(|x| out[x] = true);
                 }
             }
             out
@@ -724,7 +772,7 @@ impl Fold {
         };
         for (p, &s) in ground.iter().enumerate() {
             for (c, comp) in components.iter().enumerate() {
-                if comp.couplings.iter().any(|m| (0..EXCITED).any(|x| m[(x, s)] != C64::ZERO)) {
+                if (0..EXCITED).any(|x| comp.drives(x, s)) {
                     add(frames[p].plus(1, &comp.beat), Some((p, c)), &mut offsets, &mut sources);
                 }
             }
@@ -753,16 +801,14 @@ impl Fold {
             }
             let mut reached = vec![false; EXCITED];
             for &(p, c) in &sources {
-                for m in &components[c].couplings {
-                    (0..EXCITED).filter(|&x| m[(x, ground[p])] != C64::ZERO && !foreign(x)).for_each(|x| reached[x] = true);
-                }
+                (0..EXCITED).filter(|&x| components[c].drives(x, ground[p]) && !foreign(x)).for_each(|x| reached[x] = true);
             }
             theirs.iter().for_each(|&x| reached[x] = true);
             loop {
                 let before = reached.iter().filter(|&&r| r).count();
                 for x in 0..EXCITED {
                     for y in (0..EXCITED).filter(|&y| !foreign(y)) {
-                        if reached[x] && !reached[y] && (base_excited[(x, y)] != C64::ZERO || base_excited[(y, x)] != C64::ZERO || coupled[x * EXCITED + y]) {
+                        if reached[x] && !reached[y] && coupled[x * EXCITED + y] {
                             reached[y] = true;
                         }
                     }
@@ -790,7 +836,7 @@ impl Fold {
             for (g, comp) in components.iter().enumerate() {
                 let omega = offset.plus(-1, &comp.beat);
                 for t in (0..GROUND).filter(|&t| !ground.contains(&t) || state_frames[t] != omega) {
-                    if !comp.couplings.iter().any(|m| rows_excited.iter().any(|&x| m[(x, t)] != C64::ZERO)) {
+                    if !rows_excited.iter().any(|&x| comp.drives(x, t)) {
                         continue;
                     }
                     let status = choice
@@ -815,7 +861,7 @@ impl Fold {
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
-        // The cross decays that are not zero, and those the choice keeps (module documentation, # Tones).
+        // The cross decays there are, and those the choice keeps (module documentation, # Tones).
         let crossing = Fold::crossing(request, &components, ground, &explicit, &blocks);
         let nb = blocks.len();
         let beats: Vec<bool> = (0..nb * nb).map(|x| crossing[x] && choice.toned.contains(&Term::cross(ground[0], &blocks[x / nb].offset, &blocks[x % nb].offset))).collect();
@@ -872,24 +918,26 @@ impl Fold {
         })
     }
 
-    /// Per two blocks whether their cross decay is not zero (module documentation, # Tones): a ground state s and an axis q
-    /// both land on, C_q[s, x] ≠ 0 for an excited row x each reaches -- a source's coupling to it, or the block's
-    /// explicit state. Whether it is kept is the choice's (`Term::Cross`; its reading the start's decision's, decide.rs).
+    /// Per two blocks whether they have a cross decay (module documentation, # Tones): a ground state s and an axis q both
+    /// land on, C_q[s, x] in its structure (# What the structure is built of) for an excited row x each reaches -- a
+    /// source's drive of it, or the block's explicit state. Whether it is kept is the choice's (`Term::Cross`; its reading
+    /// the start's decision's, decide.rs).
     fn crossing(request: &Request, components: &[Component], ground: &[usize], explicit: &[usize], blocks: &[Block]) -> Vec<bool> {
         let ng = ground.len();
+        let emission: [Pattern; 3] = std::array::from_fn(|q| Pattern::of(&request.emission[q].data, STATES));
         let landing: Vec<[[bool; GROUND]; 3]> = blocks
             .iter()
             .map(|b| {
                 let mut e = [false; EXCITED];
                 for &(p, c) in &b.sources {
                     for (x, ex) in e.iter_mut().enumerate() {
-                        *ex |= components[c].couplings.iter().any(|m| m[(x, ground[p])] != C64::ZERO);
+                        *ex |= components[c].drives(x, ground[p]);
                     }
                 }
                 for &p in &b.explicit {
                     e[explicit[p - ng]] = true;
                 }
-                std::array::from_fn(|q| std::array::from_fn(|s| (0..EXCITED).any(|x| e[x] && request.emission[q][(s, GROUND + x)] != C64::ZERO)))
+                std::array::from_fn(|q| std::array::from_fn(|s| (0..EXCITED).any(|x| e[x] && emission[q].has(request.emission[q][(s, GROUND + x)]))))
             })
             .collect();
         let nb = blocks.len();

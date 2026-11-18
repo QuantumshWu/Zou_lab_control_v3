@@ -1484,7 +1484,8 @@ mod tests {
         }
     }
 
-    /// Diagnostic (决定审计 J item 1; DECIDE_REQ a request's path, DECIDE_SET the set, DECIDE_AT "s,vx,vy,vz" in m/s):
+    /// Diagnostic (决定审计 J item 1; DECIDE_REQ a request's path, DECIDE_SET the set, DECIDE_AT "s,vx,vy,vz" in m/s,
+    /// DECIDE_PHASES the beams' phases):
     /// one set with no explicit node read at one point -- the walk's accounts (item, the largest square over the columns
     /// read, on), the columns' denominators, each offered node's mixing, what it asks.
     #[test]
@@ -1502,7 +1503,10 @@ mod tests {
         let states = super::super::run::Reference::states(&req, &light).unwrap();
         let (floor, bottom) = super::super::run::Onefold::scales(&light, hbar_over_mass, &super::super::run::Reference::of(&states, &reference));
         let search = Search::new(&req, &light, floor, (2.0 * (-bottom).max(0.0) / hbar_over_mass).sqrt()).unwrap();
-        let local = Local { s: at[0], phases: vec![0.0; light.beams.len()], kappa: [at[1] / hbar_over_mass, at[2] / hbar_over_mass, at[3] / hbar_over_mass] };
+        // DECIDE_PHASES "φ_0,φ_1,...": every request beam's phase (zero where not given).
+        let mut phases: Vec<f64> = std::env::var("DECIDE_PHASES").map_or(vec![], |x| x.split(',').map(|y| y.parse().unwrap()).collect());
+        phases.resize(light.beams.len(), 0.0);
+        let local = Local { s: at[0], phases, kappa: [at[1] / hbar_over_mass, at[2] / hbar_over_mass, at[3] / hbar_over_mass] };
         // DECIDE_NODES "level,frequency,counter,source;...": the set's nodes to start from.
         let mut nodes: Vec<Key> = std::env::var("DECIDE_NODES").map_or(vec![], |x| {
             x.split(';').filter(|y| !y.is_empty()).map(|y| {
@@ -1523,6 +1527,16 @@ mod tests {
                     let most = a.squares.iter().cloned().fold(0.0_f64, f64::max);
                     if most > 1e-6 {
                         println!("  account {:?} on {} squares {:?}", a.item, a.on, a.squares.iter().map(|x| format!("{x:.2e}")).collect::<Vec<_>>());
+                    }
+                }
+                if std::env::var("DECIDE_BLOCKS").is_ok() {
+                    for (o, b) in fold.blocks.iter().enumerate() {
+                        let rows: Vec<String> = b.rows.iter().enumerate().map(|(i, r)| match *r {
+                            super::super::Row::Excited(x) => format!("{}E{x}{}", if i < b.solved { "" } else { "~" }, fold.levels[fold.excited_level[x]].1),
+                            super::super::Row::Copy { state, component } => format!("{}C{state}/{}", if i < b.solved { "" } else { "~" }, component),
+                        }).collect();
+                        let src: Vec<String> = b.sources.iter().map(|&(p, c)| format!("{}<{:?}", fold.ground[p], fold.components[c].part)).collect();
+                        println!("  block {o} {:.4} src {src:?} explicit {:?} rows {}", b.value, b.explicit.iter().map(|&p| fold.explicit[p - fold.ground.len()]).collect::<Vec<_>>(), rows.join(" "));
                     }
                 }
                 let _ = (fold, built);
