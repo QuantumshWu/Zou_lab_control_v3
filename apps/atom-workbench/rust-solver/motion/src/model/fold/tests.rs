@@ -3431,6 +3431,134 @@ fn a_two_level_atom_s_landing_waits_its_master_equation_s_time() {
     }
 }
 
+/// e^A of a small dense matrix: scaled to a norm below 1/2, its Taylor series to the rounding, squared back.
+fn dense_exp(a: &Mat) -> Mat {
+    let squarings = (a.norm1().max(1e-300) / 0.5).log2().ceil().max(0.0) as i32;
+    let scaled = a.scaled(C64::real(0.5_f64.powi(squarings)));
+    let n = a.rows;
+    let (mut sum, mut term) = (Mat::identity(n), Mat::identity(n));
+    for k in 1..30 {
+        term = term.product(&scaled).scaled(C64::real(1.0 / k as f64));
+        sum.add_scaled(C64::ONE, &term);
+    }
+    for _ in 0..squarings {
+        sum = sum.product(&sum);
+    }
+    sum
+}
+
+/// The landing's kick is the cycle's conditional mean momentum (proto/transient.rs # The kick; pland.status # 第四轮（续）
+/// §1): a two-level atom held in a standing wave at kz = π/8 (its intensity's gradient along z) and in a running wave (its
+/// phase's) -- the standing wave's s₁ 0.05 on its line, 0.3 at Δ = Γ, 0.5 at −2Γ; the running wave's 0.2 on its line and
+/// Γ/2 below it --, a bare ground state's landing at rest, nothing explicit,
+/// against the exact two-level no-jump evolution [[0, g*], [g, −Δ − iΓ/2]] with its tangent along z (∂Ψ(τ), the light's
+/// gradient ∂g at the atom):
+/// - K_∞ -- the kick where the clock's crossing lies past the transient (θ = 10⁻¹²) -- is the landed slow state's own
+///   phase gradient ∂arg ψ₀ (one P state: Im(ψ₀*∂ψ₀)/|ψ₀|²), ψ₀ = S N⁻¹f differenced across z on held forwards of the
+///   decision's decompositions (a far block's R₀ held, as the step's tangent holds it) -- through the Riccati identity
+///   N⁻¹∂T_L†β = κ_sf, exact on the exact slow span: its series' rest and a far block's centring read by the reading;
+/// - the clock's τ* where the exact survival meets θ (0.9 … 0.05) the exact's: its survival there θ on ln N, less what the
+///   slow span's own rate adds with the time (its slow eigenvalue against the two-level's: the fold's, read by its
+///   readings), within the reading;
+/// - δg(τ*) = kick − K_∞ the exact conditional mean g(τ) = Im⟨Ψ|D|∂Ψ⟩/⟨Ψ|D|Ψ⟩ less its long-time line F τ + g₀ (read
+///   at 40/Γ and 60/Γ, where the transient is e^{−20} of itself).
+/// Each on the base choice, a near-resonant one with every excited level solved in its block. The kicks within the
+/// reading's share of a photon's momentum k (K_∞ with the difference's 10⁻⁵ of it: the series' rest on T and T_L, a far
+/// block's centring; its row's rank one exact for one row).
+#[test]
+fn the_landing_s_kick_is_the_cycle_s_conditional_mean() {
+    use super::proto::Cache;
+    let ee = 1000.0;
+    for (standing, delta, s, near) in [(true, GAMMA, 0.02, false), (true, GAMMA, 0.1, false), (true, GAMMA, 0.3, false), (true, -2.0 * GAMMA, 0.5, true), (false, 0.0, 0.2, false), (false, -0.5 * GAMMA, 0.2, true)] {
+        let g = 0.5 * GAMMA * (s / 2.0_f64).sqrt();
+        let directions: &[f64] = if standing { &[1.0, -1.0] } else { &[1.0] };
+        let rays: Vec<Ray> = directions.iter().map(|&d| Ray { axis: 0, nu: ee + delta, direction: [0.0, 0.0, d], couplings: vec![(17, 0, C64::real(g))] }).collect();
+        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays, 1, true);
+        idle_decay(&mut req, GAMMA);
+        req.validate().unwrap();
+        let k = req.beams[0].wave_number;
+        let z0 = std::f64::consts::FRAC_PI_8 / k;
+        let light = Light::new(&req);
+        // The base choice, or every excited level solved in its block (`near`: no far block's centring, the Riccati
+        // equation of the slow span exact to the series' rest).
+        let mut choice = Choice::base(&req, vec![]).unwrap();
+        if near {
+            choice.excited.iter_mut().filter(|x| x.1 == Status::Centred).for_each(|x| x.1 = Status::Decomposed);
+        }
+        let fold = Fold::new(&req, &choice, 0).unwrap();
+        let mut ws = fold.prototype_workspace().unwrap();
+        // The decision at z₀, then ψ₀ at z on held forwards of its decompositions (R₀ held as the step and its tangent
+        // hold it, proto.rs # The force).
+        let mut decided = Cache::default();
+        let reading = fold.prototype([0.0, 0.0, z0], [0.0; 3], fold.thermal, &mut decided, &mut ws).expect("the fold there").reading;
+        let mut cache = decided.clone();
+        let mut landed_at = |z: f64, ws: &mut super::proto::Workspace, cache: &mut Cache| -> (Vec<C64>, Vec<C64>) {
+            *cache = decided.clone();
+            fold.prototype_within([0.0, 0.0, z], [0.0; 3], fold.thermal, cache, ws, false).expect("the held fold there");
+            ws.taken(&fold, cache, &[C64::ONE], &[], false).expect("the landing")
+        };
+        let h = 1e-4;
+        let (plus, minus) = (landed_at(z0 + h, &mut ws, &mut cache).0[0], landed_at(z0 - h, &mut ws, &mut cache).0[0]);
+        let (psi, a) = landed_at(z0, &mut ws, &mut cache);
+        fold.prototype_tangent(&cache, &mut ws);
+        let phase = (plus * minus.conj()).arg() / (2.0 * h);
+        let k_inf = ws.clock(&fold, &cache, &psi, &a, 1e-12, 0.0).expect("the clock").kick[2];
+        // The exact two-level evolution with its tangent: [[H, ∂H], [0, H]] on [∂Ψ; Ψ] from [0; f].
+        let coupling: C64 = (0..rays.len()).map(|l| light.beams[l].amplitude_to([0.0, 0.0, z0], 1).value * g).sum();
+        let gradient: C64 = (0..rays.len()).map(|l| light.beams[l].amplitude_to([0.0, 0.0, z0], 1).gradient[2] * g).sum();
+        let hm = Mat::from_fn(2, 2, |i, j| match (i, j) {
+            (0, 1) => coupling.conj(),
+            (1, 0) => coupling,
+            (1, 1) => C64::new(-delta, -0.5 * GAMMA),
+            _ => C64::ZERO,
+        });
+        let dh = Mat::from_fn(2, 2, |i, j| match (i, j) {
+            (0, 1) => gradient.conj(),
+            (1, 0) => gradient,
+            _ => C64::ZERO,
+        });
+        let big = Mat::from_fn(4, 4, |i, j| match (i < 2, j < 2) {
+            (true, true) => hm[(i, j)],
+            (true, false) => dh[(i, j - 2)],
+            (false, false) => hm[(i - 2, j - 2)],
+            _ => C64::ZERO,
+        });
+        let exact = |tau: f64| -> (f64, f64) {
+            let e = dense_exp(&big.scaled(C64::new(0.0, -tau)));
+            let (tangent, state) = ([e[(0, 2)], e[(1, 2)]], [e[(2, 2)], e[(3, 2)]]);
+            let rate = GAMMA * state[1].norm_sqr();
+            (state[0].norm_sqr() + state[1].norm_sqr(), (state[1].conj() * GAMMA * tangent[1]).im / rate)
+        };
+        let (t1, t2) = (40.0 / GAMMA, 60.0 / GAMMA);
+        let (g1, g2) = (exact(t1).1, exact(t2).1);
+        let slope = (g2 - g1) / (t2 - t1);
+        let g0 = g1 - slope * t1;
+        // The momentum's scale: one photon's, k.
+        let scale = k;
+        let far = fold.blocks.iter().any(|b| b.far());
+        println!("{} Δ {:+.1}Γ s {s} ({}): K_∞ {k_inf:+.6e} against ψ₀'s phase gradient {phase:+.6e}; the line F {slope:+.4e}, g₀ {g0:+.4e}; the reading {reading:.1e}", if standing { "standing" } else { "running" }, delta / GAMMA, if far { "a far block" } else { "near" });
+        // The Riccati identity N⁻¹∂T_L†β = κ_sf holds on the exact slow span: to its series' rest (a near block; at
+        // resonance s = 0.3 a running wave's K_∞, nothing exactly, reads 2·10⁻³ of k) and its centring (a far block's
+        // R₀ at z₀), both read by the reading.
+        assert!((k_inf - phase).abs() <= (reading + 1e-5) * scale, "K_∞ the landed slow state's own gradient: {:+.3e} off", k_inf - phase);
+        let tr = ws.transient(&fold, &cache, &a).expect("the landing's modes");
+        // The slow span's own rate against the exact two-level's (its slow eigenvalue): what it adds to ln N with the time.
+        let (kk, root) = (C64::new(-delta, -0.5 * GAMMA), ((C64::new(-delta, -0.5 * GAMMA) * C64::new(-delta, -0.5 * GAMMA)) + C64::real(4.0 * coupling.norm_sqr())).sqrt());
+        let exact_slow = [(kk + root) * 0.5, (kk - root) * 0.5].into_iter().min_by(|x, y| x.im.abs().total_cmp(&y.im.abs())).unwrap();
+        let drift = 2.0 * (exact_slow.im - tr.modes().0[0].im);
+        for theta in [0.9, 0.7, 0.5, 0.3, 0.1, 0.05] {
+            let clock = ws.clock(&fold, &cache, &psi, &a, theta, 0.0).expect("the clock");
+            let wait = tr.crossing_at(theta).expect("a crossing");
+            let (survival, cond) = exact(wait);
+            let dg = cond - slope * wait - g0;
+            let own = (survival / theta).ln() - drift * wait;
+            println!("  θ {theta}: τ* {wait:.5} (Γτ* {:.3}), θ′ {:.6}, the exact survival there {survival:.6} ({own:+.2e} on ln N beyond the slow span's rate); δg {:+.6e} against the exact {dg:+.6e}", GAMMA * wait, clock.threshold, clock.kick[2] - k_inf);
+            assert!(own.abs() <= reading.max(1e-9), "the clock the exact survival's");
+            assert!((clock.kick[2] - k_inf - dg).abs() <= reading.max(1e-6) * scale, "δg the conditional mean's");
+        }
+    }
+}
+
 /// A jump's landing on the fold carries the slow mode's survival back to the jump (proto.rs # The landing; landing.status
 /// 3): a resonant two-level atom at rest, ‖S N⁻¹f‖² = (1 + q)/(2q²), q = √(1 − 2s) -- 1.18402, 1.47883, 2.04057, 3.61803
 /// at s = 0.1–0.4 --, within twice the share of c − 1 (the series' rest on T and on T_L); off resonance (Δ = −4Γ, s = 2)

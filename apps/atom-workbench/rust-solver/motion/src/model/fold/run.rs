@@ -141,7 +141,7 @@ use crate::field::Light;
 use crate::linalg::{Mat, C64};
 use crate::model::{Cluster, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
-use crate::step::{Decided, Emitted, Forms, Held, Internal, Landed, Landing, Middle as _, Optical};
+use crate::step::{Decided, Emitted, Forms, Held, Internal, Landed, Landing, Middle as _, Optical, Owed};
 use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -577,9 +577,10 @@ impl Onefold {
         let exists = set.fold.prototype(at.r, at.kappa, self.mechanical(at.r, at.kappa), &mut cache, &mut ws).is_some();
         let taken = exists.then(|| ws.taken(&set.fold, &cache, &bare, &[], false)).flatten().filter(|(state, _)| state.iter().all(|z| z.is_finite()));
         let landed = taken.and_then(|(state, a)| {
-            let clock = ws.clock(&set.fold, &cache, &a, threshold, at.t)?;
+            // The held forms make the step's tangent there (`forms_on`), the clock's kick its.
             let (state, forms) = self.held_forms(cluster, at, &state, Some((&cache, &mut ws)), false);
-            Some((Landed { psi: state.into_iter().collect(), threshold: clock.threshold, owed: clock.owed }, forms))
+            let clock = ws.clock(&set.fold, &cache, &state, &a, threshold, at.t)?;
+            Some((landed_of(state.into_iter().collect(), clock), forms))
         });
         self.clusters.give(cluster, ws);
         caches.keep(cluster, Arc::new(cache));
@@ -1129,7 +1130,7 @@ impl Middle<'_> {
     /// on each landing set's rows, its amplitudes the two summed on the landing cluster's states (each at its frame's
     /// phase); its kick the class's of the state's own photon (`Fold::prototype_photons`, every class's moments). None
     /// where the set has no light, the fold does not exist there, or `draw` picks none.
-    pub(crate) fn transient(&self, path: &Path, s: f64, psi: &[C64], owed: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+    pub(crate) fn transient(&self, path: &Path, s: f64, psi: &[C64], owed: &Owed, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let (run, set) = (self.run, &self.run.clusters.sets.get(self.set));
         let fold = &set.fold;
         if fold.blocks.is_empty() {
@@ -1144,10 +1145,19 @@ impl Middle<'_> {
         let place = fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
         let t = self.t + s;
         let photons = fold.prototype_photons(eval, ws, psi, &run.clusters.grounds, At::Place, t, Moments::Every);
-        let whole = |b: usize, q: usize| ws.jumped(b, q) + owed[3 * b + q];
+        let whole = |b: usize, q: usize| ws.jumped(b, q) + owed.photon[3 * b + q];
         let rates: Vec<f64> = run.clusters.grounds.iter().map(|g| g.iter().map(|&b| (0..3).map(|q| whole(b, q).norm_sqr()).sum::<f64>()).sum()).collect();
         let k = draw(&rates)?;
         let class = &photons.classes[k];
+        // The kick: the drawn class's own (of ψ's photon), its mean over the classes moved to the one the landing booked --
+        // the slow photon's mean, as the step's own jumps carry it (`Clock::kick`: K_∞ + δg booked the rest); none where
+        // the landing booked the cycle's whole (at once).
+        let mean = |w: &dyn Fn(usize) -> f64| -> [f64; 3] {
+            let total: f64 = (0..rates.len()).map(w).sum();
+            std::array::from_fn(|a| if total > 0.0 { (0..rates.len()).map(|c| w(c) * photons.classes[c].kick[a]).sum::<f64>() / total } else { 0.0 })
+        };
+        let (booked, drawn) = (if owed.whole { [0.0; 3] } else { mean(&|c| photons.classes[c].rate) }, mean(&|c| rates[c]));
+        let kick: [f64; 3] = std::array::from_fn(|a| class.kick[a] + booked[a] - drawn[a]);
         let landing = self.landing_cluster(class.landing);
         let to = run.clusters.sets.get(landing);
         let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
@@ -1160,7 +1170,7 @@ impl Middle<'_> {
         }
         let first = fold.ground[0];
         let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[class.landing][0]];
-        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work + (6 * GROUND) as f64) })
+        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick, work: crate::decide::COMPLEX * (place + photons.work + (6 * GROUND) as f64) })
     }
 
     /// The cluster a jump into ground set k lands in (# The nodes risen and fallen): this middle's where k is its own set,
@@ -1186,16 +1196,16 @@ impl Middle<'_> {
         if set.fold.blocks.is_empty() {
             return Landing::On(Landed::plain(f.iter().copied().collect(), threshold));
         }
-        let mut inner = self.made(path, None, false);
+        let mut inner = self.made(path, None, true);
         let Inner { eval, ws, made, exists, .. } = &mut *inner;
         let ws = ws.as_mut().expect("a workspace");
         if *exists {
             let landed = ws.taken(&set.fold, eval, f, &[], false);
             *made += ws.left_work() * crate::decide::COMPLEX;
             if let Some((psi, a)) = landed {
-                if let Some(clock) = ws.clock(&set.fold, eval, &a, threshold, t) {
+                if let Some(clock) = ws.clock(&set.fold, eval, &psi, &a, threshold, t) {
                     *made += clock.work * crate::decide::COMPLEX;
-                    return Landing::On(Landed { psi: psi.into_iter().collect(), threshold: clock.threshold, owed: clock.owed });
+                    return Landing::On(landed_of(psi.into_iter().collect(), clock));
                 }
             }
         }
@@ -1229,6 +1239,12 @@ impl Middle<'_> {
         let phase = C64::cis(self.run.clusters.sets.get(self.set).tones[m] * (self.t + s));
         rho.iter().map(|z| *z * phase).collect()
     }
+}
+
+/// A landing on its clock (proto/transient.rs `Clock`; step.rs `Landed`): the slow state, the threshold θ′, the photon owed
+/// to that jump and whether the landing booked its cycle's whole momentum (at once), the kick.
+fn landed_of(psi: Internal, clock: super::proto::transient::Clock) -> Landed {
+    Landed { psi, threshold: clock.threshold, owed: clock.owed.map(|photon| Owed { photon, whole: clock.once }), kick: clock.kick }
 }
 
 /// The real parts of a form.
@@ -1647,7 +1663,7 @@ impl crate::step::Dynamics for Onefold {
 
     /// A jump's photon with what its landing's transient owes it (`Middle::transient`): on the step's middle at the jump's
     /// time, or at a point on a middle made there.
-    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, psi: &[C64], owed: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, psi: &[C64], owed: &Owed, held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         match on {
             Some((middle, path, s)) => middle.transient(path, s, psi, owed, draw),
             None => {

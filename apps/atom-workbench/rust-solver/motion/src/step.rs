@@ -504,11 +504,12 @@ pub trait Dynamics {
     /// point's time s from the middle (`Places`), what the step made of the model for the jump to read (DESIGN §13.2);
     /// at a trajectory's start there is none.
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
-    /// The photon of the state ψ with the photon its last landing's transient owes this jump (`Trajectory::owed`,
-    /// `Landed::owed`: the fast part's amplitudes u_q at the jump, laid as the model lays a jump's), the whole state's:
-    /// the classes' rates and the drawn class's amplitudes of ψ's photon and the owed one summed (model/fold/run.rs
-    /// `Middle::transient`). A model whose landing leaves no transient owes none (`emit`).
-    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], owed: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+    /// The photon of the state ψ with the photon its last landing's transient owes this jump (`Trajectory::owed`, `Owed`:
+    /// the fast part's amplitudes u_q at the jump, laid as the model lays a jump's), the whole state's: the classes' rates
+    /// and the drawn class's amplitudes of ψ's photon and the owed one summed, its kick's mean over the classes the one its
+    /// landing booked it (model/fold/run.rs `Middle::transient`). A model whose landing leaves no transient owes none
+    /// (`emit`).
+    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], owed: &Owed, held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let _ = owed;
         self.emit(cluster, at, on, psi, held, draw)
     }
@@ -904,21 +905,33 @@ pub enum Landing {
 /// A landing (`Dynamics::landed`; the jump clock's law, model/fold/proto/transient.rs): the state the trajectory goes on
 /// in -- the slow part, its norm the long-time survival carried back to the jump --; the threshold its next jump is at --
 /// where the model's exact survival N(τ) from the bare state meets the trajectory's θ, the slow part's norm θ′ = N_s(τ*)
-/// there, so that the step jumps where the exact clock does; θ itself where the landing leaves no transient --; and the
-/// photon its transient owes that jump (the fast part's amplitudes there, `Dynamics::transient`), none where it is gone
-/// by then. Where its norm is at or below its threshold already, the jump is at once.
+/// there, so that the step jumps where the exact clock does; θ itself where the landing leaves no transient --; the photon
+/// its transient owes that jump (`Owed`), none where it is gone by then; and the kick the landing books (1/µm): of the
+/// cycle's momentum conditional on its length τ*, what the step and the jump do not give (K_∞ + δg(τ*); its whole at
+/// once). Where its norm is at or below its threshold already, the jump is at once.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Landed {
     pub psi: Internal,
     pub threshold: f64,
-    pub owed: Option<Vec<C64>>,
+    pub owed: Option<Owed>,
+    pub kick: [f64; 3],
 }
 
 impl Landed {
-    /// A landing that leaves no transient: the state, the trajectory's own threshold, nothing owed.
+    /// A landing that leaves no transient: the state, the trajectory's own threshold, nothing owed, no kick.
     pub fn plain(psi: Internal, threshold: f64) -> Landed {
-        Landed { psi, threshold, owed: None }
+        Landed { psi, threshold, owed: None, kick: [0.0; 3] }
     }
+}
+
+/// The photon a landing's transient owes the next jump (`Landed::owed`): the fast part's amplitudes u_q on the ground
+/// states at the jump (rows (b, q) at 3b + q, every block at its offset's phase), and whether the landing booked that
+/// cycle's whole momentum (its jump at once: the slow part dark until it) -- else the jump's kick carries the slow
+/// photon's mean over the classes, as the step's own jumps do (`Dynamics::transient`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Owed {
+    pub photon: Vec<C64>,
+    pub whole: bool,
 }
 
 /// Where a jump's bare state f of the cluster `cluster` lands at a point against the threshold θ (`Dynamics::landed`): on
@@ -950,7 +963,7 @@ pub struct Trajectory {
     /// landing's θ′ (`Landed`: where the exact survival meets θ, the slow part's norm there).
     pub threshold: f64,
     /// The photon the last landing's transient owes the next jump (`Landed::owed`), none where it owes none.
-    pub owed: Option<Vec<C64>>,
+    pub owed: Option<Owed>,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
     /// The photons its jumps emitted (a jump at its threshold on landing emits another) and their Σ k_φ² (1/µm²): the
@@ -1020,7 +1033,7 @@ impl Trajectory {
         let on = norm_sqr(&landed.psi) > landed.threshold;
         let mut trajectory = Trajectory {
             r,
-            kappa,
+            kappa: std::array::from_fn(|a| kappa[a] + landed.kick[a]),
             psi: landed.psi,
             cluster,
             time: 0.0,
@@ -2936,8 +2949,9 @@ impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
 /// round for ever) --, against the threshold its landing hands it (`Landed`): where the model's exact survival from f
 /// meets the next threshold θ drawn here, the slow part's norm there, so that the step jumps where the exact clock does;
 /// and that jump's photon is the whole state's, the photon the landing's transient owes it with the state's own
-/// (`Trajectory::owed`, `Dynamics::transient`). A landed norm at or below its threshold already (the slow part dark until
-/// the jump: its norm is the threshold) is that jump at once, from the landed state with what it is owed -- its class,
+/// (`Trajectory::owed`, `Dynamics::transient`); the momentum the landing books, the cycle's conditional mean less what the
+/// step and that jump give (`Landed::kick`), at once. A landed norm at or below its threshold already (the slow part dark
+/// until the jump: its norm is the threshold) is that jump at once, from the landed state with what it is owed -- its class,
 /// polarization and direction drawn anew, its recoil and its bounded kick with them --, the next threshold drawn anew,
 /// and it lands again. A model whose landing leaves no transient hands θ back and owes nothing: the waiting time after a
 /// jump is then P(T > t) = min(1, n e^{−γt}) for the landing's norm n and the state's rate γ.
@@ -3027,6 +3041,9 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         };
         let Some((cluster, _, landed)) = landing else { return Err(Refused::Emission) };
         let at_once = norm_sqr(&landed.psi) <= landed.threshold;
+        for a in 0..3 {
+            trajectory.kappa[a] += landed.kick[a];
+        }
         (trajectory.cluster, trajectory.psi, trajectory.threshold, trajectory.owed) = (cluster, landed.psi, landed.threshold, landed.owed);
         if !at_once {
             break;

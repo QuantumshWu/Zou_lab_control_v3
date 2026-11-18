@@ -2142,7 +2142,7 @@ struct State {
     /// The trajectory's jumps up to the state, the threshold of its next one and what its last landing owes it.
     jumps: u32,
     threshold: f64,
-    owed: Option<Vec<crate::linalg::C64>>,
+    owed: Option<crate::step::Owed>,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
     forms: crate::step::Forms,
     /// Its representation (step.rs `Trajectory::held`).
