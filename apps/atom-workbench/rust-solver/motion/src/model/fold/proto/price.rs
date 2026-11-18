@@ -518,13 +518,14 @@ impl Sizes {
     }
 
     /// An integrator's candidate tone's counts (run.rs `Candidate::work`): its envelopes -- its members' tones at the three
-    /// nodes, each cross decay's three products L†L there -- and its forms (its members' bars at the three nodes, of tone
-    /// `tone`).
+    /// nodes, each cross decay's product there, `cross` its outer products of n² and its sum into the envelope over the
+    /// candidate's cross decays (run.rs `Middle::crossed`, `Fold::decay_between`) -- and its forms (its members' bars at
+    /// the three nodes, of tone `tone`).
     pub(crate) fn candidate(&self, members: usize, cross: usize, tone: usize) -> [f64; 2] {
         let n = self.n;
         let one: Vec<Cotangent> = (0..members).flat_map(|_| (0..3).map(|position| Cotangent { channel: 0, position, tone: Some(tone) })).collect();
         let forms = if one.is_empty() { 0.0 } else { self.force(&one) };
-        [(3 * one.len() * n * n + 9 * cross * (GROUND + 1) * n * n) as f64, forms]
+        [(3 * one.len() * n * n + 3 * cross * n * n) as f64, forms]
     }
 
 

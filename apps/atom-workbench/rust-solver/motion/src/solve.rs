@@ -364,6 +364,14 @@
 //!   -- the loss test could not tell (`Dynamics::lost`). It ends there with no outcome (`Counts::nowhere`, `Fate::Failed`
 //!   from then on), counted, its share booked whole as every trajectory not counted is (estimate.rs, # What is counted),
 //!   and the ledger says how many and from when.
+//! Where every trajectory ends so, nothing is integrated, and the trajectory's exit is the request's: the pilot's
+//! trajectories, all of them ended with no outcome before the first output after t = 0, refuse the request with the
+//! reasons they ended by (`nothing_integrated`) -- a result would be t = 0 carried to every output (`assemble`), and no
+//! result of that is passed on as a checkpoint either (`Messages::result`). Nor does the step's check decide or price
+//! anything on a read none of whose looks reads (`Verdict::Unread`, `read_looks`): no rung below and no pairs make a
+//! trajectory the model ended count, so the ladder is not walked down on it (tilt2 at 24d346ce: its every start
+//! landed nowhere, the pilot walked the ladder to its bottom, 7.96·10⁻⁵ µs, in zero steps, and the result carried
+//! t = 0's T to every output with no account -- T's total read 0, "finished").
 //!
 //! # Stopping (SPEC §3)
 //! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
@@ -593,11 +601,12 @@ struct Messages<'a> {
 impl Messages<'_> {
     /// A result of the solve so far, of `groups` groups and `trajectories` trajectories, with the wall time left (ms)
     /// where the run's pace gives one: made (`made`) and sent where it rests on two groups at least -- the jackknife's
-    /// least for a spread, whatever the members a group has so far (the scout's groups have one) -- and improves on the
-    /// last one, else the last result again. A result that is not sent is not made: with no group in there is none to
-    /// make.
-    fn result(&mut self, groups: usize, trajectories: u64, remaining: Option<f64>, made: impl FnOnce() -> Solution) {
-        if groups >= 2 && trajectories >= self.least {
+    /// least for a spread, whatever the members a group has so far (the scout's groups have one) --, shows something
+    /// beyond t = 0 (`integrated`: some output after it counts a trajectory; else every output after it would be
+    /// t = 0's carried, # Exits) and improves on the last one, else the last result again. A result that is not sent is
+    /// not made: with no group in there is none to make.
+    fn result(&mut self, groups: usize, trajectories: u64, integrated: bool, remaining: Option<f64>, made: impl FnOnce() -> Solution) {
+        if groups >= 2 && integrated && trajectories >= self.least {
             let s = made();
             self.least = trajectories;
             // The run's counts so far with each result (adapt.rs `counted`), to stderr; their tally at the solve's end.
@@ -843,11 +852,19 @@ fn judged(read: &Between) -> Vec<(Read, f64)> {
     looks
 }
 
+/// The looks of the family (`judged`) that read: a look no time reads at both levels -- none counts a trajectory
+/// there, or of T none holds two atoms (estimate.rs `between`) -- is no look of it. It excludes nothing, and no step
+/// makes it read: a trajectory the model ended no shorter step cures (`Fate::Failed`), and one its step ended reads
+/// unbounded instead (`Fate::Refused`); nor do pairs (`asks`). So it neither holds a rung nor leaves one.
+fn read_looks(read: &Between) -> Vec<(Read, f64)> {
+    judged(read).into_iter().filter(|(read, _)| !read.value.is_nan()).collect()
+}
+
 /// The screen of a step on the reads between its two levels (module documentation, # The step; decide.rs, # Many
 /// reads): whether the family of its reads is beyond -- some read beyond the square of the step's share among all the
-/// family's looks. The step is halved where it is.
+/// family's looks that read (`read_looks`). The step is halved where it is.
 fn screen(read: &Between) -> bool {
-    let reads = judged(read);
+    let reads = read_looks(read);
     reads.iter().any(|(read, bound)| read.outcome(*bound, reads.len() as f64) == Outcome::Beyond)
 }
 
@@ -862,12 +879,12 @@ fn carried(read: &Between, ratio: f64) -> Between {
     Between { loss: carry(&read.loss), shown: read.shown.each_ref().map(carry), temperature: read.temperature.as_ref().map(carry) }
 }
 
-/// Whether a read's every look is within the step's share as it reads (module documentation, # The step): its
-/// estimate M̂ -- unbiased, the noise's floor taken out -- at most the square b of the share; a look that is no number
-/// is not. The convergence test as a refinement is checked by hand and as an adaptive integrator's local control takes
-/// it: the change between two levels within the tolerance, on the estimate.
+/// Whether a read's every look that reads (`read_looks`) is within the step's share as it reads (module documentation,
+/// # The step): its estimate M̂ -- unbiased, the noise's floor taken out -- at most the square b of the share. The
+/// convergence test as a refinement is checked by hand and as an adaptive integrator's local control takes it: the
+/// change between two levels within the tolerance, on the estimate.
 fn within(read: &Between) -> bool {
-    judged(read).iter().all(|(read, bound)| read.value <= *bound)
+    read_looks(read).iter().all(|(read, bound)| read.value <= *bound)
 }
 
 /// What the check makes of a rung on its reads (module documentation, # The step; `verdict`).
@@ -888,6 +905,10 @@ enum Verdict {
     /// could see through it where they are expected to cost the run less than the rung below (`remedy`), else the
     /// rung is left.
     Unseeing,
+    /// No look of its own read reads (`read_looks`): its levels count no trajectory at both at any time read. No pairs
+    /// and no rung below make it read, so nothing is decided or priced on it: the check ends unable to see where it is
+    /// (`Settled::Unseen`).
+    Unread,
 }
 
 /// What the check makes of a rung (module documentation, # The step; `settle`) on its own `read` and its third level
@@ -900,7 +921,9 @@ enum Verdict {
 /// where the rung buys it (`course`); where none is, the rung stands on its own two levels. What a rung that stands
 /// does next is its course's (`course`).
 fn verdict(read: &Between, above: Option<&Between>, pilot: bool, upward: bool) -> Verdict {
-    if screen(read) || above.is_some_and(screen) {
+    if read_looks(read).is_empty() {
+        Verdict::Unread
+    } else if screen(read) || above.is_some_and(screen) {
         Verdict::Left
     } else if !pilot {
         Verdict::Stands
@@ -942,10 +965,11 @@ fn readable(read: &Between) -> bool {
 /// (decide.rs `Read::outcome`). Where it does not, the pairs are asked for what they could do at the best (`asks`):
 /// were the look's error the least its read allows -- its near end L at one look, from zero: its own interval, as at
 /// its far end (`ends`) --, what the read holds above L, value and interval, is the pairs' noise, and falls as the
-/// floor does, as 1/N. The largest factor over the looks. (A value taken as it reads -- the rule before -- makes a read
-/// that the noise has put above b ask for no pairs, and the rung below was taken on it: measured, SPEC §2.2.)
+/// floor does, as 1/N. The largest factor over the looks that read (`read_looks`: one no time reads asks for nothing
+/// pairs could give). (A value taken as it reads -- the rule before -- makes a read that the noise has put above b ask
+/// for no pairs, and the rung below was taken on it: measured, SPEC §2.2.)
 fn blind(own: &Between) -> Option<f64> {
-    judged(own).into_iter().filter(|(read, bound)| read.outcome(*bound, 1.) != Outcome::Within).map(|(read, bound)| asks(ends(&read), bound)).reduce(f64::max)
+    read_looks(own).into_iter().filter(|(read, bound)| read.outcome(*bound, 1.) != Outcome::Within).map(|(read, bound)| asks(ends(&read), bound)).reduce(f64::max)
 }
 
 /// A look's far and near ends at one look, [F, L] (decide.rs `Read::most`, `Read::least`), the near end from zero:
@@ -1250,6 +1274,20 @@ fn pooled(parts: &[&Part], scales: &Scales) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>
     (estimates, listed, counts_of(parts))
 }
 
+/// Whether some groups show anything beyond t = 0 (module documentation, # Exits): some output after it counts a
+/// trajectory -- its atom held or lost there under the run's model. Where none does, every trajectory ended with no
+/// outcome before the first output after t = 0: nothing was integrated, and every output after it would be t = 0's
+/// carried (`assemble`).
+fn integrated(parts: &[&Part]) -> bool {
+    parts.iter().any(|p| p.sums.sums.iter().skip(1).any(|s| s.trajectories > 0.))
+}
+
+/// The request's exit where nothing is integrated (module documentation, # Exits): the pilot's `trajectories`, every
+/// one ended with no outcome before the first output after t = 0, `first` (µs), and why (`ended`).
+fn nothing_integrated(counts: &Counts, trajectories: u64, first: f64) -> String {
+    format!("没有一条轨迹被积分：先导的 {trajectories} 条轨迹都在 t = 0 之后的第一个输出时刻（{}）之前没有结果地结束，t = 0 之后没有可给的结果（{}）", when(first), ended(counts, false).join("；"))
+}
+
 /// The counts of some groups.
 fn counts_of(parts: &[&Part]) -> Counts {
     parts.iter().fold(Counts::default(), |mut counts, p| {
@@ -1265,7 +1303,7 @@ fn so_far(context: &Context, have: &[Part], more: &[&Part], messages: &mut Messa
     let all: Vec<&Part> = have.iter().chain(more.iter().copied()).collect();
     // Every trajectory is held at t = 0.
     let n = all.iter().map(|p| p.sums.sums[0].trajectories + p.sums.sums[0].failed).sum::<f64>() as u64;
-    messages.result(all.len(), n, None, || {
+    messages.result(all.len(), n, integrated(&all), None, || {
         let (e, l, c) = pooled(&all, &context.scales);
         // The estimates at the analysis times the context holds, among the times its parts are read at.
         let at: Vec<usize> = context.at.iter().map(|t| context.plan.reads.iter().position(|r| r == t).expect("an analysis time is a time read")).collect();
@@ -1559,6 +1597,15 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // its states are read, and the check goes on from there priced at them. Whether it saw: a step that stands
     // uncertified -- at the steps' cap, or unable to see -- is flagged.
     let mut settled = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, messages);
+    // Nothing integrated (# Exits): the pilot's every trajectory ended with no outcome before the first output after
+    // t = 0 -- no step, no rung and no further trajectory is checked or priced on what shows nothing --, the request's
+    // exit with its reason.
+    {
+        let pilot: Vec<&Part> = levels.fine.iter().collect();
+        if !integrated(&pilot) {
+            return Err(nothing_integrated(&counts_of(&pilot), pilot.len() as u64 * GROUP, context.plan.times[1]));
+        }
+    }
     // The pilot's reads at its run level's analysis times, made at the rung they were made at; made again only where
     // the check went on to another rung.
     let mut made: Option<(f64, Vec<usize>, Vec<Part>, PilotRead)> = None;
@@ -1846,6 +1893,11 @@ fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Cont
             let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
             format!("ladder tau {} pilot {pilot} members {members} groups {} verdict {verdict:?} screen {} looks [{}] above [{}]", context.tau, numbers.len(), screen(&read), looks.join(" "), above.join(" "))
         });
+        // A read of which no look reads decides nothing and prices nothing (`Verdict::Unread`): the check ends unable to
+        // see where it is.
+        if verdict == Verdict::Unread {
+            return Settled::Unseen;
+        }
         // A rung its reads do not leave takes its course by the run's work from here: without its prices the check
         // stops there (`Settled::Pending`).
         if prices.is_none() && !screen(&read) {
@@ -2010,7 +2062,7 @@ fn product(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Co
             return (shown, l, c, e);
         }
         let want = batch(most_needed(&chased), n);
-        messages.result(all.len(), n, left(n, want), || {
+        messages.result(all.len(), n, integrated(&all), left(n, want), || {
             let (shown, l, c) = pooled(&all, &context.scales);
             assemble(context, &shown, &e, &l, &c, n)
         });
@@ -2018,7 +2070,7 @@ fn product(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Co
         let new = level(run, ensemble, domain, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
             let done = all.len() as u64 * GROUP;
-            messages.result(all.len(), done, left(done, want), || {
+            messages.result(all.len(), done, integrated(&all), left(done, want), || {
                 let (shown, l, c) = pooled(&all, &context.scales);
                 assemble(context, &shown, &summarize(&reads_of(&all), &context.scales), &l, &c, done)
             });
@@ -3214,6 +3266,30 @@ fn accounts_along(at: &[f64], population: &[Account], temperature: &[Option<Acco
         .unzip()
 }
 
+/// The trajectories that ended with no outcome (`Counts`; module documentation, # Exits), by why, in the result's words:
+/// each cause met, how many and from when; `booked`, with what that leaves in a result (their share booked whole on
+/// what is shown) -- else the cause alone, as the request's exit says it (`nothing_integrated`).
+fn ended(counts: &Counts, booked: bool) -> Vec<String> {
+    let unmade = "在某一步上，光学扇区的噪声算子 K 做不出";
+    let [after, there] = if booked { ["：此后它们不计入估计，所占的比例全部计入布居与丢失的误差", "：它们在那里结束，此后不计入估计，所占的比例全部计入布居与丢失的误差"] } else { [""; 2] };
+    let mut out = vec![];
+    for (stopped, why) in [
+        (&counts.refused, "的一步在所取步长下算出的数不是有限数（状态或参考流），在时间的舍入以内减半步长也推进不了".to_string()),
+        (&counts.failed, "的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）".to_string()),
+        (&counts.unmade[0], format!("{unmade}（激发态块或基态块的 Schur 形式不收敛；这不应发生，是引擎的缺陷）")),
+        (&counts.unmade[1], format!("{unmade}（ℳ 奇异：按构造 Q 扇区以约 Γ/2 或更快弛豫，ℳ 应当可逆；这不应发生，是引擎的缺陷）")),
+        (&counts.unmade[2], format!("{unmade}（算出的数不是有限数；这不应发生，是引擎的缺陷）")),
+    ] {
+        if let Some(t) = stopped.since {
+            out.push(format!("{} 条轨迹{why}（最早在 {}）{after}", stopped.count, when(t)));
+        }
+    }
+    if let Some(t) = counts.nowhere.since {
+        out.push(format!("{} 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 {}）{there}", counts.nowhere.count, when(t)));
+    }
+    out
+}
+
 /// A step (µs) of a run of the length `run` as the result writes it. A step is the run over a whole number N of steps
 /// (`first_rung`, and halvings of it), so its digits say nothing beyond N; it is written to one significant digit more
 /// than N has decimal digits, and N is the run over the step as written, rounded. Rounded to d significant digits the
@@ -3353,20 +3429,8 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     }
     // The trajectories that ended with no outcome, by why (`Counts`), and what that leaves (estimate.rs, # What is
     // counted).
-    let unmade = "在某一步上，光学扇区的噪声算子 K 做不出";
-    for (stopped, why) in [
-        (&counts.refused, "的一步在所取步长下算出的数不是有限数（状态或参考流），在时间的舍入以内减半步长也推进不了".to_string()),
-        (&counts.failed, "的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）".to_string()),
-        (&counts.unmade[0], format!("{unmade}（激发态块或基态块的 Schur 形式不收敛；这不应发生，是引擎的缺陷）")),
-        (&counts.unmade[1], format!("{unmade}（ℳ 奇异：按构造 Q 扇区以约 Γ/2 或更快弛豫，ℳ 应当可逆；这不应发生，是引擎的缺陷）")),
-        (&counts.unmade[2], format!("{unmade}（算出的数不是有限数；这不应发生，是引擎的缺陷）")),
-    ] {
-        if let Some(t) = stopped.since {
-            s.approximations.flag(format!("{} 条轨迹{why}（最早在 {}）：此后它们不计入估计，所占的比例全部计入布居与丢失的误差", stopped.count, when(t)));
-        }
-    }
-    if let Some(t) = counts.nowhere.since {
-        s.approximations.flag(format!("{} 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 {}）：它们在那里结束，此后不计入估计，所占的比例全部计入布居与丢失的误差", counts.nowhere.count, when(t)));
+    for said in ended(counts, true) {
+        s.approximations.flag(said);
     }
     if counts.unresolved > 0 {
         s.approximations.flag(format!("保持的前向有 {} 步（共 {} 步）未解析：两次决定之间级数之比到 1，折叠在格内可能失去存在；这些步的误差不在折叠的读数内", counts.unresolved, counts.steps));
@@ -3561,8 +3625,9 @@ mod tests {
     /// the pairs. One of 1.5 b under an interval of b -- above b, and not clearly: the noise may have put it there --
     /// has b/2 clear: (2.5 − 0.5)/(1 − 0.5) = 4 times the pairs, where the value taken as it reads asked for none. One
     /// whose near end is at b or above could be within on no number of pairs. A row asks against the populations'
-    /// share; the largest asking of the looks is taken. A look that is unread or no number excludes nothing
-    /// (`readable`): no number of pairs.
+    /// share; the largest asking of the looks is taken. A look whose spread is unread excludes nothing (`readable`): no
+    /// number of pairs. A look that is no number -- no time reads it -- is no look (`read_looks`): it asks for nothing,
+    /// and the others ask as they do; it still excludes nothing.
     #[test]
     fn a_rung_of_untested_order_asks_for_the_pairs_that_could_bring_it_within() {
         let b = step_bound()[1].powi(2);
@@ -3578,7 +3643,7 @@ mod tests {
         row.shown[1] = Read { value: 0.3, spread: Spread::UNREAD };
         assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row));
         row.shown[1] = read(f64::NAN, 0.);
-        assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row) && readable(&at(None)));
+        assert!(close(blind(&row), 2.) && !readable(&row) && readable(&at(None)));
     }
 
     /// The run's work a step's check weighs its choice by (`Prices`) in the tests: a trajectory's work a µs as its steps'
@@ -4138,7 +4203,7 @@ mod tests {
             assert!(number(b.shown) && b.shown <= 1. && number_or_unbounded(b.temperature), "{b:?}");
         }
         assert_eq!(checked(&none, None, true).0.shown, 1., "a read that is no number excludes nothing: the whole");
-        assert!(blind(&none).is_some_and(|f| f == f64::INFINITY));
+        assert_eq!(blind(&none), blind(&Between { loss: Read { value: 0., spread: Spread { error: 0., groups: f64::INFINITY } }, ..read.clone() }), "a look no time reads asks for nothing");
         assert_eq!(batch(f64::NAN, 88), 176);
         assert_eq!((probability_error(f64::NAN), probability_error(2.), probability_error(0.3)), (1., 1., 0.3));
     }
@@ -4599,8 +4664,73 @@ mod tests {
         so_far(&context, &scout[..2], &[], &mut messages);
         so_far(&context, &whole, &[], &mut messages);
         so_far(&context, &whole[..1], &[&whole[1]], &mut messages);
-        messages.result(1, 4 * GROUP, None, || unreachable!("no result is made of one group"));
+        messages.result(1, 4 * GROUP, true, None, || unreachable!("no result is made of one group"));
         assert_eq!(sent, [3, 3, 2 * GROUP, 2 * GROUP, 2 * GROUP]);
+    }
+
+    /// A run that integrates nothing hands out nothing (module documentation, # Exits; tilt2 at 24d346ce: every start
+    /// landed nowhere, zero steps, the ladder walked to its bottom, t = 0's T carried to every output and "finished").
+    /// Groups whose every trajectory ended with no outcome before the first output after t = 0 -- held there, failed
+    /// after: a start that lands nowhere -- show nothing beyond t = 0 (`integrated`), make no checkpoint (`so_far`: the
+    /// message stays due), and the request's exit says how many ended, why and from when (`nothing_integrated`). One
+    /// trajectory counted after t = 0 among them is a result. And the step's check decides nothing on a read none of
+    /// whose looks reads (`Verdict::Unread`, on the scout and on the pilot: the check ends unable to see where it is,
+    /// no rung below), while a look no time reads among looks that do neither holds the rung nor leaves it: the pilot's
+    /// rung whose loss and rows read within stands with its T unread (it went down the ladder before: its far end no
+    /// number asked for no number of pairs).
+    #[test]
+    fn a_run_that_integrates_nothing_hands_out_nothing() {
+        let context = Context {
+            at: vec![0., Plan::new(&[0., 1.], [1.; 3]).end],
+            plan: Plan::new(&[0., 1.], [1.; 3]),
+            tau: 0.5,
+            scales: Scales { hbar_over_mass: 1., frequencies: [1.; 3] },
+            initial: [0.; STATES],
+            fixed: Fixed { model: vec![[0.; 2]; 2] },
+            unresolved: vec![[0.; 2]; 2],
+            step: Bound::share(),
+            checked: None,
+            ledger: Ledger::default(),
+            method: String::new(),
+        };
+        let shape = Shape::of(&context.plan, false);
+        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false });
+        let nowhere = |i: u64| Record {
+            outputs: vec![held(i), Fate::Failed],
+            reads: vec![held(i), Fate::Failed],
+            listed: vec![None; shape.listed],
+            trail: vec![],
+            lost: None,
+            counts: Counts { nowhere: Stopped::at(0.), ..Counts::default() },
+            scattered: [0.; 2],
+        };
+        let none = [folded(&shape, (0..GROUP).map(nowhere)), folded(&shape, (GROUP..2 * GROUP).map(nowhere))];
+        let all: Vec<&Part> = none.iter().collect();
+        assert!(!integrated(&all));
+        let mut sent = vec![];
+        let mut send = |s: &Solution, _: Option<f64>| sent.push(s.trajectories);
+        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        so_far(&context, &none, &[], &mut messages);
+        assert!(messages.due().is_zero(), "no result of what shows nothing beyond t = 0");
+        let reason = nothing_integrated(&counts_of(&all), 2 * GROUP, context.plan.times[1]);
+        println!("{reason}");
+        assert!(reason.starts_with("没有一条轨迹被积分：先导的 16 条轨迹都在 t = 0 之后的第一个输出时刻（1 μs）之前") && reason.contains("16 条轨迹所在处的折叠不存在") && reason.contains("最早在 0 μs"), "{reason}");
+        let one = folded(&shape, std::iter::once(Record { outputs: vec![held(0), held(0)], reads: vec![held(0), held(0)], ..nowhere(0) }));
+        let some: Vec<&Part> = none.iter().chain(std::iter::once(&one)).collect();
+        assert!(integrated(&some));
+        so_far(&context, &none, &[&one], &mut messages);
+        assert!(!messages.due().is_zero());
+        assert_eq!(sent, [2 * GROUP + 1]);
+        // The step's reads.
+        let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
+        let nothing = Between { loss: unread, shown: [unread; STATES], temperature: Some(unread) };
+        assert!(read_looks(&nothing).is_empty() && blind(&nothing).is_none() && !screen(&nothing));
+        for (pilot, upward) in [(false, false), (true, false), (true, true)] {
+            assert_eq!(verdict(&nothing, None, pilot, upward), Verdict::Unread);
+        }
+        let b = step_bound()[1].powi(2);
+        assert_eq!(verdict(&at(Some(unread)), Some(&at(Some(read(0.1 * b, 0.01 * b)))), true, false), Verdict::Stands);
+        assert_eq!(verdict(&at(Some(unread)), None, true, true), Verdict::Above);
     }
 
     /// A message that falls due inside a hand-out is made while the trajectories run: its loops run on the pool
@@ -4695,6 +4825,70 @@ mod tests {
         eprintln!("the trajectory to {:.1} µs of {:.1} ({:?}; lost {:?}), {} jumps, {} unresolved steps, in {:.1} s; the explicit excited states of the clusters it held {held:?}; the tweezer's line {tweezer:?}", t.time, plan.end, ended, t.lost, t.jumps, t.unresolved_steps, started.elapsed().as_secs_f64());
         assert!(ended.is_ok(), "it runs through");
         assert!(held.iter().flatten().all(|e| !tweezer.contains(e)), "no node of the tweezer's line rises");
+    }
+
+    /// A step's count against its time (a measurement, ignored; tilt0's request where the scratchpad holds it): states of
+    /// three of tilt0's atoms -- the trap's centre at the thermal speed along x, y and z, run at its step τ -- every two
+    /// microseconds over their first 60 µs; from each, 4τ of the run as the run takes it at τ (four steps) and at 4τ
+    /// (one), each step made and taken on one thread (`Midway::new` and `attempt`, a scratch carried along each level, no
+    /// decision), timed, and counted as the ladder prices it (`Price::parts`, the jumps' `Trajectory::jumped`). Per
+    /// level its wall time and its count by part; the prof regions after each (cumulative; nothing without the feature).
+    #[test]
+    #[ignore]
+    fn a_step_s_count_against_its_time() {
+        let file = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\tilt0.json";
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap()).unwrap();
+        let b = chief(&request);
+        let run = Onefold::new(&request, alone(b)).unwrap();
+        let trap = Prepared::new(&run, alone(b)).unwrap().trap;
+        let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+        let (speed, tau) = (thermal(&request, &run), 0.32610161451737907);
+        let mut states = vec![];
+        for (index, axis) in [(3u64, 0usize), (5, 1), (7, 2)] {
+            let mut kappa = [0.; 3];
+            kappa[axis] = speed;
+            let mut t = Trajectory::begun(&run, b, trap.centre, kappa, SEED, index, 4. * tau);
+            let mut path = adapt::Path::new(SEED, index, 4. * tau, 2);
+            let mut scratch = Scratch::default();
+            while t.time < 60. && t.lost.is_none() {
+                let stop = t.time + 2.;
+                if adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, 1000., stop, &[], &mut |_, _, _| {}, &mut |_, _| {}).is_err() {
+                    break;
+                }
+                states.push(t.clone());
+            }
+        }
+        eprintln!("{} states{}", states.len(), crate::prof::report());
+        for (h, count) in [(tau, 4), (4. * tau, 1)] {
+            let mut scratch = Scratch::default();
+            let (mut wall, mut parts, mut jumps, mut steps) = (0.0, [0.0; 6], 0.0, 0);
+            for s in &states {
+                let mut t = s.clone();
+                for _ in 0..count {
+                    let started = Instant::now();
+                    let Ok(m) = crate::step::Midway::new(&run, &t, h, None) else { break };
+                    let Ok(step) = m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &domain) else { break };
+                    wall += started.elapsed().as_secs_f64();
+                    for (_, price) in &step.prices {
+                        for (p, x) in parts.iter_mut().zip(price.parts(price.costs)) {
+                            *p += x;
+                        }
+                    }
+                    jumps += step.end.jumped - t.jumped;
+                    t = step.end;
+                    steps += 1;
+                }
+            }
+            let total = parts.iter().sum::<f64>() + jumps;
+            eprintln!(
+                "COUNT h {h:.4} steps {steps}: wall {:.4} s, {:.2} µs a step; count {total:.4e} ({:.3} ns a count); parts [propagation, impulse, hazard, optical, end, model] {:?}, jumps {jumps:.4e}{}",
+                wall,
+                1e6 * wall / steps as f64,
+                1e9 * wall / total,
+                parts.map(|x| format!("{x:.3e}")),
+                crate::prof::report()
+            );
+        }
     }
 
     /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its

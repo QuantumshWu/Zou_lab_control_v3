@@ -583,6 +583,10 @@ pub(crate) struct Fold {
     base_excited: Mat,
     /// The emission operators (GROUND × EXCITED).
     emission: [Mat; 3],
+    /// D = Σ_q C_q†C_q on the excited states (far.rs `decay`: the excited block's decay, −(i/2)D in `base_excited`), its
+    /// entries that are not zero (x, y, D_xy): the decay between two blocks' excited amplitudes, Σ_q L_o,q†L_o′,q =
+    /// S⁻¹†ε_o† D ε_o′S⁻¹ (`Fold::decay_between`).
+    decay: Vec<(usize, usize, C64)>,
     /// The ground sets a photon lands in (`Fold::sets`): the readings' populations unit reads each transfer into another
     /// set against itself.
     landing: Vec<Vec<usize>>,
@@ -909,6 +913,7 @@ impl Fold {
             base_ground: base.block(&all, &all),
             base_excited,
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
+            decay: (0..EXCITED).flat_map(|x| (0..EXCITED).map(move |y| (x, y))).filter(|&(x, y)| d[(x, y)] != C64::ZERO).map(|(x, y)| (x, y, d[(x, y)])).collect(),
             landing: Fold::sets(request, choice)?,
             entries,
             others,
