@@ -504,22 +504,24 @@ pub trait Dynamics {
     /// point's time s from the middle (`Places`), what the step made of the model for the jump to read (DESIGN §13.2);
     /// at a trajectory's start there is none.
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
-    /// The photon a landing's transient emits at once (`jump`: a landing whose norm `landed` is at or below the threshold),
-    /// from the bare state `bare`: its landing drawn from the transient's own density (model/fold/proto.rs
-    /// `Fold::prototype_transient`; dragchk.status.md section 5). A model whose landing leaves no transient of its own
-    /// emits it as the bare state's photon (`emit`).
-    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, bare: &[C64], landed: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let _ = landed;
-        self.emit(cluster, at, on, bare, held, draw)
-    }
-    /// Where a jump's bare state `f` lands in a cluster at a point (`Landing`): the state the trajectory goes on in, with
-    /// the norm it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
-    /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
-    /// it; model.rs `Model::landed`) -- the state itself where the model folds nothing of that; or nowhere where the
-    /// landing does not exist in that cluster there. Inside a step `on` is the landing cluster's middle with the path
+    /// The photon of the state ψ with the photon its last landing's transient owes this jump (`Trajectory::owed`, `Owed`:
+    /// the fast part's amplitudes u_q at the jump, laid as the model lays a jump's), the whole state's: the classes' rates
+    /// and the drawn class's amplitudes of ψ's photon and the owed one summed, its kick's mean over the classes the one its
+    /// landing booked it (model/fold/run.rs `Middle::transient`). A model whose landing leaves no transient owes none
     /// (`emit`).
-    fn landed<'m>(&'m self, _cluster: usize, _at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path)>, f: &[C64], _held: &Held) -> Landing {
-        Landing::On(f.iter().copied().collect())
+    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], owed: &Owed, held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let _ = owed;
+        self.emit(cluster, at, on, psi, held, draw)
+    }
+    /// Where a jump's bare state `f` lands in a cluster at a point, against the trajectory's threshold θ for its next jump
+    /// (`Landing`, `Landed`): the state the trajectory goes on in, with the norm it goes on with (a fold's bare state is
+    /// its slow state and a part that is gone within the excited state's lifetime; the slow state's norm is the bare state's
+    /// survival extrapolated back to the jump, below ‖f‖ or above it; model.rs `Model::landed`), the threshold its next jump
+    /// is at and the photon the transient owes that jump (the jump clock's law: model/fold/proto/transient.rs) -- the state
+    /// itself, θ and none where the model folds nothing of that; or nowhere where the landing does not exist in that
+    /// cluster there. Inside a step `on` is the landing cluster's middle with the path (`emit`).
+    fn landed<'m>(&'m self, _cluster: usize, _at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path)>, f: &[C64], _held: &Held, threshold: f64) -> Landing {
+        Landing::On(Landed::plain(f.iter().copied().collect(), threshold))
     }
 
     /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (`Model::energy`, rad/µs).
@@ -549,26 +551,26 @@ pub trait Dynamics {
 
     /// Where a trajectory starts (`Trajectory::begun`): the bare state f on `cluster` at the point -- the cluster it lands
     /// in there (the trajectory's first decision, its look over the first cell `cell`, µs: none where it is not known),
-    /// its landing (`land`), its held forms there (`forms`), and the representation that evaluation decided (none here);
-    /// no number where it lands nowhere.
-    fn started(&self, cluster: usize, at: &Point, f: &[C64], _cell: f64) -> (usize, Internal, Forms, Held)
+    /// its landing against the threshold θ (`land`), its held forms there (`forms`), and the representation that
+    /// evaluation decided (none here); no number where it lands nowhere.
+    fn started(&self, cluster: usize, at: &Point, f: &[C64], _cell: f64, threshold: f64) -> (usize, Landed, Forms, Held)
     where
         Self: Sized,
     {
-        let Some((cluster, _, landed)) = land(self, cluster, at, None, f, &Held::default()) else {
-            return (cluster, f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default());
+        let Some((cluster, _, landed)) = land(self, cluster, at, None, f, &Held::default(), threshold) else {
+            return (cluster, Landed::plain(f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), threshold), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default());
         };
-        let forms = self.forms(cluster, at, &landed, &Held::default());
+        let forms = self.forms(cluster, at, &landed.psi, &Held::default());
         (cluster, landed, forms, Held::default())
     }
 
     /// A jump from cluster `from` landing in `cluster` at a point, where that is a decision time of the model (unify2 §4.1: a
     /// jump into another set): the cluster the bare state f (on `cluster`'s states) lands in, f on its states, its landing
-    /// and the representation the decision there made, deciding over the cell to the next decision time `until` (µs);
-    /// Some(None) where it lands nowhere. None where the model takes no decision at that jump: `jump` lands it (`land`).
-    /// None here.
+    /// against the threshold θ (`Landed`) and the representation the decision there made, deciding over the cell to the
+    /// next decision time `until` (µs); Some(None) where it lands nowhere. None where the model takes no decision at that
+    /// jump: `jump` lands it (`land`). None here.
     #[allow(clippy::type_complexity)]
-    fn entered(&self, _from: usize, _cluster: usize, _at: &Point, _f: &[C64], _held: &Held, _until: f64) -> Option<Option<(usize, Internal, Internal, Held)>> {
+    fn entered(&self, _from: usize, _cluster: usize, _at: &Point, _f: &[C64], _held: &Held, _until: f64, _threshold: f64) -> Option<Option<(usize, Internal, Landed, Held)>> {
         None
     }
 
@@ -723,9 +725,9 @@ pub trait Middle {
     }
 
     /// The model's error at this middle for the state ψ (unify2 §2.7): its decision's accounts by kind (ρ², `MODEL`'s first
-    /// five; held between two decisions: the books' profile), whether its forward is unresolved, and the state's decay
+    /// `READS`; held between two decisions: the books' profile), whether its forward is unresolved, and the state's decay
     /// rate there (i⟨ψ|G − G†|ψ⟩/‖ψ‖², 1/µs). None for a model of no fold.
-    fn books(&self, _path: &Self::Path, _psi: &[C64]) -> Option<([f64; 5], bool, f64)> {
+    fn books(&self, _path: &Self::Path, _psi: &[C64]) -> Option<([f64; READS], bool, f64)> {
         None
     }
 
@@ -746,9 +748,13 @@ pub struct Decided {
     pub booked: [f64; MODEL],
 }
 
-/// The model's books' columns (`Trajectory::model`; model/fold/proto.rs `KINDS`): the series', the reuse's, the centred
-/// rows', the nodes left out, the ring's, their whole ρ, and the unresolved steps' (ρ = 1).
-pub const MODEL: usize = 7;
+/// The model's readings by kind (model/fold/proto.rs `KINDS`): the series', the reuse's, the centred rows', the nodes left
+/// out. A landing's transient is booked exactly, read by none (model/fold/proto/transient.rs).
+pub const READS: usize = 4;
+
+/// The model's books' columns (`Trajectory::model`): the readings' (`READS`), their whole ρ, and the unresolved steps'
+/// (ρ = 1).
+pub const MODEL: usize = READS + 2;
 
 /// A trajectory's representation of the model's folds (DESIGN §11.3; model/fold/run.rs: per state set its kept
 /// decompositions and the one it stands on): what the model decided at the run's decision times, carried with the
@@ -887,21 +893,53 @@ pub struct Emitted {
     pub work: f64,
 }
 
-/// Where a jump's bare state lands in a cluster (`Dynamics::landed`): the state the trajectory goes on in (`On`); or none,
-/// where the landing does not exist in that cluster at the point -- the fold's one exit, a number that is not finite
-/// none (`Nowhere`). A landing in another set is a decision of the model there (`Dynamics::entered`).
+/// Where a jump's bare state lands in a cluster (`Dynamics::landed`): the state the trajectory goes on in and its clock
+/// (`On`); or none, where the landing does not exist in that cluster at the point -- the fold's one exit, a number that is
+/// not finite none (`Nowhere`). A landing in another set is a decision of the model there (`Dynamics::entered`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Landing {
-    On(Internal),
+    On(Landed),
     Nowhere,
 }
 
-/// Where a jump's bare state f of the cluster `cluster` lands at a point (`Dynamics::landed`): on the middles `places` holds
-/// there (`Places::of`), or at the point. The cluster, f on its states and the state it lands in; none where it lands
-/// nowhere.
-fn land<'m, D: Dynamics>(model: &'m D, cluster: usize, at: &Point, places: Option<&mut Places<'_, 'm, D>>, f: &[C64], held: &Held) -> Option<(usize, Internal, Internal)> {
+/// A landing (`Dynamics::landed`; the jump clock's law, model/fold/proto/transient.rs): the state the trajectory goes on
+/// in -- the slow part, its norm the long-time survival carried back to the jump --; the threshold its next jump is at --
+/// where the model's exact survival N(τ) from the bare state meets the trajectory's θ, the slow part's norm θ′ = N_s(τ*)
+/// there, so that the step jumps where the exact clock does; θ itself where the landing leaves no transient --; the photon
+/// its transient owes that jump (`Owed`), none where it is gone by then; and the kick the landing books (1/µm): of the
+/// cycle's momentum conditional on its length τ*, what the step and the jump do not give (K_∞ + δg(τ*); its whole at
+/// once). Where its norm is at or below its threshold already, the jump is at once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Landed {
+    pub psi: Internal,
+    pub threshold: f64,
+    pub owed: Option<Owed>,
+    pub kick: [f64; 3],
+}
+
+impl Landed {
+    /// A landing that leaves no transient: the state, the trajectory's own threshold, nothing owed, no kick.
+    pub fn plain(psi: Internal, threshold: f64) -> Landed {
+        Landed { psi, threshold, owed: None, kick: [0.0; 3] }
+    }
+}
+
+/// The photon a landing's transient owes the next jump (`Landed::owed`): the fast part's amplitudes u_q on the ground
+/// states at the jump (rows (b, q) at 3b + q, every block at its offset's phase), and whether the landing booked that
+/// cycle's whole momentum (its jump at once: the slow part dark until it) -- else the jump's kick carries the slow
+/// photon's mean over the classes, as the step's own jumps do (`Dynamics::transient`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Owed {
+    pub photon: Vec<C64>,
+    pub whole: bool,
+}
+
+/// Where a jump's bare state f of the cluster `cluster` lands at a point against the threshold θ (`Dynamics::landed`): on
+/// the middles `places` holds there (`Places::of`), or at the point. The cluster, f on its states and its landing; none
+/// where it lands nowhere.
+fn land<'m, D: Dynamics>(model: &'m D, cluster: usize, at: &Point, places: Option<&mut Places<'_, 'm, D>>, f: &[C64], held: &Held, threshold: f64) -> Option<(usize, Internal, Landed)> {
     let on = places.map(|p| p.of(cluster, held));
-    match model.landed(cluster, at, on, f, held) {
+    match model.landed(cluster, at, on, f, held, threshold) {
         Landing::On(landed) => Some((cluster, f.iter().copied().collect(), landed)),
         Landing::Nowhere => None,
     }
@@ -921,8 +959,11 @@ pub struct Trajectory {
     pub cluster: usize,
     /// Time (µs).
     pub time: f64,
-    /// The waiting time's threshold θ ∈ (0, 1]: the next jump is where ‖ψ‖² reaches it.
+    /// The waiting time's threshold: the next jump is where ‖ψ‖² reaches it -- θ ∈ (0, 1] drawn at the last jump, or its
+    /// landing's θ′ (`Landed`: where the exact survival meets θ, the slow part's norm there).
     pub threshold: f64,
+    /// The photon the last landing's transient owes the next jump (`Landed::owed`), none where it owes none.
+    pub owed: Option<Owed>,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
     /// The photons its jumps emitted (a jump at its threshold on landing emits another) and their Σ k_φ² (1/µm²): the
@@ -970,9 +1011,9 @@ pub struct Trajectory {
 impl Trajectory {
     /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0, the light switched on there
     /// (SPEC §2.4; ELIMINATION v3 4): the bare state -- the unit vector of that state on its cluster -- is a jump's
-    /// landing, the same map (model.rs `Model::landed`): its slow part, against the first threshold from jump 0's stream,
-    /// with its held forms there and the representation the evaluation decided (`Dynamics::started`); at the threshold
-    /// already, the fast part's photon at once, as after a jump (`jump`), and the held forms of the state it lands in.
+    /// landing, the same map and clock (`Landed`): its slow part, against the first threshold from jump 0's stream, with
+    /// its held forms there and the representation the evaluation decided (`Dynamics::started`); at its threshold
+    /// already, the jump at once, as after a jump (`jump`), and the held forms of the state it lands in.
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
         Trajectory::begun(model, state, r, kappa, seed, index, 0.0)
     }
@@ -988,16 +1029,16 @@ impl Trajectory {
             psi
         };
         let threshold = Stream::jump(seed, index, 0).open_uniform();
-        let (cluster, landed, forms, held) = model.started(model.cluster_of(state), &Point { r, kappa, t: 0.0 }, &bare(model.cluster_of(state)), cell);
-        let on = norm_sqr(&landed) > threshold;
-        let psi = if on { landed } else { bare(cluster) };
+        let (cluster, landed, forms, held) = model.started(model.cluster_of(state), &Point { r, kappa, t: 0.0 }, &bare(model.cluster_of(state)), cell, threshold);
+        let on = norm_sqr(&landed.psi) > landed.threshold;
         let mut trajectory = Trajectory {
             r,
-            kappa,
-            psi,
+            kappa: std::array::from_fn(|a| kappa[a] + landed.kick[a]),
+            psi: landed.psi,
             cluster,
             time: 0.0,
-            threshold,
+            threshold: landed.threshold,
+            owed: landed.owed,
             jumps: 0,
             scattered: [0.0; 2],
             lost: None,
@@ -1015,8 +1056,8 @@ impl Trajectory {
             forms,
         };
         if !on {
-            // Its fast part's photon at once; where the model has none to give, or its landing does not exist, the start
-            // is nowhere as a start that lands nowhere is: no held forms (solve.rs `run` says it, # Exits).
+            // Its jump at once; where the model has no photon to give, or its landing does not exist, the start is nowhere
+            // as a start that lands nowhere is: no held forms (solve.rs `run` says it, # Exits).
             trajectory.forms = match jump(model, &mut trajectory, None) {
                 Ok(()) => {
                     let t = &trajectory;
@@ -2198,9 +2239,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             for (b, k) in end.model.iter_mut().zip(kinds) {
                 *b += rate(k) * gamma * step;
             }
-            end.model[5] += rate(kinds.iter().sum()) * gamma * step;
+            end.model[READS] += rate(kinds.iter().sum()) * gamma * step;
             if unresolved {
-                end.model[6] += gamma * step;
+                end.model[READS + 1] += gamma * step;
                 end.unresolved_steps += 1;
                 end.unresolved_cell = true;
             }
@@ -2902,25 +2943,24 @@ impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
 /// trajectory as it was: the model's decay and its photons contradict each other, and no jump is made of that. So is a
 /// landing with no node left to rise.
 ///
-/// The landing (`Dynamics::landed`, `land`): the trajectory goes on in the state the bare state f/‖f‖ lands in, with that
-/// state's norm -- in the cluster the model rises it to where the landing does not exist in the cluster it lands in
-/// (BRIEF_COPIES item 1: a landing that is no number once sent the loop round for ever) --, against the threshold as
-/// every state is -- one rule, whatever the norm. A norm above the threshold waits: from
-/// one, ‖f‖'s own, as before; from below one, as long as the rest of the threshold's law says; from above one, longer,
-/// by the time its decay takes down to one. A norm at or below the threshold already (only a norm below one meets it
-/// but for the one threshold in 2⁵³ that is one itself) is one more photon at once: the bare state emits it as any
-/// state does -- its class, polarization and direction drawn anew, its recoil and its bounded kick with them --, the
-/// next threshold is drawn anew, and it lands again. So the waiting time after a jump is P(T > t) = min(1, n e^{−γt})
-/// for the landing's norm n and the state's rate γ (model.rs `Model::landed`: the fourth order's statistics for either
-/// sign of 1 − n), and a state that lands as it is draws nothing more.
+/// The landing (`Dynamics::landed`, `land`; the jump clock's law, model/fold/proto/transient.rs): the trajectory goes on in
+/// the state the bare state f/‖f‖ lands in, with that state's norm -- in the cluster the model rises it to where the
+/// landing does not exist in the cluster it lands in (BRIEF_COPIES item 1: a landing that is no number once sent the loop
+/// round for ever) --, against the threshold its landing hands it (`Landed`): where the model's exact survival from f
+/// meets the next threshold θ drawn here, the slow part's norm there, so that the step jumps where the exact clock does;
+/// and that jump's photon is the whole state's, the photon the landing's transient owes it with the state's own
+/// (`Trajectory::owed`, `Dynamics::transient`); the momentum the landing books, the cycle's conditional mean less what the
+/// step and that jump give (`Landed::kick`), at once. A landed norm at or below its threshold already (the slow part dark
+/// until the jump: its norm is the threshold) is that jump at once, from the landed state with what it is owed -- its class,
+/// polarization and direction drawn anew, its recoil and its bounded kick with them --, the next threshold drawn anew,
+/// and it lands again. A model whose landing leaves no transient hands θ back and owes nothing: the waiting time after a
+/// jump is then P(T > t) = min(1, n e^{−γt}) for the landing's norm n and the state's rate γ.
 pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut places: Option<&mut Places<'_, 'm, D>>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
-    let threshold = stream.open_uniform();
+    let mut threshold = stream.open_uniform();
     let (mut class, mut polarization) = (stream.uniform(), stream.uniform());
     let mut first = true;
-    // The landed slow state whose norm met the threshold at once: the next photon its transient's.
-    let mut ringing: Option<Internal> = None;
     loop {
         let at = trajectory.point();
         // The class among the state's classes by their rates; none where they have no rate between them.
@@ -2948,15 +2988,14 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         });
         let gram = |u: &[Internal; 3]| -> [[f64; 3]; 3] { std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re)) };
         // A photon whose amplitudes are no finite numbers is none, as a class's rate that is none (the one exit: the
-        // direction's rejection would accept no direction of it).
-        // The first photon the state's; one at once after a landing its transient's (`Dynamics::transient`).
-        let emitted = match &ringing {
+        // direction's rejection would accept no direction of it). The state's photon with what its landing owes it.
+        let emitted = match &trajectory.owed {
             None => model.emit(trajectory.cluster, &at, on, &trajectory.psi, &trajectory.held, &mut draw),
-            Some(landed) => model.transient(trajectory.cluster, &at, on, &trajectory.psi, landed, &trajectory.held, &mut draw),
+            Some(owed) => model.transient(trajectory.cluster, &at, on, &trajectory.psi, owed, &trajectory.held, &mut draw),
         }
         .map(|photon| (gram(&photon.amplitudes), photon));
         let Some((gram, photon)) = emitted.filter(|(g, _)| (g[0][0] + g[1][1] + g[2][2]).is_finite() && g[0][0] + g[1][1] + g[2][2] > 0.0) else {
-            // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
+            // A norm at its threshold with no photon to emit is refused; a landed state with none at once goes on as it is.
             if first {
                 return Err(Refused::Emission);
             }
@@ -2964,8 +3003,8 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         };
         if first {
             trajectory.jumps = j;
-            trajectory.threshold = threshold;
         }
+        trajectory.owed = None;
         trajectory.work += model.photon_work() + photon.work;
         let u = &photon.amplitudes;
         let trace = gram[0][0] + gram[1][1] + gram[2][2];
@@ -2991,24 +3030,25 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         trajectory.cluster = photon.landing;
         first = false;
         // The landing: into another set a decision there (`Dynamics::entered`), else on the step's middles (`land`); none
-        // where it does not exist (refused, as a photon that is none); its norm against the threshold; at the threshold
-        // already, one more photon from the bare state and the next threshold.
+        // where it does not exist (refused, as a photon that is none); against the next threshold, its clock.
         let at = trajectory.point();
-        let landing = match model.entered(from, trajectory.cluster, &at, &trajectory.psi, &held, trajectory.next) {
+        let landing = match model.entered(from, trajectory.cluster, &at, &trajectory.psi, &held, trajectory.next, threshold) {
             Some(decided) => decided.map(|(cluster, bare, landed, held)| {
                 trajectory.held = held;
                 (cluster, bare, landed)
             }),
-            None => land(model, trajectory.cluster, &at, places.as_deref_mut(), &trajectory.psi, &held),
+            None => land(model, trajectory.cluster, &at, places.as_deref_mut(), &trajectory.psi, &held, threshold),
         };
-        let Some((cluster, bare, landed)) = landing else { return Err(Refused::Emission) };
-        (trajectory.cluster, trajectory.psi) = (cluster, bare);
-        if norm_sqr(&landed) > trajectory.threshold {
-            trajectory.psi = landed;
+        let Some((cluster, _, landed)) = landing else { return Err(Refused::Emission) };
+        let at_once = norm_sqr(&landed.psi) <= landed.threshold;
+        for a in 0..3 {
+            trajectory.kappa[a] += landed.kick[a];
+        }
+        (trajectory.cluster, trajectory.psi, trajectory.threshold, trajectory.owed) = (cluster, landed.psi, landed.threshold, landed.owed);
+        if !at_once {
             break;
         }
-        ringing = Some(landed);
-        trajectory.threshold = stream.open_uniform();
+        threshold = stream.open_uniform();
         (class, polarization) = (stream.uniform(), stream.uniform());
     }
     Ok(())

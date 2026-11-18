@@ -580,3 +580,43 @@ fn the_set_s_generator_at_the_focus() {
         println!("  tone {m}: largest {:.4} at {} <- {}", big.1, place(big.0 / n), place(big.0 % n));
     }
 }
+
+/// Diagnostic (landport.status.md, the landing's cost): tilt0's (DRAG_REQ) production run, each ground set's cluster at the
+/// focus at rest, every ground state's bare landing on its middle (`Middle::landing`: the left response, the transient's
+/// modes, the clock and its kick), DRAG_COUNT (200) times each after one to warm: the mean µs a landing.
+#[test]
+#[ignore]
+fn a_landing_s_cost_at_the_focus() {
+    use crate::step::Middle as _;
+    let path = std::env::var("DRAG_REQ").expect("DRAG_REQ");
+    let mut req = crate::model::testing::scene(&path);
+    full_h0(&mut req);
+    let initial = crate::solve::components(&req);
+    let chief = initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
+    let reference: [f64; GROUND] = std::array::from_fn(|s| if s == chief { 1.0 } else { 0.0 });
+    let run = the_run(&req, reference);
+    let count = env("DRAG_COUNT", 200.0) as usize;
+    let mut seen = vec![];
+    for s in 0..GROUND {
+        let cluster = run.cluster_of(s);
+        if seen.contains(&cluster) {
+            continue;
+        }
+        seen.push(cluster);
+        let states = run.cluster(cluster).states.clone();
+        let middle = run.middle(cluster, [0.0; 3], 0.0, &crate::step::Held::default(), false);
+        let p = middle.path([0.0; 3], [0.0; 3]);
+        let grounds: Vec<usize> = states.iter().enumerate().filter(|(_, &x)| x < GROUND).map(|(i, _)| i).collect();
+        let mut times = vec![];
+        for &g in &grounds {
+            let f: Vec<C64> = (0..states.len()).map(|i| if i == g { C64::ONE } else { C64::ZERO }).collect();
+            let _ = middle.landing(&p, &f, 0.5, 0.0);
+            let clock = std::time::Instant::now();
+            for _ in 0..count {
+                std::hint::black_box(middle.landing(&p, &f, 0.5, 0.0));
+            }
+            times.push(clock.elapsed().as_secs_f64() / count as f64 * 1e6);
+        }
+        println!("cluster {cluster} ({} states, {} ground): a landing {:.1?} µs", states.len(), grounds.len(), times);
+    }
+}

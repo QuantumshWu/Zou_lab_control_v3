@@ -141,7 +141,7 @@ use crate::field::Light;
 use crate::linalg::{Mat, C64};
 use crate::model::{Cluster, Point, Quadratic, Scattering};
 use crate::request::{Request, GROUND, STATES};
-use crate::step::{Decided, Emitted, Forms, Held, Internal, Landing, Middle as _, Optical};
+use crate::step::{Decided, Emitted, Forms, Held, Internal, Landed, Landing, Middle as _, Optical, Owed};
 use std::cell::{RefCell, RefMut};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -580,23 +580,30 @@ impl Onefold {
 
     /// A bare state f landed at a point on cluster `cluster` (unify2 §4.1: a trajectory's start, a jump into another set;
     /// # The representation): a decision's forward there on the representation `held` (its decompositions made at the
-    /// point), f landed on it (`Workspace::taken`, nothing following) with its held forms there; the representation with
-    /// that decision's decompositions. None where the fold or the landing does not exist there.
-    fn landed_at(&self, cluster: usize, at: &Point, f: &[C64], from: &[usize], held: &Held) -> Option<(usize, Vec<C64>, Forms, Caches)> {
+    /// point), f landed on it (`Workspace::taken`, nothing following) against the threshold θ (its clock,
+    /// `Workspace::clock`: proto/transient.rs) with its held forms there; the representation with that decision's
+    /// decompositions. None where the fold, the landing or its modes do not exist there.
+    fn landed_at(&self, cluster: usize, at: &Point, f: &[C64], from: &[usize], held: &Held, threshold: f64) -> Option<(usize, Landed, Forms, Caches)> {
         let mut caches = caches(held).cloned().unwrap_or_default();
         let set = self.clusters.sets.get(cluster);
         let bare: Vec<C64> = set.cluster.states.iter().map(|s| from.iter().position(|x| x == s).map_or(C64::ZERO, |i| f[i])).collect();
         if set.fold.blocks.is_empty() {
             let (state, forms) = self.held_forms(cluster, at, &bare, None, false);
-            return Some((cluster, state, forms, caches));
+            return Some((cluster, Landed::plain(state.into_iter().collect(), threshold), forms, caches));
         }
         let mut cache = (*caches.sets.get(cluster).cloned().unwrap_or_default()).clone();
         let mut ws = self.clusters.take(cluster);
         let exists = set.fold.prototype(at.r, at.kappa, self.mechanical(at.r, at.kappa), &mut cache, &mut ws).is_some();
-        let landed = exists.then(|| self.held_forms(cluster, at, &bare, Some((&cache, &mut ws)), true)).filter(|(state, _)| state.iter().all(|z| z.is_finite()));
+        let taken = exists.then(|| ws.taken(&set.fold, &cache, &bare, &[], false)).flatten().filter(|(state, _)| state.iter().all(|z| z.is_finite()));
+        let landed = taken.and_then(|(state, a)| {
+            // The held forms make the step's tangent there (`forms_on`), the clock's kick its.
+            let (state, forms) = self.held_forms(cluster, at, &state, Some((&cache, &mut ws)), false);
+            let clock = ws.clock(&set.fold, &cache, &state, &a, threshold, at.t)?;
+            Some((landed_of(state.into_iter().collect(), clock), forms))
+        });
         self.clusters.give(cluster, ws);
         caches.keep(cluster, Arc::new(cache));
-        landed.map(|(state, forms)| (cluster, state, forms, caches))
+        landed.map(|(landed, forms)| (cluster, landed, forms, caches))
     }
 
     /// The prepared potential of the ground populations p (module documentation, # The rest of the model; `Reference::of`):
@@ -977,9 +984,9 @@ struct Inner {
     beyond: bool,
     /// The last forward's accounts by kind (ρ²; proto.rs `Step::kinds`), its cell's ends (`Step::started`, `Step::ended`)
     /// and whether it is unresolved.
-    kinds: [f64; 5],
-    started: [f64; 5],
-    ended: [f64; 5],
+    kinds: [f64; KINDS],
+    started: [f64; KINDS],
+    ended: [f64; KINDS],
     unresolved: bool,
 }
 
@@ -1133,13 +1140,13 @@ impl Middle<'_> {
         Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work) })
     }
 
-    /// The photon a landing's transient emits at once (step.rs `jump`; proto.rs `Fold::prototype_transient`): its landing
-    /// set and landed state drawn from the transient's own density (`draw` on its eigenvectors' weights), at the jump's
-    /// place on this middle; `landed` the landing's slow state, `bare` the bare state it rings from. Its kick and its
-    /// frequency are its landing set's class's of the bare state (`Fold::prototype_photons` there: the absorbed light's
-    /// conditional mean, which the transient's amplitudes share to its first order). None where the set has no light,
-    /// the fold does not exist there, or the density has no weight.
-    pub(crate) fn transient(&self, path: &Path, s: f64, bare: &[C64], landed: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+    /// A jump's photon of the state ψ with the photon its last landing's transient owes it (step.rs `Dynamics::transient`;
+    /// proto/transient.rs `Clock::owed`: the fast part's amplitudes u_q at the jump, every block at its offset's phase), at
+    /// the time s from the middle along the path: the whole state's photon, its class drawn by the rates of the two summed
+    /// on each landing set's rows, its amplitudes the two summed on the landing cluster's states (each at its frame's
+    /// phase); its kick the class's of the state's own photon (`Fold::prototype_photons`, every class's moments). None
+    /// where the set has no light, the fold does not exist there, or `draw` picks none.
+    pub(crate) fn transient(&self, path: &Path, s: f64, psi: &[C64], owed: &Owed, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let (run, set) = (self.run, &self.run.clusters.sets.get(self.set));
         let fold = &set.fold;
         if fold.blocks.is_empty() {
@@ -1153,26 +1160,33 @@ impl Middle<'_> {
         let ws = ws.as_mut().expect("a workspace");
         let place = fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
         let t = self.t + s;
-        // The slow amplitude x = S⁻¹ψ of the landed state.
-        let x = ws.slow_amplitude(landed);
-        let (k, drawn) = fold.prototype_transient(eval, ws, &x, &run.clusters.grounds, t, true, draw)?;
-        // The kick and the frequency: the class of set k of the bare state.
-        let mut pick = |rates: &[f64]| -> Option<usize> { Some(k).filter(|&k| k < rates.len()) };
-        let photons = fold.prototype_photons(eval, ws, bare, &run.clusters.grounds, At::Place, t, Moments::Drawn(&mut pick));
-        let class = photons.drawn.map(|c| &photons.classes[c])?;
-        let landing = self.landing_cluster(k);
+        let photons = fold.prototype_photons(eval, ws, psi, &run.clusters.grounds, At::Place, t, Moments::Every);
+        let whole = |b: usize, q: usize| ws.jumped(b, q) + owed.photon[3 * b + q];
+        let rates: Vec<f64> = run.clusters.grounds.iter().map(|g| g.iter().map(|&b| (0..3).map(|q| whole(b, q).norm_sqr()).sum::<f64>()).sum()).collect();
+        let k = draw(&rates)?;
+        let class = &photons.classes[k];
+        // The kick: the drawn class's own (of ψ's photon), its mean over the classes moved to the one the landing booked --
+        // the slow photon's mean, as the step's own jumps carry it (`Clock::kick`: K_∞ + δg booked the rest); none where
+        // the landing booked the cycle's whole (at once).
+        let mean = |w: &dyn Fn(usize) -> f64| -> [f64; 3] {
+            let total: f64 = (0..rates.len()).map(w).sum();
+            std::array::from_fn(|a| if total > 0.0 { (0..rates.len()).map(|c| w(c) * photons.classes[c].kick[a]).sum::<f64>() / total } else { 0.0 })
+        };
+        let (booked, drawn) = (if owed.whole { [0.0; 3] } else { mean(&|c| photons.classes[c].rate) }, mean(&|c| rates[c]));
+        let kick: [f64; 3] = std::array::from_fn(|a| class.kick[a] + booked[a] - drawn[a]);
+        let landing = self.landing_cluster(class.landing);
         let to = run.clusters.sets.get(landing);
         let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
         for (a, amplitude) in amplitudes.iter_mut().enumerate() {
             for ((z, &st), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
-                if let Some(b) = run.clusters.grounds[k].iter().position(|&g| g == st) {
-                    *z = drawn[b][a] * C64::cis(theta * t);
+                if st < GROUND {
+                    *z = whole(st, a) * C64::cis(theta * t);
                 }
             }
         }
         let first = fold.ground[0];
-        let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[k][0]];
-        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work) })
+        let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[class.landing][0]];
+        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick, work: crate::decide::COMPLEX * (place + photons.work + (6 * GROUND) as f64) })
     }
 
     /// The cluster a jump into ground set k lands in (# The nodes risen and fallen): this middle's where k is its own set,
@@ -1184,26 +1198,31 @@ impl Middle<'_> {
         k
     }
 
-    /// Where a jump's bare state f lands in this middle's set (`step::Landing`): its slow part S N⁻¹f along its fast one, S
-    /// and N the middle's (DESIGN §1.3, §13.2, the landing; the forward the step made at the path, its left response made
-    /// where a landing first asks for it, its count this middle's) -- the switch's formula with nothing following
-    /// (`Workspace::taken`: a fall at x_X = 0), its norm the jump clock's. The state itself where the set has no light.
-    /// Nowhere where the landing does not exist -- the forward, or the left response or N (`Workspace::taken`), the fold's
-    /// one exit: a jump into another set is a decision there (`Onefold::landed_at`), one into this set lands on what the
-    /// cell's look saw exist (unify2 §4.1, §4.3).
-    pub(super) fn landing(&self, path: &Path, f: &[C64]) -> Landing {
+    /// Where a jump's bare state f lands in this middle's set at the time t (`step::Landing`): its slow part S N⁻¹f along its
+    /// fast one, S and N the middle's (DESIGN §1.3, §13.2, the landing; the forward the step made at the path, its left
+    /// response made where a landing first asks for it, its count this middle's) -- the switch's formula with nothing
+    /// following (`Workspace::taken`: a fall at x_X = 0) --, against the trajectory's threshold θ: its clock on the
+    /// landing's modes (`Workspace::clock`, proto/transient.rs: the threshold θ′ the slow part's norm meets where the
+    /// exact survival meets θ, the photon the transient owes that jump). The state itself where the set has no light.
+    /// Nowhere where the landing does not exist -- the forward, or the left response or N (`Workspace::taken`), or its
+    /// modes, the fold's one exit: a jump into another set is a decision there (`Onefold::landed_at`), one into this set
+    /// lands on what the cell's look saw exist (unify2 §4.1, §4.3).
+    pub(super) fn landing(&self, path: &Path, f: &[C64], threshold: f64, t: f64) -> Landing {
         let set = self.run.clusters.sets.get(self.set);
         if set.fold.blocks.is_empty() {
-            return Landing::On(f.iter().copied().collect());
+            return Landing::On(Landed::plain(f.iter().copied().collect(), threshold));
         }
-        let mut inner = self.made(path, None, false);
+        let mut inner = self.made(path, None, true);
         let Inner { eval, ws, made, exists, .. } = &mut *inner;
         let ws = ws.as_mut().expect("a workspace");
         if *exists {
             let landed = ws.taken(&set.fold, eval, f, &[], false);
             *made += ws.left_work() * crate::decide::COMPLEX;
-            if let Some((psi, _)) = landed {
-                return Landing::On(psi.into_iter().collect());
+            if let Some((psi, a)) = landed {
+                if let Some(clock) = ws.clock(&set.fold, eval, &psi, &a, threshold, t) {
+                    *made += clock.work * crate::decide::COMPLEX;
+                    return Landing::On(landed_of(psi.into_iter().collect(), clock));
+                }
             }
         }
         Landing::Nowhere
@@ -1236,6 +1255,12 @@ impl Middle<'_> {
         let phase = C64::cis(self.run.clusters.sets.get(self.set).tones[m] * (self.t + s));
         rho.iter().map(|z| *z * phase).collect()
     }
+}
+
+/// A landing on its clock (proto/transient.rs `Clock`; step.rs `Landed`): the slow state, the threshold θ′, the photon owed
+/// to that jump and whether the landing booked its cycle's whole momentum (at once), the kick.
+fn landed_of(psi: Internal, clock: super::proto::transient::Clock) -> Landed {
+    Landed { psi, threshold: clock.threshold, owed: clock.owed.map(|photon| Owed { photon, whole: clock.once }), kick: clock.kick }
 }
 
 /// The real parts of a form.
@@ -1530,7 +1555,7 @@ impl crate::step::Middle for Middle<'_> {
         }
     }
 
-    fn books(&self, path: &Path, psi: &[C64]) -> Option<([f64; 5], bool, f64)> {
+    fn books(&self, path: &Path, psi: &[C64]) -> Option<([f64; KINDS], bool, f64)> {
         let inner = self.made(path, None, false);
         if !inner.exists || self.run.clusters.sets.get(self.set).fold.blocks.is_empty() {
             return None;
@@ -1569,10 +1594,10 @@ impl crate::step::Middle for Middle<'_> {
             let gamma = -2.0 * psi.iter().zip(inner.generator.apply(psi)).map(|(a, b)| a.conj() * b).sum::<C64>().im / crate::linalg::norm_sqr(psi);
             // The cell this decision ends (unify2 §2.7): its end measured, the difference from its start's booked linearly.
             let r = |rho2: f64| 2.0 * rho2.sqrt() + rho2;
-            for k in 0..5 {
+            for k in 0..KINDS {
                 out.booked[k] = 0.5 * (r(inner.ended[k]) - r(inner.started[k])) * gamma * interval;
             }
-            out.booked[5] = 0.5 * (r(inner.ended.iter().sum()) - r(inner.started.iter().sum())) * gamma * interval;
+            out.booked[KINDS] = 0.5 * (r(inner.ended.iter().sum()) - r(inner.started.iter().sum())) * gamma * interval;
             crate::adapt::count(crate::adapt::BEYOND, u64::from(inner.beyond));
         } else {
             crate::adapt::count(crate::adapt::ABSENT, 1);
@@ -1631,9 +1656,9 @@ impl crate::step::Dynamics for Onefold {
                 made: 0.0,
                 reading: 0.0,
                 beyond: false,
-                kinds: [0.0; 5],
-                started: [0.0; 5],
-                ended: [0.0; 5],
+                kinds: [0.0; KINDS],
+                started: [0.0; KINDS],
+                ended: [0.0; KINDS],
                 unresolved: false,
             }),
         }
@@ -1652,15 +1677,15 @@ impl crate::step::Dynamics for Onefold {
         }
     }
 
-    /// A landing's at-once photon (`Middle::transient`): on the step's middle at the jump's time, or at a point on a middle
-    /// made there.
-    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, bare: &[C64], landed: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+    /// A jump's photon with what its landing's transient owes it (`Middle::transient`): on the step's middle at the jump's
+    /// time, or at a point on a middle made there.
+    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, psi: &[C64], owed: &Owed, held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         match on {
-            Some((middle, path, s)) => middle.transient(path, s, bare, landed, draw),
+            Some((middle, path, s)) => middle.transient(path, s, psi, owed, draw),
             None => {
                 let middle = self.middle(cluster, at.r, at.t, held, false);
                 let path = middle.path(at.kappa, [0.0; 3]);
-                middle.transient(&path, 0.0, bare, landed, draw)
+                middle.transient(&path, 0.0, psi, owed, draw)
             }
         }
     }
@@ -1677,24 +1702,24 @@ impl crate::step::Dynamics for Onefold {
     /// cluster -- its set's with nothing explicit, the walk's rises taken there with the look over the first cell `cell`
     /// (`Onefold::landed_at`) --, and its decompositions made there its representation (# The representation and the
     /// decision times).
-    fn started(&self, cluster: usize, at: &Point, f: &[C64], _cell: f64) -> (usize, Internal, Forms, Held) {
+    fn started(&self, cluster: usize, at: &Point, f: &[C64], _cell: f64, threshold: f64) -> (usize, Landed, Forms, Held) {
         let k = self.clusters.sets.get(cluster).ground_set;
         let from = self.clusters.sets.get(cluster).cluster.states.clone();
-        match self.landed_at(k, at, f, &from, &Held::default()) {
-            Some((cluster, landed, forms, caches)) => (cluster, landed.into_iter().collect(), forms, Held(Some(Arc::new(caches)))),
-            None => (cluster, f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default()),
+        match self.landed_at(k, at, f, &from, &Held::default(), threshold) {
+            Some((cluster, landed, forms, caches)) => (cluster, landed, forms, Held(Some(Arc::new(caches)))),
+            None => (cluster, Landed::plain(f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), threshold), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default()),
         }
     }
 
-    /// Where a jump's bare state lands in its own set (`Middle::landing`): on the landing set's middle in the step, or at a
-    /// point on a middle made there; nowhere where it does not exist (`step::Landing`).
-    fn landed<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path)>, f: &[C64], held: &Held) -> Landing {
+    /// Where a jump's bare state lands in its own set against the threshold θ (`Middle::landing`): on the landing set's
+    /// middle in the step, or at a point on a middle made there; nowhere where it does not exist (`step::Landing`).
+    fn landed<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path)>, f: &[C64], held: &Held, threshold: f64) -> Landing {
         match on {
-            Some((middle, path)) => middle.landing(path, f),
+            Some((middle, path)) => middle.landing(path, f, threshold, at.t),
             None => {
                 let middle = self.middle(cluster, at.r, at.t, held, false);
                 let path = middle.path(at.kappa, [0.0; 3]);
-                middle.landing(&path, f)
+                middle.landing(&path, f, threshold, at.t)
             }
         }
     }
@@ -1743,16 +1768,16 @@ impl crate::step::Dynamics for Onefold {
     /// cluster the trajectory last held for that set (`Middle::landing_cluster`'s rule), its look over the cell to the
     /// next decision (`until`), its rises taken, the bare state landed on it (`Onefold::landed_at`). None where the jump
     /// stays in the emitting cluster's set (its landing the step's: `landed`).
-    fn entered(&self, from: usize, cluster: usize, at: &Point, f: &[C64], held: &Held, _until: f64) -> Option<Option<(usize, Internal, Internal, Held)>> {
+    fn entered(&self, from: usize, cluster: usize, at: &Point, f: &[C64], held: &Held, _until: f64, threshold: f64) -> Option<Option<(usize, Internal, Landed, Held)>> {
         let k = self.clusters.sets.get(cluster).ground_set;
         if k == self.clusters.sets.get(from).ground_set {
             return None;
         }
         let states = self.clusters.sets.get(cluster).cluster.states.clone();
-        Some(self.landed_at(k, at, f, &states, held).map(|(c, landed, _, caches)| {
+        Some(self.landed_at(k, at, f, &states, held, threshold).map(|(c, landed, _, caches)| {
             let to = &self.clusters.sets.get(c).cluster.states;
             let bare: Internal = to.iter().map(|s| states.iter().position(|x| x == s).map_or(C64::ZERO, |i| f[i])).collect();
-            (c, bare, landed.into_iter().collect(), Held(Some(Arc::new(caches))))
+            (c, bare, landed, Held(Some(Arc::new(caches))))
         }))
     }
 }

@@ -111,26 +111,19 @@
 //! series on the adjoint's inputs (`Fold::prototype_left`, `Side::Left`; with no decay T_L = T, N = M). On the slow span
 //! the fold's G is exact whatever the projection (a state there evolves as e^{−iGt}); the projection decides what a state
 //! off it -- a jump's bare state, a fall's explicit amplitudes -- becomes: along the fast span, the slow part's norm
-//! ‖S a‖² is the long-time survival carried back to the switch (c > 1 near resonance: the fast part's antibunching, a
-//! dead time; c < 1 off it: its ringing's photon at once), the jump clock's as it is (step.rs `jump`), not normalized. The
+//! ‖S a‖² is the long-time survival carried back to the switch (c > 1 near resonance: the fast part's antibunching; c < 1
+//! off it: its ringing's photons), not normalized. The
 //! orthogonal projection S⁻¹Φ†Ψ it replaces erred at first order in the excitation (M15: the landing norm 1/(1 + |T|²)
 //! against the survival's 1.48 for a resonant two-level atom at s = 0.2). Made once a forward, where a landing or a fall
 //! first asks for it, and held with the step's S (DESIGN M16).
 //!
-//! # The ring (DESIGN §9 M15, M19; landing.status 5)
-//! What the projection along the fast span leaves is the fast part's transient over ~1/Γ: the clock gives the slow
-//! part's norm at once (the long-time statistics exact), the exact state rings to it. Its leading order on a row i of K's
-//! Schur basis (κ_i, Γ_i = −2 Im κ_i) and the slow mode of decay γ (`Ring`, `ring`): the mean waiting time errs by E =
-//! −(c − 1 − ln c)₊ − γ∫P_tr, the transient's population ∫P_tr = Σ_i [|β_i|²/max(Γ_i, γ) + 2 Re ∫conj(σ_i)β_i] plus the
-//! P places' fast part's cross term (β the fast part's rows, σ the slow part's, each pair turning at κ_i + w − c̄_j) --
-//! second order in the excitation at resonance. The reading is |E|. The photon the clock gives at once is the
-//! transient's own (`Fold::prototype_transient`: its landing density Σ E X E†, X = ∫(e e† − e_s e_s†) with every row
-//! pair's cross term), so its channel is read by nothing: it is not the slow pattern's (dragchk.status.md section 5). A row decaying no
-//! faster than the slow mode is no transient: read by its population, first order. At a step (`Step::ring`, a bare
-//! ground state's landing per ground column, `landing_ring`) to first order on T alone (T_L ≈ T d̄/d), on a near block's
-//! kept rows and a far block's as one row at its decay and 1/‖R₀‖; at a switch (`Workspace::ring`) on the fall's own fast
-//! part, T_L made. It is the fold's reading of what a jump's landing leaves, in ρ: beyond the share the node rises (run.rs
-//! # The nodes risen and fallen); a fall books its own.
+//! # The landing's transient (landport.status.md; pland.status # 第四轮（续）)
+//! What the projection along the fast span leaves is the fast part's transient over ~1/Γ. It is one object, the landing's
+//! modes on the slow and the fast span (proto/transient.rs `Transient`), and it is booked, not read: the jump clock is
+//! the exact survival N(τ) = ‖Ψ(τ)‖² -- the landing hands the step the threshold θ′ = N_s(τ*) its slow part meets where N
+//! meets the trajectory's θ (`Workspace::clock`) -- and the photon at τ* is the whole state's, the fast part's amplitudes
+//! owed to that jump (`Clock::owed`; the transient's photons land where its rows ring, not on the slow pattern:
+//! dragchk.status.md section 5). So no reading of the landing is left.
 //!
 //! # The nodes (DESIGN §4.2)
 //! The integrator's outer nodes s = ±τ/2 (`Fold::prototype_nodes`): the decomposition, H, S and every split's response per
@@ -186,6 +179,7 @@ use super::*;
 use crate::field::Amplitude;
 
 pub(crate) mod price;
+pub(crate) mod transient;
 
 /// A pair of one frequency's field coefficients (frequency w, k, k'): its coefficient ε_k*ε_k'.
 type Pair = (usize, usize, usize);
@@ -466,8 +460,6 @@ struct Far {
     products: Vec<C64>,
     hf: Vec<C64>,
     mf: Vec<C64>,
-    /// Its rows' largest decay (rad/µs; the ring's, `landing_ring`).
-    decay: f64,
     /// Whether the forward leaves the block out (the evaluation's, between decisions).
     omitted: bool,
     /// Temporaries (BRIEF_PROTO5 item 1): the pairs' products at a node and their gradients (v², 3v²), the latter on the
@@ -721,13 +713,12 @@ enum Next {
 }
 
 /// The accounts' kinds (unify2 §2.2): the series' order, the reuse's, the centred rows', the nodes left out (excited
-/// levels, far blocks), the ring's.
-pub(crate) const KINDS: usize = 5;
+/// levels, far blocks). A landing's transient is read by none: it is booked exactly on its modes (proto/transient.rs).
+pub(crate) const KINDS: usize = crate::step::READS;
 
 /// What an account is of (unify2 §2.2): an order -- a near block's series part (its sweeps), a near block's decomposition (its
 /// age: the reuse) -- or a node: a block's centred rows (a near block's centred copies, a far block's levels), an excited
-/// level a near block leaves out, a far block left out, a block's rows' share of the ring. Blocks by the workspace's
-/// order (near, far).
+/// level a near block leaves out, a far block left out. Blocks by the workspace's order (near, far).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Item {
     Series { block: usize, part: usize },
@@ -735,7 +726,6 @@ pub(crate) enum Item {
     Centred { block: usize, far: bool },
     Omitted { block: usize, level: usize },
     Left { block: usize },
-    Ring { block: usize, far: bool },
 }
 
 impl Item {
@@ -746,7 +736,6 @@ impl Item {
             Item::Reuse { .. } => 1,
             Item::Centred { .. } => 2,
             Item::Omitted { .. } | Item::Left { .. } => 3,
-            Item::Ring { .. } => 4,
         }
     }
 }
@@ -971,9 +960,6 @@ pub(crate) struct Workspace {
     /// forward's point (r, κ).
     pub(crate) cell: Cell,
     point: ([f64; 3], [f64; 3]),
-    /// Whether this round of a decision made its look (`Fold::worst`: one look a round, its reads after the first on it).
-    /// A column's rows of the ring's reading (`landing_ring`): the near blocks' kept rows and the far blocks.
-    rings: Vec<Ring>,
 }
 
 /// The left response's whole (`Fold::prototype_left`; module documentation, # The landing): its series' Bloch generator
@@ -2109,88 +2095,6 @@ fn sweep_all(near: &mut [Near], scratch: &mut [Scratch], far: &[Far], cache: &Ca
     true
 }
 
-/// A row of a transient (module documentation, # The ring): its decay Γ_i; its fast amplitude's square |β_i|²; over the
-/// transient the integrals of its slow and fast amplitudes' product, Σ_j conj(σ_ij)β_i (−i)/X_ij, and of the P places'
-/// fast part on it, Σ_j conj(a_j)(−conj(z̃_ij)β_i)(−i)/X_ij (X_ij = κ_i + w − c̄_j, the row's ringing against the
-/// column's slow mode); its slow amplitude's square |Σ_j σ_ij|² (its share of the slow emission); and its part of the slow
-/// norm c where c is read to first order (a landing's, without T_L).
-#[derive(Clone, Copy)]
-struct Ring {
-    decay: f64,
-    fast: f64,
-    cross: C64,
-    p: C64,
-    slow: f64,
-    norm: f64,
-}
-
-impl Ring {
-    /// A bare state's landing at a column (module documentation, # The ring), to first order on the right response z of
-    /// a row of decay Γ at the distances d = c − w − κ, X = κ + w − c̄: its fast part −z, its slow z, the P places' fast
-    /// part through T_L ≈ T d̄/d, its part of c − 1, |z|²(1 − 2 Re d̄/d).
-    fn landing(z2: f64, decay: f64, (d, x): (C64, C64)) -> Ring {
-        let (turn, over) = (d.conj() / d, C64::new(0.0, z2) / x);
-        Ring { decay, fast: z2, cross: over, p: -turn * over, slow: z2, norm: z2 * (1.0 - 2.0 * turn.re) }
-    }
-}
-
-/// A row's distances at a column's energy c (module documentation, # The ring): d = c − w − κ and X = κ + w − c̄ at the
-/// lane's Doppler shift w nearest the row (the lanes' `shifts`; none: zero).
-fn distances(c: C64, shifts: &[f64], kappa: C64) -> (C64, C64) {
-    let (base, mut w, mut best) = (c - kappa, 0.0, f64::INFINITY);
-    for &s in shifts {
-        let d = (base - C64::real(s)).norm_sqr();
-        if d < best {
-            (w, best) = (s, d);
-        }
-    }
-    (base - C64::real(w), kappa + C64::real(w) - c.conj())
-}
-
-/// A far block's rows at a column's energy c (module documentation, # The ring): one row at its decay Γ (its rows'
-/// largest) and its resolvent's distance 1/‖R₀‖, κ = Re c − 1/‖R₀‖ − iΓ/2.
-fn far_row(c: C64, decay: f64, r0: f64) -> C64 {
-    C64::new(c.re - 1.0 / r0, -0.5 * decay)
-}
-
-/// The ring's reading of a transient (module documentation, # The ring; landing.status 5) of rows `rows`, the slow
-/// mode's decay rate γ, the slow norm c = c₀ + Σ its rows' parts: the mean waiting
-/// time's relative error E = −(c − 1 − ln c)₊ − γ∫P_tr, ∫P_tr = Σ_i [|β_i|²/max(Γ_i, γ) + 2 Re(cross_i + p_i)] (a row
-/// decaying no faster than the slow mode read by its population: first order); the reading |E|. The photon's channel is
-/// the transient's own (`Fold::prototype_transient`), so no channel mismatch is left to read.
-fn ring(rows: &[Ring], gamma: f64, c0: f64) -> f64 {
-    let (mut c, mut transient, mut emitted, mut slow) = (c0, 0.0, 0.0, 0.0);
-    for r in rows {
-        let inverse = if r.decay > 0.0 || gamma > 0.0 { 1.0 / r.decay.max(gamma) } else { 0.0 };
-        transient += r.fast * inverse + 2.0 * (r.cross + r.p).re;
-        emitted += r.fast + 2.0 * r.decay * r.cross.re;
-        slow += r.decay * r.slow;
-        c += r.norm;
-    }
-    let cap = if c > 1.0 { c - 1.0 - c.ln() } else { 0.0 };
-    // The channels: none left to read -- the at-once photon is drawn from the transient's own landing density, its rows'
-    // cross terms in (`Fold::prototype_transient`; it was drawn from the slow pattern, which this term compared by the
-    // rows' weights alone and missed: dragchk.status.md section 5).
-    let _ = (emitted, slow);
-    (-cap - gamma * transient).abs()
-}
-
-/// A bare ground state's landing's ring at the column j (module documentation, # The ring): to first order on the right
-/// response, its rows a near block's kept rows (`Ring::landing`) and a far block's (`far_row`, its column's M_F,jj), the
-/// slow mode the column's, c_j = H_jj; `rows` the workspace's (reserved with it).
-#[allow(clippy::too_many_arguments)]
-fn landing_ring(near: &[Near], far: &[Far], cache: &Cache, h: &[C64], j: usize, n: usize, rows: &mut Vec<Ring>) -> f64 {
-    let c = h[j * n + j];
-    rows.clear();
-    for nb in near.iter().filter(|nb| !nb.idle()) {
-        rows.extend((0..nb.s).map(|i| Ring::landing(nb.ztot[i * n + j].norm_sqr(), -2.0 * nb.kappa[i].im, distances(c, &nb.shifts, nb.kappa[i]))));
-    }
-    for (x, fb) in far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
-        rows.push(Ring::landing(fb.mf[j * n + j].re, fb.decay, distances(c, &[], far_row(c, fb.decay, cache.far_at(x).r0))));
-    }
-    ring(rows, -2.0 * c.im, 1.0)
-}
-
 /// The series' rest read from its last two changes (module documentation, 5), column by column over the columns whose
 /// whole response is above the rounding's: the last change times r/(1 − r), r the ratio of the last two changes (none
 /// after the first; a column that did not change has converged, r = 0), relative to the column, in rate units; and the
@@ -2789,7 +2693,6 @@ impl Fold {
                     products: vec![C64::ZERO; v * v],
                     hf: vec![C64::ZERO; n * n],
                     mf: vec![C64::ZERO; n * n],
-                    decay: b.rows.iter().filter_map(|r| if let Row::Excited(e) = *r { Some(-2.0 * self.base_excited[(e, e)].im) } else { None }).fold(0.0, f64::max),
                     omitted: false,
                     vectors,
                     pnode: vec![C64::ZERO; v * v],
@@ -2832,7 +2735,7 @@ impl Fold {
         let proj = self.light.frequencies.iter().map(|f| f.fields.iter().flat_map(|e| f.basis.iter().map(move |u| (0..3).map(|q| u[q].conj() * e[q]).sum())).collect()).collect();
         let node = || Node { at: placed.clone(), a: z(n, n), generator: z(n, n), tones: rotating.iter().map(|_| z(n, n)).collect(), hf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect(), mf: far.iter().map(|_| vec![C64::ZERO; n * n]).collect() };
         let nodes = vec![node(), node()];
-        let (near_len, near_rows, far_len) = (near.len(), near.iter().map(|x| x.all).sum::<usize>(), far.len());
+        let near_len = near.len();
         let place = placed.clone();
         let photons4 = vec![C64::ZERO; 12 * GROUND];
         Ok(Workspace {
@@ -2905,7 +2808,6 @@ impl Fold {
             landing: Landing::default(),
             cell: Cell::default(),
             point: ([0.0; 3], [0.0; 3]),
-            rings: Vec::with_capacity(near_rows + far_len),
         })
     }
 
@@ -4088,14 +3990,14 @@ impl Fold {
     /// The decision's accounts (unify2 §2.1, §2.2) on the forward it stands on, every row swept `done` times: per column the
     /// error each approximation of the evaluation leaves, attributed to its order or node -- each series part at its sweeps
     /// (`series_squares`), each near block's reuse and its centred copies (`centring`), each excited level a near block
-    /// leaves out (`bound_levels`), each far block's centring and its leaving out, each block's share of the ring --, in
+    /// leaves out (`bound_levels`), each far block's centring and its leaving out --, in
     /// one measure: the rate channel against the column's whole excited response W_j (the kept rows', the far blocks', the
     /// levels left out by their bounds: one denominator), the potential channel against the atom's energy (δV/2E: a level's
     /// and a far block's light shift). Into the workspace's `accounts`, W_j into `den`.
     #[allow(clippy::too_many_arguments)]
     fn accounts(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, energy: f64, done: usize, work: &mut f64) {
         let n = ws.n;
-        let Workspace { near, far, mid, h, whole, scratch, per, accounts, rings, den, .. } = &mut *ws;
+        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, .. } = &mut *ws;
         accounts.clear();
         // The levels left out, on their bounds; W_j with their responses (a column's whole).
         let mut failed = vec![None; near.len()];
@@ -4226,27 +4128,6 @@ impl Fold {
             accounts.push(Account { item: Item::Left { block: x }, squares: left, on: evaluation.far[x] });
             *work += (fb.terms.len() + n) as f64 / 4.0;
         }
-        // The ring (module documentation, # The ring): per ground column -- a jump lands on a ground state -- the transient a
-        // bare state's landing leaves, to first order on the right response; each block's share its rows' share of the
-        // column's excited response.
-        let at = accounts.len();
-        for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
-            let _ = nb;
-            accounts.push(Account { item: Item::Ring { block: x, far: false }, squares: vec![0.0; n], on: true });
-        }
-        for x in 0..far.len() {
-            accounts.push(Account { item: Item::Ring { block: x, far: true }, squares: vec![0.0; n], on: true });
-        }
-        for j in (0..self.ground.len()).filter(|&j| read(j)) {
-            let ring = unrate(landing_ring(near, far, cache, h, j, n, rings)).powi(2);
-            let mut shares: Vec<f64> = near.iter().filter(|nb| !nb.idle()).map(|nb| (0..nb.s).map(|i| nb.ztot[i * n + j].norm_sqr()).sum::<f64>()).collect();
-            shares.extend(far.iter().map(|fb| fb.mf[j * n + j].re));
-            let sum: f64 = shares.iter().sum();
-            for (a, w) in accounts[at..].iter_mut().zip(&shares) {
-                a.squares[j] = if sum > 0.0 { ring * w / sum } else { 0.0 };
-            }
-        }
-        *work += near.iter().map(|nb| nb.s * nb.shifts.len()).sum::<usize>() as f64 * self.ground.len() as f64 / 4.0;
     }
 
     /// The decision's walk on its accounts (unify2 §3.4; # The decisions): one budget, s² = unrate(share)² in every column
@@ -4293,8 +4174,8 @@ impl Fold {
             match (a.item, node) {
                 (Item::Omitted { block, level }, Hold::Near { block: x, level: q }) if block == *x && level == *q => vec![1.0; n],
                 (Item::Series { block, part }, Hold::Near { block: x, level: q }) if block == *x => (0..n).map(|j| shares[block].part(*q, part, j)).collect(),
-                (Item::Reuse { block } | Item::Centred { block, far: false } | Item::Ring { block, far: false }, Hold::Near { block: x, level: q }) if block == *x => (0..n).map(|j| shares[block].level(*q, j)).collect(),
-                (Item::Centred { block, far: true } | Item::Left { block } | Item::Ring { block, far: true }, Hold::Far { block: x, share }) if block == *x => vec![*share; n],
+                (Item::Reuse { block } | Item::Centred { block, far: false }, Hold::Near { block: x, level: q }) if block == *x => (0..n).map(|j| shares[block].level(*q, j)).collect(),
+                (Item::Centred { block, far: true } | Item::Left { block }, Hold::Far { block: x, share }) if block == *x => vec![*share; n],
                 _ => vec![0.0; n],
             }
         };
@@ -4304,7 +4185,6 @@ impl Fold {
             Item::Series { .. } | Item::Omitted { .. } | Item::Left { .. } => true,
             Item::Reuse { block } | Item::Centred { block, far: false } => !decision.fresh[block] && !decision.near[block],
             Item::Centred { block, far: true } => !decision.fresh_far[block] && !decision.far[block],
-            Item::Ring { .. } => false,
         };
         let (mut more, mut again) = (done, false);
         // While a column is beyond the budget: the remedy that takes the most of its ρ² -- the evaluation's; a node's rise
@@ -4316,8 +4196,8 @@ impl Fold {
                 break;
             }
             let mut offers: Vec<(f64, Remedy)> = vec![];
-            // The evaluation's remedies lead to the budget only where what none of them lowers -- the ring, a reuse or a
-            // centring already made again here -- is within it: else the column's way within is a node's rise alone. But
+            // The evaluation's remedies lead to the budget only where what none of them lowers -- a reuse or a centring
+            // already made again here -- is within it: else the column's way within is a node's rise alone. But
             // a series part's own rest beyond the whole budget is read on (more sweeps) whatever the rest: its
             // convergence is the fold's existence (§2.3), which two changes may not tell.
             let fixed: f64 = ws.accounts.iter().zip(&worst).filter(|(a, _)| a.on && !remedied(a, &ws.decision)).map(|(_, w)| w[j]).sum();
@@ -4340,7 +4220,6 @@ impl Fold {
                         let Some(c) = ws.accounts.iter().position(|a| a.item == Item::Centred { block, far: true }) else { continue };
                         offers.push((w - worst[c][j], Remedy::TakeIn(block)));
                     }
-                    Item::Ring { .. } => {}
                 }
             }
             offers.retain(|o| o.0 > 0.0);
@@ -6469,113 +6348,6 @@ impl Fold {
         out
     }
 
-    /// The photon a landing's transient emits at once (step.rs `jump`: a landing whose norm is at or below its threshold;
-    /// # The ring; dragchk.status.md section 5): its landing density over the ground states of each set and the emission's
-    /// axes, Δ = Σ E X E† -- E the near blocks' emission on their kept rows (`NearBasis::emit`), X = ∫ (e e† − e_s e_s†) dτ
-    /// the transient's excited density, e the exact no-jump evolution's excited amplitude from the bare state (excited
-    /// part zero), e_s the slow part's -- and one of its eigenvectors drawn by its weight (`draw`). The slow amplitude
-    /// `x` (S⁻¹ of the landed state) rings on the kept row r = (block, i) from β_r = −(Z x)_i at e_r = o + κ_i, its slow
-    /// part Z e^{−i(H + o)τ} x, each block at its offset's phase e^{−iot} at the time `t` (as its photons):
-    ///   X_rs = φ_r φ_s* [β_r β_s*/(i(e_r − e_s*)) + β_s* (Z (i(H + o_r − e_s*))⁻¹ x)_r + β_r conj((Z (i(H + o_s − e_r*))⁻¹ x)_s)].
-    /// The transient's photons are no slow photons: its rows ring at their own energies, so that its cross terms between
-    /// rows of different energies (F′ levels, m′ manifolds) die within 1/Γ -- the slow pattern of the bare state, its
-    /// rows coherent, put tilt0's at-once photons on the wrong states (F = 1 m = 0 from |2,−2⟩ 15 times too seldom, |2,0⟩
-    /// kept twice as often: its F = 2 populations and its force 7 % off). The rows' first order on T, the Schur diagonal
-    /// κ_i and the static H over the ~1/Γ of the ring, as the ring's reading (`ring`); a far block's rows are left out
-    /// (their share of the transient within the ring's reading). Returns the set drawn and, on its states, the
-    /// eigenvector's amplitudes per axis; None where the density has no weight.
-    pub(crate) fn prototype_transient(&self, cache: &Cache, ws: &Workspace, x: &[C64], sets: &[Vec<usize>], t: f64, placed: bool, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<(usize, Vec<[C64; 3]>)> {
-        let n = ws.n;
-        let h = &ws.h[..n * n];
-        // The rows: (near block, kept row), their energies, their fast amplitudes β (with the block's phase), and per row
-        // its block's emission column.
-        struct RowOf {
-            x: usize,
-            i: usize,
-            energy: C64,
-            offset: f64,
-            phase: C64,
-            beta: C64,
-        }
-        let mut rows: Vec<RowOf> = vec![];
-        for (xb, nb) in ws.near.iter().enumerate().filter(|(_, nb)| !nb.idle() && nb.s > 0) {
-            let z = if placed { &nb.zplace } else { &nb.ztot };
-            let offset = self.blocks[nb.o].value;
-            let phase = C64::cis(-offset * t);
-            for i in 0..nb.s {
-                let y: C64 = (0..n).map(|j| z[i * n + j] * x[j]).sum();
-                rows.push(RowOf { x: xb, i, energy: nb.kappa[i] + C64::real(offset), offset, phase, beta: -y });
-            }
-        }
-        let r = rows.len();
-        if r == 0 {
-            return None;
-        }
-        // (Z (i(H + o − e*))⁻¹ x) of a row's block at another row's energy.
-        let slow_at = |xb: usize, offset: f64, e: C64| -> Option<Vec<C64>> {
-            let m = Mat::from_fn(n, n, |a, b| C64::new(0.0, 1.0) * (h[a * n + b] + if a == b { C64::real(offset) - e.conj() } else { C64::ZERO }));
-            let lu = crate::linalg::Lu::new(&m)?;
-            let mut y = x.to_vec();
-            lu.solve(&mut y);
-            let nb = &ws.near[xb];
-            let z = if placed { &nb.zplace } else { &nb.ztot };
-            Some((0..nb.s).map(|i| (0..n).map(|j| z[i * n + j] * y[j]).sum()).collect())
-        };
-        // X (r × r).
-        let mut xm = vec![C64::ZERO; r * r];
-        for (si, sr) in rows.iter().enumerate() {
-            let mut cache_slow: Vec<(usize, Vec<C64>)> = vec![];
-            for (ri, rr) in rows.iter().enumerate() {
-                let mut v = rr.beta * sr.beta.conj() / (C64::new(0.0, 1.0) * (rr.energy - sr.energy.conj()));
-                // β_s* (Z_r (i(H + o_r − e_s*))⁻¹ x)_r
-                let at = match cache_slow.iter().position(|c| c.0 == rr.x) {
-                    Some(k) => k,
-                    None => {
-                        cache_slow.push((rr.x, slow_at(rr.x, rr.offset, sr.energy)?));
-                        cache_slow.len() - 1
-                    }
-                };
-                v += sr.beta.conj() * cache_slow[at].1[rr.i];
-                xm[ri * r + si] += rr.phase * sr.phase.conj() * v;
-            }
-        }
-        // The second cross term is the first's adjoint and the fast-fast term B is Hermitian: with F = B + C₁ made above,
-        // X = B + C₁ + C₁† = F + F† − B.
-        let f = xm.clone();
-        for ri in 0..r {
-            for si in 0..r {
-                let (rr, sr) = (&rows[ri], &rows[si]);
-                let b = rr.phase * sr.phase.conj() * rr.beta * sr.beta.conj() / (C64::new(0.0, 1.0) * (rr.energy - sr.energy.conj()));
-                xm[ri * r + si] = f[ri * r + si] + f[si * r + ri].conj() - b;
-            }
-        }
-        // Per landing set its density over (state, axis), its eigenvectors' weights.
-        let mut weights: Vec<f64> = vec![];
-        let mut picks: Vec<(usize, Vec<C64>)> = vec![];
-        for (k, set) in sets.iter().enumerate() {
-            let m = 3 * set.len();
-            let e = Mat::from_fn(m, r, |row, c| {
-                let (b, a) = (set[row / 3], row % 3);
-                let rr = &rows[c];
-                let nb = &ws.near[rr.x];
-                cache.near_at(rr.x).emit[(3 * b + a) * nb.s + rr.i]
-            });
-            let xmat = Mat { rows: r, cols: r, data: xm.clone() };
-            let d = e.product(&xmat).product(&e.adjoint());
-            let eig = crate::linalg::hermitian_eigen(&d);
-            for (c, &w) in eig.values.iter().enumerate() {
-                if w > 0.0 {
-                    weights.push(w);
-                    picks.push((k, (0..m).map(|row| eig.vectors[(row, c)]).collect()));
-                }
-            }
-        }
-        let drawn = draw(&weights)?;
-        let (k, v) = &picks[drawn];
-        Some((*k, (0..sets[*k].len()).map(|b| [v[3 * b], v[3 * b + 1], v[3 * b + 2]]).collect()))
-    }
-
-
     /// The jumps as operators at a position of the step (`At`: its middle or an outer node; the generator's decay between two
     /// blocks' offsets takes their products where it is a tone, fold.rs `Fold::beating`): per block C_q ε S⁻¹ (GROUND × n, q the emission's axis), ε the
     /// block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's R₀Σ_a e_a U_a --, S
@@ -6886,13 +6658,6 @@ impl Workspace {
             }
         }
         sum
-    }
-
-    /// The slow amplitude x = S⁻¹ψ of a state ψ on the step's metric (`Middle::transient`).
-    pub(crate) fn slow_amplitude(&self, psi: &[C64]) -> Vec<C64> {
-        let n = self.n;
-        let normal = &self.step.normal.data;
-        (0..n).map(|i| (0..n).map(|j| normal[i * n + j] * psi[j]).sum()).collect()
     }
 
     /// The excited amplitude εx the P amplitudes x give on every block's Q rows at the last step's middle (DESIGN §1.3):
