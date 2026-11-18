@@ -178,6 +178,7 @@ fn rate(rho: f64) -> f64 {
 
 /// One component of the light (module documentation): its part, exact frequency and value, and per beam (request
 /// indices) its coupling at the focus (EXCITED × GROUND) and the momentum its absorption gives.
+#[derive(Clone)]
 pub(crate) struct Component {
     pub(crate) part: Part,
     pub(crate) beat: Beat,
@@ -506,6 +507,7 @@ impl Choice {
 /// A block (module documentation, # Blocks): its offset, its explicit states' P places, its Q rows (the solved ones first:
 /// excited states, then decomposed copies; then the centred ones, excited states and copies), its ground sources (place,
 /// component), its kept copies (state, component, exact residual θ_t − ω) and its omitted ones.
+#[derive(Clone)]
 pub(crate) struct Block {
     pub(crate) offset: Beat,
     pub(crate) value: f64,
@@ -533,6 +535,7 @@ impl Block {
 }
 
 /// The fold of a request with a choice of nodes (module documentation).
+#[derive(Clone)]
 pub(crate) struct Fold {
     light: Light,
     /// The local light (run.rs `Onefold::decide`: the start's worst case over the atoms' local physics): per request beam a

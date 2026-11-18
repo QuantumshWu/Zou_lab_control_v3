@@ -28,14 +28,24 @@
 //! read in parallel on one decision, then every node asked for joins at once and the points that asked are read again:
 //! the decision does not depend on the threads' order.
 //!
+//! # What is made once
+//! A set's fold on a decision -- its tiers (`Choice::base_of`, the costly part), the fold, its candidates -- is made once,
+//! by the first thread that asks for it while the others wait, and shared (`Built`); each thread reads on its own copy of
+//! the fold with its own workspace, taken from the fold's pool and given back. A round's joins are planned on the nodes'
+//! placement alone (`Search::placed`: a node holding a state explicit at another offset is that state's drive there,
+//! `Choice::driven`), and only each set's last decision of the round is made, the sets' at once; where it cannot be made
+//! the keys join one by one again, each made (`Search::join`) -- the same as joining them one by one wherever every one
+//! of them can be made with those before it.
+//!
 //! # The report (`Decision`)
 //! Per set its explicit nodes, the worst point and its reading on the final decision (rate units: the bound), the
 //! points beyond the share where no node is offered; the rounds' counts, the time.
-use super::proto::{Cache, Cell, Taken};
+use super::proto::{Cache, Cell, Taken, Workspace};
 use super::{Choice, Fold};
 use crate::field::Light;
 use crate::linalg::C64;
 use crate::request::Request;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// An explicit excited node (run.rs `Key`, `Choice::explicit`): its level, the absorbed component, a source's ground state.
 pub(crate) type Key = (usize, crate::model::Component, usize);
@@ -220,13 +230,30 @@ enum Asked {
     Nowhere,
 }
 
-/// One set's fold on a decision, made where first asked for on a thread (`Choice::base_of` with those nodes, its own
-/// set's tiers), with its candidates and a workspace; None where it cannot be made (a refused cluster: run.rs
-/// `Clusters::cluster_with`).
-struct Made {
-    nodes: (Vec<Key>, Vec<Key>),
-    fold: Option<(Fold, super::proto::Workspace, Vec<(Key, Taken)>)>,
+/// One set's fold on a decision (module documentation, # What is made once): its choice (`Choice::base_of` with those
+/// nodes, its own set's tiers), its fold and candidates, and the threads' copies of the fold with their workspaces, taken
+/// and given back.
+struct Built {
+    choice: Choice,
+    fold: Fold,
+    candidates: Vec<(Key, Taken)>,
+    pool: Mutex<Vec<(Fold, Workspace)>>,
 }
+
+impl Built {
+    /// A copy of the fold with a workspace: one given back, else made.
+    fn take(&self) -> (Fold, Workspace) {
+        let taken = self.pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        taken.unwrap_or_else(|| (self.fold.clone(), self.fold.prototype_workspace().expect("a built fold's workspace")))
+    }
+
+    fn give(&self, held: (Fold, Workspace)) {
+        self.pool.lock().unwrap_or_else(|e| e.into_inner()).push(held);
+    }
+}
+
+/// A set's fold on a decision, once made: Err where its cluster cannot be made (run.rs `Clusters::cluster_with`).
+type Slot = Arc<OnceLock<Result<Arc<Built>, String>>>;
 
 /// The metric cross reading of a fold's same-state node pairs at its last forward (FOLDAPI §2; dragchk.status 第二项,
 /// 给 A 的实现说明 4): one physical excited state at two offsets -- an explicit place and a Q row of another block, or Q
@@ -276,9 +303,8 @@ fn crossed(fold: &Fold, cache: &Cache, ws: &super::proto::Workspace) -> f64 {
     most
 }
 
-/// The decision's inputs (module documentation), and what it makes once and keeps: each set's choice of nodes per
-/// decision (`Choice::base_of`, its tiers read at the focus: made once, on one thread), and the threads' folds and
-/// workspaces, from one round to the next.
+/// The decision's inputs (module documentation), and what it makes once and keeps (# What is made once): each set's
+/// fold per decision (`Built`), and the rule's structure with nothing explicit (`Choice::of`, the placements' reading).
 pub(crate) struct Search<'a> {
     request: &'a Request,
     light: &'a Light,
@@ -287,51 +313,71 @@ pub(crate) struct Search<'a> {
     floor: f64,
     /// The largest momentum an atom held by the trap has (rad/µm).
     most: f64,
-    choices: std::sync::Mutex<Vec<((usize, (Vec<Key>, Vec<Key>)), Result<Choice, String>)>>,
-    pools: std::sync::Mutex<Vec<Vec<Vec<Made>>>>,
+    built: Mutex<Vec<((usize, (Vec<Key>, Vec<Key>)), Slot)>>,
+    of: OnceLock<Result<Choice, String>>,
 }
 
 impl<'a> Search<'a> {
     /// The search of a request's run (module documentation): its light, its ground sets, the potential channel's floor
     /// (rad/µs) and the largest momentum an atom held by the trap has (rad/µm).
     pub(crate) fn new(request: &'a Request, light: &'a Light, grounds: &'a [Vec<usize>], floor: f64, most: f64) -> Search<'a> {
-        Search { request, light, grounds, floor, most, choices: Default::default(), pools: Default::default() }
+        Search { request, light, grounds, floor, most, built: Default::default(), of: OnceLock::new() }
     }
 
-    /// Set k's choice of nodes with the explicit nodes and drives `nodes` (`Choice::base_of`, its own set's tiers), made
-    /// once.
-    fn choice(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Choice, String> {
-        let key = (k, nodes.clone());
-        if let Some(c) = self.choices.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|c| c.0 == key) {
-            return c.1.clone();
-        }
-        let made = Choice::base_of(self.request, nodes.0.clone(), nodes.1.clone(), &|set| set == &self.grounds[k][..]);
-        self.choices.lock().unwrap_or_else(|e| e.into_inner()).push((key, made.clone()));
-        made
-    }
-
-    /// One set's fold on the nodes and drives `nodes`, kept in `made` (one per set and decision, per thread).
-    fn made<'m>(&self, made: &'m mut Vec<Made>, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> &'m mut Made {
-        let at = match made.iter().position(|m| m.nodes == *nodes) {
-            Some(at) => at,
-            None => {
-                let fold = self.choice(k, nodes).and_then(|choice| {
-                    let fold = Fold::new(self.request, &choice, self.grounds[k][0])?;
-                    let ws = fold.prototype_workspace()?;
-                    let candidates = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| (key, Taken { block, rows })).collect();
-                    Ok((fold, ws, candidates))
-                });
-                made.push(Made { nodes: nodes.clone(), fold: fold.ok() });
-                made.len() - 1
+    /// Set k's fold with the explicit nodes and drives `nodes` (`Built`: `Choice::base_of`, its own set's tiers; the fold
+    /// and its workspace), made once -- the first thread to ask makes it, the others wait for it.
+    fn built(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Arc<Built>, String> {
+        let slot: Slot = {
+            let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
+            match built.iter().find(|x| x.0 .0 == k && x.0 .1 == *nodes) {
+                Some(x) => x.1.clone(),
+                None => {
+                    let slot: Slot = Default::default();
+                    built.push(((k, nodes.clone()), slot.clone()));
+                    slot
+                }
             }
         };
-        &mut made[at]
+        slot.get_or_init(|| {
+            let choice = Choice::base_of(self.request, nodes.0.clone(), nodes.1.clone(), &|set| set == &self.grounds[k][..])?;
+            let fold = Fold::new(self.request, &choice, self.grounds[k][0])?;
+            let ws = fold.prototype_workspace()?;
+            let candidates = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| (key, Taken { block, rows })).collect();
+            Ok(Arc::new(Built { choice, pool: Mutex::new(vec![(fold.clone(), ws)]), fold, candidates }))
+        })
+        .clone()
     }
 
-    /// What the point `local` asks of set k's decision `nodes` (`Asked`; module documentation, # At each point).
-    fn ask(&self, made: &mut Vec<Made>, k: usize, nodes: &(Vec<Key>, Vec<Key>), local: &Local) -> Asked {
-        let m = self.made(made, k, nodes);
-        let Some((fold, ws, candidates)) = m.fold.as_mut() else { return Asked::Nowhere };
+    /// Every set's fold on its nodes `wanted` (set, nodes) made at once, a thread each.
+    fn build(&self, wanted: &[(usize, (Vec<Key>, Vec<Key>))]) {
+        std::thread::scope(|scope| {
+            for (k, nodes) in wanted {
+                scope.spawn(move || {
+                    let _ = self.built(*k, nodes);
+                });
+            }
+        });
+    }
+
+    /// Set k's choice with the nodes `nodes` (`Built`): the run's (run.rs `Onefold::new`).
+    pub(crate) fn choice(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Choice, String> {
+        self.built(k, nodes).map(|b| b.choice.clone())
+    }
+
+    /// Whether set k's nodes `nodes` are placed (`Fold::build`: a node holding a state explicit at another offset is
+    /// refused there) -- what can refuse a cluster before its tiers are read; read on the rule's structure, as the tiers'
+    /// first fold is (`Choice::tiered_of`).
+    fn placed(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> bool {
+        let Ok(of) = self.of.get_or_init(|| Choice::of(self.request, crate::model::elim::share())) else { return false };
+        let choice = Choice { explicit: nodes.0.clone(), driven: nodes.1.clone(), ..of.clone() };
+        Fold::sets(self.request, &choice).is_ok() && Fold::new(self.request, &choice, self.grounds[k][0]).is_ok()
+    }
+
+    /// What the point `local` asks of a set's fold `built`, read on the thread's copy `held` (`Asked`; module
+    /// documentation, # At each point).
+    fn ask(&self, built: &Result<Arc<Built>, String>, held: Option<&mut (Fold, Workspace)>, local: &Local) -> Asked {
+        let (Ok(built), Some((fold, ws))) = (built, held) else { return Asked::Nowhere };
+        let candidates = &built.candidates;
         if fold.blocks.is_empty() {
             return Asked::Within(0.0, false, 0.0);
         }
@@ -354,6 +400,9 @@ impl<'a> Search<'a> {
 
     /// The points `points` read on the decision `nodes` (per set), in parallel: per point and set what it asks.
     fn round(&self, points: &[Local], nodes: &[(Vec<Key>, Vec<Key>)]) -> Vec<Vec<Asked>> {
+        self.build(&nodes.iter().cloned().enumerate().collect::<Vec<_>>());
+        let built: Vec<Result<Arc<Built>, String>> = nodes.iter().enumerate().map(|(k, x)| self.built(k, x)).collect();
+        let built = &built;
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(points.len().max(1));
         let chunk = points.len().div_ceil(threads);
         std::thread::scope(|scope| {
@@ -361,10 +410,13 @@ impl<'a> Search<'a> {
                 .chunks(chunk.max(1))
                 .map(|part| {
                     scope.spawn(move || {
-                        let taken = self.pools.lock().unwrap_or_else(|e| e.into_inner()).pop();
-                        let mut made: Vec<Vec<Made>> = taken.unwrap_or_else(|| (0..nodes.len()).map(|_| vec![]).collect());
-                        let out = part.iter().map(|local| (0..nodes.len()).map(|k| self.ask(&mut made[k], k, &nodes[k], local)).collect::<Vec<Asked>>()).collect::<Vec<_>>();
-                        self.pools.lock().unwrap_or_else(|e| e.into_inner()).push(made);
+                        let mut held: Vec<Option<(Fold, Workspace)>> = built.iter().map(|b| b.as_ref().ok().map(|b| b.take())).collect();
+                        let out = part.iter().map(|local| (0..nodes.len()).map(|k| self.ask(&built[k], held[k].as_mut(), local)).collect::<Vec<Asked>>()).collect::<Vec<_>>();
+                        for (b, h) in built.iter().zip(held) {
+                            if let (Ok(b), Some(h)) = (b, h) {
+                                b.give(h);
+                            }
+                        }
                         out
                     })
                 })
@@ -376,7 +428,34 @@ impl<'a> Search<'a> {
     /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a state
     /// is explicit at two offsets, or a block is not the prototype's).
     fn feasible(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> bool {
-        self.choice(k, nodes).and_then(|choice| Fold::new(self.request, &choice, self.grounds[k][0])?.prototype_workspace()).is_ok()
+        self.built(k, nodes).is_ok()
+    }
+
+    /// The keys `keys` joined to a set's decision `set` in their order (`settle`), each where `can` makes its cluster with
+    /// those before it -- a node whose level is explicit at another key, where it cannot, as that level's drive there --,
+    /// else refused: the nodes and drives, and the keys refused.
+    fn join(&self, keys: &[Key], set: &SetDecision, can: &dyn Fn(&(Vec<Key>, Vec<Key>)) -> bool) -> ((Vec<Key>, Vec<Key>), Vec<Key>) {
+        let mut now = (set.nodes.clone(), set.driven.clone());
+        let mut refused: Vec<Key> = vec![];
+        for &key in keys {
+            if now.0.contains(&key) || now.1.contains(&key) || set.refused.iter().any(|r| r.0 == key) || refused.contains(&key) {
+                continue;
+            }
+            let mut more = (now.0.clone(), now.1.clone());
+            more.0.push(key);
+            more.0.sort();
+            if !can(&more) && now.0.iter().any(|n| n.0 == key.0) {
+                more = (now.0.clone(), now.1.clone());
+                more.1.push(key);
+                more.1.sort();
+            }
+            if can(&more) {
+                now = more;
+            } else {
+                refused.push(key);
+            }
+        }
+        (now, refused)
     }
 
     /// The points read until none asks for a node that can join (`round`; the nodes asked for joining at once, in their
@@ -397,37 +476,30 @@ impl<'a> Search<'a> {
             // keys' order), each where its cluster can be made: a node is a level at an offset holding the states that
             // offset reaches (fold.rs `Fold::build`), and one excited state is one place at one frame -- a node that would
             // hold a state already explicit at another offset is that state's copy there, read beyond the share: it joins
-            // as that drive, a tone (`Choice::driven`), as a copy whose coupling cannot be folded at its peak does.
-            for k in 0..sets {
-                let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
-                asks.sort();
-                let mut keys: Vec<(Key, usize)> = vec![];
-                for key in asks {
-                    match keys.iter_mut().find(|x| x.0 == key) {
-                        Some(x) => x.1 += 1,
-                        None => keys.push((key, 1)),
+            // as that drive, a tone (`Choice::driven`), as a copy whose coupling cannot be folded at its peak does. The
+            // joins planned on the placements, each set's last decision made, the sets' at once (# What is made once).
+            let keys: Vec<Vec<Key>> = (0..sets)
+                .map(|k| {
+                    let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
+                    asks.sort();
+                    let mut keys: Vec<(Key, usize)> = vec![];
+                    for key in asks {
+                        match keys.iter_mut().find(|x| x.0 == key) {
+                            Some(x) => x.1 += 1,
+                            None => keys.push((key, 1)),
+                        }
                     }
-                }
-                keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                for &(key, _) in &keys {
-                    let set = &mut decision.sets[k];
-                    if set.nodes.contains(&key) || set.driven.contains(&key) || set.refused.iter().any(|r| r.0 == key) {
-                        continue;
-                    }
-                    let mut more = (set.nodes.clone(), set.driven.clone());
-                    more.0.push(key);
-                    more.0.sort();
-                    if !self.feasible(k, &more) && set.nodes.iter().any(|n| n.0 == key.0) {
-                        more = (set.nodes.clone(), set.driven.clone());
-                        more.1.push(key);
-                        more.1.sort();
-                    }
-                    if self.feasible(k, &more) {
-                        (decision.sets[k].nodes, decision.sets[k].driven) = more;
-                    } else {
-                        decision.sets[k].refused.push((key, 0));
-                    }
-                }
+                    keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    keys.into_iter().map(|x| x.0).collect()
+                })
+                .collect();
+            let plans: Vec<((Vec<Key>, Vec<Key>), Vec<Key>)> = (0..sets).map(|k| self.join(&keys[k], &decision.sets[k], &|x| self.placed(k, x))).collect();
+            self.build(&plans.iter().map(|p| p.0.clone()).enumerate().collect::<Vec<_>>());
+            for (k, plan) in plans.into_iter().enumerate() {
+                let (now, refused) = if self.feasible(k, &plan.0) { plan } else { self.join(&keys[k], &decision.sets[k], &|x| self.feasible(k, x)) };
+                let set = &mut decision.sets[k];
+                (set.nodes, set.driven) = now;
+                set.refused.extend(refused.into_iter().map(|key| (key, 0)));
             }
             let mut again = vec![];
             // Whether set k had a node of the level joined in this round (as a place or a drive).

@@ -4049,3 +4049,45 @@ fn the_base_choice_s_omitted_copies() {
         }
     }
 }
+
+/// Diagnostic (开头提速 E item 5; DECIDE_REQ a request's path): per ground set its tiering's rounds (`Choice::tiered_of`
+/// with nothing explicit) timed -- the fold made, its forward at the focus, the jumps, the readings -- with each round's
+/// blocks' rows, solved rows and exact copies.
+#[test]
+#[ignore]
+fn the_tiering_s_rounds_timed() {
+    let path = std::env::var("DECIDE_REQ").expect("DECIDE_REQ");
+    let req = crate::model::testing::scene(&path);
+    let share = crate::model::elim::share();
+    let parts: Vec<Part> = components(&req, &Light::new(&req), &Axes::new(&req).unwrap()).unwrap().iter().map(|c| c.part).collect();
+    let mut copies = vec![];
+    for &a in &parts {
+        for s in 0..GROUND {
+            for &e in &parts {
+                for f in [1, 2] {
+                    copies.push(((a, s, e, f), Status::Decomposed));
+                }
+            }
+        }
+    }
+    let choice = Choice { copies, ..Choice::of(&req, share).unwrap() };
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let clock = std::time::Instant::now();
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        let made = clock.elapsed().as_secs_f64();
+        let rows: usize = fold.blocks.iter().map(|b| b.rows.len()).sum();
+        let shape: Vec<(usize, usize, usize)> = fold.blocks.iter().map(|b| (b.rows.len(), b.solved, b.rows[..b.solved].iter().filter(|r| matches!(r, Row::Copy { .. })).count())).collect();
+        println!("set {set:?}: n {}, {} blocks, {rows} rows; fold {made:.3} s; (rows, solved, exact) {shape:?}", fold.size(), fold.blocks.len());
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let clock = std::time::Instant::now();
+        let mut f = fold.at([0.0; 3], [0.0; 3], &mut Path::default()).unwrap();
+        let at = clock.elapsed().as_secs_f64();
+        fold.jumps(&mut f);
+        let jumps = clock.elapsed().as_secs_f64() - at;
+        fold.read(&mut f, 0.0);
+        let read = clock.elapsed().as_secs_f64() - at - jumps;
+        println!("  at {at:.3} s (passes {}), jumps {jumps:.3} s, readings {read:.3} s; work {:.3e}, reading work {:.3e}; phases {:?}", f.passes, f.work, f.reading_work, f.phases);
+    }
+}
