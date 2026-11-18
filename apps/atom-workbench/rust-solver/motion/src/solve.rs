@@ -109,8 +109,8 @@
 //! four of the step. Where every difference is below the noise no number of levels tells it from convergence.
 //!
 //! ## The ladder
-//! - Clearly beyond: a rung whose own read lies clearly beyond the square b of the step's share among the family's few
-//!   looks (`screen`) is left: the step is halved, the level at τ becomes the companion and only τ/2 is run anew; the
+//! - Clearly beyond: a rung whose own read -- or its third level above, the rung left's read lowered -- lies clearly
+//!   beyond the square b of the step's share among the family's few looks (`screen`) is left: the step is halved, the level at τ becomes the companion and only τ/2 is run anew; the
 //!   rung below's third level above is the rung left's own read, lowered. Down to the step at which a trajectory would
 //!   take `MOST_STEPS` steps, where the step stands as it is, flagged, and books what its reads do not exclude.
 //! - The run's work. Of the rungs a check's reads let stand, the run takes the one it is expected to spend least on
@@ -892,14 +892,15 @@ enum Verdict {
 
 /// What the check makes of a rung (module documentation, # The step; `settle`) on its own `read` and its third level
 /// above carried to its step, `above` (none where it has none); `pilot`: whether the read is the pilot's, the last word
-/// on the step (the scout's leaves only on what is clearly beyond); `upward`: whether a third level above on the pilot's
-/// own pairs is to be had (the ladder has the rung above, the rung has none yet, and the rung above's read was not
-/// unread). Every
+/// on the step (the scout's leaves only on what is clearly beyond -- its own read, or its third level's: a rung whose
+/// third level is clearly beyond is left on the scout as on the pilot, and no pairs at the rung can bring that read
+/// within); `upward`: whether a third level above on the pilot's own pairs is to be had (the ladder has the rung above,
+/// the rung has none yet, and the rung above's read was not unread). Every
 /// estimate is taken as it reads (`within`). The third level is the rung the ladder left above, or the pilot at 4τ
 /// where the rung buys it (`course`); where none is, the rung stands on its own two levels. What a rung that stands
 /// does next is its course's (`course`).
 fn verdict(read: &Between, above: Option<&Between>, pilot: bool, upward: bool) -> Verdict {
-    if screen(read) {
+    if screen(read) || above.is_some_and(screen) {
         Verdict::Left
     } else if !pilot {
         Verdict::Stands
@@ -1006,10 +1007,12 @@ struct Prices<'a> {
 
 /// A trajectory's work a µs at every step at the states `rated` (`one_each`), the mean over the run's held states
 /// (`over_the_run`): at each, the step of τ taken from it on the run, as its count is made (step.rs `priced`: its
-/// stretches' counts, each with its cluster's counts at a node, `Onefold::costs`) over τ, and its jumps' photons at the
-/// trajectory's own rate of jumps (`Dynamics::photon_work`: the one count of a run's step priced once a run); past any
-/// work where no step of τ can be taken from it (refused as the run's would be, the runaway's rule the run's,
-/// `Widest`). The splitting's reference is a sum over the trap light's beam pairs, no part of the price. The step's
+/// stretches' counts, each with its cluster's counts at a node, `Onefold::costs`) over τ, and its jumps' counted work a
+/// µs over its run (`Pick::jumping`: their photons and landings as they were made, step.rs `Trajectory::jumped`) -- a
+/// jump's work is the jump's whatever the step, so the step's count holds none of it: a landing's clock counted in the one
+/// step a state is priced at made the price a draw of whether that step held a jump (tilt0's scout: w(τ/2) below w(τ) by
+/// 5 %, and the ladder went down a rung for it); past any work where no step of τ can be taken from it (refused as the
+/// run's would be, the runaway's rule the run's, `Widest`). The splitting's reference is a sum over the trap light's beam pairs, no part of the price. The step's
 /// check's `Prices::work`, each step's made once -- a check prices the same steps again as it goes on --, the states'
 /// steps on the pool, each by itself.
 fn work_at<'a>(run: &'a Onefold, widest: Widest, rated: &'a [Pick<'a>]) -> impl Fn(f64) -> f64 + 'a {
@@ -1021,7 +1024,7 @@ fn work_at<'a>(run: &'a Onefold, widest: Widest, rated: &'a [Pick<'a>]) -> impl 
         let rates: Vec<f64> = rated
             .par_iter()
             .map(|pick| match crate::step::priced(run, &pick.state.trajectory(), tau, &widest) {
-                Ok(stretches) => stretches.iter().map(|(_, price)| price.work(price.costs)).sum::<f64>() / tau + pick.jumps * stretches.first().map_or(0.0, |s| s.1.jump),
+                Ok(stretches) => stretches.iter().map(|(_, price)| price.work(price.costs)).sum::<f64>() / tau + pick.jumping,
                 Err(_) => f64::INFINITY,
             })
             .collect();
@@ -1838,6 +1841,11 @@ fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Cont
         let lowest = context.plan.end / below > MOST_STEPS as f64;
         let upward = !levels.above_pilot && above(context.tau) && !levels.above_unread;
         let verdict = verdict(&read, levels.above.as_ref(), pilot, upward);
+        crate::prof::note(|| {
+            let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
+            let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
+            format!("ladder tau {} pilot {pilot} members {members} groups {} verdict {verdict:?} screen {} looks [{}] above [{}]", context.tau, numbers.len(), screen(&read), looks.join(" "), above.join(" "))
+        });
         // A rung its reads do not leave takes its course by the run's work from here: without its prices the check
         // stops there (`Settled::Pending`).
         if prices.is_none() && !screen(&read) {
@@ -1852,6 +1860,10 @@ fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Cont
             below: levels.half.as_ref().map_or(0., |_| groups as f64),
         };
         if let (Verdict::Stands | Verdict::Above, Some(prices)) = (verdict, prices) {
+            crate::prof::note(|| {
+                let w: Vec<String> = [0.25, 0.5, 1., 2., 4.].iter().map(|f| format!("w({:.4})={:.4e}", f * context.tau, (prices.work)(f * context.tau))).collect();
+                format!("ladder tau {} prices product {:.1} {:?} staying {:.4e} descending {:.4e} course {:?} [{}]", context.tau, prices.product, holding, staying(prices, context.tau, holding), descending(prices, context.tau, context.plan.end, holding), course(prices, context.tau, context.plan.end, holding, upward && levels.above.is_none()), w.join(" "))
+            });
             match course(prices, context.tau, context.plan.end, holding, upward && levels.above.is_none()) {
                 Course::Third if pilot => {
                     // The third level above on the pilot's trajectories: the rung above's coarser level, at 4τ, against
@@ -2139,8 +2151,10 @@ impl Stopped {
 struct State {
     sample: Sample,
     index: u64,
-    /// The trajectory's jumps up to the state, the threshold of its next one and what its last landing owes it.
+    /// The trajectory's jumps up to the state, their counted work (step.rs `Trajectory::jumped`), the threshold of its next
+    /// one and what its last landing owes it.
     jumps: u32,
+    jumped: f64,
     threshold: f64,
     owed: Option<crate::step::Owed>,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
@@ -2159,6 +2173,7 @@ impl State {
             sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() },
             index: t.index,
             jumps: t.jumps,
+            jumped: t.jumped,
             threshold: t.threshold,
             owed: t.owed.clone(),
             forms: t.forms.clone(),
@@ -2187,6 +2202,7 @@ impl State {
             seed: SEED,
             index: self.index,
             work: 0.,
+            jumped: 0.,
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
             model: [0.; crate::step::MODEL],
@@ -2379,6 +2395,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// `advance`: a stop is no step's end) --, and its states are made again from them (`replay`); else it is advanced
 /// through at once.
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
+    let _p = crate::prof::scope(crate::prof::SOLVE_TRAJECTORY);
     let sizes = [plan.times.len(), plan.reads.len()];
     let mut t = Trajectory::begun(model, start.state, start.r, start.kappa, SEED, index, plan.cell);
     // The time the run's fold is found not to exist for it (# Exits): at its start where its start lands nowhere.
@@ -2397,13 +2414,14 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     let times: Vec<f64> = at.iter().map(|a| a.0).collect();
     // The steps taken, and the start of the last one counted.
     let (mut steps, mut counted) = (0, None);
-    let mut record = |places: [Option<usize>; 2], t: &Trajectory| {
+    let mut record = |places: [Option<usize>; 2], t: &Trajectory, shown: Option<&[f64; STATES]>| {
         // The atom at the time's instant; from the first time on its κ and κ² are its window's means (`mean`).
         // An unresolved one is booked whole (`apart`). Where the run's fold does not exist for it: no outcome from then
         // on, and at t = 0 its own state's populations.
+        let _p = crate::prof::scope(crate::prof::SOLVE_RECORD);
         let mut rows = [0.; STATES];
         if nowhere.get().is_none() {
-            rows = model.readout(t.cluster, &t.point(), &t.psi, &t.held);
+            rows = shown.copied().unwrap_or_else(|| model.readout(t.cluster, &t.point(), &t.psi, &t.held));
             if !rows.iter().all(|x| x.is_finite()) || (domain.light.outside(t.r) && !model.energy(t.cluster, &t.point(), &t.psi).is_finite()) {
                 nowhere.set(Some(t.time));
             }
@@ -2430,14 +2448,14 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             windows[1].record(k, held);
         }
     };
-    record([Some(0), Some(0)], &t);
+    record([Some(0), Some(0)], &t, None);
     // The first output and the first time read the trajectory does not reach held; whether the scheme could not
     // advance it, and whether it stopped where a state scattered beyond every state of the atom.
     let mut reached = [1, 1];
     let mut unmade = None;
     let (failed, runaway, refused) = {
-        let mut read = |i: usize, t: &Trajectory| {
-            record(at[i].1, t);
+        let mut read = |i: usize, t: &Trajectory, shown: Option<&[f64; STATES]>| {
+            record(at[i].1, t, shown);
             for (reached, place) in reached.iter_mut().zip(at[i].1) {
                 if let Some(k) = place {
                     *reached = k + 1;
@@ -2481,10 +2499,10 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     if runaway {
         t.unresolved = true;
         for k in reached[0]..sizes[0] {
-            record([Some(k), None], &t);
+            record([Some(k), None], &t, None);
         }
         for k in reached[1]..sizes[1] {
-            record([None, Some(k)], &t);
+            record([None, Some(k)], &t, None);
         }
         reached = sizes;
     }
@@ -2538,7 +2556,7 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
             Some(going) if going.0.time >= from.trajectory.time => going,
             _ => (from.trajectory.clone(), from.path.clone(), Scratch::resumed(&from.carry)),
         };
-        let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s| (states[k], reached) = (Some(State::of(s)), k + 1), &mut |_, _| {});
+        let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s, _| (states[k], reached) = (Some(State::of(s)), k + 1), &mut |_, _| {});
         match advanced {
             Ok(()) if trajectory.lost.is_none() => going = Some((trajectory, path, scratch)),
             Err(Refused::Runaway) => {
@@ -3038,8 +3056,9 @@ struct Pick<'a> {
     state: &'a State,
     group: usize,
     weight: f64,
-    /// The trajectory's jumps per µs over the time it holds its atom: its last state's jumps over that state's time.
-    jumps: f64,
+    /// The trajectory's jumps' counted work a µs over the time it holds its atom: its last state's (`State::jumped`) over
+    /// that state's time.
+    jumping: f64,
 }
 
 /// The states a mean over the run is read at -- the rates a model is priced by (`Pricing`), a table's whole error
@@ -3077,7 +3096,7 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
             let Some(last) = lost.or(states.last().copied()) else { continue };
             let through = ((member * groups + group) as f64 + 0.5) / (members.len() * groups) as f64;
             let state = states[((through * states.len() as f64) as usize).min(states.len() - 1)];
-            picks.push(Pick { state, group, weight: last.sample.at.t, jumps: f64::from(last.jumps) / last.sample.at.t });
+            picks.push(Pick { state, group, weight: last.sample.at.t, jumping: last.jumped / last.sample.at.t });
         }
     }
     picks
@@ -3786,7 +3805,9 @@ mod tests {
     /// and else stands on its two levels, as an adaptive integrator does. A coarser pair that shows the error the two
     /// levels share -- a plateau of the error over τ and 2τ, read at 2τ against 4τ as 32 ± 1 b, lowered to 2 b, beyond
     /// the share -- does not show the order: the rung is left (e038's base path is caught by its 4τ). A third level
-    /// within: the rung stands. Clearly beyond on its own read: left, on the scout as on the pilot.
+    /// within: the rung stands. Clearly beyond on its own read, or on its third level's: left, on the scout as on the pilot
+    /// (R4_LIN_4's scout at 0.474 µs carried the left rung's loss lowered to 9.9 ± 1.5 b; it stood on its own read, and
+    /// its pilot ran there before the rung below).
     #[test]
     fn a_rung_reads_its_third_level_and_else_stands_on_its_two() {
         let b = step_bound()[1].powi(2);
@@ -3795,6 +3816,7 @@ mod tests {
         assert_eq!((verdict(&own, None, false, false), verdict(&own, None, true, true), verdict(&own, None, true, false)), (Verdict::Stands, Verdict::Above, Verdict::Stands));
         let coarser = carried(&at(Some(pilot(32. * b, b))), 0.5);
         assert!(screen(&coarser) && verdict(&own, Some(&coarser), true, false) == Verdict::Left);
+        assert_eq!(verdict(&own, Some(&coarser), false, false), Verdict::Left);
         let quiet = carried(&at(Some(pilot(4. * b, b))), 0.5);
         assert_eq!(verdict(&own, Some(&quiet), true, false), Verdict::Stands);
         let beyond = at(Some(pilot(4. * b, 0.1 * b)));
@@ -4236,9 +4258,10 @@ mod tests {
         assert!(turned.len() == 1 && (turned[0] / closes - 1.).abs() < 3e-3, "the look turns at {turned:?}, the room closes at {closes} µK");
     }
 
-    /// A state at the time t of the trajectory `index` with `jumps` jumps: no step reads it (nothing of the run's).
+    /// A state at the time t of the trajectory `index` with `jumps` jumps, each of a unit of counted work: no step reads it
+    /// (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, owed: None, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, jumped: f64::from(jumps), threshold: 0.5, owed: None, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
@@ -4372,7 +4395,7 @@ mod tests {
                 let all: Vec<&Part> = parts.iter().collect();
                 let picks = one_each(&all);
                 assert_eq!(picks.len(), n);
-                assert!(picks.iter().all(|p| p.weight == outputs as f64 && (p.state.index - MOST_TRAJECTORIES) / GROUP == p.group as u64 && p.jumps == 3.));
+                assert!(picks.iter().all(|p| p.weight == outputs as f64 && (p.state.index - MOST_TRAJECTORIES) / GROUP == p.group as u64 && p.jumping == 3.));
                 let mut places: Vec<usize> = picks.iter().map(|p| p.state.sample.at.t as usize).collect();
                 // Each group's members, in their order, a member's share of the run apart.
                 for g in 0..groups {
@@ -4399,7 +4422,7 @@ mod tests {
             let held = outputs * (p.group + 1) / groups;
             let member = (p.state.index % GROUP) as usize;
             let through = ((member * groups + p.group) as f64 + 0.5) / (groups * members) as f64;
-            assert_eq!((p.weight, p.state.sample.at.t as usize, p.jumps), (held as f64, 1 + (through * held as f64) as usize, 3.));
+            assert_eq!((p.weight, p.state.sample.at.t as usize, p.jumping), (held as f64, 1 + (through * held as f64) as usize, 3.));
         }
         let place = |picks: &[Pick], left: Option<usize>| over_the_run(picks, picks.iter().map(|p| p.state.sample.at.t), left);
         let exact = |left: Option<usize>| {
@@ -4660,7 +4683,7 @@ mod tests {
         let mut ended = Ok(());
         while t.time < plan.end && t.lost.is_none() {
             let stop = t.time + 10.;
-            ended = adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &[], &mut |_, _| {}, &mut |_, _| {});
+            ended = adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &[], &mut |_, _, _| {}, &mut |_, _| {});
             let explicit: Vec<usize> = run.cluster(t.cluster).states.iter().filter(|&&s| s >= GROUND).map(|&s| s - GROUND).collect();
             if !held.contains(&explicit) {
                 held.push(explicit);
@@ -4677,8 +4700,8 @@ mod tests {
     /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its
     /// atoms at the trap's centre at rest and at one to three times the thermal speed along each lab axis, held (no jump,
     /// each its own representation: its start's), at two steps -- a trajectory's work a µs priced at every state is that
-    /// state's step's own count (`Step::work`, its scratch primed as a run's) over τ and its jumps' photons at its rate of
-    /// jumps (`Dynamics::photon_work`), the mean over the states by their weights, to the rounding.
+    /// state's step's own count (`Step::work`, its scratch primed as a run's) over τ and its jumps' counted work a µs
+    /// (`Pick::jumping`), the mean over the states by their weights, to the rounding.
     #[test]
     fn a_state_s_price_is_its_step_s_count() {
         let (request, run, trap) = scene_run("R4_LIN_2", false, 0);
@@ -4692,15 +4715,14 @@ mod tests {
                 State::of(&t)
             })
             .collect();
-        let picks: Vec<Pick> = states.iter().enumerate().map(|(i, state)| Pick { state, group: i, weight: 1. + i as f64, jumps: 0.5 * i as f64 }).collect();
+        let picks: Vec<Pick> = states.iter().enumerate().map(|(i, state)| Pick { state, group: i, weight: 1. + i as f64, jumping: 1e5 * i as f64 }).collect();
         for tau in [0.2, 0.4335] {
             let counted = |from: &Trajectory| {
                 let (through, mut scratch) = (crate::step::Midway::new(&run, from, tau, None).unwrap(), Scratch::default());
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap();
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap().work
             };
-            let jump = |from: &Trajectory| crate::step::priced(&run, from, tau, &widest).unwrap().first().map_or(0.0, |s| s.1.jump);
-            let made = over_the_run(&picks, picks.iter().map(|p| counted(&p.state.trajectory()) / tau + p.jumps * jump(&p.state.trajectory())), None);
+            let made = over_the_run(&picks, picks.iter().map(|p| counted(&p.state.trajectory()) / tau + p.jumping), None);
             let priced = work_at(&run, widest, &picks)(tau);
             eprintln!("R4_LIN_2 at {tau} µs: priced {priced:.6e}, counted {made:.6e} a µs");
             assert!((priced - made).abs() <= 1e-12 * made, "{tau}: {priced} against {made}");
@@ -4936,7 +4958,7 @@ mod tests {
                     let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
                     let mut direct: Vec<Option<State>> = vec![None; plan.reads.len()];
                     direct[0] = Some(State::of(&t));
-                    let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &plan.reads, &mut |k, s| direct[k] = Some(State::of(s)), &mut |_, _| {});
+                    let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &plan.reads, &mut |k, s, _| direct[k] = Some(State::of(s)), &mut |_, _| {});
                     assert!(advanced.is_ok(), "{name} at {factor} × along {a}: {advanced:?}");
                     if t.lost.is_some() {
                         lost += 1;
@@ -5137,7 +5159,7 @@ mod tests {
         assert_eq!(picks.len(), groups * members);
         for p in &picks {
             let lost = &parts[p.group].lost.iter().find(|(_, s)| s.index == p.state.index).unwrap().1;
-            assert_eq!((p.state.sample.at.t, p.weight, p.jumps), (0., lost.sample.at.t, 6. / lost.sample.at.t));
+            assert_eq!((p.state.sample.at.t, p.weight, p.jumping), (0., lost.sample.at.t, 6. / lost.sample.at.t));
         }
         assert!((over_the_run(&picks, picks.iter().map(|_| 2.5), None) - 2.5).abs() < 1e-15);
         // An atom that ends with no outcome before the first output (no state, no loss) gives none.
