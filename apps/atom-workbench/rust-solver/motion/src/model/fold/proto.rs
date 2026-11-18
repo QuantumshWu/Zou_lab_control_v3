@@ -6364,6 +6364,12 @@ impl Fold {
     /// the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The jumps). A jump's own
     /// amplitudes on its state are its photons' (`Fold::prototype_photons`, `Workspace::jumped`).
     pub(crate) fn prototype_jumps(&self, cache: &Cache, ws: &Workspace, position: At) -> Vec<[Mat; 3]> {
+        self.prototype_jumps_of(cache, ws, position, &vec![true; ws.near.len() + ws.far.len()])
+    }
+
+    /// `prototype_jumps` of the blocks `needed` marks (the jumps' order), each made as there; the others empty (0 × 0):
+    /// the generator's cross decays read the blocks of their pairs alone (run.rs `Middle::crossed`).
+    pub(crate) fn prototype_jumps_of(&self, cache: &Cache, ws: &Workspace, position: At, needed: &[bool]) -> Vec<[Mat; 3]> {
         let _p = crate::prof::scope(crate::prof::P_JUMPS);
         let n = ws.n;
         let normal = &ws.step.normal;
@@ -6373,7 +6379,12 @@ impl Fold {
             At::Place => unreachable!("a jump's amplitudes at its place are its photons'"),
         };
         let mut out = vec![];
+        let none = || -> [Mat; 3] { std::array::from_fn(|_| Mat::zeros(0, 0)) };
         for (x, nb) in ws.near.iter().enumerate() {
+            if !needed[x] {
+                out.push(none());
+                continue;
+            }
             let basis = cache.near_at(x);
             let z = match position {
                 At::Middle => &nb.ztot,
@@ -6389,6 +6400,10 @@ impl Fold {
             }));
         }
         for (x, fb) in ws.far.iter().enumerate() {
+            if !needed[ws.near.len() + x] {
+                out.push(none());
+                continue;
+            }
             if fb.omitted {
                 out.push(std::array::from_fn(|_| Mat::zeros(GROUND, n)));
                 continue;
@@ -6407,6 +6422,11 @@ impl Fold {
 }
 
 impl Workspace {
+    /// The jumps' blocks (`Fold::prototype_jumps`' order: the near blocks, then the far ones).
+    pub(crate) fn blocks(&self) -> usize {
+        self.near.len() + self.far.len()
+    }
+
     /// A jump's amplitude on the ground state b along the emission's axis q, as the last `Fold::prototype_photons` left
     /// it: u_q,b = Σ_o e^{−iot}(C_q ε_o S⁻¹ψ)_b over every block, the photons' own.
     pub(crate) fn jumped(&self, b: usize, q: usize) -> C64 {

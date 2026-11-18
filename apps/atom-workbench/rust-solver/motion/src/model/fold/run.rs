@@ -984,6 +984,9 @@ struct Inner {
     reading: f64,
     /// Whether the last decision's walk left a column beyond its budget.
     beyond: bool,
+    /// The cross decays' products at the middle and the outer nodes (`Middle::crossed`), made where first asked for on
+    /// the forward and the nodes as they stand.
+    crossed: [Option<Vec<[Mat; 3]>>; 3],
     /// The last forward's accounts by kind (ρ²; proto.rs `Step::kinds`), its cell's ends (`Step::started`, `Step::ended`)
     /// and whether it is unresolved.
     kinds: [f64; KINDS],
@@ -1040,8 +1043,11 @@ impl Middle<'_> {
             // atom holds none yet, and held with the decompositions.
             let set = self.run.clusters.sets.get(self.set);
             if made.is_some() && !set.folded.is_empty() && (decide || eval.folded.is_none()) {
-                let pairs = set.folded.iter().any(|f| f.pairs.iter().any(|p| !p.is_empty()));
-                let jumps = pairs.then(|| fold.prototype_jumps(eval, ws, At::Middle));
+                let mut needed = vec![false; ws.blocks()];
+                for &(i, j) in set.folded.iter().flat_map(|f| f.pairs.iter().flatten()) {
+                    (needed[i], needed[j]) = (true, true);
+                }
+                let jumps = needed.contains(&true).then(|| fold.prototype_jumps_of(eval, ws, At::Middle, &needed));
                 let folded = folded_part(set, ws, jumps.as_deref());
                 // Its reading: held over the cell and out of the force, what it leaves is at most its own size against the
                 // generator's (its change over the cell and its gradient are its own size times the light's relative
@@ -1064,6 +1070,7 @@ impl Middle<'_> {
                 (inner.reading, inner.kinds, inner.started, inner.ended, inner.unresolved) = (reading, kinds, started, ended, unresolved);
             }
             (inner.current, inner.nodes, inner.tangent) = (Some((path.kappa, path.velocity)), None, false);
+            inner.crossed = Default::default();
         }
         inner
     }
@@ -1080,6 +1087,7 @@ impl Middle<'_> {
             let _p = crate::prof::scope(crate::prof::MID_P_NODES);
             fold.prototype_nodes(self.r, path.kappa, path.velocity, [-h, h], eval, ws.as_mut().unwrap());
             (inner.nodes, inner.half, inner.tangent) = (Some(h), Some(h), false);
+            (inner.crossed[1], inner.crossed[2]) = (None, None);
         }
         if tangent && !inner.tangent {
             let Inner { eval, ws, .. } = &mut *inner;
@@ -1261,6 +1269,29 @@ impl Middle<'_> {
         Some((ws.sizes(fold, &inner.eval, &self.run.clusters.grounds), ws.route()))
     }
 
+    /// The cross decays kept (`Set::coherent`) at a position of the step (0 its middle, 1 and 2 its outer nodes at ∓h): per
+    /// pair (i, j) and emission axis q the product L_i,q†L_j,q of its blocks' jumps there (proto.rs
+    /// `Fold::prototype_jumps_of`, the pairs' blocks alone) -- made once on the forward and the nodes as they stand, and
+    /// read by the generator and by every candidate's envelopes at that position (# The jumps' coherence). None where the
+    /// set keeps none.
+    fn crossed(&self, inner: &mut Inner, position: usize) {
+        let set = self.run.clusters.sets.get(self.set);
+        if set.coherent.is_empty() || inner.crossed[position].is_some() {
+            return;
+        }
+        let ws = inner.ws.as_ref().expect("a workspace");
+        let mut needed = vec![false; ws.blocks()];
+        for &(i, j, _) in &set.coherent {
+            (needed[i], needed[j]) = (true, true);
+        }
+        let at = match position {
+            0 => At::Middle,
+            j => At::Node(j - 1),
+        };
+        let jumps = set.fold.prototype_jumps_of(&inner.eval, ws, at, &needed);
+        inner.crossed[position] = Some(set.coherent.iter().map(|&(i, j, _)| std::array::from_fn(|q| jumps[i][q].adjoint().product(&jumps[j][q]))).collect());
+    }
+
     /// e^{iν_m (t_m + s)} ρ: tone m's X at the time s from the middle (module documentation, # The tones).
     fn phased(&self, m: usize, s: f64, rho: &[C64]) -> Vec<C64> {
         let phase = C64::cis(self.run.clusters.sets.get(self.set).tones[m] * (self.t + s));
@@ -1303,11 +1334,12 @@ impl crate::step::Middle for Middle<'_> {
     /// (module documentation, # The tones).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
         let _p = crate::prof::scope(crate::prof::MID_GENERATOR);
-        let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
+        let mut inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
         if !inner.exists {
             h.data.fill(C64::new(f64::NAN, f64::NAN));
             return;
         }
+        self.crossed(&mut inner, position(s));
         let ws = inner.ws.as_ref().unwrap();
         let source = if s == 0.0 { &inner.generator } else { ws.node_generator(usize::from(s > 0.0)) };
         h.data.copy_from_slice(&source.data);
@@ -1321,16 +1353,10 @@ impl crate::step::Middle for Middle<'_> {
         }
         // The decay between two blocks' offsets, kept: −(i/2) e^{i(o − o′)t} Σ_q L_o,q†L_o′,q of its jumps there (# The
         // jumps' coherence).
-        if !set.coherent.is_empty() {
-            let at = match position {
-                0 => At::Middle,
-                j => At::Node(j - 1),
-            };
-            let jumps = set.fold.prototype_jumps(&inner.eval, ws, at);
-            for &(i, j, beat) in &set.coherent {
+        if let Some(crossed) = &inner.crossed[position] {
+            for (&(_, _, beat), cross) in set.coherent.iter().zip(crossed) {
                 let factor = C64::new(0.0, -0.5) * C64::cis(beat * (self.t + s));
-                for q in 0..3 {
-                    let cross = jumps[i][q].adjoint().product(&jumps[j][q]);
+                for cross in cross {
                     for (z, c) in h.data.iter_mut().zip(&cross.data) {
                         *z += factor * *c;
                     }
@@ -1414,7 +1440,7 @@ impl crate::step::Middle for Middle<'_> {
     /// decays at ν there, −(i/2) Σ_q L_o,q†L_o′,q (# The jumps' coherence), and e^{−iνt_m} times the same at −ν (none: zero).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         let _p = crate::prof::scope(crate::prof::MID_ENVELOPES);
-        let inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
+        let mut inner = self.made(path, (s != 0.0).then_some(s.abs()), false);
         let set = self.run.clusters.sets.get(self.set);
         let c = &set.candidates[m];
         if !inner.exists {
@@ -1422,12 +1448,10 @@ impl crate::step::Middle for Middle<'_> {
             minus.data.fill(C64::new(f64::NAN, f64::NAN));
             return;
         }
+        if !c.cross.iter().all(Vec::is_empty) {
+            self.crossed(&mut inner, position(s));
+        }
         let ws = inner.ws.as_ref().unwrap();
-        let at = match position(s) {
-            0 => At::Middle,
-            j => At::Node(j - 1),
-        };
-        let jumps = (!c.cross.iter().all(Vec::is_empty)).then(|| set.fold.prototype_jumps(&inner.eval, ws, at));
         for ((member, cross), out, sign) in [((c.plus, &c.cross[0]), plus, 1.0), ((c.minus, &c.cross[1]), minus, -1.0)] {
             let phase = C64::cis(sign * c.beat * self.t);
             out.data.fill(C64::ZERO);
@@ -1437,11 +1461,9 @@ impl crate::step::Middle for Middle<'_> {
                 }
             }
             for &pair in cross {
-                let (i, j, _) = set.coherent[pair];
-                let jumps = jumps.as_ref().expect("the jumps of a cross decay's blocks");
+                let products = &inner.crossed[position(s)].as_ref().expect("the cross decays' products")[pair];
                 let factor = C64::new(0.0, -0.5) * phase;
-                for q in 0..3 {
-                    let product = jumps[i][q].adjoint().product(&jumps[j][q]);
+                for product in products {
                     for (z, x) in out.data.iter_mut().zip(&product.data) {
                         *z += factor * *x;
                     }
@@ -1678,6 +1700,7 @@ impl crate::step::Dynamics for Onefold {
                 made: 0.0,
                 reading: 0.0,
                 beyond: false,
+                crossed: Default::default(),
                 kinds: [0.0; KINDS],
                 started: [0.0; KINDS],
                 ended: [0.0; KINDS],
