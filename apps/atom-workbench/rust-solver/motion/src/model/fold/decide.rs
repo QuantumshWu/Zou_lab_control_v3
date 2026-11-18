@@ -337,6 +337,33 @@ impl<'a> Search<'a> {
         Search { request, light, grounds, floor, most, built: Default::default(), of: OnceLock::new(), asked: Default::default() }
     }
 
+    /// The floor and the largest momentum (`new`) given later: the sets' folds are made without them (`merged`, the base
+    /// run's), the points' reads with them.
+    pub(crate) fn bound(&mut self, floor: f64, most: f64) {
+        (self.floor, self.most) = (floor, most);
+    }
+
+    /// One choice of every set's nodes `nodes` (per set: its explicit nodes and drives), made of each set's own (`Built`,
+    /// made once and at once): the rule's sets and frames, every set's explicit nodes and drives (each list in its order),
+    /// and per set its tiers, its own keys' (a key's source state is its set's) in its choice's order -- each set's fold
+    /// on it the one on its own choice (`Fold::build` reads a set's keys alone): what `Choice::base_of` makes of all the
+    /// sets at once (run.rs `Onefold::new`).
+    pub(crate) fn merged(&self, nodes: &[(Vec<Key>, Vec<Key>)]) -> Result<Choice, String> {
+        self.build(&nodes.iter().cloned().enumerate().collect::<Vec<_>>());
+        let built: Vec<Arc<Built>> = nodes.iter().enumerate().map(|(k, x)| self.built(k, x)).collect::<Result<_, _>>()?;
+        let first = &built.first().ok_or("没有基态集合")?.choice;
+        let mut explicit: Vec<Key> = nodes.iter().flat_map(|x| x.0.iter().copied()).collect();
+        let mut driven: Vec<Key> = nodes.iter().flat_map(|x| x.1.iter().copied()).collect();
+        explicit.sort();
+        driven.sort();
+        let mut out = Choice { frames: first.frames.clone(), sets: first.sets.clone(), explicit, driven, copies: vec![], excited: vec![] };
+        for (b, ground) in built.iter().zip(self.grounds) {
+            out.copies.extend(b.choice.copies.iter().filter(|x| ground.contains(&x.0 .1)).cloned());
+            out.excited.extend(b.choice.excited.iter().filter(|x| ground.contains(&x.0 .1)).cloned());
+        }
+        Ok(out)
+    }
+
     /// Set k's fold with the explicit nodes and drives `nodes` (`Built`: `Choice::base_of`, its own set's tiers; the fold
     /// and its workspace), made once -- the first thread to ask makes it, the others wait for it.
     fn built(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Arc<Built>, String> {
@@ -370,11 +397,6 @@ impl<'a> Search<'a> {
                 });
             }
         });
-    }
-
-    /// Set k's choice with the nodes `nodes` (`Built`): the run's (run.rs `Onefold::new`).
-    pub(crate) fn choice(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Choice, String> {
-        self.built(k, nodes).map(|b| b.choice.clone())
     }
 
     /// Whether set k's nodes `nodes` are placed (`Fold::build`: a node holding a state explicit at another offset is

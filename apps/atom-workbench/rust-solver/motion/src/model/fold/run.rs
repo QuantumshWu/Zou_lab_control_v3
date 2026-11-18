@@ -359,16 +359,25 @@ impl Set {
 
 impl Onefold {
     /// The run of a request (module documentation), the splitting's reference state's ground populations `reference`:
-    /// every ground set's cluster with nothing explicit first (`Choice::base`).
+    /// every ground set's cluster with nothing explicit first (`Choice::base`), then the start's decision's. Each set's
+    /// choice is made once, by the decision's search, and the run's choice is theirs (decide.rs `Search::merged`): the
+    /// rule's ground sets are its structure's (`Choice::of`; the tiers keep no copy, which alone would join two sets,
+    /// `Fold::sets`), its light the request's.
     pub(crate) fn new(request: &Request, reference: [f64; GROUND]) -> Result<Onefold, String> {
-        let base = Onefold::of(request, &Choice::base(request, vec![])?, reference)?;
+        let light = Light::new(request);
+        let grounds = Fold::sets(request, &Choice::of(request, crate::model::elim::share())?)?;
+        let mut search = super::decide::Search::new(request, &light, &grounds, 0.0, 0.0);
+        let base = Onefold::of(request, &search.merged(&vec![(vec![], vec![]); grounds.len()])?, reference)?;
         // The start's decision (decide.rs): the worst case over the local physics, an atom held by the trap at most its
         // depth's kinetic energy; every reading in the potential channel's floor.
         let depth = (-base.bottom).max(0.0);
-        let search = super::decide::Search::new(request, &base.light, &base.clusters.grounds, base.clusters.floor, (2.0 * depth / base.hbar_over_mass).sqrt());
+        search.bound(base.clusters.floor, (2.0 * depth / base.hbar_over_mass).sqrt());
         let decision = search.decide()?;
-        let (explicit, driven) = (decision.explicit(), decision.driven());
-        let mut run = if explicit.is_empty() { base } else { Onefold::of(request, &Choice::base_of(request, explicit, driven, &|_| true)?, reference)? };
+        let mut run = if decision.explicit().is_empty() {
+            base
+        } else {
+            Onefold::of(request, &search.merged(&decision.sets.iter().map(|s| (s.nodes.clone(), s.driven.clone())).collect::<Vec<_>>())?, reference)?
+        };
         run.decision = decision;
         Ok(run)
     }
