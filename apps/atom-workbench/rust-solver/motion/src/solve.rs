@@ -4827,6 +4827,70 @@ mod tests {
         assert!(held.iter().flatten().all(|e| !tweezer.contains(e)), "no node of the tweezer's line rises");
     }
 
+    /// A step's count against its time (a measurement, ignored; tilt0's request where the scratchpad holds it): states of
+    /// three of tilt0's atoms -- the trap's centre at the thermal speed along x, y and z, run at its step τ -- every two
+    /// microseconds over their first 60 µs; from each, 4τ of the run as the run takes it at τ (four steps) and at 4τ
+    /// (one), each step made and taken on one thread (`Midway::new` and `attempt`, a scratch carried along each level, no
+    /// decision), timed, and counted as the ladder prices it (`Price::parts`, the jumps' `Trajectory::jumped`). Per
+    /// level its wall time and its count by part; the prof regions after each (cumulative; nothing without the feature).
+    #[test]
+    #[ignore]
+    fn a_step_s_count_against_its_time() {
+        let file = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\tilt0.json";
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap()).unwrap();
+        let b = chief(&request);
+        let run = Onefold::new(&request, alone(b)).unwrap();
+        let trap = Prepared::new(&run, alone(b)).unwrap().trap;
+        let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+        let (speed, tau) = (thermal(&request, &run), 0.32610161451737907);
+        let mut states = vec![];
+        for (index, axis) in [(3u64, 0usize), (5, 1), (7, 2)] {
+            let mut kappa = [0.; 3];
+            kappa[axis] = speed;
+            let mut t = Trajectory::begun(&run, b, trap.centre, kappa, SEED, index, 4. * tau);
+            let mut path = adapt::Path::new(SEED, index, 4. * tau, 2);
+            let mut scratch = Scratch::default();
+            while t.time < 60. && t.lost.is_none() {
+                let stop = t.time + 2.;
+                if adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, 1000., stop, &[], &mut |_, _, _| {}, &mut |_, _| {}).is_err() {
+                    break;
+                }
+                states.push(t.clone());
+            }
+        }
+        eprintln!("{} states{}", states.len(), crate::prof::report());
+        for (h, count) in [(tau, 4), (4. * tau, 1)] {
+            let mut scratch = Scratch::default();
+            let (mut wall, mut parts, mut jumps, mut steps) = (0.0, [0.0; 6], 0.0, 0);
+            for s in &states {
+                let mut t = s.clone();
+                for _ in 0..count {
+                    let started = Instant::now();
+                    let Ok(m) = crate::step::Midway::new(&run, &t, h, None) else { break };
+                    let Ok(step) = m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &domain) else { break };
+                    wall += started.elapsed().as_secs_f64();
+                    for (_, price) in &step.prices {
+                        for (p, x) in parts.iter_mut().zip(price.parts(price.costs)) {
+                            *p += x;
+                        }
+                    }
+                    jumps += step.end.jumped - t.jumped;
+                    t = step.end;
+                    steps += 1;
+                }
+            }
+            let total = parts.iter().sum::<f64>() + jumps;
+            eprintln!(
+                "COUNT h {h:.4} steps {steps}: wall {:.4} s, {:.2} µs a step; count {total:.4e} ({:.3} ns a count); parts [propagation, impulse, hazard, optical, end, model] {:?}, jumps {jumps:.4e}{}",
+                wall,
+                1e6 * wall / steps as f64,
+                1e9 * wall / total,
+                parts.map(|x| format!("{x:.3e}")),
+                crate::prof::report()
+            );
+        }
+    }
+
     /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its
     /// atoms at the trap's centre at rest and at one to three times the thermal speed along each lab axis, held (no jump,
     /// each its own representation: its start's), at two steps -- a trajectory's work a µs priced at every state is that

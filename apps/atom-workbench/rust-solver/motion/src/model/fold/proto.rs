@@ -575,6 +575,9 @@ struct FarBasis {
     /// Per source vector and emission axis C_qR₀U_a, stacked by rows (b, a, q) at (b·v + a)·3 + q (3 GROUND·v × n): the
     /// jumps and the photons, one product a run of ground states.
     emitted: Vec<C64>,
+    /// Per source vector R₀U_a on the block's rows (v × m × n, vector after vector): its excited amplitude's parts
+    /// (`Fold::prototype_excited`).
+    excited: Vec<C64>,
 }
 
 /// An atom's representation of a set (# The decisions; a value: its decompositions shared, so that a copy is cheap and a
@@ -3396,6 +3399,7 @@ impl Fold {
         let es: Vec<usize> = (0..GROUND).collect();
         let per: Vec<[Mat; 3]> = ru.iter().map(|x| std::array::from_fn(|q| self.emission[q].block(&es, &rows).product(x))).collect();
         let emitted: Vec<C64> = (0..GROUND).flat_map(|b| per.iter().flat_map(move |m| (0..3).flat_map(move |q| (0..n).map(move |p| m[q][(b, p)])))).collect();
+        let excited: Vec<C64> = ru.iter().flat_map(|x| x.data.iter().copied()).collect();
         let lu: Vec<Mat> = u.iter().map(|x| r0.adjoint().product(x)).collect();
         let (mut f, mut g, mut nf) = (vec![], vec![], vec![]);
         for a in 0..u.len() {
@@ -3425,7 +3429,7 @@ impl Fold {
             })
             .collect::<Vec<f64>>();
         let fg = f.iter().zip(&g).map(|(a, b)| *a + *b * laid.z0).collect();
-        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted })
+        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted, excited })
     }
 
     /// The forms Ĥ_PP's pairs and the far blocks hold at the focus, on P's diagonal at the weights `weight` (one per
@@ -6358,19 +6362,14 @@ impl Fold {
         out
     }
 
-    /// The jumps as operators at a position of the step (`At`: its middle or an outer node; the generator's decay between two
-    /// blocks' offsets takes their products where it is a tone, fold.rs `Fold::beating`): per block C_q ε S⁻¹ (GROUND × n, q the emission's axis), ε the
-    /// block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's R₀Σ_a e_a U_a --, S
-    /// the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The jumps). A jump's own
-    /// amplitudes on its state are its photons' (`Fold::prototype_photons`, `Workspace::jumped`).
+    /// The jumps as operators at a position of the step (`At`: its middle or an outer node): per block C_q ε S⁻¹ (GROUND ×
+    /// n, q the emission's axis), ε the block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node)
+    /// with its explicit states' own rows, a far block's R₀Σ_a e_a U_a --, S the middle's: i(G − G†) = Σ L†L to the
+    /// rounding at every position (module documentation, # The jumps). The run takes the operators' products by the
+    /// amplitudes (`prototype_excited`, `Fold::decay_between`) and a jump's own amplitudes on its state by its photons
+    /// (`Fold::prototype_photons`, `Workspace::jumped`): these, C_q apart, are the tests' independent reading of both.
+    #[cfg(test)]
     pub(crate) fn prototype_jumps(&self, cache: &Cache, ws: &Workspace, position: At) -> Vec<[Mat; 3]> {
-        self.prototype_jumps_of(cache, ws, position, &vec![true; ws.near.len() + ws.far.len()])
-    }
-
-    /// `prototype_jumps` of the blocks `needed` marks (the jumps' order), each made as there; the others empty (0 × 0):
-    /// the generator's cross decays read the blocks of their pairs alone (run.rs `Middle::crossed`).
-    pub(crate) fn prototype_jumps_of(&self, cache: &Cache, ws: &Workspace, position: At, needed: &[bool]) -> Vec<[Mat; 3]> {
-        let _p = crate::prof::scope(crate::prof::P_JUMPS);
         let n = ws.n;
         let normal = &ws.step.normal;
         let e = match position {
@@ -6379,12 +6378,7 @@ impl Fold {
             At::Place => unreachable!("a jump's amplitudes at its place are its photons'"),
         };
         let mut out = vec![];
-        let none = || -> [Mat; 3] { std::array::from_fn(|_| Mat::zeros(0, 0)) };
         for (x, nb) in ws.near.iter().enumerate() {
-            if !needed[x] {
-                out.push(none());
-                continue;
-            }
             let basis = cache.near_at(x);
             let z = match position {
                 At::Middle => &nb.ztot,
@@ -6400,10 +6394,6 @@ impl Fold {
             }));
         }
         for (x, fb) in ws.far.iter().enumerate() {
-            if !needed[ws.near.len() + x] {
-                out.push(none());
-                continue;
-            }
             if fb.omitted {
                 out.push(std::array::from_fn(|_| Mat::zeros(GROUND, n)));
                 continue;
@@ -6418,6 +6408,161 @@ impl Fold {
             }));
         }
         out
+    }
+
+    /// Per block `needed` marks (the jumps' order: the near blocks, then the far ones) its excited amplitude at a
+    /// position of the step (`At`) times S⁻¹ (`Excited`), S the middle's: a near block's on its explicit states -- each
+    /// its own row of S⁻¹ -- and on its kept rows VZS⁻¹ (Z = Σ_l ρ_l Z_l at a node); a far block's R₀Σ_a e_a U_a S⁻¹ on
+    /// its rows (none where it is left out). Its jumps are L_q = C_q εS⁻¹ (`prototype_jumps`), so the decay between two
+    /// blocks' offsets is Σ_q L_o,q†L_o′,q = (εS⁻¹)_o† D (εS⁻¹)_o′, D = Σ_q C_q†C_q taken once (`Fold::decay_between`;
+    /// run.rs # The jumps' coherence): the dipole sums' completeness makes D Γ on each excited line and nothing between
+    /// lines (far.rs `decay`), so a pair's product runs over the excited states the two amplitudes share, not over the
+    /// 3 GROUND (q, ground) rows of every jump.
+    pub(crate) fn prototype_excited(&self, cache: &Cache, ws: &Workspace, position: At, needed: &[bool]) -> Vec<Option<Excited>> {
+        let _p = crate::prof::scope(crate::prof::P_JUMPS);
+        let (n, ng) = (ws.n, self.ground.len());
+        let normal = &ws.step.normal;
+        let e = match position {
+            At::Middle => &ws.mid.e,
+            At::Node(j) => &ws.nodes[j].at.e,
+            At::Place => unreachable!("a jump's amplitudes at its place are its photons'"),
+        };
+        let mut work = 0.0;
+        let excited = |row: usize, o: usize| match self.blocks[o].rows[row] {
+            Row::Excited(x) => x,
+            Row::Copy { .. } => unreachable!("a block's excited amplitude is on its excited rows"),
+        };
+        let mut out: Vec<Option<Excited>> = Vec::with_capacity(needed.len());
+        for (x, nb) in ws.near.iter().enumerate() {
+            if !needed[x] {
+                out.push(None);
+                continue;
+            }
+            let basis = cache.near_at(x);
+            let z = match position {
+                At::Middle => &nb.ztot,
+                At::Node(j) => &nb.znode[j],
+                At::Place => unreachable!("a jump's amplitudes at its place are its photons'"),
+            };
+            let kept = basis.f.from(&Mat { rows: nb.s, cols: n, data: z.clone() }, &mut work);
+            let mut states: Vec<usize> = nb.xs.iter().map(|&p| self.explicit[p - ng]).collect();
+            states.extend(basis.rows.iter().map(|&r| excited(r, nb.o)));
+            let mut eps = Mat::zeros(nb.xs.len() + nb.s, n);
+            for (i, &p) in nb.xs.iter().enumerate() {
+                eps[(i, p)] = C64::ONE;
+            }
+            eps.data[nb.xs.len() * n..].copy_from_slice(&kept.data);
+            out.push(Some(Excited::of(states, eps, normal)));
+        }
+        for (x, fb) in ws.far.iter().enumerate() {
+            if !needed[ws.near.len() + x] {
+                out.push(None);
+                continue;
+            }
+            if fb.omitted {
+                out.push(Some(Excited::of(vec![], Mat::zeros(0, n), normal)));
+                continue;
+            }
+            let basis = cache.far_at(x);
+            let m = fb.m;
+            let mut eps = Mat::zeros(m, n);
+            for (a, &(cc, k)) in fb.vectors.iter().enumerate() {
+                let c = e[cc][k];
+                for (z, u) in eps.data.iter_mut().zip(&basis.excited[a * m * n..(a + 1) * m * n]) {
+                    *z += c * *u;
+                }
+            }
+            out.push(Some(Excited::of((0..m).map(|r| excited(r, fb.o)).collect(), eps, normal)));
+        }
+        out
+    }
+}
+
+/// A block's excited amplitude at a position of the step (`Fold::prototype_excited`): each excited state's row among its
+/// own (`usize::MAX` where it holds none); ε on the P columns it is not zero on (its sources' and explicit states'
+/// places where its rows solve no Sylvester equation: a far block's R₀Σ_a e_a U_a), those columns, and εS⁻¹ (rows × n).
+pub(crate) struct Excited {
+    pub(super) place: Vec<usize>,
+    pub(super) columns: Vec<usize>,
+    eps: Mat,
+    amplitude: Mat,
+}
+
+impl Excited {
+    /// The amplitude ε (rows × n) on the excited states `states`, with εS⁻¹ of its columns that are not zero -- a zero
+    /// column adds nothing to any product, so dropping it changes no number.
+    fn of(states: Vec<usize>, eps: Mat, normal: &Mat) -> Excited {
+        let mut place = vec![usize::MAX; EXCITED];
+        for (i, &s) in states.iter().enumerate() {
+            place[s] = i;
+        }
+        let n = normal.rows;
+        let columns: Vec<usize> = (0..n).filter(|&j| (0..eps.rows).any(|i| eps[(i, j)] != C64::ZERO)).collect();
+        let eps = Mat::from_fn(eps.rows, columns.len(), |i, c| eps[(i, columns[c])]);
+        let mut amplitude = Mat::zeros(eps.rows, n);
+        for i in 0..eps.rows {
+            for (c, &j) in columns.iter().enumerate() {
+                let x = eps[(i, c)];
+                for (z, v) in amplitude.data[i * n..(i + 1) * n].iter_mut().zip(&normal.data[j * n..(j + 1) * n]) {
+                    *z += x * *v;
+                }
+            }
+        }
+        Excited { place, columns, eps, amplitude }
+    }
+}
+
+impl Fold {
+    /// Σ_q L_o,q†L_o′,q of two blocks' amplitudes at one position (`Fold::prototype_excited`), S⁻¹†ε_o†Dε_o′S⁻¹ over D's
+    /// entries (`Fold::decay`) between the excited states each holds -- C_q summed once, into D, not again at every
+    /// position and pair (n × n), S the workspace's middle's (`decay_onto`).
+    pub(crate) fn decay_between(&self, ws: &Workspace, a: &Excited, b: &Excited) -> Mat {
+        let mut out = Mat::zeros(ws.n, ws.n);
+        self.decay_onto(ws, a, b, C64::ONE, &mut out.data);
+        out
+    }
+
+    /// out += f S⁻¹†ε_o†Dε_o′S⁻¹ (`decay_between`), D's k entries between the two amplitudes' excited states each one
+    /// row of either, gathered and weighed, and the products made on them: of its two associations the one of fewer
+    /// multiply-adds -- the rows of εS⁻¹ (k n²), or the core ε_o†Dε_o′ on the columns of ε that are not zero and then
+    /// S⁻¹ on either side (k c c′ + c c′ n + c n²: a far block's ε lives on its sources' columns).
+    pub(crate) fn decay_onto(&self, ws: &Workspace, a: &Excited, b: &Excited, f: C64, out: &mut [C64]) {
+        let normal = &ws.step.normal;
+        let n = normal.rows;
+        let entries: Vec<(usize, usize, C64)> = self.decay.iter().filter(|(x, y, _)| a.place[*x] != usize::MAX && b.place[*y] != usize::MAX).map(|&(x, y, d)| (a.place[x], b.place[y], (f * d).conj())).collect();
+        let (k, ca, cb) = (entries.len(), a.columns.len(), b.columns.len());
+        if k == 0 {
+            return;
+        }
+        // The left rows weighed, conj(f D_xy) times a's row, and the right rows: Σ_t (w_t a_t)† ⊗ b_t.
+        let gather = |left: &Mat, right: &Mat| -> (Vec<C64>, Vec<C64>) {
+            let (cl, cr) = (left.cols, right.cols);
+            let (mut l, mut r) = (Vec::with_capacity(k * cl), Vec::with_capacity(k * cr));
+            for &(i, j, w) in &entries {
+                l.extend(left.data[i * cl..(i + 1) * cl].iter().map(|z| w * *z));
+                r.extend_from_slice(&right.data[j * cr..(j + 1) * cr]);
+            }
+            (l, r)
+        };
+        if ca * cb * (k + n) + ca * n * n < k * n * n {
+            let (l, r) = gather(&a.eps, &b.eps);
+            let mut core = vec![C64::ZERO; ca * cb];
+            crate::linalg::adjoint_product(&l, &r, (ca, k, cb), &mut core);
+            let rows = |columns: &[usize]| -> Vec<C64> { columns.iter().flat_map(|&c| normal.data[c * n..(c + 1) * n].iter().copied()).collect() };
+            let mut right = vec![C64::ZERO; ca * n];
+            crate::linalg::fused_product(&core, &rows(&b.columns), (ca, cb, n), &mut right);
+            crate::linalg::adjoint_product_onto(&rows(&a.columns), &right, (n, ca, n), out);
+        } else {
+            let (l, r) = gather(&a.amplitude, &b.amplitude);
+            crate::linalg::adjoint_product_onto(&l, &r, (n, k, n), out);
+        }
+    }
+
+    /// The entries of D between two blocks' excited rows (fold.rs `Block::excited`): the outer products a cross decay's
+    /// product at one position sums at the most (`Fold::decay_between`), its count.
+    pub(crate) fn decay_entries(&self, i: usize, j: usize) -> usize {
+        let (a, b) = (self.blocks[i].excited(self), self.blocks[j].excited(self));
+        self.decay.iter().filter(|(x, y, _)| a.contains(x) && b.contains(y)).count()
     }
 }
 

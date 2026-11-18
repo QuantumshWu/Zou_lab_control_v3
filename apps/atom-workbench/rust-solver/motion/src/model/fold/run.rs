@@ -68,7 +68,9 @@
 //! `Fold::prototype_photons`), a jump's amplitudes its class's photons' own, every block summed at its phase at the jump's
 //! time (`Middle::emitted`, proto.rs `Workspace::jumped`): the landings' interference whole, a static one's too. The
 //! decay between jumps is Σ_q L_q†L_q: its blocks' own terms static in G, and between two blocks their cross products at
-//! the beat o − o′, each a term of the generator under the one rule (fold.rs `Fold::beating`): within the share it is
+//! the beat o − o′, S⁻¹†ε_o†Dε_o′S⁻¹ with D = Σ_q C_q†C_q -- the dipole sums over every ground state, Γ on each excited
+//! line and nothing between lines (far.rs `decay`), the excited block's own decay (proto.rs `Fold::prototype_excited`,
+//! `Fold::decay_between`) --, each a term of the generator under the one rule (fold.rs `Fold::beating`): within the share it is
 //! averaged out, beyond it added to the generator at its beat at every position (`step::Middle::generator`), so that
 //! where every cross term is a tone i(G − G†) = Σ_q L_q(t)†L_q(t) at every time, static and beating, by construction.
 //! Each cross decay kept is part of the integrator's candidate of its exact beat -- its key the offsets' exact
@@ -133,7 +135,7 @@
 //! through the compression) -- the force contracts it in the reverse mode, each where it is the cheap one. Their slope
 //! along the path is the parabola through the step's outer nodes the propagation takes, a tone's phase exact. A set of
 //! ground states alone has none: its fold's photons hold that part.
-use super::proto::{At, Bar, Cache, Moments, Workspace, KINDS};
+use super::proto::{At, Bar, Cache, Excited, Moments, Workspace, KINDS};
 #[cfg(test)]
 pub(crate) use super::proto::PROF;
 use super::{Choice, Fold};
@@ -171,8 +173,10 @@ struct Set {
     candidates: Vec<Candidate>,
     /// The pairs of the jumps' blocks (their order: the near blocks', then the far ones', as the fold's blocks) whose cross
     /// decay is a tone (fold.rs `Fold::beating`), each with its beat o − o′ (rad/µs: its candidate's, `Candidate::cross`):
-    /// the decay between their offsets (# The jumps' coherence).
+    /// the decay between their offsets (# The jumps' coherence); and per pair the entries of D between its blocks'
+    /// rows (`Fold::decay_entries`: its product's outer products at a position, at the most).
     coherent: Vec<(usize, usize, f64)>,
+    decays: Vec<usize>,
     /// The averaged terms' Fourier coefficients by beat (# The averaged terms folded).
     folded: Vec<Fourier>,
     /// Its optical sector (# The optical sector): γ_Q, the least of its explicit excited states' decay over two (none
@@ -309,8 +313,8 @@ impl Set {
         let mut states: Vec<usize> = fold.ground.clone();
         states.extend(fold.explicit.iter().map(|&x| GROUND + x));
         let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![crate::model::Beat::whole(vec![]); states.len()], states };
-        let (pool, tones, candidates, coherent, folded) = if fold.blocks.is_empty() {
-            (vec![], vec![], vec![], vec![], vec![])
+        let (pool, tones, candidates, coherent, decays, folded) = if fold.blocks.is_empty() {
+            (vec![], vec![], vec![], vec![], vec![], vec![])
         } else {
             let ws = fold.prototype_workspace()?;
             let (near, far) = ws.layout();
@@ -349,11 +353,12 @@ impl Set {
                     folded[k].1.pairs[side].push((i, j));
                 }
             }
-            (vec![ws], beats.iter().map(|b| b.1).collect(), candidates, coherent, folded.into_iter().map(|f| f.1).collect())
+            let decays = pairs.iter().map(|&(i, j)| fold.decay_entries(blocks[i], blocks[j])).collect();
+            (vec![ws], beats.iter().map(|b| b.1).collect(), candidates, coherent, decays, folded.into_iter().map(|f| f.1).collect())
         };
         let optical = fold.explicit.iter().map(|&x| 0.5 * decay[(x, x)].re).reduce(f64::min);
         let waves = fold.components.iter().flat_map(|c| c.kicks.iter().copied()).collect();
-        Ok(Set { ground_set: k, fold, cluster, pool: Mutex::new(pool), tones, candidates, coherent, folded, optical, waves })
+        Ok(Set { ground_set: k, fold, cluster, pool: Mutex::new(pool), tones, candidates, coherent, decays, folded, optical, waves })
     }
 }
 
@@ -741,8 +746,9 @@ fn forms_on(fold: &Fold, cache: &Cache, ws: &mut Workspace, tones: &[f64], t: f6
 
 /// The averaged terms' second order at the last step's middle (# The averaged terms folded): Σ_ν [G_{+ν}, G_{−ν}]/ν, each
 /// coefficient Ĥ_PP's averaged entries' G_ν there (proto.rs `Workspace::averaged_at`) and its cross decays' −(i/2) Σ_q
-/// L_o,q†L_o′,q (the jumps there, where the set has a cross decay averaged).
-fn folded_part(set: &Set, ws: &Workspace, jumps: Option<&[[Mat; 3]]>) -> Mat {
+/// L_o,q†L_o′,q (`Fold::decay_between` of the blocks' amplitudes there, `excited`, where the set has a cross decay
+/// averaged).
+fn folded_part(set: &Set, ws: &Workspace, excited: Option<&[Option<Excited>]>) -> Mat {
     let _p = crate::prof::scope(crate::prof::FOLDED_PART);
     let n = set.fold.size();
     let mut out = Mat::zeros(n, n);
@@ -753,10 +759,9 @@ fn folded_part(set: &Set, ws: &Workspace, jumps: Option<&[[Mat; 3]]>) -> Mat {
                 g.add_scaled(C64::ONE, &ws.averaged_at(m));
             }
             for &(i, j) in &f.pairs[side] {
-                let jumps = jumps.expect("the jumps of an averaged cross decay's blocks");
-                for q in 0..3 {
-                    g.add_scaled(C64::new(0.0, -0.5), &jumps[i][q].adjoint().product(&jumps[j][q]));
-                }
+                let excited = excited.expect("the amplitudes of an averaged cross decay's blocks");
+                let of = |x: usize| excited[x].as_ref().expect("an averaged cross decay's block's amplitude");
+                set.fold.decay_onto(ws, of(i), of(j), C64::new(0.0, -0.5), &mut g.data);
             }
             g
         });
@@ -986,7 +991,7 @@ struct Inner {
     beyond: bool,
     /// The cross decays' products at the middle and the outer nodes (`Middle::crossed`), made where first asked for on
     /// the forward and the nodes as they stand.
-    crossed: [Option<Vec<[Mat; 3]>>; 3],
+    crossed: [Option<Vec<Mat>>; 3],
     /// The last forward's accounts by kind (ρ²; proto.rs `Step::kinds`), its cell's ends (`Step::started`, `Step::ended`)
     /// and whether it is unresolved.
     kinds: [f64; KINDS],
@@ -1017,8 +1022,8 @@ impl Middle<'_> {
         let set = self.run.clusters.sets.get(self.set);
         let inner = self.made(path, None, false);
         let Some(ws) = inner.ws.as_ref().filter(|_| inner.exists) else { return (0.0, 0.0, 0) };
-        let jumps = set.fold.prototype_jumps(&inner.eval, ws, At::Middle);
-        (folded_part(set, ws, Some(&jumps)).frobenius(), inner.generator.frobenius(), set.folded.len())
+        let excited = set.fold.prototype_excited(&inner.eval, ws, At::Middle, &vec![true; ws.blocks()]);
+        (folded_part(set, ws, Some(&excited)).frobenius(), inner.generator.frobenius(), set.folded.len())
     }
 
     /// The forward at the path's momentum, where the workspace does not hold it (module documentation, # The representation).
@@ -1047,8 +1052,8 @@ impl Middle<'_> {
                 for &(i, j) in set.folded.iter().flat_map(|f| f.pairs.iter().flatten()) {
                     (needed[i], needed[j]) = (true, true);
                 }
-                let jumps = needed.contains(&true).then(|| fold.prototype_jumps_of(eval, ws, At::Middle, &needed));
-                let folded = folded_part(set, ws, jumps.as_deref());
+                let excited = needed.contains(&true).then(|| fold.prototype_excited(eval, ws, At::Middle, &needed));
+                let folded = folded_part(set, ws, excited.as_deref());
                 // Its reading: held over the cell and out of the force, what it leaves is at most its own size against the
                 // generator's (its change over the cell and its gradient are its own size times the light's relative
                 // change): ‖folded‖/‖G‖, against the share.
@@ -1270,10 +1275,10 @@ impl Middle<'_> {
     }
 
     /// The cross decays kept (`Set::coherent`) at a position of the step (0 its middle, 1 and 2 its outer nodes at ∓h): per
-    /// pair (i, j) and emission axis q the product L_i,q†L_j,q of its blocks' jumps there (proto.rs
-    /// `Fold::prototype_jumps_of`, the pairs' blocks alone) -- made once on the forward and the nodes as they stand, and
-    /// read by the generator and by every candidate's envelopes at that position (# The jumps' coherence). None where the
-    /// set keeps none.
+    /// pair (i, j) Σ_q L_i,q†L_j,q of its blocks' excited amplitudes there (proto.rs `Fold::prototype_excited`, the pairs'
+    /// blocks alone; `Fold::decay_between`: through D = Σ_q C_q†C_q) -- made once on the forward and the nodes as they
+    /// stand, and read by the generator and by every candidate's envelopes at that position (# The jumps' coherence).
+    /// None where the set keeps none.
     fn crossed(&self, inner: &mut Inner, position: usize) {
         let set = self.run.clusters.sets.get(self.set);
         if set.coherent.is_empty() || inner.crossed[position].is_some() {
@@ -1288,8 +1293,9 @@ impl Middle<'_> {
             0 => At::Middle,
             j => At::Node(j - 1),
         };
-        let jumps = set.fold.prototype_jumps_of(&inner.eval, ws, at, &needed);
-        inner.crossed[position] = Some(set.coherent.iter().map(|&(i, j, _)| std::array::from_fn(|q| jumps[i][q].adjoint().product(&jumps[j][q]))).collect());
+        let excited = set.fold.prototype_excited(&inner.eval, ws, at, &needed);
+        let of = |x: usize| excited[x].as_ref().expect("a cross decay's block's amplitude");
+        inner.crossed[position] = Some(set.coherent.iter().map(|&(i, j, _)| set.fold.decay_between(ws, of(i), of(j))).collect());
     }
 
     /// e^{iν_m (t_m + s)} ρ: tone m's X at the time s from the middle (module documentation, # The tones).
@@ -1356,10 +1362,8 @@ impl crate::step::Middle for Middle<'_> {
         if let Some(crossed) = &inner.crossed[position] {
             for (&(_, _, beat), cross) in set.coherent.iter().zip(crossed) {
                 let factor = C64::new(0.0, -0.5) * C64::cis(beat * (self.t + s));
-                for cross in cross {
-                    for (z, c) in h.data.iter_mut().zip(&cross.data) {
-                        *z += factor * *c;
-                    }
+                for (z, c) in h.data.iter_mut().zip(&cross.data) {
+                    *z += factor * *c;
                 }
             }
         }
@@ -1461,12 +1465,10 @@ impl crate::step::Middle for Middle<'_> {
                 }
             }
             for &pair in cross {
-                let products = &inner.crossed[position(s)].as_ref().expect("the cross decays' products")[pair];
+                let product = &inner.crossed[position(s)].as_ref().expect("the cross decays' products")[pair];
                 let factor = C64::new(0.0, -0.5) * phase;
-                for product in products {
-                    for (z, x) in out.data.iter_mut().zip(&product.data) {
-                        *z += factor * *x;
-                    }
+                for (z, x) in out.data.iter_mut().zip(&product.data) {
+                    *z += factor * *x;
                 }
             }
         }
@@ -1499,8 +1501,10 @@ impl crate::step::Middle for Middle<'_> {
     }
 
     fn tone_work(&self, m: usize) -> [f64; 2] {
-        let c = &self.run.clusters.sets.get(self.set).candidates[m];
-        let (members, cross) = (usize::from(c.plus.is_some()) + usize::from(c.minus.is_some()), c.cross[0].len() + c.cross[1].len());
+        let set = self.run.clusters.sets.get(self.set);
+        let c = &set.candidates[m];
+        // Per cross decay its product's outer products and its sum into the envelope, at each position.
+        let (members, cross) = (usize::from(c.plus.is_some()) + usize::from(c.minus.is_some()), c.cross.iter().flatten().map(|&k| set.decays[k] + 1).sum());
         self.costs().map_or([0.0; 2], |(sizes, _)| sizes.candidate(members, cross, c.plus.or(c.minus).unwrap_or(0)))
     }
 
