@@ -4471,6 +4471,14 @@ impl Fold {
                 *x = if nb.nc > 0 { centring(&basis.centre, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
             }
             let mut centred = vec![0.0; n];
+            // The centred copies' dressing of the solved rows' source, level by level (`dressing_moved`): its error per
+            // row and column, the static lane's (an explicit column) or about the lanes' mean.
+            let dressed = if nb.nc > 0 && !nb.idle() {
+                copy_rows(nb, basis, &mid.e, n, work);
+                dressing_moved(nb, basis, &mid.e, h, n, work)
+            } else {
+                vec![]
+            };
             acc.fill(0.0);
             for i in 0..s {
                 let own = basis.part[i];
@@ -4499,9 +4507,19 @@ impl Fold {
                     }
                     let lesser = |a: f64, b: f64| if a.is_nan() { b } else { a.min(b) };
                     let reuse = if all == 0.0 { 0.0 } else { lesser(e / gap + all * about, all * direct) };
-                    let static_lane = if nb.xcol[j] { eps[j] * nb.rhox[i] / (h[j * n + j] - kappa).norm_sqr().sqrt() } else { 0.0 };
-                    let rho = eps[j] * nb.rho[i];
-                    let copies = if held == 0.0 { 0.0 } else { lesser(held / gap + rho * about, rho * direct + static_lane) };
+                    // The dressing's error by level (`dressing_moved`, readings.status.md R3 item 3, RD5), not ε_R,j ρ_i ‖Z_j‖
+                    // (Cauchy–Schwarz: 10–60 times the error on tilt2): on the static lane at the column's own energy, on
+                    // the beams' lanes about their mean with the lanes' rest (`about`, `direct` as the reuse's: each lane's
+                    // share of the column's response).
+                    let ds = dressed.get(i * n + j).map_or(0.0, |d| d.abs());
+                    let copies = if held == 0.0 || ds == 0.0 {
+                        0.0
+                    } else if nb.xcol[j] {
+                        ds / (h[j * n + j] - kappa).norm_sqr().sqrt()
+                    } else {
+                        let whole = total[j].sqrt();
+                        if whole > 0.0 { ds * lesser((1.0 + gap * about / whole) / gap, direct / whole) } else { ds / gap }
+                    };
                     acc[j] += reuse * reuse;
                     centred[j] += copies * copies;
                 }
@@ -5081,6 +5099,67 @@ impl Centre {
 fn centring(centre: &Centre, z0: f64, held: f64, c: C64, shifts: &[f64]) -> f64 {
     let lanes: &[f64] = if shifts.is_empty() { &[0.0] } else { shifts };
     lanes.iter().map(|&w| ((c - C64::real(w + z0)).norm_sqr().sqrt() + held) * centre.size(c - C64::real(w))).fold(0.0, f64::max)
+}
+
+/// The error a near block's centred copies held at R₀ leave in the dressing of its solved rows' source (`Fold::accounts`;
+/// readings.status.md R3 item 3, RD5), level by level of Ĥ_CC = Σ_k λ_k u_k u_k† (its Schur form, as `copies_moved`): the
+/// dressing is Ĥ_SC R Ĥ_CS, its source on the rows V†Ĥ_SC (R(z) − R₀)B̃_j, B̃ = Ĥ_CS T_S + B_C; on level k (R(z) − R₀)B̃
+/// = u_k f̃_k t_k, t_k = u_k†T_C,j, f̃_k = (z₀ − z + δĤ)/(z − λ_k) (exact where Ĥ_CC is normal and the forms held; the
+/// forms' drift `held` along z₀ − z: its direction unknown, its size kept). The rows' coupling to a level is the copies'
+/// response's: R₀Ĥ_CS V = Y = Σ_a e_a* R₀U_a†V (`copies_of`), so V†Ĥ_SC u_k = Y†(R₀⁻¹)†u_k = (z₀ − λ̄_k) Y†u_k. So
+/// δsource_ij = Σ_k (z₀ − λ̄_k)(Y†u_k)_i f̃_k t_kj -- every level's coupling to the row and to the column with its phase,
+/// not the dressing's row norm times the factor of the worst level times the column's whole response (Cauchy–Schwarz,
+/// 10–60 times the error on tilt2's blocks). z = c_j at an explicit column (its static lane), c_j − w̄ else. Per row and
+/// column (s × n).
+fn dressing_moved(nb: &Near, basis: &NearBasis, e: &[Vec<C64>], h: &[C64], n: usize, work: &mut f64) -> Vec<C64> {
+    let (s, nc) = (nb.s, nb.nc);
+    let centre = &basis.centre;
+    let nl = centre.levels.len();
+    let mut out = vec![C64::ZERO; s * n];
+    if nl == 0 || s == 0 {
+        return out;
+    }
+    // Y (nc × s) at the point: Σ_a e_a* R₀U_a†V by copy row (`copies_of` with Z the identity).
+    let mut y = vec![C64::ZERO; nc * s];
+    for (cv, &(g, k, gi)) in nb.copies.iter().enumerate() {
+        let ek = e[g][k].conj();
+        let yc = &basis.copies[cv];
+        for (a2, &row) in nb.groups[gi].1.iter().enumerate() {
+            for i in 0..s {
+                y[row * s + i] += ek * yc[a2 * s + i];
+            }
+        }
+    }
+    // P_ik = (z₀ − λ̄_k)(Y†u_k)_i.
+    let mut pk = vec![C64::ZERO; s * nl];
+    for k in 0..nl {
+        let lam = C64::real(basis.z0) - centre.levels[k].conj();
+        for i in 0..s {
+            let mut v = C64::ZERO;
+            for r in 0..nc {
+                v += y[r * s + i].conj() * centre.vectors[(r, k)];
+            }
+            pk[i * nl + k] = lam * v;
+        }
+    }
+    let mean = nb.shifts.iter().sum::<f64>() / nb.shifts.len().max(1) as f64;
+    let mut v = vec![C64::ZERO; nl];
+    for j in 0..n {
+        let z = h[j * n + j] - C64::real(if nb.xcol[j] { 0.0 } else { mean });
+        let apart = C64::real(basis.z0) - z;
+        let drift = if apart.abs() > 0.0 { apart * (1.0 + nb.held / apart.abs()) } else { C64::real(nb.held) };
+        for k in 0..nl {
+            let t: C64 = (0..nc).map(|r| centre.vectors[(r, k)].conj() * nb.tc[r * n + j]).sum();
+            let pole = z - centre.levels[k];
+            // A level the column does not reach moves nothing (at a pole too: no 0·∞).
+            v[k] = if t == C64::ZERO { C64::ZERO } else { drift / pole * t };
+        }
+        for i in 0..s {
+            out[i * n + j] = (0..nl).map(|k| pk[i * nl + k] * v[k]).sum();
+        }
+    }
+    *work += (nc * s * (nb.copies.len() + nl) + n * nl * (nc + s)) as f64 / 4.0;
+    out
 }
 
 /// What a block's centred copies held at R₀ move of column j through their own rows (`Fold::accounts`), level by level
