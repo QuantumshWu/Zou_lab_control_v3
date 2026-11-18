@@ -963,10 +963,15 @@ impl Ritzes {
 #[allow(clippy::too_many_arguments)]
 fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usize, den: &[f64], floor: f64, h: &[C64], energy: f64, n: usize, ritz: &Ritz, pull: &Pull, x: usize, out: &mut [f64]) {
     let (s, nd) = (nb.s, nb.nd);
-    // The force channel's per column and beam lane −2 Σ_i R_ij* Ṽ_l,ij (its Im the lane's δΓ), and Σ_i Z_ij* R_ij (the metric's).
+    // The force channel's sums per column (`force_moved`): per beam lane ⟨R_j, D Z_l,j⟩ + ⟨Z_j, D R_l,j⟩ (the absorbed
+    // light's), per pair of lanes Ṽ_l†R_l' + R_l†Ṽ_l' + R_l†κZ_l' + Z_l†κR_l' (the Hermitian part's gradient), Σ_i Z_ij* R_ij
+    // (the metric's); a lane's rest R_l by the same recurrence on its own sweeps (`Near::zs`).
     let kicks = pull.kicks.get(x).map_or(&[][..], |k| &k[..]);
     let (beams, ln) = (kicks.len(), nb.lanes * n);
-    let mut lanes = vec![C64::ZERO; n * beams];
+    let mut absorbed = vec![C64::ZERO; n * beams];
+    let mut turned = vec![C64::ZERO; n * beams * beams];
+    let mut rl = vec![C64::ZERO; beams];
+    let lane = |k: usize, i: usize, l: usize, j: usize| nb.zs[k * s * ln + i * ln + l * n + j];
     let mut metric = vec![C64::ZERO; n];
     // The pairs' channel: X = Ψ†R on the part's rows, X_kj = Σ_i Z_ik* R_ij (n × n), and a row's rest by column.
     let mut overlap = vec![C64::ZERO; n * n];
@@ -994,9 +999,22 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
             let rest = r.norm_sqr();
             out[j] += rest;
             shift[j] += rest * (h[j * n + j] - C64::real(mean) - diagonal).norm_sqr().sqrt();
-            if i < s {
-                for (l, u) in lanes[j * beams..(j + 1) * beams].iter_mut().enumerate() {
-                    *u += r.conj() * nb.vt[i * ln + l * n + j];
+            if i < s && beams > 0 && nb.zs.len() >= done * s * ln {
+                let kappa = nb.kappa[i];
+                let decay = -2.0 * kappa.im;
+                for (l, x) in rl.iter_mut().enumerate() {
+                    let at_l = |k: usize| lane(k, i, l, j);
+                    let (b, t) = (if done >= 2 { at_l(done - 2) } else { C64::ZERO }, if done >= 3 { at_l(done - 3) } else { C64::ZERO });
+                    let made = if p < done { at_l(done - 1) - if p >= 1 { at_l(p - 1) } else { C64::ZERO } } else { C64::ZERO };
+                    *x = made + alpha * (b - t) + beta * (at_l(done - 1) - b);
+                }
+                for l in 0..beams {
+                    let zl = lane(done - 1, i, l, j);
+                    absorbed[j * beams + l] += r.conj() * zl * decay + last.conj() * rl[l] * decay;
+                    for m in 0..beams {
+                        let (vl, vm, zm) = (nb.vt[i * ln + l * n + j], nb.vt[i * ln + m * n + j], lane(done - 1, i, m, j));
+                        turned[(j * beams + l) * beams + m] += vl.conj() * rl[m] + rl[l].conj() * vm + rl[l].conj() * kappa * zm + zl.conj() * kappa * rl[m];
+                    }
                 }
                 metric[j] += last.conj() * r;
             }
@@ -1015,12 +1033,27 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
         let size = out[j];
         let rated = if den[j] <= floor || size.is_nan() || size == 0.0 || (size.is_finite() && rounded(size, den[j], n, s, nb.lanes)) { 0.0 } else { size / den[j] };
         // The force channel (readings.status.md RD4, RD5): the rest moves the column's force at first order (the force is
-        // no Ritz value), δF_j = Σ_l q_l δΓ_l,j − F_j δM_jj/(1 + M_jj), δΓ_l,j = −2 Im⟨R_j, Ṽ_l,j⟩, δM_jj = 2 Re⟨Z_j, R_j⟩,
-        // against the gross force Σ_l |q_l| |Γ_l,j| (`Pull`): rate(√·) of its square is |δF_j|/F_gross,j. The larger of
-        // the two channels, not their sum (one δZ).
+        // no Ritz value) -- the force as the step makes it, F_j = −∂Re G_jj + Σ Im(u*∂u) (`Fold::prototype_force`, the
+        // photons), each lane's response at its beam's phase e^{iq_l·r}: the absorbed light's Σ_l q_l Re⟨Z_j, D Z_l,j⟩ (D
+        // the rows' decay, −2 Im κ_i on the Schur diagonal) and the Hermitian part's Σ_ll' (q_l' − q_l) Im[Ṽ_l†Z_l' +
+        // Z_l†Ṽ_l' + Z_l†KZ_l'] (a lane pair's redistribution; K by its diagonal κ), both moved at first order by the lanes'
+        // rests R_l, less F_j δM_jj/(1 + M_jj), δM_jj = 2 Re⟨Z_j, R_j⟩ -- against the gross force Σ_l |q_l| |Γ_l,j| (`Pull`):
+        // rate(√·) of its square is |δF_j|/F_gross,j. Not the Hellmann–Feynman form −2 Σ_l q_l Im⟨R_j, Ṽ_l,j⟩ (RD4's): the
+        // force is the step's, not an expectation of ∇H, and of one beam the absorbed light moves as the rate does (2 Re⟨Z,
+        // DR⟩) where that form read |Δ|/Γ times more (the two-level atom at Δ = −4Γ: 4.4 times its error; tilt0's start
+        // 0.5 → 9.7 s in sweeps that form asked for). The larger of the two channels, not their sum (one δZ).
         let force = if rated > 0.0 && pull.gross.get(j).is_some_and(|&g| g > 0.0) {
             let moved = -2.0 * metric[j].re / (1.0 + den[j]);
-            let df: [f64; 3] = std::array::from_fn(|a| kicks.iter().zip(&lanes[j * beams..(j + 1) * beams]).map(|(q, u)| q[a] * (-2.0 * u.im)).sum::<f64>() + moved * pull.net[j][a]);
+            let df: [f64; 3] = std::array::from_fn(|a| {
+                let mut f = moved * pull.net[j][a];
+                for (l, q) in kicks.iter().enumerate() {
+                    f += q[a] * absorbed[j * beams + l].re;
+                    for (m, w) in kicks.iter().enumerate() {
+                        f += (w[a] - q[a]) * turned[(j * beams + l) * beams + m].im;
+                    }
+                }
+                f
+            });
             unrate(df.iter().map(|x| x * x).sum::<f64>().sqrt() / pull.gross[j]).powi(2)
         } else {
             0.0
