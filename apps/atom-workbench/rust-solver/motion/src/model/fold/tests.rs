@@ -3212,7 +3212,9 @@ impl Flow {
 /// ground state of its own choosing), the fold at the focus at rest. Per landing state the exact statistics -- the dense
 /// lattice's flow from the bare state (`lattice`, `Flow`): the mean waiting time ∫‖ψ‖²dt and the next landing's
 /// distribution, each offset's jumps apart -- against the fold's: its spectral landing ψ₀ = S N⁻¹f on the jump clock
-/// (c = ‖ψ₀‖² below one: the bare state's photon at once with 1 − c; above: the dead time to ‖e^{−iGt}ψ₀‖² = 1), its own
+/// (c = ‖ψ₀‖² below one: the transient's photons at once, its landing density Δ = Σ_q C_q X_tr C_q† on the landing's modes
+/// (proto/transient.rs); above: the dead time to ‖e^{−iGt}ψ₀‖² = 1), and the landing's exact survival's mean on its modes
+/// (`Transient::wait`, the exact clock's) beside; its own
 /// flow e^{−iGt}, its jumps L_q (`Fold::prototype_jumps`). Where its readings are within the share (ρ, the run's test: the
 /// ring's and the series' among them), so is every landing's waiting time's error and the total variation of its next
 /// landing; what they err by over the ring's and the series' readings together is said (a leading-order estimate, not a
@@ -3261,22 +3263,6 @@ fn random_systems_land_within_their_ring() {
             let mut offsets: Vec<f64> = blocks.iter().map(|&o| fold.blocks[o].value).collect();
             offsets.sort_by(f64::total_cmp);
             offsets.dedup();
-            let landed = |psi: &[C64], out: &mut [f64; GROUND], weight: f64| {
-                for &offset in &offsets {
-                    for q in 0..3 {
-                        let mut u = [C64::ZERO; GROUND];
-                        for (k, &o) in blocks.iter().enumerate().filter(|(_, o)| fold.blocks[**o].value == offset) {
-                            let _ = o;
-                            for (b, z) in u.iter_mut().enumerate() {
-                                *z += (0..n).map(|p| jumps[k][q][(b, p)] * psi[p]).sum::<C64>();
-                            }
-                        }
-                        for b in 0..GROUND {
-                            out[b] += weight * u[b].norm_sqr();
-                        }
-                    }
-                }
-            };
             let Some(fold_flow) = Flow::new(&generator) else { continue };
             // The exact lattice, its nodes connected to the set's ground states (the lattice seeds every ground state of the
             // model; the others' nodes are no part of the flow): its flow, its excited nodes by offset.
@@ -3298,7 +3284,7 @@ fn random_systems_land_within_their_ring() {
             let mut keys: Vec<Vec<i64>> = l.nodes.iter().filter(|(s, _)| *s >= GROUND).map(|x| x.1.clone()).collect();
             keys.sort();
             keys.dedup();
-            let (mut worst_tau, mut worst_tv) = (0.0_f64, 0.0_f64);
+            let (mut worst_tau, mut worst_tv, mut worst_wait) = (0.0_f64, 0.0_f64, 0.0_f64);
             for k in 0..fold.ground.len() {
                 // Exact.
                 let at = l.nodes.iter().position(|(s, key)| *s == fold.ground[k] && key.iter().all(|&x| x == 0)).expect("the ground state's node");
@@ -3323,15 +3309,18 @@ fn random_systems_land_within_their_ring() {
                 }
                 // The fold on its jump clock.
                 let bare: Vec<C64> = (0..n).map(|p| if p == k { C64::ONE } else { C64::ZERO }).collect();
-                let Some((psi0, _)) = ws.taken(&fold, &cache, &bare, &[], false) else { continue };
+                let Some((psi0, a)) = ws.taken(&fold, &cache, &bare, &[], false) else { continue };
                 let c = crate::linalg::norm_sqr(&psi0);
+                // The landing's transient (proto/transient.rs): its exact survival's mean -- the exact clock's -- and its
+                // landing density, the photons the clock gives at once.
+                let transient = ws.transient(&fold, &cache, &a).expect("the landing's modes");
+                worst_wait = worst_wait.max((transient.wait() / tau_exact - 1.0).abs());
                 let (mut tau, mut next) = (0.0, [0.0; GROUND]);
                 let start = if c <= 1.0 {
-                    let mut prompt = [0.0; GROUND];
-                    landed(&bare, &mut prompt, 1.0);
-                    let total: f64 = prompt.iter().sum();
-                    for (o, x) in next.iter_mut().zip(prompt) {
-                        *o += (1.0 - c) * x / total;
+                    let all: Vec<usize> = (0..GROUND).collect();
+                    let density = &transient.landing_density(&fold, &ws, &cache, &[all])[0];
+                    for (b, o) in next.iter_mut().enumerate() {
+                        *o += (0..3).map(|q| density[(3 * b + q, 3 * b + q)].re).sum::<f64>();
                     }
                     psi0
                 } else {
@@ -3370,10 +3359,10 @@ fn random_systems_land_within_their_ring() {
             }
             let read = ring + series;
             compared += 1;
-            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e}, next landing's total variation {worst_tv:.2e}; actual over read {:.2}", ring, series, worst_tau.max(worst_tv) / read));
+            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e} (the transient's exact survival's {worst_wait:.2e}), next landing's total variation {worst_tv:.2e}; actual over read {:.2}", ring, series, worst_tau.max(worst_tv) / read));
             if reading <= share {
                 within += 1;
-                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)", reading);
+                assert!(worst_tau <= share && worst_tv <= share && worst_wait <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting; the transient's {worst_wait:.2e}) and {worst_tv:.2e} (next landing)", reading);
             }
         }
     }

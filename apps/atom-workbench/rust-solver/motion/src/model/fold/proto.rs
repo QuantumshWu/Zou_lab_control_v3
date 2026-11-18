@@ -124,8 +124,8 @@
 //! −(c − 1 − ln c)₊ − γ∫P_tr, the transient's population ∫P_tr = Σ_i [|β_i|²/max(Γ_i, γ) + 2 Re ∫conj(σ_i)β_i] plus the
 //! P places' fast part's cross term (β the fast part's rows, σ the slow part's, each pair turning at κ_i + w − c̄_j) --
 //! second order in the excitation at resonance. The reading is |E|. The photon the clock gives at once is the
-//! transient's own (`Fold::prototype_transient`: its landing density Σ E X E†, X = ∫(e e† − e_s e_s†) with every row
-//! pair's cross term), so its channel is read by nothing: it is not the slow pattern's (dragchk.status.md section 5). A row decaying no
+//! transient's own (`Fold::prototype_transient`: its landing density Σ_q C_q X_tr C_q† on the landing's modes,
+//! proto/transient.rs), so its channel is read by nothing: it is not the slow pattern's (dragchk.status.md section 5). A row decaying no
 //! faster than the slow mode is no transient: read by its population, first order. At a step (`Step::ring`, a bare
 //! ground state's landing per ground column, `landing_ring`) to first order on T alone (T_L ≈ T d̄/d), on a near block's
 //! kept rows and a far block's as one row at its decay and 1/‖R₀‖; at a switch (`Workspace::ring`) on the fall's own fast
@@ -186,6 +186,7 @@ use super::*;
 use crate::field::Amplitude;
 
 pub(crate) mod price;
+pub(crate) mod transient;
 
 /// A pair of one frequency's field coefficients (frequency w, k, k'): its coefficient ε_k*ε_k'.
 type Pair = (usize, usize, usize);
@@ -6457,99 +6458,25 @@ impl Fold {
     }
 
     /// The photon a landing's transient emits at once (step.rs `jump`: a landing whose norm is at or below its threshold;
-    /// # The ring; dragchk.status.md section 5): its landing density over the ground states of each set and the emission's
-    /// axes, Δ = Σ E X E† -- E the near blocks' emission on their kept rows (`NearBasis::emit`), X = ∫ (e e† − e_s e_s†) dτ
-    /// the transient's excited density, e the exact no-jump evolution's excited amplitude from the bare state (excited
-    /// part zero), e_s the slow part's -- and one of its eigenvectors drawn by its weight (`draw`). The slow amplitude
-    /// `x` (S⁻¹ of the landed state) rings on the kept row r = (block, i) from β_r = −(Z x)_i at e_r = o + κ_i, its slow
-    /// part Z e^{−i(H + o)τ} x, each block at its offset's phase e^{−iot} at the time `t` (as its photons):
-    ///   X_rs = φ_r φ_s* [β_r β_s*/(i(e_r − e_s*)) + β_s* (Z (i(H + o_r − e_s*))⁻¹ x)_r + β_r conj((Z (i(H + o_s − e_r*))⁻¹ x)_s)].
-    /// The transient's photons are no slow photons: its rows ring at their own energies, so that its cross terms between
-    /// rows of different energies (F′ levels, m′ manifolds) die within 1/Γ -- the slow pattern of the bare state, its
-    /// rows coherent, put tilt0's at-once photons on the wrong states (F = 1 m = 0 from |2,−2⟩ 15 times too seldom, |2,0⟩
-    /// kept twice as often: its F = 2 populations and its force 7 % off). The rows' first order on T, the Schur diagonal
-    /// κ_i and the static H over the ~1/Γ of the ring, as the ring's reading (`ring`); a far block's rows are left out
-    /// (their share of the transient within the ring's reading). Returns the set drawn and, on its states, the
-    /// eigenvector's amplitudes per axis; None where the density has no weight.
-    pub(crate) fn prototype_transient(&self, cache: &Cache, ws: &Workspace, x: &[C64], sets: &[Vec<usize>], t: f64, placed: bool, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<(usize, Vec<[C64; 3]>)> {
-        let n = ws.n;
-        let h = &ws.h[..n * n];
-        // The rows: (near block, kept row), their energies, their fast amplitudes β (with the block's phase), and per row
-        // its block's emission column.
-        struct RowOf {
-            x: usize,
-            i: usize,
-            energy: C64,
-            offset: f64,
-            phase: C64,
-            beta: C64,
-        }
-        let mut rows: Vec<RowOf> = vec![];
-        for (xb, nb) in ws.near.iter().enumerate().filter(|(_, nb)| !nb.idle() && nb.s > 0) {
-            let z = if placed { &nb.zplace } else { &nb.ztot };
-            let offset = self.blocks[nb.o].value;
-            let phase = C64::cis(-offset * t);
-            for i in 0..nb.s {
-                let y: C64 = (0..n).map(|j| z[i * n + j] * x[j]).sum();
-                rows.push(RowOf { x: xb, i, energy: nb.kappa[i] + C64::real(offset), offset, phase, beta: -y });
-            }
-        }
-        let r = rows.len();
-        if r == 0 {
-            return None;
-        }
-        // (Z (i(H + o − e*))⁻¹ x) of a row's block at another row's energy.
-        let slow_at = |xb: usize, offset: f64, e: C64| -> Option<Vec<C64>> {
-            let m = Mat::from_fn(n, n, |a, b| C64::new(0.0, 1.0) * (h[a * n + b] + if a == b { C64::real(offset) - e.conj() } else { C64::ZERO }));
-            let lu = crate::linalg::Lu::new(&m)?;
-            let mut y = x.to_vec();
-            lu.solve(&mut y);
-            let nb = &ws.near[xb];
-            let z = if placed { &nb.zplace } else { &nb.ztot };
-            Some((0..nb.s).map(|i| (0..n).map(|j| z[i * n + j] * y[j]).sum()).collect())
-        };
-        // X (r × r).
-        let mut xm = vec![C64::ZERO; r * r];
-        for (si, sr) in rows.iter().enumerate() {
-            let mut cache_slow: Vec<(usize, Vec<C64>)> = vec![];
-            for (ri, rr) in rows.iter().enumerate() {
-                let mut v = rr.beta * sr.beta.conj() / (C64::new(0.0, 1.0) * (rr.energy - sr.energy.conj()));
-                // β_s* (Z_r (i(H + o_r − e_s*))⁻¹ x)_r
-                let at = match cache_slow.iter().position(|c| c.0 == rr.x) {
-                    Some(k) => k,
-                    None => {
-                        cache_slow.push((rr.x, slow_at(rr.x, rr.offset, sr.energy)?));
-                        cache_slow.len() - 1
-                    }
-                };
-                v += sr.beta.conj() * cache_slow[at].1[rr.i];
-                xm[ri * r + si] += rr.phase * sr.phase.conj() * v;
-            }
-        }
-        // The second cross term is the first's adjoint and the fast-fast term B is Hermitian: with F = B + C₁ made above,
-        // X = B + C₁ + C₁† = F + F† − B.
-        let f = xm.clone();
-        for ri in 0..r {
-            for si in 0..r {
-                let (rr, sr) = (&rows[ri], &rows[si]);
-                let b = rr.phase * sr.phase.conj() * rr.beta * sr.beta.conj() / (C64::new(0.0, 1.0) * (rr.energy - sr.energy.conj()));
-                xm[ri * r + si] = f[ri * r + si] + f[si * r + ri].conj() - b;
-            }
-        }
-        // Per landing set its density over (state, axis), its eigenvectors' weights.
+    /// # The ring; dragchk.status.md section 5): drawn from the transient's own landing density over the ground states of
+    /// each set and the emission's axes, Δ = Σ_q C_q X_tr C_q† of the landing's modes (proto/transient.rs `Transient`: the
+    /// near blocks' kept rows in their Schur forms, every far block's row, their cross terms whole), one of its eigenvectors
+    /// drawn by its weight (`draw`). `a` the landing's slow part's P amplitudes (S⁻¹ of the landed state). The transient's
+    /// photons are no slow photons: its rows ring at their own energies, so that its cross terms between rows of different
+    /// energies (F′ levels, m′ manifolds) die within 1/Γ -- the slow pattern of the bare state, its rows coherent, put
+    /// tilt0's at-once photons on the wrong states (F = 1 m = 0 from |2,−2⟩ 15 times too seldom, |2,0⟩ kept twice as
+    /// often: its F = 2 populations and its force 7 % off). Returns the set drawn and, on its states, the eigenvector's
+    /// amplitudes per axis, and the transient's count (complex multiply-adds); None where the landing's modes do not exist
+    /// or the density has no weight.
+    pub(crate) fn prototype_transient(&self, cache: &Cache, ws: &Workspace, a: &[C64], sets: &[Vec<usize>], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<(usize, Vec<[C64; 3]>, f64)> {
+        let transient = ws.transient(self, cache, a)?;
+        let densities = transient.landing_density(self, ws, cache, sets);
+        // Per landing set its eigenvectors' weights.
         let mut weights: Vec<f64> = vec![];
         let mut picks: Vec<(usize, Vec<C64>)> = vec![];
-        for (k, set) in sets.iter().enumerate() {
-            let m = 3 * set.len();
-            let e = Mat::from_fn(m, r, |row, c| {
-                let (b, a) = (set[row / 3], row % 3);
-                let rr = &rows[c];
-                let nb = &ws.near[rr.x];
-                cache.near_at(rr.x).emit[(3 * b + a) * nb.s + rr.i]
-            });
-            let xmat = Mat { rows: r, cols: r, data: xm.clone() };
-            let d = e.product(&xmat).product(&e.adjoint());
-            let eig = crate::linalg::hermitian_eigen(&d);
+        for (k, d) in densities.iter().enumerate() {
+            let m = d.rows;
+            let eig = crate::linalg::hermitian_eigen(d);
             for (c, &w) in eig.values.iter().enumerate() {
                 if w > 0.0 {
                     weights.push(w);
@@ -6559,9 +6486,8 @@ impl Fold {
         }
         let drawn = draw(&weights)?;
         let (k, v) = &picks[drawn];
-        Some((*k, (0..sets[*k].len()).map(|b| [v[3 * b], v[3 * b + 1], v[3 * b + 2]]).collect()))
+        Some((*k, (0..sets[*k].len()).map(|b| [v[3 * b], v[3 * b + 1], v[3 * b + 2]]).collect(), transient.work))
     }
-
 
     /// The jumps as operators at a position of the step (`At`: its middle or an outer node; the generator's decay between two
     /// blocks' offsets takes their products where it is a tone, fold.rs `Fold::beating`): per block C_q ε S⁻¹ (GROUND × n, q the emission's axis), ε the

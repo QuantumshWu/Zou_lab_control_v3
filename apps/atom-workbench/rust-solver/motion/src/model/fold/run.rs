@@ -1137,9 +1137,9 @@ impl Middle<'_> {
         let ws = ws.as_mut().expect("a workspace");
         let place = fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
         let t = self.t + s;
-        // The slow amplitude x = S⁻¹ψ of the landed state.
+        // The slow part's P amplitudes a = S⁻¹ψ of the landed state.
         let x = ws.slow_amplitude(landed);
-        let (k, drawn) = fold.prototype_transient(eval, ws, &x, &run.clusters.grounds, t, true, draw)?;
+        let (k, drawn, made) = fold.prototype_transient(eval, ws, &x, &run.clusters.grounds, draw)?;
         // The kick and the frequency: the class of set k of the bare state.
         let mut pick = |rates: &[f64]| -> Option<usize> { Some(k).filter(|&k| k < rates.len()) };
         let photons = fold.prototype_photons(eval, ws, bare, &run.clusters.grounds, At::Place, t, Moments::Drawn(&mut pick));
@@ -1156,7 +1156,7 @@ impl Middle<'_> {
         }
         let first = fold.ground[0];
         let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[k][0]];
-        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work) })
+        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work + made) })
     }
 
     /// The cluster a jump into ground set k lands in (# The nodes risen and fallen): this middle's where k is its own set,
