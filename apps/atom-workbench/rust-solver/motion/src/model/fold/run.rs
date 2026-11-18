@@ -1002,7 +1002,14 @@ impl Middle<'_> {
             if made.is_some() && !set.folded.is_empty() && (decide || eval.folded.is_none()) {
                 let pairs = set.folded.iter().any(|f| f.pairs.iter().any(|p| !p.is_empty()));
                 let jumps = pairs.then(|| fold.prototype_jumps(eval, ws, At::Middle));
-                eval.folded = Some(folded_part(set, ws, jumps.as_deref()));
+                let folded = folded_part(set, ws, jumps.as_deref());
+                // Its reading: held over the cell and out of the force, what it leaves is at most its own size against the
+                // generator's (its change over the cell and its gradient are its own size times the light's relative
+                // change): ‖folded‖/‖G‖, against the share.
+                let reading = folded.frobenius() / generator.frobenius().max(f64::MIN_POSITIVE);
+                crate::adapt::most(crate::adapt::FOLDED, reading);
+                crate::adapt::count(crate::adapt::FOLDED_BEYOND, u64::from(reading > crate::model::elim::share()));
+                eval.folded = Some(folded);
             }
             let spent = ws.spent() * crate::decide::COMPLEX;
             let beyond = decide && made.is_some() && ws.step_beyond();
