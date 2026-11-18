@@ -474,6 +474,11 @@ struct Far {
 /// The keys of the near decompositions made (`NearBasis::key`): one each, never again in a process.
 static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Diagnostic (tests): the evaluation's budget's share times this (f64 bits; one): a run's evaluation made tighter after
+/// its representation is decided (tests/drag.rs DRAG_BUDGET).
+#[cfg(test)]
+pub(crate) static BUDGET_SCALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3ff0_0000_0000_0000);
+
 /// A near block's decomposition (module documentation, # What is kept).
 struct NearBasis {
     /// Its key (`KEYS`): what an evaluation's parts are of (`Evaluation::keys`) -- by the decomposition, not by its parts'
@@ -3658,6 +3663,14 @@ impl Fold {
     /// parts swept `sweeps` times where they are taken out. None where the fold does not exist so.
     #[cfg(test)]
     pub(crate) fn prototype_without(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &Cache, ws: &mut Workspace, without: Without, sweeps: usize) -> Option<Mat> {
+        self.prototype_without_kept(r, kappa, energy, cache, ws, without, sweeps).map(|(g, _)| g)
+    }
+
+    /// `prototype_without` with the cache it stood on (its decompositions and evaluation): the forward in the workspace,
+    /// for its force (`prototype_tangent` on it).
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prototype_without_kept(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &Cache, ws: &mut Workspace, without: Without, sweeps: usize) -> Option<(Mat, Cache)> {
         let mut c = cache.clone();
         let (near, far) = (ws.near.len(), ws.far.len());
         ws.decision.start(near, far);
@@ -3701,7 +3714,29 @@ impl Fold {
             _ => {}
         }
         c.evaluation = evaluation;
-        self.prototype_within(r, kappa, energy, &mut c, ws, false).filter(|s| !s.unresolved).map(|s| s.generator.clone())
+        let g = self.prototype_within(r, kappa, energy, &mut c, ws, false).filter(|s| !s.unresolved).map(|s| s.generator.clone())?;
+        Some((g, c))
+    }
+
+    /// Diagnostic (tests): the force on each column of the forward in the workspace (on `cache`, the one it stood on), along
+    /// lab axis `a`: per column j −(Ĝ_a)_jj (the Hermitian part's gradient, `prototype_gradient`) and the absorbed light's
+    /// mean on e_j (`prototype_photons`, every ground state one class: Σ Im(u*∂u)); and each column's photon rate. Makes
+    /// the step's tangent.
+    #[cfg(test)]
+    pub(crate) fn prototype_column_forces(&self, cache: &Cache, ws: &mut Workspace, a: usize) -> Vec<(f64, f64, f64)> {
+        let n = ws.n;
+        self.prototype_tangent(cache, ws);
+        let mut out: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+        self.prototype_gradient(cache, ws, 0, true, &[], &mut out);
+        let sets = vec![(0..GROUND).collect::<Vec<usize>>()];
+        (0..n)
+            .map(|j| {
+                let psi: Vec<C64> = (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect();
+                let p = self.prototype_photons(cache, ws, &psi, &sets, At::Middle, 0.0, Moments::Every);
+                let absorbed = p.force[a] + p.classes.iter().map(|c| c.rate * c.kick[a]).sum::<f64>();
+                (-out[a][j * n + j].re, absorbed, p.rate)
+            })
+            .collect()
     }
 
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
@@ -4437,6 +4472,9 @@ impl Fold {
     #[allow(clippy::too_many_arguments)]
     fn walk_in(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, done: usize, work: &mut f64) -> Next {
         let n = ws.n;
+        #[cfg(test)]
+        let budget = unrate(crate::model::elim::share() * f64::from_bits(BUDGET_SCALE.load(std::sync::atomic::Ordering::Relaxed))).powi(2);
+        #[cfg(not(test))]
         let budget = unrate(crate::model::elim::share()).powi(2);
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
         // The columns read: those with an excited response, and those an account reads on its potential channel alone (a

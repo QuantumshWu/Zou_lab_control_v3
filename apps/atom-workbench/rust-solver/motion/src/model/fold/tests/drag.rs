@@ -76,6 +76,8 @@ fn a_dragged_atom_s_mean_force_on_the_onefold_step() {
     let chief = initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
     let reference: [f64; GROUND] = std::array::from_fn(|s| if s == chief { 1.0 } else { 0.0 });
     let run = the_run(&req, reference);
+    // DRAG_BUDGET: the run's evaluation within this times the share (its representation the start's, decided above).
+    super::super::proto::BUDGET_SCALE.store(env("DRAG_BUDGET", 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
     let hm = run.hbar_over_mass();
     let labels = req.levels().unwrap();
     // The σ⁺σ⁻ pattern's period along z: the two counter-propagating beams' wave numbers.
