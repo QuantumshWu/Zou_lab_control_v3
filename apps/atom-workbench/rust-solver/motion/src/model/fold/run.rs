@@ -344,7 +344,7 @@ impl Set {
             }
             let nb = fold.blocks.len();
             for i in 0..blocks.len() {
-                for j in (0..blocks.len()).filter(|&j| j != i && fold.crossing[blocks[i] * nb + blocks[j]] > 0.0 && !fold.beating(blocks[i], blocks[j])) {
+                for j in (0..blocks.len()).filter(|&j| j != i && fold.crossing[blocks[i] * nb + blocks[j]] && !fold.beating(blocks[i], blocks[j])) {
                     let (k, side) = at(&mut folded, fold.blocks[blocks[i]].offset.plus(-1, &fold.blocks[blocks[j]].offset), fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value);
                     folded[k].1.pairs[side].push((i, j));
                 }
@@ -367,16 +367,16 @@ impl Onefold {
         let light = Light::new(request);
         let grounds = Fold::sets(request, &Choice::of(request, crate::model::elim::share())?)?;
         let mut search = super::decide::Search::new(request, &light, &grounds, 0.0, 0.0);
-        let base = Onefold::of(request, &search.merged(&vec![vec![]; grounds.len()])?, reference)?;
+        let base = Onefold::of(request, &search.merged(&vec![(vec![], vec![]); grounds.len()])?, reference)?;
         // The start's decision (decide.rs): the worst case over the local physics, an atom held by the trap at most its
         // depth's kinetic energy; every reading in the potential channel's floor.
         let depth = (-base.bottom).max(0.0);
         search.bound(base.clusters.floor, (2.0 * depth / base.hbar_over_mass).sqrt());
         let decision = search.decide()?;
-        let mut run = if decision.explicit().is_empty() {
+        let mut run = if decision.decided().iter().all(|d| d.0.is_empty() && d.1.is_empty()) {
             base
         } else {
-            Onefold::of(request, &search.merged(&decision.sets.iter().map(|s| s.nodes.clone()).collect::<Vec<_>>())?, reference)?
+            Onefold::of(request, &search.merged(&decision.decided())?, reference)?
         };
         run.decision = decision;
         Ok(run)
@@ -386,6 +386,12 @@ impl Onefold {
     #[cfg(test)]
     pub(crate) fn explicit(&self) -> Vec<Key> {
         self.decision.explicit()
+    }
+
+    /// The run's choice: the start's decision's nodes, terms and tiers (tests).
+    #[cfg(test)]
+    pub(crate) fn choice(&self) -> &Choice {
+        &self.clusters.base
     }
 
     /// The start's decision's report (FOLDAPI §3, §7.5; decide.rs): per ground set its explicit nodes, its tones and the
@@ -417,6 +423,17 @@ impl Onefold {
             out += &format!("  集合 {k} {ground:?}
     显式：{:?}
 ", named(&sd.nodes));
+            let kinds = |f: &dyn Fn(&super::Term) -> bool| sd.toned.iter().filter(|t| f(t)).count();
+            out += &format!(
+                "    保留的项（逐点读数超份额）：P 内项 {}，驱动 {}，交叉衰减 {}；份额内的项最大读数 {:.4e}\n",
+                kinds(&|t| matches!(t, super::Term::Pair(..))),
+                kinds(&|t| matches!(t, super::Term::Drive(..))),
+                kinds(&|t| matches!(t, super::Term::Cross(..))),
+                sd.terms_worst
+            );
+            if !sd.refused_terms.is_empty() {
+                out += &format!("    要求保留而簇做不成的项 {:?}\n", sd.refused_terms.iter().map(|(t, c)| format!("{t:?}：{c} 点")).collect::<Vec<_>>());
+            }
             out += &format!("    音调：{:?}\n", set.tones.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>());
             out += &format!("    作音调的交叉衰减：{:?}\n", set.coherent.iter().map(|c| format!("{:.4}", c.2)).collect::<Vec<_>>());
             out += &format!("    平均并折叠：{:?}\n", set.folded.iter().map(|f| format!("{:.4e}", f.value)).collect::<Vec<_>>());
@@ -656,7 +673,7 @@ impl Clusters {
         self.sets.index((k, nodes.clone()), || {
             let mut explicit: Vec<Key> = self.base.explicit.iter().copied().filter(|x| !self.grounds[k].contains(&x.2)).collect();
             explicit.extend(nodes.iter().copied());
-            let choice = Choice::base_of(&self.request, explicit, &|set| set == &self.grounds[k][..])?;
+            let choice = Choice::base_of(&self.request, explicit, self.base.toned.clone(), &|set| set == &self.grounds[k][..])?;
             Set::new(&self.request, &choice, k, &self.grounds[k])
         })
     }
@@ -822,7 +839,8 @@ impl Reference {
     /// Refused where a far block does not exist at the focus.
     pub(crate) fn states(request: &Request, light: &Light) -> Result<Vec<Reference>, String> {
         let prepared = lit(request, light, |w| w == light.trap);
-        let choice = Choice::base(&prepared, vec![])?;
+        // Nothing explicit and no term kept: the reference reads the held forms at the focus, which no term changes.
+        let choice = Choice::base(&prepared, vec![], vec![])?;
         let mut out: Vec<Reference> = (0..GROUND).map(|_| Reference { pairs: vec![] }).collect();
         for set in Fold::sets(&prepared, &choice)? {
             let fold = Fold::new(&prepared, &choice, set[0])?;
@@ -1689,7 +1707,8 @@ impl crate::step::Dynamics for Onefold {
         let p = self.populations(cluster, psi);
         let untrapped = self.untrapped.get_or_init(|| {
             let request = lit(&self.clusters.request, &self.light, |w| w != self.light.trap);
-            Clusters::new(&request, &Choice::base(&request, vec![])?, self.clusters.floor)
+            // The run's terms: both light sets on one set of explicit nodes and kept terms (`Clusters::difference`).
+            Clusters::new(&request, &Choice::base(&request, vec![], self.clusters.base.toned.clone())?, self.clusters.floor)
         });
         let potential = untrapped.as_ref().ok().and_then(|u| self.clusters.difference(u, at.r, &p)).unwrap_or(f64::NAN);
         kinetic + potential

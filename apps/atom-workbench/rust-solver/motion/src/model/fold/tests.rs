@@ -1426,7 +1426,7 @@ fn tiers(req: &Request, name: &str) -> Choice {
 
 /// `tiers` with the explicit levels `explicit` (`Choice::explicit`) kept in P (`Choice::tiered`).
 fn tiers_with(req: &Request, name: &str, explicit: Vec<(usize, Part, usize)>) -> Choice {
-    let choice = Choice::tiered(req, explicit).unwrap();
+    let choice = Choice::tiered(req, explicit, vec![]).unwrap();
     println!("{name}: the rule's ground sets {:?}", choice.sets);
     choice
 }
@@ -1711,7 +1711,7 @@ pub(super) fn proto_choice(req: &Request, name: &str) -> Choice {
     // tilt0 on the start's decision (decide.rs): its F' = 3 explicit at the PGC light's offset, the probe's drive a tone.
     let choice = if name == "tilt0" {
         let run = run::Onefold::new(req, [1.0 / GROUND as f64; GROUND]).unwrap();
-        Choice::base_of(req, run.explicit(), &|_| true).unwrap()
+        run.choice().clone()
     } else {
         focus_choice(req)
     };
@@ -1726,7 +1726,7 @@ fn focus_choice(request: &Request) -> Choice {
     let share = crate::model::elim::share();
     let mut explicit: Vec<(usize, Part, usize)> = vec![];
     loop {
-        let choice = Choice::base(request, explicit.clone()).unwrap();
+        let choice = Choice::base(request, explicit.clone(), vec![]).unwrap();
         let mut kept = vec![];
         for set in Fold::sets(request, &choice).unwrap() {
             let fold = Fold::new(request, &choice, set[0]).unwrap();
@@ -2940,9 +2940,10 @@ fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
     p[0] = 1.0;
     // Both levels in P at their own offsets (the rule at the focus would want each at both: through D_ee′ each is the
     // other's block's Q row, beyond the share where the tone is -- a fold keeps a level at one offset).
-    let level = |x: usize| Fold::new(&req, &Choice::tiered(&req, vec![]).unwrap(), 0).unwrap().excited_level[x];
+    let level = |x: usize| Fold::new(&req, &Choice::tiered(&req, vec![], vec![]).unwrap(), 0).unwrap().excited_level[x];
     let part = |frequency: usize| crate::model::Component { frequency, counter: false };
-    let choice = Choice::tiered(&req, vec![(level(17), part(0), 0), (level(0), part(1), 0)]).expect("the choice");
+    // The terms kept at the focus (decide.rs # The terms: the decision's loop at one point).
+    let choice = super::decide::at_point(&req, vec![(level(17), part(0), 0), (level(0), part(1), 0)], &super::decide::Local::focus(&crate::field::Light::new(&req))).expect("the choice");
     let run = super::run::Onefold::of(&req, &choice, p).expect("the run");
     let fold = Fold::new(&req, &choice, 0).unwrap();
     assert!((0..fold.blocks.len()).any(|i| (0..fold.blocks.len()).any(|j| i != j && fold.beating(i, j))), "the explicit levels' blocks' cross decay a tone: {:?}", fold.crossing);
@@ -3097,9 +3098,9 @@ fn a_two_level_atom_s_readout_is_its_slow_mode_s_population() {
         let req = system(&[(0, 0.0)], &[(17, ee, gamma, 0)], &rays, 1, true);
         let mut p = [0.0; GROUND];
         p[0] = 1.0;
-        let level = Fold::new(&req, &Choice::tiered(&req, vec![]).unwrap(), 0).unwrap().excited_level[17];
-        let kept = Choice::tiered(&req, vec![(level, crate::model::Component { frequency: 0, counter: false }, 0)]).unwrap();
-        let (explicit, folded) = (super::run::Onefold::of(&req, &kept, p).unwrap(), super::run::Onefold::of(&req, &Choice::tiered(&req, vec![]).unwrap(), p).unwrap());
+        let level = Fold::new(&req, &Choice::tiered(&req, vec![], vec![]).unwrap(), 0).unwrap().excited_level[17];
+        let kept = Choice::tiered(&req, vec![(level, crate::model::Component { frequency: 0, counter: false }, 0)], vec![]).unwrap();
+        let (explicit, folded) = (super::run::Onefold::of(&req, &kept, p).unwrap(), super::run::Onefold::of(&req, &Choice::tiered(&req, vec![], vec![]).unwrap(), p).unwrap());
         let at = crate::model::Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 };
         let set = explicit.cluster_of(0);
         let states = &explicit.cluster(set).states;
@@ -3243,7 +3244,7 @@ fn random_systems_land_within_their_ring() {
             }
         }
         let req = system(&ground, &excited, &[Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings }], 1, true);
-        let choice = Choice::base(&req, vec![]).unwrap();
+        let choice = Choice::base(&req, vec![], vec![]).unwrap();
         for set in Fold::sets(&req, &choice).unwrap() {
             let fold = Fold::new(&req, &choice, set[0]).unwrap();
             if fold.blocks.is_empty() || !fold.explicit.is_empty() {
@@ -3411,7 +3412,7 @@ fn the_loss_energy_stands_on_one_set_of_risen_nodes_for_both_light_sets() {
         let run = super::run::Onefold::new(&req, p).expect("the run");
         let light = Light::new(&req);
         let off = super::run::lit(&req, &light, |w| w != light.trap);
-        let fold = Fold::new(&off, &Choice::base(&off, vec![]).unwrap(), 0).unwrap();
+        let fold = Fold::new(&off, &Choice::base(&off, vec![], vec![]).unwrap(), 0).unwrap();
         let exists = fold.blocks.is_empty() || fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
         let set = run.cluster_of(0);
         let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
@@ -3438,11 +3439,11 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
     let (mut made, mut refused) = (0, std::collections::BTreeMap::<String, usize>::new());
     for trial in 0..60 {
         let (req, _) = random_system(&mut state, trial);
-        let Ok(base) = Choice::base(&req, vec![]) else { continue };
+        let Ok(base) = Choice::base(&req, vec![], vec![]) else { continue };
         for set in Fold::sets(&req, &base).unwrap() {
             let Ok(fold) = Fold::new(&req, &base, set[0]) else { continue };
             for (key, _, _) in Choice::candidates(&fold) {
-                let Ok(choice) = Choice::base_of(&req, vec![key], &|x| x == &set[..]) else { continue };
+                let Ok(choice) = Choice::base_of(&req, vec![key], vec![], &|x| x == &set[..]) else { continue };
                 let Ok(risen) = Fold::new(&req, &choice, set[0]) else { continue };
                 for b in &risen.blocks {
                     let centred = b.solved == 0 && !b.rows.is_empty();
@@ -3466,7 +3467,7 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
 fn a_two_level_atom_s_ring_reads_its_landing() {
     for (delta, s, expected) in [(0.0, 0.1, 6.8e-3), (0.0, 0.2, 3.0e-2), (0.0, 0.3, 7.9e-2), (0.0, 0.4, 0.174), (-4.0 * GAMMA, 10.0, 4.6e-3), (-4.0 * GAMMA, 30.0, 2.45e-2), (-4.0 * GAMMA, 60.0, 5.5e-2)] {
         let req = two_level(delta, s);
-        let fold = Fold::new(&req, &Choice::base(&req, vec![]).unwrap(), 0).unwrap();
+        let fold = Fold::new(&req, &Choice::base(&req, vec![], vec![]).unwrap(), 0).unwrap();
         let mut ws = fold.prototype_workspace().unwrap();
         let mut cache = super::proto::Cache::default();
         let step = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws).expect("the fold at the focus");
@@ -3486,7 +3487,7 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
     let share = crate::model::elim::share();
     for (delta, s, expected) in [(0.0, 0.1, 1.18402), (0.0, 0.2, 1.47883), (0.0, 0.3, 2.04057), (0.0, 0.4, 3.61803), (-4.0 * GAMMA, 2.0, 0.98611)] {
         let req = two_level(delta, s);
-        let run = run::Onefold::of(&req, &Choice::base(&req, vec![]).unwrap(), [1.0 / GROUND as f64; GROUND]).unwrap();
+        let run = run::Onefold::of(&req, &Choice::base(&req, vec![], vec![]).unwrap(), [1.0 / GROUND as f64; GROUND]).unwrap();
         let low = run.middle(0, [0.0; 3], 0.0, &crate::step::Held::default(), false);
         let path = low.path([0.0; 3], [0.0; 3]);
         low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
@@ -3520,7 +3521,7 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
             continue;
         }
         let req = crate::model::testing::scene(&file);
-        let choice = Choice::base(&req, vec![]).unwrap();
+        let choice = Choice::base(&req, vec![], vec![]).unwrap();
         let sets = Fold::sets(&req, &choice).unwrap();
         let set = sets.iter().find(|s| ground.is_none_or(|g| s.len() == g)).expect("the scene's set").clone();
         let fold = Fold::new(&req, &choice, set[0]).unwrap();
@@ -3764,7 +3765,7 @@ fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
             // V_run of `Fold::at` on the folds with every light and with every light but the trap's (each ground set's
             // with nothing explicit; the chief state's diagonal in the lab).
             let diagonal = |request: &Request| -> f64 {
-                let choice = Choice::base(request, vec![]).unwrap();
+                let choice = Choice::base(request, vec![], vec![]).unwrap();
                 let fold = Fold::new(request, &choice, chief).unwrap();
                 let x = fold.ground.iter().position(|&g| g == chief).unwrap();
                 fold_at(&fold, r, [0.0; 3]).expect("the fold at the point").generator[(x, x)].re + fold.frame_values[x]
@@ -3968,12 +3969,12 @@ fn a_scene_s_risen_clusters_hold_their_copies_at_a_p_frame() {
     let name = std::env::var("SCENE").expect("SCENE: a request file's path");
     let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&name).unwrap()).unwrap();
     let request = crate::request::Request::from_native(&line).unwrap();
-    let base = Choice::base(&request, vec![]).unwrap();
+    let base = Choice::base(&request, vec![], vec![]).unwrap();
     let (mut held, mut refused) = (0, 0);
     for set in Fold::sets(&request, &base).unwrap().iter().filter(|s| s.len() > 1) {
         let fold = Fold::new(&request, &base, set[0]).unwrap();
         for (key, _, _) in Choice::candidates(&fold) {
-            let Ok(choice) = Choice::base_of(&request, vec![key], &|s| s == &set[..]) else { continue };
+            let Ok(choice) = Choice::base_of(&request, vec![key], vec![], &|s| s == &set[..]) else { continue };
             let Ok(risen) = Fold::new(&request, &choice, set[0]) else { continue };
             let ng = risen.ground.len();
             let mut on: Vec<(usize, usize)> = vec![];
@@ -4029,7 +4030,7 @@ fn the_start_s_decision_reported() {
 fn the_base_choice_s_omitted_copies() {
     let path = std::env::var("DECIDE_REQ").expect("DECIDE_REQ");
     let req = crate::model::testing::scene(&path);
-    let choice = Choice::base(&req, vec![]).expect("the choice");
+    let choice = Choice::base(&req, vec![], vec![]).expect("the choice");
     for set in Fold::sets(&req, &choice).unwrap() {
         let fold = Fold::new(&req, &choice, set[0]).expect("the fold");
         println!("set {set:?}");
@@ -4123,7 +4124,7 @@ fn the_given_nodes_tiers_laid_out() {
         let (nodes, driven) = after.split_once(" driven ").unwrap();
         let (nodes, driven) = (keys(nodes), keys(driven));
         let clock = std::time::Instant::now();
-        let choice = if driven.is_empty() { Choice::base_of(&req, nodes.clone(), &|set| set == &grounds[k][..]) } else { Err("drives are no choice since E2".into()) };
+        let choice = if driven.is_empty() { Choice::base_of(&req, nodes.clone(), vec![], &|set| set == &grounds[k][..]) } else { Err("drives are no choice since E2".into()) };
         let seconds = clock.elapsed().as_secs_f64();
         match choice {
             Ok(c) => {
@@ -4147,7 +4148,7 @@ fn the_decided_drives_read() {
     let initial = crate::solve::components(&req);
     let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
     let run = run::Onefold::new(&req, crate::solve::alone(initial[chief].0)).unwrap();
-    let choice = Choice::base_of(&req, run.explicit(), &|_| true).unwrap();
+    let choice = run.choice().clone();
     let share = crate::model::elim::share();
     for set in Fold::sets(&req, &choice).unwrap() {
         let fold = Fold::new(&req, &choice, set[0]).unwrap();

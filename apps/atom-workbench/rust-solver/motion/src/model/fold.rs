@@ -231,7 +231,9 @@ pub(crate) enum Row {
 /// in P), and every other Q node's tier (the same tiers for every node, module documentation # Blocks), keyed by an
 /// absorbed component and one of the block's own sources (the block): a copy's by the emitting component and its ground
 /// level F (unlisted: centred), an excited node's by its level (`excited`; unlisted: solved) -- a later entry overriding an
-/// earlier one. An explicit state's drive at another offset is no choice: the one rule reads it (`Fold::build`, `toned`).
+/// earlier one -- and the terms kept beyond the share (`toned`: the start's decision's, decide.rs # The terms; every other
+/// term that turns is averaged and folded, every explicit state's copy at another offset a Q row). Nothing builds a
+/// choice of its own reading: `Fold::build` lays what the choice says.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Choice {
     pub(crate) frames: Vec<Beat>,
@@ -239,6 +241,30 @@ pub(crate) struct Choice {
     pub(crate) explicit: Vec<(usize, Part, usize)>,
     pub(crate) copies: Vec<((Part, usize, Part, u8), Status)>,
     pub(crate) excited: Vec<((Part, usize, usize), Status)>,
+    pub(crate) toned: Vec<Term>,
+}
+
+/// A term the start's decision keeps beyond the share (decide.rs # The terms), by a key no decision changes: an entry of
+/// P between two states of different frames (the states, the lesser first: a ground pair's static coupling, or two
+/// explicit excited states'), a tone; an explicit excited state's copy at a block's offset (the state, the offset), its
+/// drive there a tone of P and no row of the block; two blocks' cross decay (their offsets, the lesser first), a tone.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Term {
+    Pair(usize, usize),
+    Drive(usize, Beat),
+    Cross(Beat, Beat),
+}
+
+impl Term {
+    /// The entry of the states s and t.
+    pub(crate) fn pair(s: usize, t: usize) -> Term {
+        Term::Pair(s.min(t), s.max(t))
+    }
+
+    /// The cross decay of the blocks at the offsets a and b.
+    pub(crate) fn cross(a: &Beat, b: &Beat) -> Term {
+        if a <= b { Term::Cross(a.clone(), b.clone()) } else { Term::Cross(b.clone(), a.clone()) }
+    }
 }
 
 /// Whether a coupling of mixing m = |a|/|Δ| (its strength over its mismatch, both frame-free) cannot be folded (DESIGN
@@ -345,7 +371,7 @@ impl Choice {
                 frames[s] = frames[s].plus(1, &shift);
             }
         }
-        Ok(Choice { frames, sets, explicit: vec![], copies: vec![], excited: vec![] })
+        Ok(Choice { frames, sets, explicit: vec![], copies: vec![], excited: vec![], toned: vec![] })
     }
 
     /// The rule's tiers at the focus with the explicit levels `explicit` kept in P (M18, the evaluation order's rule): the
@@ -355,13 +381,13 @@ impl Choice {
     /// those whose centring reads within it centred, the rest decomposed or solved -- to the fixed point (at most four
     /// rounds a set). The readings are in both units, the larger (`Fold::readings`): the column's whole emission and its
     /// emission out of the set (the populations').
-    pub(crate) fn tiered(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
-        Choice::tiered_of(request, explicit, &|_| true)
+    pub(crate) fn tiered(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>) -> Result<Choice, String> {
+        Choice::tiered_of(request, explicit, toned, &|_| true)
     }
 
     /// `tiered` on the sets `of` picks alone (the others' statuses left unread: no key of theirs is another set's, so a set's
     /// fold is the same).
-    fn tiered_of(request: &Request, explicit: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+    fn tiered_of(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
         let share = crate::model::elim::share();
         let parts: Vec<Part> = components(request, &Light::new(request), &Axes::new(request)?)?.iter().map(|c| c.part).collect();
         let mut copies = vec![];
@@ -374,7 +400,7 @@ impl Choice {
                 }
             }
         }
-        let mut choice = Choice { copies, explicit, ..Choice::of(request, share)? };
+        let mut choice = Choice { copies, explicit, toned, ..Choice::of(request, share)? };
         for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             for _ in 0..4 {
                 let fold = Fold::new(request, &choice, set[0])?;
@@ -452,14 +478,14 @@ impl Choice {
     /// every excited level of a block with rows, and of a block with none at the focus, read at every point (proto.rs # The
     /// levels kept and left out). Which excited nodes are explicit is the run's at every point, not the focus's (run.rs #
     /// The nodes risen and fallen).
-    pub(crate) fn base(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
-        Choice::base_of(request, explicit, &|_| true)
+    pub(crate) fn base(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>) -> Result<Choice, String> {
+        Choice::base_of(request, explicit, toned, &|_| true)
     }
 
     /// `base` on the sets `of` picks alone (`tiered_of`): a cluster's choice reads its own ground set's tiers, not every
     /// set's (model/fold/run.rs `Clusters::cluster_with`).
-    pub(crate) fn base_of(request: &Request, explicit: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
-        let mut choice = Choice::tiered_of(request, explicit, of)?;
+    pub(crate) fn base_of(request: &Request, explicit: Vec<(usize, Part, usize)>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+        let mut choice = Choice::tiered_of(request, explicit, toned, of)?;
         for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             let fold = Fold::new(request, &choice, set[0])?;
             let mut add = vec![];
@@ -558,8 +584,8 @@ pub(crate) struct Fold {
     /// The local light (run.rs `Onefold::decide`: the start's worst case over the atoms' local physics): per request beam a
     /// factor on its amplitude everywhere -- the trap light's √s, each beam's phase --; empty, none (every factor one).
     pub(crate) local: Vec<C64>,
-    /// The explicit states' copies at other offsets whose drive is a tone (`Fold::build`): (excited state, the block's
-    /// offset). The others are their blocks' Q rows.
+    /// The explicit states' copies at other offsets whose drive is a tone (the choice's `Term::Drive`): (excited state,
+    /// the block's offset). The others are their blocks' Q rows.
     pub(crate) driven: Vec<(usize, Beat)>,
     hbar_over_mass: f64,
     /// k_BT of the request's temperature (rad/µs): the potential's unit in the omission's reading.
@@ -573,16 +599,18 @@ pub(crate) struct Fold {
     /// Per explicit place j (P place ng + j) its excited state.
     pub(crate) explicit: Vec<usize>,
     /// Per entry (p, q) of P (n × n, row by row) whether it is a tone (module documentation, # Tones): two places of one
-    /// kind and different frames whose coupling cannot be folded.
+    /// kind and different frames whose entry the choice keeps (`Term::Pair`).
     pub(crate) turning: Vec<bool>,
-    /// Per two ground states (GROUND × GROUND) whether their static coupling cannot be folded (`turning`'s reading): a
-    /// copy at a P place's frame whose coupling to that place can be folded is a copy row, that coupling left out as P
-    /// leaves it out (proto.rs `prototype_workspace`; BRIEF_COPIES item 4).
+    /// Per two ground states (GROUND × GROUND) whether the choice keeps their static coupling (`Term::Pair`): a copy at a
+    /// P place's frame whose coupling to that place it does not keep is a copy row, that coupling left out as P leaves it
+    /// out (proto.rs `prototype_workspace`; BRIEF_COPIES item 4).
     pub(crate) ground_tone: Vec<bool>,
     pub(crate) blocks: Vec<Block>,
-    /// Per two blocks (blocks × blocks, row by row, symmetric) the reading of their cross decay L_o†L_o′ (module
-    /// documentation, # Tones; `Fold::crossing`): a tone where it is beyond the share (`Fold::beating`), else averaged out.
-    pub(crate) crossing: Vec<f64>,
+    /// Per two blocks (blocks × blocks, row by row, symmetric) whether their cross decay L_o†L_o′ is not zero -- a ground
+    /// state both land on (`Fold::crossing`) --, and whether the choice keeps it (`beats`: `Term::Cross`, a tone,
+    /// `Fold::beating`; else averaged out; module documentation, # Tones).
+    pub(crate) crossing: Vec<bool>,
+    beats: Vec<bool>,
     /// H0 less what it holds of the outside forms at the focus (request.rs `held`): its ground block, and its excited block with −(i/2)D.
     base_ground: Mat,
     base_excited: Mat,
@@ -751,30 +779,23 @@ impl Fold {
             }
         }
         let frame_values: Vec<f64> = frames.iter().map(|b| axes.omega(b)).collect();
-        // The tones (module documentation, # Tones): an entry of two places of one kind and different frames whose coupling
-        // cannot be folded -- its peak strength (H0's, the decay's, and each frequency's outside forms at its intensity
-        // scale, as `Choice::of` reads a coupling) over the states' energy difference, frame-free --; one that can is a copy
-        // left out (its reading within the share).
+        // The tones (module documentation, # Tones): an entry of two places of one kind and different frames the choice keeps
+        // (`Term::Pair`, the start's decision's); any other is averaged and folded.
         let n = ground.len() + explicit.len();
         let state = |p: usize| if p < ng { ground[p] } else { GROUND + explicit[p - ng] };
-        let cannot_fold = |s: usize, t: usize| {
-            let decayed = if s < GROUND { 0.0 } else { 0.5 * d[(s - GROUND, t - GROUND)].abs() };
-            let peak = request.hamiltonian[(s, t)].abs() + decayed + light.frequencies.iter().map(|f| f.norm * request.outside_forms[f.form].matrices.iter().map(|m| m[(s, t)].abs()).sum::<f64>()).sum::<f64>();
-            let delta = request.hamiltonian[(s, s)].re - request.hamiltonian[(t, t)].re;
-            unfoldable(peak / delta.abs(), crate::model::elim::share())
-        };
+        let kept = |s: usize, t: usize| choice.toned.contains(&Term::pair(s, t));
         let turning: Vec<bool> = (0..n * n)
             .map(|x| {
                 let (p, q) = (x / n, x % n);
                 if p == q || (p < ng) != (q < ng) || frames[p] == frames[q] {
                     return false;
                 }
-                cannot_fold(state(p), state(q))
+                kept(state(p), state(q))
             })
             .collect();
-        // Every two ground states' static coupling read the same way: a copy at a P place's frame is reached from that
-        // place by it too (`Fold::lay`'s static split).
-        let ground_tone: Vec<bool> = (0..GROUND * GROUND).map(|x| x / GROUND != x % GROUND && cannot_fold(x / GROUND, x % GROUND)).collect();
+        // Every two ground states' static coupling the same way: a copy at a P place's frame is reached from that place by it
+        // too (`Fold::lay`'s static split).
+        let ground_tone: Vec<bool> = (0..GROUND * GROUND).map(|x| x / GROUND != x % GROUND && kept(x / GROUND, x % GROUND)).collect();
         // The blocks: every offset a ground state's component reaches, and every explicit state's.
         let mut offsets: Vec<Beat> = vec![];
         let mut sources: Vec<Vec<(usize, usize)>> = vec![];
@@ -805,20 +826,13 @@ impl Fold {
             // The excited Q rows: the excited states a source or an explicit state of the block reaches, closed under 𝒦's
             // couplings (the request's and the outside forms'), each at its level's tier (solved unless chosen otherwise).
             // An explicit state is one object at one frame (FOLDAPI A, coordinator 2026-11-18). Its copy at this block's
-            // offset is a Floquet node like any other, under the one rule: where this block's sources drive it beyond
-            // the share (their peak strength Σ |V| over the beat between the offset and its frame, `unfoldable`) the
-            // drive is an entry of Ĥ_PP that turns (`Fold::driven`; proto.rs # The tones: the drives at another offset)
-            // and the block neither holds it nor reaches through it; within the share the copy is a Q row of the block,
-            // folded with its light shift, its gradient and its reading (losschk.status.md: the tweezer's far drive of
-            // tilt0's explicit F' = 3, a third of the trap's force, was lost as an averaged entry). The drive's own a/|Δ|
-            // alone decides, as every turning term's (FOLDAPI §2): a reading of the folded copy beyond the share at a point
-            // is that point's, with no node to raise (`Choice::candidates`), not a tone.
-            let toned = |x: usize| -> bool {
-                let Some(j) = explicit.iter().position(|&y| y == x) else { return false };
-                let peak: f64 = sources.iter().map(|&(p, c)| components[c].couplings.iter().map(|m| m[(x, ground[p])].abs()).sum::<f64>()).sum();
-                peak > 0.0 && unfoldable(peak / (value - frame_values[ng + j]).abs(), crate::model::elim::share())
-            };
-            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x) && toned(x);
+            // offset is a Floquet node like any other: where the choice keeps it (`Term::Drive`, the start's decision's:
+            // the copy's mixing by this block's sources at its optical detuning beyond the share at some point) the drive
+            // is an entry of Ĥ_PP that turns (`Fold::driven`; proto.rs # The tones: the drives at another offset) and the
+            // block neither holds it nor reaches through it; else the copy is a Q row of the block, folded with its light
+            // shift, its gradient and its reading (losschk.status.md: the tweezer's far drive of tilt0's explicit F' = 3,
+            // a third of the trap's force, was lost as an averaged entry).
+            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x) && choice.toned.contains(&Term::Drive(x, offset.clone()));
             for x in (0..EXCITED).filter(|&x| foreign(x)) {
                 driven.push((x, offset.clone()));
             }
@@ -886,8 +900,10 @@ impl Fold {
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
-        // The cross decays' readings (module documentation, # Tones).
-        let crossing = Fold::crossing(request, &components, &axes, ground, &explicit, &blocks);
+        // The cross decays that are not zero, and those the choice keeps (module documentation, # Tones).
+        let crossing = Fold::crossing(request, &components, ground, &explicit, &blocks);
+        let nb = blocks.len();
+        let beats: Vec<bool> = (0..nb * nb).map(|x| crossing[x] && choice.toned.contains(&Term::cross(&blocks[x / nb].offset, &blocks[x % nb].offset))).collect();
         // The outside forms' entries that are not zero, of the states the fold uses (every ground state; the excited states a
         // block solves or a place holds) and of the others.
         let mut used = [true; STATES];
@@ -928,6 +944,7 @@ impl Fold {
             ground_tone,
             blocks,
             crossing,
+            beats,
             base_ground: base.block(&all, &all),
             base_excited,
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
@@ -940,52 +957,39 @@ impl Fold {
         })
     }
 
-    /// Per two blocks the reading of their cross decay (module documentation, # Tones; FOLDAPI §2): the generator's term
-    /// −(i/2)e^{i(o − o′)t} Σ_q L_o,q†L_o′,q read as any coupling is (`unfoldable`, `Choice::of`, `turning`) -- its size at
-    /// the peak light a = ½ Σ_q Σ_s l_o(q, s) l_o′(q, s) over its beat |o − o′|, exact in the frames' arithmetic. A block's
-    /// bare landing amplitude on the ground state s along q at the peak light, as `Choice::of` reads a coupling: l_o(q, s)
-    /// = Σ_x |C_q[s, x]| e_o(x), e_o(x) = Σ_(p, c) Σ_l |X_l[x, p]| / |E_p + ν_c − E_x + iΓ_x/2| over its sources (place p,
-    /// component c), an explicit state's own row one.
-    fn crossing(request: &Request, components: &[Component], axes: &Axes, ground: &[usize], explicit: &[usize], blocks: &[Block]) -> Vec<f64> {
-        let d = decay(request);
-        let energy = |s: usize| request.hamiltonian[(s, s)].re;
+    /// Per two blocks whether their cross decay is not zero (module documentation, # Tones): a ground state s and an axis q
+    /// both land on, C_q[s, x] ≠ 0 for an excited row x each reaches -- a source's coupling to it, or the block's
+    /// explicit state. Whether it is kept is the choice's (`Term::Cross`; its reading the start's decision's, decide.rs).
+    fn crossing(request: &Request, components: &[Component], ground: &[usize], explicit: &[usize], blocks: &[Block]) -> Vec<bool> {
         let ng = ground.len();
-        let landing: Vec<[[f64; GROUND]; 3]> = blocks
+        let landing: Vec<[[bool; GROUND]; 3]> = blocks
             .iter()
             .map(|b| {
-                let mut e = [0.0; EXCITED];
+                let mut e = [false; EXCITED];
                 for &(p, c) in &b.sources {
-                    let (s, comp) = (ground[p], &components[c]);
                     for (x, ex) in e.iter_mut().enumerate() {
-                        let v: f64 = comp.couplings.iter().map(|m| m[(x, s)].abs()).sum();
-                        if v > 0.0 {
-                            *ex += v / C64::new(energy(s) + comp.nu - energy(GROUND + x), 0.5 * d[(x, x)].re).abs();
-                        }
+                        *ex |= components[c].couplings.iter().any(|m| m[(x, ground[p])] != C64::ZERO);
                     }
                 }
                 for &p in &b.explicit {
-                    e[explicit[p - ng]] = 1.0;
+                    e[explicit[p - ng]] = true;
                 }
-                std::array::from_fn(|q| std::array::from_fn(|s| (0..EXCITED).map(|x| request.emission[q][(s, GROUND + x)].abs() * e[x]).sum::<f64>()))
+                std::array::from_fn(|q| std::array::from_fn(|s| (0..EXCITED).any(|x| e[x] && request.emission[q][(s, GROUND + x)] != C64::ZERO)))
             })
             .collect();
         let nb = blocks.len();
-        let mut out = vec![0.0; nb * nb];
+        let mut out = vec![false; nb * nb];
         for i in 0..nb {
-            for j in i + 1..nb {
-                let a = 0.5 * (0..3).map(|q| (0..GROUND).map(|s| landing[i][q][s] * landing[j][q][s]).sum::<f64>()).sum::<f64>();
-                let m = if a > 0.0 { a / axes.omega(&blocks[i].offset.plus(-1, &blocks[j].offset)).abs() } else { 0.0 };
-                out[i * nb + j] = m;
-                out[j * nb + i] = m;
+            for j in (0..nb).filter(|&j| j != i) {
+                out[i * nb + j] = (0..3).any(|q| (0..GROUND).any(|s| landing[i][q][s] && landing[j][q][s]));
             }
         }
         out
     }
 
-    /// Whether the cross decay of blocks i and j is a tone (`Fold::crossing`): its reading beyond the share.
+    /// Whether the cross decay of blocks i and j is a tone: the choice keeps it (`Fold::crossing`).
     pub(crate) fn beating(&self, i: usize, j: usize) -> bool {
-        let m = self.crossing[i * self.blocks.len() + j];
-        m > 0.0 && unfoldable(m, crate::model::elim::share())
+        self.beats[i * self.blocks.len() + j]
     }
 
     /// n, P's states.

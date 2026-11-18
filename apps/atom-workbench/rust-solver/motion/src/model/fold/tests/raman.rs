@@ -53,15 +53,14 @@ fn raman_diagnostic() {
         let (folded, whole, beats) = middle.folded(&path);
         println!("cluster {k}: the averaged terms' second order {folded:.3e} against the generator's {whole:.3e} ({:.2e} of it; {beats} averaged beats)", folded / whole.max(1e-300));
     }
-    let base = Choice::base(&req, vec![]).unwrap();
+    let base = Choice::base(&req, vec![], vec![]).unwrap();
     for set in Fold::sets(&req, &base).unwrap() {
         let fold = Fold::new(&req, &base, set[0]).unwrap();
         println!("set {set:?}: {} blocks; frames {:?}; cross decays kept {:?}", fold.blocks.len(), fold.frame_values, (0..fold.blocks.len()).flat_map(|i| (i + 1..fold.blocks.len()).map(move |j| (i, j))).filter(|&(i, j)| fold.beating(i, j)).collect::<Vec<_>>());
         for i in 0..fold.blocks.len() {
             for j in i + 1..fold.blocks.len() {
-                let m = fold.crossing[i * fold.blocks.len() + j];
-                if m > 0.0 {
-                    println!("  cross decay {i} {j}: beat {:.3} reading {m:.3e} {}", fold.blocks[i].value - fold.blocks[j].value, if fold.beating(i, j) { "tone" } else { "averaged" });
+                if fold.crossing[i * fold.blocks.len() + j] {
+                    println!("  cross decay {i} {j}: beat {:.3} {}", fold.blocks[i].value - fold.blocks[j].value, if fold.beating(i, j) { "tone" } else { "averaged" });
                 }
             }
         }

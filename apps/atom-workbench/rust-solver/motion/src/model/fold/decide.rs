@@ -28,6 +28,25 @@
 //! read in parallel on one decision, then every node asked for joins at once and the points that asked are read again:
 //! the decision does not depend on the threads' order.
 //!
+//! # The terms (fixedrep.status.md, 逐点读数 H)
+//! What turns or is a copy of an explicit state is a term of one list, each with its size a(r) at the point's light and
+//! its distance Δ(r) from P, read by one function (`reading`): ρ = √w(m), m = Σ|a|/|Δ|, w(m) the dressed two-state
+//! admixture, rate(ρ) against the share -- the same that reads a copy (`unfoldable`) -- and beyond the share it joins the
+//! set's decision (`Choice::toned`), every point that asked read again on it, as a node joins:
+//! - an entry of P between two places of one kind and different frames (`Term::Pair`): a = |Ĥ_PP(r)[p, q]| (two explicit
+//!   states' with half their decay's cross term), Δ = the difference of the two diagonals there (its beat with the
+//!   frames' diagonals: frame-free); a copy of a ground state at a P place's frame reaches that place by the same entry;
+//!   beyond: a tone;
+//! - an explicit state x's copy at a block's offset (`Term::Drive`): m = Σ over the block's sources (s, c) and beams l of
+//!   |f_l X_l[x, s]| / |H_ss(r) + ν_c − 𝒦_xx(r) − w_l| -- the copy's place in the block, its optical detuning with the
+//!   light shifts, the Doppler shift and −iΓ/2, not the beat of its offset and frame (its beat is Δ only once it is P's);
+//!   beyond: its drive a tone of P, no row of the block;
+//! - two blocks' cross decay (`Term::Cross`): a = ½ Σ_q Σ_s l_o l_o′, each block's landing amplitude at the point,
+//!   l_o(q, s) = Σ_x |C_q[s, x]| e_o(x), e_o(x) = Σ |f_l X_l[x, s_p]| over the same optical detuning (an explicit row
+//!   one), Δ = |o − o′|; beyond: a tone.
+//! The terms are read on the light alone, before the forward: where a point asks for a term, it asks for no node in that
+//! round (the forward is read on the decision with it).
+//!
 //! # What is made once
 //! A set's fold on a decision -- its tiers (`Choice::base_of`, the costly part), the fold, its candidates -- is made once,
 //! by the first thread that asks for it while the others wait, and shared (`Built`); each thread reads on its own copy of
@@ -44,7 +63,7 @@
 //! Per set its explicit nodes, the worst point and its reading on the final decision (rate units: the bound), the
 //! points beyond the share where no node is offered; the rounds' counts, the time.
 use super::proto::{Cache, Cell, Taken, Workspace};
-use super::{Choice, Fold};
+use super::{admixture, rate, Choice, Fold, Term, GROUND};
 use crate::field::Light;
 use crate::linalg::C64;
 use crate::request::Request;
@@ -53,6 +72,124 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// An explicit excited node (run.rs `Key`, `Choice::explicit`): its level, the absorbed component, a source's ground state.
 pub(crate) type Key = (usize, crate::model::Component, usize);
+
+/// A set's decision: its explicit nodes and the terms it keeps (`Choice::toned`), each sorted.
+pub(crate) type Decided = (Vec<Key>, Vec<Term>);
+
+/// The one reading of a term of mixing m (module documentation, # The terms): rate(√w(m)), rate units.
+fn reading(m: f64) -> f64 {
+    rate(admixture(m).sqrt())
+}
+
+/// Every term of a set's fold at a point (module documentation, # The terms), its light the fold's `local` and its
+/// momentum `kappa`, with its reading (rate units): one entry per term, the largest where two name one.
+pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
+    let mut work = 0.0;
+    let site = fold.site([0.0; 3], kappa, &mut work);
+    let (ng, n) = (fold.ground.len(), fold.size());
+    let excited = super::EXCITED;
+    let mut out: Vec<(Term, f64)> = vec![];
+    let mut add = |term: Term, m: f64| {
+        if m > 0.0 {
+            let r = reading(m);
+            match out.iter_mut().find(|x| x.0 == term) {
+                Some(x) => x.1 = x.1.max(r),
+                None => out.push((term, r)),
+            }
+        }
+    };
+    // The decay's cross term of two excited states, Σ_q (C_q†C_q)_xy.
+    let decay = |x: usize, y: usize| -> crate::linalg::C64 { fold.emission.iter().map(|c| (0..GROUND).map(|g| c[(g, x)].conj() * c[(g, y)]).sum::<crate::linalg::C64>()).sum() };
+    let ground_pair = |s: usize, t: usize| site.ground[(s, t)].abs() / (site.ground[(s, s)].re - site.ground[(t, t)].re).abs();
+    // P's entries of two places of one kind and different frames.
+    for p in 0..n {
+        for q in (p + 1..n).filter(|&q| (p < ng) == (q < ng) && fold.frames[p] != fold.frames[q]) {
+            if p < ng {
+                add(Term::pair(fold.ground[p], fold.ground[q]), ground_pair(fold.ground[p], fold.ground[q]));
+            } else {
+                let (x, y) = (fold.explicit[p - ng], fold.explicit[q - ng]);
+                let a = fold.hermitian_excited(&site.excited, p, q).abs() + 0.5 * decay(x, y).abs();
+                add(Term::pair(GROUND + x, GROUND + y), a / (site.excited[(x, x)].re - site.excited[(y, y)].re).abs());
+            }
+        }
+    }
+    // A copy of a ground state at a P place's frame: the place's entry with it.
+    for b in &fold.blocks {
+        for r in &b.rows {
+            if let super::Row::Copy { state, component } = *r {
+                let omega = b.offset.plus(-1, &fold.components[component].beat);
+                for p in (0..ng).filter(|&p| fold.frames[p] == omega && fold.ground[p] != state) {
+                    add(Term::pair(state, fold.ground[p]), ground_pair(state, fold.ground[p]));
+                }
+            }
+        }
+    }
+    // A block's sources' mixing of each excited state, per beam at its optical detuning there.
+    let mixing = |b: &super::Block, x: usize| -> f64 {
+        let mut m = 0.0;
+        for &(p, c) in &b.sources {
+            let (s, comp) = (fold.ground[p], &fold.components[c]);
+            for (j, (&l, coupling)) in comp.beams.iter().zip(&comp.couplings).enumerate() {
+                let a = (comp.factor(site.a[l].value) * coupling[(x, s)]).abs();
+                if a > 0.0 {
+                    m += a / (crate::linalg::C64::real(site.ground[(s, s)].re + comp.nu - site.doppler[c][j]) - site.excited[(x, x)]).abs();
+                }
+            }
+        }
+        m
+    };
+    // An explicit state's copy at another block's offset.
+    for b in &fold.blocks {
+        for (j, &x) in fold.explicit.iter().enumerate().filter(|(j, _)| fold.frames[ng + j] != b.offset) {
+            let _ = j;
+            add(Term::Drive(x, b.offset.clone()), mixing(b, x));
+        }
+    }
+    // Two blocks' cross decay.
+    let nb = fold.blocks.len();
+    let landing: Vec<Vec<f64>> = fold
+        .blocks
+        .iter()
+        .map(|b| {
+            let e: Vec<f64> = (0..excited).map(|x| if b.explicit.iter().any(|&p| fold.explicit[p - ng] == x) { 1.0 } else { mixing(b, x) }).collect();
+            (0..3 * GROUND).map(|k| (0..excited).map(|x| fold.emission[k / GROUND][(k % GROUND, x)].abs() * e[x]).sum::<f64>()).collect()
+        })
+        .collect();
+    for i in 0..nb {
+        for j in (i + 1..nb).filter(|&j| fold.crossing[i * nb + j]) {
+            let a = 0.5 * landing[i].iter().zip(&landing[j]).map(|(x, y)| x * y).sum::<f64>();
+            add(Term::cross(&fold.blocks[i].offset, &fold.blocks[j].offset), a / (fold.blocks[i].value - fold.blocks[j].value).abs());
+        }
+    }
+    out
+}
+
+/// The terms of a request's sets on the explicit nodes `explicit` read at one point `local` (decide.rs # The terms), each
+/// beyond the share kept and the sets read again until none is added: the decision's loop at one point (tests: the
+/// focus's, `Local::focus`).
+pub(crate) fn at_point(request: &Request, explicit: Vec<Key>, local: &Local) -> Result<Choice, String> {
+    let share = crate::model::elim::share();
+    let light = Light::new(request);
+    let mut toned: Vec<Term> = vec![];
+    loop {
+        let choice = Choice::base(request, explicit.clone(), toned.clone())?;
+        let mut more = false;
+        for set in Fold::sets(request, &choice)? {
+            let mut fold = Fold::new(request, &choice, set[0])?;
+            fold.local = local.factors(&light);
+            for (term, r) in terms(&fold, local.kappa) {
+                if r > share && !toned.contains(&term) {
+                    toned.push(term);
+                    more = true;
+                }
+            }
+        }
+        if !more {
+            return Ok(choice);
+        }
+        toned.sort();
+    }
+}
 
 /// A point of the local physics (module documentation): the trap light's relative intensity, every beam's phase (zero for
 /// each frequency's first), the momentum κ (rad/µm: the velocity over ħ/m).
@@ -64,13 +201,18 @@ pub(crate) struct Local {
 }
 
 impl Local {
+    /// The focus: every beam at its focus value, in phase, at rest.
+    pub(crate) fn focus(light: &Light) -> Local {
+        Local { s: 1.0, phases: vec![0.0; light.beams.len()], kappa: [0.0; 3] }
+    }
+
     /// Its coordinates' bits: the point's identity (`Search::asked`).
     fn bits(&self) -> Vec<u64> {
         std::iter::once(self.s).chain(self.phases.iter().copied()).chain(self.kappa).map(f64::to_bits).collect()
     }
 
     /// Every beam's factor on its amplitude (fold.rs `Fold::local`): √s for the trap's beams, times its phase.
-    fn factors(&self, light: &Light) -> Vec<C64> {
+    pub(crate) fn factors(&self, light: &Light) -> Vec<C64> {
         (0..light.beams.len())
             .map(|l| {
                 let trap = light.frequencies[light.trap].beams.contains(&l);
@@ -89,6 +231,11 @@ impl Local {
 pub(crate) struct SetDecision {
     pub(crate) ground: Vec<usize>,
     pub(crate) nodes: Vec<Key>,
+    /// The terms it keeps (`Choice::toned`), sorted; those asked for whose cluster cannot be made with the others, each
+    /// with the count of the points that asked; the largest reading of a term within the share on the final decision.
+    pub(crate) toned: Vec<Term>,
+    pub(crate) refused_terms: Vec<(Term, usize)>,
+    pub(crate) terms_worst: f64,
     pub(crate) worst: Option<(Local, f64)>,
     pub(crate) beyond: usize,
     pub(crate) refused: Vec<(Key, usize)>,
@@ -118,6 +265,11 @@ impl Decision {
         let mut out: Vec<Key> = self.sets.iter().flat_map(|s| s.nodes.iter().copied()).collect();
         out.sort();
         out
+    }
+
+    /// Every set's decision (`Search::merged`'s input).
+    pub(crate) fn decided(&self) -> Vec<Decided> {
+        self.sets.iter().map(|s| (s.nodes.clone(), s.toned.clone())).collect()
     }
 }
 
@@ -222,11 +374,12 @@ impl Sobol {
 }
 
 /// What a point asks of one set's decision: nothing (its reading, rate units; whether it stays beyond the share with no
-/// node offered; its same-state pairs' metric cross reading, `Search::crossed`), a node (its key), or nothing where its
-/// fold does not exist and no node is left to raise.
+/// node offered; its same-state pairs' metric cross reading, `Search::crossed`; its terms' largest reading), terms beyond
+/// the share (# The terms), a node (its key), or nothing where its fold does not exist and no node is left to raise.
 #[derive(Clone)]
 enum Asked {
-    Within(f64, bool, f64),
+    Within(f64, bool, f64, f64),
+    Terms(Vec<Term>),
     Node(Key),
     Nowhere,
 }
@@ -314,11 +467,11 @@ pub(crate) struct Search<'a> {
     floor: f64,
     /// The largest momentum an atom held by the trap has (rad/µm).
     most: f64,
-    built: Mutex<Vec<((usize, Vec<Key>), Slot)>>,
+    built: Mutex<Vec<((usize, Decided), Slot)>>,
     of: OnceLock<Result<Choice, String>>,
     /// What each point asked of each set's decision (module documentation, # What is made once), by the point's bits
     /// (`Local::bits`), the set and its nodes.
-    asked: Mutex<HashMap<(Vec<u64>, usize, Vec<Key>), Asked>>,
+    asked: Mutex<HashMap<(Vec<u64>, usize, Decided), Asked>>,
 }
 
 impl<'a> Search<'a> {
@@ -339,13 +492,16 @@ impl<'a> Search<'a> {
     /// and per set its tiers, its own keys' (a key's source state is its set's) in its choice's order -- each set's fold
     /// on it the one on its own choice (`Fold::build` reads a set's keys alone): what `Choice::base_of` makes of all the
     /// sets at once (run.rs `Onefold::new`).
-    pub(crate) fn merged(&self, nodes: &[Vec<Key>]) -> Result<Choice, String> {
+    pub(crate) fn merged(&self, nodes: &[Decided]) -> Result<Choice, String> {
         self.build(&nodes.iter().cloned().enumerate().collect::<Vec<_>>());
         let built: Vec<Arc<Built>> = nodes.iter().enumerate().map(|(k, x)| self.built(k, x)).collect::<Result<_, _>>()?;
         let first = &built.first().ok_or("没有基态集合")?.choice;
-        let mut explicit: Vec<Key> = nodes.iter().flat_map(|x| x.iter().copied()).collect();
+        let mut explicit: Vec<Key> = nodes.iter().flat_map(|x| x.0.iter().copied()).collect();
         explicit.sort();
-        let mut out = Choice { frames: first.frames.clone(), sets: first.sets.clone(), explicit, copies: vec![], excited: vec![] };
+        let mut toned: Vec<Term> = nodes.iter().flat_map(|x| x.1.iter().cloned()).collect();
+        toned.sort();
+        toned.dedup();
+        let mut out = Choice { frames: first.frames.clone(), sets: first.sets.clone(), explicit, copies: vec![], excited: vec![], toned };
         for (b, ground) in built.iter().zip(self.grounds) {
             out.copies.extend(b.choice.copies.iter().filter(|x| ground.contains(&x.0 .1)).cloned());
             out.excited.extend(b.choice.excited.iter().filter(|x| ground.contains(&x.0 .1)).cloned());
@@ -355,7 +511,7 @@ impl<'a> Search<'a> {
 
     /// Set k's fold with the explicit nodes `nodes` (`Built`: `Choice::base_of`, its own set's tiers; the fold and its
     /// workspace), made once -- the first thread to ask makes it, the others wait for it.
-    fn built(&self, k: usize, nodes: &Vec<Key>) -> Result<Arc<Built>, String> {
+    fn built(&self, k: usize, nodes: &Decided) -> Result<Arc<Built>, String> {
         let slot: Slot = {
             let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
             match built.iter().find(|x| x.0 .0 == k && x.0 .1 == *nodes) {
@@ -368,7 +524,7 @@ impl<'a> Search<'a> {
             }
         };
         slot.get_or_init(|| {
-            let choice = Choice::base_of(self.request, nodes.clone(), &|set| set == &self.grounds[k][..])?;
+            let choice = Choice::base_of(self.request, nodes.0.clone(), nodes.1.clone(), &|set| set == &self.grounds[k][..])?;
             let fold = Fold::new(self.request, &choice, self.grounds[k][0])?;
             let ws = fold.prototype_workspace()?;
             let candidates = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| (key, Taken { block, rows })).collect();
@@ -378,7 +534,7 @@ impl<'a> Search<'a> {
     }
 
     /// Every set's fold on its nodes `wanted` (set, nodes) made at once, a thread each.
-    fn build(&self, wanted: &[(usize, Vec<Key>)]) {
+    fn build(&self, wanted: &[(usize, Decided)]) {
         std::thread::scope(|scope| {
             for (k, nodes) in wanted {
                 scope.spawn(move || {
@@ -399,13 +555,30 @@ impl<'a> Search<'a> {
 
     /// What the point `local` asks of a set's fold `built`, read on the thread's copy `held` (`Asked`; module
     /// documentation, # At each point).
-    fn ask(&self, built: &Result<Arc<Built>, String>, held: Option<&mut (Fold, Workspace)>, local: &Local) -> Asked {
+    fn ask(&self, built: &Result<Arc<Built>, String>, held: Option<&mut (Fold, Workspace)>, local: &Local, refused: &[Term]) -> Asked {
         let (Ok(built), Some((fold, ws))) = (built, held) else { return Asked::Nowhere };
         let candidates = &built.candidates;
         if fold.blocks.is_empty() {
-            return Asked::Within(0.0, false, 0.0);
+            return Asked::Within(0.0, false, 0.0, 0.0);
         }
         fold.local = local.factors(self.light);
+        // The terms first (# The terms): those beyond the share the decision does not keep and has not refused.
+        let share = crate::model::elim::share();
+        let mut worst = 0.0_f64;
+        let mut asks: Vec<Term> = vec![];
+        for (term, r) in terms(fold, local.kappa) {
+            if built.choice.toned.contains(&term) {
+                continue;
+            }
+            if r > share && !refused.contains(&term) {
+                asks.push(term);
+            } else {
+                worst = worst.max(r);
+            }
+        }
+        if !asks.is_empty() {
+            return Asked::Terms(asks);
+        }
         ws.cell = Cell { nodes: candidates.iter().map(|c| c.1.clone()).collect(), here: true, ..Cell::default() };
         let mut cache = Cache::default();
         let step = fold.prototype([0.0; 3], local.kappa, self.floor, &mut cache, ws).map(|s| (s.reading, s.beyond));
@@ -417,13 +590,13 @@ impl<'a> Search<'a> {
         }
         match (step, chosen) {
             (_, Some(c)) => Asked::Node(candidates[c].0),
-            (Some((reading, beyond)), None) => Asked::Within(reading, beyond, crossed(fold, &cache, ws)),
+            (Some((reading, beyond)), None) => Asked::Within(reading, beyond, crossed(fold, &cache, ws), worst),
             (None, None) => Asked::Nowhere,
         }
     }
 
     /// The points `points` read on the decision `nodes` (per set), in parallel: per point and set what it asks.
-    fn round(&self, points: &[Local], nodes: &[Vec<Key>]) -> Vec<Vec<Asked>> {
+    fn round(&self, points: &[Local], nodes: &[Decided], refused: &[Vec<Term>]) -> Vec<Vec<Asked>> {
         self.build(&nodes.iter().cloned().enumerate().collect::<Vec<_>>());
         let built: Vec<Result<Arc<Built>, String>> = nodes.iter().enumerate().map(|(k, x)| self.built(k, x)).collect();
         let built = &built;
@@ -444,7 +617,7 @@ impl<'a> Search<'a> {
                             if held[k].is_none() {
                                 held[k] = built[k].as_ref().ok().map(|b| b.take());
                             }
-                            let a = self.ask(&built[k], held[k].as_mut(), local);
+                            let a = self.ask(&built[k], held[k].as_mut(), local, &refused[k]);
                             self.asked.lock().unwrap_or_else(|e| e.into_inner()).insert(key, a.clone());
                             a
                         };
@@ -464,7 +637,7 @@ impl<'a> Search<'a> {
 
     /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a state
     /// is explicit at two offsets, or a block is not the prototype's).
-    fn feasible(&self, k: usize, nodes: &Vec<Key>) -> bool {
+    fn feasible(&self, k: usize, nodes: &Decided) -> bool {
         self.built(k, nodes).is_ok()
     }
 
@@ -501,7 +674,10 @@ impl<'a> Search<'a> {
         let mut open: Vec<usize> = (0..points.len()).collect();
         while !open.is_empty() {
             let nodes: Vec<Vec<Key>> = decision.sets.iter().map(|s| s.nodes.clone()).collect();
-            let asked = self.round(&open.iter().map(|&i| points[i].clone()).collect::<Vec<_>>(), &nodes);
+            let toned: Vec<Vec<Term>> = decision.sets.iter().map(|s| s.toned.clone()).collect();
+            let refused: Vec<Vec<Term>> = decision.sets.iter().map(|s| s.refused_terms.iter().map(|r| r.0.clone()).collect()).collect();
+            let decided: Vec<Decided> = nodes.iter().cloned().zip(toned.iter().cloned()).collect();
+            let asked = self.round(&open.iter().map(|&i| points[i].clone()).collect::<Vec<_>>(), &decided, &refused);
             decision.points += open.len();
             // The nodes asked, per set, joining in the order of the points that ask for them (the most first; a tie by the
             // keys' order), each where its cluster can be made: a node is a level at an offset holding the states that
@@ -525,13 +701,47 @@ impl<'a> Search<'a> {
                     keys.into_iter().map(|x| x.0).collect()
                 })
                 .collect();
+            // The terms asked, per set, joining at once with the nodes (each set's terms in their order, sorted); where the
+            // cluster cannot be made with them all, one by one, each where it can be made with those before it, else
+            // refused and kept so.
+            let terms: Vec<Vec<Term>> = (0..sets)
+                .map(|k| {
+                    let mut asks: Vec<Term> = asked.iter().filter_map(|a| if let Asked::Terms(t) = &a[k] { Some(t.clone()) } else { None }).flatten().collect();
+                    asks.sort();
+                    asks.dedup();
+                    asks
+                })
+                .collect();
+            let with = |k: usize, more: &[Term]| -> Vec<Term> {
+                let mut t: Vec<Term> = toned[k].iter().chain(more).cloned().collect();
+                t.sort();
+                t.dedup();
+                t
+            };
             let plans: Vec<(Vec<Key>, Vec<Key>)> = (0..sets).map(|k| self.join(&keys[k], &decision.sets[k], &|x| self.placed(k, x))).collect();
-            self.build(&plans.iter().map(|p| p.0.clone()).enumerate().collect::<Vec<_>>());
+            self.build(&plans.iter().enumerate().map(|(k, p)| (k, (p.0.clone(), with(k, &terms[k])))).collect::<Vec<_>>());
             for (k, plan) in plans.into_iter().enumerate() {
-                let (now, refused) = if self.feasible(k, &plan.0) { plan } else { self.join(&keys[k], &decision.sets[k], &|x| self.feasible(k, x)) };
+                let all = with(k, &terms[k]);
+                let (now, refused) = if self.feasible(k, &(plan.0.clone(), all.clone())) { plan } else { self.join(&keys[k], &decision.sets[k], &|x| self.feasible(k, &(x.clone(), toned[k].clone()))) };
+                let mut kept = toned[k].clone();
+                let mut refused_terms: Vec<Term> = vec![];
+                if self.feasible(k, &(now.clone(), all.clone())) {
+                    kept = all;
+                } else {
+                    for t in &terms[k] {
+                        let more = with(k, &kept.iter().chain(std::iter::once(t)).cloned().collect::<Vec<_>>());
+                        if self.feasible(k, &(now.clone(), more.clone())) {
+                            kept = more;
+                        } else {
+                            refused_terms.push(t.clone());
+                        }
+                    }
+                }
                 let set = &mut decision.sets[k];
                 set.nodes = now;
+                set.toned = kept;
                 set.refused.extend(refused.into_iter().map(|key| (key, 0)));
+                set.refused_terms.extend(refused_terms.into_iter().map(|t| (t, 0)));
             }
             let mut again = vec![];
             // Whether set k had a node of the level joined in this round.
@@ -540,8 +750,9 @@ impl<'a> Search<'a> {
                 let mut more = false;
                 for (k, ask) in asks.into_iter().enumerate() {
                     match ask {
-                        Asked::Within(reading, beyond, cross) => {
+                        Asked::Within(reading, beyond, cross, worst) => {
                             out[i][k] = (reading, beyond, false, false);
+                            decision.sets[k].terms_worst = decision.sets[k].terms_worst.max(worst);
                             let set = &mut decision.sets[k];
                             if cross > set.crossed.0 {
                                 set.crossed = (cross, Some(points[i].clone()));
@@ -549,6 +760,13 @@ impl<'a> Search<'a> {
                             set.crossed_beyond += usize::from(super::unfoldable(cross, crate::model::elim::share()));
                         }
                         Asked::Nowhere => out[i][k] = (f64::INFINITY, false, false, true),
+                        Asked::Terms(asks) if asks.iter().any(|t| decision.sets[k].toned.contains(t)) => more = true,
+                        Asked::Terms(asks) => {
+                            out[i][k] = (f64::INFINITY, false, true, false);
+                            for r in decision.sets[k].refused_terms.iter_mut().filter(|r| asks.contains(&r.0)) {
+                                r.1 += 1;
+                            }
+                        }
                         Asked::Node(key) if joined(k, key.0, &decision.sets) => more = true,
                         Asked::Node(key) => {
                             out[i][k] = (f64::INFINITY, false, true, false);
@@ -574,12 +792,12 @@ impl<'a> Search<'a> {
         let mut count = 1u64 << decision.dimensions;
         let mut from = 0u64;
         loop {
-            let before: Vec<Vec<Key>> = decision.sets.iter().map(|s| s.nodes.clone()).collect();
+            let before: Vec<Decided> = decision.decided();
             let points: Vec<Local> = (from..count).map(point).collect();
             let readings = self.settle(&points, decision);
             decision.rounds.push((points.len(), decision.sets.iter().map(|s| s.nodes.len()).sum()));
             read.extend(points.into_iter().zip(readings));
-            let same = decision.sets.iter().zip(&before).all(|(s, b)| s.nodes == *b);
+            let same = decision.decided() == before;
             if same && from > 0 {
                 return read;
             }
@@ -611,6 +829,7 @@ impl<'a> Search<'a> {
         // The readings on the final decision: the points of the last round of each doubling, read on it (a point read on
         // a smaller P reads on a larger one again at the next round's start, and those of the last round are on it).
         // (Where one asks for a node even so, it joins: the union.)
+        decision.sets.iter_mut().for_each(|s| s.terms_worst = 0.0);
         let finals = self.settle(&global.iter().chain(&refined).map(|x| x.0.clone()).collect::<Vec<_>>(), &mut decision);
         let all: Vec<Local> = global.iter().chain(&refined).map(|x| x.0.clone()).collect();
         for (k, set) in decision.sets.iter_mut().enumerate() {

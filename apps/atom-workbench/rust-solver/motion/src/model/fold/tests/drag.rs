@@ -407,7 +407,7 @@ fn the_run(req: &crate::request::Request, reference: [f64; GROUND]) -> run::Onef
     // no decision -- a measurement of a representation by hand.
     if let Some(keys) = explicit_keys() {
         println!("DRAG_EXPLICIT {keys:?}");
-        return run::Onefold::of(req, &Choice::base(req, keys).expect("the choice"), reference).expect("the run");
+        return run::Onefold::of(req, &Choice::base(req, keys, vec![]).expect("the choice"), reference).expect("the run");
     }
     if std::env::var("DRAG_KEEP_FREQ").is_err() {
         // The production run: the start's decision (decide.rs) on the base choice.
@@ -432,7 +432,7 @@ fn explicit_keys() -> Option<Vec<(usize, crate::model::Component, usize)>> {
 
 /// The diagnostics' choice: the base choice, with DRAG_KEEP_FREQ's omitted copies of the near blocks centred (`the_run`).
 fn the_choice(req: &crate::request::Request) -> Choice {
-    let mut choice = Choice::base(req, vec![]).expect("the choice");
+    let mut choice = Choice::base(req, vec![], vec![]).expect("the choice");
     if let Ok(list) = std::env::var("DRAG_KEEP_FREQ") {
         let fs: Vec<usize> = list.split(',').filter(|x| !x.trim().is_empty()).map(|x| x.trim().parse().unwrap()).collect();
         let mut keys = vec![];
@@ -503,10 +503,10 @@ fn the_decided_folds_laid_out() {
     let labels = req.levels().unwrap();
     let name = |s: usize| format!("{:?}{}{:+}", labels[s].manifold, labels[s].f, labels[s].m);
     let choice = match explicit_keys() {
-        Some(keys) => Choice::base(&req, keys).expect("the choice"),
+        Some(keys) => Choice::base(&req, keys, vec![]).expect("the choice"),
         None => {
             let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
-            Choice::base_of(&req, run.explicit(), &|_| true).expect("the choice")
+            run.choice().clone()
         }
     };
     println!("explicit keys {:?}", choice.explicit);
@@ -546,10 +546,10 @@ fn the_set_s_generator_at_the_focus() {
     let labels = req.levels().unwrap();
     let name = |s: usize| format!("{:?}{}{:+}", labels[s].manifold, labels[s].f, labels[s].m);
     let choice = match explicit_keys() {
-        Some(keys) => Choice::base(&req, keys).expect("the choice"),
+        Some(keys) => Choice::base(&req, keys, vec![]).expect("the choice"),
         None => {
             let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
-            Choice::base_of(&req, run.explicit(), &|_| true).expect("the choice")
+            run.choice().clone()
         }
     };
     let s0 = env("DRAG_SET", 3.0) as usize;

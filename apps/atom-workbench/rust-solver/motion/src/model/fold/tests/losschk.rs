@@ -47,7 +47,7 @@ fn tilt0_held_at_trap_intensities() {
     let chief = initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
     let reference: [f64; GROUND] = std::array::from_fn(|s| if s == chief { 1.0 } else { 0.0 });
     let rep = std::env::var("LOSS_REP").unwrap_or_else(|_| "new".into());
-    let run = if rep == "base" { run::Onefold::of(&req, &Choice::base(&req, vec![]).unwrap(), reference).unwrap() } else { run::Onefold::new(&req, reference).unwrap() };
+    let run = if rep == "base" { run::Onefold::of(&req, &Choice::base(&req, vec![], vec![]).unwrap(), reference).unwrap() } else { run::Onefold::new(&req, reference).unwrap() };
     // LOSS_WAIST set: the trap's intensity scaled to s in the request itself (`scaled`), the atom on the axis, the run on
     // the request's own decision (its explicit nodes).
     let explicit = run.explicit();
@@ -64,7 +64,7 @@ fn tilt0_held_at_trap_intensities() {
             let y = if scaling { 0.0 } else { waist * (-(s.ln()) / 2.0).max(0.0).sqrt() };
             let held = scaling.then(|| {
                 let r = scaled(&req, &light, s);
-                let choice = if rep == "base" { Choice::base(&r, vec![]) } else { Choice::base_of(&r, explicit.clone(), &|_| true) };
+                let choice = if rep == "base" { Choice::base(&r, vec![], vec![]) } else { Choice::base_of(&r, explicit.clone(), vec![], &|_| true) };
                 run::Onefold::of(&r, &choice.unwrap(), reference).unwrap()
             });
             let run = held.as_ref().unwrap_or(&run);
@@ -199,7 +199,7 @@ fn tilt0_free_atoms_leave_the_trap() {
     let chief = initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
     let reference: [f64; GROUND] = std::array::from_fn(|s| if s == chief { 1.0 } else { 0.0 });
     let rep = std::env::var("LOSS_REP").unwrap_or_else(|_| "new".into());
-    let run = if rep == "base" { run::Onefold::of(&req, &Choice::base(&req, vec![]).unwrap(), reference).unwrap() } else { run::Onefold::new(&req, reference).unwrap() };
+    let run = if rep == "base" { run::Onefold::of(&req, &Choice::base(&req, vec![], vec![]).unwrap(), reference).unwrap() } else { run::Onefold::new(&req, reference).unwrap() };
     let hm = run.hbar_over_mass();
     let at0 = run.reference([0.0; 3]);
     let kt = crate::units::KT_PER_UK * req.temperature_uk;
