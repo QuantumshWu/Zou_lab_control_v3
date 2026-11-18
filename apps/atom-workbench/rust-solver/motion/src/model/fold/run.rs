@@ -1098,6 +1098,48 @@ impl Middle<'_> {
         Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work) })
     }
 
+    /// The photon a landing's transient emits at once (step.rs `jump`; proto.rs `Fold::prototype_transient`): its landing
+    /// set and landed state drawn from the transient's own density (`draw` on its eigenvectors' weights), at the jump's
+    /// place on this middle; `landed` the landing's slow state, `bare` the bare state it rings from. Its kick and its
+    /// frequency are its landing set's class's of the bare state (`Fold::prototype_photons` there: the absorbed light's
+    /// conditional mean, which the transient's amplitudes share to its first order). None where the set has no light,
+    /// the fold does not exist there, or the density has no weight.
+    pub(crate) fn transient(&self, path: &Path, s: f64, bare: &[C64], landed: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let (run, set) = (self.run, &self.run.clusters.sets.get(self.set));
+        let fold = &set.fold;
+        if fold.blocks.is_empty() {
+            return None;
+        }
+        let mut inner = self.made(path, None, true);
+        if !inner.exists {
+            return None;
+        }
+        let Inner { eval, ws, .. } = &mut *inner;
+        let ws = ws.as_mut().expect("a workspace");
+        let place = fold.prototype_place(self.r, path.kappa, path.velocity, s, ws);
+        let t = self.t + s;
+        // The slow amplitude x = S⁻¹ψ of the landed state.
+        let x = ws.slow_amplitude(landed);
+        let (k, drawn) = fold.prototype_transient(eval, ws, &x, &run.clusters.grounds, t, true, draw)?;
+        // The kick and the frequency: the class of set k of the bare state.
+        let mut pick = |rates: &[f64]| -> Option<usize> { Some(k).filter(|&k| k < rates.len()) };
+        let photons = fold.prototype_photons(eval, ws, bare, &run.clusters.grounds, At::Place, t, Moments::Drawn(&mut pick));
+        let class = photons.drawn.map(|c| &photons.classes[c])?;
+        let landing = self.landing_cluster(k);
+        let to = run.clusters.sets.get(landing);
+        let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
+        for (a, amplitude) in amplitudes.iter_mut().enumerate() {
+            for ((z, &st), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
+                if let Some(b) = run.clusters.grounds[k].iter().position(|&g| g == st) {
+                    *z = drawn[b][a] * C64::cis(theta * t);
+                }
+            }
+        }
+        let first = fold.ground[0];
+        let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[k][0]];
+        Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work) })
+    }
+
     /// The cluster a jump into ground set k lands in (# The nodes risen and fallen): this middle's where k is its own set,
     /// else the one the trajectory last took there, else k's with nothing explicit.
     fn landing_cluster(&self, k: usize) -> usize {
@@ -1571,6 +1613,19 @@ impl crate::step::Dynamics for Onefold {
                 let middle = self.middle(cluster, at.r, at.t, held, false);
                 let path = middle.path(at.kappa, [0.0; 3]);
                 middle.emitted(&path, 0.0, psi, draw)
+            }
+        }
+    }
+
+    /// A landing's at-once photon (`Middle::transient`): on the step's middle at the jump's time, or at a point on a middle
+    /// made there.
+    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Middle<'m>, &Path, f64)>, bare: &[C64], landed: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        match on {
+            Some((middle, path, s)) => middle.transient(path, s, bare, landed, draw),
+            None => {
+                let middle = self.middle(cluster, at.r, at.t, held, false);
+                let path = middle.path(at.kappa, [0.0; 3]);
+                middle.transient(&path, 0.0, bare, landed, draw)
             }
         }
     }

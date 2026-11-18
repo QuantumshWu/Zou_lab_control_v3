@@ -504,6 +504,14 @@ pub trait Dynamics {
     /// point's time s from the middle (`Places`), what the step made of the model for the jump to read (DESIGN §13.2);
     /// at a trajectory's start there is none.
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
+    /// The photon a landing's transient emits at once (`jump`: a landing whose norm `landed` is at or below the threshold),
+    /// from the bare state `bare`: its landing drawn from the transient's own density (model/fold/proto.rs
+    /// `Fold::prototype_transient`; dragchk.status.md section 5). A model whose landing leaves no transient of its own
+    /// emits it as the bare state's photon (`emit`).
+    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, bare: &[C64], landed: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let _ = landed;
+        self.emit(cluster, at, on, bare, held, draw)
+    }
     /// Where a jump's bare state `f` lands in a cluster at a point (`Landing`): the state the trajectory goes on in, with
     /// the norm it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
     /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
@@ -2911,6 +2919,8 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
     let threshold = stream.open_uniform();
     let (mut class, mut polarization) = (stream.uniform(), stream.uniform());
     let mut first = true;
+    // The landed slow state whose norm met the threshold at once: the next photon its transient's.
+    let mut ringing: Option<Internal> = None;
     loop {
         let at = trajectory.point();
         // The class among the state's classes by their rates; none where they have no rate between them.
@@ -2939,7 +2949,12 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         let gram = |u: &[Internal; 3]| -> [[f64; 3]; 3] { std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re)) };
         // A photon whose amplitudes are no finite numbers is none, as a class's rate that is none (the one exit: the
         // direction's rejection would accept no direction of it).
-        let emitted = model.emit(trajectory.cluster, &at, on, &trajectory.psi, &trajectory.held, &mut draw).map(|photon| (gram(&photon.amplitudes), photon));
+        // The first photon the state's; one at once after a landing its transient's (`Dynamics::transient`).
+        let emitted = match &ringing {
+            None => model.emit(trajectory.cluster, &at, on, &trajectory.psi, &trajectory.held, &mut draw),
+            Some(landed) => model.transient(trajectory.cluster, &at, on, &trajectory.psi, landed, &trajectory.held, &mut draw),
+        }
+        .map(|photon| (gram(&photon.amplitudes), photon));
         let Some((gram, photon)) = emitted.filter(|(g, _)| (g[0][0] + g[1][1] + g[2][2]).is_finite() && g[0][0] + g[1][1] + g[2][2] > 0.0) else {
             // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
             if first {
@@ -2992,6 +3007,7 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
             trajectory.psi = landed;
             break;
         }
+        ringing = Some(landed);
         trajectory.threshold = stream.open_uniform();
         (class, polarization) = (stream.uniform(), stream.uniform());
     }
