@@ -503,19 +503,27 @@ impl Transient {
         let p_slow = (0..n).map(|j| dslow[j] * self.c[j] * e[j]).sum::<C64>().re;
         let mut whole = [0.0; 3];
         let mut part = [0.0; 3];
+        // The kernels of every mode pair, the same on the three axes: made once.
+        let kernels: Vec<(C64, C64)> = (0..d)
+            .flat_map(|j| (0..d).map(move |k| (j, k)))
+            .map(|(j, k)| {
+                let full = between(lam[j], lam[k], e[j], e[k], tau);
+                let long = match (j < n, k < n) {
+                    (true, true) => full,
+                    (true, false) => -e[j] / (i * (lam[j] - lam[k])),
+                    (false, true) => e[k] / (i * (lam[j] - lam[k])),
+                    (false, false) => C64::ZERO,
+                };
+                (full, long)
+            })
+            .collect();
         for (ax, hp) in hprime.iter().enumerate() {
             let (mut w, mut h) = (C64::ZERO, C64::ZERO);
             for j in 0..d {
                 for k in 0..d {
                     let weight = hp[(j, k)] * self.c[k];
-                    let full = between(lam[j], lam[k], e[j], e[k], tau);
+                    let (full, long) = kernels[j * d + k];
                     w += dall[j] * weight * full;
-                    let long = match (j < n, k < n) {
-                        (true, true) => full,
-                        (true, false) => -e[j] / (i * (lam[j] - lam[k])),
-                        (false, true) => e[k] / (i * (lam[j] - lam[k])),
-                        (false, false) => C64::ZERO,
-                    };
                     h += dslow[j] * weight * long;
                 }
             }
