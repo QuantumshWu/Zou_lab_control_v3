@@ -2,7 +2,7 @@
 //! the Doppler shifts on the diagonal and the energy's self-consistency by a series (the first road's minimal prototype,
 //! BRIEF_PROTO.md; not the run's, the forward alone). The same object as `Fold::at` on the same choice of nodes, with every
 //! excited row of a block that solves any row solved (a centred excited row there costs a mode, not a pass); `Fold::at`
-//! is the truth of its tests. `Fold::at` and `Fold::step` are not touched.
+//! is the truth of its tests. `Fold::at` is not touched.
 //!
 //! # The far coordinates
 //! Every frequency's field at a point on its basis, ε_k = u_k†F (field.rs `Frequency::components`). The outside forms are
