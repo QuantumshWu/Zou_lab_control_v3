@@ -586,6 +586,9 @@ pub(crate) struct Cache {
     /// Of `made`, those made because the kept levels changed.
     pub(crate) grown: usize,
     evaluation: Evaluation,
+    /// The averaged terms' second order at the last decision's point (run.rs # The averaged terms folded): held with the
+    /// decompositions, made again where they are.
+    pub(crate) folded: Option<Mat>,
 }
 
 impl Cache {
@@ -900,6 +903,10 @@ pub(crate) struct Workspace {
     lin: Lin,
     /// Ĥ_PP's tones (module documentation, # The tones), by their beats' values.
     rotating: Vec<Rotating>,
+    /// Ĥ_PP's entries the rule averages out (fold.rs `Fold::turning`: between places of one kind and different frames,
+    /// within the share), by their beats' values, laid as the tones are -- folded, not dropped: the run's generator takes
+    /// their second order, made where a decision makes it (`Workspace::averaged_at`; run.rs # The averaged terms folded).
+    averaged: Vec<Rotating>,
     near: Vec<Near>,
     far: Vec<Far>,
     /// The middle's light, and per frequency, beam and basis vector u_k†E_l (the components' gradients).
@@ -2509,6 +2516,36 @@ impl Fold {
             }
         }
         rotating.sort_by(|a, b| a.value.total_cmp(&b.value));
+        // The entries the rule averages out, laid as the tones are (their static part and per pair the forms').
+        let mut averaged: Vec<Rotating> = vec![];
+        let averages = |p: usize, q: usize| p != q && (p < ng) == (q < ng) && self.frames[p] != self.frames[q] && !turning(p, q);
+        for x in (0..n * n).filter(|&x| averages(x / n, x % n)) {
+            let (p, q) = (x / n, x % n);
+            let h = if p < ng { self.base_ground[(self.ground[p], self.ground[q])] } else { self.hermitian_excited(&self.base_excited, p, q) };
+            if h != C64::ZERO {
+                let m = tone_of(x, &mut averaged);
+                averaged[m].base.push((x, h));
+            }
+        }
+        for (t, &pair) in pairs.iter().enumerate() {
+            let m = contract(
+                pair,
+                &|i, j| {
+                    let (p, q) = (place(i)?, place(j)?);
+                    averages(p, q).then_some((p, q))
+                },
+                n,
+                n,
+            );
+            for x in (0..n * n).filter(|&x| m.data[x] != C64::ZERO) {
+                let r = tone_of(x, &mut averaged);
+                match averaged[r].pp.iter_mut().find(|y| y.0 == t) {
+                    Some(y) => y.1.push((x, m.data[x])),
+                    None => averaged[r].pp.push((t, vec![(x, m.data[x])])),
+                }
+            }
+        }
+        averaged.sort_by(|a, b| a.value.total_cmp(&b.value));
         let (mut near, mut far) = (vec![], vec![]);
         for (o, b) in self.blocks.iter().enumerate() {
             let m = b.rows.len();
@@ -2810,6 +2847,7 @@ impl Fold {
             },
             spent: 0.0,
             rotating,
+            averaged,
             gradient: Gradient::default(),
             landing: Landing::default(),
             cell: Cell::default(),
@@ -6812,6 +6850,33 @@ impl Workspace {
     /// The tones (module documentation, # The tones): per tone its exact beat and its value (rad/µs), by their values.
     pub(crate) fn tones(&self) -> impl Iterator<Item = (&Beat, f64)> {
         self.rotating.iter().map(|r| (&r.beat, r.value))
+    }
+
+    /// Ĥ_PP's entries the rule averages out, by beat (`Workspace::averaged`): each its index m (`Workspace::averaged_at`)
+    /// with its exact beat and its value (rad/µs).
+    pub(crate) fn averaged(&self) -> impl Iterator<Item = (usize, &Beat, f64)> {
+        self.averaged.iter().enumerate().map(|(m, r)| (m, &r.beat, r.value))
+    }
+
+    /// Averaged entry m's G_m = S⁻¹A_mS⁻¹ at the last step's middle (its A_m as a tone's, `Fold::generator_at`, at the
+    /// middle's pair coefficients; S⁻¹ the middle's): made where it is asked for, not at every step.
+    pub(crate) fn averaged_at(&self, m: usize) -> Mat {
+        let n = self.n;
+        let tone = &self.averaged[m];
+        let mut a = vec![C64::ZERO; n * n];
+        for &(i, v) in &tone.base {
+            a[i] += v;
+        }
+        for (t, entries) in &tone.pp {
+            let x = self.mid.coef[*t];
+            for &(i, v) in entries {
+                a[i] += x * v;
+            }
+        }
+        let (mut temp, mut g) = (vec![C64::ZERO; n * n], Mat::zeros(n, n));
+        multiply(&self.step.normal.data, &a, &mut temp, n);
+        multiply(&temp, &self.step.normal.data, &mut g.data, n);
+        g
     }
 
     /// Tone m's G_m at a position of the last step: 0 its middle, 1 and 2 its outer nodes (`Fold::prototype_nodes`).

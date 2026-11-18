@@ -43,6 +43,16 @@ fn raman_diagnostic() {
     for s in 0..GROUND {
         println!("frame {s}: {:?} = {:.5}", choice.frames[s], axes.omega(&choice.frames[s]));
     }
+    // The averaged terms folded (run.rs # The averaged terms folded): their second order against the static generator at
+    // the focus, per ground set's cluster.
+    let run = super::super::run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+    for k in 0..run.sets_len() {
+        use crate::step::{Dynamics, Middle as _};
+        let middle = run.middle(k, [0.0; 3], 0.0, &crate::step::Held::default(), false);
+        let path = middle.path([0.0; 3], [0.0; 3]);
+        let (folded, whole, beats) = middle.folded(&path);
+        println!("cluster {k}: the averaged terms' second order {folded:.3e} against the generator's {whole:.3e} ({:.2e} of it; {beats} averaged beats)", folded / whole.max(1e-300));
+    }
     let base = Choice::base(&req, vec![]).unwrap();
     for set in Fold::sets(&req, &base).unwrap() {
         let fold = Fold::new(&req, &base, set[0]).unwrap();

@@ -105,6 +105,20 @@
 //! survival's hazard at its exact phase (step.rs, # Jumps): not through the step's three nodes, which alias it beyond
 //! νh = π.
 //!
+//! # The averaged terms folded (FOLDAPI §2; DESIGN §1.2, §3.2)
+//! A term of the generator that turns and that the rule averages out -- an entry of Ĥ_PP between places of different
+//! frames within the share (proto.rs `Workspace::averaged`), a cross decay of two blocks within it (fold.rs
+//! `Fold::beating`) -- is a Floquet sideband node, folded as a far level or a ground copy is, not dropped: its static
+//! second order is kept. Of the generator's Fourier coefficients G_{±ν} at each averaged beat ν (every averaged term at
+//! that exact beat summed, the Hamiltonian's and the decay's alike), the high-frequency expansion's second order
+//! [G_{+ν}, G_{−ν}]/ν is added to the static generator at every position (`Middle::generator`, `folded_part`, `Fourier`):
+//! made at a decision's point and held with the decompositions (proto.rs `Cache::folded`; its change over the cell is its
+//! own size times the light's, beyond the order it is of); what it leaves is
+//! the next order, its reading m = a/|ν| (the rule's, within the share) once more smaller. Of a cross decay the
+//! coefficients are −(i/2) Σ_q L_o,q†L_o′,q and its adjoint: their commutator is Hermitian, a shift, no decay -- the
+//! decay stays the jumps' products'. (Its force -- the shift's gradient -- is not taken: the contraction holds the static
+//! A and the tones alone.)
+//!
 //! # The jumps' phase
 //! A jump lands on the lab frame's ground states, C_q Σ e^{−iot} ε_o S⁻¹x: in the landing set's coordinates, each of its
 //! ground states s at its own frame θ_s, the landed amplitude of s is Σ_o e^{i(θ_s − o)t} (C_q ε_o S⁻¹x)_s -- every block
@@ -195,6 +209,8 @@ struct Set {
     /// decay is a tone (fold.rs `Fold::beating`), each with its beat o − o′ (rad/µs: its candidate's, `Candidate::cross`):
     /// the decay between their offsets (# The jumps' coherence).
     coherent: Vec<(usize, usize, f64)>,
+    /// The averaged terms' Fourier coefficients by beat (# The averaged terms folded).
+    folded: Vec<Fourier>,
     /// Its optical sector (# The optical sector): γ_Q, the least of its explicit excited states' decay over two (none
     /// where it holds none), and its light's beams' momenta (the fold's components' beams: the pattern's beats).
     optical: Option<f64>,
@@ -227,6 +243,16 @@ struct Candidate {
     minus: Option<usize>,
     cross: [Vec<usize>; 2],
     key: Vec<i64>,
+}
+
+/// One averaged beat ν of a set's generator, its exact beat's orientation (# The averaged terms folded; `Beat::sign`): at
+/// +ν and at −ν, Ĥ_PP's averaged entries
+/// there (indices of proto.rs `Workspace::averaged`, their G_ν by `Workspace::averaged_at`) and the blocks' cross decays there
+/// (pairs of the jumps' blocks, `Set::coherent`'s order).
+struct Fourier {
+    value: f64,
+    entries: [Vec<usize>; 2],
+    pairs: [Vec<(usize, usize)>; 2],
 }
 
 /// An atom's representation (`step::Held`): per cluster its kept decompositions, each shared -- a decision replaces one
@@ -341,8 +367,8 @@ impl Set {
         let mut states: Vec<usize> = fold.ground.clone();
         states.extend(fold.explicit.iter().map(|&x| GROUND + x));
         let cluster = Cluster { ground: fold.ground.len(), frames: fold.frames.clone(), waves: vec![[0.0; 3]; states.len()], waves_exact: vec![crate::model::Beat::whole(vec![]); states.len()], states };
-        let (pool, tones, candidates, coherent) = if fold.blocks.is_empty() {
-            (vec![], vec![], vec![], vec![])
+        let (pool, tones, candidates, coherent, folded) = if fold.blocks.is_empty() {
+            (vec![], vec![], vec![], vec![], vec![])
         } else {
             let ws = fold.prototype_workspace()?;
             let (near, far) = ws.layout();
@@ -359,14 +385,36 @@ impl Set {
                     side.iter().for_each(|&k| coherent[k].2 = sign * c.beat);
                 }
             }
-            (vec![ws], beats.iter().map(|b| b.1).collect(), candidates, coherent)
+            // The averaged terms by their exact beat, oriented (# The averaged terms folded): Ĥ_PP's, and the cross decays
+            // the rule does not keep (a pair of blocks with a common landing, `Fold::crossing` not zero).
+            let mut folded: Vec<(crate::model::Beat, Fourier)> = vec![];
+            let at = |folded: &mut Vec<(crate::model::Beat, Fourier)>, beat: crate::model::Beat, value: f64| -> (usize, usize) {
+                let (oriented, side) = if beat.sign() > 0 { (beat, 0) } else { (beat.negated(), 1) };
+                let m = folded.iter().position(|f| f.0 == oriented).unwrap_or_else(|| {
+                    folded.push((oriented, Fourier { value: if side == 0 { value } else { -value }, entries: [vec![], vec![]], pairs: [vec![], vec![]] }));
+                    folded.len() - 1
+                });
+                (m, side)
+            };
+            for (m, beat, value) in ws.averaged() {
+                let (k, side) = at(&mut folded, beat.clone(), value);
+                folded[k].1.entries[side].push(m);
+            }
+            let nb = fold.blocks.len();
+            for i in 0..blocks.len() {
+                for j in (0..blocks.len()).filter(|&j| j != i && fold.crossing[blocks[i] * nb + blocks[j]] > 0.0 && !fold.beating(blocks[i], blocks[j])) {
+                    let (k, side) = at(&mut folded, fold.blocks[blocks[i]].offset.plus(-1, &fold.blocks[blocks[j]].offset), fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value);
+                    folded[k].1.pairs[side].push((i, j));
+                }
+            }
+            (vec![ws], beats.iter().map(|b| b.1).collect(), candidates, coherent, folded.into_iter().map(|f| f.1).collect())
         };
         let optical = fold.explicit.iter().map(|&x| 0.5 * decay[(x, x)].re).reduce(f64::min);
         let waves = fold.components.iter().flat_map(|c| c.kicks.iter().copied()).collect();
         let rises = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| Rise { key, block, rows, cluster: OnceLock::new() }).collect();
         let ng = fold.ground.len();
         let falls = nodes.iter().map(|&key| Fall { key, places: (ng..fold.size()).filter(|&p| fold.excited_level[fold.explicit[p - ng]] == key.0).collect(), cluster: OnceLock::new() }).collect();
-        Ok(Set { ground_set: k, nodes, fold, cluster, rises, falls, pool: Mutex::new(pool), tones, candidates, coherent, optical, waves })
+        Ok(Set { ground_set: k, nodes, fold, cluster, rises, falls, pool: Mutex::new(pool), tones, candidates, coherent, folded, optical, waves })
     }
 }
 
@@ -404,6 +452,12 @@ impl Onefold {
             light,
         };
         Ok(run)
+    }
+
+    /// The ground sets' count (tests).
+    #[cfg(test)]
+    pub(crate) fn sets_len(&self) -> usize {
+        self.clusters.grounds.len()
     }
 
     /// An atom's mechanical energy at (r, κ), the potential channel's unit (unify2 §2.1: each atom's error within a share of
@@ -704,6 +758,32 @@ fn forms_on(fold: &Fold, cache: &Cache, ws: &mut Workspace, tones: &[f64], t: f6
     Forms { time: 0.0, held: real(f[0]), tones: tones.iter().zip(&f[1..]).map(|(&nu, a)| (nu, *a)).collect() }
 }
 
+/// The averaged terms' second order at the last step's middle (# The averaged terms folded): Σ_ν [G_{+ν}, G_{−ν}]/ν, each
+/// coefficient Ĥ_PP's averaged entries' G_ν there (proto.rs `Workspace::averaged_at`) and its cross decays' −(i/2) Σ_q
+/// L_o,q†L_o′,q (the jumps there, where the set has a cross decay averaged).
+fn folded_part(set: &Set, ws: &Workspace, jumps: Option<&[[Mat; 3]]>) -> Mat {
+    let n = set.fold.size();
+    let mut out = Mat::zeros(n, n);
+    for f in &set.folded {
+        let [plus, minus] = [0, 1].map(|side| {
+            let mut g = Mat::zeros(n, n);
+            for &m in &f.entries[side] {
+                g.add_scaled(C64::ONE, &ws.averaged_at(m));
+            }
+            for &(i, j) in &f.pairs[side] {
+                let jumps = jumps.expect("the jumps of an averaged cross decay's blocks");
+                for q in 0..3 {
+                    g.add_scaled(C64::new(0.0, -0.5), &jumps[i][q].adjoint().product(&jumps[j][q]));
+                }
+            }
+            g
+        });
+        out.add_scaled(C64::real(1.0 / f.value), &plus.product(&minus));
+        out.add_scaled(C64::real(-1.0 / f.value), &minus.product(&plus));
+    }
+    out
+}
+
 /// A representation's per-cluster decompositions and chosen clusters (`Caches`), where it holds the run's.
 fn caches(held: &Held) -> Option<&Caches> {
     held.0.as_ref().and_then(|h| h.downcast_ref::<Caches>())
@@ -942,6 +1022,17 @@ impl Drop for Middle<'_> {
 }
 
 impl Middle<'_> {
+    /// The averaged terms' second order at the middle and the static generator's there (# The averaged terms folded), their
+    /// Frobenius norms, and the averaged beats' count (a measurement, tests).
+    #[cfg(test)]
+    pub(crate) fn folded(&self, path: &Path) -> (f64, f64, usize) {
+        let set = self.run.clusters.sets.get(self.set);
+        let inner = self.made(path, None, false);
+        let Some(ws) = inner.ws.as_ref().filter(|_| inner.exists) else { return (0.0, 0.0, 0) };
+        let jumps = set.fold.prototype_jumps(&inner.eval, ws, At::Middle);
+        (folded_part(set, ws, Some(&jumps)).frobenius(), inner.generator.frobenius(), set.folded.len())
+    }
+
     /// The forward at the path's momentum, where the workspace does not hold it (module documentation, # The representation).
     fn forward(&self, path: &Path) -> RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
@@ -959,6 +1050,14 @@ impl Middle<'_> {
                 generator.data.copy_from_slice(&step.generator.data);
                 (step.reading, step.kinds, step.started, step.ended, step.unresolved)
             });
+            // The averaged terms' second order (# The averaged terms folded): made at a decision's point, or where the
+            // atom holds none yet, and held with the decompositions.
+            let set = self.run.clusters.sets.get(self.set);
+            if made.is_some() && !set.folded.is_empty() && (decide || eval.folded.is_none()) {
+                let pairs = set.folded.iter().any(|f| f.pairs.iter().any(|p| !p.is_empty()));
+                let jumps = pairs.then(|| fold.prototype_jumps(eval, ws, At::Middle));
+                eval.folded = Some(folded_part(set, ws, jumps.as_deref()));
+            }
             let spent = ws.spent() * crate::decide::COMPLEX;
             let (rise, beyond) = (ws.cell.chosen, decide && made.is_some() && ws.step_beyond());
             if decide {
@@ -1242,6 +1341,12 @@ impl crate::step::Middle for Middle<'_> {
                         *z += factor * *c;
                     }
                 }
+            }
+        }
+        // The averaged terms' second order (# The averaged terms folded), as the trajectory holds it.
+        if let Some(folded) = &inner.eval.folded {
+            for (z, c) in h.data.iter_mut().zip(&folded.data) {
+                *z += *c;
             }
         }
     }
