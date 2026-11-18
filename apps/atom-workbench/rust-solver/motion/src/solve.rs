@@ -2520,10 +2520,14 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
 /// in: each time from the last checkpoint before it -- or from where the trajectory stands, advanced again so far,
 /// where that is later --, stopped at the first step's end at or past it (adapt.rs `advance`). The states `run` reads
 /// there to the bit (adapt.rs, # The reads: a read is an onlooker, a stop no step's end): none after the trajectory's
-/// loss or failure, and after a runaway the state it stopped in at every time it did not reach (`run`).
+/// loss or failure, and after a runaway the state it stopped in at every time it did not reach (`run`); none at all of a
+/// trajectory whose start lands nowhere (no checkpoint).
 fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[Checkpoint], times: &[f64]) -> Vec<Option<State>> {
     let mut states: Vec<Option<State>> = vec![None; times.len()];
-    states[0] = Some(State::of(&trail[0].trajectory));
+    // A trajectory whose start lands nowhere has no checkpoint (`run`: its fate sealed at t = 0, counted in
+    // `Counts::nowhere` and said): nothing is made again of it.
+    let Some(first) = trail.first() else { return states };
+    states[0] = Some(State::of(&first.trajectory));
     // The first time not read, and the trajectory as far as it is advanced again, with its path and scratch.
     let (mut reached, mut going): (usize, Option<(Trajectory, adapt::Path, Scratch)>) = (1, None);
     while reached < times.len() {
