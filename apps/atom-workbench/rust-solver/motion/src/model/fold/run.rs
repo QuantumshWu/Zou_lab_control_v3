@@ -597,8 +597,9 @@ impl Onefold {
         let landed = taken.and_then(|(state, a)| {
             // The held forms make the step's tangent there (`forms_on`), the clock's kick its.
             let (state, forms) = self.held_forms(cluster, at, &state, Some((&cache, &mut ws)), false);
+            let left = ws.left_work();
             let clock = ws.clock(&set.fold, &cache, &state, &a, threshold, at.t)?;
-            Some((landed_of(state.into_iter().collect(), clock), forms))
+            Some((landed_of(state.into_iter().collect(), clock, left), forms))
         });
         self.clusters.give(cluster, ws);
         caches.keep(cluster, Arc::new(cache));
@@ -1221,18 +1222,17 @@ impl Middle<'_> {
             return Landing::On(Landed::plain(f.iter().copied().collect(), threshold));
         }
         let mut inner = self.made(path, None, true);
-        let Inner { eval, ws, made, exists, .. } = &mut *inner;
+        let Inner { eval, ws, exists, .. } = &mut *inner;
         let ws = ws.as_mut().expect("a workspace");
         if *exists {
             let _t = crate::prof::scope(crate::prof::LAND_TAKEN);
             let landed = ws.taken(&set.fold, eval, f, &[], false);
             drop(_t);
-            *made += ws.left_work() * crate::decide::COMPLEX;
+            let left = ws.left_work();
             if let Some((psi, a)) = landed {
                 let _c = crate::prof::scope(crate::prof::LAND_CLOCK);
                 if let Some(clock) = ws.clock(&set.fold, eval, &psi, &a, threshold, t) {
-                    *made += clock.work * crate::decide::COMPLEX;
-                    return Landing::On(landed_of(psi.into_iter().collect(), clock));
+                    return Landing::On(landed_of(psi.into_iter().collect(), clock, left));
                 }
             }
         }
@@ -1269,9 +1269,10 @@ impl Middle<'_> {
 }
 
 /// A landing on its clock (proto/transient.rs `Clock`; step.rs `Landed`): the slow state, the threshold θ′, the photon owed
-/// to that jump and whether the landing booked its cycle's whole momentum (at once), the kick.
-fn landed_of(psi: Internal, clock: super::proto::transient::Clock) -> Landed {
-    Landed { psi, threshold: clock.threshold, owed: clock.owed.map(|photon| Owed { photon, whole: clock.once }), kick: clock.kick }
+/// to that jump and whether the landing booked its cycle's whole momentum (at once), the kick; its count, the clock's with
+/// the left response's `left` (complex multiply-adds; `Workspace::left_work`) -- the jump's, not the step's.
+fn landed_of(psi: Internal, clock: super::proto::transient::Clock, left: f64) -> Landed {
+    Landed { psi, threshold: clock.threshold, owed: clock.owed.map(|photon| Owed { photon, whole: clock.once }), kick: clock.kick, work: (clock.work + left) * crate::decide::COMPLEX }
 }
 
 /// The real parts of a form.
@@ -1500,10 +1501,6 @@ impl crate::step::Middle for Middle<'_> {
 
     fn work(&self) -> [f64; 3] {
         self.costs().map_or([0.0; 3], |(sizes, route)| sizes.costs(&route))
-    }
-
-    fn jump_work(&self) -> f64 {
-        self.costs().map_or(0.0, |(sizes, _)| sizes.jump())
     }
 
     /// Its forwards' counted work (`Inner::made`): a step's model is priced where it is made, its forward at the point

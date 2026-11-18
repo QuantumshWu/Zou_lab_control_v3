@@ -1006,10 +1006,12 @@ struct Prices<'a> {
 
 /// A trajectory's work a µs at every step at the states `rated` (`one_each`), the mean over the run's held states
 /// (`over_the_run`): at each, the step of τ taken from it on the run, as its count is made (step.rs `priced`: its
-/// stretches' counts, each with its cluster's counts at a node, `Onefold::costs`) over τ, and its jumps' photons at the
-/// trajectory's own rate of jumps (`Dynamics::photon_work`: the one count of a run's step priced once a run); past any
-/// work where no step of τ can be taken from it (refused as the run's would be, the runaway's rule the run's,
-/// `Widest`). The splitting's reference is a sum over the trap light's beam pairs, no part of the price. The step's
+/// stretches' counts, each with its cluster's counts at a node, `Onefold::costs`) over τ, and its jumps' counted work a
+/// µs over its run (`Pick::jumping`: their photons and landings as they were made, step.rs `Trajectory::jumped`) -- a
+/// jump's work is the jump's whatever the step, so the step's count holds none of it: a landing's clock counted in the one
+/// step a state is priced at made the price a draw of whether that step held a jump (tilt0's scout: w(τ/2) below w(τ) by
+/// 5 %, and the ladder went down a rung for it); past any work where no step of τ can be taken from it (refused as the
+/// run's would be, the runaway's rule the run's, `Widest`). The splitting's reference is a sum over the trap light's beam pairs, no part of the price. The step's
 /// check's `Prices::work`, each step's made once -- a check prices the same steps again as it goes on --, the states'
 /// steps on the pool, each by itself.
 fn work_at<'a>(run: &'a Onefold, widest: Widest, rated: &'a [Pick<'a>]) -> impl Fn(f64) -> f64 + 'a {
@@ -1021,7 +1023,7 @@ fn work_at<'a>(run: &'a Onefold, widest: Widest, rated: &'a [Pick<'a>]) -> impl 
         let rates: Vec<f64> = rated
             .par_iter()
             .map(|pick| match crate::step::priced(run, &pick.state.trajectory(), tau, &widest) {
-                Ok(stretches) => stretches.iter().map(|(_, price)| price.work(price.costs)).sum::<f64>() / tau + pick.jumps * stretches.first().map_or(0.0, |s| s.1.jump),
+                Ok(stretches) => stretches.iter().map(|(_, price)| price.work(price.costs)).sum::<f64>() / tau + pick.jumping,
                 Err(_) => f64::INFINITY,
             })
             .collect();
@@ -2148,8 +2150,10 @@ impl Stopped {
 struct State {
     sample: Sample,
     index: u64,
-    /// The trajectory's jumps up to the state, the threshold of its next one and what its last landing owes it.
+    /// The trajectory's jumps up to the state, their counted work (step.rs `Trajectory::jumped`), the threshold of its next
+    /// one and what its last landing owes it.
     jumps: u32,
+    jumped: f64,
     threshold: f64,
     owed: Option<crate::step::Owed>,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
@@ -2168,6 +2172,7 @@ impl State {
             sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() },
             index: t.index,
             jumps: t.jumps,
+            jumped: t.jumped,
             threshold: t.threshold,
             owed: t.owed.clone(),
             forms: t.forms.clone(),
@@ -2196,6 +2201,7 @@ impl State {
             seed: SEED,
             index: self.index,
             work: 0.,
+            jumped: 0.,
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
             model: [0.; crate::step::MODEL],
@@ -3049,8 +3055,9 @@ struct Pick<'a> {
     state: &'a State,
     group: usize,
     weight: f64,
-    /// The trajectory's jumps per µs over the time it holds its atom: its last state's jumps over that state's time.
-    jumps: f64,
+    /// The trajectory's jumps' counted work a µs over the time it holds its atom: its last state's (`State::jumped`) over
+    /// that state's time.
+    jumping: f64,
 }
 
 /// The states a mean over the run is read at -- the rates a model is priced by (`Pricing`), a table's whole error
@@ -3088,7 +3095,7 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
             let Some(last) = lost.or(states.last().copied()) else { continue };
             let through = ((member * groups + group) as f64 + 0.5) / (members.len() * groups) as f64;
             let state = states[((through * states.len() as f64) as usize).min(states.len() - 1)];
-            picks.push(Pick { state, group, weight: last.sample.at.t, jumps: f64::from(last.jumps) / last.sample.at.t });
+            picks.push(Pick { state, group, weight: last.sample.at.t, jumping: last.jumped / last.sample.at.t });
         }
     }
     picks
@@ -4247,9 +4254,10 @@ mod tests {
         assert!(turned.len() == 1 && (turned[0] / closes - 1.).abs() < 3e-3, "the look turns at {turned:?}, the room closes at {closes} µK");
     }
 
-    /// A state at the time t of the trajectory `index` with `jumps` jumps: no step reads it (nothing of the run's).
+    /// A state at the time t of the trajectory `index` with `jumps` jumps, each of a unit of counted work: no step reads it
+    /// (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, owed: None, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, jumped: f64::from(jumps), threshold: 0.5, owed: None, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
@@ -4383,7 +4391,7 @@ mod tests {
                 let all: Vec<&Part> = parts.iter().collect();
                 let picks = one_each(&all);
                 assert_eq!(picks.len(), n);
-                assert!(picks.iter().all(|p| p.weight == outputs as f64 && (p.state.index - MOST_TRAJECTORIES) / GROUP == p.group as u64 && p.jumps == 3.));
+                assert!(picks.iter().all(|p| p.weight == outputs as f64 && (p.state.index - MOST_TRAJECTORIES) / GROUP == p.group as u64 && p.jumping == 3.));
                 let mut places: Vec<usize> = picks.iter().map(|p| p.state.sample.at.t as usize).collect();
                 // Each group's members, in their order, a member's share of the run apart.
                 for g in 0..groups {
@@ -4410,7 +4418,7 @@ mod tests {
             let held = outputs * (p.group + 1) / groups;
             let member = (p.state.index % GROUP) as usize;
             let through = ((member * groups + p.group) as f64 + 0.5) / (groups * members) as f64;
-            assert_eq!((p.weight, p.state.sample.at.t as usize, p.jumps), (held as f64, 1 + (through * held as f64) as usize, 3.));
+            assert_eq!((p.weight, p.state.sample.at.t as usize, p.jumping), (held as f64, 1 + (through * held as f64) as usize, 3.));
         }
         let place = |picks: &[Pick], left: Option<usize>| over_the_run(picks, picks.iter().map(|p| p.state.sample.at.t), left);
         let exact = |left: Option<usize>| {
@@ -4688,8 +4696,8 @@ mod tests {
     /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its
     /// atoms at the trap's centre at rest and at one to three times the thermal speed along each lab axis, held (no jump,
     /// each its own representation: its start's), at two steps -- a trajectory's work a µs priced at every state is that
-    /// state's step's own count (`Step::work`, its scratch primed as a run's) over τ and its jumps' photons at its rate of
-    /// jumps (`Dynamics::photon_work`), the mean over the states by their weights, to the rounding.
+    /// state's step's own count (`Step::work`, its scratch primed as a run's) over τ and its jumps' counted work a µs
+    /// (`Pick::jumping`), the mean over the states by their weights, to the rounding.
     #[test]
     fn a_state_s_price_is_its_step_s_count() {
         let (request, run, trap) = scene_run("R4_LIN_2", false, 0);
@@ -4703,15 +4711,14 @@ mod tests {
                 State::of(&t)
             })
             .collect();
-        let picks: Vec<Pick> = states.iter().enumerate().map(|(i, state)| Pick { state, group: i, weight: 1. + i as f64, jumps: 0.5 * i as f64 }).collect();
+        let picks: Vec<Pick> = states.iter().enumerate().map(|(i, state)| Pick { state, group: i, weight: 1. + i as f64, jumping: 1e5 * i as f64 }).collect();
         for tau in [0.2, 0.4335] {
             let counted = |from: &Trajectory| {
                 let (through, mut scratch) = (crate::step::Midway::new(&run, from, tau, None).unwrap(), Scratch::default());
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap();
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap().work
             };
-            let jump = |from: &Trajectory| crate::step::priced(&run, from, tau, &widest).unwrap().first().map_or(0.0, |s| s.1.jump);
-            let made = over_the_run(&picks, picks.iter().map(|p| counted(&p.state.trajectory()) / tau + p.jumps * jump(&p.state.trajectory())), None);
+            let made = over_the_run(&picks, picks.iter().map(|p| counted(&p.state.trajectory()) / tau + p.jumping), None);
             let priced = work_at(&run, widest, &picks)(tau);
             eprintln!("R4_LIN_2 at {tau} µs: priced {priced:.6e}, counted {made:.6e} a µs");
             assert!((priced - made).abs() <= 1e-12 * made, "{tau}: {priced} against {made}");
@@ -5148,7 +5155,7 @@ mod tests {
         assert_eq!(picks.len(), groups * members);
         for p in &picks {
             let lost = &parts[p.group].lost.iter().find(|(_, s)| s.index == p.state.index).unwrap().1;
-            assert_eq!((p.state.sample.at.t, p.weight, p.jumps), (0., lost.sample.at.t, 6. / lost.sample.at.t));
+            assert_eq!((p.state.sample.at.t, p.weight, p.jumping), (0., lost.sample.at.t, 6. / lost.sample.at.t));
         }
         assert!((over_the_run(&picks, picks.iter().map(|_| 2.5), None) - 2.5).abs() < 1e-15);
         // An atom that ends with no outcome before the first output (no state, no loss) gives none.

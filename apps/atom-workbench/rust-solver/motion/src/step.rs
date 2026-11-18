@@ -667,12 +667,6 @@ pub trait Middle {
     /// The counted complex multiply-adds of one `generator`, one `force` and one `tones`.
     fn work(&self) -> [f64; 3];
 
-    /// A jump's price on this middle's representation (real multiply-adds: its place, its drawn photons, its landing),
-    /// where the model prices it there (`Price::jump`): none here.
-    fn jump_work(&self) -> f64 {
-        0.0
-    }
-
     /// The counted real multiply-adds that made the middle (`Dynamics::middle`): what of the generator the point holds,
     /// whatever a step asks of it.
     fn made(&self) -> f64;
@@ -909,19 +903,21 @@ pub enum Landing {
 /// there, so that the step jumps where the exact clock does; θ itself where the landing leaves no transient --; the photon
 /// its transient owes that jump (`Owed`), none where it is gone by then; and the kick the landing books (1/µm): of the
 /// cycle's momentum conditional on its length τ*, what the step and the jump do not give (K_∞ + δg(τ*); its whole at
-/// once). Where its norm is at or below its threshold already, the jump is at once.
+/// once). Where its norm is at or below its threshold already, the jump is at once. With its counted work (real
+/// multiply-adds: its left response and its clock), the jump's own as its photon's is (`jump`): no part of a step's.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Landed {
     pub psi: Internal,
     pub threshold: f64,
     pub owed: Option<Owed>,
     pub kick: [f64; 3],
+    pub work: f64,
 }
 
 impl Landed {
-    /// A landing that leaves no transient: the state, the trajectory's own threshold, nothing owed, no kick.
+    /// A landing that leaves no transient: the state, the trajectory's own threshold, nothing owed, no kick, no count.
     pub fn plain(psi: Internal, threshold: f64) -> Landed {
-        Landed { psi, threshold, owed: None, kick: [0.0; 3] }
+        Landed { psi, threshold, owed: None, kick: [0.0; 3], work: 0.0 }
     }
 }
 
@@ -981,9 +977,12 @@ pub struct Trajectory {
     pub index: u64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
     /// the generator's decomposition, its following and hops, the states at the kick's nodes and their sums, with the
-    /// model's generators and forces at the step's nodes (`adapt` adds each step's) --, and its jumps' photons
-    /// (`Dynamics::photon_work`).
+    /// model's generators and forces at the step's nodes (`adapt` adds each step's) --, and its jumps' (`jumped`).
     pub work: f64,
+    /// Of `work`, its jumps' own: their photons (`Emitted::work`, `Dynamics::photon_work`) and their landings
+    /// (`Landed::work`) as they were made -- a jump's work is the jump's at whatever step it falls in, and the run prices
+    /// it so, at the trajectory's own rate (solve.rs `work_at`).
+    pub jumped: f64,
     /// The optical sector's pending covariance (1/µm², symmetric, negative semidefinite after every step: # The optical
     /// sector's noise): what of the noise's covariance its draws have not taken -- its negative excursions --, carried
     /// across steps and jumps.
@@ -1047,6 +1046,7 @@ impl Trajectory {
             seed,
             index,
             work: 0.0,
+            jumped: 0.0,
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
             model: [0.0; MODEL],
@@ -2681,7 +2681,6 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             middle: generator.made(),
             scattering,
             costs: generator.work(),
-            jump: generator.jump_work(),
         };
         march.work += price.work(price.costs);
         march.prices.push((cluster, price));
@@ -2831,8 +2830,6 @@ pub struct Price {
     pub middle: f64,
     pub scattering: f64,
     pub costs: [f64; 3],
-    /// A jump's price on the stretch's middle (`Middle::jump_work`; real multiply-adds): what a jump expected in the step adds.
-    pub jump: f64,
 }
 
 impl Price {
@@ -3036,7 +3033,9 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
             trajectory.jumps = j;
         }
         trajectory.owed = None;
-        trajectory.work += model.photon_work() + photon.work;
+        let emitted = model.photon_work() + photon.work;
+        trajectory.work += emitted;
+        trajectory.jumped += emitted;
         let u = &photon.amplitudes;
         let trace = gram[0][0] + gram[1][1] + gram[2][2];
         let direction = loop {
@@ -3075,6 +3074,8 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         for a in 0..3 {
             trajectory.kappa[a] += landed.kick[a];
         }
+        trajectory.work += landed.work;
+        trajectory.jumped += landed.work;
         (trajectory.cluster, trajectory.psi, trajectory.threshold, trajectory.owed) = (cluster, landed.psi, landed.threshold, landed.owed);
         if !at_once {
             break;
