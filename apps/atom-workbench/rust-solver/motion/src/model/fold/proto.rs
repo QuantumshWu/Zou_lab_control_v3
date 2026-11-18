@@ -968,6 +968,9 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
     let (beams, ln) = (kicks.len(), nb.lanes * n);
     let mut lanes = vec![C64::ZERO; n * beams];
     let mut metric = vec![C64::ZERO; n];
+    // The pairs' channel: X = Ψ†R on the part's rows, X_kj = Σ_i Z_ik* R_ij (n × n), and a row's rest by column.
+    let mut overlap = vec![C64::ZERO; n * n];
+    let mut row = vec![C64::ZERO; n];
     let at = |k: usize, i: usize, j: usize| swept(nb, k, i, j, n);
     let (alpha, beta) = ritz.rest(p, done);
     let infinite = !alpha.re.is_finite();
@@ -987,6 +990,7 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
             }
             let made = if p < done { last - if p >= 1 { at(p - 1, i, j) } else { C64::ZERO } } else { C64::ZERO };
             let r = made + alpha * d1 + beta * d2;
+            row[j] = r;
             let rest = r.norm_sqr();
             out[j] += rest;
             shift[j] += rest * (h[j * n + j] - C64::real(mean) - diagonal).norm_sqr().sqrt();
@@ -997,7 +1001,16 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
                 metric[j] += last.conj() * r;
             }
         }
+        if !infinite {
+            for k in 0..n {
+                let z = at(done - 1, i, k).conj();
+                for (o, r) in overlap[k * n..(k + 1) * n].iter_mut().zip(&row) {
+                    *o += z * *r;
+                }
+            }
+        }
     }
+    let (pairs, pair_energy) = if infinite { (vec![0.0; n], vec![0.0; n]) } else { pairs_moved(h, &overlap, n) };
     for j in 0..n {
         let size = out[j];
         let rated = if den[j] <= floor || size.is_nan() || size == 0.0 || (size.is_finite() && rounded(size, den[j], n, s, nb.lanes)) { 0.0 } else { size / den[j] };
@@ -1012,8 +1025,44 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
         } else {
             0.0
         };
-        out[j] = rated.max(force) + if size.is_finite() { unrate(shift[j] / energy).powi(2) } else { 0.0 };
+        let potential = if size.is_finite() { unrate(shift[j] / energy).powi(2).max(unrate(pair_energy[j] / (2.0 * energy)).powi(2)) } else { 0.0 };
+        out[j] = rated.max(force).max(unrate(pairs[j]).powi(2)) + potential;
     }
+}
+
+/// The series' rest moves G off its diagonal at first order where the forward does not hold the response Hermitian
+/// (readings.status.md R3 (3), RD5): with the exact Ψ* = [1; T*] and Ψ = Ψ* + [0; R], δG = ½[X† − X, H_b] + (H_b† −
+/// H_b)X + O(R²), X = Ψ*†R (X_kj = ⟨Z_k, R_j⟩ on the rest's rows), H_b the Bloch generator. The commutator is a
+/// similarity, it moves no mode; the rest is δG = iBX, B = i(H_b − H_b†) the decay P holds (an explicit column's Γ_i):
+/// the coupling of column i to column j moves by δG_ij = i(BX)_ij -- an explicit column's large decay times its overlap
+/// with a column dark but through the copies, the rest of whose response it shares (random systems 86, 113: the column's
+/// own rate channel reads nothing there, its excited response none). A mode moves by it through the coupling it already
+/// has: on the two columns' block [[h_ii, h_ij], [h_ji, h_jj]] the mode at h_jj is λ_j = h_jj − d + w, d = (h_jj − h_ii)/2,
+/// w = d √(1 + h_ijh_ji/d²) (the root that is d without the coupling; √(h_ijh_ji) where d = 0), and δλ_j = (h_ji δG_ij +
+/// h_ij δG_ji)/(2w) -- the second order's first-order change, h_jih_ij/(h_jj − h_ii) far from degeneracy, smooth at it.
+/// Summed over the columns i ≠ j; read as a rate against the mode's own |Im λ_j| (λ_j = h_jj + Σ_i (w − d): its rate by
+/// the couplings, the dark column's whole), none where that is within the rounding of the largest (a dark mode is no
+/// rate's), and its energy Re δλ_j apart (the potential channel). Per column (rates, rad/µs).
+fn pairs_moved(h: &[C64], overlap: &[C64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let b = |i: usize, k: usize| C64::I * (h[i * n + k] - h[k * n + i].conj());
+    let dg = |i: usize, j: usize| C64::I * (0..n).map(|k| b(i, k) * overlap[k * n + j]).sum::<C64>();
+    let mut lambda: Vec<C64> = (0..n).map(|j| h[j * n + j]).collect();
+    let mut moved = vec![C64::ZERO; n];
+    for j in 0..n {
+        for i in (0..n).filter(|&i| i != j) {
+            let (hij, hji) = (h[i * n + j], h[j * n + i]);
+            let d = (h[j * n + j] - h[i * n + i]) * 0.5;
+            let w = if d.abs() > 0.0 { d * (C64::ONE + hij * hji / (d * d)).sqrt() } else { (hij * hji).sqrt() };
+            if w.abs() == 0.0 {
+                continue;
+            }
+            lambda[j] += w - d;
+            moved[j] += (hji * dg(i, j) + hij * dg(j, i)) / (w * 2.0);
+        }
+    }
+    let top = lambda.iter().fold(0.0_f64, |m, l| m.max(l.im.abs()));
+    let rates = (0..n).map(|j| if lambda[j].im.abs() > crate::units::rounding(n).sqrt() * top { moved[j].im.abs() / lambda[j].im.abs() } else { 0.0 }).collect();
+    (rates, moved.iter().map(|m| m.re.abs()).collect())
 }
 
 /// The force channel's inputs at a decision (readings.status.md RD4, RD5): per near block its beam lanes' wave vectors q_l
