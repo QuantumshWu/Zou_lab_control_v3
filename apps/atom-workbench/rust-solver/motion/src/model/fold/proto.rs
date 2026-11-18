@@ -4225,21 +4225,69 @@ impl Fold {
             *work += (s * n * (beams + parts + 2)) as f64 / 4.0;
             accounts.push(Account { item: Item::Reuse { block: x }, squares: (0..n).map(|j| if read(j) { acc[j] / den[j] } else { 0.0 }).collect(), on: true });
             if nb.nc > 0 {
-                accounts.push(Account { item: Item::Centred { block: x, far: false }, squares: (0..n).map(|j| if read(j) { centred[j] / den[j] } else { 0.0 }).collect(), on: true });
+                // The centred copies' own rows, T_C = R₀(Ĥ_CS T_S + B_C): their population is the metric's, M ⊇ T_C†T_C,
+                // and moves every rate and energy of the column by its relative change (G = S⁻¹AS⁻¹): centred, T_C errs
+                // by ε_R,j T_C,j to first order, the column's metric by 2ε_R,j ‖T_C,j‖² -- a relative rate error read as
+                // it is (rate units), beside the dressing's of the solved rows (above).
+                copy_rows(nb, basis, &mid.e, n, work);
+                let squares = (0..n)
+                    .map(|j| {
+                        if !read(j) {
+                            return 0.0;
+                        }
+                        let own: f64 = (0..nb.nc).map(|k| nb.tc[k * n + j].norm_sqr()).sum();
+                        centred[j] / den[j] + unrate(2.0 * eps[j] * own).powi(2)
+                    })
+                    .collect();
+                accounts.push(Account { item: Item::Centred { block: x, far: false }, squares, on: true });
             }
         }
-        // The far blocks: their response R₀B held at the reference (its centre z₀ and forms) against the exact one at every
-        // column's energy and lane (one factor, `centring`: the centring and the drift) times the block's own response, and
-        // the block left out -- its whole response and light shift, H_F,jj and M_F,jj exact.
+        // The far blocks: their response T = R₀B held at the reference (its centre z₀ and forms) against the exact one at
+        // every column's energy c_j and every lane's Doppler shift w_l, Σ_l R(c_j − w_l)B_l. To first order its error is
+        // (c_j − w̄ − z₀ + δĤ)R₀T_j -- the block's own response times the column's distance from the centre and the forms'
+        // drift -- and Σ_l (w_l − w̄)R₀(R₀B_l,j), each lane's own response times its shift from the lanes' mean: at a
+        // standing wave's node the lanes' responses cancel in T and their errors do not. Its size: ‖R₀‖ (|c_j − w̄ − z₀| +
+        // ‖δĤ‖) ‖T_j‖ + ‖R₀‖ ‖Σ_l (w_l − w̄)R₀B_l,j‖, the latter by the block's pair forms U_a†R₀†R₀U_b at the lanes' shifted
+        // coefficients; the higher orders by 1/(1 − x), x = ‖R₀‖ (|c_j − w̄ − z₀| + ‖δĤ‖ + max_l |w_l − w̄|) (beyond one the
+        // block's rows are within its resolvent's reach of the column: not far). And the block left out -- its whole
+        // response and light shift, H_F,jj and M_F,jj exact.
         for (x, fb) in far.iter().enumerate() {
             let basis = cache.far_at(x);
             let held = fb.delta.iter().zip(&basis.copied).map(|(d, c)| d.abs() * c).sum::<f64>();
-            let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| mid.w[cc][j]).chain([0.0]).collect();
-            let centred = (0..n).map(|j| if read(j) { centring(basis.r0, basis.z0, held, h[j * n + j], &shifts).powi(2) * fb.mf[j * n + j].re / den[j] } else { 0.0 }).collect();
+            let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| mid.w[cc][j]).collect();
+            let mean = shifts.iter().sum::<f64>() / shifts.len().max(1) as f64;
+            let spread = shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
+            // The lanes' coefficients on the block's source vectors, each times its shift from the mean.
+            let v = fb.vectors.len();
+            let lanes: Vec<C64> = fb
+                .vectors
+                .iter()
+                .map(|&(c, k)| fb.splits.iter().zip(&shifts).filter(|((cc, _), _)| *cc == c).map(|(&(_, j), &w)| mid.f[c][j] * self.components[c].gamma[j][k] * (w - mean)).sum())
+                .collect();
+            let centred = (0..n)
+                .map(|j| {
+                    if !read(j) {
+                        return 0.0;
+                    }
+                    let gap = (h[j * n + j] - C64::real(mean + basis.z0)).norm_sqr().sqrt();
+                    let x = basis.r0 * (gap + held + spread);
+                    if x >= 1.0 {
+                        return f64::INFINITY;
+                    }
+                    let mut spreadf = 0.0;
+                    for a in 0..v {
+                        for b in 0..v {
+                            spreadf += (lanes[a].conj() * lanes[b] * basis.g[(a * v + b) * n * n + j * n + j]).re;
+                        }
+                    }
+                    let first = basis.r0 * ((gap + held) * fb.mf[j * n + j].re.max(0.0).sqrt() + spreadf.max(0.0).sqrt());
+                    (first / (1.0 - x)).powi(2) / den[j]
+                })
+                .collect();
             let left = (0..n).map(|j| if read(j) { fb.mf[j * n + j].re / den[j] + pot(2.0 * fb.hf[j * n + j].re.abs()) } else { 0.0 }).collect();
             accounts.push(Account { item: Item::Centred { block: x, far: true }, squares: centred, on: !evaluation.far[x] });
             accounts.push(Account { item: Item::Left { block: x }, squares: left, on: evaluation.far[x] });
-            *work += (fb.terms.len() + n) as f64 / 4.0;
+            *work += (fb.terms.len() + n * (1 + v * v) + v * fb.splits.len()) as f64 / 4.0;
         }
     }
 
