@@ -1726,7 +1726,8 @@ fn focus_choice(request: &Request) -> Choice {
     let share = crate::model::elim::share();
     let mut explicit: Vec<(usize, Part, usize)> = vec![];
     loop {
-        let choice = Choice::base(request, explicit.clone(), vec![]).unwrap();
+        // The terms kept at the focus (decide.rs # The terms: the decision's loop at one point).
+        let choice = super::decide::at_point(request, explicit.clone(), &super::decide::Local::focus(&crate::field::Light::new(request))).unwrap();
         let mut kept = vec![];
         for set in Fold::sets(request, &choice).unwrap() {
             let fold = Fold::new(request, &choice, set[0]).unwrap();
