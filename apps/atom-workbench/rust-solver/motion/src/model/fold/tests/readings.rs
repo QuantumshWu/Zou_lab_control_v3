@@ -347,9 +347,12 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
             continue;
         }
         println!("{kind}: {} readings, reading over exact min {:.3} median {:.3} max {:.3e}; on the modes min {:.3} median {:.3}", ratios.len(), ratios[0].0, median, ratios[ratios.len() - 1].0, on_modes[0], on_modes[on_modes.len() / 2]);
-        for &(q, i) in ratios.iter().take(4) {
+        // The lowest on the modes (the criterion's measure), then the highest on any state.
+        let mut by_modes: Vec<(f64, usize)> = rows.iter().enumerate().filter(|(_, r)| &r.0 == kind && (r.6 > tiny || r.1 > tiny)).map(|(i, r)| (if r.6 > 0.0 { r.1 / r.6 } else { f64::INFINITY }, i)).collect();
+        by_modes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for &(q, i) in by_modes.iter().take(4) {
             let r = &rows[i];
-            println!("    {q:.3}: reading {:.3e}, exact {:.3e} (rate {:.3e}, potential {:.3e}; modes {:.3e}) -- {}", r.1, r.2, r.3, r.4, r.6, r.5);
+            println!("    {q:.3} on the modes: reading {:.3e}, modes {:.3e} (any state {:.3e}: rate {:.3e}, potential {:.3e}) -- {}", r.1, r.6, r.2, r.3, r.4, r.5);
         }
         for &(q, i) in ratios.iter().rev().take(2) {
             let r = &rows[i];
@@ -417,7 +420,9 @@ fn a_scene_s_centred_copies_read_against_their_error() {
             continue;
         }
         for p in &points {
-            let local = Local { s: p[0], phases: vec![0.0; light.beams.len()], kappa: [p[1], p[2], p[3]].map(|v| v / hbar_over_mass) };
+            // R2_PHASES ("φ0,φ1,..."): the beams' phases at every point (zero else).
+            let phases = std::env::var("R2_PHASES").map_or(vec![0.0; light.beams.len()], |x| x.split(',').map(|y| y.trim().parse().unwrap()).collect());
+            let local = Local { s: p[0], phases, kappa: [p[1], p[2], p[3]].map(|v| v / hbar_over_mass) };
             let mut fold = fold0.clone();
             fold.local = local.factors(&light);
             let mut ws = fold.prototype_workspace().unwrap();
@@ -426,9 +431,38 @@ fn a_scene_s_centred_copies_read_against_their_error() {
                 println!("set {set:?} point {p:?}: no fold");
                 continue;
             };
-            println!("set {set:?} point s {} v {:?}: whole reading {:.3e} ({} the share)", p[0], &p[1..], step.reading, if step.reading > share { "beyond" } else { "within" });
+            let (reading, sweeps) = (step.reading, step.sweeps);
+            println!("set {set:?} point s {} v {:?}: whole reading {reading:.3e} ({} the share); the series' largest Ritz value {:.3}, sweeps {sweeps}", p[0], &p[1..], if reading > share { "beyond" } else { "within" }, ws.series_most());
             let accounts = ws.accounts().to_vec();
-            let Some(mine) = fold.prototype_without([0.0; 3], local.kappa, floor, &cache, &mut ws, Without::All(None), SWEEPS) else { continue };
+            let held = fold.prototype_without([0.0; 3], local.kappa, floor, &cache, &mut ws, Without::Nothing, 0);
+            // Each series part swept on alone (its own convergence as the decision holds the rest), against the held.
+            for a in accounts.iter().filter(|a| a.on) {
+                if let (Item::Series { block, part }, Some(held)) = (a.item, held.as_ref()) {
+                    let reading = a.squares.iter().map(|x| rate(x.sqrt())).fold(0.0, f64::max);
+                    match fold.prototype_without([0.0; 3], local.kappa, floor, &cache, &mut ws, Without::Part(block, part), SWEEPS) {
+                        Some(g) => println!("  series ({block}, {part}) swept {SWEEPS}: on the modes {:.3e}; its reading {reading:.3e}", moved_modes(held, &g, floor).0),
+                        None => {
+                            let at: Vec<String> = [3, 4, 5, 6, 8, 10, 15, 20, 30, 50, 100]
+                                .iter()
+                                .map(|&k| match fold.prototype_without([0.0; 3], local.kappa, floor, &cache, &mut ws, Without::Part(block, part), k) {
+                                    Some(g) => format!("{k}: {:.2e}", moved_modes(held, &g, floor).0),
+                                    None => format!("{k}: none"),
+                                })
+                                .collect();
+                            println!("  series ({block}, {part}) swept {SWEEPS}: no fold; its reading {reading:.3e}; swept on {at:?}");
+                        }
+                    }
+                }
+            }
+            let Some(mine) = fold.prototype_without([0.0; 3], local.kappa, floor, &cache, &mut ws, Without::All(None), SWEEPS) else {
+                println!("  every approximation out ({SWEEPS} sweeps): no fold");
+                continue;
+            };
+            if let Some(held) = held {
+                // The whole: every approximation out but the centred rows (`every_reading_is_an_estimate_of_what_it_reads`).
+                let (any, ..) = moved(&held, &mine, floor);
+                println!("  the held forward against every approximation out but the centring: on the modes {:.3e}, on any state {any:.3e}", moved_modes(&held, &mine, floor).0);
+            }
             for a in accounts.iter().filter(|a| a.on) {
                 let reading = a.squares.iter().map(|x| rate(x.sqrt())).fold(0.0, f64::max);
                 if reading < 0.1 * share {
@@ -457,6 +491,87 @@ fn a_scene_s_centred_copies_read_against_their_error() {
                     }
                 }
                 println!("{said}");
+            }
+        }
+    }
+}
+
+/// Diagnostic (RD4: the force's account; DECIDE_REQ a scene's path, tilt0's): the trap beam's waist FORCE_WAIST (µm; 1e5,
+/// as the drag takes it), the start's decided representation; per set at z of FORCE_ZS (µm) and v of FORCE_VS (m/s, along
+/// z) the decision's forward and, per column, its force along z (the Hermitian part's gradient and the absorbed light's
+/// mean, `prototype_column_forces`) and its rate -- held, every approximation out, and each account's approximation out
+/// alone (as the property test takes it out), with each account's reading.
+#[test]
+#[ignore]
+fn a_scene_s_column_forces_against_every_approximation_out() {
+    use super::super::proto::{Cache, Item, Without};
+    let mut req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
+    let waist = std::env::var("FORCE_WAIST").map_or(1e5, |x| x.parse().unwrap());
+    let t = req.trap_beam;
+    req.beams[t].waist = Some(waist);
+    let initial = crate::solve::components(&req);
+    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+    let reference = crate::solve::alone(initial[chief].0);
+    let choice = super::super::run::Onefold::new(&req, reference).expect("the run").choice().clone();
+    let list = |key: &str, default: &str| -> Vec<f64> { std::env::var(key).unwrap_or_else(|_| default.into()).split(',').map(|x| x.trim().parse().unwrap()).collect() };
+    let (zs, vs) = (list("FORCE_ZS", "0,0.1"), list("FORCE_VS", "-0.2,0,0.2"));
+    let only: Option<usize> = std::env::var("FORCE_SET").ok().map(|x| x.parse().unwrap());
+    let labels = req.levels().unwrap();
+    for (k, set) in Fold::sets(&req, &choice).unwrap().into_iter().enumerate() {
+        if only.is_some_and(|o| o != k) {
+            continue;
+        }
+        let fold = Fold::new(&req, &choice, set[0]).expect("the fold");
+        if fold.blocks.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = fold.ground.iter().map(|&p| format!("{}{:+}", labels[p].f, labels[p].m)).chain(fold.explicit.iter().map(|_| "X".to_string())).collect();
+        for &z in &zs {
+            for &v in &vs {
+                let (r, kappa) = ([0.0, 0.0, z], [0.0, 0.0, v / fold.hbar_over_mass]);
+                let mut ws = fold.prototype_workspace().unwrap();
+                let mut cache = Cache::default();
+                let Some(step) = fold.prototype(r, kappa, fold.thermal, &mut cache, &mut ws) else {
+                    println!("set {k} z {z} v {v}: no fold");
+                    continue;
+                };
+                println!("set {k} {names:?} z {z} v {v:+}: whole reading {:.3e}, sweeps {}", step.reading, step.sweeps);
+                let accounts = ws.accounts().to_vec();
+                let mut show = |what: String, without: Without, sweeps: usize, ws: &mut super::super::proto::Workspace, base: Option<&Vec<(f64, f64, f64)>>| -> Option<Vec<(f64, f64, f64)>> {
+                    let (g, c) = fold.prototype_without_kept(r, kappa, fold.thermal, &cache, ws, without, sweeps)?;
+                    if std::env::var("FORCE_G").is_ok() {
+                        let n = g.rows;
+                        let rows: Vec<String> = (0..n).map(|i| (0..n).map(|j| format!("{:+.5e}{:+.5e}i", g[(i, j)].re, g[(i, j)].im)).collect::<Vec<_>>().join(" ")).collect();
+                        println!("    G {}", rows.join(" ; "));
+                    }
+                    let f = fold.prototype_column_forces(&c, ws, 2);
+                    let cols: Vec<String> = f
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &(g, p, w))| match base {
+                            None => format!("{}: F {:+.4} (grad {:+.4} abs {:+.4}) rate {:.4}", names[j], g + p, g, p, w),
+                            Some(b) => {
+                                let (g0, p0, w0) = b[j];
+                                format!("{}: dF {:+.2e} ({:+.2e} of |F|, {:+.2e} of grad+|abs|) drate {:+.2e}", names[j], g + p - g0 - p0, (g + p - g0 - p0) / (g0 + p0).abs(), (g + p - g0 - p0) / (g0.abs() + p0.abs()), (w - w0) / w0)
+                            }
+                        })
+                        .collect();
+                    println!("  {what}: {}", cols.join(" | "));
+                    Some(f)
+                };
+                let Some(held) = show("held".into(), Without::Nothing, 0, &mut ws, None) else { continue };
+                show(format!("all out ({SWEEPS})"), Without::All(None), SWEEPS, &mut ws, Some(&held));
+                for a in accounts.iter().filter(|a| a.on) {
+                    let reading: Vec<String> = a.squares.iter().map(|x| format!("{:.2e}", rate(x.sqrt()))).collect();
+                    let (without, sweeps) = match a.item {
+                        Item::Series { block, part } => (Without::Part(block, part), SWEEPS),
+                        Item::Reuse { block } | Item::Centred { block, far: false } => (Without::Remade(block), 0),
+                        Item::Omitted { block, level } => (Without::Level(block, level), 0),
+                        Item::Left { block } => (Without::In(block), 0),
+                        Item::Centred { far: true, .. } => continue,
+                    };
+                    show(format!("{:?} reading {reading:?}", a.item), without, sweeps, &mut ws, Some(&held));
+                }
             }
         }
     }

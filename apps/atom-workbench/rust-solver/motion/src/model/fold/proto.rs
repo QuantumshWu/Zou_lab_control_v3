@@ -278,10 +278,8 @@ struct Near {
     prod: Vec<C64>,
     bloch: Vec<C64>,
     tc: Vec<C64>,
-    /// Per row the sweeps of its series part (`Evaluation`; every row's at a decision); per sweep and part the change's
-    /// square per column (`Fold::sweeps`, laid (sweep, part, column)).
+    /// Per row the sweeps of its series part (`Evaluation`; every row's at a decision).
     upto: Vec<usize>,
-    hist: Vec<f64>,
     // Each sweep's, for the force (`Fold::prototype_force`): per split its diagonal's inverse and its response, and the
     // response summed over the splits.
     invs: Vec<C64>,
@@ -475,6 +473,11 @@ struct Far {
 
 /// The keys of the near decompositions made (`NearBasis::key`): one each, never again in a process.
 static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Diagnostic (tests): the evaluation's budget's share times this (f64 bits; one): a run's evaluation made tighter after
+/// its representation is decided (tests/drag.rs DRAG_BUDGET).
+#[cfg(test)]
+pub(crate) static BUDGET_SCALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3ff0_0000_0000_0000);
 
 /// A near block's decomposition (module documentation, # What is kept).
 struct NearBasis {
@@ -784,71 +787,216 @@ fn part_of(nb: &Near, basis: &NearBasis, i: usize) -> usize {
     if nb.nd > 0 { 0 } else { basis.part[i] }
 }
 
-/// A series part's account at p sweeps (unify2 §2.2, §2.4), the rows swept `done` times at the decision (two at the least):
-/// per column the rest after its p-th sweep, Σ_k≥p Δ_k, an estimate
-/// -- the changes made, Δ_p … Δ_{K−1} (K = `done`), summed, and their geometric tail Δ_{K−1} r/(1 − r) on the last ratio
-/// r = Δ_{K−1}/Δ_{K−2}; past the changes made the tail alone, Δ_{K−1} r^{p−K+1}/(1 − r) -- on the rate channel against W_j
-/// (`den`); none within the rows' rounding. A part whose changes start at its last one (reached late, through the Bloch
-/// generator: an explicit column's, an exact copies' block's) takes the whole series' ratio `whole`, the others' that
-/// drive it (it read nothing before: readings.status.md). ∞ where r reaches one.
-/// No potential channel: the compression A = Ψ†HΨ is stationary in the response about the exact one where the block is
-/// Hermitian -- a truncation's δZ moves the diagonal of G at second order, and with the decay D at first by Im(Z†DδZ)
-/// alone (said, not read: unify2 §2.1 reads 2Re(V†δT), the Bloch generator's; to be settled with U5).
-#[allow(clippy::too_many_arguments)]
-fn series_squares(nb: &Near, np: usize, part: usize, p: usize, done: usize, den: &[f64], floor: f64, n: usize, whole: f64, out: &mut [f64]) {
-    let last = done - 1;
-    let change = |k: usize, j: usize| nb.hist[(k * np + part) * n + j];
-    let (a, b) = (0..n).fold((0.0, 0.0), |(a, b), j| (a + change(last, j), b + if last > 0 { change(last - 1, j) } else { 0.0 }));
-    let r = if a == 0.0 || rounded(a, den.iter().sum(), n, nb.s, nb.lanes) { 0.0 } else if b == 0.0 { whole } else { (a / b).sqrt() };
-    for j in 0..n {
-        out[j] = 0.0;
-        if den[j] <= floor {
-            continue;
+/// The series' changes d_k = Z⁽ᵏ⁾ − Z⁽ᵏ⁻¹⁾ (Z⁽⁻¹⁾ = 0) are a Krylov sequence of the sweep's linearization 𝓛 (d_k+1 ≈ 𝓛d_k: a
+/// sweep is a fixed-point map, the Bloch generator's self-consistency and Δ in one), and the series exists where that
+/// iteration converges, ρ(𝓛) < 1 -- not where two changes' ratio is below one: blocks that drive one another through the
+/// Bloch generator make 𝓛 non-normal (a part reached late, an explicit column's, grows before it falls), and one power
+/// step's ratio exceeds one where ρ(𝓛) does not (R's trial: S2Q 105 and 65 points read "no fold", tilt0's F = 2 sets lost
+/// F' = 3), and its geometric tail falls short (150 % against a reading of 3.4 % on a random system; readings.status.md
+/// R2, R3). The decision's last three changes over every near block's rows and columns, d_K−3, d_K−2, d_K−1, give the
+/// 2-dimensional Ritz values of 𝓛 (minimal polynomial extrapolation): the recurrence d_k+1 = c₁d_k + c₀d_k−1 that fits
+/// them best, μ² − c₁μ − c₀ = 0 its roots; the rest after K sweeps is that recurrence's sum, S_K = [(c₀ + c₁)d_K−1 +
+/// c₀d_K−2]/(1 − c₀ − c₁). Where d_K−3 and d_K−2 are one direction (to the changes' rounding) the space is 1-dimensional,
+/// μ = ⟨d_K−2, d_K−1⟩/‖d_K−2‖² (c₀ = 0); none where the series made no change before its last sweep. Read per series
+/// part on its own changes and on the whole (`Ritzes`): one Krylov space of the whole is its largest parts' -- a part
+/// whose own iteration diverges, small beside the others, is not in it (tilt0's F = 2 sets: the whole's largest Ritz
+/// value 0.06–0.35 where the F' = 3 block's part, swept on alone, has no fold; readings.status.md R3). The series exists
+/// where every part's and the whole's max |μ| < 1 (`Ritzes::most`).
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Ritz {
+    c0: C64,
+    c1: C64,
+    mu: C64,
+    pub(crate) most: f64,
+    known: bool,
+}
+
+impl Ritz {
+    /// From the Gram matrix g_ab = ⟨d_a, d_b⟩ of the last three changes (a, b = 0, 1, 2 for K − 3, K − 2, K − 1), summed over
+    /// `len` entries.
+    fn of(g: &[[C64; 3]; 3], len: usize) -> Ritz {
+        let (g00, g11) = (g[0][0].re, g[1][1].re);
+        let det = g00 * g11 - g[0][1].norm_sqr();
+        let (c0, c1) = if det > crate::units::rounding(len.max(1)) * g00 * g11 {
+            ((g[0][2] * g11 - g[0][1] * g[1][2]) / det, (g[1][2] * g00 - g[1][0] * g[0][2]) / det)
+        } else if g11 > 0.0 {
+            (C64::ZERO, g[1][2] / g11)
+        } else {
+            return Ritz::default();
+        };
+        let root = (c1 * c1 + c0 * 4.0).sqrt();
+        let (a, b) = ((c1 + root) * 0.5, (c1 - root) * 0.5);
+        let mu = if a.abs() >= b.abs() { a } else { b };
+        Ritz { c0, c1, mu, most: mu.abs(), known: true }
+    }
+
+    /// The rest after p sweeps of a series swept K (`done`) times, beyond what the sweeps made (`series_squares`): its
+    /// coefficients (α, β) on the last two changes (d_K−2, d_K−1) -- S_K, and past K S_K less the recurrence's next changes;
+    /// ∞ where the series does not converge.
+    /// A part's share of the Ritz vector of the largest μ, v = c₀d_K−3 + μd_K−2 (the companion's eigenvector), on its Gram
+    /// matrix (`gram`): ‖v_part‖².
+    fn share(&self, g: &[[C64; 3]; 3]) -> f64 {
+        (self.c0.conj() * self.c0 * g[0][0] + self.mu.conj() * self.mu * g[1][1] + self.c0.conj() * self.mu * g[0][1] * 2.0).re
+    }
+
+    /// The rest after p sweeps of a series swept K (`done`) times, beyond what the sweeps made (`series_squares`): its
+    /// coefficients (α, β) on the last two changes (d_K−2, d_K−1) -- S_K, and past K S_K less the recurrence's next changes;
+    /// ∞ where the series does not converge. (On the Ritz values' phases: their sizes alone, 1/((1 − |μ₁|)(1 − |μ₂|)), read
+    /// a rest after p + 1 sweeps beyond the one after p where the series oscillates -- the remedy of a sweep more is lost:
+    /// random system 92, its column at 0.19 beyond the share with no remedy.)
+    fn rest(&self, p: usize, done: usize) -> (C64, C64) {
+        if self.most >= 1.0 {
+            return (C64::real(f64::INFINITY), C64::real(f64::INFINITY));
         }
-        let made: f64 = (p.min(done)..done).map(|k| change(k, j).sqrt()).sum();
-        let tail = change(last, j).sqrt();
-        if r >= 1.0 && tail > 0.0 {
-            out[j] = f64::INFINITY;
-            continue;
+        let one = C64::ONE - self.c0 - self.c1;
+        let (mut alpha, mut beta) = (self.c0 / one, (self.c0 + self.c1) / one);
+        // The recurrence's changes d_K, d_K+1, … on (d_K−2, d_K−1): (a, b) the one before, (x, y) the next.
+        let (mut a, mut b, mut x, mut y) = (C64::ONE, C64::ZERO, C64::ZERO, C64::ONE);
+        for _ in done..p {
+            let (nx, ny) = (self.c0 * a + self.c1 * x, self.c0 * b + self.c1 * y);
+            (a, b, x, y) = (x, y, nx, ny);
+            alpha = alpha - x;
+            beta = beta - y;
         }
-        let rest = made + if tail > 0.0 { tail * if p < done { r } else { r.powi((p + 1 - done) as i32) } / (1.0 - r) } else { 0.0 };
-        let size = rest * rest;
-        out[j] = if size == 0.0 || rounded(size, den[j], n, nb.s, nb.lanes) { 0.0 } else { size / den[j] };
+        (alpha, beta)
     }
 }
 
-/// The whole series' ratio at sweep `done` − 1: every near block's parts' changes summed, against the sweep before's
-/// (`series_squares`: a part that starts late takes it); none where the series had no change before.
-fn whole_ratio(near: &[Near], cache: &Cache, done: usize, n: usize) -> f64 {
-    if done < 2 {
-        return 0.0;
-    }
-    let (mut a, mut b) = (0.0, 0.0);
-    for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
-        let np = series_parts(nb, cache.near_at(x));
-        for part in 0..np {
-            for j in 0..n {
-                a += nb.hist[((done - 1) * np + part) * n + j];
-                b += nb.hist[((done - 2) * np + part) * n + j];
+/// A near block's series rows' response after sweep k, row i (its solved excited rows, then its exact copies' rows: one
+/// series, `series_parts`), column j (`Near::ztots`, `Near::zdtots`).
+fn swept(nb: &Near, k: usize, i: usize, j: usize, n: usize) -> C64 {
+    let (s, nd) = (nb.s, nb.nd);
+    if i < s { nb.ztots[k * s * n + i * n + j] } else { nb.zdtots[k * nd * n + (i - s) * n + j] }
+}
+
+/// The series part of a near block's series row i (`swept`): an exact copies' row is the block's one part.
+fn series_part(nb: &Near, basis: &NearBasis, i: usize) -> usize {
+    if i < nb.s { part_of(nb, basis, i) } else { 0 }
+}
+
+/// The last three changes' Gram matrix of a near block's part (all its parts where none), its rows over every column
+/// (`Ritz`), onto `g`; the entries summed.
+fn gram(nb: &Near, basis: &NearBasis, part: Option<usize>, done: usize, n: usize, g: &mut [[C64; 3]; 3]) -> usize {
+    let at = |k: usize, i: usize, j: usize| swept(nb, k, i, j, n);
+    let change = |k: isize, i: usize, j: usize| match k {
+        k if k < 0 => C64::ZERO,
+        0 => at(0, i, j),
+        k => at(k as usize, i, j) - at(k as usize - 1, i, j),
+    };
+    let mut len = 0;
+    for i in (0..nb.s + nb.nd).filter(|&i| part.is_none_or(|q| series_part(nb, basis, i) == q)) {
+        for j in 0..n {
+            let d = [change(done as isize - 3, i, j), change(done as isize - 2, i, j), change(done as isize - 1, i, j)];
+            for a in 0..3 {
+                for b in 0..3 {
+                    g[a][b] += d[a].conj() * d[b];
+                }
             }
+            len += 1;
         }
     }
-    if b == 0.0 { 0.0 } else { (a / b).sqrt() }
+    len
+}
+
+/// The series' Ritz extrapolations at a decision swept `done` times (`Ritz`): every near block's parts' on their own last
+/// three changes, and the whole's.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct Ritzes {
+    whole: Ritz,
+    parts: Vec<Vec<Ritz>>,
+}
+
+impl Ritzes {
+    fn of(near: &[Near], cache: &Cache, done: usize, n: usize) -> Ritzes {
+        let mut whole = [[C64::ZERO; 3]; 3];
+        let mut len = 0;
+        let parts = near
+            .iter()
+            .enumerate()
+            .map(|(x, nb)| {
+                if nb.idle() {
+                    return vec![];
+                }
+                let basis = cache.near_at(x);
+                (0..series_parts(nb, basis))
+                    .map(|part| {
+                        let mut g = [[C64::ZERO; 3]; 3];
+                        let l = gram(nb, basis, Some(part), done, n, &mut g);
+                        (0..3).for_each(|a| (0..3).for_each(|b| whole[a][b] += g[a][b]));
+                        len += l;
+                        Ritz::of(&g, l)
+                    })
+                    .collect()
+            })
+            .collect();
+        Ritzes { whole: Ritz::of(&whole, len), parts }
+    }
+
+    /// A part's extrapolation: its own where its changes tell one, the whole's where they do not (a part reached at the
+    /// last sweep: driven by the others).
+    fn part(&self, x: usize, part: usize) -> Ritz {
+        match self.parts.get(x).and_then(|p| p.get(part)) {
+            Some(r) if r.known => *r,
+            _ => self.whole,
+        }
+    }
+
+    /// The largest Ritz value, of the whole and of every part (at or above one the series does not exist).
+    pub(crate) fn most(&self) -> f64 {
+        self.parts.iter().flatten().map(|r| r.most).fold(self.whole.most, f64::max)
+    }
+}
+
+/// A series part's account at p sweeps (unify2 §2.2, §2.4), the rows swept `done` = K times at the decision (one past every
+/// part's evaluated sweeps, three at the least): per column the rest after its p-th sweep, R = Σ_k≥p d_k -- the changes
+/// made past p as they are, Z⁽ᴷ⁻¹⁾ − Z⁽ᵖ⁻¹⁾ (a part reached late, whose changes start at its last sweeps, is read so: its
+/// next sweep made, not extrapolated), and the series' rest beyond K by its Ritz recurrence (`Ritz::rest`) on the part's
+/// own last two changes -- over the part's series rows (`swept`: its exact copies' rows too). Its rate channel |R_j|²
+/// against W_j (`den`; none within the rows' rounding); its potential channel at the second order: the compression A =
+/// Ψ†HΨ is the Ritz value of H on Ψ, stationary in the response about the exact one where the rows are Hermitian, so a
+/// rest R moves the column's energy by R†(K − c_j)R, read Σ_i |R_ij|² |c_j − w̄ − κ_i| (rad/µs, the rows' diagonal; κ_i
+/// the solved rows', the exact copies' K̂_DD) -- where the rest is the whole of a row's response (a copy reached at the
+/// second sweep, its column dark but through it) that is the light shift it carries (random system 86: G's energy
+/// 7·10⁻⁶ rad/µs, 6·10⁻³ of the potential, the rate channel none). With the decay D the energy moves at first order too,
+/// by Im(Z†DδZ) (said, not read: unify2 §2.1 reads 2Re(V†δT), the Bloch generator's; to be settled with U5). ∞ where the
+/// series does not converge (max |μ| ≥ 1).
+#[allow(clippy::too_many_arguments)]
+fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usize, den: &[f64], floor: f64, h: &[C64], energy: f64, n: usize, ritz: &Ritz, out: &mut [f64]) {
+    let (s, nd) = (nb.s, nb.nd);
+    let at = |k: usize, i: usize, j: usize| swept(nb, k, i, j, n);
+    let (alpha, beta) = ritz.rest(p, done);
+    let infinite = !alpha.re.is_finite();
+    let mean = nb.shifts.iter().sum::<f64>() / nb.shifts.len().max(1) as f64;
+    let mut shift = vec![0.0; n];
+    out.fill(0.0);
+    for i in (0..s + nd).filter(|&i| series_part(nb, basis, i) == part) {
+        let diagonal = if i < s { nb.kappa[i] } else { nb.kdd[(i - s) * nd + i - s] };
+        for j in 0..n {
+            let last = at(done - 1, i, j);
+            let before = if done >= 2 { at(done - 2, i, j) } else { C64::ZERO };
+            let third = if done >= 3 { at(done - 3, i, j) } else { C64::ZERO };
+            let (d1, d2) = (before - third, last - before);
+            if infinite {
+                out[j] += d2.norm_sqr() * f64::INFINITY;
+                continue;
+            }
+            let made = if p < done { last - if p >= 1 { at(p - 1, i, j) } else { C64::ZERO } } else { C64::ZERO };
+            let rest = (made + alpha * d1 + beta * d2).norm_sqr();
+            out[j] += rest;
+            shift[j] += rest * (h[j * n + j] - C64::real(mean) - diagonal).norm_sqr().sqrt();
+        }
+    }
+    for j in 0..n {
+        let size = out[j];
+        let rated = if den[j] <= floor || size.is_nan() || size == 0.0 || (size.is_finite() && rounded(size, den[j], n, s, nb.lanes)) { 0.0 } else { size / den[j] };
+        out[j] = rated + if size.is_finite() { unrate(shift[j] / energy).powi(2) } else { 0.0 };
+    }
 }
 
 /// Whether a change's square is within the rounding of a column's response of the whole W_j (each of its s rows a sum
 /// over L lanes of sums of about n + s + 1 products: Σ_i of their rounding's square, s rounding(L(n + s + 1))² W_j).
 fn rounded(change: f64, whole: f64, n: usize, s: usize, lanes: usize) -> bool {
     change <= s.max(1) as f64 * crate::units::rounding(lanes.max(1) * (n + s + 1)).powi(2) * whole
-}
-
-/// The ratio of a series part's changes at sweep k and k − 1 (`Near::hist`; `den` the columns' W): over its columns -- the
-/// series' ratio is its iteration's, one for all its columns (DESIGN §1.5: a column it reaches late through the Bloch
-/// generator, or whose first terms cancel, reads no ratio of its own) --; none where the change is within the columns'
-/// rounding (converged) or the part had none before (it starts at this sweep).
-fn ratio_of(nb: &Near, np: usize, part: usize, k: usize, den: &[f64], n: usize) -> f64 {
-    let (a, b) = (0..n).fold((0.0, 0.0), |(a, b), j| (a + nb.hist[(k * np + part) * n + j], b + nb.hist[((k - 1) * np + part) * n + j]));
-    if rounded(a, den.iter().sum(), n, nb.s, nb.lanes) || b == 0.0 { 0.0 } else { (a / b).sqrt() }
 }
 
 /// The accounts held (`Account::on`) by kind at their worst column read (ρ², `KINDS`).
@@ -864,26 +1012,16 @@ fn worst_kinds(accounts: &[Account], den: &[f64], n: usize) -> [f64; KINDS] {
     kinds
 }
 
-/// The largest of every part's last ratio, its rows swept `done` times (`ratio_of`).
-fn last_ratio(near: &[Near], cache: &Cache, den: &[f64], done: usize, n: usize) -> f64 {
-    let mut last = 0.0_f64;
-    for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
-        let np = series_parts(nb, cache.near_at(x));
-        for part in 0..np {
-            last = last.max(ratio_of(nb, np, part, done - 1, den, n));
-        }
-    }
-    last
-}
-
-/// A held forward's largest ratio (unify2 §2.7): of every part of two sweeps or more, its last two changes' (`ratio_of`); at
-/// or above one the forward is unresolved there (booked at ρ = 1, counted).
-fn held_ratio(near: &[Near], cache: &Cache, evaluation: &Evaluation, whole: &[f64], n: usize) -> f64 {
+/// A held forward's largest Ritz value (unify2 §2.7; `Ritz`): of every part of two sweeps or more, on its own last changes
+/// (three where it has them, two else); at or above one the forward is unresolved there (booked at ρ = 1, counted).
+fn held_ratio(near: &[Near], cache: &Cache, evaluation: &Evaluation, n: usize) -> f64 {
     let mut most = 0.0_f64;
     for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
-        let np = series_parts(nb, cache.near_at(x));
+        let basis = cache.near_at(x);
         for (part, &p) in evaluation.parts[x].iter().enumerate().filter(|(_, p)| **p >= 2) {
-            most = most.max(ratio_of(nb, np, part, p - 1, whole, n));
+            let mut g = [[C64::ZERO; 3]; 3];
+            let len = gram(nb, basis, Some(part), p, n, &mut g);
+            most = most.max(Ritz::of(&g, len).most);
         }
     }
     most
@@ -989,6 +1127,10 @@ pub(crate) struct Workspace {
     decision: Decision,
     accounts: Vec<Account>,
     den: Vec<f64>,
+    /// The series' extrapolation at a decision (`Ritz`), read from its last three sweeps' changes; the atom's energy its
+    /// accounts' potential channel is read against.
+    ritz: Ritzes,
+    energy: f64,
     /// Per near block its matrices at the point where a decomposition is made there (`Fold::lay`, `Fold::effective`).
     here: Vec<Option<(Laid, Effective)>>,
     /// The step's temporaries: per near block (`Scratch`) and those of the whole (`Temp`).
@@ -1018,7 +1160,6 @@ struct Landing {
     c: Vec<C64>,
     delta: Vec<C64>,
     change: Vec<f64>,
-    previous: Vec<f64>,
     whole: Vec<f64>,
     n: Vec<C64>,
     lu: Vec<C64>,
@@ -1965,8 +2106,7 @@ fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, s
     let (ln, right) = (splits * n, side == Side::Right);
     let block = s * ln;
     let (t, ends) = (&basis.f.t, &basis.f.ends);
-    let np = series_parts(nb, basis);
-    let Near { shifts, upto, vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs, zs, ztots, zds, zdtots, left, hist, .. } = nb;
+    let Near { shifts, upto, vt, kappa, ked, kde, kdd, b0d, emit, hx, exd, z, ztot, zold, rhs, prod, zd, zdtot, bloch, invs, pjs, cinvs, zs, ztots, zds, zdtots, left, .. } = nb;
     // The orientation's inputs, responses and temporaries; the right's reciprocals and copies' factors laid after the
     // earlier sweeps' (the force's), the left's in place.
     let (at, pat, cat) = if right { (invs.len(), pjs.len(), cinvs.len()) } else { (0, 0, 0) };
@@ -2081,22 +2221,13 @@ fn sweep_block(nb: &mut Near, sc: &mut Scratch, basis: &NearBasis, side: Side, s
         zds.extend_from_slice(zd);
         zdtots.extend_from_slice(zdtot);
     }
-    // The change and the whole response, column by column; on the right per series part its change's square (`Near::hist`).
-    let base = sweep * np * n;
-    if right {
-        hist.resize(base + np * n, 0.0);
-        hist[base..].fill(0.0);
-    }
+    // The change and the whole response, column by column (each sweep's response kept on the right, `Near::ztots`: the
+    // series' changes for its reading, `Ritz`).
     for i in 0..s {
-        let part = if nd > 0 { 0 } else { basis.part[i] };
         for j in 0..n {
             let zn = ztot[i * n + j];
             if going(i) {
-                let d2 = (zn - zold[i * n + j]).norm_sqr();
-                change[j] += d2;
-                if right {
-                    hist[base + part * n + j] += d2;
-                }
+                change[j] += (zn - zold[i * n + j]).norm_sqr();
             }
             whole[j] += zn.norm_sqr();
         }
@@ -2154,28 +2285,6 @@ fn sweep_all(near: &mut [Near], scratch: &mut [Scratch], far: &[Far], cache: &Ca
         }
     }
     true
-}
-
-/// The series' rest read from its last two changes (module documentation, 5), column by column over the columns whose
-/// whole response is above the rounding's: the last change times r/(1 − r), r the ratio of the last two changes (none
-/// after the first; a column that did not change has converged, r = 0), relative to the column, in rate units; and the
-/// largest ratio.
-fn rest_of(change: &[f64], previous: &[f64], whole: &[f64], n: usize) -> (f64, f64) {
-    let floor = (crate::units::rounding(n) * whole.iter().sum::<f64>().sqrt()).powi(2);
-    let (mut rest, mut most) = (0.0_f64, 0.0_f64);
-    for j in (0..n).filter(|&j| whole[j] > floor) {
-        let ratio = if change[j] == 0.0 {
-            0.0
-        } else if previous[j] > 0.0 {
-            (change[j] / previous[j]).sqrt()
-        } else {
-            f64::INFINITY
-        };
-        most = most.max(ratio);
-        let x = if ratio < 1.0 { change[j].sqrt() * ratio / (1.0 - ratio) } else { f64::INFINITY };
-        rest = rest.max(rate(x / whole[j].sqrt()));
-    }
-    (rest, most)
 }
 
 /// The exact copies' part of a compression: Z_E†K̂_ED Z_D + Z_D†K̂_DE Z_E + Z_D†K̂_DD Z_D into `a`, Z_D†Z_D into `metric`.
@@ -2720,7 +2829,6 @@ impl Fold {
                     tc: z(nc * n),
                     xcol: (0..n).map(|p| xs.contains(&p)).collect(),
                     upto: vec![usize::MAX; s],
-                    hist: vec![],
                     invs: vec![],
                     zs: vec![],
                     ztots: vec![],
@@ -2835,6 +2943,8 @@ impl Fold {
             decision: Decision::default(),
             accounts: vec![],
             den: vec![0.0; n],
+            ritz: Ritzes::default(),
+            energy: 0.0,
             here: (0..near_len).map(|_| None).collect(),
             scratch,
             tm,
@@ -3553,6 +3663,14 @@ impl Fold {
     /// parts swept `sweeps` times where they are taken out. None where the fold does not exist so.
     #[cfg(test)]
     pub(crate) fn prototype_without(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &Cache, ws: &mut Workspace, without: Without, sweeps: usize) -> Option<Mat> {
+        self.prototype_without_kept(r, kappa, energy, cache, ws, without, sweeps).map(|(g, _)| g)
+    }
+
+    /// `prototype_without` with the cache it stood on (its decompositions and evaluation): the forward in the workspace,
+    /// for its force (`prototype_tangent` on it).
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prototype_without_kept(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &Cache, ws: &mut Workspace, without: Without, sweeps: usize) -> Option<(Mat, Cache)> {
         let mut c = cache.clone();
         let (near, far) = (ws.near.len(), ws.far.len());
         ws.decision.start(near, far);
@@ -3596,7 +3714,29 @@ impl Fold {
             _ => {}
         }
         c.evaluation = evaluation;
-        self.prototype_within(r, kappa, energy, &mut c, ws, false).filter(|s| !s.unresolved).map(|s| s.generator.clone())
+        let g = self.prototype_within(r, kappa, energy, &mut c, ws, false).filter(|s| !s.unresolved).map(|s| s.generator.clone())?;
+        Some((g, c))
+    }
+
+    /// Diagnostic (tests): the force on each column of the forward in the workspace (on `cache`, the one it stood on), along
+    /// lab axis `a`: per column j −(Ĝ_a)_jj (the Hermitian part's gradient, `prototype_gradient`) and the absorbed light's
+    /// mean on e_j (`prototype_photons`, every ground state one class: Σ Im(u*∂u)); and each column's photon rate. Makes
+    /// the step's tangent.
+    #[cfg(test)]
+    pub(crate) fn prototype_column_forces(&self, cache: &Cache, ws: &mut Workspace, a: usize) -> Vec<(f64, f64, f64)> {
+        let n = ws.n;
+        self.prototype_tangent(cache, ws);
+        let mut out: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+        self.prototype_gradient(cache, ws, 0, true, &[], &mut out);
+        let sets = vec![(0..GROUND).collect::<Vec<usize>>()];
+        (0..n)
+            .map(|j| {
+                let psi: Vec<C64> = (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect();
+                let p = self.prototype_photons(cache, ws, &psi, &sets, At::Middle, 0.0, Moments::Every);
+                let absorbed = p.force[a] + p.classes.iter().map(|c| c.rate * c.kick[a]).sum::<f64>();
+                (-out[a][j * n + j].re, absorbed, p.rate)
+            })
+            .collect()
     }
 
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
@@ -3658,7 +3798,7 @@ impl Fold {
             }
             *work += ((nd * (s + n)) * 2 + nd * nd + nn) as f64 / 4.0;
         }
-        let Landing { hbase: base, h, c, delta, change, previous, whole, n: metric, lu, piv, .. } = landing;
+        let Landing { hbase: base, h, c, delta, change, whole, n: metric, lu, piv, .. } = landing;
         zeroed(base, nn);
         for i in 0..n {
             for j in 0..n {
@@ -3668,7 +3808,7 @@ impl Fold {
         h.clone_from(base);
         zeroed(c, n);
         zeroed(delta, nn);
-        for v in [&mut *change, &mut *previous, &mut *whole] {
+        for v in [&mut *change, &mut *whole] {
             v.clear();
             v.resize(n, 0.0);
         }
@@ -3683,11 +3823,10 @@ impl Fold {
             if !whole.iter().chain(change.iter()).all(|x| x.is_finite()) {
                 return None;
             }
-            let (_, most) = rest_of(change, previous, whole, n);
-            previous.copy_from_slice(change);
-            if sweep >= 2 && most >= 1.0 {
-                return None;
-            }
+            // No existence of its own: the left series is the adjoint's, its sweep's linearization 𝓛's adjoint -- one
+            // spectrum, read on the right (`Ritzes`). (Its two changes' ratio, at or above one from its third sweep, read
+            // a transient's growth as none: S2Q's sets with explicit states, 121 points of three sets each, beyond the
+            // share by a landing that did not exist; readings.status.md R3.)
         }
         // N = 1 + T_L†T over the blocks.
         zeroed(metric, nn);
@@ -3781,8 +3920,9 @@ impl Fold {
             self.ready(cache, ws, &evaluation, decide, work);
             lap(FAR, &mut clock, &mut tick);
             // The series (module documentation, 5): each row to its part's sweeps as the evaluation gives them; at a
-            // decision every row to K -- two at the least (a ratio is read from two changes), the evaluation's most.
-            let (mut done, mut target) = (0, if decide { evaluation.most().max(2) } else { evaluation.most() });
+            // decision every row to K -- one past the evaluation's most (a part's rest after its sweeps is read on the
+            // next sweep made: a part reached late), three at the least (the last three changes' Ritz values, `Ritz`).
+            let (mut done, mut target) = (0, if decide { (evaluation.most() + 1).max(3) } else { evaluation.most() });
             for (x, nb) in ws.near.iter_mut().enumerate() {
                 let basis = cache.near_at(x);
                 for i in 0..nb.s {
@@ -3793,7 +3933,7 @@ impl Fold {
                 done = self.sweeps(cache, ws, done, target, work)?;
                 lap(SERIES, &mut clock, &mut tick);
                 if !decide {
-                    break 'rounds (held_ratio(&ws.near, cache, &evaluation, &ws.whole, n), done);
+                    break 'rounds (held_ratio(&ws.near, cache, &evaluation, n), done);
                 }
                 // The decision's accounts and the evaluation they choose (# The decisions).
                 #[cfg(test)]
@@ -3806,7 +3946,7 @@ impl Fold {
                 let next = self.walk(cache, ws, &mut evaluation, done, &mut work[READING]);
                 lap(READING, &mut clock, &mut tick);
                 match next {
-                    Next::Done => break 'rounds (last_ratio(&ws.near, cache, &ws.den, done, n), done),
+                    Next::Done => break 'rounds (ws.ritz.most(), done),
                     Next::Sweeps(more) => target = more,
                     Next::Again => continue 'rounds,
                     Next::Nowhere => return None,
@@ -4085,7 +4225,6 @@ impl Fold {
                 nb.zdtots.clear();
                 nb.pjs.clear();
                 nb.cinvs.clear();
-                nb.hist.clear();
             }
             cs.clear();
             deltas.clear();
@@ -4119,7 +4258,8 @@ impl Fold {
     fn accounts(&self, cache: &Cache, ws: &mut Workspace, evaluation: &Evaluation, energy: f64, done: usize, work: &mut f64) {
         let _p = crate::prof::scope(crate::prof::FWD_ACCOUNTS);
         let n = ws.n;
-        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, .. } = &mut *ws;
+        ws.energy = energy;
+        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, ritz, .. } = &mut *ws;
         accounts.clear();
         // The levels left out, on their bounds; W_j with their responses (a column's whole).
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
@@ -4146,7 +4286,7 @@ impl Fold {
         let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
         let read = |j: usize| den[j] > floor;
         let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
-        let whole_series = whole_ratio(near, cache, done, n);
+        *ritz = Ritzes::of(near, cache, done, n);
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             let basis = cache.near_at(x);
             let (om, sz, bk, sh) = &per[x];
@@ -4160,7 +4300,7 @@ impl Fold {
             let np = series_parts(nb, basis);
             for part in 0..np {
                 let mut squares = vec![0.0; n];
-                series_squares(nb, np, part, evaluation.parts[x][part], done, den, floor, n, whole_series, &mut squares);
+                series_squares(nb, basis, part, evaluation.parts[x][part], done, den, floor, h, energy, n, &ritz.part(x, part), &mut squares);
                 accounts.push(Account { item: Item::Series { block: x, part }, squares, on: true });
             }
             // The reuse's first-order error of the response the step uses, Z = Σ_l Z_l: row i of column j is Σ_l x_l/d_l, x_l
@@ -4332,13 +4472,15 @@ impl Fold {
     #[allow(clippy::too_many_arguments)]
     fn walk_in(&self, cache: &Cache, ws: &mut Workspace, evaluation: &mut Evaluation, done: usize, work: &mut f64) -> Next {
         let n = ws.n;
+        #[cfg(test)]
+        let budget = unrate(crate::model::elim::share() * f64::from_bits(BUDGET_SCALE.load(std::sync::atomic::Ordering::Relaxed))).powi(2);
+        #[cfg(not(test))]
         let budget = unrate(crate::model::elim::share()).powi(2);
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
-        let read: Vec<usize> = (0..n).filter(|&j| ws.den[j] > floor).collect();
-        if last_ratio(&ws.near, cache, &ws.den, done, n) >= 1.0 {
-            if done < 3 {
-                return Next::Sweeps(3);
-            }
+        // The columns read: those with an excited response, and those an account reads on its potential channel alone (a
+        // column dark but through a copy: its light shift).
+        let read: Vec<usize> = (0..n).filter(|&j| ws.den[j] > floor || ws.accounts.iter().any(|a| a.on && a.squares[j] > 0.0)).collect();
+        if ws.ritz.most() >= 1.0 {
             let chosen = self.failed(cache, ws, done, work);
             ws.cell.chosen = chosen;
             return Next::Nowhere;
@@ -4419,10 +4561,8 @@ impl Fold {
                     let Item::Series { block, part } = ws.accounts[k].item else { unreachable!() };
                     let p = evaluation.parts[block][part] + 1;
                     evaluation.parts[block][part] = p;
-                    let np = series_parts(&ws.near[block], cache.near_at(block));
-                    let whole = whole_ratio(&ws.near, cache, done, n);
-                    let Workspace { near, den, accounts, .. } = &mut *ws;
-                    series_squares(&near[block], np, part, p, done, den, floor, n, whole, &mut accounts[k].squares);
+                    let Workspace { near, den, h, energy, accounts, ritz, .. } = &mut *ws;
+                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), &mut accounts[k].squares);
                     worst[k] = (0..n).map(|j| self.series_worst(cache, ws, block, part, p, done, j)).collect();
                 }
                 Remedy::Refresh(x) => {
@@ -4504,8 +4644,9 @@ impl Fold {
             }
             return Next::Again;
         }
-        if evaluation.most() > done {
-            return Next::Sweeps(evaluation.most());
+        // A part's rest is read on its next sweep made (`series_squares`): one past the evaluation's most.
+        if evaluation.most() >= done {
+            return Next::Sweeps(evaluation.most() + 1);
         }
         // The cheaper evaluations within the budget at every column -- a part one sweep less, a far block left out, each
         // cheaper by its own count --: the least ρ² added first.
@@ -4536,10 +4677,8 @@ impl Fold {
                 Item::Series { block, part } => {
                     evaluation.parts[block][part] -= 1;
                     let p = evaluation.parts[block][part];
-                    let np = series_parts(&ws.near[block], cache.near_at(block));
-                    let whole = whole_ratio(&ws.near, cache, done, n);
-                    let Workspace { near, den, accounts, .. } = &mut *ws;
-                    series_squares(&near[block], np, part, p, done, den, floor, n, whole, &mut accounts[k].squares);
+                    let Workspace { near, den, h, energy, accounts, ritz, .. } = &mut *ws;
+                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), &mut accounts[k].squares);
                     worst[k] = trial;
                 }
                 Item::Centred { block, .. } => {
@@ -4574,16 +4713,15 @@ impl Fold {
     #[allow(clippy::too_many_arguments)]
     fn series_worst(&self, cache: &Cache, ws: &Workspace, block: usize, part: usize, p: usize, done: usize, j: usize) -> f64 {
         let n = ws.n;
-        let nb = &ws.near[block];
-        let np = series_parts(nb, cache.near_at(block));
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
         let mut out = vec![0.0; n];
-        series_squares(nb, np, part, p, done, &ws.den, floor, n, whole_ratio(&ws.near, cache, done, n), &mut out);
+        series_squares(&ws.near[block], cache.near_at(block), part, p, done, &ws.den, floor, &ws.h, ws.energy, n, &ws.ritz.part(block, part), &mut out);
         out[j]
     }
 
-    /// Where the fold does not exist at a decision's point (a part's ratio at one on its third sweep): the node of the
-    /// cell's (`Cell::nodes`) in a part that does not converge whose mixing is the largest (`mixings`: m = |a|/|Δ| of the
+    /// Where the fold does not exist at a decision's point (the series' largest Ritz value at or above one, `Ritzes`): the
+    /// node of the cell's (`Cell::nodes`) in a part that does not converge -- its own Ritz value at or above one, or its
+    /// share of the whole's Ritz vector that does not beyond the changes' rounding -- whose mixing is the largest (`mixings`: m = |a|/|Δ| of the
     /// bare inputs, the mixing decide.rs reads) -- the remedy by attribution to the part that diverges (unify2 §2.3,
     /// §3.4), never by the amplitudes a forward that does not exist reads (B5: a node of the tweezer's, 25 THz off, rose so
     /// and its step's work had no bound; e2e R1). None where no node is in such a part.
@@ -4591,10 +4729,18 @@ impl Fold {
         let n = ws.n;
         let shares = shares_of(&ws.near, cache, n, work);
         let mixing = mixings(&ws.near, &ws.far, cache, &ws.hbase, &ws.cell.nodes, n, work);
+        let mut whole = [[C64::ZERO; 3]; 3];
+        let len: usize = ws.near.iter().enumerate().filter(|(_, nb)| !nb.idle()).map(|(x, nb)| gram(nb, cache.near_at(x), None, done, n, &mut whole)).sum();
+        let all = ws.ritz.whole.share(&whole);
         let diverging = |x: usize, part: usize| {
             let nb = &ws.near[x];
-            let np = series_parts(nb, cache.near_at(x));
-            !nb.idle() && part < np && ratio_of(nb, np, part, done - 1, &ws.den, n) >= 1.0
+            let basis = cache.near_at(x);
+            if nb.idle() || part >= series_parts(nb, basis) {
+                return false;
+            }
+            let mut g = [[C64::ZERO; 3]; 3];
+            gram(nb, basis, Some(part), done, n, &mut g);
+            ws.ritz.parts[x][part].most >= 1.0 || (ws.ritz.whole.most >= 1.0 && ws.ritz.whole.share(&g) > crate::units::rounding(len.max(1)) * all)
         };
         most_mixed(&mixing, &ws.cell.nodes, |node| match hold_of(&ws.near, &ws.far, node) {
             Some(Hold::Near { block, level }) => (0..shares[block].level.len()).any(|k| shares[block].level[k] == level && diverging(block, shares[block].section[k])),
@@ -6915,6 +7061,12 @@ impl Workspace {
 
     /// The last step's reading: a decision's ρ (rate units; `Step::reading`), a held forward's its decision's.
     /// Whether the last decision's walk left a column beyond its budget with no remedy offered (`Fold::walk`).
+    /// The last decision's series' largest Ritz value (`Ritz`; the readings' tests).
+    #[cfg(test)]
+    pub(crate) fn series_most(&self) -> f64 {
+        self.ritz.most()
+    }
+
     pub(crate) fn step_beyond(&self) -> bool {
         self.step.beyond
     }
