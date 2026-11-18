@@ -4013,3 +4013,32 @@ fn the_start_s_decision_reported() {
     }
 }
 
+
+/// Diagnostic (根修 B item 1; DECIDE_REQ a request's path): per ground set of the base choice, each block with sources --
+/// its offset, its sources' components -- and the copies it leaves out (emitting component, copy level F): what the
+/// readings in both units (the whole emission's and the transfer out of the set's) let go.
+#[test]
+#[ignore]
+fn the_base_choice_s_omitted_copies() {
+    let path = std::env::var("DECIDE_REQ").expect("DECIDE_REQ");
+    let req = crate::model::testing::scene(&path);
+    let choice = Choice::base(&req, vec![]).expect("the choice");
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).expect("the fold");
+        println!("set {set:?}");
+        for b in fold.blocks.iter().filter(|b| !b.sources.is_empty() && !b.far()) {
+            let mut left: Vec<String> = b.omitted.iter().map(|&(t, g)| format!("{:?}F{}", fold.components[g].part, fold.ground_level[t])).collect();
+            left.sort();
+            left.dedup();
+            let src: Vec<String> = b.sources.iter().map(|&(p, c)| format!("{}<-{:?}", fold.ground[p], fold.components[c].part)).collect();
+            println!("  block {:.3} {:?}: left out {}", b.value, src, left.join(" "));
+        }
+        if std::env::var("DECIDE_READ").is_ok() {
+            let f = fold.read_at([0.0; 3]).expect("the fold at the focus");
+            for r in f.readings.iter().filter(|r| matches!(r.node, Node::Copy { .. }) && r.omission > 1e-8) {
+                let b = &fold.blocks[r.block];
+                println!("    reading block {:.3} {:?}: omission rate {:.3e} centring rate {:.3e}", b.value, r.node, rate(r.omission.sqrt()), rate(r.centring.sqrt()));
+            }
+        }
+    }
+}

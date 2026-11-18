@@ -342,10 +342,11 @@ impl Choice {
 
     /// The rule's tiers at the focus with the explicit levels `explicit` kept in P (M18, the evaluation order's rule): the
     /// rule's sets, frames and parts (`Choice::of`); every copy decomposed (exact: a centring can be singular, a copy at the
-    /// centre itself), then each at the cheapest evaluation its readings allow within the share (left out, centred,
-    /// decomposed); of a block's excited levels those whose omission readings sum within the share left out (the smallest
-    /// first), of the others those whose centring reads within it centred, the rest solved -- to the fixed point (at most
-    /// four rounds a set).
+    /// centre itself), then each at the cheapest evaluation its readings allow within the share: of a block's copies, and of
+    /// its excited levels, those whose omission readings sum within the share left out (the smallest first), of the others
+    /// those whose centring reads within it centred, the rest decomposed or solved -- to the fixed point (at most four
+    /// rounds a set). The readings are in both units, the larger (`Fold::readings`): the column's whole emission and its
+    /// emission out of the set (the populations').
     pub(crate) fn tiered(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
         Choice::tiered_of(request, explicit, &|_| true)
     }
@@ -374,20 +375,33 @@ impl Choice {
                 }
                 let f = fold.read_at([0.0; 3]).ok_or("焦点处的折叠不存在")?;
                 let mut changed = false;
-                for r in &f.readings {
-                    let Node::Copy { level, component } = r.node else { continue };
-                    let b = &fold.blocks[r.block];
-                    let Some(&(s, a)) = b.sources.first() else { continue };
-                    let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                    let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
-                    let next = if rate(r.omission.sqrt()) <= share { Status::Omitted } else if rate(r.centring.sqrt()) <= share { Status::Centred } else { Status::Decomposed };
-                    if next != status {
-                        for &(s, a) in &b.sources {
-                            let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
-                            choice.copies.retain(|x| x.0 != key);
-                            choice.copies.push((key, next));
+                // A block's copies left out together: their omission readings summed, the smallest first, as its excited
+                // levels' (each alone within the share, tilt0's three tweezer copies left out together were not:
+                // dragchk.status.md section 4).
+                for (o, b) in fold.blocks.iter().enumerate() {
+                    let Some(&(s0, a0)) = b.sources.first() else { continue };
+                    let mut nodes: Vec<(u8, usize, f64, f64)> = f.readings.iter().filter(|r| r.block == o).filter_map(|r| if let Node::Copy { level, component } = r.node { Some((level, component, r.omission, r.centring)) } else { None }).collect();
+                    nodes.sort_by(|a, b| a.2.total_cmp(&b.2));
+                    let mut sum = 0.0;
+                    for (level, component, omission, centring) in nodes {
+                        let next = if rate((sum + omission).sqrt()) <= share {
+                            sum += omission;
+                            Status::Omitted
+                        } else if rate(centring.sqrt()) <= share {
+                            Status::Centred
+                        } else {
+                            Status::Decomposed
+                        };
+                        let key = (fold.components[a0].part, fold.ground[s0], fold.components[component].part, level);
+                        let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(Status::Centred, |x| x.1);
+                        if next != status {
+                            for &(s, a) in &b.sources {
+                                let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
+                                choice.copies.retain(|x| x.0 != key);
+                                choice.copies.push((key, next));
+                            }
+                            changed = true;
                         }
-                        changed = true;
                     }
                 }
                 for (o, b) in fold.blocks.iter().enumerate() {
@@ -548,6 +562,9 @@ pub(crate) struct Fold {
     base_excited: Mat,
     /// The emission operators (GROUND × EXCITED).
     emission: [Mat; 3],
+    /// The ground sets a photon lands in (`Fold::sets`): the readings' populations unit reads each transfer into another
+    /// set against itself.
+    landing: Vec<Vec<usize>>,
     /// Per frequency and (p, q) of its outside form O_pq in the spherical components (STATES × STATES) the entries that are
     /// not zero.
     entries: Vec<Vec<(usize, usize, Vec<(usize, usize, C64)>)>>,
@@ -842,6 +859,7 @@ impl Fold {
             base_ground: base.block(&all, &all),
             base_excited,
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
+            landing: Fold::sets(request, choice)?,
             entries,
             others,
             ground_level,
@@ -2265,8 +2283,56 @@ impl Fold {
             .map(|j| self.blocks.iter().zip(&tu).map(|(b, t)| (0..b.rows.len()).filter(|&i| matches!(b.rows[i], Row::Excited(_))).map(|i| t[(i, j)].norm_sqr()).sum::<f64>()).sum::<f64>())
             .map(|x| if x > floor { x } else { 0.0 })
             .collect();
+        // The populations' unit (dragchk.status.md section 4): a ground set's populations are set by what its states emit
+        // into the other sets, not by the whole emission -- tilt0's depumping is a hundredth of its scattering and sets
+        // the F = 1 population. Per column j and landing set c (another set) its transfer W_cj = Σ_o Σ_q Σ_{b∈c}
+        // |(C_q ε_o,j)_b|², each read against itself (a landing class's rate, the population it feeds); a transfer
+        // below the rounding reads none.
+        let others: Vec<&Vec<usize>> = self.landing.iter().filter(|set| !set.iter().any(|g| self.ground.contains(g))).collect();
+        // Per landing set c (another set) the emission of block o's rows v into it, Σ_q Σ_{b∈c} |(C_q v)_b|².
+        let transfer = |o: usize, v: &dyn Fn(usize) -> C64| -> Vec<f64> {
+            let b = &self.blocks[o];
+            others
+                .iter()
+                .map(|set| {
+                    let mut sum = 0.0;
+                    for q in 0..3 {
+                        for &g in set.iter() {
+                            let mut u = C64::ZERO;
+                            for (i, row) in b.rows.iter().enumerate() {
+                                if let Row::Excited(x) = *row {
+                                    let c = self.emission[q][(g, x)];
+                                    if c != C64::ZERO {
+                                        u += c * v(i);
+                                    }
+                                }
+                            }
+                            sum += u.norm_sqr();
+                        }
+                    }
+                    sum
+                })
+                .collect()
+        };
+        // Per column and landing set its transfer (every block's), a set's below the rounding none.
+        let out_of: Vec<Vec<f64>> = (0..n)
+            .map(|j| {
+                let mut w = vec![0.0; others.len()];
+                for o in 0..self.blocks.len() {
+                    w.iter_mut().zip(transfer(o, &|i| tu[o][(i, j)])).for_each(|(a, b)| *a += b);
+                }
+                w.into_iter().map(|x| if x > floor { x } else { 0.0 }).collect()
+            })
+            .collect();
+        *work += (3 * GROUND * self.blocks.iter().map(|b| b.rows.len()).sum::<usize>() * n) as f64;
+        // An excited node's error v on block o's rows `rows` in the populations' unit at column j: the largest over the
+        // landing sets of its transfer's error against the transfer.
+        let populations = |o: usize, rows: &dyn Fn(usize) -> bool, v: &dyn Fn(usize) -> C64, j: usize| -> f64 {
+            transfer(o, &|i| if rows(i) { v(i) } else { C64::ZERO }).iter().zip(&out_of[j]).filter(|(_, w)| **w > 0.0).map(|(d, w)| d / w).fold(0.0, f64::max)
+        };
         // A row's error in its reading's units: an excited row's relative to the column's whole excited response (a rate's),
-        // a copy's absolute (a population's, per unit P amplitude: the Schur columns are of unit norm).
+        // the larger of that and its populations' unit (above); a copy's absolute (a population's, per unit P amplitude:
+        // the Schur columns are of unit norm).
         let per = |nd: Node, j: usize| match nd {
             Node::Excited(_) => whole[j],
             Node::Copy { .. } => 1.0,
@@ -2311,7 +2377,8 @@ impl Fold {
             }
             for (nd, x) in parts {
                 if per(nd, j) > 0.0 {
-                    put(o, nd, kind, scale * x / per(nd, j), out);
+                    let pop = if matches!(nd, Node::Excited(_)) { populations(o, &|i| i < back.len() && node(b, i) == nd, &|i| back.get(i).copied().unwrap_or(C64::ZERO), j) } else { 0.0 };
+                    put(o, nd, kind, scale * (x / per(nd, j)).max(pop), out);
                 }
             }
         };
@@ -2353,7 +2420,8 @@ impl Fold {
                 }
                 for (nd, x, shift) in parts {
                     let potential = ((1.0 + (2.0 * shift.re).abs() / (2.0 * self.thermal)).sqrt() - 1.0).powi(2);
-                    put(o, nd, 7, (x / whole[j]).max(potential), &mut out);
+                    let pop = populations(o, &|i| matches!(b.rows[i], Row::Excited(_)) && node(b, i) == nd, &|i| tu[o][(i, j)], j);
+                    put(o, nd, 7, (x / whole[j]).max(pop).max(potential), &mut out);
                 }
             }
         }
@@ -2377,7 +2445,11 @@ impl Fold {
                 for j in (0..n).filter(|&j| whole[j] > 0.0) {
                     let col = Mat::from_fn(rows.len(), 1, |a, _| tu[o][(rows[a], j)]);
                     let moved = mul(&r0, &col, work);
-                    let size = (C64::real(l.z0) - tri.t[(j, j)]).norm_sqr() * moved.data.iter().map(|x| x.norm_sqr()).sum::<f64>() / per(nd, j);
+                    let shift = (C64::real(l.z0) - tri.t[(j, j)]).norm_sqr();
+                    let mut size = shift * moved.data.iter().map(|x| x.norm_sqr()).sum::<f64>() / per(nd, j);
+                    if matches!(nd, Node::Excited(_)) {
+                        size = size.max(shift * populations(o, &|i| rows.contains(&i), &|i| rows.iter().position(|&r| r == i).map_or(C64::ZERO, |a| moved.data[a]), j));
+                    }
                     put(o, nd, 6, size, &mut out);
                     if centred {
                         put(o, nd, 3, size, &mut out);
@@ -2491,7 +2563,8 @@ impl Fold {
                             let st = e.to(&src, work);
                             let zz = e.back(z, &st.data, work);
                             let back = e.from(&Mat::from_fn(zz.len(), 1, |i, _| zz[i]), work).data;
-                            sizes[k] = back.iter().enumerate().map(|(i, x)| match per(node(b, i), j) { d if d > 0.0 => x.norm_sqr() / d, _ => 0.0 }).sum();
+                            let rate_unit: f64 = back.iter().enumerate().map(|(i, x)| match per(node(b, i), j) { d if d > 0.0 => x.norm_sqr() / d, _ => 0.0 }).sum();
+                            sizes[k] = rate_unit.max(populations(o, &|i| matches!(b.rows[i], Row::Excited(_)), &|i| back.get(i).copied().unwrap_or(C64::ZERO), j));
                         }
                         let nd = Node::Copy { level, component: g };
                         put(o, nd, 6, sizes[0], &mut out);
