@@ -3131,7 +3131,9 @@ impl Fold {
             }
             let mut whole = form.clone();
             plus(&mut whole, &dressing);
-            let tw = rotate(&f, &whole.block(&kr, &kr), work);
+            // V†N_tV and the levels' norms of N_t enter with δc_t alone (`moved`, `Fold::ready`, `bound_levels`; the
+            // tangent's): at the basis's own point, where it is made and let go (`Cell::here`), they are nothing.
+            let tw = if ws.cell.here { Mat::zeros(s, s) } else { rotate(&f, &whole.block(&kr, &kr), work) };
             // The dressing's rows' norms alone are read (the reuse's R₀ change): ‖(V†DV)_i‖ = ‖(V†D)_i‖, V unitary.
             let td = f.to(&dressing.block(&kr, &kr), work);
             // The explicit columns' source V†(𝒦_SX + dressing), the explicit rows' emission (𝒦_XS + dressing)V, their own
@@ -3145,11 +3147,14 @@ impl Fold {
             // Every level's: its own block's, its pairs', its dressing's rows' (with the static source's), its static source's
             // and explicit emission's columns.
             for (q, rq) in nb.levels.iter().enumerate() {
+                ldress[ti * nl + q] = (lnorm(&dressing, rq, &er).powi(2) + lnorm(&dress_sx, rq, &xall).powi(2)).sqrt();
+                if ws.cell.here {
+                    continue;
+                }
                 lterm[ti * nl + q] = lnorm(&whole, rq, rq);
                 for (p, rp) in nb.levels.iter().enumerate().filter(|&(p, _)| p != q) {
                     lpair[((ti + 1) * nl + q) * nl + p] = lnorm(&whole, rq, rp);
                 }
-                ldress[ti * nl + q] = (lnorm(&dressing, rq, &er).powi(2) + lnorm(&dress_sx, rq, &xall).powi(2)).sqrt();
                 for jx in 0..nx {
                     lstat[((ti + 1) * nl + q) * n + xcol(jx)] = lnorm(&sx, rq, &[jx]);
                     lemit[((ti + 1) * nl + q) * n + xcol(jx)] = lnorm(&xsm.adjoint(), rq, &[jx]);
@@ -3311,6 +3316,10 @@ impl Fold {
                 let (w, k, kk) = ws.pairs[t];
                 let u = &self.light.frequencies[w].basis;
                 let mut m = vec![C64::ZERO; nd * nd];
+                // K̂_DD's term enters with δc_t alone (`Fold::ready`; the tangent's), nothing at the basis's point.
+                if ws.cell.here {
+                    return m;
+                }
                 for (p, q, entries) in &self.entries[w] {
                     let cu = u[k][*p].conj() * u[kk][*q];
                     for &(i, j, v) in entries.iter().filter(|x| x.0 < GROUND && x.1 < GROUND) {
@@ -4598,6 +4607,10 @@ pub(crate) struct Taken {
 pub(crate) struct Cell {
     pub(crate) nodes: Vec<Taken>,
     pub(crate) chosen: Option<usize>,
+    /// The forward's decompositions are its point's alone (the start's decision reads a point on a cache of its own and
+    /// lets it go): what only a move along a path reads -- the terms' forms in the basis, which enter with the light's
+    /// change δc_t from the basis's point, nothing there -- is not made (`Fold::near_basis`).
+    pub(crate) here: bool,
 }
 
 /// A remedy of the walk (`Fold::walk`): an account's (by its index) or a node's rise (by its index of `Cell::nodes`).

@@ -417,7 +417,7 @@ impl<'a> Search<'a> {
             return Asked::Within(0.0, false, 0.0);
         }
         fold.local = local.factors(self.light);
-        ws.cell = Cell { nodes: candidates.iter().map(|c| c.1.clone()).collect(), ..Cell::default() };
+        ws.cell = Cell { nodes: candidates.iter().map(|c| c.1.clone()).collect(), here: true, ..Cell::default() };
         let mut cache = Cache::default();
         let step = fold.prototype([0.0; 3], local.kappa, self.floor, &mut cache, ws).map(|s| (s.reading, s.beyond));
         let mut chosen = ws.cell.chosen;
