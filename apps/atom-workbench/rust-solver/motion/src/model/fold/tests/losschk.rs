@@ -163,7 +163,7 @@ fn tilt0_held_at_trap_intensities() {
     }
 }
 
-/// The request with its trap light's intensity s of its own (`run::lit`'s rule: the fields and couplings by √s, the
+/// The request with its trap light's intensity s of its own (the fields and couplings by √s, the
 /// outside shift H0 holds at the focus by s).
 fn scaled(req: &Request, light: &crate::field::Light, s: f64) -> Request {
     let mut out = req.clone();

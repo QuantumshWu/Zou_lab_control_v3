@@ -3225,46 +3225,54 @@ fn random_systems_land_on_their_transient() {
     assert!(worst_owed <= 1e-10, "the clock's owed photon is the modes' fast photon: {worst_owed:.1e}");
 }
 
-/// The loss energy where one light set's fold ceases to exist (BRIEF_LANDIMPL item 4; run.rs # The rest of the model,
-/// `Clusters::difference`): a two-level atom in a far trap light (Δ_t = −60Γ, Ω_t = 6Γ) and a cooling light 0.1Γ below
-/// its line, at rest at the focus, the cooling's saturation about where its fold alone first ceases to exist (by tenths:
-/// 0.8–0.9 on the forward that stopped at its rounds' cap, unify2 U1: where its series' last ratio reaches one) -- with
-/// every light the fold exists there (the trap moves the line). There its node rises in both light sets:
-/// V_run at s = 0.9 is the trap's own shift, the run's of the trap light alone, within the share of it; risen in the
-/// cooling's set alone (before), V_run dropped by that set's whole cooling shift there (−6.2 rad/µs against V_run's
-/// −4.3); now by the trap's change of the cooling's shift through the risen node alone (said).
+/// The loss energy where one light set's fold ceases to exist (BRIEF_LANDIMPL item 4; run.rs # The rest of the model):
+/// a two-level atom in a far trap light (Δ_t = −60Γ, Ω_t = 6Γ) and a cooling light 0.1Γ below its line, at rest at the
+/// focus, the cooling's saturation about where its fold alone first ceases to exist (by tenths). V_run on either side is
+/// the trap's own shift -- its far form at the request's level, within the share of the trap light's fold alone --, the
+/// cooling no input. Before (risen nodes in two light sets, `Clusters::difference`) it was NaN where the cooling's fold
+/// ceased; on the start's representation -- the excited state explicit, the trap's drive of it a tone -- the
+/// diagonals' difference held none of the trap's shift and V_run was 0 on both sides.
 #[test]
-fn the_loss_energy_stands_on_one_set_of_risen_nodes_for_both_light_sets() {
+fn the_loss_energy_is_the_trap_s_own_shift_where_a_light_set_s_fold_ceases() {
     use crate::model::Point;
     use crate::step::Dynamics;
     let ee = 1000.0;
-    let rays = |s: f64, cooling: bool| -> Vec<Ray> {
-        let trap = Ray { axis: 0, nu: ee - 60.0 * GAMMA, direction: [1.0, 0.0, 0.0], couplings: vec![(17, 0, C64::real(3.0 * GAMMA))] };
-        let cool = Ray { axis: 1, nu: ee - 0.1 * GAMMA, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(0.5 * GAMMA * (s / 2.0_f64).sqrt()))] };
-        if cooling { vec![trap, cool] } else { vec![trap] }
-    };
-    let energy = |s: f64, cooling: bool| -> (f64, bool) {
-        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays(s, cooling), if cooling { 2 } else { 1 }, true);
+    let trap = || Ray { axis: 0, nu: ee - 60.0 * GAMMA, direction: [1.0, 0.0, 0.0], couplings: vec![(17, 0, C64::real(3.0 * GAMMA))] };
+    let cool = |s: f64| Ray { axis: 1, nu: ee - 0.1 * GAMMA, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(0.5 * GAMMA * (s / 2.0_f64).sqrt()))] };
+    let request = |rays: &[Ray]| -> Request {
+        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], rays, 2, true);
         idle_decay(&mut req, GAMMA);
         req.validate().unwrap();
-        let mut p = [0.0; GROUND];
-        p[0] = 1.0;
-        let run = super::run::Onefold::new(&req, p).expect("the run");
-        let light = Light::new(&req);
-        let off = super::run::lit(&req, &light, |w| w != light.trap);
-        let fold = Fold::new(&off, &Choice::base(&off, vec![], vec![]).unwrap(), 0).unwrap();
-        let exists = fold.blocks.is_empty() || fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some();
+        req
+    };
+    let mut p = [0.0; GROUND];
+    p[0] = 1.0;
+    let energy = |rays: &[Ray]| -> f64 {
+        let run = super::run::Onefold::new(&request(rays), p).expect("the run");
         let set = run.cluster_of(0);
         let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == 0 { C64::ONE } else { C64::ZERO }).collect();
-        (run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi), exists)
+        run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &psi)
     };
-    let (trap, _) = energy(0.0, false);
-    // The first saturation (by tenths) where the cooling's fold alone does not exist.
-    let gone = (5..30).map(|k| 0.1 * k as f64).find(|&s| !energy(s, true).1).expect("the cooling's fold ceases");
-    let ((below, held), (above, there)) = (energy(gone - 0.1, true), energy(gone, true));
-    println!("V_run at s = {:.1} {below:.4} rad/µs (the cooling's fold {}), at s = {gone:.1} {above:.4} ({}); the trap light's alone {trap:.4}: the step across {:.4}", gone - 0.1, if held { "exists" } else { "does not" }, if there { "exists" } else { "does not" }, above - below);
-    assert!(held && !there, "the cooling's fold ceases between s = {:.1} and {gone:.1}", gone - 0.1);
-    assert!((above - trap).abs() <= crate::model::elim::share() * trap.abs(), "risen in both, V_run is the trap's own shift");
+    // The cooling light's fold alone, nothing explicit, at the focus at rest.
+    let exists = |s: f64| -> bool {
+        let req = request(&[cool(s)]);
+        let fold = Fold::new(&req, &Choice::base(&req, vec![], vec![]).unwrap(), 0).unwrap();
+        fold.blocks.is_empty() || fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut super::proto::Cache::default(), &mut fold.prototype_workspace().unwrap()).is_some()
+    };
+    // The trap light's own shift: its fold alone at the focus, the ground state's diagonal in the lab.
+    let own = {
+        let req = request(&[trap()]);
+        let fold = Fold::new(&req, &Choice::base(&req, vec![], vec![]).unwrap(), 0).unwrap();
+        let mut ws = fold.prototype_workspace().unwrap();
+        let g = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut super::proto::Cache::default(), &mut ws).expect("the trap's fold").generator.clone();
+        g[(0, 0)].re + fold.frame_values[0]
+    };
+    let gone = (5..30).map(|k| 0.1 * k as f64).find(|&s| !exists(s)).expect("the cooling's fold ceases");
+    let (below, above) = (energy(&[trap(), cool(gone - 0.1)]), energy(&[trap(), cool(gone)]));
+    println!("V_run at s = {:.1} {below:.4} rad/µs, at s = {gone:.1} {above:.4} (the cooling's fold alone ceases there); the trap light's own shift {own:.4}", gone - 0.1);
+    for v in [below, above] {
+        assert!(v.is_finite() && (v - own).abs() <= crate::model::elim::share() * own.abs(), "V_run {v} is the trap's own shift {own}");
+    }
 }
 
 /// A risen node's cluster is a fold the prototype holds wherever the base choice makes it (BRIEF_LANDIMPL item 3; fold.rs
@@ -3714,14 +3722,14 @@ fn a_run_s_trajectories_are_the_same_to_the_bit_on_one_thread_and_on_many() {
 
 
 
-/// The splitting's reference and the loss energy on the fold (model/fold/run.rs, # The rest of the model; BRIEF_STEP3C
-/// item 3): on R4_LIN_4, R1_TWEEZER and R1_RETRO, at the prepared trap's centre, a thermal offset and 10 µm along each
-/// axis, the reference -- the trap light's held forms at the focus -- against the old model's prepared potential of the
-/// reference state (the bare fold's far forms, `Model::expansion`): value, gradient and Hessian within the share of their
-/// size; and the loss energy's potential at rest, V_run(r; p) of the folds with every light and with every light but the
-/// trap's, against the same difference of `Fold::at`'s generators (the prototype's truth) within the share of the
-/// reference's depth. The old model's running potential is said beside: its bare folds hold none of what the trap light
-/// does to the other lights' shifts (model/potential.rs, # An averaged light), the fold at the atom holds it.
+/// The splitting's reference and the loss energy on the fold (model/fold/run.rs, # The rest of the model; unify2 §5.5,
+/// loss.status (B)): on R4_LIN_4, R1_TWEEZER and R1_RETRO, at the prepared trap's centre, a thermal offset and 10 µm along
+/// each axis, the reference -- the trap light's forms on the folds at the focus, W_s on the reference state's populations
+/// -- against the old model's prepared potential of the reference state (the bare fold's far forms, `Model::expansion`):
+/// value, gradient and Hessian within the share of their size (said); the loss energy at rest on the reference state,
+/// V_run(r; p_ref), is V_ref to the rounding; and on every ground state alone it is the old model's prepared potential of
+/// that state within the share of the reference's depth. The old model's running potential is said beside: what the trap
+/// light does to the other lights' shifts is no part of V_run (loss.status (B)).
 #[test]
 fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
     use crate::model::{Model, Point};
@@ -3731,8 +3739,8 @@ fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
         let request = crate::model::testing::scene(name);
         let light = Light::new(&request);
         let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
-        let mut p = [0.0; GROUND];
-        p[chief] = 1.0;
+        let alone = |s: usize| -> [f64; GROUND] { std::array::from_fn(|x| if x == s { 1.0 } else { 0.0 }) };
+        let p = alone(chief);
         let old = Model::new(&request, &light, &[]).unwrap();
         let trap = old.trap(&p, &old.prepared()).unwrap();
         let run = super::run::Onefold::new(&request, p).expect("the run");
@@ -3740,28 +3748,99 @@ fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
         let c = trap.centre;
         let points = [c, [c[0] + 0.3, c[1] - 0.2, c[2] + 0.5], [c[0] + 10.0, c[1], c[2]], [c[0], c[1] + 10.0, c[2]], [c[0], c[1], c[2] + 10.0]];
         let size = |q: &crate::model::Quadratic| (q.value.abs(), q.gradient.iter().map(|x| x * x).sum::<f64>().sqrt(), q.hessian.iter().flatten().map(|x| x * x).sum::<f64>().sqrt());
-        let set = run.cluster_of(chief);
-        let psi: Vec<C64> = run.cluster(set).states.iter().map(|&s| if s == chief { C64::ONE } else { C64::ZERO }).collect();
+        // The loss energy at rest of ground state s alone, on its own set's base cluster.
+        let energy = |s: usize, r: [f64; 3]| -> f64 {
+            let set = run.cluster_of(s);
+            let psi: Vec<C64> = run.cluster(set).states.iter().map(|&x| if x == s { C64::ONE } else { C64::ZERO }).collect();
+            run.energy(set, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi)
+        };
         for r in points {
             let (new, was) = (run.reference(r), old.expansion(r, &p, &old.prepared()));
             let apart = crate::model::Quadratic { value: new.value - was.value, gradient: std::array::from_fn(|a| new.gradient[a] - was.gradient[a]), hessian: std::array::from_fn(|a| std::array::from_fn(|b| new.hessian[a][b] - was.hessian[a][b])) };
             let (d, s) = (size(&apart), size(&was));
-            let energy = run.energy(set, &Point { r, kappa: [0.0; 3], t: 0.0 }, &psi);
             let running = old.potential(r, &p, &old.running());
-            // V_run of `Fold::at` on the folds with every light and with every light but the trap's (each ground set's
-            // with nothing explicit; the chief state's diagonal in the lab).
-            let diagonal = |request: &Request| -> f64 {
-                let choice = Choice::base(request, vec![], vec![]).unwrap();
-                let fold = Fold::new(request, &choice, chief).unwrap();
-                let x = fold.ground.iter().position(|&g| g == chief).unwrap();
-                fold_at(&fold, r, [0.0; 3]).expect("the fold at the point").generator[(x, x)].re + fold.frame_values[x]
-            };
-            let at = diagonal(&request) - diagonal(&super::run::lit(&request, &light, |w| w != light.trap));
-            println!("{name} at {r:.2?}: the reference {:.6e} (old {:.6e}), apart: value {:.2e}, gradient {:.2e}, Hessian {:.2e} of {:.2e}, {:.2e}, {:.2e}; V_run {energy:.6e} (Fold::at's {at:.6e}; the old model's {running:.6e}; depth {depth:.4e})", new.value, was.value, d.0, d.1, d.2, s.0, s.1, s.2);
+            let at_ref = energy(chief, r);
+            // Every ground state alone against the old model's prepared potential of that state.
+            let worst = (0..GROUND).map(|s| (energy(s, r) - old.potential(r, &alone(s), &old.prepared())).abs()).fold(0.0, f64::max);
+            println!("{name} at {r:.2?}: the reference {:.6e} (old {:.6e}), apart: value {:.2e}, gradient {:.2e}, Hessian {:.2e} of {:.2e}, {:.2e}, {:.2e}; V_run {at_ref:.6e} (the old model's running {running:.6e}; depth {depth:.4e}); every state alone against its prepared potential: {worst:.2e}", new.value, was.value, d.0, d.1, d.2, s.0, s.1, s.2);
             assert!(d.0 <= share * s.0.max(1e-300) + 1e-12 * depth && d.1 <= share * s.1 + 1e-12 * depth && d.2 <= share * s.2 + 1e-12 * depth, "{name}: the reference against the prepared potential");
-            assert!((energy - at).abs() <= share * depth, "{name}: the loss energy against Fold::at's");
+            assert!((at_ref - new.value).abs() <= 1e-12 * depth, "{name}: V_run on the reference state is V_ref");
+            assert!(worst <= share * depth, "{name}: V_run on each state alone against its prepared potential");
         }
     }
+}
+
+/// The loss energy is the trap light's own shift on the state's ground populations (model/fold/run.rs # The rest of the
+/// model; unify2 §5.5, loss.status (B)), a class: a Λ atom -- two degenerate ground states, one excited state landing in
+/// the first -- in a far trap light (3000Γ below the line, a Gaussian of waist 10⁴ µm) and a probe swept through the line
+/// and its exceptional point (s 0.3, 0.5, 0.6, 2, 20 at Δ₀ −Γ, 0, +0.1Γ). Along a path across the trap's axis from the
+/// focus through the region's rim to six waists, at rest, V_run is the second-order shift Re Σ_s p_s |v_s|²/(Δ_t + iΓ/2)
+/// times the trap's intensity |a(r)|², within 10⁻¹² of the depth: a number at every point, continuous, zero far away,
+/// the probe no input -- on each ground state alone, on cos θ|0⟩ + sin θ|1⟩ (p linear: cos²θ, sin²θ), and on a state of
+/// a run with the excited node explicit, its excited population by its decay's branching (all of it to the first).
+#[test]
+fn the_loss_energy_is_the_trap_light_s_own_shift_on_p_whatever_the_near_light() {
+    use crate::model::Point;
+    use crate::step::Dynamics;
+    let ee = 1000.0;
+    let (trap_nu, v) = (ee - 3000.0 * GAMMA, [30.0 * GAMMA, 20.0 * GAMMA]);
+    let (mut made, mut refused, mut points) = (0, vec![], 0);
+    for delta in [-GAMMA, 0.0, 0.1 * GAMMA] {
+        for s in [0.3, 0.5, 0.6, 2.0, 20.0] {
+            let g = 0.5 * GAMMA * (s / 2.0_f64).sqrt();
+            let trap = Ray { axis: 0, nu: trap_nu, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(v[0])), (17, 1, C64::real(v[1]))] };
+            let probe = Ray { axis: 1, nu: ee + delta, direction: [1.0, 0.0, 0.0], couplings: vec![(17, 0, C64::real(g)), (17, 1, C64::real(g))] };
+            let mut req = system(&[(0, 0.0), (1, 0.0)], &[(17, ee, GAMMA, 0)], &[trap, probe], 2, true);
+            idle_decay(&mut req, GAMMA);
+            req.validate().unwrap();
+            let mut p = [0.0; GROUND];
+            p[0] = 1.0;
+            let run = match super::run::Onefold::new(&req, p) {
+                Ok(run) => run,
+                Err(why) => {
+                    refused.push(format!("Δ₀ {:+.1}Γ s {s}: {why}", delta / GAMMA));
+                    continue;
+                }
+            };
+            made += 1;
+            let light = Light::new(&req);
+            let shift = |x: usize| (C64::real(v[x] * v[x]) / C64::new(trap_nu - ee, 0.5 * GAMMA)).re;
+            let depth = shift(0).abs().max(shift(1).abs());
+            let set = run.cluster_of(0);
+            assert_eq!(set, run.cluster_of(1), "the two ground states one set");
+            let states = run.cluster(set).states.clone();
+            let on = |amplitudes: &[(usize, f64)]| -> Vec<C64> { states.iter().map(|&x| amplitudes.iter().find(|a| a.0 == x).map_or(C64::ZERO, |a| C64::real(a.1))).collect() };
+            // The run with the excited node explicit (its cluster holds the excited state).
+            let fold = Fold::new(&req, &Choice::base(&req, vec![], vec![]).unwrap(), 0).unwrap();
+            let explicit = super::run::Onefold::of(&req, &Choice::base(&req, vec![Choice::candidates(&fold)[0].0], vec![]).unwrap(), p).expect("the run with the node explicit");
+            let risen = explicit.cluster_of(0);
+            let excited = explicit.cluster(risen).states.clone();
+            for i in 0..=120 {
+                let r = [500.0 * i as f64, 0.0, 0.0];
+                let intensity = light.beams[0].amplitude_to(r, 0).value.norm_sqr();
+                let at = Point { r, kappa: [0.0; 3], t: 0.0 };
+                let theta = 0.37 * i as f64;
+                let (c, sn) = (theta.cos(), theta.sin());
+                let cases = [
+                    (run.energy(set, &at, &on(&[(0, 1.0)])), shift(0)),
+                    (run.energy(set, &at, &on(&[(1, 1.0)])), shift(1)),
+                    (run.energy(set, &at, &on(&[(0, c), (1, sn)])), c * c * shift(0) + sn * sn * shift(1)),
+                    // On the risen cluster: ground 0, ground 1 and the excited state at equal weights; the excited's lands in 0.
+                    (explicit.energy(risen, &at, &excited.iter().map(|&x| if x == 0 || x == 1 || x == GROUND + 17 { C64::real(1.0) } else { C64::ZERO }).collect::<Vec<_>>()), (2.0 * shift(0) + shift(1)) / 3.0),
+                ];
+                for (k, (energy, expected)) in cases.into_iter().enumerate() {
+                    assert!(energy.is_finite() && (energy - expected * intensity).abs() <= 1e-12 * depth, "Δ₀ {:+.1}Γ s {s} at {r:?} case {k}: V_run {energy:.15e} against {:.15e}", delta / GAMMA, expected * intensity);
+                }
+                points += 1;
+            }
+            if delta == 0.0 && s == 20.0 {
+                let far = run.energy(set, &Point { r: [6e4, 0.0, 0.0], kappa: [0.0; 3], t: 0.0 }, &on(&[(0, 1.0)]));
+                println!("V_run at the focus {:.6e} rad/µs (second order {:.6e}), at six waists {far:.2e}; the region's rim at {:.0} µm", run.energy(set, &Point { r: [0.0; 3], kappa: [0.0; 3], t: 0.0 }, &on(&[(0, 1.0)])), shift(0), (0..1000).map(|i| 100.0 * i as f64).find(|&x| light.outside([x, 0.0, 0.0])).unwrap_or(f64::NAN));
+            }
+        }
+    }
+    println!("{made} runs made, {points} points each read four ways; refused: {refused:?}");
+    assert!(made >= 10, "the runs made");
 }
 
 /// A request whose idle excited states lie at a laser's energy (BRIEF_STEP3C item 3): a two-level atom four linewidths

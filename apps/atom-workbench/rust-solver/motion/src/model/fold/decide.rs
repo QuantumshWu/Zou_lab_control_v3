@@ -523,7 +523,7 @@ impl Local {
 
 /// The decision of one ground set (`Decision`): its ground states, its explicit nodes, its worst point on the final
 /// decision and the reading there (rate units); the points beyond the share where no node is offered; the nodes asked for
-/// whose cluster cannot be made with the others (a state explicit at two offsets: run.rs `Clusters::cluster_with`), each
+/// whose cluster cannot be made with the others (a state explicit at two offsets: `Search::built`), each
 /// with the count of the points that asked for it, and the points of the final reading that ask for one with the first of
 /// them; and the points where its fold does not exist and nothing is left to raise.
 #[derive(Clone, Debug, Default)]
@@ -725,7 +725,7 @@ impl Built {
     }
 }
 
-/// A set's fold on a decision, once made: Err where its cluster cannot be made (run.rs `Clusters::cluster_with`).
+/// A set's fold on a decision, once made: Err where its cluster cannot be made (fold.rs `Fold::build`).
 type Slot = Arc<OnceLock<Result<Arc<Built>, String>>>;
 
 /// The decision's inputs (module documentation), and what it makes once and keeps (# What is made once): each set's
@@ -927,7 +927,7 @@ impl<'a> Search<'a> {
         })
     }
 
-    /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a state
+    /// Whether set k's cluster with the nodes `nodes` can be made (`built`: refused where a state
     /// is explicit at two offsets, or a block is not the prototype's).
     fn feasible(&self, k: usize, nodes: &Decided) -> bool {
         self.built(k, nodes).is_ok()

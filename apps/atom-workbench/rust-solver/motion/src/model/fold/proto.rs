@@ -563,6 +563,19 @@ struct NearBasis {
     xemitc: Vec<C64>,
 }
 
+/// A held form (`Fold::prototype_held`): its two coefficients e_a, e_b -- (frequency, basis vector) each, e = ε_k --, their
+/// one rotation (counter-rotating: e = ε_k*), and per P place p its weight (F_ab)_pp: the form Re Σ e_a* e_b W of a state
+/// on P's diagonal, W its places' weights at their populations.
+pub(crate) type HeldForm = ([(usize, usize); 2], bool, Vec<C64>);
+
+/// What a held form is the form of (`Fold::held_at_focus`): an outside pair (its index among the workspace's pairs), or a
+/// far block's pair of source vectors (the block's index among the workspace's far blocks, the vectors a, b).
+#[derive(Clone, Copy)]
+enum FormOf {
+    Outside(usize),
+    Far(usize, usize, usize),
+}
+
 /// A far block's pair forms (module documentation, # What is kept): per pair of source vectors (a, b) U_a†R₀U_b and
 /// U_a†R₀†R₀U_b (n × n), stacked (v² × n², row a·v + b: the forms in e_a*e_b one product); its R₀ (the tests' response) and ‖R₀‖; the forms' size on its rows per term (R₀'s change).
 struct FarBasis {
@@ -3745,40 +3758,190 @@ impl Fold {
         Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), centre, resolvent: r0, emitted, excited })
     }
 
-    /// The forms Ĥ_PP's pairs and the far blocks hold at the focus, on P's diagonal at the weights `weight` (one per
-    /// place; model/fold/run.rs, # The rest of the model): per term its two factors -- (frequency, basis vector,
-    /// counter-rotating) of the coefficients e_a = ε_k (ε_k* counter-rotating) --, and its weight W = Σ_p weight_p
-    /// (F_ab)_pp, the form being Re Σ e_a* e_b W wherever the coefficients are taken: the pairs' outside forms N_t (# The far
-    /// coordinates) and each far block's U_a†R₀U_b, R₀ held at the focus (# What is kept). Bilinear in the field: its
-    /// derivatives are the coefficients'. A near block holds none (its response is no form of the field). None where a far
-    /// block's resolvent is singular at the focus (the fold's one exit: it does not exist there).
-    pub(crate) fn prototype_held(&self, ws: &mut Workspace, weight: &[f64]) -> Option<Vec<([(usize, usize, bool); 2], C64)>> {
+    /// The forms Ĥ_PP's pairs and the far blocks hold at the focus of the frequencies `of` keeps (model/fold/run.rs, # The
+    /// rest of the model; unify2 §5.5), each on P's diagonal (`HeldForm`): the pairs' outside forms N_t (# The far
+    /// coordinates) and each far block's U_a†R₀U_b of two source vectors of one rotation on each ground place, R₀ =
+    /// (z_p − K₀)⁻¹ at that ground state's own level -- the request's, K₀ = H0_ee − (i/2)D (SPEC §1.2), no light in a
+    /// denominator: the far-detuned limit, each state's second order at its own energy (the run's far block holds one R₀
+    /// at its sources' mean, # What is kept, and reads the rest) --, the form being Re Σ e_a* e_b W wherever the
+    /// coefficients are taken. Bilinear in the field: its derivatives are the
+    /// coefficients'. A near block holds none (its response is no form of the field): a light whose blocks are all near
+    /// holds its outside forms alone. None where a far block of a kept frequency has a resolvent singular at the focus
+    /// (the fold's one exit: it does not exist there).
+    pub(crate) fn prototype_held(&self, ws: &Workspace, of: &dyn Fn(usize) -> bool) -> Option<Vec<HeldForm>> {
+        self.held_at_focus(ws, of).map(|(forms, _)| forms.into_iter().map(|x| x.0).collect())
+    }
+
+    /// `prototype_held`'s forms, each with what it is the form of (`FormOf`), and the light at the focus at rest.
+    fn held_at_focus(&self, ws: &Workspace, of: &dyn Fn(usize) -> bool) -> Option<(Vec<(HeldForm, FormOf)>, Site)> {
         let n = ws.n;
         let mut work = 0.0;
-        {
-            let Workspace { mid, pairs, pp, base, lin, rotating, proj, .. } = ws;
-            self.proto_place([0.0; 3], [0.0; 3], mid, pairs, pp, base, lin, rotating, proj, &mut work);
-        }
         let site = self.site([0.0; 3], [0.0; 3], &mut work);
-        let diagonal = |m: &[C64]| -> C64 { (0..n).map(|p| m[p * n + p] * weight[p]).sum() };
-        let mut out: Vec<([(usize, usize, bool); 2], C64)> = ws
+        let mut out: Vec<(HeldForm, FormOf)> = ws
             .pairs
             .iter()
             .zip(&ws.pp)
-            .map(|(&(w, k, kk), entries)| ([(w, k, false), (w, kk, false)], entries.iter().filter(|(i, _)| i / n == i % n).map(|&(i, v)| v * weight[i / n]).sum()))
+            .enumerate()
+            .filter(|(_, ((w, _, _), _))| of(*w))
+            .map(|(t, (&(w, k, kk), entries))| {
+                let mut d = vec![C64::ZERO; n];
+                entries.iter().filter(|(i, _)| i / n == i % n).for_each(|&(i, v)| d[i / n] += v);
+                (([(w, k), (w, kk)], false, d), FormOf::Outside(t))
+            })
             .collect();
-        for fb in &ws.far {
-            let basis = self.far_basis(fb, ws, &site, &mut work)?;
-            let factor = |(c, k): (usize, usize)| (self.components[c].part.frequency, k, self.components[c].part.counter);
-            let v = fb.vectors.len();
+        let part = |c: usize| self.components[c].part;
+        for (i, fb) in ws.far.iter().enumerate().filter(|(_, fb)| fb.vectors.iter().any(|&(c, _)| of(part(c).frequency))) {
+            let b = &self.blocks[fb.o];
+            let rows: Vec<usize> = b.rows.iter().map(|r| if let Row::Excited(x) = *r { x } else { unreachable!("a far block's rows are excited") }).collect();
+            let (m, v) = (rows.len(), fb.vectors.len());
+            let mut d = vec![vec![C64::ZERO; n]; v * v];
+            let mut places: Vec<usize> = b.sources.iter().map(|x| x.0).collect();
+            places.dedup();
+            for p in places {
+                // R₀ at the ground state's own level (the block's frame), SPEC §1.2's: R = (z_p − K₀)⁻¹, K₀ = H0_ee − (i/2)D
+                // and z_p H0's -- H0 diagonal, holding each light's outside form at the focus there --, no light in
+                // the denominator: the outside forms' entries between excited states (`site`'s beside H0's) left out.
+                let g = self.ground[p];
+                let z = site.ground[(g, g)].re - self.frame_values[p] + b.value;
+                let k0 = |e: usize, h: usize| if e == h { site.excited[(rows[e], rows[e])] } else { self.base_excited[(rows[e], rows[h])] };
+                let r0 = super::inverse(&Mat::from_fn(m, m, |e, h| if e == h { C64::real(z) } else { C64::ZERO } - k0(e, h)), &mut work)?;
+                // The source vectors on place p: U_k's column of its ground state where its component sources p.
+                let u: Vec<Vec<C64>> = fb.vectors.iter().map(|&(c, k)| rows.iter().map(|&e| if b.sources.contains(&(p, c)) { self.components[c].basis[k][(e, g)] } else { C64::ZERO }).collect()).collect();
+                let ru: Vec<Vec<C64>> = u.iter().map(|x| (0..m).map(|e| (0..m).map(|h| r0[(e, h)] * x[h]).sum()).collect()).collect();
+                for a in 0..v {
+                    for bb in 0..v {
+                        d[a * v + bb][p] = (0..m).map(|e| u[a][e].conj() * ru[bb][e]).sum();
+                    }
+                }
+            }
             for a in 0..v {
-                for b in 0..v {
-                    out.push(([factor(fb.vectors[a]), factor(fb.vectors[b])], diagonal(&basis.f[(a * v + b) * n * n..(a * v + b + 1) * n * n])));
+                for bb in 0..v {
+                    // Two coefficients of opposite rotations meet at one offset only at twice the optical frequency: no
+                    // static form holds them.
+                    let ((ca, k), (cb, kk)) = (fb.vectors[a], fb.vectors[bb]);
+                    if part(ca).counter == part(cb).counter && of(part(ca).frequency) && of(part(cb).frequency) {
+                        out.push((([(part(ca).frequency, k), (part(cb).frequency, kk)], part(ca).counter, std::mem::take(&mut d[a * v + bb])), FormOf::Far(i, a, bb)));
+                    }
                 }
             }
         }
-        out.retain(|x| x.1 != C64::ZERO);
-        Some(out)
+        out.retain(|x| x.0 .2.iter().any(|z| *z != C64::ZERO));
+        Some((out, site))
+    }
+
+    /// The reported trap's forms at the focus (SPEC §1.3; M17, psolve.status §3; model/fold/run.rs `Onefold::reported`),
+    /// each on P's diagonal: the trap's frequency's held forms (`prototype_held`: coherent, all its pairs), every other
+    /// frequency's outside forms (its caller takes each beam's own pair alone: the phases averaged), and, of every block
+    /// another frequency's component reaches from a ground place, each beam alone in second order of it -- the pair form
+    /// U_a†RU_b of its own beam at the levels the trap gives at the focus at rest: R = (z − w − K)⁻¹ on the block's
+    /// excited rows, K their 𝒦 there (H0: the trap's outside forms in it) with the trap's coupling through every ground
+    /// state, C = Σ_t V_t R_t V_t† (R_t the ground copy's resolvent at the block's energy), z the ground state's level
+    /// with the trap's far shift there, w the beam's recoil --: its shift u = Re x†Rx (`own`, per beam and place); and
+    /// its first order in the trap's coefficients about the focus, a form of the trap's pairs, D_t = x†R (X_t − W_t) R x
+    /// for every trap form t (X_t its part on the excited rows -- an outside pair's form there, a far pair's copy
+    /// dressing Σ_t U_b R_t U_a† --, W_t its ground weight): the trap moving the other light's line (M17), its decay and
+    /// the left and right responses' bilinear form as the light shift's derivative is. Exact for the Hessian where the
+    /// trap's coefficients are stationary -- a trap's centre at its focus --; what the linear form leaves elsewhere is
+    /// the trap's second order on the other light's line. None where a far block of the trap's or a block's resolvent is
+    /// singular at the focus.
+    pub(crate) fn prototype_reported(&self, ws: &Workspace, trap: usize) -> Option<(Vec<HeldForm>, Vec<(usize, Vec<f64>)>)> {
+        let n = ws.n;
+        let mut work = 0.0;
+        let (forms, site) = self.held_at_focus(ws, &|w| w == trap)?;
+        let mut out: Vec<HeldForm> = forms.iter().map(|x| x.0.clone()).collect();
+        // Every other frequency's outside forms.
+        for (&(w, k, kk), entries) in ws.pairs.iter().zip(&ws.pp).filter(|((w, _, _), _)| *w != trap) {
+            let mut d = vec![C64::ZERO; n];
+            entries.iter().filter(|(i, _)| i / n == i % n).for_each(|&(i, v)| d[i / n] += v);
+            if d.iter().any(|z| *z != C64::ZERO) {
+                out.push(([(w, k), (w, kk)], false, d));
+            }
+        }
+        // The trap's coefficients at the focus, e_k = Σ_j γ_jk a_j (its conjugate counter-rotating), and each ground
+        // place's far shift there (H0 holds its outside forms).
+        let f = &self.light.frequencies[trap];
+        let at = |k: usize, counter: bool| -> C64 {
+            let e: C64 = f.beams.iter().enumerate().map(|(j, &l)| f.coefficients[j][k] * site.a[l].value).sum();
+            if counter {
+                e.conj()
+            } else {
+                e
+            }
+        };
+        let far: Vec<f64> = (0..n).map(|p| forms.iter().filter(|x| matches!(x.1, FormOf::Far(..))).map(|(([(_, a), (_, b)], counter, d), _)| (at(*a, *counter).conj() * at(*b, *counter) * d[p]).re).sum()).collect();
+        let traps: Vec<usize> = (0..self.components.len()).filter(|&c| self.components[c].part.frequency == trap).collect();
+        let u = &f.basis;
+        let mut shifts: Vec<Vec<C64>> = vec![vec![C64::ZERO; n]; forms.len()];
+        let mut own: Vec<(usize, Vec<f64>)> = vec![];
+        for b in &self.blocks {
+            let rows: Vec<usize> = b.rows.iter().filter_map(|r| if let Row::Excited(x) = *r { Some(x) } else { None }).collect();
+            let m = rows.len();
+            for &(p, c) in b.sources.iter().filter(|x| m > 0 && self.components[x.1].part.frequency != trap) {
+                let (g, comp) = (self.ground[p], &self.components[c]);
+                for (j, (&l, coupling)) in comp.beams.iter().zip(&comp.couplings).enumerate() {
+                    let z = site.ground[(g, g)].re - self.frame_values[p] + far[p] - site.doppler[c][j];
+                    // A ground copy's resolvent at the block's energy, of trap component tc and ground state t.
+                    let copy = |tc: usize, t: usize| C64::ONE / (C64::real(z) - site.ground[(t, t)] + C64::real(b.value - self.components[tc].nu));
+                    let mut a = Mat::from_fn(m, m, |e, h| if e == h { C64::real(z + b.value) } else { C64::ZERO } - site.excited[(rows[e], rows[h])]);
+                    for &tc in &traps {
+                        for t in 0..GROUND {
+                            let r = copy(tc, t);
+                            for e in 0..m {
+                                for h in 0..m {
+                                    a[(e, h)] -= site.drives[tc][(rows[e], t)] * r * site.drives[tc][(rows[h], t)].conj();
+                                }
+                            }
+                        }
+                    }
+                    let r = super::inverse(&a, &mut work)?;
+                    let x: Vec<C64> = rows.iter().map(|&e| comp.factor(site.a[l].value) * coupling[(e, g)]).collect();
+                    let right: Vec<C64> = (0..m).map(|e| (0..m).map(|h| r[(e, h)] * x[h]).sum()).collect();
+                    let left: Vec<C64> = (0..m).map(|h| (0..m).map(|e| x[e].conj() * r[(e, h)]).sum()).collect();
+                    let shift: C64 = (0..m).map(|e| left[e] * x[e]).sum();
+                    match own.iter_mut().find(|o| o.0 == l) {
+                        Some(o) => o.1[p] += shift.re,
+                        None => {
+                            let mut v = vec![0.0; n];
+                            v[p] = shift.re;
+                            own.push((l, v));
+                        }
+                    }
+                    let norm: C64 = (0..m).map(|e| left[e] * right[e]).sum();
+                    for (i, ((_, _, d), of)) in forms.iter().enumerate() {
+                        // The form's part on the excited rows, X_t.
+                        let mut xt = Mat::zeros(m, m);
+                        match *of {
+                            FormOf::Outside(t) => {
+                                let (w, k, kk) = ws.pairs[t];
+                                for (pp, qq, entries) in &self.entries[w] {
+                                    let cu = u[k][*pp].conj() * u[kk][*qq];
+                                    for &(si, sj, v) in entries.iter().filter(|x| x.0 >= GROUND && x.1 >= GROUND) {
+                                        if let (Some(e), Some(h)) = (rows.iter().position(|&y| y == si - GROUND), rows.iter().position(|&y| y == sj - GROUND)) {
+                                            xt[(e, h)] += cu * v;
+                                        }
+                                    }
+                                }
+                            }
+                            FormOf::Far(fi, ia, ib) => {
+                                let ((ca, ka), (cb, kb)) = (ws.far[fi].vectors[ia], ws.far[fi].vectors[ib]);
+                                for t in 0..GROUND {
+                                    let r = copy(cb, t);
+                                    for e in 0..m {
+                                        for h in 0..m {
+                                            xt[(e, h)] += self.components[cb].basis[kb][(rows[e], t)] * r * self.components[ca].basis[ka][(rows[h], t)].conj();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let moved: C64 = (0..m).map(|e| left[e] * (0..m).map(|h| xt[(e, h)] * right[h]).sum::<C64>()).sum();
+                        shifts[i][p] += moved - d[p] * norm;
+                    }
+                }
+            }
+        }
+        out.extend(forms.into_iter().zip(shifts).map(|(((c, counter, _), _), d)| (c, counter, d)).filter(|x| x.2.iter().any(|z| *z != C64::ZERO)));
+        Some((out, own))
     }
 
     /// The prototype's step at a point (r, κ) on an atom's representation, a decision's (# The decisions): its forward and
@@ -7349,11 +7512,6 @@ impl Workspace {
     /// What the last forward left out: the near blocks' excited rows not kept, the far blocks left out.
     pub(crate) fn left_out(&self) -> (usize, usize) {
         (self.near.iter().map(|x| x.all - x.s).sum(), self.far.iter().filter(|x| x.omitted).count())
-    }
-
-    /// G at the last step's middle.
-    pub(crate) fn generator(&self) -> &Mat {
-        &self.step.generator
     }
 
     /// The last forward's count, made or not (complex multiply-adds; `Fold::prototype_within`).
