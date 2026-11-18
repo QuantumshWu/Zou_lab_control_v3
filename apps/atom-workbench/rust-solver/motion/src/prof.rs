@@ -1,6 +1,7 @@
 //! Profiling counters (measurement only; no effect on any result). Built only with the feature `prof`; without it every
 //! call here is empty and inlined away, so the released worker carries none of it. Per region: the wall time (ns) its
-//! calls took, inclusive of the regions inside it, its calls, and a free count (`more`) -- each thread's own, flushed to
+//! calls took, inclusive of the regions inside it, its calls, and a free count (`more`: the heap allocations made inside
+//! it, inclusive, counted by the feature's allocator) -- each thread's own, flushed to
 //! the process's every 256 updates and when a report is made; the report is one line per region entered, to stderr with
 //! every result's counts line (adapt.rs `counted`).
 
@@ -236,16 +237,49 @@ mod on {
         LOCAL.with(|l| flush_local(&mut l.borrow_mut()));
     }
 
-    pub struct Scope(std::time::Instant, usize);
+    /// The heap allocations a thread has made (`Counting`): a region's free count is those made inside it.
+    thread_local! {
+        static ALLOCATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The system allocator, each allocation counted on its thread (measurement only: the feature's alone).
+    struct Counting;
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            ALLOCATED.with(|c| c.set(c.get() + 1));
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            ALLOCATED.with(|c| c.set(c.get() + 1));
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+            ALLOCATED.with(|c| c.set(c.get() + 1));
+            unsafe { std::alloc::System.realloc(ptr, layout, size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    fn allocated() -> u64 {
+        ALLOCATED.with(|c| c.get())
+    }
+
+    /// A region's guard: its start, its region, and the thread's allocations at its start -- its free count the heap
+    /// allocations (and reallocations) made inside it.
+    pub struct Scope(std::time::Instant, usize, u64);
     impl Drop for Scope {
         #[inline]
         fn drop(&mut self) {
-            add(self.1, self.0.elapsed().as_nanos() as u64, 1, 0);
+            add(self.1, self.0.elapsed().as_nanos() as u64, 1, allocated() - self.2);
         }
     }
 
     pub fn scope(k: usize) -> Scope {
-        Scope(std::time::Instant::now(), k)
+        Scope(std::time::Instant::now(), k, allocated())
     }
 
     pub fn report() -> String {
