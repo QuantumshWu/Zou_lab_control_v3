@@ -4367,3 +4367,22 @@ fn a_scene_s_risen_clusters_hold_their_copies_at_a_p_frame() {
     println!("{held} risen clusters with copies at a P frame held, {refused} refused");
     assert!(held > 0 && refused == 0, "every one held");
 }
+
+/// The start's decision's report (FOLDAPI §3, §7.5; decide.rs; BRIEF G3), of each request DECIDE_REQ names (paths joined
+/// by ';'), its run made as the solve makes it (solve.rs `solve`: the reference the initial component of the largest
+/// population): per ground set what is explicit, its tones and the terms averaged and folded, the worst point and the
+/// bound, the points and the time.
+#[test]
+#[ignore]
+fn the_start_s_decision_reported() {
+    let paths = std::env::var("DECIDE_REQ").expect("DECIDE_REQ");
+    for path in paths.split(';').filter(|p| !p.is_empty()) {
+        let req = crate::model::testing::scene(path);
+        let initial = crate::solve::components(&req);
+        let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+        let clock = std::time::Instant::now();
+        let run = run::Onefold::new(&req, crate::solve::alone(initial[chief].0)).unwrap();
+        println!("== {path} ({:.2} s to the run)\n{}", clock.elapsed().as_secs_f64(), run.report());
+    }
+}
+

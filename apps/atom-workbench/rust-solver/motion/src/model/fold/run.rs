@@ -349,6 +349,8 @@ pub(crate) struct Onefold {
     /// V_ref at the focus (rad/µs): the bottom an atom's mechanical energy is counted from (`Onefold::mechanical`).
     bottom: f64,
     untrapped: OnceLock<Result<Clusters, String>>,
+    /// The start's decision (decide.rs; # The representation and the decision times): the run's clusters stand on it.
+    decision: super::decide::Decision,
 }
 
 // The run is one object the trajectories' threads share (solve.rs `Hand::record`): Send + Sync, by the compiler.
@@ -422,7 +424,83 @@ impl Onefold {
     /// The run of a request (module documentation), the splitting's reference state's ground populations `reference`:
     /// every ground set's cluster with nothing explicit first (`Choice::base`).
     pub(crate) fn new(request: &Request, reference: [f64; GROUND]) -> Result<Onefold, String> {
-        Onefold::of(request, &Choice::base(request, vec![])?, reference)
+        let base = Onefold::of(request, &Choice::base(request, vec![])?, reference)?;
+        // The start's decision (decide.rs): the worst case over the local physics, an atom held by the trap at most its
+        // depth's kinetic energy; every reading in the potential channel's floor.
+        let depth = (-base.bottom).max(0.0);
+        let search = super::decide::Search::new(request, &base.light, &base.clusters.grounds, base.clusters.floor, (2.0 * depth / base.hbar_over_mass).sqrt());
+        let decision = search.decide()?;
+        let explicit = decision.explicit();
+        let mut run = if explicit.is_empty() { base } else { Onefold::of(request, &Choice::base(request, explicit)?, reference)? };
+        run.decision = decision;
+        Ok(run)
+    }
+
+    /// The start's decision's report (FOLDAPI §3, §7.5; decide.rs): per ground set its explicit nodes, its tones and the
+    /// terms averaged and folded (their beats, rad/µs), its worst point and the reading there (the bound), the points
+    /// beyond the share with no node offered; the search's points, rounds and time.
+    pub(crate) fn report(&self) -> String {
+        let d = &self.decision;
+        let labels = self.clusters.request.levels().unwrap_or_default();
+        let label = |s: usize| labels.get(s).map_or(format!("{s}"), |l| format!("F={} m={}", l.f, l.m));
+        let mut out = format!(
+            "开头决定：{} 个点（{} 维），{:.2} s；各轮（点数，显式结点数）{:?}；份额 {:.4}\n",
+            d.points,
+            d.dimensions,
+            d.seconds,
+            d.rounds,
+            crate::model::elim::share()
+        );
+        for (k, sd) in d.sets.iter().enumerate() {
+            let set = self.clusters.sets.get(k);
+            let ground: Vec<String> = sd.ground.iter().map(|&s| label(s)).collect();
+            let nodes: Vec<String> = sd
+                .nodes
+                .iter()
+                .map(|&(level, part, source)| {
+                    let x = set.fold.excited_level.iter().position(|&l| l == level);
+                    format!("{} via {:?} from {}", x.map_or(format!("level {level}"), |x| label(GROUND + x).replace("F=", "F'=")), part, label(source))
+                })
+                .collect();
+            out += &format!("  集合 {k} {ground:?}
+    显式：{nodes:?}
+");
+            out += &format!("    音调：{:?}\n", set.tones.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>());
+            out += &format!("    作音调的交叉衰减：{:?}\n", set.coherent.iter().map(|c| format!("{:.4}", c.2)).collect::<Vec<_>>());
+            out += &format!("    平均并折叠：{:?}\n", set.folded.iter().map(|f| format!("{:.4e}", f.value)).collect::<Vec<_>>());
+            match &sd.worst {
+                Some((at, reading)) => {
+                    let v: Vec<f64> = at.kappa.iter().map(|k| k * self.hbar_over_mass).collect();
+                    let phases: Vec<String> = at.phases.iter().enumerate().filter(|(_, p)| **p != 0.0).map(|(l, p)| format!("{}:{:.2}", self.clusters.request.beams[l].name, p)).collect();
+                    out += &format!("    最坏点：s {:.3}，相位 {phases:?}，v [{:.3}, {:.3}, {:.3}] m/s；界（读数）{reading:.4e}\n", at.s, v[0], v[1], v[2]);
+                }
+                None => out += "    最坏点：无\n",
+            }
+            out += &format!("    超份额而无结点可升的点 {}，折叠不存在且无结点可升的点 {}\n", sd.beyond, sd.nowhere);
+            out += &format!("    同态结点对的度规交叉读数：最大 {:.3e}（份额内的混入上限 {:.3e}），超份额的读数 {} 次", sd.crossed.0, crate::model::elim::share() / 2.0, sd.crossed_beyond);
+            if let Some(at) = &sd.crossed.1 {
+                let v: Vec<f64> = at.kappa.iter().map(|k| k * self.hbar_over_mass).collect();
+                out += &format!("，最大处 s {:.3} v [{:.3}, {:.3}, {:.3}] m/s", at.s, v[0], v[1], v[2]);
+            }
+            out += "\n";
+            if !sd.refused.is_empty() {
+                let refused: Vec<String> = sd
+                    .refused
+                    .iter()
+                    .map(|&((level, part, source), count)| {
+                        let x = set.fold.excited_level.iter().position(|&l| l == level);
+                        format!("{} via {:?} from {}：{count} 点", x.map_or(format!("level {level}"), |x| label(GROUND + x).replace("F=", "F'=")), part, label(source))
+                    })
+                    .collect();
+                out += &format!("    要求升而簇做不成的结点（同一能级第二个偏置）：{refused:?}；终读中要求它们的点 {}", sd.unheld);
+                if let Some(at) = &sd.unheld_at {
+                    let v: Vec<f64> = at.kappa.iter().map(|k| k * self.hbar_over_mass).collect();
+                    out += &format!("，其一 s {:.3} v [{:.3}, {:.3}, {:.3}] m/s 相位 {:?}", at.s, v[0], v[1], v[2], at.phases.iter().map(|p| format!("{p:.2}")).collect::<Vec<_>>());
+                }
+                out += "\n";
+            }
+        }
+        out
     }
 
     /// The run of a request on a base choice of nodes (`new`: nothing explicit): its clusters (`Clusters::new`). Refused
@@ -450,6 +528,7 @@ impl Onefold {
             states,
             untrapped: OnceLock::new(),
             light,
+            decision: super::decide::Decision::default(),
         };
         Ok(run)
     }

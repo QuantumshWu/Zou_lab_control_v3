@@ -130,6 +130,7 @@ use crate::request::{Manifold, Request, GROUND, STATES};
 
 mod step;
 mod proto;
+mod decide;
 pub(crate) mod run;
 #[cfg(test)]
 mod tests;
@@ -517,6 +518,9 @@ impl Block {
 /// The fold of a request with a choice of nodes (module documentation).
 pub(crate) struct Fold {
     light: Light,
+    /// The local light (run.rs `Onefold::decide`: the start's worst case over the atoms' local physics): per request beam a
+    /// factor on its amplitude everywhere -- the trap light's √s, each beam's phase --; empty, none (every factor one).
+    pub(crate) local: Vec<C64>,
     hbar_over_mass: f64,
     /// k_BT of the request's temperature (rad/µs): the potential's unit in the omission's reading.
     thermal: f64,
@@ -818,6 +822,7 @@ impl Fold {
             others.push(theirs);
         }
         Ok(Fold {
+            local: vec![],
             hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
             thermal: crate::units::KT_PER_UK * request.temperature_uk,
             light,
@@ -914,8 +919,17 @@ impl Fold {
         }
     }
 
+    /// Beam l's amplitude at r to an order (field.rs `Geometry::amplitude_to`), times its local factor (`Fold::local`).
+    pub(crate) fn amplitude_to(&self, l: usize, r: [f64; 3], order: usize) -> Amplitude {
+        let a = self.light.beams[l].amplitude_to(r, order);
+        match self.local.get(l) {
+            Some(&f) => Amplitude { value: f * a.value, gradient: a.gradient.map(|z| f * z), hessian: a.hessian.map(|row| row.map(|z| f * z)) },
+            None => a,
+        }
+    }
+
     fn site(&self, r: [f64; 3], kappa: [f64; 3], work: &mut f64) -> Site {
-        let a: Vec<Amplitude> = self.light.beams.iter().map(|b| b.amplitude_to(r, 1)).collect();
+        let a: Vec<Amplitude> = (0..self.light.beams.len()).map(|l| self.amplitude_to(l, r, 1)).collect();
         let mut ground = self.base_ground.clone();
         let mut excited = self.base_excited.clone();
         self.forms(&self.entries, &a, &mut ground, &mut excited, work);

@@ -2869,8 +2869,8 @@ impl Fold {
     /// components ε_k, per component its beams' factors f_l and Doppler shifts w_l and its coefficients e_k; ∂ε_k, ∂e_k,
     /// ∂f_l. All a jump's photons take at its place (`prototype_place`).
     fn light_at(&self, r: [f64; 3], kappa: [f64; 3], at: &mut Placed, proj: &[Vec<C64>], work: &mut f64) {
-        for (a, b) in at.amplitudes.iter_mut().zip(&self.light.beams) {
-            *a = b.amplitude_to(r, 1);
+        for (l, a) in at.amplitudes.iter_mut().enumerate() {
+            *a = self.amplitude_to(l, r, 1);
         }
         for ((eps, f), pr) in at.eps.iter_mut().zip(&self.light.frequencies).zip(proj) {
             let rank = f.rank();
@@ -4267,9 +4267,18 @@ impl Fold {
             }
             // (removed, price, remedy); the account's remedies, then the nodes'.
             let mut best: Option<(f64, f64, Remedy)> = None;
+            // A node rises only where no evaluation is offered (FOLDAPI §2: a folded node within the share stays in Q; the
+            // representation is the start's, the evaluation the point's -- P is not chosen by price): the evaluation's
+            // offers come first.
+            let mut evaluated = false;
             let mut offer = |removed: f64, price: f64, remedy: Remedy| {
                 if !(removed > 0.0) {
                     return;
+                }
+                match remedy {
+                    Remedy::Rise(_) if evaluated => return,
+                    Remedy::Rise(_) => {}
+                    _ => evaluated = true,
                 }
                 let slope = |(r, p): (f64, f64)| if p <= 0.0 { f64::INFINITY } else { r / p };
                 let better = best.as_ref().is_none_or(|b| {

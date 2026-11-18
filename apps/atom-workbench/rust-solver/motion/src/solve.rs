@@ -548,6 +548,8 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
     let reference = alone(initial[chief].0);
     let run = Onefold::new(request, reference)?;
+    // The start's decision's report (model/fold/decide.rs), to stderr.
+    eprint!("{}", run.report());
     let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&run, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let trap = &wells[chief].trap;
@@ -626,7 +628,7 @@ pub(crate) fn components(request: &Request) -> Vec<(usize, f64)> {
 }
 
 /// The ground populations of a basis state alone.
-fn alone(state: usize) -> [f64; GROUND] {
+pub(crate) fn alone(state: usize) -> [f64; GROUND] {
     std::array::from_fn(|s| if s == state { 1. } else { 0. })
 }
 
