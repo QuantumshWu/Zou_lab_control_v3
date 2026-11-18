@@ -77,7 +77,7 @@
 //! generator's turning part: at the time t the generator is G + Σ_m e^{iν_m t} G_m, each tone's envelope G_m at the
 //! step's three nodes its own (the light at the path's points there, the middle's S). The integrator's candidates
 //! (`Middle::beats`) are the generator's whole parts at each exact beat and its opposite -- the tones' pairs, ν and −ν,
-//! and the coherence groups' cross decays at those beats (# The jumps' coherence; `Candidate`) --, each keyed by its
+//! and the cross decays kept at those beats (# The jumps' coherence; `Candidate`) --, each keyed by its
 //! beat's exact coordinates; their envelopes carry the middle's phase e^{±iν t_m}. Their forms are the same contraction
 //! as the static G's (proto.rs `Fold::prototype_force`):
 //! at the nodes with the static ones at their exact phases (`Middle::nodes`, `Middle::force`), on the integrator's sums
@@ -90,25 +90,25 @@
 //! S N⁻¹f on the landing set's (`Middle::landing`, S and N the middle's). At a point (a trajectory's start) a middle is made
 //! there and the jump made on it at s = 0: one way for both.
 //!
-//! # The jumps' coherence (BRIEF_WIRE3 item 3)
-//! A set's blocks whose landings' interference cannot be left out -- a static one never can: tilt0's two beams' blocks,
-//! landing on m − 1 and m + 1 with one photon frequency -- or whose explicit states P holds a tone between are one
-//! coherence group (fold.rs `Fold::groups`, # Tones): their jumps are one operator per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3), so the
-//! photons' classes are per group (proto.rs `Fold::prototype_photons` at the time) and a jump's amplitudes its class's
-//! photons' own, its group's blocks summed at their phases (`Middle::emitted`, proto.rs `Workspace::jumped`); and the
-//! decay between the offsets is its cross products, added to the
-//! generator at their beats at every position (`step::Middle::generator`): i(G − G†) = Σ_q L_q(t)†L_q(t) at every time,
-//! static and beating, by construction. Each cross decay is part of the integrator's candidate of its exact beat -- its
-//! key the offsets' exact coordinates o − o′, with the tone of P between the two blocks' explicit states where there is
-//! one, at the beat's same key --, so that the integrator takes the decay's beat as it takes a tone (spectral.rs, # Which
-//! beats are tones) and the survival's hazard at its exact phase (step.rs, # Jumps): not through the step's three nodes,
-//! which alias it beyond νh = π.
+//! # The jumps' coherence (BRIEF_WIRE3 item 3; FOLDAPI §0, §2)
+//! The jumps are three operators, one per emission axis q, over every block of the set: L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹
+//! (DESIGN §1.3), each block at its exact phase -- the photons' classes are the landing sets (proto.rs
+//! `Fold::prototype_photons`), a jump's amplitudes its class's photons' own, every block summed at its phase at the jump's
+//! time (`Middle::emitted`, proto.rs `Workspace::jumped`): the landings' interference whole, a static one's too. The
+//! decay between jumps is Σ_q L_q†L_q: its blocks' own terms static in G, and between two blocks their cross products at
+//! the beat o − o′, each a term of the generator under the one rule (fold.rs `Fold::beating`): within the share it is
+//! averaged out, beyond it added to the generator at its beat at every position (`step::Middle::generator`), so that
+//! where every cross term is a tone i(G − G†) = Σ_q L_q(t)†L_q(t) at every time, static and beating, by construction.
+//! Each cross decay kept is part of the integrator's candidate of its exact beat -- its key the offsets' exact
+//! coordinates o − o′, with the tone of P between the two blocks' explicit states where there is one, at the beat's same
+//! key --, so that the integrator takes the decay's beat as it takes a tone (spectral.rs, # Which beats are tones) and the
+//! survival's hazard at its exact phase (step.rs, # Jumps): not through the step's three nodes, which alias it beyond
+//! νh = π.
 //!
 //! # The jumps' phase
 //! A jump lands on the lab frame's ground states, C_q Σ e^{−iot} ε_o S⁻¹x: in the landing set's coordinates, each of its
-//! ground states s at its own frame θ_s, the landed amplitude of s is e^{i(θ_s − o)t} (C_q ε_o S⁻¹x)_s -- one block a
-//! class (fold.rs # Tones), so e^{−iot} is the state's global phase and e^{iθ_s t} what a set of several frames holds
-//! between its states (`Dynamics::emit`). The rates, the force and the diffusion are sums over the states of |u_s|² and
+//! ground states s at its own frame θ_s, the landed amplitude of s is Σ_o e^{i(θ_s − o)t} (C_q ε_o S⁻¹x)_s -- every block
+//! at its offset's phase, and e^{iθ_s t} what a set of several frames holds between its states (`Dynamics::emit`). The rates, the force and the diffusion are sums over the states of |u_s|² and
 //! of their gradients' products, each its own phase's: none of them turns.
 //!
 //! # The rest of the model (BRIEF_STEP3C item 3)
@@ -191,8 +191,8 @@ struct Set {
     /// The tones' values ν_m (rad/µs; proto.rs `Workspace::tones`' order); the integrator's candidates (`Candidate`).
     tones: Vec<f64>,
     candidates: Vec<Candidate>,
-    /// The pairs of the jumps' blocks (their order: the near blocks', then the far ones', as the fold's blocks) of one
-    /// coherence group (fold.rs `Fold::groups`), each with its beat o − o′ (rad/µs: its candidate's, `Candidate::cross`):
+    /// The pairs of the jumps' blocks (their order: the near blocks', then the far ones', as the fold's blocks) whose cross
+    /// decay is a tone (fold.rs `Fold::beating`), each with its beat o − o′ (rad/µs: its candidate's, `Candidate::cross`):
     /// the decay between their offsets (# The jumps' coherence).
     coherent: Vec<(usize, usize, f64)>,
     /// Its optical sector (# The optical sector): γ_Q, the least of its explicit excited states' decay over two (none
@@ -219,7 +219,7 @@ struct Fall {
 
 /// A candidate tone of the integrator (step.rs `Middle::beats`): the generator's whole part at one exact beat and its
 /// opposite (# The tones, # The jumps' coherence) -- a pair of the set's tones at ν and −ν (either may be none) and the
-/// coherence groups' cross decays at them (the indices of `Set::coherent`, at ν and at −ν) --, the beat's exact key (its
+/// cross decays kept at them (the indices of `Set::coherent`, at ν and at −ν) --, the beat's exact key (its
 /// coordinates on the set's common denominator); its counts are its sizes' formula where it stands (`Middle::tone_work`).
 struct Candidate {
     beat: f64,
@@ -333,7 +333,7 @@ const _: () = {
 
 impl Set {
     /// The cluster of ground set `k` (`ground`) with the explicit nodes `nodes` on a choice of nodes that keeps them
-    /// (module documentation, # The state sets): its fold and cluster, its tones' candidates, coherence groups and optical
+    /// (module documentation, # The state sets): its fold and cluster, its tones' candidates, cross decays and optical
     /// sector -- its structure alone, no evaluation made.
     fn new(request: &Request, choice: &Choice, k: usize, ground: &[usize], nodes: Vec<Key>) -> Result<Set, String> {
         let decay = super::decay(request);
@@ -348,8 +348,8 @@ impl Set {
             let (near, far) = ws.layout();
             let blocks: Vec<usize> = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
             let beats: Vec<(crate::model::Beat, f64)> = ws.tones().map(|(b, v)| (b.clone(), v)).collect();
-            // The pairs of one coherence group's blocks, each with its exact beat o − o′ and its value.
-            let pairs: Vec<(usize, usize)> = (0..blocks.len()).flat_map(|i| (0..blocks.len()).map(move |j| (i, j))).filter(|&(i, j)| i != j && fold.groups[blocks[i]] == fold.groups[blocks[j]]).collect();
+            // The pairs of blocks whose cross decay is a tone, each with its exact beat o − o′ and its value.
+            let pairs: Vec<(usize, usize)> = (0..blocks.len()).flat_map(|i| (0..blocks.len()).map(move |j| (i, j))).filter(|&(i, j)| i != j && fold.beating(blocks[i], blocks[j])).collect();
             let crossing: Vec<(crate::model::Beat, f64)> = pairs.iter().map(|&(i, j)| (fold.blocks[blocks[i]].offset.plus(-1, &fold.blocks[blocks[j]].offset), fold.blocks[blocks[i]].value - fold.blocks[blocks[j]].value)).collect();
             let candidates = candidates(&beats, &crossing);
             // Each pair turned at its candidate's beat, as the candidate's members are (`Middle::generator`).
@@ -710,7 +710,7 @@ fn caches(held: &Held) -> Option<&Caches> {
 }
 
 /// A set's candidate tones (`Candidate`; module documentation, # The tones, # The jumps' coherence) from the exact beats
-/// and values of its tones and of its coherence groups' cross decays (`crossing`): each exact beat with its opposite
+/// and values of its tones and of its cross decays kept (`crossing`): each exact beat with its opposite
 /// once -- its tones there and its cross decays there --, in the order of their first beat of positive orientation
 /// (`Beat::sign`; of a beat whose opposite is none, its own); its beat the one of positive orientation, of its tone's
 /// value where it has one; its key that beat's coordinates on the common denominator of them all.
@@ -1011,9 +1011,9 @@ impl Middle<'_> {
     /// A jump's photon of the state ψ at the time s from the middle along the path (`step::Dynamics::emit`; DESIGN §13.2):
     /// the forward and the tangent the step made at the path (made here where it made none), the place there -- the light
     /// turned to r + vs, the responses turned lane by lane, S the middle's (proto.rs `Fold::prototype_place`): no fold at
-    /// the place --, every class's rate there, the class `draw` picks and its kick alone (its group's tangent turned there,
-    /// on its landing set's rows: `Fold::prototype_photons`); its jump's amplitudes L(s)ψ on the landing set's states --
-    /// the photons' own u = C ε S⁻¹ψ of its group (`Workspace::jumped`) --, each at its frame's phase at the time t_m + s
+    /// the place --, every class's rate there, the class `draw` picks and its kick alone (the tangent turned there, on its
+    /// landing set's rows: `Fold::prototype_photons`); its jump's amplitudes L(s)ψ on the landing set's states -- the
+    /// photons' own u = Σ_o e^{−iot} C ε_o S⁻¹ψ over every block (`Workspace::jumped`) --, each at its frame's phase at the time t_m + s
     /// (module documentation, # The jumps' phase), and the photon's frequency. None where the set has no light (no
     /// blocks), the fold does not exist there, or `draw` picks none.
     pub(crate) fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
@@ -1032,20 +1032,20 @@ impl Middle<'_> {
         let t = self.t + s;
         let photons = fold.prototype_photons(eval, ws, psi, &run.clusters.grounds, At::Place, t, Moments::Drawn(draw));
         let class = &photons.classes[photons.drawn?];
-        // The class's jump: its group's blocks' at their offsets' phases e^{−iot} (# The jumps' coherence), as its photons
-        // summed them, on the landing cluster's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase).
+        // The class's jump: every block's at its offset's phase e^{−iot} (# The jumps' coherence), as its photons summed
+        // them, on the landing cluster's states, each at its frame's phase e^{iθ_s t} (# The jumps' phase).
         let landing = self.landing_cluster(class.landing);
         let to = run.clusters.sets.get(landing);
         let mut amplitudes = [Internal::zeros(to.cluster.states.len()); 3];
         for (a, amplitude) in amplitudes.iter_mut().enumerate() {
             for ((z, &s), &theta) in amplitude.iter_mut().zip(&to.cluster.states).zip(&to.fold.frame_values) {
                 if s < GROUND {
-                    *z = ws.jumped(class.slot, s, a) * C64::cis(theta * t);
+                    *z = ws.jumped(s, a) * C64::cis(theta * t);
                 }
             }
         }
         // The photon's frequency: the excited amplitude's (the frame's, its offset's and the set's slow ground energy) less
-        // the landing state's energy; of a group, its blocks' offsets at their shares of the rate (`Class::offset`).
+        // the landing state's energy; the blocks' offsets at their shares of the class's rate (`Class::offset`).
         let first = fold.ground[0];
         let omega = run.frame + class.offset + run.energies[first] - fold.frame_values[0] - run.energies[run.clusters.grounds[class.landing][0]];
         Some(Emitted { landing, wave_number: crate::units::wave_number((omega / crate::units::RAD_PER_US_PER_MHZ).abs()), amplitudes, kick: class.kick, work: crate::decide::COMPLEX * (place + photons.work) })
@@ -1226,7 +1226,7 @@ impl crate::step::Middle for Middle<'_> {
                 *z += phase * *g;
             }
         }
-        // The decay between a coherence group's offsets: −(i/2) e^{i(o − o′)t} Σ_q L_o,q†L_o′,q of its jumps there (# The
+        // The decay between two blocks' offsets, kept: −(i/2) e^{i(o − o′)t} Σ_q L_o,q†L_o′,q of its jumps there (# The
         // jumps' coherence).
         if !set.coherent.is_empty() {
             let at = match position {

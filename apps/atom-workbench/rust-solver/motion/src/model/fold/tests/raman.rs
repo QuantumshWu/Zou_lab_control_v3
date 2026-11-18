@@ -46,7 +46,15 @@ fn raman_diagnostic() {
     let base = Choice::base(&req, vec![]).unwrap();
     for set in Fold::sets(&req, &base).unwrap() {
         let fold = Fold::new(&req, &base, set[0]).unwrap();
-        println!("set {set:?}: {} blocks; frames {:?}; coherence groups {:?}", fold.blocks.len(), fold.frame_values, fold.groups);
+        println!("set {set:?}: {} blocks; frames {:?}; cross decays kept {:?}", fold.blocks.len(), fold.frame_values, (0..fold.blocks.len()).flat_map(|i| (i + 1..fold.blocks.len()).map(move |j| (i, j))).filter(|&(i, j)| fold.beating(i, j)).collect::<Vec<_>>());
+        for i in 0..fold.blocks.len() {
+            for j in i + 1..fold.blocks.len() {
+                let m = fold.crossing[i * fold.blocks.len() + j];
+                if m > 0.0 {
+                    println!("  cross decay {i} {j}: beat {:.3} reading {m:.3e} {}", fold.blocks[i].value - fold.blocks[j].value, if fold.beating(i, j) { "tone" } else { "averaged" });
+                }
+            }
+        }
         for b in &fold.blocks {
             let sources: Vec<(usize, usize)> = b.sources.iter().map(|&(p, c)| (fold.ground[p], c)).collect();
             println!("  block {:?} = {:.5}: sources (state, component) {sources:?}, rows {} solved {}", b.offset, b.value, b.rows.len(), b.solved);

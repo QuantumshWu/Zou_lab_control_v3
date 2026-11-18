@@ -2478,9 +2478,10 @@ fn an_explicit_set_s_step_makes_its_optical_sector() {
 }
 
 /// The prototype's photons (proto.rs `Fold::prototype_photons`, BRIEF_PROTO2 item 2) of a random state at the step's middle:
-/// their rate is the state's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² to the rounding (the jumps' amplitudes u = Lψ are the decay's);
+/// their rate is the jumps' whole product ‖Σ_o L_o ψ‖²/‖ψ‖² at the time to the rounding (the three operators over every
+/// block, fold.rs # Tones -- the generator's hazard ⟨ψ|i(G − G†)|ψ⟩/‖ψ‖² less the cross decays the rule averages out);
 /// a class's jump's amplitudes as they leave them (`Workspace::jumped`, a jump's at its place) are the operators' on the
-/// state (`prototype_jumps`) to the rounding; and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
+/// state (`prototype_jumps`, summed over the blocks) to the rounding; and their moments, of the step's tangent, are those of the amplitudes' difference -- ∇u by the central difference of
 /// u = L(r)ψ, each on a fresh cache (`prototype_jumps`; h = 10⁻⁴ µm), its responses' own change and S⁻¹'s with the
 /// beams', its discrete choices those of the centre (else skipped) -- within the difference's error and what the kept R₀
 /// leaves (10⁻⁴ of the force's and the diffusion's scale). On PGC3D_1ms (refs), R4_LIN_4 and unify's Λ (`lambda_request`:
@@ -2513,14 +2514,17 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let kappa = [speed * st * phi.cos(), speed * st * phi.sin(), speed * ct];
                 let psi: Vec<C64> = (0..n).map(|_| C64::new(u() - 0.5, u() - 0.5)).collect();
                 let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-                // Per class (block, landing set) and emission axis, u on the set's rows.
+                // Per class (landing set) and emission axis, u on the set's rows: every block's at its phase at the time
+                // (zero: one).
                 let amplitudes = |r: [f64; 3], ws: &mut super::proto::Workspace| -> (Vec<Vec<C64>>, (usize, Vec<Vec<usize>>)) {
                     let mut cache = Cache::default();
                     fold.prototype(r, kappa, fold.thermal, &mut cache, ws).expect("the prototype");
-                    let mut out = vec![];
+                    let mut out: Vec<Vec<C64>> = sets.iter().map(|set| vec![C64::ZERO; 3 * set.len()]).collect();
                     for js in fold.prototype_jumps(&cache, ws, super::proto::At::Middle) {
-                        for set in &sets {
-                            out.push((0..3).flat_map(|q| set.iter().map(move |&b| (q, b))).map(|(q, b)| (0..n).map(|j| js[q][(b, j)] * psi[j]).sum()).collect());
+                        for (k, set) in sets.iter().enumerate() {
+                            for (i, (q, b)) in (0..3).flat_map(|q| set.iter().map(move |&b| (q, b))).enumerate() {
+                                out[k][i] += (0..n).map(|j| js[q][(b, j)] * psi[j]).sum::<C64>();
+                            }
                         }
                     }
                     (out, ws.choices())
@@ -2530,9 +2534,8 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 fold.prototype_tangent(&cache, &mut ws);
                 let photons = fold.prototype_photons(&cache, &mut ws, &psi, &sets, super::proto::At::Middle, 0.0, super::proto::Moments::Every);
                 let hazard: f64 = (0..n).map(|i| (0..n).map(|j| psi[i].conj() * C64::I * (g[(i, j)] - g[(j, i)].conj()) * psi[j]).sum::<C64>().re).sum::<f64>() / norm;
-                assert!((photons.rate - hazard).abs() <= 1e-12 * hazard.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the hazard {hazard}", photons.rate);
                 // A class's jump's amplitudes as the photons leave them (`Workspace::jumped`), on its set's rows.
-                let jumped: Vec<(usize, Vec<C64>)> = photons.classes.iter().map(|c| (c.landing, (0..3).flat_map(|q| sets[c.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(c.slot, b, q)).collect())).collect();
+                let jumped: Vec<(usize, Vec<C64>)> = photons.classes.iter().map(|c| (c.landing, (0..3).flat_map(|q| sets[c.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(b, q)).collect())).collect();
                 // A jump's order -- every class's rate, then the drawn class's moments alone (BRIEF_STEP3 item 6) -- is the
                 // same formula: each class drawn, its rates, kick and amplitudes those of every class's moments.
                 for (c, whole) in photons.classes.iter().enumerate() {
@@ -2543,18 +2546,21 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                     let size = whole.kick.iter().map(|x| x.abs()).fold(0.0, f64::max);
                     let apart = (0..3).map(|a| (one.kick[a] - whole.kick[a]).abs()).fold(0.0, f64::max);
                     assert!(apart <= 1e-14 * size, "{name} set {set:?} point {point}: class {c}'s kick drawn {:?} against every class's {:?}", one.kick, whole.kick);
-                    let amplitudes: Vec<C64> = (0..3).flat_map(|q| sets[one.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(one.slot, b, q)).collect();
+                    let amplitudes: Vec<C64> = (0..3).flat_map(|q| sets[one.landing].iter().map(move |&b| (q, b))).map(|(q, b)| ws.jumped(b, q)).collect();
                     assert!(amplitudes == jumped[c].1, "{name} set {set:?} point {point}: class {c}'s amplitudes drawn");
                     assert!(drawn.work < photons.work || photons.classes.len() == 1, "{name} set {set:?} point {point}: a drawn class's work {} against every class's {}", drawn.work, photons.work);
                 }
                 // The whole gradient by the difference (h = 1e-4 µm, central).
                 let h = 1e-4;
                 let (u0, centre) = amplitudes(r0, &mut ws);
-                // ... are the operators' on the state (every block a coherence group of its own here): each class's those of
-                // one block landing in its set, to the rounding.
+                // The rate is the jumps' whole product.
+                let whole: f64 = u0.iter().flatten().map(|z| z.norm_sqr()).sum::<f64>() / norm;
+                assert!((photons.rate - whole).abs() <= 1e-12 * whole.abs().max(1e-300), "{name} set {set:?} point {point}: the photons' rate {} against the jumps' product {whole}", photons.rate);
+                // ... are the operators' on the state: each class's those of every block landing in its set, to the
+                // rounding.
                 let scale = u0.iter().flatten().map(|z| z.abs()).fold(0.0, f64::max);
                 for (landing, a) in &jumped {
-                    let apart = u0.iter().skip(*landing).step_by(sets.len()).map(|x| x.iter().zip(a).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max)).fold(f64::INFINITY, f64::min);
+                    let apart = u0[*landing].iter().zip(a).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max);
                     assert!(apart <= 1e-13 * scale, "{name} set {set:?} point {point}: a class's jump's amplitudes {apart:e} from the operators' (scale {scale:e})");
                 }
                 let mut other = false;
@@ -2578,11 +2584,10 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                     println!("{name} set {set:?} point {point}: another choice within the difference's step: skipped");
                     continue;
                 }
-                // The moments by photon.rs's rule, k_c the class's block's (`Workspace::absorbed`).
-                let kcs = ws.absorbed(&fold);
+                // The moments by photon.rs's rule, k_c the blocks' largest (`Workspace::absorbed`).
+                let kc = ws.absorbed(&fold).into_iter().fold(0.0, f64::max);
                 let (mut force, mut diffusion) = ([0.0; 3], [[0.0; 3]; 3]);
                 for (c, x) in u0.iter().enumerate() {
-                    let kc = kcs[c / sets.len()];
                     let w: f64 = x.iter().map(|z| z.norm_sqr()).sum();
                     let mean: [f64; 3] = std::array::from_fn(|a| x.iter().zip(&du[c][a]).map(|(z, d)| (z.conj() * *d).im).sum());
                     let square = crate::linalg::dot3(mean, mean);
@@ -2600,7 +2605,7 @@ fn the_prototype_s_photons_are_its_hazard_and_their_gradients_said() {
                 let fgap = (0..3).map(|a| (photons.force[a] - force[a]).powi(2)).sum::<f64>().sqrt();
                 let dgap = (0..3).flat_map(|a| (0..3).map(move |b| (a, b))).map(|(a, b)| (photons.diffusion[a][b] - diffusion[a][b]).abs()).fold(0.0, f64::max);
                 println!(
-                    "{name} set {set:?} point {point}: rate {:.4e} (hazard {hazard:.4e}); the force the jumps leave {:?} against the whole gradient's {:?} ({:.1e} of its size); 2D's trace {:.4e} against {:.4e}, its largest entry apart {:.1e} of the trace; {:.0} multiply-adds",
+                    "{name} set {set:?} point {point}: rate {:.4e} (the generator's hazard {hazard:.4e}, less the cross decays averaged out); the force the jumps leave {:?} against the whole gradient's {:?} ({:.1e} of its size); 2D's trace {:.4e} against {:.4e}, its largest entry apart {:.1e} of the trace; {:.0} multiply-adds",
                     photons.rate,
                     photons.force.map(|x| format!("{x:.3e}")),
                     force.map(|x| format!("{x:.3e}")),
@@ -2896,7 +2901,7 @@ fn the_run_s_lambda_with_a_tone_is_the_master_equation_s() {
 /// each at its offset (a tiered choice), the offsets 100 rad/µs apart; D_ee′ = 10 rad/µs, so P holds a tone between them
 /// (its mixing |D_ee′|/2 over their 100 rad/µs, 0.05, beyond the share; at 10 rad/µs apart the copies of the ground state
 /// the two drives make at ±10 rad/µs mix at 1 and the fold does not exist -- its series' ratio 58 --, BRIEF_STEP3C item 1):
-/// their blocks are one coherence group. At the step's three positions and at times across the beat, for random states
+/// their blocks' cross decay is a tone (fold.rs `Fold::beating`). At the step's three positions and at times across the beat, for random states
 /// of the set: the photons' rate at the jump's place (`Middle::emitted`'s classes, the light turned there) is the hazard
 /// ψ†i(G − G†)ψ/ψ†ψ of the generator at that node (`Middle::generator`) to the rounding: the decay is the jumps' product at
 /// every time, its beat between the offsets with it. (With the jumps per block and the tone's decay in G they differed by
@@ -2926,8 +2931,7 @@ fn a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps() {
     let choice = Choice::tiered(&req, vec![(level(17), part(0), 0), (level(0), part(1), 0)]).expect("the choice");
     let run = super::run::Onefold::of(&req, &choice, p).expect("the run");
     let fold = Fold::new(&req, &choice, 0).unwrap();
-    let joined: Vec<usize> = (0..fold.blocks.len()).filter(|&b| fold.groups[b] != b).collect();
-    assert!(!joined.is_empty(), "the explicit levels' blocks one coherence group: {:?}", fold.groups);
+    assert!((0..fold.blocks.len()).any(|i| (0..fold.blocks.len()).any(|j| i != j && fold.beating(i, j))), "the explicit levels' blocks' cross decay a tone: {:?}", fold.crossing);
     let set = run.cluster_of(0);
     let cluster = run.cluster(set);
     let n = cluster.states.len();

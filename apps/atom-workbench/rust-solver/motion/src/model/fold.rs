@@ -87,19 +87,19 @@
 //! with a size |o − o'|·|ε_o'†ε_o|/2 and a second-order shift of nothing in the exact Floquet problem (onefold report, step
 //! 1); what one block's light does to another's ground states is the copies'.
 //!
-//! Not so the jumps. A photon is no laser component: the jump operator is one per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o
-//! S⁻¹ over every block (DESIGN §1.3), and two blocks' landings on the states s, s′ of one landing set interfere at the
-//! residual r = (o − θ_s) − (o′ − θ_s′), their photons' frequency difference in the landing frames -- at s = s′ the decay's
-//! cross term at o − o′. That interference is left out (each block's jumps its own) only where its reading is within the
-//! share, as any coupling's (`unfoldable`; `Fold::groups`): the bare landing amplitudes' product at the peak light, read as
-//! `Choice::of` reads a coupling, over |r|. A static one never is: tilt0's Larmor-compensated σ⁺σ⁻, whose two beams'
-//! blocks land on m − 1 and m + 1 with one photon frequency -- the ground coherence the rotating polarization pumps, its
-//! friction (BRIEF_RAMAN; obe.status: left out, the force of two incoherent beams). Blocks so joined, or whose explicit
-//! states P holds a tone between, are one coherence group: their jumps one operator per landing set over the group
-//! (model/fold/run.rs), the decay between their offsets its cross products L_o†L_o′ at e^{i(o − o′)t} -- whole, the
-//! explicit rows' with the solved ones' --, so that the decay is the jumps' product at every time by construction, positive
-//! semidefinite (BRIEF_WIRE3 item 3). (A kept copy's related blocks keep their cross term whole and their jumps apart: not
-//! the run's, whose choice keeps no copy in P.)
+//! Not so the jumps. A photon is no laser component: the jump operators are three, one per emission axis q, over every
+//! block, L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ (DESIGN §1.3; FOLDAPI §0), each term at its exact phase and the whole of it
+//! taken at a jump's time (model/fold/run.rs): two blocks' landings on the states s, s′ of one landing set interfere at
+//! their exact residual, a static one too -- tilt0's Larmor-compensated σ⁺σ⁻, whose two beams' blocks land on m − 1 and
+//! m + 1 with one photon frequency: the ground coherence the rotating polarization pumps, its friction (BRIEF_RAMAN). The
+//! decay between jumps is Σ_q L_q†L_q: each block's own, L_o†L_o, static in G; and between two blocks their cross
+//! products L_o†L_o′ at e^{i(o − o′)t}, terms of the generator that turn as the Hamiltonian's tones do, under the one
+//! rule (FOLDAPI §2; `Fold::beating`): the term's size a over its beat |o − o′|, read as `Choice::of` reads a coupling
+//! (`unfoldable`) -- within the share it is averaged out (its mean, nothing, kept; its reading the rest), beyond it a tone
+//! of the integrator (the run's candidates), so that where every cross term is a tone the decay is the jumps' product at
+//! every time by construction, positive semidefinite (BRIEF_WIRE3 item 3). GMD1C's cross decay of its F = 1 and F = 2
+//! blocks turns at the hyperfine 42943 rad/µs and is averaged; tilt0's of its two beams' blocks, at 26 rad/µs, is a tone.
+//! (A kept copy's related blocks keep their cross term whole: not the run's, whose choice keeps no copy in P.)
 //!
 //! # The passes as the next one reads (DESIGN §1.5, M1)
 //! Two passes, a third only as the share asks (the cheapest within the share, the evaluation order's rule): after the
@@ -536,10 +536,9 @@ pub(crate) struct Fold {
     /// leaves it out (proto.rs `prototype_workspace`; BRIEF_COPIES item 4).
     pub(crate) ground_tone: Vec<bool>,
     pub(crate) blocks: Vec<Block>,
-    /// Per block its coherence group (module documentation, # Tones), named by its least block: blocks whose landings'
-    /// interference cannot be left out, or whose explicit states P holds a tone between, are one group, their jumps one
-    /// operator.
-    pub(crate) groups: Vec<usize>,
+    /// Per two blocks (blocks × blocks, row by row, symmetric) the reading of their cross decay L_o†L_o′ (module
+    /// documentation, # Tones; `Fold::crossing`): a tone where it is beyond the share (`Fold::beating`), else averaged out.
+    pub(crate) crossing: Vec<f64>,
     /// H0 less the outside forms at the focus: its ground block, and its excited block with −(i/2)D.
     base_ground: Mat,
     base_excited: Mat,
@@ -791,23 +790,8 @@ impl Fold {
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
-        // The coherence groups (module documentation, # Tones): blocks joined by a tone between their explicit states, and
-        // blocks whose landings' interference cannot be left out (`interfering`).
-        let mut groups: Vec<usize> = (0..blocks.len()).collect();
-        let join = |groups: &mut Vec<usize>, i: usize, j: usize| {
-            let (gi, gj) = (groups[i], groups[j]);
-            let (low, high) = (gi.min(gj), gi.max(gj));
-            groups.iter_mut().filter(|g| **g == high).for_each(|g| *g = low);
-        };
-        let block_of = |p: usize| blocks.iter().position(|b| b.explicit.contains(&p));
-        for x in (0..n * n).filter(|&x| turning[x] && x / n >= ng && x % n >= ng) {
-            if let (Some(i), Some(j)) = (block_of(x / n), block_of(x % n)) {
-                join(&mut groups, i, j);
-            }
-        }
-        for (i, j) in Fold::interfering(request, choice, &components, &axes, ground, &explicit, &blocks)? {
-            join(&mut groups, i, j);
-        }
+        // The cross decays' readings (module documentation, # Tones).
+        let crossing = Fold::crossing(request, &components, &axes, ground, &explicit, &blocks);
         // The outside forms' entries that are not zero, of the states the fold uses (every ground state; the excited states a
         // block solves or a place holds) and of the others.
         let mut used = [true; STATES];
@@ -845,7 +829,7 @@ impl Fold {
             turning,
             ground_tone,
             blocks,
-            groups,
+            crossing,
             base_ground: base.block(&all, &all),
             base_excited,
             emission: std::array::from_fn(|q| request.emission[q].block(&all, &excited)),
@@ -857,18 +841,17 @@ impl Fold {
         })
     }
 
-    /// The pairs of blocks i < j whose landings' interference cannot be left out (module documentation, # Tones): landing
-    /// states s, s′ of one landing set (`Fold::sets`) at whose residual r = (o_i − θ_s) − (o_j − θ_s′) the bare landing
-    /// amplitudes' product a = A_i(s)A_j(s′) cannot be folded, `unfoldable(a/|r|)` -- the one reading of a coupling
-    /// (`Choice::of`, `turning`), r exact in the frames' arithmetic. A block's landing amplitude on s at the peak light, as
-    /// `Choice::of` reads a coupling: A_o(s)² = Σ_q (Σ_x |C_q[s, x]| e_o(x))², e_o(x) = Σ_(p, c) Σ_l |X_l[x, p]| /
-    /// |E_p + ν_c − E_x + iΓ_x/2| over its sources (place p, component c), an explicit state's own row one.
-    fn interfering(request: &Request, choice: &Choice, components: &[Component], axes: &Axes, ground: &[usize], explicit: &[usize], blocks: &[Block]) -> Result<Vec<(usize, usize)>, String> {
-        let share = crate::model::elim::share();
+    /// Per two blocks the reading of their cross decay (module documentation, # Tones; FOLDAPI §2): the generator's term
+    /// −(i/2)e^{i(o − o′)t} Σ_q L_o,q†L_o′,q read as any coupling is (`unfoldable`, `Choice::of`, `turning`) -- its size at
+    /// the peak light a = ½ Σ_q Σ_s l_o(q, s) l_o′(q, s) over its beat |o − o′|, exact in the frames' arithmetic. A block's
+    /// bare landing amplitude on the ground state s along q at the peak light, as `Choice::of` reads a coupling: l_o(q, s)
+    /// = Σ_x |C_q[s, x]| e_o(x), e_o(x) = Σ_(p, c) Σ_l |X_l[x, p]| / |E_p + ν_c − E_x + iΓ_x/2| over its sources (place p,
+    /// component c), an explicit state's own row one.
+    fn crossing(request: &Request, components: &[Component], axes: &Axes, ground: &[usize], explicit: &[usize], blocks: &[Block]) -> Vec<f64> {
         let d = decay(request);
         let energy = |s: usize| request.hamiltonian[(s, s)].re;
         let ng = ground.len();
-        let landing: Vec<[f64; GROUND]> = blocks
+        let landing: Vec<[[f64; GROUND]; 3]> = blocks
             .iter()
             .map(|b| {
                 let mut e = [0.0; EXCITED];
@@ -884,25 +867,26 @@ impl Fold {
                 for &p in &b.explicit {
                     e[explicit[p - ng]] = 1.0;
                 }
-                std::array::from_fn(|s| (0..3).map(|q| (0..EXCITED).map(|x| request.emission[q][(s, GROUND + x)].abs() * e[x]).sum::<f64>().powi(2)).sum::<f64>().sqrt())
+                std::array::from_fn(|q| std::array::from_fn(|s| (0..EXCITED).map(|x| request.emission[q][(s, GROUND + x)].abs() * e[x]).sum::<f64>()))
             })
             .collect();
-        // Per block and landing state its photon's frequency in the landing frames, o − θ_s, exactly.
-        let photons: Vec<Vec<Beat>> = blocks.iter().map(|b| choice.frames.iter().map(|theta| b.offset.plus(-1, theta)).collect()).collect();
-        let sets = Fold::sets(request, choice)?;
-        let mut out = vec![];
-        for i in 0..blocks.len() {
-            for j in i + 1..blocks.len() {
-                let interfere = |s: usize, t: usize| {
-                    let a = landing[i][s] * landing[j][t];
-                    a > 0.0 && unfoldable(a / axes.omega(&photons[i][s].plus(-1, &photons[j][t])).abs(), share)
-                };
-                if sets.iter().any(|set| set.iter().any(|&s| set.iter().any(|&t| interfere(s, t)))) {
-                    out.push((i, j));
-                }
+        let nb = blocks.len();
+        let mut out = vec![0.0; nb * nb];
+        for i in 0..nb {
+            for j in i + 1..nb {
+                let a = 0.5 * (0..3).map(|q| (0..GROUND).map(|s| landing[i][q][s] * landing[j][q][s]).sum::<f64>()).sum::<f64>();
+                let m = if a > 0.0 { a / axes.omega(&blocks[i].offset.plus(-1, &blocks[j].offset)).abs() } else { 0.0 };
+                out[i * nb + j] = m;
+                out[j * nb + i] = m;
             }
         }
-        Ok(out)
+        out
+    }
+
+    /// Whether the cross decay of blocks i and j is a tone (`Fold::crossing`): its reading beyond the share.
+    pub(crate) fn beating(&self, i: usize, j: usize) -> bool {
+        let m = self.crossing[i * self.blocks.len() + j];
+        m > 0.0 && unfoldable(m, crate::model::elim::share())
     }
 
     /// n, P's states.

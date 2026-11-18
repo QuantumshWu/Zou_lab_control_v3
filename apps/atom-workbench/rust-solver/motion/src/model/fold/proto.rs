@@ -914,7 +914,7 @@ pub(crate) struct Workspace {
     noded: bool,
     /// The light at a jump's place (`Fold::prototype_place`).
     place: Placed,
-    /// The photons' [u | ∂u] per coherence group (`Fold::prototype_photons`; fold.rs `Fold::groups`).
+    /// The photons' [u | ∂u], every block's at its offset's phase (`Fold::prototype_photons`; fold.rs # Tones).
     photons4: Vec<C64>,
     /// Whether the step's tangent was made (`Fold::prototype_tangent`: per near block its own, `Near::tg`; per lab axis the
     /// metric's ∂X and S's ∂S), its ticks and work by phase (`TANGENT`).
@@ -1220,7 +1220,7 @@ struct BoundTemps {
 /// tangent, ∂H, ∂X (n × 3n), ∂Δ (n × n), ∂c (3 × n), a product's (3 × n × n), two n × n; the force's Ā_j (three), N̄, Ā†,
 /// X̄, Ā*, a work n × n, per component and vector ḡ_e, the diagonal's gradient (n × 3); the photons' ζ, ∂ζ (n × 3), [ζ | ∂ζ] (n × 4),
 /// a block's columns of [u | ∂u] (3 GROUND × at most 4), a class's rows of them and their Gram matrix (4 × 4), the
-/// classes' rates (before and after the norm) and per group its rows' runs of the drawn class (made once, then kept); a
+/// classes' rates (before and after the norm) and the rows' runs of the drawn class (made once, then kept); a
 /// block's bounds on trial (`Bounds`, the largest levels × n: a level's leaving, `Fold::allocate`); the near blocks' rows stacked (BRIEF_PROTO5 item 2: every block's rows of a product's two
 /// factors, 2 × the rows in all × n each; the force's product on them, 2 × the rows in all × n).
 struct Temp {
@@ -1248,7 +1248,7 @@ struct Temp {
     gram: Vec<C64>,
     raw: Vec<f64>,
     rates: Vec<f64>,
-    runs: Vec<Vec<(usize, usize)>>,
+    runs: Vec<(usize, usize)>,
     trial: Bounds,
     sl: Vec<C64>,
     sr: Vec<C64>,
@@ -2743,7 +2743,7 @@ impl Fold {
         let nodes = vec![node(), node()];
         let (near_len, near_rows, far_len) = (near.len(), near.iter().map(|x| x.all).sum::<usize>(), far.len());
         let place = placed.clone();
-        let photons4 = vec![C64::ZERO; (near.len() + far.len()) * 12 * GROUND];
+        let photons4 = vec![C64::ZERO; 12 * GROUND];
         Ok(Workspace {
             n,
             pp,
@@ -4971,12 +4971,11 @@ pub(crate) enum Moments<'d> {
     Drawn(&'d mut dyn FnMut(&[f64]) -> Option<usize>),
 }
 
-/// A class of photons (a coherence group's, landing in one set; `Fold::prototype_photons`): its group's slot -- where its
-/// jump's amplitudes u = Σ_o e^{−iot} C ε_o S⁻¹ψ stand after the call (`Workspace::jumped`) --, its landing set (an index
-/// of `sets`), its rate W_c, the kick its jump carries (where its moments were asked), and the offset of its light, its
-/// group's blocks' at their shares of its rate (the first block's where it has none).
+/// A class of photons (those landing in one set; `Fold::prototype_photons`; its jump's amplitudes u = Σ_o e^{−iot} C ε_o
+/// S⁻¹ψ on its set's rows stand after the call, `Workspace::jumped`): its landing set (an index of `sets`), its rate W_c,
+/// the kick its jump carries (where its moments were asked), and the offset of its light, the blocks' at their shares of
+/// its rate (the first block's where it has none).
 pub(crate) struct Class {
-    pub(crate) slot: usize,
     pub(crate) landing: usize,
     pub(crate) rate: f64,
     pub(crate) kick: [f64; 3],
@@ -6333,9 +6332,9 @@ impl Fold {
 
     /// The absorbed light's moments of the state ψ at a position of the step -- its middle, or a jump's place
     /// (`prototype_place`: the light there, the responses turned, S the middle's) -- (photon.rs # The absorbed light's
-    /// momentum, its moments' formula): per coherence group (fold.rs `Fold::groups`: a block alone, its photons one
-    /// frequency; or blocks whose jumps are one operator, each block's at its offset's phase e^{−iot} at the time `t`) and
-    /// landing set (`sets`, the ground states' partition) a class, u_q = C_q ε S⁻¹ψ -- ε = VZ of a near block, R₀Σ_a e_a U_a
+    /// momentum, its moments' formula): per landing set (`sets`, the ground states' partition) a class, the jumps one
+    /// operator per axis over every block (fold.rs # Tones), each block's at its offset's phase e^{−iot} at the time `t`,
+    /// u_q = Σ_o e^{−iot} C_q ε_o S⁻¹ψ -- ε = VZ of a near block, R₀Σ_a e_a U_a
     /// of a far one -- with its whole gradient ∇u of the step's tangent (`Fold::prototype_tangent`: ∂Z, ∂e, and S⁻¹'s
     /// ∂(S⁻¹ψ) = −S⁻¹ ∂S S⁻¹ψ). The jumps carry each class's mean up to one absorbed photon (`Photon::kick`'s rule, k_c the
     /// class's largest beam wave number): the rest is the force; 2D = Σ_c M2_c − W_c b_c b_cᵀ of the kicks.
@@ -6346,8 +6345,8 @@ impl Fold {
     /// [ζ | ∂ζ]; a far block's Σ_a e_a C_qR₀U_a ζ and Σ_a ∂e_a C_qR₀U_a ζ + e_a C_qR₀U_a ∂ζ. Every class's u and rate W_c =
     /// Σ|u|² first; ∇u, the mean Σ Im(u*∂u) and the second moment Σ Re(∂u*∂u) of the classes `moments` asks. Where every
     /// class is asked (the middle's scattered light) the first pass makes all four columns of every row; where a jump draws
-    /// one among the rates, the first makes u alone, and the second ∂u of the drawn class's group's blocks alone on its
-    /// landing set's rows -- at a jump's place with those blocks' tangent turned there. The tangent is asked where a
+    /// one among the rates, the first makes u alone, and the second ∂u on the drawn class's landing set's rows alone -- at
+    /// a jump's place with the blocks' tangent turned there. The tangent is asked where a
     /// moment is.
     pub(crate) fn prototype_photons(&self, cache: &Cache, ws: &mut Workspace, psi: &[C64], sets: &[Vec<usize>], position: At, t: f64, moments: Moments) -> Photons {
         let n = ws.n;
@@ -6368,14 +6367,14 @@ impl Fold {
         fused_product_into(normal, psi, (n, n, 1), zeta);
         work += (n * n) as f64;
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-        // Per coherence group (fold.rs `Fold::groups`) its blocks' [u | ∂u] summed at their offsets' phases e^{−iot} at the
-        // time t (u its classes' jumps' amplitudes, column 0: `Workspace::jumped`), laid by rows (b, q) at 3b + q, four
-        // columns a row; its group, its first block's offset, the largest absorbed wave number; per landing set its
-        // blocks' rates Σ|u|² and their offsets at those weights: its classes' offsets (a group of one block, its block's).
-        let groups = &mut photons4[..(near.len() + far.len()) * 4 * g3];
-        groups.fill(C64::ZERO);
-        let mut slots: Vec<(usize, f64, f64)> = Vec::with_capacity(near.len() + far.len());
-        let mut offsets: Vec<[f64; 2]> = Vec::with_capacity((near.len() + far.len()) * sets.len());
+        // Every block's [u | ∂u] summed at its offset's phase e^{−iot} at the time t (u the classes' jumps' amplitudes,
+        // column 0: `Workspace::jumped`), laid by rows (b, q) at 3b + q, four columns a row; the first block's offset and
+        // the largest absorbed wave number; per landing set the blocks' rates Σ|u|² and their offsets at those weights:
+        // its class's offset.
+        let summed = &mut photons4[..4 * g3];
+        summed.fill(C64::ZERO);
+        let (mut own, mut absorbed_most) = (None::<f64>, 0.0_f64);
+        let mut offsets: Vec<[f64; 2]> = vec![[0.0; 2]; sets.len()];
         let wave = |l: usize| self.light.beams[l].wave_number;
         let mut out = Photons { rate: 0.0, force: [0.0; 3], diffusion: [[0.0; 3]; 3], work: 0.0, classes: vec![], drawn: None };
         raw.clear();
@@ -6383,8 +6382,8 @@ impl Fold {
             Moments::Every => (true, None),
             Moments::Drawn(draw) => (false, Some(draw)),
         };
-        // Per group the rows (b ∈ the drawn class's set) of the second pass, by their runs of consecutive ground states.
-        runs.iter_mut().for_each(|r| r.clear());
+        // The rows (b ∈ the drawn class's set) of the second pass, by their runs of consecutive ground states.
+        runs.clear();
         let every_row = [(0, GROUND)];
         for pass in 0..2 {
             // The pass's columns of [u | ∂u], from `first`, `width` of them: u and where every class is asked ∂u; then ∂u.
@@ -6417,29 +6416,22 @@ impl Fold {
                 (0, _) => z4,
                 _ => dzeta,
             };
-            // A block's columns on its rows' runs (rows (b, q) at 3b + q, `width` a row) onto its group's.
-            let onto = |groups: &mut [C64], slot: usize, o: usize, runs: &[(usize, usize)], cols: &[C64]| {
+            // A block's columns on its rows' runs (rows (b, q) at 3b + q, `width` a row) onto the sum.
+            let onto = |sums: &mut [C64], o: usize, runs: &[(usize, usize)], cols: &[C64]| {
                 let phase = C64::cis(-self.blocks[o].value * t);
-                let sums = &mut groups[slot * 4 * g3..(slot + 1) * 4 * g3];
                 for &(b0, b1) in runs {
                     for (sum, col) in sums[12 * b0..12 * b1].chunks_exact_mut(4).zip(cols[3 * b0 * width..3 * b1 * width].chunks_exact(width)) {
                         sum[first..first + width].iter_mut().zip(col).for_each(|(s, c)| *s += phase * *c);
                     }
                 }
             };
-            // A block's group (its slot, made by the first pass), and in the first pass the group's largest absorbed wave
-            // number and per landing set the block's rate Σ|u|² and its offset at it.
-            let slot_of = |slots: &mut Vec<(usize, f64, f64)>, offsets: &mut Vec<[f64; 2]>, o: usize| -> usize {
-                slots.iter().position(|s| s.0 == self.groups[o]).unwrap_or_else(|| {
-                    slots.push((self.groups[o], self.blocks[o].value, 0.0));
-                    offsets.extend(sets.iter().map(|_| [0.0; 2]));
-                    slots.len() - 1
-                })
-            };
-            let rated = |slots: &mut [(usize, f64, f64)], offsets: &mut [[f64; 2]], slot: usize, o: usize, absorbed: f64, cols: &[C64]| {
+            // In the first pass the largest absorbed wave number, and per landing set the block's rate Σ|u|² and its offset
+            // at it.
+            let rated = |own: &mut Option<f64>, absorbed_most: &mut f64, offsets: &mut [[f64; 2]], o: usize, absorbed: f64, cols: &[C64]| {
                 let value = self.blocks[o].value;
-                slots[slot].2 = slots[slot].2.max(absorbed);
-                for (sum, set) in offsets[slot * sets.len()..].iter_mut().zip(sets) {
+                own.get_or_insert(value);
+                *absorbed_most = absorbed_most.max(absorbed);
+                for (sum, set) in offsets.iter_mut().zip(sets) {
                     let w: f64 = set.iter().flat_map(|&b| cols[3 * b * width..3 * (b + 1) * width].iter().step_by(width)).map(|z| z.norm_sqr()).sum();
                     *sum = [sum[0] + w, sum[1] + w * value];
                 }
@@ -6449,8 +6441,7 @@ impl Fold {
                 if nb.idle() {
                     continue;
                 }
-                let slot = slot_of(&mut slots, &mut offsets, nb.o);
-                let ranges: &[(usize, usize)] = if pass == 0 { &every_row } else { &runs[slot] };
+                let ranges: &[(usize, usize)] = if pass == 0 { &every_row } else { runs };
                 if ranges.is_empty() {
                     continue;
                 }
@@ -6495,17 +6486,16 @@ impl Fold {
                 }
                 if pass == 0 {
                     let absorbed = nb.splits.iter().map(|&(cc, jj)| wave(self.components[cc].beams[jj])).fold(0.0, f64::max);
-                    rated(&mut slots, &mut offsets, slot, nb.o, absorbed, cols);
+                    rated(&mut own, &mut absorbed_most, &mut offsets, nb.o, absorbed, cols);
                 }
-                onto(groups, slot, nb.o, ranges, cols);
+                onto(summed, nb.o, ranges, cols);
                 work += (ranges.iter().map(|r| 3 * (r.1 - r.0)).sum::<usize>() * (width + 1)) as f64;
             }
             for (x, fb) in far.iter_mut().enumerate() {
                 if fb.omitted {
                     continue;
                 }
-                let slot = slot_of(&mut slots, &mut offsets, fb.o);
-                let ranges: &[(usize, usize)] = if pass == 0 { &every_row } else { &runs[slot] };
+                let ranges: &[(usize, usize)] = if pass == 0 { &every_row } else { runs };
                 if ranges.is_empty() {
                     continue;
                 }
@@ -6540,39 +6530,33 @@ impl Fold {
                 }
                 if pass == 0 {
                     let absorbed = fb.splits.iter().flat_map(|&(cc, _)| self.components[cc].beams.iter().map(|&l| wave(l))).fold(0.0, f64::max);
-                    rated(&mut slots, &mut offsets, slot, fb.o, absorbed, cols);
+                    rated(&mut own, &mut absorbed_most, &mut offsets, fb.o, absorbed, cols);
                 }
-                onto(groups, slot, fb.o, ranges, cols);
+                onto(summed, fb.o, ranges, cols);
                 work += (ranges.iter().map(|r| 3 * (r.1 - r.0)).sum::<usize>() * (width + 1)) as f64;
             }
             if pass == 1 {
                 break;
             }
-            // Every class and its rate; the classes asked, and per group the runs of their landing sets' rows.
-            for (slot, &(_, own, _)) in slots.iter().enumerate() {
-                let sums = &groups[slot * 4 * g3..(slot + 1) * 4 * g3];
-                for (k, set) in sets.iter().enumerate() {
-                    let w: f64 = set.iter().flat_map(|&b| (0..3).map(move |q| 4 * (3 * b + q))).map(|i| sums[i].norm_sqr()).sum();
-                    let [share, of] = offsets[slot * sets.len() + k];
-                    raw.push(w);
-                    out.classes.push(Class { slot, landing: k, rate: w / norm, kick: [0.0; 3], offset: if share > 0.0 { of / share } else { own } });
-                }
-                work += g3 as f64;
+            // Every class and its rate; the class asked, and the runs of its landing set's rows.
+            let own = own.unwrap_or(0.0);
+            for (k, set) in sets.iter().enumerate() {
+                let w: f64 = set.iter().flat_map(|&b| (0..3).map(move |q| 4 * (3 * b + q))).map(|i| summed[i].norm_sqr()).sum();
+                let [share, of] = offsets[k];
+                raw.push(w);
+                out.classes.push(Class { landing: k, rate: w / norm, kick: [0.0; 3], offset: if share > 0.0 { of / share } else { own } });
             }
+            work += g3 as f64;
             out.rate = out.classes.iter().map(|c| c.rate).sum();
             if let Some(draw) = draw.as_mut() {
                 rates.clear();
                 rates.extend(out.classes.iter().map(|c| c.rate));
                 out.drawn = draw(rates);
                 if let Some(c) = out.drawn {
-                    let class = &out.classes[c];
-                    if runs.len() < slots.len() {
-                        runs.resize_with(slots.len(), || Vec::with_capacity(GROUND));
-                    }
-                    for &b in &sets[class.landing] {
-                        match runs[class.slot].last_mut() {
+                    for &b in &sets[out.classes[c].landing] {
+                        match runs.last_mut() {
                             Some(run) if run.1 == b => run.1 += 1,
-                            _ => runs[class.slot].push((b, b + 1)),
+                            _ => runs.push((b, b + 1)),
                         }
                     }
                 }
@@ -6582,8 +6566,8 @@ impl Fold {
         // R†R (4 × 4) one product -- the mean Σ Im(u*∂u), the second moment Σ Re(∂u*∂u) --, and its rate.
         let gram = &mut gram[..16];
         for c in (0..out.classes.len()).filter(|&c| every || out.drawn == Some(c)) {
-            let (slot, set) = (out.classes[c].slot, &sets[out.classes[c].landing]);
-            let (sums, absorbed, w) = (&groups[slot * 4 * g3..(slot + 1) * 4 * g3], slots[slot].2, raw[c]);
+            let set = &sets[out.classes[c].landing];
+            let (sums, absorbed, w) = (&*summed, absorbed_most, raw[c]);
             let m = 3 * set.len();
             let r = &mut rows4[..4 * m];
             for (k, &b) in set.iter().enumerate() {
@@ -6609,8 +6593,8 @@ impl Fold {
         out
     }
 
-    /// The jumps as operators at a position of the step (`At`: its middle or an outer node; the generator's decay between a
-    /// coherence group's offsets takes their products): per block C_q ε S⁻¹ (GROUND × n, q the emission's axis), ε the
+    /// The jumps as operators at a position of the step (`At`: its middle or an outer node; the generator's decay between two
+    /// blocks' offsets takes their products where it is a tone, fold.rs `Fold::beating`): per block C_q ε S⁻¹ (GROUND × n, q the emission's axis), ε the
     /// block's excited amplitude there -- a near block's VZ (Z = Σ_l ρ_l Z_l at a node), a far block's R₀Σ_a e_a U_a --, S
     /// the middle's: i(G − G†) = Σ L†L to the rounding at every position (module documentation, # The jumps). A jump's own
     /// amplitudes on its state are its photons' (`Fold::prototype_photons`, `Workspace::jumped`).
@@ -6657,10 +6641,10 @@ impl Fold {
 }
 
 impl Workspace {
-    /// A class's jump's amplitude on the ground state b along the emission's axis q, as the last `Fold::prototype_photons`
-    /// left it (`Class::slot`): u_q,b = Σ_o e^{−iot}(C_q ε_o S⁻¹ψ)_b over its group's blocks, the photons' own.
-    pub(crate) fn jumped(&self, slot: usize, b: usize, q: usize) -> C64 {
-        self.photons4[slot * 12 * GROUND + 4 * (3 * b + q)]
+    /// A jump's amplitude on the ground state b along the emission's axis q, as the last `Fold::prototype_photons` left
+    /// it: u_q,b = Σ_o e^{−iot}(C_q ε_o S⁻¹ψ)_b over every block, the photons' own.
+    pub(crate) fn jumped(&self, b: usize, q: usize) -> C64 {
+        self.photons4[4 * (3 * b + q)]
     }
 
     /// Per block of the jumps (`Fold::prototype_jumps`' order: the near blocks, then the far ones) the photon's absorbed

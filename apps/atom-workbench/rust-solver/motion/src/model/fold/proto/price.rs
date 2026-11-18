@@ -838,11 +838,11 @@ impl Workspace {
                     all: nb.all,
                     level_parts: basis.map_or(vec![vec![]; nl], |b| b.lfact.iter().map(|f| f.as_ref().map_or(vec![], |f| f.parts.iter().map(|p| p.0.len()).collect())).collect()),
                     rat: basis.map_or(vec![0; nl], |b| b.rat.clone()),
-                    group: fold.groups[nb.o],
+                    group: 0,
                 }
             })
             .collect();
-        let far = self.far.iter().map(|fb| FarSize { v: fb.vectors.len(), m: fb.m, splits: fb.splits.len(), terms: fb.terms.len(), omitted: fb.omitted, group: fold.groups[fb.o] }).collect();
+        let far = self.far.iter().map(|fb| FarSize { v: fb.vectors.len(), m: fb.m, splits: fb.splits.len(), terms: fb.terms.len(), omitted: fb.omitted, group: 0 }).collect();
         Sizes { n: self.n, ground: fold.ground.len(), layout, near, far, sweeps: self.step.sweeps, sets: sets.iter().map(Vec::len).collect() }
     }
 }
@@ -984,7 +984,7 @@ mod tests {
                 let mut draw = |rates: &[f64]| (c < rates.len()).then_some(c);
                 let drawn = fold.prototype_photons(&cache, &mut ws, &psi, sets, At::Place, 0.0, Moments::Drawn(&mut draw));
                 let class = &drawn.classes[c];
-                let asked = Asked::Drawn { group: slots[class.slot], set: sets[class.landing].len() };
+                let asked = Asked::Drawn { group: slots[0], set: sets[class.landing].len() };
                 assert!(same(drawn.work, sizes.photons(asked, true)), "{at}: class {c}'s photons counted {} against {}", drawn.work, sizes.photons(asked, true));
             }
             // The left response: every row swept as the right's (its sweeps a size).
