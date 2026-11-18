@@ -499,6 +499,20 @@ impl Choice {
                 }
             }
             choice.excited.extend(add);
+            // A block that is not far and has no excited row to solve -- an explicit node's states and the copies their
+            // emission reaches, nothing else its sources drive there (tilt0 correctness C: a node holds the states its
+            // offset drives) -- solves its copies: a far form holds no explicit state, so its rows cannot all be centred.
+            for b in fold.blocks.iter().filter(|b| !b.far() && b.solved == 0 && b.rows.iter().all(|r| matches!(r, Row::Copy { .. }))) {
+                for r in &b.rows {
+                    if let Row::Copy { state, component } = *r {
+                        for &(p, c) in &b.sources {
+                            let key = (fold.components[c].part, fold.ground[p], fold.components[component].part, fold.ground_level[state]);
+                            choice.copies.retain(|x| x.0 != key);
+                            choice.copies.push((key, Status::Decomposed));
+                        }
+                    }
+                }
+            }
             for b in fold.blocks.iter().filter(|b| !b.rows.is_empty()) {
                 let status = if b.far() { Status::Centred } else { Status::Decomposed };
                 for &(p, c) in &b.sources {
