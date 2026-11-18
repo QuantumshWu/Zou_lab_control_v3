@@ -961,8 +961,13 @@ impl Ritzes {
 /// by Im(Z†DδZ) (said, not read: unify2 §2.1 reads 2Re(V†δT), the Bloch generator's; to be settled with U5). ∞ where the
 /// series does not converge (max |μ| ≥ 1).
 #[allow(clippy::too_many_arguments)]
-fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usize, den: &[f64], floor: f64, h: &[C64], energy: f64, n: usize, ritz: &Ritz, out: &mut [f64]) {
+fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usize, den: &[f64], floor: f64, h: &[C64], energy: f64, n: usize, ritz: &Ritz, pull: &Pull, x: usize, out: &mut [f64]) {
     let (s, nd) = (nb.s, nb.nd);
+    // The force channel's per column and beam lane −2 Σ_i R_ij* Ṽ_l,ij (its Im the lane's δΓ), and Σ_i Z_ij* R_ij (the metric's).
+    let kicks = pull.kicks.get(x).map_or(&[][..], |k| &k[..]);
+    let (beams, ln) = (kicks.len(), nb.lanes * n);
+    let mut lanes = vec![C64::ZERO; n * beams];
+    let mut metric = vec![C64::ZERO; n];
     let at = |k: usize, i: usize, j: usize| swept(nb, k, i, j, n);
     let (alpha, beta) = ritz.rest(p, done);
     let infinite = !alpha.re.is_finite();
@@ -981,15 +986,69 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
                 continue;
             }
             let made = if p < done { last - if p >= 1 { at(p - 1, i, j) } else { C64::ZERO } } else { C64::ZERO };
-            let rest = (made + alpha * d1 + beta * d2).norm_sqr();
+            let r = made + alpha * d1 + beta * d2;
+            let rest = r.norm_sqr();
             out[j] += rest;
             shift[j] += rest * (h[j * n + j] - C64::real(mean) - diagonal).norm_sqr().sqrt();
+            if i < s {
+                for (l, u) in lanes[j * beams..(j + 1) * beams].iter_mut().enumerate() {
+                    *u += r.conj() * nb.vt[i * ln + l * n + j];
+                }
+                metric[j] += last.conj() * r;
+            }
         }
     }
     for j in 0..n {
         let size = out[j];
         let rated = if den[j] <= floor || size.is_nan() || size == 0.0 || (size.is_finite() && rounded(size, den[j], n, s, nb.lanes)) { 0.0 } else { size / den[j] };
-        out[j] = rated + if size.is_finite() { unrate(shift[j] / energy).powi(2) } else { 0.0 };
+        // The force channel (readings.status.md RD4, RD5): the rest moves the column's force at first order (the force is
+        // no Ritz value), δF_j = Σ_l q_l δΓ_l,j − F_j δM_jj/(1 + M_jj), δΓ_l,j = −2 Im⟨R_j, Ṽ_l,j⟩, δM_jj = 2 Re⟨Z_j, R_j⟩,
+        // against the gross force Σ_l |q_l| |Γ_l,j| (`Pull`): rate(√·) of its square is |δF_j|/F_gross,j. The larger of
+        // the two channels, not their sum (one δZ).
+        let force = if rated > 0.0 && pull.gross.get(j).is_some_and(|&g| g > 0.0) {
+            let moved = -2.0 * metric[j].re / (1.0 + den[j]);
+            let df: [f64; 3] = std::array::from_fn(|a| kicks.iter().zip(&lanes[j * beams..(j + 1) * beams]).map(|(q, u)| q[a] * (-2.0 * u.im)).sum::<f64>() + moved * pull.net[j][a]);
+            unrate(df.iter().map(|x| x * x).sum::<f64>().sqrt() / pull.gross[j]).powi(2)
+        } else {
+            0.0
+        };
+        out[j] = rated.max(force) + if size.is_finite() { unrate(shift[j] / energy).powi(2) } else { 0.0 };
+    }
+}
+
+/// The force channel's inputs at a decision (readings.status.md RD4, RD5): per near block its beam lanes' wave vectors q_l
+/// (`Near::splits`' components' kicks; the static lane's none), and per column over every near block's solved rows the
+/// absorption by beam lane Γ_l,j = −2 Im⟨Z_j, Ṽ_l,j⟩ -- its gross Σ_l |q_l| |Γ_l,j| (a block's lanes apart: a standing
+/// wave's or a σ± pair's redistribution is in it, the net force of a column between them is not its scale) and its net
+/// F_j = Σ_l q_l Γ_l,j. The force F = Σ_l ħq_l Γ_l (the momentum each lane's light gives) moves at first order in a
+/// response's error; it is read against its gross, not |F_j|, which a balanced column holds near zero (tilt0's m = 0).
+#[derive(Clone, Default, Debug)]
+pub(crate) struct Pull {
+    kicks: Vec<Vec<[f64; 3]>>,
+    gross: Vec<f64>,
+    net: Vec<[f64; 3]>,
+}
+
+impl Pull {
+    fn of(fold: &Fold, near: &[Near], n: usize, work: &mut f64) -> Pull {
+        let kicks: Vec<Vec<[f64; 3]>> = near.iter().map(|nb| nb.splits.iter().map(|&(c, j)| fold.components[c].kicks[j]).collect()).collect();
+        let (mut gross, mut net) = (vec![0.0; n], vec![[0.0; 3]; n]);
+        for (nb, q) in near.iter().zip(&kicks).filter(|(nb, _)| !nb.idle()) {
+            let ln = nb.lanes * n;
+            for (l, q) in q.iter().enumerate() {
+                let size = q.iter().map(|x| x * x).sum::<f64>().sqrt();
+                for j in 0..n {
+                    let g: C64 = (0..nb.s).map(|i| nb.ztot[i * n + j].conj() * nb.vt[i * ln + l * n + j]).sum();
+                    let gamma = -2.0 * g.im;
+                    gross[j] += size * gamma.abs();
+                    for a in 0..3 {
+                        net[j][a] += q[a] * gamma;
+                    }
+                }
+            }
+            *work += (nb.s * q.len() * n) as f64 / 4.0;
+        }
+        Pull { kicks, gross, net }
     }
 }
 
@@ -1130,6 +1189,8 @@ pub(crate) struct Workspace {
     /// The series' extrapolation at a decision (`Ritz`), read from its last three sweeps' changes; the atom's energy its
     /// accounts' potential channel is read against.
     ritz: Ritzes,
+    /// The force channel's inputs at a decision (`Pull`).
+    pull: Pull,
     energy: f64,
     /// Per near block its matrices at the point where a decomposition is made there (`Fold::lay`, `Fold::effective`).
     here: Vec<Option<(Laid, Effective)>>,
@@ -2944,6 +3005,7 @@ impl Fold {
             accounts: vec![],
             den: vec![0.0; n],
             ritz: Ritzes::default(),
+            pull: Pull::default(),
             energy: 0.0,
             here: (0..near_len).map(|_| None).collect(),
             scratch,
@@ -3739,6 +3801,24 @@ impl Fold {
             .collect()
     }
 
+    /// `prototype_column_forces` on every lab axis at once (one tangent, one gradient): per column its force, the Hermitian
+    /// part's gradient and the absorbed light's mean summed (the readings' test).
+    #[cfg(test)]
+    pub(crate) fn prototype_column_forces_all(&self, cache: &Cache, ws: &mut Workspace) -> Vec<[f64; 3]> {
+        let n = ws.n;
+        self.prototype_tangent(cache, ws);
+        let mut out: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+        self.prototype_gradient(cache, ws, 0, true, &[], &mut out);
+        let sets = vec![(0..GROUND).collect::<Vec<usize>>()];
+        (0..n)
+            .map(|j| {
+                let psi: Vec<C64> = (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect();
+                let p = self.prototype_photons(cache, ws, &psi, &sets, At::Middle, 0.0, Moments::Every);
+                std::array::from_fn(|a| -out[a][j * n + j].re + p.force[a] + p.classes.iter().map(|c| c.rate * c.kick[a]).sum::<f64>())
+            })
+            .collect()
+    }
+
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
     /// the same series (`sweep_all`, `Side::Left`) on the adjoint's inputs, per near block the Schur form's adjoint, the
     /// explicit columns' source and rows' emission exchanged, the explicit states' dressing and the exact copies' blocks
@@ -4259,7 +4339,7 @@ impl Fold {
         let _p = crate::prof::scope(crate::prof::FWD_ACCOUNTS);
         let n = ws.n;
         ws.energy = energy;
-        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, ritz, .. } = &mut *ws;
+        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, ritz, pull, .. } = &mut *ws;
         accounts.clear();
         // The levels left out, on their bounds; W_j with their responses (a column's whole).
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
@@ -4287,6 +4367,7 @@ impl Fold {
         let read = |j: usize| den[j] > floor;
         let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
         *ritz = Ritzes::of(near, cache, done, n);
+        *pull = Pull::of(self, near, n, work);
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             let basis = cache.near_at(x);
             let (om, sz, bk, sh) = &per[x];
@@ -4300,7 +4381,7 @@ impl Fold {
             let np = series_parts(nb, basis);
             for part in 0..np {
                 let mut squares = vec![0.0; n];
-                series_squares(nb, basis, part, evaluation.parts[x][part], done, den, floor, h, energy, n, &ritz.part(x, part), &mut squares);
+                series_squares(nb, basis, part, evaluation.parts[x][part], done, den, floor, h, energy, n, &ritz.part(x, part), pull, x, &mut squares);
                 accounts.push(Account { item: Item::Series { block: x, part }, squares, on: true });
             }
             // The reuse's first-order error of the response the step uses, Z = Σ_l Z_l: row i of column j is Σ_l x_l/d_l, x_l
@@ -4561,8 +4642,8 @@ impl Fold {
                     let Item::Series { block, part } = ws.accounts[k].item else { unreachable!() };
                     let p = evaluation.parts[block][part] + 1;
                     evaluation.parts[block][part] = p;
-                    let Workspace { near, den, h, energy, accounts, ritz, .. } = &mut *ws;
-                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), &mut accounts[k].squares);
+                    let Workspace { near, den, h, energy, accounts, ritz, pull, .. } = &mut *ws;
+                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), pull, block, &mut accounts[k].squares);
                     worst[k] = (0..n).map(|j| self.series_worst(cache, ws, block, part, p, done, j)).collect();
                 }
                 Remedy::Refresh(x) => {
@@ -4677,8 +4758,8 @@ impl Fold {
                 Item::Series { block, part } => {
                     evaluation.parts[block][part] -= 1;
                     let p = evaluation.parts[block][part];
-                    let Workspace { near, den, h, energy, accounts, ritz, .. } = &mut *ws;
-                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), &mut accounts[k].squares);
+                    let Workspace { near, den, h, energy, accounts, ritz, pull, .. } = &mut *ws;
+                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), pull, block, &mut accounts[k].squares);
                     worst[k] = trial;
                 }
                 Item::Centred { block, .. } => {
@@ -4715,7 +4796,7 @@ impl Fold {
         let n = ws.n;
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
         let mut out = vec![0.0; n];
-        series_squares(&ws.near[block], cache.near_at(block), part, p, done, &ws.den, floor, &ws.h, ws.energy, n, &ws.ritz.part(block, part), &mut out);
+        series_squares(&ws.near[block], cache.near_at(block), part, p, done, &ws.den, floor, &ws.h, ws.energy, n, &ws.ritz.part(block, part), &ws.pull, block, &mut out);
         out[j]
     }
 
@@ -7090,6 +7171,12 @@ impl Workspace {
     /// The last decision's accounts (`Fold::accounts`).
     pub(crate) fn accounts(&self) -> &[Account] {
         &self.accounts
+    }
+
+    /// The last decision's columns' gross force Σ_l |q_l| |Γ_l,j| (`Pull`; the readings' test).
+    #[cfg(test)]
+    pub(crate) fn gross_forces(&self) -> &[f64] {
+        &self.pull.gross
     }
 
     /// The fold's block of the workspace's near (or far) block x (the readings' test).
