@@ -7,7 +7,7 @@
 //! # The Hamiltonian at a point, by laser frequency
 //! The ground states G (`GROUND`) in the lab frame, the excited states E (`EXCITED`) in the request's frame ν_frame. At r,
 //! H_GG(r) = H0_GG + Σ_ω O_ω,GG(E_ω(r)) and 𝒦(r) = H0_EE + Σ_ω O_ω,EE(E_ω(r)) − (i/2)D, the outside forms O_ω quadratic in
-//! each frequency's coherent field (H0 holds them at the focus). Every frequency's light is two components c (`Part`): the
+//! each frequency's coherent field (H0 holds their diagonal at the focus: request.rs `held`). Every frequency's light is two components c (`Part`): the
 //! co-rotating V_c = Σ_l a_l X_l at e^{−iν_c t}, ν_c = δ_ω, and the counter-rotating Σ_l a_l* R_l at ν_c = −(δ_ω + 2ν_frame);
 //! one rule for both and for every frequency, the tweezer's too (DESIGN §1.4). Absorbing beam l takes the momentum q_l = k_l
 //! (the counter-rotating −k_l) and raises the excited state's energy by w_l = (ħ/m)(q_l·κ + q_l²/2) (DESIGN §1.2, onefold 1).
@@ -557,7 +557,7 @@ pub(crate) struct Fold {
     /// Per two blocks (blocks × blocks, row by row, symmetric) the reading of their cross decay L_o†L_o′ (module
     /// documentation, # Tones; `Fold::crossing`): a tone where it is beyond the share (`Fold::beating`), else averaged out.
     pub(crate) crossing: Vec<f64>,
-    /// H0 less the outside forms at the focus: its ground block, and its excited block with −(i/2)D.
+    /// H0 less what it holds of the outside forms at the focus (request.rs `held`): its ground block, and its excited block with −(i/2)D.
     base_ground: Mat,
     base_excited: Mat,
     /// The emission operators (GROUND × EXCITED).
@@ -663,16 +663,18 @@ impl Fold {
             }
         }
         let frame_values: Vec<f64> = frames.iter().map(|b| axes.omega(b)).collect();
-        // H0 less the outside forms at the focus (the field there Σ_l E_l).
+        // H0 less what it holds of the outside forms at the focus (the field there Σ_l E_l; request.rs `held`).
         let outside: Vec<[[Mat; 3]; 3]> = light.frequencies.iter().map(|f| outside_form(&request.outside_forms[f.form].matrices)).collect();
         let mut base = request.hamiltonian.clone();
         for (w, f) in light.frequencies.iter().enumerate() {
             let e0: [C64; 3] = std::array::from_fn(|q| f.fields.iter().map(|e| e[q]).sum());
+            let mut at_focus = Mat::zeros(STATES, STATES);
             for p in 0..3 {
                 for q in 0..3 {
-                    base.add_scaled(-(e0[p].conj() * e0[q]), &outside[w][p][q]);
+                    at_focus.add_scaled(e0[p].conj() * e0[q], &outside[w][p][q]);
                 }
             }
+            base.add_scaled(-C64::ONE, &crate::request::held(&at_focus));
         }
         let all: Vec<usize> = (0..GROUND).collect();
         let excited: Vec<usize> = (GROUND..STATES).collect();

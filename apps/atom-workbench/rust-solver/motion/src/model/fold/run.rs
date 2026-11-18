@@ -773,15 +773,17 @@ fn candidates(beats: &[(crate::model::Beat, f64)], crossing: &[(crate::model::Be
 }
 
 /// The request with only the frequencies `on` lit (module documentation, # The rest of the model): every other
-/// frequency's beams' fields and couplings zero, and its outside shift at the focus taken out of H0, which holds it
-/// (request.rs: H = H0 + Σ_ω Σ_i (x_ω,i(r) − x_ω,i(0)) O_ω,i).
+/// frequency's beams' fields and couplings zero, and what H0 holds of its outside shift at the focus taken out of H0
+/// (request.rs `held`: H = H0 − held(O(0)) + O(r)).
 pub(super) fn lit(request: &Request, light: &Light, on: impl Fn(usize) -> bool) -> Request {
     let mut out = request.clone();
     for (_, f) in light.frequencies.iter().enumerate().filter(|(w, _)| !on(*w)) {
         let focus: [C64; 3] = std::array::from_fn(|q| f.beams.iter().map(|&l| request.beams[l].field[q]).sum());
+        let mut at_focus = Mat::zeros(STATES, STATES);
         for (x, o) in crate::request::coordinates(&focus).iter().zip(&request.outside_forms[f.form].matrices) {
-            out.hamiltonian.add_scaled(C64::real(-x), o);
+            at_focus.add_scaled(C64::real(*x), o);
         }
+        out.hamiltonian.add_scaled(-C64::ONE, &crate::request::held(&at_focus));
         for &l in &f.beams {
             let beam = &mut out.beams[l];
             beam.field = [C64::ZERO; 3];

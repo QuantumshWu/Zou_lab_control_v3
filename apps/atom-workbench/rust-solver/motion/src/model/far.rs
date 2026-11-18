@@ -280,7 +280,7 @@ pub(crate) struct Tone {
     pub(crate) forms: Vec<Mat>,
     /// P_l'l (STATES × STATES) at `pairs[l' n + l]`, l' and l in the frequency's beam order.
     pub(crate) pairs: Vec<Mat>,
-    /// O(E(0)): the outside form at the focus, which H0 holds.
+    /// What H0 holds of O(E(0)), the outside form at the focus (request.rs `held`): what a model takes out of H0.
     pub(crate) focus: Mat,
     /// Per component ([co, counter]) and beam its bare drives' response R_l (EXCITED × GROUND, the readout's).
     pub(crate) responses: [Vec<Mat>; 2],
@@ -367,6 +367,7 @@ impl Tone {
                 focus.add_scaled(e0[k].conj() * e0[kk], &plain[k * r + kk]);
             }
         }
+        let focus = crate::request::held(&focus);
         let k0 = {
             let excited: Vec<usize> = (GROUND..STATES).collect();
             let mut k0 = request.hamiltonian.block(&excited, &excited);

@@ -1960,7 +1960,7 @@ pub(crate) fn share() -> f64 {
 }
 
 /// A request's levels and light at a point r (µm): H0 and every frequency's outside form at the point's field
-/// (request.rs `OutsideForm`, its value at the focus taken out of H0), the decay and the emission, and the classes --
+/// (request.rs `OutsideForm`, what H0 holds of its value at the focus taken out of H0: request.rs `held`), the decay and the emission, and the classes --
 /// per frequency of the light its co-rotating part at δ_ω and its counter-rotating part at −(δ_ω + 2ν_frame), each
 /// beam's coupling at its amplitude there (the counter-rotating one at its conjugate, its wave vector −k).
 pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Light, r: [f64; 3]) -> (Levels, Vec<Class>, Vec<(usize, bool)>) {
@@ -1971,14 +1971,19 @@ pub(crate) fn system(request: &crate::request::Request, light: &crate::field::Li
     for f in &light.frequencies {
         let (e, e0) = (f.field(&amplitudes).value, f.field(&focus).value);
         let form = super::far::outside_form(&request.outside_forms[f.form].matrices);
+        let mut at_focus = Mat::zeros(STATES, STATES);
         for p in 0..3 {
             for q in 0..3 {
-                let weight = e[p].conj() * e[q] - e0[p].conj() * e0[q];
+                let (weight, w0) = (e[p].conj() * e[q], e0[p].conj() * e0[q]);
                 if weight != C64::ZERO {
                     h.add_scaled(weight, &form[p][q]);
                 }
+                if w0 != C64::ZERO {
+                    at_focus.add_scaled(w0, &form[p][q]);
+                }
             }
         }
+        h.add_scaled(-C64::ONE, &crate::request::held(&at_focus));
     }
     let (ground, excited): (Vec<usize>, Vec<usize>) = ((0..GROUND).collect(), (GROUND..STATES).collect());
     let emission: [Mat; 3] = std::array::from_fn(|a| request.emission[a].block(&ground, &excited));

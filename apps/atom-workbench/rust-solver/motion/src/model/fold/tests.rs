@@ -2729,7 +2729,7 @@ fn the_levels_cross_series() {
 /// 100 rad/µs, one excited state decaying at Γ = 38 rad/µs, three quarters to |1⟩ and a quarter to |2⟩ (on two axes),
 /// laser A on |1⟩ (`a` rad/µs) and B on |2⟩ (`b`), both on resonance. Where `form` is not zero B is a standing wave along z
 /// (two beams of `b` each) with an outside form `form` between |1⟩ and |2⟩ (per unit |E_π|², a beam's 10⁶): H_GG's entry
-/// c(r) = form (|E_B(r)|² − |E_B(0)|²) (H0 holds the forms at the focus), in their frames 100 rad/µs apart a tone at
+/// c(r) = form |E_B(r)|² (H0 holds the forms' diagonal at the focus alone, request.rs `held`; this form has none), in their frames 100 rad/µs apart a tone at
 /// ±100 rad/µs (run.rs # The tones), and the atom at rest at kz = π/4, where B's intensity is half its focus's. The two
 /// ground states are one set (their Raman coupling resonant), both lasers reach one block, its jumps are one operator, and
 /// a jump lands on both states at their frames' phases (run.rs # The jumps' phase): 400 trajectories from |1⟩ (the atom
@@ -2783,7 +2783,7 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
     let amplitude = |l: usize, r: [f64; 3]| light.beams[l].amplitude_to(r, 1).value;
     let (ae, be) = (amplitude(0, at) * a, (1..rays).map(|l| amplitude(l, at)).sum::<C64>() * b);
     let intensity = |r: [f64; 3]| 1e6 * (1..rays).map(|l| amplitude(l, r)).sum::<C64>().norm_sqr();
-    let c = form * (intensity(at) - intensity([0.0; 3]));
+    let c = form * intensity(at);
     // The exact three-level master equation in the lasers' frame, from |1⟩⟨1|, at 60 µs (RK4): |2⟩'s frame 100 rad/µs
     // above |1⟩'s, so c turns as e^{∓i100t}.
     let h3 = |t: f64| {

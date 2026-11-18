@@ -143,6 +143,15 @@ pub struct Transition {
     pub shift: [Vec<f64>; 9],
 }
 
+/// What H0 holds of an outside form's value O at the focus (`Request::hamiltonian`: H0 is diagonal in the model basis):
+/// its diagonal. The light's Hamiltonian at r is H0 − held(O(0)) + O(r) -- the bare levels plus the whole form there --,
+/// so that taking the focus's form out of H0 takes out what H0 holds and no more (dragchk.status.md section 4 (b): with
+/// the whole O(0) taken out, tilt0's tweezer form lost its off-diagonal at the focus -- up to 11 rad/µs between D2
+/// hyperfine levels of one m -- and had it with the wrong sign away from it).
+pub(crate) fn held(o: &Mat) -> Mat {
+    Mat::from_fn(o.rows, o.cols, |i, j| if i == j { o[(i, i)] } else { C64::ZERO })
+}
+
 /// The coordinates x_i(E) of a field's outside forms (`OutsideForm`): |E_q|² for q = −1, 0, +1, then per pair p < q in
 /// the order (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q) and Im(E_p* E_q).
 pub(crate) fn coordinates(e: &[C64; 3]) -> [f64; 9] {

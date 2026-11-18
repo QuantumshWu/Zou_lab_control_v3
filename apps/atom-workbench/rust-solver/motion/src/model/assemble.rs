@@ -6,7 +6,7 @@
 //! cluster's states, at a base beat Ω (∝ e^{iΩt}), all exact (`Beat`, `Wave`). A field's component is u(r) = Σ_l a_l(r) c_l over
 //! beams of one frequency (`Scalar`): its coherent field's component on its basis, e_k = Σ_l a_l γ_lk (field.rs; an averaged
 //! light's, each beam's alone), or the conjugate of one. The terms:
-//! - the base (H0 less the outside forms at the focus: every light off) and the frames' −θ_s, constant;
+//! - the base (H0 less what it holds of the outside forms at the focus, request.rs `held`: every light off) and the frames' −θ_s, constant;
 //! - each pair of lit frequencies' constant form at their beat, e^ω'_k'* e^ω_k C_k'k (far.rs `constant`; a frequency's own is
 //!   its static form): the folds with the bare levels;
 //! - the same pairs' part at the atom, e^ω'_k'* e^ω_k S_k'k on the ground states (eliminate.rs), the same contraction of
