@@ -70,6 +70,8 @@ impl Local {
 pub(crate) struct SetDecision {
     pub(crate) ground: Vec<usize>,
     pub(crate) nodes: Vec<Key>,
+    /// The nodes asked for whose level is explicit at another key (`Choice::driven`): its drive there a tone.
+    pub(crate) driven: Vec<Key>,
     pub(crate) worst: Option<(Local, f64)>,
     pub(crate) beyond: usize,
     pub(crate) refused: Vec<(Key, usize)>,
@@ -97,6 +99,13 @@ impl Decision {
     /// Every set's explicit nodes, one list (`Choice::base`'s).
     pub(crate) fn explicit(&self) -> Vec<Key> {
         let mut out: Vec<Key> = self.sets.iter().flat_map(|s| s.nodes.iter().copied()).collect();
+        out.sort();
+        out
+    }
+
+    /// Every set's explicit levels' drives at another key, tones (`Choice::driven`), one list.
+    pub(crate) fn driven(&self) -> Vec<Key> {
+        let mut out: Vec<Key> = self.sets.iter().flat_map(|s| s.driven.iter().copied()).collect();
         out.sort();
         out
     }
@@ -215,7 +224,7 @@ enum Asked {
 /// set's tiers), with its candidates and a workspace; None where it cannot be made (a refused cluster: run.rs
 /// `Clusters::cluster_with`).
 struct Made {
-    nodes: Vec<Key>,
+    nodes: (Vec<Key>, Vec<Key>),
     fold: Option<(Fold, super::proto::Workspace, Vec<(Key, Taken)>)>,
 }
 
@@ -278,7 +287,7 @@ pub(crate) struct Search<'a> {
     floor: f64,
     /// The largest momentum an atom held by the trap has (rad/µm).
     most: f64,
-    choices: std::sync::Mutex<Vec<((usize, Vec<Key>), Result<Choice, String>)>>,
+    choices: std::sync::Mutex<Vec<((usize, (Vec<Key>, Vec<Key>)), Result<Choice, String>)>>,
     pools: std::sync::Mutex<Vec<Vec<Vec<Made>>>>,
 }
 
@@ -289,20 +298,21 @@ impl<'a> Search<'a> {
         Search { request, light, grounds, floor, most, choices: Default::default(), pools: Default::default() }
     }
 
-    /// Set k's choice of nodes with the explicit nodes `nodes` (`Choice::base_of`, its own set's tiers), made once.
-    fn choice(&self, k: usize, nodes: &[Key]) -> Result<Choice, String> {
-        let key = (k, nodes.to_vec());
+    /// Set k's choice of nodes with the explicit nodes and drives `nodes` (`Choice::base_of`, its own set's tiers), made
+    /// once.
+    fn choice(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Choice, String> {
+        let key = (k, nodes.clone());
         if let Some(c) = self.choices.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|c| c.0 == key) {
             return c.1.clone();
         }
-        let made = Choice::base_of(self.request, nodes.to_vec(), &|set| set == &self.grounds[k][..]);
+        let made = Choice::base_of(self.request, nodes.0.clone(), nodes.1.clone(), &|set| set == &self.grounds[k][..]);
         self.choices.lock().unwrap_or_else(|e| e.into_inner()).push((key, made.clone()));
         made
     }
 
-    /// One set's fold on the nodes `nodes`, kept in `made` (one per set and decision, per thread).
-    fn made<'m>(&self, made: &'m mut Vec<Made>, k: usize, nodes: &[Key]) -> &'m mut Made {
-        let at = match made.iter().position(|m| m.nodes == nodes) {
+    /// One set's fold on the nodes and drives `nodes`, kept in `made` (one per set and decision, per thread).
+    fn made<'m>(&self, made: &'m mut Vec<Made>, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> &'m mut Made {
+        let at = match made.iter().position(|m| m.nodes == *nodes) {
             Some(at) => at,
             None => {
                 let fold = self.choice(k, nodes).and_then(|choice| {
@@ -311,7 +321,7 @@ impl<'a> Search<'a> {
                     let candidates = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| (key, Taken { block, rows })).collect();
                     Ok((fold, ws, candidates))
                 });
-                made.push(Made { nodes: nodes.to_vec(), fold: fold.ok() });
+                made.push(Made { nodes: nodes.clone(), fold: fold.ok() });
                 made.len() - 1
             }
         };
@@ -319,7 +329,7 @@ impl<'a> Search<'a> {
     }
 
     /// What the point `local` asks of set k's decision `nodes` (`Asked`; module documentation, # At each point).
-    fn ask(&self, made: &mut Vec<Made>, k: usize, nodes: &[Key], local: &Local) -> Asked {
+    fn ask(&self, made: &mut Vec<Made>, k: usize, nodes: &(Vec<Key>, Vec<Key>), local: &Local) -> Asked {
         let m = self.made(made, k, nodes);
         let Some((fold, ws, candidates)) = m.fold.as_mut() else { return Asked::Nowhere };
         if fold.blocks.is_empty() {
@@ -343,7 +353,7 @@ impl<'a> Search<'a> {
     }
 
     /// The points `points` read on the decision `nodes` (per set), in parallel: per point and set what it asks.
-    fn round(&self, points: &[Local], nodes: &[Vec<Key>]) -> Vec<Vec<Asked>> {
+    fn round(&self, points: &[Local], nodes: &[(Vec<Key>, Vec<Key>)]) -> Vec<Vec<Asked>> {
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(points.len().max(1));
         let chunk = points.len().div_ceil(threads);
         std::thread::scope(|scope| {
@@ -365,13 +375,14 @@ impl<'a> Search<'a> {
 
     /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a level
     /// is explicit at two offsets, or a block is not the prototype's).
-    fn feasible(&self, k: usize, nodes: &[Key]) -> bool {
+    fn feasible(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> bool {
         self.choice(k, nodes).and_then(|choice| Fold::new(self.request, &choice, self.grounds[k][0])?.prototype_workspace()).is_ok()
     }
 
     /// The points read until none asks for a node that can join (`round`; the nodes asked for joining at once, in their
     /// keys' order, each where its cluster can be made with those before it -- else refused, kept so --, the points
-    /// whose node joined read again), into the decision; each point's reading per set on the final decision: (its
+    /// whose node's level had a node join read again: every read again follows a join, so the reading ends), into the
+    /// decision; each point's reading per set on the final decision: (its
     /// reading, rate units, infinite where it asked for a refused node or its fold does not exist with none to raise;
     /// beyond the share with no node offered; asked for a refused node; no fold and no node).
     fn settle(&self, points: &[Local], decision: &mut Decision) -> Vec<Vec<(f64, bool, bool, bool)>> {
@@ -379,12 +390,14 @@ impl<'a> Search<'a> {
         let mut out: Vec<Vec<(f64, bool, bool, bool)>> = vec![vec![(0.0, false, false, false); sets]; points.len()];
         let mut open: Vec<usize> = (0..points.len()).collect();
         while !open.is_empty() {
-            let nodes: Vec<Vec<Key>> = decision.sets.iter().map(|s| s.nodes.clone()).collect();
+            let nodes: Vec<(Vec<Key>, Vec<Key>)> = decision.sets.iter().map(|s| (s.nodes.clone(), s.driven.clone())).collect();
             let asked = self.round(&open.iter().map(|&i| points[i].clone()).collect::<Vec<_>>(), &nodes);
             decision.points += open.len();
             // The nodes asked, per set: an excited level is one object at one frame (fold.rs `Fold::build`), so of the keys
             // asked for one level the one the most points ask for (its frame the component that drives it at the most
-            // points; a tie by the keys' order), in the levels' order; each joins where its cluster can be made.
+            // points; a tie by the keys' order), in the levels' order; each joins where its cluster can be made. A node of
+            // a level explicit at another key is its copy there, read beyond the share: it joins as that level's drive
+            // there, a tone (`Choice::driven`), as a copy whose coupling cannot be folded at its peak does.
             for k in 0..sets {
                 let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
                 asks.sort();
@@ -404,20 +417,24 @@ impl<'a> Search<'a> {
                 }
                 for key in chosen {
                     let set = &mut decision.sets[k];
-                    if set.nodes.iter().any(|n| n.0 == key.0) || set.refused.iter().any(|r| r.0 == key) {
+                    if set.nodes.contains(&key) || set.driven.contains(&key) || set.refused.iter().any(|r| r.0 == key) {
                         continue;
                     }
-                    let mut more = set.nodes.clone();
-                    more.push(key);
-                    more.sort();
+                    let mut more = (set.nodes.clone(), set.driven.clone());
+                    let drive = set.nodes.iter().any(|n| n.0 == key.0);
+                    if drive { &mut more.1 } else { &mut more.0 }.push(key);
+                    more.0.sort();
+                    more.1.sort();
                     if self.feasible(k, &more) {
-                        decision.sets[k].nodes = more;
+                        (decision.sets[k].nodes, decision.sets[k].driven) = more;
                     } else {
                         decision.sets[k].refused.push((key, 0));
                     }
                 }
             }
             let mut again = vec![];
+            // Whether set k had a node of the level joined in this round (as a place or a drive).
+            let joined = |k: usize, level: usize, sets: &[SetDecision]| sets[k].nodes.iter().chain(&sets[k].driven).any(|n| n.0 == level && !nodes[k].0.contains(n) && !nodes[k].1.contains(n));
             for (&i, asks) in open.iter().zip(asked) {
                 let mut more = false;
                 for (k, ask) in asks.into_iter().enumerate() {
@@ -431,7 +448,7 @@ impl<'a> Search<'a> {
                             set.crossed_beyond += usize::from(super::unfoldable(cross, crate::model::elim::share()));
                         }
                         Asked::Nowhere => out[i][k] = (f64::INFINITY, false, false, true),
-                        Asked::Node(key) if decision.sets[k].nodes.iter().any(|n| n.0 == key.0) => more = true,
+                        Asked::Node(key) if joined(k, key.0, &decision.sets) => more = true,
                         Asked::Node(key) => {
                             out[i][k] = (f64::INFINITY, false, true, false);
                             if let Some(r) = decision.sets[k].refused.iter_mut().find(|r| r.0 == key) {

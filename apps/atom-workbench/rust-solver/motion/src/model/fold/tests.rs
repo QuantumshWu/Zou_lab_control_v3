@@ -1709,7 +1709,12 @@ fn tilt0() -> Option<(String, Request)> {
 
 pub(super) fn proto_choice(req: &Request, name: &str) -> Choice {
     // tilt0 on the start's decision (decide.rs): its F' = 3 explicit at the PGC light's offset, the probe's drive a tone.
-    let choice = if name == "tilt0" { Choice::base(req, run::Onefold::new(req, [1.0 / GROUND as f64; GROUND]).unwrap().explicit()).unwrap() } else { focus_choice(req) };
+    let choice = if name == "tilt0" {
+        let run = run::Onefold::new(req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        Choice::base_of(req, run.explicit(), run.driven(), &|_| true).unwrap()
+    } else {
+        focus_choice(req)
+    };
     println!("{name}: the rule's ground sets {:?}", choice.sets);
     choice
 }
@@ -3437,7 +3442,7 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
         for set in Fold::sets(&req, &base).unwrap() {
             let Ok(fold) = Fold::new(&req, &base, set[0]) else { continue };
             for (key, _, _) in Choice::candidates(&fold) {
-                let Ok(choice) = Choice::base_of(&req, vec![key], &|x| x == &set[..]) else { continue };
+                let Ok(choice) = Choice::base_of(&req, vec![key], vec![], &|x| x == &set[..]) else { continue };
                 let Ok(risen) = Fold::new(&req, &choice, set[0]) else { continue };
                 for b in &risen.blocks {
                     let centred = b.solved == 0 && !b.rows.is_empty();
@@ -3968,7 +3973,7 @@ fn a_scene_s_risen_clusters_hold_their_copies_at_a_p_frame() {
     for set in Fold::sets(&request, &base).unwrap().iter().filter(|s| s.len() > 1) {
         let fold = Fold::new(&request, &base, set[0]).unwrap();
         for (key, _, _) in Choice::candidates(&fold) {
-            let Ok(choice) = Choice::base_of(&request, vec![key], &|s| s == &set[..]) else { continue };
+            let Ok(choice) = Choice::base_of(&request, vec![key], vec![], &|s| s == &set[..]) else { continue };
             let Ok(risen) = Fold::new(&request, &choice, set[0]) else { continue };
             let ng = risen.ground.len();
             let mut on: Vec<(usize, usize)> = vec![];
