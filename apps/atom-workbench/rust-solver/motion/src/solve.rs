@@ -109,8 +109,8 @@
 //! four of the step. Where every difference is below the noise no number of levels tells it from convergence.
 //!
 //! ## The ladder
-//! - Clearly beyond: a rung whose own read lies clearly beyond the square b of the step's share among the family's few
-//!   looks (`screen`) is left: the step is halved, the level at τ becomes the companion and only τ/2 is run anew; the
+//! - Clearly beyond: a rung whose own read -- or its third level above, the rung left's read lowered -- lies clearly
+//!   beyond the square b of the step's share among the family's few looks (`screen`) is left: the step is halved, the level at τ becomes the companion and only τ/2 is run anew; the
 //!   rung below's third level above is the rung left's own read, lowered. Down to the step at which a trajectory would
 //!   take `MOST_STEPS` steps, where the step stands as it is, flagged, and books what its reads do not exclude.
 //! - The run's work. Of the rungs a check's reads let stand, the run takes the one it is expected to spend least on
@@ -892,14 +892,15 @@ enum Verdict {
 
 /// What the check makes of a rung (module documentation, # The step; `settle`) on its own `read` and its third level
 /// above carried to its step, `above` (none where it has none); `pilot`: whether the read is the pilot's, the last word
-/// on the step (the scout's leaves only on what is clearly beyond); `upward`: whether a third level above on the pilot's
-/// own pairs is to be had (the ladder has the rung above, the rung has none yet, and the rung above's read was not
-/// unread). Every
+/// on the step (the scout's leaves only on what is clearly beyond -- its own read, or its third level's: a rung whose
+/// third level is clearly beyond is left on the scout as on the pilot, and no pairs at the rung can bring that read
+/// within); `upward`: whether a third level above on the pilot's own pairs is to be had (the ladder has the rung above,
+/// the rung has none yet, and the rung above's read was not unread). Every
 /// estimate is taken as it reads (`within`). The third level is the rung the ladder left above, or the pilot at 4τ
 /// where the rung buys it (`course`); where none is, the rung stands on its own two levels. What a rung that stands
 /// does next is its course's (`course`).
 fn verdict(read: &Between, above: Option<&Between>, pilot: bool, upward: bool) -> Verdict {
-    if screen(read) {
+    if screen(read) || above.is_some_and(screen) {
         Verdict::Left
     } else if !pilot {
         Verdict::Stands
@@ -3804,7 +3805,9 @@ mod tests {
     /// and else stands on its two levels, as an adaptive integrator does. A coarser pair that shows the error the two
     /// levels share -- a plateau of the error over τ and 2τ, read at 2τ against 4τ as 32 ± 1 b, lowered to 2 b, beyond
     /// the share -- does not show the order: the rung is left (e038's base path is caught by its 4τ). A third level
-    /// within: the rung stands. Clearly beyond on its own read: left, on the scout as on the pilot.
+    /// within: the rung stands. Clearly beyond on its own read, or on its third level's: left, on the scout as on the pilot
+    /// (R4_LIN_4's scout at 0.474 µs carried the left rung's loss lowered to 9.9 ± 1.5 b; it stood on its own read, and
+    /// its pilot ran there before the rung below).
     #[test]
     fn a_rung_reads_its_third_level_and_else_stands_on_its_two() {
         let b = step_bound()[1].powi(2);
@@ -3813,6 +3816,7 @@ mod tests {
         assert_eq!((verdict(&own, None, false, false), verdict(&own, None, true, true), verdict(&own, None, true, false)), (Verdict::Stands, Verdict::Above, Verdict::Stands));
         let coarser = carried(&at(Some(pilot(32. * b, b))), 0.5);
         assert!(screen(&coarser) && verdict(&own, Some(&coarser), true, false) == Verdict::Left);
+        assert_eq!(verdict(&own, Some(&coarser), false, false), Verdict::Left);
         let quiet = carried(&at(Some(pilot(4. * b, b))), 0.5);
         assert_eq!(verdict(&own, Some(&quiet), true, false), Verdict::Stands);
         let beyond = at(Some(pilot(4. * b, 0.1 * b)));
