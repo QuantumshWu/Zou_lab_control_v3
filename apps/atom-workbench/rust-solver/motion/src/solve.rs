@@ -556,7 +556,10 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let reported = reported(&run, &reference).ok();
     let setting = Setting { run: &run, trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported, kick: kick_curvature(&run, trap) };
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
-    attempt(request, &setting, &mut messages)
+    let solved = attempt(request, &setting, &mut messages);
+    // The run's counts (adapt.rs `tally`): the safety net's readings beyond the share and absent folds, to stderr.
+    eprintln!("{}", crate::adapt::tally());
+    solved
 }
 
 /// What the solve takes of its run beside the steps (`solve`), made once.

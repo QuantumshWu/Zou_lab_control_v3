@@ -6857,55 +6857,6 @@ impl Workspace {
         most_mixed(&mixing, &self.cell.nodes, |_| true)
     }
 
-    /// The price of an explicit node's fall over the decision's cell (unify2 §3.3, §3.4; real multiply-adds): the cell's
-    /// price on the sizes the fall leaves -- its P places `places` out of P, their level back in their block as one left
-    /// out --, less the standing one's (the evaluation held), with the switch to it once (`Sizes::switch`). None where no
-    /// near block holds the places, or where the node's fold, predicted, does not exist. The prediction (unify2 §2.3, §3.4:
-    /// P → Q by the first order, no trial for it): the node's excitation folded, x̂ = Σ_{p,g} |a_pg|²/|Δ_pg|² of Ĥ_PP's
-    /// entries at the decision's point (its drives over the places' energy differences, decay with them) -- the series'
-    /// ratio is the excitation (r = x for one P state; summed over the ground columns, the trace, an upper bound of the
-    /// iteration's spectral radius) --: none where x̂ ≥ 1; else its level solved again in its block at the sweeps its
-    /// series asks to the budget, r̂^p/(1 − r̂) ≤ s (two at the least: a ratio is read from two). A node so driven that its
-    /// fold would not converge, or would sweep dearly, is not tried (R4_LIN_4's D2 F′ = 2 was tried at every cell, its
-    /// fold rising it again at once).
-    pub(crate) fn fall_price(&self, fold: &Fold, cache: &Cache, places: &[usize]) -> Option<f64> {
-        let x = self.near.iter().position(|nb| !places.is_empty() && places.iter().all(|p| nb.xs.contains(p)))?;
-        let (n, ng) = (self.n, fold.ground.len());
-        let h = &self.hbase;
-        let excitation: f64 = places
-            .iter()
-            .flat_map(|&p| (0..ng).map(move |g| (p, g)))
-            .map(|(p, g)| {
-                let a = h[p * n + g].abs().max(h[g * n + p].abs());
-                if a > 0.0 { (a / (h[p * n + p] - h[g * n + g]).abs()).powi(2) } else { 0.0 }
-            })
-            .sum();
-        if !(excitation < 1.0) {
-            return None;
-        }
-        let budget = unrate(crate::model::elim::share());
-        let sweeps = if excitation > 0.0 { ((budget * (1.0 - excitation)).ln() / excitation.ln()).ceil().max(2.0) as usize } else { 2 };
-        let sizes = held_sizes(self.sizes(fold, cache, &self.cell.sets), &cache.evaluation);
-        let size = self.den.iter().sum::<f64>();
-        let rows = places.len();
-        let mut s = sizes.clone();
-        s.n -= rows.min(s.n);
-        let b = &mut s.near[x];
-        b.explicit -= rows.min(b.explicit);
-        if b.explicit == 0 && b.lanes > 0 {
-            b.lanes -= 1;
-        }
-        b.levels.push(rows);
-        b.omitted.push(false);
-        b.level_parts.push(vec![rows]);
-        b.rat.push(0);
-        b.all += rows;
-        b.parts.push(price::Span::dense(rows, sweeps));
-        s.sweeps = s.sweeps.max(sweeps);
-        let route = |n: usize| price::Route::predicted(size, n);
-        Some(self.cell.price(&s, &route(s.n)) - self.cell.price(&sizes, &route(sizes.n)) + s.switch(&route(s.n)))
-    }
-
     pub(crate) fn reading(&self) -> f64 {
         self.step.reading
     }
@@ -7158,79 +7109,6 @@ impl Workspace {
         crate::linalg::solve(&self.landing.lu, &self.landing.piv, n, &mut overlap, 1);
         let lifted: Vec<C64> = overlap.iter().zip(self.step.metric.apply(&overlap)).map(|(a, m)| *a + m).collect();
         Some((self.step.normal.apply(&lifted), overlap))
-    }
-
-    /// The ring of what a switch leaves (module documentation, # The ring; run.rs # The nodes risen and fallen): of the
-    /// lifted state Ψ `taken` took (P amplitudes x, the rows `given` their own, every other Q row following T where
-    /// `follow`), its slow part's P amplitudes a and the state ψ′ = S a it gave -- the fast part's rows β = Ψ_Q − Ta =
-    /// T(x − a) + (Ψ_Q − Tx) on the near blocks' kept rows in their Schur basis (a given row of a level the point leaves
-    /// out at its level's decay, nothing following), on the far blocks' rows (`far_row`), the slow part's σ_ij = (Z a)_ij,
-    /// the P places' fast part −T_L†β through the left response; the slow mode's decay ψ′'s, c = ‖ψ′‖²/‖Ψ‖². Zero for a
-    /// state that follows T (a rise).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn ring(&self, fold: &Fold, cache: &Cache, x: &[C64], given: &[(usize, usize, C64)], follow: bool, a: &[C64], taken: &[C64]) -> f64 {
-        let n = self.n;
-        let tx = self.amplitudes(fold, cache, x);
-        let d: Vec<(usize, usize, C64)> = given.iter().map(|&(o, r, z)| (o, r, if follow { z - tx[o][r] } else { z })).collect();
-        // ‖Ψ‖²: the following state's x†(1 + X)x with the given rows' own amplitudes in place of theirs.
-        let following = if follow { x.iter().zip(self.step.metric.apply(x)).map(|(u, v)| (u.conj() * (*u + v)).re).sum::<f64>() } else { crate::linalg::norm_sqr(x) };
-        let total = following + d.iter().map(|&(o, r, dz)| (dz + if follow { tx[o][r] } else { C64::ZERO }).norm_sqr() - if follow { tx[o][r].norm_sqr() } else { 0.0 }).sum::<f64>();
-        let y: Vec<C64> = x.iter().zip(a).map(|(u, v)| *u - *v).collect();
-        let kept = crate::linalg::norm_sqr(taken);
-        let gamma = -2.0 * taken.iter().zip(self.step.generator.apply(taken)).map(|(u, v)| u.conj() * v).sum::<C64>().im / kept;
-        let i = C64::new(0.0, 1.0);
-        let mut rows: Vec<Ring> = vec![];
-        let mut w = 0.0;
-        // A row's integrals over the columns: its slow amplitudes σ_ij = t_j a_j, its left response z̃_j, its fast β.
-        let row = |t: &dyn Fn(usize) -> C64, tl: &dyn Fn(usize) -> C64, beta: C64, kappa: &dyn Fn(usize) -> (C64, C64), decay: f64| -> Ring {
-            let (mut cross, mut p, mut sigma) = (C64::ZERO, C64::ZERO, C64::ZERO);
-            for j in 0..n {
-                let (_, xj) = kappa(j);
-                let s = t(j) * a[j];
-                sigma += s;
-                cross += s.conj() * beta * (-i) / xj;
-                p += a[j].conj() * (-(tl(j).conj() * beta)) * (-i) / xj;
-            }
-            Ring { decay, fast: beta.norm_sqr() / total, cross: cross / total, p: p / total, slow: sigma.norm_sqr(), norm: 0.0 }
-        };
-        let h = &self.h;
-        for (k, nb) in self.near.iter().enumerate() {
-            let Some(basis) = cache.near.get(k).and_then(Option::as_deref) else { continue };
-            let mut dk = Mat::zeros(nb.s, 1);
-            for &(_, r, dz) in d.iter().filter(|g| g.0 == nb.o) {
-                match basis.rows.iter().position(|&q| q == r) {
-                    Some(place) => dk[(place, 0)] = dz,
-                    // A row of a level the point leaves out: no response, its amplitude all fast, at its level's decay.
-                    None => {
-                        let level = nb.levels.iter().position(|rs| rs.contains(&r)).expect("a given row's level");
-                        let g = basis.gersh[level];
-                        rows.push(Ring { decay: 0.5 * (g[2] + g[3]), fast: dz.norm_sqr() / total, cross: C64::ZERO, p: C64::ZERO, slow: 0.0, norm: 0.0 });
-                    }
-                }
-            }
-            if nb.idle() {
-                continue;
-            }
-            let vd = basis.f.to(&dk, &mut w);
-            for r in 0..nb.s {
-                let beta = (0..n).map(|j| nb.ztot[r * n + j] * y[j]).sum::<C64>() + vd[(r, 0)];
-                let kappa = |j: usize| distances(h[j * n + j], &nb.shifts, nb.kappa[r]);
-                rows.push(row(&|j| nb.ztot[r * n + j], &|j| nb.left.ztot[r * n + j], beta, &kappa, -2.0 * nb.kappa[r].im));
-            }
-        }
-        if !self.far.is_empty() {
-            let (right, left) = (self.responses(fold, cache, Side::Right), self.responses(fold, cache, Side::Left));
-            for (k, fb) in self.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
-                let (t, tl) = (right[fb.o].as_ref().expect("a far block's response"), left[fb.o].as_ref().expect("its left response"));
-                let r0 = cache.far_at(k).r0;
-                for r in 0..fb.m {
-                    let beta = (0..n).map(|j| t[(r, j)] * y[j]).sum::<C64>() + d.iter().filter(|g| g.0 == fb.o && g.1 == r).map(|g| g.2).sum::<C64>();
-                    let kappa = |j: usize| distances(h[j * n + j], &[], far_row(h[j * n + j], fb.decay, r0));
-                    rows.push(row(&|j| t[(r, j)], &|j| tl[(r, j)], beta, &kappa, fb.decay));
-                }
-            }
-        }
-        ring(&rows, gamma, kept / total)
     }
 
     /// The left response's count at the last forward not yet taken (complex multiply-adds; `Fold::prototype_left`): a

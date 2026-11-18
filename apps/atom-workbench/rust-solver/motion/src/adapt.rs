@@ -105,22 +105,40 @@ use crate::random::Stream;
 use crate::step::{test_loss, Brownian, Domain, Dynamics, Midway, Refused, Scratch, Segment, Trajectory};
 use crate::units::rounding;
 
-/// PROTOTYPE switch (fixed representation): `ATOM_PROTO_DECIDE=start` -- the decision times refresh the decompositions
-/// alone; the representation does not move by price (model/fold/run.rs `Middle::decide`).
-/// PROTOTYPE counters: steps taken, steps refused and halved, decisions made and their time (ns), the states held at
-/// the decisions (sum), the time in steps (ns); a line to stderr at each power of two of the steps from 4096.
-pub(crate) static PC: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
-pub(crate) fn pc_add(i: usize, x: u64) {
-    let n = PC[i].fetch_add(x, std::sync::atomic::Ordering::Relaxed) + x;
-    if i == 0 && n >= 4096 && n.is_power_of_two() {
-        let g = |k: usize| PC[k].load(std::sync::atomic::Ordering::Relaxed);
-        let d = g(2).max(1);
-        eprintln!("proto: steps {n}, halved {}, decisions {} ({:.1} us each, {:.1} states), step time {:.1} us each", g(1), g(2), 1e-3 * g(3) as f64 / d as f64, g(4) as f64 / d as f64, 1e-3 * g(5) as f64 / n as f64);
-    }
+/// The run's counts, said at the solve's end (`tally`; FOLDAPI §3: the safety net counts, never changes the
+/// representation): the steps taken and refused, the decisions made with their time (ns) and the states they held (sum),
+/// the time in steps (ns), the decisions' readings beyond the share and the folds that did not exist at a decision.
+static COUNTS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+pub(crate) const STEPS: usize = 0;
+pub(crate) const REFUSED: usize = 1;
+pub(crate) const DECISIONS: usize = 2;
+pub(crate) const DECIDING: usize = 3;
+pub(crate) const STATES: usize = 4;
+pub(crate) const STEPPING: usize = 5;
+pub(crate) const BEYOND: usize = 6;
+pub(crate) const ABSENT: usize = 7;
+
+/// Adds x to count i (`COUNTS`).
+pub(crate) fn count(i: usize, x: u64) {
+    COUNTS[i].fetch_add(x, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub(crate) static START_ONLY: std::sync::LazyLock<bool> =
-    std::sync::LazyLock::new(|| std::env::var("ATOM_PROTO_DECIDE").map(|v| v == "start").unwrap_or(false));
+/// The counts since the last tally as one line, and set to zero (the solve's end; a solve at a time in a process).
+pub(crate) fn tally() -> String {
+    let g: Vec<u64> = COUNTS.iter().map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed)).collect();
+    let (steps, decisions) = (g[STEPS].max(1), g[DECISIONS].max(1));
+    format!(
+        "运行计数：步 {}（拒 {}），每步 {:.1} µs；格端决定 {}（每次 {:.1} µs，平均 {:.1} 态）；格端读数超份额 {} 次，格端折叠不存在 {} 次",
+        g[STEPS],
+        g[REFUSED],
+        1e-3 * g[STEPPING] as f64 / steps as f64,
+        g[DECISIONS],
+        1e-3 * g[DECIDING] as f64 / decisions as f64,
+        g[STATES] as f64 / decisions as f64,
+        g[BEYOND],
+        g[ABSENT]
+    )
+}
 
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
 /// path's part from that time to the bin's end.
@@ -274,8 +292,8 @@ pub fn advance<D: Dynamics>(
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
             let clock = std::time::Instant::now();
             let tried = Midway::new(model, trajectory, length, decision).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain));
-            pc_add(5, clock.elapsed().as_nanos() as u64);
-            if tried.is_ok() { pc_add(0, 1) } else { pc_add(1, 1) }
+            count(STEPPING, clock.elapsed().as_nanos() as u64);
+            count(if tried.is_ok() { STEPS } else { REFUSED }, 1);
             match tried {
                 Ok(step) => break (step, end, beyond),
                 Err(refusal @ (Refused::Emission | Refused::Runaway | Refused::Optical(_))) => return Err(refusal),
