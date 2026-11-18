@@ -245,26 +245,37 @@ pub(crate) struct Choice {
     pub(crate) toned: Vec<Term>,
 }
 
-/// A term the start's decision keeps beyond the share (decide.rs # The terms), by a key no decision changes: an entry of
-/// P between two states of different frames (the states, the lesser first: a ground pair's static coupling, or two
-/// explicit excited states'), a tone; an explicit excited state's copy at a block's offset (the state, the offset), its
-/// drive there a tone of P and no row of the block; two blocks' cross decay (their offsets, the lesser first), a tone.
+/// A term the start's decision keeps beyond the share (decide.rs # The terms), of one ground set's fold (its first, least,
+/// ground state: every set has P of its own, an explicit state and an offset its own too) by a key no decision changes:
+/// an entry of P between two states of different frames (the states, the lesser first: a ground pair's static coupling,
+/// or two explicit excited states'), a tone; an explicit excited state's copy at a block's offset (the state, the
+/// offset), its drive there a tone of P and no row of the block; two blocks' cross decay (their offsets, the lesser
+/// first), a tone.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Term {
-    Pair(usize, usize),
-    Drive(usize, Beat),
-    Cross(Beat, Beat),
+    Pair(usize, usize, usize),
+    Drive(usize, usize, Beat),
+    Cross(usize, Beat, Beat),
 }
 
 impl Term {
-    /// The entry of the states s and t.
-    pub(crate) fn pair(s: usize, t: usize) -> Term {
-        Term::Pair(s.min(t), s.max(t))
+    /// The entry of the states s and t in the set of first ground state `set`.
+    pub(crate) fn pair(set: usize, s: usize, t: usize) -> Term {
+        Term::Pair(set, s.min(t), s.max(t))
     }
 
-    /// The cross decay of the blocks at the offsets a and b.
-    pub(crate) fn cross(a: &Beat, b: &Beat) -> Term {
-        if a <= b { Term::Cross(a.clone(), b.clone()) } else { Term::Cross(b.clone(), a.clone()) }
+    /// The cross decay of the blocks at the offsets a and b in the set of first ground state `set`.
+    pub(crate) fn cross(set: usize, a: &Beat, b: &Beat) -> Term {
+        if a <= b { Term::Cross(set, a.clone(), b.clone()) } else { Term::Cross(set, b.clone(), a.clone()) }
+    }
+
+    /// The same term in the set of first ground state `set` (a set merged into a larger one, decide.rs `restructure`).
+    pub(crate) fn in_set(&self, set: usize) -> Term {
+        match self {
+            Term::Pair(_, s, t) => Term::Pair(set, *s, *t),
+            Term::Drive(_, x, o) => Term::Drive(set, *x, o.clone()),
+            Term::Cross(_, a, b) => Term::Cross(set, a.clone(), b.clone()),
+        }
     }
 }
 
@@ -687,7 +698,7 @@ impl Fold {
         // (`Term::Pair`, the start's decision's); any other is averaged and folded.
         let n = ground.len() + explicit.len();
         let state = |p: usize| if p < ng { ground[p] } else { GROUND + explicit[p - ng] };
-        let kept = |s: usize, t: usize| choice.toned.contains(&Term::pair(s, t));
+        let kept = |s: usize, t: usize| choice.toned.contains(&Term::pair(ground[0], s, t));
         let turning: Vec<bool> = (0..n * n)
             .map(|x| {
                 let (p, q) = (x / n, x % n);
@@ -736,7 +747,7 @@ impl Fold {
             // block neither holds it nor reaches through it; else the copy is a Q row of the block, folded with its light
             // shift, its gradient and its reading (losschk.status.md: the tweezer's far drive of tilt0's explicit F' = 3,
             // a third of the trap's force, was lost as an averaged entry).
-            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x) && choice.toned.contains(&Term::Drive(x, offset.clone()));
+            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x) && choice.toned.contains(&Term::Drive(ground[0], x, offset.clone()));
             for x in (0..EXCITED).filter(|&x| foreign(x)) {
                 driven.push((x, offset.clone()));
             }
@@ -807,7 +818,7 @@ impl Fold {
         // The cross decays that are not zero, and those the choice keeps (module documentation, # Tones).
         let crossing = Fold::crossing(request, &components, ground, &explicit, &blocks);
         let nb = blocks.len();
-        let beats: Vec<bool> = (0..nb * nb).map(|x| crossing[x] && choice.toned.contains(&Term::cross(&blocks[x / nb].offset, &blocks[x % nb].offset))).collect();
+        let beats: Vec<bool> = (0..nb * nb).map(|x| crossing[x] && choice.toned.contains(&Term::cross(ground[0], &blocks[x / nb].offset, &blocks[x % nb].offset))).collect();
         // The outside forms' entries that are not zero, of the states the fold uses (every ground state; the excited states a
         // block solves or a place holds) and of the others.
         let mut used = [true; STATES];

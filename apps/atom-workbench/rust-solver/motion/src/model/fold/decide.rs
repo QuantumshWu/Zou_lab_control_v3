@@ -421,6 +421,7 @@ fn mixing(fold: &Fold, site: &super::Site, dressed: &Dressed, b: &super::Block, 
 /// Every term of a set's fold at a point (module documentation, # The terms), its light the fold's `local` and its
 /// momentum `kappa`, with its reading (rate units): one entry per term, the largest where two name one.
 pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
+    let set = fold.ground[0];
     let mut work = 0.0;
     let site = fold.site([0.0; 3], kappa, &mut work);
     let (ng, n) = (fold.ground.len(), fold.size());
@@ -442,11 +443,11 @@ pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
     for p in 0..n {
         for q in (p + 1..n).filter(|&q| (p < ng) == (q < ng) && fold.frames[p] != fold.frames[q]) {
             if p < ng {
-                add(Term::pair(fold.ground[p], fold.ground[q]), ground_pair(fold.ground[p], fold.ground[q]));
+                add(Term::pair(set, fold.ground[p], fold.ground[q]), ground_pair(fold.ground[p], fold.ground[q]));
             } else {
                 let (x, y) = (fold.explicit[p - ng], fold.explicit[q - ng]);
                 let a = fold.hermitian_excited(&site.excited, p, q).abs() + 0.5 * decay(x, y).abs();
-                add(Term::pair(GROUND + x, GROUND + y), a / (site.excited[(x, x)].re - site.excited[(y, y)].re).abs());
+                add(Term::pair(set, GROUND + x, GROUND + y), a / (site.excited[(x, x)].re - site.excited[(y, y)].re).abs());
             }
         }
     }
@@ -456,7 +457,7 @@ pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
             if let super::Row::Copy { state, component } = *r {
                 let omega = b.offset.plus(-1, &fold.components[component].beat);
                 for p in (0..ng).filter(|&p| fold.frames[p] == omega && fold.ground[p] != state) {
-                    add(Term::pair(state, fold.ground[p]), ground_pair(state, fold.ground[p]));
+                    add(Term::pair(set, state, fold.ground[p]), ground_pair(state, fold.ground[p]));
                 }
             }
         }
@@ -468,7 +469,7 @@ pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
     for b in &fold.blocks {
         for (j, &x) in fold.explicit.iter().enumerate().filter(|(j, _)| fold.frames[ng + j] != b.offset) {
             let _ = j;
-            add(Term::Drive(x, b.offset.clone()), mixing(b, x));
+            add(Term::Drive(set, x, b.offset.clone()), mixing(b, x));
         }
     }
     // Two blocks' cross decay.
@@ -484,7 +485,7 @@ pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
     for i in 0..nb {
         for j in (i + 1..nb).filter(|&j| fold.crossing[i * nb + j]) {
             let a = 0.5 * landing[i].iter().zip(&landing[j]).map(|(x, y)| x * y).sum::<f64>();
-            add(Term::cross(&fold.blocks[i].offset, &fold.blocks[j].offset), a / (fold.blocks[i].value - fold.blocks[j].value).abs());
+            add(Term::cross(set, &fold.blocks[i].offset, &fold.blocks[j].offset), a / (fold.blocks[i].value - fold.blocks[j].value).abs());
         }
     }
     out
@@ -1214,11 +1215,11 @@ impl<'a> Search<'a> {
                 let mut nodes: Vec<Key> = parts.iter().flat_map(|d| d.nodes.iter().copied()).collect();
                 nodes.sort();
                 nodes.dedup();
-                let mut toned: Vec<Term> = parts.iter().flat_map(|d| d.toned.iter().cloned()).filter(|t| still || matches!(t, Term::Pair(..))).collect();
+                let mut toned: Vec<Term> = parts.iter().flat_map(|d| d.toned.iter().map(|t| t.in_set(g[0]))).filter(|t| still || matches!(t, Term::Pair(..))).collect();
                 toned.sort();
                 toned.dedup();
                 let refused = parts.iter().flat_map(|d| d.refused.iter().copied()).collect();
-                let refused_terms = parts.iter().flat_map(|d| d.refused_terms.iter().cloned()).filter(|t| still || matches!(t.0, Term::Pair(..))).collect();
+                let refused_terms = parts.iter().flat_map(|d| d.refused_terms.iter().map(|t| (t.0.in_set(g[0]), t.1))).filter(|t| still || matches!(t.0, Term::Pair(..))).collect();
                 SetDecision { ground: g.clone(), nodes, toned, refused, refused_terms, ..SetDecision::default() }
             })
             .collect();
