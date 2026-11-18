@@ -59,7 +59,15 @@
 //!   beyond: its drive a tone of P, no row of the block;
 //! - two blocks' cross decay (`Term::Cross`): a = ½ Σ_q Σ_s l_o l_o′, each block's landing amplitude at the point,
 //!   l_o(q, s) = Σ_x |C_q[s, x]| e_o(x), e_o(x) = Σ |f_l X_l[x, s_p]| over the same optical detuning (an explicit row
-//!   one), Δ = |o − o′|; beyond: a tone.
+//!   one), Δ = |o − o′|; beyond: a tone;
+//! - one physical excited state's two nodes (`same`; 项清单完成 I item 3): its explicit place, if a node holds it, and its
+//!   Q rows of the blocks, two at a time, m = e_o e_o′ -- an explicit place's e one, a Q row's its mixing by its block's
+//!   sources at its optical detuning, as `Term::Drive` reads it --: the metric's cross term of the two Floquet nodes of
+//!   one state, turning at o − o′ (its size ‖ε_o‖ ‖ε_o′‖, in the static metric's gauge the Hamiltonian cross term's
+//!   a/|Δ|: dragchk (B1)). With the explicit place it is the drive (`Term::Drive`): one rule, two faces. Of two Q rows,
+//!   beyond the share the state goes into P once -- the node of its level at the block of the larger row -- and its
+//!   other rows are drives from then on; within it the pair is averaged out (M8). A node holds the states its offset
+//!   drives that no node holds already (fold.rs `Fold::build`): one state, one place.
 //! The terms are read on the light alone, before the forward: where a point asks for a term, it asks for no node in that
 //! round (the forward is read on the decision with it).
 //!
@@ -324,6 +332,92 @@ pub(crate) fn focus(request: &Request) -> Result<Choice, String> {
     skeleton_at(request, &Local::focus(&Light::new(request)))
 }
 
+/// One physical excited state's two Q rows (module documentation, # The terms: the same state's nodes) at a point, read as
+/// `terms` reads: per state no node holds, per two blocks whose rows it is, m = e_o e_o′ -- each row's mixing by its
+/// block's sources at its optical detuning (`Term::Drive`'s, an explicit place's one) --, with the block of the larger
+/// (the earlier of two equal), where its reading is beyond the share: (state, block, reading).
+pub(crate) fn same(fold: &Fold, kappa: [f64; 3]) -> Vec<(usize, usize, f64)> {
+    let mut work = 0.0;
+    let site = fold.site([0.0; 3], kappa, &mut work);
+    let dressed = dressed(fold, &site);
+    let share = crate::model::elim::share();
+    let mut out = vec![];
+    for x in (0..EXCITED).filter(|x| !fold.explicit.contains(x)) {
+        let rows: Vec<(usize, f64)> = fold.blocks.iter().enumerate().filter(|(_, b)| b.rows.contains(&super::Row::Excited(x))).map(|(o, b)| (o, mixing(fold, &site, &dressed, b, x))).filter(|r| r.1 > 0.0).collect();
+        let mut most: Option<(usize, f64)> = None;
+        for (i, &(oa, ea)) in rows.iter().enumerate() {
+            for &(ob, eb) in &rows[i + 1..] {
+                let r = reading(ea * eb);
+                if r > share && most.is_none_or(|m| r > m.1) {
+                    most = Some((if eb > ea { ob } else { oa }, r));
+                }
+            }
+        }
+        if let Some((o, r)) = most {
+            out.push((x, o, r));
+        }
+    }
+    out
+}
+
+/// P's static generator at a point, Ĥ_PP(r) (`Fold::p_matrix`: the ground places' H_GG(r) of one frame, every block's
+/// part -- the explicit states' 𝒦(r) and their drives at their own offsets), decomposed: the columns' energies λ_j and
+/// their eigenvectors U_j (unit norm) -- what an explicit state's drive dresses its ground places with (Autler–Townes).
+/// Where it has no eigenbasis, its diagonal (the places' own energies).
+pub(crate) struct Dressed {
+    values: Vec<C64>,
+    vectors: crate::linalg::Mat,
+}
+
+fn dressed(fold: &Fold, site: &super::Site) -> Dressed {
+    let mut work = 0.0;
+    let laid: Vec<super::Laid> = (0..fold.blocks.len()).map(|o| fold.lay(o, site, &mut work)).collect();
+    let h = fold.p_matrix(site, &laid);
+    let n = h.rows;
+    let mut eigen = crate::linalg::Eigen::default();
+    if eigen.decompose(&h) {
+        let mut vectors = eigen.vectors.clone();
+        for j in 0..n {
+            let norm = (0..n).map(|i| vectors[(i, j)].norm_sqr()).sum::<f64>().sqrt();
+            if norm > 0.0 {
+                (0..n).for_each(|i| vectors[(i, j)] = vectors[(i, j)] * (1.0 / norm));
+            }
+        }
+        Dressed { values: eigen.values.clone(), vectors }
+    } else {
+        Dressed { values: (0..n).map(|i| h[(i, i)]).collect(), vectors: crate::linalg::Mat::from_fn(n, n, |i, j| if i == j { C64::ONE } else { C64::ZERO }) }
+    }
+}
+
+/// A block's sources' mixing of an excited state at a point (`Term::Drive`'s, # The terms): the state's row of the
+/// block's response per unit column, in closed form -- per column j of P's generator at the point (`Dressed`: its
+/// energy λ_j, its eigenvector U_j) and beam l of a source's component c, |Σ_p f_l X_l[x, s_p] U_pj| over its mismatch
+/// |λ_j − w_l − (𝒦_xx(r) − o)| (the Sylvester equation's, column by column: the copy's optical detuning from the
+/// column's dressed energy, light shifts, Doppler and −iΓ/2), summed. Undressed (P's ground places alone) it is
+/// Σ |f_l X_l[x, s]| / |H_ss(r) + ν_c − 𝒦_xx(r) − w_l|; dressed, an explicit state's Autler–Townes pair of a ground
+/// place can sit within Γ of a copy of that very state at another offset a Zeeman beat away (tilt2).
+fn mixing(fold: &Fold, site: &super::Site, dressed: &Dressed, b: &super::Block, x: usize) -> f64 {
+    let n = dressed.values.len();
+    let mut m = 0.0;
+    let row = site.excited[(x, x)] - C64::real(b.value);
+    for &(p, c) in &b.sources {
+        let (s, comp) = (fold.ground[p], &fold.components[c]);
+        for (j, (&l, coupling)) in comp.beams.iter().zip(&comp.couplings).enumerate() {
+            let a = comp.factor(site.a[l].value) * coupling[(x, s)];
+            if a == C64::ZERO {
+                continue;
+            }
+            for col in 0..n {
+                let u = dressed.vectors[(p, col)];
+                if u != C64::ZERO {
+                    m += (a * u).abs() / (dressed.values[col] - C64::real(site.doppler[c][j]) - row).abs();
+                }
+            }
+        }
+    }
+    m
+}
+
 /// Every term of a set's fold at a point (module documentation, # The terms), its light the fold's `local` and its
 /// momentum `kappa`, with its reading (rate units): one entry per term, the largest where two name one.
 pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
@@ -368,19 +462,8 @@ pub(crate) fn terms(fold: &Fold, kappa: [f64; 3]) -> Vec<(Term, f64)> {
         }
     }
     // A block's sources' mixing of each excited state, per beam at its optical detuning there.
-    let mixing = |b: &super::Block, x: usize| -> f64 {
-        let mut m = 0.0;
-        for &(p, c) in &b.sources {
-            let (s, comp) = (fold.ground[p], &fold.components[c]);
-            for (j, (&l, coupling)) in comp.beams.iter().zip(&comp.couplings).enumerate() {
-                let a = (comp.factor(site.a[l].value) * coupling[(x, s)]).abs();
-                if a > 0.0 {
-                    m += a / (crate::linalg::C64::real(site.ground[(s, s)].re + comp.nu - site.doppler[c][j]) - site.excited[(x, x)]).abs();
-                }
-            }
-        }
-        m
-    };
+    let dressed = dressed(fold, &site);
+    let mixing = |b: &super::Block, x: usize| -> f64 { mixing(fold, &site, &dressed, b, x) };
     // An explicit state's copy at another block's offset.
     for b in &fold.blocks {
         for (j, &x) in fold.explicit.iter().enumerate().filter(|(j, _)| fold.frames[ng + j] != b.offset) {
@@ -838,6 +921,14 @@ impl<'a> Search<'a> {
         if !asks.is_empty() {
             return Asked::Terms(asks);
         }
+        // One physical state's two Q rows beyond the share (module documentation, # The terms: the same state's nodes):
+        // the state into P once, at the block of the larger row, its node the level's there.
+        for (x, o, _) in same(fold, local.kappa) {
+            let level = fold.excited_level[x];
+            if let Some(c) = candidates.iter().find(|c| c.1.block == o && fold.blocks[o].rows.iter().enumerate().any(|(r, row)| *row == super::Row::Excited(x) && c.1.rows.contains(&r)) && c.0 .0 == level) {
+                return Asked::Node(c.0);
+            }
+        }
         ws.cell = Cell { nodes: candidates.iter().map(|c| c.1.clone()).collect(), here: true, ..Cell::default() };
         let mut cache = Cache::default();
         let step = fold.prototype([0.0; 3], local.kappa, self.floor, &mut cache, ws).map(|s| (s.reading, s.beyond));
@@ -1254,6 +1345,79 @@ impl<'a> Search<'a> {
 #[cfg(test)]
 mod tests {
     use super::Sobol;
+
+    /// Diagnostic (项清单完成 I item 3; DECIDE_REQ a request's path): the decision made as the run makes it, then per set
+    /// its points that end beyond the share with no node offered or with no fold, each read again with every level's
+    /// rows of every block offered to the walk (its states explicit elsewhere too): what the walk would raise -- the
+    /// block's offset, the level, its rows' states and which of them a node holds elsewhere --, the same-state readings
+    /// (`same`) and the forward's cross reading there.
+    #[test]
+    #[ignore]
+    fn the_points_with_no_node_read() {
+        use super::*;
+        let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
+        let light = Light::new(&req);
+        let initial = crate::solve::components(&req);
+        let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+        let reference = crate::solve::alone(initial[chief].0);
+        let hbar_over_mass = crate::units::hbar_over_mass(req.mass_kg);
+        let states = super::super::run::Reference::states(&req, &light).unwrap();
+        let (floor, bottom) = super::super::run::Onefold::scales(&light, hbar_over_mass, &super::super::run::Reference::of(&states, &reference));
+        let mut search = Search::new(&req, &light, floor, (2.0 * (-bottom).max(0.0) / hbar_over_mass).sqrt()).unwrap();
+        let decision = search.decide().unwrap();
+        for (k, set) in decision.sets.iter().enumerate() {
+            let built = search.built(k, &(set.nodes.clone(), set.toned.clone())).unwrap();
+            let fold0 = &built.fold;
+            let mut wanted: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut count = 0;
+            for (i, local) in search.seen.iter().enumerate() {
+                let row = &search.rows[i];
+                if row.len() <= k || !(row[k].1 || row[k].3) {
+                    continue;
+                }
+                count += 1;
+                let mut fold = fold0.clone();
+                fold.local = local.factors(&light);
+                let mut ws = fold.prototype_workspace().unwrap();
+                // Every level's rows of every block offered.
+                let mut nodes: Vec<(usize, usize, Vec<usize>)> = vec![];
+                for (o, b) in fold.blocks.iter().enumerate() {
+                    for (r, rw) in b.rows.iter().enumerate() {
+                        if let super::super::Row::Excited(x) = *rw {
+                            let level = fold.excited_level[x];
+                            match nodes.iter_mut().find(|n| n.0 == o && n.1 == level) {
+                                Some(n) => n.2.push(r),
+                                None => nodes.push((o, level, vec![r])),
+                            }
+                        }
+                    }
+                }
+                ws.cell = Cell { nodes: nodes.iter().map(|n| Taken { block: n.0, rows: n.2.clone() }).collect(), here: true, ..Cell::default() };
+                let mut cache = Cache::default();
+                let step = fold.prototype([0.0; 3], local.kappa, search.floor, &mut cache, &mut ws).map(|s| s.beyond);
+                let mut chosen = ws.cell.chosen;
+                if step.is_some() && chosen.is_none() && !fold.prototype_left(&cache, &mut ws) {
+                    chosen = ws.attributed(&cache);
+                }
+                let cross = if step.is_some() { crossed(&fold, &cache, &ws) } else { f64::NAN };
+                let same_read: Vec<String> = same(&fold, local.kappa).iter().map(|x| format!("x{} b{} {:.2e}", x.0, x.1, x.2)).collect();
+                let what = match chosen {
+                    Some(c) => {
+                        let (o, level, rows) = &nodes[c];
+                        let b = &fold.blocks[*o];
+                        let xs: Vec<String> = rows.iter().map(|&r| if let super::super::Row::Excited(x) = b.rows[r] { format!("{x}{}", if fold.explicit.contains(&x) { "*" } else { "" }) } else { String::new() }).collect();
+                        format!("block {:.3} level {level} rows {xs:?}", b.value)
+                    }
+                    None => "none".into(),
+                };
+                *wanted.entry(what.clone()).or_insert(0) += 1;
+                if count <= 6 {
+                    println!("set {k} point s {:.3} v {:?}: {} {}; the walk raises {what}; same {same_read:?}; cross {cross:.2e}", local.s, local.kappa, if row[k].3 { "no fold" } else { "beyond" }, row[k].0, );
+                }
+            }
+            println!("set {k} {:?}: {count} points; explicit {:?} at {:?}; wanted {wanted:?}", set.ground, fold0.explicit, fold0.frame_values[fold0.ground.len()..].to_vec());
+        }
+    }
 
     /// Every dimension's first 2^m points take each of the 2^m intervals once (its generator's leading m × m block unit
     /// upper triangular), and every pair of the first eight dimensions' first 2^(2m+4) points each of the 2^m × 2^m

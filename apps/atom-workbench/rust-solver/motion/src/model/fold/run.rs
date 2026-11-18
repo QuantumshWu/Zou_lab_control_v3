@@ -377,7 +377,7 @@ impl Onefold {
 
     /// The potential channel's floor, k_B T_sc (unify2 §2.1; estimate.rs `semiclassical`): the larger of 30 recoils at the
     /// beams' mean k² and the reference's zero point ħω̄/2 at the focus; and the reference's value there (rad/µs).
-    fn scales(light: &Light, hbar_over_mass: f64, reference: &Reference) -> (f64, f64) {
+    pub(super) fn scales(light: &Light, hbar_over_mass: f64, reference: &Reference) -> (f64, f64) {
         let k2 = light.beams.iter().map(|b| b.wave_number * b.wave_number).sum::<f64>() / light.beams.len().max(1) as f64;
         let at = reference.at(light, [0.0; 3]);
         let zero_point = (0..3).map(|a| (hbar_over_mass * at.hessian[a][a]).max(0.0).sqrt()).sum::<f64>() / 6.0;

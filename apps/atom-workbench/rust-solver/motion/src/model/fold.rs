@@ -429,24 +429,19 @@ impl Choice {
 
     /// The excited nodes of a fold that may be kept in P (DESIGN §11.1): per block with sources, each excited level among
     /// its Q rows -- its key (level, the absorbed component's part, its first source's ground state; `Choice::explicit`)
-    /// with the block and its rows -- where it can be placed: a node holds its level's states its offset drives
-    /// (`Fold::build`), and one of them explicit at another offset makes it no node. Its drive there is not P's to choose:
-    /// the one rule reads it (`Fold::build`, `toned`; FOLDAPI §2), and a point whose reading it leaves beyond the share has
-    /// no node to raise there.
+    /// with the block and its rows of states no node holds -- where the node would hold one (`Fold::build`: a node holds
+    /// its level's states its offset drives that no other node holds). A state another node holds is not this node's to
+    /// raise: its copy here is the one rule's (`Fold::build`, `toned`; FOLDAPI §2).
     pub(crate) fn candidates(fold: &Fold) -> Vec<((usize, Part, usize), usize, Vec<usize>)> {
-        let ng = fold.ground.len();
-        let placed = |b: &Block, level: usize| {
-            (0..EXCITED).filter(|&x| fold.excited_level[x] == level).all(|x| {
-                let held = b.sources.iter().any(|&(p, c)| fold.components[c].couplings.iter().any(|m| m[(x, fold.ground[p])] != C64::ZERO));
-                !held || fold.explicit.iter().position(|&y| y == x).is_none_or(|j| fold.frames[ng + j] == b.offset)
-            })
+        let holds = |b: &Block, level: usize| {
+            (0..EXCITED).filter(|&x| fold.excited_level[x] == level && !fold.explicit.contains(&x)).any(|x| b.sources.iter().any(|&(p, c)| fold.components[c].couplings.iter().any(|m| m[(x, fold.ground[p])] != C64::ZERO)))
         };
         let mut out: Vec<((usize, Part, usize), usize, Vec<usize>)> = vec![];
         for (o, b) in fold.blocks.iter().enumerate() {
             let Some(&(p, c)) = b.sources.first() else { continue };
             for (r, row) in b.rows.iter().enumerate() {
                 let Row::Excited(x) = *row else { continue };
-                if !placed(b, fold.excited_level[x]) {
+                if fold.explicit.contains(&x) || !holds(b, fold.excited_level[x]) {
                     continue;
                 }
                 let key = (fold.excited_level[x], fold.components[c].part, fold.ground[p]);
@@ -672,22 +667,18 @@ impl Fold {
         // level's states that offset drives (`driven_at`), each at the node's offset -- not the level's other states, which
         // other offsets drive (tilt0's F' = 3 m′ at the PGC's offset from m′ + 1, a Zeeman beat apart one from the next:
         // the level whole at one offset made its drives from the other ground states strong tones of a near-resonant
-        // transition and its states Q rows of their own blocks besides). One excited state is one place at one frame:
-        // a node whose offset would hold a state explicit at another is refused (its drive there is read by the one rule,
-        // `toned` below; the start's decision does not offer it, `Choice::candidates`); a node another key names again
-        // adds nothing.
+        // transition and its states Q rows of their own blocks besides). One excited state is one place at one frame
+        // (项清单完成 I item 3): a node holds the states its offset drives that no node before it (the choice's order)
+        // holds; a state another node holds is that node's, and its copy at this offset is the one rule's (`toned` below:
+        // the start's decision's `Term::Drive`, a tone beyond the share, a Q row of this block within it).
         let mut explicit = vec![];
         for &(level, part, source) in choice.explicit.iter().filter(|x| ground.contains(&x.2)) {
             let offset = state_frames[source].plus(1, &components[find(part)?].beat);
             let held = driven_at(&offset);
-            for x in (0..EXCITED).filter(|&x| excited_level[x] == level && held[x]) {
-                match explicit.iter().position(|&y| y == x) {
-                    Some(j) if frames[ng + j] == offset => {}
-                    Some(_) => return Err("一个激发态只能在一个偏移上显式".into()),
-                    None => {
-                        explicit.push(x);
-                        frames.push(offset.clone());
-                    }
+            for x in 0..EXCITED {
+                if excited_level[x] == level && held[x] && !explicit.contains(&x) {
+                    explicit.push(x);
+                    frames.push(offset.clone());
                 }
             }
         }
