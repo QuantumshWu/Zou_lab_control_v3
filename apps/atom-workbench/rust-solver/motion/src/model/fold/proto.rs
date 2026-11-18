@@ -2,7 +2,7 @@
 //! the Doppler shifts on the diagonal and the energy's self-consistency by a series (the first road's minimal prototype,
 //! BRIEF_PROTO.md; not the run's, the forward alone). The same object as `Fold::at` on the same choice of nodes, with every
 //! excited row of a block that solves any row solved (a centred excited row there costs a mode, not a pass); `Fold::at`
-//! is the truth of its tests. `Fold::at` and `Fold::step` are not touched.
+//! is the truth of its tests. `Fold::at` is not touched.
 //!
 //! # The far coordinates
 //! Every frequency's field at a point on its basis, ε_k = u_k†F (field.rs `Frequency::components`). The outside forms are
@@ -525,6 +525,8 @@ struct NearBasis {
     copies: Vec<Vec<C64>>,
     z0: f64,
     r0: f64,
+    /// The centred rows' matrix Ĥ_CC on its Schur form (`Centre`): the centring's estimate.
+    centre: Centre,
     /// Per term V†N_tV on the parts' entries (s × s, zero across parts: the tangent's ∂K̃); the emission on the block's rows
     /// C_qV, the axes stacked by rows (b, q) at 3b + q (3 GROUND × s: the jumps and the photons, one product).
     within: Vec<C64>,
@@ -572,6 +574,8 @@ struct FarBasis {
     resolvent: Mat,
     z0: f64,
     r0: f64,
+    /// Its rows' matrix on its Schur form (`Centre`): the centring's estimate.
+    centre: Centre,
     /// Per source vector and emission axis C_qR₀U_a, stacked by rows (b, a, q) at (b·v + a)·3 + q (3 GROUND·v × n): the
     /// jumps and the photons, one product a run of ground states.
     emitted: Vec<C64>,
@@ -744,6 +748,21 @@ impl Item {
     }
 }
 
+/// An approximation of a held forward taken out (`Fold::prototype_without`, the readings' test): none, a series part swept
+/// further, a near block made again at the point, a level a near block leaves out joined, a far block left out taken in,
+/// or all of them (every near block made again at the point with every level, every far block's R₀ made there -- but the
+/// one named, held -- and in, every part swept further).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Without {
+    Nothing,
+    Part(usize, usize),
+    Remade(usize),
+    Level(usize, usize),
+    In(usize),
+    All(Option<usize>),
+}
+
 /// One account of a decision (unify2 §2.1): per column its ρ² -- the rate channel |δT|²/W_j, the potential channel
 /// unrate(|δV|/2E)² --, and whether the evaluation holds it (an alternative it may take is read with it: a far block's
 /// centring and the block left out).
@@ -766,33 +785,55 @@ fn part_of(nb: &Near, basis: &NearBasis, i: usize) -> usize {
 }
 
 /// A series part's account at p sweeps (unify2 §2.2, §2.4), the rows swept `done` times at the decision (two at the least):
-/// per column read the rest after its p-th sweep, Σ_k>p Δ_k -- the next change where it was made, Δ_p/(1 − r) with r =
-/// Δ_p/Δ_{p−1}, else the last one's geometric tail, Δ_{K−1} r^{p−K+1}/(1 − r) with r = Δ_{K−1}/Δ_{K−2} (K = `done`) -- on
-/// the rate channel against W_j (`den`); none within the rows' rounding (`ratio_of`). ∞ where r reaches one (a part at its
-/// first sweep's order reads its second change against its first: the decision sweeps every part twice at the least).
+/// per column the rest after its p-th sweep, Σ_k≥p Δ_k, an estimate
+/// -- the changes made, Δ_p … Δ_{K−1} (K = `done`), summed, and their geometric tail Δ_{K−1} r/(1 − r) on the last ratio
+/// r = Δ_{K−1}/Δ_{K−2}; past the changes made the tail alone, Δ_{K−1} r^{p−K+1}/(1 − r) -- on the rate channel against W_j
+/// (`den`); none within the rows' rounding. A part whose changes start at its last one (reached late, through the Bloch
+/// generator: an explicit column's, an exact copies' block's) takes the whole series' ratio `whole`, the others' that
+/// drive it (it read nothing before: readings.status.md). ∞ where r reaches one.
 /// No potential channel: the compression A = Ψ†HΨ is stationary in the response about the exact one where the block is
 /// Hermitian -- a truncation's δZ moves the diagonal of G at second order, and with the decay D at first by Im(Z†DδZ)
 /// alone (said, not read: unify2 §2.1 reads 2Re(V†δT), the Bloch generator's; to be settled with U5).
 #[allow(clippy::too_many_arguments)]
-fn series_squares(nb: &Near, np: usize, part: usize, p: usize, done: usize, den: &[f64], floor: f64, n: usize, out: &mut [f64]) {
-    let (k, power) = if p < done { (p, 0) } else { (done - 1, (p + 1 - done) as i32) };
-    let r = ratio_of(nb, np, part, k, den, n);
+fn series_squares(nb: &Near, np: usize, part: usize, p: usize, done: usize, den: &[f64], floor: f64, n: usize, whole: f64, out: &mut [f64]) {
+    let last = done - 1;
+    let change = |k: usize, j: usize| nb.hist[(k * np + part) * n + j];
+    let (a, b) = (0..n).fold((0.0, 0.0), |(a, b), j| (a + change(last, j), b + if last > 0 { change(last - 1, j) } else { 0.0 }));
+    let r = if a == 0.0 || rounded(a, den.iter().sum(), n, nb.s, nb.lanes) { 0.0 } else if b == 0.0 { whole } else { (a / b).sqrt() };
     for j in 0..n {
         out[j] = 0.0;
         if den[j] <= floor {
             continue;
         }
-        let last = nb.hist[(k * np + part) * n + j];
-        if r == 0.0 || last == 0.0 {
-            continue;
-        }
-        if r >= 1.0 {
+        let made: f64 = (p.min(done)..done).map(|k| change(k, j).sqrt()).sum();
+        let tail = change(last, j).sqrt();
+        if r >= 1.0 && tail > 0.0 {
             out[j] = f64::INFINITY;
             continue;
         }
-        let size = last * (r.powi(power) / (1.0 - r)).powi(2);
-        out[j] = if rounded(size, den[j], n, nb.s, nb.lanes) { 0.0 } else { size / den[j] };
+        let rest = made + if tail > 0.0 { tail * if p < done { r } else { r.powi((p + 1 - done) as i32) } / (1.0 - r) } else { 0.0 };
+        let size = rest * rest;
+        out[j] = if size == 0.0 || rounded(size, den[j], n, nb.s, nb.lanes) { 0.0 } else { size / den[j] };
     }
+}
+
+/// The whole series' ratio at sweep `done` − 1: every near block's parts' changes summed, against the sweep before's
+/// (`series_squares`: a part that starts late takes it); none where the series had no change before.
+fn whole_ratio(near: &[Near], cache: &Cache, done: usize, n: usize) -> f64 {
+    if done < 2 {
+        return 0.0;
+    }
+    let (mut a, mut b) = (0.0, 0.0);
+    for (x, nb) in near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
+        let np = series_parts(nb, cache.near_at(x));
+        for part in 0..np {
+            for j in 0..n {
+                a += nb.hist[((done - 1) * np + part) * n + j];
+                b += nb.hist[((done - 2) * np + part) * n + j];
+            }
+        }
+    }
+    if b == 0.0 { 0.0 } else { (a / b).sqrt() }
 }
 
 /// Whether a change's square is within the rounding of a column's response of the whole W_j (each of its s rows a sum
@@ -1063,11 +1104,10 @@ struct Scratch {
 }
 
 /// The reuse's reading's temporaries (BRIEF_PROTO5 item 3): per part and column Σ_i∈P |Z_ij|² (s × n at most), per lane and
-/// column Σ_i |Z_l,ij|² (L × n), per column Σ_l of their roots, Σ_P, and the error's squares summed (n each).
+/// column Σ_i |Z_l,ij|² (L × n), per column Σ_P, and the error's squares summed (n each).
 struct RowTemps {
     part: Vec<f64>,
     lane: Vec<f64>,
-    each: Vec<f64>,
     total: Vec<f64>,
     acc: Vec<f64>,
     eps: Vec<f64>,
@@ -1120,7 +1160,7 @@ impl Scratch {
                 bdb: z(nd * n),
             },
             copies_back: CopiesBack { zea: z(s * n), zda: z(nd * n) },
-            rows: RowTemps { part: vec![0.0; s.max(1) * n], lane: vec![0.0; ln], each: vec![0.0; n], total: vec![0.0; n], acc: vec![0.0; n], eps: vec![0.0; n] },
+            rows: RowTemps { part: vec![0.0; s.max(1) * n], lane: vec![0.0; ln], total: vec![0.0; n], acc: vec![0.0; n], eps: vec![0.0; n] },
             bound: BoundTemps {
                 q_of: Vec::with_capacity(levels),
                 c: z(n),
@@ -1315,19 +1355,48 @@ fn outside(z: C64, g: &[f64; 4], r: f64) -> f64 {
     (x * x + y * y).sqrt()
 }
 
+/// The size of a resolvent ‖(z − K)⁻¹‖ estimated on K's Schur form D + N (readings.status.md: a reading is an estimate,
+/// not a bound that may not exist): (1/δ)(1 + ν/δ), δ the least distance of z from D, ν what the form leaves off its
+/// diagonal and what moves it (its departure from normality, the drift) -- the Neumann series' first order in ν/δ, which
+/// exists wherever δ > 0. Infinite at a pole alone (δ = 0), where the response itself is.
+fn resolvent_size(delta: f64, nu: f64) -> f64 {
+    if delta > 0.0 { (1.0 + nu / delta) / delta } else { f64::INFINITY }
+}
+
+/// A level's resolvent size at z (`resolvent_size`) on its Schur form at the reference (`NearBasis::lfact`), its departure
+/// from normality and the drift `radius` its ν; on its Hermitian part's and decay's Gershgorin rectangle where it has no
+/// form (singular there), the rectangle's distance its δ.
+fn level_resolvent(f: Option<&Factored>, gersh: &[f64; 4], radius: f64, z: C64) -> f64 {
+    match f {
+        Some(f) => {
+            let m = f.t.rows;
+            let delta = (0..m).map(|i| (z - f.t[(i, i)]).norm_sqr()).fold(f64::INFINITY, f64::min).sqrt();
+            let mut nu = 0.0;
+            for i in 0..m {
+                for l in i + 1..f.ends[i] {
+                    nu += f.t[(i, l)].norm_sqr();
+                }
+            }
+            resolvent_size(delta, nu.sqrt() + radius)
+        }
+        None => resolvent_size(outside(z, gersh, 0.0), radius),
+    }
+}
+
 /// One block's omitted levels read (module documentation, # The levels kept and left out; unify2 §2.4): the leading term an
 /// estimate -- the level's first-order response to its whole source at the lanes' mean on K_qq's Schur form at the
-/// reference (`NearBasis::lfact`), and its emission's on it the potential's numerator --, the rest bounds as follows. Per level q of `omitted` and
+/// reference (`NearBasis::lfact`), and its emission's on it the potential's numerator --, the rest as follows, every
+/// resolvent by its size's estimate (`level_resolvent`, `resolvent_size`: a bound that need not exist is no reading,
+/// readings.status.md). Per level q of `omitted` and
 /// column j the bound N_q,j on its response (`sizes`, L × n), δ_q,j on what its absence leaves of the kept rows' (`backs`),
 /// and its potential's numerator (`shifts`), at the Bloch generator H (its diagonal the column energies c, the rest Δ). One
 /// bound (BRIEF_PROTO5 item 6): the lanes' responses summed by the resolvent identity about their mean Doppler shift w̄,
 /// N = ḡ (‖Σ_l r_l‖ + Σ_l |w_l − w̄| x_l) -- the whole source and the reference's coupling to the kept response exact
-/// vectors (a standing wave's node cancels in them), the remainder on each lane's bound x_l = g_l (...) (the omitted levels'
-/// own coupling and Δ's by a contraction). Where a bound does not exist (a column energy on a level's widened numerical
-/// range, at a lane or at the mean, or the omitted levels' own coupling and Δ's not contracting) the level that holds it
-/// the most, its largest γ (or β's that do not exist). Its temporaries the block's (`BoundTemps`).
+/// vectors (a standing wave's node cancels in them), the remainder on each lane's x_l = g_l (...) (the omitted levels' own
+/// coupling and Δ's to their second order, once). Infinite only at a pole of a resolvent (the response itself infinite).
+/// Its temporaries the block's (`BoundTemps`).
 #[allow(clippy::too_many_arguments)]
-fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: &[C64], sizes: &mut [f64], backs: &mut [f64], shifts: &mut [f64], tp: &mut BoundTemps, n: usize, work: &mut f64) -> Result<(), usize> {
+fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: &[C64], sizes: &mut [f64], backs: &mut [f64], shifts: &mut [f64], tp: &mut BoundTemps, n: usize, work: &mut f64) {
     let nl = nb.levels.len();
     let terms = nb.terms.len();
     let (s, lanes) = (nb.s, nb.lanes);
@@ -1339,7 +1408,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     tp.q_of.clear();
     tp.q_of.extend((0..nl).filter(|&q| omitted[q]));
     if tp.q_of.is_empty() {
-        return Ok(());
+        return;
     }
     let BoundTemps { q_of, c, ea, gm, habs, coupled, dabs, cabs, pair, radius, held, zk, gk, ek, dcol, zt, beta, gam, gl, src, x, rqk, rkq, whole, vall, rz, v } = tp;
     let q_of = &q_of[..];
@@ -1398,8 +1467,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         if s == 0 {
             return 0.0;
         }
-        let d = d2.sqrt();
-        if d > nu { 1.0 / (d - nu) } else { f64::INFINITY }
+        resolvent_size(d2.sqrt(), nu)
     };
     let gk = &mut gk[..ln];
     gk.fill(f64::INFINITY);
@@ -1454,9 +1522,8 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
                     }
                     v + held[q]
                 };
-                // The denominator (c_j − w_l) − (K_qq − o): z against the numerical range of K_qq − o.
-                let d = outside(c[j] - C64::real(wl), &basis.gersh[q], radius[q]);
-                let g = if d > 0.0 { 1.0 / d } else { f64::INFINITY };
+                // The denominator (c_j − w_l) − (K_qq − o): its resolvent's size there (`level_resolvent`).
+                let g = level_resolvent(basis.lfact[q].as_ref(), &basis.gersh[q], radius[q], c[j] - C64::real(wl));
                 let at = k * ln + sp * n + j;
                 (gl[at], src[at]) = (g, y);
                 beta[at] = g * (y + rqk[k] * zk[sp * n + j]);
@@ -1467,22 +1534,18 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
     }
     x.fill(0.0);
     for sp in 0..lanes {
-        let (mut gmax, mut bmax) = (0.0_f64, 0.0_f64);
+        let mut bmax = 0.0_f64;
         for k in 0..nq {
             for j in 0..n {
-                gmax = gmax.max(gam[k * ln + sp * n + j]);
                 bmax = bmax.max(beta[k * ln + sp * n + j]);
             }
         }
         if bmax == 0.0 {
             continue;
         }
-        if !(gmax < 1.0 && bmax.is_finite()) {
-            let worst = |k: usize| (0..n).map(|j| if beta[k * ln + sp * n + j].is_finite() { gam[k * ln + sp * n + j] } else { f64::INFINITY }).fold(0.0, f64::max);
-            let k = (0..nq).max_by(|&a, &b| worst(a).total_cmp(&worst(b))).unwrap();
-            return Err(q_of[k]);
-        }
-        let top = bmax / (1.0 - gmax);
+        // The omitted levels' own coupling and Δ's once (their second order: an estimate, not the contraction's sum,
+        // which has no value where γ reaches one).
+        let top = bmax;
         for k in 0..nq {
             for j in 0..n {
                 x[k * ln + sp * n + j] = beta[k * ln + sp * n + j] + gam[k * ln + sp * n + j] * top;
@@ -1600,8 +1663,7 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         }
         let dr = (0..nl).filter(|&p| !omitted[p]).map(|p| (pair[q * nl + p] - basis.lpair[q * nl + p]).powi(2)).sum::<f64>().sqrt();
         for j in 0..n {
-            let d = outside(c[j] - C64::real(mean), &basis.gersh[q], radius[q]);
-            let gb = if d > 0.0 { 1.0 / d } else { f64::INFINITY };
+            let gb = level_resolvent(basis.lfact[q].as_ref(), &basis.gersh[q], radius[q], c[j] - C64::real(mean));
             let vj = (0..m).map(|i| v[i * n + j].norm_sqr()).sum::<f64>().sqrt();
             let mut stat_d = 0.0;
             if nb.xcol[j] {
@@ -1620,10 +1682,6 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
             let rest = dr * zt[j] + stat_d + spread + (1.0 + most) * coupled[k * n + j];
             let est = estimates[k * n + j].0;
             let size = if est.is_nan() { if vj + rest > 0.0 { gb * (vj + rest) } else { 0.0 } } else { est + if rest > 0.0 { gb * rest } else { 0.0 } };
-            if !size.is_finite() {
-                // No bound: the column's energy on the level's widened numerical range at the pivot.
-                return Err(q);
-            }
             sizes[q * n + j] = size;
             // What its absence leaves of the kept rows, likewise: the kept resolvent at the mean on the whole, the lanes'
             // spread on each lane's bound.
@@ -1660,7 +1718,6 @@ fn bound_levels(nb: &Near, basis: &NearBasis, omitted: &[bool], at: &Placed, h: 
         }
         *work += (n * nb.vectors.len()) as f64;
     }
-    Ok(())
 }
 
 /// A block's levels' bounds at a point (`bound_levels`): per level whether it is left out, N, δ and the potential's
@@ -3356,6 +3413,7 @@ impl Fold {
             copies,
             z0: laid.z0,
             r0: r0.frobenius(),
+            centre: Centre::of(&laid.inner.block(&(b.solved..b.rows.len()).collect::<Vec<_>>(), &(b.solved..b.rows.len()).collect::<Vec<_>>()), work)?,
             within,
             emit,
             couple,
@@ -3429,7 +3487,8 @@ impl Fold {
             })
             .collect::<Vec<f64>>();
         let fg = f.iter().zip(&g).map(|(a, b)| *a + *b * laid.z0).collect();
-        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), resolvent: r0, emitted, excited })
+        let centre = Centre::of(&laid.inner, work)?;
+        Some(FarBasis { at: fb.terms.iter().map(|&t| ws.mid.coef[t]).collect(), f, g, fg, nf, copied, z0: laid.z0, r0: r0.frobenius(), centre, resolvent: r0, emitted, excited })
     }
 
     /// The forms Ĥ_PP's pairs and the far blocks hold at the focus, on P's diagonal at the weights `weight` (one per
@@ -3487,6 +3546,57 @@ impl Fold {
         let made = self.forward_within(r, kappa, energy, cache, ws, decide, &mut work);
         ws.spent = work.iter().sum();
         made.map(|()| &ws.step)
+    }
+
+    /// A held forward on a decision's representation `cache` with one of its approximations taken out (`Without`; the
+    /// readings' test, tests/readings.rs): its G. A block made again or a level joined is made at the point; the series'
+    /// parts swept `sweeps` times where they are taken out. None where the fold does not exist so.
+    #[cfg(test)]
+    pub(crate) fn prototype_without(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &Cache, ws: &mut Workspace, without: Without, sweeps: usize) -> Option<Mat> {
+        let mut c = cache.clone();
+        let (near, far) = (ws.near.len(), ws.far.len());
+        ws.decision.start(near, far);
+        match without {
+            Without::Remade(x) => ws.decision.near[x] = true,
+            Without::Level(x, q) => {
+                let mut kept = c.near_at(x).kept.clone();
+                kept.push(q);
+                kept.sort_unstable();
+                kept.dedup();
+                ws.decision.kept[x] = Some(kept);
+            }
+            Without::All(held) => {
+                for x in 0..near {
+                    ws.decision.kept[x] = Some((0..ws.near[x].levels.len()).collect());
+                    ws.decision.near[x] = true;
+                }
+                for x in (0..far).filter(|&x| Some(x) != held) {
+                    ws.decision.far[x] = true;
+                }
+            }
+            _ => {}
+        }
+        let mut work = 0.0;
+        self.bases(r, kappa, &mut c, ws, &mut None, &mut work)?;
+        let before = c.evaluation.clone();
+        let mut evaluation = c.evaluation.clone();
+        evaluation.fit(&c, &ws.near, &ws.far);
+        for x in 0..near {
+            if evaluation.parts[x].len() == before.parts.get(x).map_or(0, |p| p.len()) {
+                evaluation.parts[x] = before.parts[x].clone();
+            }
+        }
+        match without {
+            Without::Part(x, p) => evaluation.parts[x][p] = sweeps,
+            Without::In(x) => evaluation.far[x] = false,
+            Without::All(_) => {
+                evaluation.parts.iter_mut().flatten().for_each(|p| *p = sweeps);
+                evaluation.far.iter_mut().for_each(|f| *f = false);
+            }
+            _ => {}
+        }
+        c.evaluation = evaluation;
+        self.prototype_within(r, kappa, energy, &mut c, ws, false).filter(|s| !s.unresolved).map(|s| s.generator.clone())
     }
 
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
@@ -4012,22 +4122,22 @@ impl Fold {
         let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, .. } = &mut *ws;
         accounts.clear();
         // The levels left out, on their bounds; W_j with their responses (a column's whole).
-        let mut failed = vec![None; near.len()];
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             let basis = cache.near_at(x);
-            nb.epsr = if nb.nc > 0 { (0..n).map(|j| centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts)).fold(0.0, f64::max) } else { 0.0 };
+            nb.epsr = if nb.nc > 0 { (0..n).map(|j| centring(&basis.centre, basis.z0, nb.held, h[j * n + j], &nb.shifts)).fold(0.0, f64::max) } else { 0.0 };
             let (omitted, sz, bk, sh) = &mut per[x];
             for (q, o) in omitted[..nb.levels.len()].iter_mut().enumerate() {
                 *o = !basis.kept.contains(&q);
             }
-            failed[x] = bound_levels(nb, basis, omitted, mid, h, sz, bk, sh, &mut sc.bound, n, work).err();
+            bound_levels(nb, basis, omitted, mid, h, sz, bk, sh, &mut sc.bound, n, work);
         }
         den.clear();
         den.extend_from_slice(&whole[..n]);
-        for ((om, sz, ..), fail) in per.iter().zip(&failed) {
-            if fail.is_none() {
-                for q in (0..om.len()).filter(|&q| om[q]) {
-                    for j in 0..n {
+        for (om, sz, ..) in per.iter() {
+            for q in (0..om.len()).filter(|&q| om[q]) {
+                for j in 0..n {
+                    // A response at a pole (infinite) is no part of the denominator: its account reads it.
+                    if sz[q * n + j].is_finite() {
                         den[j] += sz[q * n + j].powi(2);
                     }
                 }
@@ -4036,17 +4146,12 @@ impl Fold {
         let floor = (crate::units::rounding(n) * den.iter().sum::<f64>().sqrt()).powi(2);
         let read = |j: usize| den[j] > floor;
         let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
+        let whole_series = whole_ratio(near, cache, done, n);
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             let basis = cache.near_at(x);
             let (om, sz, bk, sh) = &per[x];
             for q in (0..nb.levels.len()).filter(|&q| om[q]) {
-                let squares = (0..n)
-                    .map(|j| match failed[x] {
-                        _ if !read(j) => 0.0,
-                        Some(f) => if f == q { f64::INFINITY } else { 0.0 },
-                        None => (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j] + pot(2.0 * sh[q * n + j]),
-                    })
-                    .collect();
+                let squares = (0..n).map(|j| if read(j) { (sz[q * n + j] + bk[q * n + j]).powi(2) / den[j] + pot(2.0 * sh[q * n + j]) } else { 0.0 }).collect();
                 accounts.push(Account { item: Item::Omitted { block: x, level: q }, squares, on: true });
             }
             if nb.idle() {
@@ -4055,22 +4160,25 @@ impl Fold {
             let np = series_parts(nb, basis);
             for part in 0..np {
                 let mut squares = vec![0.0; n];
-                series_squares(nb, np, part, evaluation.parts[x][part], done, den, floor, n, &mut squares);
+                series_squares(nb, np, part, evaluation.parts[x][part], done, den, floor, n, whole_series, &mut squares);
                 accounts.push(Account { item: Item::Series { block: x, part }, squares, on: true });
             }
-            // The reuse's first-order error of the response the step uses, Z = Σ_l Z_l: Σ_l R_l δK̃ Z_l = R̄ δK̃ Z + Σ_l (R_l −
-            // R̄) δK̃ Z_l, R̄ at the beams' mean Doppler shift w̄ -- row by row, row i of δK̃Z at most Σ_P off_iP ‖Z_P∖i‖, the beams'
-            // rest at most W|R̄|²/(1 − W|R̄|) (W the largest |w_l − w̄|) times Σ_P off_iP Σ_l ‖Z_l‖; the centred copies' R₀ held,
-            // likewise with ε_R,j ρ_i (`centring`) in place of the parts' change. Read on the beams one by one against their
-            // sum, the reading would grow where the beams' responses cancel (a standing wave's node) though the error cancels.
+            // The reuse's first-order error of the response the step uses, Z = Σ_l Z_l: row i of column j is Σ_l x_l/d_l, x_l
+            // = (δK̃ Z_l)_ij, d_l = c_j − w_l − κ_i each lane's own denominator. Two estimates of it, the lesser read: about
+            // the beams' mean Doppler shift w̄, (Σ_l x_l)/d̄ + Σ_l x_l (1/d_l − 1/d̄) -- row i of δK̃Z at most Σ_P off_iP
+            // ‖Z_P∖i‖ (a standing wave's node cancels in it), each lane's rest exactly |w_l − w̄|/(|d_l| |d̄|) times its
+            // |x_l| ≤ Σ_P off_iP ‖Z_l‖ --; and lane by lane, Σ_l |x_l|/|d_l| (where d̄ is small though no lane is: a column
+            // near a row at the mean of two lanes' shifts). No expansion in the spread over |d̄|: such a series' bound has no
+            // value beyond its radius (an explicit column within the Doppler spread of a row of its own level, tilt2), the
+            // estimate has. The centred copies' R₀ held likewise, with ε_R,j ρ_i (`centring`) in place of the parts'
+            // change (the explicit columns' source ε_R,j ρ_X,i on the static lane alone).
             let s = nb.s;
             let parts = basis.f.parts.len().max(1);
             let beams = nb.lanes;
             let ln = beams * n;
             let mean = nb.shifts.iter().sum::<f64>() / beams.max(1) as f64;
-            let spread = nb.shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
-            let RowTemps { part: pn, lane, each, total, acc, eps } = &mut sc.rows;
-            let (pn, lane, each, total, acc) = (&mut pn[..parts * n], &mut lane[..ln], &mut each[..n], &mut total[..n], &mut acc[..n]);
+            let RowTemps { part: pn, lane, total, acc, eps } = &mut sc.rows;
+            let (pn, lane, total, acc) = (&mut pn[..parts * n], &mut lane[..ln], &mut total[..n], &mut acc[..n]);
             pn.fill(0.0);
             lane.fill(0.0);
             for i in 0..s {
@@ -4082,12 +4190,6 @@ impl Fold {
                     *u += z.norm_sqr();
                 }
             }
-            each.fill(0.0);
-            for sp in 0..beams {
-                for (e, l) in each.iter_mut().zip(&lane[sp * n..(sp + 1) * n]) {
-                    *e += l.sqrt();
-                }
-            }
             total.fill(0.0);
             for g in 0..parts {
                 for (t, u) in total.iter_mut().zip(&pn[g * n..(g + 1) * n]) {
@@ -4096,9 +4198,8 @@ impl Fold {
             }
             let eps = &mut eps[..n];
             for (j, x) in eps.iter_mut().enumerate() {
-                *x = if nb.nc > 0 { centring(basis.r0, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
+                *x = if nb.nc > 0 { centring(&basis.centre, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
             }
-            let most = eps.iter().copied().fold(0.0, f64::max);
             let mut centred = vec![0.0; n];
             acc.fill(0.0);
             for i in 0..s {
@@ -4115,8 +4216,22 @@ impl Fold {
                         }
                     }
                     let gap = (h[j * n + j] - C64::real(mean) - kappa).norm_sqr().sqrt();
-                    let rest = |size: f64| if size == 0.0 { 0.0 } else if spread < gap { size * each[j] * spread / (gap * (gap - spread)) } else { f64::INFINITY };
-                    let (reuse, copies) = (e / gap + rest(all), held / gap + rest(most * nb.rho[i]));
+                    // Per lane |Z_l,j| over |d_l| (the lane's whole response, its rows' bound's), and the same times
+                    // |w_l − w̄|/|d̄|: the lanes' rest about the mean.
+                    let (mut direct, mut about) = (0.0, 0.0);
+                    for (sp, &w) in nb.shifts.iter().enumerate() {
+                        let d = (h[j * n + j] - C64::real(w) - kappa).norm_sqr().sqrt();
+                        let z = lane[sp * n + j].sqrt();
+                        if z > 0.0 {
+                            direct += z / d;
+                            about += z * (w - mean).abs() / (d * gap);
+                        }
+                    }
+                    let lesser = |a: f64, b: f64| if a.is_nan() { b } else { a.min(b) };
+                    let reuse = if all == 0.0 { 0.0 } else { lesser(e / gap + all * about, all * direct) };
+                    let static_lane = if nb.xcol[j] { eps[j] * nb.rhox[i] / (h[j * n + j] - kappa).norm_sqr().sqrt() } else { 0.0 };
+                    let rho = eps[j] * nb.rho[i];
+                    let copies = if held == 0.0 { 0.0 } else { lesser(held / gap + rho * about, rho * direct + static_lane) };
                     acc[j] += reuse * reuse;
                     centred[j] += copies * copies;
                 }
@@ -4124,21 +4239,69 @@ impl Fold {
             *work += (s * n * (beams + parts + 2)) as f64 / 4.0;
             accounts.push(Account { item: Item::Reuse { block: x }, squares: (0..n).map(|j| if read(j) { acc[j] / den[j] } else { 0.0 }).collect(), on: true });
             if nb.nc > 0 {
-                accounts.push(Account { item: Item::Centred { block: x, far: false }, squares: (0..n).map(|j| if read(j) { centred[j] / den[j] } else { 0.0 }).collect(), on: true });
+                // The centred copies' own rows, T_C = R₀(Ĥ_CS T_S + B_C): their population is the metric's, M ⊇ T_C†T_C,
+                // and moves every rate and energy of the column by its relative change (G = S⁻¹AS⁻¹): centred, T_C errs
+                // by (R(c_j) − R₀)B̃_j, B̃ = Ĥ_CS T_S + B_C: the column's rate at first order (2 Re T_C,j†δT_C,j, relative,
+                // rate units), beside the dressing's of the solved rows (above), and its energy at the second (the Ritz
+                // value's stationarity; the potential channel). Level by level of Ĥ_CC (`copies_moved`).
+                copy_rows(nb, basis, &mid.e, n, work);
+                let squares = (0..n)
+                    .map(|j| {
+                        if !read(j) {
+                            return 0.0;
+                        }
+                        let (metric, shift) = copies_moved(&basis.centre, basis.z0, nb.held, h[j * n + j], &nb.shifts, &nb.tc, j, n);
+                        centred[j] / den[j] + unrate(metric).powi(2) + pot(2.0 * shift)
+                    })
+                    .collect();
+                accounts.push(Account { item: Item::Centred { block: x, far: false }, squares, on: true });
             }
         }
-        // The far blocks: their response R₀B held at the reference (its centre z₀ and forms) against the exact one at every
-        // column's energy and lane (one factor, `centring`: the centring and the drift) times the block's own response, and
-        // the block left out -- its whole response and light shift, H_F,jj and M_F,jj exact.
+        // The far blocks: their response T = R₀B held at the reference (its centre z₀ and forms) against the exact one at
+        // every column's energy c_j and every lane's Doppler shift w_l, Σ_l R(c_j − w_l)B_l. To first order its error is
+        // (c_j − w̄ − z₀ + δĤ)R₀T_j -- the block's own response times the column's distance from the centre and the forms'
+        // drift -- and Σ_l (w_l − w̄)R₀(R₀B_l,j), each lane's own response times its shift from the lanes' mean: at a
+        // standing wave's node the lanes' responses cancel in T and their errors do not. At every order the leading R₀ is
+        // R(c_j − w_l): its size ‖R(c_j − w_l)‖ (|c_j − w̄ − z₀| + ‖δĤ‖) ‖T_j‖ + ‖R(c_j − w_l)‖ ‖Σ_l (w_l − w̄)R₀B_l,j‖, the
+        // latter by the block's pair forms U_a†R₀†R₀U_b at the lanes' shifted coefficients, ‖R(z)‖ by its estimate on the
+        // block's Schur form, the lanes' largest (`Centre::size`; not the Neumann bound ‖R₀‖/(1 − x), which has no value
+        // beyond x = 1: readings.status.md R2). And the block left out -- its whole response and light shift, H_F,jj and
+        // M_F,jj exact.
         for (x, fb) in far.iter().enumerate() {
             let basis = cache.far_at(x);
             let held = fb.delta.iter().zip(&basis.copied).map(|(d, c)| d.abs() * c).sum::<f64>();
-            let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| mid.w[cc][j]).chain([0.0]).collect();
-            let centred = (0..n).map(|j| if read(j) { centring(basis.r0, basis.z0, held, h[j * n + j], &shifts).powi(2) * fb.mf[j * n + j].re / den[j] } else { 0.0 }).collect();
+            let shifts: Vec<f64> = fb.splits.iter().map(|&(cc, j)| mid.w[cc][j]).collect();
+            let mean = shifts.iter().sum::<f64>() / shifts.len().max(1) as f64;
+            // The lanes' coefficients on the block's source vectors, each times its shift from the mean.
+            let v = fb.vectors.len();
+            let lanes: Vec<C64> = fb
+                .vectors
+                .iter()
+                .map(|&(c, k)| fb.splits.iter().zip(&shifts).filter(|((cc, _), _)| *cc == c).map(|(&(_, j), &w)| mid.f[c][j] * self.components[c].gamma[j][k] * (w - mean)).sum())
+                .collect();
+            let centred = (0..n)
+                .map(|j| {
+                    if !read(j) {
+                        return 0.0;
+                    }
+                    let gap = (h[j * n + j] - C64::real(mean + basis.z0)).norm_sqr().sqrt();
+                    // ‖R(c_j − w_l)‖ at the lanes, by its estimate on the block's Schur form (`Centre::size`): the
+                    // Neumann bound ‖R₀‖/(1 − x) has no value beyond x = 1 (readings.status.md R2).
+                    let size = shifts.iter().map(|&w| basis.centre.size(h[j * n + j] - C64::real(w))).fold(if shifts.is_empty() { basis.centre.size(h[j * n + j]) } else { 0.0 }, f64::max);
+                    let mut spreadf = 0.0;
+                    for a in 0..v {
+                        for b in 0..v {
+                            spreadf += (lanes[a].conj() * lanes[b] * basis.g[(a * v + b) * n * n + j * n + j]).re;
+                        }
+                    }
+                    let first = size * ((gap + held) * fb.mf[j * n + j].re.max(0.0).sqrt() + spreadf.max(0.0).sqrt());
+                    first.powi(2) / den[j]
+                })
+                .collect();
             let left = (0..n).map(|j| if read(j) { fb.mf[j * n + j].re / den[j] + pot(2.0 * fb.hf[j * n + j].re.abs()) } else { 0.0 }).collect();
             accounts.push(Account { item: Item::Centred { block: x, far: true }, squares: centred, on: !evaluation.far[x] });
             accounts.push(Account { item: Item::Left { block: x }, squares: left, on: evaluation.far[x] });
-            *work += (fb.terms.len() + n) as f64 / 4.0;
+            *work += (fb.terms.len() + n * (1 + v * v) + v * fb.splits.len()) as f64 / 4.0;
         }
     }
 
@@ -4198,7 +4361,7 @@ impl Fold {
             Item::Reuse { block } | Item::Centred { block, far: false } => !decision.fresh[block] && !decision.near[block],
             Item::Centred { block, far: true } => !decision.fresh_far[block] && !decision.far[block],
         };
-        let (mut more, mut again) = (done, false);
+        let mut again = false;
         // While a column is beyond the budget: the remedy that takes the most of its ρ² -- the evaluation's; a node's rise
         // (Q → P) only where none is offered, and only where nodes are offered at all (the start's decision, decide.rs:
         // the run's representation is fixed, P is not chosen in the run).
@@ -4256,10 +4419,10 @@ impl Fold {
                     let Item::Series { block, part } = ws.accounts[k].item else { unreachable!() };
                     let p = evaluation.parts[block][part] + 1;
                     evaluation.parts[block][part] = p;
-                    more = more.max(p);
                     let np = series_parts(&ws.near[block], cache.near_at(block));
+                    let whole = whole_ratio(&ws.near, cache, done, n);
                     let Workspace { near, den, accounts, .. } = &mut *ws;
-                    series_squares(&near[block], np, part, p, done, den, floor, n, &mut accounts[k].squares);
+                    series_squares(&near[block], np, part, p, done, den, floor, n, whole, &mut accounts[k].squares);
                     worst[k] = (0..n).map(|j| self.series_worst(cache, ws, block, part, p, done, j)).collect();
                 }
                 Remedy::Refresh(x) => {
@@ -4341,8 +4504,8 @@ impl Fold {
             }
             return Next::Again;
         }
-        if more > done {
-            return Next::Sweeps(more);
+        if evaluation.most() > done {
+            return Next::Sweeps(evaluation.most());
         }
         // The cheaper evaluations within the budget at every column -- a part one sweep less, a far block left out, each
         // cheaper by its own count --: the least ρ² added first.
@@ -4374,8 +4537,9 @@ impl Fold {
                     evaluation.parts[block][part] -= 1;
                     let p = evaluation.parts[block][part];
                     let np = series_parts(&ws.near[block], cache.near_at(block));
+                    let whole = whole_ratio(&ws.near, cache, done, n);
                     let Workspace { near, den, accounts, .. } = &mut *ws;
-                    series_squares(&near[block], np, part, p, done, den, floor, n, &mut accounts[k].squares);
+                    series_squares(&near[block], np, part, p, done, den, floor, n, whole, &mut accounts[k].squares);
                     worst[k] = trial;
                 }
                 Item::Centred { block, .. } => {
@@ -4414,7 +4578,7 @@ impl Fold {
         let np = series_parts(nb, cache.near_at(block));
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
         let mut out = vec![0.0; n];
-        series_squares(nb, np, part, p, done, &ws.den, floor, n, &mut out);
+        series_squares(nb, np, part, p, done, &ws.den, floor, n, whole_ratio(&ws.near, cache, done, n), &mut out);
         out[j]
     }
 
@@ -4591,16 +4755,97 @@ fn shares_of(near: &[Near], cache: &Cache, n: usize, work: &mut f64) -> Vec<Shar
         .collect()
 }
 
+/// A centred resolvent's matrix Ĥ_ref (a block's centred rows, a far block's rows) on its Schur form D + N
+/// (`Factored::of`): D its levels, ν what the form leaves off its diagonal and drops (its departure from normality) -- the
+/// size of R(z) = (z − Ĥ_ref)⁻¹ at any z by `resolvent_size` (readings.status.md R2).
+#[derive(Clone)]
+struct Centre {
+    levels: Vec<C64>,
+    nu: f64,
+    /// The Schur vectors (rows × levels, each level's column): a response on the rows by level, U†T.
+    vectors: Mat,
+}
+
+impl Centre {
+    fn of(m: &Mat, work: &mut f64) -> Option<Centre> {
+        if m.rows == 0 {
+            return Some(Centre { levels: vec![], nu: 0.0, vectors: Mat::zeros(0, 0) });
+        }
+        let f = Factored::of(m, work)?;
+        let k = m.rows;
+        let nu = (0..k).flat_map(|i| (i + 1..k).map(move |j| (i, j))).map(|(i, j)| f.t[(i, j)].norm_sqr()).sum::<f64>().sqrt() + f.dropped.iter().sum::<f64>();
+        let mut vectors = Mat::zeros(k, k);
+        for (idx, at, u) in &f.parts {
+            for a in 0..idx.len() {
+                for (r, &row) in idx.iter().enumerate() {
+                    vectors[(row, at + a)] = u[(r, a)];
+                }
+            }
+        }
+        Some(Centre { levels: (0..k).map(|i| f.t[(i, i)]).collect(), nu, vectors })
+    }
+
+    /// ‖R(z)‖'s estimate on the Schur form, `resolvent_size`(δ, ν) = (1/δ)(1 + ν/δ), δ the least distance of z from the
+    /// levels λ_k -- the one estimate of a resolvent's size (the omitted levels' `level_resolvent` alike): exact where Ĥ_ref
+    /// is normal, ∞ at a level alone (a pole); none where it has no rows.
+    fn size(&self, z: C64) -> f64 {
+        let delta = self.levels.iter().map(|l| (z - *l).norm_sqr().sqrt()).fold(f64::INFINITY, f64::min);
+        if delta.is_finite() { resolvent_size(delta, self.nu) } else { 0.0 }
+    }
+}
+
 /// The factor ε_R of a resolvent held at the reference, R₀ = (z₀ − Ĥ_ref)⁻¹ (a block's centred copies', a far block's rows'),
-/// against the exact one at a column's energy c and every lane, R(c − w) (DESIGN §1.2, M10, M18; BRIEF_COPIES item 2):
-/// R(z) − R₀ = R(z)(z₀ − z + Ĥ − Ĥ_ref)R₀, so ‖R(z) − R₀‖ ≤ ‖R₀‖ x/(1 − x), x = ‖R₀‖ d, d = |c − w̄ − z₀| + max_l |w_l − w̄|
-/// + ‖Ĥ − Ĥ_ref‖ (`held`, the forms' change): the centring itself -- each column at its own energy, not at the block's
-/// centre -- and the reference's drift in one factor, column by column. ∞ where x reaches one.
-fn centring(r0: f64, z0: f64, held: f64, c: C64, shifts: &[f64]) -> f64 {
-    let mean = shifts.iter().sum::<f64>() / shifts.len().max(1) as f64;
-    let spread = shifts.iter().map(|w| (w - mean).abs()).fold(0.0, f64::max);
-    let x = r0 * ((c - C64::real(mean + z0)).norm_sqr().sqrt() + spread + held);
-    if x < 1.0 { x / (1.0 - x) } else { f64::INFINITY }
+/// against the exact one at a column's energy c and every lane, R(c − w_l) (DESIGN §1.2, M10, M18; BRIEF_COPIES item 2):
+/// R(z) − R₀ = R(z)(z₀ − z + Ĥ − Ĥ_ref)R₀, so ‖R(z) − R₀‖/‖R₀‖ ≈ ‖R(z)‖ d_l, d_l = |c − w_l − z₀| + ‖Ĥ − Ĥ_ref‖ (`held`,
+/// the forms' change): the centring itself -- each column at its own energy, each lane at its own Doppler shift, not at
+/// the block's centre -- and the reference's drift in one factor, column by column, the lanes' largest. ‖R(z)‖ by its
+/// estimate on Ĥ_ref's Schur form (`Centre::size`), which exists wherever z is not a level of Ĥ_ref -- not the Neumann
+/// bound ‖R₀‖/(1 − ‖R₀‖d), which has no value once d reaches the levels' distance from z₀ (∞: tilt2's 220–256 points
+/// beyond the share a set, the centred copies' own rows where the true error was 10⁻⁴ of a rate; readings.status.md R2).
+fn centring(centre: &Centre, z0: f64, held: f64, c: C64, shifts: &[f64]) -> f64 {
+    let lanes: &[f64] = if shifts.is_empty() { &[0.0] } else { shifts };
+    lanes.iter().map(|&w| ((c - C64::real(w + z0)).norm_sqr().sqrt() + held) * centre.size(c - C64::real(w))).fold(0.0, f64::max)
+}
+
+/// What a block's centred copies held at R₀ move of column j through their own rows (`Fold::accounts`), level by level
+/// of Ĥ_CC = Σ_k λ_k u_k u_k† (its Schur form; ν the departure from normality): with T_C = R₀B̃ on level k t_k = u_k†T_C,j,
+/// R(z) − R₀ = R(z)(z₀ − z + δĤ)R₀ moves t_k by δt_k = f̃_k t_k, |f̃_k| ≈ f_k = d_l ‖(z − λ_k)⁻¹‖ (`resolvent_size`),
+/// z = c_j − w_l, d_l = |z − z₀| + ‖δĤ‖ (`held`) -- exact at every order where Ĥ_CC is normal and the forms held. G =
+/// S⁻¹AS⁻¹ is the Rayleigh-Ritz value of H on Ψ = [1; T] (A = Ψ†HΨ, 1 + M = Ψ†Ψ) and the copies' rows are Hermitian
+/// (ground states): with the exact Ψ* (HΨ* = Ψ*c, c the column's Bloch energy) δG = [δt†(Ĥ_CC − c)δt − 2i Im(c) t†δt]/(1
+/// + M). So the column's rate moves at first order, by 2 Re(t†δt) + |δt|² relative, read Σ_k f_k(2 + f_k)|t_k|²; its
+/// energy at the second, Re δt†(Ĥ_CC − c)δt, read Σ_k f_k²|t_k|²|z − λ_k| = Σ_k f_k|t_k|² d_l (rad/µs; the term in
+/// Im(c) moves it by Im(c) Im(t†δt), second order in the ratios). The lanes' largest. Not the dressing's first order
+/// alone, B̃†(R(z) − R₀)B̃: the copies' own population z₀|t|² and the metric cancel it (the Ritz value is stationary), and
+/// read so the copies' light shift was Σ_k f_k|t_k|²|z₀ − λ_k|, 12 to 470 times the error on tilt0's and tilt2's blocks
+/// (readings.status.md R2, R3; scratchpad read/r3/stat2.py: on a toy the second order reads 0.9–1.6 times the error, the
+/// first 10–700 times). (The level that sits near z carries a large f_k and, its own coupling small, a small t_k: a
+/// column far from the centre is read by what it moves, not by the worst level's factor times every level's population.)
+#[allow(clippy::too_many_arguments)]
+fn copies_moved(centre: &Centre, z0: f64, held: f64, c: C64, shifts: &[f64], tc: &[C64], j: usize, n: usize) -> (f64, f64) {
+    let nl = centre.levels.len();
+    if nl == 0 {
+        return (0.0, 0.0);
+    }
+    let t: Vec<f64> = (0..nl).map(|k| (0..nl).map(|r| centre.vectors[(r, k)].conj() * tc[r * n + j]).sum::<C64>().norm_sqr()).collect();
+    let lanes: &[f64] = if shifts.is_empty() { &[0.0] } else { shifts };
+    let (mut metric, mut shift) = (0.0_f64, 0.0_f64);
+    for &w in lanes {
+        let z = c - C64::real(w);
+        let d = (z - C64::real(z0)).norm_sqr().sqrt() + held;
+        let (mut m, mut e) = (0.0, 0.0);
+        for (l, t) in centre.levels.iter().zip(&t) {
+            let f = d * resolvent_size((z - *l).norm_sqr().sqrt(), centre.nu);
+            // A level the column does not reach moves nothing (at a pole too: no 0·∞).
+            if *t > 0.0 {
+                m += f * (2.0 + f) * t;
+                e += f * t * d;
+            }
+        }
+        metric = metric.max(m);
+        shift = shift.max(e);
+    }
+    (metric, shift)
 }
 
 /// One near block's tangent along the lab axes (`Fold::prototype_tangent`), the three axes side by side in every row
@@ -4695,8 +4940,9 @@ pub(crate) struct Bar<'a> {
 }
 
 /// The step's derivative's forms (`Fold::prototype_force`): per channel and lab axis ∂/∂r_a of its bars' sum, every
-/// position moved together (real where the channel holds static bars alone); per axis the bound on what the kept R₀ and
-/// z₀ leave of it (their own change along the axis: module documentation, # The force); the work (complex multiply-adds).
+/// position moved together (real where the channel holds static bars alone); per axis the estimate of what the kept R₀
+/// and z₀ leave of the static bars' forms, in their unit (their own change along the axis times what they carry of the
+/// contraction: module documentation, # The force); the work (complex multiply-adds).
 pub(crate) struct Force {
     pub(crate) forms: Vec<[C64; 3]>,
     pub(crate) held: [f64; 3],
@@ -5020,6 +5266,9 @@ impl Fold {
         // A channel's static bars' slots: its first and its count (the K̃̄ product's, one a channel).
         let first = |c: usize| statics.iter().filter(|&&i| bars[i].channel < c).count();
         let count = |c: usize| statics.iter().filter(|&&i| bars[i].channel == c).count();
+        // Per far block and per near block's centred copies the size of what R₀ carries of the static bars' contraction,
+        // Σ_bars |Re⟨Ā, the block's R₀-carried forms⟩| (`Force::held`).
+        let mut carried = vec![0.0_f64; far.len() + near.len()];
         for (slot, &i) in statics.iter().enumerate() {
             let (channel, j) = (bars[i].channel, bars[i].position);
             let mut fp = [0.0_f64; 3];
@@ -5055,16 +5304,19 @@ impl Fold {
                 // ⟨Ā, F_ab + z₀G_ab⟩ for every pair (a, b): one product of the stacked forms on Ā*.
                 let ks = &mut fb.ks[..v * v];
                 fused_product_into(&basis.fg, abc, (v * v, nn, 1), ks);
+                let mut own = C64::ZERO;
                 for ia in 0..v {
                     for ib in 0..v {
                         let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
                         let k = ks[ia * v + ib];
+                        own += k * at.e[ca][ka].conj() * at.e[cb][kb];
                         let (da, db) = (de[ca][ka], de[cb][kb]);
                         for a in 0..3 {
                             fp[a] += (k * (da[a].conj() * at.e[cb][kb] + at.e[ca][ka].conj() * db[a])).re;
                         }
                     }
                 }
+                carried[x] += own.re.abs();
                 work += (v * v * nn) as f64;
             }
             lap(1, &mut clock, &mut ft);
@@ -5180,6 +5432,17 @@ impl Fold {
                 let tcb = &mut tcbar[..nb.nc * n];
                 if nb.copied() {
                     let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
+                    // What R₀ carries of the contraction here: the copies' rows' z₀T_C†T_C (their dressing of the solved
+                    // rows is in K̃, held).
+                    let mut own = 0.0;
+                    for k in 0..nb.nc {
+                        for p in 0..n {
+                            for q in 0..n {
+                                own += (ab[p * n + q].conj() * tc[k * n + p].conj() * tc[k * n + q]).re * basis.z0;
+                            }
+                        }
+                    }
+                    carried[far.len() + x] += own.abs();
                     (0..nn).for_each(|i| wz[i] = ab[i] * (2.0 * basis.z0));
                     tcb.fill(C64::ZERO);
                     for k in 0..nb.nc {
@@ -5298,8 +5561,10 @@ impl Fold {
             }
         }
         lap(2, &mut clock, &mut ft);
-        // What the kept R₀ and z₀ leave: their relative change per µm along each axis. A block's centre z₀'s gradient: the
-        // mean of its sources' Ĥ_PP diagonal's, of the pairs' coefficients' gradients.
+        // What the kept R₀ and z₀ leave of the forms (`Force::held`), an estimate in the forms' own unit: per block its R₀'s
+        // relative change along the axis, ‖R₀‖ (|∂z₀| + Σ_t |∂c_t| ‖N_t‖) -- z₀'s gradient the mean of its sources' Ĥ_PP
+        // diagonal's, of the pairs' coefficients' gradients --, times what R₀ carries of the contraction (`carried`: R₀B's
+        // forms and R₀B†R₀B's, the latter twice R₀'s relative change: the factor two).
         let diagonal = &mut diagonal[..n];
         diagonal.fill([0.0; 3]);
         for (t, e) in pp.iter().enumerate() {
@@ -5319,7 +5584,7 @@ impl Fold {
             let z0g = centre_gradient(&nb.centre);
             for a in 0..3 {
                 let change = z0g[a].abs() + nb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
-                held[a] = held[a].max(basis.r0 * change);
+                held[a] += 2.0 * basis.r0 * change * carried[far.len() + x];
             }
         }
         for (x, fb) in far.iter().enumerate() {
@@ -5327,7 +5592,7 @@ impl Fold {
             let z0g = centre_gradient(&fb.centre);
             for a in 0..3 {
                 let change = z0g[a].abs() + fb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
-                held[a] = held[a].max(basis.r0 * change);
+                held[a] += 2.0 * basis.r0 * change * carried[x];
             }
         }
         lap(4, &mut clock, &mut ft);
@@ -6673,6 +6938,12 @@ impl Workspace {
     /// The last decision's accounts (`Fold::accounts`).
     pub(crate) fn accounts(&self) -> &[Account] {
         &self.accounts
+    }
+
+    /// The fold's block of the workspace's near (or far) block x (the readings' test).
+    #[cfg(test)]
+    pub(crate) fn block_of(&self, x: usize, far: bool) -> usize {
+        if far { self.far[x].o } else { self.near[x].o }
     }
 
     /// What the last forward left out: the near blocks' excited rows not kept, the far blocks left out.

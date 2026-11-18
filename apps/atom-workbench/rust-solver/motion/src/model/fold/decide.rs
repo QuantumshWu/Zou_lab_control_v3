@@ -1370,7 +1370,7 @@ mod tests {
 
     /// The structure (项清单完成 I item 4): what is folded, kept as a tone or averaged is the start's decision's alone
     /// (module documentation, # The terms). Outside decide.rs the code the run compiles -- fold.rs, its prototype
-    /// (proto.rs, proto/), the run (run.rs) and the step (step.rs) -- calls none of the decision's readings (the G
+    /// (proto.rs, proto/) and the run (run.rs) -- calls none of the decision's readings (the G
     /// terms, the terms, the same state's nodes, the tiers, the skeleton at a point) and no reading of a coupling's
     /// mixing (the admixture, `unfoldable`, the peak rule `Choice::of`), and builds no tier of its own (`Fold::tiers_at`,
     /// the tiers' readings); the readings' functions are private to decide.rs. Each one is a site that would judge the
