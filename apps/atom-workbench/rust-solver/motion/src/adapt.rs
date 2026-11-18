@@ -108,7 +108,7 @@ use crate::units::rounding;
 /// The run's counts, said with each result and at the solve's end (`counted`; FOLDAPI §3: the safety net counts, never changes the
 /// representation): the steps taken and refused, the decisions made with their time (ns) and the states they held (sum),
 /// the time in steps (ns), the decisions' readings beyond the share and the folds that did not exist at a decision.
-static COUNTS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+static COUNTS: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
 pub(crate) const STEPS: usize = 0;
 pub(crate) const REFUSED: usize = 1;
 pub(crate) const DECISIONS: usize = 2;
@@ -117,6 +117,15 @@ pub(crate) const STATES: usize = 4;
 pub(crate) const STEPPING: usize = 5;
 pub(crate) const BEYOND: usize = 6;
 pub(crate) const ABSENT: usize = 7;
+/// The averaged terms' folded second order's reading (model/fold/run.rs # The averaged terms folded): its largest (the
+/// bits of a positive f64, ordered as the number) and the decisions where it is beyond the share.
+pub(crate) const FOLDED: usize = 8;
+pub(crate) const FOLDED_BEYOND: usize = 9;
+
+/// The largest of count i and x (a positive f64 by its bits).
+pub(crate) fn most(i: usize, x: f64) {
+    COUNTS[i].fetch_max(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Adds x to count i (`COUNTS`).
 pub(crate) fn count(i: usize, x: u64) {
@@ -129,7 +138,7 @@ pub(crate) fn counted(tally: bool) -> String {
     let g: Vec<u64> = COUNTS.iter().map(|c| if tally { c.swap(0, std::sync::atomic::Ordering::Relaxed) } else { c.load(std::sync::atomic::Ordering::Relaxed) }).collect();
     let (steps, decisions) = (g[STEPS].max(1), g[DECISIONS].max(1));
     format!(
-        "运行计数：步 {}（拒 {}），每步 {:.1} µs；格端决定 {}（每次 {:.1} µs，平均 {:.1} 态）；格端读数超份额 {} 次，格端折叠不存在 {} 次",
+        "运行计数：步 {}（拒 {}），每步 {:.1} µs；格端决定 {}（每次 {:.1} µs，平均 {:.1} 态）；格端读数超份额 {} 次，格端折叠不存在 {} 次；平均项折叠的读数最大 {:.2e}，超份额 {} 次",
         g[STEPS],
         g[REFUSED],
         1e-3 * g[STEPPING] as f64 / steps as f64,
@@ -137,7 +146,9 @@ pub(crate) fn counted(tally: bool) -> String {
         1e-3 * g[DECIDING] as f64 / decisions as f64,
         g[STATES] as f64 / decisions as f64,
         g[BEYOND],
-        g[ABSENT]
+        g[ABSENT],
+        f64::from_bits(g[FOLDED]),
+        g[FOLDED_BEYOND]
     )
 }
 

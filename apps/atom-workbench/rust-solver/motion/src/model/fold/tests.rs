@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 
 mod raman;
 mod drag;
+mod losschk;
 
 const GAMMA: f64 = 38.1;
 

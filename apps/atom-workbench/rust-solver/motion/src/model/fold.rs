@@ -535,6 +535,9 @@ pub(crate) struct Fold {
     /// The local light (run.rs `Onefold::decide`: the start's worst case over the atoms' local physics): per request beam a
     /// factor on its amplitude everywhere -- the trap light's √s, each beam's phase --; empty, none (every factor one).
     pub(crate) local: Vec<C64>,
+    /// The explicit states' copies at other offsets whose drive is a tone (`Fold::build`): (excited state, the block's
+    /// offset). The others are their blocks' Q rows.
+    pub(crate) driven: Vec<(usize, Beat)>,
     hbar_over_mass: f64,
     /// k_BT of the request's temperature (rad/µs): the potential's unit in the omission's reading.
     thermal: f64,
@@ -743,16 +746,29 @@ impl Fold {
             add(frames[ng + j].clone(), None, &mut offsets, &mut sources);
         }
         let mut blocks = vec![];
+        let mut driven: Vec<(usize, Beat)> = vec![];
         for (offset, sources) in offsets.into_iter().zip(sources) {
             let value = axes.omega(&offset);
             let mine: Vec<usize> = (0..explicit.len()).filter(|&j| frames[ng + j] == offset).map(|j| ng + j).collect();
             let theirs: Vec<usize> = mine.iter().map(|&p| explicit[p - ng]).collect();
             // The excited Q rows: the excited states a source or an explicit state of the block reaches, closed under 𝒦's
             // couplings (the request's and the outside forms'), each at its level's tier (solved unless chosen otherwise).
-            // An explicit state is one object at one frame (FOLDAPI A, coordinator 2026-11-18): no other block holds it,
-            // nor reaches through it -- another component's drive of it is an entry of Ĥ_PP that turns (proto.rs
-            // # The tones: the drives at another offset).
-            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x);
+            // An explicit state is one object at one frame (FOLDAPI A, coordinator 2026-11-18). Its copy at this block's
+            // offset is a Floquet node like any other, under the one rule: where this block's sources drive it beyond
+            // the share (their peak strength Σ |V| over the beat between the offset and its frame, `unfoldable`) the
+            // drive is an entry of Ĥ_PP that turns (`Fold::driven`; proto.rs # The tones: the drives at another offset)
+            // and the block neither holds it nor reaches through it; within the share the copy is a Q row of the block,
+            // folded with its light shift, its gradient and its reading (losschk.status.md: the tweezer's far drive of
+            // tilt0's explicit F' = 3, a third of the trap's force, was lost as an averaged entry).
+            let toned = |x: usize| -> bool {
+                let Some(j) = explicit.iter().position(|&y| y == x) else { return false };
+                let peak: f64 = sources.iter().map(|&(p, c)| components[c].couplings.iter().map(|m| m[(x, ground[p])].abs()).sum::<f64>()).sum();
+                peak > 0.0 && unfoldable(peak / (value - frame_values[ng + j]).abs(), crate::model::elim::share())
+            };
+            let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x) && toned(x);
+            for x in (0..EXCITED).filter(|&x| foreign(x)) {
+                driven.push((x, offset.clone()));
+            }
             let mut reached = vec![false; EXCITED];
             for &(p, c) in &sources {
                 for m in &components[c].couplings {
@@ -845,6 +861,7 @@ impl Fold {
             others.push(theirs);
         }
         Ok(Fold {
+            driven,
             local: vec![],
             hbar_over_mass: crate::units::hbar_over_mass(request.mass_kg),
             thermal: crate::units::KT_PER_UK * request.temperature_uk,
