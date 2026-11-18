@@ -172,7 +172,9 @@
 //!   measured where it was left out, 3.3·10⁻² of a share of 4.5·10⁻² on PGC3D's steps, up to 39 at a few);
 //! - **hopped** where the hops leave less: J < F/(1 − r) + L with r < 1, or J < F + L with r ≥ 1 -- the hops hold
 //!   where the entry turns little between the nodes, which is where J is the less --, and an entry that does not turn
-//!   (x = 0);
+//!   (x = 0). J is at the entry's modulus in the interaction picture, which grows by e^{|Im Ω| 2|h|} over the step
+//!   (`followed`): a pair apart in decay is hopped only where its hops leave less even so, and the hop's exponent
+//!   is summed and priced at that growth (`Picture::moved`);
 //! - **neither**, the step by the strides (# The strides), where the following has no sum, r ≥ 1 -- 1 + X is no near
 //!   identity and D₂'s fast entries left out are not of a higher order --, and the hops leave more than even its
 //!   leading term, J ≥ F + L: such an entry turns far between the nodes, and hopped it turns by its decay rates'
@@ -528,6 +530,9 @@ pub struct Picture {
     times: [f64; 3],
     /// max|Ω| over the hopped entries of every class (rad/µs): what a hop's series is summed against.
     spread: f64,
+    /// max e^{|Im Ω| 2|h|} over the hopped entries: their growth in the interaction picture over the step (`followed`),
+    /// a factor of a hop's exponent's bound (`moved`).
+    grown: f64,
     /// The bounds of Ĥ₀ less its scalar part (`linalg::bounds`), and the Frobenius norms of D's constants, slopes and
     /// curvatures as the hops take them, summed over the classes: what bounds a hop's exponent, and what a hop is priced
     /// by.
@@ -598,6 +603,7 @@ impl Default for Picture {
             stops: Vec::new(),
             times: [0.0; 3],
             spread: 0.0,
+            grown: 1.0,
             bounds: [0.0; 2],
             slopes: [0.0; 3],
             reached: Vec::new(),
@@ -628,13 +634,24 @@ impl Default for Picture {
 /// With the route, what it leaves at the step's end: the least of the two where r < 1, the hops' where they are taken
 /// at r ≥ 1, the following's leading term where neither is (the least any route could leave there); none where the term
 /// does not turn (its hops' second term is x times the sizes').
-fn followed(x: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64) -> (Option<bool>, f64) {
+///
+/// A hopped entry is the hops' in the interaction picture of Ĥ₀ (`Picture::turn`): turned to the launch, its modulus is
+/// e^{−Im Ω s} of the unturned one, s from the launch to its time -- at most the step, 2|h| --, and its partner's
+/// e^{+Im Ω s}. Every order of the Magnus series carries on the entry (a, b) the factor of its two states (in a product
+/// of the turned matrix the intermediate states' factors cancel but for their own decay over the hop's width), so the
+/// hops' remainder on it is the one at |e^{iΩs}| = 1 times e^{|Im Ω| 2|h|}, `decay` = |Im Ω| |h| -- and so is the hop's
+/// exponent itself, which the hop's exponential is summed and priced by (`Picture::moved`). The following and the
+/// strides take Ω whole and grow by nothing. (Until 2026-11-18 the hops were read at a unit modulus: on S2Q an
+/// F′ = 3 mode and a ground mode within a rad/µs of each other and Γ/2 apart in decay were hopped, their exponent 10² to
+/// 2.6·10⁶, the first Magnus term far out of its range and the hop's Chebyshev series up to 1.3·10⁶ parts.)
+fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64) -> (Option<bool>, f64) {
     if !(x > 0.0) {
         return (Some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
     let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0) + 2.0 * coupled * r * x.powi(3);
-    let (light, hops, cube) = (4.0 / 15.0 * second * (x * x), x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0), x.powi(3));
+    let hops = x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0) * (2.0 * decay).exp();
+    let (light, cube) = (4.0 / 15.0 * second * (x * x), x.powi(3));
     if r < 1.0 {
         let following = leading / (1.0 - r) + light;
         if following <= hops { (Some(true), following / cube) } else { (Some(false), hops / cube) }
@@ -730,13 +747,13 @@ fn toned(diagonal: &[C64], beat: f64, half: f64, members: [&Mat; 2], reciprocals
             let combined = omega + C64::real(nu);
             // As a tone: its envelope at its combined frequency.
             let r = if combined != C64::ZERO { c.abs() / combined.abs() } else { 0.0 };
-            tone += followed(combined.abs() * h, [0.0, 0.0, size], r, 0.0).1;
+            tone += followed(combined.abs() * h, combined.im.abs() * h, [0.0, 0.0, size], r, 0.0).1;
             // In the static group: the parabola's slope and curvature at the entry's turn, and the beat it misses.
             let (a, b) = (c * C64::new(0.0, sin / half), c * ((cos - 1.0) / (half * half)));
             let y_poly = if omega != C64::ZERO { following(omega.recip(), C64::ZERO, a, b) } else { [C64::ZERO; 3] };
             let at = |u: f64| y_poly[0] + y_poly[1] * u + y_poly[2] * (u * u);
             let r = [-half, half].into_iter().map(|u| at(u).abs()).fold(0.0, f64::max);
-            let (route, left) = followed(omega.abs() * h, [size * sin.abs(), size * (1.0 - cos), 0.0], r, 0.0);
+            let (route, left) = followed(omega.abs() * h, omega.im.abs() * h, [size * sin.abs(), size * (1.0 - cos), 0.0], r, 0.0);
             let missed = if route == Some(true) {
                 [-half, half].into_iter().map(|u| (at(u) - c / omega + C64::cis(nu * u) * c / combined).abs()).fold(0.0, f64::max)
             } else {
@@ -820,9 +837,11 @@ fn take(class: &mut Class, k: usize, t: usize, omega: C64, fast: bool, size: usi
 /// their turn |Ω| |h| and the changes' `sizes` (`followed`), each the following's convergence on its own -- r, the
 /// larger of its two ways' |Y| at the step's ends, Y its following of the class's `envelope` on the entry (C, A, B:
 /// a first-order class's change, a product's second order through the nodes) --; the largest |Ω| hopped into
-/// `spread`. False where an entry is taken by no route of the decomposition (the rest is flagged as it would be, and
-/// not used).
-fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], coupled: f64, h: f64, spread: &mut f64) -> bool {
+/// `spread`, and the largest growth e^{|Im Ω| 2|h|} of a hopped entry in the interaction picture into `grown`
+/// (`followed`). False where an entry is taken by no route of the decomposition (the rest is flagged as it would be,
+/// and not used).
+#[allow(clippy::too_many_arguments)]
+fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], coupled: f64, h: f64, spread: &mut f64, grown: &mut f64) -> bool {
     let size = |class: &Class, k: usize, omega: C64| {
         let [c, a, b] = envelope(class, k);
         let y = following(omega.recip(), c, a, b);
@@ -842,11 +861,13 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, lambda: &[C64], si
                 let turn = omega.abs();
                 let (k, t) = (row * n + column, column * n + row);
                 let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
-                let (split, _) = followed(turn * h.abs(), sizes, r, coupled);
+                let decay = omega.im.abs() * h.abs();
+                let (split, _) = followed(turn * h.abs(), decay, sizes, r, coupled);
                 routed &= split.is_some();
                 let fast = split.unwrap_or(false);
                 if !fast {
                     *spread = spread.max(turn);
+                    *grown = grown.max((2.0 * decay).exp());
                 }
                 let (one, other) = both(classes, c, partner);
                 take(one, row * n + column, column * n + row, omega, fast, n * n);
@@ -1051,7 +1072,7 @@ impl Picture {
         assert!(!still || self.beats.is_empty(), "exact tones on a still path");
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
-        (self.half, self.followed, self.spread, self.factored, self.routed) = (half, false, 0.0, f64::NAN, true);
+        (self.half, self.followed, self.spread, self.factored, self.routed, self.grown) = (half, false, 0.0, f64::NAN, true, 1.0);
         self.classify();
         if !still {
             let [minus, plus] = &mut self.ends;
@@ -1343,7 +1364,7 @@ impl Picture {
         let size_of = |sum: f64| (0.5 * sum).sqrt();
         let sizes = [size_of(sums[1]) * (h * h), size_of(sums[2]) * (h * h * h).abs(), size_of(sums[0]) * h.abs()];
         let mut spread = self.spread;
-        if !flag(&mut classes, 0..order, &self.lambda, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), 0.0, h, &mut spread) {
+        if !flag(&mut classes, 0..order, &self.lambda, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), 0.0, h, &mut spread, &mut self.grown) {
             self.routed = false;
             return self.finish(classes, spread);
         }
@@ -1442,7 +1463,7 @@ impl Picture {
             let middle = if tones > 0 { entry(&class.second, 2 * block + place) } else { C64::ZERO };
             [middle, (plus - minus) * first, (plus + minus - middle * 2.0) * second]
         };
-        if !flag(&mut classes, order..all, &self.lambda, sizes, &product, sizes.iter().sum(), h, &mut spread) {
+        if !flag(&mut classes, order..all, &self.lambda, sizes, &product, sizes.iter().sum(), h, &mut spread, &mut self.grown) {
             self.routed = false;
             return self.finish(classes, spread);
         }
@@ -1605,10 +1626,11 @@ impl Picture {
     }
 
     /// The bound of a hop's exponent from the time u over the width w: ∫‖D₂‖ at the norms of its constants, slopes and
-    /// curvatures, D₂(t) = C + tA + t²B at the farther end of the hop from the middle.
+    /// curvatures, D₂(t) = C + tA + t²B at the farther end of the hop from the middle, times the hopped entries' largest
+    /// growth in the interaction picture over the step (`grown`, `followed`).
     fn moved(&self, u: f64, w: f64) -> f64 {
         let far = u.abs().max((u + w).abs());
-        (self.slopes[0] + far * self.slopes[1] + far * far * self.slopes[2]) * w.abs()
+        (self.slopes[0] + far * self.slopes[1] + far * far * self.slopes[2]) * w.abs() * self.grown
     }
 
     /// A hop's exponent ∫₀ʷ e^{iω_ab t}(D₂)_ab(u + t) dt into `matrix` (module documentation), from the time u over the
@@ -2363,7 +2385,7 @@ pub(crate) mod tests {
         // A second pair's slope that takes the first to a route, and the second pair (3 rad between two nodes) to one.
         let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| {
             let sizes = [own[0].hypot(*other), own[1], 0.0];
-            followed(x, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0).0 == Some(fast) && followed(3.0, sizes, across(3.0, C64::real(*other), C64::ZERO), 0.0).0.is_some()
+            followed(x, 0.0, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0).0 == Some(fast) && followed(3.0, 0.0, sizes, across(3.0, C64::real(*other), C64::ZERO), 0.0).0.is_some()
         });
         let mut found = [None; 3];
         for (treatment, wanted) in [Some(false), Some(true), None].into_iter().enumerate() {
