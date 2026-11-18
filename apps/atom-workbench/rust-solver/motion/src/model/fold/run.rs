@@ -425,6 +425,30 @@ impl Onefold {
             out += &format!("  集合 {k} {ground:?}
     显式：{:?}
 ", named(&sd.nodes));
+            // Each node with its labels and provenance (决定审计 J item 1): the line and F′, the states it holds (m′), its
+            // offset and its source's frame, and why it joined (decide.rs `Rule`) -- the first point that asked, how many
+            // of that round's points did, the node's mixing and the reading there.
+            let fold = &set.fold;
+            let ng = fold.ground.len();
+            for key in &sd.nodes {
+                let &(level, part, source) = key;
+                let (manifold, f) = fold.levels.get(level).copied().unwrap_or((crate::request::Manifold::Ground, 0));
+                let Some(p) = fold.ground.iter().position(|&g| g == source) else { continue };
+                let Some(comp) = fold.components.iter().find(|c| c.part == part) else { continue };
+                let offset = fold.frames[p].plus(1, &comp.beat);
+                let held: Vec<i32> = (0..fold.explicit.len()).filter(|&j| fold.excited_level[fold.explicit[j]] == level && fold.frames[ng + j] == offset).map(|j| labels.get(GROUND + fold.explicit[j]).map_or(99, |l| l.m as i32)).collect();
+                out += &format!("      {manifold:?} F'={f} m′{held:?}，偏置 {:.4} rad/µs（源 {} 的帧 {:.4}），经 {part:?}", fold.frame_values[p] + comp.nu, label(source), fold.frame_values[p]);
+                match sd.why.iter().find(|w| w.0 == *key) {
+                    Some((_, (rule, mixing, reading), count, at, on)) => {
+                        let v: Vec<f64> = at.kappa.iter().map(|k| k * self.hbar_over_mass).collect();
+                        let on: Vec<String> = on.iter().map(|x| format!("{},{},{},{}", x.0, x.1.frequency, u8::from(x.1.counter), x.2)).collect();
+                        out += &format!("；由 {rule:?}，该轮 {count} 点，首点 s {:.3} v [{:.3}, {:.3}, {:.3}] m/s，结点混入 {mixing:.3e}，读数 {reading:.3e}，读于 [{}]
+", at.s, v[0], v[1], v[2], on.join(";"));
+                    }
+                    None => out += "
+",
+                }
+            }
             let kinds = |f: &dyn Fn(&super::Term) -> bool| sd.toned.iter().filter(|t| f(t)).count();
             out += &format!(
                 "    保留的项（逐点读数超份额）：P 内项 {}，驱动 {}，交叉衰减 {}；份额内的项最大读数 {:.4e}\n",

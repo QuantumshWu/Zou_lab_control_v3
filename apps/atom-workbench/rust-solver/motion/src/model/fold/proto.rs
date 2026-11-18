@@ -4225,9 +4225,14 @@ impl Fold {
             }
             offers.retain(|o| o.0 > 0.0);
             if offers.is_empty() {
+                // Each node's part of the column's ρ²: where an account is infinite (a bound that does not exist, a
+                // Doppler spread beyond its gap), its part of those accounts alone -- infinity times any share is no
+                // ordering, and a node of a share 1e-12 of it is not its cause (决定审计 J item 1: tilt2's D1 levels rose
+                // so, first in the nodes' order).
+                let infinite = total(&worst, &ws.accounts, j).is_infinite();
                 for (m, hold) in holds.iter().enumerate() {
                     let Some(hold) = hold else { continue };
-                    let removed: f64 = ws.accounts.iter().zip(&worst).filter(|(a, _)| a.on).map(|(a, w)| w[j] * attributed(a, hold)[j]).sum();
+                    let removed: f64 = ws.accounts.iter().zip(&worst).filter(|(a, w)| a.on && (!infinite || w[j].is_infinite())).map(|(a, w)| if infinite { attributed(a, hold)[j] } else { w[j] * attributed(a, hold)[j] }).sum();
                     if removed > 0.0 {
                         offers.push((removed, Remedy::Rise(m)));
                     }
@@ -6478,8 +6483,12 @@ impl Workspace {
     /// landing does not exist at a decision's point -- N singular, an exceptional point --, its attribution by the bare
     /// inputs, never by the state's population nor the response there). None where no node is in a part.
     pub(crate) fn attributed(&self, cache: &Cache) -> Option<usize> {
-        let mixing = mixings(&self.near, &self.far, cache, &self.hbase, &self.cell.nodes, self.n, &mut 0.0);
-        most_mixed(&mixing, &self.cell.nodes, |_| true)
+        most_mixed(&self.mixings(cache), &self.cell.nodes, |_| true)
+    }
+
+    /// Each offered node's mixing at the last forward's point (`mixings`; the decision's report reads it).
+    pub(crate) fn mixings(&self, cache: &Cache) -> Vec<f64> {
+        mixings(&self.near, &self.far, cache, &self.hbase, &self.cell.nodes, self.n, &mut 0.0)
     }
 
     pub(crate) fn reading(&self) -> f64 {
