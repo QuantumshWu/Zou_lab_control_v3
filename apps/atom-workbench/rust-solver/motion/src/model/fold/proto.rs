@@ -741,6 +741,21 @@ impl Item {
     }
 }
 
+/// An approximation of a held forward taken out (`Fold::prototype_without`, the readings' test): none, a series part swept
+/// further, a near block made again at the point, a level a near block leaves out joined, a far block left out taken in,
+/// or all of them (every near block made again at the point with every level, every far block's R₀ made there -- but the
+/// one named, held -- and in, every part swept further).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Without {
+    Nothing,
+    Part(usize, usize),
+    Remade(usize),
+    Level(usize, usize),
+    In(usize),
+    All(Option<usize>),
+}
+
 /// One account of a decision (unify2 §2.1): per column its ρ² -- the rate channel |δT|²/W_j, the potential channel
 /// unrate(|δV|/2E)² --, and whether the evaluation holds it (an alternative it may take is read with it: a far block's
 /// centring and the block left out).
@@ -3478,6 +3493,57 @@ impl Fold {
         let made = self.forward_within(r, kappa, energy, cache, ws, decide, &mut work);
         ws.spent = work.iter().sum();
         made.map(|()| &ws.step)
+    }
+
+    /// A held forward on a decision's representation `cache` with one of its approximations taken out (`Without`; the
+    /// readings' test, tests/readings.rs): its G. A block made again or a level joined is made at the point; the series'
+    /// parts swept `sweeps` times where they are taken out. None where the fold does not exist so.
+    #[cfg(test)]
+    pub(crate) fn prototype_without(&self, r: [f64; 3], kappa: [f64; 3], energy: f64, cache: &Cache, ws: &mut Workspace, without: Without, sweeps: usize) -> Option<Mat> {
+        let mut c = cache.clone();
+        let (near, far) = (ws.near.len(), ws.far.len());
+        ws.decision.start(near, far);
+        match without {
+            Without::Remade(x) => ws.decision.near[x] = true,
+            Without::Level(x, q) => {
+                let mut kept = c.near_at(x).kept.clone();
+                kept.push(q);
+                kept.sort_unstable();
+                kept.dedup();
+                ws.decision.kept[x] = Some(kept);
+            }
+            Without::All(held) => {
+                for x in 0..near {
+                    ws.decision.kept[x] = Some((0..ws.near[x].levels.len()).collect());
+                    ws.decision.near[x] = true;
+                }
+                for x in (0..far).filter(|&x| Some(x) != held) {
+                    ws.decision.far[x] = true;
+                }
+            }
+            _ => {}
+        }
+        let mut work = 0.0;
+        self.bases(r, kappa, &mut c, ws, &mut None, &mut work)?;
+        let before = c.evaluation.clone();
+        let mut evaluation = c.evaluation.clone();
+        evaluation.fit(&c, &ws.near, &ws.far);
+        for x in 0..near {
+            if evaluation.parts[x].len() == before.parts.get(x).map_or(0, |p| p.len()) {
+                evaluation.parts[x] = before.parts[x].clone();
+            }
+        }
+        match without {
+            Without::Part(x, p) => evaluation.parts[x][p] = sweeps,
+            Without::In(x) => evaluation.far[x] = false,
+            Without::All(_) => {
+                evaluation.parts.iter_mut().flatten().for_each(|p| *p = sweeps);
+                evaluation.far.iter_mut().for_each(|f| *f = false);
+            }
+            _ => {}
+        }
+        c.evaluation = evaluation;
+        self.prototype_within(r, kappa, energy, &mut c, ws, false).filter(|s| !s.unresolved).map(|s| s.generator.clone())
     }
 
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
@@ -6489,6 +6555,12 @@ impl Workspace {
     /// The last decision's accounts (`Fold::accounts`).
     pub(crate) fn accounts(&self) -> &[Account] {
         &self.accounts
+    }
+
+    /// The fold's block of the workspace's near (or far) block x (the readings' test).
+    #[cfg(test)]
+    pub(crate) fn block_of(&self, x: usize, far: bool) -> usize {
+        if far { self.far[x].o } else { self.near[x].o }
     }
 
     /// What the last forward left out: the near blocks' excited rows not kept, the far blocks left out.

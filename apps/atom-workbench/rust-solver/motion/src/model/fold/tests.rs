@@ -10,6 +10,7 @@ use std::collections::{HashMap, VecDeque};
 mod raman;
 mod drag;
 mod losschk;
+mod readings;
 
 const GAMMA: f64 = 38.1;
 
@@ -3178,8 +3179,9 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
 /// = 0.1–0.4, and 4.6·10⁻³ to 5.5·10⁻² at Δ = −4Γ, s = 10–60): the exact survival's mean ∫N(τ)dτ (`Transient::wait`)
 /// against it, less what the slow span's own rate errs by (its slow mode's decay against the two-level no-jump
 /// generator's, analytic: the mean wait goes as its inverse), within the reading (the series' rest on T and T_L); the
-/// slow span's own error said beside (the fold's, read by its readings: at Δ = −4Γ, s = 10 the far row's centring errs
-/// by 2.4 % on the rate where the reading says 1.2 %).
+/// slow span's own error said beside (H_s's, the series' Bloch generator's: at Δ = −4Γ, s = 10 it errs by 2.4 % on the
+/// rate, its first order in the series' rest amplified by the shift over the rate; G's, what the run propagates, by 0.8 %,
+/// within the reading: tests/readings.rs `a_two_level_atom_s_reading_reads_its_generator_s_slow_mode`).
 #[test]
 fn a_two_level_atom_s_landing_waits_its_master_equation_s_time() {
     for (delta, s) in [(0.0, 0.1), (0.0, 0.2), (0.0, 0.3), (0.0, 0.4), (-4.0 * GAMMA, 10.0), (-4.0 * GAMMA, 30.0), (-4.0 * GAMMA, 60.0)] {
