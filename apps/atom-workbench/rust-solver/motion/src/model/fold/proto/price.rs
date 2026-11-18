@@ -44,7 +44,6 @@
 //! once). No forward is made for a price, and none is kept. A held forward reads nothing (unify2 U1: the readings are a
 //! decision's, `Fold::accounts`), so the formula of a forward holding the evaluation has no reading in it.
 use super::*;
-use crate::decide::COMPLEX;
 
 /// A Schur part of a near block's kept rows: its rows s_P, its triangle's reach Σ_{i∈P} (end_i − i) (the rows' entries
 /// to the right of the diagonal and the diagonal: K̂Z's and the triangular solve's), and the sweeps the evaluation gives
@@ -528,12 +527,6 @@ impl Sizes {
         [(3 * one.len() * n * n + 9 * cross * (GROUND + 1) * n * n) as f64, forms]
     }
 
-    /// A jump's price (real multiply-adds): its place, its drawn class's photons there (the dearest class's: the sizes do not
-    /// say which a jump draws), its landing's left response.
-    pub(crate) fn jump(&self) -> f64 {
-        let dearest = self.slots().into_iter().flat_map(|group| self.sets.iter().map(move |&set| Asked::Drawn { group, set })).map(|asked| self.photons(asked, true)).fold(0.0, f64::max);
-        COMPLEX * (self.place() + dearest + self.left())
-    }
 
 }
 

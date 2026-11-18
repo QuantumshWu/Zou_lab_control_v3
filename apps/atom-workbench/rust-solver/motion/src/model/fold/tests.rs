@@ -3951,3 +3951,100 @@ fn the_tiering_s_rounds_timed() {
 }
 
 
+
+/// Dust where the selection rules give zero (不靠零 J2): a request with 10⁻¹² to 10⁻⁴⁰ of each matrix's largest entry, at
+/// a phase of its own, in every zero entry of every beam's couplings (both rotations, excited ← ground), of every outside
+/// form's matrices off the diagonal (Hermitian) and of every emission operator (ground ← excited) -- what a request in a
+/// dressed basis carries (tilt2: 10⁻⁷ to 10⁻⁴⁵, the trap light's eigenbasis at the focus).
+fn dusted(clean: &Request) -> Request {
+    let mut dusty = clean.clone();
+    let mut k = 0u64;
+    let mut dust = |m: &mut Mat, allowed: &dyn Fn(usize, usize) -> bool, hermitian: bool| {
+        let most = m.data.iter().map(|z| z.abs()).fold(0.0, f64::max);
+        for i in 0..STATES {
+            for j in (0..STATES).filter(|&j| allowed(i, j) && (!hermitian || i < j)) {
+                if m[(i, j)] == C64::ZERO {
+                    k += 1;
+                    let size = most * 10f64.powf(-12.0 - 28.0 * (k as f64 * 0.618_033_988_749_895).fract());
+                    let phase = std::f64::consts::TAU * (k as f64 * 0.754_877_666_246_693).fract();
+                    m[(i, j)] = C64::new(size * phase.cos(), size * phase.sin());
+                    if hermitian {
+                        m[(j, i)] = m[(i, j)].conj();
+                    }
+                }
+            }
+        }
+    };
+    for b in &mut dusty.beams {
+        dust(&mut b.coupling, &|i, j| i >= GROUND && j < GROUND, false);
+        dust(&mut b.counter_coupling, &|i, j| i >= GROUND && j < GROUND, false);
+    }
+    for f in &mut dusty.outside_forms {
+        for m in &mut f.matrices {
+            dust(m, &|i, j| i != j, true);
+        }
+    }
+    for c in &mut dusty.emission {
+        dust(c, &|i, j| i < GROUND && j >= GROUND, false);
+    }
+    assert!(k > 1000, "dust in {k} entries");
+    dusty.validate().unwrap();
+    dusty
+}
+
+/// 不靠零 J2 (fold.rs # What the structure is built of): dust where the selection rules give zero (`dusted`) builds the
+/// same fold on the same choice -- every set's explicit states (the states its nodes hold), its blocks (offsets, sources,
+/// rows and how each is taken, explicit states, copies kept and left out), its cross decays, its candidate nodes -- and
+/// reads the same at the focus: every node's reading as the report gives it (four digits; one within the rounding of
+/// its unit reads nothing).
+#[test]
+fn dust_where_the_selection_rules_give_zero_builds_the_same_fold() {
+    let clean = crate::model::testing::scene("R4_LIN_4");
+    let dusty = dusted(&clean);
+    let choice = Choice::base(&clean, vec![(4, Part { frequency: 2, counter: false }, 0)], vec![]).unwrap();
+    for set in Fold::sets(&clean, &choice).unwrap() {
+        let (a, b) = (Fold::new(&clean, &choice, set[0]).unwrap(), Fold::new(&dusty, &choice, set[0]).unwrap());
+        assert_eq!(a.explicit, b.explicit, "set {set:?}: the explicit states");
+        assert_eq!(a.blocks.len(), b.blocks.len(), "set {set:?}: the blocks");
+        for (x, y) in a.blocks.iter().zip(&b.blocks) {
+            let same = x.offset == y.offset && x.rows == y.rows && x.solved == y.solved && x.sources == y.sources && x.explicit == y.explicit && x.kept == y.kept && x.omitted == y.omitted;
+            assert!(same, "set {set:?}: block at {} {:?} against {:?}", x.value, x.rows, y.rows);
+        }
+        assert_eq!(a.crossing, b.crossing, "set {set:?}: the cross decays");
+        assert_eq!(Choice::candidates(&a), Choice::candidates(&b), "set {set:?}: the candidates");
+        // A reading within the rounding of its unit (one) reads nothing.
+        let shown = |x: f64| if x > crate::units::rounding(STATES) { format!("{x:.4e}") } else { "rounding".into() };
+        let read = |f: &Fold| -> Vec<String> { f.read_at([0.0; 3]).unwrap().readings.iter().map(|r| format!("{} {:?} {}", r.block, r.node, shown(r.total()))).collect() };
+        assert_eq!(read(&a), read(&b), "set {set:?}: the readings at the focus");
+    }
+}
+
+/// 不靠零 J2, the start's decision whole: the same dust (`dusted`) decides the same -- the report's representation and
+/// readings, all but the time it took. Open: the decision's own readings still take an exact zero for no term (decide.rs
+/// `links`: a route's a > 0 and the direct entry's; `terms`: a ground pair's) -- at a degenerate pair (R4's zero field,
+/// Δ = 0) a dust a reads infinite and joins the sets (R4: F = 1 {−1, +1}, {0} became one). Those functions are the
+/// closed-form readings' implementer's (FOLDAPI 7.x, 2026-11-18); un-ignore with their fix (the rule: a route exists
+/// where both its couplings are in their components' structure, `Component::drives`; a direct entry where the forms'
+/// ground block has it).
+#[test]
+#[ignore]
+fn dust_where_the_selection_rules_give_zero_decides_the_same() {
+    let clean = crate::model::testing::scene("R4_LIN_4");
+    let dusty = dusted(&clean);
+    let report = |req: &Request| -> String {
+        let initial = crate::solve::components(req);
+        let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+        let run = run::Onefold::new(req, crate::solve::alone(initial[chief].0)).unwrap();
+        // The time the decision took ("（d 维），t s；") is no part of it.
+        run.report()
+            .lines()
+            .map(|line| match (line.find("维），"), line.find(" s；")) {
+                (Some(a), Some(b)) if b > a => format!("{}{}", &line[..a + "维），".len()], &line[b + " s".len()..]),
+                _ => line.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (a, b) = (report(&clean), report(&dusty));
+    assert_eq!(a, b, "the decision with dust differs:\n{a}\n---\n{b}");
+}

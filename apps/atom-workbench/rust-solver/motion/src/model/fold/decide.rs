@@ -60,14 +60,13 @@
 //! - two blocks' cross decay (`Term::Cross`): a = ½ Σ_q Σ_s l_o l_o′, each block's landing amplitude at the point,
 //!   l_o(q, s) = Σ_x |C_q[s, x]| e_o(x), e_o(x) = Σ |f_l X_l[x, s_p]| over the same optical detuning (an explicit row
 //!   one), Δ = |o − o′|; beyond: a tone;
-//! - one physical excited state's two nodes (`same`; 项清单完成 I item 3): its explicit place, if a node holds it, and its
-//!   Q rows of the blocks, two at a time, m = e_o e_o′ -- an explicit place's e one, a Q row's its mixing by its block's
-//!   sources at its optical detuning, as `Term::Drive` reads it --: the metric's cross term of the two Floquet nodes of
-//!   one state, turning at o − o′ (its size ‖ε_o‖ ‖ε_o′‖, in the static metric's gauge the Hamiltonian cross term's
-//!   a/|Δ|: dragchk (B1)). With the explicit place it is the drive (`Term::Drive`): one rule, two faces. Of two Q rows,
-//!   beyond the share the state goes into P once -- the node of its level at the block of the larger row -- and its
-//!   other rows are drives from then on; within it the pair is averaged out (M8). A node holds the states its offset
-//!   drives that no node holds already (fold.rs `Fold::build`): one state, one place.
+//! - one physical excited state at two blocks' offsets is no term of its own (决定审计 J item 2): its two Floquet nodes
+//!   are orthogonal in the time-averaged metric (the exact Floquet problem couples them only through the ground states),
+//!   and what their cross terms do is the terms above -- the Raman link through it between its two sources at their
+//!   two-photon mismatch (G; two places of one set at different frames: `Term::Pair`), the two blocks' cross decay over
+//!   their beat (`Term::Cross`, its diagonal part the state's own decay), and at a readout the instantaneous excited
+//!   population, exact from the blocks' amplitudes. A node holds the states its offset drives that no node holds
+//!   already (fold.rs `Fold::build`): one state, one place.
 //! The terms are read on the light alone, before the forward: where a point asks for a term, it asks for no node in that
 //! round (the forward is read on the decision with it).
 //!
@@ -332,34 +331,6 @@ pub(crate) fn focus(request: &Request) -> Result<Choice, String> {
     skeleton_at(request, &Local::focus(&Light::new(request)))
 }
 
-/// One physical excited state's two Q rows (module documentation, # The terms: the same state's nodes) at a point, read as
-/// `terms` reads: per state no node holds, per two blocks whose rows it is, m = e_o e_o′ -- each row's mixing by its
-/// block's sources at its optical detuning (`Term::Drive`'s, an explicit place's one) --, with the block of the larger
-/// (the earlier of two equal), where its reading is beyond the share: (state, block, reading).
-pub(crate) fn same(fold: &Fold, kappa: [f64; 3]) -> Vec<(usize, usize, f64)> {
-    let mut work = 0.0;
-    let site = fold.site([0.0; 3], kappa, &mut work);
-    let dressed = dressed(fold, &site);
-    let share = crate::model::elim::share();
-    let mut out = vec![];
-    for x in (0..EXCITED).filter(|x| !fold.explicit.contains(x)) {
-        let rows: Vec<(usize, f64)> = fold.blocks.iter().enumerate().filter(|(_, b)| b.rows.contains(&super::Row::Excited(x))).map(|(o, b)| (o, mixing(fold, &site, &dressed, b, x))).filter(|r| r.1 > 0.0).collect();
-        let mut most: Option<(usize, f64)> = None;
-        for (i, &(oa, ea)) in rows.iter().enumerate() {
-            for &(ob, eb) in &rows[i + 1..] {
-                let r = reading(ea * eb);
-                if r > share && most.is_none_or(|m| r > m.1) {
-                    most = Some((if eb > ea { ob } else { oa }, r));
-                }
-            }
-        }
-        if let Some((o, r)) = most {
-            out.push((x, o, r));
-        }
-    }
-    out
-}
-
 /// P's static generator at a point, Ĥ_PP(r) (`Fold::p_matrix`: the ground places' H_GG(r) of one frame, every block's
 /// part -- the explicit states' 𝒦(r) and their drives at their own offsets), decomposed: the columns' energies λ_j and
 /// their eigenvectors U_j (unit norm) -- what an explicit state's drive dresses its ground places with (Autler–Townes).
@@ -570,10 +541,9 @@ pub(crate) struct SetDecision {
     pub(crate) unheld: usize,
     pub(crate) unheld_at: Option<Local>,
     pub(crate) nowhere: usize,
-    /// Its same-state pairs' metric cross reading (`crossed`): the largest over the points read and where, and the count
-    /// of the readings beyond the share (`reading`; each point's every reading counted, its re-reads too).
-    pub(crate) crossed: (f64, Option<Local>),
-    pub(crate) crossed_beyond: usize,
+    /// Per node joined its provenance (决定审计 J item 1): the key, why the first point that asked for it did, the count of
+    /// the points of that round that asked, the first of them, the nodes it was read on.
+    pub(crate) why: Vec<(Key, Why, usize, Local, Vec<Key>)>,
     /// The links kept between its states (G, # The terms), and the largest reading of a link of one of its states
     /// within the share over the points read.
     pub(crate) links: usize,
@@ -708,15 +678,30 @@ impl Sobol {
 }
 
 /// What a point asks of one set's decision: nothing (its reading, rate units; whether it stays beyond the share with no
-/// node offered; its same-state pairs' metric cross reading, `Search::crossed`; its terms' largest reading), terms beyond
+/// node offered; its terms' largest reading), terms beyond
 /// the share (# The terms), a node (its key), or nothing where its fold does not exist and no node is left to raise.
 #[derive(Clone)]
 enum Asked {
-    Within(f64, bool, f64, f64),
+    Within(f64, bool, f64),
     Terms(Vec<Term>),
-    Node(Key),
+    Node(Key, Why),
     Nowhere,
 }
+
+/// Which rule asked for a node (the report's provenance, 决定审计 J item 1): the walk's rise where a column stays beyond the budget with no remedy of the evaluation's; the fold
+/// that does not exist at the point (its series' ratio at one), the node the attribution names (`Fold::failed`); the
+/// landing that does not exist (`Workspace::attributed`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Rule {
+    Budget,
+    NoFold,
+    Landing,
+}
+
+/// A node's provenance at the point that asked for it: the rule, the node's mixing there (proto.rs `mixings`: its kept
+/// rows' bare source over the level's distance from the column's bare energy) and the reading that asked (the step's;
+/// NaN where the fold does not exist).
+pub(crate) type Why = (Rule, f64, f64);
 
 /// One set's fold on a decision (module documentation, # What is made once): its choice (`Choice::base_of` with those
 /// nodes, its own set's tiers), its fold and candidates, and the threads' copies of the fold with their workspaces, taken
@@ -742,54 +727,6 @@ impl Built {
 
 /// A set's fold on a decision, once made: Err where its cluster cannot be made (run.rs `Clusters::cluster_with`).
 type Slot = Arc<OnceLock<Result<Arc<Built>, String>>>;
-
-/// The metric cross reading of a fold's same-state node pairs at its last forward (FOLDAPI §2; dragchk.status 第二项,
-/// 给 A 的实现说明 4): one physical excited state at two offsets -- an explicit place and a Q row of another block, or Q
-/// rows of two blocks -- is two nodes whose cross term in the physical norm, Σ e^{i(o − o′)t} ε_n†ε_n′, the metric drops
-/// (M8: the blocks apart, `Workspace::populations`; the beating metric). Its size, the coupling's mixing in the rule's
-/// reading (dragchk (B1); in the static metric's gauge the Hamiltonian cross term's a/|Δ|), is ‖ε_n‖ ‖ε_n′‖ on the P
-/// columns (an explicit place's row the unit one): the largest over every pair. Within the share it is averaged out (the
-/// blocks apart); beyond it the pair's cross terms must be kept in the transients (dragchk (B3)), which this fold does not
-/// hold: the decision reports it.
-fn crossed(fold: &Fold, cache: &Cache, ws: &super::proto::Workspace) -> f64 {
-    let n = fold.size();
-    // Every block's rows' ε on the P columns: per block, per row, its squared norm over the columns.
-    let mut norms: Vec<Vec<f64>> = fold.blocks.iter().map(|_| vec![]).collect();
-    for j in 0..n {
-        let mut x = vec![C64::ZERO; n];
-        x[j] = C64::ONE;
-        for (o, rows) in ws.amplitudes(fold, cache, &x).into_iter().enumerate() {
-            norms[o].resize(rows.len(), 0.0);
-            for (r, z) in rows.into_iter().enumerate() {
-                norms[o][r] += z.norm_sqr();
-            }
-        }
-    }
-    // Per excited state its nodes' norms: its explicit place (one), and each block's row of it.
-    let mut nodes: Vec<Vec<(usize, f64)>> = vec![vec![]; crate::request::STATES];
-    for p in fold.ground.len()..n {
-        nodes[fold.place_state(p)].push((usize::MAX, 1.0));
-    }
-    for (o, rows) in norms.iter().enumerate() {
-        for (r, &w) in rows.iter().enumerate() {
-            let state = fold.row_state(o, r);
-            if state >= crate::request::GROUND {
-                nodes[state].push((o, w.sqrt()));
-            }
-        }
-    }
-    let mut most = 0.0_f64;
-    for of in &nodes {
-        for (a, &(oa, wa)) in of.iter().enumerate() {
-            for &(ob, wb) in &of[a + 1..] {
-                if oa != ob {
-                    most = most.max(wa * wb);
-                }
-            }
-        }
-    }
-    most
-}
 
 /// The decision's inputs (module documentation), and what it makes once and keeps (# What is made once): each set's
 /// fold per decision (`Built`) on the skeleton so far (# The terms, G), the points read and their G terms.
@@ -902,7 +839,7 @@ impl<'a> Search<'a> {
         let (Ok(built), Some((fold, ws))) = (built, held) else { return Asked::Nowhere };
         let candidates = &built.candidates;
         if fold.blocks.is_empty() {
-            return Asked::Within(0.0, false, 0.0, 0.0);
+            return Asked::Within(0.0, false, 0.0);
         }
         fold.local = local.factors(self.light);
         // The terms first (# The terms): those beyond the share the decision does not keep and has not refused.
@@ -922,26 +859,30 @@ impl<'a> Search<'a> {
         if !asks.is_empty() {
             return Asked::Terms(asks);
         }
-        // One physical state's two Q rows beyond the share (module documentation, # The terms: the same state's nodes):
-        // the state into P once, at the block of the larger row, its node the level's there.
-        for (x, o, _) in same(fold, local.kappa) {
-            let level = fold.excited_level[x];
-            if let Some(c) = candidates.iter().find(|c| c.1.block == o && fold.blocks[o].rows.iter().enumerate().any(|(r, row)| *row == super::Row::Excited(x) && c.1.rows.contains(&r)) && c.0 .0 == level) {
-                return Asked::Node(c.0);
-            }
-        }
         ws.cell = Cell { nodes: candidates.iter().map(|c| c.1.clone()).collect(), here: true, ..Cell::default() };
         let mut cache = Cache::default();
         let step = fold.prototype([0.0; 3], local.kappa, self.floor, &mut cache, ws).map(|s| (s.reading, s.beyond));
         let mut chosen = ws.cell.chosen;
+        let mut rule = if step.is_some() { Rule::Budget } else { Rule::NoFold };
         if let (Some(_), None) = (step, chosen) {
             if !fold.prototype_left(&cache, ws) {
                 chosen = ws.attributed(&cache);
+                rule = Rule::Landing;
+            }
+        }
+        // A node the walk or the attribution names is the cause only where its own mixing (`Workspace::mixings`: its rows'
+        // source over their distance from the column) reads beyond the share (the one reading): one within it cannot make
+        // a column's error, nor the fold's existence, nor the landing's -- what does is no node's (决定审计 J item 1).
+        let mixing = chosen.map_or(0.0, |c| ws.mixings(&cache)[c]);
+        if chosen.is_some() && reading(mixing) <= share {
+            chosen = None;
+            if let Some((r, _)) = step {
+                return Asked::Within(r.max(share * (1.0 + f64::EPSILON)), true, worst);
             }
         }
         match (step, chosen) {
-            (_, Some(c)) => Asked::Node(candidates[c].0),
-            (Some((reading, beyond)), None) => Asked::Within(reading, beyond, crossed(fold, &cache, ws), worst),
+            (_, Some(c)) => Asked::Node(candidates[c].0, (rule, mixing, step.map_or(f64::NAN, |s| s.0))),
+            (Some((reading, beyond)), None) => Asked::Within(reading, beyond, worst),
             (None, None) => Asked::Nowhere,
         }
     }
@@ -1055,7 +996,7 @@ impl<'a> Search<'a> {
             // last decision made, the sets' at once (# What is made once).
             let keys: Vec<Vec<Key>> = (0..sets)
                 .map(|k| {
-                    let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
+                    let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key, _) = a[k] { Some(key) } else { None }).collect();
                     asks.sort();
                     let mut keys: Vec<(Key, usize)> = vec![];
                     for key in asks {
@@ -1105,6 +1046,12 @@ impl<'a> Search<'a> {
                     }
                 }
                 let set = &mut decision.sets[k];
+                for key in now.iter().filter(|key| !set.nodes.contains(key)) {
+                    let asking: Vec<(usize, Why)> = asked.iter().enumerate().filter_map(|(i, a)| if let Asked::Node(x, why) = a[k] { (x == *key).then_some((i, why)) } else { None }).collect();
+                    if let Some(&(i, why)) = asking.first() {
+                        set.why.push((*key, why, asking.len(), points[i].clone(), nodes[k].clone()));
+                    }
+                }
                 set.nodes = now;
                 set.toned = kept;
                 set.refused.extend(refused.into_iter().map(|key| (key, 0)));
@@ -1113,19 +1060,14 @@ impl<'a> Search<'a> {
             let mut again = vec![];
             // Whether set k had a node of the level joined in this round.
             let joined = |k: usize, level: usize, sets: &[SetDecision]| sets[k].nodes.iter().any(|n| n.0 == level && !nodes[k].contains(n));
-            for ((&i, asks), point) in open.iter().zip(asked).zip(&points) {
+            for (&i, asks) in open.iter().zip(asked) {
                 let mut more = false;
                 let mut row = vec![(0.0, false, false, false); sets];
                 for (k, ask) in asks.into_iter().enumerate() {
                     match ask {
-                        Asked::Within(read, beyond, cross, worst) => {
+                        Asked::Within(read, beyond, worst) => {
                             row[k] = (read, beyond, false, false);
                             decision.sets[k].terms_worst = decision.sets[k].terms_worst.max(worst);
-                            let set = &mut decision.sets[k];
-                            if cross > set.crossed.0 {
-                                set.crossed = (cross, Some(point.clone()));
-                            }
-                            set.crossed_beyond += usize::from(reading(cross) > crate::model::elim::share());
                         }
                         Asked::Nowhere => row[k] = (f64::INFINITY, false, false, true),
                         Asked::Terms(asks) if asks.iter().any(|t| decision.sets[k].toned.contains(t)) => more = true,
@@ -1135,8 +1077,8 @@ impl<'a> Search<'a> {
                                 r.1 += 1;
                             }
                         }
-                        Asked::Node(key) if joined(k, key.0, &decision.sets) => more = true,
-                        Asked::Node(key) => {
+                        Asked::Node(key, _) if joined(k, key.0, &decision.sets) => more = true,
+                        Asked::Node(key, _) => {
                             row[k] = (f64::INFINITY, false, true, false);
                             if let Some(r) = decision.sets[k].refused.iter_mut().find(|r| r.0 == key) {
                                 r.1 += 1;
@@ -1219,8 +1161,9 @@ impl<'a> Search<'a> {
                 toned.sort();
                 toned.dedup();
                 let refused = parts.iter().flat_map(|d| d.refused.iter().copied()).collect();
+                let why = parts.iter().flat_map(|d| d.why.iter().cloned()).collect();
                 let refused_terms = parts.iter().flat_map(|d| d.refused_terms.iter().map(|t| (t.0.in_set(g[0]), t.1))).filter(|t| still || matches!(t.0, Term::Pair(..))).collect();
-                SetDecision { ground: g.clone(), nodes, toned, refused, refused_terms, ..SetDecision::default() }
+                SetDecision { ground: g.clone(), nodes, toned, refused, refused_terms, why, ..SetDecision::default() }
             })
             .collect();
         decision.sets = sets;
@@ -1444,7 +1387,7 @@ mod tests {
                 }
             }
         }
-        let judged = ["admixture", "unfoldable", "Choice::of(", "decide::tiered", "decide::terms", "decide::links", "decide::same", "decide::skeleton_at", "decide::focus", "decide::at_point", ".tiers_at("];
+        let judged = ["admixture", "unfoldable", "Choice::of(", "decide::tiered", "decide::terms", "decide::links", "decide::skeleton_at", "decide::focus", "decide::at_point", ".tiers_at("];
         let mut found = vec![];
         for path in &files {
             let code = compiled(&std::fs::read_to_string(path).unwrap());
@@ -1523,8 +1466,6 @@ mod tests {
                 if step.is_some() && chosen.is_none() && !fold.prototype_left(&cache, &mut ws) {
                     chosen = ws.attributed(&cache);
                 }
-                let cross = if step.is_some() { crossed(&fold, &cache, &ws) } else { f64::NAN };
-                let same_read: Vec<String> = same(&fold, local.kappa).iter().map(|x| format!("x{} b{} {:.2e}", x.0, x.1, x.2)).collect();
                 let what = match chosen {
                     Some(c) => {
                         let (o, level, rows) = &nodes[c];
@@ -1536,10 +1477,91 @@ mod tests {
                 };
                 *wanted.entry(what.clone()).or_insert(0) += 1;
                 if count <= 6 {
-                    println!("set {k} point s {:.3} v {:?}: {} {}; the walk raises {what}; same {same_read:?}; cross {cross:.2e}", local.s, local.kappa, if row[k].3 { "no fold" } else { "beyond" }, row[k].0, );
+                    println!("set {k} point s {:.3} v {:?}: {} {}; the walk raises {what}", local.s, local.kappa, if row[k].3 { "no fold" } else { "beyond" }, row[k].0, );
                 }
             }
             println!("set {k} {:?}: {count} points; explicit {:?} at {:?}; wanted {wanted:?}", set.ground, fold0.explicit, fold0.frame_values[fold0.ground.len()..].to_vec());
+        }
+    }
+
+    /// Diagnostic (决定审计 J item 1; DECIDE_REQ a request's path, DECIDE_SET the set, DECIDE_AT "s,vx,vy,vz" in m/s,
+    /// DECIDE_PHASES the beams' phases):
+    /// one set with no explicit node read at one point -- the walk's accounts (item, the largest square over the columns
+    /// read, on), the columns' denominators, each offered node's mixing, what it asks.
+    #[test]
+    #[ignore]
+    fn one_set_read_at_one_point() {
+        use super::*;
+        let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
+        let light = Light::new(&req);
+        let k: usize = std::env::var("DECIDE_SET").map_or(0, |x| x.parse().unwrap());
+        let at: Vec<f64> = std::env::var("DECIDE_AT").map_or(vec![0.0; 4], |x| x.split(',').map(|y| y.parse().unwrap()).collect());
+        let hbar_over_mass = crate::units::hbar_over_mass(req.mass_kg);
+        let initial = crate::solve::components(&req);
+        let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+        let reference = crate::solve::alone(initial[chief].0);
+        let states = super::super::run::Reference::states(&req, &light).unwrap();
+        let (floor, bottom) = super::super::run::Onefold::scales(&light, hbar_over_mass, &super::super::run::Reference::of(&states, &reference));
+        let search = Search::new(&req, &light, floor, (2.0 * (-bottom).max(0.0) / hbar_over_mass).sqrt()).unwrap();
+        // DECIDE_PHASES "φ_0,φ_1,...": every request beam's phase (zero where not given).
+        let mut phases: Vec<f64> = std::env::var("DECIDE_PHASES").map_or(vec![], |x| x.split(',').map(|y| y.parse().unwrap()).collect());
+        phases.resize(light.beams.len(), 0.0);
+        let local = Local { s: at[0], phases, kappa: [at[1] / hbar_over_mass, at[2] / hbar_over_mass, at[3] / hbar_over_mass] };
+        // DECIDE_NODES "level,frequency,counter,source;...": the set's nodes to start from.
+        let mut nodes: Vec<Key> = std::env::var("DECIDE_NODES").map_or(vec![], |x| {
+            x.split(';').filter(|y| !y.is_empty()).map(|y| {
+                let v: Vec<usize> = y.split(',').map(|z| z.parse().unwrap()).collect();
+                (v[0], crate::model::Component { frequency: v[1], counter: v[2] == 1 }, v[3])
+            }).collect()
+        });
+        nodes.sort();
+        let mut toned: Vec<Term> = vec![];
+        for _ in 0..40 {
+            let built = search.built(k, &(nodes.clone(), toned.clone()));
+            let mut held = built.as_ref().ok().map(|b| b.take());
+            let asked = search.ask(&built, held.as_mut(), &local, &[]);
+            let (Ok(built), Some((fold, ws))) = (&built, held.as_ref()) else { println!("no cluster"); break };
+            let show = |what: String| {
+                println!("set {k} {:?} at {at:?} nodes {nodes:?} toned {}: {what}", search.grounds[k], toned.len());
+                for a in ws.accounts() {
+                    let most = a.squares.iter().cloned().fold(0.0_f64, f64::max);
+                    if most > 1e-6 {
+                        println!("  account {:?} on {} squares {:?}", a.item, a.on, a.squares.iter().map(|x| format!("{x:.2e}")).collect::<Vec<_>>());
+                    }
+                }
+                if std::env::var("DECIDE_BLOCKS").is_ok() {
+                    for (o, b) in fold.blocks.iter().enumerate() {
+                        let rows: Vec<String> = b.rows.iter().enumerate().map(|(i, r)| match *r {
+                            super::super::Row::Excited(x) => format!("{}E{x}{}", if i < b.solved { "" } else { "~" }, fold.levels[fold.excited_level[x]].1),
+                            super::super::Row::Copy { state, component } => format!("{}C{state}/{}", if i < b.solved { "" } else { "~" }, component),
+                        }).collect();
+                        let src: Vec<String> = b.sources.iter().map(|&(p, c)| format!("{}<{:?}", fold.ground[p], fold.components[c].part)).collect();
+                        println!("  block {o} {:.4} src {src:?} explicit {:?} rows {}", b.value, b.explicit.iter().map(|&p| fold.explicit[p - fold.ground.len()]).collect::<Vec<_>>(), rows.join(" "));
+                    }
+                }
+                let _ = (fold, built);
+            };
+            match asked {
+                Asked::Terms(t) => {
+                    println!("terms {t:?}");
+                    toned.extend(t);
+                    toned.sort();
+                    toned.dedup();
+                }
+                Asked::Node(key, why) => {
+                    show(format!("node {key:?} why {why:?}"));
+                    nodes.push(key);
+                    nodes.sort();
+                }
+                Asked::Within(r, beyond, worst) => {
+                    show(format!("within {r:.3e} beyond {beyond} terms {worst:.3e}"));
+                    break;
+                }
+                Asked::Nowhere => {
+                    show("nowhere".into());
+                    break;
+                }
+            }
         }
     }
 
