@@ -171,12 +171,13 @@
 //! A tone is Hermitian: an explicit pair's entry is 𝒦's less its decay (`Fold::hermitian_excited`), the decay between two
 //! offsets being their group's jumps' cross products (fold.rs # Tones; model/fold/run.rs, # The jumps' coherence).
 //!
-//! The drives at another offset: an explicit state is one object at one frame (fold.rs `Fold::build`: no other block
-//! holds it). A component that reaches it from a ground place at another offset drives it by an entry of Ĥ_PP linear in
-//! the component's coefficients (as `lin`, the drives at its own offset), turning at θ_x − θ_q − ν_g, its conjugate at
-//! the opposite beat; read as `Choice::of` reads a coupling (its peak strength over its beat, `unfoldable`), it is a
-//! tone beyond the share (`Rotating::lin`: its A_m, its gradient by ∂e) and an averaged entry within it, folded (run.rs
-//! # The averaged terms folded). tilt0's probe, 26.37 rad/µs from its PGC light, drives F' = 3 so: its two Floquet copies
+//! The drives at another offset: an explicit state is one object at one frame (fold.rs `Fold::build`); its copy at
+//! another block's offset is a Floquet node under the one rule. Where that block's sources drive it beyond the share
+//! (their peak strength over the beat, `unfoldable`; `Fold::driven`) the block does not hold it, and the drive is an
+//! entry of Ĥ_PP linear in the component's coefficients (as `lin`, the drives at its own offset), turning at
+//! θ_x − θ_q − ν_g, its conjugate at the opposite beat: a tone (`Rotating::lin`: its A_m, its gradient by ∂e). Within
+//! the share the copy is the block's Q row, folded with its light shift and its gradient (losschk.status.md: the
+//! tweezer's far drive of tilt0's explicit F' = 3, as an averaged entry, lost a third of the trap's force). tilt0's probe, 26.37 rad/µs from its PGC light, drives F' = 3 so: its two Floquet copies
 //! would overlap within Γ.
 //!
 //! The copies a block solves exactly (the P layer's Woodbury) are the solved rows after its excited ones; a block with no
@@ -2482,10 +2483,10 @@ impl Fold {
             }
         }
         // The drives between a ground place and an explicit one at another offset (an explicit state is one object at one
-        // frame: fold.rs `Fold::build`): the entry (x, q) of component g turns at θ_x − θ_q − ν_g, its conjugate at the
-        // opposite beat. Each is read as `Choice::of` reads a coupling -- its peak strength Σ_l |V_l[x, q]| over its beat --
-        // and by the one rule is a tone beyond the share, an averaged entry within it (`unfoldable`; folded, run.rs # The
-        // averaged terms folded). Per (beat, component, vector): its entries at e_k, or at e_k* for the conjugate.
+        // frame: fold.rs `Fold::build`): where its block's drive of x is beyond the share (`Fold::driven`), the entry
+        // (x, q) of component g turns at θ_x − θ_q − ν_g, its conjugate at the opposite beat: a tone. Within the share x's
+        // copy is that block's Q row, folded there. Per (beat, component, vector): its entries at e_k, or at e_k* for the
+        // conjugate.
         let mut drives: Vec<(Beat, f64, bool, usize, usize, bool, usize, C64)> = vec![];
         for (g, comp) in self.components.iter().enumerate() {
             for px in ng..n {
@@ -2497,7 +2498,12 @@ impl Fold {
                     }
                     let beat = self.frames[px].plus(-1, &self.frames[q].plus(1, &comp.beat));
                     let value = self.frame_values[px] - self.frame_values[q] - comp.nu;
-                    let tone = super::unfoldable(peak / value.abs(), crate::model::elim::share());
+                    // A tone where its block's drive of x is (`Fold::driven`); else x's copy is that block's Q row.
+                    let offset = self.frames[q].plus(1, &comp.beat);
+                    if !self.driven.iter().any(|d| d.0 == x && d.1 == offset) {
+                        continue;
+                    }
+                    let tone = true;
                     for k in 0..comp.basis.len() {
                         let v = comp.basis[k][(x, self.ground[q])];
                         if v != C64::ZERO {
@@ -2572,9 +2578,6 @@ impl Fold {
                 let m = tone_of(x, &mut averaged);
                 averaged[m].base.push((x, h));
             }
-        }
-        for d in drives.iter().filter(|d| !d.2) {
-            drive_into(&mut averaged, (d.0.clone(), d.1, d.3, d.4, d.5, d.6, d.7));
         }
         for (t, &pair) in pairs.iter().enumerate() {
             let m = contract(
