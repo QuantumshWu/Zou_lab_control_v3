@@ -3027,7 +3027,7 @@ fn a_scene_s_onefold_step_cost() {
     for set in 0..GROUND {
         let first = (0..GROUND).find(|&g| run.cluster_of(g) == set);
         let Some(first) = first else { break };
-        let decided: std::cell::RefCell<Vec<(usize, f64, [f64; 5])>> = std::cell::RefCell::new(vec![]);
+        let decided: std::cell::RefCell<Vec<(usize, f64, [f64; super::READS])>> = std::cell::RefCell::new(vec![]);
         let starts: Vec<Trajectory> = (0..16)
             .map(|i| {
                 let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, set as u32);
@@ -3051,7 +3051,7 @@ fn a_scene_s_onefold_step_cost() {
                 let middle = run.middle(start.cluster, start.r, start.time, &start.held, true);
                 let path = middle.path(start.kappa, start.kappa.map(|k| run.hbar_over_mass() * k));
                 if middle.exists(&path) {
-                    let kinds = middle.books(&path, &start.psi).map_or([0.0; 5], |b| b.0);
+                    let kinds = middle.books(&path, &start.psi).map_or([0.0; super::READS], |b| b.0);
                     if let Some(held) = middle.held() {
                         decided.borrow_mut().push((start.cluster, middle.made(), kinds));
                         start.held = held;
@@ -3071,9 +3071,9 @@ fn a_scene_s_onefold_step_cost() {
             // The decisions' forwards' counts against a held forward's on each atom's own decision (real multiply-adds).
             let forwards: Vec<f64> = decided.borrow().iter().filter(|d| d.0 == cluster).map(|d| d.1).collect();
             // Their accounts by kind at their worst column (ρ, amplitude units): the mean over the atoms.
-            let kinds: Vec<[f64; 5]> = decided.borrow().iter().filter(|d| d.0 == cluster).map(|d| d.2).collect();
-            let mean_kinds: Vec<String> = (0..5).map(|k| format!("{:.1e}", kinds.iter().map(|x| x[k].sqrt()).sum::<f64>() / kinds.len().max(1) as f64)).collect();
-            println!("{label}: the decisions' accounts (series, reuse, centred, left out, ring; ρ, the atoms' mean) {mean_kinds:?}");
+            let kinds: Vec<[f64; super::READS]> = decided.borrow().iter().filter(|d| d.0 == cluster).map(|d| d.2).collect();
+            let mean_kinds: Vec<String> = (0..super::READS).map(|k| format!("{:.1e}", kinds.iter().map(|x| x[k].sqrt()).sum::<f64>() / kinds.len().max(1) as f64)).collect();
+            println!("{label}: the decisions' accounts (series, reuse, centred, left out; ρ, the atoms' mean) {mean_kinds:?}");
             let held: Vec<f64> = these
                 .iter()
                 .map(|t| {
@@ -3287,8 +3287,8 @@ fn parts<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) {
                 let mut sum = 0.0;
                 for (t, e, a) in jumped.iter().zip(&emitted).zip(&alongs).filter_map(|((t, e), a)| e.as_ref().filter(|e| e.landing == t.cluster).map(|e| (t, e, a))) {
                     a.middle.forget_left();
-                    if let super::Landing::On(landed) = model.landed(e.landing, &t.point(), Some((a.middle, &a.path)), &e.amplitudes[0], &t.held) {
-                        sum += landed[0].re;
+                    if let super::Landing::On(landed) = model.landed(e.landing, &t.point(), Some((a.middle, &a.path)), &e.amplitudes[0], &t.held, t.threshold) {
+                        sum += landed.psi[0].re;
                     }
                 }
                 sum

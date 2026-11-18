@@ -23,6 +23,19 @@
 //! Two nodes of one physical state at two offsets (a Floquet copy) are two rows: the quadratic forms on the modes are the
 //! node space's (dragchk.status 第二项 (B1), Q⁰): their cross parts turn at the offsets' difference and are taken averaged,
 //! as the representation takes them (FOLDAPI §2: none of the scenes keeps such a pair as a tone).
+//!
+//! # The clock (pland.status # 第四轮（续）; dragchk.status 第二项)
+//! The jump clock is the exact survival N(τ) = ‖Ψ(τ)‖² from the bare state, the slow part's and the fast part's: the jump
+//! is where N reaches the trajectory's threshold θ. The step follows the slow part alone, its norm N_s the engine's ‖ψ‖²;
+//! so the landing solves N(τ*) = θ on its modes and hands the step the threshold θ′ = N_s(τ*) for this cycle -- the step
+//! then jumps at τ* (to its own accuracy: the motion's change of the transient is of the first order within it), with no
+//! dead time and no norm of its own (`Workspace::clock`). θ′ = θ to the rounding where τ* lies past the transient.
+//! The photon at τ* is the whole state's: L_qΨ(τ*), the slow part's the step's own (its state at the jump), the fast
+//! part's owed to that jump by the landing (`Clock::owed`: its amplitudes at τ*, every block at its offset's phase) -- the
+//! transient's photons land where its rows ring, each at its time (dragchk.status.md section 5: drawn on the slow
+//! pattern, tilt0's at-once photons put its F = 2 populations off). Where the slow part is dark until τ* (θ′ its whole
+//! norm), that jump is at once (step.rs `jump`). The jump operators enter through the bare state alone: f = P_set L_q(t*)ψ,
+//! every block's at its exact phase (dragchk.status 第二项).
 use super::*;
 use crate::linalg::Eigen;
 
@@ -53,6 +66,7 @@ pub(crate) struct Transient {
     values: Vec<C64>,
     c: Vec<C64>,
     gram: Mat,
+    a: Vec<C64>,
     pub(crate) work: f64,
 }
 
@@ -194,8 +208,19 @@ impl Workspace {
             put(&mut gram, &quick.vectors.adjoint_product(&ff.product(&quick.vectors)), n, n);
         }
         work += (2 * n * n * n + 2 * n * rows * (n + rows) + 2 * rows * rows * (n + rows)) as f64;
-        Some(Transient { n, blocks, far, t, tl, slow, quick, values, c, gram, work })
+        Some(Transient { n, blocks, far, t, tl, slow, quick, values, c, gram, a: a.to_vec(), work })
     }
+}
+
+/// The landing's clock (module documentation, # The clock): the threshold θ′ the slow part's norm meets where the exact
+/// survival meets the trajectory's θ at τ* (θ itself where it never does), the photon the fast part owes that jump -- its amplitudes u_q on the ground states at the jump's time (rows (b, q) at 3b + q, every block at
+/// its offset's phase, `Fold::prototype_photons`' layout) --, none where it is within the rounding of the slow photon's
+/// there; and its count (complex multiply-adds).
+#[derive(Clone, Debug)]
+pub(crate) struct Clock {
+    pub(crate) threshold: f64,
+    pub(crate) owed: Option<Vec<C64>>,
+    pub(crate) work: f64,
 }
 
 impl Transient {
@@ -204,18 +229,160 @@ impl Transient {
         self.values.len()
     }
 
-    /// The emission of every mode's excited part per offset of the fold (laid as the photons are: rows (b, q) at 3b + q,
-    /// 3 GROUND × d each, `Fold::prototype_photons`): a near block's kept rows by its emission on them (C_qV, `NearBasis::
-    /// emit`) and its explicit states' own rows (`NearBasis::xemitc`) on the mode's P part, a far block's by C_qR₀B on the
-    /// slow modes' whole response and on a fast mode's row along β̂ (C_qβ_f/‖β_f‖ times its coordinate). A slow mode's P
-    /// part q_j and rows Tq_j (the far block's R₀Bq_j whole), a fast mode's P part −T_L†q_k and rows q_k. Per offset (its
-    /// value, exact as the blocks hold it) its matrix: the photons of one offset are one Floquet node's, coherent; two
-    /// offsets' turn apart (module documentation).
+    /// At τ from the landing: the exact survival N(τ) = Σ_ij c_i*c_j e^{i(λ_i*−λ_j)τ} G_ij, the slow pairs' N_s(τ) (the
+    /// engine's ‖ψ‖²), and their photon rates p = −N′, p_s = −N_s′ (r_i†D r_j = i(λ_j − λ_i*)G_ij on the modes).
+    fn survival(&self, tau: f64) -> [f64; 4] {
+        let (n, d) = (self.n, self.size());
+        let v: Vec<C64> = self.values.iter().zip(&self.c).map(|(l, c)| *c * (C64::new(0.0, -tau) * *l).exp()).collect();
+        let mut out = [0.0; 4];
+        for i in 0..d {
+            for j in 0..d {
+                let z = v[i].conj() * self.gram[(i, j)] * v[j];
+                let r = (z * C64::I * (self.values[j] - self.values[i].conj())).re;
+                out[0] += z.re;
+                out[2] += r;
+                if i < n && j < n {
+                    out[1] += z.re;
+                    out[3] += r;
+                }
+            }
+        }
+        out
+    }
+
+    /// τ* where the exact survival meets θ (N(0) = 1 ≥ θ, N falling): the bracket doubled from the fastest decay's time
+    /// until N is below θ -- none where every decaying mode has gone (e^{−700} of itself) with N still at θ or above --,
+    /// then Newton on ln N within it, halved where a step leaves it, to the rounding of τ or of ln N. With the survival's
+    /// evaluations.
+    fn crossing(&self, theta: f64) -> (Option<f64>, usize) {
+        let decays = self.values.iter().map(|l| -2.0 * l.im).filter(|g| *g > 0.0);
+        let (fastest, slowest) = decays.fold((0.0_f64, f64::INFINITY), |(a, b), g| (a.max(g), b.min(g)));
+        if !(fastest > 0.0) {
+            return (None, 0);
+        }
+        let (mut lo, mut hi, mut evaluations) = (0.0, 1.0 / fastest, 1);
+        while self.survival(hi)[0] >= theta {
+            if hi > 1400.0 / slowest {
+                return (None, evaluations);
+            }
+            (lo, hi, evaluations) = (hi, 2.0 * hi, evaluations + 1);
+        }
+        let target = theta.ln();
+        let mut tau = 0.5 * (lo + hi);
+        for _ in 0..200 {
+            let [all, _, rate, _] = self.survival(tau);
+            evaluations += 1;
+            let f = all.ln() - target;
+            if f.abs() <= 4.0 * f64::EPSILON * target.abs().max(1.0) || hi - lo <= 4.0 * f64::EPSILON * hi {
+                break;
+            }
+            if f > 0.0 {
+                lo = tau;
+            } else {
+                hi = tau;
+            }
+            let step = tau + f * all / rate;
+            tau = if rate > 0.0 && step > lo && step < hi { step } else { 0.5 * (lo + hi) };
+        }
+        (Some(tau), evaluations)
+    }
+
+    /// The fast part's coordinates on the rows at τ from the landing, z(τ) = Q_f e^{−iΛ_fτ} c_f.
+    fn fast(&self, tau: f64) -> Vec<C64> {
+        let n = self.n;
+        let turned: Vec<C64> = (n..self.size()).map(|k| self.c[k] * (C64::new(0.0, -tau) * self.values[k]).exp()).collect();
+        self.quick.vectors.apply(&turned)
+    }
+
+    /// The mean waiting time from the landing, ∫₀^∞ N(τ)dτ = Σ_ij c_i*c_j G_ij/(i(λ_j − λ_i*)), N(τ) = ‖Ψ(τ)‖² the exact
+    /// survival on the modes (µs; infinite where a mode does not decay): the exact clock's.
+    pub(crate) fn wait(&self) -> f64 {
+        let d = self.size();
+        let mut sum = C64::ZERO;
+        for i in 0..d {
+            for j in 0..d {
+                sum += self.c[i].conj() * self.c[j] * self.gram[(i, j)] / (C64::I * (self.values[j] - self.values[i].conj()));
+            }
+        }
+        sum.re
+    }
+}
+
+impl Workspace {
+    /// The photon the fast part z (its coordinates on the transient's rows) emits at the time t: u_q = Σ_o e^{−iot} C_q of
+    /// its excited amplitude on each block -- a near block's kept rows by its emission on them (C_qV, `NearBasis::emit`),
+    /// its explicit states' own rows (`NearBasis::xemitc`) on the fast part's P part −T_L†z, a far block's row along β̂
+    /// (C_qβ_f = −Σ_a e_a C_qR₀U_a a, `FarBasis::emitted`) --, laid as `Fold::prototype_photons` lays the photons (rows
+    /// (b, q) at 3b + q, 3 GROUND).
+    fn fast_photon(&self, fold: &Fold, cache: &Cache, tr: &Transient, z: &[C64], t: f64) -> Vec<C64> {
+        let n = self.n;
+        let g3 = 3 * GROUND;
+        let mut u = vec![C64::ZERO; g3];
+        let p = tr.tl.adjoint().apply(z);
+        for (x, nb) in self.near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
+            let basis = cache.near_at(x);
+            let phase = C64::cis(-fold.blocks[nb.o].value * t);
+            if let Some(&(_, o, s)) = tr.blocks.iter().find(|b| b.0 == x) {
+                for (r, out) in u.iter_mut().enumerate() {
+                    *out += phase * (0..s).map(|i| basis.emit[r * s + i] * z[o + i]).sum::<C64>();
+                }
+            }
+            if !nb.xs.is_empty() {
+                for (r, out) in u.iter_mut().enumerate() {
+                    *out -= phase * (0..n).map(|j| basis.xemitc[r * n + j] * p[j]).sum::<C64>();
+                }
+            }
+        }
+        let s: usize = tr.blocks.iter().map(|b| b.2).sum();
+        for (r, row) in tr.far.iter().enumerate() {
+            let fb = &self.far[row.x];
+            let basis = cache.far_at(row.x);
+            let v = fb.vectors.len();
+            let phase = C64::cis(-fold.blocks[fb.o].value * t) * (-z[s + r] / row.size);
+            for (ia, &(cc, kk)) in fb.vectors.iter().enumerate() {
+                let e = phase * self.mid.e[cc][kk];
+                for b in 0..GROUND {
+                    for q in 0..3 {
+                        let from = ((b * v + ia) * 3 + q) * n;
+                        u[3 * b + q] += e * (0..n).map(|j| basis.emitted[from + j] * tr.a[j]).sum::<C64>();
+                    }
+                }
+            }
+        }
+        u
+    }
+
+    /// The landing's clock (module documentation, # The clock; `Clock`) of a landing whose slow part's P amplitudes are `a`
+    /// (a = N⁻¹f, `Workspace::taken`), against the trajectory's threshold θ, the landing at the time t; at the last
+    /// forward, its left response made. None where the landing's modes do not exist (`Workspace::transient`).
+    pub(crate) fn clock(&self, fold: &Fold, cache: &Cache, a: &[C64], theta: f64, t: f64) -> Option<Clock> {
+        let tr = self.transient(fold, cache, a)?;
+        let (crossed, evaluations) = tr.crossing(theta);
+        let d = tr.size();
+        let mut work = tr.work + (evaluations * 2 * d * d) as f64;
+        let Some(wait) = crossed else { return Some(Clock { threshold: theta, owed: None, work }) };
+        let [_, slow, _, rate] = tr.survival(wait);
+        let z = tr.fast(wait);
+        let u = self.fast_photon(fold, cache, &tr, &z, t + wait);
+        work += (2 * d * d + 3 * GROUND * d) as f64;
+        // The fast part's photon where it is beyond the rounding of the slow photon's (its hazard p_s at τ*).
+        let floor = crate::units::rounding(d).powi(2) * rate.max(0.0);
+        let owed = (crate::linalg::norm_sqr(&u) > floor).then_some(u);
+        Some(Clock { threshold: slow, owed, work })
+    }
+}
+
+/// For the tests: the modes' photons laid by offset, the whole cycle's next landing and the photon at a time.
+#[cfg(test)]
+impl Transient {
+    /// The emission of every mode's excited part per offset of the fold (rows (b, q) at 3b + q, 3 GROUND × d each): a near
+    /// block's kept rows by C_qV and its explicit states' own rows on the mode's P part, a far block's by C_qR₀B on the slow
+    /// modes' whole response and on a fast mode's row along β̂. A slow mode's P part q_j and rows Tq_j, a fast mode's P part
+    /// −T_L†q_k and rows q_k. Per offset (its value) its matrix: one offset's photons coherent, two offsets' turning apart.
     fn emissions(&self, fold: &Fold, ws: &Workspace, cache: &Cache) -> Vec<(f64, Mat)> {
         let (n, d) = (self.n, self.size());
         let g3 = 3 * GROUND;
         let rows = d - n;
-        // Every mode's P part (n × d) and its rows (rows × d).
         let mut p = Mat::zeros(n, d);
         let mut q = Mat::zeros(rows, d);
         for j in 0..n {
@@ -243,14 +410,12 @@ impl Transient {
             Some((_, sum)) => sum.add_scaled(C64::ONE, &m),
             None => out.push((value, m)),
         };
-        let first: Vec<usize> = (0..ws.near.len()).map(|x| self.blocks.iter().find(|b| b.0 == x).map_or(usize::MAX, |b| b.1)).collect();
         for (x, nb) in ws.near.iter().enumerate().filter(|(_, nb)| !nb.idle()) {
             let basis = cache.near_at(x);
             let mut m = Mat::zeros(g3, d);
-            if nb.s > 0 {
-                let o = first[x];
-                let emit = Mat { rows: g3, cols: nb.s, data: basis.emit[..g3 * nb.s].to_vec() };
-                m.add_scaled(C64::ONE, &emit.product(&Mat::from_fn(nb.s, d, |i, j| q[(o + i, j)])));
+            if let Some(&(_, o, s)) = self.blocks.iter().find(|b| b.0 == x) {
+                let emit = Mat { rows: g3, cols: s, data: basis.emit[..g3 * s].to_vec() };
+                m.add_scaled(C64::ONE, &emit.product(&Mat::from_fn(s, d, |i, j| q[(o + i, j)])));
             }
             if !nb.xs.is_empty() {
                 let xe = Mat { rows: g3, cols: n, data: basis.xemitc[..g3 * n].to_vec() };
@@ -262,26 +427,18 @@ impl Transient {
         for (x, fb) in ws.far.iter().enumerate().filter(|(_, fb)| !fb.omitted) {
             let basis = cache.far_at(x);
             let v = fb.vectors.len();
-            // C_qR₀B = Σ_a e_a C_qR₀U_a on P (3 GROUND × n).
             let mut crb = Mat::zeros(g3, n);
             for (ia, &(cc, kk)) in fb.vectors.iter().enumerate() {
                 let e = ws.mid.e[cc][kk];
-                for b in 0..GROUND {
-                    for qq in 0..3 {
-                        let row = &basis.emitted[((b * v + ia) * 3 + qq) * n..((b * v + ia) * 3 + qq + 1) * n];
-                        for (z, y) in crb.data[(3 * b + qq) * n..(3 * b + qq + 1) * n].iter_mut().zip(row) {
-                            *z += e * *y;
-                        }
-                    }
+                for (r, z) in crb.data.chunks_exact_mut(n).enumerate() {
+                    let (b, qq) = (r / 3, r % 3);
+                    let row = &basis.emitted[((b * v + ia) * 3 + qq) * n..((b * v + ia) * 3 + qq + 1) * n];
+                    z.iter_mut().zip(row).for_each(|(z, y)| *z += e * *y);
                 }
             }
-            let mut m = Mat::zeros(g3, d);
-            // The slow modes' whole response R₀Bq_j.
-            m.add_scaled(C64::ONE, &crb.product(&Mat::from_fn(n, d, |i, j| if j < n { self.slow.vectors[(i, j)] } else { C64::ZERO })));
-            // A fast mode's coordinate on this block's row, along β̂ = −R₀Ba/‖β_f‖: C_qβ̂ = −C_qR₀Ba/‖β_f‖.
+            let mut m = crb.product(&Mat::from_fn(n, d, |i, j| if j < n { self.slow.vectors[(i, j)] } else { C64::ZERO }));
             if let Some(r) = self.far.iter().position(|row| row.x == x) {
-                let row = &self.far[r];
-                let ca: Vec<C64> = crb.apply(&self.slow_part()).into_iter().map(|z| -z / row.size).collect();
+                let ca: Vec<C64> = crb.apply(&self.a).into_iter().map(|z| -z / self.far[r].size).collect();
                 for k in 0..rows {
                     let z = q[(s + r, n + k)];
                     for (i, w) in ca.iter().enumerate() {
@@ -294,42 +451,41 @@ impl Transient {
         out
     }
 
-    /// The mean waiting time from the landing, ∫₀^∞ N(τ)dτ = Σ_ij c_i*c_j G_ij/(i(λ_j − λ_i*)), N(τ) = ‖Ψ(τ)‖² the exact
-    /// survival on the modes (µs; infinite where a mode does not decay).
-    pub(crate) fn wait(&self) -> f64 {
+    /// The whole cycle's next landing from the landing, every ground state's rows (b, q) at 3b + q: ∫₀^∞ Σ_q C_qΨ(τ)Ψ(τ)†C_q†
+    /// dτ per offset (`emissions`) -- the exact clock's, its photon at τ* the whole state's (`Clock::owed` with the slow
+    /// state's own).
+    pub(crate) fn next_landing(&self, fold: &Fold, ws: &Workspace, cache: &Cache) -> Mat {
         let d = self.size();
-        let mut sum = C64::ZERO;
-        for i in 0..d {
-            for j in 0..d {
-                sum += self.c[i].conj() * self.c[j] * self.gram[(i, j)] / (C64::I * (self.values[j] - self.values[i].conj()));
+        let cm = Mat::from_fn(d, d, |j, i| self.c[j] * self.c[i].conj() / (C64::I * (self.values[j] - self.values[i].conj())));
+        let mut out = Mat::zeros(3 * GROUND, 3 * GROUND);
+        for (_, e) in &self.emissions(fold, ws, cache) {
+            out.add_scaled(C64::ONE, &e.product(&cm).product(&e.adjoint()));
+        }
+        out
+    }
+
+    /// The photon of the modes at τ from the landing, at the time t (every offset at its phase): the slow modes' where
+    /// `slow`, the fast's where `fast` (`emissions` on c e^{−iΛτ}).
+    pub(crate) fn photon_at(&self, fold: &Fold, ws: &Workspace, cache: &Cache, tau: f64, t: f64, slow: bool, fast: bool) -> Vec<C64> {
+        let n = self.n;
+        let w: Vec<C64> = (0..self.size()).map(|j| if (j < n && slow) || (j >= n && fast) { self.c[j] * (C64::new(0.0, -tau) * self.values[j]).exp() } else { C64::ZERO }).collect();
+        let mut u = vec![C64::ZERO; 3 * GROUND];
+        for (value, e) in &self.emissions(fold, ws, cache) {
+            let phase = C64::cis(-value * t);
+            for (o, x) in u.iter_mut().zip(e.apply(&w)) {
+                *o += phase * x;
             }
         }
-        sum.re
+        u
     }
 
-    /// The slow part's P amplitudes a = Q_s c_s.
-    fn slow_part(&self) -> Vec<C64> {
-        self.slow.vectors.apply(&self.c[..self.n])
+    /// The modes' eigenvalues (the slow first) and the switched state's coefficients on them.
+    pub(crate) fn modes(&self) -> (&[C64], &[C64], usize) {
+        (&self.values, &self.c, self.n)
     }
 
-    /// The transient's landing density on each landing set (`sets`), over its states and the emission's axes (3|set| square,
-    /// rows (b, q) of the set at 3b + q): Δ = Σ_q C_q X_tr C_q† per offset (module documentation), its trace the transient's
-    /// net emission (1 − c of a unit bare state's landing whose norm is c).
-    pub(crate) fn landing_density(&self, fold: &Fold, ws: &Workspace, cache: &Cache, sets: &[Vec<usize>]) -> Vec<Mat> {
-        let (n, d) = (self.n, self.size());
-        // C_ji = c_j c_i*/(i(λ_j − λ_i*)), the slow pairs none.
-        let cm = Mat::from_fn(d, d, |j, i| if j < n && i < n { C64::ZERO } else { self.c[j] * self.c[i].conj() / (C64::I * (self.values[j] - self.values[i].conj())) });
-        let emissions = self.emissions(fold, ws, cache);
-        sets.iter()
-            .map(|set| {
-                let m = 3 * set.len();
-                let mut out = Mat::zeros(m, m);
-                for (_, e) in &emissions {
-                    let a = Mat::from_fn(m, d, |r, j| e[(3 * set[r / 3] + r % 3, j)]);
-                    out.add_scaled(C64::ONE, &a.product(&cm).product(&a.adjoint()));
-                }
-                out
-            })
-            .collect()
+    /// The fast part's photon at τ by the clock's own (`Workspace::fast_photon`).
+    pub(crate) fn fast_photon_at(&self, fold: &Fold, ws: &Workspace, cache: &Cache, tau: f64, t: f64) -> Vec<C64> {
+        ws.fast_photon(fold, cache, self, &self.fast(tau), t)
     }
 }

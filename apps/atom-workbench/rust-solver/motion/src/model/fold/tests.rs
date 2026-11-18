@@ -2031,7 +2031,7 @@ fn a_prototype_s_step_at_a_scene() {
                 let mut tangent: Vec<([u64; 6], [f64; 6], f64, [u64; 5])> = vec![];
                 let (mut sweeps, mut made, mut rounds) = (vec![], vec![], vec![]);
                 let (mut sweep_ticks, mut sweep_work, mut sweep_count) = (vec![0u64; 64], vec![0.0; 64], vec![0usize; 64]);
-                let mut most = [0.0_f64; 6];
+                let mut most = [0.0_f64; 5];
                 let (mut left, mut most_omitted, mut grown) = ([0usize; 2], 0.0_f64, 0usize);
                 // The decompositions at an atom's first step and after it (count, kept-level changes, ticks), and per step
                 // the work the path's δK̃ would add entering the series (BRIEF_PROTO4 item 3 (a)): T s² to form it, per
@@ -2055,7 +2055,7 @@ fn a_prototype_s_step_at_a_scene() {
                         let sw = s.sweeps;
                         grown += s.grown;
                         most_omitted = most_omitted.max(s.kind(3));
-                        let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.kind(0), s.kind(1), s.kind(2), s.kind(4), s.ratio, 0.0]);
+                        let s = (s.ticks, s.work, s.sweeps, s.made, s.rounds, s.sweep_ticks.clone(), s.sweep_work.clone(), [s.kind(0), s.kind(1), s.kind(2), s.ratio, 0.0]);
                         let (levels, blocks) = ws.left_out();
                         left[0] += levels;
                         left[1] += blocks;
@@ -2109,7 +2109,7 @@ fn a_prototype_s_step_at_a_scene() {
                 sweeps.iter().for_each(|&k| hist[k.min(63)] += 1);
                 let shares: Vec<String> = hist.iter().enumerate().filter(|x| *x.1 > 0).map(|(k, c)| format!("{k}: {:.1}%", 100.0 * *c as f64 / steps as f64)).collect();
                 out += &format!(
-                    "   {split}(pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all, {grown} of them for a change of the kept levels), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held (their centring with them) {:.1e}, the ring {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
+                    "   {split}(pace {pace:.3} ns a yardstick multiply-add): {:.2} µs a step ({:.2} µs on the {} steps of one round that made nothing; {} steps made a decomposition or took up a kept one, {} made in all, {grown} of them for a change of the kept levels), {:.0} multiply-adds a step ({:.0} on those), {:.2} ns each; sweeps {shares:?}; the largest readings: series {:.1e}, reuse {:.1e}, the far forms held (their centring with them) {:.1e}, the sweeps' ratio {:.2}, the copies' rows left out {:.1e}",
                     us(&every),
                     us(&calm),
                     calm.len(),
@@ -2122,8 +2122,7 @@ fn a_prototype_s_step_at_a_scene() {
                     most[1],
                     most[2],
                     most[3],
-                    most[4],
-                    most[5]
+                    most[4]
                 );
                 out += &format!("; the nodes left out: {:.2} near levels and {:.2} far blocks a step, their largest reading {most_omitted:.1e}", left[0] as f64 / steps as f64, left[1] as f64 / steps as f64);
                 out += &format!(
@@ -3187,12 +3186,6 @@ impl Flow {
         crate::linalg::eigen(m).map(|e| Flow { e })
     }
 
-    fn at(&self, v: &[C64], t: f64) -> Vec<C64> {
-        let c = self.e.inverse.apply(v);
-        let size = v.len();
-        (0..size).map(|i| (0..size).map(|k| self.e.vectors[(i, k)] * c[k] * (C64::new(0.0, -t) * self.e.values[k]).exp()).sum()).collect()
-    }
-
     fn integral(&self, v: &[C64]) -> Mat {
         let c = self.e.inverse.apply(v);
         let size = v.len();
@@ -3207,21 +3200,19 @@ impl Flow {
     }
 }
 
-/// Random systems land within their ring (proto.rs # The ring; landing.status 6, 9): one laser frequency on 2–3 ground and
+/// Random systems land on their transient (proto/transient.rs; landport.status.md): one laser frequency on 2–3 ground and
 /// 2–3 excited states (detunings within ±2Γ, couplings 0.05–0.6 Γ at random phases, each excited state decaying at Γ to a
 /// ground state of its own choosing), the fold at the focus at rest. Per landing state the exact statistics -- the dense
 /// lattice's flow from the bare state (`lattice`, `Flow`): the mean waiting time ∫‖ψ‖²dt and the next landing's
-/// distribution, each offset's jumps apart -- against the fold's: its spectral landing ψ₀ = S N⁻¹f on the jump clock
-/// (c = ‖ψ₀‖² below one: the transient's photons at once, its landing density Δ = Σ_q C_q X_tr C_q† on the landing's modes
-/// (proto/transient.rs); above: the dead time to ‖e^{−iGt}ψ₀‖² = 1), and the landing's exact survival's mean on its modes
-/// (`Transient::wait`, the exact clock's) beside; its own
-/// flow e^{−iGt}, its jumps L_q (`Fold::prototype_jumps`). Where its readings are within the share (ρ, the run's test: the
-/// ring's and the series' among them), so is every landing's waiting time's error and the total variation of its next
-/// landing; what they err by over the ring's and the series' readings together is said (a leading-order estimate, not a
-/// bound: no ratio is asserted).
+/// distribution, each offset's jumps apart -- against the fold's on its exact clock: the landing's modes (`Transient`), its
+/// exact survival's mean ∫N(τ)dτ (`Transient::wait`) and its next landing ∫Σ_q C_qΨ(τ)Ψ(τ)†C_q†dτ, the photon at the jump
+/// the whole state's (`Transient::next_landing`). The clock's photon owed by the fast part (`Workspace::fast_photon`) is
+/// the modes' own fast photon at two times, to the rounding. Where its readings are within the share (ρ, the run's test:
+/// the series' among them), so is every landing's waiting time's error and the total variation of its next landing; what
+/// they err by over the series' reading is said (a leading-order estimate, not a bound: no ratio is asserted).
 #[test]
-fn random_systems_land_within_their_ring() {
-    use super::proto::{At, Cache};
+fn random_systems_land_on_their_transient() {
+    use super::proto::Cache;
     let share = crate::model::elim::share();
     let mut state = 20261116u64;
     let mut u = || {
@@ -3232,7 +3223,7 @@ fn random_systems_land_within_their_ring() {
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     };
     let (grounds, exciteds, ee) = ([0usize, 4, 6], [17usize, 13, 9], 1000.0);
-    let (mut within, mut compared, mut lines) = (0, 0, vec![]);
+    let (mut within, mut compared, mut lines, mut worst_owed) = (0, 0, vec![], 0.0_f64);
     for trial in 0..40 {
         let (g, e) = (2 + (u() * 2.0) as usize, 2 + (u() * 2.0) as usize);
         let scale = 0.05 + 0.55 * u();
@@ -3254,16 +3245,8 @@ fn random_systems_land_within_their_ring() {
             let Ok(mut ws) = fold.prototype_workspace() else { continue };
             let mut cache = Cache::default();
             let Some(step) = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws) else { continue };
-            let (ring, series, reading, generator) = (step.kind(4), step.kind(0), step.reading, step.generator.clone());
+            let (series, reading) = (step.kind(0), step.reading);
             let n = fold.size();
-            let jumps = fold.prototype_jumps(&cache, &ws, At::Middle);
-            let (near, far) = ws.layout();
-            let blocks: Vec<usize> = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
-            // The fold's jumps by offset: a group of one offset's blocks coherent, the offsets apart.
-            let mut offsets: Vec<f64> = blocks.iter().map(|&o| fold.blocks[o].value).collect();
-            offsets.sort_by(f64::total_cmp);
-            offsets.dedup();
-            let Some(fold_flow) = Flow::new(&generator) else { continue };
             // The exact lattice, its nodes connected to the set's ground states (the lattice seeds every ground state of the
             // model; the others' nodes are no part of the flow): its flow, its excited nodes by offset.
             let whole = lattice(&fold, [0.0; 3], 4, &|_| true);
@@ -3284,7 +3267,7 @@ fn random_systems_land_within_their_ring() {
             let mut keys: Vec<Vec<i64>> = l.nodes.iter().filter(|(s, _)| *s >= GROUND).map(|x| x.1.clone()).collect();
             keys.sort();
             keys.dedup();
-            let (mut worst_tau, mut worst_tv, mut worst_wait) = (0.0_f64, 0.0_f64, 0.0_f64);
+            let (mut worst_tau, mut worst_tv) = (0.0_f64, 0.0_f64);
             for k in 0..fold.ground.len() {
                 // Exact.
                 let at = l.nodes.iter().position(|(s, key)| *s == fold.ground[k] && key.iter().all(|&x| x == 0)).expect("the ground state's node");
@@ -3307,70 +3290,37 @@ fn random_systems_land_within_their_ring() {
                         }
                     }
                 }
-                // The fold on its jump clock.
+                // The fold on its exact clock: the landing's modes from the bare state.
                 let bare: Vec<C64> = (0..n).map(|p| if p == k { C64::ONE } else { C64::ZERO }).collect();
-                let Some((psi0, a)) = ws.taken(&fold, &cache, &bare, &[], false) else { continue };
-                let c = crate::linalg::norm_sqr(&psi0);
-                // The landing's transient (proto/transient.rs): its exact survival's mean -- the exact clock's -- and its
-                // landing density, the photons the clock gives at once.
+                let Some((_, a)) = ws.taken(&fold, &cache, &bare, &[], false) else { continue };
                 let transient = ws.transient(&fold, &cache, &a).expect("the landing's modes");
-                worst_wait = worst_wait.max((transient.wait() / tau_exact - 1.0).abs());
-                let (mut tau, mut next) = (0.0, [0.0; GROUND]);
-                let start = if c <= 1.0 {
-                    let all: Vec<usize> = (0..GROUND).collect();
-                    let density = &transient.landing_density(&fold, &ws, &cache, &[all])[0];
-                    for (b, o) in next.iter_mut().enumerate() {
-                        *o += (0..3).map(|q| density[(3 * b + q, 3 * b + q)].re).sum::<f64>();
-                    }
-                    psi0
-                } else {
-                    let norm = |t: f64| crate::linalg::norm_sqr(&fold_flow.at(&psi0, t)) - 1.0;
-                    let mut hi = 1.0 / GAMMA;
-                    while norm(hi) > 0.0 {
-                        hi *= 2.0;
-                    }
-                    let mut lo = 0.0;
-                    for _ in 0..80 {
-                        let mid = 0.5 * (lo + hi);
-                        if norm(mid) > 0.0 {
-                            lo = mid;
-                        } else {
-                            hi = mid;
-                        }
-                    }
-                    tau += lo;
-                    fold_flow.at(&psi0, lo)
-                };
-                let rho = fold_flow.integral(&start);
-                tau += (0..n).map(|p| rho[(p, p)].re).sum::<f64>();
-                for &offset in &offsets {
-                    for q in 0..3 {
-                        let lq = Mat::from_fn(GROUND, n, |b, p| blocks.iter().enumerate().filter(|(_, o)| fold.blocks[**o].value == offset).map(|(x, _)| jumps[x][q][(b, p)]).sum());
-                        let m = lq.product(&rho).product(&lq.adjoint());
-                        for (b, o) in next.iter_mut().enumerate() {
-                            *o += m[(b, b)].re;
-                        }
-                    }
+                let tau = transient.wait();
+                let density = transient.next_landing(&fold, &ws, &cache);
+                let next: Vec<f64> = (0..GROUND).map(|b| (0..3).map(|q| density[(3 * b + q, 3 * b + q)].re).sum()).collect();
+                for (when, time) in [(0.3 / GAMMA, 0.7), (2.0 / GAMMA, 1.3)] {
+                    let (owed, modes) = (transient.fast_photon_at(&fold, &ws, &cache, when, time), transient.photon_at(&fold, &ws, &cache, when, time, false, true));
+                    let scale = crate::linalg::norm_sqr(&modes).sqrt().max(1e-300);
+                    worst_owed = worst_owed.max(owed.iter().zip(&modes).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max) / scale);
                 }
                 let total_exact: f64 = next_exact.iter().sum();
                 let total: f64 = next.iter().sum();
                 worst_tau = worst_tau.max((tau / tau_exact - 1.0).abs());
                 worst_tv = worst_tv.max(0.5 * (0..GROUND).map(|b| (next[b] / total - next_exact[b] / total_exact).abs()).sum::<f64>());
             }
-            let read = ring + series;
             compared += 1;
-            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the ring {:.2e}, the series {:.2e}; the worst landing's waiting time {worst_tau:.2e} (the transient's exact survival's {worst_wait:.2e}), next landing's total variation {worst_tv:.2e}; actual over read {:.2}", ring, series, worst_tau.max(worst_tv) / read));
+            lines.push(format!("   trial {trial} (ground {g}, excited {e}, couplings ×{scale:.2}Γ): the reading {reading:.2e} (the series {series:.2e}); the worst landing's waiting time {worst_tau:.2e}, next landing's total variation {worst_tv:.2e}; actual over read {:.2}", worst_tau.max(worst_tv) / reading));
             if reading <= share {
                 within += 1;
-                assert!(worst_tau <= share && worst_tv <= share && worst_wait <= share, "trial {trial}: within its readings ({:.2e}) the landings err by {worst_tau:.2e} (waiting; the transient's {worst_wait:.2e}) and {worst_tv:.2e} (next landing)", reading);
+                assert!(worst_tau <= share && worst_tv <= share, "trial {trial}: within its readings ({reading:.2e}) the landings err by {worst_tau:.2e} (waiting) and {worst_tv:.2e} (next landing)");
             }
         }
     }
     for l in &lines {
         println!("{l}");
     }
-    println!("{compared} folds compared, {within} within their readings");
+    println!("{compared} folds compared, {within} within their readings; the owed photon against the modes' own: {worst_owed:.1e}");
     assert!(within >= 10, "{within} within");
+    assert!(worst_owed <= 1e-10, "the clock's owed photon is the modes' fast photon: {worst_owed:.1e}");
 }
 
 /// The loss energy where one light set's fold ceases to exist (BRIEF_LANDIMPL item 4; run.rs # The rest of the model,
@@ -3448,20 +3398,36 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
     assert!(refused.is_empty(), "every risen cluster held: no all-centred block with an explicit state or a copy, no copy at a P frame refused where its static coupling folds (BRIEF_COPIES item 4: 5 of 235 were)");
 }
 
-/// A two-level atom's ring reads what its landing leaves (proto.rs # The ring; landing.status 6): the ring's reading at the
-/// focus, resonant at s = 0.1–0.4, 6.8·10⁻³, 3.0·10⁻², 7.9·10⁻², 0.174, and at Δ = −4Γ, s = 10, 30, 60, 4.6·10⁻³,
-/// 2.45·10⁻², 5.5·10⁻² -- the leading order of the waiting time's error on the exact slow span -- each within a tenth.
+/// A two-level atom's landing waits its master equation's time (proto/transient.rs # The clock; the ring's ground, the
+/// c-clock's error, landing.status 6, gone): after every jump the atom is in its ground state, so the mean wait from a
+/// landing is the photon rate's inverse, 1/(Γρ_ee), ρ_ee = (s/2)/(1 + s + (2Δ/Γ)²). The landing's modes at the focus at
+/// rest, from the bare ground state, nothing explicit (the c-clock erred by the ring's 6.8·10⁻³ to 0.174 at resonance, s
+/// = 0.1–0.4, and 4.6·10⁻³ to 5.5·10⁻² at Δ = −4Γ, s = 10–60): the exact survival's mean ∫N(τ)dτ (`Transient::wait`)
+/// against it, less what the slow span's own rate errs by (its slow mode's decay against the two-level no-jump
+/// generator's, analytic: the mean wait goes as its inverse), within the reading (the series' rest on T and T_L); the
+/// slow span's own error said beside (the fold's, read by its readings: at Δ = −4Γ, s = 10 the far row's centring errs
+/// by 2.4 % on the rate where the reading says 1.2 %).
 #[test]
-fn a_two_level_atom_s_ring_reads_its_landing() {
-    for (delta, s, expected) in [(0.0, 0.1, 6.8e-3), (0.0, 0.2, 3.0e-2), (0.0, 0.3, 7.9e-2), (0.0, 0.4, 0.174), (-4.0 * GAMMA, 10.0, 4.6e-3), (-4.0 * GAMMA, 30.0, 2.45e-2), (-4.0 * GAMMA, 60.0, 5.5e-2)] {
+fn a_two_level_atom_s_landing_waits_its_master_equation_s_time() {
+    for (delta, s) in [(0.0, 0.1), (0.0, 0.2), (0.0, 0.3), (0.0, 0.4), (-4.0 * GAMMA, 10.0), (-4.0 * GAMMA, 30.0), (-4.0 * GAMMA, 60.0)] {
         let req = two_level(delta, s);
         let fold = Fold::new(&req, &Choice::base(&req, vec![]).unwrap(), 0).unwrap();
         let mut ws = fold.prototype_workspace().unwrap();
         let mut cache = super::proto::Cache::default();
-        let step = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws).expect("the fold at the focus");
-        let (ring, series) = (step.kind(4), step.kind(0));
-        println!("Δ {delta:+.1} s {s}: the ring {ring:.3e} against {expected:.2e} (the series' {series:.1e})");
-        assert!((ring - expected).abs() <= 0.1 * expected, "the ring reads the landing's error");
+        let reading = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws).expect("the fold at the focus").reading;
+        let (_, a) = ws.taken(&fold, &cache, &[C64::ONE], &[], false).expect("the landing");
+        let transient = ws.transient(&fold, &cache, &a).expect("the landing's modes");
+        let wait = transient.wait();
+        let master = (1.0 + s + (2.0 * delta / GAMMA).powi(2)) / (GAMMA * 0.5 * s);
+        // The two-level no-jump generator [[0, g], [g, −Δ − iΓ/2]]: its slow eigenvalue, the root nearer zero.
+        let (g, k) = (0.5 * GAMMA * (s / 2.0_f64).sqrt(), C64::new(-delta, -0.5 * GAMMA));
+        let root = (k * k + C64::real(4.0 * g * g)).sqrt();
+        let exact = [(k + root) * 0.5, (k - root) * 0.5].into_iter().min_by(|x, y| x.abs().total_cmp(&y.abs())).unwrap();
+        let (values, _, _) = transient.modes();
+        let span = values[0].im / exact.im;
+        let own = wait / master * span - 1.0;
+        println!("Δ {delta:+.1} s {s}: the landing's mean wait {wait:.6} µs against the master equation's {master:.6} ({:+.2e}); the slow span's rate {span:.5} of the exact (its own error); the clock's beyond it {own:+.2e}, the reading {reading:.1e}", wait / master - 1.0);
+        assert!(own.abs() <= reading.max(crate::units::rounding(fold.size())), "the exact clock adds nothing to the slow span's own rate");
     }
 }
 
@@ -3479,8 +3445,8 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
         let low = run.middle(0, [0.0; 3], 0.0, &crate::step::Held::default(), false);
         let path = low.path([0.0; 3], [0.0; 3]);
         low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
-        let crate::step::Landing::On(landed) = low.landing(&path, &[C64::ONE]) else { panic!("the landing exists") };
-        let c = landed[0].norm_sqr();
+        let crate::step::Landing::On(landed) = low.landing(&path, &[C64::ONE], 0.5, 0.0) else { panic!("the landing exists") };
+        let c = landed.psi[0].norm_sqr();
         let q = (1.0 - 2.0 * s).max(0.0).sqrt();
         println!("Δ {delta:+.1} s {s}: ‖S N⁻¹f‖² {c:.5} against {expected:.5} (the orthogonal (1 + q)/2 at resonance {:.5})", 0.5 * (1.0 + q));
         assert!((c - expected).abs() <= 2.0 * share * (expected - 1.0).abs(), "the landing's norm the slow mode's survival at the jump");

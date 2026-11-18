@@ -150,7 +150,7 @@ pub(crate) struct Layout {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Sizes {
     pub(crate) n: usize,
-    /// The set's ground places (the ring's columns).
+    /// The set's ground places.
     pub(crate) ground: usize,
     pub(crate) layout: Layout,
     pub(crate) near: Vec<NearSize>,

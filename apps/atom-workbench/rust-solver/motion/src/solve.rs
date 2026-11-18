@@ -316,7 +316,8 @@
 //! the fold's readings at the pilot's states (`sampled`, `booked_at`): the books' profile each state's trajectory holds
 //! there (unify2 §2.7: per account the reading its cluster's last decision left, what every step books over its cell,
 //! step.rs `Trajectory::model`; no forward made) -- the series' rest, the reuse of a decomposition along the path, the
-//! centred rows, what the nodes left out leave, a landing's transient (model/fold/proto.rs `KINDS`; `READINGS`), each a
+//! centred rows, what the nodes left out leave (model/fold/proto.rs `KINDS`; `READINGS`; a landing's transient is booked
+//! exactly on its modes, read by none: model/fold/proto/transient.rs), each a
 //! rate's relative error at the state --, combined as one component's are, ρ² = Σ_k ρ_k² (the one combination of the
 //! decision's rule and of the books, DESIGN §1.5). A reading x books x on the populations (absolute) and x on T
 //! (relative), as a rate wrong by x moves them (`Booking::of`); one that is no number, or a state whose representation
@@ -476,12 +477,11 @@ const FOLD_MEASURED: &str = "按原子所在处折叠（一个对象），这一
 
 /// The fold's readings a state's error is booked by (model/fold/proto.rs `KINDS`, the accounts' kinds, rate units; module
 /// documentation, # The model), each with the ledger's name of it; the state's error is their combination (√Σρ_k²).
-const READINGS: [&str; 5] = [
+const READINGS: [&str; crate::step::READS] = [
     "折叠的级数（H 自洽的下一遍）",
     "分解沿路径的复用",
     "居中（近块的居中拷贝、远块的能级）",
     "略去的结点（激发能级、远块）",
-    "跳跃着陆的过渡（振铃）",
 ];
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
@@ -2139,9 +2139,10 @@ impl Stopped {
 struct State {
     sample: Sample,
     index: u64,
-    /// The trajectory's jumps up to the state, and the threshold of its next one.
+    /// The trajectory's jumps up to the state, the threshold of its next one and what its last landing owes it.
     jumps: u32,
     threshold: f64,
+    owed: Option<Vec<crate::linalg::C64>>,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
     forms: crate::step::Forms,
     /// Its representation (step.rs `Trajectory::held`).
@@ -2159,6 +2160,7 @@ impl State {
             index: t.index,
             jumps: t.jumps,
             threshold: t.threshold,
+            owed: t.owed.clone(),
             forms: t.forms.clone(),
             held: t.held.clone(),
             next: t.next,
@@ -2177,6 +2179,7 @@ impl State {
             cluster: *cluster,
             time: at.t,
             threshold: self.threshold,
+            owed: self.owed.clone(),
             jumps: self.jumps,
             scattered: [0.; 2],
             lost: None,
@@ -4235,7 +4238,7 @@ mod tests {
 
     /// A state at the time t of the trajectory `index` with `jumps` jumps: no step reads it (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, owed: None, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
