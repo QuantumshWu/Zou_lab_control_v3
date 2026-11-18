@@ -368,8 +368,8 @@
 //!   that does not hold the atom (`trap_of`), no step below the edge (`first_rung`);
 //! - a trajectory's (`run`), where the run's fold does not exist for it: its start lands nowhere (no node left to rise:
 //!   its held forms no number, model/fold/run.rs `Dynamics::started`; or its fast part's photon none, step.rs
-//!   `Trajectory::new`), its readout at a time read is no number, or outside the trap's region its loss energy is none
-//!   -- the loss test could not tell (`Dynamics::lost`). It ends there with no outcome (`Counts::nowhere`, `Fate::Failed`
+//!   `Trajectory::new`), or its readout at a time read is no number (the loss energy is a number everywhere: model/fold/
+//!   run.rs # The rest of the model). It ends there with no outcome (`Counts::nowhere`, `Fate::Failed`
 //!   from then on), counted, its share booked whole as every trajectory not counted is (estimate.rs, # What is counted),
 //!   and the ledger says how many and from when.
 //! Where every trajectory ends so, nothing is integrated, and the trajectory's exit is the request's: the pilot's
@@ -666,7 +666,7 @@ struct Prepared<'a> {
 impl<'a> Prepared<'a> {
     fn new(run: &'a Onefold, populations: [f64; GROUND]) -> Result<Prepared<'a>, String> {
         let (light, potential) = (run.light(), run.prepared(&populations));
-        let trap = trap_of(run, &potential, &|w| w == light.trap)?;
+        let trap = trap_of(run, &potential, &|w| w == light.trap).map_err(|why| format!("准备阱不存在：{why}（准备阱是阱光在主折叠里的形式：它的外层形式与远块；近共振的阱光没有远块）"))?;
         Ok(Prepared { light, potential, trap })
     }
 }
@@ -811,11 +811,9 @@ impl Ladder {
     }
 }
 
-/// What a level's steps ask of the run's domain (step.rs, # The domain): the runaway's rule (`Widest`), and the trap
-/// light's region, outside of which a trajectory's loss is tested (`run`: its loss energy read there).
+/// What a level's steps ask of the run's domain (step.rs, # The domain): the runaway's rule (`Widest`).
 #[derive(Clone, Copy)]
-struct Domain<'a> {
-    light: &'a Light,
+struct Domain {
     widest: Widest,
 }
 
@@ -835,7 +833,7 @@ impl crate::step::Domain for Widest {
         hazard > self.0
     }
 }
-impl crate::step::Domain for Domain<'_> {
+impl crate::step::Domain for Domain {
     /// A hazard above the fastest excited state's decay, wholly excited (`Widest`).
     fn runaway(&self, hazard: f64) -> bool {
         self.widest.runaway(hazard)
@@ -1621,7 +1619,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // reads that rung on a third level, at 4τ (`settle`): a cell of the Brownian path.
     let above = |tau: f64| 4. * tau <= end && stable(2. * tau, frequency, kick) && stable(4. * tau, frequency, kick);
     // What the steps ask of the run's domain (`Domain`).
-    let domain = Domain { light: run.light(), widest: Widest::of(request) };
+    let domain = Domain { widest: Widest::of(request) };
     // The analysis times' candidates (# The analysis times): every level is read there while the pilot runs.
     let (candidates, window) = (grid(end, first_rung), plan.window);
     let mut context = Context {
@@ -2272,7 +2270,7 @@ impl Plan {
 /// on by (adapt.rs, # The jumps) --, and the trajectories that ended with no outcome (estimate.rs, # What is counted),
 /// by why: the scheme could not advance them (adapt.rs `advance`'s refusal), a step's optical sector made no K (step.rs
 /// `Refused::Optical`, by its `Unmade`), or the run's fold does not exist where they were (`run`: a start that lands
-/// nowhere, a loss energy that is no number -- the trajectory's one exit, said, never carried on as a number); and the
+/// nowhere, a readout that is no number -- the trajectory's one exit, said, never carried on as a number); and the
 /// trajectories stopped where a state of theirs scattered beyond every state of the atom (`Domain::runaway`),
 /// unresolved from there on (`run`); and the steps whose held forward read its series' ratio at one between two
 /// decisions (step.rs `Trajectory::unresolved_steps`; unify2 §2.7: booked at ρ = 1 in the trajectory's books, counted).
@@ -2570,8 +2568,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// of the atom (`Domain::runaway`: a fold far outside its validity) stops there: it is unresolved from then on, held at
 /// every later time as it stood (module documentation, # The unresolved atoms). One the run's fold does not exist for
 /// -- its start lands nowhere (its held forms no number: model/fold/run.rs `Dynamics::started`, step.rs
-/// `Trajectory::new`), or at a time read its readout is no number, or outside the trap's region its loss energy is none
-/// (`Dynamics::lost` could not tell) -- ends there with no outcome, said (`Counts::nowhere`; # Exits): at t = 0 it is
+/// `Trajectory::new`), or at a time read its readout is no number -- ends there with no outcome, said (`Counts::nowhere`; # Exits): at t = 0 it is
 /// the atom in its initial state, its own populations. Where its states are kept (`keep`), it is
 /// advanced from checkpoint to checkpoint (`Checkpoint`: at t = 0 and at the first step's end at or past every multiple
 /// of T's shortest window, module documentation, # The analysis times) -- the same trajectory to the bit (adapt.rs
@@ -2605,7 +2602,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         let mut rows = [0.; STATES];
         if nowhere.get().is_none() {
             rows = shown.copied().unwrap_or_else(|| model.readout(t.cluster, &t.point(), &t.psi, &t.held));
-            if !rows.iter().all(|x| x.is_finite()) || (domain.light.outside(t.r) && !model.energy(t.cluster, &t.point(), &t.psi).is_finite()) {
+            if !rows.iter().all(|x| x.is_finite()) {
                 nowhere.set(Some(t.time));
             }
         }
@@ -4999,7 +4996,7 @@ mod tests {
         let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
         let b = chief(&request);
         let (request, run, trap) = scene_run("PGC3D_1ms", true, b);
-        let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+        let domain = Domain { widest: Widest::of(&request) };
         let speed = thermal(&request, &run);
         let mut plan = Plan::new(&[0., 100., 200.], trap.lab);
         let tau = plan.end / 800.;
@@ -5045,7 +5042,7 @@ mod tests {
         let b = chief(&request);
         let run = Onefold::new(&request, alone(b)).unwrap();
         let trap = Prepared::new(&run, alone(b)).unwrap().trap;
-        let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+        let domain = Domain { widest: Widest::of(&request) };
         let (speed, tau) = (thermal(&request, &run), 0.32610161451737907);
         let mut states = vec![];
         for (index, axis) in [(3u64, 0usize), (5, 1), (7, 2)] {
@@ -5233,7 +5230,7 @@ mod tests {
         let (request, run, trap) = scene_run("R2_RECOIL", false, 7);
         let b = 7;
         let widest = Widest::of(&request);
-        let domain = Domain { light: run.light(), widest };
+        let domain = Domain { widest };
         let plan = Plan::new(&[0., 0.2, 0.4, 0.6, 0.8], trap.lab);
         let speed = thermal(&request, &run);
         let (mut stopped, mut ran) = (0, 0);
@@ -5281,7 +5278,7 @@ mod tests {
     fn the_decisions_reads_are_the_same_whatever_the_outputs() {
         let (request, run, trap) = scene_run("R2_RECOIL", false, 7);
         let b = 7;
-        let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+        let domain = Domain { widest: Widest::of(&request) };
         let speed = thermal(&request, &run);
         let end = Plan::new(&[0., 2.], trap.lab).end;
         let tau = end / 800.;
@@ -5336,7 +5333,7 @@ mod tests {
             let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
             let b = chief(&request);
             let (request, run, trap) = scene_run(name, requests, b);
-            let domain = Domain { light: run.light(), widest: Widest::of(&request) };
+            let domain = Domain { widest: Widest::of(&request) };
             let speed = thermal(&request, &run);
             let mut plan = Plan::new(&[0., 0.5 * last, last], trap.lab);
             let tau = plan.end / 800.;
