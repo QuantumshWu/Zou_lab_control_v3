@@ -17,7 +17,7 @@
 //! rises or falls in the run: a trajectory starts on its set's cluster (its bare state landed there, `Onefold::landed_at`;
 //! nowhere where the landing does not exist, counted), a jump into a set lands on that set's cluster. A decision time
 //! reads and makes the decompositions again (below); a reading beyond the share there, or a fold that does not exist
-//! there, is counted and said at the solve's end (`tally`), the representation unchanged.
+//! there, is counted and said with each result and at the solve's end (adapt.rs `counted`), the representation unchanged.
 //!
 //! # The representation and the decision times
 //! An atom's kept decompositions (proto.rs `Cache`), per set, are its own: the trajectory carries them as a value
@@ -1474,7 +1474,7 @@ impl crate::step::Middle for Middle<'_> {
     /// The decision at a step's end, on a middle made deciding at the end's point (# The representation and the decision
     /// times; step.rs `Midway::decided`): its forward reads and makes its decompositions again at the point, the
     /// trajectory's from here; the cell's books' end. A reading beyond the share there, or a fold that does not exist
-    /// there, is counted (`tally`): the representation is the start's (# The representation). Nothing where this middle
+    /// there, is counted (adapt.rs `counted`): the representation is the start's (# The representation). Nothing where this middle
     /// does not decide or holds no light.
     fn decide(&self, path: &Path, psi: &[C64], interval: f64, owed: f64, _steps: f64) -> Decided {
         let mut out = Decided { owed, held: None, switched: None, work: 0.0, booked: [0.0; crate::step::MODEL] };

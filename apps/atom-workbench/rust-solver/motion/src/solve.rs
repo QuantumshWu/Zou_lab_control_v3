@@ -558,7 +558,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     let solved = attempt(request, &setting, &mut messages);
     // The run's counts (adapt.rs `tally`): the safety net's readings beyond the share and absent folds, to stderr.
-    eprintln!("{}", crate::adapt::tally());
+    eprintln!("{}", crate::adapt::counted(true));
     solved
 }
 
@@ -600,6 +600,8 @@ impl Messages<'_> {
         if groups >= 2 && trajectories >= self.least {
             let s = made();
             self.least = trajectories;
+            // The run's counts so far with each result (adapt.rs `counted`), to stderr; their tally at the solve's end.
+            eprintln!("{}", crate::adapt::counted(false));
             (self.send)(&s, remaining);
             self.last = Some(s);
             self.clock = Instant::now();

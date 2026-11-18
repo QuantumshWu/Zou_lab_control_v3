@@ -105,7 +105,7 @@ use crate::random::Stream;
 use crate::step::{test_loss, Brownian, Domain, Dynamics, Midway, Refused, Scratch, Segment, Trajectory};
 use crate::units::rounding;
 
-/// The run's counts, said at the solve's end (`tally`; FOLDAPI §3: the safety net counts, never changes the
+/// The run's counts, said with each result and at the solve's end (`counted`; FOLDAPI §3: the safety net counts, never changes the
 /// representation): the steps taken and refused, the decisions made with their time (ns) and the states they held (sum),
 /// the time in steps (ns), the decisions' readings beyond the share and the folds that did not exist at a decision.
 static COUNTS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
@@ -123,9 +123,10 @@ pub(crate) fn count(i: usize, x: u64) {
     COUNTS[i].fetch_add(x, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The counts since the last tally as one line, and set to zero (the solve's end; a solve at a time in a process).
-pub(crate) fn tally() -> String {
-    let g: Vec<u64> = COUNTS.iter().map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed)).collect();
+/// The counts since the last tally as one line, set to zero where `tally` (the solve's end; a solve at a time in a
+/// process), else read as they stand (a result's).
+pub(crate) fn counted(tally: bool) -> String {
+    let g: Vec<u64> = COUNTS.iter().map(|c| if tally { c.swap(0, std::sync::atomic::Ordering::Relaxed) } else { c.load(std::sync::atomic::Ordering::Relaxed) }).collect();
     let (steps, decisions) = (g[STEPS].max(1), g[DECISIONS].max(1));
     format!(
         "运行计数：步 {}（拒 {}），每步 {:.1} µs；格端决定 {}（每次 {:.1} µs，平均 {:.1} 态）；格端读数超份额 {} 次，格端折叠不存在 {} 次",

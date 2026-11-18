@@ -7,7 +7,6 @@ use crate::request::tests::sample;
 use crate::request::{Beam, OutsideForm};
 use std::collections::{HashMap, VecDeque};
 
-mod look;
 mod raman;
 
 const GAMMA: f64 = 38.1;
@@ -3480,7 +3479,7 @@ fn a_landing_is_the_slow_mode_s_survival_extrapolated_to_the_jump() {
     let share = crate::model::elim::share();
     for (delta, s, expected) in [(0.0, 0.1, 1.18402), (0.0, 0.2, 1.47883), (0.0, 0.3, 2.04057), (0.0, 0.4, 3.61803), (-4.0 * GAMMA, 2.0, 0.98611)] {
         let req = two_level(delta, s);
-        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let run = run::Onefold::of(&req, &Choice::base(&req, vec![]).unwrap(), [1.0 / GROUND as f64; GROUND]).unwrap();
         let low = run.middle(0, [0.0; 3], 0.0, &crate::step::Held::default(), false);
         let path = low.path([0.0; 3], [0.0; 3]);
         low.generator(&path, 0.0, &mut Mat::zeros(1, 1));
@@ -3525,7 +3524,7 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
         for orbit in thermal_paths(8) {
             for r in orbit.iter().step_by(40).take(3) {
                 let mut ws = fold.prototype_workspace().unwrap();
-                ws.cell = Cell { nodes: nodes.clone(), sets: sets.clone(), ..Cell::default() };
+                ws.cell = Cell { nodes: nodes.clone(), ..Cell::default() };
                 let mut cache = Cache::default();
                 let exists = fold.prototype(*r, kappa, fold.thermal, &mut cache, &mut ws).map(|s| (s.ended, s.rise, s.grown, s.beyond));
                 let Some((ended, rise, grown, beyond)) = exists else {
