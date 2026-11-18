@@ -50,7 +50,7 @@ fn tilt0_held_at_trap_intensities() {
     let run = if rep == "base" { run::Onefold::of(&req, &Choice::base(&req, vec![]).unwrap(), reference).unwrap() } else { run::Onefold::new(&req, reference).unwrap() };
     // LOSS_WAIST set: the trap's intensity scaled to s in the request itself (`scaled`), the atom on the axis, the run on
     // the request's own decision (its explicit nodes).
-    let (explicit, driven) = (run.explicit(), run.driven());
+    let explicit = run.explicit();
     let light = crate::field::Light::new(&req);
     let scaling = std::env::var("LOSS_WAIST").is_ok();
     let hm = run.hbar_over_mass();
@@ -64,7 +64,7 @@ fn tilt0_held_at_trap_intensities() {
             let y = if scaling { 0.0 } else { waist * (-(s.ln()) / 2.0).max(0.0).sqrt() };
             let held = scaling.then(|| {
                 let r = scaled(&req, &light, s);
-                let choice = if rep == "base" { Choice::base(&r, vec![]) } else { Choice::base_of(&r, explicit.clone(), driven.clone(), &|_| true) };
+                let choice = if rep == "base" { Choice::base(&r, vec![]) } else { Choice::base_of(&r, explicit.clone(), &|_| true) };
                 run::Onefold::of(&r, &choice.unwrap(), reference).unwrap()
             });
             let run = held.as_ref().unwrap_or(&run);

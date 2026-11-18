@@ -506,10 +506,10 @@ fn the_decided_folds_laid_out() {
         Some(keys) => Choice::base(&req, keys).expect("the choice"),
         None => {
             let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
-            Choice::base_of(&req, run.explicit(), run.driven(), &|_| true).expect("the choice")
+            Choice::base_of(&req, run.explicit(), &|_| true).expect("the choice")
         }
     };
-    println!("explicit keys {:?}\ndriven keys {:?}", choice.explicit, choice.driven);
+    println!("explicit keys {:?}", choice.explicit);
     for set in Fold::sets(&req, &choice).unwrap() {
         let fold = Fold::new(&req, &choice, set[0]).expect("the fold");
         let places: Vec<String> = (0..fold.size()).map(|p| format!("{}@{:.3}", name(if p < fold.ground.len() { fold.ground[p] } else { GROUND + fold.explicit[p - fold.ground.len()] }), fold.frame_values[p])).collect();
@@ -549,7 +549,7 @@ fn the_set_s_generator_at_the_focus() {
         Some(keys) => Choice::base(&req, keys).expect("the choice"),
         None => {
             let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
-            Choice::base_of(&req, run.explicit(), run.driven(), &|_| true).expect("the choice")
+            Choice::base_of(&req, run.explicit(), &|_| true).expect("the choice")
         }
     };
     let s0 = env("DRAG_SET", 3.0) as usize;

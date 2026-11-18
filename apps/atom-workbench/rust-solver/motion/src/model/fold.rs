@@ -231,15 +231,12 @@ pub(crate) enum Row {
 /// in P), and every other Q node's tier (the same tiers for every node, module documentation # Blocks), keyed by an
 /// absorbed component and one of the block's own sources (the block): a copy's by the emitting component and its ground
 /// level F (unlisted: centred), an excited node's by its level (`excited`; unlisted: solved) -- a later entry overriding an
-/// earlier one. `driven`: the nodes of an explicit level at another offset (its key's) that cannot be folded there by the
-/// readings (decide.rs, the start's decision): the drive there is a tone of Ĥ_PP (`Fold::driven`), as where the coupling
-/// cannot be folded at its peak.
+/// earlier one. An explicit state's drive at another offset is no choice: the one rule reads it (`Fold::build`, `toned`).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Choice {
     pub(crate) frames: Vec<Beat>,
     pub(crate) sets: Vec<Vec<usize>>,
     pub(crate) explicit: Vec<(usize, Part, usize)>,
-    pub(crate) driven: Vec<(usize, Part, usize)>,
     pub(crate) copies: Vec<((Part, usize, Part, u8), Status)>,
     pub(crate) excited: Vec<((Part, usize, usize), Status)>,
 }
@@ -348,7 +345,7 @@ impl Choice {
                 frames[s] = frames[s].plus(1, &shift);
             }
         }
-        Ok(Choice { frames, sets, explicit: vec![], driven: vec![], copies: vec![], excited: vec![] })
+        Ok(Choice { frames, sets, explicit: vec![], copies: vec![], excited: vec![] })
     }
 
     /// The rule's tiers at the focus with the explicit levels `explicit` kept in P (M18, the evaluation order's rule): the
@@ -359,12 +356,12 @@ impl Choice {
     /// rounds a set). The readings are in both units, the larger (`Fold::readings`): the column's whole emission and its
     /// emission out of the set (the populations').
     pub(crate) fn tiered(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
-        Choice::tiered_of(request, explicit, vec![], &|_| true)
+        Choice::tiered_of(request, explicit, &|_| true)
     }
 
     /// `tiered` on the sets `of` picks alone (the others' statuses left unread: no key of theirs is another set's, so a set's
-    /// fold is the same), the explicit levels' drives `driven` tones.
-    fn tiered_of(request: &Request, explicit: Vec<(usize, Part, usize)>, driven: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+    /// fold is the same).
+    fn tiered_of(request: &Request, explicit: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
         let share = crate::model::elim::share();
         let parts: Vec<Part> = components(request, &Light::new(request), &Axes::new(request)?)?.iter().map(|c| c.part).collect();
         let mut copies = vec![];
@@ -377,7 +374,7 @@ impl Choice {
                 }
             }
         }
-        let mut choice = Choice { copies, explicit, driven, ..Choice::of(request, share)? };
+        let mut choice = Choice { copies, explicit, ..Choice::of(request, share)? };
         for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             for _ in 0..4 {
                 let fold = Fold::new(request, &choice, set[0])?;
@@ -456,13 +453,13 @@ impl Choice {
     /// levels kept and left out). Which excited nodes are explicit is the run's at every point, not the focus's (run.rs #
     /// The nodes risen and fallen).
     pub(crate) fn base(request: &Request, explicit: Vec<(usize, Part, usize)>) -> Result<Choice, String> {
-        Choice::base_of(request, explicit, vec![], &|_| true)
+        Choice::base_of(request, explicit, &|_| true)
     }
 
     /// `base` on the sets `of` picks alone (`tiered_of`): a cluster's choice reads its own ground set's tiers, not every
-    /// set's (model/fold/run.rs `Clusters::cluster_with`); the explicit levels' drives `driven` tones (`Choice::driven`).
-    pub(crate) fn base_of(request: &Request, explicit: Vec<(usize, Part, usize)>, driven: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
-        let mut choice = Choice::tiered_of(request, explicit, driven, of)?;
+    /// set's (model/fold/run.rs `Clusters::cluster_with`).
+    pub(crate) fn base_of(request: &Request, explicit: Vec<(usize, Part, usize)>, of: &dyn Fn(&[usize]) -> bool) -> Result<Choice, String> {
+        let mut choice = Choice::tiered_of(request, explicit, of)?;
         for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
             let fold = Fold::new(request, &choice, set[0])?;
             let mut add = vec![];
@@ -493,13 +490,26 @@ impl Choice {
 
     /// The excited nodes of a fold that may be kept in P (DESIGN §11.1): per block with sources, each excited level among
     /// its Q rows -- its key (level, the absorbed component's part, its first source's ground state; `Choice::explicit`)
-    /// with the block and its rows.
+    /// with the block and its rows -- where it can be placed: a node holds its level's states its offset drives
+    /// (`Fold::build`), and one of them explicit at another offset makes it no node. Its drive there is not P's to choose:
+    /// the one rule reads it (`Fold::build`, `toned`; FOLDAPI §2), and a point whose reading it leaves beyond the share has
+    /// no node to raise there.
     pub(crate) fn candidates(fold: &Fold) -> Vec<((usize, Part, usize), usize, Vec<usize>)> {
+        let ng = fold.ground.len();
+        let placed = |b: &Block, level: usize| {
+            (0..EXCITED).filter(|&x| fold.excited_level[x] == level).all(|x| {
+                let held = b.sources.iter().any(|&(p, c)| fold.components[c].couplings.iter().any(|m| m[(x, fold.ground[p])] != C64::ZERO));
+                !held || fold.explicit.iter().position(|&y| y == x).is_none_or(|j| fold.frames[ng + j] == b.offset)
+            })
+        };
         let mut out: Vec<((usize, Part, usize), usize, Vec<usize>)> = vec![];
         for (o, b) in fold.blocks.iter().enumerate() {
             let Some(&(p, c)) = b.sources.first() else { continue };
             for (r, row) in b.rows.iter().enumerate() {
                 let Row::Excited(x) = *row else { continue };
+                if !placed(b, fold.excited_level[x]) {
+                    continue;
+                }
                 let key = (fold.excited_level[x], fold.components[c].part, fold.ground[p]);
                 match out.iter_mut().find(|n| n.0 == key) {
                     Some(n) => n.2.push(r),
@@ -722,8 +732,9 @@ impl Fold {
         // other offsets drive (tilt0's F' = 3 m′ at the PGC's offset from m′ + 1, a Zeeman beat apart one from the next:
         // the level whole at one offset made its drives from the other ground states strong tones of a near-resonant
         // transition and its states Q rows of their own blocks besides). One excited state is one place at one frame:
-        // a node whose offset would hold a state explicit at another is refused (the start's decision takes its drive
-        // there as a tone, `Choice::driven`); a node another key names again adds nothing.
+        // a node whose offset would hold a state explicit at another is refused (its drive there is read by the one rule,
+        // `toned` below; the start's decision does not offer it, `Choice::candidates`); a node another key names again
+        // adds nothing.
         let mut explicit = vec![];
         for &(level, part, source) in choice.explicit.iter().filter(|x| ground.contains(&x.2)) {
             let offset = state_frames[source].plus(1, &components[find(part)?].beat);
@@ -799,16 +810,13 @@ impl Fold {
             // drive is an entry of Ĥ_PP that turns (`Fold::driven`; proto.rs # The tones: the drives at another offset)
             // and the block neither holds it nor reaches through it; within the share the copy is a Q row of the block,
             // folded with its light shift, its gradient and its reading (losschk.status.md: the tweezer's far drive of
-            // tilt0's explicit F' = 3, a third of the trap's force, was lost as an averaged entry). The readings judge the
-            // copy as they judge any node: where the start's decision reads it beyond the share at a point, its node is
-            // `Choice::driven` and the drive here is a tone the same way.
+            // tilt0's explicit F' = 3, a third of the trap's force, was lost as an averaged entry). The drive's own a/|Δ|
+            // alone decides, as every turning term's (FOLDAPI §2): a reading of the folded copy beyond the share at a point
+            // is that point's, with no node to raise (`Choice::candidates`), not a tone.
             let toned = |x: usize| -> bool {
                 let Some(j) = explicit.iter().position(|&y| y == x) else { return false };
                 let peak: f64 = sources.iter().map(|&(p, c)| components[c].couplings.iter().map(|m| m[(x, ground[p])].abs()).sum::<f64>()).sum();
-                let decided = choice.driven.iter().any(|&(level, part, source)| {
-                    level == excited_level[x] && ground.contains(&source) && components.iter().find(|c| c.part == part).is_some_and(|c| state_frames[source].plus(1, &c.beat) == offset)
-                });
-                decided || (peak > 0.0 && unfoldable(peak / (value - frame_values[ng + j]).abs(), crate::model::elim::share()))
+                peak > 0.0 && unfoldable(peak / (value - frame_values[ng + j]).abs(), crate::model::elim::share())
             };
             let foreign = |x: usize| explicit.contains(&x) && !theirs.contains(&x) && toned(x);
             for x in (0..EXCITED).filter(|&x| foreign(x)) {

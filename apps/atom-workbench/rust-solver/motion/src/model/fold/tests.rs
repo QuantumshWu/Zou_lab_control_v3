@@ -1711,7 +1711,7 @@ pub(super) fn proto_choice(req: &Request, name: &str) -> Choice {
     // tilt0 on the start's decision (decide.rs): its F' = 3 explicit at the PGC light's offset, the probe's drive a tone.
     let choice = if name == "tilt0" {
         let run = run::Onefold::new(req, [1.0 / GROUND as f64; GROUND]).unwrap();
-        Choice::base_of(req, run.explicit(), run.driven(), &|_| true).unwrap()
+        Choice::base_of(req, run.explicit(), &|_| true).unwrap()
     } else {
         focus_choice(req)
     };
@@ -3442,7 +3442,7 @@ fn a_risen_node_s_cluster_holds_no_far_block_a_far_form_does_not_hold() {
         for set in Fold::sets(&req, &base).unwrap() {
             let Ok(fold) = Fold::new(&req, &base, set[0]) else { continue };
             for (key, _, _) in Choice::candidates(&fold) {
-                let Ok(choice) = Choice::base_of(&req, vec![key], vec![], &|x| x == &set[..]) else { continue };
+                let Ok(choice) = Choice::base_of(&req, vec![key], &|x| x == &set[..]) else { continue };
                 let Ok(risen) = Fold::new(&req, &choice, set[0]) else { continue };
                 for b in &risen.blocks {
                     let centred = b.solved == 0 && !b.rows.is_empty();
@@ -3973,7 +3973,7 @@ fn a_scene_s_risen_clusters_hold_their_copies_at_a_p_frame() {
     for set in Fold::sets(&request, &base).unwrap().iter().filter(|s| s.len() > 1) {
         let fold = Fold::new(&request, &base, set[0]).unwrap();
         for (key, _, _) in Choice::candidates(&fold) {
-            let Ok(choice) = Choice::base_of(&request, vec![key], vec![], &|s| s == &set[..]) else { continue };
+            let Ok(choice) = Choice::base_of(&request, vec![key], &|s| s == &set[..]) else { continue };
             let Ok(risen) = Fold::new(&request, &choice, set[0]) else { continue };
             let ng = risen.ground.len();
             let mut on: Vec<(usize, usize)> = vec![];
@@ -4123,7 +4123,7 @@ fn the_given_nodes_tiers_laid_out() {
         let (nodes, driven) = after.split_once(" driven ").unwrap();
         let (nodes, driven) = (keys(nodes), keys(driven));
         let clock = std::time::Instant::now();
-        let choice = Choice::base_of(&req, nodes.clone(), driven.clone(), &|set| set == &grounds[k][..]);
+        let choice = if driven.is_empty() { Choice::base_of(&req, nodes.clone(), &|set| set == &grounds[k][..]) } else { Err("drives are no choice since E2".into()) };
         let seconds = clock.elapsed().as_secs_f64();
         match choice {
             Ok(c) => {
@@ -4133,6 +4133,36 @@ fn the_given_nodes_tiers_laid_out() {
                 println!("line {} set {k} ({} nodes, {} driven; {seconds:.2} s): copies {copies:?} excited {excited:?}", i + 1, nodes.len(), driven.len());
             }
             Err(e) => println!("line {} set {k}: refused {e} ({seconds:.2} s)", i + 1),
+        }
+    }
+}
+
+/// Diagnostic (驱动按规则 E2; DECIDE_REQ a request's path): the run's decided folds, per set, every explicit state's drive
+/// at every other block offset -- its peak strength over its beat, m = a/|Δ|, and its reading rate(√w(m)) against the
+/// share (`Fold::build`'s `toned`): folded within, a tone beyond.
+#[test]
+#[ignore]
+fn the_decided_drives_read() {
+    let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
+    let initial = crate::solve::components(&req);
+    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+    let run = run::Onefold::new(&req, crate::solve::alone(initial[chief].0)).unwrap();
+    let choice = Choice::base_of(&req, run.explicit(), &|_| true).unwrap();
+    let share = crate::model::elim::share();
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).unwrap();
+        let ng = fold.ground.len();
+        for (j, &x) in fold.explicit.iter().enumerate() {
+            for b in fold.blocks.iter().filter(|b| b.offset != fold.frames[ng + j]) {
+                let peak: f64 = b.sources.iter().map(|&(p, c)| fold.components[c].couplings.iter().map(|m| m[(x, fold.ground[p])].abs()).sum::<f64>()).sum();
+                if peak == 0.0 {
+                    continue;
+                }
+                let beat = b.value - fold.frame_values[ng + j];
+                let m = peak / beat.abs();
+                let reading = rate(admixture(m).sqrt());
+                println!("set {set:?} explicit {x} (level {}) at block {:.4}: peak {peak:.4} beat {beat:.4} m {m:.3e} reading {reading:.3e} {}", fold.excited_level[x], b.value, if reading > share { "tone" } else { "folded" });
+            }
         }
     }
 }

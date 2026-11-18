@@ -231,7 +231,7 @@ impl Caches {
 /// bit whatever order its threads ask in. A cluster is made under the keys' lock: its making runs on no thread pool.
 struct Arena {
     chunks: [OnceLock<Box<[OnceLock<Set>]>>; 32],
-    keys: Mutex<Vec<((usize, Vec<Key>, Vec<Key>), Result<usize, String>)>>,
+    keys: Mutex<Vec<((usize, Vec<Key>), Result<usize, String>)>>,
 }
 
 impl Arena {
@@ -245,7 +245,7 @@ impl Arena {
     }
 
     /// The cluster of a key, made by `make` where it was not asked for yet; refused as it was where it was.
-    fn index(&self, key: (usize, Vec<Key>, Vec<Key>), make: impl FnOnce() -> Result<Set, String>) -> Result<usize, String> {
+    fn index(&self, key: (usize, Vec<Key>), make: impl FnOnce() -> Result<Set, String>) -> Result<usize, String> {
         let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, at)) = keys.iter().find(|k| k.0 == key) {
             return at.clone();
@@ -367,7 +367,7 @@ impl Onefold {
         let light = Light::new(request);
         let grounds = Fold::sets(request, &Choice::of(request, crate::model::elim::share())?)?;
         let mut search = super::decide::Search::new(request, &light, &grounds, 0.0, 0.0);
-        let base = Onefold::of(request, &search.merged(&vec![(vec![], vec![]); grounds.len()])?, reference)?;
+        let base = Onefold::of(request, &search.merged(&vec![vec![]; grounds.len()])?, reference)?;
         // The start's decision (decide.rs): the worst case over the local physics, an atom held by the trap at most its
         // depth's kinetic energy; every reading in the potential channel's floor.
         let depth = (-base.bottom).max(0.0);
@@ -376,7 +376,7 @@ impl Onefold {
         let mut run = if decision.explicit().is_empty() {
             base
         } else {
-            Onefold::of(request, &search.merged(&decision.sets.iter().map(|s| (s.nodes.clone(), s.driven.clone())).collect::<Vec<_>>())?, reference)?
+            Onefold::of(request, &search.merged(&decision.sets.iter().map(|s| s.nodes.clone()).collect::<Vec<_>>())?, reference)?
         };
         run.decision = decision;
         Ok(run)
@@ -386,12 +386,6 @@ impl Onefold {
     #[cfg(test)]
     pub(crate) fn explicit(&self) -> Vec<Key> {
         self.decision.explicit()
-    }
-
-    /// The start's decision's explicit levels' drives at other keys, tones (tests; `Choice::driven`).
-    #[cfg(test)]
-    pub(crate) fn driven(&self) -> Vec<Key> {
-        self.decision.driven()
     }
 
     /// The start's decision's report (FOLDAPI §3, §7.5; decide.rs): per ground set its explicit nodes, its tones and the
@@ -422,8 +416,7 @@ impl Onefold {
             };
             out += &format!("  集合 {k} {ground:?}
     显式：{:?}
-    他处显式能级的驱动（音调）：{:?}
-", named(&sd.nodes), named(&sd.driven));
+", named(&sd.nodes));
             out += &format!("    音调：{:?}\n", set.tones.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>());
             out += &format!("    作音调的交叉衰减：{:?}\n", set.coherent.iter().map(|c| format!("{:.4}", c.2)).collect::<Vec<_>>());
             out += &format!("    平均并折叠：{:?}\n", set.folded.iter().map(|f| format!("{:.4e}", f.value)).collect::<Vec<_>>());
@@ -648,25 +641,22 @@ impl Clusters {
         let out = Clusters { request: request.clone(), sets: Arena { chunks: std::array::from_fn(|_| OnceLock::new()), keys: Mutex::new(vec![]) }, base: choice.clone(), grounds, membership, floor };
         for k in 0..out.grounds.len() {
             let mut nodes: Vec<Key> = choice.explicit.iter().copied().filter(|x| out.grounds[k].contains(&x.2)).collect();
-            let mut driven: Vec<Key> = choice.driven.iter().copied().filter(|x| out.grounds[k].contains(&x.2)).collect();
             nodes.sort();
-            driven.sort();
-            out.sets.index((k, nodes, driven), || Set::new(request, choice, k, &out.grounds[k]))?;
+            out.sets.index((k, nodes), || Set::new(request, choice, k, &out.grounds[k]))?;
         }
         Ok(out)
     }
 
-    /// The cluster of ground set k with the explicit nodes `nodes` and the explicit levels' drives `driven` tones (# The
-    /// state sets; `Choice::driven`): made where it is not yet, on the base choice of that set with those nodes kept in P
+    /// The cluster of ground set k with the explicit nodes `nodes` (# The state sets): made where it is not yet, on the
+    /// base choice of that set with those nodes kept in P
     /// (`Choice::base_of`: its own set's tiers, no other's); refused where a fold of it cannot be made (a state explicit at
     /// two offsets, a block the prototype does not hold), and kept refused.
-    pub(super) fn cluster_with(&self, k: usize, mut nodes: Vec<Key>, mut driven: Vec<Key>) -> Result<usize, String> {
+    pub(super) fn cluster_with(&self, k: usize, mut nodes: Vec<Key>) -> Result<usize, String> {
         nodes.sort();
-        driven.sort();
-        self.sets.index((k, nodes.clone(), driven.clone()), || {
+        self.sets.index((k, nodes.clone()), || {
             let mut explicit: Vec<Key> = self.base.explicit.iter().copied().filter(|x| !self.grounds[k].contains(&x.2)).collect();
             explicit.extend(nodes.iter().copied());
-            let choice = Choice::base_of(&self.request, explicit, driven, &|set| set == &self.grounds[k][..])?;
+            let choice = Choice::base_of(&self.request, explicit, &|set| set == &self.grounds[k][..])?;
             Set::new(&self.request, &choice, k, &self.grounds[k])
         })
     }
@@ -692,8 +682,7 @@ impl Clusters {
                 let base = &side.sets.get(k).fold;
                 let on = |key: &Key| side.grounds[k].contains(&key.2) && base.components.iter().any(|c| c.part == key.1);
                 let nodes: Vec<Key> = self.base.explicit.iter().copied().filter(on).collect();
-                let driven: Vec<Key> = self.base.driven.iter().copied().filter(on).collect();
-                let cluster = side.cluster_with(k, nodes, driven).ok()?;
+                let cluster = side.cluster_with(k, nodes).ok()?;
                 let set = side.sets.get(cluster);
                 let mut cache = Cache::default();
                 let mut ws = side.take(cluster);

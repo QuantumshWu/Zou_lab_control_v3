@@ -32,8 +32,8 @@
 //! A set's fold on a decision -- its tiers (`Choice::base_of`, the costly part), the fold, its candidates -- is made once,
 //! by the first thread that asks for it while the others wait, and shared (`Built`); each thread reads on its own copy of
 //! the fold with its own workspace, taken from the fold's pool and given back. A round's joins are planned on the nodes'
-//! placement alone (`Search::placed`: a node holding a state explicit at another offset is that state's drive there,
-//! `Choice::driven`), and only each set's last decision of the round is made, the sets' at once; where it cannot be made
+//! placement alone (`Search::placed`: a node holding a state explicit at another offset is refused), and only each
+//! set's last decision of the round is made, the sets' at once; where it cannot be made
 //! the keys join one by one again, each made (`Search::join`) -- the same as joining them one by one wherever every one
 //! of them can be made with those before it. What a point asks of a set's decision is the point's and the decision's
 //! alone: a point read again on a set whose nodes did not change since it was read there -- the other sets of a point
@@ -89,8 +89,6 @@ impl Local {
 pub(crate) struct SetDecision {
     pub(crate) ground: Vec<usize>,
     pub(crate) nodes: Vec<Key>,
-    /// The nodes asked for whose level is explicit at another key (`Choice::driven`): its drive there a tone.
-    pub(crate) driven: Vec<Key>,
     pub(crate) worst: Option<(Local, f64)>,
     pub(crate) beyond: usize,
     pub(crate) refused: Vec<(Key, usize)>,
@@ -118,13 +116,6 @@ impl Decision {
     /// Every set's explicit nodes, one list (`Choice::base`'s).
     pub(crate) fn explicit(&self) -> Vec<Key> {
         let mut out: Vec<Key> = self.sets.iter().flat_map(|s| s.nodes.iter().copied()).collect();
-        out.sort();
-        out
-    }
-
-    /// Every set's explicit levels' drives at another key, tones (`Choice::driven`), one list.
-    pub(crate) fn driven(&self) -> Vec<Key> {
-        let mut out: Vec<Key> = self.sets.iter().flat_map(|s| s.driven.iter().copied()).collect();
         out.sort();
         out
     }
@@ -323,11 +314,11 @@ pub(crate) struct Search<'a> {
     floor: f64,
     /// The largest momentum an atom held by the trap has (rad/µm).
     most: f64,
-    built: Mutex<Vec<((usize, (Vec<Key>, Vec<Key>)), Slot)>>,
+    built: Mutex<Vec<((usize, Vec<Key>), Slot)>>,
     of: OnceLock<Result<Choice, String>>,
     /// What each point asked of each set's decision (module documentation, # What is made once), by the point's bits
     /// (`Local::bits`), the set and its nodes.
-    asked: Mutex<HashMap<(Vec<u64>, usize, (Vec<Key>, Vec<Key>)), Asked>>,
+    asked: Mutex<HashMap<(Vec<u64>, usize, Vec<Key>), Asked>>,
 }
 
 impl<'a> Search<'a> {
@@ -343,20 +334,18 @@ impl<'a> Search<'a> {
         (self.floor, self.most) = (floor, most);
     }
 
-    /// One choice of every set's nodes `nodes` (per set: its explicit nodes and drives), made of each set's own (`Built`,
-    /// made once and at once): the rule's sets and frames, every set's explicit nodes and drives (each list in its order),
+    /// One choice of every set's explicit nodes `nodes`, made of each set's own (`Built`, made once and at once): the
+    /// rule's sets and frames, every set's explicit nodes (one list in its order),
     /// and per set its tiers, its own keys' (a key's source state is its set's) in its choice's order -- each set's fold
     /// on it the one on its own choice (`Fold::build` reads a set's keys alone): what `Choice::base_of` makes of all the
     /// sets at once (run.rs `Onefold::new`).
-    pub(crate) fn merged(&self, nodes: &[(Vec<Key>, Vec<Key>)]) -> Result<Choice, String> {
+    pub(crate) fn merged(&self, nodes: &[Vec<Key>]) -> Result<Choice, String> {
         self.build(&nodes.iter().cloned().enumerate().collect::<Vec<_>>());
         let built: Vec<Arc<Built>> = nodes.iter().enumerate().map(|(k, x)| self.built(k, x)).collect::<Result<_, _>>()?;
         let first = &built.first().ok_or("没有基态集合")?.choice;
-        let mut explicit: Vec<Key> = nodes.iter().flat_map(|x| x.0.iter().copied()).collect();
-        let mut driven: Vec<Key> = nodes.iter().flat_map(|x| x.1.iter().copied()).collect();
+        let mut explicit: Vec<Key> = nodes.iter().flat_map(|x| x.iter().copied()).collect();
         explicit.sort();
-        driven.sort();
-        let mut out = Choice { frames: first.frames.clone(), sets: first.sets.clone(), explicit, driven, copies: vec![], excited: vec![] };
+        let mut out = Choice { frames: first.frames.clone(), sets: first.sets.clone(), explicit, copies: vec![], excited: vec![] };
         for (b, ground) in built.iter().zip(self.grounds) {
             out.copies.extend(b.choice.copies.iter().filter(|x| ground.contains(&x.0 .1)).cloned());
             out.excited.extend(b.choice.excited.iter().filter(|x| ground.contains(&x.0 .1)).cloned());
@@ -364,9 +353,9 @@ impl<'a> Search<'a> {
         Ok(out)
     }
 
-    /// Set k's fold with the explicit nodes and drives `nodes` (`Built`: `Choice::base_of`, its own set's tiers; the fold
-    /// and its workspace), made once -- the first thread to ask makes it, the others wait for it.
-    fn built(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> Result<Arc<Built>, String> {
+    /// Set k's fold with the explicit nodes `nodes` (`Built`: `Choice::base_of`, its own set's tiers; the fold and its
+    /// workspace), made once -- the first thread to ask makes it, the others wait for it.
+    fn built(&self, k: usize, nodes: &Vec<Key>) -> Result<Arc<Built>, String> {
         let slot: Slot = {
             let mut built = self.built.lock().unwrap_or_else(|e| e.into_inner());
             match built.iter().find(|x| x.0 .0 == k && x.0 .1 == *nodes) {
@@ -379,7 +368,7 @@ impl<'a> Search<'a> {
             }
         };
         slot.get_or_init(|| {
-            let choice = Choice::base_of(self.request, nodes.0.clone(), nodes.1.clone(), &|set| set == &self.grounds[k][..])?;
+            let choice = Choice::base_of(self.request, nodes.clone(), &|set| set == &self.grounds[k][..])?;
             let fold = Fold::new(self.request, &choice, self.grounds[k][0])?;
             let ws = fold.prototype_workspace()?;
             let candidates = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| (key, Taken { block, rows })).collect();
@@ -389,7 +378,7 @@ impl<'a> Search<'a> {
     }
 
     /// Every set's fold on its nodes `wanted` (set, nodes) made at once, a thread each.
-    fn build(&self, wanted: &[(usize, (Vec<Key>, Vec<Key>))]) {
+    fn build(&self, wanted: &[(usize, Vec<Key>)]) {
         std::thread::scope(|scope| {
             for (k, nodes) in wanted {
                 scope.spawn(move || {
@@ -402,9 +391,9 @@ impl<'a> Search<'a> {
     /// Whether set k's nodes `nodes` are placed (`Fold::build`: a node holding a state explicit at another offset is
     /// refused there) -- what can refuse a cluster before its tiers are read; read on the rule's structure, as the tiers'
     /// first fold is (`Choice::tiered_of`).
-    fn placed(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> bool {
+    fn placed(&self, k: usize, nodes: &Vec<Key>) -> bool {
         let Ok(of) = self.of.get_or_init(|| Choice::of(self.request, crate::model::elim::share())) else { return false };
-        let choice = Choice { explicit: nodes.0.clone(), driven: nodes.1.clone(), ..of.clone() };
+        let choice = Choice { explicit: nodes.clone(), ..of.clone() };
         Fold::sets(self.request, &choice).is_ok() && Fold::new(self.request, &choice, self.grounds[k][0]).is_ok()
     }
 
@@ -434,7 +423,7 @@ impl<'a> Search<'a> {
     }
 
     /// The points `points` read on the decision `nodes` (per set), in parallel: per point and set what it asks.
-    fn round(&self, points: &[Local], nodes: &[(Vec<Key>, Vec<Key>)]) -> Vec<Vec<Asked>> {
+    fn round(&self, points: &[Local], nodes: &[Vec<Key>]) -> Vec<Vec<Asked>> {
         self.build(&nodes.iter().cloned().enumerate().collect::<Vec<_>>());
         let built: Vec<Result<Arc<Built>, String>> = nodes.iter().enumerate().map(|(k, x)| self.built(k, x)).collect();
         let built = &built;
@@ -475,28 +464,22 @@ impl<'a> Search<'a> {
 
     /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a state
     /// is explicit at two offsets, or a block is not the prototype's).
-    fn feasible(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> bool {
+    fn feasible(&self, k: usize, nodes: &Vec<Key>) -> bool {
         self.built(k, nodes).is_ok()
     }
 
     /// The keys `keys` joined to a set's decision `set` in their order (`settle`), each where `can` makes its cluster with
-    /// those before it -- a node whose level is explicit at another key, where it cannot, as that level's drive there --,
-    /// else refused: the nodes and drives, and the keys refused.
-    fn join(&self, keys: &[Key], set: &SetDecision, can: &dyn Fn(&(Vec<Key>, Vec<Key>)) -> bool) -> ((Vec<Key>, Vec<Key>), Vec<Key>) {
-        let mut now = (set.nodes.clone(), set.driven.clone());
+    /// those before it, else refused: the nodes, and the keys refused.
+    fn join(&self, keys: &[Key], set: &SetDecision, can: &dyn Fn(&Vec<Key>) -> bool) -> (Vec<Key>, Vec<Key>) {
+        let mut now = set.nodes.clone();
         let mut refused: Vec<Key> = vec![];
         for &key in keys {
-            if now.0.contains(&key) || now.1.contains(&key) || set.refused.iter().any(|r| r.0 == key) || refused.contains(&key) {
+            if now.contains(&key) || set.refused.iter().any(|r| r.0 == key) || refused.contains(&key) {
                 continue;
             }
-            let mut more = (now.0.clone(), now.1.clone());
-            more.0.push(key);
-            more.0.sort();
-            if !can(&more) && now.0.iter().any(|n| n.0 == key.0) {
-                more = (now.0.clone(), now.1.clone());
-                more.1.push(key);
-                more.1.sort();
-            }
+            let mut more = now.clone();
+            more.push(key);
+            more.sort();
             if can(&more) {
                 now = more;
             } else {
@@ -517,15 +500,16 @@ impl<'a> Search<'a> {
         let mut out: Vec<Vec<(f64, bool, bool, bool)>> = vec![vec![(0.0, false, false, false); sets]; points.len()];
         let mut open: Vec<usize> = (0..points.len()).collect();
         while !open.is_empty() {
-            let nodes: Vec<(Vec<Key>, Vec<Key>)> = decision.sets.iter().map(|s| (s.nodes.clone(), s.driven.clone())).collect();
+            let nodes: Vec<Vec<Key>> = decision.sets.iter().map(|s| s.nodes.clone()).collect();
             let asked = self.round(&open.iter().map(|&i| points[i].clone()).collect::<Vec<_>>(), &nodes);
             decision.points += open.len();
             // The nodes asked, per set, joining in the order of the points that ask for them (the most first; a tie by the
             // keys' order), each where its cluster can be made: a node is a level at an offset holding the states that
             // offset reaches (fold.rs `Fold::build`), and one excited state is one place at one frame -- a node that would
-            // hold a state already explicit at another offset is that state's copy there, read beyond the share: it joins
-            // as that drive, a tone (`Choice::driven`), as a copy whose coupling cannot be folded at its peak does. The
-            // joins planned on the placements, each set's last decision made, the sets' at once (# What is made once).
+            // hold a state already explicit at another offset is refused (its drive there is the one rule's, fold.rs
+            // `toned`; the candidates offer no such node, `Choice::candidates`, so only two keys of one round that each
+            // hold the state meet it). The joins planned on the placements, each set's last decision made, the sets' at
+            // once (# What is made once).
             let keys: Vec<Vec<Key>> = (0..sets)
                 .map(|k| {
                     let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
@@ -541,17 +525,17 @@ impl<'a> Search<'a> {
                     keys.into_iter().map(|x| x.0).collect()
                 })
                 .collect();
-            let plans: Vec<((Vec<Key>, Vec<Key>), Vec<Key>)> = (0..sets).map(|k| self.join(&keys[k], &decision.sets[k], &|x| self.placed(k, x))).collect();
+            let plans: Vec<(Vec<Key>, Vec<Key>)> = (0..sets).map(|k| self.join(&keys[k], &decision.sets[k], &|x| self.placed(k, x))).collect();
             self.build(&plans.iter().map(|p| p.0.clone()).enumerate().collect::<Vec<_>>());
             for (k, plan) in plans.into_iter().enumerate() {
                 let (now, refused) = if self.feasible(k, &plan.0) { plan } else { self.join(&keys[k], &decision.sets[k], &|x| self.feasible(k, x)) };
                 let set = &mut decision.sets[k];
-                (set.nodes, set.driven) = now;
+                set.nodes = now;
                 set.refused.extend(refused.into_iter().map(|key| (key, 0)));
             }
             let mut again = vec![];
-            // Whether set k had a node of the level joined in this round (as a place or a drive).
-            let joined = |k: usize, level: usize, sets: &[SetDecision]| sets[k].nodes.iter().chain(&sets[k].driven).any(|n| n.0 == level && !nodes[k].0.contains(n) && !nodes[k].1.contains(n));
+            // Whether set k had a node of the level joined in this round.
+            let joined = |k: usize, level: usize, sets: &[SetDecision]| sets[k].nodes.iter().any(|n| n.0 == level && !nodes[k].contains(n));
             for (&i, asks) in open.iter().zip(asked) {
                 let mut more = false;
                 for (k, ask) in asks.into_iter().enumerate() {
