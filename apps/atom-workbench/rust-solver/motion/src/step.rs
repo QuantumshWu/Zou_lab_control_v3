@@ -2870,6 +2870,20 @@ impl Price {
         self.middle + self.scattering
     }
 
+    /// `work`'s parts (a measurement): the propagation, the kick, the survival's hazard, the optical sector, the end
+    /// state's held forms, the model's own.
+    #[cfg(test)]
+    pub fn parts(&self, costs: [f64; 3]) -> [f64; 6] {
+        let (n, still) = (self.states, self.still);
+        [
+            count::propagation(costs, still, self.made + self.stops, self.toned[0]),
+            count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]),
+            count::hazard(n, self.traces, still, self.tones),
+            self.sector.map_or(0.0, |(_, make)| optical_work(n, make)),
+            if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 },
+            self.modelled(),
+        ]
+    }
 }
 
 /// The step of τ from a trajectory's state as its run takes it, for its count: its stretches' prices, each with its

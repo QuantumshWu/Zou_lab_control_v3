@@ -1969,6 +1969,134 @@ fn proto_decay(generator: &Mat, jumps: &[[Mat; 3]]) -> f64 {
     gap.max_abs() / scale
 }
 
+/// The decay between two blocks' offsets through D (proto.rs `Fold::prototype_excited`, `Fold::decay_between`: the
+/// excited amplitudes' (εS⁻¹)†D(εS⁻¹), D = Σ_q C_q†C_q, far.rs `decay`) is their jumps' Σ_q L_i,q†L_j,q
+/// (`Fold::prototype_jumps`) to the rounding of the generator's size, for every two blocks of every set at the step's
+/// three positions: PGC3D_1ms (refs), R4_LIN_4, a Λ with a tone, unify's Λ with its excited level in P, tilt0 (its
+/// cross decays kept as tones), two random points each, by their prototype choices; and the explicit levels at two
+/// offsets whose emission is no dipole's (`a_set_with_explicit_states_at_two_offsets_decays_by_its_jumps`'s: D has an
+/// entry between two excited lines there, and it is taken as it is).
+#[test]
+fn the_cross_decays_through_d_are_the_jumps_products() {
+    use super::proto::{At, Cache};
+    let pgc = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json").to_string_lossy().into_owned();
+    let (mut pairs, mut worst) = (0, 0.0_f64);
+    let mut check = |name: &str, req: &Request, choice: &Choice, points: &[([f64; 3], [f64; 3])]| {
+        for set in Fold::sets(req, choice).unwrap() {
+            let fold = Fold::new(req, choice, set[0]).unwrap();
+            if fold.blocks.is_empty() {
+                continue;
+            }
+            let Ok(mut ws) = fold.prototype_workspace() else { continue };
+            for &(r, kappa) in points {
+                let mut cache = Cache::default();
+                let Some(g0) = fold.prototype(r, kappa, fold.thermal, &mut cache, &mut ws).map(|s| s.generator.clone()) else { continue };
+                fold.prototype_nodes(r, kappa, kappa.map(|k| k * fold.hbar_over_mass), [-0.325, 0.325], &cache, &mut ws);
+                for (at, g) in [(At::Middle, g0.clone()), (At::Node(0), ws.node_generator(0).clone()), (At::Node(1), ws.node_generator(1).clone())] {
+                    let jumps = fold.prototype_jumps(&cache, &ws, at);
+                    let excited = fold.prototype_excited(&cache, &ws, at, &vec![true; jumps.len()]);
+                    for a in 0..jumps.len() {
+                        for b in (0..jumps.len()).filter(|&b| b != a) {
+                            let mut apart = fold.decay_between(&ws, excited[a].as_ref().unwrap(), excited[b].as_ref().unwrap());
+                            for q in 0..3 {
+                                apart.add_scaled(-C64::ONE, &jumps[a][q].adjoint_product(&jumps[b][q]));
+                            }
+                            let miss = apart.max_abs() / g.frobenius();
+                            assert!(miss <= 1e-12, "{name} set {set:?} at {r:?}: blocks {a}, {b} through D against their jumps' products, {miss:.1e} of G");
+                            worst = worst.max(miss);
+                            pairs += 1;
+                        }
+                    }
+                }
+            }
+        }
+    };
+    let points = [([0.11, -0.07, 0.23], [3.0, -1.0, 2.0]), ([-0.2, 0.15, -0.05], [-2.0, 4.0, 1.0])];
+    for (name, req) in [(pgc.clone(), crate::model::testing::scene(&pgc)), ("R4_LIN_4".to_string(), crate::model::testing::scene("R4_LIN_4")), ("a Λ with a tone".to_string(), toned_lambda()), ("a Λ with its excited level in P".to_string(), lambda_request(3.0, 1.5, 0.0))].into_iter().chain(tilt0()) {
+        check(&name, &req, &proto_choice(&req, &name), &points);
+    }
+    // The explicit levels at two offsets, their emission no dipole's (an entry of D between the two lines).
+    let (gamma, ee) = (38.0, 1000.0);
+    let rays = [
+        Ray { axis: 0, nu: ee, direction: [0.0, 0.0, 1.0], couplings: vec![(17, 0, C64::real(10.0))] },
+        Ray { axis: 1, nu: ee + 100.0, direction: [1.0, 0.0, 0.0], couplings: vec![(0, 0, C64::real(10.0))] },
+    ];
+    let mut req = system(&[(0, 0.0), (4, 100.0)], &[(17, ee, gamma, 0), (0, ee + 100.0, gamma, 0)], &rays, 2, true);
+    req.emission = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
+    req.emission[0][(0, GROUND + 17)] = C64::real(2.0);
+    req.emission[1][(4, GROUND + 17)] = C64::real((gamma - 4.0).sqrt());
+    req.emission[0][(0, GROUND)] = C64::real(25.0_f64.sqrt());
+    req.validate().unwrap();
+    let level = |x: usize| Fold::new(&req, &Choice::tiered(&req, vec![], vec![]).unwrap(), 0).unwrap().excited_level[x];
+    let part = |frequency: usize| crate::model::Component { frequency, counter: false };
+    let choice = super::decide::at_point(&req, vec![(level(17), part(0), 0), (level(0), part(1), 0)], &super::decide::Local::focus(&crate::field::Light::new(&req))).expect("the choice");
+    let between = Fold::new(&req, &choice, 0).unwrap().decay.iter().filter(|(x, y, _)| x != y).count();
+    check("two explicit levels at two offsets", &req, &choice, &[([0.3, 0.0, 0.0], [2.0, 0.0, 0.0]), ([0.1, 0.2, -0.1], [0.0, 1.0, 1.0])]);
+    println!("{pairs} pairs of blocks at three positions: the largest miss {worst:.1e} of G; D's entries between two excited states of the two-offset system: {between}");
+    assert!(pairs > 0 && between > 0);
+}
+
+/// The averaged cross decays' products timed (a measurement, ignored; the scratchpad's GMD1C_1ms and tilt0 requests): per
+/// set of the run's choice at a point, the pairs of blocks whose cross decay is averaged (`Fold::crossing`, not
+/// `Fold::beating`), made 200 times through D (`prototype_excited`, `decay_between`) and as the jumps' Σ_q L†L
+/// (`prototype_jumps`, three products a pair); the pairs, D's entries and the amplitudes' columns a pair, n.
+#[test]
+#[ignore]
+fn the_averaged_cross_decays_timed() {
+    use super::proto::{At, Cache};
+    let dir = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req";
+    for name in ["GMD1C_1ms", "tilt0"] {
+        let req = crate::model::testing::scene(&format!("{dir}\\{name}.json"));
+        let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
+        let choice = run.choice().clone();
+        let d = crate::model::far::decay(&req);
+        let off: Vec<f64> = (0..d.rows).flat_map(|x| (0..d.rows).map(move |y| (x, y))).filter(|&(x, y)| x != y && d[(x, y)] != C64::ZERO).map(|(x, y)| d[(x, y)].abs() / (d[(x, x)].abs() * d[(y, y)].abs()).sqrt()).collect();
+        println!("{name}: D's entries off its diagonal {} of {}, the largest {:.2e} of its diagonal's", off.len(), d.rows * d.rows, off.iter().copied().fold(0.0, f64::max));
+        for set in Fold::sets(&req, &choice).unwrap() {
+            let fold = Fold::new(&req, &choice, set[0]).unwrap();
+            let Ok(mut ws) = fold.prototype_workspace() else { continue };
+            let mut cache = Cache::default();
+            if fold.prototype([0.05, -0.02, 0.03], [1.0, 0.5, -0.5], fold.thermal, &mut cache, &mut ws).is_none() {
+                continue;
+            }
+            let (near, far) = ws.layout();
+            let blocks: Vec<usize> = near.iter().map(|x| x.0).chain(far.iter().map(|x| x.0)).collect();
+            let nb = fold.blocks.len();
+            let pairs: Vec<(usize, usize)> = (0..blocks.len()).flat_map(|i| (0..blocks.len()).map(move |j| (i, j))).filter(|&(i, j)| i != j && fold.crossing[blocks[i] * nb + blocks[j]] && !fold.beating(blocks[i], blocks[j])).collect();
+            if pairs.is_empty() {
+                continue;
+            }
+            let times = 200;
+            let started = std::time::Instant::now();
+            let mut sink = 0.0;
+            for _ in 0..times {
+                let excited = fold.prototype_excited(&cache, &ws, At::Middle, &vec![true; blocks.len()]);
+                for &(i, j) in &pairs {
+                    sink += fold.decay_between(&ws, excited[i].as_ref().unwrap(), excited[j].as_ref().unwrap()).data[0].re;
+                }
+            }
+            let through_d = started.elapsed().as_secs_f64() / times as f64;
+            let started = std::time::Instant::now();
+            for _ in 0..times {
+                let jumps = fold.prototype_jumps(&cache, &ws, At::Middle);
+                for &(i, j) in &pairs {
+                    for q in 0..3 {
+                        sink += jumps[i][q].adjoint().product(&jumps[j][q]).data[0].re;
+                    }
+                }
+            }
+            let products = started.elapsed().as_secs_f64() / times as f64;
+            let excited = fold.prototype_excited(&cache, &ws, At::Middle, &vec![true; blocks.len()]);
+            let (mut k, mut c) = (0, 0);
+            for &(i, j) in &pairs {
+                k += fold.decay.iter().filter(|(x, y, _)| excited[i].as_ref().unwrap().place[*x] != usize::MAX && excited[j].as_ref().unwrap().place[*y] != usize::MAX).count();
+                c += excited[i].as_ref().unwrap().columns.len();
+            }
+            println!("{name} set {set:?}: n {}, {} blocks ({} near), {} averaged pairs, D's entries {:.1} and columns {:.1} a pair; through D {:.1} µs, the jumps' products {:.1} µs ({sink:.1e})", fold.size(), blocks.len(), near.len(), pairs.len(), k as f64 / pairs.len() as f64, c as f64 / pairs.len() as f64, 1e6 * through_d, 1e6 * products);
+        }
+    }
+}
+
 /// A Λ whose two ground states turn against each other (BRIEF_WIRE2 item 1's tone): |0⟩ at 0 and |4⟩ at 100 rad/µs, one
 /// excited state (17) at 1000 rad/µs decaying at Γ to |0⟩, laser A (the trap's axis, a plane wave) on |0⟩ at 0.5 rad/µs and
 /// laser B on |4⟩ at 0.4 rad/µs a standing wave along z, both on resonance: the Raman coupling is resonant, so |0⟩ and |4⟩
