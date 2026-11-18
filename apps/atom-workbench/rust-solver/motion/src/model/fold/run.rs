@@ -679,7 +679,7 @@ impl Clusters {
         self.sets.index((k, nodes.clone()), || {
             let mut explicit: Vec<Key> = self.base.explicit.iter().copied().filter(|x| !self.grounds[k].contains(&x.2)).collect();
             explicit.extend(nodes.iter().copied());
-            let choice = Choice::base_of(&self.request, &self.base, explicit, self.base.toned.clone(), &|set| set == &self.grounds[k][..])?;
+            let choice = Choice::laid(&self.request, Choice { explicit, ..self.base.clone() }, &|set| set == &self.grounds[k][..])?;
             Set::new(&self.request, &choice, k, &self.grounds[k])
         })
     }
@@ -1734,7 +1734,7 @@ impl crate::step::Dynamics for Onefold {
             let request = lit(&self.clusters.request, &self.light, |w| w != self.light.trap);
             // The run's skeleton and terms: both light sets on one set of explicit nodes and kept terms
             // (`Clusters::difference`).
-            Clusters::new(&request, &Choice::base_of(&request, &self.clusters.base, vec![], self.clusters.base.toned.clone(), &|_| true)?, self.clusters.floor)
+            Clusters::new(&request, &Choice::laid(&request, Choice { explicit: vec![], ..self.clusters.base.clone() }, &|_| true)?, self.clusters.floor)
         });
         let potential = untrapped.as_ref().ok().and_then(|u| self.clusters.difference(u, at.r, &p)).unwrap_or(f64::NAN);
         kinetic + potential

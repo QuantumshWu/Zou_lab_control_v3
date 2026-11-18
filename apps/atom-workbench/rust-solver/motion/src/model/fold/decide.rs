@@ -43,6 +43,11 @@
 //!   copy of s's fold. A skeleton that changes merges its sets' decisions -- their nodes and their terms, those named by
 //!   an offset of a set whose frames moved read again --, and every point read so far is read again on it.
 //!
+//! Every Q node's tier (T: a copy's or an excited level's, solved, centred or left out) is the rule's here too
+//! (`tiered`), read at the focus on each set's decision (`Search::built`); the fold lays it and reads nothing
+//! (`Choice::laid`). Read at every point and the dearest taken, it costs more than the decision's budget (项清单完成 I
+//! item 2: GMD1C 54 s, PGC3D 131 s, tilt2 beyond 290 s), so the focus's stands.
+//!
 //! The terms of a set's fold follow, every point that asks for one read again on it, as a node joins:
 //! - an entry of P between two places of one kind and different frames (`Term::Pair`): a = |Ĥ_PP(r)[p, q]| (two explicit
 //!   states' with half their decay's cross term), Δ = the difference of the two diagonals there (its beat with the
@@ -59,7 +64,7 @@
 //! round (the forward is read on the decision with it).
 //!
 //! # What is made once
-//! A set's fold on a decision -- its tiers (`Choice::base_of`, the costly part), the fold, its candidates -- is made once,
+//! A set's fold on a decision -- its tiers (`tiered`, the costly part; `Choice::laid`), the fold, its candidates -- is made once,
 //! by the first thread that asks for it while the others wait, and shared (`Built`); each thread reads on its own copy of
 //! the fold with its own workspace, taken from the fold's pool and given back. A round's joins are planned on the nodes'
 //! placement alone (`Search::placed`: a node holding a state explicit at another offset is refused), and only each
@@ -74,7 +79,7 @@
 //! Per set its explicit nodes, the worst point and its reading on the final decision (rate units: the bound), the
 //! points beyond the share where no node is offered; the rounds' counts, the time.
 use super::proto::{Cache, Cell, Taken, Workspace};
-use super::{rate, Beat, Choice, Fold, Term, EXCITED, GROUND};
+use super::{rate, Beat, Choice, Fold, Part, Term, EXCITED, GROUND};
 use crate::field::Light;
 use crate::linalg::C64;
 use crate::request::Request;
@@ -216,6 +221,104 @@ pub(crate) fn admixture_of(m: f64) -> f64 {
     admixture(m)
 }
 
+/// The tiers (module documentation, # The terms, T) of the sets `of` picks with the explicit nodes `explicit` and the
+/// terms `toned`, on the skeleton `skeleton`, at the point `local`: each Q node's at the cheapest evaluation its readings
+/// there allow within the share -- of a block's copies, and of its excited levels, those whose omission readings sum
+/// within the share left out (the smallest first), of the others those whose centring reads within it centred, the rest
+/// decomposed or solved, from every copy decomposed (exact: a centring can be singular, a copy at the centre itself) to
+/// the fixed point (at most four rounds a set) (M18, the evaluation order's rule; the readings in both units, the larger,
+/// `Fold::readings`: the column's whole emission and its emission out of the set). The decision reads them at the focus
+/// (`Search::built`; 项清单完成 I item 2: at every point they cost more than the decision's budget).
+pub(crate) fn tiered(request: &Request, skeleton: &Choice, explicit: Vec<Key>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool, local: &Local) -> Result<Choice, String> {
+    tiered_at(request, skeleton, explicit, toned, of, local, &Light::new(request))
+}
+
+/// The tiers at one point (`tiered`).
+fn tiered_at(request: &Request, skeleton: &Choice, explicit: Vec<Key>, toned: Vec<Term>, of: &dyn Fn(&[usize]) -> bool, local: &Local, light: &Light) -> Result<Choice, String> {
+    let share = crate::model::elim::share();
+    let parts: Vec<Part> = super::components(request, light, &super::Axes::new(request)?)?.iter().map(|c| c.part).collect();
+    let mut copies = vec![];
+    for &a in &parts {
+        for s in 0..GROUND {
+            for &e in &parts {
+                for f in [1, 2] {
+                    copies.push(((a, s, e, f), super::Status::Decomposed));
+                }
+            }
+        }
+    }
+    let mut choice = Choice { copies, explicit, toned, frames: skeleton.frames.clone(), sets: skeleton.sets.clone(), excited: vec![] };
+    for set in Fold::sets(request, &choice)?.into_iter().filter(|set| of(set)) {
+        for _ in 0..4 {
+            let mut fold = Fold::new(request, &choice, set[0])?;
+            if fold.blocks.is_empty() {
+                break;
+            }
+            fold.local = local.factors(light);
+            let f = fold.tiers_at([0.0; 3], local.kappa).ok_or("该点的折叠不存在")?;
+            let mut changed = false;
+            // A block's copies left out together: their omission readings summed, the smallest first, as its excited
+            // levels' (each alone within the share, tilt0's three tweezer copies left out together were not:
+            // dragchk.status.md section 4).
+            for (o, b) in fold.blocks.iter().enumerate() {
+                let Some(&(s0, a0)) = b.sources.first() else { continue };
+                let mut nodes: Vec<(u8, usize, f64, f64)> = f.readings.iter().filter(|r| r.block == o).filter_map(|r| if let super::Node::Copy { level, component } = r.node { Some((level, component, r.omission, r.centring)) } else { None }).collect();
+                nodes.sort_by(|a, b| a.2.total_cmp(&b.2));
+                let mut sum = 0.0;
+                for (level, component, omission, centring) in nodes {
+                    let next = if rate((sum + omission).sqrt()) <= share {
+                        sum += omission;
+                        super::Status::Omitted
+                    } else if rate(centring.sqrt()) <= share {
+                        super::Status::Centred
+                    } else {
+                        super::Status::Decomposed
+                    };
+                    let key = (fold.components[a0].part, fold.ground[s0], fold.components[component].part, level);
+                    let status = choice.copies.iter().rev().find(|x| x.0 == key).map_or(super::Status::Centred, |x| x.1);
+                    if next != status {
+                        for &(s, a) in &b.sources {
+                            let key = (fold.components[a].part, fold.ground[s], fold.components[component].part, level);
+                            choice.copies.retain(|x| x.0 != key);
+                            choice.copies.push((key, next));
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            for (o, b) in fold.blocks.iter().enumerate() {
+                let mut nodes: Vec<(usize, f64, f64)> = f.readings.iter().filter(|r| r.block == o).filter_map(|r| if let super::Node::Excited(level) = r.node { Some((level, r.omission, r.centring)) } else { None }).collect();
+                nodes.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let mut sum = 0.0;
+                for (level, omission, centring) in nodes {
+                    let next = if rate((sum + omission).sqrt()) <= share {
+                        sum += omission;
+                        super::Status::Omitted
+                    } else if rate(centring.sqrt()) <= share {
+                        super::Status::Centred
+                    } else {
+                        super::Status::Decomposed
+                    };
+                    let Some(&(s0, a0)) = b.sources.first() else { continue };
+                    let now = choice.excited.iter().rev().find(|x| x.0 == (fold.components[a0].part, fold.ground[s0], level)).map_or(super::Status::Decomposed, |x| x.1);
+                    if next != now {
+                        for &(s, a) in &b.sources {
+                            let key = (fold.components[a].part, fold.ground[s], level);
+                            choice.excited.retain(|x| x.0 != key);
+                            choice.excited.push((key, next));
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    Ok(choice)
+}
+
 /// The skeleton at the focus (`skeleton_at`, `Local::focus`).
 pub(crate) fn focus(request: &Request) -> Result<Choice, String> {
     skeleton_at(request, &Local::focus(&Light::new(request)))
@@ -313,7 +416,7 @@ pub(crate) fn at_point(request: &Request, explicit: Vec<Key>, local: &Local) -> 
     let skeleton = skeleton_at(request, local)?;
     let mut toned: Vec<Term> = vec![];
     loop {
-        let choice = Choice::base_of(request, &skeleton, explicit.clone(), toned.clone(), &|_| true)?;
+        let choice = Choice::laid(request, tiered(request, &skeleton, explicit.clone(), toned.clone(), &|_| true, local)?, &|_| true)?;
         let mut more = false;
         for set in Fold::sets(request, &choice)? {
             let mut fold = Fold::new(request, &choice, set[0])?;
@@ -680,7 +783,8 @@ impl<'a> Search<'a> {
             }
         };
         slot.get_or_init(|| {
-            let choice = Choice::base_of(self.request, &self.skeleton, nodes.0.clone(), nodes.1.clone(), &|set| set == &self.grounds[k][..])?;
+            let of = |set: &[usize]| set == &self.grounds[k][..];
+            let choice = Choice::laid(self.request, tiered(self.request, &self.skeleton, nodes.0.clone(), nodes.1.clone(), &of, &Local::focus(self.light))?, &of)?;
             let fold = Fold::new(self.request, &choice, self.grounds[k][0])?;
             let ws = fold.prototype_workspace()?;
             let candidates = Choice::candidates(&fold).into_iter().map(|(key, block, rows)| (key, Taken { block, rows })).collect();
