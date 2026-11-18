@@ -1476,8 +1476,8 @@ impl crate::step::Middle for Middle<'_> {
     /// trajectory's from here; the cell's books' end. A reading beyond the share there, or a fold that does not exist
     /// there, is counted (adapt.rs `counted`): the representation is the start's (# The representation). Nothing where this middle
     /// does not decide or holds no light.
-    fn decide(&self, path: &Path, psi: &[C64], interval: f64, owed: f64, _steps: f64) -> Decided {
-        let mut out = Decided { owed, held: None, switched: None, work: 0.0, booked: [0.0; crate::step::MODEL] };
+    fn decide(&self, path: &Path, psi: &[C64], interval: f64) -> Decided {
+        let mut out = Decided { held: None, work: 0.0, booked: [0.0; crate::step::MODEL] };
         let set = self.run.clusters.sets.get(self.set);
         if !self.decide || set.fold.blocks.is_empty() {
             return out;

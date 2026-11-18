@@ -2144,11 +2144,8 @@ struct State {
     threshold: f64,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
     forms: crate::step::Forms,
-    /// Its representation (step.rs `Trajectory::held`) and its switches' booking and balance (`Trajectory::dropped`,
-    /// `Trajectory::owed`).
+    /// Its representation (step.rs `Trajectory::held`).
     held: crate::step::Held,
-    dropped: f64,
-    owed: f64,
     /// Its next decision time, and whether a step of its cell was unresolved (step.rs `Trajectory::next`,
     /// `Trajectory::unresolved_cell`: its account reads ρ = 1 there, `booked_at`).
     next: f64,
@@ -2164,8 +2161,6 @@ impl State {
             threshold: t.threshold,
             forms: t.forms.clone(),
             held: t.held.clone(),
-            dropped: t.dropped,
-            owed: t.owed,
             next: t.next,
             unresolved: t.unresolved_cell,
         }
@@ -2191,8 +2186,6 @@ impl State {
             work: 0.,
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
-            dropped: self.dropped,
-            owed: self.owed,
             model: [0.; crate::step::MODEL],
             unresolved_steps: 0,
             next: self.next,
@@ -4242,7 +4235,7 @@ mod tests {
 
     /// A state at the time t of the trajectory `index` with `jumps` jumps: no step reads it (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, forms: crate::step::Forms::default(), held: crate::step::Held::default(), dropped: 0., owed: 0., next: 0., unresolved: false }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
@@ -4912,7 +4905,7 @@ mod tests {
     /// the bit those that one advance through the run reads there -- none after its loss.
     #[test]
     fn a_kept_trajectory_s_states_are_made_again_from_its_checkpoints_to_the_bit() {
-        let key = |s: &Option<State>| s.as_ref().map(|s| format!("{:?} {} {} {:?} {} {}", s.sample, s.index, s.jumps, s.forms, s.dropped, s.owed));
+        let key = |s: &Option<State>| s.as_ref().map(|s| format!("{:?} {} {} {:?}", s.sample, s.index, s.jumps, s.forms));
         let (mut ends, mut lost, mut most) = (0, 0, 0);
         let started = Instant::now();
         for (name, requests, last, factors) in [("R2_RECOIL", false, 2., [1., 10., 100.]), ("PGC3D_1ms", true, 200., [0.5, 1., 2.])] {

@@ -2844,7 +2844,7 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
     let steps = (time / tau).round() as usize;
     let mut shares = vec![];
     let mut scratch = crate::step::Scratch::default();
-    let (mut explicit, mut switches, mut dropped) = (0, 0, 0.0);
+    let (mut explicit, mut switches, dropped) = (0, 0, 0.0);
     for i in 0..count {
         let mut t = Trajectory::new(&run, 0, at, [0.0; 3], 11, i);
         for _ in 0..steps {
@@ -2854,7 +2854,7 @@ fn lambda_against_master(a: f64, b: f64, form: f64, time: f64) -> (f64, f64, f64
             explicit += usize::from(c.states.len() > c.ground);
             switches += usize::from(t.cluster != before && run.cluster(before).ground == c.ground);
         }
-        dropped += t.dropped;
+
         let rows = run.readout(t.cluster, &t.point(), &t.psi, &t.held);
         shares.push(rows[0] / (rows[0] + rows[4]));
     }
@@ -3652,7 +3652,7 @@ fn r4_lin_4_s_thermal_paths_meet_no_point_where_their_fold_does_not_exist() {
     let hm = crate::units::hbar_over_mass(req.mass_kg);
     let thermal = (crate::units::KT_PER_UK * req.temperature_uk / hm).sqrt();
     let mut scratch = crate::step::Scratch::default();
-    let (mut steps, mut explicit, mut switched, mut dropped) = (0, 0, 0, 0.0);
+    let (mut steps, mut explicit, mut switched, dropped) = (0, 0, 0, 0.0);
     let first = run.cluster(0).states[0];
     for i in 0..8u64 {
         let phase = 2.0 * std::f64::consts::PI * i as f64 / 8.0;
@@ -3666,7 +3666,6 @@ fn r4_lin_4_s_thermal_paths_meet_no_point_where_their_fold_does_not_exist() {
             explicit += usize::from(c.states.len() > c.ground);
             switched += usize::from(t.cluster != before && run.cluster(before).ground == c.ground && run.cluster(before).states[0] == c.states[0]);
         }
-        dropped += t.dropped;
     }
     println!("R4_LIN_4: {steps} steps from F = 1, {explicit} steps' ends on an explicit cluster, {switched} switches, δp booked {dropped:.2e}");
 }
@@ -3702,7 +3701,7 @@ fn a_run_s_trajectories_are_the_same_to_the_bit_on_one_thread_and_on_many() {
         }
         visited.sort_unstable();
         visited.dedup();
-        bits.extend(t.r.iter().chain(&t.kappa).chain([&t.time, &t.threshold, &t.dropped, &t.owed, &t.work]).map(|x| x.to_bits()));
+        bits.extend(t.r.iter().chain(&t.kappa).chain([&t.time, &t.threshold, &t.work]).map(|x| x.to_bits()));
         bits.extend(t.psi.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
         bits.extend([u64::from(t.jumps), t.lost.map_or(0, f64::to_bits)]);
         (visited, bits)

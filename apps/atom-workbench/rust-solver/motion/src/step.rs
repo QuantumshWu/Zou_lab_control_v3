@@ -707,14 +707,11 @@ pub trait Middle {
     #[cfg(test)]
     fn forget_left(&self) {}
 
-    /// A decision time's choice of representation (DESIGN §11; # The nodes risen and fallen; unify2 §3.4), on a middle made
-    /// deciding at the step's end for the state ψ there (`Midway::decided`), `interval` (µs) to the next decision, with
-    /// the trajectory's owed balance (`Trajectory::owed`) and the steps the cell's price counts (`steps`; the model prices
-    /// its representations by their sizes' formula): the balance as its interval leaves it, the cluster and state it
-    /// takes ψ on where another (what the switch drops is booked where the integrator takes it: `Midway::decided`), the
-    /// representation it decided and the work it counted. Here it keeps ψ as it is.
-    fn decide(&self, _path: &Self::Path, _psi: &[C64], _interval: f64, owed: f64, _steps: f64) -> Decided {
-        Decided { owed, held: None, switched: None, work: 0.0, booked: [0.0; MODEL] }
+    /// A decision time (DESIGN §11.3), on a middle made deciding at the step's end for the state ψ there
+    /// (`Midway::decided`), `interval` (µs) to the next decision: the representation it leaves (its decompositions made
+    /// again at the point), what the cell it ends books, the work it counted. Here nothing.
+    fn decide(&self, _path: &Self::Path, _psi: &[C64], _interval: f64) -> Decided {
+        Decided { held: None, work: 0.0, booked: [0.0; MODEL] }
     }
 
     /// The model's error at this middle for the state ψ (unify2 §2.7): its decision's accounts by kind (ρ², `MODEL`'s first
@@ -731,13 +728,10 @@ pub trait Middle {
 
 }
 
-/// What a decision took (`Middle::decide`): the owed balance its interval leaves (`Trajectory::owed`), the representation it
-/// leaves where it made one (the decompositions its evaluations made, the trajectory's from then on: `Held`), the switch
-/// where it took another cluster, and its counted work (real multiply-adds).
+/// What a decision took (`Middle::decide`): the representation it leaves where it made one (the decompositions its
+/// evaluations made, the trajectory's from then on: `Held`) and its counted work (real multiply-adds).
 pub struct Decided {
-    pub owed: f64,
     pub held: Option<Held>,
-    pub switched: Option<Switched>,
     pub work: f64,
     /// What the cell it ends books beyond its profile (`Trajectory::model`): its end measured at the decision, the
     /// difference from its start's taken linearly over the cell.
@@ -747,17 +741,6 @@ pub struct Decided {
 /// The model's books' columns (`Trajectory::model`; model/fold/proto.rs `KINDS`): the series', the reuse's, the centred
 /// rows', the nodes left out, the ring's, their whole ρ, and the unresolved steps' (ρ = 1).
 pub const MODEL: usize = 7;
-
-/// A state taken onto another cluster at a decision time (DESIGN §11.1): the cluster, the state on it at the point (its
-/// norm the slow part's: the jump clock's), what the switch leaves booked -- the ring of its fast part, its transient's
-/// error (rate units: model/fold/proto.rs # The ring; zero for a state that follows the fold, a rise) --, and its held
-/// forms at the point (the model's, `Forms`, its time the point's).
-pub struct Switched {
-    pub cluster: usize,
-    pub psi: Internal,
-    pub dropped: f64,
-    pub forms: Forms,
-}
 
 /// A trajectory's representation of the model's folds (DESIGN §11.3; model/fold/run.rs: per state set its kept
 /// decompositions and the one it stands on): what the model decided at the run's decision times, carried with the
@@ -958,12 +941,6 @@ pub struct Trajectory {
     /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
     /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
     pub booked: [f64; 3],
-    /// What its switches of representation left booked (DESIGN §11.1, §11.4: Σ E, each switch's ring, `Switched`), and
-    /// the balance of it the share has not yet paid -- owed: each decision interval pays (share − ρ)γΔt off it, never
-    /// below zero, and a node falls only where the balance, its E and its fold's ργΔt are within the share's γΔt
-    /// (`Middle::decide`).
-    pub dropped: f64,
-    pub owed: f64,
     /// The model's error booked along it (unify2 §2.7; `MODEL`): per kind and whole Σ ρ γ τ over its steps (ρ its
     /// decision's reading, rate units, held over the cell: the profile; each decision books its cell's measured end
     /// linearly, `Decided::booked`; γ the state's decay rate at the step's middle), the unresolved steps' at ρ = 1; and
@@ -1022,8 +999,6 @@ impl Trajectory {
             work: 0.0,
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
-            dropped: 0.0,
-            owed: 0.0,
             model: [0.0; MODEL],
             unresolved_steps: 0,
             next: cell,
@@ -2250,7 +2225,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         (end.r, end.kappa, end.time) = (r1, kappa1, from.time + tau);
         // The decision where the step ends at a decision time: at the end itself (adapt.rs # The decision times).
         if let Some(interval) = self.decision {
-            work += self.decided(&mut end, interval, &mut made)?;
+            work += self.decided(&mut end, interval)?;
         }
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() } }));
@@ -2258,45 +2233,21 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         Ok(Step { end, segment, made, work, prices, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
     }
 
-    /// The decision at the step's end where it ends at a decision time (DESIGN §11, §11.3; adapt.rs # The decision times): on the
-    /// end state itself, at its own point and time -- a middle of its cluster made there deciding, its forward the
-    /// decision's (`Dynamics::middle`), its path at the end's momentum --, so that every level decides on its own state at
-    /// the same times and the same points but for its step's error. It takes the state on the cheapest representation
-    /// within the share over the cell to the next decision (`Middle::decide`), the model pricing its representations by
-    /// their sizes over the cell as one step -- the decision grid's coarse step, whose three points the look's are (unify2
-    /// §4.2): one count for every level, so that every level holds the same representation (§11.3 (a); priced at the
-    /// level's own D/τ steps, a two-level atom's levels switched apart, 39 of 40 alike, the coarsest pair's order 3.6 on
-    /// the grid's test). What it
-    /// takes is the end state's: its cluster, its state, its representation, its held forms at the point (less the
-    /// reference's gradient there), what the switch drops booked onto the owed balance (`Trajectory::owed`) as the
-    /// decision leaves it; the next decision time, a cell on, and the cell's unresolved steps none; its counted work, the
-    /// decision's forward with it, the step's. A switch whose state's norm is at the threshold or below
-    /// -- its fast part's photon, by the jump clock, is emitted already (# Jumps) -- is the photon at once, from the state
-    /// before it (which holds that fast part) at the point, on the decision's middle, as a landing at its threshold is
-    /// (`jump`): its kick at the step's end.
-    fn decided(&self, state: &mut Trajectory, interval: f64, made: &mut Vec<Made>) -> Result<f64, Refused> {
+    /// The decision at a step's end that reaches a decision time (# The decision times): on the end state itself, at its
+    /// own point and time -- a middle of its cluster made there deciding, its forward the decision's (`Dynamics::middle`),
+    /// its path at the end's momentum --, so that every level decides on its own state at the same times and the same
+    /// points but for its step's error: the representation it leaves (the decompositions made again at the point; the
+    /// representation itself is the run's, fixed: model/fold/run.rs # The representation), the cell's books' end; the next
+    /// decision time, a cell on, and the cell's unresolved steps none; its counted work, the decision's forward with it.
+    fn decided(&self, state: &mut Trajectory, interval: f64) -> Result<f64, Refused> {
         let (kappa, velocity) = (state.kappa, state.kappa.map(|k| self.hbar_over_mass * k));
         let middle = self.model.middle(state.cluster, state.r, state.time, &state.held, true);
         let path = middle.path(kappa, velocity);
-        let decided = middle.decide(&path, &state.psi, interval, state.owed, 1.0);
+        let decided = middle.decide(&path, &state.psi, interval);
         (state.next, state.unresolved_cell) = (state.time + interval, false);
-        state.owed = decided.owed;
         state.model.iter_mut().zip(decided.booked).for_each(|(b, x)| *b += x);
         if let Some(held) = decided.held {
             state.held = held;
-        }
-        if let Some(switched) = decided.switched {
-            if norm_sqr(&switched.psi) > state.threshold {
-                (state.cluster, state.psi) = (switched.cluster, switched.psi);
-                state.forms = Forms { time: state.time, ..switched.forms }.less(self.model.reference(state.r).gradient);
-                state.dropped += switched.dropped;
-                state.owed = (state.owed + switched.dropped).max(0.0);
-            } else {
-                let mut places = Places { model: self.model, point: (state.r, state.time), path: (kappa, velocity), s: 0.0, own: (state.cluster, &middle, &path), other: None };
-                jump(self.model, state, Some(&mut places))?;
-                state.forms = self.model.forms(state.cluster, &state.point(), &state.psi, &state.held);
-                made.push(Made { kick: Some(std::array::from_fn(|a| state.kappa[a] - kappa[a])), state: state.clone() });
-            }
         }
         Ok(decided.work + middle.made())
     }

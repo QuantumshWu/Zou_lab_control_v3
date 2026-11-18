@@ -2972,10 +2972,9 @@ fn a_scene_s_cell_cost() {
                     let clock = std::time::Instant::now();
                     let middle = run.middle(t.cluster, t.r, t.time, &t.held, true);
                     let path = middle.path(t.kappa, t.kappa.map(|k| hm * k));
-                    let d = middle.decide(&path, &t.psi, 2.0 * tau, t.owed, 1.0);
-                    switched += usize::from(d.switched.is_some());
+                    let d = middle.decide(&path, &t.psi, 2.0 * tau);
                     // The decision's representation the atom's from here (its rounds after the first the steady state's).
-                    if let (Some(held), None) = (d.held, &d.switched) {
+                    if let Some(held) = d.held {
                         t.held = held;
                     }
                     drop(middle);
