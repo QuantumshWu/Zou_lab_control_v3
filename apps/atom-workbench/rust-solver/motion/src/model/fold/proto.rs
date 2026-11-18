@@ -961,8 +961,21 @@ impl Ritzes {
 /// by Im(Z†DδZ) (said, not read: unify2 §2.1 reads 2Re(V†δT), the Bloch generator's; to be settled with U5). ∞ where the
 /// series does not converge (max |μ| ≥ 1).
 #[allow(clippy::too_many_arguments)]
-fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usize, den: &[f64], floor: f64, h: &[C64], energy: f64, n: usize, ritz: &Ritz, out: &mut [f64]) {
+fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usize, den: &[f64], floor: f64, h: &[C64], energy: f64, n: usize, ritz: &Ritz, pull: &Pull, x: usize, out: &mut [f64]) {
     let (s, nd) = (nb.s, nb.nd);
+    // The force channel's sums per column (`force_moved`): per beam lane ⟨R_j, D Z_l,j⟩ + ⟨Z_j, D R_l,j⟩ (the absorbed
+    // light's), per pair of lanes Ṽ_l†R_l' + R_l†Ṽ_l' + R_l†κZ_l' + Z_l†κR_l' (the Hermitian part's gradient), Σ_i Z_ij* R_ij
+    // (the metric's); a lane's rest R_l by the same recurrence on its own sweeps (`Near::zs`).
+    let kicks = pull.kicks.get(x).map_or(&[][..], |k| &k[..]);
+    let (beams, ln) = (kicks.len(), nb.lanes * n);
+    let mut absorbed = vec![C64::ZERO; n * beams];
+    let mut turned = vec![C64::ZERO; n * beams * beams];
+    let mut rl = vec![C64::ZERO; beams];
+    let lane = |k: usize, i: usize, l: usize, j: usize| nb.zs[k * s * ln + i * ln + l * n + j];
+    let mut metric = vec![C64::ZERO; n];
+    // The pairs' channel: X = Ψ†R on the part's rows, X_kj = Σ_i Z_ik* R_ij (n × n), and a row's rest by column.
+    let mut overlap = vec![C64::ZERO; n * n];
+    let mut row = vec![C64::ZERO; n];
     let at = |k: usize, i: usize, j: usize| swept(nb, k, i, j, n);
     let (alpha, beta) = ritz.rest(p, done);
     let infinite = !alpha.re.is_finite();
@@ -981,15 +994,143 @@ fn series_squares(nb: &Near, basis: &NearBasis, part: usize, p: usize, done: usi
                 continue;
             }
             let made = if p < done { last - if p >= 1 { at(p - 1, i, j) } else { C64::ZERO } } else { C64::ZERO };
-            let rest = (made + alpha * d1 + beta * d2).norm_sqr();
+            let r = made + alpha * d1 + beta * d2;
+            row[j] = r;
+            let rest = r.norm_sqr();
             out[j] += rest;
             shift[j] += rest * (h[j * n + j] - C64::real(mean) - diagonal).norm_sqr().sqrt();
+            if i < s && beams > 0 && nb.zs.len() >= done * s * ln {
+                let kappa = nb.kappa[i];
+                let decay = -2.0 * kappa.im;
+                for (l, x) in rl.iter_mut().enumerate() {
+                    let at_l = |k: usize| lane(k, i, l, j);
+                    let (b, t) = (if done >= 2 { at_l(done - 2) } else { C64::ZERO }, if done >= 3 { at_l(done - 3) } else { C64::ZERO });
+                    let made = if p < done { at_l(done - 1) - if p >= 1 { at_l(p - 1) } else { C64::ZERO } } else { C64::ZERO };
+                    *x = made + alpha * (b - t) + beta * (at_l(done - 1) - b);
+                }
+                for l in 0..beams {
+                    let zl = lane(done - 1, i, l, j);
+                    absorbed[j * beams + l] += r.conj() * zl * decay + last.conj() * rl[l] * decay;
+                    for m in 0..beams {
+                        let (vl, vm, zm) = (nb.vt[i * ln + l * n + j], nb.vt[i * ln + m * n + j], lane(done - 1, i, m, j));
+                        turned[(j * beams + l) * beams + m] += vl.conj() * rl[m] + rl[l].conj() * vm + rl[l].conj() * kappa * zm + zl.conj() * kappa * rl[m];
+                    }
+                }
+                metric[j] += last.conj() * r;
+            }
+        }
+        if !infinite {
+            for k in 0..n {
+                let z = at(done - 1, i, k).conj();
+                for (o, r) in overlap[k * n..(k + 1) * n].iter_mut().zip(&row) {
+                    *o += z * *r;
+                }
+            }
         }
     }
+    let (pairs, pair_energy) = if infinite { (vec![0.0; n], vec![0.0; n]) } else { pairs_moved(h, &overlap, n) };
     for j in 0..n {
         let size = out[j];
         let rated = if den[j] <= floor || size.is_nan() || size == 0.0 || (size.is_finite() && rounded(size, den[j], n, s, nb.lanes)) { 0.0 } else { size / den[j] };
-        out[j] = rated + if size.is_finite() { unrate(shift[j] / energy).powi(2) } else { 0.0 };
+        // The force channel (readings.status.md RD4, RD5): the rest moves the column's force at first order (the force is
+        // no Ritz value) -- the force as the step makes it, F_j = −∂Re G_jj + Σ Im(u*∂u) (`Fold::prototype_force`, the
+        // photons), each lane's response at its beam's phase e^{iq_l·r}: the absorbed light's Σ_l q_l Re⟨Z_j, D Z_l,j⟩ (D
+        // the rows' decay, −2 Im κ_i on the Schur diagonal) and the Hermitian part's Σ_ll' (q_l' − q_l) Im[Ṽ_l†Z_l' +
+        // Z_l†Ṽ_l' + Z_l†KZ_l'] (a lane pair's redistribution; K by its diagonal κ), both moved at first order by the lanes'
+        // rests R_l, less F_j δM_jj/(1 + M_jj), δM_jj = 2 Re⟨Z_j, R_j⟩ -- against the gross force Σ_l |q_l| |Γ_l,j| (`Pull`):
+        // rate(√·) of its square is |δF_j|/F_gross,j. Not the Hellmann–Feynman form −2 Σ_l q_l Im⟨R_j, Ṽ_l,j⟩ (RD4's): the
+        // force is the step's, not an expectation of ∇H, and of one beam the absorbed light moves as the rate does (2 Re⟨Z,
+        // DR⟩) where that form read |Δ|/Γ times more (the two-level atom at Δ = −4Γ: 4.4 times its error; tilt0's start
+        // 0.5 → 9.7 s in sweeps that form asked for). The larger of the two channels, not their sum (one δZ).
+        let force = if rated > 0.0 && pull.gross.get(j).is_some_and(|&g| g > 0.0) {
+            let moved = -2.0 * metric[j].re / (1.0 + den[j]);
+            let df: [f64; 3] = std::array::from_fn(|a| {
+                let mut f = moved * pull.net[j][a];
+                for (l, q) in kicks.iter().enumerate() {
+                    f += q[a] * absorbed[j * beams + l].re;
+                    for (m, w) in kicks.iter().enumerate() {
+                        f += (w[a] - q[a]) * turned[(j * beams + l) * beams + m].im;
+                    }
+                }
+                f
+            });
+            unrate(df.iter().map(|x| x * x).sum::<f64>().sqrt() / pull.gross[j]).powi(2)
+        } else {
+            0.0
+        };
+        let potential = if size.is_finite() { unrate(shift[j] / energy).powi(2).max(unrate(pair_energy[j] / (2.0 * energy)).powi(2)) } else { 0.0 };
+        out[j] = rated.max(force).max(unrate(pairs[j]).powi(2)) + potential;
+    }
+}
+
+/// The series' rest moves G off its diagonal at first order where the forward does not hold the response Hermitian
+/// (readings.status.md R3 (3), RD5): with the exact Ψ* = [1; T*] and Ψ = Ψ* + [0; R], δG = ½[X† − X, H_b] + (H_b† −
+/// H_b)X + O(R²), X = Ψ*†R (X_kj = ⟨Z_k, R_j⟩ on the rest's rows), H_b the Bloch generator. The commutator is a
+/// similarity, it moves no mode; the rest is δG = iBX, B = i(H_b − H_b†) the decay P holds (an explicit column's Γ_i):
+/// the coupling of column i to column j moves by δG_ij = i(BX)_ij -- an explicit column's large decay times its overlap
+/// with a column dark but through the copies, the rest of whose response it shares (random systems 86, 113: the column's
+/// own rate channel reads nothing there, its excited response none). A mode moves by it through the coupling it already
+/// has: on the two columns' block [[h_ii, h_ij], [h_ji, h_jj]] the mode at h_jj is λ_j = h_jj − d + w, d = (h_jj − h_ii)/2,
+/// w = d √(1 + h_ijh_ji/d²) (the root that is d without the coupling; √(h_ijh_ji) where d = 0), and δλ_j = (h_ji δG_ij +
+/// h_ij δG_ji)/(2w) -- the second order's first-order change, h_jih_ij/(h_jj − h_ii) far from degeneracy, smooth at it.
+/// Summed over the columns i ≠ j; read as a rate against the mode's own |Im λ_j| (λ_j = h_jj + Σ_i (w − d): its rate by
+/// the couplings, the dark column's whole), none where that is within the rounding of the largest (a dark mode is no
+/// rate's), and its energy Re δλ_j apart (the potential channel). Per column (rates, rad/µs).
+fn pairs_moved(h: &[C64], overlap: &[C64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let b = |i: usize, k: usize| C64::I * (h[i * n + k] - h[k * n + i].conj());
+    let dg = |i: usize, j: usize| C64::I * (0..n).map(|k| b(i, k) * overlap[k * n + j]).sum::<C64>();
+    let mut lambda: Vec<C64> = (0..n).map(|j| h[j * n + j]).collect();
+    let mut moved = vec![C64::ZERO; n];
+    for j in 0..n {
+        for i in (0..n).filter(|&i| i != j) {
+            let (hij, hji) = (h[i * n + j], h[j * n + i]);
+            let d = (h[j * n + j] - h[i * n + i]) * 0.5;
+            let w = if d.abs() > 0.0 { d * (C64::ONE + hij * hji / (d * d)).sqrt() } else { (hij * hji).sqrt() };
+            if w.abs() == 0.0 {
+                continue;
+            }
+            lambda[j] += w - d;
+            moved[j] += (hji * dg(i, j) + hij * dg(j, i)) / (w * 2.0);
+        }
+    }
+    let top = lambda.iter().fold(0.0_f64, |m, l| m.max(l.im.abs()));
+    let rates = (0..n).map(|j| if lambda[j].im.abs() > crate::units::rounding(n).sqrt() * top { moved[j].im.abs() / lambda[j].im.abs() } else { 0.0 }).collect();
+    (rates, moved.iter().map(|m| m.re.abs()).collect())
+}
+
+/// The force channel's inputs at a decision (readings.status.md RD4, RD5): per near block its beam lanes' wave vectors q_l
+/// (`Near::splits`' components' kicks; the static lane's none), and per column over every near block's solved rows the
+/// absorption by beam lane Γ_l,j = −2 Im⟨Z_j, Ṽ_l,j⟩ -- its gross Σ_l |q_l| |Γ_l,j| (a block's lanes apart: a standing
+/// wave's or a σ± pair's redistribution is in it, the net force of a column between them is not its scale) and its net
+/// F_j = Σ_l q_l Γ_l,j. The force F = Σ_l ħq_l Γ_l (the momentum each lane's light gives) moves at first order in a
+/// response's error; it is read against its gross, not |F_j|, which a balanced column holds near zero (tilt0's m = 0).
+#[derive(Clone, Default, Debug)]
+pub(crate) struct Pull {
+    kicks: Vec<Vec<[f64; 3]>>,
+    gross: Vec<f64>,
+    net: Vec<[f64; 3]>,
+}
+
+impl Pull {
+    fn of(fold: &Fold, near: &[Near], n: usize, work: &mut f64) -> Pull {
+        let kicks: Vec<Vec<[f64; 3]>> = near.iter().map(|nb| nb.splits.iter().map(|&(c, j)| fold.components[c].kicks[j]).collect()).collect();
+        let (mut gross, mut net) = (vec![0.0; n], vec![[0.0; 3]; n]);
+        for (nb, q) in near.iter().zip(&kicks).filter(|(nb, _)| !nb.idle()) {
+            let ln = nb.lanes * n;
+            for (l, q) in q.iter().enumerate() {
+                let size = q.iter().map(|x| x * x).sum::<f64>().sqrt();
+                for j in 0..n {
+                    let g: C64 = (0..nb.s).map(|i| nb.ztot[i * n + j].conj() * nb.vt[i * ln + l * n + j]).sum();
+                    let gamma = -2.0 * g.im;
+                    gross[j] += size * gamma.abs();
+                    for a in 0..3 {
+                        net[j][a] += q[a] * gamma;
+                    }
+                }
+            }
+            *work += (nb.s * q.len() * n) as f64 / 4.0;
+        }
+        Pull { kicks, gross, net }
     }
 }
 
@@ -1130,6 +1271,8 @@ pub(crate) struct Workspace {
     /// The series' extrapolation at a decision (`Ritz`), read from its last three sweeps' changes; the atom's energy its
     /// accounts' potential channel is read against.
     ritz: Ritzes,
+    /// The force channel's inputs at a decision (`Pull`).
+    pull: Pull,
     energy: f64,
     /// Per near block its matrices at the point where a decomposition is made there (`Fold::lay`, `Fold::effective`).
     here: Vec<Option<(Laid, Effective)>>,
@@ -2944,6 +3087,7 @@ impl Fold {
             accounts: vec![],
             den: vec![0.0; n],
             ritz: Ritzes::default(),
+            pull: Pull::default(),
             energy: 0.0,
             here: (0..near_len).map(|_| None).collect(),
             scratch,
@@ -3739,6 +3883,24 @@ impl Fold {
             .collect()
     }
 
+    /// `prototype_column_forces` on every lab axis at once (one tangent, one gradient): per column its force, the Hermitian
+    /// part's gradient and the absorbed light's mean summed (the readings' test).
+    #[cfg(test)]
+    pub(crate) fn prototype_column_forces_all(&self, cache: &Cache, ws: &mut Workspace) -> Vec<[f64; 3]> {
+        let n = ws.n;
+        self.prototype_tangent(cache, ws);
+        let mut out: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+        self.prototype_gradient(cache, ws, 0, true, &[], &mut out);
+        let sets = vec![(0..GROUND).collect::<Vec<usize>>()];
+        (0..n)
+            .map(|j| {
+                let psi: Vec<C64> = (0..n).map(|i| if i == j { C64::ONE } else { C64::ZERO }).collect();
+                let p = self.prototype_photons(cache, ws, &psi, &sets, At::Middle, 0.0, Moments::Every);
+                std::array::from_fn(|a| -out[a][j * n + j].re + p.force[a] + p.classes.iter().map(|c| c.rate * c.kick[a]).sum::<f64>())
+            })
+            .collect()
+    }
+
     /// The left response at the last forward (module documentation, # The landing): T_L, the right response of H_NH† --
     /// the same series (`sweep_all`, `Side::Left`) on the adjoint's inputs, per near block the Schur form's adjoint, the
     /// explicit columns' source and rows' emission exchanged, the explicit states' dressing and the exact copies' blocks
@@ -4259,7 +4421,7 @@ impl Fold {
         let _p = crate::prof::scope(crate::prof::FWD_ACCOUNTS);
         let n = ws.n;
         ws.energy = energy;
-        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, ritz, .. } = &mut *ws;
+        let Workspace { near, far, mid, h, whole, scratch, per, accounts, den, ritz, pull, .. } = &mut *ws;
         accounts.clear();
         // The levels left out, on their bounds; W_j with their responses (a column's whole).
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
@@ -4287,6 +4449,7 @@ impl Fold {
         let read = |j: usize| den[j] > floor;
         let pot = |dv: f64| unrate(dv / (2.0 * energy)).powi(2);
         *ritz = Ritzes::of(near, cache, done, n);
+        *pull = Pull::of(self, near, n, work);
         for (x, (nb, sc)) in near.iter_mut().zip(scratch.iter_mut()).enumerate() {
             let basis = cache.near_at(x);
             let (om, sz, bk, sh) = &per[x];
@@ -4300,7 +4463,7 @@ impl Fold {
             let np = series_parts(nb, basis);
             for part in 0..np {
                 let mut squares = vec![0.0; n];
-                series_squares(nb, basis, part, evaluation.parts[x][part], done, den, floor, h, energy, n, &ritz.part(x, part), &mut squares);
+                series_squares(nb, basis, part, evaluation.parts[x][part], done, den, floor, h, energy, n, &ritz.part(x, part), pull, x, &mut squares);
                 accounts.push(Account { item: Item::Series { block: x, part }, squares, on: true });
             }
             // The reuse's first-order error of the response the step uses, Z = Σ_l Z_l: row i of column j is Σ_l x_l/d_l, x_l
@@ -4341,6 +4504,14 @@ impl Fold {
                 *x = if nb.nc > 0 { centring(&basis.centre, basis.z0, nb.held, h[j * n + j], &nb.shifts) } else { 0.0 };
             }
             let mut centred = vec![0.0; n];
+            // The centred copies' dressing of the solved rows' source, level by level (`dressing_moved`): its error per
+            // row and column, the static lane's (an explicit column) or about the lanes' mean.
+            let dressed = if nb.nc > 0 && !nb.idle() {
+                copy_rows(nb, basis, &mid.e, n, work);
+                dressing_moved(nb, basis, &mid.e, h, n, work)
+            } else {
+                vec![]
+            };
             acc.fill(0.0);
             for i in 0..s {
                 let own = basis.part[i];
@@ -4369,9 +4540,19 @@ impl Fold {
                     }
                     let lesser = |a: f64, b: f64| if a.is_nan() { b } else { a.min(b) };
                     let reuse = if all == 0.0 { 0.0 } else { lesser(e / gap + all * about, all * direct) };
-                    let static_lane = if nb.xcol[j] { eps[j] * nb.rhox[i] / (h[j * n + j] - kappa).norm_sqr().sqrt() } else { 0.0 };
-                    let rho = eps[j] * nb.rho[i];
-                    let copies = if held == 0.0 { 0.0 } else { lesser(held / gap + rho * about, rho * direct + static_lane) };
+                    // The dressing's error by level (`dressing_moved`, readings.status.md R3 item 3, RD5), not ε_R,j ρ_i ‖Z_j‖
+                    // (Cauchy–Schwarz: 10–60 times the error on tilt2): on the static lane at the column's own energy, on
+                    // the beams' lanes about their mean with the lanes' rest (`about`, `direct` as the reuse's: each lane's
+                    // share of the column's response).
+                    let ds = dressed.get(i * n + j).map_or(0.0, |d| d.abs());
+                    let copies = if held == 0.0 || ds == 0.0 {
+                        0.0
+                    } else if nb.xcol[j] {
+                        ds / (h[j * n + j] - kappa).norm_sqr().sqrt()
+                    } else {
+                        let whole = total[j].sqrt();
+                        if whole > 0.0 { ds * lesser((1.0 + gap * about / whole) / gap, direct / whole) } else { ds / gap }
+                    };
                     acc[j] += reuse * reuse;
                     centred[j] += copies * copies;
                 }
@@ -4561,8 +4742,8 @@ impl Fold {
                     let Item::Series { block, part } = ws.accounts[k].item else { unreachable!() };
                     let p = evaluation.parts[block][part] + 1;
                     evaluation.parts[block][part] = p;
-                    let Workspace { near, den, h, energy, accounts, ritz, .. } = &mut *ws;
-                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), &mut accounts[k].squares);
+                    let Workspace { near, den, h, energy, accounts, ritz, pull, .. } = &mut *ws;
+                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), pull, block, &mut accounts[k].squares);
                     worst[k] = (0..n).map(|j| self.series_worst(cache, ws, block, part, p, done, j)).collect();
                 }
                 Remedy::Refresh(x) => {
@@ -4677,8 +4858,8 @@ impl Fold {
                 Item::Series { block, part } => {
                     evaluation.parts[block][part] -= 1;
                     let p = evaluation.parts[block][part];
-                    let Workspace { near, den, h, energy, accounts, ritz, .. } = &mut *ws;
-                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), &mut accounts[k].squares);
+                    let Workspace { near, den, h, energy, accounts, ritz, pull, .. } = &mut *ws;
+                    series_squares(&near[block], cache.near_at(block), part, p, done, den, floor, h, *energy, n, &ritz.part(block, part), pull, block, &mut accounts[k].squares);
                     worst[k] = trial;
                 }
                 Item::Centred { block, .. } => {
@@ -4715,7 +4896,7 @@ impl Fold {
         let n = ws.n;
         let floor = (crate::units::rounding(n) * ws.den.iter().sum::<f64>().sqrt()).powi(2);
         let mut out = vec![0.0; n];
-        series_squares(&ws.near[block], cache.near_at(block), part, p, done, &ws.den, floor, &ws.h, ws.energy, n, &ws.ritz.part(block, part), &mut out);
+        series_squares(&ws.near[block], cache.near_at(block), part, p, done, &ws.den, floor, &ws.h, ws.energy, n, &ws.ritz.part(block, part), &ws.pull, block, &mut out);
         out[j]
     }
 
@@ -4951,6 +5132,67 @@ impl Centre {
 fn centring(centre: &Centre, z0: f64, held: f64, c: C64, shifts: &[f64]) -> f64 {
     let lanes: &[f64] = if shifts.is_empty() { &[0.0] } else { shifts };
     lanes.iter().map(|&w| ((c - C64::real(w + z0)).norm_sqr().sqrt() + held) * centre.size(c - C64::real(w))).fold(0.0, f64::max)
+}
+
+/// The error a near block's centred copies held at R₀ leave in the dressing of its solved rows' source (`Fold::accounts`;
+/// readings.status.md R3 item 3, RD5), level by level of Ĥ_CC = Σ_k λ_k u_k u_k† (its Schur form, as `copies_moved`): the
+/// dressing is Ĥ_SC R Ĥ_CS, its source on the rows V†Ĥ_SC (R(z) − R₀)B̃_j, B̃ = Ĥ_CS T_S + B_C; on level k (R(z) − R₀)B̃
+/// = u_k f̃_k t_k, t_k = u_k†T_C,j, f̃_k = (z₀ − z + δĤ)/(z − λ_k) (exact where Ĥ_CC is normal and the forms held; the
+/// forms' drift `held` along z₀ − z: its direction unknown, its size kept). The rows' coupling to a level is the copies'
+/// response's: R₀Ĥ_CS V = Y = Σ_a e_a* R₀U_a†V (`copies_of`), so V†Ĥ_SC u_k = Y†(R₀⁻¹)†u_k = (z₀ − λ̄_k) Y†u_k. So
+/// δsource_ij = Σ_k (z₀ − λ̄_k)(Y†u_k)_i f̃_k t_kj -- every level's coupling to the row and to the column with its phase,
+/// not the dressing's row norm times the factor of the worst level times the column's whole response (Cauchy–Schwarz,
+/// 10–60 times the error on tilt2's blocks). z = c_j at an explicit column (its static lane), c_j − w̄ else. Per row and
+/// column (s × n).
+fn dressing_moved(nb: &Near, basis: &NearBasis, e: &[Vec<C64>], h: &[C64], n: usize, work: &mut f64) -> Vec<C64> {
+    let (s, nc) = (nb.s, nb.nc);
+    let centre = &basis.centre;
+    let nl = centre.levels.len();
+    let mut out = vec![C64::ZERO; s * n];
+    if nl == 0 || s == 0 {
+        return out;
+    }
+    // Y (nc × s) at the point: Σ_a e_a* R₀U_a†V by copy row (`copies_of` with Z the identity).
+    let mut y = vec![C64::ZERO; nc * s];
+    for (cv, &(g, k, gi)) in nb.copies.iter().enumerate() {
+        let ek = e[g][k].conj();
+        let yc = &basis.copies[cv];
+        for (a2, &row) in nb.groups[gi].1.iter().enumerate() {
+            for i in 0..s {
+                y[row * s + i] += ek * yc[a2 * s + i];
+            }
+        }
+    }
+    // P_ik = (z₀ − λ̄_k)(Y†u_k)_i.
+    let mut pk = vec![C64::ZERO; s * nl];
+    for k in 0..nl {
+        let lam = C64::real(basis.z0) - centre.levels[k].conj();
+        for i in 0..s {
+            let mut v = C64::ZERO;
+            for r in 0..nc {
+                v += y[r * s + i].conj() * centre.vectors[(r, k)];
+            }
+            pk[i * nl + k] = lam * v;
+        }
+    }
+    let mean = nb.shifts.iter().sum::<f64>() / nb.shifts.len().max(1) as f64;
+    let mut v = vec![C64::ZERO; nl];
+    for j in 0..n {
+        let z = h[j * n + j] - C64::real(if nb.xcol[j] { 0.0 } else { mean });
+        let apart = C64::real(basis.z0) - z;
+        let drift = if apart.abs() > 0.0 { apart * (1.0 + nb.held / apart.abs()) } else { C64::real(nb.held) };
+        for k in 0..nl {
+            let t: C64 = (0..nc).map(|r| centre.vectors[(r, k)].conj() * nb.tc[r * n + j]).sum();
+            let pole = z - centre.levels[k];
+            // A level the column does not reach moves nothing (at a pole too: no 0·∞).
+            v[k] = if t == C64::ZERO { C64::ZERO } else { drift / pole * t };
+        }
+        for i in 0..s {
+            out[i * n + j] = (0..nl).map(|k| pk[i * nl + k] * v[k]).sum();
+        }
+    }
+    *work += (nc * s * (nb.copies.len() + nl) + n * nl * (nc + s)) as f64 / 4.0;
+    out
 }
 
 /// What a block's centred copies held at R₀ move of column j through their own rows (`Fold::accounts`), level by level
@@ -7090,6 +7332,12 @@ impl Workspace {
     /// The last decision's accounts (`Fold::accounts`).
     pub(crate) fn accounts(&self) -> &[Account] {
         &self.accounts
+    }
+
+    /// The last decision's columns' gross force Σ_l |q_l| |Γ_l,j| (`Pull`; the readings' test).
+    #[cfg(test)]
+    pub(crate) fn gross_forces(&self) -> &[f64] {
+        &self.pull.gross
     }
 
     /// The fold's block of the workspace's near (or far) block x (the readings' test).

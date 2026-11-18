@@ -212,8 +212,18 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     };
     let trials: usize = std::env::var("READINGS_TRIALS").ok().map_or(60, |s| s.parse().unwrap());
-    // (kind, reading, exact, rate part, potential part, what, on the modes)
-    let mut rows: Vec<(String, f64, f64, f64, f64, String, f64)> = vec![];
+    // (kind, reading, exact, rate part, potential part, what, on the modes, the force's)
+    let mut rows: Vec<(String, f64, f64, f64, f64, String, f64, f64)> = vec![];
+    // The columns' forces of the forward in the workspace on `cache` (`prototype_column_forces`, the three axes: the
+    // Hermitian part's gradient and the absorbed light's mean).
+    let forces = |fold: &Fold, cache: &Cache, ws: &mut super::super::proto::Workspace| -> Vec<[f64; 3]> { fold.prototype_column_forces_all(cache, ws) };
+    // The force's error in the force channel's unit (proto.rs `Pull`): the largest over the ground columns of |δF_j|
+    // against the column's gross force Σ_l |q_l| |Γ_l,j| (the decision's; none where it has none). An explicit column's
+    // source is its static lane, which carries no beam's momentum: no gross, not read (readings.status.md RD5).
+    let force_moved = |a: &[[f64; 3]], b: &[[f64; 3]], gross: &[f64], ground: usize| -> f64 {
+        let top = gross.iter().fold(0.0_f64, |m, g| m.max(*g));
+        (0..a.len().min(gross.len()).min(ground)).filter(|&j| gross[j] > crate::units::rounding(a.len()).sqrt() * top).map(|j| (0..3).map(|x| (a[j][x] - b[j][x]).powi(2)).sum::<f64>().sqrt() / gross[j]).fold(0.0, f64::max)
+    };
     let tiny = 1e-9;
     let mut seen: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut decided, mut nowhere) = (0usize, 0usize);
@@ -257,37 +267,47 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
                     }
                 }
                 let accounts = ws.accounts().to_vec();
-                let Some(held) = fold.prototype_without(r, kappa, energy, &cache, &mut ws, Without::Nothing, 0) else { break };
+                let gross = ws.gross_forces().to_vec();
+                let Some((held, hc)) = fold.prototype_without_kept(r, kappa, energy, &cache, &mut ws, Without::Nothing, 0) else { break };
+                let held_f = forces(&fold, &hc, &mut ws);
                 let what = format!("trial {trial} set {set:?} point {point} (n {}, explicit {}, |v| {:.2})", fold.size(), fold.explicit.len(), v.iter().map(|x| x * x).sum::<f64>().sqrt());
                 // The variant of block o (every block where none) with its centred rows decomposed, everything else taken
                 // out alike (a far block `held_far` of this fold kept as the decision holds it): this fold's G and its.
-                let variant = |o: Option<usize>, ws: &mut super::super::proto::Workspace, held_far: Option<usize>| -> Option<(Mat, Mat)> {
+                let variant = |o: Option<usize>, ws: &mut super::super::proto::Workspace, held_far: Option<usize>| -> Option<(Mat, Mat, f64)> {
                     let other = decomposed(&choice, &fold, o);
                     let f2 = Fold::new(&req, &other, set[0]).ok()?;
                     let mut w2 = f2.prototype_workspace().ok()?;
                     let mut c2 = Cache::default();
                     f2.prototype(r, kappa, energy, &mut c2, &mut w2)?;
-                    let exact = f2.prototype_without(r, kappa, energy, &c2, &mut w2, Without::All(None), SWEEPS)?;
-                    let mine = fold.prototype_without(r, kappa, energy, &cache, ws, Without::All(held_far), SWEEPS)?;
-                    Some((mine, exact))
+                    let (exact, ce) = f2.prototype_without_kept(r, kappa, energy, &c2, &mut w2, Without::All(None), SWEEPS)?;
+                    let fe = forces(&f2, &ce, &mut w2);
+                    let (mine, cm) = fold.prototype_without_kept(r, kappa, energy, &cache, ws, Without::All(held_far), SWEEPS)?;
+                    let fm = forces(&fold, &cm, ws);
+                    Some((mine, exact, force_moved(&fm, &fe, &gross, fold.ground.len())))
+                };
+                // A held forward with one approximation out: the held G, its G, and its force's error against the held one.
+                let out = |without: Without, sweeps: usize, ws: &mut super::super::proto::Workspace| -> Option<(Mat, Mat, f64)> {
+                    let (g, c) = fold.prototype_without_kept(r, kappa, energy, &cache, ws, without, sweeps)?;
+                    let f = forces(&fold, &c, ws);
+                    Some((held.clone(), g, force_moved(&held_f, &f, &gross, fold.ground.len())))
                 };
                 for a in accounts.iter().filter(|a| a.on) {
                     *seen.entry(format!("{:?}", a.item).split(' ').next().unwrap().to_string()).or_insert(0usize) += 1;
                     let reading = a.squares.iter().map(|x| rate(x.sqrt())).fold(0.0, f64::max);
                     let (kind, pair) = match a.item {
-                        Item::Series { block, part } => ("series", fold.prototype_without(r, kappa, energy, &cache, &mut ws, Without::Part(block, part), SWEEPS).map(|g| (held.clone(), g))),
-                        Item::Reuse { block } => ("reuse", fold.prototype_without(r, kappa, energy, &cache, &mut ws, Without::Remade(block), 0).map(|g| (held.clone(), g))),
-                        Item::Omitted { block, level } if point == 0 => ("omitted", fold.prototype_without(r, kappa, energy, &cache, &mut ws, Without::Level(block, level), 0).map(|g| (held.clone(), g))),
-                        Item::Left { block } => ("left", fold.prototype_without(r, kappa, energy, &cache, &mut ws, Without::In(block), 0).map(|g| (held.clone(), g))),
+                        Item::Series { block, part } => ("series", out(Without::Part(block, part), SWEEPS, &mut ws)),
+                        Item::Reuse { block } => ("reuse", out(Without::Remade(block), 0, &mut ws)),
+                        Item::Omitted { block, level } if point == 0 => ("omitted", out(Without::Level(block, level), 0, &mut ws)),
+                        Item::Left { block } => ("left", out(Without::In(block), 0, &mut ws)),
                         Item::Centred { block, far: true } => ("centred far", variant(Some(ws.block_of(block, true)), &mut ws, Some(block))),
                         Item::Centred { block, far: false } if point == 0 => ("centred near", variant(Some(ws.block_of(block, false)), &mut ws, None)),
                         _ => continue,
                     };
-                    let Some((mine, exact)) = pair else { continue };
+                    let Some((mine, exact, force)) = pair else { continue };
                     let (moved, rate_part, potential) = moved(&mine, &exact, energy);
                     let modes = moved_modes(&mine, &exact, energy).0;
-                    if reading > tiny || moved > tiny {
-                        rows.push((format!("{kind}{}", if point == 1 { " (held)" } else { "" }), reading, moved, rate_part, potential, format!("{what} {:?}", a.item), modes));
+                    if reading > tiny || moved > tiny || force > tiny {
+                        rows.push((format!("{kind}{}", if point == 1 { " (held)" } else { "" }), reading, moved, rate_part, potential, format!("{what} {:?}", a.item), modes, force));
                     }
                 }
                 if std::env::var("READINGS_ONLY").ok().is_some_and(|x| x.parse::<usize>().unwrap() == trial) {
@@ -314,18 +334,21 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
                         }
                     }
                     let all = fold.prototype_without(r, kappa, energy, &cache, &mut ws, Without::All(None), SWEEPS);
-                    if let (Some(all), Some((_, exact))) = (all, variant(None, &mut ws, None)) {
+                    if let (Some(all), Some((_, exact, _))) = (all, variant(None, &mut ws, None)) {
                         println!("   held against all out {:?}; all out against every centring decomposed {:?}", moved(&held, &all, energy), moved(&all, &exact, energy));
                         println!("   held G {:?}", held.data);
                         println!("   exact G {:?}", exact.data);
                     }
                 }
                 // The whole: every approximation out, every centred row decomposed.
-                if let Some((_, exact)) = variant(None, &mut ws, None) {
+                if let Some((_, exact, _)) = variant(None, &mut ws, None) {
                     let (moved, rate_part, potential) = moved(&held, &exact, energy);
                     let modes = moved_modes(&held, &exact, energy).0;
-                    if whole > tiny || moved > tiny {
-                        rows.push((format!("whole{}", if point == 1 { " (held)" } else { "" }), whole, moved, rate_part, potential, what.clone(), modes));
+                    // The force: the held against every approximation out (the centred rows held: their force error is
+                    // the centred kinds' own rows).
+                    let force = out(Without::All(None), SWEEPS, &mut ws).map_or(0.0, |x| x.2);
+                    if whole > tiny || moved > tiny || force > tiny {
+                        rows.push((format!("whole{}", if point == 1 { " (held)" } else { "" }), whole, moved, rate_part, potential, what.clone(), modes, force));
                     }
                 }
             }
@@ -340,19 +363,25 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
         let mut ratios: Vec<(f64, usize)> = rows.iter().enumerate().filter(|(_, r)| &r.0 == kind).map(|(i, r)| (if r.2 > 0.0 { r.1 / r.2 } else { f64::INFINITY }, i)).collect();
         ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
         let median = ratios[ratios.len() / 2].0;
-        let mut on_modes: Vec<f64> = rows.iter().filter(|r| &r.0 == kind && (r.6 > tiny || r.1 > tiny)).map(|r| if r.6 > 0.0 { r.1 / r.6 } else { f64::INFINITY }).collect();
+        // The criterion's measure: G's modes and the columns' forces (RD5), the larger.
+        let measure = |r: &(String, f64, f64, f64, f64, String, f64, f64)| r.6.max(r.7);
+        let mut on_modes: Vec<f64> = rows.iter().filter(|r| &r.0 == kind && (measure(r) > tiny || r.1 > tiny)).map(|r| if measure(r) > 0.0 { r.1 / measure(r) } else { f64::INFINITY }).collect();
         on_modes.sort_by(|a, b| a.total_cmp(b));
         if on_modes.is_empty() {
             println!("{kind}: {} readings, none beyond the rounding on the modes", ratios.len());
             continue;
         }
-        println!("{kind}: {} readings, reading over exact min {:.3} median {:.3} max {:.3e}; on the modes min {:.3} median {:.3}", ratios.len(), ratios[0].0, median, ratios[ratios.len() - 1].0, on_modes[0], on_modes[on_modes.len() / 2]);
+        // The force alone: the reading over the columns' force error (where it has one).
+        let mut on_force: Vec<f64> = rows.iter().filter(|r| &r.0 == kind && r.7 > tiny).map(|r| r.1 / r.7).collect();
+        on_force.sort_by(|a, b| a.total_cmp(b));
+        let force_said = if on_force.is_empty() { "none".to_string() } else { format!("{} min {:.3} median {:.3}", on_force.len(), on_force[0], on_force[on_force.len() / 2]) };
+        println!("{kind}: {} readings, reading over exact min {:.3} median {:.3} max {:.3e}; on the modes and forces min {:.3} median {:.3}; on the force alone {force_said}", ratios.len(), ratios[0].0, median, ratios[ratios.len() - 1].0, on_modes[0], on_modes[on_modes.len() / 2]);
         // The lowest on the modes (the criterion's measure), then the highest on any state.
-        let mut by_modes: Vec<(f64, usize)> = rows.iter().enumerate().filter(|(_, r)| &r.0 == kind && (r.6 > tiny || r.1 > tiny)).map(|(i, r)| (if r.6 > 0.0 { r.1 / r.6 } else { f64::INFINITY }, i)).collect();
+        let mut by_modes: Vec<(f64, usize)> = rows.iter().enumerate().filter(|(_, r)| &r.0 == kind && (measure(r) > tiny || r.1 > tiny)).map(|(i, r)| (if measure(r) > 0.0 { r.1 / measure(r) } else { f64::INFINITY }, i)).collect();
         by_modes.sort_by(|a, b| a.0.total_cmp(&b.0));
         for &(q, i) in by_modes.iter().take(4) {
             let r = &rows[i];
-            println!("    {q:.3} on the modes: reading {:.3e}, modes {:.3e} (any state {:.3e}: rate {:.3e}, potential {:.3e}) -- {}", r.1, r.6, r.2, r.3, r.4, r.5);
+            println!("    {q:.3} on the modes and forces: reading {:.3e}, modes {:.3e}, force {:.3e} (any state {:.3e}: rate {:.3e}, potential {:.3e}) -- {}", r.1, r.6, r.7, r.2, r.3, r.4, r.5);
         }
         for &(q, i) in ratios.iter().rev().take(2) {
             let r = &rows[i];
