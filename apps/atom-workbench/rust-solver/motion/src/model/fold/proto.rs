@@ -4840,8 +4840,9 @@ pub(crate) struct Bar<'a> {
 }
 
 /// The step's derivative's forms (`Fold::prototype_force`): per channel and lab axis ∂/∂r_a of its bars' sum, every
-/// position moved together (real where the channel holds static bars alone); per axis the bound on what the kept R₀ and
-/// z₀ leave of it (their own change along the axis: module documentation, # The force); the work (complex multiply-adds).
+/// position moved together (real where the channel holds static bars alone); per axis the estimate of what the kept R₀
+/// and z₀ leave of the static bars' forms, in their unit (their own change along the axis times what they carry of the
+/// contraction: module documentation, # The force); the work (complex multiply-adds).
 pub(crate) struct Force {
     pub(crate) forms: Vec<[C64; 3]>,
     pub(crate) held: [f64; 3],
@@ -5164,6 +5165,9 @@ impl Fold {
         // A channel's static bars' slots: its first and its count (the K̃̄ product's, one a channel).
         let first = |c: usize| statics.iter().filter(|&&i| bars[i].channel < c).count();
         let count = |c: usize| statics.iter().filter(|&&i| bars[i].channel == c).count();
+        // Per far block and per near block's centred copies the size of what R₀ carries of the static bars' contraction,
+        // Σ_bars |Re⟨Ā, the block's R₀-carried forms⟩| (`Force::held`).
+        let mut carried = vec![0.0_f64; far.len() + near.len()];
         for (slot, &i) in statics.iter().enumerate() {
             let (channel, j) = (bars[i].channel, bars[i].position);
             let mut fp = [0.0_f64; 3];
@@ -5199,16 +5203,19 @@ impl Fold {
                 // ⟨Ā, F_ab + z₀G_ab⟩ for every pair (a, b): one product of the stacked forms on Ā*.
                 let ks = &mut fb.ks[..v * v];
                 fused_product_into(&basis.fg, abc, (v * v, nn, 1), ks);
+                let mut own = C64::ZERO;
                 for ia in 0..v {
                     for ib in 0..v {
                         let ((ca, ka), (cb, kb)) = (fb.vectors[ia], fb.vectors[ib]);
                         let k = ks[ia * v + ib];
+                        own += k * at.e[ca][ka].conj() * at.e[cb][kb];
                         let (da, db) = (de[ca][ka], de[cb][kb]);
                         for a in 0..3 {
                             fp[a] += (k * (da[a].conj() * at.e[cb][kb] + at.e[ca][ka].conj() * db[a])).re;
                         }
                     }
                 }
+                carried[x] += own.re.abs();
                 work += (v * v * nn) as f64;
             }
             lap(1, &mut clock, &mut ft);
@@ -5324,6 +5331,17 @@ impl Fold {
                 let tcb = &mut tcbar[..nb.nc * n];
                 if nb.copied() {
                     let tc: &[C64] = if j == 0 { &nb.tc } else { &nb.tcnode[j - 1] };
+                    // What R₀ carries of the contraction here: the copies' rows' z₀T_C†T_C (their dressing of the solved
+                    // rows is in K̃, held).
+                    let mut own = 0.0;
+                    for k in 0..nb.nc {
+                        for p in 0..n {
+                            for q in 0..n {
+                                own += (ab[p * n + q].conj() * tc[k * n + p].conj() * tc[k * n + q]).re * basis.z0;
+                            }
+                        }
+                    }
+                    carried[far.len() + x] += own.abs();
                     (0..nn).for_each(|i| wz[i] = ab[i] * (2.0 * basis.z0));
                     tcb.fill(C64::ZERO);
                     for k in 0..nb.nc {
@@ -5442,8 +5460,10 @@ impl Fold {
             }
         }
         lap(2, &mut clock, &mut ft);
-        // What the kept R₀ and z₀ leave: their relative change per µm along each axis. A block's centre z₀'s gradient: the
-        // mean of its sources' Ĥ_PP diagonal's, of the pairs' coefficients' gradients.
+        // What the kept R₀ and z₀ leave of the forms (`Force::held`), an estimate in the forms' own unit: per block its R₀'s
+        // relative change along the axis, ‖R₀‖ (|∂z₀| + Σ_t |∂c_t| ‖N_t‖) -- z₀'s gradient the mean of its sources' Ĥ_PP
+        // diagonal's, of the pairs' coefficients' gradients --, times what R₀ carries of the contraction (`carried`: R₀B's
+        // forms and R₀B†R₀B's, the latter twice R₀'s relative change: the factor two).
         let diagonal = &mut diagonal[..n];
         diagonal.fill([0.0; 3]);
         for (t, e) in pp.iter().enumerate() {
@@ -5463,7 +5483,7 @@ impl Fold {
             let z0g = centre_gradient(&nb.centre);
             for a in 0..3 {
                 let change = z0g[a].abs() + nb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
-                held[a] = held[a].max(basis.r0 * change);
+                held[a] += 2.0 * basis.r0 * change * carried[far.len() + x];
             }
         }
         for (x, fb) in far.iter().enumerate() {
@@ -5471,7 +5491,7 @@ impl Fold {
             let z0g = centre_gradient(&fb.centre);
             for a in 0..3 {
                 let change = z0g[a].abs() + fb.terms.iter().enumerate().map(|(ti, &tt)| mid.dc[tt][a].abs() * basis.copied[ti]).sum::<f64>();
-                held[a] = held[a].max(basis.r0 * change);
+                held[a] += 2.0 * basis.r0 * change * carried[x];
             }
         }
         lap(4, &mut clock, &mut ft);

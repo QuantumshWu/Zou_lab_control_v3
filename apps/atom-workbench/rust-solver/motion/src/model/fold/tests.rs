@@ -2115,8 +2115,8 @@ fn the_prototype_s_force_is_the_difference_of_its_generator() {
                         let limit = r1 + (r1 - r0) / 15.0;
                         let size = if c == 0 { scale } else { force.forms[if c <= tones { c } else { c - tones }].iter().fold(0.0_f64, |m, z| m.max(z.abs())) };
                         println!("   ∂{a} channel {c}: the forms {form:.10e}, difference {:.10e} ± {:.1e} (extrapolated {limit:.10e}, ± {:.1e}), held {:.1e}", estimate.0, estimate.1, (limit - r1).abs(), force.held[a]);
-                        // What the kept R₀ and z₀ leave: their relative change along the axis (`Force::held`) of the scale.
-                        let held = force.held[a] * size;
+                        // What the kept R₀ and z₀ leave of the forms (`Force::held`, an estimate in the forms' unit).
+                        let held = force.held[a];
                         assert!(crate::model::testing::agrees(form, (estimate.0, estimate.1 + held / 4.0), size), "{name} set {set:?} point {point} axis {a} channel {c}: the forms against the difference");
                         assert!((form - limit).abs() <= 4.0 * (limit - r1).abs() + held + 1e-8 * size, "{name} set {set:?} point {point} axis {a} channel {c}: the forms against the extrapolated difference");
                     }
