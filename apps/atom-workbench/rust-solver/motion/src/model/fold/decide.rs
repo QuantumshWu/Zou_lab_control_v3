@@ -63,7 +63,7 @@ impl Local {
 
 /// The decision of one ground set (`Decision`): its ground states, its explicit nodes, its worst point on the final
 /// decision and the reading there (rate units); the points beyond the share where no node is offered; the nodes asked for
-/// whose cluster cannot be made with the others (a level explicit at two offsets: run.rs `Clusters::cluster_with`), each
+/// whose cluster cannot be made with the others (a state explicit at two offsets: run.rs `Clusters::cluster_with`), each
 /// with the count of the points that asked for it, and the points of the final reading that ask for one with the first of
 /// them; and the points where its fold does not exist and nothing is left to raise.
 #[derive(Clone, Debug, Default)]
@@ -373,7 +373,7 @@ impl<'a> Search<'a> {
         })
     }
 
-    /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a level
+    /// Whether set k's cluster with the nodes `nodes` can be made (run.rs `Clusters::cluster_with`: refused where a state
     /// is explicit at two offsets, or a block is not the prototype's).
     fn feasible(&self, k: usize, nodes: &(Vec<Key>, Vec<Key>)) -> bool {
         self.choice(k, nodes).and_then(|choice| Fold::new(self.request, &choice, self.grounds[k][0])?.prototype_workspace()).is_ok()
@@ -393,11 +393,11 @@ impl<'a> Search<'a> {
             let nodes: Vec<(Vec<Key>, Vec<Key>)> = decision.sets.iter().map(|s| (s.nodes.clone(), s.driven.clone())).collect();
             let asked = self.round(&open.iter().map(|&i| points[i].clone()).collect::<Vec<_>>(), &nodes);
             decision.points += open.len();
-            // The nodes asked, per set: an excited level is one object at one frame (fold.rs `Fold::build`), so of the keys
-            // asked for one level the one the most points ask for (its frame the component that drives it at the most
-            // points; a tie by the keys' order), in the levels' order; each joins where its cluster can be made. A node of
-            // a level explicit at another key is its copy there, read beyond the share: it joins as that level's drive
-            // there, a tone (`Choice::driven`), as a copy whose coupling cannot be folded at its peak does.
+            // The nodes asked, per set, joining in the order of the points that ask for them (the most first; a tie by the
+            // keys' order), each where its cluster can be made: a node is a level at an offset holding the states that
+            // offset reaches (fold.rs `Fold::build`), and one excited state is one place at one frame -- a node that would
+            // hold a state already explicit at another offset is that state's copy there, read beyond the share: it joins
+            // as that drive, a tone (`Choice::driven`), as a copy whose coupling cannot be folded at its peak does.
             for k in 0..sets {
                 let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
                 asks.sort();
@@ -408,23 +408,20 @@ impl<'a> Search<'a> {
                         None => keys.push((key, 1)),
                     }
                 }
-                let mut chosen: Vec<Key> = vec![];
-                for &(key, count) in &keys {
-                    let best = keys.iter().filter(|x| x.0 .0 == key.0).all(|x| x.1 < count || (x.1 == count && x.0 >= key));
-                    if best {
-                        chosen.push(key);
-                    }
-                }
-                for key in chosen {
+                keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                for &(key, _) in &keys {
                     let set = &mut decision.sets[k];
                     if set.nodes.contains(&key) || set.driven.contains(&key) || set.refused.iter().any(|r| r.0 == key) {
                         continue;
                     }
                     let mut more = (set.nodes.clone(), set.driven.clone());
-                    let drive = set.nodes.iter().any(|n| n.0 == key.0);
-                    if drive { &mut more.1 } else { &mut more.0 }.push(key);
+                    more.0.push(key);
                     more.0.sort();
-                    more.1.sort();
+                    if !self.feasible(k, &more) && set.nodes.iter().any(|n| n.0 == key.0) {
+                        more = (set.nodes.clone(), set.driven.clone());
+                        more.1.push(key);
+                        more.1.sort();
+                    }
                     if self.feasible(k, &more) {
                         (decision.sets[k].nodes, decision.sets[k].driven) = more;
                     } else {

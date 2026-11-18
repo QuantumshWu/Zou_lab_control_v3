@@ -657,18 +657,6 @@ impl Fold {
         let state_frames = choice.frames.clone();
         let ng = ground.len();
         let mut frames: Vec<Beat> = ground.iter().map(|&s| state_frames[s].clone()).collect();
-        let mut explicit = vec![];
-        for &(level, part, source) in choice.explicit.iter().filter(|x| ground.contains(&x.2)) {
-            let offset = state_frames[source].plus(1, &components[find(part)?].beat);
-            for x in (0..EXCITED).filter(|&x| excited_level[x] == level) {
-                if explicit.contains(&x) {
-                    return Err("一个激发能级只能在一个偏移上显式".into());
-                }
-                explicit.push(x);
-                frames.push(offset.clone());
-            }
-        }
-        let frame_values: Vec<f64> = frames.iter().map(|b| axes.omega(b)).collect();
         // H0 less what it holds of the outside forms at the focus (the field there Σ_l E_l; request.rs `held`).
         let outside: Vec<[[Mat; 3]; 3]> = light.frequencies.iter().map(|f| outside_form(&request.outside_forms[f.form].matrices)).collect();
         let mut base = request.hamiltonian.clone();
@@ -687,6 +675,61 @@ impl Fold {
         let d = decay(request);
         let mut base_excited = base.block(&excited, &excited);
         base_excited.add_scaled(C64::new(0.0, -0.5), &d);
+        // The excited states the outside forms couple: each frequency's form on the field components its beams have (a
+        // beam's polarization is the same everywhere, field.rs: paraxial), E_p* E_q for p, q among them -- not a component
+        // no beam of it has (tilt0's π tweezer couples no m′ to m′ ± 2: such a row would be a copy at an offset that drives it
+        // only through a zero, near resonant with an explicit state's column there).
+        let mut coupled = vec![false; EXCITED * EXCITED];
+        for (o, f) in outside.iter().zip(&light.frequencies) {
+            let has: Vec<bool> = (0..3).map(|p| f.fields.iter().any(|e| e[p] != C64::ZERO)).collect();
+            for (p, row) in o.iter().enumerate().filter(|(p, _)| has[*p]) {
+                for (_, m) in row.iter().enumerate().filter(|(q, _)| has[*q]) {
+                    for x in 0..EXCITED {
+                        for y in 0..EXCITED {
+                            if m[(GROUND + x, GROUND + y)] != C64::ZERO {
+                                coupled[x * EXCITED + y] = true;
+                                coupled[y * EXCITED + x] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The excited states an offset drives: a component from a ground state of the set reaches them there.
+        let driven_at = |offset: &Beat| -> Vec<bool> {
+            let mut out = vec![false; EXCITED];
+            for &s in ground {
+                for c in components.iter().filter(|c| state_frames[s].plus(1, &c.beat) == *offset) {
+                    for m in &c.couplings {
+                        (0..EXCITED).filter(|&x| m[(x, s)] != C64::ZERO).for_each(|x| out[x] = true);
+                    }
+                }
+            }
+            out
+        };
+        // P's explicit states (module documentation, # P, sets and frames): a node is a level at an offset, and holds the
+        // level's states that offset drives (`driven_at`), each at the node's offset -- not the level's other states, which
+        // other offsets drive (tilt0's F' = 3 m′ at the PGC's offset from m′ + 1, a Zeeman beat apart one from the next:
+        // the level whole at one offset made its drives from the other ground states strong tones of a near-resonant
+        // transition and its states Q rows of their own blocks besides). One excited state is one place at one frame:
+        // a node whose offset would hold a state explicit at another is refused (the start's decision takes its drive
+        // there as a tone, `Choice::driven`); a node another key names again adds nothing.
+        let mut explicit = vec![];
+        for &(level, part, source) in choice.explicit.iter().filter(|x| ground.contains(&x.2)) {
+            let offset = state_frames[source].plus(1, &components[find(part)?].beat);
+            let held = driven_at(&offset);
+            for x in (0..EXCITED).filter(|&x| excited_level[x] == level && held[x]) {
+                match explicit.iter().position(|&y| y == x) {
+                    Some(j) if frames[ng + j] == offset => {}
+                    Some(_) => return Err("一个激发态只能在一个偏移上显式".into()),
+                    None => {
+                        explicit.push(x);
+                        frames.push(offset.clone());
+                    }
+                }
+            }
+        }
+        let frame_values: Vec<f64> = frames.iter().map(|b| axes.omega(b)).collect();
         // The tones (module documentation, # Tones): an entry of two places of one kind and different frames whose coupling
         // cannot be folded -- its peak strength (H0's, the decay's, and each frequency's outside forms at its intensity
         // scale, as `Choice::of` reads a coupling) over the states' energy difference, frame-free --; one that can is a copy
@@ -711,22 +754,6 @@ impl Fold {
         // Every two ground states' static coupling read the same way: a copy at a P place's frame is reached from that
         // place by it too (`Fold::lay`'s static split).
         let ground_tone: Vec<bool> = (0..GROUND * GROUND).map(|x| x / GROUND != x % GROUND && cannot_fold(x / GROUND, x % GROUND)).collect();
-        // The excited states the outside forms couple (any frequency, any field components).
-        let mut coupled = vec![false; EXCITED * EXCITED];
-        for o in &outside {
-            for row in o {
-                for m in row {
-                    for x in 0..EXCITED {
-                        for y in 0..EXCITED {
-                            if m[(GROUND + x, GROUND + y)] != C64::ZERO {
-                                coupled[x * EXCITED + y] = true;
-                                coupled[y * EXCITED + x] = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
         // The blocks: every offset a ground state's component reaches, and every explicit state's.
         let mut offsets: Vec<Beat> = vec![];
         let mut sources: Vec<Vec<(usize, usize)>> = vec![];
@@ -2534,8 +2561,35 @@ impl Fold {
         if let Some(b) = &bare {
             *work += b.work;
         }
+        // A node's dressing δK_EE = V δR V† of a block's explicit places (P; V its coupling to them, δR its resolvent's
+        // change) read at column j as any node's is, in both units, the larger: the potential it carries -- the column's
+        // light shift through it, ΔV_j = 2|Re(u_E,j† δK_EE u_E,j)|, against T's share of k_BT, as an excited node left out
+        // -- and the rate's: what it moves of the column's excited amplitudes in P, P's own response to it -- the reduced
+        // resolvent (t_jj − t)⁻¹ in H's Schur coordinates, the column's own direction dropped (its energy's change is the
+        // potential) -- against the column's whole excited response, P's explicit amplitudes with the Q rows'.
+        let explicit_dressing = |v: &Mat, dr: &Mat, places: &[usize], j: usize, work: &mut f64| -> f64 {
+            let ng = self.ground.len();
+            let ue = Mat::from_fn(places.len(), 1, |i, _| tri.u[(places[i], j)]);
+            let dk = mul(v, &mul(dr, &mul_adj(v, &ue, work), work), work);
+            let shift: C64 = (0..places.len()).map(|i| ue[(i, 0)].conj() * dk[(i, 0)]).sum();
+            let potential = ((1.0 + (2.0 * shift.re).abs() / (2.0 * self.thermal)).sqrt() - 1.0).powi(2);
+            let d: Vec<C64> = (0..n).map(|k| (0..places.len()).map(|i| tri.u[(places[i], k)].conj() * dk[(i, 0)]).sum()).collect();
+            let mut y = vec![C64::ZERO; n];
+            for k in (0..n).rev().filter(|&k| k != j) {
+                let mut s = d[k];
+                for l in k + 1..n {
+                    s += tri.t[(k, l)] * y[l];
+                }
+                y[k] = s / (tri.t[(j, j)] - tri.t[(k, k)]);
+            }
+            *work += (n * n * (places.len() + 2)) as f64;
+            let moved: f64 = (ng..n).map(|p| (0..n).map(|k| tri.u[(p, k)] * y[k]).sum::<C64>().norm_sqr()).sum();
+            let response = whole[j] + (ng..n).map(|p| tri.u[(p, j)].norm_sqr()).sum::<f64>();
+            potential.max(if response > 0.0 { moved / response } else { 0.0 })
+        };
         // The copies: the evaluation order's error by the block perturbation δK on the solved rows, R(z_j) δK T_j (one
-        // function for centring, its prospect and omission); the reabsorption a third order would add; the mixing.
+        // function for centring, its prospect and omission), and on the block's explicit places (`explicit_dressing`); the
+        // reabsorption a third order would add; the mixing.
         for (o, b) in self.blocks.iter().enumerate() {
             let l = &f.laid[o];
             let e = &f.eliminated[o];
@@ -2574,6 +2628,10 @@ impl Fold {
                     let r_at = |z: C64, work: &mut f64| inverse(&Mat::from_fn(hc.rows, hc.cols, |i, k| if i == k { z } else { C64::ZERO } - hc[(i, k)]), work);
                     let r0 = r_at(C64::real(l.z0), work);
                     let tu_exc = Mat::from_fn(exc.len(), n, |i, j| tu[o][(exc[i], j)]);
+                    // The block's explicit places (P) the copy dresses too, Ĥ_PC T_C on their rows: their light shift
+                    // through it (tilt0's tweezer copies of F = 2 shift its explicit F' = 3 m′ = ±1 by 95 rad/µs) -- V on them.
+                    let places = &b.explicit;
+                    let v_e = Mat::from_fn(places.len(), states.len(), |i, k| f.site.drives[g][(self.explicit[places[i] - self.ground.len()], states[k])]);
                     for j in 0..n {
                         let z = tri.t[(j, j)];
                         let Some(rz) = r_at(z, work) else { continue };
@@ -2592,6 +2650,9 @@ impl Fold {
                             let back = e.from(&Mat::from_fn(zz.len(), 1, |i, _| zz[i]), work).data;
                             let rate_unit: f64 = back.iter().enumerate().map(|(i, x)| match per(node(b, i), j) { d if d > 0.0 => x.norm_sqr() / d, _ => 0.0 }).sum();
                             sizes[k] = rate_unit.max(populations(o, &|i| matches!(b.rows[i], Row::Excited(_)), &|i| back.get(i).copied().unwrap_or(C64::ZERO), j));
+                            if !places.is_empty() {
+                                sizes[k] = sizes[k].max(explicit_dressing(&v_e, dr, places, j, work));
+                            }
                         }
                         let nd = Node::Copy { level, component: g };
                         put(o, nd, 6, sizes[0], &mut out);

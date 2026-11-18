@@ -403,11 +403,31 @@ fn tilt0_s_choice_and_readings_at_the_focus() {
 /// leaves out (Omitted) centred instead -- in the near blocks (a far block holds no copy) -- a measurement of what the omission costs, on the test's own run (the production
 /// choice unchanged).
 fn the_run(req: &crate::request::Request, reference: [f64; GROUND]) -> run::Onefold {
+    // DRAG_EXPLICIT ("level,frequency,ground;..."): the representation those explicit nodes give (co-rotating components),
+    // no decision -- a measurement of a representation by hand.
+    if let Some(keys) = explicit_keys() {
+        println!("DRAG_EXPLICIT {keys:?}");
+        return run::Onefold::of(req, &Choice::base(req, keys).expect("the choice"), reference).expect("the run");
+    }
     if std::env::var("DRAG_KEEP_FREQ").is_err() {
         // The production run: the start's decision (decide.rs) on the base choice.
         return run::Onefold::new(req, reference).expect("the run");
     }
     run::Onefold::of(req, &the_choice(req), reference).expect("the run")
+}
+
+/// DRAG_EXPLICIT's keys ("level,frequency,ground;...", co-rotating components), if set.
+fn explicit_keys() -> Option<Vec<(usize, crate::model::Component, usize)>> {
+    let list = std::env::var("DRAG_EXPLICIT").ok()?;
+    Some(
+        list.split(';')
+            .filter(|x| !x.trim().is_empty())
+            .map(|x| {
+                let v: Vec<usize> = x.split(',').map(|y| y.trim().parse().unwrap()).collect();
+                (v[0], crate::model::Component { frequency: v[1], counter: false }, v[2])
+            })
+            .collect(),
+    )
 }
 
 /// The diagnostics' choice: the base choice, with DRAG_KEEP_FREQ's omitted copies of the near blocks centred (`the_run`).
@@ -470,4 +490,93 @@ fn full_h0(req: &mut crate::request::Request) {
         }
     }
     println!("DRAG_H0_FULL: the outside forms' off-diagonal at the focus put into H0 (largest entry added {added:.4} rad/µs)");
+}
+
+/// Diagnostic (DRAG_REQ a request's path): the start's decided representation (`Onefold::new`'s choice) set by set -- the
+/// ground and explicit places with their frames (rad/µs), the drives that are tones, and each block's offset, sources,
+/// explicit places and rows.
+#[test]
+#[ignore]
+fn the_decided_folds_laid_out() {
+    let path = std::env::var("DRAG_REQ").expect("DRAG_REQ");
+    let req = crate::model::testing::scene(&path);
+    let labels = req.levels().unwrap();
+    let name = |s: usize| format!("{:?}{}{:+}", labels[s].manifold, labels[s].f, labels[s].m);
+    let choice = match explicit_keys() {
+        Some(keys) => Choice::base(&req, keys).expect("the choice"),
+        None => {
+            let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
+            Choice::base_of(&req, run.explicit(), run.driven(), &|_| true).expect("the choice")
+        }
+    };
+    println!("explicit keys {:?}\ndriven keys {:?}", choice.explicit, choice.driven);
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold = Fold::new(&req, &choice, set[0]).expect("the fold");
+        let places: Vec<String> = (0..fold.size()).map(|p| format!("{}@{:.3}", name(if p < fold.ground.len() { fold.ground[p] } else { GROUND + fold.explicit[p - fold.ground.len()] }), fold.frame_values[p])).collect();
+        println!("== set {:?}: places {}", set.iter().map(|&s| name(s)).collect::<Vec<_>>(), places.join(" "));
+        println!("  driven (state, offset): {:?}", fold.driven.iter().map(|(x, o)| format!("{}@{:.3}", name(GROUND + x), fold.blocks.iter().find(|b| b.offset == *o).map_or(f64::NAN, |b| b.value))).collect::<Vec<_>>());
+        for (o, b) in fold.blocks.iter().enumerate().filter(|(_, b)| !b.far()) {
+            let rows: Vec<String> = b
+                .rows
+                .iter()
+                .map(|r| match *r {
+                    Row::Excited(x) => name(GROUND + x),
+                    Row::Copy { state, component } => format!("copy({},c{component})", name(state)),
+                })
+                .collect();
+            println!(
+                "  block {o}: value {:.3} sources {:?} explicit {:?} rows {}",
+                b.value,
+                b.sources.iter().map(|&(p, c)| format!("{}<-{:?}", name(fold.ground[p]), fold.components[c].part)).collect::<Vec<_>>(),
+                b.explicit.iter().map(|&p| name(GROUND + fold.explicit[p - fold.ground.len()])).collect::<Vec<_>>(),
+                rows.join(" ")
+            );
+        }
+    }
+}
+
+/// Diagnostic (DRAG_REQ; DRAG_EXPLICIT or the decided representation; DRAG_SET a ground state of the set, 3): the static
+/// generator G = S⁻¹AS⁻¹ and the metric M of that set's fold at the focus at rest, place by place (rad/µs; the frames
+/// added back on the diagonal), and its tones' G_m largest entries.
+#[test]
+#[ignore]
+fn the_set_s_generator_at_the_focus() {
+    let path = std::env::var("DRAG_REQ").expect("DRAG_REQ");
+    let req = crate::model::testing::scene(&path);
+    let labels = req.levels().unwrap();
+    let name = |s: usize| format!("{:?}{}{:+}", labels[s].manifold, labels[s].f, labels[s].m);
+    let choice = match explicit_keys() {
+        Some(keys) => Choice::base(&req, keys).expect("the choice"),
+        None => {
+            let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).expect("the run");
+            Choice::base_of(&req, run.explicit(), run.driven(), &|_| true).expect("the choice")
+        }
+    };
+    let s0 = env("DRAG_SET", 3.0) as usize;
+    let set = Fold::sets(&req, &choice).unwrap().into_iter().find(|s| s.contains(&s0)).unwrap();
+    let fold = Fold::new(&req, &choice, set[0]).expect("the fold");
+    let mut ws = fold.prototype_workspace().expect("the workspace");
+    let mut cache = super::super::proto::Cache::default();
+    let step = fold.prototype([0.0; 3], [0.0; 3], fold.thermal, &mut cache, &mut ws).expect("the fold at the focus");
+    let n = fold.size();
+    let place = |p: usize| name(if p < fold.ground.len() { fold.ground[p] } else { GROUND + fold.explicit[p - fold.ground.len()] });
+    println!("set {:?}: {} places", set.iter().map(|&s| name(s)).collect::<Vec<_>>(), n);
+    for p in 0..n {
+        let row: Vec<String> = (0..n)
+            .filter(|&q| step.generator[(p, q)].abs() > 1e-6 || p == q)
+            .map(|q| {
+                let g = step.generator[(p, q)] + if p == q { C64::real(fold.frame_values[p]) } else { C64::ZERO };
+                format!("{}:{:+.4}{:+.4}i", place(q), g.re, g.im)
+            })
+            .collect();
+        println!("  G {} @{:.3}: {}", place(p), fold.frame_values[p], row.join(" "));
+    }
+    for p in 0..n {
+        let row: Vec<String> = (0..n).filter(|&q| (step.metric[(p, q)] - if p == q { C64::ONE } else { C64::ZERO }).abs() > 1e-7).map(|q| format!("{}:{:+.3e}{:+.3e}i", place(q), step.metric[(p, q)].re - if p == q { 1.0 } else { 0.0 }, step.metric[(p, q)].im)).collect();
+        println!("  M-1 {}: {}", place(p), row.join(" "));
+    }
+    for (m, g) in step.tones.iter().enumerate() {
+        let big = (0..n * n).map(|x| (x, g[(x / n, x % n)].abs())).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+        println!("  tone {m}: largest {:.4} at {} <- {}", big.1, place(big.0 / n), place(big.0 % n));
+    }
 }

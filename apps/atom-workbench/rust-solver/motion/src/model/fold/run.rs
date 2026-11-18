@@ -649,7 +649,7 @@ impl Clusters {
 
     /// The cluster of ground set k with the explicit nodes `nodes` and the explicit levels' drives `driven` tones (# The
     /// state sets; `Choice::driven`): made where it is not yet, on the base choice of that set with those nodes kept in P
-    /// (`Choice::base_of`: its own set's tiers, no other's); refused where a fold of it cannot be made (a level explicit at
+    /// (`Choice::base_of`: its own set's tiers, no other's); refused where a fold of it cannot be made (a state explicit at
     /// two offsets, a block the prototype does not hold), and kept refused.
     pub(super) fn cluster_with(&self, k: usize, mut nodes: Vec<Key>, mut driven: Vec<Key>) -> Result<usize, String> {
         nodes.sort();
