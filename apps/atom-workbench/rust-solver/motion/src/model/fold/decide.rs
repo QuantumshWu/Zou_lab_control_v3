@@ -1049,11 +1049,9 @@ impl<'a> Search<'a> {
             decision.points += open.len();
             // The nodes asked, per set, joining in the order of the points that ask for them (the most first; a tie by the
             // keys' order), each where its cluster can be made: a node is a level at an offset holding the states that
-            // offset reaches (fold.rs `Fold::build`), and one excited state is one place at one frame -- a node that would
-            // hold a state already explicit at another offset is refused (its drive there is the one rule's, fold.rs
-            // `toned`; the candidates offer no such node, `Choice::candidates`, so only two keys of one round that each
-            // hold the state meet it). The joins planned on the placements, each set's last decision made, the sets' at
-            // once (# What is made once).
+            // offset reaches that no node before it holds (fold.rs `Fold::build`: one excited state is one place at one
+            // frame; its copy at another offset is the drive's term). The joins planned on the placements, each set's
+            // last decision made, the sets' at once (# What is made once).
             let keys: Vec<Vec<Key>> = (0..sets)
                 .map(|k| {
                     let mut asks: Vec<Key> = asked.iter().filter_map(|a| if let Asked::Node(key) = a[k] { Some(key) } else { None }).collect();
@@ -1345,6 +1343,131 @@ impl<'a> Search<'a> {
 #[cfg(test)]
 mod tests {
     use super::Sobol;
+
+    /// A source's code without what only the tests compile: every item after `#[cfg(test)]` (to its block's matching
+    /// brace, or its `;`) cut out, the comments, strings and characters skipped in the brace count and blanked.
+    fn compiled(source: &str) -> String {
+        // The code with its comments and literals blanked (the same length, so positions hold).
+        let b: Vec<char> = source.chars().collect();
+        let mut code: Vec<char> = b.clone();
+        let mut i = 0;
+        let blank = |code: &mut Vec<char>, from: usize, to: usize| (from..to.min(code.len())).for_each(|k| if code[k] != '\n' { code[k] = ' ' });
+        while i < b.len() {
+            if b[i] == '/' && b.get(i + 1) == Some(&'/') {
+                let end = (i..b.len()).find(|&k| b[k] == '\n').unwrap_or(b.len());
+                blank(&mut code, i, end);
+                i = end;
+            } else if b[i] == '/' && b.get(i + 1) == Some(&'*') {
+                let end = (i + 2..b.len()).find(|&k| b[k] == '*' && b.get(k + 1) == Some(&'/')).map_or(b.len(), |k| k + 2);
+                blank(&mut code, i, end);
+                i = end;
+            } else if b[i] == 'r' && (b.get(i + 1) == Some(&'"') || (b.get(i + 1) == Some(&'#') && b.get(i + 2) == Some(&'"'))) && (i == 0 || !(b[i - 1].is_alphanumeric() || b[i - 1] == '_')) {
+                let hashes = if b[i + 1] == '#' { 1 } else { 0 };
+                let open = i + 2 + hashes;
+                let end = (open..b.len()).find(|&k| b[k] == '"' && (hashes == 0 || b.get(k + 1) == Some(&'#'))).map_or(b.len(), |k| k + 1 + hashes);
+                blank(&mut code, i, end);
+                i = end;
+            } else if b[i] == '"' {
+                let mut k = i + 1;
+                while k < b.len() && b[k] != '"' {
+                    k += if b[k] == '\\' { 2 } else { 1 };
+                }
+                blank(&mut code, i, k + 1);
+                i = k + 1;
+            } else if b[i] == '\'' {
+                // A character ('x', '\n', '\'', '\u{..}'), else a lifetime.
+                let end = if b.get(i + 1) == Some(&'\\') { (i + 2..b.len()).find(|&k| b[k] == '\'' && k > i + 2) } else if b.get(i + 2) == Some(&'\'') { Some(i + 2) } else { None };
+                match end {
+                    Some(end) => {
+                        blank(&mut code, i, end + 1);
+                        i = end + 1;
+                    }
+                    None => i += 1,
+                }
+            } else {
+                i += 1;
+            }
+        }
+        // Every item after `#[cfg(test)]` cut out.
+        let text: String = code.iter().collect();
+        let mut out = String::new();
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("#[cfg(test)]") {
+            out.push_str(&rest[..at]);
+            let after = &rest[at..];
+            let brace = after.find('{');
+            let semi = after.find(';');
+            let end = match (brace, semi) {
+                (Some(o), Some(s)) if s < o => s + 1,
+                (Some(o), _) => {
+                    let mut depth = 0;
+                    let mut end = after.len();
+                    for (k, c) in after[o..].char_indices() {
+                        depth += match c {
+                            '{' => 1,
+                            '}' => -1,
+                            _ => 0,
+                        };
+                        if depth == 0 {
+                            end = o + k + 1;
+                            break;
+                        }
+                    }
+                    end
+                }
+                (None, Some(s)) => s + 1,
+                (None, None) => after.len(),
+            };
+            rest = &after[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The structure (项清单完成 I item 4): what is folded, kept as a tone or averaged is the start's decision's alone
+    /// (module documentation, # The terms). Outside decide.rs the code the run compiles -- fold.rs, its prototype
+    /// (proto.rs, proto/), the run (run.rs) and the step (step.rs) -- calls none of the decision's readings (the G
+    /// terms, the terms, the same state's nodes, the tiers, the skeleton at a point) and no reading of a coupling's
+    /// mixing (the admixture, `unfoldable`, the peak rule `Choice::of`), and builds no tier of its own (`Fold::tiers_at`,
+    /// the tiers' readings); the readings' functions are private to decide.rs. Each one is a site that would judge the
+    /// representation outside the decision's loop.
+    #[test]
+    fn nothing_outside_the_decision_judges_the_representation() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("model");
+        let mut files = vec![root.join("fold.rs")];
+        for dir in [root.join("fold"), root.join("fold").join("proto")] {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|x| x == "rs") && path.file_name().is_some_and(|x| x != "decide.rs" && x != "tests.rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let judged = ["admixture", "unfoldable", "Choice::of(", "decide::tiered", "decide::terms", "decide::links", "decide::same", "decide::skeleton_at", "decide::focus", "decide::at_point", ".tiers_at("];
+        let mut found = vec![];
+        for path in &files {
+            let code = compiled(&std::fs::read_to_string(path).unwrap());
+            for name in judged {
+                for (at, _) in code.match_indices(name) {
+                    let line = code[..at].matches('\n').count() + 1;
+                    found.push(format!("{}:{line}: {name}", path.file_name().unwrap().to_string_lossy()));
+                }
+            }
+        }
+        println!("{} files read: {:?}", files.len(), files.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>());
+        assert!(found.is_empty(), "the representation judged outside the decision: {found:?}");
+        // The readings' functions are decide.rs's own: none of them is visible outside it.
+        let decide = compiled(&std::fs::read_to_string(root.join("fold").join("decide.rs")).unwrap());
+        for name in ["fn admixture(", "fn reading(", "fn kept(", "fn tiered_at(", "fn mixing(", "fn dressed("] {
+            let at = decide.find(name).unwrap_or_else(|| panic!("decide.rs has {name}"));
+            let line_start = decide[..at].rfind('\n').map_or(0, |k| k + 1);
+            assert!(!decide[line_start..at].contains("pub"), "{name} is decide.rs's own");
+        }
+        // The cutting of what the tests compile is what it says: a test module's call is not read.
+        let sample = "fn a() { x(); }\n#[cfg(test)]\nmod tests {\n    fn b() { let s = \"}\"; admixture(1.0); }\n}\nfn c() {}\n";
+        let cut = compiled(sample);
+        assert!(!cut.contains("admixture") && cut.contains("fn c()") && cut.contains("fn a()"), "{cut}");
+    }
 
     /// Diagnostic (项清单完成 I item 3; DECIDE_REQ a request's path): the decision made as the run makes it, then per set
     /// its points that end beyond the share with no node offered or with no fold, each read again with every level's
