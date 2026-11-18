@@ -220,6 +220,8 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
     let mut dust_most = 0.0_f64;
     for trial in 0..trials {
         let (req, clean, explicit, r1, v) = random_model(&mut u);
+        // READINGS_CLEAN: the same systems without their dust (readings.status.md R2: which low readings the dust makes).
+        let req = if std::env::var("READINGS_CLEAN").is_ok() { clean.clone() } else { req };
         let reach = [0.003, 0.03, 0.1][(u() * 3.0) as usize];
         let d: [f64; 3] = std::array::from_fn(|_| reach * (2.0 * u() - 1.0));
         let r2: [f64; 3] = std::array::from_fn(|a| r1[a] + d[a]);
@@ -361,4 +363,101 @@ fn every_reading_is_an_estimate_of_what_it_reads() {
         }
     }
     assert!(failing.is_empty(), "readings that are no estimate of what they read: {failing:?}");
+}
+
+/// Diagnostic (readings.status.md R2, item 3; DECIDE_REQ a scene's path, tilt2's): the start's decided representation
+/// (`Onefold::new`), per set at the points R2_POINTS ("s,vx,vy,vz;...", m/s; the phases zero) the decision's forward --
+/// its whole reading against the share -- and each account read beyond a tenth of the share; for every near block's
+/// centred copies (`Item::Centred`, near) the error its reading reads, measured as the property test measures it
+/// (`every_reading_is_an_estimate_of_what_it_reads`): every approximation out on the held decompositions, against the
+/// same with that block's centred rows decomposed, on G's modes.
+#[test]
+#[ignore]
+fn a_scene_s_centred_copies_read_against_their_error() {
+    use super::super::decide::Local;
+    use super::super::proto::{Cache, Item, Without};
+    let req = crate::model::testing::scene(&std::env::var("DECIDE_REQ").expect("DECIDE_REQ"));
+    let light = crate::field::Light::new(&req);
+    let initial = crate::solve::components(&req);
+    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).unwrap();
+    let reference = crate::solve::alone(initial[chief].0);
+    let hbar_over_mass = crate::units::hbar_over_mass(req.mass_kg);
+    let states = super::super::run::Reference::states(&req, &light).unwrap();
+    let (floor, _) = super::super::run::Onefold::scales(&light, hbar_over_mass, &super::super::run::Reference::of(&states, &reference));
+    // R2_EXPLICIT ("level,frequency,ground;...", co-rotating): that representation (the tests' fixture's tiers at the focus)
+    // instead of the start's decision.
+    let choice = match std::env::var("R2_EXPLICIT") {
+        Ok(list) => {
+            let keys = list
+                .split(';')
+                .filter(|x| !x.trim().is_empty())
+                .map(|x| {
+                    let v: Vec<usize> = x.split(',').map(|y| y.trim().parse().unwrap()).collect();
+                    (v[0], crate::model::Component { frequency: v[1], counter: false }, v[2])
+                })
+                .collect();
+            Choice::base(&req, keys, vec![]).expect("the choice")
+        }
+        Err(_) => super::super::run::Onefold::new(&req, reference).expect("the run").choice().clone(),
+    };
+    let share = crate::model::elim::share();
+    let points: Vec<[f64; 4]> = std::env::var("R2_POINTS")
+        .unwrap_or_else(|_| "1,0,0,0;0.5,0,0,0.2;0.1,0.2,0,0.1".into())
+        .split(';')
+        .filter(|x| !x.trim().is_empty())
+        .map(|x| {
+            let v: Vec<f64> = x.split(',').map(|y| y.trim().parse().unwrap()).collect();
+            [v[0], v[1], v[2], v[3]]
+        })
+        .collect();
+    println!("floor {floor:.4} rad/µs, share {share:.4}");
+    for set in Fold::sets(&req, &choice).unwrap() {
+        let fold0 = Fold::new(&req, &choice, set[0]).expect("the fold");
+        if fold0.blocks.is_empty() {
+            continue;
+        }
+        for p in &points {
+            let local = Local { s: p[0], phases: vec![0.0; light.beams.len()], kappa: [p[1], p[2], p[3]].map(|v| v / hbar_over_mass) };
+            let mut fold = fold0.clone();
+            fold.local = local.factors(&light);
+            let mut ws = fold.prototype_workspace().unwrap();
+            let mut cache = Cache::default();
+            let Some(step) = fold.prototype([0.0; 3], local.kappa, floor, &mut cache, &mut ws) else {
+                println!("set {set:?} point {p:?}: no fold");
+                continue;
+            };
+            println!("set {set:?} point s {} v {:?}: whole reading {:.3e} ({} the share)", p[0], &p[1..], step.reading, if step.reading > share { "beyond" } else { "within" });
+            let accounts = ws.accounts().to_vec();
+            let Some(mine) = fold.prototype_without([0.0; 3], local.kappa, floor, &cache, &mut ws, Without::All(None), SWEEPS) else { continue };
+            for a in accounts.iter().filter(|a| a.on) {
+                let reading = a.squares.iter().map(|x| rate(x.sqrt())).fold(0.0, f64::max);
+                if reading < 0.1 * share {
+                    continue;
+                }
+                let mut said = format!("  {:?}: reading {reading:.3e}", a.item);
+                if let Item::Centred { block, far: false } = a.item {
+                    let o = ws.block_of(block, false);
+                    let other = decomposed(&choice, &fold, Some(o));
+                    let exact = Fold::new(&req, &other, set[0]).ok().and_then(|mut f2| {
+                        f2.local = fold.local.clone();
+                        let mut w2 = f2.prototype_workspace().ok()?;
+                        let mut c2 = Cache::default();
+                        f2.prototype([0.0; 3], local.kappa, floor, &mut c2, &mut w2)?;
+                        f2.prototype_without([0.0; 3], local.kappa, floor, &c2, &mut w2, Without::All(None), SWEEPS)
+                    });
+                    match exact {
+                        Some(exact) => {
+                            let (modes, rate_part, potential) = moved_modes(&mine, &exact, floor);
+                            let (any, ..) = moved(&mine, &exact, floor);
+                            let b = &fold.blocks[o];
+                            let centred: Vec<String> = b.rows[b.solved..].iter().map(|r| format!("{r:?}")).collect();
+                            said += &format!(" -- block {o} at {:+.3} (centred rows {centred:?}): the error on the modes {modes:.3e} (rate {rate_part:.3e}, energy {potential:.3e}), on any state {any:.3e}; reading over error {:.2}", b.value, reading / modes);
+                        }
+                        None => said += " -- its centred rows decomposed: no fold",
+                    }
+                }
+                println!("{said}");
+            }
+        }
+    }
 }

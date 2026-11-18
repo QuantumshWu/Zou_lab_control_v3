@@ -66,7 +66,11 @@ fn a_dragged_atom_s_mean_force_on_the_onefold_step() {
     // rad/µs, and the fold read within its share what it should not).
     let hold = env("DRAG_HOLD", 1.0) > 0.0;
     // Pinned: the position set back to the drag's path (z₀ + vt) after every step too, so that a held atom at a trap's
-    // focus stays there (unpinned, the light force walks it off until the trap's pull answers it).
+    // focus stays there (unpinned, the light force walks it off until the trap's pull answers it) -- and the atom is
+    // the master equation's, infinitely heavy at exactly v: unpinned, the held atom moves between the momentum's resets
+    // with what the step gave it (±2 mm/s while a stretched state cycles, ±6 mm/s after a photon) and keeps the
+    // displacement; on tilt0 that moved F(0) by +4.2 % ± 0.8 % at every τ from 0.16 to 0.65 µs, at 100 times the mass by
+    // −0.1 % (readings.status.md R2). The comparison with obe_fix pins.
     let pin = env("DRAG_PIN", 0.0) > 0.0;
     let initial = crate::solve::components(&req);
     let chief = initial.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap().0;
