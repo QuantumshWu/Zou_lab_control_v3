@@ -82,15 +82,24 @@
 //! kept copy's emission Γ_t†V_g†ε_o at θ_t − ω and its partner; and the beat of the two blocks a kept copy relates,
 //! ε_o'†(𝒦 − ν̄)ε_o at o' − o (o' = θ_t + ν_g; ν̄ the columns' offsets from their own frames, gauge invariant, `Fold::cross`):
 //! the copy's excited node is reached both from block o and from its state's sideband through its own block, one Floquet node, so their interference (the rate's, with
-//! the decay -(i/2)ε_o'†Dε_o) is physics. Two blocks no kept copy relates are different Floquet nodes: their cross terms
-//! are not taken -- with the beating metric dropped (M8) they would turn at |o − o'| with a size |o − o'|·|ε_o'†ε_o|/2 and
-//! a second-order shift of nothing in the exact Floquet problem (onefold report, step 1); the jumps' cross terms the same
-//! way: each block's jumps its own. Blocks whose explicit states P holds a tone between (`Fold::groups`) are one group: the
-//! decay of P between their explicit states is no tone's but their jumps', which are one operator per landing set,
-//! L_q(t) = C_q Σ_o e^{−iot}ε_o S⁻¹ over the group (DESIGN §1.3; model/fold/run.rs): the decay between the offsets is its
-//! cross products L_o†L_o′ at e^{i(o − o′)t} -- whole, the explicit rows' with the solved ones' --, so that the decay is the
-//! jumps' product at every time by construction, positive semidefinite (BRIEF_WIRE3 item 3). (A kept copy's related
-//! blocks keep their cross term whole and their jumps apart: not the run's, whose choice keeps no copy in P.)
+//! the decay -(i/2)ε_o'†Dε_o) is physics. Two blocks no kept copy relates are different Floquet nodes of the Hamiltonian:
+//! their cross terms ε_o'†(𝒦 − ν̄)ε_o are not taken -- with the beating metric dropped (M8) they would turn at |o − o'|
+//! with a size |o − o'|·|ε_o'†ε_o|/2 and a second-order shift of nothing in the exact Floquet problem (onefold report, step
+//! 1); what one block's light does to another's ground states is the copies'.
+//!
+//! Not so the jumps. A photon is no laser component: the jump operator is one per landing set, L_q(t) = C_q Σ_o e^{−iot}ε_o
+//! S⁻¹ over every block (DESIGN §1.3), and two blocks' landings on the states s, s′ of one landing set interfere at the
+//! residual r = (o − θ_s) − (o′ − θ_s′), their photons' frequency difference in the landing frames -- at s = s′ the decay's
+//! cross term at o − o′. That interference is left out (each block's jumps its own) only where its reading is within the
+//! share, as any coupling's (`unfoldable`; `Fold::groups`): the bare landing amplitudes' product at the peak light, read as
+//! `Choice::of` reads a coupling, over |r|. A static one never is: tilt0's Larmor-compensated σ⁺σ⁻, whose two beams'
+//! blocks land on m − 1 and m + 1 with one photon frequency -- the ground coherence the rotating polarization pumps, its
+//! friction (BRIEF_RAMAN; obe.status: left out, the force of two incoherent beams). Blocks so joined, or whose explicit
+//! states P holds a tone between, are one coherence group: their jumps one operator per landing set over the group
+//! (model/fold/run.rs), the decay between their offsets its cross products L_o†L_o′ at e^{i(o − o′)t} -- whole, the
+//! explicit rows' with the solved ones' --, so that the decay is the jumps' product at every time by construction, positive
+//! semidefinite (BRIEF_WIRE3 item 3). (A kept copy's related blocks keep their cross term whole and their jumps apart: not
+//! the run's, whose choice keeps no copy in P.)
 //!
 //! # The passes as the next one reads (DESIGN §1.5, M1)
 //! Two passes, a third only as the share asks (the cheapest within the share, the evaluation order's rule): after the
@@ -527,8 +536,9 @@ pub(crate) struct Fold {
     /// leaves it out (proto.rs `prototype_workspace`; BRIEF_COPIES item 4).
     pub(crate) ground_tone: Vec<bool>,
     pub(crate) blocks: Vec<Block>,
-    /// Per block its coherence group (module documentation, # Tones), named by its least block: blocks whose explicit
-    /// states P holds a tone between are one group, their jumps one operator.
+    /// Per block its coherence group (module documentation, # Tones), named by its least block: blocks whose landings'
+    /// interference cannot be left out, or whose explicit states P holds a tone between, are one group, their jumps one
+    /// operator.
     pub(crate) groups: Vec<usize>,
     /// H0 less the outside forms at the focus: its ground block, and its excited block with −(i/2)D.
     base_ground: Mat,
@@ -781,15 +791,22 @@ impl Fold {
             rows.extend(centred);
             blocks.push(Block { offset, value, explicit: mine, rows, solved, sources, kept, omitted });
         }
-        // The coherence groups (module documentation, # Tones): blocks joined by a tone between their explicit states.
+        // The coherence groups (module documentation, # Tones): blocks joined by a tone between their explicit states, and
+        // blocks whose landings' interference cannot be left out (`interfering`).
         let mut groups: Vec<usize> = (0..blocks.len()).collect();
+        let join = |groups: &mut Vec<usize>, i: usize, j: usize| {
+            let (gi, gj) = (groups[i], groups[j]);
+            let (low, high) = (gi.min(gj), gi.max(gj));
+            groups.iter_mut().filter(|g| **g == high).for_each(|g| *g = low);
+        };
         let block_of = |p: usize| blocks.iter().position(|b| b.explicit.contains(&p));
         for x in (0..n * n).filter(|&x| turning[x] && x / n >= ng && x % n >= ng) {
             if let (Some(i), Some(j)) = (block_of(x / n), block_of(x % n)) {
-                let (gi, gj) = (groups[i], groups[j]);
-                let (low, high) = (gi.min(gj), gi.max(gj));
-                groups.iter_mut().filter(|g| **g == high).for_each(|g| *g = low);
+                join(&mut groups, i, j);
             }
+        }
+        for (i, j) in Fold::interfering(request, choice, &components, &axes, ground, &explicit, &blocks)? {
+            join(&mut groups, i, j);
         }
         // The outside forms' entries that are not zero, of the states the fold uses (every ground state; the excited states a
         // block solves or a place holds) and of the others.
@@ -838,6 +855,54 @@ impl Fold {
             excited_level,
             levels,
         })
+    }
+
+    /// The pairs of blocks i < j whose landings' interference cannot be left out (module documentation, # Tones): landing
+    /// states s, s′ of one landing set (`Fold::sets`) at whose residual r = (o_i − θ_s) − (o_j − θ_s′) the bare landing
+    /// amplitudes' product a = A_i(s)A_j(s′) cannot be folded, `unfoldable(a/|r|)` -- the one reading of a coupling
+    /// (`Choice::of`, `turning`), r exact in the frames' arithmetic. A block's landing amplitude on s at the peak light, as
+    /// `Choice::of` reads a coupling: A_o(s)² = Σ_q (Σ_x |C_q[s, x]| e_o(x))², e_o(x) = Σ_(p, c) Σ_l |X_l[x, p]| /
+    /// |E_p + ν_c − E_x + iΓ_x/2| over its sources (place p, component c), an explicit state's own row one.
+    fn interfering(request: &Request, choice: &Choice, components: &[Component], axes: &Axes, ground: &[usize], explicit: &[usize], blocks: &[Block]) -> Result<Vec<(usize, usize)>, String> {
+        let share = crate::model::elim::share();
+        let d = decay(request);
+        let energy = |s: usize| request.hamiltonian[(s, s)].re;
+        let ng = ground.len();
+        let landing: Vec<[f64; GROUND]> = blocks
+            .iter()
+            .map(|b| {
+                let mut e = [0.0; EXCITED];
+                for &(p, c) in &b.sources {
+                    let (s, comp) = (ground[p], &components[c]);
+                    for (x, ex) in e.iter_mut().enumerate() {
+                        let v: f64 = comp.couplings.iter().map(|m| m[(x, s)].abs()).sum();
+                        if v > 0.0 {
+                            *ex += v / C64::new(energy(s) + comp.nu - energy(GROUND + x), 0.5 * d[(x, x)].re).abs();
+                        }
+                    }
+                }
+                for &p in &b.explicit {
+                    e[explicit[p - ng]] = 1.0;
+                }
+                std::array::from_fn(|s| (0..3).map(|q| (0..EXCITED).map(|x| request.emission[q][(s, GROUND + x)].abs() * e[x]).sum::<f64>().powi(2)).sum::<f64>().sqrt())
+            })
+            .collect();
+        // Per block and landing state its photon's frequency in the landing frames, o − θ_s, exactly.
+        let photons: Vec<Vec<Beat>> = blocks.iter().map(|b| choice.frames.iter().map(|theta| b.offset.plus(-1, theta)).collect()).collect();
+        let sets = Fold::sets(request, choice)?;
+        let mut out = vec![];
+        for i in 0..blocks.len() {
+            for j in i + 1..blocks.len() {
+                let interfere = |s: usize, t: usize| {
+                    let a = landing[i][s] * landing[j][t];
+                    a > 0.0 && unfoldable(a / axes.omega(&photons[i][s].plus(-1, &photons[j][t])).abs(), share)
+                };
+                if sets.iter().any(|set| set.iter().any(|&s| set.iter().any(|&t| interfere(s, t)))) {
+                    out.push((i, j));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// n, P's states.
