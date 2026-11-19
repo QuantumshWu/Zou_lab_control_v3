@@ -77,7 +77,7 @@ pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigm
     let batch: Vec<FitCell> = (0..cells).map(|cell| FitCell {
         data: CellData::Points { coordinates: vec![coordinates.clone()], observations: Some(row(&observations, points, cell).into()) },
         sigma: sigma.as_ref().map(|sigma| row(sigma, points, cell).into()),
-        sigma_dof: sigma_dof.as_ref().map(|dof| row(dof, points, cell).into()), selected_indices: None, data_revision: 0,
+        sigma_dof: sigma_dof.as_ref().map(|dof| row(dof, points, cell).into()), trials: None, selected_indices: None, data_revision: 0,
         warm_start: warm.as_ref().map(|warm| row(warm, count, cell)).filter(|start| start.iter().all(|value| value.is_finite())),
     }).collect();
     let outcomes = if batch.is_empty() { Vec::new() } else {
@@ -186,7 +186,7 @@ mod tests {
         // The answer is the engine's own, cell for cell.
         let shared: Arc<[f64]> = x.clone().into();
         let direct: Vec<FitCell> = y.chunks(points).map(|row| FitCell { data: CellData::Points { coordinates: vec![shared.clone()], observations: Some(row.to_vec().into()) },
-            sigma: None, sigma_dof: None, selected_indices: None, data_revision: 0, warm_start: None }).collect();
+            sigma: None, sigma_dof: None, trials: None, selected_indices: None, data_revision: 0, warm_start: None }).collect();
         let model = engine.registry.get("damped_sine").unwrap();
         let outcomes = engine.fit_batch(&model, &direct, &FitRequest::default()).unwrap();
         for (cell, outcome) in outcomes.iter().enumerate() {

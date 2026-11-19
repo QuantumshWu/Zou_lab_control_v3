@@ -42,6 +42,11 @@ pub struct FitCell {
     /// known otherwise. With any finite one (and the linear loss) the fit
     /// is the Student-t likelihood's (`student_dof`).
     pub sigma_dof: Option<Arc<[f64]>>,
+    /// The Bernoulli trials behind each observation: an observation with
+    /// trials `n` is the proportion `k / n` of `n` independent trials (the
+    /// MEAN of boolean samples) and is fitted by the binomial likelihood.
+    /// A cell with trials carries no sigma.
+    pub trials: Option<Arc<[f64]>>,
     pub selected_indices: Option<Arc<[i64]>>,
     pub data_revision: i64,
     /// A previous solution, one value per parameter.
@@ -54,13 +59,14 @@ impl FitCell {
             data: CellData::Points { coordinates: coordinates.into_iter().map(Into::into).collect(), observations: Some(observations.into()) },
             sigma: None,
             sigma_dof: None,
+            trials: None,
             selected_indices: None,
             data_revision: 0,
             warm_start: None,
         }
     }
     pub fn image(input: RegularImageFitInput) -> Self {
-        FitCell { data: CellData::Image(Arc::new(input)), sigma: None, sigma_dof: None, selected_indices: None, data_revision: 0, warm_start: None }
+        FitCell { data: CellData::Image(Arc::new(input)), sigma: None, sigma_dof: None, trials: None, selected_indices: None, data_revision: 0, warm_start: None }
     }
 }
 
