@@ -27,7 +27,8 @@ pub mod trf;
 pub use engine::{CellData, CellOutcome, FitCell, FitEngine, FitRequest};
 pub use evaluation::{evaluate_batch, evaluate_single, EvaluatedTargets, TargetCell};
 pub use radial::{RegularImageFitInput, Samples};
-pub use result::{Bound, Bounds, FitError, FitOptions, FitParameterDisplay, FitResult, ParamValues, SolveDiagnostics};
+pub use models::Likelihood;
+pub use result::{Bound, Bounds, ErrorBasis, FitError, FitOptions, FitParameterDisplay, FitResult, ParamValues, SolveDiagnostics};
 pub use spec::{builtin_fit_models, default_fit_registry, FitModelRegistry, FitModelSpec, FitParameterSpec, FitTarget, ParameterDomain, UnitRelation};
 
 /// `evidence.DECISIVE_BIC_GAIN`: Kass and Raftery's "very strong".

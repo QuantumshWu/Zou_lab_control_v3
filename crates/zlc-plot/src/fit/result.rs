@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use super::models::Likelihood;
 use super::num::str_repr;
 use super::spec::FitModelSpec;
 
@@ -246,6 +247,34 @@ impl std::fmt::Debug for ObservationArrays {
     }
 }
 
+/// What a fit's standard errors are.  An error with finite `dof` is itself
+/// estimated: its 68 % interval is `t_dof` wide, not normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorBasis {
+    /// The inverse Fisher information of a likelihood whose model fixes the
+    /// noise (Poisson, binomial): no free scale, infinite degrees of freedom.
+    Likelihood(Likelihood),
+    /// The Student-t M-estimator sandwich (means of few repeats), `dof = n - p`.
+    Sandwich { dof: i64 },
+    /// The Gaussian inverse information scaled by the reduced chi-square of
+    /// the residuals, `dof = n - p`.
+    Residuals { dof: i64 },
+}
+
+impl ErrorBasis {
+    /// The basis of a fit of `points` observations with `free` parameters
+    /// by `likelihood` (`student`: Gaussian points with the Student-t
+    /// likelihood of their estimated sigmas).
+    pub fn of(likelihood: Likelihood, student: bool, points: usize, free: usize) -> Self {
+        let dof = points as i64 - free as i64;
+        match likelihood {
+            Likelihood::Gaussian if student => ErrorBasis::Sandwich { dof },
+            Likelihood::Gaussian => ErrorBasis::Residuals { dof },
+            counting => ErrorBasis::Likelihood(counting),
+        }
+    }
+}
+
 /// An immutable fit output (`FitResult`).
 #[derive(Debug, Clone)]
 pub struct FitResult {
@@ -266,6 +295,8 @@ pub struct FitResult {
     pub reduced: bool,
     pub evidence: f64,
     pub diagnostics: Option<SolveDiagnostics>,
+    /// What `standard_errors` are.
+    pub error_basis: ErrorBasis,
 }
 
 fn allclose(a: f64, b: f64, rtol: f64, atol: f64) -> bool {
@@ -290,6 +321,7 @@ impl FitResult {
         reduced_chi_square: f64,
         covariance_valid: bool,
         fixed_parameter_names: Vec<String>,
+        error_basis: ErrorBasis,
     ) -> Result<Self, FitError> {
         let count = model.parameters.len();
         if parameter_values.len() != count || standard_errors.len() != count {
@@ -361,7 +393,24 @@ impl FitResult {
             reduced: false,
             evidence: f64::NAN,
             diagnostics: None,
+            error_basis,
         })
+    }
+
+    /// The fit annotation's line saying what the `± 1σ` errors are (empty
+    /// when the fit has none): the likelihood's, the Student-t sandwich's or
+    /// the residuals' scale, with the degrees of freedom of an estimated one.
+    pub fn error_basis_text(&self) -> String {
+        if !(self.success && self.covariance_valid) {
+            return String::new();
+        }
+        match self.error_basis {
+            ErrorBasis::Likelihood(likelihood) => format!(r"± 1$\sigma$: {} likelihood", likelihood.name()),
+            ErrorBasis::Sandwich { dof } => format!(r"± 1$\sigma$: Student-t, $\nu$ = {dof}"),
+            ErrorBasis::Residuals { dof } => {
+                format!(r"± 1$\sigma$: scaled by $\chi^2_r$ = {}, $\nu$ = {dof}", crate::pyfmt::format_g(self.reduced_chi_square, 3))
+            }
+        }
     }
 
     pub fn eager(fitted: Vec<f64>, residuals: Vec<f64>, indices: Vec<i64>) -> ObservationArrays {

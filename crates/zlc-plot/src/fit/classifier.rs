@@ -171,6 +171,7 @@ pub fn authored_classifier_result(
         reduced,
         false,
         Vec::new(),
+        super::result::ErrorBasis::of(super::models::Likelihood::Gaussian, false, observed.len(), count),
     )?;
     result.with_parameter_units(units)
 }

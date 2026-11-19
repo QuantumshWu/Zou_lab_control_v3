@@ -5,7 +5,7 @@
 use rayon::prelude::*;
 use super::identify;
 use super::linalg::{self, LinAlgError};
-use super::models::{point_terms, rho, student_score, student_terms, COUNT_FLOOR};
+use super::models::{information_scale, point_terms, rho, student_score, student_terms, Likelihood};
 use super::num::{div, nextafter, pmax, pmin, KernelError, Zr, EPSILON};
 
 pub const RSS_TIE_RELATIVE: f64 = 1.0e-10;
@@ -1112,7 +1112,8 @@ impl From<LinAlgError> for FinalizeError {
 
 /// `_finalize_one` for a point-layout cell.  `value_jacobian(selected,
 /// with_jacobian)` evaluates the model at the selected (valid) points:
-/// values and a row-major `selected x parameters` Jacobian.
+/// values and a row-major `selected x parameters` Jacobian.  `trials`: per
+/// point, the Bernoulli trials of binomial observations (else empty).
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_one(
     value_jacobian: &dyn Fn(bool) -> Zr<(Vec<f64>, Vec<f64>)>,
@@ -1122,7 +1123,8 @@ pub fn finalize_one(
     free_indices: &[usize],
     weights: &[f64],
     use_weights: bool,
-    poisson: bool,
+    likelihood: Likelihood,
+    trials: &[f64],
     loss_code: i64,
     dof: &[f64],
 ) -> Result<Finalized, FinalizeError> {
@@ -1171,10 +1173,11 @@ pub fn finalize_one(
         }
         selected += 1;
         let weight = if use_weights { weights[point] } else { 1.0 };
-        let (raw, squared, point_finite, robust_scale) = if dof.is_empty() {
-            let (raw, squared, _cost, _gf, _if, point_finite) = point_terms(fitted[point], observations[point], poisson, weight, use_weights, loss_code)?;
+        let point_trials = trials.get(point).copied().unwrap_or(f64::NAN);
+        let (squared, point_finite, robust_scale) = if dof.is_empty() {
+            let (raw, squared, _cost, _gf, _if, point_finite) = point_terms(fitted[point], observations[point], likelihood, point_trials, weight, use_weights, loss_code)?;
             let (_rho0, rho1, rho2) = rho(raw * raw, loss_code)?;
-            (raw, squared, point_finite, pmax(rho1 + 2.0 * rho2 * raw * raw, EPSILON).sqrt())
+            (squared, point_finite, pmax(rho1 + 2.0 * rho2 * raw * raw, EPSILON).sqrt())
         } else {
             // The Student-t point: its score and slope feed the sandwich.
             let (raw, squared, _cost, _gf, _if, point_finite) = student_terms(fitted[point], observations[point], weight, dof[point]);
@@ -1182,24 +1185,14 @@ pub fn finalize_one(
             let rounding = student_score(EPSILON * fitted[point].abs() * weight, dof[point]).0;
             scores.push(if score.abs() < rounding { rounding } else { score });
             slopes.push(slope);
-            (raw, squared, point_finite, 1.0)
+            (squared, point_finite, 1.0)
         };
         raw_rss += squared;
         let rounding = EPSILON * fitted[point].abs() * weight;
         rounding_rss += rounding * rounding;
-        let residual_scale = if poisson {
-            let expected = pmax(fitted[point], COUNT_FLOOR);
-            let absolute = raw.abs();
-            if absolute > COUNT_FLOOR {
-                div((expected - observations[point]).abs(), expected * pmax(absolute, COUNT_FLOOR))?
-            } else {
-                div(1.0, expected.sqrt())?
-            }
-        } else if use_weights {
-            weights[point]
-        } else {
-            1.0
-        };
+        // The point's row of the Fisher information (its sigma's weight for a
+        // Gaussian point; the model's own noise for counts and proportions).
+        let residual_scale = information_scale(likelihood, fitted[point], point_trials, weight)?;
         if !point_finite {
             finite = false;
         }
@@ -1271,8 +1264,12 @@ pub fn finalize_one(
         let triangular = linalg::qr_r(selected, free_count, &scaled_jacobian)?;
         match identify::from_factor(free_count, &triangular, selected.max(free_count))? {
             Some(identified) => {
-                let floor = if poisson { 0.0 } else { rounding_rss / (selected as i64 - free_count as i64).max(1) as f64 };
-                free_covariance = identified.covariance(pmax(reduced, floor));
+                // Poisson and binomial: the model fixes the noise, the
+                // covariance is the inverse Fisher information.  Gaussian:
+                // the residuals set the unknown scale, floored at the
+                // arithmetic's own scatter.
+                let factor = if likelihood.fixes_noise() { 1.0 } else { pmax(reduced, rounding_rss / (selected as i64 - free_count as i64).max(1) as f64) };
+                free_covariance = identified.covariance(factor);
                 defined = identified.defined;
             }
             None => covariance_valid = false,
