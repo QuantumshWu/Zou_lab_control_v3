@@ -18,12 +18,16 @@ plans to the source's schemas alone, so the editor's preview and Start's
 admission are the evaluation's own answer before any data exists.  The native scientific engine
 does the math; nothing here runs operator-written code.
 
-A statistic can reduce one of its axes in consecutive groups (``by`` +
-``every``) instead of whole, and ``fit`` is the statistic that eats one axis
-and yields a model's parameters, one published signal per parameter.  A group
-over an axis of the Cell domain closes inside one evaluation and is array work
-here; one over a Repeat or Point axis spans publications, and what stands
-between them is :mod:`.groups`.  Its plans are these.
+An axis is read in BLOCKS, each evaluated once all of it arrived.  A
+statistic reduces one of its axes in consecutive groups (``by`` + ``every``)
+or whole; ``fit`` is the statistic that eats one axis -- whole, or in
+consecutive blocks of it -- and yields a model's parameters, one published
+signal per parameter.  A group over an axis of the Cell domain closes inside
+one evaluation and is array work here; one over a Repeat or Point axis spans
+publications, as does the whole of an axis a finite run's publications carry
+one part at a time, and a pick of such an axis keeps each publication's rows
+inside its labels for a block to reduce.  What stands between publications is
+:mod:`.groups`.  Its plans are these.
 """
 from __future__ import annotations
 
@@ -124,7 +128,8 @@ VARIABLE_COLUMNS = (
                                "fit reads exactly one, its x"),
     AuthoringField("by", "text", "By", "",
                    description="one of the over axes, reduced in consecutive groups of every coordinates "
-                               "instead of whole: it stays an axis, one coordinate per group"),
+                               "instead of whole: it stays an axis, one coordinate per group; a fit's x, "
+                               "fitted in consecutive blocks"),
     AuthoringField("every", "int", "Every", 0, minimum=0,
                    description="how many coordinates of by make one group; 0 reduces by whole"),
     AuthoringField("model", "text", "Model", "",
@@ -469,17 +474,30 @@ def _masked(value, mask, negate, texts):
     return Operand(schema, value.values, kept["valid"], value.sigma, value.dof, value.trials)
 
 
-def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
+class RunAxes(dict):
+    """The axes publications carry one part at a time (:func:`changing_axes`),
+    each with the labels the latest one carries; ``finite`` when they are parts
+    of a run's known whole (a finite run), not a monitor's endless shots.
+
+    Over a finite run such an axis is read in blocks, each evaluated once all
+    of it arrived: a statistic over it without groups is one block, the whole
+    axis; a pick of it keeps the publications' rows inside its labels.  A
+    monitor's shots have no whole: there they are grouped (by shot, every N)."""
+
+    finite = False
+
+
+def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> RunAxes:
     """The Repeat/Point axes of ``schema`` -- what typing reads -- whose
     labels change from one publication to the next (a finite run's shots
     and scan points, a monitor's shots), each with the labels the latest
-    publication ``event`` carries.  Typing refuses a pick on them.
+    publication ``event`` carries.
     """
 
+    changing = RunAxes()
     if event is None:
-        return {}
-    whole = schema != event
-    changing = {}
+        return changing
+    whole = changing.finite = schema != event
     for d in (0, 1):
         carried = {axis.axis_id: axis for axis in _domains(event)[d].axes}
         for axis in _primary(_domains(schema)[d]):
@@ -488,6 +506,22 @@ def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
                     other != axis and _axis_labels(other)[0] != _axis_labels(axis)[0]):
                 changing[axis.axis_id] = () if other is None else _axis_labels(other)[0]
     return changing
+
+
+def bundle_axes(pairs) -> RunAxes:
+    """:func:`changing_axes` of a bundle's members, ``(schema, event)`` each."""
+
+    changing = RunAxes()
+    for schema, event in pairs:
+        own = changing_axes(schema, event)
+        changing.update(own)
+        changing.finite = changing.finite or own.finite
+    return changing
+
+
+def _moving_axis(axes, changing):
+    """The first of a pick's axes that publications carry one part at a time, or None."""
+    return next((axis for axis in axes if axis.axis_id in changing), None)
 
 
 def _pick(item, term, evaluating, changing):
@@ -500,16 +534,26 @@ def _pick(item, term, evaluating, changing):
     fixed when the pick was written; a coordinate two of them name is
     kept once.  How many labels are written, not how many coordinates
     they reach, decides whether the axis stays, so a pick keeps its shape
-    when the axis changes length."""
+    when the axis changes length.
+
+    Over an axis a finite run's publications carry one part at a time, a
+    pick keeps each publication's rows inside its labels (none: an
+    :class:`EmptySelection`), so only what reduces those rows in blocks may
+    read it (:func:`typed_variables`)."""
     schema = _schema_of(item)
     what, at, labels = term["of"], term["at"], term["labels"]
     d, axes = _pick_target(schema, at, what)
-    moving = next((axis for axis in axes if axis.axis_id in changing), None) if not evaluating else None
+    moving = _moving_axis(axes, changing) if not evaluating else None
     if moving is not None:
-        carried = changing[moving.axis_id]
-        raise ValueError(f"{moving.name} changes with each publication"
-                         + (f" (the latest carries {_listed(carried)})" if carried else "")
-                         + f"; reduce over {moving.name} with a statistic, or plot it in a panel")
+        if not getattr(changing, "finite", False):
+            carried = changing[moving.axis_id]
+            raise ValueError(f"{moving.name} changes with each publication"
+                             + (f" (the latest carries {_listed(carried)})" if carried else "")
+                             + f"; reduce over {moving.name} with a statistic, or plot it in a panel")
+        end = next((label for label in labels if label in (FIRST, LAST)), None)
+        if end is not None:
+            raise ValueError(f"{moving.name} arrives one publication at a time, so its {end} is not known "
+                             f"while it runs; write the {moving.name} label")
     domain_pick = at in DOMAINS
     known, positions = _domain_rows(_domains(schema)[d], d < 2) if domain_pick else _axis_labels(axes[0])
     word = "value" if domain_pick else "label"
@@ -522,23 +566,23 @@ def _pick(item, term, evaluating, changing):
     if own is not None:
         raise ValueError(f"{at} has a {word} {own!r} of its own; a pick cannot tell it from its {own} {word}")
     ends = {FIRST: 0, LAST: len(known) - 1} if known else {}
-    missing = next((label for label in labels if label not in ends and label not in positions), None)
-    if missing is not None:
-        if evaluating and d < 2:
-            # Typing read the whole run's geometry; this one event of it
-            # does not carry every scan point or shot.
-            raise ValueError(f"this publication carries no {at} {missing!r}; "
-                             f"{at} {word}s here: {_listed(known)}")
-        raise ValueError(f"{what} has no {at} {missing!r}; {at} {word}s: {_listed(known)}")
-    chosen = tuple(sorted({ends[label] if label in ends else positions[label] for label in labels}))
+    missing = tuple(label for label in labels if label not in ends and label not in positions)
+    present = tuple(label for label in labels if label not in missing)
+    if missing and not (evaluating and d < 2):
+        raise ValueError(f"{what} has no {at} {missing[0]!r}; {at} {word}s: {_listed(known)}")
+    if not present:
+        # Typing read the whole run's labels; this publication is part of it.
+        raise EmptySelection(f"this publication carries no {at} {_listed(labels)}")
+    chosen = tuple(sorted({ends[label] if label in ends else positions[label] for label in present}))
     try:
         if domain_pick:
             picked, take = _domain_plan(schema, d, axes, chosen, len(labels) == 1)
         else:
             picked, take = _isel_plan(schema, d, axes[0], chosen, len(labels) == 1)
     except EmptySelection:
-        where = "this publication carries" if evaluating else f"{what} stores"
-        raise ValueError(f"{where} no row at {at} {labels[0]!r}") from None
+        if evaluating and d < 2:
+            raise EmptySelection(f"this publication carries no row at {at} {_listed(labels)}") from None
+        raise ValueError(f"{what} stores no row at {at} {labels[0]!r}") from None
     if not isinstance(item, Operand):
         return picked
     planes = native_ops.selected((item.values, item.valid, item.sigma, item.dof, item.trials), take)
@@ -564,17 +608,23 @@ def _statistic(item, operation, names, by="", every=0, errors=False):
 class FitTarget:
     """What a fit over one axis of a value's schema is: that axis' domain and
     x, where each stored row lands (``rows``: output row and x position of a
-    Repeat/Point axis; None for a Cell axis, by ``position``) and the schema
-    with the axis gone."""
+    Repeat/Point axis; None for a Cell axis, by ``position``), the block of
+    each x position (``blocks``: all 0 for one fit over the whole axis) and
+    the output schema -- the axis gone, or in blocks the axis kept with one
+    coordinate per block, the mean of its x (the reduction plan's groups).
+    ``grouped`` is, for a Repeat/Point axis in blocks, each output row's
+    (row without x, block)."""
 
     domain: int
     position: int
     x: np.ndarray
     rows: tuple | None
     schema: DatasetSchema
+    blocks: np.ndarray
+    grouped: np.ndarray | None = None
 
 
-def fit_target(schema, names) -> FitTarget:
+def fit_target(schema, names, by="", every=0) -> FitTarget:
     if len(names) != 1:
         raise ValueError("fit reads exactly one axis as its x")
     if _is_boolean(schema):
@@ -583,14 +633,28 @@ def fit_target(schema, names) -> FitTarget:
     x = np.asarray(axis)
     if axis.coordinate_labels is not None or x.dtype.kind not in "iuf":
         raise ValueError(f"{axis.name} has no numeric coordinates to fit over")
+    if every and by != axis.name:
+        raise ValueError(f"a fit's blocks are of its own x; group by {axis.name}")
     base, plans = _reduce_plan(schema, "mean", names)
+    blocks = np.arange(x.size) // every if every else np.zeros(x.size, np.int64)
+    output, grouping = _reduce_plan(schema, "mean", names, by, every) if every else (base, plans)
     if d == 2:
-        return FitTarget(d, _domains(schema)[2].axes.index(axis) + 2, x.astype(np.float64), None, base)
+        return FitTarget(d, _domains(schema)[2].axes.index(axis) + 2, x.astype(np.float64), None, output, blocks)
     codes = np.asarray(_domains(schema)[d].codes(axis.axis_id))
     inverse = next((plan[2] for plan in plans if plan[0] == "mapped"), np.zeros(codes.size, np.int64))
     if np.unique(inverse * axis.size + codes).size != codes.size:
         raise ValueError(f"{axis.name} repeats a coordinate; reduce the repeats first")
-    return FitTarget(d, d, x.astype(np.float64), (inverse, codes, _domains(base)[d].size), base)
+    grouped = None
+    if every:
+        rows = next(plan[2] for plan in grouping if plan[0] == "mapped")
+        grouped = np.zeros((_domains(output)[d].size, 2), np.int64)
+        grouped[rows] = np.column_stack((inverse, blocks[codes]))
+    return FitTarget(d, d, x.astype(np.float64), (inverse, codes, _domains(base)[d].size), output, blocks, grouped)
+
+
+def row_fit_target(schema, row) -> FitTarget:
+    """A variable's fit over ``schema``: its x, whole or in its blocks."""
+    return fit_target(schema, row["over"], row["by"], row["every"])
 
 
 def _fit_tensor(plane, target):
@@ -604,32 +668,60 @@ def _fit_tensor(plane, target):
     return tensor
 
 
+def _fit_stored(plane, target, lead, tail=()):
+    """A plane of one answer per cell and block, ``(*lead, blocks, *tail)``,
+    as ``target.schema``'s physical shape with ``tail`` after it."""
+    plane = np.asarray(plane)
+    where = len(lead)
+    if target.rows is None:
+        # A Cell axis' blocks stand where x stood (one block: x is gone).
+        return np.moveaxis(plane, where, target.position).reshape(*target.schema.physical_shape, *tail)
+    if target.grouped is None:
+        plane = plane.reshape(*lead, *tail)
+    else:
+        blocks = int(target.blocks.max()) + 1
+        flat = plane.reshape(*lead[:-1], lead[-1] * blocks, *tail)
+        plane = np.take(flat, target.grouped[:, 0] * blocks + target.grouped[:, 1], axis=where - 1)
+    plane = np.moveaxis(plane, where - 1, target.domain)
+    return plane.reshape(*target.schema.physical_shape, *tail)
+
+
 def fit_cells(item, target, model, fit, warm=None):
-    """One independent fit per remaining cell of ``item``, as one batch:
-    (values, errors, success), each ``target.schema``'s physical shape, values
-    and errors with the parameters last.  ``warm`` is one row per cell."""
+    """One independent fit per remaining cell of ``item`` and block of its x,
+    one batch per block: (values, errors, success), each ``target.schema``'s
+    physical shape, values and errors with the parameters last.  ``warm`` is
+    one row per output cell, in that order."""
     y = _fit_tensor(np.where(item.valid, item.values, np.nan), target)
     # A proportion is fitted by its trials (the binomial likelihood), a mean of
     # reals by its sigma and that sigma's degrees of freedom (docs/UNCERTAINTY.md).
     trials = None if item.trials is None else _fit_tensor(np.where(item.valid, item.trials, np.nan), target)
     sigma = None if item.sigma is None or trials is not None else _fit_tensor(np.where(item.valid, item.sigma, np.nan), target)
     dof = None if item.dof is None or trials is not None else _fit_tensor(np.where(item.valid, item.dof, np.inf), target)
-    lead, count = y.shape[:-1], target.x.size
+    lead = y.shape[:-1]
+    cells, blocks = int(np.prod(lead, dtype=np.int64)), int(target.blocks.max()) + 1
+    if warm is not None:
+        # The output cells' rows, as each (cell, block) stands among them.
+        order = _fit_stored(np.arange(cells * blocks).reshape(*lead, blocks), target, lead).reshape(-1)
+        rows = np.full((cells * blocks, np.asarray(warm).shape[-1]), np.nan)
+        rows[order] = np.asarray(warm).reshape(order.size, -1)
+        warm = rows.reshape(cells, blocks, -1)
+    answers = []
+    for block in range(blocks):
+        columns = target.blocks == block
+        count = int(columns.sum())
 
-    def rows(plane):
-        return None if plane is None else plane.reshape(-1, count)
+        def part(plane):
+            return None if plane is None else plane[..., columns].reshape(-1, count)
 
-    answer = fit(model, target.x, y.reshape(-1, count), sigma=rows(sigma), warm=warm, sigma_dof=rows(dof), trials=rows(trials))
+        answers.append(fit(model, target.x[columns], part(y), sigma=part(sigma),
+                           warm=None if warm is None else warm[:, block], sigma_dof=part(dof), trials=part(trials)))
+    width = np.asarray(answers[0].values).shape[-1]
 
-    def stored(plane, tail=()):
-        plane = np.asarray(plane).reshape(*lead, *tail)
-        if target.rows is not None:
-            plane = np.moveaxis(plane, len(lead) - 1, target.domain)
-        return plane.reshape(*target.schema.physical_shape, *tail)
+    def joined(field, tail=()):
+        planes = [np.asarray(getattr(answer, field)).reshape(*lead, *tail) for answer in answers]
+        return _fit_stored(np.stack(planes, axis=len(lead)), target, lead, tail)
 
-    width = np.asarray(answer.values).shape[-1]
-    return (stored(answer.values, (width,)), stored(answer.errors, (width,)),
-            stored(np.asarray(answer.success, dtype=bool)))
+    return joined("values", (width,)), joined("errors", (width,)), joined("success").astype(bool)
 
 
 def fit_schemas(schema, target, row) -> dict[str, DatasetSchema]:
@@ -652,7 +744,7 @@ def fit_operands(schemas, values, errors, success) -> dict[str, "Operand"]:
 
 def _fit(item, row, fit):
     """``item`` fitted, by the row's model, in every remaining cell: by parameter name."""
-    target = fit_target(_schema_of(item), row["over"])
+    target = row_fit_target(_schema_of(item), row)
     if _model_parameters(row["model"]) is None:
         known = ", ".join(fit_models()) or "none yet"
         raise ValueError(f"no fit model {row['model']!r}; models: {known}")
@@ -849,10 +941,9 @@ def _formula_problem(row, closing=None) -> DeriveError | None:
         return DeriveError(name, "statistic", "choose the axes it reduces over")
     if row["over"] and not row["statistic"]:
         return DeriveError(name, "statistic", "choose the statistic")
-    if row["statistic"] == "fit":
-        problem = ("choose a model" if not row["model"]
-                   else "a fit takes no groups; group the value it reads" if row["by"] or row["every"] else None)
-    elif row["model"]:
+    if row["statistic"] == "fit" and not row["model"]:
+        problem = "choose a model"
+    elif row["statistic"] != "fit" and row["model"]:
         problem = "a model belongs to statistic fit"
     elif row["every"] < 0:
         problem = "a group has at least one coordinate"
@@ -875,8 +966,11 @@ def formula(row, read, evaluating, trace=None, changing=None):
     than reading it left to right, also says how the formula reads.
     ``trace``, while typing, receives what the editor shows: each term's
     operand and left side, the unit a number there takes, and the value the
-    statistic reduces.  ``changing`` (typing) holds the axes no pick may
-    name (:func:`changing_axes`)."""
+    statistic reduces, and ``rows``: the axis a pick keeps a finite run's
+    publications' rows of.  ``changing`` (typing) holds the axes
+    publications carry one part at a time (:func:`changing_axes`).  An
+    evaluation over a publication with no row a pick keeps raises
+    :class:`EmptySelection`: there is nothing of this variable in it."""
     name, terms = row["name"], row["terms"]
     tree = _tree(terms)
 
@@ -894,7 +988,16 @@ def formula(row, read, evaluating, trace=None, changing=None):
                 value = read(term["of"])
                 if trace is not None:
                     trace["terms"][node]["operand"] = value
-                return _pick(value, term, evaluating, changing or {}) if term["at"] else value
+                if not term["at"]:
+                    return value
+                picked = _pick(value, term, evaluating, changing or {})
+                if trace is not None and changing:
+                    moving = _moving_axis(_pick_target(_schema_of(value), term["at"], term["of"])[1], changing)
+                    if moving is not None:
+                        trace["rows"] = trace.get("rows") or moving.name
+                return picked
+            except EmptySelection:
+                raise
             except (ValueError, TypeError) as error:
                 raise stage_error(node, error) from None
         k, op, left_node, right_node = node
@@ -1068,16 +1171,25 @@ def _answering(rows) -> dict[str, int]:
     return first
 
 
-def group_domain(row, schema) -> int | None:
-    """The domain of the axis a row's groups span publications over, or None
-    when it has no such groups (a Cell axis' close inside one evaluation)."""
-    if not row["every"]:
+def group_domain(row, schema, blocks=None) -> int | None:
+    """The domain of the axis a row's blocks span publications over, or None
+    when it has none (a Cell axis' groups close inside one evaluation).
+
+    A statistic's blocks are its groups (``by`` + ``every``) over a Repeat
+    or Point axis; without groups, over an axis in ``blocks`` -- one that
+    publications carry one part at a time -- its one block is the whole
+    axis.  A fit's blocks are of its own x and close with what it reads."""
+    if not row["statistic"] or row["statistic"] == "fit":
         return None
     try:
-        d = _axis(schema, row["by"], "the value", "reduce")[0]
+        if row["every"]:
+            d = _axis(schema, row["by"], "the value", "reduce")[0]
+            return d if d < 2 else None
+        found = [_axis(schema, name, "the value", "reduce") for name in row["over"]]
     except ValueError as error:
         raise DeriveError(row["name"], "statistic", str(error)) from None
-    return d if d < 2 else None
+    spanning = [d for d, axis in found if d < 2 and axis.axis_id in (blocks or {})]
+    return min(spanning) if spanning else None
 
 
 def _refuse_mixed(name, reads, events):
@@ -1091,35 +1203,40 @@ def _refuse_mixed(name, reads, events):
                                              "group the input too, or read only one of them")
 
 
-def _clock(row, value, reads, moving, changing):
-    """When a variable has something to give, by the groups in what it reads:
-    ``(domain, axis ids that close, the output's kept Repeat domain of a Point
-    group)`` -- two variables with one clock close together -- or None for
-    every evaluation.
+def _blocks(moving, changing):
+    """The axes a value arrives part by part on: a clock's closing axes, or
+    the axes a finite run's publications carry one part at a time."""
+    if moving is not None:
+        return moving
+    return changing if getattr(changing, "finite", False) else {}
 
-    A variable that groups across publications starts a clock.  Its readers
-    evaluate on what just closed, so they cannot reduce away what closes; a
-    fit, which needs its whole axis at once, cannot take an axis a publication
-    only carries part of."""
-    name = row["name"]
+
+def _clock(row, value, reads, moving, changing):
+    """When a variable has something to give, by the blocks in what it reads
+    and makes: ``(domain, axis ids that close, the output's kept Repeat domain
+    of a Point block)`` -- two variables with one clock close together -- or
+    None for every evaluation.
+
+    A variable whose blocks span publications starts a clock; its readers
+    evaluate on what just closed, and a statistic of theirs over what closes
+    is a block of its own (:func:`group_domain`).  A fit reads its whole x at
+    once, so never an x that arrives part by part."""
     over = tuple(row["over"]) if row["statistic"] else ()
     named = {axis.name: axis for _d, axis in _named_axes(value)}
-    d = group_domain(row, value)
-    if moving is not None:
-        closing = next((item for item in over if item in named and named[item].axis_id in moving
-                        and not (d is not None and item == row["by"])), None)
-        if closing is not None:
-            raise DeriveError(name, "statistic", f"{closing} closes group by group, so it cannot be reduced whole; "
-                                                 f"reduce it by {closing} every N")
-    elif row["statistic"] == "fit" and over and over[0] in named and named[over[0]].axis_id in (changing or {}):
-        raise DeriveError(name, "statistic", f"{over[0]} changes with each publication and a fit needs all of it; "
-                                             "read a variable reduced in groups (by repeat, every N)")
+    partial = moving if moving is not None else (changing or {})
+    if row["statistic"] == "fit" and over and over[0] in named and named[over[0]].axis_id in partial:
+        raise DeriveError(row["name"], "statistic",
+                          f"{over[0]} arrives part by part here and a fit reads all of its x at once; fit a value "
+                          f"that has all of {over[0]} -- reduce the shots first (e.g. mean over repeat)")
+    d = group_domain(row, value, _blocks(moving, changing))
     if d is None:
         return next(iter(reads), None)
     kept = _reduce_plan(value, row["statistic"], row["over"], row["by"], row["every"])[0]
-    grouped = next(axis for axis in _domains(kept)[d].axes if axis.name == row["by"])
-    family = tuple(sorted(axis.axis_id.value for axis in _domains(kept)[d].coordinate_axes(grouped.axis_id)))
-    # A Point group closes per kept Repeat row, so what is kept there is part of when.
+    family = ()
+    if row["every"]:
+        grouped = next(axis for axis in _domains(kept)[d].axes if axis.name == row["by"])
+        family = tuple(sorted(axis.axis_id.value for axis in _domains(kept)[d].coordinate_axes(grouped.axis_id)))
+    # A Point block closes per kept Repeat row, so what is kept there is part of when.
     return d, family, None if d == 0 else _domains(kept)[0]
 
 
@@ -1138,14 +1255,17 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
     (``value.canonical_schema or value.snapshot.block.schema``), each None
     before the source publishes: what each variable reads is checked
     against the names alone, and values are typed once every member has a
-    schema.  ``changing`` holds the axes no pick may name
-    (:func:`changing_axes`).  One dict per variable, in card order:
+    schema.  ``changing`` holds the axes publications carry one part at a
+    time (:func:`changing_axes`).  One dict per variable, in card order:
     ``schema`` and ``error`` (a :class:`DeriveError`), ``live``,
     ``waits_for`` (the variable with a problem it reads), ``reads`` and
     ``read_by`` (variable names), ``grouping`` (``reads …`` when precedence
     groups the formula otherwise than left to right), ``reducible`` (what
     a statistic reduces), ``fit`` (a fit's schema by output name), ``clock``
-    (None, or when the groups it reads or makes close: :func:`_clock`) and
+    (None, or when the blocks it reads or makes close: :func:`_clock`),
+    ``group`` (the domain its own blocks span publications over:
+    :func:`group_domain`), ``rows`` (the axis whose picked rows of a finite
+    run's publications it holds, unreduced, or None) and
     per term ``operand`` (schema before its pick),
     ``left`` (schema left of its operator) and ``number_unit`` (the unit a
     number there takes, None beside × ÷).  Typing stops at a variable's
@@ -1164,7 +1284,7 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
             "read_by": tuple(reader["name"] for reader, reads in zip(rows, edges)
                              if any(other == position for _k, other in reads)),
             "grouping": None if error is not None else _grouping(row["terms"]),
-            "reducible": None, "fit": None, "clock": None,
+            "reducible": None, "fit": None, "clock": None, "group": None, "rows": None,
             "terms": tuple({"operand": None, "left": None, "number_unit": None} for _term in row["terms"]),
         })
     if not members or any(schema is None for schema in inputs.values()):
@@ -1213,9 +1333,20 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
                 value = formula(row, read, False, answer, changing if moving is None else moving)
                 result = statistic_of(row, value)
                 answer["clock"] = _clock(row, value, reads, moving, changing)
+                answer["group"] = group_domain(row, value, _blocks(moving, changing))
+                # Rows a pick kept of a finite run's publications reach a
+                # signal only through a block that reduces them.
+                kept = answer["rows"] or next((answers[other]["rows"] for _k, other in edges[position]
+                                               if answers[other]["rows"]), None)
+                answer["rows"] = None if answer["group"] is not None else kept
+                if answer["rows"] and (row["publish"] or row["statistic"] == "fit"):
+                    raise DeriveError(row["name"], "statistic",
+                                      f"it keeps the {answer['rows']} picked, and a publication carries one "
+                                      f"{answer['rows']} at a time; reduce it over the shots (e.g. mean over "
+                                      f"repeat) and {'fit' if row['statistic'] == 'fit' else 'publish'} that")
                 if row["statistic"] == "fit":
                     answer["fit"] = result
-                    answer["schema"] = typed[position] = fit_target(value, row["over"]).schema
+                    answer["schema"] = typed[position] = row_fit_target(value, row).schema
                 else:
                     answer["schema"] = typed[position] = result
         except DeriveError as error:
@@ -1361,25 +1492,41 @@ def reads_for_fit(rows, edges) -> set[int]:
     return wanted
 
 
+def reader(*sources: Mapping[str, Operand]):
+    """``read(name)`` over these values in turn; a name none holds had
+    nothing in this publication (:class:`EmptySelection`)."""
+
+    def read(name):
+        for source in sources:
+            if name in source:
+                return source[name]
+        raise EmptySelection(f"this publication carries nothing of {name}")
+
+    return read
+
+
 def evaluate(rows: Sequence[Mapping[str, object]], members: Mapping[str, Operand], fit=None) -> dict[str, Operand]:
     """Every LIVE variable over one publication's members, in dependency order.
 
     The rows are a checked draft (:func:`checked_variables`) whose names
     and reads were planned against the bundle (:func:`input_members`).
-    ``fit`` answers a fit statistic (``RunContext.fit``).
+    ``fit`` answers a fit statistic (``RunContext.fit``).  A variable with
+    nothing in this publication -- a pick of a finite run's rows none of
+    which it carries, or what reads one -- is absent from the answer.
     """
     rows = tuple(rows)
     edges, order, _closing, live = _structure(rows, tuple(members))
     weighed = reads_for_fit(rows, edges)
     results = {}
-
-    def read(name):
-        return members[name] if name in members else results[name]
+    read = reader(members, results)
 
     for position in order:
         if position in live:
             row = rows[position]
-            value = statistic_of(row, formula(row, read, True), fit, position in weighed)
+            try:
+                value = statistic_of(row, formula(row, read, True), fit, position in weighed)
+            except EmptySelection:
+                continue
             if row["statistic"] == "fit":
                 results.update(value)
             else:
@@ -1397,9 +1544,9 @@ def error_stage(text: str) -> tuple[str, str, str] | None:
 
 
 __all__ = [
-    "CATEGORIES", "DOMAINS", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS",
+    "CATEGORIES", "DOMAINS", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "RunAxes", "STATISTICS",
     "STATISTICS_FOR", "TERM_COLUMNS", "TERM_DEFAULTS", "VARIABLE_COLUMNS", "axes_text", "axis_groups",
-    "changing_axes", "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate",
+    "bundle_axes", "changing_axes", "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate",
     "fit_models", "frames_kept", "input_members", "pick_values", "published", "term_text", "typed_variables",
     "variable_outputs", "where_notes",
 ]

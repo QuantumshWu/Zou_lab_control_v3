@@ -9,7 +9,7 @@ from zlc_plugin import DatasetInput, DatasetOutputDeclaration, NodeKind, NodeTyp
 
 from .editor import derive_editor_facts
 from .expression import (
-    VARIABLE_COLUMNS, changing_axes, checked_variables, frames_kept, published, typed_variables,
+    VARIABLE_COLUMNS, bundle_axes, checked_variables, frames_kept, published, typed_variables,
 )
 from .processor import DeriveProcessor, declared_outputs
 
@@ -95,14 +95,15 @@ def _admit_source(values: Mapping[str, object], members) -> tuple[str, ...]:
 
     from zlc_data.codec import dataset_schema_from_tree
 
-    inputs, changing = {}, {}
+    inputs, pairs = {}, []
     for member in members:
         name = str(member["name"])
         schema = dataset_schema_from_tree(member["schema"])
         event_tree = member.get("event_schema")
         event = schema if event_tree is None else dataset_schema_from_tree(event_tree)
         inputs[name] = schema
-        changing.update(changing_axes(schema, event))
+        pairs.append((schema, event))
+    changing = bundle_axes(pairs)
     return tuple(
         str(answer["error"]) for answer in typed_variables(_ROWS.draft_values({"variables": values["variables"]})["variables"],
                                                            inputs, changing)
@@ -153,18 +154,24 @@ LOGIC_NODE = NodeType(
         "with two or more axes (Repeat, Point, Cell) and labels are its rows written \"detuning 2 · power "
         "1\"; \"first\" and \"last\" are its first and last coordinate (row) whatever its length, resolved "
         "each evaluation, never a fixed label. One label drops the axis (the domain's axes), several keep "
-        "those coordinates (one two of them name, once). A pick never "
-        "names an axis each publication carries its own part of (a finite run's shots and scan points, a "
-        "monitor's shots): reduce those, or plot them. Every term after the first has op: arithmetic + - "
+        "those coordinates (one two of them name, once). An axis a finite run's publications carry one "
+        "part at a time (its shots and scan points) is read in blocks, each evaluated once all of it "
+        "arrived: a pick of it keeps each publication's rows inside its labels (written labels, not first or "
+        "last), and those rows reach a signal or a fit only through a statistic that reduces them over the "
+        "shots. A monitor's shots are never picked: group them (by shot, every N). Every term after the "
+        "first has op: arithmetic + - "
         "* /, comparison == != > < >= <=, logic and, or, \"and not\", mask where, \"where not\". "
         "Precedence: * / then + - then one comparison then and/\"and not\" then or then where; left to "
         "right within a level; no parentheses (put a group in an internal variable). statistic sum mean "
         "count min max std any all reduces the over axis names (a list, any domains), and with by (one of "
         "them) + every N that axis in consecutive groups of N instead of whole: it stays, one coordinate per "
-        "group, the mean of its members'. Groups over a Repeat or Point axis span publications: what reads "
-        "them evaluates on what just closed, once; a finite source gives a finite output. statistic fit "
-        "+ model reads one numeric over axis as x and publishes <name>_<parameter>, with sigma, per remaining "
-        "cell: a = mean of counts over repeat, Site by repeat every 50; rabi = fit of a over duration. "
+        "group, the mean of its members'. Without groups, a statistic over an axis a finite run's "
+        "publications carry one part at a time is one block, the whole axis. Blocks over a Repeat or Point "
+        "axis span publications: what reads them evaluates on what just closed, once; a finite source gives "
+        "a finite output. statistic fit + model reads one numeric over axis as x -- whole, or with by (that "
+        "axis) + every N in consecutive blocks of N, one fit each at the block's mean x -- and publishes "
+        "<name>_<parameter>, with sigma, per remaining cell: a = mean of counts over repeat, Site; "
+        "rabi = fit of a over duration by duration every 20. "
         "Booleans: sum is "
         "the number true, mean the fraction true, count the valid samples; booleans never mix with "
         "numbers, and two booleans take every comparison, false < true (occupied at frame 0 > occupied "

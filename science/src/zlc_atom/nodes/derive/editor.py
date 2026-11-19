@@ -23,7 +23,7 @@ from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 from .expression import (
     CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, STATISTICS_FOR, TERM_DEFAULTS, VARIABLE_COLUMNS,
-    _answering, axis_groups, changing_axes, describe_schema, fit_models, fit_target, frames_kept, pick_values,
+    _answering, axis_groups, bundle_axes, describe_schema, fit_models, fit_target, frames_kept, pick_values,
     term_text, typed_variables, variable_outputs, where_notes,
 )
 
@@ -169,7 +169,7 @@ def _inputs(bundle: Sequence[Mapping], inputs: Mapping, changing: Mapping) -> li
                 axes.append({"text": f"{axis.name} {axis.size}", "domain": word})
                 labels = axis.labels()
                 shown = ", ".join(labels) if len(labels) <= 8 else f"{labels[0]} … {labels[-1]}"
-                moving = " · changes with each publication" if axis.axis_id in changing else ""
+                moving = " · arrives one publication at a time" if axis.axis_id in changing else ""
                 lines.append(f"{axis.name} — {axis.axis_id.value} · {word} · {axis.role.value} · {shown}{moving}")
         rows.append({"name": name, "kind": f"{value.dtype} · unit {value.value_unit or '1'}", "axes": axes,
                      "tip": "\n".join(lines)})
@@ -238,9 +238,10 @@ def _line(kind, term, info, context) -> dict:
         changing = context["changing"]
         axes.append({"value": _ALL, "label": "All", "group": None, "labels": None})
         for word, _domain, domain_axes in groups:
-            # An axis each publication carries its own part of is never a
-            # pick; a domain is one when every axis of it may be.
-            free = [axis for axis in domain_axes if axis.axis_id not in changing]
+            # A monitor's shots are never a pick (they have no whole); a
+            # finite run's are, its blocks reducing the rows kept.  A domain
+            # is one when every axis of it may be.
+            free = [axis for axis in domain_axes if changing.finite or axis.axis_id not in changing]
             if not free:
                 continue
             if len(domain_axes) > 1 and len(free) == len(domain_axes):
@@ -375,10 +376,12 @@ def _card(row, answer, context) -> dict:
     # axis of the value (v2 _statistic_chosen).
     cells = [] if reducible is None else [axis.name for word, _domain, axes in axis_groups(reducible)
                                          if word == "Cell" for axis in axes]
-    # What picking each statistic writes.  A fit's x is one axis; a group is not offered it.
+    # What picking each statistic writes.  A fit's x is one axis, fitted
+    # whole or in blocks of it.
     reducing = {"row": {"over": list(row["over"]) or cells, "model": ""},
                 "opens_over": not row["over"] and not cells and bool(over)}
-    fitting = {"row": {"over": list(row["over"]) if len(row["over"]) == 1 else [], "by": "", "every": 0},
+    fitting = {"row": {"over": list(row["over"]) if len(row["over"]) == 1 else [],
+                       **({} if len(row["over"]) == 1 and row["by"] in row["over"] else {"by": "", "every": 0})},
                "opens_over": False}
     fit = row["statistic"] == "fit"
     axes = [] if not fit or reducible is None else _fit_axes(reducible)
@@ -388,8 +391,9 @@ def _card(row, answer, context) -> dict:
                      or name == row["statistic"]] for name in STATISTICS],
         "over": list(row["over"]), "over_choices": over,
         "chosen": {name: fitting if name == "fit" else reducing for name in STATISTICS},
-        # Groups: blank every is the whole axis; by is one of the axes reduced.
-        "every_axes": [] if fit or not row["statistic"] else list(row["over"]),
+        # Groups: blank every is the whole axis; by is one of the axes reduced
+        # (a fit's: its x, in blocks of every coordinates).
+        "every_axes": [] if not row["statistic"] else list(row["over"]),
         "by": row["by"], "every": row["every"],
         # A fit: the model's list once fit is chosen, the one x axis it may take
         # (and the one the row names, whatever is said of it), what it publishes.
@@ -435,13 +439,14 @@ def derive_editor_facts(rows: Sequence[Mapping[str, object]], problem: str, bund
     from zlc_data.codec import dataset_schema_from_tree
 
     members = tuple(str(member["name"]) for member in bundle)
-    inputs, changing = {}, {}
+    inputs, pairs = {}, []
     for member in bundle:
         tree, event = member.get("schema"), member.get("event_schema")
         schema = None if tree is None else dataset_schema_from_tree(tree)
         inputs[str(member["name"])] = schema
         if schema is not None and event is not None:
-            changing.update(changing_axes(schema, dataset_schema_from_tree(event)))
+            pairs.append((schema, dataset_schema_from_tree(event)))
+    changing = bundle_axes(pairs)
     frames = None if source is None or len(source[1]) < 2 else tuple(str(label) for label in source[1])
     frame_axis = None if frames is None else source[0]
     if not problem and rows and not any(row["publish"] for row in rows):
