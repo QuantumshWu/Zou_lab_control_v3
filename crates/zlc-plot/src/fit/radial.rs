@@ -9,12 +9,12 @@ use rayon::prelude::*;
 
 use super::blas;
 use super::engine::{Check, CellOutcome, FitRequest};
-use super::models::{point_terms, Kernel, LOSS_LINEAR};
+use super::models::{point_terms, Kernel, Likelihood, LOSS_LINEAR};
 use super::num::{div, fsum, numpy_sum, pmax, Zr, EPSILON};
 pub use super::plane::Samples;
 use super::plane::{centred_context, plane_products, residual_rss};
 use super::prepare::Seeds;
-use super::result::{DeferredArrays, FitError, FitOptions, FitResult, ObservationArrays, SolveDiagnostics};
+use super::result::{DeferredArrays, ErrorBasis, FitError, FitOptions, FitResult, ObservationArrays, SolveDiagnostics};
 use super::scratch::Scratch;
 use super::shared::{authored_seed, fixed_parameter_partition, solver_bounds, too_few_points, warm_seed};
 use super::spec::{FitModelSpec, REGULAR_IMAGE_RADIAL, REGULAR_IMAGE_SEPARABLE};
@@ -614,7 +614,7 @@ impl GeneralPass<'_> {
                 let predicted = amplitude * phi + offset;
                 let observed = s[point].value() - self.reference;
                 let (_raw, squared, local_cost, gradient_factor, information_factor, finite) =
-                    if PLAIN { point_terms(predicted, observed, false, 1.0, false, LOSS_LINEAR)? } else { point_terms(predicted, observed, false, 1.0, false, self.loss_code)? };
+                    if PLAIN { point_terms(predicted, observed, Likelihood::Gaussian, f64::NAN, 1.0, false, LOSS_LINEAR)? } else { point_terms(predicted, observed, Likelihood::Gaussian, f64::NAN, 1.0, false, self.loss_code)? };
                 if !finite || !predicted.is_finite() {
                     return Ok((f64::INFINITY, f64::INFINITY, false));
                 }
@@ -1415,7 +1415,7 @@ fn fit_images(
         let origin = cropped.origin;
         let result_parameters = parameters.clone();
         let deferred = DeferredArrays::new(Box::new(move || result_arrays(kernel, &data, &result_parameters, observation_count, origin)));
-        let outcome = FitResult::new(model.clone(), parameters, errors, covariance, ObservationArrays::Deferred(Arc::new(deferred)), data_revisions[cell] as u64, success, &message, reduced, covariance_valid, fixed_names.clone())
+        let outcome = FitResult::new(model.clone(), parameters, errors, covariance, ObservationArrays::Deferred(Arc::new(deferred)), data_revisions[cell] as u64, success, &message, reduced, covariance_valid, fixed_names.clone(), ErrorBasis::of(Likelihood::Gaussian, false, observation_count, free_indices.len()))
             .map(|result| FitResult { diagnostics: Some(diagnostics), ..result });
         outcomes[cell] = Some(outcome.map_err(|e| e.failure_text()));
     }

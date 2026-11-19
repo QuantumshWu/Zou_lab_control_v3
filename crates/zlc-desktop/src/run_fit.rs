@@ -57,12 +57,21 @@ fn rows(array: &Array, name: &str, cells: usize, columns: usize) -> Result<Vec<f
     reals(array, name)
 }
 
-/// The batch `y` `(cells, n)` over `x` `(n)`, with `sigma` `(cells, n)`, its degrees of
-/// freedom `sigma_dof` as a panel's fit has them, and warm starts `warm`
-/// `(cells, parameters)`, a row with a non-finite value being none for its cell.
-/// One cell's failure is that cell's: only a bad request or `Cancelled` fails the call.
-pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigma: Option<&Array>, sigma_dof: Option<&Array>, warm: Option<&Array>,
-                  cancelled: Option<&(dyn Fn() -> bool + Sync)>) -> Result<FitAnswer, FitError> {
+/// What a batch fits beside `y`: each point's `sigma` and its degrees of freedom
+/// `sigma_dof` as a panel's fit has them, or the Bernoulli `trials` behind each
+/// proportion `y` (fitted by the binomial likelihood), all `(cells, n)`; warm starts
+/// `warm` `(cells, parameters)`, a row with a non-finite value being none for its cell.
+#[derive(Default, Clone, Copy)]
+pub struct FitInputs<'a> {
+    pub sigma: Option<&'a Array>,
+    pub sigma_dof: Option<&'a Array>,
+    pub trials: Option<&'a Array>,
+    pub warm: Option<&'a Array>,
+}
+
+/// The batch `y` `(cells, n)` over `x` `(n)` with its `inputs`.  One cell's failure is
+/// that cell's: only a bad request or `Cancelled` fails the call.
+pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, inputs: FitInputs, cancelled: Option<&(dyn Fn() -> bool + Sync)>) -> Result<FitAnswer, FitError> {
     let model = engine.registry.get(model_id).map_err(|error| FitError::value(error.0))?;
     if !fits_a_series(&model) { return Err(FitError::value(format!("run.fit: {model_id} does not fit a series"))); }
     let [points] = x.shape[..] else { return Err(FitError::value(format!("run.fit: x has shape {:?}, not one axis", x.shape))) };
@@ -70,14 +79,16 @@ pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigm
     let count = model.parameters.len();
     let coordinates: Arc<[f64]> = reals(x, "x")?.into();
     let observations = rows(y, "y", cells, points)?;
-    let sigma = sigma.map(|sigma| rows(sigma, "sigma", cells, points)).transpose()?;
-    let sigma_dof = sigma_dof.map(|dof| rows(dof, "sigma_dof", cells, points)).transpose()?;
-    let warm = warm.map(|warm| rows(warm, "warm", cells, count)).transpose()?;
+    let sigma = inputs.sigma.map(|sigma| rows(sigma, "sigma", cells, points)).transpose()?;
+    let sigma_dof = inputs.sigma_dof.map(|dof| rows(dof, "sigma_dof", cells, points)).transpose()?;
+    let trials = inputs.trials.map(|trials| rows(trials, "trials", cells, points)).transpose()?;
+    let warm = inputs.warm.map(|warm| rows(warm, "warm", cells, count)).transpose()?;
     let row = |values: &[f64], width: usize, cell: usize| values[cell * width..(cell + 1) * width].to_vec();
     let batch: Vec<FitCell> = (0..cells).map(|cell| FitCell {
         data: CellData::Points { coordinates: vec![coordinates.clone()], observations: Some(row(&observations, points, cell).into()) },
         sigma: sigma.as_ref().map(|sigma| row(sigma, points, cell).into()),
-        sigma_dof: sigma_dof.as_ref().map(|dof| row(dof, points, cell).into()), trials: None, selected_indices: None, data_revision: 0,
+        sigma_dof: sigma_dof.as_ref().map(|dof| row(dof, points, cell).into()),
+        trials: trials.as_ref().map(|trials| row(trials, points, cell).into()), selected_indices: None, data_revision: 0,
         warm_start: warm.as_ref().map(|warm| row(warm, count, cell)).filter(|start| start.iter().all(|value| value.is_finite())),
     }).collect();
     let outcomes = if batch.is_empty() { Vec::new() } else {
@@ -112,14 +123,15 @@ pub fn fit_answer(engine: &FitEngine, model_id: &str, x: &Array, y: &Array, sigm
     Ok(answer)
 }
 
-/// One `run.fit` request `{model, x, y, sigma, sigma_dof, warm}`; a run that stops ends its batch.
+/// One `run.fit` request `{model, x, y, sigma, sigma_dof, trials, warm}`; a run that stops ends its batch.
 pub fn answer(params: &Value, lent: &Lent, stop: &AtomicBool) -> Result<Value, CallError> {
     let refused = |message: String| CallError::new(ErrorKind::Refused, message);
     let optional = |field: &str| (!params[field].is_null()).then(|| lent.array(&params[field])).transpose().map_err(refused);
     let (x, y) = (lent.array(&params["x"]).map_err(refused)?, lent.array(&params["y"]).map_err(refused)?);
-    let (sigma, sigma_dof, warm) = (optional("sigma")?, optional("sigma_dof")?, optional("warm")?);
+    let (sigma, sigma_dof, trials, warm) = (optional("sigma")?, optional("sigma_dof")?, optional("trials")?, optional("warm")?);
     let cancelled = || stop.load(Ordering::Relaxed);
-    match fit_answer(&ENGINE, params["model"].as_str().unwrap_or(""), &x, &y, sigma.as_ref(), sigma_dof.as_ref(), warm.as_ref(), Some(&cancelled)) {
+    let inputs = FitInputs { sigma: sigma.as_ref(), sigma_dof: sigma_dof.as_ref(), trials: trials.as_ref(), warm: warm.as_ref() };
+    match fit_answer(&ENGINE, params["model"].as_str().unwrap_or(""), &x, &y, inputs, Some(&cancelled)) {
         Ok(answer) => Ok(answer.to_json()),
         Err(FitError::Cancelled) => Err(CallError::new(ErrorKind::Cancelled, "the run was stopped")),
         Err(error) => Err(refused(error.failure_text())),
@@ -168,7 +180,7 @@ mod tests {
         y[points..2 * points].fill(f64::NAN);
         y[3 * points + 5..4 * points].fill(f64::NAN);
         for hole in [3, 17, 40] { y[4 * points + hole] = f64::NAN; }
-        let answer = fit_answer(&engine, "damped_sine", &array(x.clone(), &[points]), &array(y.clone(), &[cells, points]), None, None, None, None).unwrap();
+        let answer = fit_answer(&engine, "damped_sine", &array(x.clone(), &[points]), &array(y.clone(), &[cells, points]), FitInputs::default(), None).unwrap();
         assert_eq!(answer.parameters, ["amplitude", "offset", "baseband_frequency", "decay_time", "phase"]);
         assert_eq!(answer.success, [true, false, true, false, true, true], "{:?}", answer.messages);
         for cell in [1, 3] {
@@ -218,18 +230,47 @@ mod tests {
         let mut starts: Vec<f64> = truth.iter().flatten().copied().collect();
         starts[5] = f64::NAN;
         let warm = array(starts, &[cells, 5]);
-        let answer = fit_answer(&engine, "damped_sine", &x, &y, Some(&sigma), None, Some(&warm), None).unwrap();
+        let answer = fit_answer(&engine, "damped_sine", &x, &y, FitInputs { sigma: Some(&sigma), warm: Some(&warm), ..FitInputs::default() }, None).unwrap();
         assert_eq!(answer.success, [true, true, true], "{:?}", answer.messages);
         // With the noise's own sigma the reduced chi-square is near one.
         assert!(answer.reduced_chi_square.iter().all(|chi| (0.4..1.8).contains(chi)), "{:?}", answer.reduced_chi_square);
 
         let short = array(vec![0.0; 3], &[3]);
-        for result in [fit_answer(&engine, "damped_sine", &short, &y, None, None, None, None), fit_answer(&engine, "damped_sine", &x, &y, Some(&short), None, None, None),
-                       fit_answer(&engine, "damped_sine", &x, &y, None, None, Some(&sigma), None), fit_answer(&engine, "no_such_model", &x, &y, None, None, None, None)] {
+        let none = FitInputs::default();
+        for result in [fit_answer(&engine, "damped_sine", &short, &y, none, None), fit_answer(&engine, "damped_sine", &x, &y, FitInputs { sigma: Some(&short), ..none }, None),
+                       fit_answer(&engine, "damped_sine", &x, &y, FitInputs { warm: Some(&sigma), ..none }, None), fit_answer(&engine, "no_such_model", &x, &y, none, None)] {
             assert!(result.is_err());
         }
-        let empty = fit_answer(&engine, "damped_sine", &x, &array(Vec::new(), &[0, points]), None, None, None, None).unwrap();
+        let empty = fit_answer(&engine, "damped_sine", &x, &array(Vec::new(), &[0, points]), none, None).unwrap();
         assert!(empty.values.is_empty() && empty.parameters.len() == 5);
+    }
+
+    #[test]
+    fn trials_reach_their_cells_as_proportions() {
+        // Two survival decays of 8 points, 20 trials each.
+        let engine = FitEngine::default();
+        let x = [0.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0];
+        let k = [18.0, 13.0, 11.0, 8.0, 4.0, 4.0, 2.0, 0.0];
+        let y: Vec<f64> = k.iter().chain(&[19.0, 15.0, 12.0, 9.0, 7.0, 3.0, 1.0, 1.0]).map(|k| k / 20.0).collect();
+        let (x, y, trials) = (array(x.to_vec(), &[8]), array(y, &[2, 8]), array(vec![20.0; 16], &[2, 8]));
+        let answer = fit_answer(&engine, "exponential_decay", &x, &y, FitInputs { trials: Some(&trials), ..FitInputs::default() }, None).unwrap();
+        assert_eq!(answer.success, [true, true], "{:?}", answer.messages);
+        // Each row is the engine's binomial fit of that row.
+        let model = engine.registry.get("exponential_decay").unwrap();
+        for cell in 0..2 {
+            let mut direct = FitCell::points(vec![real_values(&x.values).unwrap()], real_values(&y.values).unwrap()[cell * 8..(cell + 1) * 8].to_vec());
+            direct.trials = Some(vec![20.0; 8].into());
+            let result = engine.fit(&model, &direct, &FitRequest::default()).unwrap();
+            assert_eq!(result.error_basis, zlc_plot::fit::ErrorBasis::Likelihood(zlc_plot::fit::Likelihood::Binomial));
+            assert_eq!((&answer.values[cell], &answer.errors[cell]), (&result.parameter_values, &result.standard_errors));
+        }
+        // Trials beside a sigma, or of the wrong shape, are refused (the shape by the call,
+        // the sigma by each cell).
+        let short = array(vec![20.0; 8], &[8]);
+        assert!(fit_answer(&engine, "exponential_decay", &x, &y, FitInputs { trials: Some(&short), ..FitInputs::default() }, None).is_err());
+        let sigma = array(vec![0.1; 16], &[2, 8]);
+        let both = fit_answer(&engine, "exponential_decay", &x, &y, FitInputs { trials: Some(&trials), sigma: Some(&sigma), ..FitInputs::default() }, None).unwrap();
+        assert!(both.success.iter().all(|s| !s) && both.messages.iter().all(|m| m.contains("an external sigma has no meaning there")), "{:?}", both.messages);
     }
 
     #[test]
@@ -237,7 +278,7 @@ mod tests {
         let engine = FitEngine::default();
         let (x, y) = batch(&truths(2), 60, 0.02);
         let stopped = || true;
-        let result = fit_answer(&engine, "damped_sine", &array(x, &[60]), &array(y, &[2, 60]), None, None, None, Some(&stopped));
+        let result = fit_answer(&engine, "damped_sine", &array(x, &[60]), &array(y, &[2, 60]), FitInputs::default(), Some(&stopped));
         assert!(matches!(result, Err(FitError::Cancelled)));
 
         // A Stop that comes once the batch's one bucket is solving: its cells not begun never start.
@@ -245,7 +286,7 @@ mod tests {
         let (x, y) = batch(&truths(cells), points, 0.02);
         let asked = std::sync::atomic::AtomicUsize::new(0);
         let begun = || asked.fetch_add(1, Ordering::Relaxed) > cells + cells / 2;
-        let result = fit_answer(&engine, "damped_sine", &array(x, &[points]), &array(y, &[cells, points]), None, None, None, Some(&begun));
+        let result = fit_answer(&engine, "damped_sine", &array(x, &[points]), &array(y, &[cells, points]), FitInputs::default(), Some(&begun));
         assert!(matches!(result, Err(FitError::Cancelled)));
         assert!(asked.load(Ordering::Relaxed) < 2 * cells, "{asked:?}");
     }
@@ -274,7 +315,7 @@ mod tests {
         let (x, y) = (array(x, &[points]), array(y, &[cells, points]));
         for round in 0..3 {
             let started = Instant::now();
-            let answer = fit_answer(&engine, "damped_sine", &x, &y, None, None, None, None).unwrap();
+            let answer = fit_answer(&engine, "damped_sine", &x, &y, FitInputs::default(), None).unwrap();
             let good = answer.success.iter().filter(|success| **success).count();
             println!("round {round}: {cells} cells of {points} points, damped_sine: {:.1} ms, {good} succeeded", started.elapsed().as_secs_f64() * 1e3);
         }

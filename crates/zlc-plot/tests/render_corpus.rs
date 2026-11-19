@@ -264,6 +264,7 @@ impl Capture {
             name: doc["name"].as_str().unwrap().to_owned(), label: doc["label"].as_str().unwrap().to_owned(), value: num(&doc["value"]),
             standard_error: if doc["standard_error"].is_null() { None } else { Some(num(&doc["standard_error"])) },
             unit: doc["unit"].as_str().unwrap().to_owned(),
+            interval: None,
         }
     }
 

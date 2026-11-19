@@ -5,7 +5,7 @@
 use rayon::prelude::*;
 use super::identify;
 use super::linalg::{self, LinAlgError};
-use super::models::{point_terms, rho, student_score, student_terms, COUNT_FLOOR};
+use super::models::{information_scale, point_terms, rho, student_score, student_terms, Likelihood};
 use super::num::{div, nextafter, pmax, pmin, KernelError, Zr, EPSILON};
 
 pub const RSS_TIE_RELATIVE: f64 = 1.0e-10;
@@ -59,6 +59,11 @@ impl std::fmt::Display for SolveError {
 }
 
 /// One cell's objective as the descriptor's callback sees it.
+/// The tolerances every fit's trust-region solve stops at (`ftol`, `xtol`,
+/// `gtol`, as SciPy names them): the solved parameters are known to this
+/// fraction of their size.
+pub const TOLERANCE: f64 = 1.0e-8;
+
 pub trait CellObjective: Sync {
     /// `(cost, raw_rss, finite)`; fills the free gradient and the row-major
     /// free information when `derivatives`.
@@ -72,6 +77,34 @@ pub trait CellObjective: Sync {
     #[allow(clippy::too_many_arguments)]
     fn finish_stalled(&self, _params: &[f64], _free: &[usize], _values: &[f64], _cost: f64, _raw_rss: f64, _lower: &[f64], _upper: &[f64],
                       _budget: i64, _tolerances: (f64, f64, f64)) -> Option<Result<SeedOutcome, SolveError>> { None }
+    /// A free `step` from `params` that takes a model value out of the
+    /// likelihood's support (where the objective is not finite): the step
+    /// slid along the support's edge (`along_edges`), or `None` when the
+    /// likelihood has no support to leave.
+    fn along_support(&self, _params: &[f64], _free: &[usize], _step: &[f64]) -> Option<Vec<f64>> { None }
+}
+
+/// `step` with its components across violated linear edges removed: each
+/// edge `(a, c)` asks `a . step <= c` (a model value's free Jacobian row and
+/// its distance to the support's edge, signed outward); a violated one is
+/// met by the least change of the step (its projection onto `a . step = c`),
+/// sweeping the edges once per edge so that edges met later do not undo the
+/// earlier ones' (Kaczmarz).
+pub fn along_edges(edges: &[(Vec<f64>, f64)], step: &[f64]) -> Vec<f64> {
+    let mut slid = step.to_vec();
+    for _ in 0..edges.len() {
+        for (row, limit) in edges {
+            let across: f64 = row.iter().zip(&slid).map(|(a, s)| a * s).sum();
+            let norm: f64 = row.iter().map(|a| a * a).sum();
+            if across > *limit && norm > 0.0 {
+                let excess = (across - limit) / norm;
+                for (s, a) in slid.iter_mut().zip(row) {
+                    *s -= excess * a;
+                }
+            }
+        }
+    }
+    slid
 }
 
 /// The iterations after which a solve that has not met its tolerances is
@@ -773,12 +806,34 @@ pub fn solve_seed(
             for index in 0..n {
                 full_parameters[free_indices[index]] = trial[index];
             }
-            let (trial_cost, trial_rss, trial_finite) = objective.evaluate(&full_parameters, free_indices, &mut gradient, &mut information, &mut jacobian_row, false)?;
+            let (mut trial_cost, mut trial_rss, mut trial_finite) = objective.evaluate(&full_parameters, free_indices, &mut gradient, &mut information, &mut jacobian_row, false)?;
             nfev += 1;
-            let scaled_norm = vector_norm(&scaled_step);
+            let mut scaled_norm = vector_norm(&scaled_step);
+            let mut predicted = predicted;
             if !trial_finite || !trial_cost.is_finite() {
-                radius = 0.25 * scaled_norm;
-                continue;
+                // A step out of the likelihood's support slides along its edge.
+                for index in 0..n {
+                    full_parameters[free_indices[index]] = values[index];
+                }
+                if let Some(along) = objective.along_support(&full_parameters, free_indices, &step) {
+                    for index in 0..n {
+                        step[index] = along[index];
+                        scaled_step[index] = div(along[index], scaling[index])?;
+                        trial[index] = values[index] + step[index];
+                    }
+                    make_feasible(&mut trial, lower, upper, 0.0);
+                    for index in 0..n {
+                        full_parameters[free_indices[index]] = trial[index];
+                    }
+                    (trial_cost, trial_rss, trial_finite) = objective.evaluate(&full_parameters, free_indices, &mut gradient, &mut information, &mut jacobian_row, false)?;
+                    nfev += 1;
+                    predicted = -quadratic(&trust_information, &scaled_gradient, &scaled_step);
+                }
+                if !trial_finite || !trial_cost.is_finite() {
+                    radius = 0.25 * scaled_norm;
+                    continue;
+                }
+                scaled_norm = vector_norm(&scaled_step);
             }
             let actual = cost - trial_cost;
             let old_radius = radius;
@@ -1112,7 +1167,8 @@ impl From<LinAlgError> for FinalizeError {
 
 /// `_finalize_one` for a point-layout cell.  `value_jacobian(selected,
 /// with_jacobian)` evaluates the model at the selected (valid) points:
-/// values and a row-major `selected x parameters` Jacobian.
+/// values and a row-major `selected x parameters` Jacobian.  `trials`: per
+/// point, the Bernoulli trials of binomial observations (else empty).
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_one(
     value_jacobian: &dyn Fn(bool) -> Zr<(Vec<f64>, Vec<f64>)>,
@@ -1122,7 +1178,8 @@ pub fn finalize_one(
     free_indices: &[usize],
     weights: &[f64],
     use_weights: bool,
-    poisson: bool,
+    likelihood: Likelihood,
+    trials: &[f64],
     loss_code: i64,
     dof: &[f64],
 ) -> Result<Finalized, FinalizeError> {
@@ -1171,10 +1228,11 @@ pub fn finalize_one(
         }
         selected += 1;
         let weight = if use_weights { weights[point] } else { 1.0 };
-        let (raw, squared, point_finite, robust_scale) = if dof.is_empty() {
-            let (raw, squared, _cost, _gf, _if, point_finite) = point_terms(fitted[point], observations[point], poisson, weight, use_weights, loss_code)?;
+        let point_trials = trials.get(point).copied().unwrap_or(f64::NAN);
+        let (squared, point_finite, robust_scale) = if dof.is_empty() {
+            let (raw, squared, _cost, _gf, _if, point_finite) = point_terms(fitted[point], observations[point], likelihood, point_trials, weight, use_weights, loss_code)?;
             let (_rho0, rho1, rho2) = rho(raw * raw, loss_code)?;
-            (raw, squared, point_finite, pmax(rho1 + 2.0 * rho2 * raw * raw, EPSILON).sqrt())
+            (squared, point_finite, pmax(rho1 + 2.0 * rho2 * raw * raw, EPSILON).sqrt())
         } else {
             // The Student-t point: its score and slope feed the sandwich.
             let (raw, squared, _cost, _gf, _if, point_finite) = student_terms(fitted[point], observations[point], weight, dof[point]);
@@ -1182,24 +1240,14 @@ pub fn finalize_one(
             let rounding = student_score(EPSILON * fitted[point].abs() * weight, dof[point]).0;
             scores.push(if score.abs() < rounding { rounding } else { score });
             slopes.push(slope);
-            (raw, squared, point_finite, 1.0)
+            (squared, point_finite, 1.0)
         };
         raw_rss += squared;
         let rounding = EPSILON * fitted[point].abs() * weight;
         rounding_rss += rounding * rounding;
-        let residual_scale = if poisson {
-            let expected = pmax(fitted[point], COUNT_FLOOR);
-            let absolute = raw.abs();
-            if absolute > COUNT_FLOOR {
-                div((expected - observations[point]).abs(), expected * pmax(absolute, COUNT_FLOOR))?
-            } else {
-                div(1.0, expected.sqrt())?
-            }
-        } else if use_weights {
-            weights[point]
-        } else {
-            1.0
-        };
+        // The point's row of the Fisher information (its sigma's weight for a
+        // Gaussian point; the model's own noise for counts and proportions).
+        let residual_scale = information_scale(likelihood, fitted[point], point_trials, weight)?;
         if !point_finite {
             finite = false;
         }
@@ -1271,8 +1319,12 @@ pub fn finalize_one(
         let triangular = linalg::qr_r(selected, free_count, &scaled_jacobian)?;
         match identify::from_factor(free_count, &triangular, selected.max(free_count))? {
             Some(identified) => {
-                let floor = if poisson { 0.0 } else { rounding_rss / (selected as i64 - free_count as i64).max(1) as f64 };
-                free_covariance = identified.covariance(pmax(reduced, floor));
+                // Poisson and binomial: the model fixes the noise, the
+                // covariance is the inverse Fisher information.  Gaussian:
+                // the residuals set the unknown scale, floored at the
+                // arithmetic's own scatter.
+                let factor = if likelihood.fixes_noise() { 1.0 } else { pmax(reduced, rounding_rss / (selected as i64 - free_count as i64).max(1) as f64) };
+                free_covariance = identified.covariance(factor);
                 defined = identified.defined;
             }
             None => covariance_valid = false,

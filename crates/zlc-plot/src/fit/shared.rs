@@ -1,14 +1,14 @@
 //! The Python-side preparation every lane shares (`fit.py`'s private
 //! helpers): bounds, histogram confinement, fixed partitions, weights,
-//! binned statistics, seeds and the Poisson deviance -- NumPy semantics
-//! reproduced (pairwise sums, `np.unique`, `np.median`).
+//! binned statistics, seeds, the observations' likelihood and its deviance
+//! -- NumPy semantics reproduced (pairwise sums, `np.unique`, `np.median`).
 
+use super::models::{deviance_residual, Likelihood};
 use super::num::{numpy_median, numpy_sum, pmax, pmin, str_list_repr, EPSILON};
 use super::result::{Bound, Bounds, FitError, ParamValues};
 use super::spec::{FitModelSpec, ParameterDomain, UnitRelation};
 
 pub const FIT_RSS_TIE_RELATIVE: f64 = 1e-10;
-pub const COUNT_FLOOR: f64 = 1e-9;
 
 /// `_span(x)`.
 pub fn span(x: &[f64]) -> f64 {
@@ -237,18 +237,57 @@ pub fn binned_curve_statistics(x: &[f64], values: &[f64], bins: i64) -> Option<(
     Some((x_means, y_means, weights.iter().map(|w| w.sqrt()).collect()))
 }
 
-/// `_poisson_deviance_residual(fitted, observed)`.
-pub fn poisson_deviance_residual(fitted: &[f64], observed: &[f64]) -> Vec<f64> {
-    fitted
-        .iter()
-        .zip(observed)
-        .map(|(&f, &n)| {
-            let expected = pmax_np(f, COUNT_FLOOR);
-            let logarithm = if n > 0.0 { n * (n / expected).ln() } else { 0.0 };
-            let deviance = 2.0 * pmax_np(expected - n + logarithm, 0.0);
-            deviance.sqrt().copysign(expected - n)
-        })
-        .collect()
+/// The points a fit uses: a finite observation at finite coordinates.
+pub fn finite_points(coordinates: &[std::sync::Arc<[f64]>], observations: &[f64]) -> Vec<bool> {
+    (0..observations.len()).map(|i| observations[i].is_finite() && coordinates.iter().all(|a| a[i].is_finite())).collect()
+}
+
+/// `source` at the points `keep` marks.
+pub fn kept(source: &[f64], keep: &[bool]) -> Vec<f64> { source.iter().zip(keep).filter(|(_, k)| **k).map(|(&v, _)| v).collect() }
+
+/// The likelihood of a cell's observations, its sigma and trials checked
+/// against them: a histogram's counts are Poisson, observations with
+/// Bernoulli trials binomial (no sigma beside them), the rest Gaussian.
+pub fn observation_likelihood(counted: bool, observations: usize, sigma: Option<&[f64]>, trials: Option<&[f64]>) -> Result<Likelihood, FitError> {
+    if let Some(sigma) = sigma {
+        if sigma.len() != observations {
+            return Err(FitError::value("observation_sigma must match observations"));
+        }
+        if counted {
+            return Err(FitError::value("histogram targets weight themselves by counts; an external sigma has no meaning there"));
+        }
+    }
+    let Some(trials) = trials else { return Ok(if counted { Likelihood::Poisson } else { Likelihood::Gaussian }) };
+    if trials.len() != observations {
+        return Err(FitError::value("trials must match observations"));
+    }
+    if counted {
+        return Err(FitError::value("histogram targets are counts (Poisson); Bernoulli trials have no meaning there"));
+    }
+    if sigma.is_some() {
+        return Err(FitError::value("observations with trials are proportions whose noise the trials fix; an external sigma has no meaning there"));
+    }
+    Ok(Likelihood::Binomial)
+}
+
+/// The used points of binomial observations: each a proportion in
+/// `[0, 1]` of a finite number of trials, at least one.
+pub fn check_proportions(values: &[f64], trials: &[f64]) -> Result<(), FitError> {
+    if trials.iter().any(|n| !(n.is_finite() && *n >= 1.0)) {
+        return Err(FitError::value("trials must be finite and at least 1"));
+    }
+    if values.iter().any(|y| !(0.0..=1.0).contains(y)) {
+        return Err(FitError::value("observations with trials are proportions and must lie in [0, 1]"));
+    }
+    Ok(())
+}
+
+/// The signed deviance residuals (`models::deviance_residual`) of a
+/// Poisson or binomial cell's observations at its model values; `trials`
+/// beside binomial observations.
+pub fn deviance_residuals(likelihood: Likelihood, fitted: &[f64], observed: &[f64], trials: Option<&[f64]>) -> Result<Vec<f64>, FitError> {
+    let trials_at = |i: usize| trials.map_or(f64::NAN, |t| t[i]);
+    (0..fitted.len()).map(|i| Ok(deviance_residual(likelihood, fitted[i], observed[i], trials_at(i))?.0)).collect()
 }
 
 /// `_authored_seed(model, initial)`: NaN where the guess names nothing.

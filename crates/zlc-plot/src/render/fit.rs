@@ -112,11 +112,19 @@ fn truncate_diagnostic(message: &str, maximum: usize) -> String {
     format!("{}...", chars[..maximum - 3].iter().collect::<String>())
 }
 
-/// `_fit_parameter_parts(parameter)`: the catalogue's symbol and the live value.
+/// `_fit_parameter_parts(parameter)`: the catalogue's symbol and the live
+/// value, `± error`, or `+above/-below` for a likelihood interval whose
+/// sides differ.
 pub fn parameter_parts(parameter: &crate::fit::FitParameterDisplay) -> (String, String) {
-    let uncertainty = match parameter.standard_error { None => "n/a".to_owned(), Some(error) => compact_number(error, None) };
+    let uncertainty = match (parameter.interval, parameter.standard_error) {
+        (Some((below, above)), Some(_)) if (above - below).abs() > 1e-12 * (1.0 + above.abs()) => {
+            format!("+{}/-{}", compact_number(above, None), compact_number(below, None))
+        }
+        (_, None) => "± n/a".to_owned(),
+        (_, Some(error)) => format!("± {}", compact_number(error, None)),
+    };
     let unit = if parameter.unit.is_empty() { String::new() } else { format!(" {}", literal_text(&parameter.unit)) };
-    (super::fonts::drawable_text(&parameter.label), format!(" = {} ± {uncertainty}{unit}", compact_number(parameter.value, None)))
+    (super::fonts::drawable_text(&parameter.label), format!(" = {} {uncertainty}{unit}", compact_number(parameter.value, None)))
 }
 
 /// `_fit_annotation_text(overlay)`.
