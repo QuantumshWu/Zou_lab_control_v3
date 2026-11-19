@@ -466,7 +466,7 @@ def _masked(value, mask, negate, texts):
         return schema
     keep, judged = native_ops.aligned((mask.values, mask.valid), steps, value.shape)
     kept = native_ops.call("scientific.where", valid=value.valid, mask=keep, judged=judged, negate=negate)
-    return Operand(schema, value.values, kept["valid"], value.sigma, value.dof)
+    return Operand(schema, value.values, kept["valid"], value.sigma, value.dof, value.trials)
 
 
 def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
@@ -541,7 +541,7 @@ def _pick(item, term, evaluating, changing):
         raise ValueError(f"{where} no row at {at} {labels[0]!r}") from None
     if not isinstance(item, Operand):
         return picked
-    planes = native_ops.selected((item.values, item.valid, item.sigma, item.dof), take)
+    planes = native_ops.selected((item.values, item.valid, item.sigma, item.dof, item.trials), take)
     return Operand(picked, *planes)
 
 
@@ -555,7 +555,7 @@ def _statistic(item, operation, names, by="", every=0, errors=False):
     if not isinstance(item, Operand):
         return schema
     answer = native_ops.statistic(item, plans, operation, errors)
-    return Operand(schema, answer["values"], answer["valid"], answer.get("sigma"), answer.get("dof"))
+    return Operand(schema, answer["values"], answer["valid"], answer.get("sigma"), answer.get("dof"), answer.get("trials"))
 
 
 # -- fit: a statistic that eats one axis and yields parameters ---------------
@@ -609,11 +609,17 @@ def fit_cells(item, target, model, fit, warm=None):
     (values, errors, success), each ``target.schema``'s physical shape, values
     and errors with the parameters last.  ``warm`` is one row per cell."""
     y = _fit_tensor(np.where(item.valid, item.values, np.nan), target)
-    sigma = None if item.sigma is None else _fit_tensor(np.where(item.valid, item.sigma, np.nan), target)
-    dof = None if item.dof is None else _fit_tensor(np.where(item.valid, item.dof, np.inf), target)
+    # A proportion is fitted by its trials (the binomial likelihood), a mean of
+    # reals by its sigma and that sigma's degrees of freedom (docs/UNCERTAINTY.md).
+    trials = None if item.trials is None else _fit_tensor(np.where(item.valid, item.trials, np.nan), target)
+    sigma = None if item.sigma is None or trials is not None else _fit_tensor(np.where(item.valid, item.sigma, np.nan), target)
+    dof = None if item.dof is None or trials is not None else _fit_tensor(np.where(item.valid, item.dof, np.inf), target)
     lead, count = y.shape[:-1], target.x.size
-    answer = fit(model, target.x, y.reshape(-1, count), sigma=None if sigma is None else sigma.reshape(-1, count),
-                 warm=warm, sigma_dof=None if dof is None else dof.reshape(-1, count))
+
+    def rows(plane):
+        return None if plane is None else plane.reshape(-1, count)
+
+    answer = fit(model, target.x, y.reshape(-1, count), sigma=rows(sigma), warm=warm, sigma_dof=rows(dof), trials=rows(trials))
 
     def stored(plane, tail=()):
         plane = np.asarray(plane).reshape(*lead, *tail)
@@ -662,13 +668,18 @@ class Operand:
     values and validity.  A non-finite float is invalid.  ``sigma``, when it
     has one, is the uncertainty of these samples: a pick and a where keep it,
     an operator has no rule for it and drops it.  ``dof`` stands beside a sigma
-    that was estimated here: its degrees of freedom, which a fit weighs it by."""
+    that was estimated here: its degrees of freedom, which a fit weighs it by.
+    ``trials`` stands beside a proportion (a mean of booleans): the Bernoulli
+    trials of each value, which a fit reads by the binomial likelihood; its
+    sigma is then the half-width of the proportion's Wilson interval, the
+    one a publication keeps (docs/UNCERTAINTY.md)."""
 
     schema: DatasetSchema
     values: np.ndarray
     valid: np.ndarray | None = None
     sigma: np.ndarray | None = None
     dof: np.ndarray | None = None
+    trials: np.ndarray | None = None
 
     def __post_init__(self):
         values = np.asarray(self.values)
@@ -690,6 +701,10 @@ class Operand:
             dof = np.asarray(self.dof, dtype=np.float64).view()
             dof.setflags(write=False)
             object.__setattr__(self, "dof", dof)
+        if self.trials is not None:
+            trials = np.asarray(self.trials, dtype=np.float64).view()
+            trials.setflags(write=False)
+            object.__setattr__(self, "trials", trials)
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
         object.__setattr__(self, "schema", _schema(

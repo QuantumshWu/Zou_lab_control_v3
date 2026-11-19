@@ -15,6 +15,7 @@ import numpy as np
 
 from zlc_data import SITE, AxisId, AxisSpec
 from zlc_durable import strict_json_loads, write_readable_json
+from zlc_plugin.statistics import proportion_interval
 
 from zlc_atom.authoring import AuthoringChoice
 from zlc_atom.devices.camera.contract import READOUT_SCALE, counting_readout
@@ -2841,6 +2842,8 @@ def _fit_readout_model(
             & ~np.isfinite(gaussian_thresholds)
         ),
         "site_n_actual": confusion.evaluated,
+        # The counting interval of each site's fidelity (68 %, Wilson): (2, sites).
+        "site_fidelity_interval": np.stack(proportion_interval(confusion.correct, confusion.evaluated)),
         "site_n_dark": n_dark,
         "site_n_bright": n_bright,
     }

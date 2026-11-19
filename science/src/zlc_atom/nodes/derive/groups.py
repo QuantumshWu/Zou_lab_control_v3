@@ -142,7 +142,7 @@ class Accumulator:
                 size = (len(rows), _domains(self.schema)[1].size if self.domain == 0 else len(columns))
                 origin, ordinal = (rows[0], columns[0]), None
                 schema = restricted(self.schema, origin, size)
-            chunks.append(Chunk(Operand(schema, part["values"], part["valid"], part.get("sigma"), part.get("dof")), origin, ordinal))
+            chunks.append(Chunk(Operand(schema, part["values"], part["valid"], part.get("sigma"), part.get("dof"), part.get("trials")), origin, ordinal))
         return tuple(chunks)
 
 
@@ -311,7 +311,7 @@ class Accumulation:
 def _take_rows(value: Operand, d: int, k: int, origin, extent) -> Operand:
     cut = (slice(None),) * d + (slice(k, k + 1),)
     return Operand(restricted(value.schema, origin, extent), value.values[cut], value.valid[cut],
-                   None if value.sigma is None else value.sigma[cut], None if value.dof is None else value.dof[cut])
+                   *(None if plane is None else plane[cut] for plane in (value.sigma, value.dof, value.trials)))
 
 
 def _origin(result: Operand, whole: DatasetSchema, where) -> tuple[int, int]:

@@ -47,7 +47,7 @@ def fake_fit(model, x, y, sigma=None, warm=None, sigma_dof=None):
 
 class Context:
     def __init__(self): self.warms, self.dofs = [], []
-    def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None):
+    def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None, trials=None):
         self.warms.append(warm)
         self.dofs.append(sigma_dof)
         return fake_fit(model, x, y, sigma, warm, sigma_dof)
@@ -167,6 +167,12 @@ def _reduced(values, valid, whole, by_axis, operation):
         spread = np.where(valid, (values.astype(np.float64) - expanded) ** 2, 0).sum(axis=axes)
         if operation == 'std':
             return np.sqrt(np.divide(spread, count, out=np.full(count.shape, np.nan), where=ok)), ok, None
+        if values.dtype.kind == 'b':
+            # A proportion: the half-width of its Wilson interval (docs/UNCERTAINTY.md),
+            # never the spread of its zeros and ones.
+            with np.errstate(invalid='ignore', divide='ignore'):
+                half = np.sqrt(total * (count - total) / count + 0.25) / (count + 1.0)
+            return mean, ok, np.where(ok, half, np.nan)
         sem = np.sqrt(np.divide(spread, count * (count - 1.0), out=np.full(count.shape, np.nan), where=count > 1))
         return mean, ok, sem
     if operation == 'min':
@@ -242,7 +248,7 @@ class Moments(unittest.TestCase):
                         want, ok = np.reshape(want, got.shape), np.reshape(ok, got.shape)
                         np.testing.assert_array_equal(got_valid, ok, name)
                         close(got, want, ok)
-                        if sem is not None and not boolean:
+                        if sem is not None:
                             finite = ok & np.isfinite(np.reshape(sem, got.shape))
                             close(plane['sigma'][cut], np.reshape(sem, got.shape), finite)
 
@@ -447,7 +453,7 @@ class Fit(unittest.TestCase):
 
     def test_an_undetermined_parameter_is_invalid_alone(self):
         class Undetermined(Context):
-            def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None):
+            def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None, trials=None):
                 answer = fake_fit(model, x, y, sigma, warm, sigma_dof)
                 answer.errors[:, 0] = np.nan
                 return answer

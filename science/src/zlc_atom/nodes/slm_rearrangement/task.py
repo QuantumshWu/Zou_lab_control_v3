@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from math import sqrt
 from pathlib import Path
 from time import perf_counter, monotonic, time_ns
 import sys
@@ -26,6 +25,7 @@ from zlc_plugin.figures import (
     PlotLabels,
 )
 from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_plugin.statistics import proportion_interval
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
@@ -728,10 +728,8 @@ class SlmRearrangementTask:
             occupied = sum(outcome[kind]["occupied"] for outcome in accepted for kind in kinds)
             entry = {"judged": judged, "occupied": occupied, "fraction": None, "fraction_1sigma": None}
             if judged:
-                fraction = occupied / judged
-                centre = (fraction + 1 / (2 * judged)) / (1 + 1 / judged)
-                half = sqrt(fraction * (1 - fraction) / judged + 1 / (4 * judged * judged)) / (1 + 1 / judged)
-                entry.update(fraction=fraction, fraction_1sigma=[centre - half, centre + half])
+                low, high = proportion_interval(occupied, judged)
+                entry.update(fraction=occupied / judged, fraction_1sigma=[float(low), float(high)])
             occupancy[name] = entry
         completed = [report for report in reports if report["status"] == "completed"]
         timings = {}
