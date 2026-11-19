@@ -1,7 +1,11 @@
 //! The fit engine against zlc_plot.fit (see `src/fit/TOLERANCES.md`): every
 //! recorded case refitted natively and compared field by field -- values
 //! bit for bit, texts character for character, the compiled lane's own
-//! counts exactly.  Golden data: `tests/gen/fit_cases.py`.
+//! counts exactly.  Histogram (Poisson) fits are compared the same way
+//! except their covariance, which is the inverse Fisher information here
+//! and the oracle's times deviance/dof: it is compared against the Fisher
+//! value at the fitted parameters (TOLERANCES.md, "Fisher covariance for
+//! counts").  Golden data: `tests/gen/fit_cases.py`.
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -189,6 +193,8 @@ struct Report {
     worst_covariance: f64,
     /// Cells the oracle's raw-unit rank test called singular and this port determines.
     determined_cells: Vec<String>,
+    /// The largest deviation of a histogram fit's covariance from the Fisher value.
+    worst_fisher: f64,
 }
 
 /// Standard errors and covariance against the oracle's, on a point cell
@@ -204,8 +210,56 @@ const NOISE_FREE: [&str; 2] = ["gauss_clean", "exponential_fixed_tau"];
 /// (a time constant far beyond the window, a series that never changed).
 const RAW_UNIT_SINGULAR: [&str; 3] = ["curve_fit_release_recapture#", "histogram_fits#", "gauss_constant"];
 
-/// Compare the covariance; true when the oracle called the cell singular and this port does not.
-fn compare_covariance(name: &str, want: &Value, got: &FitResult, image: bool, report: &mut Report, problems: &mut Vec<String>, rounded: &mut bool) -> bool {
+/// The inverse Poisson Fisher information `(sum j j^T / f)^+` of a
+/// histogram fit at its parameters, over the cell's finite bins: the
+/// kernel's analytic Jacobian, weights `1 / max(f, COUNT_FLOOR)`, the
+/// determined parameters as `identify` reads them.  A settled one-population
+/// answer is the nested model's, at the shared parameters.
+fn poisson_fisher(engine: &FitEngine, got: &FitResult, cell: &FitCell) -> Vec<f64> {
+    let CellData::Points { coordinates, observations: Some(observations) } = &cell.data else { panic!("a histogram cell has points") };
+    let x: Vec<f64> = (0..observations.len()).filter(|&i| observations[i].is_finite() && coordinates[0][i].is_finite()).map(|i| coordinates[0][i]).collect();
+    let wide = &got.model;
+    // The solved model, its parameters, and each one's index in the result.
+    let (model, values, places): (Arc<FitModelSpec>, Vec<f64>, Vec<usize>) = match (&wide.reduction, got.reduced) {
+        (Some(reduction), true) => {
+            let narrow = engine.registry.get(&reduction.nested_model_id).unwrap();
+            let places: Vec<usize> = narrow.parameters.iter().map(|p| wide.parameter_index(&reduction.shared.iter().find(|(_, n)| *n == p.name).unwrap().0).unwrap()).collect();
+            let values = places.iter().map(|&w| got.parameter_values[w]).collect();
+            (narrow, values, places)
+        }
+        _ => (wide.clone(), got.parameter_values.clone(), (0..wide.parameters.len()).collect()),
+    };
+    let spec::Evaluator::Builtin(kernel) = &model.evaluator else { panic!("{} is not a built-in model", model.model_id) };
+    let (fitted, jacobian) = kernel.value_jacobian(&models::Axes::one(&x), &values, true).unwrap();
+    let count = values.len();
+    let free: Vec<usize> = (0..count).filter(|&i| !got.fixed_parameter_names.contains(&wide.parameters[places[i]].name)).collect();
+    let k = free.len();
+    let mut information = vec![0.0; k * k];
+    for (point, &f) in fitted.iter().enumerate() {
+        let weight = 1.0 / f.max(models::COUNT_FLOOR);
+        for a in 0..k {
+            for b in 0..k {
+                information[a * k + b] += jacobian[point * count + free[a]] * jacobian[point * count + free[b]] * weight;
+            }
+        }
+    }
+    let n = wide.parameters.len();
+    let mut covariance = vec![0.0; n * n];
+    let free_covariance = identify::from_information(k, &information, x.len().max(k)).unwrap().unwrap().covariance(1.0);
+    for a in 0..k {
+        for b in 0..k {
+            covariance[places[free[a]] * n + places[free[b]]] = free_covariance[a * k + b];
+        }
+    }
+    covariance
+}
+
+/// Compare the covariance; true when the oracle called the cell singular
+/// and this port does not.  `fisher`: a histogram fit's inverse Fisher
+/// information, which its covariance is compared against within
+/// `COVARIANCE_BOUND` of its own scale `sqrt(c_ii c_jj)`.
+#[allow(clippy::too_many_arguments)]
+fn compare_covariance(name: &str, want: &Value, got: &FitResult, fisher: Option<&[f64]>, image: bool, report: &mut Report, problems: &mut Vec<String>, rounded: &mut bool) -> bool {
     let (want_errors, want_covariance) = (floats(&want["errors"]), floats(&want["covariance"]));
     if image {
         for (label, wanted, values) in [("error", &want_errors, &got.standard_errors), ("covariance", &want_covariance, &got.covariance)] {
@@ -238,6 +292,23 @@ fn compare_covariance(name: &str, want: &Value, got: &FitResult, image: bool, re
         if want_errors[i].is_nan() != got.standard_errors[i].is_nan() {
             problems.push(format!("error [{i}] {:e} vs {:e}", want_errors[i], got.standard_errors[i]));
         }
+    }
+    if let Some(fisher) = fisher {
+        *rounded = true;
+        let n = want_errors.len();
+        let defined: Vec<bool> = (0..n).map(|i| got.standard_errors[i].is_finite()).collect();
+        for a in (0..n).filter(|&a| defined[a]) {
+            for b in (0..n).filter(|&b| defined[b]) {
+                let (w, g) = (fisher[a * n + b], got.covariance[a * n + b]);
+                let scale = (fisher[a * n + a] * fisher[b * n + b]).abs().sqrt();
+                let deviation = if w == g { 0.0 } else if scale > 0.0 { (w - g).abs() / scale } else { f64::INFINITY };
+                report.worst_fisher = report.worst_fisher.max(deviation);
+                if !(deviation <= COVARIANCE_BOUND) {
+                    problems.push(format!("Fisher covariance [{a},{b}] {w:e} vs {g:e} ({deviation:.2e})"));
+                }
+            }
+        }
+        return false;
     }
     if NOISE_FREE.contains(&name) {
         *rounded = true;
@@ -276,7 +347,7 @@ fn scaled_deviation(want: f64, got: f64, error: f64) -> f64 {
     (want - got).abs() / scale
 }
 
-fn compare_result(name: &str, local: usize, want: &Value, got: &FitResult, image: bool, report: &mut Report) {
+fn compare_result(engine: &FitEngine, name: &str, local: usize, want: &Value, got: &FitResult, cell: &FitCell, image: bool, report: &mut Report) {
     report.checked += 1;
     let mut problems: Vec<String> = Vec::new();
     if want["model"] != got.model.model_id {
@@ -296,7 +367,8 @@ fn compare_result(name: &str, local: usize, want: &Value, got: &FitResult, image
         }
     }
     let mut rounded = false;
-    let determined = compare_covariance(name, want, got, image, report, &mut problems, &mut rounded);
+    let fisher = (got.model.counted() && got.covariance_valid).then(|| poisson_fisher(engine, got, cell));
+    let determined = compare_covariance(name, want, got, fisher.as_deref(), image, report, &mut problems, &mut rounded);
     if determined {
         report.determined_cells.push(format!("{name}[{local}]"));
     }
@@ -341,7 +413,9 @@ fn compare_result(name: &str, local: usize, want: &Value, got: &FitResult, image
     for (i, texts) in want["text"].as_array().unwrap().iter().enumerate() {
         let value = compact_number(got.parameter_values[i], None);
         let error = if got.standard_errors[i].is_finite() { compact_number(got.standard_errors[i], None) } else { "nan".into() };
-        if texts[0].as_str().unwrap() != value || (!determined && !NOISE_FREE.contains(&name) && texts[1].as_str().unwrap() != error) {
+        // A histogram fit's error is the Fisher one, not the oracle's.
+        let oracle_error = !determined && !NOISE_FREE.contains(&name) && fisher.is_none();
+        if texts[0].as_str().unwrap() != value || (oracle_error && texts[1].as_str().unwrap() != error) {
             problems.push(format!("painted text [{i}] {} ± {} vs {value} ± {error}", texts[0], texts[1]));
         }
     }
@@ -376,10 +450,14 @@ fn compare_result(name: &str, local: usize, want: &Value, got: &FitResult, image
     }
 }
 
-fn run_cases(data: &Value) -> Report {
+/// Whether a record's model fits a histogram (Poisson) or not.
+fn histogram_model(engine: &FitEngine, model: &Value) -> bool { model != RETIRED_MODEL && engine.registry.get(model.as_str().unwrap()).unwrap().counted() }
+
+/// The records of `data` whose model fits a histogram (`histograms`) or not.
+fn run_cases(data: &Value, histograms: bool) -> Report {
     let engine = FitEngine::default();
     let mut report = Report::default();
-    for case in data["cases"].as_array().unwrap().iter().filter(|c| c["model"] != RETIRED_MODEL) {
+    for case in data["cases"].as_array().unwrap().iter().filter(|c| c["model"] != RETIRED_MODEL && histogram_model(&engine, &c["model"]) == histograms) {
         let name = case["name"].as_str().unwrap();
         let model = engine.registry.get(case["model"].as_str().unwrap()).unwrap();
         let cells: Vec<FitCell> = case["cells"].as_array().unwrap().iter().map(cell).collect();
@@ -407,7 +485,7 @@ fn run_cases(data: &Value) -> Report {
                 for (local, outcome) in outcomes.iter().enumerate() {
                     match (&results[local], &failures[local], outcome) {
                         (want, Value::Null, Ok(got)) if !want.is_null() => {
-                            compare_result(name, local, want, got, case["cells"][local].get("image").is_some(), &mut report);
+                            compare_result(&engine, name, local, want, got, &cells[local], case["cells"][local].get("image").is_some(), &mut report);
                         }
                         (_, Value::String(message), Err(got)) => {
                             report.checked += 1;
@@ -426,15 +504,29 @@ fn run_cases(data: &Value) -> Report {
     report
 }
 
+/// Print a report and fail on its differences.
+fn settle(label: &str, report: &Report, shown: usize) {
+    eprintln!(
+        "{label}: checked {}, bit-exact {}, covariance within the bound {}, worst parameter deviation {:.3e}, worst covariance deviation {:.3e}, worst Fisher deviation {:.3e}; determined here, singular in the oracle: {:?}",
+        report.checked, report.exact_cells, report.rounded_cells, report.worst_parameter, report.worst_covariance, report.worst_fisher, report.determined_cells
+    );
+    for failure in report.failures.iter().take(shown) {
+        eprintln!("  {failure}");
+    }
+    assert!(report.failures.is_empty() && report.checked > 0, "{label}: {} of {} cells differ", report.failures.len(), report.checked);
+}
+
 #[test]
 fn fits_match_the_oracle() {
     let data: Value = serde_json::from_str(include_str!("data/fit.json")).unwrap();
-    let report = run_cases(&data);
-    eprintln!("fit cells checked {}, bit-exact {}, covariance within the bound {}, worst parameter deviation {:.3e}, worst covariance deviation {:.3e}; determined here, singular in the oracle: {:?}", report.checked, report.exact_cells, report.rounded_cells, report.worst_parameter, report.worst_covariance, report.determined_cells);
-    for failure in report.failures.iter().take(60) {
-        eprintln!("  {failure}");
-    }
-    assert!(report.failures.is_empty(), "{} of {} cells differ", report.failures.len(), report.checked);
+    settle("fit cells", &run_cases(&data, false), 60);
+}
+
+/// The histogram (Poisson) records: their covariance against the Fisher value.
+#[test]
+fn histogram_fits_match_the_oracle() {
+    let data: Value = serde_json::from_str(include_str!("data/fit.json")).unwrap();
+    settle("histogram fit cells", &run_cases(&data, true), 60);
 }
 
 /// A Poisson table sized past `num::ALLOCATION_LIMIT` by the data (a rate
@@ -452,12 +544,13 @@ fn poisson_tables_past_the_allocation_limit_are_refused() {
 #[test]
 fn captured_session_fits_match_the_oracle() {
     let data: Value = serde_json::from_str(include_str!("data/fit_captured.json")).unwrap();
-    let report = run_cases(&data);
-    eprintln!("captured cells checked {}, bit-exact {}, covariance within the bound {}, worst covariance deviation {:.3e}; determined here, singular in the oracle: {:?}", report.checked, report.exact_cells, report.rounded_cells, report.worst_covariance, report.determined_cells);
-    for failure in report.failures.iter().take(30) {
-        eprintln!("  {failure}");
-    }
-    assert!(report.failures.is_empty(), "{} of {} cells differ", report.failures.len(), report.checked);
+    settle("captured cells", &run_cases(&data, false), 30);
+}
+
+#[test]
+fn captured_session_histogram_fits_match_the_oracle() {
+    let data: Value = serde_json::from_str(include_str!("data/fit_captured.json")).unwrap();
+    settle("captured histogram cells", &run_cases(&data, true), 30);
 }
 
 /// The large sets kept outside the repository (big frames, the unbinned
@@ -468,20 +561,22 @@ fn large_fits_match_the_oracle() {
     let Ok(paths) = std::env::var("ZLC_FIT_GOLDEN_LARGE") else { return };
     for path in paths.split(';').filter(|p| !p.is_empty()) {
         let data: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let (report, evaluations) = (run_cases(&data), run_evaluations(&data));
-        eprintln!("{path}: cells checked {}, bit-exact {}; evaluation targets checked {}, bit-exact {}", report.checked, report.exact_cells, evaluations.checked, evaluations.exact_cells);
-        for failure in report.failures.iter().chain(&evaluations.failures).take(30) {
-            eprintln!("  {failure}");
+        for histograms in [false, true] {
+            let (report, evaluations) = (run_cases(&data, histograms), run_evaluations(&data, histograms));
+            eprintln!("{path} (histograms {histograms}): cells checked {}, bit-exact {}; evaluation targets checked {}, bit-exact {}", report.checked, report.exact_cells, evaluations.checked, evaluations.exact_cells);
+            for failure in report.failures.iter().chain(&evaluations.failures).take(30) {
+                eprintln!("  {failure}");
+            }
+            assert!(report.failures.is_empty() && evaluations.failures.is_empty(), "{path}: {} of {} cells and {} of {} evaluation targets differ", report.failures.len(), report.checked, evaluations.failures.len(), evaluations.checked);
         }
-        assert!(report.failures.is_empty() && evaluations.failures.is_empty(), "{path}: {} of {} cells and {} of {} evaluation targets differ", report.failures.len(), report.checked, evaluations.failures.len(), evaluations.checked);
     }
 }
 
 /// `evaluate_fit` over the targets a session's projection prepared.
-fn run_evaluations(data: &Value) -> Report {
+fn run_evaluations(data: &Value, histograms: bool) -> Report {
     let engine = FitEngine::default();
     let mut report = Report::default();
-    for record in data["evaluations"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter(|r| r["model"] != RETIRED_MODEL) {
+    for record in data["evaluations"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter(|r| r["model"] != RETIRED_MODEL && histogram_model(&engine, &r["model"]) == histograms) {
         let name = record["name"].as_str().unwrap();
         let model = engine.registry.get(record["model"].as_str().unwrap()).unwrap();
         let units: Vec<(String, String)> = record["units"].as_array().unwrap().iter().map(|u| (u[0].as_str().unwrap().to_string(), u[1].as_str().unwrap().to_string())).collect();
@@ -513,7 +608,10 @@ fn run_evaluations(data: &Value) -> Report {
         }
         for (local, (got, failure)) in evaluated.results.iter().zip(&evaluated.failures).enumerate() {
             match (got, &results[local]) {
-                (Some(got), want) if !want.is_null() => compare_result(name, local, want, got, record["targets"][local]["cell"].get("image").is_some(), &mut report),
+                (Some(got), want) if !want.is_null() => {
+                    let cell = cell(&record["targets"][local]["cell"]);
+                    compare_result(&engine, name, local, want, got, &cell, record["targets"][local]["cell"].get("image").is_some(), &mut report)
+                }
                 (None, Value::Null) => {
                     report.checked += 1;
                     if failure.as_deref() == failures[local].as_str() {
@@ -532,12 +630,13 @@ fn run_evaluations(data: &Value) -> Report {
 #[test]
 fn captured_evaluations_match_the_oracle() {
     let data: Value = serde_json::from_str(include_str!("data/fit_captured.json")).unwrap();
-    let report = run_evaluations(&data);
-    eprintln!("evaluation targets checked {}, bit-exact {}, covariance within the bound {}, worst covariance deviation {:.3e}; determined here, singular in the oracle: {:?}", report.checked, report.exact_cells, report.rounded_cells, report.worst_covariance, report.determined_cells);
-    for failure in report.failures.iter().take(30) {
-        eprintln!("  {failure}");
-    }
-    assert!(report.failures.is_empty() && report.checked > 0, "{} of {} evaluation targets differ", report.failures.len(), report.checked);
+    settle("evaluation targets", &run_evaluations(&data, false), 30);
+}
+
+#[test]
+fn captured_histogram_evaluations_match_the_oracle() {
+    let data: Value = serde_json::from_str(include_str!("data/fit_captured.json")).unwrap();
+    settle("histogram evaluation targets", &run_evaluations(&data, true), 30);
 }
 
 #[test]

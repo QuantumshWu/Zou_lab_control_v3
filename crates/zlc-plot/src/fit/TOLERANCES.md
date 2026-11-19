@@ -34,7 +34,7 @@ the numeric tolerance says.
 | Cold seeds, data-derived bounds, histogram confinement, sigma weights, binned sufficient statistics, peak finding, Poisson deviance residuals, `_authored_seed` / candidate de-duplication | bit-exact | bit-exact (see "Reductions" for the sorts, sums and medians) |
 | Warm starts | a warm start is a whole previous solution (what the product passes: `tuple(result.parameter_values)`), checked as `_initial_values` checks a row | exact.  A *partial* (named) warm start -- which made Python complete it with its Python-lane initializer -- is not reachable from the product and is not accepted (see "Open gaps") |
 | Trust-region solve (compiled lane): free parameters, cost, raw RSS, status, `nfev`, `njev`, iterations, winning seed | bit-exact | bit-exact |
-| Covariance, standard errors, `covariance_valid` (compiled lane: `dgeqrf` of the scaled Jacobian, `dgesdd` of R) | a deliberate departure: R's columns are equilibrated before the SVD and the rank is read per parameter ("Identifiable covariance" below); the oracle's values within 1e-9 of `sqrt(c_ii c_jj)` where it called the fit full rank | worst 6.2e-11 over `fit.json`, `fit_captured.json` and its evaluations; `fit_large.json` and `captured.json` are not in the repository and were not re-run |
+| Covariance, standard errors, `covariance_valid` (compiled lane: `dgeqrf` of the scaled Jacobian, `dgesdd` of R) | a deliberate departure: R's columns are equilibrated before the SVD and the rank is read per parameter ("Identifiable covariance" below); the oracle's values within 1e-9 of `sqrt(c_ii c_jj)` where it called the fit full rank.  Histogram (Poisson) fits: a second departure, the inverse Fisher information ("Counts and proportions" below), compared against that value at the fitted parameters within the same 1e-9 | curves and images: worst 6.2e-11 over `fit.json`, `fit_captured.json` and its evaluations; histograms: worst 4.2e-14 of the Fisher value (69 cells and evaluation targets); `fit_large.json` and `captured.json` are not in the repository and were not re-run |
 | Reduced chi-square, final fitted values and residuals, `parameter_units`, `batch_revision`, array lengths | bit-exact | bit-exact |
 | BIC gain (`evidence`), reduction verdict, settled one-population parameters | bit-exact | bit-exact |
 | Classifier threshold, fractions, fidelity (`_bimodal_classifier_metrics`), component curves | bit-exact | bit-exact |
@@ -195,11 +195,53 @@ difference.  As `n` grows every term tends to the Gaussian weighting's
 (infinite dof gives its exact solution).  A point of one repeat has no own
 scatter: a stated sigma is used as known (infinite dof), and a point with no
 sigma at all keeps the oracle's rule (the largest usable sigma, Gaussian
-term).  A known sigma alone, counts (Poisson deviance), a robust loss the
-caller chose, and custom models (fallback lane) are unchanged.  No golden
+term).  A known sigma alone, a robust loss the caller chose, and custom
+models (fallback lane) are unchanged; counts and proportions have their
+own likelihoods ("Counts and proportions" below).  No golden
 record carries degrees of freedom, so every golden comparison is unchanged
 (bit-exact); live sessions whose curves are means of repeats fit differently
 from the oracle, which is the point.
+
+## Counts and proportions: the likelihood fixes the noise (a deliberate departure)
+
+The oracle multiplies a histogram fit's covariance by its deviance per
+degree of freedom, as if the Poisson noise had a free scale.  It has none:
+the model's own value is the variance.  The factor is a random number of
+mean about one whatever the fit (in sparse bins it is well below one: 120
+shots of a photon-count histogram in 0.25-wide bins understate the rate's
+error by 17 % on average, up to 40 %, and the ±1σ covers the truth in 54 %
+of 300 draws), and it moves the reported error by its own scatter even in
+dense bins.  v3's covariance for a histogram is the inverse Fisher
+information on the identified subspace, `(sum j j^T / f)^+` -- each point's
+row scaled by `1/sqrt(f)`, not by the deviance residual's Gauss-Newton
+derivative, which halves the information of a point far from the model
+(`y = 0` at `f = 1`) -- with factor 1 (same draws: 63 % coverage).  The
+reduced chi-square stays the deviance per degree of freedom: it judges the
+model, it does not scale the errors.  Golden histogram records keep their
+parameters, fitted values, residuals, reduced chi-square, evidence and
+solver rows bit for bit; their covariance is compared against the Fisher
+value at the fitted parameters (the kernel's analytic Jacobian, weights
+`1 / max(f, COUNT_FLOOR)`, `identify` on the information matrix) within the
+covariance bound, and their painted errors are not compared to the oracle's.
+
+The oracle fits a proportion (the mean of boolean samples: survival,
+occupancy) as a Gaussian point of sigma `sqrt(p (1 - p) / (n - 1))`, a
+function of the estimate that is zero at `p = 0` and `p = 1`; the sigma
+weights then make exactly those points the heaviest.  A survival decay of 8
+points of 20 trials comes out with tau 6 % low and a ±1σ that covers it 54 %
+of the time (400 draws).  v3 fits observations that carry their trials
+(`FitCell::trials`) by the binomial likelihood: deviance
+`2 n (y ln(y/f) + (1 - y) ln((1 - y)/(1 - f)))`, `f` in
+`[COUNT_FLOOR, 1 - COUNT_FLOOR]`, with the Poisson branch's residual,
+Gauss-Newton and Fisher scales (`models::deviance_residual`,
+`models::information_scale`), on both lanes; same draws: bias -0.5 %,
+coverage 68 %.  Its covariance is the inverse Fisher information
+`(sum j j^T n / (f (1 - f)))^+`, its evidence the deviance difference less
+`k ln N`, `N` the trials.  A cell with trials takes no sigma, no binning
+and no Student-t term, and a histogram takes no trials.  No golden record
+carries trials.  Every result names its errors' basis (`ErrorBasis`:
+likelihood, Student-t sandwich, or residuals scaled by the reduced
+chi-square).
 
 ## Identifiable covariance (a deliberate departure)
 
@@ -236,8 +278,7 @@ Student-t sandwich, of each point's score and the score at that rounding),
 while the reported reduced chi-square stays the residuals'.  Without it a
 series that never changed (a site that survives every shot) would read
 `center = 2 +- 0`: an equilibrated column stays identified however small,
-and zero scatter times any inverse is zero.  Poisson fits have their own
-scale and no floor.
+and zero scatter times any inverse is zero.
 
 These errors remain the linearised ones.  Where the amplitude is itself
 insignificant the shape parameters' errors are of the order of the
