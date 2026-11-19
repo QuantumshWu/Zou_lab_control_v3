@@ -45,12 +45,15 @@ moments (Chan); a window's sem is that of the pooled samples.
 
 Per point, the likelihood is the one the table above names.
 
-* **Binomial** (observations with `trials`): model `f` clamped to
-  `[COUNT_FLOOR, 1 - COUNT_FLOOR]`, deviance
+* **Binomial** (observations with `trials`): deviance
   `d = 2 n [ y ln(y/f) + (1 - y) ln((1 - y)/(1 - f)) ]` (a `0 ln 0` term is
-  0), residual `sign(f - y) sqrt(d)`; the solve minimises `sum d / 2`, the
-  negative log-likelihood up to a constant.
-* **Poisson** (histogram targets): unchanged deviance.
+  0), exact on `f` in `[0, 1]` and infinite outside it -- a probability past
+  1 has no likelihood; residual `sign(f - y) sqrt(d)`; the solve minimises
+  `sum d / 2`, the negative log-likelihood up to a constant, and a step that
+  would leave `[0, 1]` slides along its edge (an MLE on the edge -- all
+  successes at `t = 0` -- is common).
+* **Poisson** (histogram targets): unchanged deviance (`f` floored at
+  `COUNT_FLOOR`), infinite for `f < 0`.
 * **Student-t** for means of few repeats, **Gaussian** for a stated or no sigma: unchanged.
 
 ### Covariance: scale only what the model does not fix
