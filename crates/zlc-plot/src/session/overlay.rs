@@ -42,12 +42,14 @@ pub struct FitOverlay {
     pub headline_parameter: Option<FitParameterDisplay>,
     /// How the two-population question was decided; empty for other models.
     pub evidence: String,
+    /// What the parameters' errors are (`FitResult::error_basis_text`); empty when they have none.
+    pub error_basis: String,
 }
 
 impl Default for FitOverlay {
     fn default() -> Self {
         Self { polylines: Vec::new(), ellipse_glyph: None, success: true, formula: String::new(), parameter_display: Vec::new(),
-               diagnostic: String::new(), facet_index: None, group_key: Vec::new(), headline_parameter: None, evidence: String::new() }
+               diagnostic: String::new(), facet_index: None, group_key: Vec::new(), headline_parameter: None, evidence: String::new(), error_basis: String::new() }
     }
 }
 

@@ -135,6 +135,7 @@ fn annotation_text(overlay: &FitOverlay) -> String {
         let (symbol, value) = parameter_parts(parameter);
         lines.push(symbol + &value);
     }
+    if !overlay.error_basis.is_empty() { lines.push(super::fonts::drawable_text(&overlay.error_basis)); }
     if !overlay.evidence.is_empty() { lines.push(super::fonts::drawable_text(&overlay.evidence)); }
     lines.join("\n")
 }

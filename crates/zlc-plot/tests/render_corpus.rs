@@ -286,6 +286,7 @@ impl Capture {
             group_key: doc["group_key"].as_array().unwrap().iter().map(|v| self.axis_value(v)).collect(),
             headline_parameter: if doc["headline_parameter"].is_null() { None } else { Some(self.parameter(&doc["headline_parameter"])) },
             evidence: doc["evidence"].as_str().unwrap().to_owned(),
+            error_basis: doc["error_basis"].as_str().unwrap_or_default().to_owned(),
         }
     }
 }
