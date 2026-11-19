@@ -28,17 +28,21 @@ class DeriveProcessor:
     one evaluation are the bundle's members by output name; the anchor is
     the member the operator selected.
 
-    A variable with groups over a Repeat or Point axis, and what reads it, give
-    only what just closed (:mod:`.groups`): placed write-once when the source
-    is finite, one Latest event per group when it is a monitor.
+    A variable with blocks over a Repeat or Point axis -- groups, or the
+    whole of an axis a finite run's publications carry one part at a time --
+    and what reads it, give only what just closed (:mod:`.groups`): placed
+    write-once when the source is finite, one Latest event per group when it
+    is a monitor.
     """
 
     def __init__(self, *, variables, primary_output: str):
         self._variables = tuple(variables)
         self.primary_output = str(primary_output)
         self.dataset_output_declarations = declared_outputs(self._variables)
-        #: Whether anything here can give less than one result per publication.
-        self._accumulating = any(row["every"] or row["statistic"] == "fit" for row in self._variables)
+        #: Whether anything here can give less than one result per
+        #: publication: known from the first delivery, which says what
+        #: publications carry.
+        self._accumulating: bool | None = None
         self._accumulation: Accumulation | None = None
         self._context = None
         self._placed: dict[str, int] = {}
@@ -69,6 +73,11 @@ class DeriveProcessor:
         primary = inputs.get(self.primary_output)
         if primary is None:
             raise TypeError("derive needs its bound input bundle")
+        if self._accumulating is None:
+            accumulation = Accumulation(self._variables, inputs, self._names(inputs))
+            self._accumulating = bool(accumulation.steps) or any(
+                row["every"] or row["statistic"] == "fit" for row in self._variables)
+            self._accumulation = accumulation if self._accumulating else None
         if self._accumulating:
             return self._increment(inputs, primary)
         results = evaluate(self._variables, {
@@ -88,8 +97,6 @@ class DeriveProcessor:
         """One delivery with groups in the draft: the commits it makes, none when nothing closed."""
 
         names = self._names(inputs)
-        if self._accumulation is None:
-            self._accumulation = Accumulation(self._variables, inputs, names)
         self._last = primary
         events, views = {}, {}
         for name in names:
