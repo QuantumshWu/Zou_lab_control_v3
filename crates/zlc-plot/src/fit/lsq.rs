@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use super::engine::{evaluate_model, Check, FitCell, FitEngine, FitRequest, CellData};
-use super::models::{information_scale, point_terms, Axes, Likelihood};
+use super::models::{information_scale, point_terms, support_edges, Axes, Likelihood};
+use super::profile::{interval_covariance, Profile};
 use super::num::{nextafter, pmax, pmin, Zr, EPSILON};
 use super::result::{Bounds, ErrorBasis, FitError, FitOptions, FitResult};
 use super::shared::{
@@ -121,6 +122,19 @@ impl CellObjective for ResidualObjective<'_> {
         Ok((cost, rss, true))
     }
     fn selected(&self) -> usize { self.values.len() }
+    fn along_support(&self, params: &[f64], free: &[usize], step: &[f64]) -> Option<Vec<f64>> {
+        if !self.likelihood.fixes_noise() {
+            return None;
+        }
+        let (values, jacobian) = (self.predict(params)?, self.jacobian(params)?);
+        let mut trial = params.to_vec();
+        for (k, &parameter) in free.iter().enumerate() {
+            trial[parameter] += step[k];
+        }
+        let moved = self.predict(&trial)?;
+        let edges = support_edges(self.likelihood, &values, &jacobian, &moved, &|_| true, free);
+        (!edges.is_empty()).then(|| trf::along_edges(&edges, step))
+    }
 }
 
 /// `fit()` for a model without a compiled descriptor.
@@ -211,7 +225,11 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
             }
         };
         let reduced = super::blas::ddot(&quality, &quality) / values.len() as f64;
-        return FitResult::new(spec, lower, vec![0.0; count], vec![0.0; count * count], FitResult::eager(fitted, residuals, indices), cell.data_revision as u64, true, "all parameters fixed", reduced, true, fixed_names, ErrorBasis::of(likelihood, false, values.len(), 0));
+        if !reduced.is_finite() {
+            return Err(FitError::value("the fixed parameters put the model outside its likelihood's support"));
+        }
+        return FitResult::new(spec, lower, vec![0.0; count], vec![0.0; count * count], FitResult::eager(fitted, residuals, indices), cell.data_revision as u64, true, "all parameters fixed", reduced, true, fixed_names, ErrorBasis::of(likelihood, false, values.len(), 0))
+            .map(|result| FitResult { intervals: likelihood.fixes_noise().then(|| result.parameter_values.iter().map(|&v| [v, v]).collect()), ..result });
     }
     let complete_seeds = super::pylane::initial_candidates(&spec, &solver_coords, &solver_values, request.initial.as_ref(), cell.warm_start.as_deref())?;
     let mut seeds: Vec<Vec<f64>> = Vec::new();
@@ -248,7 +266,7 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     let budget = opts.evaluation_budget(values.len());
     for (seed_index, seed) in seeds.iter().enumerate() {
         check.check()?;
-        let outcome = match trf::solve_seed(&objective, &lower, &free_indices, seed, &free_lower, &free_upper, budget, 1e-8, 1e-8, 1e-8) {
+        let outcome = match trf::solve_seed(&objective, &lower, &free_indices, seed, &free_lower, &free_upper, budget, trf::TOLERANCE, trf::TOLERANCE, trf::TOLERANCE) {
             Ok(o) => o,
             Err(_) => continue,
         };
@@ -294,7 +312,14 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     let reduced = rss / degrees;
     // The modified Jacobian at the solution, and the SVD rank test.
     let (free_covariance, covariance_valid) = covariance_at(&objective, &solved, &free_indices, reduced);
-    let (covariance, errors) = expand_fixed_covariance(count, &free_indices, &free_covariance, covariance_valid);
+    let (mut covariance, mut errors) = expand_fixed_covariance(count, &free_indices, &free_covariance, covariance_valid);
+    // A likelihood that fixes the noise: the errors are its profile intervals'.
+    let intervals = (likelihood.fixes_noise() && covariance_valid).then(|| {
+        let profile = Profile { objective: &objective, parameters: &solved, free: &free_indices, lower: &lower, upper: &upper, budget };
+        let intervals = profile.intervals(&errors);
+        interval_covariance(&mut covariance, &mut errors, &intervals, &free_indices);
+        intervals
+    });
     let result = FitResult::new(
         spec.clone(),
         solved,
@@ -309,6 +334,7 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
         fixed_names,
         ErrorBasis::of(likelihood, false, values.len(), free_indices.len()),
     )?;
+    let result = FitResult { intervals, ..result };
     let nested_cell = FitCell { warm_start: None, ..cell.clone() };
     let nested = engine.nested_population_fit(spec_in, std::slice::from_ref(&nested_cell), request.bounds.as_ref(), opts, request.cancelled)?;
     engine.settle_population(&spec, result, nested.into_iter().next().flatten().as_ref(), opts, cell)

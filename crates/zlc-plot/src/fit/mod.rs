@@ -15,6 +15,7 @@ pub mod num;
 pub mod param_units;
 pub mod plane;
 pub mod prepare;
+pub mod profile;
 pub mod pylane;
 pub mod radial;
 pub mod result;

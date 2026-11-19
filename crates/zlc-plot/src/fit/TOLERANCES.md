@@ -219,8 +219,8 @@ derivative, which halves the information of a point far from the model
 reduced chi-square stays the deviance per degree of freedom: it judges the
 model, it does not scale the errors.  Golden histogram records keep their
 parameters, fitted values, residuals, reduced chi-square, evidence and
-solver rows bit for bit; their covariance is compared against the Fisher
-value at the fitted parameters (the kernel's analytic Jacobian, weights
+solver rows bit for bit; their correlation is compared against the Fisher
+one at the fitted parameters (the kernel's analytic Jacobian, weights
 `1 / max(f, COUNT_FLOOR)`, `identify` on the information matrix) within the
 covariance bound, and their painted errors are not compared to the oracle's.
 
@@ -235,13 +235,29 @@ of the time (400 draws).  v3 fits observations that carry their trials
 `[COUNT_FLOOR, 1 - COUNT_FLOOR]`, with the Poisson branch's residual,
 Gauss-Newton and Fisher scales (`models::deviance_residual`,
 `models::information_scale`), on both lanes; same draws: bias -0.5 %,
-coverage 68 %.  Its covariance is the inverse Fisher information
-`(sum j j^T n / (f (1 - f)))^+`, its evidence the deviance difference less
-`k ln N`, `N` the trials.  A cell with trials takes no sigma, no binning
+coverage 68 %.  Its evidence is the deviance difference less `k ln N`,
+`N` the trials.  A cell with trials takes no sigma, no binning
 and no Student-t term, and a histogram takes no trials.  No golden record
 carries trials.  Every result names its errors' basis (`ErrorBasis`:
 likelihood, Student-t sandwich, or residuals scaled by the reduced
 chi-square).
+
+For both likelihoods the reported errors are profile-likelihood intervals
+(`profile.rs`, MINOS): per free, determined parameter the values where the
+deviance minimised over the others rises at most 1, found by warm,
+constrained refits of the cell's own solve (step out from the Fisher error,
+then a safeguarded secant on `sqrt(rise)` to 1e-3 of the side), a side
+ending at a solver bound or where a model value leaves the support
+(`Likelihood::supports`, to the solve's resolution).  `FitResult::intervals`
+carries them; `standard_errors` are the half-widths and the covariance is
+`D R D` (`R` the Fisher correlation, `D` the half-widths), so its diagonal
+is the errors squared.  Curvature errors fail where a proportion is fitted
+at 0 or 1: the k(0) = 20 survival decay's amplitude sits on f(0) = 1 with a
+Fisher error of 7e-6; its interval is [0.9712, 1] (SciPy profile
+0.97124, 1).  Golden histogram records compare the correlation against the
+Fisher one at the fitted parameters (within the covariance bound) and each
+error against its interval's half-width; their parameters, fitted values,
+residuals, reduced chi-square, evidence and solver rows stay bit-exact.
 
 ## Identifiable covariance (a deliberate departure)
 

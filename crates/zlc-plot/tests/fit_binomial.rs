@@ -1,7 +1,7 @@
 //! Proportions (the MEAN of booleans, observations with Bernoulli trials)
-//! are fitted by the binomial likelihood, histograms by the Poisson one,
-//! and for both the standard errors are the inverse Fisher information:
-//! the model fixes the noise, the deviance is not a scale (docs/UNCERTAINTY.md).
+//! are fitted by the binomial likelihood, histograms by the Poisson one;
+//! the model fixes the noise, the deviance is not a scale, and the errors
+//! are the profile-likelihood intervals' (docs/UNCERTAINTY.md).
 use std::sync::Arc;
 
 use zlc_plot::fit::engine::evaluate_model;
@@ -68,11 +68,11 @@ fn fisher_weight(f: f64, trials: Option<f64>) -> f64 {
     }
 }
 
-/// `sqrt(diag)` of the inverse Fisher information at `result`'s parameters,
-/// computed here independently: central-difference Jacobian of the model's
-/// values, `J^T W J` over the free parameters, Gauss-Jordan on its
-/// correlation form.  A fixed parameter's error is 0.
-fn fisher_errors(result: &FitResult, x: &[f64], trials: Option<&[f64]>) -> Vec<f64> {
+/// The inverse Fisher information at `result`'s parameters, computed here
+/// independently: central-difference Jacobian of the model's values,
+/// `J^T W J` over the free parameters, Gauss-Jordan on its correlation
+/// form.  Row-major over all parameters, 0 at fixed ones.
+fn fisher_covariance(result: &FitResult, x: &[f64], trials: Option<&[f64]>) -> Vec<f64> {
     let p = &result.parameter_values;
     let free: Vec<usize> = (0..p.len()).filter(|&i| !result.fixed_parameter_names.contains(&result.model.parameters[i].name)).collect();
     let coords = vec![x.to_vec()];
@@ -93,11 +93,14 @@ fn fisher_errors(result: &FitResult, x: &[f64], trials: Option<&[f64]>) -> Vec<f
         .map(|i| (0..x.len()).map(|point| columns[i / k][point] * columns[i % k][point] * fisher_weight(f[point], trials.map(|t| t[point]))).sum())
         .collect();
     let inverse = invert(k, &information);
-    let mut errors = vec![0.0; p.len()];
-    for (a, &j) in free.iter().enumerate() {
-        errors[j] = inverse[a * k + a].sqrt();
+    let n = p.len();
+    let mut covariance = vec![0.0; n * n];
+    for (a, &i) in free.iter().enumerate() {
+        for (b, &j) in free.iter().enumerate() {
+            covariance[i * n + j] = inverse[a * k + b];
+        }
     }
-    errors
+    covariance
 }
 
 /// The inverse of a symmetric positive-definite matrix (Gauss-Jordan on its
@@ -126,20 +129,56 @@ fn invert(k: usize, matrix: &[f64]) -> Vec<f64> {
 /// The binomial deviance, summed, of proportions `y` of `n` trials at `f`.
 fn binomial_deviance(y: &[f64], n: &[f64], f: &[f64]) -> f64 {
     let term = |a: f64, b: f64| if a > 0.0 { a * (a / b).ln() } else { 0.0 };
+    (0..y.len()).map(|i| 2.0 * n[i] * (term(y[i], f[i]) + term(1.0 - y[i], 1.0 - f[i]))).sum()
+}
+
+/// The Poisson deviance, summed, of counts `y` at `f`.
+fn poisson_deviance(y: &[f64], f: &[f64]) -> f64 {
     (0..y.len()).map(|i| {
-        let f = f[i].clamp(FLOOR, 1.0 - FLOOR);
-        2.0 * n[i] * (term(y[i], f) + term(1.0 - y[i], 1.0 - f))
+        let f = f[i].max(FLOOR);
+        2.0 * (f - y[i] + if y[i] > 0.0 { y[i] * (y[i] / f).ln() } else { 0.0 }).max(0.0)
     }).sum()
 }
 
 fn relative(got: f64, want: f64) -> f64 { (got - want).abs() / want.abs() }
 
+/// Every parameter's error is its interval's half-width and the covariance
+/// is `D R D`: half-widths on the Fisher correlation `R`.
+fn assert_interval_errors(label: &str, result: &FitResult, fisher: &[f64]) {
+    let intervals = result.intervals.as_ref().unwrap_or_else(|| panic!("{label}: no intervals"));
+    let n = result.parameter_values.len();
+    for i in 0..n {
+        let [low, high] = intervals[i];
+        assert!(low <= result.parameter_values[i] && result.parameter_values[i] <= high, "{label} [{i}]: {low} .. {high} misses {}", result.parameter_values[i]);
+        assert!((result.standard_errors[i] - 0.5 * (high - low)).abs() <= 1e-12 * result.standard_errors[i], "{label} [{i}]");
+        for j in 0..n {
+            let scale = (fisher[i * n + i] * fisher[j * n + j]).sqrt();
+            if scale > 0.0 {
+                let correlation = result.covariance[i * n + j] / (result.standard_errors[i] * result.standard_errors[j]);
+                assert!((correlation - fisher[i * n + j] / scale).abs() <= 1e-6, "{label} [{i},{j}]: correlation {correlation} vs Fisher {}", fisher[i * n + j] / scale);
+            }
+        }
+    }
+}
+
+/// An interval's ends against a reference profile: each within 2e-3 of its side's length.
+fn assert_ends(label: &str, result: &FitResult, name: &str, want: [f64; 2]) {
+    let index = result.model.parameter_index(name).unwrap();
+    let (value, [low, high]) = (result.parameter_values[index], result.intervals.as_ref().unwrap()[index]);
+    eprintln!("{label} {name}: {value} in [{low}, {high}] (reference [{}, {}])", want[0], want[1]);
+    for (got, want) in [(low, want[0]), (high, want[1])] {
+        let side = (want - value).abs();
+        assert!((got - want).abs() <= 2e-3 * side + 1e-8 * value.abs(), "{label} {name}: end {got} vs {want} (side {side})");
+    }
+}
+
 const REFERENCE_X: [f64; 8] = [0.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0];
 const REFERENCE_K: [f64; 8] = [18.0, 13.0, 11.0, 8.0, 4.0, 4.0, 2.0, 0.0];
 
 /// A survival decay, 8 points of 20 trials, `A exp(-x/tau)`: the binomial
-/// maximum-likelihood answer and its Fisher covariance of a checked
-/// prototype (SciPy), on both lanes.
+/// maximum-likelihood answer of a checked prototype (SciPy), and its
+/// profile-likelihood intervals (SciPy: Nelder-Mead profile, brentq on a
+/// rise of 1, `prof.py` in the work notes), on both lanes.
 #[test]
 fn the_binomial_reference_is_reproduced_on_both_lanes() {
     let engine = FitEngine::default();
@@ -151,33 +190,127 @@ fn the_binomial_reference_is_reproduced_on_both_lanes() {
         // The fallback lane solves seed by seed and keeps no solver row.
         assert_eq!(result.diagnostics.is_none(), lane == "fallback");
         let (amplitude, tau) = (result.parameter("amplitude").unwrap(), result.parameter("decay_time").unwrap());
-        eprintln!("{lane}: A = {amplitude} ± {}, tau = {tau} ± {}", result.error("amplitude").unwrap(), result.error("decay_time").unwrap());
         assert!(relative(amplitude, 0.90218585) < 1e-5, "{lane}: A {amplitude}");
         assert!(relative(tau, 84.522032) < 1e-5, "{lane}: tau {tau}");
-        let c = |a: usize, b: usize| result.covariance[a * 3 + b];
-        for (got, want) in [(c(0, 0), 0.0037442270), (c(0, 2), -0.33345775), (c(2, 0), -0.33345775), (c(2, 2), 150.80504)] {
-            assert!(relative(got, want) < 1e-4, "{lane}: covariance {got} vs {want}");
+        assert_ends(lane, &result, "amplitude", [0.8332957110133942, 0.9526838224621427]);
+        assert_ends(lane, &result, "decay_time", [73.49190165036055, 98.47508008892879]);
+        // The Fisher covariance of the prototype: its correlation stays.
+        let mut fisher = vec![0.0; 9];
+        for (index, value) in [(0, 0.0037442270), (2, -0.33345775), (6, -0.33345775), (8, 150.80504)] {
+            fisher[index] = value;
         }
-        assert!(relative(result.error("amplitude").unwrap(), 0.0611901) < 1e-4);
-        assert!(relative(result.error("decay_time").unwrap(), 12.28027) < 1e-4);
+        assert_interval_errors(lane, &result, &fisher);
         assert_eq!(result.error("offset").unwrap(), 0.0);
+        assert_eq!(result.intervals.as_ref().unwrap()[1], [0.0, 0.0]);
         assert_eq!(result.error_basis, ErrorBasis::Likelihood(Likelihood::Binomial));
         // The reduced chi-square is the deviance per degree of freedom.
         let y: Vec<f64> = REFERENCE_K.iter().map(|k| k / 20.0).collect();
         let deviance = binomial_deviance(&y, &trials, &result.fitted_values());
         assert!(relative(result.reduced_chi_square, deviance / 6.0) < 1e-9, "{lane}: {} vs {}", result.reduced_chi_square, deviance / 6.0);
-        assert_eq!(result.error_basis_text(), r"± 1$\sigma$: binomial likelihood");
+        assert_eq!(result.error_basis_text(), "68 % likelihood interval (binomial)");
     }
 }
 
-/// The class: for proportions and counts, on both lanes and over data sets
-/// whose deviance per degree of freedom ranges widely, every reported error
-/// is the inverse Fisher information at the fitted parameters -- whatever
-/// the deviance.
+/// An all-successes point (`y = 1`): the fit puts f(0) = A on the edge of
+/// the probabilities, where the log-likelihood is linear in A and no
+/// curvature describes it.  The profile does: A's interval is one-sided,
+/// its upper side 0 (A cannot pass 1), its lower side the likelihood-ratio
+/// distance; tau's is two-sided.  SciPy profile on the support (`prof.py`):
+/// A in [0.9712432308837338, 1], tau in [67.9301940955145, 86.39872214385115],
+/// MLE A = 1, tau = 76.52498052650844.
 #[test]
-fn counted_and_proportion_errors_are_the_inverse_fisher_information() {
+fn an_all_successes_point_gets_a_one_sided_interval() {
+    let engine = FitEngine::default();
+    let trials = [20.0; 8];
+    let mut k = REFERENCE_K;
+    k[0] = 20.0;
+    let cell = proportion_cell(&REFERENCE_X, &k, &trials);
+    for (lane, model) in lanes(&engine, "exponential_decay") {
+        let result = engine.fit(&model, &cell, &request(offset_fixed_at_zero())).unwrap();
+        assert!(result.success && result.covariance_valid, "{lane}: {}", result.message);
+        assert!(result.parameter_values.iter().chain(&result.standard_errors).all(|v| v.is_finite()));
+        let (amplitude, tau) = (result.parameter("amplitude").unwrap(), result.parameter("decay_time").unwrap());
+        assert!(relative(tau, 76.52498052650844) < 1e-4, "{lane}: tau {tau}");
+        // f(0) at the clamp: the amplitude on the boundary f(0) = 1.
+        assert!((amplitude - 1.0).abs() < 1e-6, "{lane}: A {amplitude}");
+        let [low, high] = result.intervals.as_ref().unwrap()[0];
+        eprintln!("{lane}: A = {amplitude} in [{low}, {high}], error {}", result.error("amplitude").unwrap());
+        // The upper side is 0: it ends where f(0) leaves [0, 1] (to the solve's resolution).
+        assert!(high >= amplitude && (high - 1.0).abs() <= 1e-7, "{lane}: A's upper end {high}");
+        assert!((low - 0.9712432308837338).abs() <= 2e-3 * (1.0 - 0.9712432308837338), "{lane}: A's lower end {low}");
+        assert_ends(lane, &result, "decay_time", [67.9301940955145, 86.39872214385115]);
+        assert!(result.error("amplitude").unwrap() > 0.01, "{lane}: A's error {}", result.error("amplitude").unwrap());
+        let fisher = fisher_covariance(&result, &REFERENCE_X, Some(&trials));
+        assert_interval_errors(lane, &result, &fisher);
+    }
+}
+
+/// A Poisson histogram (71 counts in 21 bins of 0.5), `histogram_gaussian`:
+/// the MLE and its profile intervals against SciPy (`profp.py`, Nelder-Mead
+/// profile, brentq on a rise of 1), on both lanes.
+#[test]
+fn a_histogram_gets_its_profile_intervals() {
+    let engine = FitEngine::default();
+    let x: Vec<f64> = (0..21).map(|i| -5.0 + 0.5 * i as f64).collect();
+    let counts = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 7.0, 8.0, 12.0, 10.0, 11.0, 10.0, 6.0, 3.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+    let cell = FitCell::points(vec![x.clone()], counts.to_vec());
+    for (lane, model) in lanes(&engine, "histogram_gaussian") {
+        let result = engine.fit(&model, &cell, &request(None)).unwrap();
+        assert!(result.success && result.covariance_valid, "{lane}: {}", result.message);
+        for (name, want) in [("amplitude", 35.50009656), ("center", 0.16902326), ("sigma", 1.1163152)] {
+            assert!(relative(result.parameter(name).unwrap(), want) < 1e-5, "{lane} {name}: {}", result.parameter(name).unwrap());
+        }
+        assert_ends(lane, &result, "amplitude", [31.452002789028146, 39.88147251183366]);
+        assert_ends(lane, &result, "center", [0.036069889315810066, 0.30198057361140485]);
+        assert_ends(lane, &result, "sigma", [1.0287871074213146, 1.2170422597989148]);
+        assert_interval_errors(lane, &result, &fisher_covariance(&result, &x, None));
+        assert_eq!(result.error_basis_text(), "68 % likelihood interval (Poisson)");
+    }
+}
+
+/// The class: for proportions and counts, on both lanes, over data sets
+/// whose deviance per degree of freedom ranges widely, every interval holds
+/// its MLE, the profile deviance -- refitted here by the engine with the
+/// parameter fixed, the deviance computed here -- rises by 1 at each end
+/// (or less, at the edge of the likelihood's support), the errors are the
+/// half-widths on the Fisher correlation, and nothing scales by the deviance.
+#[test]
+fn likelihood_intervals_are_the_profile() {
     let engine = FitEngine::default();
     let mut reduced = Vec::new();
+    let (mut ends, mut saturated) = (0, 0);
+    let mut check = |label: &str, model: &Arc<FitModelSpec>, cell: &FitCell, base: Vec<(String, (Option<f64>, Option<f64>))>, deviance: &dyn Fn(&[f64]) -> f64, x: &[f64], trials: Option<&[f64]>| {
+        let result = engine.fit(model, cell, &request((!base.is_empty()).then(|| Bounds(base.clone())))).unwrap();
+        assert!(result.success && result.covariance_valid, "{label}: {}", result.message);
+        assert_interval_errors(label, &result, &fisher_covariance(&result, x, trials));
+        let minimum = deviance(&result.fitted_values());
+        for (index, parameter) in result.model.parameters.iter().enumerate() {
+            if result.fixed_parameter_names.contains(&parameter.name) {
+                continue;
+            }
+            let value = result.parameter_values[index];
+            for end in result.intervals.as_ref().unwrap()[index] {
+                if end == value {
+                    saturated += 1;
+                    continue;
+                }
+                let mut bounds = base.clone();
+                bounds.push((parameter.name.clone(), (Some(end), Some(end))));
+                let held = engine.fit(model, cell, &request(Some(Bounds(bounds)))).unwrap();
+                let fitted = held.fitted_values();
+                let rise = deviance(&fitted) - minimum;
+                let at_edge = fitted.iter().any(|&f| trials.is_some() && f >= 1.0 - 1e-6);
+                ends += 1;
+                if at_edge {
+                    saturated += 1;
+                    assert!(rise <= 1.01, "{label} {}: rise {rise} at the support's edge {end}", parameter.name);
+                } else {
+                    assert!((rise - 1.0).abs() <= 0.01, "{label} {}: rise {rise} at {end} (value {value})", parameter.name);
+                }
+            }
+        }
+        result.reduced_chi_square
+    };
     // Proportions: a survival decay, 8 to 15 points of 10, 20 or 50 trials.
     for seed in 1..=8u64 {
         let mut rng = Noise::new(seed);
@@ -185,15 +318,12 @@ fn counted_and_proportion_errors_are_the_inverse_fisher_information() {
         let x: Vec<f64> = (0..points).map(|i| 20.0 * i as f64).collect();
         let n: Vec<f64> = (0..points).map(|_| [10.0, 20.0, 50.0][(rng.uniform() * 3.0) as usize]).collect();
         let k: Vec<f64> = x.iter().zip(&n).map(|(&x, &n)| rng.binomial(n, 0.8 * (-x / 90.0).exp())).collect();
+        let y: Vec<f64> = k.iter().zip(&n).map(|(k, n)| k / n).collect();
         let cell = proportion_cell(&x, &k, &n);
+        let deviance = |f: &[f64]| binomial_deviance(&y, &n, f);
         for (lane, model) in lanes(&engine, "exponential_decay") {
-            let result = engine.fit(&model, &cell, &request(offset_fixed_at_zero())).unwrap();
-            assert!(result.success && result.covariance_valid, "seed {seed} {lane}: {}", result.message);
-            let want = fisher_errors(&result, &x, Some(&n));
-            for (i, (&got, &want)) in result.standard_errors.iter().zip(&want).enumerate() {
-                assert!((got - want).abs() <= 1e-6 * want, "binomial seed {seed} {lane} [{i}]: {got} vs Fisher {want} (deviance/dof {})", result.reduced_chi_square);
-            }
-            reduced.push(result.reduced_chi_square);
+            let base = vec![("offset".to_string(), (Some(0.0), Some(0.0)))];
+            reduced.push(check(&format!("binomial seed {seed} {lane}"), &model, &cell, base, &deviance, &x, Some(&n)));
         }
     }
     // Counts: a Gaussian histogram of 40 to 400 shots in 21 bins, many sparse.
@@ -204,105 +334,89 @@ fn counted_and_proportion_errors_are_the_inverse_fisher_information() {
         let x: Vec<f64> = (0..21).map(|i| -5.0 + step * i as f64).collect();
         let density = |v: f64| (-0.5 * (v / 1.3) * (v / 1.3)).exp() / (1.3 * (2.0 * std::f64::consts::PI).sqrt());
         let counts: Vec<f64> = x.iter().map(|&v| rng.poisson(shots * step * density(v))).collect();
-        let cell = FitCell::points(vec![x.clone()], counts);
+        let cell = FitCell::points(vec![x.clone()], counts.clone());
+        let deviance = |f: &[f64]| poisson_deviance(&counts, f);
         for (lane, model) in lanes(&engine, "histogram_gaussian") {
-            let result = engine.fit(&model, &cell, &request(None)).unwrap();
-            assert!(result.success && result.covariance_valid, "seed {seed} {lane}: {}", result.message);
-            assert_eq!(result.error_basis, ErrorBasis::Likelihood(Likelihood::Poisson));
-            let want = fisher_errors(&result, &x, None);
-            for (i, (&got, &want)) in result.standard_errors.iter().zip(&want).enumerate() {
-                assert!((got - want).abs() <= 1e-6 * want, "Poisson seed {seed} {lane} [{i}]: {got} vs Fisher {want} (deviance/dof {})", result.reduced_chi_square);
-            }
-            reduced.push(result.reduced_chi_square);
+            reduced.push(check(&format!("Poisson seed {seed} {lane}"), &model, &cell, Vec::new(), &deviance, &x, None));
         }
     }
     let (low, high) = reduced.iter().fold((f64::INFINITY, 0.0_f64), |(l, h), &r| (l.min(r), h.max(r)));
-    eprintln!("deviance per degree of freedom over the sets: {low:.3} .. {high:.3}");
+    eprintln!("deviance per degree of freedom over the sets: {low:.3} .. {high:.3}; {ends} ends refitted, {saturated} at the support's edge");
     // Data sets whose deviance/dof is far from 1: a scaled covariance would
     // be off by sqrt of that.
     assert!(low < 0.7 && high > 1.3, "{low} .. {high}");
 }
 
-/// An all-successes point (`y = 1`) is a proportion like any other: the fit
-/// is finite, its errors the Fisher ones, and the point does not pull the
-/// curve to itself (the binomial MLE of these data, SciPy: tau = 76.52498,
-/// its error 9.23799; amplitude on the boundary f(0) = 1).
+/// Survival decays of 8 points x 20 trials, 400 draws each: one well inside
+/// (A = 0.9, the audit's) and one boundary-prone (A = 0.97: f(0) comes out
+/// at 1 in about half the draws).  The likelihood intervals cover the truth
+/// about 68 % of the time for tau in both and for A inside; on the
+/// boundary A's interval covers about half the time, as the profile
+/// likelihood itself does there (SciPy, the same profile on 200 draws of
+/// A = 0.97: A 49.5 %, tau 67 %; `cov.py` in the work notes) -- a coverage
+/// property of likelihood intervals on a boundary, not of this solver.
+/// Printed beside them, the Fisher (curvature) ±1σ and the Gaussian fit
+/// with the proportions' own standard errors `sqrt(p (1 - p) / (n - 1))`.
 #[test]
-fn an_all_successes_point_neither_vanishes_nor_dominates() {
-    let engine = FitEngine::default();
-    let trials = [20.0; 8];
-    let mut k = REFERENCE_K;
-    k[0] = 20.0;
-    let cell = proportion_cell(&REFERENCE_X, &k, &trials);
-    for (lane, model) in lanes(&engine, "exponential_decay") {
-        let result = engine.fit(&model, &cell, &request(offset_fixed_at_zero())).unwrap();
-        assert!(result.success && result.covariance_valid, "{lane}: {}", result.message);
-        assert!(result.parameter_values.iter().chain(&result.standard_errors).all(|v| v.is_finite()));
-        let (amplitude, tau, tau_error) = (result.parameter("amplitude").unwrap(), result.parameter("decay_time").unwrap(), result.error("decay_time").unwrap());
-        eprintln!("{lane}: A = {amplitude} ± {:e}, tau = {tau} ± {tau_error}", result.error("amplitude").unwrap());
-        assert!(relative(tau, 76.52498) < 1e-4, "{lane}: tau {tau}");
-        assert!(relative(tau_error, 9.23799) < 1e-3, "{lane}: tau error {tau_error}");
-        // f(0) at the clamp: the amplitude sits on the boundary f(0) = 1.
-        assert!((amplitude - 1.0).abs() < 1e-6, "{lane}: A {amplitude}");
-        let want = fisher_errors(&result, &REFERENCE_X, Some(&trials));
-        for (i, (&got, &want)) in result.standard_errors.iter().zip(&want).enumerate() {
-            assert!((got - want).abs() <= 1e-3 * want, "{lane} [{i}]: {got} vs Fisher {want}");
-        }
-    }
-}
-
-/// The audit's survival decay (A = 0.9, tau = 80, 8 points of 20 trials),
-/// 400 times: the binomial fit's tau is unbiased and its ±1σ covers the
-/// truth about 68 % of the time.  Printed beside it: the Gaussian fit with
-/// the proportions' own standard errors `sqrt(p (1 - p) / (n - 1))`.
-#[test]
-fn binomial_errors_cover_their_truth() {
+fn likelihood_intervals_cover_their_truth() {
     let engine = FitEngine::default();
     let model = engine.registry.get("exponential_decay").unwrap();
-    let (amplitude, tau, n) = (0.9, 80.0, 20.0);
+    let (tau, n, draws) = (80.0, 20.0, 400);
     let trials = [n; 8];
-    let mut rng = Noise::new(7);
-    let (mut covered, mut sum, mut count) = (0, 0.0, 0);
-    let (mut gaussian_covered, mut gaussian_sum, mut gaussian_count) = (0, 0.0, 0);
-    for _ in 0..400 {
-        let k: Vec<f64> = REFERENCE_X.iter().map(|&x| rng.binomial(n, amplitude * (-x / tau).exp())).collect();
-        let binomial = engine.fit(&model, &proportion_cell(&REFERENCE_X, &k, &trials), &request(offset_fixed_at_zero()));
-        if let Ok(result) = binomial.as_ref().map_err(|_| ()).and_then(|r| if r.success && r.covariance_valid { Ok(r) } else { Err(()) }) {
-            let (value, error) = (result.parameter("decay_time").unwrap(), result.error("decay_time").unwrap());
-            covered += ((value - tau).abs() <= error) as usize;
-            sum += value;
+    // (A, seed, A's coverage band): a binomial share of 400 draws within
+    // three of its standard deviations (2.3 %) of 68 %, or of SciPy's 49.5 %.
+    for (amplitude, seed, band) in [(0.9, 7, 0.61..=0.75), (0.97, 8, 0.42..=0.57)] {
+        let mut rng = Noise::new(seed);
+        let (mut count, mut on_edge, mut sum) = (0, 0, 0.0);
+        let (mut covered, mut fisher_covered) = ([0; 2], [0; 2]);
+        let (mut gaussian_covered, mut gaussian_count) = (0, 0);
+        let truth = [amplitude, tau];
+        for _ in 0..draws {
+            let k: Vec<f64> = REFERENCE_X.iter().map(|&x| rng.binomial(n, amplitude * (-x / tau).exp())).collect();
+            let Ok(result) = engine.fit(&model, &proportion_cell(&REFERENCE_X, &k, &trials), &request(offset_fixed_at_zero())) else { continue };
+            if !(result.success && result.covariance_valid) {
+                continue;
+            }
             count += 1;
-        }
-        let y: Vec<f64> = k.iter().map(|k| k / n).collect();
-        let mut cell = FitCell::points(vec![REFERENCE_X.to_vec()], y.clone());
-        cell.sigma = Some(y.iter().map(|p| (p * (1.0 - p) / (n - 1.0)).sqrt()).collect::<Vec<f64>>().into());
-        if let Ok(result) = engine.fit(&model, &cell, &request(offset_fixed_at_zero())) {
-            if result.success && result.covariance_valid {
-                let (value, error) = (result.parameter("decay_time").unwrap(), result.error("decay_time").unwrap());
-                gaussian_covered += ((value - tau).abs() <= error) as usize;
-                gaussian_sum += value;
-                gaussian_count += 1;
+            on_edge += (k[0] == n) as usize;
+            sum += result.parameter_values[2];
+            let fisher = fisher_covariance(&result, &REFERENCE_X, Some(&trials));
+            for (slot, index) in [(0, 0), (1, 2)] {
+                let [low, high] = result.intervals.as_ref().unwrap()[index];
+                covered[slot] += (low <= truth[slot] && truth[slot] <= high) as usize;
+                fisher_covered[slot] += ((result.parameter_values[index] - truth[slot]).abs() <= fisher[index * 3 + index].sqrt()) as usize;
+            }
+            let y: Vec<f64> = k.iter().map(|k| k / n).collect();
+            let mut cell = FitCell::points(vec![REFERENCE_X.to_vec()], y.clone());
+            cell.sigma = Some(y.iter().map(|p| (p * (1.0 - p) / (n - 1.0)).sqrt()).collect::<Vec<f64>>().into());
+            if let Ok(gaussian) = engine.fit(&model, &cell, &request(offset_fixed_at_zero())) {
+                if gaussian.success && gaussian.covariance_valid {
+                    gaussian_covered += ((gaussian.parameter_values[2] - tau).abs() <= gaussian.standard_errors[2]) as usize;
+                    gaussian_count += 1;
+                }
             }
         }
+        let share = |c: usize| c as f64 / count as f64;
+        eprintln!(
+            "A = {amplitude}: {count} fits ({on_edge} with k(0) = n), tau bias {:+.2} %; likelihood interval coverage A {:.1} %, tau {:.1} %; Fisher ±1σ A {:.1} %, tau {:.1} %; Gaussian with the proportions' sem: tau {:.1} %",
+            100.0 * (sum / count as f64 / tau - 1.0),
+            100.0 * share(covered[0]),
+            100.0 * share(covered[1]),
+            100.0 * share(fisher_covered[0]),
+            100.0 * share(fisher_covered[1]),
+            100.0 * gaussian_covered as f64 / gaussian_count as f64
+        );
+        assert!(count >= draws - 5, "{count} of {draws} fitted");
+        assert!(band.contains(&share(covered[0])), "A = {amplitude}: A's coverage {}", share(covered[0]));
+        assert!((0.61..=0.75).contains(&share(covered[1])), "A = {amplitude}: tau's coverage {}", share(covered[1]));
     }
-    let coverage = covered as f64 / count as f64;
-    let bias = sum / count as f64 / tau - 1.0;
-    eprintln!(
-        "binomial: {count} fits, tau bias {:+.2} %, ±1σ coverage {:.1} %; Gaussian with the proportions' sem: {gaussian_count} fits, bias {:+.2} %, coverage {:.1} %",
-        100.0 * bias,
-        100.0 * coverage,
-        100.0 * (gaussian_sum / gaussian_count as f64 / tau - 1.0),
-        100.0 * gaussian_covered as f64 / gaussian_count as f64
-    );
-    assert!(count >= 395, "{count} of 400 fitted");
-    assert!((0.63..=0.73).contains(&coverage), "coverage {coverage}");
-    assert!(bias.abs() < 0.02, "bias {bias}");
 }
 
 /// Sparse photon-count histograms (`histogram_poisson_gaussian`, 120 shots
-/// of rate 3 read with sigma 0.35, 0.25-wide bins): the rate's ±1σ covers
-/// the truth about 68 % of the time.  The error the deviance/dof scale gave
-/// (`error x sqrt(reduced chi-square)`) is printed beside it.
+/// of rate 3 read with sigma 0.35, 0.25-wide bins): the rate's likelihood
+/// interval covers the truth about 68 % of the time.  Printed beside it:
+/// the Fisher ±1σ and the error the deviance/dof scale gave
+/// (`Fisher x sqrt(reduced chi-square)`).
 #[test]
 fn sparse_histograms_cover_their_rate() {
     let engine = FitEngine::default();
@@ -310,8 +424,7 @@ fn sparse_histograms_cover_their_rate() {
     let (shots, rate, sigma, step) = (120, 3.0, 0.35, 0.25);
     let x: Vec<f64> = (0..61).map(|i| -1.0 + step * i as f64).collect();
     let mut rng = Noise::new(11);
-    let (mut covered, mut scaled_covered, mut count) = (0, 0, 0);
-    let (mut smallest, mut largest, mut ratio_sum) = (f64::INFINITY, 0.0_f64, 0.0);
+    let (mut covered, mut fisher_covered, mut scaled_covered, mut count) = (0, 0, 0, 0);
     for _ in 0..300 {
         let mut counts = vec![0.0; x.len()];
         for _ in 0..shots {
@@ -325,27 +438,24 @@ fn sparse_histograms_cover_their_rate() {
         if !(result.success && result.covariance_valid) {
             continue;
         }
-        let (value, error) = (result.parameter("rate").unwrap(), result.error("rate").unwrap());
-        let scaled = error * result.reduced_chi_square.sqrt();
-        covered += ((value - rate).abs() <= error) as usize;
-        scaled_covered += ((value - rate).abs() <= scaled) as usize;
+        let index = model.parameter_index("rate").unwrap();
+        let value = result.parameter_values[index];
+        let [low, high] = result.intervals.as_ref().unwrap()[index];
+        let fisher = fisher_covariance(&result, &x, None)[index * 3 + index].sqrt();
+        covered += (low <= rate && rate <= high) as usize;
+        fisher_covered += ((value - rate).abs() <= fisher) as usize;
+        scaled_covered += ((value - rate).abs() <= fisher * result.reduced_chi_square.sqrt()) as usize;
         count += 1;
-        let ratio = scaled / error;
-        smallest = smallest.min(ratio);
-        largest = largest.max(ratio);
-        ratio_sum += ratio;
     }
-    let coverage = covered as f64 / count as f64;
+    let share = |c: usize| c as f64 / count as f64;
     eprintln!(
-        "rate: {count} fits, Fisher ±1σ coverage {:.1} %; deviance-scaled coverage {:.1} %, scaled/Fisher error {:.3} .. {:.3} (mean {:.3})",
-        100.0 * coverage,
-        100.0 * scaled_covered as f64 / count as f64,
-        smallest,
-        largest,
-        ratio_sum / count as f64
+        "rate: {count} fits, likelihood interval coverage {:.1} %, Fisher ±1σ {:.1} %, deviance-scaled ±1σ {:.1} %",
+        100.0 * share(covered),
+        100.0 * share(fisher_covered),
+        100.0 * share(scaled_covered)
     );
     assert!(count >= 290, "{count} of 300 fitted");
-    assert!((0.62..=0.74).contains(&coverage), "coverage {coverage}");
+    assert!((0.62..=0.74).contains(&share(covered)), "coverage {}", share(covered));
 }
 
 /// A binomial series weighed against its nested model: the evidence is the

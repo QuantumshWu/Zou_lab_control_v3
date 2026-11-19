@@ -56,10 +56,18 @@ Per point, the likelihood is the one the table above names.
 ### Covariance: scale only what the model does not fix
 
 * Binomial and Poisson: the noise is fixed by the model (`f (1 - f) / n`,
-  `f`).  The covariance is the inverse Fisher information,
-  `(sum J J^T n / (f (1 - f)))^+` and `(sum J J^T / f)^+`, **not** rescaled by
-  deviance / dof.  The deviance per degree of freedom is still reported (as
-  the reduced chi-square) for judging the model.
+  `f`), nothing is rescaled by deviance / dof.  Each free parameter's
+  uncertainty is its 68.27 % profile-likelihood interval (MINOS): the values
+  where the deviance, minimised over the other parameters, rises at most 1;
+  a side that does not rise by 1 before a solver bound or the edge of the
+  support (a model value leaving `[0, 1]`, or going negative) ends there,
+  one-sided -- a proportion fitted at 0 or 1 is such an edge, where the
+  log-likelihood is linear and no curvature describes it.  The standard
+  error is the interval's half-width, the covariance those half-widths on
+  the correlation of the inverse Fisher information
+  (`(sum J J^T n / (f (1 - f)))^+`, `(sum J J^T / f)^+`), so its diagonal is
+  the errors squared.  The deviance per degree of freedom is still reported
+  (as the reduced chi-square) for judging the model.
 * Student-t: the M-estimator sandwich times `n / (n - p)`, unchanged.
 * Gaussian with a stated sigma or none: `(J^T W J)^+` times the reduced
   chi-square (its floor at the rounding scatter), unchanged.  A stated sigma

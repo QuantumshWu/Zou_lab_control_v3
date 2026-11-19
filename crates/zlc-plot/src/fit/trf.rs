@@ -59,6 +59,11 @@ impl std::fmt::Display for SolveError {
 }
 
 /// One cell's objective as the descriptor's callback sees it.
+/// The tolerances every fit's trust-region solve stops at (`ftol`, `xtol`,
+/// `gtol`, as SciPy names them): the solved parameters are known to this
+/// fraction of their size.
+pub const TOLERANCE: f64 = 1.0e-8;
+
 pub trait CellObjective: Sync {
     /// `(cost, raw_rss, finite)`; fills the free gradient and the row-major
     /// free information when `derivatives`.
@@ -72,6 +77,34 @@ pub trait CellObjective: Sync {
     #[allow(clippy::too_many_arguments)]
     fn finish_stalled(&self, _params: &[f64], _free: &[usize], _values: &[f64], _cost: f64, _raw_rss: f64, _lower: &[f64], _upper: &[f64],
                       _budget: i64, _tolerances: (f64, f64, f64)) -> Option<Result<SeedOutcome, SolveError>> { None }
+    /// A free `step` from `params` that takes a model value out of the
+    /// likelihood's support (where the objective is not finite): the step
+    /// slid along the support's edge (`along_edges`), or `None` when the
+    /// likelihood has no support to leave.
+    fn along_support(&self, _params: &[f64], _free: &[usize], _step: &[f64]) -> Option<Vec<f64>> { None }
+}
+
+/// `step` with its components across violated linear edges removed: each
+/// edge `(a, c)` asks `a . step <= c` (a model value's free Jacobian row and
+/// its distance to the support's edge, signed outward); a violated one is
+/// met by the least change of the step (its projection onto `a . step = c`),
+/// sweeping the edges once per edge so that edges met later do not undo the
+/// earlier ones' (Kaczmarz).
+pub fn along_edges(edges: &[(Vec<f64>, f64)], step: &[f64]) -> Vec<f64> {
+    let mut slid = step.to_vec();
+    for _ in 0..edges.len() {
+        for (row, limit) in edges {
+            let across: f64 = row.iter().zip(&slid).map(|(a, s)| a * s).sum();
+            let norm: f64 = row.iter().map(|a| a * a).sum();
+            if across > *limit && norm > 0.0 {
+                let excess = (across - limit) / norm;
+                for (s, a) in slid.iter_mut().zip(row) {
+                    *s -= excess * a;
+                }
+            }
+        }
+    }
+    slid
 }
 
 /// The iterations after which a solve that has not met its tolerances is
@@ -773,12 +806,34 @@ pub fn solve_seed(
             for index in 0..n {
                 full_parameters[free_indices[index]] = trial[index];
             }
-            let (trial_cost, trial_rss, trial_finite) = objective.evaluate(&full_parameters, free_indices, &mut gradient, &mut information, &mut jacobian_row, false)?;
+            let (mut trial_cost, mut trial_rss, mut trial_finite) = objective.evaluate(&full_parameters, free_indices, &mut gradient, &mut information, &mut jacobian_row, false)?;
             nfev += 1;
-            let scaled_norm = vector_norm(&scaled_step);
+            let mut scaled_norm = vector_norm(&scaled_step);
+            let mut predicted = predicted;
             if !trial_finite || !trial_cost.is_finite() {
-                radius = 0.25 * scaled_norm;
-                continue;
+                // A step out of the likelihood's support slides along its edge.
+                for index in 0..n {
+                    full_parameters[free_indices[index]] = values[index];
+                }
+                if let Some(along) = objective.along_support(&full_parameters, free_indices, &step) {
+                    for index in 0..n {
+                        step[index] = along[index];
+                        scaled_step[index] = div(along[index], scaling[index])?;
+                        trial[index] = values[index] + step[index];
+                    }
+                    make_feasible(&mut trial, lower, upper, 0.0);
+                    for index in 0..n {
+                        full_parameters[free_indices[index]] = trial[index];
+                    }
+                    (trial_cost, trial_rss, trial_finite) = objective.evaluate(&full_parameters, free_indices, &mut gradient, &mut information, &mut jacobian_row, false)?;
+                    nfev += 1;
+                    predicted = -quadratic(&trust_information, &scaled_gradient, &scaled_step);
+                }
+                if !trial_finite || !trial_cost.is_finite() {
+                    radius = 0.25 * scaled_norm;
+                    continue;
+                }
+                scaled_norm = vector_norm(&scaled_step);
             }
             let actual = cost - trial_cost;
             let old_radius = radius;

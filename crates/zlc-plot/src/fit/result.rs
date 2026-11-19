@@ -297,6 +297,11 @@ pub struct FitResult {
     pub diagnostics: Option<SolveDiagnostics>,
     /// What `standard_errors` are.
     pub error_basis: ErrorBasis,
+    /// A likelihood fit's (`ErrorBasis::Likelihood`) 68.27 % profile
+    /// intervals `[low, high]`, one per parameter (a fixed one's is its
+    /// value, an undetermined one's NaN); its `standard_errors` are their
+    /// half-widths.  `None` for the other bases.
+    pub intervals: Option<Vec<[f64; 2]>>,
 }
 
 fn allclose(a: f64, b: f64, rtol: f64, atol: f64) -> bool {
@@ -394,18 +399,20 @@ impl FitResult {
             evidence: f64::NAN,
             diagnostics: None,
             error_basis,
+            intervals: None,
         })
     }
 
-    /// The fit annotation's line saying what the `± 1σ` errors are (empty
-    /// when the fit has none): the likelihood's, the Student-t sandwich's or
-    /// the residuals' scale, with the degrees of freedom of an estimated one.
+    /// The fit annotation's line saying what the errors are (empty when
+    /// the fit has none): the likelihood's profile interval, or the `± 1σ`
+    /// of the Student-t sandwich or of the residuals' scale, with the
+    /// degrees of freedom of an estimated one.
     pub fn error_basis_text(&self) -> String {
         if !(self.success && self.covariance_valid) {
             return String::new();
         }
         match self.error_basis {
-            ErrorBasis::Likelihood(likelihood) => format!(r"± 1$\sigma$: {} likelihood", likelihood.name()),
+            ErrorBasis::Likelihood(likelihood) => format!("68 % likelihood interval ({})", likelihood.name()),
             ErrorBasis::Sandwich { dof } => format!(r"± 1$\sigma$: Student-t, $\nu$ = {dof}"),
             ErrorBasis::Residuals { dof } => {
                 format!(r"± 1$\sigma$: scaled by $\chi^2_r$ = {}, $\nu$ = {dof}", crate::pyfmt::format_g(self.reduced_chi_square, 3))
@@ -528,9 +535,21 @@ pub struct FitParameterDisplay {
     pub value: f64,
     pub standard_error: Option<f64>,
     pub unit: String,
+    /// A likelihood interval's sides `(below, above)` the value, in painted
+    /// units (`FitResult::intervals`); `None` for a symmetric error.
+    pub interval: Option<(f64, f64)>,
 }
 
 impl FitParameterDisplay {
+    /// The parameter with its likelihood interval's sides, `below` and
+    /// `above` the value (non-negative, finite).
+    pub fn with_interval(self, below: f64, above: f64) -> Result<Self, FitError> {
+        if !(below.is_finite() && above.is_finite() && below >= 0.0 && above >= 0.0) {
+            return Err(FitError::value("fit parameter interval sides must be finite and non-negative"));
+        }
+        Ok(FitParameterDisplay { interval: Some((below, above)), ..self })
+    }
+
     pub fn new(name: &str, label: &str, value: f64, standard_error: Option<f64>, unit: &str) -> Result<Self, FitError> {
         let name_text = crate::pystr::strip(name);
         if name_text.is_empty() {
@@ -551,7 +570,7 @@ impl FitParameterDisplay {
                 return Err(FitError::value("fit parameter standard_error must be non-negative"));
             }
         }
-        Ok(FitParameterDisplay { name: name_text.into(), label: label_text.into(), value, standard_error, unit: crate::pystr::strip(unit).into() })
+        Ok(FitParameterDisplay { name: name_text.into(), label: label_text.into(), value, standard_error, unit: crate::pystr::strip(unit).into(), interval: None })
     }
 }
 

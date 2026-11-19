@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use super::models::{loss_code, Axes, Kernel, Likelihood, ObjectiveData};
+use super::models::{loss_code, support_edges, Axes, Kernel, Likelihood, ObjectiveData};
 use super::num::{numpy_sum, pmax, Zr};
 use super::prepare::Seeds;
+use super::profile::{interval_covariance, Profile};
 use super::radial::{self, RegularImageFitInput};
 use super::result::{Bounds, ErrorBasis, FitError, FitOptions, FitResult, ObservationArrays, ParamValues, SolveDiagnostics};
 use super::shared::{
@@ -155,6 +156,8 @@ struct Solved {
     errors: Vec<f64>,
     reduced: f64,
     covariance_valid: bool,
+    /// A likelihood fit's profile intervals (`profile.rs`).
+    intervals: Option<Vec<[f64; 2]>>,
 }
 
 struct PointObjective<'a> {
@@ -169,6 +172,19 @@ impl CellObjective for PointObjective<'_> {
         self.kernel.objective(&self.coords, &self.data, params, free, gradient, information, jacobian_row, derivatives)
     }
     fn selected(&self) -> usize { self.selected }
+    fn along_support(&self, params: &[f64], free: &[usize], step: &[f64]) -> Option<Vec<f64>> {
+        if !self.data.likelihood.fixes_noise() {
+            return None;
+        }
+        let (values, jacobian) = self.kernel.value_jacobian(&self.coords, params, true).ok()?;
+        let mut trial = params.to_vec();
+        for (k, &parameter) in free.iter().enumerate() {
+            trial[parameter] += step[k];
+        }
+        let (moved, _) = self.kernel.value_jacobian(&self.coords, &trial, false).ok()?;
+        let edges = support_edges(self.data.likelihood, &values, &jacobian, &moved, &|point| self.data.valid[point], free);
+        (!edges.is_empty()).then(|| trf::along_edges(&edges, step))
+    }
 }
 
 fn bucket_failure(error: &FinalizeError) -> String { error.to_string() }
@@ -422,6 +438,17 @@ impl FitEngine {
             .collect();
         let mut covariance = vec![0.0; count * count];
         let mut errors = vec![0.0; count];
+        // The nested answer's intervals at the shared parameters; a pinned
+        // or fixed one's is its value.
+        let intervals = nested.intervals.as_ref().map(|narrow| {
+            let mut wide: Vec<[f64; 2]> = values.iter().map(|&v| [v, v]).collect();
+            for (w, n) in &reduction.shared {
+                if let (Ok(wi), Ok(ni)) = (spec.parameter_index(w), nested_spec.parameter_index(n)) {
+                    wide[wi] = narrow[ni];
+                }
+            }
+            wide
+        });
         if nested.covariance_valid {
             let narrow_count = nested_spec.parameters.len();
             let wide: Vec<usize> = reduction.shared.iter().map(|(w, _)| spec.parameter_index(w).expect("shared")).collect();
@@ -464,6 +491,7 @@ impl FitEngine {
             evidence,
             diagnostics: nested.diagnostics,
             error_basis: nested.error_basis,
+            intervals,
         })
     }
 
@@ -646,6 +674,9 @@ impl FitEngine {
                     }
                 };
                 let reduced = super::blas::ddot(&quality, &quality) / item.values.len() as f64;
+                if !reduced.is_finite() {
+                    return Err(FitError::value("the fixed parameters put the model outside its likelihood's support"));
+                }
                 let count = parameter_count;
                 Ok(FitResult {
                     model: item.model.clone(),
@@ -665,6 +696,7 @@ impl FitEngine {
                     evidence: f64::NAN,
                     diagnostics: None,
                     error_basis: ErrorBasis::of(item.likelihood, item.dof.is_some(), item.values.len(), 0),
+                    intervals: item.likelihood.fixes_noise().then(|| fixed_values.iter().map(|&v| [v, v]).collect()),
                 })
             })();
             outcomes[index] = Some(match outcome {
@@ -930,7 +962,7 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
         data: ObjectiveData { observations: &grid_values, valid: &grid_valid, weights: weights_slice, use_weights, likelihood: item.likelihood, trials: &grid_trials, loss_code: loss, dof: &grid_dof },
         selected: grid_valid.iter().filter(|&&v| v).count(),
     };
-    let solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, 1.0e-8, 1.0e-8, 1.0e-8, item.warm.is_some(), prepared.status);
+    let solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, trf::TOLERANCE, trf::TOLERANCE, trf::TOLERANCE, item.warm.is_some(), prepared.status);
     // Finalize on the cell's selected points.
     let selected_coords: Vec<Vec<f64>> = grid_coords.iter().map(|axis| axis.iter().zip(&grid_valid).filter(|(_, v)| **v).map(|(&x, _)| x).collect()).collect();
     let selected_axes = if selected_coords.len() == 1 { Axes::one(&selected_coords[0]) } else { Axes::two(&selected_coords[0], &selected_coords[1]) };
@@ -938,6 +970,14 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
     let finalized = trf::finalize_one(&value_jacobian, &grid_values, &grid_valid, &solution.parameters, &item.free_indices, weights_slice, use_weights, item.likelihood, &grid_trials, loss, &grid_dof)
         .map_err(|e| bucket_failure(&e))?;
     let covariance_valid = finalized.covariance_valid && solution.status >= STATUS_MAX_NFEV;
+    // A likelihood that fixes the noise: the errors are its profile intervals'.
+    let (mut covariance, mut errors) = (finalized.covariance, finalized.errors);
+    let intervals = (item.likelihood.fixes_noise() && covariance_valid).then(|| {
+        let profile = Profile { objective: &objective, parameters: &solution.parameters, free: &item.free_indices, lower: &prepared.lower, upper: &prepared.upper, budget: max_nfev };
+        let intervals = profile.intervals(&errors);
+        interval_covariance(&mut covariance, &mut errors, &intervals, &item.free_indices);
+        intervals
+    });
     // Back from the grid to the cell's own points.
     let (fitted, residuals) = match layout {
         Layout::Shared => (finalized.fitted, finalized.residuals),
@@ -957,10 +997,11 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
         status: solution.status,
         fitted,
         residuals,
-        covariance: finalized.covariance,
-        errors: finalized.errors,
+        covariance,
+        errors,
         reduced: finalized.reduced,
         covariance_valid,
+        intervals,
     })
 }
 
@@ -1073,5 +1114,6 @@ fn finish_cell(item: &Prepared, mut solved: Solved, parameter_count: usize) -> C
         evidence: f64::NAN,
         diagnostics: Some(solved.diagnostics),
         error_basis: ErrorBasis::of(item.likelihood, item.dof.is_some(), item.values.len(), free_count),
+        intervals: solved.intervals.filter(|_| covariance_valid),
     })
 }

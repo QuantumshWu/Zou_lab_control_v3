@@ -2,10 +2,10 @@
 //! recorded case refitted natively and compared field by field -- values
 //! bit for bit, texts character for character, the compiled lane's own
 //! counts exactly.  Histogram (Poisson) fits are compared the same way
-//! except their covariance, which is the inverse Fisher information here
-//! and the oracle's times deviance/dof: it is compared against the Fisher
-//! value at the fitted parameters (TOLERANCES.md, "Fisher covariance for
-//! counts").  Golden data: `tests/gen/fit_cases.py`.
+//! except their errors, which are profile-likelihood half-widths here and
+//! the oracle's Fisher errors times deviance/dof: their covariance is
+//! compared as the Fisher correlation at the fitted parameters on those
+//! half-widths (TOLERANCES.md, "Counts and proportions").  Golden data: `tests/gen/fit_cases.py`.
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -193,7 +193,7 @@ struct Report {
     worst_covariance: f64,
     /// Cells the oracle's raw-unit rank test called singular and this port determines.
     determined_cells: Vec<String>,
-    /// The largest deviation of a histogram fit's covariance from the Fisher value.
+    /// The largest deviation of a histogram fit's correlation from the Fisher one.
     worst_fisher: f64,
 }
 
@@ -256,8 +256,8 @@ fn poisson_fisher(engine: &FitEngine, got: &FitResult, cell: &FitCell) -> Vec<f6
 
 /// Compare the covariance; true when the oracle called the cell singular
 /// and this port does not.  `fisher`: a histogram fit's inverse Fisher
-/// information, which its covariance is compared against within
-/// `COVARIANCE_BOUND` of its own scale `sqrt(c_ii c_jj)`.
+/// information, whose correlation its covariance carries (within
+/// `COVARIANCE_BOUND`) on its profile intervals' half-widths.
 #[allow(clippy::too_many_arguments)]
 fn compare_covariance(name: &str, want: &Value, got: &FitResult, fisher: Option<&[f64]>, image: bool, report: &mut Report, problems: &mut Vec<String>, rounded: &mut bool) -> bool {
     let (want_errors, want_covariance) = (floats(&want["errors"]), floats(&want["covariance"]));
@@ -297,14 +297,23 @@ fn compare_covariance(name: &str, want: &Value, got: &FitResult, fisher: Option<
         *rounded = true;
         let n = want_errors.len();
         let defined: Vec<bool> = (0..n).map(|i| got.standard_errors[i].is_finite()).collect();
+        // The errors are the profile intervals' half-widths, the covariance
+        // those on the Fisher correlation.
+        let intervals = got.intervals.as_ref().expect("a likelihood fit's intervals");
         for a in (0..n).filter(|&a| defined[a]) {
-            for b in (0..n).filter(|&b| defined[b]) {
-                let (w, g) = (fisher[a * n + b], got.covariance[a * n + b]);
+            let half = 0.5 * (intervals[a][1] - intervals[a][0]);
+            if !(intervals[a][0] <= got.parameter_values[a] && got.parameter_values[a] <= intervals[a][1]) || got.standard_errors[a] != half {
+                problems.push(format!("interval [{a}] {:?} vs value {:e} and error {:e}", intervals[a], got.parameter_values[a], got.standard_errors[a]));
+            }
+        }
+        for a in (0..n).filter(|&a| defined[a] && got.standard_errors[a] > 0.0) {
+            for b in (0..n).filter(|&b| defined[b] && got.standard_errors[b] > 0.0) {
                 let scale = (fisher[a * n + a] * fisher[b * n + b]).abs().sqrt();
-                let deviation = if w == g { 0.0 } else if scale > 0.0 { (w - g).abs() / scale } else { f64::INFINITY };
+                let (w, g) = (fisher[a * n + b] / scale, got.covariance[a * n + b] / (got.standard_errors[a] * got.standard_errors[b]));
+                let deviation = if w == g { 0.0 } else { (w - g).abs() };
                 report.worst_fisher = report.worst_fisher.max(deviation);
                 if !(deviation <= COVARIANCE_BOUND) {
-                    problems.push(format!("Fisher covariance [{a},{b}] {w:e} vs {g:e} ({deviation:.2e})"));
+                    problems.push(format!("Fisher correlation [{a},{b}] {w:e} vs {g:e} ({deviation:.2e})"));
                 }
             }
         }
