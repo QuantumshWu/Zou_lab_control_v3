@@ -46,10 +46,12 @@ def fake_fit(model, x, y, sigma=None, warm=None, sigma_dof=None):
 
 
 class Context:
-    def __init__(self): self.warms, self.dofs = [], []
+    def __init__(self): self.warms, self.dofs, self.sigmas, self.trials = [], [], [], []
     def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None, trials=None):
         self.warms.append(warm)
         self.dofs.append(sigma_dof)
+        self.sigmas.append(sigma)
+        self.trials.append(trials)
         return fake_fit(model, x, y, sigma, warm, sigma_dof)
 
 
@@ -435,6 +437,24 @@ class Fit(unittest.TestCase):
         context = Context()
         run(over, sealed_route(self.schema, self.values, valid), context)
         self.assertIsNone(context.dofs[0])
+
+    def test_a_fit_reads_a_proportion_by_its_trials(self):
+        """A mean of booleans reaches the fit as trials, never as a sigma (docs/UNCERTAINTY.md)."""
+        schema = schema_of(6, 8, (3,), dtype=bool)
+        rng = np.random.default_rng(11)
+        values = rng.random(schema.physical_shape) < 0.7
+        valid = rng.random(schema.physical_shape) > 0.2
+        rows = rows_of({'name': 'a', 'publish': False, 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['repeat'], 'by': 'repeat', 'every': 2},
+                       {'name': 'rabi', 'terms': [{'of': 'a'}], 'statistic': 'fit', 'over': ['duration'], 'model': 'line'})
+        for route in (live_route, sealed_route):
+            context = Context()
+            run(rows, route(schema, values, valid), context)
+            self.assertIsNone(context.sigmas[0])
+            self.assertIsNone(context.dofs[0])
+            # Group 0 is repeats 0 and 1: per (cell, duration) the valid samples are the trials.
+            want = valid[0:2].sum(axis=0).T.astype(float)
+            got = context.trials[0][:3]
+            np.testing.assert_array_equal(np.where(want > 0, got, 0), want)
 
     def test_an_inverse_unit_reads_as_the_panels(self):
         from zlc_data.units import DEFAULT_UNITS
