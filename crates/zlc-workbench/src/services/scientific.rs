@@ -77,6 +77,16 @@ impl Service{
                     else{reduce::statistic(&data,&flags,sigma.as_ref(),&steps,statistic,args["errors"].as_bool().unwrap_or(false))?};
                 encode_planes(result,write)
             }
+            "proportion"=>{
+                // The Wilson interval and standard uncertainty of proportions (docs/UNCERTAINTY.md).
+                let successes=read(&args["successes"])?;let trials=read(&args["trials"])?;
+                if successes.shape!=trials.shape{return Err("successes and trials differ in shape".into());}
+                let pairs:Vec<(f64,f64)>=successes.reals()?.iter().zip(trials.reals()?.iter()).map(|(k,n)|(*k,*n)).collect();
+                let plane=|f:&dyn Fn(f64,f64)->f64|Tensor::from_reals(pairs.iter().map(|(k,n)|f(*k,*n)).collect(),successes.shape.clone());
+                use zlc_core::scientific::statistics::{proportion_interval,proportion_uncertainty};
+                Ok(json!({"low":write(plane(&|k,n|proportion_interval(k,n).0))?,"high":write(plane(&|k,n|proportion_interval(k,n).1))?,
+                    "uncertainty":write(plane(&|k,n|proportion_uncertainty(k,n)))?}))
+            }
             "select"=>{
                 let steps=args["steps"].as_array().ok_or("selection steps must be a list")?.iter().map(|step|Ok(transform::SelectionStep{
                     axis:integer(step,"axis")?,indexes:integers(&step["indexes"],read)?,drop:step["drop"].as_bool().unwrap_or(false)})).collect::<Result<Vec<_>>>()?;

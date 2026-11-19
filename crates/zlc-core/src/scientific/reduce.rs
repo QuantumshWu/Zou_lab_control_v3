@@ -134,7 +134,12 @@ pub fn measure(data: &Tensor, flags: &[bool], sigma: Option<&Tensor>, steps: &[S
         let m2 = apply(centered.iter().map(|v| v*v).collect(), &data.shape, steps, "sum")?;
         part.insert("mean".into(), Tensor::from_reals(anchors.iter().zip(local).map(|(a,b)| *a+b).collect(), shape.clone()));
         part.insert("m2".into(), Tensor::from_reals(m2, shape.clone()));
-        if operation == "mean" { if let Some(sigma) = sigma {
+        // A mean of booleans is a proportion: its uncertainty is that of
+        // `successes` out of `n` trials, not the spread of zeros and ones.
+        if operation == "mean" && matches!(data.values, AnyBuffer::Bool(_)) {
+            let hits = values.iter().zip(&flags).map(|(v,ok)| if *ok && *v != 0.0 { 1.0 } else { 0.0 }).collect();
+            part.insert("successes".into(), Tensor::from_reals(apply(hits,&data.shape,steps,"sum")?,shape.clone()));
+        } else if operation == "mean" { if let Some(sigma) = sigma {
             if sigma.shape != data.shape { return Err("sigma shape differs from values".into()); }
             let squares = sigma.reals()?.iter().zip(&flags).map(|(v,valid)| if *valid { v*v } else { 0.0 }).collect();
             part.insert("stated".into(), Tensor::from_reals(apply(squares,&data.shape,steps,"sum")?,shape.clone()));
@@ -172,10 +177,19 @@ pub fn result(mut part: Planes, operation: &str) -> Result<Planes,String> {
     }).collect(),n.shape.clone());
     let mut output=Planes::from([("values".into(),values),("valid".into(),valid)]);
     if operation=="mean" {
-        let stated=part.get("stated").map(Tensor::reals).transpose()?;
-        let sigma=statistics::sem_from_centred(&part["m2"].reals()?,&counts,stated.as_deref());
-        output.insert("sigma".into(),Tensor::from_reals(sigma,n.shape.clone()));
-        output.insert("dof".into(),Tensor::from_reals(counts.iter().map(|n|statistics::sem_dof(*n)).collect(),n.shape));
+        if let Some(successes)=part.get("successes") {
+            // A proportion: its trials, and the half-width of its Wilson
+            // interval as the one symmetric uncertainty a publication keeps.
+            let trials:Vec<f64>=counts.iter().map(|n|*n as f64).collect();
+            let sigma=successes.reals()?.iter().zip(&trials).map(|(k,n)|statistics::proportion_uncertainty(*k,*n)).collect();
+            output.insert("sigma".into(),Tensor::from_reals(sigma,n.shape.clone()));
+            output.insert("trials".into(),Tensor::from_reals(trials,n.shape));
+        } else {
+            let stated=part.get("stated").map(Tensor::reals).transpose()?;
+            let sigma=statistics::sem_from_centred(&part["m2"].reals()?,&counts,stated.as_deref());
+            output.insert("sigma".into(),Tensor::from_reals(sigma,n.shape.clone()));
+            output.insert("dof".into(),Tensor::from_reals(counts.iter().map(|n|statistics::sem_dof(*n)).collect(),n.shape));
+        }
     }
     Ok(output)
 }
@@ -193,6 +207,6 @@ pub fn statistic(data:&Tensor,flags:&[bool],sigma:Option<&Tensor>,plans:&[Step],
         result.insert("valid".into(),Tensor::from_flags(valid,result["values"].shape.clone()));
         result.insert("values".into(),Tensor::from_reals(values,result["values"].shape.clone()));
     }
-    if !errors{result.remove("sigma");result.remove("dof");}
+    if !errors{result.remove("sigma");result.remove("dof");result.remove("trials");}
     Ok(result)
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::lattice::{FactoredPlanes, axis_coordinate_labels};
 use super::nd::{Array, Plane, Scalar, product};
-use super::output::{AxisValue, CurveData, CurveSeries, FacetCell, FacetData, ImageData, Payload, QuantityArray};
+use super::output::{AxisValue, CurveData, CurveSeries, FacetCell, FacetData, ImageData, Payload, QuantityArray, Spread};
 use super::view::{DataView, UsedDomain};
 use super::{ProjectionError, Result};
 use crate::kinds::{AxisRef, Reduction};
@@ -45,7 +45,7 @@ impl DataView {
     /// `_series_from_columns`.
     #[allow(clippy::too_many_arguments)]
     pub fn series_from_columns(&self, x: &QuantityArray, x_labels: &Option<Vec<String>>, group_domains: &[Arc<UsedDomain>],
-                               group_sizes: &[usize], y: &[f64], counts: &[i64], sem: Option<&[f64]>,
+                               group_sizes: &[usize], y: &[f64], counts: &[i64], spread: Spread<'_>,
                                used: Option<&[bool]>, valid: Option<&[bool]>) -> Vec<CurveSeries> {
         let combos = product(group_sizes);
         let sizes: Vec<usize> = if group_sizes.is_empty() { vec![1] } else { group_sizes.to_vec() };
@@ -54,7 +54,7 @@ impl DataView {
             let key: Vec<AxisValue> = group_domains.iter().zip(&indices).map(|(domain, index)| domain.values()[*index].clone()).collect();
             let mut y_column = column(y, combos, flat);
             let mut counts_column = column(counts, combos, flat);
-            let mut sem_column = sem.map(|s| column(s, combos, flat));
+            let mut sem_column = match spread { Spread::Sem(s) => Some(column(s, combos, flat)), _ => None };
             let mut shown_x = x.clone();
             let mut shown_labels = x_labels.clone();
             if let Some(used) = used {
@@ -74,12 +74,14 @@ impl DataView {
             };
             let label = self.key_label(&key);
             // `sem_from_moments`: a bucket of n > 1 repeats estimates its own
-            // variance; one repeat takes the stated sigma, if any.
+            // variance; one repeat takes the stated sigma, if any. A proportion
+            // carries its trials instead (docs/UNCERTAINTY.md).
             let sem_dof = sem_column.as_ref().map(|_| counts_column.iter().map(|&n| if n > 1 { (n - 1) as f64 } else { f64::INFINITY }).collect::<Vec<f64>>());
             CurveSeries {
                 x: shown_x, x_labels: shown_labels,
                 y: QuantityArray::new(Array::vector(y_column), self.value_unit.clone(), self.value_display_unit.clone(), self.value_label()),
-                valid: Array::vector(valid_column), sem: sem_column.map(Array::vector), sem_dof: sem_dof.map(Array::vector), group_key: key, label,
+                valid: Array::vector(valid_column), sem: sem_column.map(Array::vector), sem_dof: sem_dof.map(Array::vector),
+                trials: matches!(spread, Spread::Trials).then(|| Array::vector(counts_column.iter().map(|&n| n as f64).collect())), group_key: key, label,
             }
         }).collect()
     }
@@ -110,7 +112,7 @@ impl DataView {
         let labels = axis_coordinate_labels(self, x, &x_domain.canonical)?;
         let y = dense.values.to_f64();
         let series = self.series_from_columns(&x_quantity, &labels, group_domains, &group_sizes, &y, &dense.counts.to_vec(),
-            dense.sem.as_deref(), None, Some(&dense.valid.to_vec()));
+            self.spread(uncertainty, dense.sem.as_deref()), None, Some(&dense.valid.to_vec()));
         Ok(Some(self.curve_data(x, groups, series)))
     }
 
@@ -126,7 +128,7 @@ impl DataView {
         let labels = axis_coordinate_labels(self, x, &x_domain.canonical)?;
         let series = self.series_from_columns(&x_quantity, &labels, group_domains, &group_sizes,
             &last_axis_first(&reduced.values, &sizes), &last_axis_first(&reduced.counts, &sizes),
-            reduced.sem.as_ref().map(|s| last_axis_first(s, &sizes)).as_deref(),
+            self.spread(uncertainty, reduced.sem.as_ref().map(|s| last_axis_first(s, &sizes)).as_deref()),
             Some(&last_axis_first(&reduced.presence, &sizes)), None);
         Ok(self.curve_data(x, groups, series))
     }
@@ -140,7 +142,7 @@ impl DataView {
         let Some(planes) = self.factored_planes(&row_refs, &tensor, aggregation, uncertainty)? else { return Ok(None) };
         if carrier.is_empty() {
             let series = self.series_from_planes(&planes, &planes.group_domains, &planes.group_sizes, &planes.y_plane,
-                &planes.counts_plane, planes.sem_plane.as_deref(), None);
+                &planes.counts_plane, self.spread(uncertainty, planes.sem_plane.as_deref()), None);
             return Ok(Some(self.curve_data(x, groups, series)));
         }
         let carrier_sizes = &planes.row_sizes[..planes.row_sizes.len() - 1];
@@ -180,15 +182,15 @@ impl DataView {
         let group_sizes: Vec<usize> = group_domains.iter().map(|d| d.size()).collect();
         let series = self.series_from_columns(&planes.x_quantity, &planes.x_labels, &group_domains, &group_sizes,
             &gather_f(&planes.y_plane), &positions.iter().map(|p| planes.counts_plane[*p]).collect::<Vec<_>>(),
-            planes.sem_plane.as_ref().map(|s| gather_f(s)).as_deref(), Some(&used), None);
+            self.spread(uncertainty, planes.sem_plane.as_ref().map(|s| gather_f(s)).as_deref()), Some(&used), None);
         Ok(Some(self.curve_data(x, groups, series)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn series_from_planes(&self, planes: &FactoredPlanes, group_domains: &[Arc<UsedDomain>], group_sizes: &[usize],
-                          y: &[f64], counts: &[i64], sem: Option<&[f64]>, x: Option<(QuantityArray, Option<Vec<String>>)>) -> Vec<CurveSeries> {
+                          y: &[f64], counts: &[i64], spread: Spread<'_>, x: Option<(QuantityArray, Option<Vec<String>>)>) -> Vec<CurveSeries> {
         let (x_quantity, x_labels) = x.unwrap_or_else(|| (planes.x_quantity.clone(), planes.x_labels.clone()));
-        self.series_from_columns(&x_quantity, &x_labels, group_domains, group_sizes, y, counts, sem, None, None)
+        self.series_from_columns(&x_quantity, &x_labels, group_domains, group_sizes, y, counts, spread, None, None)
     }
 
     // ------------------------------------------------------------- image
@@ -329,7 +331,7 @@ impl DataView {
                 for (index, value) in facet_domain.values().iter().enumerate() {
                     let range = index * per..(index + 1) * per;
                     let series = self.series_from_columns(&x_quantity, &labels, group_domains, &group_sizes, &y[range.clone()],
-                        &dense.counts.range(range.start, range.end).to_vec(), dense.sem.as_ref().map(|s| &s[range.clone()]), None, Some(&dense.valid.range(range.start, range.end).to_vec()));
+                        &dense.counts.range(range.start, range.end).to_vec(), self.spread(curve_uncertainty, dense.sem.as_ref().map(|s| &s[range.clone()])), None, Some(&dense.valid.range(range.start, range.end).to_vec()));
                     cells.push(Self::facet_cell(index, value, Payload::Curve(self.curve_data(x, group.as_slice(), series))));
                 }
             }
@@ -375,14 +377,14 @@ impl DataView {
                 let x_quantity = planes.x_quantity.compress(used);
                 let x_labels = planes.x_labels.as_ref().map(|labels| labels.iter().zip(used).filter(|(_, k)| **k).map(|(l, _)| l.clone()).collect());
                 self.series_from_planes(&planes, &cell_domains, &cell_sizes, &take_rows_f(&planes.y_plane), &counts,
-                    planes.sem_plane.as_ref().map(|s| take_rows_f(s)).as_deref(), Some((x_quantity, x_labels)))
+                    self.spread(uncertainty, planes.sem_plane.as_ref().map(|s| take_rows_f(s)).as_deref()), Some((x_quantity, x_labels)))
             } else {
                 let window = facet_index * cell_combos..(facet_index + 1) * cell_combos;
                 let rows = planes.y_plane.len() / combos;
                 let take_cols = |plane: &[f64]| -> Vec<f64> { (0..rows).flat_map(|r| plane[r * combos + window.start..r * combos + window.end].iter().copied()).collect() };
                 let counts: Vec<i64> = (0..rows).flat_map(|r| planes.counts_plane[r * combos + window.start..r * combos + window.end].iter().copied()).collect();
                 self.series_from_planes(&planes, &cell_domains, &cell_sizes, &take_cols(&planes.y_plane), &counts,
-                    planes.sem_plane.as_ref().map(|s| take_cols(s)).as_deref(), None)
+                    self.spread(uncertainty, planes.sem_plane.as_ref().map(|s| take_cols(s)).as_deref()), None)
             };
             let value = facet_domain.values()[facet_index].clone();
             let index = cells.len();

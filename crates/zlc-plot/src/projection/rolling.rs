@@ -45,6 +45,8 @@ impl DataView {
 
     /// `rolling_history(x, group, aggregation, uncertainty)`.
     pub fn rolling_history(&self, x: Option<&AxisRef>, group: Option<&AxisRef>, aggregation: Reduction, uncertainty: bool) -> Result<RollingHistory> {
+        // A proportion's history carries no sem: its counts are its trials.
+        let uncertainty = self.sem_wanted(uncertainty);
         self.validate_rolling(group, x)?;
         let aggregation = aggregation.statistic();
         if let Some(layout) = self.layout.clone() {
@@ -330,8 +332,13 @@ fn centred_moment_totals(plane: &Array, offset: f64) -> (f64, f64) {
     (first, second)
 }
 
-/// `_trailing_trace(history, column, span, uncertainty)`.
-fn trailing_trace(history: &RollingHistory, column: usize, span: usize, uncertainty: bool) -> (Vec<f64>, Option<Vec<f64>>, Vec<bool>) {
+/// `_trailing_trace(history, column, span, uncertainty)`: each shot's
+/// trailing window, pooled; `(means, sem, trials, valid)`.  A proportion's
+/// window pools its trials -- `sum k / sum n` of `sum n` trials, every
+/// sample one trial -- and its uncertainty is those trials' (`trials`);
+/// a real mean's pools its samples' moments (`sem`).
+fn trailing_trace(history: &RollingHistory, column: usize, span: usize, uncertainty: bool, proportion: bool)
+                  -> (Vec<f64>, Option<Vec<f64>>, Option<Vec<f64>>, Vec<bool>) {
     let total = history.len();
     let groups = history.groups();
     let at = |array: &Array| -> Vec<f64> { let plane = array.to_f64(); (0..total).map(|r| plane[r * groups + column]).collect() };
@@ -339,7 +346,7 @@ fn trailing_trace(history: &RollingHistory, column: usize, span: usize, uncertai
     let valid = history.valid.bools();
     let mut contributing: Vec<bool> = (0..total).map(|r| valid[r * groups + column]).collect();
     let sems: Vec<f64> = match (&history.sem, uncertainty) { (Some(sem), true) => at(sem), _ => vec![f64::NAN; total] };
-    let shot_n: Vec<i64> = if history.group_keys[column].is_empty() {
+    let shot_n: Vec<i64> = if proportion || history.group_keys[column].is_empty() {
         let plane = history.counts.slice::<i64>();
         let counts: Vec<i64> = (0..total).map(|r| plane[r * groups + column]).collect();
         for (c, n) in contributing.iter_mut().zip(&counts) { *c = *c && *n > 0; }
@@ -354,15 +361,16 @@ fn trailing_trace(history: &RollingHistory, column: usize, span: usize, uncertai
     }
     let mut counts = shot_n;
     kernels::trailing_moment_windows(&mut counts, &mut means, &mut m2s, &mut singles, span);
-    let sem = uncertainty.then(|| (0..total).map(|r| {
+    let sem = (uncertainty && !proportion).then(|| (0..total).map(|r| {
         let mut variance = f64::NAN;
         if counts[r] > 1 { variance = m2s[r] / (counts[r] - 1) as f64; }
         if counts[r] == 1 && singles[r].is_finite() { variance = singles[r]; }
         (variance / counts[r] as f64).sqrt()
     }).collect());
+    let trials = (uncertainty && proportion).then(|| counts.iter().map(|&n| n as f64).collect());
     let valid: Vec<bool> = counts.iter().zip(&means).map(|(n, m)| *n > 0 && m.is_finite()).collect();
     let means = means.into_iter().zip(&valid).map(|(m, v)| if *v { m } else { f64::NAN }).collect();
-    (means, sem, valid)
+    (means, sem, trials, valid)
 }
 
 /// `FitProjection._rolling_payload`: one history series per rolling group.
@@ -401,16 +409,20 @@ pub fn rolling_payload(view: &DataView, history: &RollingHistory, along: Option<
         (Some(sem), true) => Some(sem.to_f64().into_iter().zip(valid_plane).map(|(v, k)| if *k { v } else { f64::NAN }).collect()),
         _ => None,
     };
+    let proportion = view.proportion();
+    let counts_plane = history.counts.slice::<i64>();
     let series = history.group_keys.iter().enumerate().map(|(column, key)| {
-        let (canonical, sem, valid) = if trailing > 1 {
-            trailing_trace(history, column, trailing, uncertainty)
+        let (canonical, sem, trials, valid) = if trailing > 1 {
+            trailing_trace(history, column, trailing, uncertainty, proportion)
         } else {
             let take = |plane: &[f64]| -> Vec<f64> { (0..total).map(|r| plane[r * groups + column]).collect() };
-            (take(&values_plane), sem_plane.as_ref().map(|s| take(s)), (0..total).map(|r| valid_plane[r * groups + column]).collect())
+            let trials = (uncertainty && proportion).then(|| (0..total).map(|r| counts_plane[r * groups + column] as f64).collect());
+            (take(&values_plane), sem_plane.as_ref().map(|s| take(s)), trials, (0..total).map(|r| valid_plane[r * groups + column]).collect())
         };
         let label = if key.is_empty() { value_label.clone() } else { key.iter().map(|v| v.label.as_str()).collect::<Vec<_>>().join(", ") };
         CurveSeries { x: x.clone(), y: QuantityArray::new(Array::vector(canonical), canonical_unit.clone(), unit.clone(), value_label.clone()),
-            valid: Array::vector(valid), sem: sem.map(Array::vector), sem_dof: None, x_labels: None, group_key: key.clone(), label }
+            valid: Array::vector(valid), sem: sem.map(Array::vector), sem_dof: None, trials: trials.map(Array::vector), x_labels: None,
+            group_key: key.clone(), label }
     }).collect();
     Ok(CurveData { revision: history.revision, generation: history.generation.clone(), x_ref: None,
         group_by: group.into_iter().cloned().collect(), series, x_role: Some(role.into()) })

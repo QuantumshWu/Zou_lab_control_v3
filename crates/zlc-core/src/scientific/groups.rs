@@ -26,6 +26,7 @@ impl Tally {
             self.real.get_mut("mean").unwrap()[slot]=moment.mean;
         }
         if part.contains_key("stated"){self.real.get_mut("stated").unwrap()[slot]+=value("stated");}
+        if part.contains_key("successes"){self.real.get_mut("successes").unwrap()[slot]+=value("successes");}
         if let Some(total_plane)=part.get("total"){match &total_plane.values{
             AnyBuffer::I64(v)=>{let current=&mut self.integer.as_mut().unwrap()[slot];*current=current.checked_add(v.as_slice()[from]).ok_or("boolean total overflows int64")?;},
             AnyBuffer::F64(v)=>self.real.get_mut("total").unwrap()[slot]+=v.as_slice()[from],_=>unreachable!(),

@@ -48,6 +48,8 @@ impl DataView {
             revision: self.revision(), generation: self.generation().clone(), site: site.clone(),
             coordinates, geometry, indices, values,
             valid: Array::vector(valid), sigma: sigma.filter(|values| values.iter().any(|v| v.is_finite())).map(Array::vector),
+            // A mean of booleans is a proportion: its uncertainty is its trials.
+            trials: (uncertainty && self.proportion() && !boolean).then(|| Array::vector(counts.iter().map(|&n| n as f64).collect())),
             boolean,
         })
     }

@@ -157,6 +157,7 @@ impl Capture {
                     valid: self.array(&s["valid"]),
                     sem: if s["sem"].is_null() { None } else { Some(self.array(&s["sem"])) },
                     sem_dof: None,
+                    trials: None,
                     x_labels: s["x_labels"].as_array().map(|v| v.iter().map(|t| t.as_str().unwrap().to_owned()).collect()),
                     group_key: s["group_key"].as_array().unwrap().iter().map(|v| self.axis_value(v)).collect(),
                     label: s["label"].as_str().unwrap().to_owned(),

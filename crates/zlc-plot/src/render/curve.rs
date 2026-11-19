@@ -115,21 +115,20 @@ fn summarize(x: &[f64], y: &[f64], source_valid: &[bool]) -> (Vec<bool>, Summary
     (valid, Summary { xlow: xmin, xhigh: xmax, ylow: ymin, yhigh: ymax, isolated })
 }
 
-/// `_series_band`: display-unit y+/-sem bounds of one projected series.
+/// `_series_band`: display-unit bounds of each point's 68 % interval
+/// (`point_intervals`: `y +- sem`, or a proportion's Wilson interval).
 fn series_band(item: &CurveSeries) -> Option<(Vec<f64>, Vec<f64>)> {
-    let spread = item.sem.as_ref()?.to_f64();
-    if !spread.iter().any(|v| v.is_finite()) { return None; }
     let quantity: &QuantityArray = &item.y;
     let canonical = quantity.canonical.to_f64();
+    let (low, high) = crate::projection::output::point_intervals(&canonical, item.sem.as_ref(), item.trials.as_ref())?;
+    if !low.iter().any(|v| v.is_finite()) { return None; }
     let unit = &quantity.canonical_unit;
     let target = &quantity.display_unit;
     let convert = |values: Vec<f64>| -> Vec<f64> {
         if unit == target { return values; }
         values.into_iter().map(|v| target.from_base(unit.to_base(v))).collect()
     };
-    let low = convert(canonical.iter().zip(&spread).map(|(c, s)| c - s).collect());
-    let high = convert(canonical.iter().zip(&spread).map(|(c, s)| c + s).collect());
-    Some((low, high))
+    Some((convert(low), convert(high)))
 }
 
 /// `_prepare_curve_series(source)` (kernels engaged).

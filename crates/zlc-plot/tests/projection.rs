@@ -98,8 +98,21 @@ fn run_suite(path: &Path, tally: &mut Tally, filter: Option<&str>) {
             }
             (Ok(projected), None) => {
                 let mut arrays = GoldenArrays::default();
-                let payload = projected.payload.golden(&mut arrays);
-                compare(&suite, &arrays, &case["payload"], &payload, "payload", &mut problems);
+                let mut payload = projected.payload.golden(&mut arrays);
+                let mut expected = case["payload"].clone();
+                if let Some(trailing) = proportion_window(&projected.view, case) {
+                    // AGREEMENT.md, "Proportions": a window pools its trials.
+                    // Checked against pooling the per-shot proportions, which
+                    // the oracle's own record of the same plan settles.
+                    let shots = Snapshot::from_source(&source(&suite, &snapshots[case["snapshot"].as_str().unwrap()]), &mut cache)
+                        .and_then(|snapshot| Projection::new().project_snapshot(snapshot, &with_trailing(&case["plan"], 1)));
+                    match shots { Ok(shots) => pooled_windows(&shots.payload, &projected.payload, trailing, &mut problems),
+                                  Err(error) => problems.push(format!("per-shot projection refused: {error}")) }
+                    for series in [&mut payload, &mut expected] {
+                        for item in series["series"].as_array_mut().into_iter().flatten() { item.as_object_mut().unwrap().remove("y"); }
+                    }
+                }
+                compare(&suite, &arrays, &expected, &payload, "payload", &mut problems);
                 compare(&suite, &arrays, &case["histogram"], &histogram_json(&projection.histogram), "histogram", &mut problems);
                 match (Projection::selection_subject(&projected.view, &plan, &projected.payload), case.get("subject"), case.get("subject_error")) {
                     (Ok(subject), Some(expected), _) => compare(&suite, &arrays, expected, &subject.golden(), "subject", &mut problems),
@@ -114,6 +127,43 @@ fn run_suite(path: &Path, tally: &mut Tally, filter: Option<&str>) {
         let (count, size) = suite.compared.replace((0, 0));
         tally.arrays += count;
         tally.bytes += size;
+    }
+}
+
+/// The trailing window of a rolling plan of proportions with uncertainty.
+fn proportion_window(view: &zlc_plot::projection::DataView, case: &Value) -> Option<usize> {
+    let display = &case["plan"]["display"];
+    let trailing = display["trailing"].as_u64().unwrap_or(1) as usize;
+    (case["plan"]["spec"]["kind"] == "rolling" && case["plan"]["spec"]["reduction"] == "mean" && display["uncertainty"] == true && trailing > 1 && view.proportion()).then_some(trailing)
+}
+
+fn with_trailing(plan: &Value, trailing: usize) -> ProjectionPlan {
+    let mut plan = plan.clone();
+    plan["display"]["trailing"] = trailing.into();
+    serde_json::from_value(plan).unwrap()
+}
+
+/// Each window of `trailing` shots is `sum k / sum n` of `sum n` trials,
+/// `k = y n`, over the per-shot series.
+fn pooled_windows(shots: &zlc_plot::projection::output::Payload, windows: &zlc_plot::projection::output::Payload, trailing: usize, problems: &mut Vec<String>) {
+    use zlc_plot::projection::output::Payload;
+    let (Payload::Curve(shots), Payload::Curve(windows)) = (shots, windows) else { return problems.push("rolling payloads are curves".into()) };
+    for (index, (shot, window)) in shots.series.iter().zip(&windows.series).enumerate() {
+        let (y, valid) = (shot.y.canonical.to_f64(), shot.valid.to_f64());
+        let (Some(n), Some(got_n)) = (shot.trials.as_ref(), window.trials.as_ref()) else {
+            return problems.push(format!("series[{index}]: trials per shot {} and per window {}", shot.trials.is_some(), window.trials.is_some()));
+        };
+        let (n, got, got_n) = (n.to_f64(), window.y.canonical.to_f64(), got_n.to_f64());
+        for r in 0..y.len() {
+            let span = r + 1 - trailing.min(r + 1)..=r;
+            let trials: f64 = span.clone().filter(|&i| valid[i] != 0.0).map(|i| n[i]).sum();
+            let successes: f64 = span.filter(|&i| valid[i] != 0.0).map(|i| y[i] * n[i]).sum();
+            let want = if trials > 0.0 { successes / trials } else { f64::NAN };
+            let agrees = (want.is_nan() && got[r].is_nan()) || (want - got[r]).abs() <= 1e-14 * want.abs().max(1.0);
+            if !agrees || (trials > 0.0 && got_n[r] != trials) {
+                return problems.push(format!("series[{index}] window {r}: {} of {} trials, pooled {want} of {trials}", got[r], got_n[r]));
+            }
+        }
     }
 }
 

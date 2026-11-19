@@ -52,7 +52,7 @@ fn cell(selection: &FitSelection, warm_start: Seed) -> FitCell {
                                  data_revision: selection.data_revision as i64, warm_start },
         None => FitCell {
             data: CellData::Points { coordinates: selection.coordinates.clone(), observations: Some(selection.observations.clone()) },
-            sigma: selection.observation_sigma.clone(), sigma_dof: selection.observation_dof.clone(), trials: None, selected_indices: selection.selected_indices.clone(),
+            sigma: selection.observation_sigma.clone(), sigma_dof: selection.observation_dof.clone(), trials: selection.observation_trials.clone(), selected_indices: selection.selected_indices.clone(),
             data_revision: selection.data_revision as i64, warm_start,
         },
     }

@@ -200,7 +200,9 @@ pub fn compare(suite: &Suite, arrays: &GoldenArrays, expected: &Value, actual: &
     }
     match (expected, actual) {
         (Value::Object(e), Value::Object(a)) => {
+            let departed = proportion_departure(suite, arrays, e, a, path, out);
             for key in e.keys().chain(a.keys().filter(|k| !e.contains_key(*k))) {
+                if departed.contains(&key.as_str()) { continue; }
                 match (e.get(key), a.get(key)) {
                     (Some(x), Some(y)) => compare(suite, arrays, x, y, &format!("{path}.{key}"), out),
                     _ => out.push(format!("{path}.{key}: present on one side only")),
@@ -213,6 +215,44 @@ pub fn compare(suite: &Suite, arrays: &GoldenArrays, expected: &Value, actual: &
         }
         (e, a) => if e != a { out.push(format!("{path}: python {} rust {}", truncate(e), truncate(a))); },
     }
+}
+
+/// AGREEMENT.md, "Proportions": where the native payload carries a
+/// proportion's trials, the oracle carried the sample standard error of its
+/// zeros and ones, `sqrt(p (1 - p) / (n - 1))`.  That standard error is not
+/// compared; it is recomputed from the native point and trials, which checks
+/// that the trials are the oracle's counts.  Returns the keys so settled.
+fn proportion_departure(suite: &Suite, arrays: &GoldenArrays, expected: &serde_json::Map<String, Value>,
+                        actual: &serde_json::Map<String, Value>, path: &str, out: &mut Vec<String>) -> Vec<&'static str> {
+    let quantity = |key: &str| actual.get(key).map_or(&Value::Null, |q| &q["canonical"]);
+    let (trials_key, oracle_key, point) = match actual.get("type").and_then(Value::as_str) {
+        Some("CurveSeries") => ("trials", "sem", quantity("y")),
+        Some("PointMapData") => ("trials", "sigma", quantity("values")),
+        Some("FitSelection") => ("observation_trials", "observation_sigma", actual.get("observations").unwrap_or(&Value::Null)),
+        _ => return Vec::new(),
+    };
+    let Some(trials) = actual.get(trials_key) else { return Vec::new() };
+    // A pooled window's point is checked by its caller against pooling the
+    // per-shot proportions (`tests/projection.rs`, `pooled_windows`).
+    if point.is_null() { return vec![trials_key, oracle_key]; }
+    let native = |value: &Value| arrays.0[value["rust"].as_u64().unwrap() as usize].to_f64();
+    let (trials, point) = (native(trials), native(point));
+    match expected.get(oracle_key) {
+        Some(reference) if !reference.is_null() => {
+            let (buffer, shape) = suite.buffer(reference);
+            let oracle = Array::from_buffer(buffer, shape).to_f64();
+            let differing = (0..trials.len()).filter(|&i| {
+                let (p, n) = (point[i], trials[i]);
+                let wald = if n > 1.0 { (p * (1.0 - p) / (n - 1.0)).sqrt() } else { f64::NAN };
+                !(wald.is_nan() && oracle[i].is_nan() || (wald - oracle[i]).abs() <= 1e-12 * wald.max(1e-300) + 1e-15)
+            }).count();
+            if oracle.len() != trials.len() || differing > 0 {
+                out.push(format!("{path}: the oracle's proportion sem disagrees with the native trials at {differing} of {} points", trials.len()));
+            }
+        }
+        _ => out.push(format!("{path}: native trials where the oracle had no uncertainty")),
+    }
+    vec![trials_key, oracle_key]
 }
 
 pub fn truncate(value: &Value) -> String { let s = value.to_string(); if s.len() > 160 { format!("{}...", &s[..160]) } else { s } }
