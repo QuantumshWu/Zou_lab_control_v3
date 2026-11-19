@@ -416,3 +416,33 @@ fn trials_are_checked_and_follow_their_points() {
     let error = engine.fit(&model, &cell, &request(None)).unwrap_err().to_string();
     assert!(error.contains("Bernoulli trials have no meaning there"), "{error}");
 }
+
+/// Wall time of the reference fit and of a 35-cell batch of survival decays
+/// (8 points x 20 trials): `cargo test --test fit_binomial binomial_fit_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing, read by hand"]
+fn binomial_fit_cost() {
+    let engine = FitEngine::default();
+    let model = engine.registry.get("exponential_decay").unwrap();
+    let trials = [20.0; 8];
+    let reference = proportion_cell(&REFERENCE_X, &REFERENCE_K, &trials);
+    let mut rng = Noise::new(5);
+    let batch: Vec<FitCell> = (0..35)
+        .map(|_| {
+            let k: Vec<f64> = REFERENCE_X.iter().map(|&x| rng.binomial(20.0, 0.9 * (-x / 80.0).exp())).collect();
+            proportion_cell(&REFERENCE_X, &k, &trials)
+        })
+        .collect();
+    let rounds = 200;
+    let started = std::time::Instant::now();
+    for _ in 0..rounds {
+        engine.fit(&model, &reference, &request(offset_fixed_at_zero())).unwrap();
+    }
+    let single = started.elapsed().as_secs_f64() / rounds as f64;
+    let started = std::time::Instant::now();
+    for _ in 0..rounds / 10 {
+        engine.fit_batch(&model, &batch, &request(offset_fixed_at_zero())).unwrap();
+    }
+    let batched = started.elapsed().as_secs_f64() / (rounds / 10) as f64;
+    eprintln!("reference fit {:.3} ms; 35-cell batch {:.3} ms", 1e3 * single, 1e3 * batched);
+}
