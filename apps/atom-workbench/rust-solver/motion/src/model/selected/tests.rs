@@ -144,10 +144,11 @@ fn the_selected_decay_is_its_photons() {
 /// phases in one group (`Local::contract`, each component's weight e^{−iF_c t}, F_c its key's frequency in the frame)
 /// put in the frame, x_a = e^{iθ_a t} ψ_a: H_eff's Hermitian part with θ on its diagonal, H_eff's gradient, each
 /// class's axis L(t) and ∇L(t) and its photon form K(t), each channel up to one phase of modulus one (its fast index's,
-/// common to its elements). At t = 0 that sum is `Local::now(0)` itself. F_c is the frame's, at rest: the node's beats
-/// do not hold the Doppler shifts (its motion is its place along the path) nor the recoil shifts ħk²/2m the point's
-/// rates hold (`Scene::doppler`), so at t ≠ 0 `now(t)` differs from the node by those phases by construction. At the
-/// centre and off it at rest and at the moving point, t = 0, 0.37 and −1.9 µs. The two are one set of sums taken in two
+/// common to its elements). At t = 0 that sum is `Local::now(0)` itself. At rest (κ = 0) F_c is the component's own
+/// frequency, its beams' recoil in, and the sum is `now(t)` at every time (the one Doppler shift per beam, model/rs.rs #
+/// The frequencies); at a moving point F_c is the frame's, at rest: the node's beats do not hold the Doppler shifts K·κ,
+/// its motion is its place along the path. At the centre and off it at rest and at the moving point, t = 0, 0.37 and
+/// −1.9 µs. The two are one set of sums taken in two
 /// orders (by beats, one group): they differ by rounding alone, bounded as `now_is_the_components_at_their_phases`
 /// bounds it -- per component 64u(1 + |F_c t| + 2 max|θ t|) max|X⁽ᶜ⁾| summed over the quantity's components, and κ(V)u
 /// relative to its largest entry (10⁻¹⁰).
@@ -177,7 +178,12 @@ fn the_node_is_the_model_now_in_its_frame() {
                 let bound = |parts: &mut dyn Iterator<Item = (&ModelPart, &Mat)>, scale: f64| -> f64 {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
-                let sum = local.contract(&|key, _| (Vec::new(), 0.0, C64::cis(-frequency(key) * t)), Making { model: true, kicks: true, lift: false });
+                let rest = kappa == [0.0; 3];
+                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false });
+                if rest {
+                    let now = local.now(t);
+                    assert!(sum.effective.first().is_none_or(|p| (0..n * n).all(|x| (p.value.data[x] - now.hamiltonian.data[x]).abs() <= 1e-12 * now.hamiltonian.max_abs())), "{name}: at rest the sum is now(t)");
+                }
                 if t == 0.0 {
                     let now = local.now(0.0);
                     assert!(sum.effective.first().is_none_or(|p| p.value == now.hamiltonian), "{name}: the sum at t = 0 is now(0)");

@@ -553,6 +553,34 @@ mod tests {
         assert!(within[0] <= rounding && between[levels - 2] > rounding);
     }
 
+    /// The one Doppler shift per beam (model/rs.rs, # The frequencies): on R4 (two counter-propagating beams of one
+    /// frequency, k_m = −k_l) at a momentum along them, a beam's key holds f_l = ω_l − ħ(k_l·κ + |k_l|²/2)/m and the
+    /// product of the two, at e_m − e_l, the beams' sum f_m − f_l = −ħ(k_m − k_l)·κ/m: their recoils cancel (equal
+    /// wavelengths), no |K|²/2 = 4 single-photon recoils; at rest it is zero.
+    #[test]
+    fn a_key_s_frequency_is_its_beams_sum() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R4_LIN_4.json");
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let scene = Scene::new(&Request::from_native(&line).unwrap()).unwrap();
+        let hm = scene.hbar_over_mass;
+        let (l, m) = (0..scene.geometry.len())
+            .flat_map(|l| (0..scene.geometry.len()).map(move |m| (l, m)))
+            .find(|&(l, m)| l < m && scene.request.beams[l].frequency_index == scene.request.beams[m].frequency_index && dot3(scene.geometry[l].direction, scene.geometry[m].direction) < -0.5)
+            .expect("two counter-propagating beams of one frequency");
+        let (kl, km) = (scene.geometry[l].wave_vector(), scene.geometry[m].wave_vector());
+        for kappa in [[0.0; 3], kl.map(|x| 3.0 * x), [12.0, -7.0, 40.0]] {
+            let point = scene.point_at([0.0; 3], kappa);
+            let key: Key = scene.unit(m).iter().zip(scene.unit(l)).map(|(x, y)| x - y).collect();
+            let raman = point.frequency(&key);
+            let doppler: f64 = (0..3).map(|a| (km[a] - kl[a]) * kappa[a]).sum::<f64>() * hm;
+            let single = point.frequency(&scene.unit(l));
+            let expected = scene.generators[l].frequency - hm * (dot3(kl, kappa) + 0.5 * dot3(kl, kl));
+            println!("κ {kappa:?}: the Raman key {raman:.6e} against −ħK·κ/m {:.6e}; the single photon's {single:.12e} against {expected:.12e}", -doppler);
+            assert!((raman + doppler).abs() <= 1e-12 * (1.0 + doppler.abs()));
+            assert_eq!(single, expected);
+        }
+    }
+
     /// The reported trap (SPEC §1.3) of every reference scene that states trap frequencies (refs/expect, the references
     /// refs/lib/phys.mjs `preparedTrap` / `runningTrap`), judged as refs/check.mjs judges them: |engine − reference| ≤
     /// 2u, u the reference's own uncertainty. The engine's: the running potential (`running_potential`, the tweezer

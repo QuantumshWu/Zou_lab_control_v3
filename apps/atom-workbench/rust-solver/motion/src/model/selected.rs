@@ -7,10 +7,12 @@
 //! The trajectory's states are P, all of them one cluster (the ground states first: `Rs::keep` is sorted), in the frame
 //! θ of floquet/frame.rs chosen at the checkpoint's centre at rest: ψ_a = e^{−iθ_a t} x_a with θ_a an exact vector over
 //! the generators (the beams, the carrier) and α. No Doppler frame (K_s = 0, as onefold): at the step's outer nodes the
-//! model is taken at the path's own points, so the beams' plane waves turn with the path there, and its time phases
-//! are the lab's, ω_c = Σ_g c_g ω_g of a component's key c. An element a ← b of a component of key c then holds
-//! e^{−iΩt}, Ω = (c − θ_a + θ_b)·(ω, α) (floquet/assemble.rs `to_frame`, the same vector), and x_a holds −θ_a on the
-//! diagonal. The fold keeps its slow elements alone, so every Ω is the slow remainder of that vector
+//! model is taken at the path's own points, so the beams' plane waves turn with the path there and the classical
+//! centre of mass gives each key its K·v; its time phases are each beam's frequency at rest with its recoil,
+//! f_g = ω_g − ħ|k_g|²/2m (`Scene::doppler` at κ = 0, the one Doppler shift per beam, model/rs.rs # The frequencies: the
+//! frame is made at those, its lattice holding each laser's recoil exactly), so that a node at κ = 0 is `now(t)` at
+//! every time. An element a ← b of a component of key c then holds e^{−iΩt}, Ω = (c − θ_a + θ_b)·(f, α)
+//! (floquet/assemble.rs `to_frame`, the same vector), and x_a holds −θ_a on the diagonal. The fold keeps its slow elements alone, so every Ω is the slow remainder of that vector
 //! (`Frame::split`): a beat of the lights against the frame -- a tilt's, a lattice's of two frequencies --, exact.
 //!
 //! # The generator by beats
@@ -88,7 +90,8 @@ pub struct Selected {
     pub rs: Rs,
     pub report: Selection,
     frame: Frame,
-    /// The request's frequency axes Φ_i (rad/µs): the primitives of the frame at rest, a beat's value Σ p_i Φ_i.
+    /// The frame's primitives' values (rad/µs): the request's frequency axes Φ_i, then each laser's recoil class δ_c; a
+    /// beat's value Σ p_i (Φ, δ)_i.
     axes: Vec<f64>,
     /// θ_a of P's states (rad/µs).
     theta: Vec<f64>,
@@ -318,15 +321,31 @@ impl Selected {
     /// populations `reference`. The frame is the checkpoint's centre's at rest (floquet/frame.rs), the fold's sectors
     /// its (`Rs::new`). Err where P does not hold every ground state (a jump lands on any of them).
     pub fn new(scene: Scene, report: Selection, reference: [f64; GROUND]) -> Result<Selected, String> {
-        let zero = vec![0.0; scene.request.beams.len()];
-        let centre = scene.components([0.0; 3], &zero, 1.0);
-        let frame = Frame::new(&scene, &Hilbert::full(&scene, &centre), &zero);
+        // The frame at rest with the beams' recoil shifts (module documentation, # One cluster, one frame).
+        let recoil = scene.doppler([0.0; 3]);
+        let centre = scene.components([0.0; 3], &recoil, 1.0);
+        let frame = Frame::new(&scene, &Hilbert::full(&scene, &centre), &recoil);
         let rs = Rs::new(&scene, &report.keep, frame.sectors());
         let request = &scene.request;
         if rs.keep.iter().filter(|&&s| s < GROUND).count() != GROUND {
             return Err("选出的 P 必须含全部基态（跳跃落到任一基态）".into());
         }
-        let axes = request.frequencies_mhz.iter().map(|f| RAD_PER_US_PER_MHZ * f).collect();
+        // The primitives' values: the request's axes Φ_i, then each Doppler class's δ_c (a laser's recoil): a generator
+        // of the class has the coordinate −r on it, its shift r δ_c.
+        let mut axes: Vec<f64> = request.frequencies_mhz.iter().map(|f| RAD_PER_US_PER_MHZ * f).collect();
+        let count = scene.generators.len();
+        let unit = |g: usize| -> FrameKey { (0..=count).map(|h| i64::from(h == g)).collect() };
+        let width = frame.primitive(&unit(0)).len();
+        for c in axes.len()..width {
+            let (g, r) = (0..count)
+                .find_map(|g| {
+                    let p = frame.primitive(&unit(g));
+                    (p[c].num != 0).then(|| (g, p[c]))
+                })
+                .expect("a generator of the Doppler class");
+            let l = scene.generators[g].beam.expect("a beam's class");
+            axes.push(recoil[l] / (-(r.num as f64) / r.den as f64));
+        }
         let theta = rs.keep.iter().map(|&s| frame.theta[s].iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum()).collect();
         let n = rs.keep.len();
         let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: vec![[0.0; 3]; n], waves_exact: vec![Beat::whole(vec![]); n], states: rs.keep.clone() };

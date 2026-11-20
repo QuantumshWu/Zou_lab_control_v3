@@ -457,3 +457,19 @@ fn r1_nodes_per_step() {
         eprintln!("R1NODES {name}: τ {tau}, {taken} steps, {jumps} jumps: {:.3} nodes a step without the photon forms, {:.3} with them", made[0] as f64 / taken as f64, made[1] as f64 / taken as f64);
     }
 }
+
+/// R1-MODEL item 4: the trajectory's frame at rest with the beams' recoil shifts (`Scene::doppler` at κ = 0) against
+/// the checkpoint's (no Doppler shift): θ and the sectors per scene.
+#[test]
+#[ignore]
+fn r1_frame_with_recoil() {
+    use crate::floquet::Frame;
+    for (name, request, _) in runs() {
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let zero = vec![0.0; scene.request.beams.len()];
+        let recoil = scene.doppler([0.0; 3]);
+        let a = Frame::new(&scene, &Hilbert::full(&scene, &scene.components([0.0; 3], &zero, 1.0)), &zero);
+        let b = Frame::new(&scene, &Hilbert::full(&scene, &scene.components([0.0; 3], &recoil, 1.0)), &recoil);
+        eprintln!("R1FRAME {name}: θ the same {}, sectors the same {}, values {:?} vs {:?}", a.theta == b.theta, a.sectors() == b.sectors(), &a.values, &b.values);
+    }
+}
