@@ -34,6 +34,7 @@
 //! remainders of every Liouville component and readout row generate a Z-module; its Hermite basis b gives the slow
 //! coordinates m (`Lattice`). A lattice key (m, n) has the frequency m·b + n·(φ, Φ_tw, Φ_ν).
 
+use crate::linalg::larger;
 use std::cmp::Ordering;
 
 use super::Hilbert;
@@ -437,8 +438,8 @@ impl Frame {
             let bet = betas(*alpha);
             let at = |l: Lev| bet.iter().find(|b| b.0 == l).map_or(0.0, |b| b.1);
             let residual: Vec<(f64, f64)> = terms.iter().map(|&(amp, f, dm, lg, le, _)| (amp, f - alpha * dm as f64 - (at(le) - at(lg)))).collect();
-            let score = residual.iter().filter(|r| r.1.abs() > STATIC).map(|r| r.0).fold(0.0, f64::max);
-            let band = residual.iter().filter(|r| r.0 > BAND * strongest).map(|r| r.1.abs()).fold(0.0, f64::max);
+            let score = residual.iter().filter(|r| r.1.abs() > STATIC).map(|r| r.0).fold(0.0, larger);
+            let band = residual.iter().filter(|r| r.0 > BAND * strongest).map(|r| r.1.abs()).fold(0.0, larger);
             let better = match &best {
                 None => true,
                 Some((s, _, _, b)) => score < s - TIE * strongest || ((score - s).abs() <= TIE * strongest && band < b - TIE),

@@ -23,6 +23,7 @@
 //! beam is its own component, at its own Doppler shift (D2); two beams of one frequency and one Doppler shift beat at zero,
 //! so their outside-form product is static.
 
+use crate::linalg::larger;
 use crate::field::{Amplitude, Geometry};
 use crate::linalg::{dot3, C64, Mat, V3};
 use crate::model::Quadratic;
@@ -674,7 +675,7 @@ mod tests {
             let smooth = scene.smooth(&still);
             let request = &scene.request;
             let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
-            let k = request.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+            let k = request.beams.iter().map(|b| b.wave_number).fold(0.0, larger);
             let tw = request.trap_beam;
             let trap_light: Vec<usize> = (0..request.beams.len()).filter(|&l| request.beams[l].frequency_index == request.beams[tw].frequency_index).collect();
             let outside = |r: V3| trap_light.iter().all(|&l| scene.geometry[l].amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY);

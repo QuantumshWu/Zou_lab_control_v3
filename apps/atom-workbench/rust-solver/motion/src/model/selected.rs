@@ -65,6 +65,7 @@
 //! exact beat with their values (`Selected::components`), H_eff's gradient's, and the photon classes. A propagation that
 //! takes the model once a step (STEPBENCH L2) asks for the middle's alone; the onefold integrator asks for three.
 
+use crate::linalg::{larger, largest, smaller};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -369,7 +370,7 @@ impl Selected {
                 }
             })
             .collect();
-        let optical = rs.keep.iter().filter(|&&s| s >= GROUND).map(|&e| 0.5 * (0..GROUND).map(|g| decay(e, g)).sum::<f64>()).reduce(f64::min);
+        let optical = rs.keep.iter().filter(|&&s| s >= GROUND).map(|&e| 0.5 * (0..GROUND).map(|g| decay(e, g)).sum::<f64>()).reduce(smaller);
         let waves = scene.geometry.iter().enumerate().filter(|(l, _)| *l != scene.tweezer()).map(|(_, g)| g.wave_vector()).collect();
         // The fold's pieces by the lab's frequency at rest -- the frame's primitive vector of their keys --, each group
         // under the first of its keys met.
@@ -428,7 +429,9 @@ impl Selected {
         Ok(run)
     }
 
-    /// The selection's report (stderr): P by levels, each candidate's errors at the two points, the time.
+    /// The selection's report (stderr): P by levels and state by state, the states left out, the selection's notes (a
+    /// point not judged and why: `Selection::notes`), each candidate's errors at the two points -- "不判" at a point not
+    /// judged, never its zero --, the time.
     pub fn report(&self) -> String {
         let labels = &self.scene.request.states;
         let mut levels: Vec<String> = Vec::new();
@@ -439,10 +442,28 @@ impl Selected {
                 levels.push(label);
             }
         }
-        let mut out = format!("两点选态：P = {} 态 {:?}，用时 {:.2} s\n", self.rs.keep.len(), levels, self.report.seconds);
+        let names = |states: &[usize]| states.iter().map(|&s| labels[s].as_str()).collect::<Vec<_>>().join(", ");
+        let mut out = format!("两点选态：P = {} 态 {:?}，用时 {:.2} s
+", self.rs.keep.len(), levels, self.report.seconds);
+        out += &format!("  P 的态：{}
+", names(&self.rs.keep));
+        out += &format!("  删去 {} 态：{}
+", self.rs.folded.len(), if self.rs.folded.is_empty() { "无".to_string() } else { names(&self.rs.folded) });
+        for note in self.report.notes() {
+            out += &format!("  注：{note}
+");
+        }
+        let judged: Vec<bool> = self.report.reference.iter().map(Option::is_some).collect();
         for c in &self.report.candidates {
-            let e = |p: &crate::select::PointError| format!("布居 {:.2e} R {:.2e} F {:.2e}", p.populations, p.rate, p.force);
-            out += &format!("  候选 {} 态：中心 {}；边缘 {}{}\n", c.keep.len(), e(&c.centre), e(&c.edge), if c.passes() { "（过）" } else { "" });
+            let e = |p: &crate::select::PointError, at: usize| {
+                if judged[at] {
+                    format!("布居 {:.2e} R {:.2e} F {:.2e}", p.populations, p.rate, p.force)
+                } else {
+                    "不判".to_string()
+                }
+            };
+            out += &format!("  候选 {} 态：中心 {}；边缘 {}{}
+", c.keep.len(), e(&c.centre, 0), e(&c.edge, 1), if c.passes() { "（过）" } else { "" });
         }
         out
     }
@@ -452,7 +473,7 @@ impl Selected {
     /// (relative) -- a rate or a force wrong by x moves T by x. No number where the selection holds no measurement of P.
     pub fn error(&self) -> [f64; 2] {
         self.report.candidates.last().filter(|c| c.keep == self.rs.keep).map_or([f64::NAN; 2], |c| {
-            [c.centre.populations.max(c.edge.populations), c.centre.rate.max(c.centre.force).max(c.edge.rate).max(c.edge.force)]
+            [larger(c.centre.populations, c.edge.populations), largest(c.centre.rate, [c.centre.force, c.edge.rate, c.edge.force])]
         })
     }
 
@@ -584,8 +605,8 @@ impl Selected {
             if *which == 0 && !lab.channel_lists[co].is_empty() {
                 let beams = key.iter().enumerate().filter(|(g, k)| **k != 0 && *g < self.scene.geometry.len()).map(|(g, _)| self.scene.geometry[g].wave_number);
                 match absorbed.iter_mut().find(|a| a.0 == *fast) {
-                    Some(a) => a.1 = beams.fold(a.1, f64::max),
-                    None => absorbed.push((*fast, beams.fold(0.0, f64::max))),
+                    Some(a) => a.1 = beams.fold(a.1, larger),
+                    None => absorbed.push((*fast, beams.fold(0.0, larger))),
                 }
             }
             for x in lab.channel_lists[co].iter().map(|&x| x as usize) {
@@ -718,8 +739,11 @@ impl Selected {
                 }
             }
         }
-        let gradients: Vec<(usize, f64)> = node.gradient.iter().map(|(beat, g)| (*beat, g.iter().map(Mat::max_abs).fold(0.0, f64::max))).collect();
-        let (top, gtop) = (largest.iter().copied().fold(0.0, f64::max), gradients.iter().map(|g| g.1).fold(0.0, f64::max));
+        let gradients: Vec<(usize, f64)> = node.gradient.iter().map(|(beat, g)| (*beat, g.iter().map(Mat::max_abs).fold(0.0, larger))).collect();
+        let (top, gtop) = (largest.iter().copied().fold(0.0, larger), gradients.iter().map(|g| g.1).fold(0.0, larger));
+        // A NaN coefficient would read every ratio as NaN and drop every beat but the zero one (a comparison with NaN is
+        // false): the node at unit amplitude is numbers, or the run is refused here.
+        assert!(top.is_finite() && gtop.is_finite(), "the node's coefficients at unit amplitude are not finite");
         let epsilon = 2.0 * crate::units::UNIT_ROUNDOFF;
         let mut keep = vec![true; node.generator.len()];
         self.kept = Vec::new();

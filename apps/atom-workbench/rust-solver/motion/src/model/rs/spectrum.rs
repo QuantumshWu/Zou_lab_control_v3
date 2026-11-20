@@ -16,6 +16,7 @@
 //! largest off-diagonal row sum) and than twice the coupling across: the iteration's ratio is then below one half. Which
 //! split is taken chooses only which exact transform is used.
 
+use crate::linalg::larger;
 use crate::linalg::{self, C64, Mat};
 use crate::units::UNIT_ROUNDOFF;
 
@@ -45,7 +46,7 @@ pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
     let row_sum = |i: usize, side: &[usize]| -> f64 { side.iter().filter(|&&j| j != i).map(|&j| g[(i, j)].abs()).sum() };
     let spread = |side: &[usize]| -> f64 {
         let (lo, hi) = side.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| (lo.min(d[i]), hi.max(d[i])));
-        let off = if side.len() > 1 { side.iter().map(|&i| row_sum(i, side)).fold(0.0, f64::max) } else { 0.0 };
+        let off = if side.len() > 1 { side.iter().map(|&i| row_sum(i, side)).fold(0.0, larger) } else { 0.0 };
         hi - lo + 2.0 * off
     };
     let mut best: Option<(f64, usize)> = None;
@@ -55,7 +56,7 @@ pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
         if best.is_some_and(|(b, _)| gap <= b) {
             continue;
         }
-        let cross = left.iter().flat_map(|&i| right.iter().map(move |&j| g[(i, j)].abs().max(g[(j, i)].abs()))).fold(0.0, f64::max);
+        let cross = left.iter().flat_map(|&i| right.iter().map(move |&j| larger(g[(i, j)].abs(), g[(j, i)].abs()))).fold(0.0, larger);
         if gap > 2.0 * cross && gap > spread(left) + spread(right) {
             best = Some((gap, c));
         }
@@ -293,14 +294,14 @@ mod tests {
         assert!(s.decompose(&g));
         assert!(s.leaves.len() >= 2, "{:?}", s.leaves);
         let product = s.vectors.product(&s.inverse);
-        let unit = (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| (product[(i, j)] - if i == j { C64::ONE } else { C64::ZERO }).abs()).fold(0.0, f64::max);
+        let unit = (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| (product[(i, j)] - if i == j { C64::ONE } else { C64::ZERO }).abs()).fold(0.0, larger);
         assert!(unit < 1e-14, "{unit:e}");
         // The near leaf's residual G v − λ v per eigen index, relative to the near group's scale.
         for k in 0..n {
             let lambda = C64::real(s.centre[k]) + s.values[k];
             let v: Vec<C64> = (0..n).map(|i| s.vectors[(i, k)]).collect();
             let gv = g.apply(&v);
-            let r = (0..n).map(|i| (gv[i] - lambda * v[i]).abs()).fold(0.0, f64::max);
+            let r = (0..n).map(|i| (gv[i] - lambda * v[i]).abs()).fold(0.0, larger);
             let scale = if s.centre[k] < 0.0 { 4.5e7 } else { 1e3 };
             eprintln!("k {k}: λ {lambda:?} residual {r:.2e} (scale {scale:e})");
             if s.centre[k] > 0.0 {

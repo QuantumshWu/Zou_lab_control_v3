@@ -11,6 +11,7 @@
 //! is tested only against the window [Im c_y − R_y − max R, Im c_y + R_y + max R] -- the same component as testing all
 //! pairs (the prototype asserted equality at every point), with far fewer tests.
 
+use crate::linalg::larger;
 use super::row;
 use crate::floquet::Sparse;
 use crate::linalg::C64;
@@ -30,7 +31,7 @@ pub fn split(a: &Sparse) -> (Vec<bool>, usize) {
             }
         }
     }
-    let widest = radius.iter().cloned().fold(0.0, f64::max);
+    let widest = radius.iter().cloned().fold(0.0, larger);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&p, &q| centre[p].im.total_cmp(&centre[q].im));
     let im: Vec<f64> = order.iter().map(|&p| centre[p].im).collect();

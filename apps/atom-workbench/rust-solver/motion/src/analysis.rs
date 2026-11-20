@@ -53,6 +53,7 @@
 //! that holds it again, as a feature would be followed -- what makes a feature found stay found: a chance split costs
 //! as many more as the halvings down to the candidates at the most, log₂ of their number.
 
+use crate::linalg::larger;
 use crate::estimate::{spread, Spread};
 use crate::units::rounding;
 
@@ -175,7 +176,7 @@ mod tests {
                 let s = (times[k] - times[a]) / (times[b] - times[a]);
                 (f(times[k]) - ((1.0 - s) * f(times[a]) + s * f(times[b]))).abs()
             })
-            .fold(0.0, f64::max)
+            .fold(0.0, larger)
     }
 
     /// A transient after a light's switch and an edge inside the run (module documentation, # The rule): a population
@@ -267,7 +268,7 @@ mod tests {
         let deviation = (splits.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
         let p = crate::estimate::tail_among(1.0);
         let expected = 1.0 / (1.0 - 2.0 * p) - 1.0;
-        let most = splits.iter().copied().fold(0.0, f64::max);
+        let most = splits.iter().copied().fold(0.0, larger);
         eprintln!("flat noise: {mean:.3} ± {deviation:.3} splits a case (at most {expected:.3} expected), {most} at the most; {:.2} candidates read a case", reads as f64 / n);
         assert!(mean <= expected + crate::units::CONFIDENCE * deviation && most <= 4.0, "{mean} ± {deviation} splits a case against {expected}; {most} at the most");
     }

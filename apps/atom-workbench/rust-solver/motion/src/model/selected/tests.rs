@@ -546,3 +546,19 @@ fn a_step_s_time_on_the_selected_model() {
 
 #[path = "golden.rs"]
 mod golden;
+
+/// The selection's report (`Selected::report`): P state by state, the states left out, and a point not judged said as
+/// such -- R10_NODE's edge, where no light reaches the atom (`Selection::notes`) --, never as zero errors.
+#[test]
+fn the_report_lists_p_the_states_left_out_and_the_notes() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R10_NODE.json");
+    let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let request = Request::from_native(&line).unwrap();
+    let run = crate::solve::run_of(&request, crate::solve::alone(crate::solve::chief(&request))).unwrap();
+    let report = run.report();
+    eprint!("{report}");
+    assert!(report.contains("P 的态：") && report.contains("删去 "), "{report}");
+    let notes = run.report.notes();
+    assert!(!notes.is_empty() && notes.iter().all(|n| report.contains(n.as_str())), "{report}");
+    assert!(report.contains("不判"), "{report}");
+}
