@@ -119,6 +119,8 @@ struct Beats {
     exact: Vec<Exact>,
     value: Vec<f64>,
     elements: HashMap<(Key, u8), Arc<Vec<usize>>>,
+    /// The beat k − k' of two jump beats (k, k'), made where first asked for.
+    differences: HashMap<(usize, usize), usize>,
 }
 
 /// Which elements' beats (`Selected::elements`): H_eff's (P × P), the jumps' slow remainders (P × P), the lift's (Q × P).
@@ -360,6 +362,18 @@ impl Selected {
         beats.elements.entry(tag).or_insert(table).clone()
     }
 
+    /// The handle of the beat k − k' of two jump beats (their slow remainders), made where first asked for.
+    fn difference(&self, k: usize, k_: usize) -> usize {
+        if let Some(&id) = self.read(|b| b.differences.get(&(k, k_)).copied()).as_ref() {
+            return id;
+        }
+        let mut beats = self.beats.write().unwrap_or_else(|e| e.into_inner());
+        let difference = minus(&beats.exact[k].1, &beats.exact[k_].1);
+        let id = self.intern(&mut beats, ([0; 3], difference));
+        beats.differences.insert((k, k_), id);
+        id
+    }
+
     /// What `then` reads of the beats as they stand.
     fn read<R>(&self, then: impl FnOnce(&Beats) -> R) -> R {
         then(&self.beats.read().unwrap_or_else(|e| e.into_inner()))
@@ -443,21 +457,29 @@ impl Selected {
                 work += 5 * n * n;
             }
         }
-        // The decay −(i/2) Σ_ch L(t)†L(t) by beats: L_k'†L_k e^{−i(Ω_k − Ω_k')t} at the beat k − k'.
+        // The decay −(i/2) Σ_ch L(t)†L(t) by beats: L_k'†L_k e^{−i(Ω_k − Ω_k')t} at the beat k − k', each product over the
+        // rows and columns its two factors hold (a jump lands on the ground states alone).
+        let held = |m: &Mat| -> (Vec<usize>, Vec<usize>) {
+            let rows = (0..n).filter(|&g| (0..n).any(|b| m.data[g * n + b] != C64::ZERO)).collect();
+            let cols = (0..n).filter(|&b| (0..n).any(|g| m.data[g * n + b] != C64::ZERO)).collect();
+            (rows, cols)
+        };
         for class in &classes {
             for axis in &class.axes {
-                for left in axis {
-                    for right in axis {
-                        let beat = if left.beat == right.beat {
-                            0
-                        } else {
-                            let difference = self.read(|b| minus(&b.exact[right.beat].1, &b.exact[left.beat].1));
-                            let mut beats = self.beats.write().unwrap_or_else(|e| e.into_inner());
-                            self.intern(&mut beats, ([0; 3], difference))
-                        };
+                let pattern: Vec<(Vec<usize>, Vec<usize>)> = axis.iter().map(|j| held(&j.value)).collect();
+                for (left, (left_rows, left_cols)) in axis.iter().zip(&pattern) {
+                    for (right, (right_rows, right_cols)) in axis.iter().zip(&pattern) {
+                        let beat = if left.beat == right.beat { 0 } else { self.difference(right.beat, left.beat) };
                         let i = slot(&mut generator, beat, || Mat::zeros(n, n));
-                        generator[i].1.add_scaled(C64::new(0.0, -0.5), &left.value.adjoint_product(&right.value));
-                        work += n * n * n;
+                        let rows: Vec<usize> = left_rows.iter().copied().filter(|g| right_rows.contains(g)).collect();
+                        let decay = &mut generator[i].1.data;
+                        for &a in left_cols {
+                            for &b in right_cols {
+                                let z: C64 = rows.iter().map(|&g| left.value.data[g * n + a].conj() * right.value.data[g * n + b]).sum();
+                                decay[a * n + b] += C64::new(0.0, -0.5) * z;
+                            }
+                        }
+                        work += rows.len() * left_cols.len() * right_cols.len();
                     }
                 }
             }

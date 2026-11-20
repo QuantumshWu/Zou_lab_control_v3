@@ -239,7 +239,7 @@ fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
         let n = forces.len() as f64;
         let mean = forces.iter().sum::<f64>() / n;
         let error = (forces.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
-        let model = starts.iter().map(|&z0| static_force(&run, [0.0, 0.0, z0], kappa)).sum::<f64>() / n;
+        let model = starts.par_iter().map(|&z0| static_force(&run, [0.0, 0.0, z0], kappa)).sum::<f64>() / n;
         let within = crate::estimate::Spread { error, groups: n }.interval_over(vs.len() as f64);
         eprintln!("v {v:+.3} m/s: engine F_z {mean:.6e} ± {error:.2e}, static model {model:.6e}, difference {:.2e} (interval {within:.2e}), {:.1} s", mean - model, clock.elapsed().as_secs_f64());
         if (mean - model).abs() > within {
