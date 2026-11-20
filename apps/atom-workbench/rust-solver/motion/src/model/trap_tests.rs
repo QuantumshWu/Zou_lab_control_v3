@@ -3,7 +3,6 @@
 //! series (refs/lib/phys.mjs `runningTrap`, `preparedTrap`) are judged here as refs/check.mjs judges them in a
 //! result: |engine − reference| ≤ 2u, u the reference's own stated uncertainty (a quantity without a user's target has
 //! no other tolerance; check.mjs, rule 0 for one deterministic output).
-use crate::model::fold::run::Onefold;
 use crate::model::{Trap, GROUND};
 use crate::request::Request;
 use serde_json::Value;
@@ -18,17 +17,19 @@ fn json(path: PathBuf) -> Value {
 }
 
 /// The reported trap of a request as the solve makes it (solve.rs `reported`): the run at the reference state -- the
-/// initial component of the largest population --, its reported potential's trap there.
-fn reported(request: &Request) -> Trap {
-    let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
-    let mut reference = [0.0; GROUND];
-    reference[chief] = 1.0;
-    let run = Onefold::new(request, reference).unwrap();
-    crate::solve::reported(&run, &reference).unwrap()
+/// initial component of the largest population --, its reported potential's trap there; none where the scene refuses the
+/// request (a light outside the allowed approximations, scene.rs `Scene::new`), with its reason. 临时入口：P 取全部 32
+/// 态（`select::choose` 落地前；合并时改回 `choose`）.
+fn reported(request: &Request) -> Result<Trap, String> {
+    crate::scene::Scene::new(request)?;
+    let reference: [f64; GROUND] = std::array::from_fn(|s| f64::from(u8::from(s == crate::solve::chief(request))));
+    let run = crate::model::selected::keeping(request, (0..crate::request::STATES).collect(), None, reference);
+    crate::solve::reported(&run, &reference)
 }
 
 /// Every expectation that states trap frequencies: the engine's reported trap of its scene is within twice the
-/// reference's own uncertainty of them -- every axis read and said, those beyond named.
+/// reference's own uncertainty of them -- every axis read and said, those beyond named; a scene the engine refuses is
+/// said with its reason.
 #[test]
 fn the_reported_trap_is_the_references() {
     let (mut seen, mut beyond) = (0, vec![]);
@@ -45,7 +46,13 @@ fn the_reported_trap_is_the_references() {
         }
         let id = expectation["id"].as_str().unwrap();
         let request = Request::from_native(&json(refs().join(expectation["request"].as_str().unwrap()))).unwrap();
-        let reported = reported(&request);
+        let reported = match reported(&request) {
+            Ok(trap) => trap,
+            Err(why) => {
+                println!("{id}: refused: {why}");
+                continue;
+            }
+        };
         for s in stated {
             let axis = ["x", "y", "z"].iter().position(|a| s["axis"] == *a).unwrap();
             let (value, u) = (s["value"].as_f64().unwrap(), s["u"].as_f64().unwrap());

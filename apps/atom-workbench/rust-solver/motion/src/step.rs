@@ -161,7 +161,7 @@
 //! to the same τ∇V_ref(r_h) either way). The forms are those of the end state ψ₁ at the last step's middle r_h, its
 //! density contracted with the step's own kick (`Middle::nodes`: one more density, its static form and each tone's
 //! complex amplitude), less the step's τ∇V_ref(r_h); at the trajectory's start the model's at its own point
-//! (`Dynamics::started`, the same contraction there; the trajectory's first decision); after a jump at a step's end into
+//! (`Dynamics::started`, the same contraction there); after a jump at a step's end into
 //! another cluster, that cluster's at the jump's point (`Dynamics::forms`).
 //! - The forms against the force the next step needs, its own average over its path about r_h′ = r_h + v_m τ + O(τ²):
 //!   the state is the trajectory's own at t₁, the position O(τ) from r_h′, and the generator is taken at κ_m of the last
@@ -252,8 +252,7 @@
 //!   the step as the kick δκ cos ωu and the displacement −(ħ/m) δκ sin(ωu)/ω at the middle do, per principal axis (the
 //!   identity of `spreading` and of `Segment`);
 //! - a jump that lands in another cluster goes on in that cluster's generator at the same middle (`Dynamics::middle`),
-//!   on the same path -- the middle the jump's landing was made on (`Places`), whose evaluation there holds the
-//!   trajectory's representation, what it lacks made there and the trajectory's --: its picture is made there, its part
+//!   on the same path -- the middle the jump's landing was made on (`Places`) --: its picture is made there, its part
 //!   of the kick is its own forms'.
 //! What a jump inside a step leaves, each once a jump (the jumps' number is the physics', so each is an error of the
 //! run of its own order in τ; h = τ/2, a the acceleration, f the force beside the reference's):
@@ -489,12 +488,8 @@ pub trait Dynamics {
     fn cluster_of(&self, ground: usize) -> usize;
 
     /// The cluster's generator at the position r and the time t with every light on, for every momentum and along every
-    /// straight path through the point (`Middle`): made once a step, at its middle, on the trajectory's representation
-    /// `held` (`Held`). Where `decide` the middle's first evaluation is a decision of the run (DESIGN §11.3: at a decision
-    /// time's point, `Midway::decided`, and where a step's middle does not exist, at its start): what it decides of the
-    /// representation -- the nodes kept, the decompositions made again -- is the trajectory's from then on
-    /// (`Middle::held`); any other evaluation decides nothing that outlives it.
-    fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &Held, decide: bool) -> Self::Middle<'_>;
+    /// straight path through the point (`Middle`): made once a step, at its middle.
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_>;
 
     /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/photon.rs
     /// `Model::emission_of`): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
@@ -503,24 +498,12 @@ pub trait Dynamics {
     /// none. Inside a step the point is on the step's path: `on` is the cluster's middle there with the path and the
     /// point's time s from the middle (`Places`), what the step made of the model for the jump to read (DESIGN §13.2);
     /// at a trajectory's start there is none.
-    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
-    /// The photon of the state ψ with the photon its last landing's transient owes this jump (`Trajectory::owed`, `Owed`:
-    /// the fast part's amplitudes u_q at the jump, laid as the model lays a jump's), the whole state's: the classes' rates
-    /// and the drawn class's amplitudes of ψ's photon and the owed one summed, its kick's mean over the classes the one its
-    /// landing booked it (model/fold/run.rs `Middle::transient`). A model whose landing leaves no transient owes none
-    /// (`emit`).
-    fn transient<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], owed: &Owed, held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let _ = owed;
-        self.emit(cluster, at, on, psi, held, draw)
-    }
+    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
     /// Where a jump's bare state `f` lands in a cluster at a point, against the trajectory's threshold θ for its next jump
-    /// (`Landing`, `Landed`): the state the trajectory goes on in, with the norm it goes on with (a fold's bare state is
-    /// its slow state and a part that is gone within the excited state's lifetime; the slow state's norm is the bare state's
-    /// survival extrapolated back to the jump, below ‖f‖ or above it; model.rs `Model::landed`), the threshold its next jump
-    /// is at and the photon the transient owes that jump (the jump clock's law: model/fold/proto/transient.rs) -- the state
-    /// itself, θ and none where the model folds nothing of that; or nowhere where the landing does not exist in that
-    /// cluster there. Inside a step `on` is the landing cluster's middle with the path (`emit`).
-    fn landed<'m>(&'m self, _cluster: usize, _at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path)>, f: &[C64], _held: &Held, threshold: f64) -> Landing {
+    /// (`Landing`, `Landed`): the state the trajectory goes on in and its threshold -- the state itself and θ for a model
+    /// whose jumps land on its own states (the plain landing L_qψ/‖·‖, RUSTPLAN §2.2 D5) --; or nowhere where the landing
+    /// does not exist in that cluster there. Inside a step `on` is the landing cluster's middle with the path (`emit`).
+    fn landed<'m>(&'m self, _cluster: usize, _at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path)>, f: &[C64], threshold: f64) -> Landing {
         Landing::On(Landed::plain(f.iter().copied().collect(), threshold))
     }
 
@@ -530,48 +513,36 @@ pub trait Dynamics {
     /// The loss test at a point (`Model::lost`): outside the region and E_s above its far value.
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool;
 
-    /// The displayed rows of the cluster's state at a point (`Model::readout`), on the trajectory's representation `held`
-    /// (deciding nothing).
-    fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> [f64; STATES];
+    /// The displayed rows of the cluster's state at a point (`Model::readout`).
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
     /// A cluster's state's held forms at a point (module documentation, # The path's momentum: `Forms`, at the point's
     /// time): the model at the point (`middle`, deciding nothing), the state on its path at the point's momentum, at the
     /// middle (`forms_at`), less the reference's gradient there. Where a jump at a step's end lands in another cluster,
     /// and after a trajectory's first jump.
-    fn forms(&self, cluster: usize, at: &Point, psi: &[C64], held: &Held) -> Forms
+    fn forms(&self, cluster: usize, at: &Point, psi: &[C64]) -> Forms
     where
         Self: Sized,
     {
-        let middle = self.middle(cluster, at.r, at.t, held, false);
+        let middle = self.middle(cluster, at.r, at.t);
         let path = middle.path(at.kappa, [0.0; 3]);
         let mut rho = vec![C64::ZERO; psi.len() * psi.len()];
         density(psi, &mut rho);
         Forms { time: at.t, ..forms_at(&middle, &path, &rho) }.less(self.reference(at.r).gradient)
     }
 
-    /// Where a trajectory starts (`Trajectory::begun`): the bare state f on `cluster` at the point -- the cluster it lands
-    /// in there (the trajectory's first decision, its look over the first cell `cell`, µs: none where it is not known),
-    /// its landing against the threshold θ (`land`), its held forms there (`forms`), and the representation that
-    /// evaluation decided (none here); no number where it lands nowhere.
-    fn started(&self, cluster: usize, at: &Point, f: &[C64], _cell: f64, threshold: f64) -> (usize, Landed, Forms, Held)
+    /// Where a trajectory starts (`Trajectory::new`): the bare state f on `cluster` at the point -- the cluster it lands
+    /// in there, its landing against the threshold θ (`land`) and its held forms there (`forms`); no number where it
+    /// lands nowhere.
+    fn started(&self, cluster: usize, at: &Point, f: &[C64], threshold: f64) -> (usize, Landed, Forms)
     where
         Self: Sized,
     {
-        let Some((cluster, _, landed)) = land(self, cluster, at, None, f, &Held::default(), threshold) else {
-            return (cluster, Landed::plain(f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), threshold), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] }, Held::default());
+        let Some((cluster, _, landed)) = land(self, cluster, at, None, f, threshold) else {
+            return (cluster, Landed::plain(f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), threshold), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] });
         };
-        let forms = self.forms(cluster, at, &landed.psi, &Held::default());
-        (cluster, landed, forms, Held::default())
-    }
-
-    /// A jump from cluster `from` landing in `cluster` at a point, where that is a decision time of the model (unify2 §4.1: a
-    /// jump into another set): the cluster the bare state f (on `cluster`'s states) lands in, f on its states, its landing
-    /// against the threshold θ (`Landed`) and the representation the decision there made, deciding over the cell to the
-    /// next decision time `until` (µs); Some(None) where it lands nowhere. None where the model takes no decision at that
-    /// jump: `jump` lands it (`land`). None here.
-    #[allow(clippy::type_complexity)]
-    fn entered(&self, _from: usize, _cluster: usize, _at: &Point, _f: &[C64], _held: &Held, _until: f64, _threshold: f64) -> Option<Option<(usize, Internal, Landed, Held)>> {
-        None
+        let forms = self.forms(cluster, at, &landed.psi);
+        (cluster, landed, forms)
     }
 
     /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
@@ -708,74 +679,6 @@ pub trait Middle {
         (forms, end.map(|(rho, fixed)| forms_at(self, fixed, rho)))
     }
 
-    /// The representation a deciding middle left (`Dynamics::middle`): None where it decided nothing of it.
-    fn held(&self) -> Option<Held> {
-        None
-    }
-
-    /// What a landing made at this middle forgotten, so that the next one makes it again as a step's first does (the
-    /// step harness's count of a jump).
-    #[cfg(test)]
-    fn forget_left(&self) {}
-
-    /// A decision time (DESIGN §11.3), on a middle made deciding at the step's end for the state ψ there
-    /// (`Midway::decided`), `interval` (µs) to the next decision: the representation it leaves (its decompositions made
-    /// again at the point), what the cell it ends books, the work it counted. Here nothing.
-    fn decide(&self, _path: &Self::Path, _psi: &[C64], _interval: f64) -> Decided {
-        Decided { held: None, work: 0.0, booked: [0.0; MODEL] }
-    }
-
-    /// The model's error at this middle for the state ψ (unify2 §2.7): its decision's accounts by kind (ρ², `MODEL`'s first
-    /// `READS`; held between two decisions: the books' profile), whether its forward is unresolved, and the state's decay
-    /// rate there (i⟨ψ|G − G†|ψ⟩/‖ψ‖², 1/µs). None for a model of no fold.
-    fn books(&self, _path: &Self::Path, _psi: &[C64]) -> Option<([f64; READS], bool, f64)> {
-        None
-    }
-
-    /// Whether the generator exists along the path (its fold at the point: DESIGN §11.3). Here everywhere.
-    fn exists(&self, _path: &Self::Path) -> bool {
-        true
-    }
-
-}
-
-/// What a decision took (`Middle::decide`): the representation it leaves where it made one (the decompositions its
-/// evaluations made, the trajectory's from then on: `Held`) and its counted work (real multiply-adds).
-pub struct Decided {
-    pub held: Option<Held>,
-    pub work: f64,
-    /// What the cell it ends books beyond its profile (`Trajectory::model`): its end measured at the decision, the
-    /// difference from its start's taken linearly over the cell.
-    pub booked: [f64; MODEL],
-}
-
-/// The model's readings by kind (model/fold/proto.rs `KINDS`): the series', the reuse's, the centred rows', the nodes left
-/// out. A landing's transient is booked exactly, read by none (model/fold/proto/transient.rs).
-pub const READS: usize = 4;
-
-/// The model's books' columns (`Trajectory::model`): the readings' (`READS`), their whole ρ, and the unresolved steps'
-/// (ρ = 1).
-pub const MODEL: usize = READS + 2;
-
-/// A trajectory's representation of the model's folds (DESIGN §11.3; model/fold/run.rs: per state set its kept
-/// decompositions and the one it stands on): what the model decided at the run's decision times, carried with the
-/// trajectory as a value -- a snapshot's is its own, so a trajectory taken up again from one goes on the same --, opaque
-/// to the integrator, which hands it to the model (`Dynamics::middle`, `emit`, `landed`) and takes back what a deciding
-/// middle made (`Middle::held`). None where the model keeps nothing of its own per trajectory (model.rs `Run`). No part
-/// of the atom's state: trajectories are equal by their state whatever their representations.
-#[derive(Clone, Default)]
-pub struct Held(pub Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
-
-impl PartialEq for Held {
-    fn eq(&self, _: &Held) -> bool {
-        true
-    }
-}
-
-impl std::fmt::Debug for Held {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.is_some() { "Held(..)" } else { "Held(none)" })
-    }
 }
 
 /// The optical sector of a cluster on a path (# The optical sector's noise; model/optical.rs): its ground states (the
@@ -895,55 +798,39 @@ pub struct Emitted {
     pub work: f64,
 }
 
-/// Where a jump's bare state lands in a cluster (`Dynamics::landed`): the state the trajectory goes on in and its clock
-/// (`On`); or none, where the landing does not exist in that cluster at the point -- the fold's one exit, a number that is
-/// not finite none (`Nowhere`). A landing in another set is a decision of the model there (`Dynamics::entered`).
+/// Where a jump's bare state lands in a cluster (`Dynamics::landed`): the state the trajectory goes on in and its
+/// threshold (`On`); or none, where the landing does not exist in that cluster at the point -- a number that is not
+/// finite none (`Nowhere`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Landing {
     On(Landed),
     Nowhere,
 }
 
-/// A landing (`Dynamics::landed`; the jump clock's law, model/fold/proto/transient.rs): the state the trajectory goes on
-/// in -- the slow part, its norm the long-time survival carried back to the jump --; the threshold its next jump is at --
-/// where the model's exact survival N(τ) from the bare state meets the trajectory's θ, the slow part's norm θ′ = N_s(τ*)
-/// there, so that the step jumps where the exact clock does; θ itself where the landing leaves no transient --; the photon
-/// its transient owes that jump (`Owed`), none where it is gone by then; and the kick the landing books (1/µm): of the
-/// cycle's momentum conditional on its length τ*, what the step and the jump do not give (K_∞ + δg(τ*); its whole at
-/// once). Where its norm is at or below its threshold already, the jump is at once. With its counted work (real
-/// multiply-adds: its left response and its clock), the jump's own as its photon's is (`jump`): no part of a step's.
+/// A landing (`Dynamics::landed`): the state the trajectory goes on in, the threshold its next jump is at, the kick the
+/// landing books (1/µm) and its counted work (real multiply-adds), the jump's own as its photon's is (`jump`): no part of a
+/// step's. Where its norm is at or below its threshold already, the jump is at once.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Landed {
     pub psi: Internal,
     pub threshold: f64,
-    pub owed: Option<Owed>,
     pub kick: [f64; 3],
     pub work: f64,
 }
 
 impl Landed {
-    /// A landing that leaves no transient: the state, the trajectory's own threshold, nothing owed, no kick, no count.
+    /// The plain landing: the state, the trajectory's own threshold, no kick, no count.
     pub fn plain(psi: Internal, threshold: f64) -> Landed {
-        Landed { psi, threshold, owed: None, kick: [0.0; 3], work: 0.0 }
+        Landed { psi, threshold, kick: [0.0; 3], work: 0.0 }
     }
-}
-
-/// The photon a landing's transient owes the next jump (`Landed::owed`): the fast part's amplitudes u_q on the ground
-/// states at the jump (rows (b, q) at 3b + q, every block at its offset's phase), and whether the landing booked that
-/// cycle's whole momentum (its jump at once: the slow part dark until it) -- else the jump's kick carries the slow
-/// photon's mean over the classes, as the step's own jumps do (`Dynamics::transient`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Owed {
-    pub photon: Vec<C64>,
-    pub whole: bool,
 }
 
 /// Where a jump's bare state f of the cluster `cluster` lands at a point against the threshold θ (`Dynamics::landed`): on
 /// the middles `places` holds there (`Places::of`), or at the point. The cluster, f on its states and its landing; none
 /// where it lands nowhere.
-fn land<'m, D: Dynamics>(model: &'m D, cluster: usize, at: &Point, places: Option<&mut Places<'_, 'm, D>>, f: &[C64], held: &Held, threshold: f64) -> Option<(usize, Internal, Landed)> {
-    let on = places.map(|p| p.of(cluster, held));
-    match model.landed(cluster, at, on, f, held, threshold) {
+fn land<'m, D: Dynamics>(model: &'m D, cluster: usize, at: &Point, places: Option<&mut Places<'_, 'm, D>>, f: &[C64], threshold: f64) -> Option<(usize, Internal, Landed)> {
+    let on = places.map(|p| p.of(cluster));
+    match model.landed(cluster, at, on, f, threshold) {
         Landing::On(landed) => Some((cluster, f.iter().copied().collect(), landed)),
         Landing::Nowhere => None,
     }
@@ -964,10 +851,8 @@ pub struct Trajectory {
     /// Time (µs).
     pub time: f64,
     /// The waiting time's threshold: the next jump is where ‖ψ‖² reaches it -- θ ∈ (0, 1] drawn at the last jump, or its
-    /// landing's θ′ (`Landed`: where the exact survival meets θ, the slow part's norm there).
+    /// landing's (`Landed`).
     pub threshold: f64,
-    /// The photon the last landing's transient owes the next jump (`Landed::owed`), none where it owes none.
-    pub owed: Option<Owed>,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
     /// The photons its jumps emitted (a jump at its threshold on landing emits another) and their Σ k_φ² (1/µm²): the
@@ -997,19 +882,6 @@ pub struct Trajectory {
     /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
     /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
     pub booked: [f64; 3],
-    /// The model's error booked along it (unify2 §2.7; `MODEL`): per kind and whole Σ ρ γ τ over its steps (ρ its
-    /// decision's reading, rate units, held over the cell: the profile; each decision books its cell's measured end
-    /// linearly, `Decided::booked`; γ the state's decay rate at the step's middle), the unresolved steps' at ρ = 1; and
-    /// their count.
-    pub model: [f64; MODEL],
-    pub unresolved_steps: usize,
-    /// The next decision time (µs; adapt.rs # The decision times: the end of the cell the trajectory stands in, the look's
-    /// end at a jump into another set), and whether a step of the cell it stands in was unresolved (unify2 §2.7: a state
-    /// read in that cell reads that account at ρ = 1).
-    pub next: f64,
-    pub unresolved_cell: bool,
-    /// The model's representation of its folds for this trajectory (`Held`).
-    pub held: Held,
     /// Its state's held forms where the model last evaluated it (module documentation, # The path's momentum): its next
     /// step's path momentum.
     pub forms: Forms,
@@ -1018,16 +890,10 @@ pub struct Trajectory {
 impl Trajectory {
     /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0, the light switched on there
     /// (SPEC §2.4; ELIMINATION v3 4): the bare state -- the unit vector of that state on its cluster -- is a jump's
-    /// landing, the same map and clock (`Landed`): its slow part, against the first threshold from jump 0's stream, with
-    /// its held forms there and the representation the evaluation decided (`Dynamics::started`); at its threshold
-    /// already, the jump at once, as after a jump (`jump`), and the held forms of the state it lands in.
+    /// landing, the same map (`Landed`), against the first threshold from jump 0's stream, with its held forms there
+    /// (`Dynamics::started`); at its threshold already, the jump at once, as after a jump (`jump`), and the held forms of
+    /// the state it lands in.
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
-        Trajectory::begun(model, state, r, kappa, seed, index, 0.0)
-    }
-
-    /// `new` with the width of the decision cells (adapt.rs # The decision times): its first decision looks over the first
-    /// cell (unify2 §4.2).
-    pub fn begun<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64, cell: f64) -> Trajectory {
         let bare = |cluster: usize| -> Internal {
             let states = &model.cluster(cluster).states;
             let at = states.iter().position(|&s| s == state).expect("a ground state lies on its cluster");
@@ -1036,7 +902,7 @@ impl Trajectory {
             psi
         };
         let threshold = Stream::jump(seed, index, 0).open_uniform();
-        let (cluster, landed, forms, held) = model.started(model.cluster_of(state), &Point { r, kappa, t: 0.0 }, &bare(model.cluster_of(state)), cell, threshold);
+        let (cluster, landed, forms) = model.started(model.cluster_of(state), &Point { r, kappa, t: 0.0 }, &bare(model.cluster_of(state)), threshold);
         let on = norm_sqr(&landed.psi) > landed.threshold;
         let mut trajectory = Trajectory {
             r,
@@ -1045,7 +911,6 @@ impl Trajectory {
             cluster,
             time: 0.0,
             threshold: landed.threshold,
-            owed: landed.owed,
             jumps: 0,
             scattered: [0.0; 2],
             lost: None,
@@ -1056,11 +921,6 @@ impl Trajectory {
             jumped: 0.0,
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
-            model: [0.0; MODEL],
-            unresolved_steps: 0,
-            next: cell,
-            unresolved_cell: false,
-            held,
             forms,
         };
         if !on {
@@ -1069,7 +929,7 @@ impl Trajectory {
             trajectory.forms = match jump(model, &mut trajectory, None) {
                 Ok(()) => {
                     let t = &trajectory;
-                    model.forms(t.cluster, &t.point(), &t.psi, &t.held)
+                    model.forms(t.cluster, &t.point(), &t.psi)
                 }
                 Err(_) => Forms { time: 0.0, held: [f64::NAN; 3], tones: vec![] },
             };
@@ -2139,9 +1999,6 @@ pub fn predicted(forms: &Forms, kappa_h: [f64; 3], tau: f64, t_m: f64) -> [f64; 
 pub struct Midway<'a, D: Dynamics + 'a> {
     model: &'a D,
     tau: f64,
-    /// The interval to the next decision where the step ends at a decision time, none where it does not (adapt.rs # The decision
-    /// times).
-    decision: Option<f64>,
     hbar_over_mass: f64,
     flow: Flow,
     reached: ([f64; 3], [f64; 3]),
@@ -2184,23 +2041,15 @@ struct March {
 
 impl<'a, D: Dynamics> Midway<'a, D> {
     /// The middle of the step of τ (negative: the reverse step) from a trajectory's position, momentum, cluster and
-    /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there on the
-    /// trajectory's representation, deciding nothing (adapt.rs # The decision times: where the step ends at a decision time,
-    /// `decision` the interval to the next one, its end decides, `decided`). The representation holds between the
-    /// decision times (unify2 §4.3): where the generator does not exist along the step's path -- a held forward that is
-    /// no number --, the step is refused as a jump with no photon is (`Refused::Emission`).
-    pub fn new(model: &'a D, from: &Trajectory, tau: f64, decision: Option<f64>) -> Result<Midway<'a, D>, Refused> {
+    /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there.
+    pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
         let _p = crate::prof::scope(crate::prof::STEP_NEW);
         let half = 0.5 * tau;
         let (flow, reached) = middle(model, from.r, from.kappa, half)?;
         let hm = model.hbar_over_mass();
         let reference = flow.gradient_at(reached.0);
-        let generator = model.middle(from.cluster, reached.0, from.time + half, &from.held, false);
-        let kappa_m = predicted(&from.forms, reached.1, tau, from.time + half);
-        if !generator.exists(&generator.path(kappa_m, kappa_m.map(|k| hm * k))) {
-            return Err(Refused::Emission);
-        }
-        Ok(Midway { model, tau, decision, hbar_over_mass: hm, flow, reached, reference, generator })
+        let generator = model.middle(from.cluster, reached.0, from.time + half);
+        Ok(Midway { model, tau, hbar_over_mass: hm, flow, reached, reference, generator })
     }
 
     /// The step through this middle of a state at its start -- the middle's own position, momentum, cluster and time,
@@ -2232,10 +2081,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             landed = Some(next.unwrap_or_else(|| {
                 let _p = crate::prof::scope(crate::prof::STEP_OTHER_MIDDLE);
-                self.model.middle(march.state.cluster, r_h, from.time + h, &march.state.held, false)
+                self.model.middle(march.state.cluster, r_h, from.time + h)
             }));
         }
-        let March { state: mut end, read, impulse, scattered, optical, mut work, prices, mut made, ended, .. } = march;
+        let March { state: mut end, read, impulse, scattered, optical, work, prices, mut made, ended, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
         // optical sector's drawn covariance -- the middle state's rate over the step with what was pending (# The
         // optical sector's noise) --, their factor on the Brownian path's increment (the momentum) and on its first
@@ -2261,19 +2110,6 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             end.booked[1] += trace(&added);
         }
         end.booked[2] += step * trace(&scattered.diffusion);
-        // The model's error over the step (unify2 §2.7): the middle's decision's accounts at the state's decay rate there.
-        if let Some((kinds, unresolved, gamma)) = self.generator.books(&self.generator.path(kappa_m, kappa_m.map(|k| hm * k)), &from.psi) {
-            let rate = |rho2: f64| 2.0 * rho2.sqrt() + rho2;
-            for (b, k) in end.model.iter_mut().zip(kinds) {
-                *b += rate(k) * gamma * step;
-            }
-            end.model[READS] += rate(kinds.iter().sum()) * gamma * step;
-            if unresolved {
-                end.model[READS + 1] += gamma * step;
-                end.unresolved_steps += 1;
-                end.unresolved_cell = true;
-            }
-        }
         let spread = factor(&rate, size, scattered.links);
         let through = |w: &[f64; 3]| -> [f64; 3] { std::array::from_fn(|a| (0..3).map(|c| spread[a][c] * w[c]).sum()) };
         let (push, shift) = spreading(&flow, tau, through(&brownian.increment), through(&brownian.moment));
@@ -2300,34 +2136,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             return Err(Refused::Overflow);
         }
         (end.r, end.kappa, end.time) = (r1, kappa1, from.time + tau);
-        // The decision where the step ends at a decision time: at the end itself (adapt.rs # The decision times).
-        if let Some(interval) = self.decision {
-            work += self.decided(&mut end, interval)?;
-        }
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() }, rows: ended }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
         Ok(Step { end, segment, made, work, prices, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
-    }
-
-    /// The decision at a step's end that reaches a decision time (# The decision times): on the end state itself, at its
-    /// own point and time -- a middle of its cluster made there deciding, its forward the decision's (`Dynamics::middle`),
-    /// its path at the end's momentum --, so that every level decides on its own state at the same times and the same
-    /// points but for its step's error: the representation it leaves (the decompositions made again at the point; the
-    /// representation itself is the run's, fixed: model/fold/run.rs # The representation), the cell's books' end; the next
-    /// decision time, a cell on, and the cell's unresolved steps none; its counted work, the decision's forward with it.
-    fn decided(&self, state: &mut Trajectory, interval: f64) -> Result<f64, Refused> {
-        let _p = crate::prof::scope(crate::prof::DECIDED);
-        let (kappa, velocity) = (state.kappa, state.kappa.map(|k| self.hbar_over_mass * k));
-        let middle = self.model.middle(state.cluster, state.r, state.time, &state.held, true);
-        let path = middle.path(kappa, velocity);
-        let decided = middle.decide(&path, &state.psi, interval);
-        (state.next, state.unresolved_cell) = (state.time + interval, false);
-        state.model.iter_mut().zip(decided.booked).for_each(|(b, x)| *b += x);
-        if let Some(held) = decided.held {
-            state.held = held;
-        }
-        Ok(decided.work + middle.made())
     }
 
     /// The propagation of B on the step's path from where the march stands, in the cluster its state is in, as far as
@@ -2372,11 +2184,6 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
         // decay laid alike.
         let scale = pictured(&along, scratch, tau, Some((&launched[..n], march.u)))?;
-        // What the middle decided at its first evaluation (the picture's, the step's first) is the trajectory's
-        // representation from here on, before any jump of the step reads it.
-        if let Some(held) = generator.held() {
-            march.state.held = held;
-        }
         let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
         // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
         let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
@@ -2560,7 +2367,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         });
         if done && !ended {
             let state = &march.state;
-            let forms = self.model.forms(state.cluster, &state.point(), &state.psi, &state.held);
+            let forms = self.model.forms(state.cluster, &state.point(), &state.psi);
             march.state.forms = forms;
         }
         let t_m = start + h;
@@ -2893,7 +2700,7 @@ impl Price {
 /// jumps are the state's own -- its threshold, its streams --, the Brownian path none (no work is of it), no time
 /// read. Refused as the run's step would be (`Midway::attempt`).
 pub fn priced<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, domain: &dyn Domain) -> Result<Vec<(usize, Price)>, Refused> {
-    let (through, mut scratch) = (Midway::new(model, from, tau, None)?, Scratch::default());
+    let (through, mut scratch) = (Midway::new(model, from, tau)?, Scratch::default());
     through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?;
     Ok(through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?.prices)
 }
@@ -2958,10 +2765,7 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// The middles a jump inside a step is made on (`jump`; module documentation, # Jumps): the step's middle point and
 /// time, the path's momentum and velocity and the jump's time s from the middle; the emitting cluster's middle with its
 /// path, and the middle of a cluster a jump lands in where that is another, made there -- the one the step goes on in
-/// after the jump (`Midway::stretch`). A middle here decides nothing (adapt.rs # The decision times; a decision's photon
-/// is made on the decision's own middle, at the step's end: s = 0): what the landing's evaluation makes of that cluster's
-/// representation that it lacked -- its first decomposition there -- is the trajectory's from then on, as a step's
-/// middle's is.
+/// after the jump (`Midway::stretch`).
 pub struct Places<'p, 'm, D: Dynamics + 'm> {
     model: &'m D,
     point: ([f64; 3], f64),
@@ -2973,12 +2777,12 @@ pub struct Places<'p, 'm, D: Dynamics + 'm> {
 
 impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
     /// A cluster's middle with its path: the emitting cluster's, or another's, made where it is first asked for.
-    fn of(&mut self, cluster: usize, held: &Held) -> (&D::Middle<'m>, &<D::Middle<'m> as Middle>::Path) {
+    fn of(&mut self, cluster: usize) -> (&D::Middle<'m>, &<D::Middle<'m> as Middle>::Path) {
         if cluster == self.own.0 {
             return (self.own.1, self.own.2);
         }
         if self.other.as_ref().is_none_or(|other| other.0 != cluster) {
-            let middle = self.model.middle(cluster, self.point.0, self.point.1, held, false);
+            let middle = self.model.middle(cluster, self.point.0, self.point.1);
             let path = middle.path(self.path.0, self.path.1);
             self.other = Some((cluster, middle, path));
         }
@@ -2999,20 +2803,14 @@ impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
 /// trajectory's own place (adapt.rs). A norm that reached its threshold with no photon to emit -- every class's
 /// weight zero, or not a number, or its amplitudes no finite numbers -- is refused (`Refused::Emission`) with the
 /// trajectory as it was: the model's decay and its photons contradict each other, and no jump is made of that. So is a
-/// landing with no node left to rise.
+/// landing that does not exist.
 ///
-/// The landing (`Dynamics::landed`, `land`; the jump clock's law, model/fold/proto/transient.rs): the trajectory goes on in
-/// the state the bare state f/‖f‖ lands in, with that state's norm -- in the cluster the model rises it to where the
-/// landing does not exist in the cluster it lands in (BRIEF_COPIES item 1: a landing that is no number once sent the loop
-/// round for ever) --, against the threshold its landing hands it (`Landed`): where the model's exact survival from f
-/// meets the next threshold θ drawn here, the slow part's norm there, so that the step jumps where the exact clock does;
-/// and that jump's photon is the whole state's, the photon the landing's transient owes it with the state's own
-/// (`Trajectory::owed`, `Dynamics::transient`); the momentum the landing books, the cycle's conditional mean less what the
-/// step and that jump give (`Landed::kick`), at once. A landed norm at or below its threshold already (the slow part dark
-/// until the jump: its norm is the threshold) is that jump at once, from the landed state with what it is owed -- its class,
-/// polarization and direction drawn anew, its recoil and its bounded kick with them --, the next threshold drawn anew,
-/// and it lands again. A model whose landing leaves no transient hands θ back and owes nothing: the waiting time after a
-/// jump is then P(T > t) = min(1, n e^{−γt}) for the landing's norm n and the state's rate γ.
+/// The landing (`Dynamics::landed`, `land`): the trajectory goes on in the state the bare state f/‖f‖ lands in, with that
+/// state's norm, against the threshold its landing hands it (`Landed`; the plain landing, RUSTPLAN §2.2 D5: the state
+/// itself and the threshold θ drawn here), with the kick the landing books. A landed norm at or below its threshold
+/// already is that jump at once -- its class, polarization and direction drawn anew --, the next threshold drawn anew,
+/// and it lands again. The waiting time after a plain landing is P(T > t) = min(1, n e^{−γt}) for the landing's norm n
+/// and the state's rate γ.
 pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut places: Option<&mut Places<'_, 'm, D>>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
@@ -3038,20 +2836,15 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
             }
             Some(pick)
         };
-        let held = trajectory.held.clone();
         let on = places.as_deref_mut().map(|p| {
             let s = p.s;
-            let (middle, path) = p.of(trajectory.cluster, &held);
+            let (middle, path) = p.of(trajectory.cluster);
             (middle, path, s)
         });
         let gram = |u: &[Internal; 3]| -> [[f64; 3]; 3] { std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re)) };
         // A photon whose amplitudes are no finite numbers is none, as a class's rate that is none (the one exit: the
-        // direction's rejection would accept no direction of it). The state's photon with what its landing owes it.
-        let emitted = match &trajectory.owed {
-            None => model.emit(trajectory.cluster, &at, on, &trajectory.psi, &trajectory.held, &mut draw),
-            Some(owed) => model.transient(trajectory.cluster, &at, on, &trajectory.psi, owed, &trajectory.held, &mut draw),
-        }
-        .map(|photon| (gram(&photon.amplitudes), photon));
+        // direction's rejection would accept no direction of it).
+        let emitted = model.emit(trajectory.cluster, &at, on, &trajectory.psi, &mut draw).map(|photon| (gram(&photon.amplitudes), photon));
         let Some((gram, photon)) = emitted.filter(|(g, _)| (g[0][0] + g[1][1] + g[2][2]).is_finite() && g[0][0] + g[1][1] + g[2][2] > 0.0) else {
             // A norm at its threshold with no photon to emit is refused; a landed state with none at once goes on as it is.
             if first {
@@ -3062,7 +2855,6 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         if first {
             trajectory.jumps = j;
         }
-        trajectory.owed = None;
         let emitted = model.photon_work() + photon.work;
         trajectory.work += emitted;
         trajectory.jumped += emitted;
@@ -3085,28 +2877,20 @@ pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut plac
         }
         trajectory.scattered = [trajectory.scattered[0] + 1.0, trajectory.scattered[1] + photon.wave_number * photon.wave_number];
         let scale = 1.0 / w.sqrt();
-        let from = trajectory.cluster;
         trajectory.psi = f.iter().map(|z| *z * scale).collect();
         trajectory.cluster = photon.landing;
         first = false;
-        // The landing: into another set a decision there (`Dynamics::entered`), else on the step's middles (`land`); none
-        // where it does not exist (refused, as a photon that is none); against the next threshold, its clock.
+        // The landing on the step's middles (`land`); none where it does not exist (refused, as a photon that is none);
+        // against the next threshold.
         let at = trajectory.point();
-        let landing = match model.entered(from, trajectory.cluster, &at, &trajectory.psi, &held, trajectory.next, threshold) {
-            Some(decided) => decided.map(|(cluster, bare, landed, held)| {
-                trajectory.held = held;
-                (cluster, bare, landed)
-            }),
-            None => land(model, trajectory.cluster, &at, places.as_deref_mut(), &trajectory.psi, &held, threshold),
-        };
-        let Some((cluster, _, landed)) = landing else { return Err(Refused::Emission) };
+        let Some((cluster, _, landed)) = land(model, trajectory.cluster, &at, places.as_deref_mut(), &trajectory.psi, threshold) else { return Err(Refused::Emission) };
         let at_once = norm_sqr(&landed.psi) <= landed.threshold;
         for a in 0..3 {
             trajectory.kappa[a] += landed.kick[a];
         }
         trajectory.work += landed.work;
         trajectory.jumped += landed.work;
-        (trajectory.cluster, trajectory.psi, trajectory.threshold, trajectory.owed) = (cluster, landed.psi, landed.threshold, landed.owed);
+        (trajectory.cluster, trajectory.psi, trajectory.threshold) = (cluster, landed.psi, landed.threshold);
         if !at_once {
             break;
         }
