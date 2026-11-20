@@ -320,6 +320,58 @@ fn choose_cost() {
     }
 }
 
+/// Off the two points (PSTATE's risk, a measurement; `V3D_REQ`, `PSTATE_SCENE` one scene): the gate's measures of the
+/// base and of P against the full reference where the gate does not look -- the static points moved along each axis by
+/// λ/8 and λ/4 (λ the carrier's wavelength: the light's pattern there, its polarization and intensity, the mirror
+/// states' cancellations broken), the tweezer as the scene has it there and off; at rest. Each place's model on that
+/// place's own frame, as the gate's own points. (At the thermal momentum along z the full reference of R4 at the centre
+/// outgrew 8 GB; tilt0 and tilt2 there: pstate.status.md.)
+#[test]
+#[ignore]
+fn off_the_two_points() {
+    for (scene_name, scene) in six() {
+        let selection = choose(&scene).unwrap();
+        let k = selection_k(&scene);
+        let lambda = 2.0 * std::f64::consts::PI / k;
+        let mut places: Vec<(String, [f64; 3], f64)> = Vec::new();
+        for (a, axis) in ["x", "y", "z"].into_iter().enumerate() {
+            for (f, part) in [(0.125, "λ/8"), (0.25, "λ/4")] {
+                let mut r = [0.0; 3];
+                r[a] = f * lambda;
+                places.push((format!("{part} {axis}, tweezer"), r, 1.0));
+                places.push((format!("{part} {axis}, dark"), r, 0.0));
+            }
+        }
+        let base = selection.base().keep.clone();
+        let rows: Vec<(PointError, PointError)> = places
+            .par_iter()
+            .map(|(_, r, tweezer)| {
+                // At rest as the gate's points (`points`): no Doppler shift.
+                let doppler = vec![0.0; scene.request.beams.len()];
+                let components = scene.components(*r, &doppler, *tweezer);
+                let reference = rs::reference(&scene, &components);
+                let frame = Frame::new(&scene, &reference.hilbert(), &doppler);
+                let full = solved(&frame, &reference).unwrap();
+                let model = |keep: &[usize]| {
+                    let (m, route) = solved(&frame, &Rs::new(&scene, keep, frame.sectors()).at(&scene, &components)).unwrap();
+                    errors(&m, &full.0, k, route)
+                };
+                (model(&base), model(&selection.keep))
+            })
+            .collect();
+        let e = |p: &PointError| format!("{:.2e} {:.2e} {:.2e}", p.populations, p.rate, p.force);
+        eprintln!("{scene_name}: off the two points, populations R F⃗ -- the base P {} | P {}", base.len(), selection.keep.len());
+        let mut most = [[0.0_f64; 3]; 2];
+        for ((place, ..), (b, p)) in places.iter().zip(&rows) {
+            eprintln!("  {place:<20} {} | {}", e(b), e(p));
+            for (m, x) in most.iter_mut().zip([b, p]) {
+                *m = [m[0].max(x.populations), m[1].max(x.rate), m[2].max(x.force)];
+            }
+        }
+        eprintln!("  {:<20} {:.2e} {:.2e} {:.2e} | {:.2e} {:.2e} {:.2e}", "largest", most[0][0], most[0][1], most[0][2], most[1][0], most[1][1], most[1][2]);
+    }
+}
+
 fn selection_k(scene: &Scene) -> f64 {
     scene.generators.last().unwrap().frequency / SPEED_OF_LIGHT
 }
