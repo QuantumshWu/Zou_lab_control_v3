@@ -304,3 +304,45 @@ fn the_default_scene_s_first_solve_is_numbers() {
     let run = keeping(&request, (0..STATES).collect(), None, std::array::from_fn(|s| f64::from(u8::from(s == chief))));
     assert!(first_result("default", &request, &run), "a number that is none");
 }
+
+/// A step's time on the selected model (a measurement, ignored; V3E_SCENE one of the six): from the reference state at
+/// the trap's centre at the thermal speed along x, the model at a point (`Selected::node`, and its `Rs::at` alone) and a whole step
+/// at τ = V3E_TAU µs (0.3256), each on one thread, timed (µs, the least of five); the step's candidate tones and their
+/// largest beat.
+#[test]
+#[ignore]
+fn a_step_s_time_on_the_selected_model() {
+    let tau = env("V3E_TAU", 0.3256);
+    for (name, request, keep, errors) in scenes() {
+        let run = run_of(&request, &keep, errors);
+        let chief = crate::solve::chief(&request);
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let kappa = [speed, 0.0, 0.0];
+        let least = |f: &mut dyn FnMut()| (0..5).map(|_| {
+            let clock = std::time::Instant::now();
+            f();
+            clock.elapsed().as_secs_f64() * 1e6
+        }).fold(f64::INFINITY, f64::min);
+        let node = least(&mut || {
+            std::hint::black_box(run.node([0.1, 0.2, 0.3], kappa));
+        });
+        let model = least(&mut || {
+            std::hint::black_box(run.at([0.1, 0.2, 0.3], kappa));
+        });
+        let t = Trajectory::new(&run, chief, [0.1, 0.2, 0.3], kappa, 7, 0);
+        let mut scratch = Scratch::default();
+        let step = least(&mut || {
+            let m = Midway::new(&run, &t, tau).unwrap();
+            std::hint::black_box(m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap());
+        });
+        let middle = run.middle(0, [0.1, 0.2, 0.3], 0.0);
+        let path = middle.path(kappa, kappa.map(|k| run.hbar_over_mass() * k));
+        let mut h = Mat::zeros(keep.len(), keep.len());
+        for s in [0.0, -0.5 * tau, 0.5 * tau] {
+            middle.generator(&path, s, &mut h);
+        }
+        let (mut beats, mut keys) = (vec![], vec![]);
+        middle.beats(&path, &mut beats, &mut keys);
+        eprintln!("{name}: P {}, node {node:.0} µs (Rs::at {model:.0}), step {step:.0} µs; {} candidate tones, the largest {:.4e} rad/µs", keep.len(), beats.len(), beats.iter().copied().fold(0.0, f64::max));
+    }
+}
