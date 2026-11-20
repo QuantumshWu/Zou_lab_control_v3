@@ -6,7 +6,7 @@ use atom_motion::request::Request;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// Every reference scene (R1–R9, R4's TW1/TW2, R8) is a request the crate accepts, its trap beam focused; the set is
+/// Every reference scene (R1–R10, R4's TW1/TW2) is a request the crate accepts, its trap beam focused; the set is
 /// exactly the scenes refs/scenes.mjs wrote (its manifest).
 #[test]
 fn every_reference_scene_is_a_valid_request() {

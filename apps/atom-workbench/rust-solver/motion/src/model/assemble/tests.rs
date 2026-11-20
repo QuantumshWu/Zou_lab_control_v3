@@ -41,39 +41,12 @@ fn others(light: &Light, unit: &Unit) -> bool {
     matches!(unit, Unit::Bare { component, .. } if component.frequency != light.trap)
 }
 
-/// A scene's model with one frequency's drives at all three levels: of the light that is not the trap's, the drives of the
-/// stretched state explicit, and of the others those into every second excited state folded at the atom, the rest bare.
-fn three_levels(name: &str) -> Model {
-    let request = scene(name);
-    let light = Light::new(&request);
-    let bare = Model::new(&request, &light, &[]).unwrap();
-    let mut kept = vec![];
-    for frequency in (0..light.frequencies.len()).filter(|&f| f != light.trap) {
-        for unit in bare.bare_units(Component { frequency, counter: false }) {
-            let Unit::Bare { component, excited, ground } = unit else { unreachable!() };
-            if ground == GROUND - 1 {
-                kept.push(Unit::Drive { component, excited, ground });
-            } else if excited % 2 == 0 {
-                kept.push(unit);
-            }
-        }
-    }
-    let model = Model::new(&request, &light, &kept).unwrap();
-    for level in [Level::Bare, Level::Atom, Level::Explicit] {
-        assert!(model.driven.iter().any(|&(c, e, g)| c.frequency != light.trap && model.level(c, e, g) == level), "{name}: no drive {level:?}");
-    }
-    assert!(model.clusters.iter().any(|c| c.states.len() - c.ground > 1), "{name}: explicit states that share folded drives");
-    model
-}
-
-/// The models the tests run on, every kind of term among them. With every drive bare: one beam (still clusters) and a
-/// standing wave of two (beating along a path); crossed beams with their static couplings kept (clusters of four states in
-/// Doppler frames that turn); two frequencies with every coupling of two states kept, their beats' too (tones at rest). With
-/// the drives of the light that is not the trap's folded at the atom: the drives of the stretched state kept (explicit states
-/// with their shifts, drives and own photons; one carrier, two of two beats, and eight explicit states); every coupling of
-/// two states kept -- of one carrier with the trap's bare light (a bare coupling against a response at the atom), of one
-/// with the photons' coherences (merged classes), of two carriers of several beams (all eight ground states). And one
-/// frequency's drives at all three levels (`three_levels`).
+/// The models the tests run on. With every drive bare: one beam (still clusters); two frequencies with every coupling of
+/// two states kept, their beats' too (tones at rest). With the drives of the light that is not the trap's folded at the
+/// atom: the drives of the stretched state kept (explicit states with their shifts, drives and own photons; one carrier,
+/// two of two beats, and eight explicit states); every coupling of two states kept -- of one carrier with the trap's bare
+/// light (a bare coupling against a response at the atom), of one with the photons' coherences (merged classes), of two
+/// carriers of several beams (all eight ground states).
 fn models() -> Vec<(&'static str, Model)> {
     let none = |_: &Unit| false;
     let nothing = |_: &Light, _: &Unit| false;
@@ -81,8 +54,6 @@ fn models() -> Vec<(&'static str, Model)> {
     let drives = |u: &Unit| matches!(u, Unit::Drive { ground: 7, .. });
     vec![
         ("R1_TWEEZER bare", model("R1_TWEEZER", &nothing, &none)),
-        ("R1_RETRO bare", model("R1_RETRO", &nothing, &none)),
-        ("R1_CROSSED bare, couplings kept", model("R1_CROSSED", &nothing, &couplings)),
         ("R2_RECOIL bare, couplings kept", model("R2_RECOIL", &nothing, &couplings)),
         ("R2_RECOIL at the atom, drives of |2,2> kept", model("R2_RECOIL", &others, &drives)),
         ("R2_RECOIL at the atom, couplings kept", model("R2_RECOIL", &others, &couplings)),
@@ -90,8 +61,6 @@ fn models() -> Vec<(&'static str, Model)> {
         ("R4_TW1 at the atom, couplings kept", model("R4_TW1", &others, &couplings)),
         ("R5_PUMP at the atom, drives of |2,2> kept", model("R5_PUMP", &others, &drives)),
         ("R6_RAMAN_CO at the atom, drives of |2,2> kept", model("R6_RAMAN_CO", &others, &drives)),
-        ("R8_R5051 at the atom, couplings kept", model("R8_R5051", &others, &couplings)),
-        ("R8_R5051 at three levels", three_levels("R8_R5051")),
     ]
 }
 

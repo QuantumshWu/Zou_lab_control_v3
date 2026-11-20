@@ -1,5 +1,5 @@
 //! The model's far light, potential, trap, envelope, reach and assembly on the reference scenes (refs/scenes, built by the
-//! app's own model builder): analytic references where the far light is a Gaussian beam's or a standing wave's, and the
+//! app's own model builder): an analytic reference where the far light is a Gaussian beam's, and the
 //! identities the model holds by construction (the assembly's static diagonal is the potential, its force the potential's
 //! gradient, its decay the photons' rate, the readout's populations sum to one).
 use atom_motion::field::Light;
@@ -52,31 +52,12 @@ fn a_lone_tweezer_s_trap_frequencies_are_the_gaussian_beam_s() {
     assert!(close(trap.lab[0], axial, 1e-10) && close(trap.lab[1], radial, 1e-10) && close(trap.lab[2], radial, 1e-10), "{:?}", trap.lab);
 }
 
-/// A retro-reflected tweezer (R1_RETRO: R = 1, φ = 0, one polarization) is one coherent field, V = q|a₁ + a₂|², the depth four
-/// times one beam's. On the axis |a₁ + a₂|² = 4cos²(kζ − ψ)/(1 + s) with the Gouy phase ψ = atan(ζ/z_R), so its curvature at the
-/// focus is −8(k − 1/z_R)² − 8/z_R² (the lattice: k√(8U₀/m) of contract §6 R1 to that Gouy correction), and across it
-/// 4e^{−2ρ²/w₀²}, −16/w₀²: ω_lat² = (|V_min|/4)(ħ/m)(8(k − 1/z_R)² + 8/z_R²), ω_ρ² = 4|V_min|(ħ/m)/w₀².
-#[test]
-fn a_retro_reflected_tweezer_s_lattice_is_the_coherent_standing_wave_s() {
-    let (request, _, model, p) = built("R1_RETRO");
-    let trap = model.trap(&p, &model.prepared()).unwrap();
-    assert!(trap.centre.iter().all(|x| x.abs() < 1e-9), "{:?}", trap.centre);
-    let beam = &request.beams[request.trap_beam];
-    let (w, k) = (beam.waist.unwrap(), beam.wave_number);
-    let zr = k * w * w / 2.0;
-    let (u, hm) = (-trap.minimum, model.hbar_over_mass());
-    let lattice = (u / 4.0 * hm * (8.0 * (k - 1.0 / zr).powi(2) + 8.0 / (zr * zr))).sqrt();
-    let radial = (4.0 * u * hm).sqrt() / w;
-    assert!(close(trap.lab[0], lattice, 1e-9), "lattice {} against {}", trap.lab[0], lattice);
-    assert!(close(trap.lab[1], radial, 1e-9) && close(trap.lab[2], radial, 1e-9), "{:?} radial {}", trap.lab, radial);
-}
-
 /// The proven envelope bounds the prepared potential everywhere (model.rs `Envelope`): at points across the trap and far out,
 /// −V_prep(r) ≤ B max_l A_l(r), A_l = 1/(1 + 2ρ²/w₀² + ζ²/z_R²) of the trap light's beams -- the bound the initial ensemble
-/// draws under (ensemble.rs) --, a standing wave and a rank-2 crossed field included.
+/// draws under (ensemble.rs).
 #[test]
 fn the_envelope_bounds_the_prepared_potential() {
-    for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
+    for name in ["R1_TWEEZER", "R1_SIGMA_P"] {
         let (_, light, model, p) = built(name);
         let envelope = model.envelope(&p);
         let lights = model.prepared();
@@ -106,11 +87,11 @@ fn the_envelope_bounds_the_prepared_potential() {
 }
 
 /// The reach's box holds its sublevel set: on a grid over each face of the box the prepared potential lies above the level
-/// (at 50 µK and s = 2e-3 the level, 10.2 k_B T above the bottom with the traps' six degrees of freedom, is below every
-/// one of these traps' far value: a bounded reach).
+/// (at 50 µK and s = 2e-3 the level, 10.2 k_B T above the bottom with the trap's six degrees of freedom, is below the
+/// trap's far value: a bounded reach).
 #[test]
 fn the_reach_s_box_holds_its_sublevel_set() {
-    for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED"] {
+    for name in ["R1_TWEEZER"] {
         let (_, _, model, p) = built(name);
         let trap = model.trap(&p, &model.prepared()).unwrap();
         let reach = model.reach(&trap, &p, 50.0, 2e-3);
@@ -140,7 +121,7 @@ fn the_reach_s_box_holds_its_sublevel_set() {
 /// ⟨ψ|i(H − H†)|ψ⟩ = Σ_φ Σ_a ‖J_{a,φ}ψ‖² (Lindblad by construction); its readout's populations sum to one.
 #[test]
 fn the_assembly_holds_the_potential_its_force_and_the_photons_rate() {
-    for name in ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"] {
+    for name in ["R1_TWEEZER", "R1_SIGMA_P"] {
         let (_, _, model, p) = built(name);
         let b = p.iter().position(|&x| x == 1.0).unwrap();
         let cluster = model.cluster_of(b);

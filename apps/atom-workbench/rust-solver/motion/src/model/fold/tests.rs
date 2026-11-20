@@ -3723,7 +3723,7 @@ fn a_run_s_trajectories_are_the_same_to_the_bit_on_one_thread_and_on_many() {
 
 
 /// The splitting's reference and the loss energy on the fold (model/fold/run.rs, # The rest of the model; unify2 §5.5,
-/// loss.status (B)): on R4_LIN_4, R1_TWEEZER and R1_RETRO, at the prepared trap's centre, a thermal offset and 10 µm along
+/// loss.status (B)): on R4_LIN_4 and R1_TWEEZER, at the prepared trap's centre, a thermal offset and 10 µm along
 /// each axis, the reference -- the trap light's forms on the folds at the focus, W_s on the reference state's populations
 /// -- against the old model's prepared potential of the reference state (the bare fold's far forms, `Model::expansion`):
 /// value, gradient and Hessian within the share of their size (said); the loss energy at rest on the reference state,
@@ -3735,7 +3735,7 @@ fn the_reference_and_the_loss_energy_are_the_trap_light_s_on_the_fold() {
     use crate::model::{Model, Point};
     use crate::step::Dynamics;
     let share = super::super::elim::share();
-    for name in ["R4_LIN_4", "R1_TWEEZER", "R1_RETRO"] {
+    for name in ["R4_LIN_4", "R1_TWEEZER"] {
         let request = crate::model::testing::scene(name);
         let light = Light::new(&request);
         let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();

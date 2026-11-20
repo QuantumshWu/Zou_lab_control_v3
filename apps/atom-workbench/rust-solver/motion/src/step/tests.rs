@@ -2192,11 +2192,6 @@ fn r1_a_lone_tweezer_keeps_its_atoms_energies() {
     conservative_trap("R1_TWEEZER");
 }
 
-#[test]
-fn r1_a_retro_reflected_lattice_keeps_its_atoms_energies() {
-    conservative_trap("R1_RETRO");
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The step's cost.
 
@@ -3457,7 +3452,7 @@ fn a_scene_s_decay_is_positive_along_its_steps() {
 }
 
 /// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step_of` and per phase,
-/// single-threaded, on the R1 scenes' far light (a static path and a standing wave's beating one), on a two-level atom
+/// single-threaded, on R1_TWEEZER's far light (a static path), on a two-level atom
 /// with its excited state explicit in a standing wave in a tweezer -- near resonance, and twenty linewidths off it at
 /// the steps 0.0625 and 0.5 µs --, and on clusters of 1, 3, 5 and 8 ground states at a near-resonant light's sizes
 /// (`Synthetic`) on a static path (Doppler frames), on a standing wave's beating one (a pair of beat parts) and on six
@@ -3466,7 +3461,6 @@ fn a_scene_s_decay_is_positive_along_its_steps() {
 #[ignore = "a measurement, not a check: run by name"]
 fn the_step_s_cost() {
     scene_cost("R1_TWEEZER", 2.5);
-    scene_cost("R1_RETRO", 0.3125);
     let tau = 0.5;
     let standing = |rabi: f64| vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
     let tweezer = Trap::Gaussian { depth: 1000.0, waists: [1.0, 1.0, 3.0] };

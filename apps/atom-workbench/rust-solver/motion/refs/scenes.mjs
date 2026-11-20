@@ -1,8 +1,8 @@
 // node scenes.mjs [ids...] -- writes every reference request (or the named ones alone, the manifest keeping the others'
 // entries), built by the app's own model builder (lib/app.mjs):
-// - scenes/<id>.scene.json and scenes/<id>.json: the R1–R10 scenes (lib/defs.mjs), R4's TW1/TW2 (from the quantum
-//   references' own specification) and R8 (R5051 held at its trap's centre): the app scene, and the native request the app
-//   sends for it (a motion trajectory, device "cpu"; a scene's `mass` multiplies the request's: R10's held atom);
+// - scenes/<id>.scene.json and scenes/<id>.json: the R1–R10 scenes (lib/defs.mjs) and R4's TW1/TW2 (from the quantum
+//   references' own specification): the app scene, and the native request the app sends for it (a motion trajectory,
+//   device "cpu"; a scene's `mass` multiplies the request's: R10's held atom);
 // - out/R0/<id>.json and out/R0/<id>.static.json: the static limit (contract §6 R0) of the R0 set -- the scene's motion
 //   request with the mass ×10⁶ and 1e-3 µK, and the same scene without motion for the population core (r0.mjs);
 // Every request is checked against what request::Request needs (lib/contract.mjs). The app commit is recorded in
@@ -26,20 +26,7 @@ const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
  * recoil 10⁻³ and 10⁻⁶ of the usual: m → ∞ decouples the motion, and the jump ensemble's mean is the Lindblad equation
  * at the focus. */
 export const HELD={mass:1e6,temperatureUK:1e-3};
-function held(line,{mass,temperatureUK}=HELD){const m=structuredClone(line);m.model.motion.massKg*=mass;m.model.motion.temperatureUK=temperatureUK;return m;}
-/** R8's held atom. The mass factor: the momentum diffusion D adds (ħ²/Mm)·2Dt to k_BT while the held atom's zero-point
- * floor is ħω/2 ∝ 1/√M, so their ratio falls as 1/√M -- at ×10⁶ the diffusion is ~10⁻³ of the floor (invisible). ×100
- * keeps the atom within its zero-point spread √(ħ/2Mmω) ≈ λ/150 of the trap centre (no motional decorrelation: held)
- * while the diffusion of R5051 over 100 µs is ~15 % of the floor at the QRT's γ = 1/µs cutoff.
- * The temperature: the trap is a site of the standing wave, 9.0 kHz across and 38 kHz along it at this mass
- * (ħω/k_B = 0.43 and 1.8 µK), so at k_BT ≪ ħω the ensemble is the site's ground state whatever T is (the Wigner
- * factor coth(ħω/2k_BT) across is 1 + 1e-6 at 0.03 µK, 1.03 at 0.1 µK): spreads √(ħ/2Mmω) = 8.1 and 3.9 nm (kσ ≤ 0.065
- * of the probe's wave number; expect.mjs r8 lists them), and a lower T holds the atom no better. What T does set is
- * the cost of the initial draw -- an exact rejection from the lowered isothermal at T, in a well whose bottom is
- * 0.19 µm off the focus: measured on the line at ae35752f (the whole run, 248 trajectories): 2.2 s at 0.1 µK, 4.7 s at
- * 0.03 µK, 24 s at 0.01 µK (at 0.001 µK the lines before gave no result in 285 s). 0.03 µK is the lowest value whose
- * draw takes a few seconds. */
-export const R8_HELD={mass:100,temperatureUK:0.03};
+function held(line){const m=structuredClone(line);m.model.motion.massKg*=HELD.mass;m.model.motion.temperatureUK=HELD.temperatureUK;return m;}
 
 /** R4: the 1D quantum references' scenes (TW1, TW2; contract §3.5, the 1D GMW engine's LONGREF_TW*.json, kept in
  * refs/data) rebuilt from
@@ -61,7 +48,7 @@ async function twScene(name,durationUs){
 
 /** The R0 set: physically different scenes, each with a duration that reaches its static limit's steady state at a
  * modest cost (the solver's work at m ×10⁶ is its jumps). */
-export const R0_SET={DEFAULT:[100,201],THREE:[1000,201],PGC3D:[200,201],GMD1C:[200,201],F10_28MHZ:[10,101],R5059:[500,101],R5068:[1000,101],RETRO:[100,101],R5_PUMP:[200,201],R6_RAMAN_CO:[20,401]};
+export const R0_SET={DEFAULT:[100,201],THREE:[1000,201],PGC3D:[200,201],GMD1C:[200,201],F10_28MHZ:[10,101],R5068:[1000,101],R5_PUMP:[200,201],R6_RAMAN_CO:[20,401]};
 
 async function main(only){
   const commit=execFileSync('git',['-C',APP,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
@@ -77,11 +64,6 @@ async function main(only){
   for(const [id,d] of Object.entries(SCENES))if(wanted(id))await emit(id,await d.build(),d.title,d.ref,d.mass);
   if(wanted('R4_TW1'))await emit('R4_TW1',await twScene('TW1',3000),'R4 西西弗斯 TW1：app 的 1D PGC 例子加光镊（加热）','R4');
   if(wanted('R4_TW2'))await emit('R4_TW2',await twScene('TW2',1000),'R4 西西弗斯 TW2：典型阱内 PGC（冷却）','R4');
-  // R8: R5051 (a retro-reflected 880 nm tweezer, a D2 probe near F′=3 and a weak F=1 → F′=0 beam) held at its trap's centre.
-  if(wanted('R8_R5051')){const src=read(path.join(here,'regress','R5051.scene.json'));src.dynamics.samples=101;
-   const s=await finish(src),line=held(await motionRequest('R8_R5051',s,{device:'cpu'}),R8_HELD);const c=checkRequest(line);
-   write(out('scenes','R8_R5051.scene.json'),s);write(out('scenes','R8_R5051.json'),line);
-   manifest.scenes.R8_R5051={ref:'R8',title:`R8 静止原子的动量扩散（R5051，质量 ×${R8_HELD.mass}，${R8_HELD.temperatureUK} µK）`,...c,held:R8_HELD,...(commit===manifest.app?{}:{app:commit})};console.log('R8_R5051',JSON.stringify(c));}
   for(const [id,[durationUs,samples]] of Object.entries(R0_SET)){
     if(!wanted(`R0_${id}`))continue;
     // The source: a scene of this run, else the one written before (named runs), else the old gate's.

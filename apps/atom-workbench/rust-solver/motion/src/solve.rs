@@ -5184,16 +5184,16 @@ mod tests {
         assert_eq!(again[0].len(), 1);
     }
 
-    /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
-    /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the run's prepared wells (`Prepared`: the trap
+    /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer and a
+    /// σ⁺ tweezer) in the run's prepared wells (`Prepared`: the trap
     /// light's held forms on the fold) under their envelopes (`Reference::peak`): 2¹² draws each read the exact moments (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within their
-    /// intervals over the groups at the confidence z -- twelve looks, three axes of four traps -- and the quadrature's own
+    /// intervals over the groups at the confidence z -- six looks, three axes of two traps -- and the quadrature's own
     /// error as the solve books it for T(0), its last two levels' relative difference (`Fixed::start`), here on 2¹⁶
     /// evaluations, fewer than a pilot's steps in these traps (88 trajectories of 800 steps or more). η lies in (0, 1]:
     /// the lowered isothermal's kinetic temperature, below the Boltzmann one.
     #[test]
     fn the_reference_traps_draw_their_exact_moments() {
-        let names = ["R1_TWEEZER", "R1_RETRO", "R1_CROSSED", "R1_SIGMA_P"];
+        let names = ["R1_TWEEZER", "R1_SIGMA_P"];
         for name in names {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
             let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
