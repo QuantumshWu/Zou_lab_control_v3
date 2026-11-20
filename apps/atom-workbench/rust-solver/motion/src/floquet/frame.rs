@@ -406,8 +406,8 @@ impl Frame {
         frame
     }
 
-    /// A vector over B as a primitive vector.
-    fn primitive(&self, v: &FrameKey) -> Vec<Ratio> {
+    /// A vector over B as a primitive vector (linear: what the frame reads of a vector, `split` and the lattice).
+    pub(crate) fn primitive(&self, v: &FrameKey) -> Vec<Ratio> {
         let count = self.alpha.len();
         let u: Vec<Ratio> = (0..count).map(|g| Ratio::int(v[g]).add(Ratio::int(v[count]).mul(self.alpha[g]))).collect();
         self.primitives.of(&u)

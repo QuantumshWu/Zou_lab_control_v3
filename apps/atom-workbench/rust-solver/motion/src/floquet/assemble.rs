@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use super::frame::FrameKey;
+use super::frame::{FrameKey, Ratio};
 use super::{Element, Elements, Frame, Hilbert, Lattice, Part, Sparse};
 use crate::linalg::{C64, Mat};
 
@@ -99,9 +99,30 @@ impl Terms {
     }
 }
 
-/// An operator list in the frame: each nonzero entry (r, c) of a part at key v moves to v − θ_r + θ_c; the entries are
-/// gathered per frame vector, the vectors in sorted order per part (td_s.to_frame).
-fn to_frame<'a>(parts: impl IntoIterator<Item = (&'a [i32], &'a Mat)>, theta: &[&FrameKey]) -> Vec<(FrameKey, Mat)> {
+/// One frame vector per primitive vector (`Frame::primitive`): vectors over the generators the frame reads alike -- two
+/// beams of one frequency, each its own key in a model's components -- are one vector here, so that a model's
+/// components are gathered and paired as the frequencies they are. Everything the Liouvillian does with a vector reads
+/// its primitive (`Frame::split`, `Lattice`), and the primitive is linear: a difference's is the members' difference.
+struct Canon<'a> {
+    frame: &'a Frame,
+    seen: HashMap<FrameKey, FrameKey>,
+    of: HashMap<Vec<Ratio>, FrameKey>,
+}
+
+impl Canon<'_> {
+    fn of(&mut self, v: FrameKey) -> FrameKey {
+        if let Some(r) = self.seen.get(&v) {
+            return r.clone();
+        }
+        let r = self.of.entry(self.frame.primitive(&v)).or_insert_with(|| v.clone()).clone();
+        self.seen.insert(v, r.clone());
+        r
+    }
+}
+
+/// An operator list in the frame: each nonzero entry (r, c) of a part at key v moves to v − θ_r + θ_c (its canonical
+/// vector, `Canon`); the entries are gathered per frame vector, the vectors in sorted order per part (td_s.to_frame).
+fn to_frame<'a>(parts: impl IntoIterator<Item = (&'a [i32], &'a Mat)>, theta: &[&FrameKey], canon: &mut Canon) -> Vec<(FrameKey, Mat)> {
     let mut out: Vec<(FrameKey, Mat)> = Vec::new();
     for (key, x) in parts {
         let mut entries: Vec<(FrameKey, usize, usize)> = Vec::new();
@@ -109,7 +130,7 @@ fn to_frame<'a>(parts: impl IntoIterator<Item = (&'a [i32], &'a Mat)>, theta: &[
             for c in 0..x.cols {
                 if x[(r, c)] != C64::ZERO {
                     let v: FrameKey = (0..theta[r].len()).map(|i| super::frame::element(key.get(i).map_or(0, |&k| k as i64), theta[r][i], theta[c][i])).collect();
-                    entries.push((v, r, c));
+                    entries.push((canon.of(v), r, c));
                 }
             }
         }
@@ -132,35 +153,44 @@ fn difference(a: &FrameKey, b: &FrameKey) -> FrameKey {
     a.iter().zip(b).map(|(x, y)| x - y).collect()
 }
 
-/// Σ over pairs (f ∈ a, g ∈ b) of s·(X_f ⊗ Y_g*) at f − g, into `terms`' list `which`; dense per vector, then its nonzeros.
-fn pairs(terms: &mut Terms, which: usize, a: &[(FrameKey, Mat)], b: &[(FrameKey, Mat)], s: C64, n: usize) {
-    let d = n * n;
+/// Σ over pairs (f ∈ a, g ∈ b) of s·(X_f ⊗ Y_g*) at f − g, into `terms`' list `which`: per vector its products of nonzero
+/// entries, summed per (row, column) -- a stable sort, each entry's terms in the pairs' order -- and the nonzero sums
+/// pushed in (row, column) order. No dense d × d block: a channel's frame vectors make hundreds of differences.
+fn pairs(terms: &mut Terms, which: usize, a: &[(FrameKey, Mat)], b: &[(FrameKey, Mat)], s: C64, n: usize, canon: &mut Canon) {
+    let xs: Vec<Vec<(usize, usize, C64)>> = a.iter().map(|(_, x)| nonzero(x)).collect();
+    let ys: Vec<Vec<(usize, usize, C64)>> = b.iter().map(|(_, y)| nonzero(y)).collect();
     let mut groups: Vec<(FrameKey, Vec<(usize, usize)>)> = Vec::new();
     for (i, (va, _)) in a.iter().enumerate() {
         for (j, (vb, _)) in b.iter().enumerate() {
-            let v = difference(va, vb);
+            let v = canon.of(difference(va, vb));
             match groups.iter_mut().find(|g| g.0 == v) {
                 Some(g) => g.1.push((i, j)),
                 None => groups.push((v, vec![(i, j)])),
             }
         }
     }
+    let mut products: Triplets = Vec::new();
     for (v, list) in groups {
-        let mut dense = vec![C64::ZERO; d * d];
+        products.clear();
         for (i, j) in list {
-            let (x, y) = (&a[i].1, &b[j].1);
-            let xs: Vec<(usize, usize, C64)> = nonzero(x);
-            let ys: Vec<(usize, usize, C64)> = nonzero(y);
-            for &(p, q, xv) in &xs {
-                for &(r, t, yv) in &ys {
-                    dense[(p * n + r) * d + q * n + t] += xv * yv.conj();
+            for &(p, q, xv) in &xs[i] {
+                for &(r, t, yv) in &ys[j] {
+                    products.push(((p * n + r) as u32, (q * n + t) as u32, xv * yv.conj()));
                 }
             }
         }
+        products.sort_by_key(|&(r, c, _)| (r, c));
         let at = terms.at(&v);
-        for (k, z) in dense.into_iter().enumerate() {
+        let mut k = 0;
+        while k < products.len() {
+            let (r, c) = (products[k].0, products[k].1);
+            let mut z = C64::ZERO;
+            while k < products.len() && products[k].0 == r && products[k].1 == c {
+                z += products[k].2;
+                k += 1;
+            }
             if z != C64::ZERO {
-                terms.which[at][which].push(((k / d) as u32, (k % d) as u32, z * s));
+                terms.which[at][which].push((r, c, z * s));
             }
         }
     }
@@ -170,13 +200,18 @@ fn nonzero(x: &Mat) -> Vec<(usize, usize, C64)> {
     (0..x.rows).flat_map(|r| (0..x.cols).map(move |c| (r, c))).filter(|&(r, c)| x[(r, c)] != C64::ZERO).map(|(r, c)| (r, c, x[(r, c)])).collect()
 }
 
-/// Σ over pairs (f ∈ a, g ∈ b) of Y_g† X_f at f − g.
-fn products(a: &[(FrameKey, Mat)], b: &[(FrameKey, Mat)]) -> Vec<(FrameKey, Mat)> {
+/// Σ over pairs (f ∈ a, g ∈ b) of Y_g† X_f at f − g, over Y's nonzero entries (Y_g†X_f's row i the sum over Y_g's
+/// entries (k, i) of conj(Y_ki) X_f's row k).
+fn products(a: &[(FrameKey, Mat)], b: &[(FrameKey, Mat)], canon: &mut Canon) -> Vec<(FrameKey, Mat)> {
     let mut out: Vec<(FrameKey, Mat)> = Vec::new();
+    let ys: Vec<Vec<(usize, usize, C64)>> = b.iter().map(|(_, y)| nonzero(y)).collect();
     for (va, x) in a {
-        for (vb, y) in b {
-            let v = difference(va, vb);
-            let z = y.adjoint_product(x);
+        for ((vb, y), entries) in b.iter().zip(&ys) {
+            let v = canon.of(difference(va, vb));
+            let mut z = Mat::zeros(y.cols, x.cols);
+            for &(k, i, w) in entries {
+                crate::linalg::mul_add(false, &mut z.data[i * x.cols..(i + 1) * x.cols], w.conj(), &x.data[k * x.cols..(k + 1) * x.cols]);
+            }
             match out.iter_mut().find(|o| o.0 == v) {
                 Some(o) => o.1.add_scaled(C64::ONE, &z),
                 None => out.push((v, z)),
@@ -220,9 +255,11 @@ impl Liouville {
         let zero: FrameKey = vec![0; size];
         let l = 0;
         let mut terms = Terms::default();
+        let mut canon = Canon { frame, seen: HashMap::new(), of: HashMap::new() };
+        let zero = canon.of(zero);
         let i = C64::I;
         // H, with the frame's diagonal at the zero vector.
-        let mut h = to_frame(hilbert.hamiltonian.iter().map(|p| (p.key.as_slice(), &p.value)), &theta);
+        let mut h = to_frame(hilbert.hamiltonian.iter().map(|p| (p.key.as_slice(), &p.value)), &theta, &mut canon);
         if !h.iter().any(|o| o.0 == zero) {
             h.push((zero.clone(), Mat::zeros(n, n)));
         }
@@ -235,7 +272,7 @@ impl Liouville {
             sides(&mut terms, l, v, x, -i, i);
         }
         for axis in 0..3 {
-            for (v, x) in &to_frame(hilbert.hamiltonian.iter().map(|p| (p.key.as_slice(), &p.gradient[axis])), &theta) {
+            for (v, x) in &to_frame(hilbert.hamiltonian.iter().map(|p| (p.key.as_slice(), &p.gradient[axis])), &theta, &mut canon) {
                 sides(&mut terms, 1 + axis, v, x, C64::real(-0.5), C64::real(-0.5));
             }
         }
@@ -244,20 +281,32 @@ impl Liouville {
         for a in 0..n {
             terms.rows[z0].push((a as u32, (a * n + a) as u32, C64::ONE));
         }
-        // The lift's rows.
+        // The lift's rows: Σ_fg tr(M_g[q]* M_f[q] ρ), its entry (a, b) at f − g − θ_a + θ_b = u − u′ with u = f + θ_b
+        // of M_f[q, b] and u′ = g + θ_a of M_g[q, a]: each row's amplitudes summed by their u first, then paired.
         let (of_row, lifted) = match &hilbert.lift {
             Some(lift) => {
                 let rows = lift.folded.len();
                 for q in 0..rows {
-                    let mut ops: Vec<(Vec<i32>, Mat)> = Vec::new();
+                    let mut by: Vec<(FrameKey, Vec<C64>)> = Vec::new();
                     for (kf, mf) in &lift.amplitudes {
-                        for (kg, mg) in &lift.amplitudes {
-                            let key: Vec<i32> = kf.iter().zip(kg).map(|(x, y)| x - y).collect();
-                            ops.push((key, Mat::from_fn(n, n, |a, b| mg[(q, a)].conj() * mf[(q, b)])));
+                        for b in (0..n).filter(|&b| mf[(q, b)] != C64::ZERO) {
+                            let u = canon.of((0..size).map(|i| kf.get(i).map_or(0, |&k| k as i64) + theta[b][i]).collect());
+                            let at = match by.iter().position(|x| x.0 == u) {
+                                Some(i) => i,
+                                None => {
+                                    by.push((u, vec![C64::ZERO; n]));
+                                    by.len() - 1
+                                }
+                            };
+                            by[at].1[b] += mf[(q, b)];
                         }
                     }
-                    for (v, o) in &to_frame(ops.iter().map(|(k, o)| (k.as_slice(), o)), &theta) {
-                        trace_row(&mut terms, n + q, v, o);
+                    for (u, m) in &by {
+                        for (u2, m2) in &by {
+                            let o = Mat::from_fn(n, n, |a, b| m2[a].conj() * m[b]);
+                            let v = canon.of(difference(u, u2));
+                            trace_row(&mut terms, n + q, &v, &o);
+                        }
                     }
                 }
                 (lift.folded.clone(), rows)
@@ -267,20 +316,20 @@ impl Liouville {
         // The jumps, per channel.
         let channels = hilbert.jumps.len();
         for (j, jump) in hilbert.jumps.iter().enumerate() {
-            let c = to_frame(jump.iter().map(|p: &Part| (p.key.as_slice(), &p.value)), &theta);
-            pairs(&mut terms, l, &c, &c, C64::ONE, n);
-            for (v, z) in &products(&c, &c) {
+            let c = to_frame(jump.iter().map(|p: &Part| (p.key.as_slice(), &p.value)), &theta, &mut canon);
+            pairs(&mut terms, l, &c, &c, C64::ONE, n, &mut canon);
+            for (v, z) in &products(&c, &c, &mut canon) {
                 sides(&mut terms, l, v, z, C64::real(-0.5), C64::real(-0.5));
                 trace_row(&mut terms, n + lifted + j, v, z);
             }
             for axis in 0..3 {
-                let dc = to_frame(jump.iter().map(|p: &Part| (p.key.as_slice(), &p.gradient[axis])), &theta);
+                let dc = to_frame(jump.iter().map(|p: &Part| (p.key.as_slice(), &p.gradient[axis])), &theta, &mut canon);
                 if dc.is_empty() {
                     continue;
                 }
-                pairs(&mut terms, 1 + axis, &dc, &c, C64::new(0.0, -0.5), n);
-                pairs(&mut terms, 1 + axis, &c, &dc, C64::new(0.0, 0.5), n);
-                for (v, z) in products(&c, &dc).iter().chain(&products(&dc, &c)) {
+                pairs(&mut terms, 1 + axis, &dc, &c, C64::new(0.0, -0.5), n, &mut canon);
+                pairs(&mut terms, 1 + axis, &c, &dc, C64::new(0.0, 0.5), n, &mut canon);
+                for (v, z) in products(&c, &dc, &mut canon).iter().chain(&products(&dc, &c, &mut canon)) {
                     sides(&mut terms, 1 + axis, v, z, C64::new(0.0, 0.25), C64::new(0.0, -0.25));
                 }
             }

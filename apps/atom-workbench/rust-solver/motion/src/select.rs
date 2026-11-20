@@ -326,6 +326,56 @@ mod tests {
         eprintln!("largest: the reference's readouts {:.1e}; the gate's errors apart by {:.1e}", worst[0], worst[1]);
     }
 
+    /// The time of a checkpoint's stages per point (one thread for each stage, the solve's own threads aside): the
+    /// reference, the frame, a candidate's model (`Rs::new` + `Rs::at`), and of each the Liouvillian, the elements, the
+    /// assembly and the solve; and `choose`'s wall clock. On the six scenes' requests (`V3D_REQ`).
+    #[test]
+    #[ignore]
+    fn choose_cost() {
+        let dir = std::path::PathBuf::from(std::env::var("V3D_REQ").expect("V3D_REQ"));
+        for file in ["tilt0.json", "tilt2.json", "R4_LIN_4.json", "GMD1C_1ms.json", "PGC3D_1ms.json", "TET_1ms.json"] {
+            let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap();
+            line["options"]["device"] = serde_json::json!("cpu");
+            for form in line["model"]["motion"]["outsideForms"].as_array_mut().unwrap() {
+                form.as_object_mut().unwrap().entry("transitions").or_insert(serde_json::json!([]));
+            }
+            let scene = Scene::new(&crate::request::Request::from_native(&line).unwrap()).unwrap();
+            let points = points(&scene);
+            let zero = vec![0.0; scene.request.beams.len()];
+            let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(&scene, p)).collect();
+            let order = ranking(&scene, &references, &points);
+            for (i, p) in points.iter().enumerate() {
+                let clock = Instant::now();
+                let reference = rs::reference(&scene, p);
+                let made = clock.elapsed().as_secs_f64();
+                let clock = Instant::now();
+                let frame = Frame::new(&scene, &reference.hilbert(), &zero);
+                let framed = clock.elapsed().as_secs_f64();
+                let keep: Vec<usize> = (0..GROUND).chain(order.iter().take(2).flatten().copied()).collect();
+                let clock = Instant::now();
+                let model = Rs::new(&scene, &keep, frame.sectors()).at(&scene, p);
+                let modelled = clock.elapsed().as_secs_f64();
+                for (what, m, built) in [("reference", &reference, made), ("model", &model, modelled)] {
+                    let clock = Instant::now();
+                    let liouville = Liouville::new(&frame, &m.hilbert());
+                    let l = clock.elapsed().as_secs_f64();
+                    let clock = Instant::now();
+                    let elements = select(&liouville);
+                    let e = clock.elapsed().as_secs_f64();
+                    let clock = Instant::now();
+                    let system = assemble(&liouville, &elements);
+                    let a = clock.elapsed().as_secs_f64();
+                    let clock = Instant::now();
+                    let solved = crate::krylov::solve(&system).unwrap();
+                    let k = clock.elapsed().as_secs_f64();
+                    eprintln!("{file} point {i} {what} (n {}, {} elements): made {built:.3} frame {framed:.3} | Liouville {l:.3} elements {e:.3} assembly {a:.3} solve {k:.3} s ({:?})", m.states.len(), elements.order.len(), solved.route);
+                }
+            }
+            let selection = choose(&scene).unwrap();
+            eprintln!("{file}: choose {:.2} s (P {})", selection.seconds, selection.keep.len());
+        }
+    }
+
     fn selection_k(scene: &Scene) -> f64 {
         scene.generators.last().unwrap().frequency / SPEED_OF_LIGHT
     }
