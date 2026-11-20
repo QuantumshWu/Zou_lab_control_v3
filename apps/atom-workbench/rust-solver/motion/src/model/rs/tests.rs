@@ -7,6 +7,7 @@
 use super::*;
 use crate::floquet::Frame;
 use crate::request::Request;
+use crate::linalg;
 
 
 fn matrix(v: &serde_json::Value) -> Mat {
@@ -25,22 +26,28 @@ fn key(v: &serde_json::Value) -> Key {
 }
 
 /// The prototype's model at a point as a fold's source: each component (the static part, then each key) its value and
-/// its gradient along z as two fixed matrices (terms 1·value and z-gradient-only 1·gradient), each nonzero key both
+/// its gradient along z as two fixed matrices (factors: one, and zero with the gradient (0, 0, 1)), each nonzero key both
 /// ways; the Cartesian emission's channels with their photons' forms (the export's wave numbers); the generator the
-/// static part − (i/2) Σ C†C. Returns the library and the source.
-fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> (Vec<Fixed>, Source) {
+/// static part − (i/2) Σ C†C. Returns the library, the source and its values.
+fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> (Vec<Fixed>, Source, Values) {
     let mut library: Vec<Fixed> = Vec::new();
     let mut put = |m: &Mat| {
         library.push(fixed(m));
         library.len() - 1
     };
     let mut hamiltonian = Vec::new();
+    let mut frequencies = Vec::new();
     let mut piece = |key: Key, frequency: f64, value: &serde_json::Value, grad: &serde_json::Value| {
-        let terms = vec![Term::one(put(&matrix(value)), C64::ONE), Term { matrix: put(&matrix(grad)), adjoint: false, scale: C64::ZERO, gradient: [C64::ZERO, C64::ZERO, C64::ONE] }];
-        let p = Piece { key, frequency, terms };
-        let adjoint = p.key.iter().any(|k| *k != 0).then(|| p.adjoint());
+        let terms = vec![Term::one(0, put(&matrix(value))), Term::one(1, put(&matrix(grad)))];
+        let nonzero = key.iter().any(|k| *k != 0);
+        let p = Piece { key, terms };
+        let adjoint = nonzero.then(|| Piece { key: p.key.iter().map(|k| -k).collect(), terms: p.terms.iter().map(|t| Term { adjoint: true, ..t.clone() }).collect() });
         hamiltonian.push(p);
-        hamiltonian.extend(adjoint);
+        frequencies.push(frequency);
+        if let Some(a) = adjoint {
+            hamiltonian.push(a);
+            frequencies.push(-frequency);
+        }
     };
     piece(vec![0; length], 0.0, &point["static"], &point["static_grad"]);
     for c in point["comps"].as_array().unwrap() {
@@ -56,8 +63,12 @@ fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> 
     let (parts, kicks) = (c.each_ref().map(&mut put), k.each_ref().map(&mut put));
     let decay = put(&gamma);
     let mut generator = hamiltonian[0].terms.clone();
-    generator.push(Term::one(decay, C64::new(0.0, -0.5)));
-    (library, Source { hamiltonian, jumps: emission_channels(length, parts, kicks), generator })
+    generator.push(Term { factor: 0, adjoint: false, scale: C64::new(0.0, -0.5), matrices: vec![(decay, 0)] });
+    let jumps = emission_channels(length, 0, parts, kicks);
+    frequencies.extend(std::iter::repeat_n(0.0, 6));
+    let source = Source { hamiltonian, jumps, generator, varying: vec![false, true], coefficients: 1 };
+    let values = Values { factors: vec![(C64::ONE, [C64::ZERO; 3]), (C64::ZERO, [C64::ZERO, C64::ZERO, C64::ONE])], coefficients: vec![1.0], frequencies };
+    (library, source, values)
 }
 
 /// The largest entry difference of two matrices and the larger of their largest entries.
@@ -80,13 +91,12 @@ fn model(doc: &serde_json::Value, which: usize) -> (ModelAt, Now) {
     let labels: Vec<String> = doc["labels"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
     let mut keep: Vec<usize> = doc["keep"].as_array().unwrap().iter().map(|k| k.as_u64().unwrap() as usize).collect();
     keep.sort_unstable();
-    let folded: Vec<usize> = (0..STATES).filter(|s| keep.binary_search(s).is_err()).collect();
     let length = doc["out"]["H"][0]["key"].as_array().unwrap().len();
-    let (library, source) = source(doc, &doc["points"][which], length);
+    let (library, source, values) = source(doc, &doc["points"][which], length);
     let sectors = Sectors { states: vec![[0; 2]; STATES], generators: vec![[0; 2]; length] };
     let all: Vec<usize> = (0..STATES).collect();
-    let splits = Split::all(&library, &keep, &sectors, MODEL);
-    let local = fold(&splits, &keep, &folded, &source, &sectors, MODEL, &levels(&labels, &all));
+    let folding = Folding::new(&library, &source, &keep, &sectors, MODEL, &levels(&labels, &all));
+    let local = folding.at(&values);
     (local.components(), local.now(0.0))
 }
 
@@ -633,14 +643,8 @@ fn rs_at_cost() {
             let dense = time(&mut || {
                 std::hint::black_box(scene.components_at([0.13, -0.21, 0.37], [50.0, -80.0, 120.0]));
             });
-            let sizes: Vec<usize> = local.blocks.iter().map(|b| b.rows.len()).collect();
-            eprintln!(
-                "{name} {point}: point_at {terms:.1} + Rs::local {fold:.1} + now {now:.1} = {:.1} µs per point; components {by:.1} µs; (components_at {dense:.1} µs); blocks {sizes:?}, {} amplitudes, {} legs, {} jump parts",
-                terms + fold + now,
-                local.amplitudes.len(),
-                local.legs.len(),
-                local.jumps.len()
-            );
+            let sizes = rs.plan().blocks();
+            eprintln!("{name} {point}: point_at {terms:.1} + Rs::local {fold:.1} + now {now:.1} = {:.1} µs per point; components {by:.1} µs; (components_at {dense:.1} µs); blocks {sizes:?}", terms + fold + now);
         }
     }
 }
@@ -729,4 +733,99 @@ fn the_reference_is_pysel_to_rounding() {
 
 fn summed_parts(parts: &[ModelPart], gradient: Option<usize>) -> Mat {
     summed(parts, gradient, STATES)
+}
+
+
+
+/// The tweezer's sidebands are its photons (`Rs::new`): on R1_TWEEZER and R1_SIGMA_P (lone tweezers, the frame's
+/// reference: no axis of their own, scene.rs `tweezer_axis`) and R4_LIN_4 (one of its own), the model on the ground states
+/// at the trap's centre has every channel's parts at one count of tweezer photons, the channel's n_tw, and the tweezer's
+/// co-rotating (n_tw = 1) and counter-rotating (n_tw = −1) channels apart: their interference, 2ν (R1) or 2(ω_tw + ν)
+/// apart, is not in the model. Every number finite and both channels lit: on the lone tweezers the co-rotating coupling
+/// is static (f = 0), and the unit fold resolves it on the blocks and columns it holds alone (`unit_fold`; a ground
+/// state's own block there is singular, and its 0·∞ made the channel NaN, which the largest entry does not show).
+#[test]
+fn the_tweezer_s_channels_are_its_photons() {
+    for name in ["R1_TWEEZER", "R1_SIGMA_P", "R4_LIN_4"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let scene = Scene::new(&Request::from_native(&line).unwrap()).unwrap();
+        let zero = vec![0.0; scene.request.beams.len()];
+        let centre = scene.components([0.0; 3], &zero, 1.0);
+        let frame = Frame::new(&scene, &crate::floquet::Hilbert::full(&scene, &centre), &zero);
+        let rs = Rs::new(&scene, &(0..crate::request::GROUND).collect::<Vec<_>>(), frame.sectors());
+        let model = rs.at(&scene, &centre);
+        let tw = scene.tweezer();
+        let mut counts = std::collections::BTreeSet::new();
+        let finite = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
+        assert!(model.effective.iter().all(|p| finite(&p.value) && p.gradient.iter().all(finite)), "{name}: H_eff finite");
+        let mut lit = std::collections::BTreeMap::new();
+        for c in &model.jumps {
+            for p in &c.parts {
+                assert_eq!(i64::from(p.key[tw]), c.fast[1], "{name}: channel {} {:?}, part at {:?}", c.emission, c.fast, p.key);
+                assert!(finite(&p.value) && p.gradient.iter().all(finite), "{name}: channel {} {:?} finite", c.emission, c.fast);
+                let size: &mut f64 = lit.entry(c.fast[1]).or_insert(0.0);
+                *size = size.max(p.value.max_abs());
+            }
+            counts.insert(c.fast[1]);
+        }
+        println!("{name}: the channels' largest entries by n_tw {lit:?}");
+        assert!(lit.get(&1).is_some_and(|&x| x > 0.0) && lit.get(&-1).is_some_and(|&x| x > 0.0), "{name}: both tweezer channels lit");
+        let frame_count = frame.fast_index(&scene.unit(tw))[1];
+        println!("{name}: {} channels, their tweezer photons {counts:?}; the frame's count of the tweezer's own key {frame_count}", model.jumps.len());
+        assert!(counts.contains(&1) && counts.contains(&-1), "{name}: the co- and counter-rotating channels");
+    }
+}
+
+/// R6_RAMAN_CO and R6_RAMAN_COUNTER (a Raman pair on D1, ramanB 6834.59 MHz below ramanA, the frame's reference): the
+/// frame's ground levels apart by the pair's difference (the Raman coupling static: floquet/frame.rs `Raman`), φ =
+/// 42943 rad/µs; at the two checkpoint points the full reference certified with |ρ| ≤ 1 and the model on all 32 states
+/// against it, both solved as the selection solves them (populations by level, R, F⃗ over max(|F⃗|, kR)), within 10⁻⁶ --
+/// the fold's own fourth order in the fast (n_φ) elements, measured 2·10⁻⁸, 7·10⁻⁹, 2.8·10⁻⁷ --; the selection passes.
+/// With both ground levels in one frame (until 2026-11-20) φ was 0, the Raman elements were taken as fast (2·10⁻⁴,
+/// F⃗ 1.2·10⁻² on COUNTER), the reference's max|ρ| was 1.4·10⁸ at the centre and singular at the edge.
+#[test]
+fn the_raman_scenes_frame_and_model() {
+    use crate::floquet::{assemble, readouts, select, Liouville};
+    for name in ["R6_RAMAN_CO", "R6_RAMAN_COUNTER"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let scene = Scene::new(&Request::from_native(&line).unwrap()).unwrap();
+        let points = crate::select::points(&scene);
+        let all: Vec<usize> = (0..STATES).collect();
+        let mut worst = [0.0_f64; 3];
+        for (p, point) in points.iter().enumerate() {
+            let reference = reference(&scene, point);
+            let zero = vec![0.0; scene.request.beams.len()];
+            let frame = Frame::new(&scene, &reference.hilbert(), &zero);
+            let grounds: Vec<(String, Vec<i64>)> = [0usize, 3].iter().map(|&s| (scene.request.states[s].clone(), frame.theta[s].clone())).collect();
+            let solve = |model: &ModelAt| {
+                let liouville = Liouville::new(&frame, &model.hilbert());
+                let system = assemble(&liouville, &select(&liouville));
+                let solved = crate::krylov::solve(&system).expect("consistent");
+                let biggest = solved.rho.iter().map(|z| z.abs()).fold(0.0, f64::max);
+                (readouts(&liouville, &system, &solved.rho), solved.route, solved.certified, biggest)
+            };
+            let (r, route, certified, biggest) = solve(&reference);
+            let model = Rs::new(&scene, &all, frame.sectors()).at(&scene, point);
+            let (m, mroute, mcertified, _) = solve(&model);
+            let pops = r.levels.iter().zip(&m.levels).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+            let rate = (r.rate - m.rate).abs() / r.rate.abs().max(f64::MIN_POSITIVE);
+            let scale = r.force.iter().map(|x| x * x).sum::<f64>().sqrt().max(scene.generators.last().unwrap().frequency / crate::units::SPEED_OF_LIGHT * r.rate);
+            let force = (0..3).map(|i| (r.force[i] - m.force[i]).powi(2)).sum::<f64>().sqrt() / scale;
+            println!(
+                "{name} point {p}: grounds {grounds:?}, φ {:.4} rad/µs; reference {route:?} certified {certified} max|ρ| {biggest:.2e}, R {:.4e}; P 32 {mroute:?} {mcertified}: populations {pops:.2e}, R {rate:.2e}, F {force:.2e}",
+                frame.fast[0], r.rate
+            );
+            for (w, x) in worst.iter_mut().zip([pops, rate, force]) {
+                *w = w.max(x);
+            }
+            assert!((frame.fast[0] - 42943.0).abs() < 1.0, "{name}: φ {}", frame.fast[0]);
+            assert!(certified && mcertified && biggest <= 1.0 + 1e-9, "{name} point {p}: the solves");
+        }
+        let chosen = crate::select::choose(&scene);
+        println!("{name}: P 32 against the reference at worst {worst:?}; the selection {:?}", chosen.as_ref().map(|s| s.keep.len()));
+        assert!(worst.iter().all(|&w| w <= 1e-6), "{name}: P 32 {worst:?}");
+        assert!(chosen.is_ok(), "{name}: {chosen:?}");
+    }
 }

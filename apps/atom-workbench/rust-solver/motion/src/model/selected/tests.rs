@@ -139,15 +139,59 @@ fn the_selected_decay_is_its_photons() {
     }
 }
 
+/// A lone tweezer's model (R1_TWEEZER, R1_SIGMA_P: the frame's reference, no axis of its own; scene.rs `tweezer_axis`,
+/// `Rs::new`): its run as the solve makes it, the node at the trap's centre at rest holds the zero beat alone (the
+/// light shift is static in the tweezer's frame), its photons in two classes, the tweezer's co-rotating (n_tw = 1)
+/// and counter-rotating (n_tw = −1) scattering, every number finite, and its decay i(Ĥ − Ĥ†) the classes' Σ L†L to the
+/// rounding of the products and of H's Hermitian part (the request's forms Hermitian to their own rounding: σ⁺'s vector
+/// shift holds off-diagonal ones), n u (max|Γ| + max|Ĥ|) times 16 as `the_selected_decay_is_its_photons` bounds it.
+#[test]
+fn a_lone_tweezer_s_node_is_its_two_photon_classes() {
+    for name in ["R1_TWEEZER", "R1_SIGMA_P"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request = Request::from_native(&line).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = crate::solve::run_of(&request, crate::solve::alone(chief)).unwrap();
+        let n = run.rs.keep.len();
+        let node = run.node([0.0; 3], [0.0; 3], true);
+        let finite = |z: &C64| z.re.is_finite() && z.im.is_finite();
+        assert!(node.generator.iter().all(|(_, m)| m.data.iter().all(finite)), "{name}: the generator finite");
+        let fasts: Vec<[i64; 2]> = node.classes.iter().map(|c| c.fast).collect();
+        let mut gamma = Mat::zeros(n, n);
+        for class in &node.classes {
+            for axis in &class.axes {
+                let mut l = Mat::zeros(n, n);
+                for jump in axis {
+                    for e in &jump.elements {
+                        assert!(finite(&e.value) && finite(&e.kick), "{name}: a photon's element finite");
+                        l.data[e.at] += e.value;
+                    }
+                }
+                gamma.add_scaled(C64::ONE, &l.adjoint_product(&l));
+            }
+        }
+        let h = &node.generator[0].1;
+        let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
+        let (size, whole) = (gamma.max_abs(), h.max_abs());
+        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, f64::max);
+        eprintln!("{name}: P {n}, beats {:?}, classes {fasts:?}; |i(H − H†) − Σ L†L| {worst:.3e} of |Γ| {size:.3e}, |H| {whole:.3e}", node.generator.iter().map(|g| g.0).collect::<Vec<_>>());
+        assert_eq!(node.generator.len(), 1, "{name}: the zero beat alone");
+        assert!(fasts.contains(&[0, 1]) && fasts.contains(&[0, -1]) && fasts.len() == 2, "{name}: {fasts:?}");
+        assert!(size > 0.0 && worst <= n as f64 * crate::units::UNIT_ROUNDOFF * (size + whole) * 16.0, "{name}: {worst:e} of {size:e}, {whole:e}");
+    }
+}
+
 /// The node is the model's value in its frame (module documentation, # One cluster, one frame): a jump's node (with
 /// the photon forms) at the time t, every beat at its phase, against the same fold's components summed at their
 /// phases in one group (`Local::contract`, each component's weight e^{−iF_c t}, F_c its key's frequency in the frame)
 /// put in the frame, x_a = e^{iθ_a t} ψ_a: H_eff's Hermitian part with θ on its diagonal, H_eff's gradient, each
 /// class's axis L(t) and ∇L(t) and its photon form K(t), each channel up to one phase of modulus one (its fast index's,
-/// common to its elements). At t = 0 that sum is `Local::now(0)` itself. F_c is the frame's, at rest: the node's beats
-/// do not hold the Doppler shifts (its motion is its place along the path) nor the recoil shifts ħk²/2m the point's
-/// rates hold (`Scene::doppler`), so at t ≠ 0 `now(t)` differs from the node by those phases by construction. At the
-/// centre and off it at rest and at the moving point, t = 0, 0.37 and −1.9 µs. The two are one set of sums taken in two
+/// common to its elements). At t = 0 that sum is `Local::now(0)` itself. At rest (κ = 0) F_c is the component's own
+/// frequency, its beams' recoil in, and the sum is `now(t)` at every time (the one Doppler shift per beam, model/rs.rs #
+/// The frequencies); at a moving point F_c is the frame's, at rest: the node's beats do not hold the Doppler shifts K·κ,
+/// its motion is its place along the path. At the centre and off it at rest and at the moving point, t = 0, 0.37 and
+/// −1.9 µs. The two are one set of sums taken in two
 /// orders (by beats, one group): they differ by rounding alone, bounded as `now_is_the_components_at_their_phases`
 /// bounds it -- per component 64u(1 + |F_c t| + 2 max|θ t|) max|X⁽ᶜ⁾| summed over the quantity's components, and κ(V)u
 /// relative to its largest entry (10⁻¹⁰).
@@ -177,7 +221,12 @@ fn the_node_is_the_model_now_in_its_frame() {
                 let bound = |parts: &mut dyn Iterator<Item = (&ModelPart, &Mat)>, scale: f64| -> f64 {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
-                let sum = local.contract(&|key, _| (Vec::new(), 0.0, C64::cis(-frequency(key) * t)), Making { model: true, kicks: true, lift: false });
+                let rest = kappa == [0.0; 3];
+                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false });
+                if rest {
+                    let now = local.now(t);
+                    assert!(sum.effective.first().is_none_or(|p| (0..n * n).all(|x| (p.value.data[x] - now.hamiltonian.data[x]).abs() <= 1e-12 * now.hamiltonian.max_abs())), "{name}: at rest the sum is now(t)");
+                }
                 if t == 0.0 {
                     let now = local.now(0.0);
                     assert!(sum.effective.first().is_none_or(|p| p.value == now.hamiltonian), "{name}: the sum at t = 0 is now(0)");
@@ -494,3 +543,6 @@ fn a_step_s_time_on_the_selected_model() {
         );
     }
 }
+
+#[path = "golden.rs"]
+mod golden;

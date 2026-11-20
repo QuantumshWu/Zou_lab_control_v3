@@ -19,6 +19,15 @@
 //! that choice (`STRONG`, `STATIC`, `BAND`, `TIE`, `DIGITS`) decide nothing but which exact frame is used (td_s's, kept
 //! so that the elements are labelled as the prototype's).
 //!
+//! A ground level's strongest coupling may be of the second order: two beams l, m through one excited state e couple
+//! the ground states s ← s′ by W = ½ V_es* V_es′ (1/Δ_s + 1/Δ_s′) (the Raman coupling, RS's pair) at the two-photon
+//! detuning δ = (E_s′ + f_m) − (E_s + f_l), its amplitude |W| / |δ|. Where it is above the first-order amplitude of the
+//! coupling that would set the level, the level is set from it -- θ_s − θ_s′ = e_m − e_l, so that the Raman coupling is
+//! static (`Raman`). A Raman pair far from its excited states (R6_RAMAN_CO, R6_RAMAN_COUNTER: 15 GHz on D1, 0.1 MHz
+//! from the two-photon resonance) has first-order amplitudes ~10⁻³ and a two-photon one ~10⁻¹: by the first order alone
+//! both ground levels took the frame of the stronger beam, the same vector, φ = 0 (2026-11-20, pstate.status.md 4.5).
+//! In the cooling scenes the resonant first-order couplings stay the strongest and the frame is the same.
+//!
 //! # The lattice
 //! A vector's fast part n = (n_φ, n_tw, n_ν) is split off exactly (`Frame::split`): n_ν the carrier axis' coefficient,
 //! n_tw the tweezer's own axis', n_φ = round(f/φ), φ = β_g2 − β_g1 (the ground hyperfine in the frame). The slow
@@ -47,6 +56,18 @@ const BAND: f64 = 1e-6;
 const TIE: f64 = 1e-9;
 /// α candidates equal to this many decimals are one.
 const DIGITS: usize = 10;
+
+/// A second-order coupling between two ground levels' states through one excited state (`Frame::new`): |W|/|δ|, the
+/// levels of s (`to`) and s′ (`from`), the beams l (into s) and m (into s′), their frequencies, m_s − m_s′.
+struct Raman {
+    amplitude: f64,
+    to: Lev,
+    from: Lev,
+    l: usize,
+    m: usize,
+    f: (f64, f64),
+    dm: i64,
+}
 
 /// An exact rational number, normalized (den > 0, gcd 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -252,7 +273,8 @@ pub struct Frame {
     alpha: Vec<Ratio>,
     /// φ's primitive vector (None with fewer than two ground levels in the frame).
     phi: Option<Vec<Ratio>>,
-    /// The tweezer's own axis (one no other beam uses) and its frequency index.
+    /// The tweezer's own axis (scene.rs `tweezer_axis`: one no other generator uses) and its frequency index; none for a
+    /// lone tweezer at the frame's carrier.
     tweezer: Option<(usize, Vec<i32>)>,
 }
 
@@ -314,20 +336,50 @@ impl Frame {
                 None => groups.push((p, g, values[g], part.value.clone())),
             }
         }
-        // (amplitude, f, Δm, ground level, excited level, generator)
+        // (amplitude, f, Δm, ground level, excited level, generator), and per term its excited and ground states, V and
+        // its denominator.
         let mut terms: Vec<(f64, f64, i64, Lev, Lev, usize)> = Vec::new();
+        let mut legs: Vec<(usize, usize, C64, C64)> = Vec::new();
         for (_, g, f, v) in groups.iter().rev() {
             for e in 0..STATES {
                 for s in 0..STATES {
                     if v[(e, s)] == C64::ZERO || levels[e].is_ground() || !levels[s].is_ground() {
                         continue;
                     }
-                    let amp = v[(e, s)].abs() / C64::new(energy[e] - energy[s] - f, -0.5 * gamma[e]).abs();
+                    let den = C64::new(energy[e] - energy[s] - f, -0.5 * gamma[e]);
+                    let amp = v[(e, s)].abs() / den.abs();
                     terms.push((amp, *f, levels[e].m as i64 - levels[s].m as i64, lev(&levels[s]), lev(&levels[e]), *g));
+                    legs.push((e, s, v[(e, s)], den));
                 }
             }
         }
-        terms.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("finite amplitudes"));
+        // The second-order couplings between ground states of two levels through one excited state (module
+        // documentation, # The frame): per pair of legs (amplitude, s's level, s′'s level, l, m, f_l, f_m, m_s − m_s′).
+        let mut raman: Vec<Raman> = Vec::new();
+        for (i, &(e, s, vs, ds)) in legs.iter().enumerate() {
+            for (j, &(e2, s2, vs2, ds2)) in legs.iter().enumerate() {
+                if e2 != e || terms[i].3 == terms[j].3 {
+                    continue;
+                }
+                let w = vs.conj() * vs2 * (ds.recip() + ds2.recip()) * 0.5;
+                let delta = (energy[s2] + terms[j].1) - (energy[s] + terms[i].1);
+                if w == C64::ZERO {
+                    continue;
+                }
+                raman.push(Raman {
+                    amplitude: w.abs() / delta.abs(),
+                    to: terms[i].3,
+                    from: terms[j].3,
+                    l: terms[i].5,
+                    m: terms[j].5,
+                    f: (terms[i].1, terms[j].1),
+                    dm: levels[s].m as i64 - levels[s2].m as i64,
+                });
+            }
+        }
+        let mut order: Vec<usize> = (0..terms.len()).collect();
+        order.sort_by(|&a, &b| terms[b].0.partial_cmp(&terms[a].0).expect("finite amplitudes"));
+        let terms: Vec<(f64, f64, i64, Lev, Lev, usize)> = order.iter().map(|&i| terms[i]).collect();
         let strongest = terms.first().map_or(0.0, |t| t.0);
         let strong: Vec<_> = terms.iter().filter(|t| t.0 > STRONG * strongest).collect();
         // α candidates: (rounded value, value, vector over the generators), the first of each rounded value.
@@ -350,15 +402,32 @@ impl Frame {
         let size = count + 1;
         let betas = |alpha: f64| {
             let mut bet: Vec<(Lev, f64, FrameKey)> = Vec::new();
-            for &(_, f, dm, lg, le, g) in &terms {
+            for &(amp, f, dm, lg, le, g) in &terms {
                 if !bet.iter().any(|b| b.0 == le) {
                     bet.push((le, 0.0, vec![0; size]));
                 }
-                if !bet.iter().any(|b| b.0 == lg) {
-                    let (be, mut v) = bet.iter().find(|b| b.0 == le).map(|b| (b.1, b.2.clone())).expect("set");
-                    v[g] -= 1;
-                    v[count] += dm;
-                    bet.push((lg, be - f + alpha * dm as f64, v));
+                if bet.iter().any(|b| b.0 == lg) {
+                    continue;
+                }
+                // The level's strongest coupling: this one, or a Raman one to a ground level set before it.
+                let second = raman
+                    .iter()
+                    .filter(|r| r.from == lg && r.amplitude > amp && bet.iter().any(|b| b.0 == r.to))
+                    .max_by(|a, b| a.amplitude.partial_cmp(&b.amplitude).expect("finite amplitudes"));
+                match second {
+                    Some(r) => {
+                        let (bt, mut v) = bet.iter().find(|b| b.0 == r.to).map(|b| (b.1, b.2.clone())).expect("set");
+                        v[r.l] += 1;
+                        v[r.m] -= 1;
+                        v[count] += r.dm;
+                        bet.push((lg, bt + r.f.0 - r.f.1 + alpha * r.dm as f64, v));
+                    }
+                    None => {
+                        let (be, mut v) = bet.iter().find(|b| b.0 == le).map(|b| (b.1, b.2.clone())).expect("set");
+                        v[g] -= 1;
+                        v[count] += dm;
+                        bet.push((lg, be - f + alpha * dm as f64, v));
+                    }
                 }
             }
             bet
@@ -393,15 +462,19 @@ impl Frame {
         let mut grounds: Vec<&(Lev, f64, FrameKey)> = bet.iter().filter(|b| matches!(b.0, Lev::Ground(_))).collect();
         grounds.sort_by_key(|b| b.0);
         let tw = &request.beams[request.trap_beam].frequency_index;
-        let tweezer = (0..axes)
-            .find(|&i| tw[i] != 0 && generators.iter().all(|g| g.beam == Some(request.trap_beam) || g.frequency_index[i] == 0))
-            .map(|i| (i, tw.clone()));
+        let tweezer = crate::scene::tweezer_axis(request).map(|i| (i, tw.clone()));
         let tweezer_frequency = tweezer.as_ref().map_or(0.0, |(_, idx)| idx.iter().zip(&phi_axes).map(|(&i, p)| i as f64 * p).sum());
         let mut frame = Frame { theta, values, fast: [0.0, tweezer_frequency, phi_axes[axes - 1]], primitives, alpha, phi: None, tweezer };
+        // φ: the two ground levels' frames apart, where they are (an exact vector: two levels in one frame have no φ,
+        // n_φ ≡ 0, and `split` reads none).
         if let [low, high] = grounds[..] {
             let v: FrameKey = high.2.iter().zip(&low.2).map(|(a, b)| a - b).collect();
-            frame.fast[0] = v.iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum();
-            frame.phi = Some(frame.primitive(&v));
+            let p = frame.primitive(&v);
+            if p.iter().any(|x| x.num != 0) {
+                frame.fast[0] = v.iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum();
+                assert!(frame.fast[0].is_finite() && frame.fast[0] != 0.0, "the ground levels' frames apart by a nonzero frequency");
+                frame.phi = Some(p);
+            }
         }
         frame
     }

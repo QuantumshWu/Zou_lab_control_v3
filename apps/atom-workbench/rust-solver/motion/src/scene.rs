@@ -177,19 +177,36 @@ pub fn bilinear(m: &[Mat; 9], e: &[C64; 3], f: &[C64; 3]) -> Mat {
     out
 }
 
+/// The tweezer's own frequency axis, the one judgment of it (Scene::new and floquet/frame.rs `Frame::new`): an axis on
+/// which the tweezer's index is nonzero and every other generator's zero -- every other beam's, and the carrier's, whose
+/// index is the unit on the last axis, so the last axis is never the tweezer's own. The carrier ν is a generator of its
+/// own (the excited states' frame; the counter-rotating coupling's 2ν), its count n_ν read off the last axis first
+/// (`Frame::split`): an index there is a whole number of carriers, not the tweezer's frequency. The tweezer is the one
+/// trap light, and this axis tells its beats with the other light -- its photons' frequency against that light's, the
+/// tweezer split's sidebands that the one fold folds (model/rs.rs) -- in the frame's lattice (n_tw). The app's requests
+/// hold the carrier last with every beam zero on it (full-master-model.ts: the beats' tree, then the reference's
+/// carrier), so that a tweezer beside other light has one where the tree gives it a beat of its own; a lone tweezer is the
+/// app's reference laser, its index zero (R1_TWEEZER, R1_SIGMA_P), and has none: with no other light there is no beat
+/// to tell, and the fold counts its photons alone (`Rs::new`).
+pub fn tweezer_axis(request: &Request) -> Option<usize> {
+    let tweezer = request.trap_beam;
+    let index = &request.beams[tweezer].frequency_index;
+    let carrier = request.frequencies_mhz.len().checked_sub(1)?;
+    (0..carrier).find(|&i| index[i] != 0 && request.beams.iter().enumerate().all(|(l, b)| l == tweezer || b.frequency_index[i] == 0))
+}
+
 impl Scene {
     /// Builds the scene; Err for a request outside the allowed approximations (`Request::validate`) or one whose tweezer
-    /// has no frequency axis of its own (its sidebands are told by that axis, floquet/frame.rs).
+    /// beside other light has no frequency axis of its own (`tweezer_axis`).
     pub fn new(request: &Request) -> Result<Scene, String> {
         request.validate()?;
-        let tweezer = request.trap_beam;
         let phi: Vec<f64> = request.frequencies_mhz.iter().map(|f| RAD_PER_US_PER_MHZ * f).collect();
         let axes = phi.len();
         let omega = |index: &[i32]| index.iter().zip(&phi).map(|(&i, p)| i as f64 * p).sum::<f64>();
         let beams = &request.beams;
-        let own = (0..axes).any(|i| beams[tweezer].frequency_index[i] != 0 && beams.iter().enumerate().all(|(l, b)| l == tweezer || b.frequency_index[i] == 0));
-        if !own {
-            return Err(format!("The tweezer {} needs a frequency axis of its own (its sidebands are folded by that axis)", beams[tweezer].id));
+        if tweezer_axis(request).is_none() && beams.len() > 1 {
+            let id = &beams[request.trap_beam].id;
+            return Err(format!("The tweezer {id} needs a frequency axis of its own beside the other light (its beats with that light are told by it)"));
         }
         let carrier: Vec<i32> = (0..axes).map(|i| (i + 1 == axes) as i32).collect();
         let generators = beams
@@ -290,10 +307,11 @@ impl Scene {
     }
 
     /// H's terms at the Doppler shifts w_l (rad/µs, one per beam, request order): the static part's -- the base, and
-    /// each outside form's products that do not beat, conj(a_l) a_m B(E_l, E_m) with its conjugate for l ≠ m --, each
-    /// beam's a_l X_l at e_l, f_l = ω_l − w_l, the tweezer's a_tw* R_tw at −e_tw − 2e_ν, then the products that beat
-    /// (two beams of one frequency at different Doppler shifts) at e_m − e_l, f_m − f_l. The product of two beams of one
-    /// frequency and one Doppler shift beats at zero and is static.
+    /// each outside form's own intensity terms |a_l|² B(E_l, E_l) --, each beam's a_l X_l at e_l, f_l = ω_l − w_l, the
+    /// tweezer's a_tw* R_tw at −e_tw − 2e_ν, then the products of two beams of one frequency, conj(a_l) a_m B(E_l, E_m) at
+    /// e_m − e_l, f_m − f_l (its conjugate the other way). The terms are the same at every Doppler shift (the structure is
+    /// made once, model/rs.rs): a product of two beams at one Doppler shift has the frequency zero, it is not the static
+    /// part (whose key is zero), and the static generator G₀ of a fold does not hold it.
     pub fn terms(&self, doppler: &[f64]) -> Vec<Term> {
         let beams = self.request.beams.len();
         let tw = self.request.trap_beam;
@@ -306,9 +324,6 @@ impl Scene {
             let matrix = beams + 2 + i;
             if l == m {
                 terms.push(term(&zero, matrix, false, Factor::Product(l, l)));
-            } else if doppler[l] == doppler[m] {
-                terms.push(term(&zero, matrix, false, Factor::Product(l, m)));
-                terms.push(term(&zero, matrix, true, Factor::Product(m, l)));
             } else {
                 let key: Key = self.unit(m).iter().zip(self.unit(l)).map(|(x, y)| x - y).collect();
                 beating.push(term(&key, matrix, false, Factor::Product(l, m)));
@@ -348,6 +363,23 @@ impl Scene {
     /// H at r by its terms for the momentum κ (1/µm): what the fold reads at a point of a trajectory.
     pub fn point_at(&self, r: V3, kappa: V3) -> Point {
         self.point(r, &self.doppler(kappa), 1.0)
+    }
+
+    /// What the fold reads at a point of a trajectory (model/rs.rs `Tweezer::values`) into a buffer: the beams'
+    /// amplitudes with their gradients at r and the generators' rest-frame frequencies at the momentum κ; no terms (the
+    /// fold's structure is made once).
+    pub fn point_into(&self, r: V3, kappa: V3, point: &mut Point) {
+        point.terms.clear();
+        point.amplitudes.clear();
+        point.amplitudes.extend(self.geometry.iter().map(|g| g.amplitude_to(r, 1)));
+        point.rates.clear();
+        for g in &self.generators {
+            let w = g.beam.map_or(0.0, |l| {
+                let k = self.geometry[l].wave_vector();
+                self.hbar_over_mass * (dot3(k, kappa) + 0.5 * dot3(k, k))
+            });
+            point.rates.push(g.frequency - w);
+        }
     }
 
     /// H at r by its terms for given Doppler shifts w_l with the tweezer's amplitude scaled by `tweezer` (`components`).
@@ -512,6 +544,47 @@ impl Scene {
 mod tests {
     use super::*;
 
+    /// The tweezer's own axis (`tweezer_axis`): R1_TWEEZER and R1_SIGMA_P, the app's lone tweezers (the reference laser:
+    /// index zero on their one axis, the carrier), have none and are scenes; R4_LIN_4's tweezer has one; on the sample with
+    /// a beat axis and the carrier, a tweezer with a beat of its own beside other light, or alone at index zero, is a
+    /// scene; one at the reference (index zero), one sharing its beat axis, or one on the carrier's axis alone beside other
+    /// light is refused.
+    #[test]
+    fn a_tweezer_needs_an_axis_of_its_own_beside_other_light() {
+        for (name, own) in [("R1_TWEEZER", None), ("R1_SIGMA_P", None), ("R4_LIN_4", Some(1))] {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+            let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let request = Request::from_native(&line).unwrap();
+            assert_eq!(tweezer_axis(&request), own, "{name}");
+            let scene = Scene::new(&request).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(scene.request.frequencies_mhz, request.frequencies_mhz);
+        }
+        let with = |tweezer: [i32; 2], other: Option<[i32; 2]>| {
+            let mut r = crate::request::tests::sample();
+            r.frequencies_mhz = vec![1.0, 3.8e8];
+            r.beams[0].frequency_index = tweezer.to_vec();
+            r.outside_forms[0].frequency_index = tweezer.to_vec();
+            match other {
+                Some(i) => {
+                    r.beams[1].frequency_index = i.to_vec();
+                    r.outside_forms[1].frequency_index = i.to_vec();
+                }
+                None => {
+                    r.beams.truncate(1);
+                    r.outside_forms.truncate(1);
+                }
+            }
+            r
+        };
+        for (tweezer, other) in [([0, 0], [1, 0]), ([1, 0], [2, 0]), ([0, 1], [1, 0])] {
+            let e = Scene::new(&with(tweezer, Some(other))).err().expect("refused");
+            assert!(e.contains("axis of its own"), "{e}");
+        }
+        assert_eq!(tweezer_axis(&with([-4, 0], Some([0, 0]))), Some(0));
+        assert!(Scene::new(&with([-4, 0], Some([0, 0]))).is_ok());
+        assert!(Scene::new(&with([0, 0], None)).is_ok());
+    }
+
     /// With every light off H is the bare atom (pysel.status.md, "H0 约定"): on R4_LIN_4 (B = 0) the spectrum of
     /// H0 − Σ_ω O_ω(E_ω(0)) is the hyperfine levels, each 2F + 1 fold degenerate, to the rounding of a Hermitian
     /// eigensolver on H, n u ‖H‖_F (n = 32; ‖H‖ ~ 4.5·10⁷ rad/µs of the D lines in one frame): the gaps within a level
@@ -536,6 +609,34 @@ mod tests {
         let (between, within) = gaps.split_at(levels - 1);
         eprintln!("levels {levels}: smallest gap between {:.3e}, largest within {:.3e}, rounding {rounding:.3e} rad/µs", between[levels - 2], within[0]);
         assert!(within[0] <= rounding && between[levels - 2] > rounding);
+    }
+
+    /// The one Doppler shift per beam (model/rs.rs, # The frequencies): on R4 (two counter-propagating beams of one
+    /// frequency, k_m = −k_l) at a momentum along them, a beam's key holds f_l = ω_l − ħ(k_l·κ + |k_l|²/2)/m and the
+    /// product of the two, at e_m − e_l, the beams' sum f_m − f_l = −ħ(k_m − k_l)·κ/m: their recoils cancel (equal
+    /// wavelengths), no |K|²/2 = 4 single-photon recoils; at rest it is zero.
+    #[test]
+    fn a_key_s_frequency_is_its_beams_sum() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R4_LIN_4.json");
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let scene = Scene::new(&Request::from_native(&line).unwrap()).unwrap();
+        let hm = scene.hbar_over_mass;
+        let (l, m) = (0..scene.geometry.len())
+            .flat_map(|l| (0..scene.geometry.len()).map(move |m| (l, m)))
+            .find(|&(l, m)| l < m && scene.request.beams[l].frequency_index == scene.request.beams[m].frequency_index && dot3(scene.geometry[l].direction, scene.geometry[m].direction) < -0.5)
+            .expect("two counter-propagating beams of one frequency");
+        let (kl, km) = (scene.geometry[l].wave_vector(), scene.geometry[m].wave_vector());
+        for kappa in [[0.0; 3], kl.map(|x| 3.0 * x), [12.0, -7.0, 40.0]] {
+            let point = scene.point_at([0.0; 3], kappa);
+            let key: Key = scene.unit(m).iter().zip(scene.unit(l)).map(|(x, y)| x - y).collect();
+            let raman = point.frequency(&key);
+            let doppler: f64 = (0..3).map(|a| (km[a] - kl[a]) * kappa[a]).sum::<f64>() * hm;
+            let single = point.frequency(&scene.unit(l));
+            let expected = scene.generators[l].frequency - hm * (dot3(kl, kappa) + 0.5 * dot3(kl, kl));
+            println!("κ {kappa:?}: the Raman key {raman:.6e} against −ħK·κ/m {:.6e}; the single photon's {single:.12e} against {expected:.12e}", -doppler);
+            assert!((raman + doppler).abs() <= 1e-12 * (1.0 + doppler.abs()));
+            assert_eq!(single, expected);
+        }
     }
 
     /// The reported trap (SPEC §1.3) of every reference scene that states trap frequencies (refs/expect, the references
