@@ -3998,8 +3998,8 @@ fn a_two_level_atom_s_mean_force_in_a_running_wave_is_the_master_equation_s() {
     }
 }
 
-/// A two-level atom held in a standing wave (BRIEF_STEP3C test table): two counter-propagating beams of one frequency,
-/// the coupling 2g cos kz, s(z) = 4 s₁ cos² kz; at kz = π/8, red of the line (Δ = −2Γ, s₁ = 0.5) and on it (Δ = 0,
+/// A two-level atom held in a standing wave (BRIEF_STEP3C test table): two counter-propagating beams of one frequency
+/// beside the tweezer (validate: no other beam at the tweezer's frequency; here it couples nothing), the coupling 2g cos kz, s(z) = 4 s₁ cos² kz; at kz = π/8, red of the line (Δ = −2Γ, s₁ = 0.5) and on it (Δ = 0,
 /// s₁ = 0.1), the mean force along the wave is the master equation's dipole force −(Δ/2) s′(z)/(1 + s(z) + (2Δ/Γ)²) --
 /// the two beams' pressures cancel -- within four standard errors and the share of its size.
 #[test]
@@ -4007,11 +4007,12 @@ fn a_two_level_atom_s_dipole_force_in_a_standing_wave_is_the_master_equation_s()
     let share = crate::model::elim::share();
     for (delta, s1) in [(-2.0 * GAMMA, 0.5), (0.0, 0.1)] {
         let (ee, g) = (1000.0, 0.5 * GAMMA * (s1 / 2.0_f64).sqrt());
-        let rays = [1.0, -1.0].map(|d| Ray { axis: 0, nu: ee + delta, direction: [0.0, 0.0, d], couplings: vec![(17, 0, C64::real(g))] });
-        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays, 1, true);
+        let tweezer = Ray { axis: 0, nu: ee - 3000.0 * GAMMA, direction: [0.0, 0.0, 1.0], couplings: vec![] };
+        let rays: Vec<Ray> = std::iter::once(tweezer).chain([1.0, -1.0].map(|d| Ray { axis: 1, nu: ee + delta, direction: [0.0, 0.0, d], couplings: vec![(17, 0, C64::real(g))] })).collect();
+        let mut req = system(&[(0, 0.0)], &[(17, ee, GAMMA, 0)], &rays, 2, true);
         idle_decay(&mut req, GAMMA);
         req.validate().unwrap();
-        let k = req.beams[0].wave_number;
+        let k = req.beams[1].wave_number;
         let z = std::f64::consts::FRAC_PI_8 / k;
         let run = run::Onefold::new(&req, [1.0 / GROUND as f64; GROUND]).unwrap();
         let (mean, error) = held_mean_force(&run, [0.0, 0.0, z], 48, 200, 0.1);

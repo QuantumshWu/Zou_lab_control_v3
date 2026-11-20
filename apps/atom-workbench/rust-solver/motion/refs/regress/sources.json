@@ -1,5 +1,5 @@
 {
- "note": "Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state. refused: scenes with light the engine is not given (lib/contract.mjs).",
+ "note": "Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state. refused: scenes with light the engine refuses (lib/contract.mjs).",
  "sources": {
   "DEFAULT": {
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/DEFAULT.scene.json",
@@ -196,14 +196,14 @@
  },
  "missing": [],
  "refused": [
-  "F5_RETRO80: 光镊（反射） (tweezer-reflection) reflects the tweezer; 光镊（反射） (tweezer-reflection) 852.0 nm",
-  "RETRO: 光镊（反射） (tweezer-reflection) reflects the tweezer; 光镊（反射） (tweezer-reflection) 852.0 nm",
-  "R5051: 光镊（反射） (tweezer-reflection) reflects the tweezer; 光镊（反射） (tweezer-reflection) 880.0 nm",
-  "R5006: 光镊（反射） (tweezer-reflection) reflects the tweezer; 光镊（反射） (tweezer-reflection) 911.0 nm",
-  "R5059: 光镊（反射） (tweezer-reflection) reflects the tweezer; 光镊（反射） (tweezer-reflection) 911.0 nm",
-  "F9_CROSSED: 第二束远失谐光 (second) 940.0 nm",
-  "F9_CROSSED_P: 第二束远失谐光 (second) 940.0 nm",
-  "R5031: 光镊（反射） (tweezer-reflection) reflects the tweezer",
-  "R5063: 光镊（反射） (tweezer-reflection) reflects the tweezer"
+  "F5_RETRO80: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 852.0 nm",
+  "RETRO: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 852.0 nm",
+  "R5051: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 880.0 nm",
+  "R5006: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 911.0 nm",
+  "R5059: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 911.0 nm",
+  "F9_CROSSED: 第二束远失谐光 (second) at the tweezer's frequency; 第二束远失谐光 (second) 940.0 nm",
+  "F9_CROSSED_P: 第二束远失谐光 (second) at the tweezer's frequency; 第二束远失谐光 (second) 940.0 nm",
+  "R5031: 光镊（反射） (tweezer-reflection) at the tweezer's frequency",
+  "R5063: 光镊（反射） (tweezer-reflection) at the tweezer's frequency"
  ]
 }

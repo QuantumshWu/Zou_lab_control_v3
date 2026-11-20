@@ -3,8 +3,8 @@
 //   <id>.scene.json) copied to regress/<scene>.scene.json, with its provenance in regress/sources.json and the check that
 //   the app's re-export of it reproduces the gate's payload bit for bit (couplings, emission, H0, initial state): the old
 //   truths' state-resolved populations are then in the same basis as the new requests. Scenes without a source are
-//   listed there (they drop out), and so are scenes with light the engine is not given (lib/contract.mjs: a reflection of
-//   the tweezer, light beside it outside D1/D2): refused, with the reason.
+//   listed there (they drop out), and so are scenes with light the engine refuses (lib/contract.mjs: a beam at the
+//   tweezer's frequency beside it, light beside it outside D1/D2): refused, with the reason.
 // - requests: out/regress/<run>.json, each gate run's request as the app sends it now (the run's duration and samples;
 //   a GPU run and its CPU twin share one truth and one request, run on the CPU).
 // - truths: expect/regress/<run>.json, the run's old truth (G/truth/<run>.json: at its three outputs T per axis, loss and
@@ -16,7 +16,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {finish,motionRequest} from './lib/app.mjs';
-import {checkRequest,offLines,tweezerReflections} from './lib/contract.mjs';
+import {atTweezerFrequency,checkRequest,offLines} from './lib/contract.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
 const SP='C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad';
@@ -45,7 +45,7 @@ async function importSources(){
     // The gate's payload, against which the re-export is compared (the gate's own copy; F2's from validate/repro).
     const gate=id==='F2'?`${SP}/validate/repro/F2_default_plus_weak_D1_beam.json`:`${GATE}/scenes/${id}.json`;
     const old=read(gate),now=await motionRequest(id,await finish(structuredClone(scene)),{device:'cpu'});
-    const why=[...tweezerReflections(scene).map(l=>`${l.name} (${l.id}) reflects the tweezer`),...offLines(now)];
+    const why=[...atTweezerFrequency(now).map(b=>`${b} at the tweezer's frequency`),...offLines(now)];
     if(why.length){refused.push(`${id}: ${why.join('; ')}`);console.log(id.padEnd(16),'refused:',why.join('; '));continue;}
     const same=['hReal','hImag','initialReal','initialImag'].every(k=>JSON.stringify(old.model[k])===JSON.stringify(now.model[k]))&&
       JSON.stringify(old.model.motion.emission)===JSON.stringify(now.model.motion.emission)&&
@@ -54,7 +54,7 @@ async function importSources(){
     sources[id]={source:file,sha256:sha(text),gatePayload:gate,reproducesGatePayload:same};
     console.log(id.padEnd(16),name.padEnd(12),same?'bit-identical model':'MODEL DIFFERS');
   }
-  write(path.join(here,'regress','sources.json'),{note:'Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state. refused: scenes with light the engine is not given (lib/contract.mjs).',sources,missing,refused});
+  write(path.join(here,'regress','sources.json'),{note:'Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state. refused: scenes with light the engine refuses (lib/contract.mjs).',sources,missing,refused});
   console.log('missing sources:',missing.length?missing.join(', '):'none');
 }
 
