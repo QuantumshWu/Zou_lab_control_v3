@@ -269,8 +269,7 @@
 //!   the run level keeps its trajectories' checkpoints, next), the product at the analysis times alone.
 //! - The run level's states are not kept at the candidates -- its trajectories times the candidates, in proportion to
 //!   the run's length: PGC3D's 10 ms, 88 × 15 400 states, 345 MB --, but its trajectories' checkpoints (`Checkpoint`:
-//!   the trajectory, its Brownian path and what its scratch carries, step.rs `Carry`, at a step's end: adapt.rs
-//!   `advance`'s stops), at t = 0 and at the first step's end at or past every multiple of T's shortest window
+//!   the trajectory and its Brownian path at a step's end: adapt.rs `advance`'s stops), at t = 0 and at the first step's end at or past every multiple of T's shortest window
 //!   (`Plan::window`); a state at an analysis time is made again from
 //!   the last checkpoint before it once the times are known (`replay`, `parts_at`), the trajectory's own to the bit
 //!   (adapt.rs, # The reads: a read is an onlooker, a stop no step's end). The window is the scale the reads are spaced
@@ -449,7 +448,7 @@ use crate::model::optical::Unmade;
 use crate::model::potential::descend;
 use crate::model::{Sample, Trap, GROUND};
 use crate::request::STATES;
-use crate::step::{stumpff, Carry, Dynamics, Refused, Scratch, Segment, Trajectory};
+use crate::step::{stumpff, Dynamics, Refused, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE};
 use rayon::prelude::*;
 use std::collections::VecDeque;
@@ -2359,13 +2358,12 @@ impl State {
 }
 
 /// A kept trajectory's whole state at a step's end (module documentation, # The analysis times; adapt.rs `advance`'s
-/// stops): the trajectory, its Brownian path and what its scratch carries to the next step (step.rs `Carry`: the next
-/// step's route is weighed against it), from which it is advanced again to the bit (`replay`).
+/// stops): the trajectory and its Brownian path, from which it is advanced again to the bit with a fresh scratch
+/// (`replay`; step.rs `Scratch`: nothing of a step is carried to the next).
 #[derive(Clone)]
 struct Checkpoint {
     trajectory: Trajectory,
     path: adapt::Path,
-    carry: Carry,
 }
 
 /// What one trajectory leaves: what became of it by every output (estimate.rs `Fate`), its (r, κ) at the listed outputs
@@ -2620,7 +2618,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         let mut advanced = Ok(());
         while advanced.is_ok() && t.lost.is_none() && t.time < plan.end && nowhere.get().is_none() {
             if keep {
-                trail.push(Checkpoint { trajectory: t.clone(), path: path.clone(), carry: scratch.carry() });
+                trail.push(Checkpoint { trajectory: t.clone(), path: path.clone() });
             }
             let stop = ((t.time / every).floor() + 1.) * every;
             advanced = adapt::advance(model, domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &times, &mut read, &mut each);
@@ -2633,7 +2631,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
                 unmade = Some(why);
                 (true, false, false)
             }
-            Err(Refused::Overflow | Refused::Reference) => (true, false, true),
+            Err(Refused::Overflow | Refused::Reference | Refused::Propagation(_)) => (true, false, true),
             Err(Refused::Emission) => (true, false, false),
         }
     };
@@ -2695,7 +2693,7 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
         let from = &trail[trail.partition_point(|c| c.trajectory.time < next) - 1];
         let (mut trajectory, mut path, mut scratch) = match going.take() {
             Some(going) if going.0.time >= from.trajectory.time => going,
-            _ => (from.trajectory.clone(), from.path.clone(), Scratch::resumed(&from.carry)),
+            _ => (from.trajectory.clone(), from.path.clone(), Scratch::default()),
         };
         let advanced = adapt::advance(model, domain, tau, &mut trajectory, &mut scratch, &mut path, end, next, times, &mut |k, s, _| (states[k], reached) = (Some(State::of(s)), k + 1), &mut |_, _| {});
         match advanced {
@@ -3363,7 +3361,7 @@ fn ended(counts: &Counts, booked: bool) -> Vec<String> {
     let [after, there] = if booked { ["：此后它们不计入估计，所占的比例全部计入布居与丢失的误差", "：它们在那里结束，此后不计入估计，所占的比例全部计入布居与丢失的误差"] } else { [""; 2] };
     let mut out = vec![];
     for (stopped, why) in [
-        (&counts.refused, "的一步在所取步长下算出的数不是有限数（状态或参考流），在时间的舍入以内减半步长也推进不了".to_string()),
+        (&counts.refused, "的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了".to_string()),
         (&counts.failed, "的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）".to_string()),
         (&counts.unmade[0], format!("{unmade}（激发态块或基态块的 Schur 形式不收敛；这不应发生，是引擎的缺陷）")),
         (&counts.unmade[1], format!("{unmade}（ℳ 奇异：按构造 Q 扇区以约 Γ/2 或更快弛豫，ℳ 应当可逆；这不应发生，是引擎的缺陷）")),
@@ -4215,7 +4213,7 @@ mod tests {
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
         let flagged = s.approximations.flagged.expect("flagged");
-        for said in ["4 条轨迹的一步在所取步长下算出的数不是有限数（状态或参考流），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "6 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 16 μs）：它们在那里结束", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
+        for said in ["4 条轨迹的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "6 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 16 μs）：它们在那里结束", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
             assert!(flagged.contains(said), "{said} in {flagged}");
         }
         assert!(!flagged.contains("已无原子留在光阱中"), "{flagged}");
@@ -4533,7 +4531,7 @@ mod tests {
     fn a_lost_atom_s_fate_is_read_on_its_path_below_the_far_value_and_the_rim_where_held() {
         let state = |index: u64, t: f64| bare_state(index, t, 0);
         let trail = |index: u64, until: f64| -> Vec<Checkpoint> {
-            (0..).map(|j| 6. * j as f64).take_while(|&t| t < until).map(|t| Checkpoint { trajectory: state(index, t).trajectory(), path: adapt::Path::new(SEED, index, 2., 2), carry: Scratch::default().carry() }).collect()
+            (0..).map(|j| 6. * j as f64).take_while(|&t| t < until).map(|t| Checkpoint { trajectory: state(index, t).trajectory(), path: adapt::Path::new(SEED, index, 2., 2) }).collect()
         };
         // The escaping atom (0), the one that goes to the rim and back (1), the one held at the rim (2).
         let leaving = |from: f64| move |t: &Trajectory| t.time >= from;
@@ -5232,8 +5230,7 @@ mod tests {
     /// `Held`, carried by the checkpoint's trajectory: the decompositions a decision made and its switches' balance) --,
     /// on its class: R2_RECOIL's atoms in |2,2⟩ at the trap's centre at 1 to 100 times the thermal speed along each lab
     /// axis through 2 µs at 800 steps, and PGC3D_1ms's at a half to twice it through 200 µs (tens of jumps an atom, the
-    /// representation's decisions at every cell's end, the steps' routes chosen by what the scratch carries, step.rs
-    /// `Carry`) -- atoms held to the end and lost --, read at the candidates m·2τ, the checkpoints a fifth of the run
+    /// representation's decisions at every cell's end) -- atoms held to the end and lost --, read at the candidates m·2τ, the checkpoints a fifth of the run
     /// less a little apart (off the step's grid). Kept, a trajectory's fates, listed atoms and counts are those of the
     /// same trajectory advanced through at once; and its states replayed at every candidate, and at a few of them, are to
     /// the bit those that one advance through the run reads there -- none after its loss.

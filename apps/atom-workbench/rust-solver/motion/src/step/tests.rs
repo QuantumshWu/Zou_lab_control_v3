@@ -793,10 +793,9 @@ fn a_step_integrates_its_internal_frequencies_whatever_the_detuning() {
 /// of its change over a half step), read from the step's picture.
 /// - Where the step's nodes resolve the pair for what changes (Δτ = 1 in four and in eight steps; with the decay in
 ///   two as well) the state is hopped, and both fall as the fourth order, sixteen a halving: a hop's second Magnus term
-///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's) --
-///   and so is the strides' CF4 where the step takes them, their exponentials summed to round-off (spectral.rs,
-///   # The strides; until 2026-11-17 truncated at the share of what the state forgets, which this test let pass down to
-///   QUADRATURE Γ span).
+///   is of the fifth order in the step, and so is the three nodes' representation of the change (Simpson's rule's).
+///   (Until 2026-11-20 so was the strides' CF4 where the step took them, spectral.rs, # Where the decomposition does
+///   not take the step.)
 /// - Where they do not (Δτ = 1 in one step, Δτ = 10 and more in any) the state follows the change, by the following
 ///   X = D/ω and its rate's corrections, to the second order. Its error is within the square of the following at the
 ///   step's end, (k·v h V/ω)² with V the light's largest coupling and ω the dressed pair's frequency -- held to that
@@ -2645,19 +2644,18 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let own = whole - calls[0] * reference - calls[1] * point - nodes;
     let fixed = middle - calls[0] * reference;
     let work = steps.iter().map(|s| s.work).sum::<f64>() / count as f64;
-    // What the propagations took: the quadrature's nodes at the picture's bandwidth, and the share of the strides'
-    // route (a step after the decomposition's was counted: the second), the starts' means.
-    let [nodes, turned, strided] = pieces.iter().zip(starts).fold([0.0; 3], |sums, (p, s)| {
+    // What the propagations took: the quadrature's nodes at the picture's bandwidth, the starts' means.
+    let [nodes, turned] = pieces.iter().zip(starts).fold([0.0; 2], |sums, (p, s)| {
         let mut scratch = fitted(s.psi.len());
         for _ in 0..2 {
             let _ = p.through.attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut scratch, &Everywhere);
         }
         let picture = &scratch.picture;
-        let found = [super::nodes(tau, picture.bandwidth) as f64, picture.bandwidth * tau, if picture.decomposed() { 0.0 } else { 1.0 }];
+        let found = [super::nodes(tau, picture.bandwidth) as f64, picture.bandwidth * tau];
         std::array::from_fn(|i| sums[i] + found[i] / count as f64)
     });
     eprintln!(
-        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | a readout {readout:6.2} | fixed point {fixed:6.2}  through the middle {propagated:8.2}  (with a jump {root:8.2}, {crossings}/{count}; {nodes:.1} nodes at the bandwidth × τ {turned:.2}, strides {strided:.2}) | counted {work:9.0} | pace {:.3} ns",
+        "{name:<22} n {n} τ {tau:<6} | step {whole:8.2} = model {:8.2} (reference {reference:5.2} × {:4.1} + middle {point:7.2} × {:.0} + generator {generator:6.2} × {:4.1} + force {force:6.2} × {:4.1} + tones {tones:6.2} × {:3.1}) + own {own:8.2} (scattering {scattering:6.2}) | a readout {readout:6.2} | fixed point {fixed:6.2}  through the middle {propagated:8.2}  (with a jump {root:8.2}, {crossings}/{count}; {nodes:.1} nodes at the bandwidth × τ {turned:.2}) | counted {work:9.0} | pace {:.3} ns",
         whole - own,
         calls[0],
         calls[1],
@@ -2751,17 +2749,17 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
     (r, kappa)
 }
 
-/// A trajectory stopped at step ends and taken up again with what its scratch carries is the trajectory run through
-/// (adapt.rs `advance`'s stops; `Scratch::carry`, `Scratch::resumed`), on its class: PGC3D_1ms's model as the solve
-/// closes it, with its near tables (`scene_clusters`), six atoms of each cluster through 600 steps of 0.326 µs on their
-/// own jump thresholds -- tens of jumps each --, each run through at once and run again stopped at twelve random times,
-/// at every stop the trajectory and its path copied and its scratch resumed from its carry: every piece of every
-/// step's path (its jumps') and the end state the same to the bit. A fresh scratch at the stops instead goes on along
-/// other bits for some atom (the picture's counts choose the steps' routes): the carry is what a stop needs.
+/// A trajectory stopped at step ends and taken up again with a fresh scratch is the trajectory run through (adapt.rs
+/// `advance`'s stops; step.rs `Scratch`: nothing of a step is carried to the next), on its class: PGC3D_1ms's model as
+/// the solve closes it, with its near tables (`scene_clusters`), six atoms of each cluster through 600 steps of
+/// 0.326 µs on their own jump thresholds -- tens of jumps each --, each run through at once and run again stopped at
+/// twelve random times, at every stop the trajectory and its path copied and its scratch made anew: every piece of
+/// every step's path (its jumps') and the end state the same to the bit. (Until 2026-11-20 the picture's counts chose
+/// the steps' routes, and a fresh scratch went on along other bits: the scratch carried them.)
 #[test]
-fn a_trajectory_stopped_and_taken_up_with_its_carry_is_the_one_run_through() {
+fn a_trajectory_stopped_and_taken_up_with_a_fresh_scratch_is_the_one_run_through() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/refs/requests/PGC3D_1ms.json");
-    let (mut atoms, mut differ) = (0, 0);
+    let mut atoms = 0;
     scene_clusters(path, &mut |_, _, cluster, run, starts| {
         let (tau, steps) = (0.326, 600);
         let end = steps as f64 * tau;
@@ -2772,8 +2770,9 @@ fn a_trajectory_stopped_and_taken_up_with_its_carry_is_the_one_run_through() {
             let mut stops: Vec<f64> = (0..12).map(|_| stream.uniform() * end).collect();
             stops.sort_by(f64::total_cmp);
             stops.push(end);
-            // The end state and every piece of the path, stopped at `stops`, each stop taken up again by `resume`.
-            let advanced = |stops: &[f64], resume: Option<&dyn Fn(&step::Scratch) -> step::Scratch>| -> String {
+            // The end state and every piece of the path, stopped at `stops`, each stop taken up again on a fresh scratch
+            // where `resume`.
+            let advanced = |stops: &[f64], resume: bool| -> String {
                 let (mut t, mut scratch, mut path) = (start.clone(), step::Scratch::default(), adapt::Path::new(17, i as u64, 4.0 * tau, 2));
                 let mut pieces = vec![];
                 for &stop in stops {
@@ -2781,20 +2780,19 @@ fn a_trajectory_stopped_and_taken_up_with_its_carry_is_the_one_run_through() {
                     if advanced.is_err() || t.lost.is_some() {
                         break;
                     }
-                    if let Some(resume) = resume {
-                        (t, path, scratch) = (t.clone(), path.clone(), resume(&scratch));
+                    if resume {
+                        (t, path, scratch) = (t.clone(), path.clone(), step::Scratch::default());
                     }
                 }
                 format!("{t:?} {}", pieces.join(" "))
             };
-            let through = advanced(&[end], None);
-            assert_eq!(advanced(&stops, Some(&|s| step::Scratch::resumed(&s.carry()))), through, "cluster {cluster}, atom {i}: stopped at {stops:?}");
-            differ += usize::from(advanced(&stops, Some(&|_| step::Scratch::default())) != through);
+            let through = advanced(&[end], false);
+            assert_eq!(advanced(&stops, true), through, "cluster {cluster}, atom {i}: stopped at {stops:?}");
             atoms += 1;
         }
     });
-    eprintln!("{atoms} atoms stopped and taken up with their carry as run through; with a fresh scratch {differ} of them go on along other bits");
-    assert!(atoms > 0 && differ > 0, "{atoms} atoms, {differ} differ with a fresh scratch");
+    eprintln!("{atoms} atoms stopped and taken up with a fresh scratch as run through");
+    assert!(atoms > 0, "{atoms} atoms");
 }
 
 /// A scene's model closed by its units' errors at its reference state (model.rs `Model::closed_at`) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
@@ -3349,7 +3347,7 @@ fn a_scene_s_step_error_by_the_split() {
                         along.middle.generator(&along.path, middle - 0.5 * t, &mut picture.ends[0]);
                         along.middle.generator(&along.path, middle + 0.5 * t, &mut picture.ends[1]);
                     }
-                    picture.prepare(0.5 * t, still, |bandwidth| super::nodes(t, bandwidth) + 2, 0.0, None);
+                    picture.prepare(0.5 * t, still, None).expect("the decomposition takes the step");
                     if i == 0 {
                         for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
                             let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
@@ -3361,7 +3359,7 @@ fn a_scene_s_step_error_by_the_split() {
                     picture.launch(-0.5 * t, &from);
                     for j in 1..=per {
                         let mark = i * per + j;
-                        picture.advance((j as f64 / per as f64 - 0.5) * t, &mut x);
+                        picture.at((j as f64 / per as f64 - 0.5) * t, &mut x);
                         if j < per {
                             inside[level] += apart(&x, &exact[mark - 1]) / (count * (marks - steps) as f64);
                         }
@@ -3709,11 +3707,14 @@ impl Dynamics for Lindblad {
 /// light's resolution (π) --; the jumps' size held to what the step's survival can tell from zero, a decay of at most
 /// 20/τ a state (a threshold of zero is the tests' none: a survival that rounds to zero would meet it); each from a
 /// random state, its threshold at zero, and from the same state fifteen steps of random lengths below τ: the survival
-/// probed at the trajectory's own states, the steps' ends (a reading's norm is no survival, adapt.rs # The reads). To
-/// `each`: the model, the start, the steps with their lengths (τ's last), τ times the generator's size and n, and the
-/// fastest turn between two nodes (rad).
-fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad, &Trajectory, &[(f64, step::Step)], f64, f64)) {
+/// probed at the trajectory's own states, the steps' ends (a reading's norm is no survival, adapt.rs # The reads). A
+/// length the decomposition does not take (step.rs `Refused::Propagation`: an entry beyond both its series' radii, a
+/// step far past the light's resolution) is no step of the scheme -- the advance takes it at its half -- and is left
+/// out. To `each`: the model, the start, the steps taken with their lengths (the longest last), τ times the generator's
+/// size and n, and the fastest turn between two nodes (rad). Returns the lengths left out and the lengths tried.
+fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad, &Trajectory, &[(f64, step::Step)], f64, f64)) -> (usize, usize) {
     let mut scratch = step::Scratch::default();
+    let (mut refused, mut tried) = (0, 0);
     for case in 0..count {
         let mut s = crate::random::Stream::new(43, crate::random::Purpose::Initial, case, 0);
         let n = 1 + (5.0 * s.uniform()) as usize;
@@ -3736,10 +3737,18 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
         lengths.push(tau);
         let steps: Vec<(f64, step::Step)> = lengths
             .into_iter()
-            .map(|length| (length, step_of(&model, &start, length, &mut scratch).unwrap_or_else(|e| panic!("case {case}: n {n}, {waves} waves, size {size}, speed {speed}, turn {:.3}π, a step of {length} of τ {tau}: {e:?}", turn / std::f64::consts::PI))))
+            .filter_map(|length| match step_of(&model, &start, length, &mut scratch) {
+                Ok(taken) => Some((length, taken)),
+                Err(step::Refused::Propagation(_)) => None,
+                Err(e) => panic!("case {case}: n {n}, {waves} waves, size {size}, speed {speed}, turn {:.3}π, a step of {length} of τ {tau}: {e:?}", turn / std::f64::consts::PI),
+            })
             .collect();
-        each(&model, &start, &steps, tau * size * n as f64, turn);
+        (refused, tried) = (refused + 16 - steps.len(), tried + 16);
+        if !steps.is_empty() {
+            each(&model, &start, &steps, tau * size * n as f64, turn);
+        }
     }
+    (refused, tried)
 }
 
 /// The step's own decay along its path (step.rs, # Jumps): from a state at its start, the generator the propagation takes
@@ -3783,23 +3792,23 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
 /// The largest singular value of the propagation's own map over a step from a state, on the step's path at the start's
 /// momentum (`spectral::Picture`, launched at the step's start on each basis state and read at its end): what the
 /// survival does not take.
-fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
+fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> Option<f64> {
     let n = start.psi.len();
     let through = step::Midway::new(model, start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).unwrap();
+    super::pictured(&along, &mut scratch, tau, None).ok()?;
     let picture = &mut scratch.picture;
     let mut map = Mat::zeros(n, n);
     for a in 0..n {
         let (mut x, mut y) = (vec![C64::ZERO; n], vec![C64::ZERO; n]);
         x[a] = C64::ONE;
         picture.launch(-0.5 * tau, &x);
-        picture.advance(0.5 * tau, &mut y);
+        picture.at(0.5 * tau, &mut y);
         (0..n).for_each(|b| map[(b, a)] = y[b]);
     }
     let gram = Mat::from_fn(n, n, |i, j| (0..n).map(|k| map[(k, i)].conj() * map[(k, j)]).sum());
-    crate::linalg::hermitian_eigen(&gram).values.iter().fold(0.0_f64, |m, v| m.max(*v)).sqrt()
+    Some(crate::linalg::hermitian_eigen(&gram).values.iter().fold(0.0_f64, |m, v| m.max(*v)).sqrt())
 }
 
 /// The norm is the probability of no jump, and the exact dynamics only lowers it (step.rs, # Jumps): over 400 random
@@ -3812,7 +3821,7 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
 #[test]
 fn the_survival_never_rises_whatever_the_generator_and_the_step() {
     let (mut most, mut grown, mut widest, mut negative) = (f64::NEG_INFINITY, 0, 0.0_f64, Vec::new());
-    random_steps(400, None, &mut |model, start, steps, _, turn| {
+    let (refused, tried) = random_steps(400, None, &mut |model, start, steps, _, turn| {
         let first = crate::linalg::norm_sqr(&start.psi);
         for (length, taken) in steps {
             let (allowed, size) = negative_decay(model, start, *length);
@@ -3824,14 +3833,15 @@ fn the_survival_never_rises_whatever_the_generator_and_the_step() {
             most = most.max((end / first).ln());
             assert!((end / first).ln() <= allowed + 1e-12 * (1.0 + size), "the survival rose (case {}, turn {:.3}π, a step of {length}) by more than its decay's negative part {allowed:e}: {first} → {end}", start.index, turn / std::f64::consts::PI);
         }
-        let tau = steps.last().expect("τ's step").0;
-        let sigma = map_growth(model, start, tau);
-        widest = widest.max(sigma);
-        grown += usize::from(sigma > 1.0 + 1e-12);
+        let tau = steps.last().expect("a step taken").0;
+        if let Some(sigma) = map_growth(model, start, tau) {
+            widest = widest.max(sigma);
+            grown += usize::from(sigma > 1.0 + 1e-12);
+        }
     });
     negative.sort_by(|a, b| a.0.total_cmp(&b.0));
     eprintln!("the survival's largest rise over a step, ln: {most:e}; the steps whose decay's parabola goes negative (the turn between two nodes in π, its negative part over its size): {negative:.3?}");
-    eprintln!("the propagation's own map: largest singular value {widest:.4}, above one on {grown} of 400 steps");
+    eprintln!("the propagation's own map: largest singular value {widest:.4}, above one on {grown} of 400 steps; {refused} of {tried} lengths refused by the decomposition");
     assert!(grown > 0, "the random steps hold propagations whose map grows");
 }
 
@@ -3841,7 +3851,7 @@ fn the_survival_never_rises_whatever_the_generator_and_the_step() {
 #[test]
 fn a_generator_without_a_decay_keeps_the_survival() {
     let mut most = 0.0_f64;
-    random_steps(200, Some(0), &mut |_, _, steps, scale, _| {
+    let _ = random_steps(200, Some(0), &mut |_, _, steps, scale, _| {
         for psi in steps.iter().map(|(_, taken)| &taken.end.psi) {
             let off = (crate::linalg::norm_sqr(psi) - 1.0).abs();
             most = most.max(off / (1.0 + scale));
@@ -4005,7 +4015,7 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
 /// motion3d_status/rewrite/norm.status.md).
 #[test]
 fn r4_lin_2_s_steps_never_raise_the_survival() {
-    let (mut most, mut grown, mut widest, mut steps) = (f64::NEG_INFINITY, 0, 0.0_f64, 0);
+    let (mut most, mut grown, mut widest, mut steps, mut refused) = (f64::NEG_INFINITY, 0, 0.0_f64, 0, 0);
     for tau in [0.36, 0.4335, 0.867] {
         scene_clusters("R4_LIN_2", &mut |_, _, cluster, run, starts| {
             let mut scratch = step::Scratch::default();
@@ -4015,21 +4025,30 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
                     let start = Trajectory { kappa: start.kappa.map(|k| faster * k), ..start.clone() };
                     let first = crate::linalg::norm_sqr(&start.psi);
                     for length in (1..=8).map(|k| tau * k as f64 / 8.0) {
-                        let end = crate::linalg::norm_sqr(&step_of(run, &start, length, &mut scratch).unwrap().end.psi);
+                        // A length the decomposition does not take is no step of the scheme (the advance halves it).
+                        let end = match step_of(run, &start, length, &mut scratch) {
+                            Ok(taken) => crate::linalg::norm_sqr(&taken.end.psi),
+                            Err(step::Refused::Propagation(_)) => {
+                                refused += 1;
+                                continue;
+                            }
+                            Err(e) => panic!("R4_LIN_2 cluster {cluster}, τ {tau}, a step of {length}: {e:?}"),
+                        };
                         most = most.max((end / first).ln());
                         assert!(end <= first * (1.0 + 1e-12), "R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}, a step of {length}: the survival rose: {first} → {end}");
                     }
-                    let sigma = map_growth(run, &start, tau);
-                    wide = wide.max(sigma);
-                    grown += usize::from(sigma > 1.0 + 1e-12);
-                    steps += 1;
+                    if let Some(sigma) = map_growth(run, &start, tau) {
+                        wide = wide.max(sigma);
+                        grown += usize::from(sigma > 1.0 + 1e-12);
+                        steps += 1;
+                    }
                 }
                 widest = widest.max(wide);
                 eprintln!("R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}: the propagation's map at the most {wide:.6}");
             }
         });
     }
-    eprintln!("R4_LIN_2: the survival's largest change over a step, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps");
+    eprintln!("R4_LIN_2: the survival's largest change over a step, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps; {refused} lengths refused by the decomposition");
     assert!(grown > 0, "R4_LIN_2's steps hold propagations whose map grows");
 }
 
@@ -4037,21 +4056,19 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
 /// multiples of τ in one cell of the run), read at the times `reads`: its last state, every piece of its path with its
 /// start and the time it is on it to (`Segment`: from a step's start, or from a jump with its place and kick -- the
 /// jumps' sequence), the readings with their places in `reads`, each printed whole (`{:?}`, the numbers' shortest round
-/// trip: equal prints are equal bits), and whether its last step went through the decomposition
-/// (`spectral::Picture::decomposed`).
+/// trip: equal prints are equal bits).
 struct Advanced {
     last: Trajectory,
     printed: String,
     pieces: Vec<(f64, String)>,
     readings: Vec<(usize, String)>,
-    decomposed: bool,
 }
 fn advanced<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, run: f64, reads: &[f64]) -> Advanced {
     let (mut t, mut scratch) = (start.clone(), step::Scratch::default());
     let mut path = adapt::Path::new(start.seed, start.index, run, (run / tau).log2().round() as u32);
     let (mut pieces, mut readings) = (vec![], vec![]);
     adapt::advance(model, &Everywhere, tau, &mut t, &mut scratch, &mut path, run, run, reads, &mut |k, s, _| readings.push((k, format!("{s:?}"))), &mut |s, until| pieces.push((s.start, format!("{s:?} to {until:?}")))).unwrap();
-    Advanced { printed: format!("{t:?}"), last: t, pieces, readings, decomposed: scratch.picture.decomposed() }
+    Advanced { printed: format!("{t:?}"), last: t, pieces, readings }
 }
 
 /// A trajectory against itself read at `reads` and at none: the same last state and the same pieces of its path to the
@@ -4125,12 +4142,11 @@ fn a_trajectory_is_the_same_to_the_bit_whatever_times_it_is_read_at() {
 /// them: 1 to 5 states, beat pairs, plane waves of the jumps, sizes 0.3 to 30 rad/µs, speeds of 10⁻³ to 1 µm/µs, steps
 /// whose fastest turn between two nodes is 0.01π to 20π) jumping at their thresholds, the jumps' decay up to 20/τ a
 /// state, over 8 to 64 steps; each read at 1 to 300 times -- uniform, at steps' ends and middles, within a few
-/// roundings of a step's end, or packed into one step -- against read at none and at a random part of its times. Both
-/// routes of the state are taken (`spectral::Picture::decomposed`: the decomposition, and the strides that take every
-/// stop from the last).
+/// roundings of a step's end, or packed into one step -- against read at none and at a random part of its times. The
+/// steps the decomposition does not take are taken at their halves (adapt.rs, # The step).
 #[test]
 fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
-    let (mut routes, mut jumps, mut inside) = ([0, 0], 0, 0);
+    let (mut jumps, mut inside) = (0, 0);
     for case in 0..96 {
         let mut s = crate::random::Stream::new(47, crate::random::Purpose::Initial, case, 0);
         let n = 1 + (5.0 * s.uniform()) as usize;
@@ -4168,11 +4184,10 @@ fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
         let fewer: Vec<f64> = reads.iter().copied().filter(|_| s.uniform() < 0.5).collect();
         let case = format!("case {case}: n {n}, {waves} waves, size {size:.3}, τ {tau:.4}, {steps} steps, {} times", reads.len());
         let (plain, i) = read_apart(&model, &start, tau, run, &reads, &fewer, &case);
-        routes[usize::from(plain.decomposed)] += 1;
         (jumps, inside) = (jumps + plain.last.jumps, inside + i);
     }
-    eprintln!("96 random trajectories: {jumps} jumps, {inside} times read inside steps; the last step strided on {}, through the decomposition on {}", routes[0], routes[1]);
-    assert!(routes[0] > 0 && routes[1] > 0 && jumps > 500 && inside > 2000, "routes {routes:?}, {jumps} jumps, {inside} times read inside steps");
+    eprintln!("96 random trajectories: {jumps} jumps, {inside} times read inside steps");
+    assert!(jumps > 500 && inside > 2000, "{jumps} jumps, {inside} times read inside steps");
 }
 
 /// A model of two groups of two states (`a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is`): each group
@@ -4443,13 +4458,13 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
         rest.product(&power)
     };
     // The picture over [0, 1 µs] in steps of τ, as the engine takes a step; per step its bandwidth, stops and time.
-    let pictured = |base: &Mat, p: &Mat, m: &Mat, tau: f64, start: &[C64]| -> (Vec<C64>, f64, usize, f64, bool) {
+    let pictured = |base: &Mat, p: &Mat, m: &Mat, tau: f64, start: &[C64]| -> (Vec<C64>, f64, usize, f64) {
         let (h, steps) = (0.5 * tau, (1.0 / tau).round() as usize);
         let toned = p.max_abs() > 0.0;
         let mut picture = Picture::default();
         picture.fit(n);
         let (mut x, mut y) = (start.to_vec(), vec![C64::ZERO; n]);
-        let (mut bandwidth, mut count, mut through) = (0.0_f64, 0, true);
+        let (mut bandwidth, mut count) = (0.0_f64, 0);
         let clock = std::time::Instant::now();
         for k in 0..steps {
             let centre = (k as f64 + 0.5) * tau;
@@ -4466,19 +4481,19 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
                 );
                 assert_eq!(picture.beats.len(), 1, "the beat a tone");
             }
-            picture.prepare(h, false, |bandwidth| super::nodes(tau, bandwidth) + 2, 0.0, Some(&x));
+            picture.prepare(h, false, Some(&x)).expect("the decomposition takes the step");
             picture.launch(-h, &x);
             let mut stops: Vec<f64> = super::quadrature(-h, h, picture.bandwidth, super::FORMS).map(|(u, _)| u).collect();
             stops.extend([0.0, h]);
             stops.sort_by(f64::total_cmp);
             stops.dedup();
             for &u in &stops {
-                picture.advance(u, &mut y);
+                picture.at(u, &mut y);
             }
-            (bandwidth, count, through) = (bandwidth.max(picture.bandwidth), count.max(stops.len()), through && picture.decomposed());
+            (bandwidth, count) = (bandwidth.max(picture.bandwidth), count.max(stops.len()));
             x.copy_from_slice(&y);
         }
-        (x, bandwidth, count, clock.elapsed().as_secs_f64() * 1e6 / steps as f64, through)
+        (x, bandwidth, count, clock.elapsed().as_secs_f64() * 1e6 / steps as f64)
     };
     let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
     let starts: [[C64; 3]; 3] = [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ONE, C64::ZERO], [C64::real(0.6), C64::new(0.0, 0.8), C64::ZERO]];
@@ -4491,10 +4506,10 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
         eprintln!("case {case}: the reference's own error ≤ {reference:.1e}");
         for tau in [0.5, 0.25, 0.125, 0.0625] {
             let (mut tone, mut alone, mut effect, mut phase, mut norm) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0, 0.0);
-            let (mut bandwidth, mut nodes, mut time, mut through) = ([0.0; 2], [0; 2], [0.0; 2], true);
+            let (mut bandwidth, mut nodes, mut time) = ([0.0; 2], [0; 2], [0.0; 2]);
             for (s, start) in starts.iter().enumerate() {
-                let (x, b, c, t, d) = pictured(&base, &plus, &minus, tau, start);
-                let (z, b0, c0, t0, _) = pictured(&base, &none, &none, tau, start);
+                let (x, b, c, t) = pictured(&base, &plus, &minus, tau, start);
+                let (z, b0, c0, t0) = pictured(&base, &none, &none, tau, start);
                 let (truth, truth0) = (full.apply(start), bare.apply(start));
                 tone = tone.max(apart(&x, &truth));
                 alone = alone.max(apart(&z, &truth0));
@@ -4503,10 +4518,10 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
                     phase = (x[0] / truth[0]).arg();
                     norm = crate::linalg::norm_sqr(&x) - crate::linalg::norm_sqr(&truth);
                 }
-                (bandwidth, nodes, time, through) = ([b, b0], [c, c0], [t, t0], through && d);
+                (bandwidth, nodes, time) = ([b, b0], [c, c0], [t, t0]);
             }
             eprintln!(
-                "  τ = {tau}: error {tone:.2e} (the beat's effect {effect:.2e}; the static group's own step {alone:.2e}); from g₁ the shift errs by {:.2e}, the scattering by {:.2e} (relative); bandwidth {:.3e} against {:.3e} rad/µs, stops a step {} against {}, {:.0} µs against {:.0} µs a step (n = 3), decomposed {through}",
+                "  τ = {tau}: error {tone:.2e} (the beat's effect {effect:.2e}; the static group's own step {alone:.2e}); from g₁ the shift errs by {:.2e}, the scattering by {:.2e} (relative); bandwidth {:.3e} against {:.3e} rad/µs, stops a step {} against {}, {:.0} µs against {:.0} µs a step (n = 3)",
                 phase.abs() / shift,
                 norm.abs() / scattering,
                 bandwidth[0],
@@ -4523,3 +4538,6 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
         }
     }
 }
+
+// R1-PROP: the propagation's regression and measurements on the six scenes (ignored, by name).
+mod r1prop;

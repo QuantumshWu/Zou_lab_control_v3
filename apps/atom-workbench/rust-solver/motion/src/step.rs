@@ -215,7 +215,7 @@
 //!   below zero between the nodes by its own third-order error; no scene's does.)
 //! - N reaches the trajectory's threshold θ first in the first panel whose end is at θ or below (N is monotone); a jump
 //!   is made there, at the root u* of ln N(u) = ln θ to ln N's rounding, ln N inside the panel its start less ∫h over
-//!   spans of it by their own quadratures on the propagation's states (`Picture::between`), stepped from below at the
+//!   spans of it by their own quadratures on the propagation's states (`Picture::at`), stepped from below at the
 //!   hazard's rate (`root`): the spans below the root are the kick's part of the panel as far as the root, so that the
 //!   root costs the panel's nodes before it and a few more, as laying them again did. The states kept inside that
 //!   panel -- the middle, a time read -- stand where they lie before the root; the others are met again after the
@@ -395,8 +395,8 @@
 //! - The internal state at any time: its propagation has x(u), u the time from the middle, on the straight path through
 //!   the middle (spectral.rs), and ψ_s = e^{iK_s·v_m u} x_s. A time read is no stop of the propagation: the step's
 //!   stops and nodes, its jumps' roots and its count are what the step resolves alone, and a read takes the state
-//!   from the propagation as it passes -- from the latest stop at or before the time (`Picture::between`), after the
-//!   jumps before it and before those after it (`looked`) --, its norm the propagation's there: a reading is read as
+//!   from the propagation as it passes -- the state there (`Picture::at`), after the jumps before it and before those
+//!   after it (`looked`) --, its norm the propagation's there: a reading is read as
 //!   ρ/tr ρ alone, and nothing of the survival is integrated for it. So a trajectory is the same to the bit whatever
 //!   times it is read at, and a read is the same whatever else is read (adapt.rs, # The reads). That path lies ½au² + ½a_B h²
 //!   from the atom's (a its
@@ -460,7 +460,7 @@ use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
-use crate::spectral::{Beat, Picture};
+use crate::spectral::{Beat, Picture, Refusal};
 use crate::units::{rounding, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
@@ -1477,12 +1477,10 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
 /// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
-/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads but one: the
-/// picture's counts of the decomposition's route (spectral.rs `Picture::counts`), which the next step's route is weighed
-/// against -- a step takes the strides where they cost less than the decomposition as it was last counted. That is what
-/// the scratch carries from one step to the next (`Carry`): a step's route follows from it, and the routes' states agree
-/// to their accuracy, not to the bit, so a trajectory taken up again with a fresh scratch goes on along other bits (and
-/// then other jumps); taken up with its carry, it goes on as itself (`Scratch::resumed`; adapt.rs `advance`'s stops).
+/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing of a
+/// step is carried to the next one, and a trajectory taken up again with a fresh scratch goes on as itself, to the bit.
+/// (Until 2026-11-20 the scratch carried its picture's counts of the decomposition's route, which the next step's
+/// route was priced against: the strides', spectral.rs, # Where the decomposition does not take the step.)
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
@@ -1511,22 +1509,7 @@ struct Carved<'a> {
     kept: &'a mut [f64],
 }
 
-/// What a trajectory's scratch carries from one step to the next (`Scratch`): its picture's counts of the decomposition's
-/// route (spectral.rs `Picture::counts`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Carry(Vec<Option<[f64; 2]>>);
-
 impl Scratch {
-    /// What the scratch carries to the trajectory's next step (`Carry`).
-    pub fn carry(&self) -> Carry {
-        Carry(self.picture.counts().to_vec())
-    }
-
-    /// The scratch of a trajectory taken up again where its own carried `carry`: its next steps the same to the bit.
-    pub fn resumed(carry: &Carry) -> Scratch {
-        Scratch { picture: Picture::counting(&carry.0), ..Scratch::default() }
-    }
-
     /// The scratch for a cluster of n states and `slots` sums (`Sums`): the weights' sums of the three nodes kept, a
     /// step's earlier stretches' (`Midway::stretch`).
     fn fit(&mut self, n: usize, slots: usize) {
@@ -1593,29 +1576,22 @@ mod count {
 }
 
 /// The node count of a quadrature over τ at a bandwidth (`plan`).
+#[cfg(test)]
 fn nodes(tau: f64, bandwidth: f64) -> usize {
     let (rule, panels) = plan(tau.abs(), bandwidth, FORMS);
     rule.nodes.len() * panels
 }
 
-/// The states a jump's root reads (`root`), as its rounds go: Newton's from below double the bits of ln N that are right
-/// each round, so that from the first to the mantissa's `ROUNDS` takes log₂ ROUNDS of them, each the hazard at the
-/// latest time below and a span of the fewest nodes (`FORMS`).
-fn root_states() -> f64 {
-    (1 + FORMS) as f64 * (ROUNDS as f64).log2()
-}
-
-/// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
-/// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
-/// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
-/// the time u it is launched from (none: no root priced) --: the model's generator at the step's middle and, unless it
-/// is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes at the three
-/// nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums (`Sums`): the static
-/// group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each node at the phases
-/// 0 and π/2 -- the survival's hazard (# Jumps); `part` is a sum's scratch. Returns the largest sum over the nodes of
-/// the moduli the decay's entries can reach (the static group's and each tone's two at once); a generator at a node
-/// that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
-fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<(&[C64], f64)>) -> Result<f64, Refused> {
+/// The picture of the generator along a step's path (`spectral::Picture`), prepared on `start`, the frame's state the
+/// step is launched with (none: any; `Picture::prepare`'s reached states): the model's generator at the step's middle
+/// and, unless it is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes
+/// at the three nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums
+/// (`Sums`): the static group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each
+/// node at the phases 0 and π/2 -- the survival's hazard (# Jumps). Returns the largest sum over the nodes of the moduli
+/// the decay's entries can reach (the static group's and each tone's two at once); a generator at a node that is no
+/// number refuses the step (`Refused::Overflow`: nothing of it can be propagated), and so does a step the decomposition
+/// does not take (`Refused::Propagation`).
+fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<&[C64]>) -> Result<f64, Refused> {
     let _p = crate::prof::scope(crate::prof::PICTURED);
     let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
     let picture = &mut scratch.picture;
@@ -1647,7 +1623,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     }
     let slots = Sums { still, h, tones: &picture.beats }.count();
     scratch.fit(n, slots);
-    let Carved { picture, decay, part, .. } = scratch.carve();
+    let Carved { picture, decay, .. } = scratch.carve();
     decay.fill(0.0);
     let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
     // The decay i(X − X†) of an n × n matrix X given entry by entry (row by row).
@@ -1668,15 +1644,8 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         }
     }
     let scale = sizes.into_iter().fold(0.0, f64::max);
-    let sums = Sums { still, h, tones: &picture.beats };
-    let rate = start.map_or(0.0, |(x, u)| {
-        part.fill(0.0);
-        sums.gather(u, 1.0, x, None, part);
-        hazard(decay, part, x.len()).max(0.0)
-    });
-    let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
     let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, start.map(|(x, _)| x));
+    picture.prepare(h, still, start).map_err(Refused::Propagation)?;
     Ok(scale)
 }
 
@@ -1717,7 +1686,7 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 }
 
 /// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
-/// bandwidth to the round-off (`Picture::between`: any time after the launch), their densities summed into
+/// bandwidth to the round-off (`Picture::at`: any time after the launch), their densities summed into
 /// `part` as the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a
 /// jump's root lies -- and, a span before the root, the kick's part of it. Returns it and the nodes taken.
 fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
@@ -1726,7 +1695,7 @@ fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), ba
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
     for (u, w) in quadrature(from, to, bandwidth, FORMS) {
-        picture.between(u, &mut x[..n]);
+        picture.at(u, &mut x[..n]);
         Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), part);
         nodes += 1;
     }
@@ -1790,22 +1759,22 @@ impl Sums<'_> {
     }
 }
 
-/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::between`), its
+/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::at`), its
 /// density through `part` (`Sums::gather` at the weight one, `hazard`).
 fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], part: &mut [f64]) -> f64 {
     let _p = crate::prof::scope(crate::prof::HAZARD_AT);
     let n = picture.states();
     part.fill(0.0);
     let mut x = [C64::ZERO; STATES];
-    picture.between(u, &mut x[..n]);
+    picture.at(u, &mut x[..n]);
     Sums { still, h, tones: &picture.beats }.gather(u, 1.0, &x[..n], None, part);
     hazard(decay, part, n)
 }
 
 /// The times read of `reads` (lab times; from the `read`-th on) that the propagation has passed at the time u (from the
 /// middle of the step of 2h that starts at `start`), before the step's end -- a time read at the end is the end's own
-/// (`Midway::attempt`) --, each the frame's state there (`Picture::between`: from the latest stop the propagation made at
-/// or before it), kept in `met` with its time until the panel's root is known (`Midway::stretch`). A read is no stop
+/// (`Midway::attempt`) --, each the frame's state there (`Picture::at`), kept in `met` with its time until the panel's
+/// root is known (`Midway::stretch`). A read is no stop
 /// of the propagation and nothing of it is taken up by the step (# The path between a step's ends): the stops and the
 /// nodes are the step's alone, and so is the picture's count of its work, which the reads leave as they found it.
 /// Returns the next time to read.
@@ -1816,7 +1785,7 @@ fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f6
     let work = picture.work;
     while let Some(t) = reads.get(read).map(|&time| (time - start) - h).filter(|&t| ahead(t) <= ahead(u) && ahead(t) < 1.0) {
         let mut x = [C64::ZERO; STATES];
-        picture.between(t, &mut x[..n]);
+        picture.at(t, &mut x[..n]);
         met.push((Stop::Read, t, x));
         read += 1;
     }
@@ -1959,9 +1928,10 @@ pub struct Made {
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
 /// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
 /// decay and its photons contradict each other); a state scatters faster than any state of the atom can
-/// (`Domain::runaway`: a fold far outside its validity); or the middle state's cluster made no K of its optical sector
-/// (`Unmade`: # The optical sector's noise). The advance takes the step at its half at the first two (adapt.rs, # The
-/// step), and ends at the others.
+/// (`Domain::runaway`: a fold far outside its validity); the middle state's cluster made no K of its optical sector
+/// (`Unmade`: # The optical sector's noise); or the decomposition of the generator does not take the step
+/// (spectral.rs `Refusal`, # Where the decomposition does not take the step). The advance takes the step at its half at
+/// the first two and the last (adapt.rs, # The step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
@@ -1969,6 +1939,7 @@ pub enum Refused {
     Emission,
     Runaway,
     Optical(Unmade),
+    Propagation(Refusal),
 }
 
 /// What the integrator asks of the model's domain at every step (SPEC §1.8; module documentation, # The domain).
@@ -2183,7 +2154,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let launched = along.turned(&march.state.psi, march.u, true);
         // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
         // decay laid alike.
-        let scale = pictured(&along, scratch, tau, Some((&launched[..n], march.u)))?;
+        let scale = pictured(&along, scratch, tau, Some(&launched[..n]))?;
         let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
         // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
         let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
@@ -2259,7 +2230,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     };
                     {
                         let _p = crate::prof::scope(crate::prof::ADVANCE);
-                        picture.advance(u, &mut x[..n]);
+                        picture.at(u, &mut x[..n]);
                     }
                     read = looked(picture, reads, read, (start, h), u, met);
                     if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
@@ -2300,7 +2271,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
                     (counted, traces) = (counted + nodes, traces + spans);
                     match crossed {
-                        Some(crossed) => picture.between(crossed, &mut x[..n]),
+                        Some(crossed) => picture.at(crossed, &mut x[..n]),
                         None => end = log - fell,
                     }
                     crossed
@@ -2611,7 +2582,7 @@ impl Brownian {
 /// picture along the path, its preparation (`made`: its decomposition, its slopes, its tones and their products, its
 /// following, as `pictured` made them) and the states it made after (`stops`: the launches -- the stretch's first and
 /// one after each of its jumps --, the states at the kick's nodes, at the middle and at the end, and those its jumps'
-/// roots read: `spectral::Picture::launch`, `advance`, `between`); the kick's nodes and the tones their states were
+/// roots read: `spectral::Picture::launch`, `at`); the kick's nodes and the tones their states were
 /// summed with (`nodes`, `tones`); the survival's traces (`traces`); where the stretch holds the step's middle
 /// (`centred`) the middle's form there and the optical sector's make (`sector`: its ground states and the make's count);
 /// the end state's held forms on the stretch that reaches the step's end (`ended`); and the model's own: the middle's
