@@ -10,6 +10,9 @@ crate-type = ["rlib"]
 [dependencies]
 rayon = "=1.12.0"
 serde_json = "1.0"
+# Sparse LU (COLAMD column order, partial pivoting) for the krylov module's preconditioner blocks and fallbacks;
+# pinned (published before 2026-10-22), single-threaded (no rayon feature): the module parallelises over blocks itself.
+faer = { version = "=0.24.4", default-features = false, features = ["std", "sparse-linalg"] }
 
 [features]
 # Profiling counters (src/prof.rs), measurement only: off in every released build.
