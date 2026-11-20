@@ -9,4 +9,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 rayon = "=1.12.0"
-serde_json = "1.0"
+# float_roundtrip: requests are parsed to the exact double JSON.stringify wrote (the default parser misreads ~6 % of
+# a request's numbers by 1-2 ulp).
+serde_json = { version = "1.0", features = ["float_roundtrip"] }

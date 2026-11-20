@@ -9,10 +9,12 @@ publish = false
 [features]
 embedded-solver = ["dep:atom-lindblad-embedded"]
 
+# float_roundtrip: requests are parsed to the exact double JSON.stringify wrote (the default parser misreads ~6 % of
+# a request's numbers by 1-2 ulp).
 [dependencies]
 tao = "=0.37.1"
 wry = "=0.57.0"
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 percent-encoding = "2"
 sha2 = "=0.10.9"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
