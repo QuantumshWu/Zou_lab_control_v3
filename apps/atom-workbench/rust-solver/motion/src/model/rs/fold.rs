@@ -468,9 +468,10 @@ pub struct Grouping {
     lift: Vec<(usize, usize, Vec<usize>)>,
     /// Per leg sum its members (legs) with each member row's row in the sum (u32::MAX: another sum's).
     wmaps: Vec<Vec<(usize, Vec<u32>)>>,
-    /// Per leg sum the union of its members' entries (row in the sum, column in the block), and per member per entry
-    /// its place there (u32::MAX: another sum's).
-    unions: Vec<(Vec<(u32, u32)>, Vec<Vec<u32>>)>,
+    /// Per block its amplitude sums side by side (`Out`'s M): their indices and their columns together C; per sum its
+    /// first column there.
+    layout: Vec<(Vec<usize>, usize)>,
+    z_offset: Vec<usize>,
 }
 
 /// An H pair (`Grouping`): its sums, its output and its conjugate's, and per element (i, j) of W Z its place in each.
@@ -717,36 +718,15 @@ impl Grouping {
                     .collect()
             })
             .collect();
-        let unions = ws
-            .iter()
-            .zip(&wmaps)
-            .map(|(_, members): (&Sum, &Vec<(usize, Vec<u32>)>)| {
-                let mut union: Vec<(u32, u32)> = Vec::new();
-                let mut places = Vec::new();
-                for (member, map) in members {
-                    let mut mine = Vec::new();
-                    for e in &plan.legs[*member].entries {
-                        let to = map[e.row as usize];
-                        if to == u32::MAX {
-                            mine.push(u32::MAX);
-                            continue;
-                        }
-                        let key = (to, e.col);
-                        let at = match union.iter().position(|x| *x == key) {
-                            Some(i) => i,
-                            None => {
-                                union.push(key);
-                                union.len() - 1
-                            }
-                        };
-                        mine.push(at as u32);
-                    }
-                    places.push(mine);
-                }
-                (union, places)
-            })
-            .collect();
-        Grouping { labels, of, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, unions }
+        let mut layout: Vec<(Vec<usize>, usize)> = vec![(Vec::new(), 0); plan.blocks.len()];
+        let mut z_offset = vec![0; zs.len()];
+        for (zi, z) in zs.iter().enumerate() {
+            let l = &mut layout[z.block];
+            z_offset[zi] = l.1;
+            l.0.push(zi);
+            l.1 += z.index.len();
+        }
+        Grouping { labels, of, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset }
     }
 
     /// Each piece's group.
@@ -1207,15 +1187,20 @@ pub struct Out {
     pub h: Vec<Compact>,
     pub channels: Vec<Compact>,
     pub lift: Vec<(Mat, [Mat; 3])>,
-    /// Per amplitude sum Ẑ in the block's basis and M = V Ẑ in the states' (|B| × 4|cols|: per row the values, then
-    /// the three gradients).
-    zs: Vec<Mat>,
-    ms: Vec<Mat>,
-    /// A pair's product and its gradients (3 stacked).
+    /// Per block its amplitude sums side by side (`Grouping::layout`), Ẑ in the block's basis and M = V Ẑ in the
+    /// states': the values (|B| × C, C their columns together) and the three gradients (|B| × 3C, side by side).
+    zv: Vec<Mat>,
+    zd: Vec<Mat>,
+    mv: Vec<Mat>,
+    md: Vec<Mat>,
+    /// A leg sum at the point, dense on its rows × the block: X, then ∂X along each axis (4|rows| × |B|, stacked), and
+    /// whether it moves (∂X ≠ 0); its products [X; ∂X] M (4|rows| × C) and X ∂M (|rows| × 3C).
+    x: Mat,
+    moving: bool,
     p: Mat,
-    dp: Mat,
-    /// A leg sum's entries at the point (values and three gradients per entry), the sum they belong to.
-    x: Vec<C64>,
+    pd: Mat,
+    /// A piece's terms' factors at the point with their scales and weight, and whether each moves.
+    tf: Vec<(C64, [C64; 3], bool)>,
     made: usize,
     pub work: f64,
 }
@@ -1242,82 +1227,97 @@ impl Out {
             c.zeroed(list.len());
         }
         self.made = usize::MAX;
-        // The amplitudes' sums, then M = V Ẑ.
-        self.zs.resize_with(grouping.zs.len(), Default::default);
-        self.ms.resize_with(grouping.zs.len(), Default::default);
-        for ((s, z), m) in grouping.zs.iter().zip(self.zs.iter_mut()).zip(self.ms.iter_mut()) {
-            let size = plan.blocks[s.block].rows.len();
-            let count = s.index.len();
-            let width = 4 * count;
-            zero(z, size, width);
-            for (member, map) in &s.members {
-                let (b, off) = plan.place[*member];
-                let (a, da) = (&local.m[b], &local.dm[b]);
-                let (total, c) = (a.cols, plan.amplitudes[*member].cols.len());
-                let w = weight(plan.amplitudes[*member].piece);
-                for k in 0..size {
-                    let row = &mut z.data[k * width..(k + 1) * width];
-                    for &(from, to) in map {
-                        row[to] += w * a.data[k * total + off + from];
-                        for d in 0..3 {
-                            row[(d + 1) * count + to] += w * da.data[k * 3 * total + 3 * off + d * c + from];
-                        }
-                    }
-                }
-            }
-            if plan.blocks[s.block].sideband.is_none() {
-                product(&local.spectra[s.block].vectors, z, m);
-                work += (size * size * width) as f64;
-            } else {
-                m.clone_from(z);
-            }
+        // The amplitudes' sums, block by block side by side, then M = V Ẑ: two products a block.
+        let nb = plan.blocks.len();
+        for list in [&mut self.zv, &mut self.zd, &mut self.mv, &mut self.md] {
+            list.resize_with(nb, Default::default);
         }
-        let v = &local.values;
-        let entry = |p: usize, e: &Entry| -> (C64, [C64; 3]) {
-            let (f, s) = plan.terms[p][e.term as usize];
-            let (x, g) = v.factors[f];
-            let c = e.value * v.coefficients[e.coefficient as usize] * s * weight(p);
-            (x * c, g.map(|d| d * c))
-        };
-        if making.model {
-            // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
-            for p in 0..plan.hamiltonian {
-                let o = &mut self.h[grouping.h_direct[p]];
-                for ((e, _), &k) in plan.direct[p].iter().zip(&grouping.h_direct_places[p]) {
-                    let (x, dx) = entry(p, e);
-                    o.value[k as usize] += x;
-                    for (g, d) in o.gradient.iter_mut().zip(dx) {
-                        g[k as usize] += d;
-                    }
-                }
+        for (b, (list, width)) in grouping.layout.iter().enumerate() {
+            let (size, width) = (plan.blocks[b].rows.len(), *width);
+            let (zv, zd) = (&mut self.zv[b], &mut self.zd[b]);
+            zero(zv, size, width);
+            zero(zd, size, 3 * width);
+            if list.is_empty() {
+                continue;
             }
-            for pair in &grouping.h_pairs {
-                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
-                if self.made != pair.w {
-                    self.legs(plan, grouping, v, &weight, pair.w);
-                    self.made = pair.w;
-                }
-                work += self.pair(grouping, pair.w, pair.z);
-                let (p, dp) = (&self.p.data, &self.dp.data);
-                {
-                    let o = &mut self.h[pair.out];
-                    for i in 0..rows {
-                        for j in 0..cols {
-                            let k = pair.places[i * cols + j] as usize;
-                            o.value[k] += p[i * cols + j] * 0.5;
-                            for a in 0..3 {
-                                o.gradient[a][k] += dp[(a * rows + i) * cols + j] * 0.5;
+            for &zi in list {
+                let (s, o) = (&grouping.zs[zi], grouping.z_offset[zi]);
+                for (member, map) in &s.members {
+                    let (mb, off) = plan.place[*member];
+                    let (a, da) = (&local.m[mb], &local.dm[mb]);
+                    let (total, c) = (a.cols, plan.amplitudes[*member].cols.len());
+                    let w = weight(plan.amplitudes[*member].piece);
+                    for k in 0..size {
+                        let (row, drow) = (&mut zv.data[k * width..(k + 1) * width], &mut zd.data[k * 3 * width..(k + 1) * 3 * width]);
+                        let (av, dv) = (&a.data[k * total + off..], &da.data[k * 3 * total + 3 * off..]);
+                        for &(from, to) in map {
+                            row[o + to] += w * av[from];
+                            for d in 0..3 {
+                                drow[d * width + o + to] += w * dv[d * c + from];
                             }
                         }
                     }
                 }
-                let o = &mut self.h[pair.conjugate];
+            }
+            if plan.blocks[b].sideband.is_none() {
+                let vectors = &local.spectra[b].vectors;
+                product(vectors, &self.zv[b], &mut self.mv[b]);
+                product(vectors, &self.zd[b], &mut self.md[b]);
+                work += (size * size * 4 * width) as f64;
+            } else {
+                self.mv[b].clone_from(&self.zv[b]);
+                self.md[b].clone_from(&self.zd[b]);
+            }
+        }
+        let v = &local.values;
+        // A piece's terms' factors with their scales and the piece's weight, once a piece.
+        let factors = |tf: &mut Vec<(C64, [C64; 3], bool)>, p: usize| {
+            let w = weight(p);
+            tf.clear();
+            tf.extend(plan.terms[p].iter().map(|&(f, s)| {
+                let (x, g) = v.factors[f];
+                let c = s * w;
+                (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
+            }));
+        };
+        if making.model {
+            // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
+            for p in 0..plan.hamiltonian {
+                factors(&mut self.tf, p);
+                let o = &mut self.h[grouping.h_direct[p]];
+                for ((e, _), &k) in plan.direct[p].iter().zip(&grouping.h_direct_places[p]) {
+                    let (x, dx, moving) = self.tf[e.term as usize];
+                    let c = e.value * v.coefficients[e.coefficient as usize];
+                    let k = k as usize;
+                    o.value[k] += x * c;
+                    if moving {
+                        for (g, d) in o.gradient.iter_mut().zip(dx) {
+                            g[k] += d * c;
+                        }
+                    }
+                }
+            }
+            for pair in &grouping.h_pairs {
+                if self.made != pair.w {
+                    self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.product(grouping, pair.w);
+                    self.made = pair.w;
+                }
+                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
                 for i in 0..rows {
                     for j in 0..cols {
-                        let k = pair.conjugate_places[i * cols + j] as usize;
-                        o.value[k] += (p[i * cols + j] * 0.5).conj();
+                        let (x, dx) = self.element(grouping, pair.w, pair.z, i, j);
+                        let (x, dx) = (x * 0.5, dx.map(|d| d * 0.5));
+                        let (k, kc) = (pair.places[i * cols + j] as usize, pair.conjugate_places[i * cols + j] as usize);
+                        let out = &mut self.h[pair.out];
+                        out.value[k] += x;
                         for a in 0..3 {
-                            o.gradient[a][k] += (dp[(a * rows + i) * cols + j] * 0.5).conj();
+                            out.gradient[a][k] += dx[a];
+                        }
+                        let out = &mut self.h[pair.conjugate];
+                        out.value[kc] += x.conj();
+                        for a in 0..3 {
+                            out.gradient[a][kc] += dx[a].conj();
                         }
                     }
                 }
@@ -1328,12 +1328,16 @@ impl Out {
                 if which == 1 && !making.kicks {
                     continue;
                 }
+                factors(&mut self.tf, p);
                 for ((e, _), &(o, k)) in plan.direct[p].iter().zip(&grouping.j_direct[p - plan.hamiltonian]) {
-                    let (x, dx) = entry(p, e);
-                    let o = &mut self.channels[o];
-                    o.value[k as usize] += x;
-                    for (g, d) in o.gradient.iter_mut().zip(dx) {
-                        g[k as usize] += d;
+                    let (x, dx, moving) = self.tf[e.term as usize];
+                    let c = e.value * v.coefficients[e.coefficient as usize];
+                    let (o, k) = (&mut self.channels[o], k as usize);
+                    o.value[k] += x * c;
+                    if moving {
+                        for (g, d) in o.gradient.iter_mut().zip(dx) {
+                            g[k] += d * c;
+                        }
                     }
                 }
             }
@@ -1341,20 +1345,19 @@ impl Out {
                 if grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks {
                     continue;
                 }
-                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
                 if self.made != pair.w {
                     self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.product(grouping, pair.w);
                     self.made = pair.w;
                 }
-                work += self.pair(grouping, pair.w, pair.z);
-                let (p, dp) = (&self.p.data, &self.dp.data);
-                let o = &mut self.channels[pair.out];
+                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
                 for i in 0..rows {
                     for j in 0..cols {
-                        let k = pair.places[i * cols + j] as usize;
-                        o.value[k] += p[i * cols + j];
+                        let (x, dx) = self.element(grouping, pair.w, pair.z, i, j);
+                        let (out, k) = (&mut self.channels[pair.out], pair.places[i * cols + j] as usize);
+                        out.value[k] += x;
                         for a in 0..3 {
-                            o.gradient[a][k] += dp[(a * rows + i) * cols + j];
+                            out.gradient[a][k] += dx[a];
                         }
                     }
                 }
@@ -1370,14 +1373,14 @@ impl Out {
             }
             for (b, group, mine) in &grouping.lift {
                 let (lv, lg) = &mut self.lift[*group];
+                let (mv, md, width) = (&self.mv[*b], &self.md[*b], grouping.layout[*b].1);
                 for &i in mine {
-                    let (s, m) = (&grouping.zs[i], &self.ms[i]);
-                    let c = s.index.len();
+                    let (s, o) = (&grouping.zs[i], grouping.z_offset[i]);
                     for (k, &row) in plan.blocks[*b].rows.iter().enumerate() {
                         for (j, &a) in s.index.iter().enumerate() {
-                            lv.data[row * n + a] += m.data[k * 4 * c + j];
+                            lv.data[row * n + a] += mv.data[k * width + o + j];
                             for d in 0..3 {
-                                lg[d].data[row * n + a] += m.data[k * 4 * c + (d + 1) * c + j];
+                                lg[d].data[row * n + a] += md.data[k * 3 * width + d * width + o + j];
                             }
                         }
                     }
@@ -1387,58 +1390,68 @@ impl Out {
         self.work = work;
     }
 
-    /// The leg sum wi's entries (`Grouping::unions`) at the point: its members' fixed entries at their factors, weights
-    /// and coefficients, summed on the union of their places, values and gradients.
+    /// The leg sum wi at the point, dense: X and ∂X (`x`), its members' fixed entries at their factors, weights and
+    /// coefficients, each on its row in the sum (`Grouping::wmaps`) and its column in the block.
     fn legs(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, wi: usize) {
         let s = &grouping.ws[wi];
-        let (union, places) = &grouping.unions[s.at];
-        self.x.clear();
-        self.x.resize(4 * union.len(), C64::ZERO);
-        for ((member, _), slots) in grouping.wmaps[s.at].iter().zip(places) {
+        let (rows, size) = (s.index.len(), plan.blocks[s.block].rows.len());
+        zero(&mut self.x, 4 * rows, size);
+        self.moving = false;
+        for (member, map) in &grouping.wmaps[s.at] {
             let r = &plan.legs[*member];
             let f = weight(r.piece);
             let ts = &plan.terms[r.piece];
-            for (e, &slot) in r.entries.iter().zip(slots) {
-                let k = v.coefficients[e.coefficient as usize];
-                if slot == u32::MAX || k == 0.0 {
+            for e in &r.entries {
+                let (k, to) = (v.coefficients[e.coefficient as usize], map[e.row as usize]);
+                if to == u32::MAX || k == 0.0 {
                     continue;
                 }
                 let (fi, sc) = ts[e.term as usize];
                 let (x, g) = v.factors[fi];
                 let c = e.value * k * sc * f;
-                let at = 4 * slot as usize;
-                self.x[at] += x * c;
-                for a in 0..3 {
-                    self.x[at + 1 + a] += g[a] * c;
+                let at = to as usize * size + e.col as usize;
+                self.x.data[at] += x * c;
+                for (a, d) in g.iter().enumerate() {
+                    if *d != C64::ZERO {
+                        self.x.data[(a + 1) * rows * size + at] += *d * c;
+                        self.moving = true;
+                    }
                 }
             }
         }
     }
 
-    /// The pair of the leg sum wi (its entries made, `legs`) and the amplitude sum zi: P = X_KQ M (|rows| × |cols|) into
-    /// `p`, its gradients ∂X M + X ∂M (3 stacked) into `dp`, entry by entry, each a row of M.
-    fn pair(&mut self, grouping: &Grouping, wi: usize, zi: usize) -> f64 {
+    /// The products of the leg sum wi (made, `legs`) with its block's M, by the product kernel: [X; ∂X] M_v -- X M_v
+    /// alone where the sum does not move -- and X ∂M; every pair of the sum is a slice of them (`Grouping::z_offset`,
+    /// `element`). Returns the counted complex multiply-adds.
+    fn product(&mut self, grouping: &Grouping, wi: usize) -> f64 {
         let s = &grouping.ws[wi];
-        let rows = s.index.len();
-        let m = &self.ms[zi];
-        let cols = grouping.zs[zi].index.len();
-        let width = 4 * cols;
-        zero(&mut self.p, rows, cols);
-        zero(&mut self.dp, 3 * rows, cols);
-        let (union, _) = &grouping.unions[s.at];
-        for (slot, &(to, col)) in union.iter().enumerate() {
-            let (value, g) = (self.x[4 * slot], [self.x[4 * slot + 1], self.x[4 * slot + 2], self.x[4 * slot + 3]]);
-            let (to, row) = (to as usize, &m.data[col as usize * width..(col as usize + 1) * width]);
-            linalg::mul_add(false, &mut self.p.data[to * cols..(to + 1) * cols], value, &row[..cols]);
-            for a in 0..3 {
-                let out = &mut self.dp.data[(a * rows + to) * cols..(a * rows + to + 1) * cols];
-                if g[a] != C64::ZERO {
-                    linalg::mul_add(false, out, g[a], &row[..cols]);
-                }
-                linalg::mul_add(false, out, value, &row[(a + 1) * cols..(a + 2) * cols]);
+        let (rows, width) = (s.index.len(), grouping.layout[s.block].1);
+        let (mv, md) = (&self.mv[s.block], &self.md[s.block]);
+        let size = mv.rows;
+        let stacked = if self.moving { 4 * rows } else { rows };
+        sized(&mut self.p, stacked, width);
+        linalg::fused_product(&self.x.data[..stacked * size], &mv.data, (stacked, size, width), &mut self.p.data);
+        sized(&mut self.pd, rows, 3 * width);
+        linalg::fused_product(&self.x.data[..rows * size], &md.data, (rows, size, 3 * width), &mut self.pd.data);
+        ((stacked + 3 * rows) * size * width) as f64
+    }
+
+    /// The element (i, j) of the pair of the leg sum wi (its products made) and the amplitude sum zi: X M and its three
+    /// gradients ∂X M + X ∂M.
+    fn element(&self, grouping: &Grouping, wi: usize, zi: usize, i: usize, j: usize) -> (C64, [C64; 3]) {
+        let (rows, width) = (grouping.ws[wi].index.len(), grouping.layout[grouping.ws[wi].block].1);
+        let at = grouping.z_offset[zi] + j;
+        let value = self.p.data[i * width + at];
+        let gradient = std::array::from_fn(|a| {
+            let held = self.pd.data[i * 3 * width + a * width + at];
+            if self.moving {
+                held + self.p.data[((a + 1) * rows + i) * width + at]
+            } else {
+                held
             }
-        }
-        (7 * union.len() * cols) as f64
+        });
+        (value, gradient)
     }
 }
 

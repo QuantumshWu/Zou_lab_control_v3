@@ -183,6 +183,11 @@ impl Spectrum {
     pub fn decompose(&mut self, g: &Mat) -> bool {
         let n = g.rows;
         let mut work = 0.0;
+        // One leaf (no gap that pays, every block of one state among them): the leaf about its own centre, on the
+        // buffers as they stand -- no change of basis to multiply in, nothing allocated where the sizes repeat.
+        if n < 2 || split(g).is_none() {
+            return self.leaf(g);
+        }
         let (t, ti, leaves) = decouple(g, &mut work);
         let (mut vb, mut vbi) = (Mat::zeros(n, n), Mat::zeros(n, n));
         self.centre = vec![0.0; n];
@@ -215,6 +220,47 @@ impl Spectrum {
         self.inverse = vbi.product(&ti);
         work += 2.0 * (n * n * n) as f64;
         self.work = work;
+        true
+    }
+
+    /// The spectrum of one leaf, the whole block (`decompose`): its centre c (the mean of Re G_ii), and G − c by the
+    /// eigensolver -- a single state its own value, V = V⁻¹ = 1.
+    fn leaf(&mut self, g: &Mat) -> bool {
+        let n = g.rows;
+        let c = (0..n).map(|i| g[(i, i)].re).sum::<f64>() / n.max(1) as f64;
+        self.centre.clear();
+        self.centre.resize(n, c);
+        self.leaves.clear();
+        self.leaves.push(n);
+        self.values.clear();
+        if n == 1 {
+            self.values.push(g[(0, 0)] - C64::real(c));
+            for m in [&mut self.vectors, &mut self.inverse] {
+                m.rows = 1;
+                m.cols = 1;
+                m.data.clear();
+                m.data.push(C64::ONE);
+            }
+            self.work = 0.0;
+            return true;
+        }
+        if self.eigens.is_empty() {
+            self.eigens.push(linalg::Eigen::default());
+        }
+        let mut shifted = std::mem::take(&mut self.vectors);
+        shifted.clone_from(g);
+        for i in 0..n {
+            shifted.data[i * n + i] -= C64::real(c);
+        }
+        let eigen = &mut self.eigens[0];
+        if !eigen.decompose(&shifted) {
+            return false;
+        }
+        self.values.extend_from_slice(&eigen.values[..n]);
+        shifted.clone_from(&eigen.vectors);
+        self.vectors = shifted;
+        self.inverse.clone_from(&eigen.inverse);
+        self.work = eigen.work;
         true
     }
 }
