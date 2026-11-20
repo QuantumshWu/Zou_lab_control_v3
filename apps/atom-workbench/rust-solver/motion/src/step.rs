@@ -115,7 +115,21 @@
 //! bandwidth B, does not hold for it: laid at the propagation's remainder (10⁻⁷ a step on that atom at τ = 0.2 µs), the
 //! survival erred by 1.9·10⁻², the quotient's unresolved ringing; at 2B by 1.5·10⁻³; to the round-off by 1.9·10⁻⁴,
 //! falling with the step as above -- the rule's margin there takes the multiples of B (its error grows as (νw)^{2m}).
-//! How far the quotient reaches at a tolerance is not derived (BRIEF_TAU, tau.status.md).
+//! So the rule is laid at the quotient's own bandwidth ν_Q (spectral.rs `Picture::quotient`): the forms' with the
+//! norm's ringing and its harmonics to the round-off -- the quotient's terms, a numerator pair's times k ringing pairs'
+//! of the eigenvectors' overlaps, their weights the launched state's and their frequencies added, cut by Chernoff's
+//! bound on the series where what lies beyond weighs within the round-off --, over each piece of the step as many equal
+//! Gauss–Legendre panels as leave the fewest nodes to take (`count`: one where no jump's root lies in the piece, more
+//! where one does and the root's panel is taken again), each of the fewest nodes to the round-off (`fewest`), every
+//! rule made in O(m) to the round-off once for the process (`special::gauss_legendre`, `rule`). Measured against brute
+//! force on the six scenes' plain pieces, the pieces after a jump and the bare starts at τ = 0.3256 and 0.948 µs
+//! (step/tests/r1prop.rs `r1prop_quadrature`; tilt2 at 0.3256): the sums, the hazard, the kick and the hazard to a time
+//! inside the piece (a root's span) within 3·10⁻¹⁴, laid as one panel and as a root's piece's three to eight, where the
+//! panels at the forms' bandwidth before left the norm's harmonics at 2B and 3B, up to 10⁻⁹ (motion3d_status/rewrite/
+//! carrier.status.md); ν_Q 2.0 to 3.2 times the forms' bandwidth on the explicit clusters, 5.6 to 6.4 on GMD1C's ground
+//! states, the nodes 1.3 to 2.0 times the panels' before (2.1 to 2.5 on GMD1C, of 9 to 27 nodes). The integration's
+//! time -- the stretch less its picture's making, along a walk on one thread (`r1prop_integration_time`) -- 1.1 to 2.1
+//! times the strides' before on PGC3D, TET, R4, GMD1C and tilt2, a fifth to nine tenths of it on tilt0.
 //!
 //! Why a quadrature and not a closed form. On the unnormalized state every form is a sum over the pairs of states of
 //! a slow factor times e^{−i(λ_b − λ_a*)s}, whose integral over the step is a closed form pair by pair (the moments
@@ -215,7 +229,7 @@
 //!   below zero between the nodes by its own third-order error; no scene's does.)
 //! - N reaches the trajectory's threshold θ first in the first panel whose end is at θ or below (N is monotone); a jump
 //!   is made there, at the root u* of ln N(u) = ln θ to ln N's rounding, ln N inside the panel its start less ∫h over
-//!   spans of it by their own quadratures on the propagation's states (`Picture::between`), stepped from below at the
+//!   spans of it by their own quadratures on the propagation's states (`Picture::at`), stepped from below at the
 //!   hazard's rate (`root`): the spans below the root are the kick's part of the panel as far as the root, so that the
 //!   root costs the panel's nodes before it and a few more, as laying them again did. The states kept inside that
 //!   panel -- the middle, a time read -- stand where they lie before the root; the others are met again after the
@@ -395,8 +409,8 @@
 //! - The internal state at any time: its propagation has x(u), u the time from the middle, on the straight path through
 //!   the middle (spectral.rs), and ψ_s = e^{iK_s·v_m u} x_s. A time read is no stop of the propagation: the step's
 //!   stops and nodes, its jumps' roots and its count are what the step resolves alone, and a read takes the state
-//!   from the propagation as it passes -- from the latest stop at or before the time (`Picture::between`), after the
-//!   jumps before it and before those after it (`looked`) --, its norm the propagation's there: a reading is read as
+//!   from the propagation as it passes -- the state there (`Picture::at`), after the jumps before it and before those
+//!   after it (`looked`) --, its norm the propagation's there: a reading is read as
 //!   ρ/tr ρ alone, and nothing of the survival is integrated for it. So a trajectory is the same to the bit whatever
 //!   times it is read at, and a read is the same whatever else is read (adapt.rs, # The reads). That path lies ½au² + ½a_B h²
 //!   from the atom's (a its
@@ -453,14 +467,14 @@
 //! falls by the decay the step takes and never rises (# Jumps) --, and how inaccurate is the check's to read
 //! (step/tests.rs: an atom past its standing wave's resolution).
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
-use crate::spectral::{Beat, Picture};
+use crate::spectral::{Beat, Picture, Refusal};
 use crate::units::{rounding, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
@@ -1025,7 +1039,7 @@ impl Flow {
         let hm = self.hbar_over_mass;
         let d = [r[0] - self.centre[0], r[1] - self.centre[1], r[2] - self.centre[2]];
         let (mut r1, mut k1) = (self.centre, [0.0; 3]);
-        let mut sizes = [self.centre.iter().fold(0.0, |m: f64, x| m.max(x.abs())), 0.0];
+        let mut sizes = [self.centre.iter().fold(0.0, |m: f64, x| linalg::larger(m, x.abs())), 0.0];
         for i in 0..3 {
             let e = self.axes[i];
             let (y, k, lambda) = (linalg::dot3(e, d), linalg::dot3(e, kappa), self.curvatures[i]);
@@ -1064,7 +1078,7 @@ impl Flow {
     }
     /// The largest rate of the flow, max_i √((ħ/m)|λ_i|) (rad/µs): κ's frequency along its axes (a hyperbolic axis' rate).
     fn rate(&self) -> f64 {
-        self.curvatures.iter().map(|l| (self.hbar_over_mass * l.abs()).sqrt()).fold(0.0, f64::max)
+        self.curvatures.iter().map(|l| (self.hbar_over_mass * l.abs()).sqrt()).fold(0.0, linalg::larger)
     }
 }
 
@@ -1094,7 +1108,7 @@ const REACH: usize = 28;
 /// contraction too slow for a stable step.
 fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Result<(Flow, ([f64; 3], [f64; 3])), Refused> {
     let hm = model.hbar_over_mass();
-    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, f64::max);
+    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, linalg::larger);
     let mut p: [f64; 3] = std::array::from_fn(|a| r[a] + hm * kappa[a] * half);
     // The last move of the reach's position, the momentum it reached then, and the largest contraction measured (the
     // first round measures none: its move over no move before it is zero).
@@ -1106,7 +1120,7 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
         if !moved.is_finite() || !reached.1.iter().all(|k| k.is_finite()) {
             return Err(Refused::Overflow);
         }
-        contraction = contraction.max(moved / last);
+        contraction = linalg::larger(contraction, moved / last);
         let within = sizes.map(|size| rounding(REACH) * size);
         let next = [contraction * moved, contraction * apart(reached.1, before)];
         if moved <= within[0] || (last.is_finite() && next[0] <= within[0] && next[1] <= within[1]) {
@@ -1123,72 +1137,138 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
 // ---------------------------------------------------------------------------------------------------------------------
 // Quadrature within a tolerance.
 
-/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes, weights) and its panel phase x_m: the largest ν w at which its
-/// error on a component e^{iνs} over a panel of width w, w (νw)^{2m} (m!)⁴/((2m + 1)((2m)!)³) (Davis & Rabinowitz
-/// 2.7.12), is within the unit round-off times w (# The quadrature's tolerance): the panel a rule integrates an entire
-/// function of that bandwidth on to the round-off of its size times the width -- the path's moments
-/// (`Segment::moments`), the kick's and the survival's quadratures on the propagation's states.
+/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes from the largest down, weights).
 struct Rule {
     nodes: Vec<f64>,
     weights: Vec<f64>,
-    phase: f64,
 }
 
-impl Rule {
-    fn new(m: usize) -> Rule {
-        let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
-        let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
-        let ln = ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
-        Rule { nodes, weights, phase: ((UNIT_ROUNDOFF.ln() + ln) / (2 * m) as f64).exp() }
+/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is first asked and
+/// kept for the process -- the same rule whichever thread makes it.
+fn rule(m: usize) -> &'static Rule {
+    static RULES: RwLock<Vec<Option<&'static Rule>>> = RwLock::new(Vec::new());
+    if let Some(&Some(rule)) = RULES.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(m) {
+        return rule;
     }
-}
-
-/// The rules of 2 to 64 nodes. The least is the smallest rule there is (`FORMS`, `MOMENTS` ask for no fewer). The
-/// largest is not derived: a rule's panel phase over its nodes, x_m/m, rises with m towards 8/e (Stirling on the
-/// error's factorials), so no rule is the last that pays; 64 is at three quarters of that limit at the round-off
-/// (u^{1/128}). The largest sets the nodes of a stiff step's quadrature, its cost alone.
-fn rules() -> &'static [Rule] {
-    static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
-    RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
-}
-
-/// The rule and the panels over a width of an entire integrand of bandwidth ν to the round-off (`Rule`): the fewest
-/// nodes (the smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m, of the
-/// rules of `nodes` nodes and more -- a rule of m nodes is exact for the polynomials of degree 2m − 1, which is what is
-/// asked of it where the bandwidth vanishes. Its node count is the propagation's states and the kick's sums
-/// (`propagate`, `count::impulse`). The rules are looked at from the smallest up as far as the first that takes one
-/// panel: every larger rule has more nodes than that one.
-fn plan(width: f64, bandwidth: f64, nodes: usize) -> (&'static Rule, usize) {
-    let mut least: Option<(&'static Rule, usize)> = None;
-    for rule in rules().iter().filter(|rule| rule.nodes.len() >= nodes) {
-        let panels = ((bandwidth * width / rule.phase).ceil() as usize).max(1);
-        if least.map_or(true, |(best, most)| rule.nodes.len() * panels < best.nodes.len() * most) {
-            least = Some((rule, panels));
-        }
-        if panels == 1 {
-            break;
-        }
+    let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
+    let made = Rule { nodes, weights };
+    let mut rules = RULES.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if rules.len() <= m {
+        rules.resize(m + 1, None);
     }
-    least.expect("a rule")
+    *rules[m].get_or_insert_with(|| Box::leak(Box::new(made)))
 }
 
-/// The panels over [a, b] of an entire integrand of bandwidth ν within a tolerance (`plan`, of the rules of `nodes`
-/// nodes and more), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in
-/// their order (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's
-/// millions of nodes are never held at once.
-fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
-    let (rule, panels) = plan((b - a).abs(), bandwidth, nodes);
-    let w = (b - a) / panels as f64;
-    (0..panels).map(move |p| {
-        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == panels { b } else { a + (p + 1) as f64 * w });
-        (end, rule.nodes.iter().zip(&rule.weights).rev().map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight)))
+thread_local! {
+    /// The spherical Bessel functions' scratch (`fewest`).
+    static BESSELS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The index past `from` where the three-term recurrence's growing solution (p_{from−1} = 0, p_from = 1, upward) has
+/// grown by the round-off's inverse: there j_l has fallen below the round-off of j_from, and Miller's recurrence started
+/// there has j_from to the round-off (Gautschi 1967).
+fn grown(x: f64, from: usize) -> usize {
+    let (mut p0, mut p1, mut l) = (0.0f64, 1.0f64, from);
+    while p1.abs() < 1.0 / UNIT_ROUNDOFF {
+        let p2 = (2 * l + 1) as f64 / x * p1 - p0;
+        (p0, p1, l) = (p1, p2, l + 1);
+    }
+    l
+}
+
+/// The fewest nodes of one Gauss–Legendre panel over the width w on an integrand that is entire at the bandwidth ν,
+/// times a polynomial of `degree`, to the round-off of its size times the width -- every component of it, as the
+/// propagation takes Ĥ₀ (# The quadrature's tolerance): on [−1, 1] a component is e^{iκt} p(t), κ = ν w/2, whose
+/// Legendre series has the coefficients (2l + 1) i^l j_l(κ) (j_l the spherical Bessel functions), moved by p at most
+/// `degree` places; the rule of m nodes integrates P_l exactly up to l = 2m − 1 and errs on a P_l beyond by no more
+/// than 2 (|P_l| ≤ 1, its weights' sum 2), so within Σ_{l ≥ 2m − degree} (2l + 1)|j_l(κ)| over the integral's scale 2:
+/// the least m that holds that within the unit round-off -- the phase over four and the Bessel functions' tail past
+/// l ≈ κ, which falls faster than any power --, not fewer than `least`. Measured tight (CARRIER: at κ = 20, 150, 600
+/// the rule of 27, 106, 349 nodes errs by 10⁻¹⁶–10⁻¹⁵, a tenth fewer nodes by 3·10⁻¹⁴, 6·10⁻¹⁰, 5·10⁻⁴). j_l by
+/// Miller's backward recurrence from where it has fallen below the round-off (`grown`), normalized by
+/// Σ(2l + 1)j_l² = 1.
+fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
+    let kappa = 0.5 * nu * width.abs();
+    if kappa <= 0.0 {
+        return least;
+    }
+    // No finite bandwidth -- ∞ or NaN, never read as none -- has a rule: its caller refuses it first (`Midway::stretch`).
+    if !kappa.is_finite() {
+        return usize::MAX;
+    }
+    BESSELS.with(|f| {
+        let f = &mut *f.borrow_mut();
+        let top = grown(kappa, grown(kappa, kappa.ceil() as usize + 1).max(2 * least));
+        f.clear();
+        f.resize(top + 2, 0.0);
+        f[top] = 1.0;
+        for l in (1..=top).rev() {
+            f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
+            if f[l - 1].abs() > 1e100 {
+                f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+            }
+        }
+        let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+        let mut tail = 0.0;
+        let start = (0..=top).rev().find(|&l| {
+            tail += (2 * l + 1) as f64 * f[l].abs() / norm;
+            tail > UNIT_ROUNDOFF
+        });
+        start.map_or(least, |l| (l + 1 + degree).div_ceil(2).max(least))
     })
 }
 
-/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν within a tolerance, panel after panel
-/// (`panels`).
-fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, bandwidth, nodes).flat_map(|(_, nodes)| nodes)
+/// The panels' count over a piece of the width w at the bandwidth ν (`panels`; `fewest` of `nodes` nodes and more, on
+/// an integrand times a polynomial of `degree`): the n that leaves the fewest nodes to take, each node a state and its
+/// sums (`Midway::stretch`). The rules are made once for the process (`rule`): their making is no part of a piece's
+/// cost. On n equal panels of m = m(νw/n) nodes each (m(κ) ≈ κ/2 and the Bessel tail's few, the tail each panel's own):
+/// - a piece the survival does not end in takes them all: C(n) = n m;
+/// - a piece a jump's root lies in takes the panels before the root's, the root's panel's nodes as far as the norm's
+///   crossing -- which the root takes again, by its span from the panel's start (`root`, `fallen`) -- and that span,
+///   and no node past the root. Over the root's place -- uniform in the piece on the trajectories' thresholds, which are
+///   uniform in the survival, the survival taken linear between the piece's ends --, (n − 1)/2 panels before it, half
+///   the root's panel's nodes (a rule's nodes lie symmetric in its panel: the share before a uniform point is ½ on the
+///   mean) and the span at its mean, half the panel: C(n) = (n/2) m + m(νw/(2n)) -- the tail n times against what the
+///   root takes again, a panel's.
+/// Which one a piece is, `ends` tells (the propagation's norm at the piece's end at the trajectory's threshold or below:
+/// the survival to the propagation's accuracy, a stop's cost), asked only where the root's n is not one. n is the first
+/// past which C does not fall (each part of C is monotone in n, but for the node counts' steps of one).
+fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> usize {
+    let m = |n: usize| fewest(bandwidth, width / n as f64, nodes, degree) as f64;
+    let least = |cost: &dyn Fn(usize) -> f64| {
+        let (mut n, mut best) = (1, cost(1));
+        loop {
+            let next = cost(n + 1);
+            if !(next < best) {
+                break n;
+            }
+            (n, best) = (n + 1, next);
+        }
+    };
+    let rooted = least(&|n| 0.5 * n as f64 * m(n) + m(2 * n));
+    if rooted > 1 && ends() {
+        rooted
+    } else {
+        least(&|n| n as f64 * m(n))
+    }
+}
+
+/// The `count` equal panels over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, each
+/// to the round-off (`fewest`, of `nodes` nodes and more), in their order from a to b: each panel's end (b itself for
+/// the last) and its nodes and weights in their order.
+fn panels(a: f64, b: f64, count: usize, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+    let w = (b - a) / count as f64;
+    let rule = rule(fewest(bandwidth, w, nodes, degree));
+    (0..count).map(move |p| {
+        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
+        (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k])))
+    })
+}
+
+/// The nodes and weights over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the
+/// round-off, where no jump's root is sought (`count`).
+fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, f64)> {
+    panels(a, b, count(b - a, bandwidth, nodes, degree, || false), bandwidth, nodes, degree).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1282,7 +1362,7 @@ impl Segment {
         if !(hi > lo) {
             return (one, two);
         }
-        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS) {
+        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, 0) {
             let k = self.at(t).1;
             for x in 0..3 {
                 one[x] += sign * w * k[x];
@@ -1477,12 +1557,12 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
 /// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
-/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads but one: the
-/// picture's counts of the decomposition's route (spectral.rs `Picture::counts`), which the next step's route is weighed
-/// against -- a step takes the strides where they cost less than the decomposition as it was last counted. That is what
-/// the scratch carries from one step to the next (`Carry`): a step's route follows from it, and the routes' states agree
-/// to their accuracy, not to the bit, so a trajectory taken up again with a fresh scratch goes on along other bits (and
-/// then other jumps); taken up with its carry, it goes on as itself (`Scratch::resumed`; adapt.rs `advance`'s stops).
+/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing of a
+/// step is carried to the next one, and a trajectory taken up again with a fresh scratch goes on as itself, to the bit.
+/// Beside, the count of the trajectory's steps the decomposition refused for an entry of no route (`unrouted`:
+/// spectral.rs, # The split), which the solve's probe reads (solve.rs, ## The ladder) and no step does.
+/// (Until 2026-11-20 the scratch carried its picture's counts of the decomposition's route, which the next step's
+/// route was priced against: the strides', spectral.rs, # Where the decomposition does not take the step.)
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
@@ -1494,6 +1574,8 @@ pub struct Scratch {
     slots: usize,
     weights: Vec<f64>,
     kept: Vec<f64>,
+    /// The steps refused for an entry of no route (`Refused::Propagation(Refusal::Radius)`), at whatever length.
+    unrouted: u64,
 }
 
 struct Carved<'a> {
@@ -1511,20 +1593,11 @@ struct Carved<'a> {
     kept: &'a mut [f64],
 }
 
-/// What a trajectory's scratch carries from one step to the next (`Scratch`): its picture's counts of the decomposition's
-/// route (spectral.rs `Picture::counts`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Carry(Vec<Option<[f64; 2]>>);
-
 impl Scratch {
-    /// What the scratch carries to the trajectory's next step (`Carry`).
-    pub fn carry(&self) -> Carry {
-        Carry(self.picture.counts().to_vec())
-    }
-
-    /// The scratch of a trajectory taken up again where its own carried `carry`: its next steps the same to the bit.
-    pub fn resumed(carry: &Carry) -> Scratch {
-        Scratch { picture: Picture::counting(&carry.0), ..Scratch::default() }
+    /// The steps refused for an entry the decomposition takes by no route (spectral.rs, # The split), at whatever
+    /// length -- each taken at its halves by the advance (adapt.rs, # The step) -- since the scratch was made.
+    pub fn unrouted(&self) -> u64 {
+        self.unrouted
     }
 
     /// The scratch for a cluster of n states and `slots` sums (`Sums`): the weights' sums of the three nodes kept, a
@@ -1592,30 +1665,22 @@ mod count {
     }
 }
 
-/// The node count of a quadrature over τ at a bandwidth (`plan`).
+/// The node count of a quadrature over τ at a bandwidth (`fewest`, with the three nodes' Lagrange weights).
+#[cfg(test)]
 fn nodes(tau: f64, bandwidth: f64) -> usize {
-    let (rule, panels) = plan(tau.abs(), bandwidth, FORMS);
-    rule.nodes.len() * panels
+    fewest(bandwidth, tau, FORMS, 2)
 }
 
-/// The states a jump's root reads (`root`), as its rounds go: Newton's from below double the bits of ln N that are right
-/// each round, so that from the first to the mantissa's `ROUNDS` takes log₂ ROUNDS of them, each the hazard at the
-/// latest time below and a span of the fewest nodes (`FORMS`).
-fn root_states() -> f64 {
-    (1 + FORMS) as f64 * (ROUNDS as f64).log2()
-}
-
-/// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
-/// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
-/// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
-/// the time u it is launched from (none: no root priced) --: the model's generator at the step's middle and, unless it
-/// is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes at the three
-/// nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums (`Sums`): the static
-/// group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each node at the phases
-/// 0 and π/2 -- the survival's hazard (# Jumps); `part` is a sum's scratch. Returns the largest sum over the nodes of
-/// the moduli the decay's entries can reach (the static group's and each tone's two at once); a generator at a node
-/// that is no number refuses the step (`Refused::Overflow`: nothing of it can be propagated).
-fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<(&[C64], f64)>) -> Result<f64, Refused> {
+/// The picture of the generator along a step's path (`spectral::Picture`), prepared on `start`, the frame's state the
+/// step is launched with (none: any; `Picture::prepare`'s reached states): the model's generator at the step's middle
+/// and, unless it is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes
+/// at the three nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums
+/// (`Sums`): the static group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each
+/// node at the phases 0 and π/2 -- the survival's hazard (# Jumps). Returns the largest sum over the nodes of the moduli
+/// the decay's entries can reach (the static group's and each tone's two at once); a generator at a node that is no
+/// number refuses the step (`Refused::Overflow`: nothing of it can be propagated), and so does a step the decomposition
+/// does not take (`Refused::Propagation`).
+fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<&[C64]>) -> Result<f64, Refused> {
     let _p = crate::prof::scope(crate::prof::PICTURED);
     let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
     let picture = &mut scratch.picture;
@@ -1647,7 +1712,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     }
     let slots = Sums { still, h, tones: &picture.beats }.count();
     scratch.fit(n, slots);
-    let Carved { picture, decay, part, .. } = scratch.carve();
+    let Carved { picture, decay, .. } = scratch.carve();
     decay.fill(0.0);
     let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
     // The decay i(X − X†) of an n × n matrix X given entry by entry (row by row).
@@ -1667,16 +1732,9 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
             *size += laid(of(|k| plus[k] + minus[k], n), n, at, decay) + laid(of(|k| C64::I * (plus[k] - minus[k]), n), n, at + 1, decay);
         }
     }
-    let scale = sizes.into_iter().fold(0.0, f64::max);
-    let sums = Sums { still, h, tones: &picture.beats };
-    let rate = start.map_or(0.0, |(x, u)| {
-        part.fill(0.0);
-        sums.gather(u, 1.0, x, None, part);
-        hazard(decay, part, x.len()).max(0.0)
-    });
-    let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
+    let scale = sizes.into_iter().fold(0.0, linalg::larger);
     let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, start.map(|(x, _)| x));
+    picture.prepare(h, still, start).map_err(Refused::Propagation)?;
     Ok(scale)
 }
 
@@ -1717,7 +1775,7 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 }
 
 /// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
-/// bandwidth to the round-off (`Picture::between`: any time after the launch), their densities summed into
+/// bandwidth to the round-off (`Picture::at`: any time after the launch), their densities summed into
 /// `part` as the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a
 /// jump's root lies -- and, a span before the root, the kick's part of it. Returns it and the nodes taken.
 fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
@@ -1725,8 +1783,8 @@ fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), ba
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
-    for (u, w) in quadrature(from, to, bandwidth, FORMS) {
-        picture.between(u, &mut x[..n]);
+    for (u, w) in quadrature(from, to, bandwidth, FORMS, 2) {
+        picture.at(u, &mut x[..n]);
         Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), part);
         nodes += 1;
     }
@@ -1790,22 +1848,22 @@ impl Sums<'_> {
     }
 }
 
-/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::between`), its
+/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::at`), its
 /// density through `part` (`Sums::gather` at the weight one, `hazard`).
 fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], part: &mut [f64]) -> f64 {
     let _p = crate::prof::scope(crate::prof::HAZARD_AT);
     let n = picture.states();
     part.fill(0.0);
     let mut x = [C64::ZERO; STATES];
-    picture.between(u, &mut x[..n]);
+    picture.at(u, &mut x[..n]);
     Sums { still, h, tones: &picture.beats }.gather(u, 1.0, &x[..n], None, part);
     hazard(decay, part, n)
 }
 
 /// The times read of `reads` (lab times; from the `read`-th on) that the propagation has passed at the time u (from the
 /// middle of the step of 2h that starts at `start`), before the step's end -- a time read at the end is the end's own
-/// (`Midway::attempt`) --, each the frame's state there (`Picture::between`: from the latest stop the propagation made at
-/// or before it), kept in `met` with its time until the panel's root is known (`Midway::stretch`). A read is no stop
+/// (`Midway::attempt`) --, each the frame's state there (`Picture::at`), kept in `met` with its time until the panel's
+/// root is known (`Midway::stretch`). A read is no stop
 /// of the propagation and nothing of it is taken up by the step (# The path between a step's ends): the stops and the
 /// nodes are the step's alone, and so is the picture's count of its work, which the reads leave as they found it.
 /// Returns the next time to read.
@@ -1816,7 +1874,7 @@ fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f6
     let work = picture.work;
     while let Some(t) = reads.get(read).map(|&time| (time - start) - h).filter(|&t| ahead(t) <= ahead(u) && ahead(t) < 1.0) {
         let mut x = [C64::ZERO; STATES];
-        picture.between(t, &mut x[..n]);
+        picture.at(t, &mut x[..n]);
         met.push((Stop::Read, t, x));
         read += 1;
     }
@@ -1957,11 +2015,13 @@ pub struct Made {
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
-/// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other); a state scatters faster than any state of the atom can
-/// (`Domain::runaway`: a fold far outside its validity); or the middle state's cluster made no K of its optical sector
-/// (`Unmade`: # The optical sector's noise). The advance takes the step at its half at the first two (adapt.rs, # The
-/// step), and ends at the others.
+/// state left the floating-point range, or a piece's quotient has no finite bandwidth (`Midway::stretch`); the norm
+/// reached its threshold with no photon to emit (`jump`: the model's decay and its photons contradict each other); a
+/// state scatters faster than any state of the atom can (`Domain::runaway`: a fold far outside its validity); the
+/// middle state's cluster made no K of its optical sector (`Unmade`: # The optical sector's noise); or the
+/// decomposition of the generator does not take the step (spectral.rs `Refusal`, # Where the decomposition does not
+/// take the step). The advance takes the step at its half at
+/// the first two and the last (adapt.rs, # The step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
@@ -1969,6 +2029,7 @@ pub enum Refused {
     Emission,
     Runaway,
     Optical(Unmade),
+    Propagation(Refusal),
 }
 
 /// What the integrator asks of the model's domain at every step (SPEC §1.8; module documentation, # The domain).
@@ -2102,7 +2163,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     rate[a][b] += drawn[a][b] / step;
                 }
             }
-            size += (0..3).map(|a| drawn[a][a]).fold(0.0, f64::max) / step;
+            size += (0..3).map(|a| drawn[a][a]).fold(0.0, linalg::larger) / step;
             end.pending = pending;
         }
         if let Some((_, epsilon)) = optical {
@@ -2183,7 +2244,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let launched = along.turned(&march.state.psi, march.u, true);
         // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
         // decay laid alike.
-        let scale = pictured(&along, scratch, tau, Some((&launched[..n], march.u)))?;
+        let scale = pictured(&along, scratch, tau, Some(&launched[..n])).inspect_err(|refused| scratch.unrouted += u64::from(*refused == Refused::Propagation(Refusal::Radius)))?;
         let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
         // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
         let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
@@ -2209,8 +2270,14 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 let _p = crate::prof::scope(crate::prof::LAUNCH);
                 picture.launch(from, &launched[..n]);
             }
-            // The forms' bandwidth on the states this piece's state can hold (`spectral::Picture::launch`).
-            let bandwidth = picture.bandwidth;
+            // The quotients' bandwidth over this piece, on the states its state can hold (`spectral::Picture::launch`,
+            // `quotient`): the forms' with the norm's ringing.
+            let bandwidth = picture.quotient;
+            // A quotient of no finite bandwidth lays no rule (`fewest`): the step is refused, as a state that left the
+            // numbers is (`Refused::Overflow`).
+            if !bandwidth.is_finite() {
+                return Err(Refused::Overflow);
+            }
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
             // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
             // the picture is moved or counted).
@@ -2225,7 +2292,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
-            for (b, nodes) in panels(from, h, bandwidth, FORMS) {
+            // The panels: as many as leave the fewest nodes, on whether the survival ends in the piece (`count`).
+            let laid = count(h - from, bandwidth, FORMS, 2, || {
+                picture.at(h, &mut x[..n]);
+                norm_sqr(&x[..n]) <= march.state.threshold
+            });
+            for (b, nodes) in panels(from, h, laid, bandwidth, FORMS, 2) {
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);
@@ -2258,8 +2330,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         (None, None) => break,
                     };
                     {
-                        let _p = crate::prof::scope(crate::prof::ADVANCE);
-                        picture.advance(u, &mut x[..n]);
+                        let _p = crate::prof::scope(crate::prof::AT_NODES);
+                        picture.at(u, &mut x[..n]);
                     }
                     read = looked(picture, reads, read, (start, h), u, met);
                     if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
@@ -2300,7 +2372,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
                     (counted, traces) = (counted + nodes, traces + spans);
                     match crossed {
-                        Some(crossed) => picture.between(crossed, &mut x[..n]),
+                        Some(crossed) => picture.at(crossed, &mut x[..n]),
                         None => end = log - fell,
                     }
                     crossed
@@ -2386,7 +2458,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let size = n * n;
             if let Some(middle) = &middle {
                 if !done {
-                    for (u, w) in quadrature(march.u, h, 0.0, FORMS) {
+                    for (u, w) in quadrature(march.u, h, 0.0, FORMS, 2) {
                         let s = u / h;
                         for (sum, l) in weights.iter_mut().zip([0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)]) {
                             *sum += w * l;
@@ -2402,7 +2474,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 let mut outside = [0.0; TONE];
                 if middle.is_some() {
                     for (a, b) in [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))) {
-                        for (u, w) in quadrature(a, b, tone.beat.abs(), FORMS) {
+                        for (u, w) in quadrature(a, b, tone.beat.abs(), FORMS, 2) {
                             let (s, (sin, cos)) = (u / h, (tone.beat * u).sin_cos());
                             let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
                             for (k, part) in outside.iter_mut().enumerate() {
@@ -2611,7 +2683,7 @@ impl Brownian {
 /// picture along the path, its preparation (`made`: its decomposition, its slopes, its tones and their products, its
 /// following, as `pictured` made them) and the states it made after (`stops`: the launches -- the stretch's first and
 /// one after each of its jumps --, the states at the kick's nodes, at the middle and at the end, and those its jumps'
-/// roots read: `spectral::Picture::launch`, `advance`, `between`); the kick's nodes and the tones their states were
+/// roots read: `spectral::Picture::launch`, `at`); the kick's nodes and the tones their states were
 /// summed with (`nodes`, `tones`); the survival's traces (`traces`); where the stretch holds the step's middle
 /// (`centred`) the middle's form there and the optical sector's make (`sector`: its ground states and the make's count);
 /// the end state's held forms on the stretch that reaches the step's end (`ended`); and the model's own: the middle's
