@@ -30,7 +30,8 @@
 //! operations: γ_i = γ_{2(m_i+1)} = 2(m_i + 1)u / (1 − 2(m_i + 1)u) (`units::rounding`), which is the prototype's
 //! (m_i + 1)ε / (1 − (m_i + 1)ε) with ε = 2u, digit for digit.
 
-use super::{Csr, Inconsistent, Schur};
+use super::{product, row, Schur};
+use crate::floquet::Sparse;
 use crate::linalg::C64;
 use crate::units::rounding;
 
@@ -43,22 +44,17 @@ pub struct Rows {
 }
 
 impl Rows {
-    pub fn new(a: &Csr) -> Rows {
-        let n = a.dim();
-        let norm: Vec<f64> = (0..n).map(|i| a.row(i).1.iter().map(|v| v.abs()).sum()).collect();
+    pub fn new(a: &Sparse) -> Rows {
+        let n = a.rows;
+        let norm: Vec<f64> = (0..n).map(|i| row(a, i).1.iter().map(|v| v.abs()).sum()).collect();
         let weight = norm.iter().map(|&s| if s == 0.0 { 1.0 } else { 1.0 / s }).collect();
-        let level = (0..n).map(|i| rounding(2 * (a.start[i + 1] - a.start[i] + 1))).collect();
+        let level = (0..n).map(|i| rounding(2 * (a.indptr[i + 1] - a.indptr[i] + 1))).collect();
         Rows { norm, weight, level }
     }
 
     /// The zero rows whose right-hand side is not zero (0 = b_i: no solution).
-    pub fn check(&self, b: &[C64]) -> Result<(), Inconsistent> {
-        let rows: Vec<usize> = (0..b.len()).filter(|&i| self.norm[i] == 0.0 && b[i] != C64::ZERO).collect();
-        if rows.is_empty() {
-            Ok(())
-        } else {
-            Err(Inconsistent { rows })
-        }
+    pub fn inconsistent(&self, b: &[C64]) -> Vec<usize> {
+        (0..b.len()).filter(|&i| self.norm[i] == 0.0 && b[i] != C64::ZERO).collect()
     }
 
     /// (η, ζ): the row-equilibrated backward error max_i |r_i| / (a_i ‖x‖∞ + |b_i|), and the same over each row's
@@ -96,7 +92,7 @@ pub enum Stop {
 /// One GMRES run: the returned iterate (least ‖W r‖₂), its index, the first certified iterate, its backward errors,
 /// the stop, ζ per iteration, and the complex multiply-adds spent (the prototype's account: two products by A, one
 /// application of P⁻¹ without its factors' solves, the Gram–Schmidt sweep, the residual's weights).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     pub x: Vec<C64>,
     pub iterations: usize,
@@ -111,7 +107,7 @@ pub struct Outcome {
 }
 
 /// GMRES on A x = b with the right preconditioner P, minimising ‖W r‖₂ (`Rows`), x0 = 0, to the floor.
-pub fn gmres(a: &Csr, b: &[C64], p: &Schur, rows: &Rows) -> Outcome {
+pub fn gmres(a: &Sparse, b: &[C64], p: &Schur, rows: &Rows) -> Outcome {
     let n = b.len();
     let w = &rows.weight;
     let bw: Vec<C64> = b.iter().zip(w).map(|(&v, &s)| v * s).collect();
@@ -146,7 +142,7 @@ pub fn gmres(a: &Csr, b: &[C64], p: &Schur, rows: &Rows) -> Outcome {
     let mut az = vec![C64::ZERO; n];
     let mut x = vec![C64::ZERO; n];
     let mut residual = vec![C64::ZERO; n];
-    let nnz = a.nnz() as f64;
+    let nnz = a.indices.len() as f64;
     for k in 0..n {
         // z_k = P⁻¹ W⁻¹ v_k
         let scaled: Vec<C64> = v[k].iter().zip(w).map(|(&x, &s)| x / s).collect();
@@ -156,7 +152,7 @@ pub fn gmres(a: &Csr, b: &[C64], p: &Schur, rows: &Rows) -> Outcome {
             out.stop = Stop::NonFinite;
             break;
         }
-        a.apply(&zk, &mut az);
+        product(a, &zk, &mut az);
         let mut u: Vec<C64> = az.iter().zip(w).map(|(&x, &s)| x * s).collect();
         z.push(zk);
         // modified Gram–Schmidt
@@ -198,7 +194,7 @@ pub fn gmres(a: &Csr, b: &[C64], p: &Schur, rows: &Rows) -> Outcome {
                 *e += q * yj;
             }
         }
-        a.apply(&x, &mut residual);
+        product(a, &x, &mut residual);
         for (ri, &bi) in residual.iter_mut().zip(b) {
             *ri = bi - *ri;
         }

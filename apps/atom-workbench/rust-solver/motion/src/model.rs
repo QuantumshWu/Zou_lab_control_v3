@@ -45,6 +45,8 @@ pub(crate) mod optical;
 pub(crate) mod jet;
 pub(crate) mod own;
 pub(crate) mod fold;
+pub mod rs;
+pub mod selected;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]

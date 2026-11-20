@@ -21,22 +21,29 @@
 //! run in the prototype's order (T = (A_sf D_f⁻¹) A_fs first, then A_ss − T), so the result does not depend on the
 //! thread count.
 //!
-//! The sparse LU is faer's (`sp_lu`: COLAMD column order, partial row pivoting) -- see Cargo.toml. A block whose
-//! factorisation fails structurally makes the preconditioner unavailable (`Unfactorised`); a numerically zero pivot shows as
-//! a non-finite application, which GMRES stops on.
+//! The sparse LU is faer's (COLAMD column order, partial row pivoting) -- see Cargo.toml -- in its left-looking
+//! (Gilbert–Peierls, "simplicial") form: L and U grow with the fill the pivots actually make, as SuperLU's do. faer's
+//! supernodal form instead sizes its storage from the structure of AᵀA, an upper bound over every pivot sequence; on
+//! tilt2's edge reference (30097 unknowns, 110 entries a row) that bound is near dense and the factorisation runs out
+//! of memory (8 GB), where the actual fill is a few hundred MB. A block whose factorisation fails makes the
+//! preconditioner unavailable (`Unfactorised`, with faer's error); a numerically zero pivot shows as a non-finite
+//! application, which GMRES stops on.
 
-use super::Csr;
+use super::{diagonal, row};
+use crate::floquet::Sparse;
 use crate::linalg::C64;
-use faer::linalg::solvers::Solve;
-use faer::sparse::linalg::solvers::Lu;
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::sparse::linalg::lu::{factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu};
+use faer::sparse::linalg::SupernodalThreshold;
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
-use faer::{c64, MatMut};
+use faer::{c64, Conj, MatMut, Par};
 use rayon::prelude::*;
 
 /// One diagonal block of the slow Schur complement, factorised: its slow-local members (ascending) and the LU.
 struct Block {
     members: Vec<usize>,
-    lu: Lu<usize, c64>,
+    symbolic: SymbolicLu<usize>,
+    numeric: NumericLu<usize, c64>,
 }
 
 /// A block's LU failed (faer's error, e.g. a structurally singular block); `cross`: S had entries outside the blocks.
@@ -51,8 +58,8 @@ pub struct Schur {
     slow: Vec<usize>,
     fast: Vec<usize>,
     d_fast: Vec<C64>,
-    a_sf: Csr,
-    a_fs: Csr,
+    a_sf: Sparse,
+    a_fs: Sparse,
     blocks: Vec<Block>,
     /// S has an entry outside the blocks (then the blocks are not the exact S).
     pub cross: bool,
@@ -66,8 +73,8 @@ pub struct Schur {
 impl Schur {
     /// P for the slow mask `slow` (true = slow) and the slow unknowns' partition `group` (one label per unknown; only
     /// the slow ones' are read).
-    pub fn new(a: &Csr, slow: &[bool], group: &[usize]) -> Result<Schur, Unfactorised> {
-        let n = a.dim();
+    pub fn new(a: &Sparse, slow: &[bool], group: &[usize]) -> Result<Schur, Unfactorised> {
+        let n = a.rows;
         let s: Vec<usize> = (0..n).filter(|&i| slow[i]).collect();
         let f: Vec<usize> = (0..n).filter(|&i| !slow[i]).collect();
         let mut local = vec![0usize; n];
@@ -77,24 +84,25 @@ impl Schur {
         for (k, &i) in f.iter().enumerate() {
             local[i] = k;
         }
-        let diag = a.diagonal();
+        let diag = diagonal(a);
         let d_fast: Vec<C64> = f.iter().map(|&i| diag[i]).collect();
         // the four blocks of A by rows: A_ss and A_sf from the slow rows, A_fs from the fast rows
-        let pick = |rows: &[usize], want_slow: bool| -> Csr {
-            let mut start = Vec::with_capacity(rows.len() + 1);
-            let (mut column, mut value) = (Vec::new(), Vec::new());
-            start.push(0);
+        let pick = |rows: &[usize], want_slow: bool| -> Sparse {
+            let mut indptr = Vec::with_capacity(rows.len() + 1);
+            let (mut indices, mut values) = (Vec::new(), Vec::new());
+            indptr.push(0);
             for &i in rows {
-                let (c, v) = a.row(i);
+                let (c, v) = row(a, i);
                 for (&j, &x) in c.iter().zip(v) {
                     if slow[j] == want_slow {
-                        column.push(local[j]);
-                        value.push(x);
+                        indices.push(local[j]);
+                        values.push(x);
                     }
                 }
-                start.push(column.len());
+                indptr.push(indices.len());
             }
-            Csr { start, column, value }
+            let cols = if want_slow { s.len() } else { f.len() };
+            Sparse { rows: rows.len(), cols, indptr, indices, values }
         };
         let a_ss = pick(&s, true);
         let a_sf = pick(&s, false);
@@ -112,10 +120,10 @@ impl Schur {
                     let mut cols = Vec::new();
                     let mut cross = false;
                     // T_i = Σ_k (A_ik D_k⁻¹) A_k·
-                    let (cf, vf) = a_sf.row(i);
+                    let (cf, vf) = row(&a_sf, i);
                     for (&k, &x) in cf.iter().zip(vf) {
                         let coeff = x * reciprocal[k];
-                        let (cs, vs) = a_fs.row(k);
+                        let (cs, vs) = row(&a_fs, k);
                         for (&j, &y) in cs.iter().zip(vs) {
                             if label[j] != g {
                                 cross = true;
@@ -131,7 +139,7 @@ impl Schur {
                             product[j] += coeff * y;
                         }
                     }
-                    let (cs, vs) = a_ss.row(i);
+                    let (cs, vs) = row(&a_ss, i);
                     for (&j, &x) in cs.iter().zip(vs) {
                         if label[j] != g {
                             cross = true;
@@ -196,12 +204,23 @@ impl Schur {
                     }
                 }
                 let symbolic = SymbolicSparseColMatRef::new_checked(size, size, &count, None, &row_index);
-                let lu = SparseColMatRef::new(symbolic, &values).sp_lu().map_err(|e| format!("{e:?}"))?;
-                Ok(Block { members: m, lu })
+                let matrix = SparseColMatRef::new(symbolic, &values);
+                let params = LuSymbolicParams {
+                    supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
+                    ..Default::default()
+                };
+                let symbolic = factorize_symbolic_lu(matrix.symbolic(), params).map_err(|e| format!("{e:?}"))?;
+                let mut numeric = NumericLu::new();
+                let scratch = symbolic.factorize_numeric_lu_scratch::<c64>(Par::Seq, Default::default());
+                let mut memory = MemBuffer::try_new(scratch).map_err(|e| format!("{e:?}"))?;
+                symbolic
+                    .factorize_numeric_lu(&mut numeric, matrix, Par::Seq, MemStack::new(&mut memory), Default::default())
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(Block { members: m, symbolic, numeric })
             })
             .collect();
         let blocks = blocks.map_err(|reason| Unfactorised { cross, reason })?;
-        let apply_madds = (2 * f.len() + a_sf.nnz() + a_fs.nnz()) as f64;
+        let apply_madds = (2 * f.len() + a_sf.indices.len() + a_fs.indices.len()) as f64;
         Ok(Schur { slow: s, fast: f, d_fast, a_sf, a_fs, blocks, cross, nnz_kept, apply_madds })
     }
 
@@ -215,7 +234,7 @@ impl Schur {
         let t: Vec<C64> = self.fast.iter().zip(&self.d_fast).map(|(&i, &d)| r[i] / d).collect();
         let mut rs: Vec<C64> = self.slow.iter().map(|&i| r[i]).collect();
         for (k, ri) in rs.iter_mut().enumerate() {
-            let (c, v) = self.a_sf.row(k);
+            let (c, v) = row(&self.a_sf, k);
             *ri -= c.iter().zip(v).map(|(&j, &x)| x * t[j]).sum::<C64>();
         }
         let solved: Vec<Vec<c64>> = self
@@ -224,7 +243,13 @@ impl Schur {
             .map(|b| {
                 let mut buf: Vec<c64> = b.members.iter().map(|&i| c64::new(rs[i].re, rs[i].im)).collect();
                 let m = buf.len();
-                b.lu.solve_in_place(MatMut::from_column_major_slice_mut(&mut buf, m, 1));
+                let mut memory = MemBuffer::new(b.symbolic.solve_in_place_scratch::<c64>(1, Par::Seq));
+                LuRef::new_unchecked(&b.symbolic, &b.numeric).solve_in_place_with_conj(
+                    Conj::No,
+                    MatMut::from_column_major_slice_mut(&mut buf, m, 1),
+                    Par::Seq,
+                    MemStack::new(&mut memory),
+                );
                 buf
             })
             .collect();
@@ -234,7 +259,7 @@ impl Schur {
             }
         }
         for (k, (&i, &d)) in self.fast.iter().zip(&self.d_fast).enumerate() {
-            let (c, v) = self.a_fs.row(k);
+            let (c, v) = row(&self.a_fs, k);
             let coupled: C64 = c.iter().zip(v).map(|(&j, &x)| x * z[self.slow[j]]).sum();
             z[i] = (r[i] - coupled) / d;
         }

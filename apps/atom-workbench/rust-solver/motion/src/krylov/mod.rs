@@ -1,13 +1,13 @@
-//! The static Floquet–Liouville reference solver of the two-point check (FASTREF.md, the prototype `fastref\fr.py`
-//! `fr.solve` with the zero-norm root fix of `vlat\frx.py`): the bordered steady-state system
+//! The static Floquet–Liouville reference solver of the two-point check (RUSTPLAN §1.1; FASTREF.md, the prototype
+//! `fastref\fr.py` `fr.solve` with the zero-norm root fix of `vlat\frx.py`): the bordered steady-state system
 //!
 //! ```text
-//!     Bd [ρ; μ] = [0; 1],    Bd = [[KK, τ*], [τᵀ, 0]]
+//!     Bd [ρ; μ] = [0; 1],    Bd = [[KK, τ*], [τᵀ, 0]],
 //! ```
 //!
-//! solved to its rounding floor by right-preconditioned GMRES, certified by a row-wise backward error, with a chain
-//! of exact fallbacks. The module takes the system as given (sparse matrix, right-hand side, each unknown's harmonic,
-//! the readout rows); building it is the lattice's business.
+//! solved to its rounding floor by right-preconditioned GMRES, certified by a row-wise backward error, with a chain of
+//! exact fallbacks. The module takes `floquet::System` as given (the matrix, each unknown's harmonic); the readouts
+//! are `floquet::readouts`. Only ρ is solved (`solve`).
 //!
 //! # The method (FASTREF.md §§ 2, 3, 5, 8)
 //! 1. **Split** (`split`): slow = the unknowns whose Gershgorin disc lies in the connected component of the disc union
@@ -37,112 +37,45 @@
 //! - A singular pivot of a preconditioner block (a block may be singular where S or A is not): its application is not
 //!   finite; the attempt stops uncertified and the route goes on.
 
-mod gmres;
-mod precond;
-mod solve;
-mod split;
+pub mod gmres;
+pub mod precond;
+pub mod solve;
+pub mod split;
 
 pub use gmres::{gmres, Outcome, Rows, Stop};
 pub use precond::{Schur, Unfactorised};
-pub use solve::{solve, Attempt, Level, Solved};
+pub use solve::{solve, Attempt, Route, Solved};
 pub use split::split;
 
+use crate::floquet::Sparse;
 use crate::linalg::C64;
 use rayon::prelude::*;
 
-/// A square sparse complex matrix in compressed rows: row i's entries are `column[start[i]..start[i + 1]]` and
-/// `value[...]`, any order within a row.
-#[derive(Clone, Debug)]
-pub struct Csr {
-    pub start: Vec<usize>,
-    pub column: Vec<usize>,
-    pub value: Vec<C64>,
+/// Row i of a compressed-row matrix: its columns and values.
+pub fn row(a: &Sparse, i: usize) -> (&[usize], &[C64]) {
+    let r = a.indptr[i]..a.indptr[i + 1];
+    (&a.indices[r.clone()], &a.values[r])
 }
 
-impl Csr {
-    pub fn dim(&self) -> usize {
-        self.start.len() - 1
-    }
-    pub fn nnz(&self) -> usize {
-        self.column.len()
-    }
-    pub fn row(&self, i: usize) -> (&[usize], &[C64]) {
-        let r = self.start[i]..self.start[i + 1];
-        (&self.column[r.clone()], &self.value[r])
-    }
-    /// The diagonal (0 where not stored).
-    pub fn diagonal(&self) -> Vec<C64> {
-        (0..self.dim())
-            .map(|i| {
-                let (c, v) = self.row(i);
-                c.iter().zip(v).filter(|(&j, _)| j == i).map(|(_, &x)| x).sum()
-            })
-            .collect()
-    }
-    /// y = A x, rows in parallel (each row's sum in stored order: the result does not depend on the thread count).
-    pub fn apply(&self, x: &[C64], y: &mut [C64]) {
-        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
-            let (c, v) = self.row(i);
-            *yi = c.iter().zip(v).map(|(&j, &a)| a * x[j]).sum();
-        });
-    }
+/// The diagonal of a square matrix (0 where not stored).
+pub fn diagonal(a: &Sparse) -> Vec<C64> {
+    (0..a.rows)
+        .map(|i| {
+            let (c, v) = row(a, i);
+            c.iter().zip(v).filter(|(&j, _)| j == i).map(|(_, &x)| x).sum()
+        })
+        .collect()
 }
 
-/// A sparse row vector (a readout's linear form over the unknowns).
-#[derive(Clone, Debug, Default)]
-pub struct Row {
-    pub index: Vec<usize>,
-    pub value: Vec<C64>,
+/// y = A x, rows in parallel (each row's sum in stored order: the result does not depend on the thread count).
+pub fn product(a: &Sparse, x: &[C64], y: &mut [C64]) {
+    y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+        let (c, v) = row(a, i);
+        *yi = c.iter().zip(v).map(|(&j, &e)| e * x[j]).sum();
+    });
 }
 
-impl Row {
-    /// Re(row · x).
-    pub fn read(&self, x: &[C64]) -> f64 {
-        self.index.iter().zip(&self.value).map(|(&i, &v)| v * x[i]).sum::<C64>().re
-    }
-}
-
-/// The readouts as linear forms of the solution: the force F = Re(f·x) (τᵀK1ρ), the scattering rate R = Re(r·x) (the
-/// rate channels' sum), and per level group the lifted, unnormalised population Re(p_g·x); the groups partition the
-/// states, so the populations are normalised by their own sum.
-#[derive(Clone, Debug, Default)]
-pub struct Readouts {
-    pub force: Row,
-    pub rate: Row,
-    pub populations: Vec<(String, Row)>,
-}
-
-impl Readouts {
-    /// The readouts of x (populations normalised by their sum; left as they are when the sum is 0 -- x = 0, the
-    /// zero-norm class: no sum to divide by).
-    pub fn read(&self, x: &[C64]) -> Readings {
-        let raw: Vec<(String, f64)> = self.populations.iter().map(|(name, row)| (name.clone(), row.read(x))).collect();
-        let total: f64 = raw.iter().map(|(_, v)| v).sum();
-        let populations = raw.into_iter().map(|(name, v)| (name, if total == 0.0 { v } else { v / total })).collect();
-        Readings { force: self.force.read(x), rate: self.rate.read(x), populations }
-    }
-}
-
-/// The readouts' values: F, R, the populations by group.
-#[derive(Clone, Debug, Default)]
-pub struct Readings {
-    pub force: f64,
-    pub rate: f64,
-    pub populations: Vec<(String, f64)>,
-}
-
-/// The bordered steady-state system: the matrix (the last unknown is the border's μ), the right-hand side, every
-/// unknown's harmonic (the slow-lattice index j of its element key, any integer labelling; the border row goes with
-/// the populations it sums), and the readouts.
-#[derive(Clone, Debug)]
-pub struct System {
-    pub matrix: Csr,
-    pub rhs: Vec<C64>,
-    pub harmonic: Vec<usize>,
-    pub readouts: Readouts,
-}
-
-/// A zero row of the matrix with a nonzero right-hand side: 0 = b_i has no solution (the rows, at most a few).
+/// A zero row of the matrix with a nonzero right-hand side: 0 = b_i has no solution (the rows).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Inconsistent {
     pub rows: Vec<usize>,

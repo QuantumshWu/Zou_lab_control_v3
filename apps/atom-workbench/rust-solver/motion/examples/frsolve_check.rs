@@ -1,17 +1,23 @@
-//! FRSOLVE check: the krylov solver on the systems the Python prototype exported (`frsolve\exp.py`), against
-//! Python's `fr.solve` readouts and ρ, with the clock and the process's peak memory.
+//! FRSOLVE check: `krylov::solve` on the systems the Python prototype exported (`frsolve\exp.py`), against Python's
+//! `fr.solve` (its ρ, readouts and route), with the clock and the process's peak memory.
 //!
-//! frsolve_check <data dir> [filter] [--repeat N] [--level route|exact|direct] [--zero]
-//! - route (default): `krylov::solve`, the clock the least of N runs;
-//! - exact / direct: that level alone (the split, the exact S or P = A, GMRES), forced -- the fallbacks' cost;
-//! - --zero: the same systems with b = 0 (x = 0 certified, no iteration).
-//! Measures as td_s.cmp: F by max(|F|, kR), R relative, populations absolute; ρ by max |Δρ| / max |ρ|.
+//! frsolve_check <data dir> [filter] [--repeat N] [--level route|exact|direct]
+//! - route (default): `krylov::solve` (ρ), the clock the least of N runs;
+//! - exact / direct: ρ on that route alone (the split, the exact S or P = A, GMRES), forced -- the fallbacks' cost.
+//! Readouts (the exported rows, as mdlat.readouts): F = Re(f·ρ), R = Re(r·ρ), populations Re(p_g·ρ) over their sum.
+//! Measures as td_s.cmp: F by max(|F|, kR), R relative, populations absolute; ρ by max |Δ| / max |Python's|.
 
-use atom_motion::krylov::{gmres, solve, split, Csr, Readouts, Row, Rows, Schur, System};
+use atom_motion::floquet::{Elements, Sparse, System};
+use atom_motion::krylov::{gmres, solve, split, Rows, Schur};
 use atom_motion::linalg::C64;
 use std::io::Read;
 use std::time::Instant;
 
+fn bytes(path: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    std::fs::File::open(path).unwrap().read_to_end(&mut b).unwrap();
+    b
+}
 fn u64_at(b: &[u8], p: &mut usize) -> u64 {
     let v = u64::from_le_bytes(b[*p..*p + 8].try_into().unwrap());
     *p += 8;
@@ -28,35 +34,66 @@ fn c64s(b: &[u8], p: &mut usize, n: usize) -> Vec<C64> {
     *p += 16 * n;
     v
 }
+fn csr(b: &[u8], p: &mut usize) -> Sparse {
+    let n = u64_at(b, p) as usize;
+    let nnz = u64_at(b, p) as usize;
+    let indptr = u32s(b, p, n + 1);
+    let indices = u32s(b, p, nnz);
+    let values = c64s(b, p, nnz);
+    Sparse { rows: n, cols: n, indptr, indices, values }
+}
 
-fn load(path: &str) -> System {
-    let mut b = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut b).unwrap();
+/// A readout row: Re(row · ρ).
+struct Row(Vec<usize>, Vec<C64>);
+impl Row {
+    fn read(&self, x: &[C64]) -> f64 {
+        self.0.iter().zip(&self.1).map(|(&i, &v)| v * x[i]).sum::<C64>().re
+    }
+}
+
+/// The system and its readout rows (F, R, the populations by group).
+fn load(dir: &str, tag: &str) -> (System, Row, Row, Vec<(String, Row)>) {
+    let b = bytes(&format!("{dir}/{tag}.sys"));
     assert_eq!(&b[..8], b"FRSYS001");
     let mut p = 8;
-    let n = u64_at(&b, &mut p) as usize;
-    let nnz = u64_at(&b, &mut p) as usize;
-    let start = u32s(&b, &mut p, n + 1);
-    let column = u32s(&b, &mut p, nnz);
-    let value = c64s(&b, &mut p, nnz);
-    let rhs = c64s(&b, &mut p, n);
+    let matrix = csr(&b, &mut p);
+    let n = matrix.rows;
+    let _rhs = c64s(&b, &mut p, n);
     let harmonic = u32s(&b, &mut p, n);
     let rows = u64_at(&b, &mut p) as usize;
-    let mut readouts = Readouts::default();
+    let (mut force, mut rate, mut pops) = (Row(vec![], vec![]), Row(vec![], vec![]), Vec::new());
     for _ in 0..rows {
         let len = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize;
         p += 4;
         let name = String::from_utf8(b[p..p + len].to_vec()).unwrap();
         p += len;
         let count = u64_at(&b, &mut p) as usize;
-        let row = Row { index: u32s(&b, &mut p, count), value: c64s(&b, &mut p, count) };
+        let row = Row(u32s(&b, &mut p, count), c64s(&b, &mut p, count));
         match name.as_str() {
-            "F" => readouts.force = row,
-            "R" => readouts.rate = row,
-            _ => readouts.populations.push((name[4..].to_string(), row)),
+            "F" => force = row,
+            "R" => rate = row,
+            _ => pops.push((name[4..].to_string(), row)),
         }
     }
-    System { matrix: Csr { start, column, value }, rhs, harmonic, readouts }
+    let empty = || Sparse { rows: n - 1, cols: n - 1, indptr: vec![0; n], indices: vec![], values: vec![] };
+    (System { elements: Elements::default(), matrix, k1: empty(), k2: empty(), trace: vec![], harmonic }, force, rate, pops)
+}
+
+fn vector(path: &str) -> Vec<C64> {
+    let b = bytes(path);
+    let mut p = 0;
+    c64s(&b, &mut p, b.len() / 16)
+}
+
+/// max |a − b| / max |b|.
+fn relative(a: &[C64], b: &[C64]) -> f64 {
+    let scale = b.iter().map(|v| v.abs()).fold(0.0, f64::max);
+    let d = a.iter().zip(b).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        d
+    } else {
+        d / scale
+    }
 }
 
 #[repr(C)]
@@ -89,7 +126,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = &args[1];
     let mut filter = String::new();
-    let (mut repeat, mut level, mut zero) = (1usize, "route".to_string(), false);
+    let (mut repeat, mut level) = (1usize, "route".to_string());
     let mut k = 2;
     while k < args.len() {
         match args[k].as_str() {
@@ -101,7 +138,6 @@ fn main() {
                 level = args[k + 1].clone();
                 k += 1;
             }
-            "--zero" => zero = true,
             f => filter = f.to_string(),
         }
         k += 1;
@@ -116,22 +152,14 @@ fn main() {
     println!("threads {}", rayon::current_num_threads());
     let mut worst = [0.0f64; 4];
     for tag in &names {
-        let mut system = load(&format!("{dir}/{tag}.sys"));
+        let (system, force, rate, pops) = load(dir, tag);
         let py: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(format!("{dir}/{tag}.json")).unwrap()).unwrap();
-        let rho: Vec<C64> = {
-            let mut b = Vec::new();
-            std::fs::File::open(format!("{dir}/{tag}.rho")).unwrap().read_to_end(&mut b).unwrap();
-            let mut p = 0;
-            c64s(&b, &mut p, b.len() / 16)
-        };
-        if zero {
-            system.rhs.iter_mut().for_each(|v| *v = C64::ZERO);
-        }
+        let rho_py = vector(&format!("{dir}/{tag}.rho"));
         let (mem0, _, _) = memory();
         let a = &system.matrix;
         let mut best = f64::INFINITY;
-        let mut x = Vec::new();
+        let mut rho = Vec::new();
         let mut report = String::new();
         for _ in 0..repeat {
             let clock = Instant::now();
@@ -141,32 +169,37 @@ fn main() {
                 if t < best {
                     best = t;
                     report = out
-                        .route
+                        .attempts
                         .iter()
                         .map(|at| match &at.run {
                             Some(r) => format!(
                                 "{:?} slow {} blocks {} it {} best {} cert {:?} zeta {:.1e} {:?} [setup {:.3} iter {:.3}]",
-                                at.level, at.slow, at.blocks, r.iterations, r.best, r.first_certified, r.zeta, r.stop,
+                                at.route, at.slow, at.blocks, r.iterations, r.best, r.first_certified, r.zeta, r.stop,
                                 at.seconds_setup, at.seconds_iterate
                             ),
-                            None => format!("{:?} unfactorised", at.level),
+                            None => format!("{:?} unfactorised: {}", at.route, at.unfactorised.as_deref().unwrap_or("")),
                         })
                         .collect::<Vec<_>>()
                         .join(" -> ")
-                        + &format!(" | split {:.3} slow {} tests {} | certified {}", out.seconds_split, out.slow, out.split_tests, out.certified);
-                    x = out.x;
+                        + &format!(
+                            " | split {:.3} slow {} tests {} | route {:?} certified {}",
+                            out.seconds_split, out.slow, out.split_tests, out.route, out.certified
+                        );
+                    rho = out.rho;
                 }
             } else {
                 let rows = Rows::new(a);
                 let (slow, _) = split(a);
-                let n = a.dim();
+                let n = a.rows;
                 let mask = if level == "direct" { vec![true; n] } else { slow };
                 let p = match Schur::new(a, &mask, &vec![0usize; n]) {
                     Ok(p) => p,
                     Err(u) => panic!("unfactorised after {:.1} s: {}", clock.elapsed().as_secs_f64(), u.reason),
                 };
                 let t_setup = clock.elapsed().as_secs_f64();
-                let r = gmres(a, &system.rhs, &p, &rows);
+                let mut b = vec![C64::ZERO; n];
+                b[n - 1] = C64::ONE;
+                let r = gmres(a, &b, &p, &rows);
                 let t = clock.elapsed().as_secs_f64();
                 if t < best {
                     best = t;
@@ -174,40 +207,32 @@ fn main() {
                         "{level} slow {} it {} best {} cert {:?} zeta {:.1e} {:?} [setup {:.3} iter {:.3}]",
                         p.shape().0, r.iterations, r.best, r.first_certified, r.zeta, r.stop, t_setup, t - t_setup
                     );
-                    x = r.x;
+                    rho = r.x[..n - 1].to_vec();
                 }
             }
         }
         let (_, peak, peak_ws) = memory();
-        let got = system.readouts.read(&x);
         let kph = py["kph"].as_f64().unwrap();
         let r = &py["readouts"];
         let (f0, r0) = (r["F"].as_f64().unwrap(), r["R"].as_f64().unwrap());
-        let (d_f, d_r, d_p, d_x);
-        if zero {
-            d_f = got.force.abs();
-            d_r = got.rate.abs();
-            d_p = got.populations.iter().map(|(_, v)| v.abs()).fold(0.0, f64::max);
-            d_x = x.iter().map(|v| v.abs()).fold(0.0, f64::max);
-        } else {
-            d_f = (got.force - f0).abs() / f0.abs().max(kph * r0);
-            d_r = (got.rate - r0).abs() / r0.abs();
-            d_p = got
-                .populations
-                .iter()
-                .map(|(g, v)| (v - r["pops"][g].as_f64().unwrap()).abs())
-                .fold(0.0, f64::max);
-            let scale = rho.iter().map(|v| v.abs()).fold(0.0, f64::max);
-            d_x = rho.iter().zip(&x).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max) / scale;
-        }
+        let raw: Vec<f64> = pops.iter().map(|(_, row)| row.read(&rho)).collect();
+        let total: f64 = raw.iter().sum();
+        let d_f = (force.read(&rho) - f0).abs() / f0.abs().max(kph * r0);
+        let d_r = (rate.read(&rho) - r0).abs() / r0.abs();
+        let d_p = pops
+            .iter()
+            .zip(&raw)
+            .map(|((g, _), v)| (v / total - r["pops"][g].as_f64().unwrap()).abs())
+            .fold(0.0, f64::max);
+        let d_x = relative(&rho, &rho_py);
         for (w, d) in worst.iter_mut().zip([d_f, d_r, d_p, d_x]) {
             *w = w.max(d);
         }
         let pr = &py["rho"];
         println!(
             "{tag:<24} n {:>6} nnz {:>8} | rust {best:.4} s | {report} | py it {} best {} cert {} zeta {:.1e} slow {} | dF {d_f:.1e} dR {d_r:.1e} dP {d_p:.1e} drho {d_x:.1e} | mem MB before {mem0:.0} peak {peak:.0} ws {peak_ws:.0}",
-            a.dim(),
-            a.nnz(),
+            a.rows,
+            a.indices.len(),
             pr["iters"],
             pr["kbest"],
             pr["first"],

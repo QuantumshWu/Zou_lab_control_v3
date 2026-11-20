@@ -11,16 +11,17 @@
 //! is tested only against the window [Im c_y − R_y − max R, Im c_y + R_y + max R] -- the same component as testing all
 //! pairs (the prototype asserted equality at every point), with far fewer tests.
 
-use super::Csr;
+use super::row;
+use crate::floquet::Sparse;
 use crate::linalg::C64;
 
 /// The slow mask (true = slow: in the Gershgorin component of 0) and the number of disc-pair tests made.
-pub fn split(a: &Csr) -> (Vec<bool>, usize) {
-    let n = a.dim();
+pub fn split(a: &Sparse) -> (Vec<bool>, usize) {
+    let n = a.rows;
     let mut centre = vec![C64::ZERO; n];
     let mut radius = vec![0.0f64; n];
     for i in 0..n {
-        let (c, v) = a.row(i);
+        let (c, v) = row(a, i);
         for (&j, &x) in c.iter().zip(v) {
             if j == i {
                 centre[i] += x;
