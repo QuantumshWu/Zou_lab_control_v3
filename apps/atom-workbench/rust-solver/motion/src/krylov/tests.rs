@@ -25,8 +25,7 @@ fn system(n: usize, entries: &[(usize, usize, f64)], trace: &[f64], harmonic: &[
     System {
         elements: Elements::default(),
         matrix: sparse(n, entries),
-        k1: sparse(n - 1, &[]),
-        k2: sparse(n - 1, &[]),
+        k1: [sparse(n - 1, &[]), sparse(n - 1, &[]), sparse(n - 1, &[])],
         trace: trace.iter().map(|&t| C64::real(t)).collect(),
         harmonic: harmonic.to_vec(),
     }

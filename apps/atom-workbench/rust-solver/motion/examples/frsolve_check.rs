@@ -1,14 +1,17 @@
 //! FRSOLVE check: `krylov::solve` on the systems the Python prototype exported (`frsolve\exp.py`), against Python's
 //! `fr.solve` (its ρ, readouts and route), with the clock and the process's peak memory.
 //!
-//! frsolve_check <data dir> [filter] [--repeat N] [--level route|exact|direct]
+//! frsolve_check <data dir> [filter] [--repeat N] [--level route|exact|direct] [--select]
 //! - route (default): `krylov::solve` (ρ), the clock the least of N runs;
-//! - exact / direct: ρ on that route alone (the split, the exact S or P = A, GMRES), forced -- the fallbacks' cost.
+//! - exact / direct: ρ on that route alone (the split, the exact S or P = A, GMRES), forced -- the fallbacks' cost;
+//! - --select: `select::decide` per scene (the filter names the scenes) on the full references and the fold2 models
+//!   of every P on the scene's path (`<scene>_manifest.json`), F as (0, 0, F_z) -- the exported rows hold z only.
 //! Readouts (the exported rows, as mdlat.readouts): F = Re(f·ρ), R = Re(r·ρ), populations Re(p_g·ρ) over their sum.
 //! Measures as td_s.cmp: F by max(|F|, kR), R relative, populations absolute; ρ by max |Δ| / max |Python's|.
 
-use atom_motion::floquet::{Elements, Sparse, System};
+use atom_motion::floquet::{Elements, Readouts, Sparse, System};
 use atom_motion::krylov::{gmres, solve, split, Rows, Schur};
+use atom_motion::select::decide;
 use atom_motion::linalg::C64;
 use std::io::Read;
 use std::time::Instant;
@@ -76,7 +79,7 @@ fn load(dir: &str, tag: &str) -> (System, Row, Row, Vec<(String, Row)>) {
         }
     }
     let empty = || Sparse { rows: n - 1, cols: n - 1, indptr: vec![0; n], indices: vec![], values: vec![] };
-    (System { elements: Elements::default(), matrix, k1: empty(), k2: empty(), trace: vec![], harmonic }, force, rate, pops)
+    (System { elements: Elements::default(), matrix, k1: [empty(), empty(), empty()], trace: vec![], harmonic }, force, rate, pops)
 }
 
 fn vector(path: &str) -> Vec<C64> {
@@ -122,11 +125,54 @@ fn memory() -> (f64, f64, f64) {
     (mb(c.pagefile), mb(c.peak_pagefile), mb(c.peak_working_set))
 }
 
+/// The readouts of ρ from the exported rows (levels over their sum, F along z).
+fn readouts(rho: &[C64], force: &Row, rate: &Row, pops: &[(String, Row)]) -> Readouts {
+    let raw: Vec<f64> = pops.iter().map(|(_, row)| row.read(rho)).collect();
+    let total: f64 = raw.iter().sum();
+    Readouts {
+        levels: raw.iter().map(|v| v / total).collect(),
+        rate: rate.read(rho),
+        force: [0.0, 0.0, force.read(rho)],
+        ..Default::default()
+    }
+}
+
+/// `select::decide` on a scene's exported systems; prints the chosen P and every candidate's worst error per point.
+fn select_scene(dir: &str, scene: &str) {
+    let man: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/{scene}_manifest.json")).unwrap()).unwrap();
+    let k = man["kph"].as_f64().unwrap();
+    let points = ["centre0", "edge"];
+    let models = |p: &str| man["systems"][p]["models"].as_array().unwrap().clone();
+    let sizes: Vec<usize> = models("centre0").iter().map(|m| m["P"].as_u64().unwrap() as usize).collect();
+    let systems: Vec<Vec<_>> = points
+        .iter()
+        .map(|p| {
+            let mut tags = vec![man["systems"][*p]["full"].as_str().unwrap().to_string()];
+            tags.extend(models(p).iter().map(|m| m["fold2"].as_str().unwrap().to_string()));
+            tags.iter().map(|t| load(dir, t)).collect()
+        })
+        .collect();
+    let candidates: Vec<Vec<usize>> = sizes.iter().map(|&n| (0..n).collect()).collect();
+    let out = decide(&candidates, k, |p, c| {
+        let (system, force, rate, pops) = &systems[p][c.map_or(0, |c| c + 1)];
+        let solved = solve(system).map_err(|e| format!("{e:?}"))?;
+        Ok((readouts(&solved.rho, force, rate, pops), solved.route))
+    })
+    .unwrap();
+    let errors: Vec<String> = out
+        .candidates
+        .iter()
+        .map(|c| format!("P{} {:.2e}/{:.2e}", c.keep.len(), c.centre.worst(), c.edge.worst()))
+        .collect();
+    println!("{scene:<6} P {} | {:.3} s | {}", out.keep.len(), out.seconds, errors.join(" | "));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = &args[1];
     let mut filter = String::new();
-    let (mut repeat, mut level) = (1usize, "route".to_string());
+    let (mut repeat, mut level, mut select) = (1usize, "route".to_string(), false);
     let mut k = 2;
     while k < args.len() {
         match args[k].as_str() {
@@ -138,9 +184,17 @@ fn main() {
                 level = args[k + 1].clone();
                 k += 1;
             }
+            "--select" => select = true,
             f => filter = f.to_string(),
         }
         k += 1;
+    }
+    if select {
+        println!("threads {}", rayon::current_num_threads());
+        for scene in filter.split(',') {
+            select_scene(dir, scene);
+        }
+        return;
     }
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
