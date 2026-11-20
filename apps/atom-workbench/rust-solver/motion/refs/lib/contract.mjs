@@ -11,7 +11,8 @@
 // beams[]                <- model.motion.beams[]: name, direction, waveNumberPerUm, waistUm?, frequencyIndex, coupling,
 //                           counterCoupling, electricField (required)
 // outside_forms[]        <- model.motion.outsideForms[] (one per distinct frequencyIndex, 9 matrices each)
-// trap_beam              <- the index of model.motion.trapBeamId among the beams (a Gaussian beam: waistUm)
+// trap_beam              <- the index of model.motion.trapBeamId among the beams (a Gaussian beam: waistUm; every other
+//                           beam on D1/D2, `offLines`)
 // emission               <- model.motion.emission (3 matrices, ground <- excited)
 // mass_kg, temperature_uk<- model.motion.massKg, temperatureUK
 // initial_density        <- model.initialReal / initialImag (32 x 32, diagonal, trace 1)
@@ -24,6 +25,19 @@ function matrix(m,what){
 }
 const entries=(m,keep)=>{const out=[];for(let i=0;i<N;i++)for(let j=0;j<N;j++){const k=i*N+j;if((m.real[k]!==0||m.imag[k]!==0)&&!keep(i,j))out.push([i,j]);}return out;};
 const label=/^(ground|D1|D2)-(\d)-(-?\d)$/;
+
+/** The wavelengths (nm) light other than the tweezer may have: D1 and D2, 765–810 nm (request.rs D_LINES_UM: `validate`
+ * refuses a request with a beam beside its trap beam outside them). */
+export const D_LINES_NM=[765,810];
+/** The beams of a request beside its trap beam whose wavelength is outside D_LINES_NM, each as "name (id) λ nm". */
+export function offLines(line){
+  const m=line.model.motion;
+  return m.beams.filter(b=>b.id!==m.trapBeamId).map(b=>({b,nm:2e3*Math.PI/b.waveNumberPerUm}))
+    .filter(({nm})=>!(nm>=D_LINES_NM[0]&&nm<=D_LINES_NM[1])).map(({b,nm})=>`${b.name} (${b.id}) ${nm.toFixed(1)} nm`);
+}
+/** The lasers of an app scene that reflect its tweezer: none is allowed (the user's rule, 2026-11-20: a tweezer has no
+ * reflection). */
+export const tweezerReflections=scene=>scene.lasers.filter(l=>l.enabled!==false&&l.reflection?.of===scene.tweezerId);
 
 /** Checks a native request line; returns a short summary or throws why it lacks what the Request needs. */
 export function checkRequest(line){
@@ -72,6 +86,8 @@ export function checkRequest(line){
   const trap=m.beams.findIndex(b=>b.id===m.trapBeamId);
   if(trap<0)throw new Error(`${what}: trapBeamId names no beam`);
   if(m.beams[trap].waistUm===undefined)throw new Error(`${what}: the trap beam has no waist`);
+  const off=offLines(line);
+  if(off.length)throw new Error(`${what}: light beside the tweezer outside D1/D2 (${D_LINES_NM.join('–')} nm): ${off.join(', ')}`);
   if(!Array.isArray(m.emission)||m.emission.length!==3)throw new Error(`${what}: emission`);
   m.emission.forEach((c,a)=>{matrix(c,`${what}: emission ${a}`);if(entries(c,(i,j)=>ground[i]&&!ground[j]).length)throw new Error(`${what}: emission ${a} not ground <- excited`);});
   return {beams:m.beams.length,frequencies:keys.size,trapBeam:trap,axes:axes.length,durationUs:o.durationUs,samples:o.samples};
