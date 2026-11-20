@@ -1627,7 +1627,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         scales,
         initial: row,
         ledger,
-        method: "三维半经典运动：内态按原子所在处的光折叠（基态全部保留，激发态在每个判断时刻按折叠自己的读数升为显式或降回折叠）".into(),
+        method: "三维半经典运动：内态在两点选态一次定好的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），模型在开头只构造一次，整个求解共用".into(),
     };
     context.plan.read_at(candidates.clone());
 
