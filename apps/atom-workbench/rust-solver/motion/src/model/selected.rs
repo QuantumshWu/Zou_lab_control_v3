@@ -65,6 +65,7 @@
 //! exact beat with their values (`Selected::components`), H_eff's gradient's, and the photon classes. A propagation that
 //! takes the model once a step (STEPBENCH L2) asks for the middle's alone; the onefold integrator asks for three.
 
+use crate::linalg::{larger, smaller};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -369,7 +370,7 @@ impl Selected {
                 }
             })
             .collect();
-        let optical = rs.keep.iter().filter(|&&s| s >= GROUND).map(|&e| 0.5 * (0..GROUND).map(|g| decay(e, g)).sum::<f64>()).reduce(f64::min);
+        let optical = rs.keep.iter().filter(|&&s| s >= GROUND).map(|&e| 0.5 * (0..GROUND).map(|g| decay(e, g)).sum::<f64>()).reduce(smaller);
         let waves = scene.geometry.iter().enumerate().filter(|(l, _)| *l != scene.tweezer()).map(|(_, g)| g.wave_vector()).collect();
         // The fold's pieces by the lab's frequency at rest -- the frame's primitive vector of their keys --, each group
         // under the first of its keys met.
@@ -584,8 +585,8 @@ impl Selected {
             if *which == 0 && !lab.channel_lists[co].is_empty() {
                 let beams = key.iter().enumerate().filter(|(g, k)| **k != 0 && *g < self.scene.geometry.len()).map(|(g, _)| self.scene.geometry[g].wave_number);
                 match absorbed.iter_mut().find(|a| a.0 == *fast) {
-                    Some(a) => a.1 = beams.fold(a.1, f64::max),
-                    None => absorbed.push((*fast, beams.fold(0.0, f64::max))),
+                    Some(a) => a.1 = beams.fold(a.1, larger),
+                    None => absorbed.push((*fast, beams.fold(0.0, larger))),
                 }
             }
             for x in lab.channel_lists[co].iter().map(|&x| x as usize) {
@@ -718,8 +719,11 @@ impl Selected {
                 }
             }
         }
-        let gradients: Vec<(usize, f64)> = node.gradient.iter().map(|(beat, g)| (*beat, g.iter().map(Mat::max_abs).fold(0.0, f64::max))).collect();
-        let (top, gtop) = (largest.iter().copied().fold(0.0, f64::max), gradients.iter().map(|g| g.1).fold(0.0, f64::max));
+        let gradients: Vec<(usize, f64)> = node.gradient.iter().map(|(beat, g)| (*beat, g.iter().map(Mat::max_abs).fold(0.0, larger))).collect();
+        let (top, gtop) = (largest.iter().copied().fold(0.0, larger), gradients.iter().map(|g| g.1).fold(0.0, larger));
+        // A NaN coefficient would read every ratio as NaN and drop every beat but the zero one (a comparison with NaN is
+        // false): the node at unit amplitude is numbers, or the run is refused here.
+        assert!(top.is_finite() && gtop.is_finite(), "the node's coefficients at unit amplitude are not finite");
         let epsilon = 2.0 * crate::units::UNIT_ROUNDOFF;
         let mut keep = vec![true; node.generator.len()];
         self.kept = Vec::new();

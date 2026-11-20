@@ -30,6 +30,7 @@
 //! operations: γ_i = γ_{2(m_i+1)} = 2(m_i + 1)u / (1 − 2(m_i + 1)u) (`units::rounding`), which is the prototype's
 //! (m_i + 1)ε / (1 − (m_i + 1)ε) with ε = 2u, digit for digit.
 
+use crate::linalg::larger;
 use super::{product, row, Schur};
 use crate::floquet::Sparse;
 use crate::linalg::C64;
@@ -60,7 +61,7 @@ impl Rows {
     /// (η, ζ): the row-equilibrated backward error max_i |r_i| / (a_i ‖x‖∞ + |b_i|), and the same over each row's
     /// rounding level. A row with a_i ‖x‖∞ + |b_i| = 0 has r_i = 0 exactly and counts 0.
     pub fn backward(&self, x: &[C64], b: &[C64], r: &[C64]) -> (f64, f64) {
-        let size = x.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let size = x.iter().map(|v| v.abs()).fold(0.0, larger);
         let (mut eta, mut zeta) = (0.0f64, 0.0f64);
         for i in 0..b.len() {
             let scale = self.norm[i] * size + b[i].abs();

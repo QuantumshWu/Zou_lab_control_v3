@@ -45,6 +45,7 @@
 //! cooling beam given by its waist is focused too, on the millimetre scale, and an atom it pushes out of the tweezer
 //! moves along it for metres (√19 z_R) -- counted by its intensity, such an atom would never be lost.
 
+use crate::linalg::{larger, smaller};
 use crate::linalg::{dot3, hermitian_eigen, Mat, C64, V3};
 use crate::units::rounding;
 use crate::request::Request;
@@ -422,7 +423,7 @@ mod tests {
                 let t: V3 = std::array::from_fn(|j| r[j] - dot3(r, b.direction) * b.direction[j]);
                 rounding(4) * (1.0 + b.wave_number * norm3(r) + b.waist.map_or(0.0, |w| dot3(t, t) / (w * w)))
             })
-            .fold(0.0, f64::max)
+            .fold(0.0, larger)
     }
     /// The central difference's error at step h, relative to the function's size: its truncation (h²/6)K³ for a
     /// function whose third derivative is within K³ of it, and its rounding (own)/h, doubled for the two ends.
@@ -508,7 +509,7 @@ mod tests {
             if fields.len() == 2 {
                 assert_eq!(parallel(&fields[0], &fields[1]), rank == 1, "{fields:?}");
             }
-            let largest = fields.iter().map(|e| e.iter().map(|z| z.abs()).fold(0.0, f64::max)).fold(0.0, f64::max);
+            let largest = fields.iter().map(|e| e.iter().map(|z| z.abs()).fold(0.0, larger)).fold(0.0, larger);
             for (j, e) in fields.iter().enumerate() {
                 for q in 0..3 {
                     let back: C64 = (0..rank).map(|k| f.coefficients[j][k] * f.basis[k][q]).sum();
@@ -559,8 +560,8 @@ mod tests {
             // carry the amplitudes' rounding over ε: `difference_error` at K/ε and own/ε.
             let (e, _) = f.components(&field);
             let total = e.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-            let smallest = e.iter().map(|z| z.abs() / total).fold(1.0, f64::min);
-            let k = light.beams.iter().map(|b| scale(b, r)).fold(0.0, f64::max);
+            let smallest = e.iter().map(|z| z.abs() / total).fold(1.0, smaller);
+            let k = light.beams.iter().map(|b| scale(b, r)).fold(0.0, larger);
             let h = third / k;
             for a in 0..3 {
                 let (mut plus, mut minus) = (r, r);

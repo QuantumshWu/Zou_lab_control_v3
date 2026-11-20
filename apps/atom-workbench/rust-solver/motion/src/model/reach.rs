@@ -198,6 +198,7 @@
 //! edge is: where a companion lies in such a band its trajectories differ from the run's without bound, and the check
 //! halves.
 
+use crate::linalg::{larger, smaller};
 use super::own::{least, most, Own};
 use super::{Envelope, Lights, Model, Reach, Trap};
 use crate::field::{Amplitude, Geometry};
@@ -312,8 +313,8 @@ impl Span {
         let axis = norm3(std::array::from_fn(|i| c[i] - zeta * beam.direction[i]));
         let modulus = |rho: f64, u: f64| (-(rho / w).powi(2) / u).exp() / u.sqrt();
         let u = |zeta: f64| 1.0 + (zeta / z).powi(2);
-        let (near, far) = (u((zeta.abs() - along).max(0.0)), u(zeta.abs() + along));
-        let (inner, outer) = ((axis - across).max(0.0), axis + across);
+        let (near, far) = (u(larger(zeta.abs() - along, 0.0)), u(zeta.abs() + along));
+        let (inner, outer) = (larger(axis - across, 0.0), axis + across);
         [modulus(outer, near).min(modulus(outer, far)), modulus(inner, (2.0 * (inner / w).powi(2)).clamp(near, far))]
     }
 
@@ -329,7 +330,7 @@ impl Span {
         // The envelope's gradient at the centre (its phase e^{ik·c} left on: only moduli are read), and the cell's extents
         // across the beam and along it.
         let envelope: [C64; 3] = std::array::from_fn(|i| gradient[i] - C64::new(0.0, k[i]) * value);
-        let across = least((0..3).map(|i| half[i] * (1.0 - n[i] * n[i]).max(0.0).sqrt()).sum::<f64>(), rho);
+        let across = least((0..3).map(|i| half[i] * larger(1.0 - n[i] * n[i], 0.0).sqrt()).sum::<f64>(), rho);
         let along = least((0..3).map(|i| half[i] * n[i].abs()).sum::<f64>(), rho);
         let [tt, tn, nn] = bends.curvature;
         let bend = tt * across * across + 2.0 * tn * across * along + nn * along * along;
@@ -953,7 +954,7 @@ impl Model {
                         let u = b / -level - 1.0;
                         for a in 0..3 {
                             let na = beam.direction[a];
-                            extent[a] = extent[a].max((u.max(0.0) * (0.5 * w * w * (1.0 - na * na) + z * z * na * na)).sqrt());
+                            extent[a] = larger(extent[a], (larger(u, 0.0) * (0.5 * w * w * (1.0 - na * na) + z * z * na * na)).sqrt());
                         }
                     }
                     _ => extent = [f64::INFINITY; 3],
@@ -1267,7 +1268,7 @@ mod tests {
             // to d − r.
             let share_above = |level: f64| -> f64 {
                 let inner = |r: f64| -> f64 {
-                    let (lo, hi) = (((level - a * r) / b).max(0.0), d - r);
+                    let (lo, hi) = (larger((level - a * r) / b, 0.0), d - r);
                     if hi <= lo { 0.0 } else { r * ((-r - lo).exp() - (-r - hi).exp() - (-d).exp() * (hi - lo)) }
                 };
                 let all = |r: f64| r * ((-r).exp() - (-d).exp() - (-d).exp() * (d - r));
@@ -1304,7 +1305,7 @@ mod tests {
         let cell = Cell { centre: [148.128, -1.623, 4.629], half: [21.1611, 1.6232, 0.0127] };
         let spans = model.spans(&cell);
         let pair = pair_span(&spans, trap, trap);
-        let moved = points(&cell).iter().map(|&r| (model.light.beams[trap].amplitude(r).value.norm_sqr() - pair.centre.re).abs()).fold(0.0, f64::max);
+        let moved = points(&cell).iter().map(|&r| (model.light.beams[trap].amplitude(r).value.norm_sqr() - pair.centre.re).abs()).fold(0.0, larger);
         assert!(moved <= pair.radius, "the intensity moves by {moved} beyond its radius {}", pair.radius);
         assert!(pair.radius <= 4.0 * moved, "the radius {} against the intensity's movement {moved}", pair.radius);
         assert!(spans[trap].least > 0.0 && spans[trap].most < 1.0, "the modulus within [{}, {}]", spans[trap].least, spans[trap].most);
@@ -1336,8 +1337,8 @@ mod tests {
             assert!(request.initial_density[(state, state)].re == 1.0, "{scene}: the atoms' state");
             let trap = model.trap(&alone(state), &model.prepared()).unwrap();
             let reach = model.reach(&trap, &alone(state), request.temperature_uk, share);
-            let rate = |trap: &Trap| trap.frequencies.iter().copied().fold(0.0, f64::max);
-            let stiffest = (0..GROUND).map(|s| rate(&model.trap(&alone(s), &model.prepared()).unwrap()).powi(2) - rate(&trap).powi(2)).fold(f64::NEG_INFINITY, f64::max);
+            let rate = |trap: &Trap| trap.frequencies.iter().copied().fold(0.0, larger);
+            let stiffest = (0..GROUND).map(|s| rate(&model.trap(&alone(s), &model.prepared()).unwrap()).powi(2) - rate(&trap).powi(2)).fold(f64::NEG_INFINITY, larger);
             let (kick, own) = (model.kick_curvature(&reach, &model.moduli(&reach), &trap), rate(&trap).powi(2));
             eprintln!("{scene}: ω_k² = {:.4} ω²; the traps' {:.4} ω²", kick / own, stiffest / own);
             assert!((kick - stiffest).abs() <= 1e-9 * own, "{scene}: the bound {kick}, the wells' difference {stiffest}");
