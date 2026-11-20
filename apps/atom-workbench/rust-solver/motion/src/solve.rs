@@ -109,6 +109,18 @@
 //! four of the step. Where every difference is below the noise no number of levels tells it from convergence.
 //!
 //! ## The ladder
+//! - No route: a rung whose own steps on the scout -- the first member of every pilot group, at the rung's own
+//!   length -- hold one the decomposition refused for an entry of no route (spectral.rs, # The split: neither the
+//!   following's series nor the hops' converges on it, a length beyond both radii; step.rs `Scratch::unrouted`) is
+//!   left as one clearly beyond is, whatever its read: such a step is no step of the scheme at the rung's length --
+//!   the advance takes it at its halves --, and a rung whose steps are not its own is no rung to stand at. Only a
+//!   rung's own level tells: its companion's steps are twice its length. (Measured on the scenes' steps from the moving
+//!   point, 25 600 a rung: none at R4's 0.237 and 0.474 µs, GMD1C's 0.948 and 1.897, tilt0's 0.326 and 0.652, tilt2's;
+//!   a quarter of R4's at 0.948 -- the rung R4's ladder begins at, its pilot an hour's: motion3d_status/rewrite/
+//!   r1prop.status.md.) What the rung leaves of the readings is its read's to tell: the decomposition's own remainders
+//!   on a step (spectral.rs `Picture::remainder`) bound the internal state's error over the step alone, and the readings'
+//!   differences at the rungs a run stands at are the splitting's second order, which they do not see (R4: 1e-6 to
+//!   1e-3 of the state a step at 0.474 µs, against T_z 7.7 ± 2.3 µK apart from 0.237 µs), so no rung is left by them.
 //! - Clearly beyond: a rung whose own read -- or its third level above, the rung left's read lowered -- lies clearly
 //!   beyond the square b of the step's share among the family's few looks (`screen`) is left: the step is halved, the level at τ becomes the companion and only τ/2 is run anew; the
 //!   rung below's third level above is the rung left's own read, lowered. Down to the step at which a trajectory would
@@ -1959,19 +1971,22 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         let lowest = context.plan.end / below > MOST_STEPS as f64;
         let upward = !levels.above_pilot && above(context.tau) && !levels.above_unread;
         let verdict = verdict(&read, levels.above.as_ref(), pilot, upward);
+        // On the scout, a rung whose own steps the decomposition refused for an entry of no route (## The ladder) is
+        // left whatever its read: neither of the entry's series converges at its length (spectral.rs, # The split).
+        let unrouted = !pilot && levels.fine.iter().map(|p| p.counts.unrouted).sum::<u64>() > 0;
         crate::prof::note(|| {
             let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
             let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
-            format!("ladder tau {} pilot {pilot} members {members} groups {} verdict {verdict:?} screen {} looks [{}] above [{}]", context.tau, numbers.len(), screen(&read), looks.join(" "), above.join(" "))
+            format!("ladder tau {} pilot {pilot} members {members} groups {} verdict {verdict:?} screen {} unrouted {} looks [{}] above [{}]", context.tau, numbers.len(), screen(&read), levels.fine.iter().map(|p| p.counts.unrouted).sum::<u64>(), looks.join(" "), above.join(" "))
         });
         // A read of which no look reads decides nothing and prices nothing (`Verdict::Unread`): the check ends unable to
         // see where it is.
-        if verdict == Verdict::Unread {
+        if verdict == Verdict::Unread && !unrouted {
             return Settled::Unseen;
         }
         // A rung its reads do not leave takes its course by the run's work from here: without its prices the check
         // stops there (`Settled::Pending`).
-        if prices.is_none() && !screen(&read) {
+        if prices.is_none() && !screen(&read) && !unrouted {
             return Settled::Pending;
         }
         // What the run holds of the rung's levels (`Holding`).
@@ -1982,7 +1997,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
             pairs: (groups * members + levels.further[0].len() as u64 * GROUP) as f64,
             below: levels.half.as_ref().map_or(0., |_| groups as f64),
         };
-        if let (Verdict::Stands | Verdict::Above, Some(prices)) = (verdict, prices) {
+        if let (Verdict::Stands | Verdict::Above, Some(prices), false) = (verdict, prices, unrouted) {
             crate::prof::note(|| {
                 let w: Vec<String> = [0.25, 0.5, 1., 2., 4.].iter().map(|f| format!("w({:.4})={:.4e}", f * context.tau, (prices.work)(f * context.tau))).collect();
                 format!("ladder tau {} prices product {:.1} {:?} staying {:.4e} descending {:.4e} course {:?} [{}]", context.tau, prices.product, holding, staying(prices, context.tau, holding), descending(prices, context.tau, context.plan.end, holding), course(prices, context.tau, context.plan.end, holding, upward && levels.above.is_none()), w.join(" "))
@@ -2006,7 +2021,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // rung is left, as an adaptive integrator leaves a step whose error estimate is beyond its tolerance.
         let have = holding.pairs as u64;
         let remedied = match (verdict, prices) {
-            (Verdict::Unseeing, Some(prices)) => {
+            (Verdict::Unseeing, Some(prices)) if !unrouted => {
                 let own_within = within(&read);
                 if !lowest && !own_within && seeing(&read, have).is_some() && levels.half.is_none() {
                     levels.half = Some(foresee(run, ensemble, domain, context, levels, numbers, messages));
@@ -2060,7 +2075,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // the ladder's bottom -- where no rung below is cheaper, there being none -- a read clearly beyond leaves the step
         // capped, one that only could not be seen through, unable to see.
         if lowest {
-            return if verdict == Verdict::Unseeing { Settled::Unseen } else { Settled::Capped };
+            return if verdict == Verdict::Unseeing && !unrouted { Settled::Unseen } else { Settled::Capped };
         }
         // The rung below's third level above: this rung's own read, lowered.
         let inherits = Some(carried(&read, 0.5));
@@ -2266,10 +2281,14 @@ struct Counts {
     runaway: Stopped,
     /// The optical sector's sums over the trajectories (ledger.rs `optical`; step.rs `Trajectory::booked`, `pending`).
     optical: [f64; 4],
+    /// The steps the decomposition refused for an entry of no route, each taken at its halves (step.rs
+    /// `Scratch::unrouted`): what the probe excludes a rung by (## The ladder).
+    unrouted: u64,
 }
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
+        self.unrouted += o.unrouted;
         self.refused.add(&o.refused);
         self.failed.add(&o.failed);
         for (stopped, other) in self.unmade.iter_mut().zip(&o.unmade) {
@@ -2669,6 +2688,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         nowhere: nowhere.map_or_else(Stopped::default, Stopped::at),
         runaway: stopped(runaway),
         optical,
+        unrouted: scratch.unrouted(),
     };
     Record { outputs, listed, reads, trail, lost, counts, scattered: t.scattered }
 }
@@ -4208,7 +4228,7 @@ mod tests {
             method: String::new(),
         };
         let unmade = [Stopped::default(), Stopped { count: 2, since: Some(14.) }, Stopped::default()];
-        let counts = Counts { steps: 0, refused: Stopped { count: 4, since: Some(11.) }, failed: Stopped { count: 3, since: Some(12.5) }, unmade, nowhere: Stopped { count: 6, since: Some(16.) }, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
+        let counts = Counts { steps: 0, refused: Stopped { count: 4, since: Some(11.) }, failed: Stopped { count: 3, since: Some(12.5) }, unmade, nowhere: Stopped { count: 6, since: Some(16.) }, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4], unrouted: 0 };
         let s = assemble(&context, &estimates, &estimates, &listed, &counts, 8);
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");

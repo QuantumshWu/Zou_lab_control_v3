@@ -6,6 +6,8 @@
 //!   the decomposition -- the regression of the propagation's change: the steps the decomposition took before are the
 //!   same to the bit.
 //! - `r1prop_refused`: the steps the decomposition refuses (`spectral::Refusal`), by why, at a step and at its halves.
+//! - `r1prop_remainder`: the remainder estimate (`Picture::remainder`) against the flow.
+//! - `r1prop_solve`: the probe and the pilot as the solve runs them, their messages' times.
 
 use crate::model::selected::Selected;
 use crate::request::Request;
@@ -289,5 +291,31 @@ fn r1prop_remainder() {
                 Err(_) => break,
             }
         }
+    }
+}
+
+/// The probe and the pilot as the solve runs them (solve.rs `solve`), one scene at a time: every message's time,
+/// trajectories and step; ended where the product's first batch is reported (more trajectories than the pilot's) or the
+/// solve ends. With the feature `prof` the ladder's checks are noted as they are made (`PROFNOTE ladder ...`).
+#[test]
+#[ignore]
+fn r1prop_solve() {
+    let pilot = crate::solve::pilot_size();
+    for (name, request) in scenes() {
+        let clock = std::time::Instant::now();
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::solve::solve(&request, &mut |s, remaining| {
+                println!("R1-SOLVE {name} {:.1} s: {} trajectories, tau {} us, remaining {remaining:?}", clock.elapsed().as_secs_f64(), s.trajectories, s.time_step_us);
+                if s.trajectories > pilot {
+                    panic!("R1-SOLVE the product's first batch");
+                }
+            })
+        }));
+        let how = match ended {
+            Ok(Ok(s)) => format!("solved: tau {} us, {} trajectories", s.time_step_us, s.trajectories),
+            Ok(Err(e)) => format!("refused: {e}"),
+            Err(_) => "the product began".to_string(),
+        };
+        println!("R1-SOLVE {name} ended at {:.1} s: {how}", clock.elapsed().as_secs_f64());
     }
 }

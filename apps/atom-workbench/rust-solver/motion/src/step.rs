@@ -1479,6 +1479,8 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 /// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
 /// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing of a
 /// step is carried to the next one, and a trajectory taken up again with a fresh scratch goes on as itself, to the bit.
+/// Beside, the count of the trajectory's steps the decomposition refused for an entry of no route (`unrouted`:
+/// spectral.rs, # The split), which the solve's probe reads (solve.rs, ## The ladder) and no step does.
 /// (Until 2026-11-20 the scratch carried its picture's counts of the decomposition's route, which the next step's
 /// route was priced against: the strides', spectral.rs, # Where the decomposition does not take the step.)
 #[derive(Default)]
@@ -1492,6 +1494,8 @@ pub struct Scratch {
     slots: usize,
     weights: Vec<f64>,
     kept: Vec<f64>,
+    /// The steps refused for an entry of no route (`Refused::Propagation(Refusal::Radius)`), at whatever length.
+    unrouted: u64,
 }
 
 struct Carved<'a> {
@@ -1510,6 +1514,12 @@ struct Carved<'a> {
 }
 
 impl Scratch {
+    /// The steps refused for an entry the decomposition takes by no route (spectral.rs, # The split), at whatever
+    /// length -- each taken at its halves by the advance (adapt.rs, # The step) -- since the scratch was made.
+    pub fn unrouted(&self) -> u64 {
+        self.unrouted
+    }
+
     /// The scratch for a cluster of n states and `slots` sums (`Sums`): the weights' sums of the three nodes kept, a
     /// step's earlier stretches' (`Midway::stretch`).
     fn fit(&mut self, n: usize, slots: usize) {
@@ -2154,7 +2164,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let launched = along.turned(&march.state.psi, march.u, true);
         // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
         // decay laid alike.
-        let scale = pictured(&along, scratch, tau, Some(&launched[..n]))?;
+        let scale = pictured(&along, scratch, tau, Some(&launched[..n])).inspect_err(|refused| scratch.unrouted += u64::from(*refused == Refused::Propagation(Refusal::Radius)))?;
         let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
         // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
         let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
