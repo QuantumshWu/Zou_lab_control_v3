@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use super::{Elements, Frame, Hilbert, Lattice, Sparse};
 use crate::linalg::C64;
-use crate::scene::Scene;
 
 /// One lattice component of the Liouvillian: L, K1, K2 (d × d, d = n²), each absent where zero.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,9 +37,10 @@ pub struct Liouville {
 }
 
 impl Liouville {
-    /// The Liouvillian of a Hilbert model in its frame (td_s.Liou + mdlat.PerM).
-    pub fn new(scene: &Scene, hilbert: &Hilbert) -> Liouville {
-        let _ = (scene, hilbert);
+    /// The Liouvillian of a Hilbert model in the frame of its point (td_s.Liou + mdlat.PerM): the reference and the model
+    /// at one point take the same frame (`Frame::new` on the reference).
+    pub fn new(frame: &Frame, hilbert: &Hilbert) -> Liouville {
+        let _ = (frame, hilbert);
         todo!()
     }
 }

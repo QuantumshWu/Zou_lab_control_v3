@@ -7,8 +7,9 @@ pub mod frame;
 pub mod select;
 pub mod assemble;
 
-use crate::linalg::{C64, Mat};
-use crate::scene::Key;
+use crate::linalg::{C64, Mat, V3};
+use crate::request::STATES;
+use crate::scene::{Components, Key, Scene};
 
 pub use assemble::{assemble, readouts, Liouville, Readouts, System};
 pub use frame::{Frame, Lattice};
@@ -32,20 +33,21 @@ pub struct Hilbert {
     pub states: Vec<usize>,
     /// H's components, each key with its −key's conjugate listed too (td_s.hilbert_full).
     pub hamiltonian: Vec<Part>,
-    /// Per jump channel (e1, e2, u: the emission rotated onto the analysis axis u, weights 2/5, 2/5, 1/5) its components;
-    /// `Part::gradient` holds ∂L/∂u (zero for the full reference).
+    /// Per jump channel (each fast channel of the fold, model/rs.rs `Channel`, its emission rotated onto (e1, e2, u), u the
+    /// analysis axis, weights 2/5, 2/5, 1/5) its components; `Part::gradient` holds ∂L/∂u.
     pub jumps: Vec<Vec<Part>>,
     /// Per jump channel √w (K ∘ C) by components: the photon's momentum along u (scene_x `jumpk`).
     pub kicks: Vec<Vec<Part>>,
     /// The levels (populations read per level): indices into `states`.
     pub groups: Vec<Vec<usize>>,
-    /// The RS lift (None for the full reference): the folded states Q (indices into the 32) and M_f (|Q| × n) per key.
+    /// The fold's lift: M_f per key, a row per folded state or sideband.
     pub lift: Option<Lift>,
 }
 
-/// The RS model's folded states and their amplitudes M_f = (E_a + f − G_QQ)⁻¹ H_QS,f.
+/// The fold's amplitudes M_f = (E_a + f − G)⁻¹ V_f on the folded rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lift {
+    /// Each row's state (an index into the 32).
     pub folded: Vec<usize>,
     pub amplitudes: Vec<(Key, Mat)>,
 }
@@ -79,10 +81,10 @@ pub struct Sparse {
 }
 
 impl Hilbert {
-    /// The full 32-state reference at r for the momentum κ, its gradients and jumps along the analysis axis u
-    /// (td_s.hilbert_full on scene_x.build).
-    pub fn full(scene: &crate::scene::Scene, r: crate::linalg::V3, kappa: crate::linalg::V3, axis: crate::linalg::V3) -> Hilbert {
-        let _ = (scene, r, kappa, axis);
-        todo!()
+    /// The reference at a point: the 32 states with the tweezer's sidebands folded (the one fold, model/rs.rs `fold`),
+    /// everything else explicit, along the analysis axis u.
+    pub fn full(scene: &Scene, components: &Components, axis: V3) -> Hilbert {
+        let all: Vec<usize> = (0..STATES).collect();
+        crate::model::rs::fold(scene, components, &all, None).hilbert(axis)
     }
 }
