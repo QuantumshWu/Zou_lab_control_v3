@@ -166,6 +166,12 @@ struct Work {
     product: Vec<C64>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The nodes the middles made, without and with the photon forms (a check's count).
+    pub(crate) static MADE: RefCell<[usize; 2]> = const { RefCell::new([0; 2]) };
+}
+
 thread_local! {
     /// The thread's buffers, for the run whose number it holds.
     static WORK: RefCell<Option<(usize, Work)>> = const { RefCell::new(None) };
@@ -264,7 +270,8 @@ pub struct SelectedMiddle<'a> {
     r: V3,
     t: f64,
     nodes: RefCell<Vec<Rc<Node>>>,
-    /// The outer nodes' offset last made: the step's half (its picture's ends; `gradient`'s slope).
+    /// The step's half-width h, as the step gives it (`Middle::nodes`): its outer nodes' offset, the chord of
+    /// `gradient`'s slope. A jump's node at another offset does not change it.
     half: Cell<Option<f64>>,
     made: Cell<f64>,
 }
@@ -915,9 +922,8 @@ impl SelectedMiddle<'_> {
         }
         let node = Rc::new(self.model.node(at, path.kappa, kicked));
         self.made.set(self.made.get() + node.work);
-        if s != 0.0 {
-            self.half.set(Some(s.abs()));
-        }
+        #[cfg(test)]
+        MADE.with(|m| m.borrow_mut()[usize::from(kicked)] += 1);
         self.nodes.borrow_mut().push(node.clone());
         node
     }
@@ -1234,6 +1240,16 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     /// P's explicit excited states' optical sector (step.rs, # The optical sector's noise): its ground states, γ_Q, and
     /// the light pattern's fastest beat along the path over the non-tweezer beams.
+    /// The step's three nodes' forms (`step::Middle::nodes`), the step's half-width h kept for `gradient`'s slope.
+    fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Path)>) -> ([[f64; 3]; 3], Option<crate::step::Forms>) {
+        self.half.set(Some(h));
+        let forms = std::array::from_fn(|j| match held {
+            Some((held, weight)) if j == 1 => self.centre(path, held, weight, rho[j]),
+            _ => self.force(path, [-h, 0.0, h][j], rho[j]),
+        });
+        (forms, end.map(|(rho, fixed)| crate::step::forms_at(self, fixed, rho)))
+    }
+
     fn optical(&self, path: &Path) -> Option<Optical> {
         let decay = self.model.optical?;
         let (most, least) = self.model.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(x), least.min(x)));

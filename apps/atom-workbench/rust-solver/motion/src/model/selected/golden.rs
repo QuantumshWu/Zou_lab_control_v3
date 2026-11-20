@@ -428,3 +428,32 @@ fn r1_tones() {
         }
     }
 }
+
+/// R1-MODEL item 3: the nodes a step makes (STEPCOST finding 1): from the reference state at the trap's centre at the
+/// thermal speed along x, R1_STEPS steps at τ = V3E_TAU µs (0.948) with the Brownian draws and the jumps, per step the
+/// nodes made without the photon forms and with them; and the gradient's slope taken over the step's own ends.
+#[test]
+#[ignore]
+fn r1_nodes_per_step() {
+    use crate::step::{Brownian, Midway, Scratch, Trajectory};
+    let tau = super::env("V3E_TAU", 0.948);
+    let steps = super::env("R1_STEPS", 40.0) as usize;
+    for (name, request, keep) in runs() {
+        let run = run_of(&request, &keep);
+        let chief = crate::solve::chief(&request);
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let mut t = Trajectory::new(&run, chief, R1, [speed, 0.0, 0.0], 11, 0);
+        let mut scratch = Scratch::default();
+        MADE.with(|m| *m.borrow_mut() = [0; 2]);
+        let (mut taken, mut jumps) = (0, 0);
+        for _ in 0..steps {
+            let Ok(m) = Midway::new(&run, &t, tau) else { break };
+            let Ok(step) = m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &super::Anywhere) else { break };
+            jumps += step.made.iter().filter(|m| m.kick.is_some()).count();
+            t = step.end;
+            taken += 1;
+        }
+        let made = MADE.with(|m| *m.borrow());
+        eprintln!("R1NODES {name}: τ {tau}, {taken} steps, {jumps} jumps: {:.3} nodes a step without the photon forms, {:.3} with them", made[0] as f64 / taken as f64, made[1] as f64 / taken as f64);
+    }
+}
