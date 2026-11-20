@@ -1,7 +1,7 @@
 //! The pipeline: request, run, pilot, step's check, batches, checkpoints, result (SPEC §3, §5, §9).
 //!
 //! # The pipeline
-//! 1. The request's checks; the initial components; the run (model/selected.rs `Selected`: the scene, the two-point
+//! 1. The request's checks; the initial components; the run (model/selected.rs `Selected`: the scene, the three-point
 //!    check's P (select.rs `choose`) and its RS fold, one object for every step of the solve, decided once before any
 //!    trajectory runs, RUSTPLAN §3.2); every initial component's prepared well and the initial ensemble drawn in them,
 //!    the reported trap, the kick's curvature (`solve`, `Setting`); the outputs' plan, the first rung (# The step).
@@ -308,7 +308,7 @@
 //!   read is no end -- an interval whose reads lie on its line stands whole and adds no time. (First built with the
 //!   intervals bounded instead, by the slowest axis's window, every end a time: PGC3D 1 ms read at 26 analysis times,
 //!   2200 rows of the units, and took 1.23 times 717cb386's CPU over three alternating pairs.)
-//! - The model's error is no reading of the times: it is the two points' measured error, the same at every state
+//! - The model's error is no reading of the times: it is the three points' measured error, the same at every state
 //!   (`booked_at`), read where the atoms went (# Where the atoms went).
 //! - What stands on them: the step's mean square (estimate.rs `between`, each time by its share of the run); every
 //!   state of the pilot's run level there, each group's every member held and every atom lost by then (`sampled`), the
@@ -323,9 +323,10 @@
 //! # The model (SPEC §5.2)
 //! The model is decided once, before any trajectory runs (RUSTPLAN §3.2; model/selected.rs `Selected`): P is the
 //! smallest set of the ground states and whole excited levels whose RS fold meets the 1 % gate against the full
-//! reference at the two points, the centre and the edge (select.rs `choose`), and the fold's formula and coefficients
+//! reference at the three points, the centre, the edge and on the tweezer's axis at +z_R, where its intensity is half
+//! (select.rs `choose`), and the fold's formula and coefficients
 //! are fixed with it. The solve decides nothing of it. What the solve books of the model is that measurement
-//! (`Selected::error`), one account (`READINGS`): at every state the chosen P's largest population error at the two
+//! (`Selected::error`), one account (`READINGS`): at every state the chosen P's largest population error at the three
 //! points on the populations (absolute) and its largest rate or force error on T (relative), as a rate or a force
 //! wrong by x moves T by x (`booked_at`); one that is no number -- a P no check measured -- the state's whole.
 
@@ -379,7 +380,7 @@
 //!
 //! # Stopping (SPEC §3)
 //! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
-//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the two points' measurement booked at the pilot's states
+//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the three points' measurement booked at the pilot's states
 //! -- its held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the optical sector's booking, and c
 //! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what the run's
 //! unresolved atoms carry, read before each batch's looks (# The unresolved atoms) --; S the statistics' interval. The
@@ -483,13 +484,13 @@ const DISTRIBUTION_TIMES: usize = 21;
 /// interval. The other half is left to what runs between two messages and sends none (module documentation,
 /// # Checkpoints): a margin, not a bound derived from those stages' work. It times messages and decides no result.
 const CHECKPOINT: Duration = Duration::from_secs(60);
-/// What the engine did with the model's error (the ledger's `action`, shown by the app): measured once, at the two
+/// What the engine did with the model's error (the ledger's `action`, shown by the app): measured once, at the three
 /// points, against the full reference (module documentation, # The model).
-const MODEL_MEASURED: &str = "模型（选出的 P 及其 RS 折叠）在开头一次定下；这一项误差是中心、边缘两点上对完整参照的实测";
+const MODEL_MEASURED: &str = "模型（选出的 P 及其 RS 折叠）在开头一次定下；这一项误差是中心、边缘和光镊轴上 +z_R（光强一半）处三点上对完整参照的实测";
 
 /// The model's accounts a state's error is booked by, with the ledger's name of each (module documentation, # The
-/// model): the two points' measured error, one account; a state's row holds it and its combination (the same).
-const READINGS: [&str; 1] = ["选出的 P 的模型误差（中心、边缘两点实测）"];
+/// model): the three points' measured error, one account; a state's row holds it and its combination (the same).
+const READINGS: [&str; 1] = ["选出的 P 的模型误差（中心、边缘、光镊轴上 +z_R 三点实测）"];
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -542,7 +543,7 @@ pub struct Solution {
 /// left (ms) where the run's pace gives one, the final solution returned; partial results are never withheld.
 ///
 /// The run is one object, made once for the request and the same at every step of the solve (model/selected.rs
-/// `Selected`: the scene, the two-point check's P and its fold): what the solve takes of it beside the steps -- the
+/// `Selected`: the scene, the three-point check's P and its fold): what the solve takes of it beside the steps -- the
 /// prepared potentials and their traps, the initial ensemble drawn in them, the reported trap, the kick's curvature
 /// (`Setting`) -- is made from it here, and the pipeline runs once (`attempt`). A request it refuses (the scene, the
 /// selection, a trap that does not hold the atom, no step below the edge) is refused with its reason, before a
@@ -553,7 +554,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     solve_on(request, &run, checkpoint)
 }
 
-/// The run of a request at the reference populations `reference` (`solve`): its scene, the two-point check's P
+/// The run of a request at the reference populations `reference` (`solve`): its scene, the three-point check's P
 /// (`select::choose`) and its fold.
 pub(crate) fn run_of(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
     let scene = crate::scene::Scene::new(request)?;
@@ -1488,7 +1489,7 @@ fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Opt
     Some(along)
 }
 
-/// The model's error at a state as the books take it (module documentation, # The model): the two points' measured
+/// The model's error at a state as the books take it (module documentation, # The model): the three points' measured
 /// error (`Selected::error`), the same at every state, and its combination (one account: itself); the state's whole
 /// where it is no number.
 fn booked_at(run: &Selected, _state: &State) -> Vec<Booking> {
@@ -1627,7 +1628,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         scales,
         initial: row,
         ledger,
-        method: "三维半经典运动：内态在两点选态一次定好的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），模型在开头只构造一次，整个求解共用".into(),
+        method: "三维半经典运动：内态在三点选态一次定好的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），模型在开头只构造一次，整个求解共用".into(),
     };
     context.plan.read_at(candidates.clone());
 
