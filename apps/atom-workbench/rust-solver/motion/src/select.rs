@@ -1,8 +1,7 @@
-//! The two-point state selection (RUSTPLAN §1.1, its corrections at the end of RUSTPLAN.md): P from the ground states,
-//! adding one whole level at a time in the order of its largest first-order amplitude at the two points
-//! (scene2.ranking), the rest folded by RS (`model::rs`); P is the smallest whose model meets the gate against the full
-//! reference at both points. The two points: the centre (tweezer at full intensity, v = 0) and the edge (tweezer
-//! intensity 0, v = 0, the centre's lattice phase). The only place P is decided.
+//! The two-point state selection (RUSTPLAN §1.1, its corrections at the end of RUSTPLAN.md; PSTATE): P judged at two
+//! points against the full reference, the rest of the 32 folded by RS (`model::rs`). The two points: the centre (tweezer
+//! at full intensity, v = 0) and the edge (tweezer intensity 0, v = 0, the centre's lattice phase). The only place P is
+//! decided.
 //!
 //! # The gate
 //! At each point, the model's readouts against the reference's (td_s.cmp with the force as a vector):
@@ -11,14 +10,34 @@
 //! - the force vector: |δF⃗| / max(|F⃗|, kR) -- the scale kR is the force a photon's momentum per scattering would give,
 //!   so a vanishing F⃗ (a balanced point) is judged against the scattering it could produce, not against zero.
 //!
-//! Each ≤ `GATE` at both points passes. The diffusion is not judged (the user: out of the model's gate), so only ρ is
-//! solved.
+//! Each ≤ `GATE` at both points passes; a measure that is not a number passes no gate. The diffusion is not judged (the
+//! user: out of the model's gate), so only ρ is solved.
 //!
 //! # The decision
-//! The references at both points, then the candidates in turn, each at both points at once (rayon); P the first passing.
-//! A candidate beyond it is never solved: its model is larger than every one below it (a level more), and the largest
-//! (every level kept, the reference's size) would cost the most time and memory of all (GMD1C: P = 8 passes, its
-//! candidates run to 32). No candidate passing is an error, never an empty P.
+//! One procedure in two stages:
+//! 1. **The base** (`decide`): from the ground states, one whole level more at a time in the order of its largest
+//!    first-order amplitude at the two points (`ranking`, scene2.ranking); the base is the first candidate passing.
+//!    The references at both points, then the candidates in turn, each at both points at once (rayon). A candidate
+//!    beyond the base is never solved: its model is larger than every one below it (a level more), and the largest
+//!    (every level kept, the reference's size) would cost the most time and memory of all (GMD1C: the base 8 passes,
+//!    its candidates run to 32). No candidate passing is an error, never an empty P.
+//! 2. **Leave one out** (`leave_one_out`, `descend`; PFINE's, its prototype pfine/predict.py): each explicit excited
+//!    state i of the base folded alone -- the base less i judged at both points, all of them at once (rayon) --, its
+//!    e_i that model's worst error (the largest of the three measures over both points, against the full reference:
+//!    the error of the base less i, not an increment over the base's). Then from the base the states are removed in
+//!    increasing e_i (ties in the base's order) while the predicted error -- the base's worst plus the removed states'
+//!    e_i -- stays within the gate; that set is checked at both points, and while it fails, the removed state of the
+//!    largest e_i (the first of equal ones) is put back and the set checked again. P is the first set passing; every
+//!    state put back, the base (which passed). The ground states are never removed.
+//!
+//! The prediction adds the e_i as if the removals' errors added up; each e_i holds the base's own error once more, so
+//! the sum counts the base's error once per removed state above the once it starts with. Whatever it predicts, P is a
+//! set measured within the gate at both points: the errors over removals are not monotone (a mirror pair with one side
+//! kept loses its cancellation; a folded state of amplitude a ≳ 0.25–0.3 is outside RS), so a removal the prediction
+//! allows may fail its check -- a check more and a state put back, never the gate (PSTATE's decision history: the gate
+//! is judged at the two points alone, the user's rule of 11-19). The descent ends: each failed check puts a state back,
+//! so there are at most as many checks as removed states, and a set of one removed state is its leave-one-out model,
+//! measured at e_i ≤ the gate less the base's worst (its prediction).
 
 use crate::floquet::{assemble, readouts, select, Frame, Liouville, Readouts};
 use crate::krylov::Route;
@@ -36,6 +55,11 @@ pub const GATE: f64 = 0.01;
 /// The two points: the centre (0) and the edge (1).
 pub const POINTS: usize = 2;
 
+/// The largest of some errors; not a number where one of them is not (# The gate).
+fn largest(errors: &[f64]) -> f64 {
+    errors.iter().fold(0.0, |m: f64, &x| if m.is_nan() || x.is_nan() { f64::NAN } else { m.max(x) })
+}
+
 /// One point's comparison of a candidate P's model with the full reference.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PointError {
@@ -47,9 +71,9 @@ pub struct PointError {
 }
 
 impl PointError {
-    /// The largest of the three.
+    /// The largest of the three (`largest`).
     pub fn worst(&self) -> f64 {
-        self.populations.max(self.rate).max(self.force)
+        largest(&[self.populations, self.rate, self.force])
     }
 }
 
@@ -62,19 +86,77 @@ pub struct Candidate {
 }
 
 impl Candidate {
+    /// The larger of the two points' worst errors (`largest`).
+    pub fn worst(&self) -> f64 {
+        largest(&[self.centre.worst(), self.edge.worst()])
+    }
+
+    /// Every error at both points within `gate`.
+    pub fn within(&self, gate: f64) -> bool {
+        self.worst() <= gate
+    }
+
+    /// Within the gate (`GATE`) at both points.
     pub fn passes(&self) -> bool {
-        self.centre.worst() <= GATE && self.edge.worst() <= GATE
+        self.within(GATE)
     }
 }
 
-/// The selection's report: the chosen P, the candidates up to it with their errors, the full reference's readouts and
-/// routes, the time.
+/// One explicit excited state of the base folded alone (module documentation, # The decision, 2): the state and the
+/// base less it, judged at both points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeftOut {
+    pub state: usize,
+    pub candidate: Candidate,
+}
+
+impl LeftOut {
+    /// Its e_i: the base less the state, its worst error at both points.
+    pub fn e(&self) -> f64 {
+        self.candidate.worst()
+    }
+}
+
+/// The descent from the base at a gate (`descend`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Descent {
+    /// P: the base less `removed`.
+    pub keep: Vec<usize>,
+    /// The states P leaves out of the base, in increasing e_i.
+    pub removed: Vec<usize>,
+    /// The first removal's predicted error: the base's worst plus its states' e_i.
+    pub predicted: f64,
+    /// The sets checked at both points in turn; none where nothing could be removed.
+    pub checks: Vec<Candidate>,
+}
+
+/// The selection's report: the chosen P; the sets judged at both points on the way, with their errors; the full
+/// reference's readouts and routes; the time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Selection {
+    /// P.
     pub keep: Vec<usize>,
+    /// Every set judged at both points in turn but the leave-one-out ones: the whole-level candidates up to the base
+    /// (the first `whole` of them, the base the last), then the descent's checks. The last is P's.
     pub candidates: Vec<Candidate>,
+    pub whole: usize,
+    /// The base's explicit excited states each folded alone, in the base's order (`leave_one_out`).
+    pub left_out: Vec<LeftOut>,
+    /// The states P leaves out of the base and the first removal's predicted error (`Descent`).
+    pub removed: Vec<usize>,
+    pub predicted: f64,
     pub reference: [(Readouts, Route); 2],
+    /// The time (s): the whole and its stages -- the base (the references and the whole levels), the leave-one-out, the
+    /// descent's checks.
     pub seconds: f64,
+    pub stages: [f64; 3],
+}
+
+impl Selection {
+    /// The base: the first whole-level candidate passing (# The decision, 1).
+    pub fn base(&self) -> &Candidate {
+        &self.candidates[self.whole - 1]
+    }
 }
 
 /// The model's errors against the reference at one point; `k` the photon wave number of the force's scale kR.
@@ -88,35 +170,138 @@ pub fn errors(model: &Readouts, reference: &Readouts, k: f64, route: Route) -> P
     PointError { populations, rate, force, route }
 }
 
-/// The decision over ranked candidates (each `keep` a superset of the one before): `solve(point, None)` is the full
-/// reference at a point, `solve(point, Some(c))` candidate c's model there, each giving the readouts and the route.
-/// The references, then the candidates in turn, each at both points at once; P is the first candidate passing at both
-/// points (module documentation, # The decision).
+/// A set judged: its models' readouts and routes at the two points against the references'.
+fn judged(keep: &[usize], models: &[(Readouts, Route)], reference: &[(Readouts, Route); 2], k: f64) -> Candidate {
+    let point = |p: usize| errors(&models[p].0, &reference[p].0, k, models[p].1);
+    Candidate { keep: keep.to_vec(), centre: point(0), edge: point(1) }
+}
+
+/// A set's models at both points at once.
+fn pair<F>(keep: &[usize], solve: &F) -> Result<Vec<(Readouts, Route)>, String>
+where
+    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
+{
+    (0..POINTS).into_par_iter().map(|p| solve(p, keep)).collect()
+}
+
+/// The base (module documentation, # The decision, 1) over ranked candidates (each `keep` a superset of the one
+/// before): `solve(point, None)` is the full reference at a point, `solve(point, Some(c))` candidate c's model there,
+/// each giving the readouts and the route. The references, then the candidates in turn, each at both points at once;
+/// the base is the first candidate passing at both points. The report's P is the base, nothing left out yet
+/// (`refine` takes it on).
 pub fn decide<F>(candidates: &[Vec<usize>], k: f64, solve: F) -> Result<Selection, String>
 where
     F: Fn(usize, Option<usize>) -> Result<(Readouts, Route), String> + Sync,
 {
     let clock = Instant::now();
-    let pair =|c: Option<usize>| -> Result<Vec<(Readouts, Route)>, String> { (0..POINTS).into_par_iter().map(|p| solve(p, c)).collect() };
-    let reference = pair(None)?;
+    let both = |c: Option<usize>| -> Result<Vec<(Readouts, Route)>, String> { (0..POINTS).into_par_iter().map(|p| solve(p, c)).collect() };
+    let reference = both(None)?;
+    let reference = [reference[0].clone(), reference[1].clone()];
     let mut tried: Vec<Candidate> = Vec::new();
     for (c, keep) in candidates.iter().enumerate() {
-        let models = pair(Some(c))?;
-        let point = |p: usize| errors(&models[p].0, &reference[p].0, k, models[p].1);
-        let candidate = Candidate { keep: keep.clone(), centre: point(0), edge: point(1) };
+        let candidate = judged(keep, &both(Some(c))?, &reference, k);
         let passes = candidate.passes();
         tried.push(candidate);
         if passes {
+            let seconds = clock.elapsed().as_secs_f64();
+            let predicted = tried[c].worst();
             return Ok(Selection {
                 keep: keep.clone(),
+                whole: tried.len(),
                 candidates: tried,
-                reference: [reference[0].clone(), reference[1].clone()],
-                seconds: clock.elapsed().as_secs_f64(),
+                left_out: Vec::new(),
+                removed: Vec::new(),
+                predicted,
+                reference,
+                seconds,
+                stages: [seconds, 0.0, 0.0],
             });
         }
     }
     let largest = candidates.last().map_or(0, |k| k.len());
     Err(format!("no candidate P passes the {GATE} gate at both points (the largest has {largest} states)"))
+}
+
+/// Stage 2's measurements (module documentation, # The decision, 2): the base less each of its explicit excited states,
+/// every set at both points at once (rayon); `solve(point, keep)` a model's readouts and route at a point. In the
+/// base's order.
+pub fn leave_one_out<F>(base: &Candidate, reference: &[(Readouts, Route); 2], k: f64, solve: &F) -> Result<Vec<LeftOut>, String>
+where
+    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
+{
+    let states: Vec<usize> = base.keep.iter().copied().filter(|&s| s >= GROUND).collect();
+    let sets: Vec<Vec<usize>> = states.iter().map(|&i| base.keep.iter().copied().filter(|&s| s != i).collect()).collect();
+    let models: Vec<(Readouts, Route)> =
+        (0..sets.len() * POINTS).into_par_iter().map(|j| solve(j % POINTS, &sets[j / POINTS])).collect::<Result<_, _>>()?;
+    Ok(states
+        .iter()
+        .zip(&sets)
+        .zip(models.chunks(POINTS))
+        .map(|((&state, keep), models)| LeftOut { state, candidate: judged(keep, models, reference, k) })
+        .collect())
+}
+
+/// Stage 2's decision (module documentation, # The decision, 2) at `gate` from the base, which passes it, and its
+/// leave-one-out: the removal the prediction allows, then the checks, each at both points at once, with the
+/// put-backs. P the first set passing or, every state put back, the base. Err where the base does not pass the gate.
+pub fn descend<F>(base: &Candidate, left_out: &[LeftOut], gate: f64, reference: &[(Readouts, Route); 2], k: f64, solve: &F) -> Result<Descent, String>
+where
+    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
+{
+    if !base.within(gate) {
+        return Err(format!("the base ({} states) does not pass the {gate} gate", base.keep.len()));
+    }
+    let mut order: Vec<&LeftOut> = left_out.iter().collect();
+    order.sort_by(|a, b| a.e().total_cmp(&b.e()));
+    let mut predicted = base.worst();
+    let mut removed: Vec<&LeftOut> = Vec::new();
+    for state in order {
+        if predicted + state.e() <= gate {
+            predicted += state.e();
+            removed.push(state);
+        }
+    }
+    let mut checks: Vec<Candidate> = Vec::new();
+    while !removed.is_empty() {
+        let keep: Vec<usize> = base.keep.iter().copied().filter(|s| removed.iter().all(|r| r.state != *s)).collect();
+        let candidate = judged(&keep, &pair(&keep, solve)?, reference, k);
+        let passes = candidate.within(gate);
+        checks.push(candidate);
+        if passes {
+            break;
+        }
+        let back = (0..removed.len()).fold(0, |b, j| if removed[j].e() > removed[b].e() { j } else { b });
+        removed.remove(back);
+    }
+    let keep = if removed.is_empty() { base.keep.clone() } else { checks.last().expect("a removal is checked").keep.clone() };
+    Ok(Descent { keep, removed: removed.iter().map(|r| r.state).collect(), predicted, checks })
+}
+
+/// Stage 2 on the base's selection (`decide`) at the gate (`GATE`): its leave-one-out and its descent, the report's P
+/// the descent's, its checks after the whole levels -- and the base's measurement once more where every removed state
+/// was put back, so that the last is P's.
+pub fn refine<F>(mut selection: Selection, k: f64, solve: &F) -> Result<Selection, String>
+where
+    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
+{
+    let clock = Instant::now();
+    let base = selection.base().clone();
+    let left_out = leave_one_out(&base, &selection.reference, k, solve)?;
+    let looked = clock.elapsed().as_secs_f64();
+    let descent = descend(&base, &left_out, GATE, &selection.reference, k, solve)?;
+    let checked = clock.elapsed().as_secs_f64() - looked;
+    selection.candidates.extend(descent.checks);
+    if selection.candidates.last().map(|c| &c.keep) != Some(&descent.keep) {
+        selection.candidates.push(base);
+    }
+    selection.keep = descent.keep;
+    selection.left_out = left_out;
+    selection.removed = descent.removed;
+    selection.predicted = descent.predicted;
+    selection.stages[1] = looked;
+    selection.stages[2] = checked;
+    selection.seconds += looked + checked;
+    Ok(selection)
 }
 
 /// The two points' components (module documentation): the centre, the tweezer full, and the edge, dark; no Doppler
@@ -182,201 +367,57 @@ fn solved(frame: &Frame, model: &ModelAt) -> Result<(Readouts, Route), String> {
     Ok((readouts(&liouville, &system, &solved.rho), solved.route))
 }
 
-/// Chooses P for a scene (module documentation): at the two points (`points`) the full reference (`rs::reference`) and
-/// its frame (`Frame::new`: the reference there, no Doppler shift); the candidates the ground states and then one level
-/// more at a time (`ranking`); each candidate's RS model at each point on that point's frame's sectors
-/// (`Rs::at`); every solve the same (`solved`); then `decide`, the force's scale k the carrier's wave number (ν/c,
-/// td_s's kref).
-pub fn choose(scene: &Scene) -> Result<Selection, String> {
-    let points = points(scene);
-    let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(scene, p)).collect();
-    let zero = vec![0.0; scene.request.beams.len()];
-    let frames: Vec<Frame> = references.iter().map(|r| Frame::new(scene, &r.hilbert(), &zero)).collect();
-    let mut keep: Vec<usize> = (0..GROUND).collect();
-    let mut candidates = vec![keep.clone()];
-    for level in ranking(scene, &references, &points) {
-        keep.extend(level);
-        keep.sort_unstable();
-        candidates.push(keep.clone());
+/// What every solve of a scene's selection reads: the two points (`points`), the full reference at each
+/// (`rs::reference`) and its frame (`Frame::new`: the reference there, no Doppler shift); the whole-level candidates --
+/// the ground states, then one level more at a time in `ranking`'s order --; the force's scale k, the carrier's wave
+/// number (ν/c, td_s's kref).
+pub struct TwoPoints<'a> {
+    scene: &'a Scene,
+    points: [Components; POINTS],
+    references: Vec<ModelAt>,
+    frames: Vec<Frame>,
+    pub candidates: Vec<Vec<usize>>,
+    pub k: f64,
+}
+
+impl<'a> TwoPoints<'a> {
+    pub fn new(scene: &'a Scene) -> TwoPoints<'a> {
+        let points = points(scene);
+        let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(scene, p)).collect();
+        let zero = vec![0.0; scene.request.beams.len()];
+        let frames: Vec<Frame> = references.iter().map(|r| Frame::new(scene, &r.hilbert(), &zero)).collect();
+        let mut keep: Vec<usize> = (0..GROUND).collect();
+        let mut candidates = vec![keep.clone()];
+        for level in ranking(scene, &references, &points) {
+            keep.extend(level);
+            keep.sort_unstable();
+            candidates.push(keep.clone());
+        }
+        let k = scene.generators.last().expect("the carrier").frequency / SPEED_OF_LIGHT;
+        TwoPoints { scene, points, references, frames, candidates, k }
     }
-    let k = scene.generators.last().expect("the carrier").frequency / SPEED_OF_LIGHT;
-    decide(&candidates, k, |p, c| match c {
-        None => solved(&frames[p], &references[p]),
-        Some(c) => solved(&frames[p], &Rs::new(scene, &candidates[c], frames[p].sectors()).at(scene, &points[p])),
-    })
+
+    /// The full reference's readouts and route at point p.
+    pub fn reference(&self, p: usize) -> Result<(Readouts, Route), String> {
+        solved(&self.frames[p], &self.references[p])
+    }
+
+    /// The RS model on `keep` (indices into the 32) at point p, on that point's frame's sectors (`Rs::new`, `Rs::at`).
+    pub fn model(&self, p: usize, keep: &[usize]) -> Result<(Readouts, Route), String> {
+        solved(&self.frames[p], &Rs::new(self.scene, keep, self.frames[p].sectors()).at(self.scene, &self.points[p]))
+    }
+}
+
+/// Chooses P for a scene (module documentation, # The decision): on the two points (`TwoPoints`) the base over the
+/// whole-level candidates (`decide`), then its leave-one-out and descent (`refine`); every solve the same (`solved`).
+pub fn choose(scene: &Scene) -> Result<Selection, String> {
+    let two = TwoPoints::new(scene);
+    let base = decide(&two.candidates, two.k, |p, c| match c {
+        None => two.reference(p),
+        Some(c) => two.model(p, &two.candidates[c]),
+    })?;
+    refine(base, two.k, &|p: usize, keep: &[usize]| two.model(p, keep))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn readouts(levels: &[f64], rate: f64, force: [f64; 3]) -> Readouts {
-        Readouts { levels: levels.to_vec(), rate, force, ..Default::default() }
-    }
-
-    /// The gate's three measures, by hand: populations 0.004 absolute, R 0.02 relative, F⃗ |(0.3, 0.4, 0)| = 0.5 over
-    /// max(|F⃗| = 10, kR = 2·4 = 8) = 0.05; at a balanced point F⃗ = 0 the scale is kR = 8: |(0, 0, 0.08)| / 8 = 0.01.
-    #[test]
-    fn select_errors_by_hand() {
-        let reference = readouts(&[0.5, 0.5], 4.0, [6.0, 8.0, 0.0]);
-        let model = readouts(&[0.504, 0.496], 4.08, [6.3, 8.4, 0.0]);
-        let e = errors(&model, &reference, 2.0, Route::Krylov);
-        assert!((e.populations - 0.004).abs() < 1e-15 && (e.rate - 0.02).abs() < 1e-15 && (e.force - 0.05).abs() < 1e-15);
-        let balanced = readouts(&[0.5, 0.5], 4.0, [0.0; 3]);
-        let e = errors(&readouts(&[0.5, 0.5], 4.0, [0.0, 0.0, 0.08]), &balanced, 2.0, Route::Krylov);
-        assert!((e.force - 0.01).abs() < 1e-15);
-    }
-
-    /// The decision takes the smallest candidate passing at both points, though a larger one passes too and a
-    /// smaller one passes at one point only; the report keeps the candidates up to it. None passing is an error.
-    #[test]
-    fn select_decide_takes_the_smallest_passing() {
-        let candidates = vec![vec![0], vec![0, 1], vec![0, 1, 2]];
-        // R's relative error per (point, candidate): candidate 0 fails at the edge, 1 and 2 pass both
-        let error = |p: usize, c: usize| [[0.001, 0.005, 0.0], [0.03, 0.009, 0.0]][p][c];
-        let out = decide(&candidates, 1.0, |p, c| {
-            Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, |c| error(p, c)), [1.0, 0.0, 0.0]), Route::Krylov))
-        })
-        .unwrap();
-        assert_eq!(out.keep, vec![0, 1]);
-        assert_eq!(out.candidates.len(), 2);
-        assert!(!out.candidates[0].passes() && out.candidates[1].passes());
-        let none = decide(&candidates, 1.0, |_, c| {
-            Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, |_| 0.5), [1.0, 0.0, 0.0]), Route::Krylov))
-        });
-        assert!(none.is_err());
-    }
-
-    /// A level's name in the prototype's readouts (td_s: "g1", "g2", "e<line><F′>"), of its first state's label
-    /// ("ground-F-m", "D<line>-F′-m").
-    fn name(label: &str) -> String {
-        let mut parts = label.splitn(3, '-');
-        let (head, f) = (parts.next().unwrap(), parts.next().unwrap());
-        if head == "ground" { format!("g{f}") } else { format!("e{}{f}", &head[1..]) }
-    }
-
-    /// `choose` is the prototype's selection (PYEXP2, scratchpad pyexp2/sel_<scene>.json: PYSEL's procedure on each scene's
-    /// own request, reqprec/req, its exports pysel/export2) on the six scenes' requests (the directory `V3D_REQ`, the
-    /// selections' `V3D_SEL`): the levels' ranking and P the same; the full reference's readouts at both points -- F⃗,
-    /// R, the levels' populations, each as the gate reads it -- the prototype's to the solves' accuracy; and per candidate
-    /// the gate's three errors, which differ by what the two models differ by (the prototype folds the model's fast
-    /// elements in Liouville space, fold2; this one in Hilbert space by RS, model/rs.rs: the same second order, apart in
-    /// the next, v3c2.status.md §2.3), said.
-    ///
-    /// Measured: the references' readouts within 3.4·10⁻¹³ on five scenes, the same element sets (GMD1C 4634 and 4428 as
-    /// the prototype's); GMD1C's F⃗ 2.0·10⁻⁷ of its scale max(|F⃗|, kR) ≈ 6·10⁻⁴ (its force near balance), all of it the
-    /// prototype's F_y: −1.2·10⁻¹⁰ at the centre where the scene's symmetry has none (here 5.7·10⁻¹⁵) -- the prototype's
-    /// solve there agrees with its own direct LU to 10⁻¹¹ only (pyexp2.status.md, its condition). The bound read is 10⁻⁶
-    /// of the gate's scale: four orders below the gate, the decisions the same where no error sits within it of 1 %.
-    #[test]
-    fn choose_is_pysel() {
-        let dir = std::path::PathBuf::from(std::env::var("V3D_REQ").expect("V3D_REQ: the six scenes' requests (scratchpad reqprec/req)"));
-        let sel = std::path::PathBuf::from(std::env::var("V3D_SEL").expect("V3D_SEL: the prototype's selections (scratchpad pyexp2)"));
-        let json = |p: std::path::PathBuf| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap() };
-        let mut worst = [0.0_f64; 2];
-        for (file, scene_name) in [("tilt0.json", "tilt0"), ("tilt2.json", "tilt2"), ("R4_LIN_4.json", "r4"), ("GMD1C_1ms.json", "gmd1c"), ("PGC3D_1ms.json", "pgc3d"), ("TET_1ms.json", "tet")] {
-            let mut line = json(dir.join(file));
-            line["options"]["device"] = serde_json::json!("cpu");
-            for form in line["model"]["motion"]["outsideForms"].as_array_mut().unwrap() {
-                form.as_object_mut().unwrap().entry("transitions").or_insert(serde_json::json!([]));
-            }
-            let scene = Scene::new(&crate::request::Request::from_native(&line).unwrap()).unwrap();
-            let python = json(sel.join(format!("sel_{scene_name}.json")));
-            let labels = &scene.request.states;
-            // The ranking.
-            let points = points(&scene);
-            let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(&scene, p)).collect();
-            let ours: Vec<String> = ranking(&scene, &references, &points).iter().map(|l| name(&labels[l[0]])).collect();
-            let theirs: Vec<String> = python["ranking"].as_array().unwrap().iter().map(|r| format!("e{}{}", &r[0].as_str().unwrap()[1..], r[1])).collect();
-            assert_eq!(ours, theirs, "{scene_name}: the ranking");
-            // The selection.
-            let selection = choose(&scene).unwrap();
-            let p = python["P"].as_u64().unwrap() as usize;
-            eprintln!("{scene_name}: P {} (prototype {p}), {} candidates, {:.2} s", selection.keep.len(), selection.candidates.len(), selection.seconds);
-            assert_eq!(selection.keep.len(), p, "{scene_name}: P");
-            // The full reference's readouts.
-            let groups = levels(labels, &(0..STATES).collect::<Vec<_>>());
-            for (i, point) in ["centre", "edge"].into_iter().enumerate() {
-                let (ours, route) = &selection.reference[i];
-                let theirs = &python["full"][point];
-                let f: Vec<f64> = theirs["F"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
-                let r = theirs["R"].as_f64().unwrap();
-                let scale = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt().max(selection_k(&scene) * r);
-                let df = (0..3).map(|a| (ours.force[a] - f[a]).powi(2)).sum::<f64>().sqrt() / scale;
-                let dr = (ours.rate - r).abs() / r;
-                let dp = groups.iter().zip(&ours.levels).map(|(g, x)| (x - theirs["pops"][name(&labels[g[0]])].as_f64().unwrap()).abs()).fold(0.0, f64::max);
-                eprintln!("  {point} reference ({route:?}): F⃗ {df:.1e} R {dr:.1e} populations {dp:.1e}");
-                worst[0] = worst[0].max(df.max(dr).max(dp));
-                assert!(df.max(dr).max(dp) <= 1e-6, "{scene_name} {point}: the reference's readouts");
-            }
-            // Each candidate's gate errors.
-            for (c, step) in selection.candidates.iter().zip(python["steps"].as_array().unwrap()) {
-                assert_eq!(c.keep.len() as u64, step["P"].as_u64().unwrap(), "{scene_name}: the candidates' sizes");
-                for (point, ours) in [("centre", &c.centre), ("edge", &c.edge)] {
-                    let e = &step["err"][point];
-                    let (f, r, pop) = (e["F"].as_f64().unwrap(), e["R"].as_f64().unwrap(), e["P"].as_f64().unwrap());
-                    eprintln!(
-                        "  P {:2} {point}: F⃗ {:.4e} ({:.4e}) R {:.4e} ({:.4e}) populations {:.4e} ({:.4e}) -- ours (prototype's); {:?}",
-                        c.keep.len(), ours.force, f, ours.rate, r, ours.populations, pop, ours.route
-                    );
-                    worst[1] = worst[1].max(((ours.force - f).abs()).max((ours.rate - r).abs()).max((ours.populations - pop).abs()));
-                }
-            }
-        }
-        eprintln!("largest: the reference's readouts {:.1e}; the gate's errors apart by {:.1e}", worst[0], worst[1]);
-    }
-
-    /// The time of a checkpoint's stages per point (one thread for each stage, the solve's own threads aside): the
-    /// reference, the frame, a candidate's model (`Rs::new` + `Rs::at`), and of each the Liouvillian, the elements, the
-    /// assembly and the solve; and `choose`'s wall clock. On the six scenes' requests (`V3D_REQ`).
-    #[test]
-    #[ignore]
-    fn choose_cost() {
-        let dir = std::path::PathBuf::from(std::env::var("V3D_REQ").expect("V3D_REQ"));
-        for file in ["tilt0.json", "tilt2.json", "R4_LIN_4.json", "GMD1C_1ms.json", "PGC3D_1ms.json", "TET_1ms.json"] {
-            let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap();
-            line["options"]["device"] = serde_json::json!("cpu");
-            for form in line["model"]["motion"]["outsideForms"].as_array_mut().unwrap() {
-                form.as_object_mut().unwrap().entry("transitions").or_insert(serde_json::json!([]));
-            }
-            let scene = Scene::new(&crate::request::Request::from_native(&line).unwrap()).unwrap();
-            let points = points(&scene);
-            let zero = vec![0.0; scene.request.beams.len()];
-            let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(&scene, p)).collect();
-            let order = ranking(&scene, &references, &points);
-            for (i, p) in points.iter().enumerate() {
-                let clock = Instant::now();
-                let reference = rs::reference(&scene, p);
-                let made = clock.elapsed().as_secs_f64();
-                let clock = Instant::now();
-                let frame = Frame::new(&scene, &reference.hilbert(), &zero);
-                let framed = clock.elapsed().as_secs_f64();
-                let keep: Vec<usize> = (0..GROUND).chain(order.iter().take(2).flatten().copied()).collect();
-                let clock = Instant::now();
-                let model = Rs::new(&scene, &keep, frame.sectors()).at(&scene, p);
-                let modelled = clock.elapsed().as_secs_f64();
-                for (what, m, built) in [("reference", &reference, made), ("model", &model, modelled)] {
-                    let clock = Instant::now();
-                    let liouville = Liouville::new(&frame, &m.hilbert());
-                    let l = clock.elapsed().as_secs_f64();
-                    let clock = Instant::now();
-                    let elements = select(&liouville);
-                    let e = clock.elapsed().as_secs_f64();
-                    let clock = Instant::now();
-                    let system = assemble(&liouville, &elements);
-                    let a = clock.elapsed().as_secs_f64();
-                    let clock = Instant::now();
-                    let solved = crate::krylov::solve(&system).unwrap();
-                    let k = clock.elapsed().as_secs_f64();
-                    eprintln!("{file} point {i} {what} (n {}, {} elements): made {built:.3} frame {framed:.3} | Liouville {l:.3} elements {e:.3} assembly {a:.3} solve {k:.3} s ({:?})", m.states.len(), elements.order.len(), solved.route);
-                }
-            }
-            let selection = choose(&scene).unwrap();
-            eprintln!("{file}: choose {:.2} s (P {})", selection.seconds, selection.keep.len());
-        }
-    }
-
-    fn selection_k(scene: &Scene) -> f64 {
-        scene.generators.last().unwrap().frequency / SPEED_OF_LIGHT
-    }
-}
+mod tests;
