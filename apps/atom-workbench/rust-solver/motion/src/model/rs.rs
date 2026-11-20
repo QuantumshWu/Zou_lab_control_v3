@@ -935,7 +935,7 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
     // R^{j+1} H_c for each component and power, M_c[B, a] = (E_a + f_c − G₀_BB)⁻¹ H_Ba on the blocks B and columns a
     // H_c holds (the request's structure: the couplings excited ← ground, `Request::validate`; a power's the same):
     // elsewhere M_c is zero, the resolvent acting on nothing -- and there it may be singular, a ground state's own
-    // block at E_a + f_c = E_a where the tweezer is the frame's carrier (f_c = 0: a lone tweezer, scene.rs `own_axis`).
+    // block at E_a + f_c = E_a where the tweezer is the frame's carrier (f_c = 0: a lone tweezer, scene.rs `tweezer_axis`).
     let resolved: Vec<Vec<Mat>> = comps
         .iter()
         .map(|(_, freq, h, _, _)| {
@@ -1056,7 +1056,7 @@ impl Rs {
     /// one, every other generator's none: `Sectors::tweezer`, the reference's), a state's the frame's, zero (θ holds no
     /// tweezer photon: floquet/frame.rs chooses it on the other light). The frame counts them so on the tweezer's own
     /// axis; a tweezer without other light has none (its index zero, its frequency the frame's carrier: scene.rs
-    /// `own_axis`), and its co- and counter-rotating channels, 2ν apart, are told apart by the count alone.
+    /// `tweezer_axis`), and its co- and counter-rotating channels, 2ν apart, are told apart by the count alone.
     pub fn new(scene: &Scene, keep: &[usize], sectors: Sectors) -> Rs {
         let mut sectors = sectors;
         let tw = scene.tweezer();

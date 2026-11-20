@@ -139,7 +139,7 @@ fn the_selected_decay_is_its_photons() {
     }
 }
 
-/// A lone tweezer's model (R1_TWEEZER, R1_SIGMA_P: the frame's reference, no axis of its own; scene.rs `own_axis`,
+/// A lone tweezer's model (R1_TWEEZER, R1_SIGMA_P: the frame's reference, no axis of its own; scene.rs `tweezer_axis`,
 /// `Rs::new`): its run as the solve makes it, the node at the trap's centre at rest holds the zero beat alone (the
 /// light shift is static in the tweezer's frame), its photons in two classes, the tweezer's co-rotating (n_tw = 1)
 /// and counter-rotating (n_tw = −1) scattering, every number finite, and its decay i(Ĥ − Ĥ†) the classes' Σ L†L to the

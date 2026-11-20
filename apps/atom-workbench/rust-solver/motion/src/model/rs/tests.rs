@@ -738,7 +738,7 @@ fn summed_parts(parts: &[ModelPart], gradient: Option<usize>) -> Mat {
 
 
 /// The tweezer's sidebands are its photons (`Rs::new`): on R1_TWEEZER and R1_SIGMA_P (lone tweezers, the frame's
-/// reference: no axis of their own, scene.rs `own_axis`) and R4_LIN_4 (one of its own), the model on the ground states
+/// reference: no axis of their own, scene.rs `tweezer_axis`) and R4_LIN_4 (one of its own), the model on the ground states
 /// at the trap's centre has every channel's parts at one count of tweezer photons, the channel's n_tw, and the tweezer's
 /// co-rotating (n_tw = 1) and counter-rotating (n_tw = −1) channels apart: their interference, 2ν (R1) or 2(ω_tw + ν)
 /// apart, is not in the model. Every number finite and both channels lit: on the lone tweezers the co-rotating coupling

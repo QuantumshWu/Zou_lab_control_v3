@@ -252,7 +252,8 @@ pub struct Frame {
     alpha: Vec<Ratio>,
     /// φ's primitive vector (None with fewer than two ground levels in the frame).
     phi: Option<Vec<Ratio>>,
-    /// The tweezer's own axis (one no other beam uses) and its frequency index.
+    /// The tweezer's own axis (scene.rs `tweezer_axis`: one no other generator uses) and its frequency index; none for a
+    /// lone tweezer at the frame's carrier.
     tweezer: Option<(usize, Vec<i32>)>,
 }
 
@@ -393,9 +394,7 @@ impl Frame {
         let mut grounds: Vec<&(Lev, f64, FrameKey)> = bet.iter().filter(|b| matches!(b.0, Lev::Ground(_))).collect();
         grounds.sort_by_key(|b| b.0);
         let tw = &request.beams[request.trap_beam].frequency_index;
-        let tweezer = (0..axes)
-            .find(|&i| tw[i] != 0 && generators.iter().all(|g| g.beam == Some(request.trap_beam) || g.frequency_index[i] == 0))
-            .map(|i| (i, tw.clone()));
+        let tweezer = crate::scene::tweezer_axis(request).map(|i| (i, tw.clone()));
         let tweezer_frequency = tweezer.as_ref().map_or(0.0, |(_, idx)| idx.iter().zip(&phi_axes).map(|(&i, p)| i as f64 * p).sum());
         let mut frame = Frame { theta, values, fast: [0.0, tweezer_frequency, phi_axes[axes - 1]], primitives, alpha, phi: None, tweezer };
         if let [low, high] = grounds[..] {
