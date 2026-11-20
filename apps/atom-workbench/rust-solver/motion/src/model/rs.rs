@@ -1,18 +1,19 @@
 //! The one fold (RUSTPLAN §2.1–§2.3 and its corrections of 2026-11-19: "模型只定一次", "一个折叠公式，快分量与光镊都由它
 //! 折叠"): Reiter–Sørensen second order with harmonics and dissipation (td_s.hilbert_rs, each column at E_a + f), the
-//! full reference's and the model's alike -- they differ only in what is folded.
+//! full reference's and the model's alike -- they differ only in what is folded and at which generator.
 //!
 //! # The fold
-//! A Lindblad model on a set of states by frequency components (`ModelAt`): H's static part H⁽⁰⁾ and components H⁽ᶜ⁾
-//! e^{−if_c t} taken both ways (each nonzero key with its conjugate at −key), and jump channels L_ch = Σ_c L_ch⁽ᶜ⁾
-//! e^{−if_c t}. A fold keeps the states K and, among their elements, the slow ones: the element b ← a of the component c
-//! has the fast index n = Σ_l c_l n_l + n_b − n_a (`Sectors`, the frame's integer fast parts of the key coordinates and
-//! of the states, floquet/frame.rs), slow where its folding coordinates (`axes`) are zero. Everything else is folded:
-//! every component of the other states F (= Q), and the fast elements within K (K's sidebands -- the hyperfine n_φ and
-//! the tweezer n_tw). The folded states' unperturbed generator is block diagonal,
-//!   G₀ = H⁽⁰⁾_BB − (i/2) Γ_BB,  Γ = Σ_ch Σ_c L_ch⁽ᶜ⁾† L_ch⁽ᶜ⁾  (the static decay),
-//! on the blocks B: Q, and K's states by their fast parts (H⁽⁰⁾ and Γ do not couple two of them: a static element
-//! between them is fast and folded). Column a of K at its energy E_a = Re H⁽⁰⁾_aa and the component's frequency,
+//! A Lindblad model on a set of states by frequency components (`ModelAt`): H's components H⁽ᶜ⁾ e^{−if_c t} taken both
+//! ways (each nonzero key with its conjugate at −key), and jump channels L_ch = Σ_c L_ch⁽ᶜ⁾ e^{−if_c t}. A fold keeps the
+//! states K and, among their elements, the slow ones: the element b ← a of the component c has the fast index n = Σ_l c_l
+//! n_l + n_b − n_a (`Sectors`, the frame's integer fast parts (n_φ, n_tw) of the key coordinates and of the states,
+//! floquet/frame.rs), slow where its folding coordinates (`axes`) are zero. Everything else is folded: every component of
+//! the other states F (= Q), and the fast elements within K (K's sidebands -- the hyperfine n_φ and the tweezer n_tw).
+//! The folded states' unperturbed generator is block diagonal,
+//!   G₀ = G_BB − (i/2) Γ_BB,  Γ = Σ_ch Σ_c L_ch⁽ᶜ⁾† L_ch⁽ᶜ⁾  (the static decay),
+//! G the static generator the fold is taken at (`generator`), on the blocks B: Q, and K's states by their fast parts (G
+//! and Γ do not couple two of them: a static element between them is fast and folded). Column a of K at its energy
+//! E_a = Re G_aa and the component's frequency,
 //!   M_c[B, a] = (E_a + f_c − G₀_BB)⁻¹ H⁽ᶜ⁾_Ba        (B = Q, or a block of K where c's element into it is fast),
 //! and the model on K, slow elements alone,
 //!   H_eff = Σ_c [H⁽ᶜ⁾_KK]_slow + ½ Σ_{c′,c} [H⁽ᶜ′⁾_K· M_c + h.c.]_slow,  the pair at key c + c′,
@@ -23,25 +24,40 @@
 //!   ∂M_c[B, a] = (E_a + f_c − G₀_BB)⁻¹ (∂H⁽ᶜ⁾_Ba + (∂G₀_BB − ∂E_a) M_c[B, a]).
 //!
 //! # The two folds
-//! - The full reference (`reference`): the scene's components and its Cartesian emission on the 32 states, all kept,
-//!   the tweezer's sidebands folded (axes n_tw): the tweezer's light shift on every state and its scattering (its jumps
-//!   between the ground states, linear in a_tw(r)) -- the one allowed distinction.
-//! - The model (`Rs::at`): the reference folded again on P, every fast element folded (axes n_φ, n_tw, n_ν): Q at every
-//!   component, P's hyperfine sidebands. The integrator sees the slow components alone.
+//! - The full reference (`Tweezer`, `reference`): the scene's components and its Cartesian emission on the 32 states, all
+//!   kept, the tweezer's sidebands folded (axes n_tw) at the request's H0 (pysel.status.md: the denominators the bare
+//!   levels E = diag H0, fixed, not differentiated -- their dependence on the local shifts is of the fourth order, 10⁻⁷
+//!   relative, within the one allowed distinction's second order). Its components are a_tw X_tw and a_tw* R_tw and its
+//!   denominators fixed, so the fold is linear in them: made once at unit amplitude, its pairs (n_tw = 0) are |a_tw|²
+//!   times the unit fold's and its channels (n_tw = ±1) a_tw or a_tw* times them; at a point the amplitude alone is put
+//!   in. Six channels: the three emission axes, co- and counter-rotating, apart from the emission's (n_tw = 0).
+//! - The model (`Rs::at`): the reference folded again on P at its static part, every fast element folded (axes n_φ,
+//!   n_tw): Q at every component, P's hyperfine sidebands. The integrator sees the slow components alone.
 //!
-//! # At a point
-//! Each block's G₀ is decomposed once at the point, G₀ = V diag(μ) V⁻¹ (`linalg::Eigen`), and every resolvent of the
-//! point is that one spectrum, (z − G₀)⁻¹ = V diag(1/(z − μ)) V⁻¹; the components carry the beams' local amplitudes
-//! (H⁽ᶜ⁾ = Σ_l a_l(r) X_l: the contraction). Nothing else is made at a point. Against td_s.hilbert_rs's column-by-column
-//! inverse it is the same formula to the rounding of the decomposition, κ(V) u relative (tests,
-//! `the_fold_is_hilbert_rs_to_rounding`).
+//! # At a point: which block how
+//! The folded states' generator at a point splits into its connected parts (the pattern of G₀ and ∂G₀), and each part's
+//! resolvent is taken one of two ways, both to the rounding of the formula above:
+//! - Q's parts: decomposed at the point, G₀ = V diag(μ) V⁻¹ (`linalg::Eigen`), every column's resolvent that one
+//!   spectrum. Q's levels lie within the local shifts of resonance (the tweezer's excited shift is of the order of the
+//!   detunings), so nothing fixed is near them: the decomposition is the least work at the point.
+//! - K's sideband parts: their denominators are a fast frequency -- a hyperfine φ ≈ 4·10⁴ rad/µs, or the tweezer's 10⁸ --
+//!   off the local energies, whose couplings within the part (Zeeman, the outside forms' tensor shifts, the tweezer's) are
+//!   ≲ 10² rad/µs. Each column's resolvent is the Neumann series about the part's diagonal at the point,
+//!   (D_z − N)⁻¹ = Σ_k (D_z⁻¹N)^k D_z⁻¹, D_z = z − diag G₀ (exact at the point), N its off-diagonal: ρ = ‖D_z⁻¹N‖_∞ ≈
+//!   2·10⁻³ and less, and the series is summed until its remainder's bound ‖w_k‖ ρ/(1 − ρ) is below the rounding of the
+//!   column's sum, u‖M‖_∞ -- the count the ratio's own (a few terms; one where the part is diagonal, as the tweezer's bare
+//!   levels are). No decomposition. Where ρ ≥ 1 the series does not converge and the part is decomposed as Q's.
+//!
+//! Against td_s.hilbert_rs's column-by-column inverse it is the same formula to the rounding of the decomposition, κ(V)u
+//! relative (tests, `the_fold_is_hilbert_rs_to_rounding`).
 
 use std::collections::BTreeMap;
 
-use crate::floquet::{Hilbert, Lift, Part};
+use crate::floquet::{Hilbert, Lift, Part, Sectors};
 use crate::linalg::{self, C64, Mat, V3};
 use crate::request::STATES;
 use crate::scene::{Components, Jumps, Key, Scene};
+use crate::units::UNIT_ROUNDOFF;
 
 /// One frequency component of a model operator: `value` e^{−i f t}.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,12 +70,12 @@ pub struct ModelPart {
     pub gradient: [Mat; 3],
 }
 
-/// A jump channel: the Cartesian emission it comes of, the fast index its elements share, its components and the same
-/// of k∘C (the photon's wave number per element: rad/µm · 1/√µs).
+/// A jump channel: the Cartesian emission it comes of, the fast index (n_φ, n_tw) its elements share, its components and
+/// the same of k∘C (the photon's wave number per element: rad/µm · 1/√µs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Channel {
     pub emission: usize,
-    pub fast: [i64; 3],
+    pub fast: [i64; 2],
     pub parts: Vec<ModelPart>,
     pub kicks: Vec<ModelPart>,
 }
@@ -67,10 +83,11 @@ pub struct Channel {
 /// A Lindblad model at a point by frequency components: what a fold takes and gives.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelAt {
-    /// Its states (indices into the 32), the states the fold that made it folded (Q), and its levels (indices into
-    /// `states`).
+    /// Its states (indices into the 32) and the states the fold that made it folded (Q).
     pub states: Vec<usize>,
     pub folded: Vec<usize>,
+    /// The levels over the 32 states (indices into the 32): a level's population is its kept states' and its folded
+    /// states' lifted ones.
     pub groups: Vec<Vec<usize>>,
     /// H's components, the static one and each other key both ways.
     pub effective: Vec<ModelPart>,
@@ -79,35 +96,29 @@ pub struct ModelAt {
     pub lift: Vec<ModelPart>,
 }
 
-/// The frame's integer fast parts (n_φ, n_tw, n_ν) of each of the 32 states' θ_a and of each key coordinate (the
-/// scene's generators), floquet/frame.rs: the fast index of an element b ← a of the key c is Σ_l c_l generators_l +
-/// states_b − states_a.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Sectors {
-    pub states: Vec<[i64; 3]>,
-    pub generators: Vec<[i64; 3]>,
-}
-
 impl Sectors {
-    fn index(&self, key: &Key, to: usize, from: usize) -> [i64; 3] {
-        std::array::from_fn(|i| key.iter().zip(&self.generators).map(|(&k, g)| i64::from(k) * g[i]).sum::<i64>() + self.states[to][i] - self.states[from][i])
+    /// The full reference's: the tweezer's coordinate alone (n_tw = 1 on its generator; its counter-rotating key
+    /// −e_tw − 2e_ν has n_tw = −1), the states all slow.
+    pub fn tweezer(scene: &Scene) -> Sectors {
+        let tw = scene.tweezer();
+        Sectors { states: vec![[0; 2]; STATES], generators: (0..scene.generators.len()).map(|g| [0, (g == tw) as i64]).collect() }
+    }
+
+    /// Σ_l c_l n_l of a key on the folding coordinates.
+    fn key(&self, key: &Key, axes: [bool; 2]) -> [i64; 2] {
+        std::array::from_fn(|i| if axes[i] { key.iter().zip(&self.generators).map(|(&k, g)| i64::from(k) * g[i]).sum() } else { 0 })
+    }
+
+    /// A state's fast part on the folding coordinates.
+    fn state(&self, state: usize, axes: [bool; 2]) -> [i64; 2] {
+        std::array::from_fn(|i| if axes[i] { self.states[state][i] } else { 0 })
     }
 }
 
 /// The fast coordinates the full reference folds: the tweezer's (n_tw).
-pub const REFERENCE: [bool; 3] = [false, true, false];
+pub const REFERENCE: [bool; 2] = [false, true];
 /// The fast coordinates the model folds: every one.
-pub const MODEL: [bool; 3] = [true, true, true];
-
-/// The RS fold on a kept set P: P, its complement and the frame's sectors, fixed for the run.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Rs {
-    /// P: indices into the 32, sorted (the ground states first).
-    pub keep: Vec<usize>,
-    /// Q: the folded states, the rest of the 32.
-    pub folded: Vec<usize>,
-    pub sectors: Sectors,
-}
+pub const MODEL: [bool; 2] = [true, true];
 
 /// The levels of the states `of` (indices into the 32): one per ground F and one per excited (line, F′), each its members'
 /// places in `of`, in the order of their first member (the request's labels "manifold-F-m").
@@ -115,52 +126,13 @@ pub fn levels(labels: &[String], of: &[usize]) -> Vec<Vec<usize>> {
     let mut found: Vec<(&str, Vec<usize>)> = Vec::new();
     for (place, &state) in of.iter().enumerate() {
         let level = labels[state].rsplit_once('-').map_or(labels[state].as_str(), |(level, _)| level);
+        let level = if level.ends_with('-') { &level[..level.len() - 1] } else { level };
         match found.iter_mut().find(|(name, _)| *name == level) {
             Some((_, members)) => members.push(place),
             None => found.push((level, vec![place])),
         }
     }
     found.into_iter().map(|(_, members)| members).collect()
-}
-
-/// The jump channels along the analysis axis u (scene_x `build`, recoil 'emission'): the emission projected on e₁, e₂
-/// and u, e₁ ⊥ u from x (or y where u is within acos 0.9 of x), e₂ = u × e₁; each with the photon's mean ⟨(n·u)²⟩ of a
-/// dipole along it, 2/5, 2/5, 1/5 -- the weight of its momentum along u. The full reference's channels and the model's.
-pub fn channels(axis: V3) -> [(V3, f64); 3] {
-    let u = axis.map(|x| x / linalg::norm3(axis));
-    let e3 = if u[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
-    let along = linalg::dot3(e3, u);
-    let e1 = [e3[0] - along * u[0], e3[1] - along * u[1], e3[2] - along * u[2]];
-    let e1 = e1.map(|x| x / linalg::norm3(e1));
-    [(e1, 0.4), (linalg::cross3(u, e1), 0.4), (u, 0.2)]
-}
-
-/// Sums of model parts by key, in the keys' order; an element added where `mask` holds.
-#[derive(Default)]
-struct Sums(BTreeMap<Key, ModelPart>);
-
-impl Sums {
-    fn add(&mut self, key: &Key, frequency: f64, value: &Mat, gradient: [&Mat; 3], scale: f64, mask: impl Fn(usize, usize) -> bool) {
-        let (rows, cols) = (value.rows, value.cols);
-        let part = self.0.entry(key.clone()).or_insert_with(|| ModelPart {
-            key: key.clone(),
-            frequency,
-            value: Mat::zeros(rows, cols),
-            gradient: std::array::from_fn(|_| Mat::zeros(rows, cols)),
-        });
-        for b in 0..rows {
-            for a in (0..cols).filter(|&a| mask(b, a)) {
-                part.value[(b, a)] += value[(b, a)] * scale;
-                for (g, d) in part.gradient.iter_mut().zip(gradient) {
-                    g[(b, a)] += d[(b, a)] * scale;
-                }
-            }
-        }
-    }
-
-    fn parts(self) -> Vec<ModelPart> {
-        self.0.into_values().filter(|p| nonzero(&p.value) || p.gradient.iter().any(nonzero)).collect()
-    }
 }
 
 fn nonzero(m: &Mat) -> bool {
@@ -176,30 +148,219 @@ fn negated(key: &Key) -> Key {
     key.iter().map(|k| -k).collect()
 }
 
-/// The resolvent of one block of the folded states at the point: its rows (positions in the source), its decomposition,
-/// and ∂G₀ on it.
-struct Block {
-    rows: Vec<usize>,
-    eigen: linalg::Eigen,
-    changes: [Mat; 3],
+fn plus(a: [i64; 2], b: [i64; 2]) -> [i64; 2] {
+    [a[0] + b[0], a[1] + b[1]]
 }
 
-impl Block {
-    /// (E_a + f − G₀)⁻¹ y on each column a of y (the columns of `columns`), y on the block's rows: V diag(1/(z_a − μ)) V⁻¹ y.
-    fn resolve(&self, energies: &[f64], frequency: f64, y: &Mat, columns: &[bool]) -> Mat {
-        let mut w = self.eigen.inverse.product(y);
-        for k in 0..w.rows {
-            for a in 0..w.cols {
-                w[(k, a)] = if columns[a] { w[(k, a)] / (C64::real(energies[a] + frequency) - self.eigen.values[k]) } else { C64::ZERO };
+fn zeros(rows: usize, cols: usize) -> [Mat; 3] {
+    std::array::from_fn(|_| Mat::zeros(rows, cols))
+}
+
+/// a b, the zero entries of a skipped (the scene's operators are block sparse: a coupling ground ← excited, a form
+/// within a manifold, an emission ground ← excited).
+fn product(a: &Mat, b: &Mat) -> Mat {
+    assert_eq!(a.cols, b.rows);
+    let mut out = Mat::zeros(a.rows, b.cols);
+    if b.cols == 0 {
+        return out;
+    }
+    for (row, x) in out.data.chunks_exact_mut(b.cols).zip(a.data.chunks_exact(a.cols.max(1))) {
+        for (x, b) in x.iter().zip(b.data.chunks_exact(b.cols)) {
+            if *x != C64::ZERO {
+                linalg::mul_add(false, row, *x, b);
             }
         }
-        self.eigen.vectors.product(&w)
+    }
+    out
+}
+
+/// out ← out + a† b, the zero entries of a skipped.
+fn adjoint_product_onto(a: &Mat, b: &Mat, scale: C64, out: &mut Mat) {
+    assert_eq!((a.rows, a.cols, b.cols), (b.rows, out.rows, out.cols));
+    for k in 0..a.rows {
+        for i in 0..a.cols {
+            let x = a[(k, i)];
+            if x != C64::ZERO {
+                linalg::mul_add(false, &mut out.data[i * out.cols..(i + 1) * out.cols], scale * x.conj(), &b.data[k * b.cols..(k + 1) * b.cols]);
+            }
+        }
     }
 }
 
+/// Sums of model parts by key, in the keys' order.
+#[derive(Default)]
+struct Sums(BTreeMap<Key, ModelPart>);
+
+impl Sums {
+    /// Adds scale·x into the part of `key` (size × size), x's entry (i, j) -- or, `adjoint`, x's (j, i) conjugated -- at
+    /// (rows[i], cols[j]), where `keep(rows[i], cols[j])` holds.
+    #[allow(clippy::too_many_arguments)]
+    fn add(&mut self, key: &Key, frequency: f64, size: usize, x: (&Mat, [&Mat; 3]), adjoint: bool, rows: &[usize], cols: &[usize], scale: f64, keep: impl Fn(usize, usize) -> bool) {
+        let part = self.0.entry(key.clone()).or_insert_with(|| ModelPart { key: key.clone(), frequency, value: Mat::zeros(size, size), gradient: zeros(size, size) });
+        let read = |m: &Mat, i: usize, j: usize| if adjoint { m[(j, i)].conj() } else { m[(i, j)] };
+        for (i, &b) in rows.iter().enumerate() {
+            for (j, &a) in cols.iter().enumerate() {
+                if keep(b, a) {
+                    part.value[(b, a)] += read(x.0, i, j) * scale;
+                    for (g, d) in part.gradient.iter_mut().zip(x.1) {
+                        g[(b, a)] += read(d, i, j) * scale;
+                    }
+                }
+            }
+        }
+    }
+
+    fn parts(self) -> Vec<ModelPart> {
+        self.0.into_values().filter(|p| nonzero(&p.value) || p.gradient.iter().any(nonzero)).collect()
+    }
+}
+
+/// How a connected part of the folded states' generator is resolved at the point (module documentation, # At a point).
+enum Resolvent {
+    /// Its decomposition G₀ = V diag(μ) V⁻¹.
+    Spectrum(linalg::Eigen),
+    /// The Neumann series about its diagonal.
+    Series,
+}
+
+/// A connected part of a block of the folded states at the point: its rows (positions in the source), G₀ and ∂G₀ on it,
+/// its resolvent, and the fast part of its states (None: Q, folded at every element).
+struct Block {
+    rows: Vec<usize>,
+    g: Mat,
+    changes: [Mat; 3],
+    resolvent: Resolvent,
+    part: Option<[i64; 2]>,
+}
+
+impl Block {
+    fn new(rows: Vec<usize>, g: Mat, changes: [Mat; 3], part: Option<[i64; 2]>) -> Block {
+        let resolvent = if part.is_some() { Resolvent::Series } else { Resolvent::Spectrum(Block::decompose(&g)) };
+        Block { rows, g, changes, resolvent, part }
+    }
+
+    fn decompose(g: &Mat) -> linalg::Eigen {
+        let mut eigen = linalg::Eigen::default();
+        assert!(eigen.decompose(g), "a folded block's G₀ has no eigendecomposition (defective)");
+        eigen
+    }
+
+    /// (z_j − G₀)⁻¹ y_j on each column j of y.
+    fn resolve(&mut self, z: &[f64], y: &Mat) -> Mat {
+        if let Resolvent::Series = self.resolvent {
+            if let Some(m) = self.series(z, y) {
+                return m;
+            }
+            self.resolvent = Resolvent::Spectrum(Block::decompose(&self.g));
+        }
+        let Resolvent::Spectrum(eigen) = &self.resolvent else { unreachable!() };
+        let mut w = eigen.inverse.product(y);
+        for k in 0..w.rows {
+            for (j, &zj) in z.iter().enumerate() {
+                w[(k, j)] = w[(k, j)] / (C64::real(zj) - eigen.values[k]);
+            }
+        }
+        eigen.vectors.product(&w)
+    }
+
+    /// The Neumann series about the diagonal, each column to the rounding of its sum (module documentation); None where
+    /// it does not converge (ρ ≥ 1).
+    fn series(&self, z: &[f64], y: &Mat) -> Option<Mat> {
+        let size = self.rows.len();
+        let mut out = Mat::zeros(size, y.cols);
+        let (mut w, mut next) = (vec![C64::ZERO; size], vec![C64::ZERO; size]);
+        let inf = |v: &[C64]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        for (j, &zj) in z.iter().enumerate() {
+            let d: Vec<C64> = (0..size).map(|i| C64::real(zj) - self.g[(i, i)]).collect();
+            let rho = (0..size).map(|i| (0..size).filter(|&k| k != i).map(|k| self.g[(i, k)].abs()).sum::<f64>() / d[i].abs()).fold(0.0, f64::max);
+            if rho >= 1.0 {
+                return None;
+            }
+            for i in 0..size {
+                w[i] = y[(i, j)] / d[i];
+                out[(i, j)] = w[i];
+            }
+            let tail = rho / (1.0 - rho);
+            loop {
+                let sum: Vec<C64> = (0..size).map(|i| out[(i, j)]).collect();
+                if inf(&w) * tail <= UNIT_ROUNDOFF * inf(&sum) {
+                    break;
+                }
+                for i in 0..size {
+                    next[i] = (0..size).filter(|&k| k != i).map(|k| self.g[(i, k)] * w[k]).sum::<C64>() / d[i];
+                }
+                std::mem::swap(&mut w, &mut next);
+                for i in 0..size {
+                    out[(i, j)] += w[i];
+                }
+            }
+        }
+        Some(out)
+    }
+}
+
+/// The connected parts of `rows` under the pattern of the matrices on them (|rows| × |rows|).
+fn connected(rows: &[usize], on: &[&Mat]) -> Vec<Vec<usize>> {
+    let size = rows.len();
+    let mut root: Vec<usize> = (0..size).collect();
+    fn find(root: &mut [usize], mut i: usize) -> usize {
+        while root[i] != i {
+            root[i] = root[root[i]];
+            i = root[i];
+        }
+        i
+    }
+    for i in 0..size {
+        for k in 0..size {
+            if i != k && on.iter().any(|m| m[(i, k)] != C64::ZERO) {
+                let (a, b) = (find(&mut root, i), find(&mut root, k));
+                root[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut parts: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..size {
+        let r = find(&mut root, i);
+        parts.entry(r).or_default().push(i);
+    }
+    parts.into_values().collect()
+}
+
+/// One component's amplitude on one block part: M_c[B, cols] and ∂M_c (|B| × |cols|), cols places in K; and the fast
+/// parts n_a − n_b of its columns against K's states, the keys an out-leg makes slow elements of with it.
+struct Folded {
+    component: usize,
+    block: usize,
+    cols: Vec<usize>,
+    m: Mat,
+    dm: [Mat; 3],
+    slow: Vec<[i64; 2]>,
+    /// max|M| and the largest max|∂_i M|.
+    size: [f64; 2],
+}
+
+/// A leg's block H_K,B (or L_K,B) with its gradients and max|·|, max_i max|∂_i ·|; None where all are zero.
+type Leg = Option<(Mat, [Mat; 3], [f64; 2])>;
+
+fn leg(value: &Mat, gradient: &[Mat; 3], rows: &[usize], cols: &[usize]) -> Leg {
+    let out = value.block(rows, cols);
+    let moved = gradient.each_ref().map(|d| d.block(rows, cols));
+    let size = [out.max_abs(), moved.iter().map(Mat::max_abs).fold(0.0, f64::max)];
+    (size != [0.0; 2]).then_some((out, moved, size))
+}
+
+/// Whether a pair leg·M is below the rounding of the quantity it adds to (the rounding rule, a ≥ ε): each entry of the
+/// product within |B| max|leg| max|M|, of its gradient within |B| (max|∂leg| max|M| + max|leg| max|∂M|), against u
+/// times the quantity's scale and its gradient's (`scale`, lower bounds: the direct terms' largest entries).
+fn negligible(width: usize, leg: [f64; 2], m: [f64; 2], scale: [f64; 2]) -> bool {
+    let w = width as f64;
+    w * leg[0] * m[0] < UNIT_ROUNDOFF * scale[0] && w * (leg[1] * m[0] + leg[0] * m[1]) < UNIT_ROUNDOFF * scale[1]
+}
+
 /// The one fold (module documentation): of `source`, keep the states `keep` (indices into the 32, among the source's)
-/// and their slow elements by `sectors` on the fast coordinates `axes`; fold the rest.
-pub fn fold(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 3]) -> ModelAt {
+/// and their slow elements by `sectors` on the fast coordinates `axes`; fold the rest at the static generator
+/// `generator` (on the source's states, with its gradient).
+pub fn fold(source: &ModelAt, generator: &ModelPart, keep: &[usize], sectors: &Sectors, axes: [bool; 2]) -> ModelAt {
     let place = |state: usize| source.states.iter().position(|&s| s == state).expect("a kept state of the source");
     let mut kept: Vec<usize> = keep.iter().map(|&s| place(s)).collect();
     kept.sort_unstable();
@@ -207,137 +368,178 @@ pub fn fold(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 3]
     let size = source.states.len();
     let others: Vec<usize> = (0..size).filter(|p| kept.binary_search(p).is_err()).collect();
     let n = kept.len();
-    let state = |p: usize| source.states[p];
-    // The fast index of an element (positions in the source) on the folding coordinates.
-    let fast = |key: &Key, to: usize, from: usize| -> [i64; 3] {
-        let index = sectors.index(key, state(to), state(from));
-        std::array::from_fn(|i| if axes[i] { index[i] } else { 0 })
-    };
-    let still = source.effective.iter().find(|p| p.key.iter().all(|k| *k == 0)).expect("H's static part");
-    // G₀ = H⁽⁰⁾ − (i/2)Γ and its gradient, on the source's states.
-    let mut g0 = still.value.clone();
-    let mut dg0 = still.gradient.clone();
-    for channel in &source.jumps {
-        for p in &channel.parts {
-            g0.add_scaled(C64::new(0.0, -0.5), &p.value.adjoint_product(&p.value));
-            for (d, dl) in dg0.iter_mut().zip(&p.gradient) {
-                d.add_scaled(C64::new(0.0, -0.5), &dl.adjoint_product(&p.value));
-                d.add_scaled(C64::new(0.0, -0.5), &p.value.adjoint_product(dl));
-            }
+    let part: Vec<[i64; 2]> = source.states.iter().map(|&s| sectors.state(s, axes)).collect();
+    // The fast index of an element b ← a (positions in the source) of a key whose own is `keyed`.
+    let fast = |keyed: [i64; 2], to: usize, from: usize| -> [i64; 2] { [keyed[0] + part[to][0] - part[from][0], keyed[1] + part[to][1] - part[from][1]] };
+    let keyed: Vec<[i64; 2]> = source.effective.iter().map(|c| sectors.key(&c.key, axes)).collect();
+    // The blocks of the folded states: Q, and the kept states by their fast parts; each split into its connected parts.
+    let mut sets: Vec<(Vec<usize>, Option<[i64; 2]>)> = Vec::new();
+    if !others.is_empty() {
+        sets.push((others.clone(), None));
+    }
+    let mut by_part: BTreeMap<[i64; 2], Vec<usize>> = BTreeMap::new();
+    for &p in &kept {
+        by_part.entry(part[p]).or_default().push(p);
+    }
+    // A kept block is wanted where some component has a fast element into it.
+    for (s, rows) in by_part {
+        let wanted = keyed.iter().any(|&k| kept.iter().any(|&a| plus(k, [s[0] - part[a][0], s[1] - part[a][1]]) != [0; 2]));
+        if wanted {
+            sets.push((rows, Some(s)));
         }
     }
-    // The blocks of the folded states: Q, and the kept states by their fast parts.
-    let mut groups: BTreeMap<[i64; 3], Vec<usize>> = BTreeMap::new();
-    for &p in &kept {
-        let s = sectors.states[state(p)];
-        groups.entry(std::array::from_fn(|i| if axes[i] { s[i] } else { 0 })).or_default().push(p);
+    let mut blocks: Vec<Block> = Vec::new();
+    for (rows, s) in sets {
+        // G₀ = G − (i/2)Γ on the rows, with its gradient.
+        let mut g = generator.value.block(&rows, &rows);
+        let mut changes = generator.gradient.each_ref().map(|d| d.block(&rows, &rows));
+        let all: Vec<usize> = (0..size).collect();
+        for channel in &source.jumps {
+            for p in &channel.parts {
+                let l = p.value.block(&all, &rows);
+                adjoint_product_onto(&l, &l, C64::new(0.0, -0.5), &mut g);
+                for (d, dl) in changes.iter_mut().zip(&p.gradient) {
+                    if nonzero(dl) {
+                        let dl = dl.block(&all, &rows);
+                        adjoint_product_onto(&dl, &l, C64::new(0.0, -0.5), d);
+                        adjoint_product_onto(&l, &dl, C64::new(0.0, -0.5), d);
+                    }
+                }
+            }
+        }
+        let on: Vec<&Mat> = std::iter::once(&g).chain(changes.iter()).collect();
+        for members in connected(&rows, &on) {
+            let sub: Vec<usize> = members.iter().map(|&i| rows[i]).collect();
+            blocks.push(Block::new(sub, g.block(&members, &members), changes.each_ref().map(|d| d.block(&members, &members)), s));
+        }
     }
-    let blocks: Vec<Block> = std::iter::once(others.clone())
-        .filter(|rows| !rows.is_empty())
-        .chain(groups.into_values())
-        .map(|rows| {
-            let mut eigen = linalg::Eigen::default();
-            assert!(eigen.decompose(&g0.block(&rows, &rows)), "a folded block's G₀ has no eigendecomposition (defective)");
-            let changes = dg0.each_ref().map(|d| d.block(&rows, &rows));
-            Block { rows, eigen, changes }
-        })
-        .collect();
-    let energies: Vec<f64> = kept.iter().map(|&a| still.value[(a, a)].re).collect();
-    let slopes: [Vec<f64>; 3] = std::array::from_fn(|i| kept.iter().map(|&a| still.gradient[i][(a, a)].re).collect());
-    // M_c and ∂M_c (rows: every source position, the kept slow ones zero; columns: K) of every component.
-    let mut amplitudes: Vec<(usize, Mat, [Mat; 3])> = Vec::new();
+    let energies: Vec<f64> = kept.iter().map(|&a| generator.value[(a, a)].re).collect();
+    let slopes: [Vec<f64>; 3] = std::array::from_fn(|i| kept.iter().map(|&a| generator.gradient[i][(a, a)].re).collect());
+    // M_c and ∂M_c of every component on every block part it folds into.
+    let mut kinds: Vec<[i64; 2]> = kept.iter().map(|&p| part[p]).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    let mut amplitudes: Vec<Folded> = Vec::new();
     for (index, c) in source.effective.iter().enumerate() {
-        let mut m = Mat::zeros(size, n);
-        let mut dm: [Mat; 3] = std::array::from_fn(|_| Mat::zeros(size, n));
-        let mut any = false;
-        for block in &blocks {
-            // The columns whose element into the block is folded: every one into Q, the fast ones into a kept block.
-            let columns: Vec<bool> = kept.iter().map(|&a| others.binary_search(&block.rows[0]).is_ok() || fast(&c.key, block.rows[0], a) != [0; 3]).collect();
+        for (b, block) in blocks.iter_mut().enumerate() {
             let y = c.value.block(&block.rows, &kept);
             let moved = c.gradient.each_ref().map(|d| d.block(&block.rows, &kept));
-            if !columns.iter().any(|&x| x) || (!nonzero(&y) && !moved.iter().any(nonzero)) {
+            let cols: Vec<usize> = (0..n)
+                .filter(|&j| block.part.is_none() || fast(keyed[index], block.rows[0], kept[j]) != [0; 2])
+                .filter(|&j| (0..block.rows.len()).any(|i| y[(i, j)] != C64::ZERO || moved.iter().any(|d| d[(i, j)] != C64::ZERO)))
+                .collect();
+            if cols.is_empty() {
                 continue;
             }
-            any = true;
-            let amplitude = block.resolve(&energies, c.frequency, &y, &columns);
-            for (i, d) in dm.iter_mut().enumerate() {
-                let mut z = moved[i].clone();
-                z.add_scaled(C64::ONE, &block.changes[i].product(&amplitude));
-                for k in 0..z.rows {
-                    for a in 0..n {
-                        z[(k, a)] -= amplitude[(k, a)] * slopes[i][a];
+            let z: Vec<f64> = cols.iter().map(|&j| energies[j] + c.frequency).collect();
+            let all_rows: Vec<usize> = (0..block.rows.len()).collect();
+            let m = block.resolve(&z, &y.block(&all_rows, &cols));
+            let dm = std::array::from_fn(|i| {
+                let mut rhs = moved[i].block(&all_rows, &cols);
+                rhs.add_scaled(C64::ONE, &product(&block.changes[i], &m));
+                for k in 0..rhs.rows {
+                    for (j, &col) in cols.iter().enumerate() {
+                        rhs[(k, j)] -= m[(k, j)] * slopes[i][col];
                     }
                 }
-                let change = block.resolve(&energies, c.frequency, &z, &columns);
-                for (k, &row) in block.rows.iter().enumerate() {
-                    for a in 0..n {
-                        d[(row, a)] = change[(k, a)];
-                    }
-                }
+                block.resolve(&z, &rhs)
+            });
+            let mut slow: Vec<[i64; 2]> = Vec::new();
+            for &j in &cols {
+                slow.extend(kinds.iter().map(|k| [part[kept[j]][0] - k[0], part[kept[j]][1] - k[1]]));
             }
-            for (k, &row) in block.rows.iter().enumerate() {
-                for a in 0..n {
-                    m[(row, a)] = amplitude[(k, a)];
-                }
-            }
-        }
-        if any {
-            amplitudes.push((index, m, dm));
+            slow.sort_unstable();
+            slow.dedup();
+            let size = [m.max_abs(), dm.iter().map(Mat::max_abs).fold(0.0, f64::max)];
+            amplitudes.push(Folded { component: index, block: b, cols, m, dm, slow, size });
         }
     }
+    let all_kept: Vec<usize> = (0..n).collect();
+    let slow_pair = |keyed_sum: [i64; 2], b: usize, a: usize| fast(keyed_sum, kept[b], kept[a]) == [0; 2];
     // H_eff: the slow kept elements of each component, and each folded pair's slow half with its conjugate.
     let mut effective = Sums::default();
-    for c in &source.effective {
+    let mut scale = [0.0_f64; 2];
+    for (index, c) in source.effective.iter().enumerate() {
         let (block, moved) = (c.value.block(&kept, &kept), c.gradient.each_ref().map(|d| d.block(&kept, &kept)));
-        effective.add(&c.key, c.frequency, &block, moved.each_ref(), 1.0, |b, a| fast(&c.key, kept[b], kept[a]) == [0; 3]);
+        scale = [scale[0].max(block.max_abs()), moved.iter().map(Mat::max_abs).fold(scale[1], f64::max)];
+        effective.add(&c.key, c.frequency, n, (&block, moved.each_ref()), false, &all_kept, &all_kept, 1.0, |b, a| slow_pair(keyed[index], b, a));
     }
-    let all: Vec<usize> = (0..size).collect();
-    for c2 in &source.effective {
-        let (out, moved) = (c2.value.block(&kept, &all), c2.gradient.each_ref().map(|d| d.block(&kept, &all)));
-        if !nonzero(&out) && !moved.iter().any(nonzero) {
-            continue;
-        }
-        for (index, m, dm) in &amplitudes {
-            let c = &source.effective[*index];
-            let (key, frequency) = (sum_keys(&c.key, &c2.key), c.frequency + c2.frequency);
-            let a = out.product(m);
+    // The out-legs H⁽ᶜ′⁾_K,B per component and block part, made once.
+    let mut legs: BTreeMap<(usize, usize), Leg> = BTreeMap::new();
+    for (index2, c2) in source.effective.iter().enumerate() {
+        for folded in &amplitudes {
+            let c = &source.effective[folded.component];
+            let sum = plus(keyed[folded.component], keyed[index2]);
+            if folded.slow.binary_search(&sum).is_err() {
+                continue;
+            }
+            let rows = &blocks[folded.block].rows;
+            let found = legs.entry((index2, folded.block)).or_insert_with(|| leg(&c2.value, &c2.gradient, &kept, rows));
+            let Some((out, moved, size)) = found else { continue };
+            if negligible(rows.len(), *size, folded.size, scale) {
+                continue;
+            }
+            let a = product(out, &folded.m);
             let da: [Mat; 3] = std::array::from_fn(|i| {
-                let mut d = moved[i].product(m);
-                d.add_scaled(C64::ONE, &out.product(&dm[i]));
+                let mut d = product(&moved[i], &folded.m);
+                d.add_scaled(C64::ONE, &product(out, &folded.dm[i]));
                 d
             });
-            let slow = |b: usize, x: usize| fast(&key, kept[b], kept[x]) == [0; 3];
-            effective.add(&key, frequency, &a, da.each_ref(), 0.5, slow);
-            let back = negated(&key);
-            effective.add(&back, -frequency, &a.adjoint(), da.each_ref().map(Mat::adjoint).each_ref(), 0.5, |b, x| slow(x, b));
+            let (key, frequency) = (sum_keys(&c.key, &c2.key), c.frequency + c2.frequency);
+            let cols: Vec<usize> = folded.cols.clone();
+            effective.add(&key, frequency, n, (&a, da.each_ref()), false, &all_kept, &cols, 0.5, |b, x| slow_pair(sum, b, x));
+            effective.add(&negated(&key), -frequency, n, (&a, da.each_ref()), true, &cols, &all_kept, 0.5, |x, b| slow_pair(sum, b, x));
         }
     }
     // The jumps: each element in the channel of its fast index.
-    let mut out: BTreeMap<(usize, [i64; 3]), [Sums; 2]> = BTreeMap::new();
+    let mut out: BTreeMap<(usize, [i64; 2]), [Sums; 2]> = BTreeMap::new();
+    let mut scales = [[0.0_f64; 2]; 2];
     for channel in &source.jumps {
         for (which, parts) in [&channel.parts, &channel.kicks].into_iter().enumerate() {
             for p in parts {
-                let mut add = |key: &Key, frequency: f64, value: &Mat, gradient: [&Mat; 3]| {
-                    let mut indices: Vec<[i64; 3]> = (0..n).flat_map(|b| (0..n).map(move |a| (b, a))).filter(|&(b, a)| value[(b, a)] != C64::ZERO || gradient.iter().any(|d| d[(b, a)] != C64::ZERO)).map(|(b, a)| fast(key, kept[b], kept[a])).collect();
+                let s = &mut scales[which];
+                *s = [s[0].max(p.value.block(&kept, &kept).max_abs()), p.gradient.iter().map(|d| d.block(&kept, &kept).max_abs()).fold(s[1], f64::max)];
+            }
+        }
+    }
+    for channel in &source.jumps {
+        for (which, parts) in [&channel.parts, &channel.kicks].into_iter().enumerate() {
+            for p in parts {
+                let mut legs: BTreeMap<usize, Leg> = BTreeMap::new();
+                let mut add = |key: &Key, frequency: f64, value: &Mat, gradient: [&Mat; 3], cols: &[usize]| {
+                    let own = sectors.key(key, axes);
+                    let mut indices: Vec<[i64; 2]> = Vec::new();
+                    for b in 0..n {
+                        for (j, &a) in cols.iter().enumerate() {
+                            if value[(b, j)] != C64::ZERO || gradient.iter().any(|d| d[(b, j)] != C64::ZERO) {
+                                indices.push(fast(own, kept[b], kept[a]));
+                            }
+                        }
+                    }
                     indices.sort_unstable();
                     indices.dedup();
                     for index in indices {
                         let sums = &mut out.entry((channel.emission, index)).or_default()[which];
-                        sums.add(key, frequency, value, gradient, 1.0, |b, a| fast(key, kept[b], kept[a]) == index);
+                        sums.add(key, frequency, n, (value, gradient), false, &all_kept, cols, 1.0, |b, a| fast(own, kept[b], kept[a]) == index);
                     }
                 };
                 let (direct, moved) = (p.value.block(&kept, &kept), p.gradient.each_ref().map(|d| d.block(&kept, &kept)));
-                add(&p.key, p.frequency, &direct, moved.each_ref());
-                let (from, moved) = (p.value.block(&kept, &all), p.gradient.each_ref().map(|d| d.block(&kept, &all)));
-                for (index, m, dm) in &amplitudes {
-                    let c = &source.effective[*index];
-                    let value = from.product(m);
+                add(&p.key, p.frequency, &direct, moved.each_ref(), &all_kept);
+                for folded in &amplitudes {
+                    let rows = &blocks[folded.block].rows;
+                    let found = legs.entry(folded.block).or_insert_with(|| leg(&p.value, &p.gradient, &kept, rows));
+                    let Some((from, moved, size)) = found else { continue };
+                    if negligible(rows.len(), *size, folded.size, scales[which]) {
+                        continue;
+                    }
+                    let c = &source.effective[folded.component];
+                    let value = product(&from, &folded.m);
                     let gradient: [Mat; 3] = std::array::from_fn(|i| {
-                        let mut d = moved[i].product(m);
-                        d.add_scaled(C64::ONE, &from.product(&dm[i]));
+                        let mut d = product(&moved[i], &folded.m);
+                        d.add_scaled(C64::ONE, &product(&from, &folded.dm[i]));
                         d
                     });
-                    add(&sum_keys(&p.key, &c.key), p.frequency + c.frequency, &value, gradient.each_ref());
+                    add(&sum_keys(&p.key, &c.key), p.frequency + c.frequency, &value, gradient.each_ref(), &folded.cols);
                 }
             }
         }
@@ -347,77 +549,160 @@ pub fn fold(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 3]
         .map(|((emission, fast), [parts, kicks])| Channel { emission, fast, parts: parts.parts(), kicks: kicks.parts() })
         .filter(|c| !c.parts.is_empty())
         .collect();
-    let lift = amplitudes
-        .iter()
-        .map(|(index, m, dm)| {
-            let c = &source.effective[*index];
-            ModelPart { key: c.key.clone(), frequency: c.frequency, value: m.block(&others, &all[..n]), gradient: dm.each_ref().map(|d| d.block(&others, &all[..n])) }
-        })
-        .filter(|p| nonzero(&p.value))
-        .collect();
-    let groups = source
-        .groups
-        .iter()
-        .map(|members| members.iter().filter_map(|p| kept.binary_search(p).ok()).collect::<Vec<usize>>())
-        .filter(|members| !members.is_empty())
-        .collect();
+    // The lift: M_c on Q's rows, in Q's order.
+    let mut lift = Sums::default();
+    let q = others.len();
+    for folded in amplitudes.iter().filter(|f| blocks[f.block].part.is_none()) {
+        let c = &source.effective[folded.component];
+        let rows: Vec<usize> = blocks[folded.block].rows.iter().map(|r| others.binary_search(r).expect("a row of Q")).collect();
+        let part = lift.0.entry(c.key.clone()).or_insert_with(|| ModelPart { key: c.key.clone(), frequency: c.frequency, value: Mat::zeros(q, n), gradient: zeros(q, n) });
+        for (i, &row) in rows.iter().enumerate() {
+            for (j, &col) in folded.cols.iter().enumerate() {
+                part.value[(row, col)] = folded.m[(i, j)];
+                for (g, d) in part.gradient.iter_mut().zip(&folded.dm) {
+                    g[(row, col)] = d[(i, j)];
+                }
+            }
+        }
+    }
     ModelAt {
-        states: kept.iter().map(|&p| state(p)).collect(),
-        folded: others.iter().map(|&p| state(p)).collect(),
-        groups,
+        states: kept.iter().map(|&p| source.states[p]).collect(),
+        folded: others.iter().map(|&p| source.states[p]).collect(),
+        groups: source.groups.clone(),
         effective: effective.parts(),
         jumps,
-        lift,
+        lift: lift.parts(),
     }
 }
 
 impl ModelAt {
-    /// The unfolded model of H's components on the 32 states (each nonzero key both ways) and the Cartesian emission's
-    /// three channels with their photons' forms: what the full reference folds.
-    pub fn source(components: &Components, jumps: &Jumps, labels: &[String]) -> ModelAt {
+    /// The unfolded model of H's components on the 32 states (each nonzero key both ways), those whose key `fold` folds
+    /// left out, and the Cartesian emission's three channels with their photons' forms.
+    fn source(components: &Components, jumps: &Jumps, labels: &[String], skip: impl Fn(&Key) -> bool) -> ModelAt {
         let mut effective = Vec::new();
-        for c in &components.parts {
+        for c in components.parts.iter().filter(|c| !skip(&c.key)) {
             effective.push(ModelPart { key: c.key.clone(), frequency: c.frequency, value: c.value.clone(), gradient: c.gradient.clone() });
             if c.key.iter().any(|k| *k != 0) {
                 effective.push(ModelPart { key: negated(&c.key), frequency: -c.frequency, value: c.value.adjoint(), gradient: c.gradient.each_ref().map(Mat::adjoint) });
             }
         }
-        let zero: Key = components.parts.iter().find(|c| c.key.iter().all(|k| *k == 0)).expect("H's static part").key.clone();
-        let none = || std::array::from_fn(|_| Mat::zeros(STATES, STATES));
-        let part = |value: Mat| ModelPart { key: zero.clone(), frequency: 0.0, value, gradient: none() };
-        let photon = |c: &Mat| Mat::from_fn(STATES, STATES, |i, j| c[(i, j)] * jumps.wave_number[(i, j)].re);
+        let length = components.parts[0].key.len();
         let states: Vec<usize> = (0..STATES).collect();
-        ModelAt {
-            groups: levels(labels, &states),
-            states,
-            folded: Vec::new(),
-            effective,
-            jumps: (0..3).map(|a| Channel { emission: a, fast: [0; 3], parts: vec![part(jumps.emission[a].clone())], kicks: vec![part(photon(&jumps.emission[a]))] }).collect(),
-            lift: Vec::new(),
-        }
+        ModelAt { groups: levels(labels, &states), states, folded: Vec::new(), effective, jumps: emission(jumps, length), lift: Vec::new() }
+    }
+
+    /// H's static part (the zero key).
+    pub fn still(&self) -> &ModelPart {
+        self.effective.iter().find(|p| p.key.iter().all(|k| *k == 0)).expect("H's static part")
     }
 }
 
-/// The full reference at r for the momentum κ: the scene's model on the 32 states with the tweezer's sidebands folded
-/// (floquet's `Hilbert::full` is it along an axis).
-pub fn reference(scene: &Scene, sectors: &Sectors, r: V3, kappa: V3) -> ModelAt {
-    let source = ModelAt::source(&scene.components_at(r, kappa), scene.jumps(), &scene.request.states);
-    fold(&source, &(0..STATES).collect::<Vec<_>>(), sectors, REFERENCE)
+/// The request's Cartesian emission as three channels (n_tw = n_φ = 0), each with its photons' form k∘C.
+fn emission(jumps: &Jumps, length: usize) -> Vec<Channel> {
+    let none = || zeros(STATES, STATES);
+    let part = |value: Mat| ModelPart { key: vec![0; length], frequency: 0.0, value, gradient: none() };
+    let photon = |c: &Mat| Mat::from_fn(STATES, STATES, |i, j| c[(i, j)] * jumps.wave_number[(i, j)].re);
+    (0..3).map(|a| Channel { emission: a, fast: [0; 2], parts: vec![part(jumps.emission[a].clone())], kicks: vec![part(photon(&jumps.emission[a]))] }).collect()
+}
+
+/// The tweezer's sidebands folded once (module documentation, # The two folds): the unit fold's pairs (n_tw = 0, H's
+/// part ∝ |a_tw|²) and its channels (n_tw = ±1, ∝ a_tw and a_tw*).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tweezer {
+    sectors: Sectors,
+    shift: Vec<ModelPart>,
+    channels: Vec<Channel>,
+}
+
+impl Tweezer {
+    /// The fold of the tweezer's couplings at unit amplitude and at rest (`Scene::tweezer_couplings`, both ways) with the
+    /// emission's channels, kept on the 32 states, at the request's H0.
+    pub fn new(scene: &Scene) -> Tweezer {
+        let length = scene.generators.len();
+        let mut effective = Vec::new();
+        for (key, frequency, x) in scene.tweezer_couplings() {
+            effective.push(ModelPart { key: key.clone(), frequency, value: x.clone(), gradient: zeros(STATES, STATES) });
+            effective.push(ModelPart { key: negated(&key), frequency: -frequency, value: x.adjoint(), gradient: zeros(STATES, STATES) });
+        }
+        let states: Vec<usize> = (0..STATES).collect();
+        let source = ModelAt { groups: levels(&scene.request.states, &states), states: states.clone(), folded: Vec::new(), effective, jumps: emission(scene.jumps(), length), lift: Vec::new() };
+        let generator = ModelPart { key: vec![0; length], frequency: 0.0, value: scene.request.hamiltonian.clone(), gradient: zeros(STATES, STATES) };
+        let sectors = Sectors::tweezer(scene);
+        let unit = fold(&source, &generator, &states, &sectors, REFERENCE);
+        Tweezer { shift: unit.effective, channels: unit.jumps.into_iter().filter(|c| c.fast != [0; 2]).collect(), sectors }
+    }
+
+    /// The full reference at a point: the scene's components there, the tweezer's left out, their fold put in at its
+    /// amplitude a: the pairs times |a|², the channels with n_tw = 1 times a, with −1 times a*, each with its gradient.
+    pub fn reference(&self, scene: &Scene, components: &Components) -> ModelAt {
+        let tweezer = |key: &Key| self.sectors.key(key, REFERENCE) != [0; 2];
+        let mut source = ModelAt::source(components, scene.jumps(), &scene.request.states, tweezer);
+        let (a, da) = components.tweezer;
+        let (power, dpower): (f64, [f64; 3]) = (a.norm_sqr(), std::array::from_fn(|i| 2.0 * (a.conj() * da[i]).re));
+        // The frequency of a key at the point: the components' own.
+        let frequency = |key: &Key, bare: f64| components.parts.iter().find(|c| &c.key == key).map_or(bare, |c| c.frequency);
+        for s in &self.shift {
+            let at = match source.effective.iter_mut().find(|p| p.key == s.key) {
+                Some(p) => p,
+                None => {
+                    source.effective.push(ModelPart { key: s.key.clone(), frequency: s.frequency, value: Mat::zeros(STATES, STATES), gradient: zeros(STATES, STATES) });
+                    source.effective.last_mut().unwrap()
+                }
+            };
+            at.value.add_scaled(C64::real(power), &s.value);
+            for (g, d) in at.gradient.iter_mut().zip(dpower) {
+                g.add_scaled(C64::real(d), &s.value);
+            }
+        }
+        for channel in &self.channels {
+            let (scale, dscale): (C64, [C64; 3]) = if channel.fast[1] > 0 { (a, da) } else { (a.conj(), da.map(C64::conj)) };
+            let put = |p: &ModelPart| ModelPart {
+                key: p.key.clone(),
+                frequency: frequency(&p.key, p.frequency),
+                value: p.value.scaled(scale),
+                gradient: dscale.map(|d| p.value.scaled(d)),
+            };
+            let parts: Vec<ModelPart> = channel.parts.iter().map(put).filter(|p| nonzero(&p.value) || p.gradient.iter().any(nonzero)).collect();
+            if !parts.is_empty() {
+                source.jumps.push(Channel { emission: channel.emission, fast: channel.fast, parts, kicks: channel.kicks.iter().map(put).collect() });
+            }
+        }
+        source
+    }
+}
+
+/// The full reference for the scene's components at a point: the scene's model on the 32 states with the tweezer's
+/// sidebands folded (floquet's `Hilbert::full` is it).
+pub fn reference(scene: &Scene, components: &Components) -> ModelAt {
+    Tweezer::new(scene).reference(scene, components)
+}
+
+/// The RS model on a kept set P: P, its complement, the frame's sectors and the tweezer's fold, fixed for the run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rs {
+    /// P: indices into the 32, sorted (the ground states first).
+    pub keep: Vec<usize>,
+    /// Q: the folded states, the rest of the 32.
+    pub folded: Vec<usize>,
+    pub sectors: Sectors,
+    tweezer: Tweezer,
 }
 
 impl Rs {
-    /// The model's fold on P = `keep` with the frame's sectors.
-    pub fn new(keep: &[usize], sectors: Sectors) -> Rs {
+    /// The model's fold on P = `keep` with the frame's sectors; the tweezer's fold made here once.
+    pub fn new(scene: &Scene, keep: &[usize], sectors: Sectors) -> Rs {
         let mut keep = keep.to_vec();
         keep.sort_unstable();
         keep.dedup();
         let folded = (0..STATES).filter(|i| keep.binary_search(i).is_err()).collect();
-        Rs { keep, folded, sectors }
+        Rs { keep, folded, sectors, tweezer: Tweezer::new(scene) }
     }
 
-    /// The model at r for the momentum κ: the full reference there, folded on P.
-    pub fn at(&self, scene: &Scene, r: V3, kappa: V3) -> ModelAt {
-        fold(&reference(scene, &self.sectors, r, kappa), &self.keep, &self.sectors, MODEL)
+    /// The model for the scene's components at a point (`Scene::components_at`, or `Scene::components` for the
+    /// checkpoint's): the full reference there, folded on P at its static part.
+    pub fn at(&self, scene: &Scene, components: &Components) -> ModelAt {
+        let reference = self.tweezer.reference(scene, components);
+        fold(&reference, reference.still(), &self.keep, &self.sectors, MODEL)
     }
 }
 
@@ -467,45 +752,16 @@ impl ModelAt {
         out
     }
 
-    /// The model as a Hilbert model for the checkpoint, along the analysis axis u: gradients along u; each channel's
-    /// emissions projected on e₁, e₂, u (`channels`), with their photons' momentum along u, √w (k∘C).
-    pub fn hilbert(&self, axis: V3) -> Hilbert {
-        let u = axis.map(|x| x / linalg::norm3(axis));
-        let along = |p: &ModelPart| {
-            let mut g = Mat::zeros(p.value.rows, p.value.cols);
-            for (i, d) in p.gradient.iter().enumerate() {
-                g.add_scaled(C64::real(u[i]), d);
-            }
-            g
-        };
-        let mut fasts: Vec<[i64; 3]> = self.jumps.iter().map(|c| c.fast).collect();
-        fasts.sort_unstable();
-        fasts.dedup();
-        let (mut jumps, mut kicks) = (Vec::new(), Vec::new());
-        for fast in fasts {
-            for (e, w) in channels(u) {
-                let mut sums = [Sums::default(), Sums::default()];
-                for channel in self.jumps.iter().filter(|c| c.fast == fast) {
-                    for (which, parts) in [&channel.parts, &channel.kicks].into_iter().enumerate() {
-                        let scale = e[channel.emission] * if which == 0 { 1.0 } else { w.sqrt() };
-                        for p in parts {
-                            let g = along(p);
-                            sums[which].add(&p.key, p.frequency, &p.value, [&g, &g, &g], scale, |_, _| true);
-                        }
-                    }
-                }
-                let [l, k] = sums.map(|s| s.parts().into_iter().map(|p| Part { key: p.key, value: p.value, gradient: p.gradient[0].clone() }).collect::<Vec<_>>());
-                jumps.push(l);
-                kicks.push(k);
-            }
-        }
+    /// The model as a Hilbert model for the checkpoint (floquet): H's components, each channel's components (channels do
+    /// not interfere), three-axis gradients, the levels over the 32 and the lift.
+    pub fn hilbert(&self) -> Hilbert {
+        let part = |p: &ModelPart| Part { key: p.key.clone(), value: p.value.clone(), gradient: p.gradient.clone() };
         Hilbert {
             states: self.states.clone(),
-            hamiltonian: self.effective.iter().map(|p| Part { key: p.key.clone(), value: p.value.clone(), gradient: along(p) }).collect(),
-            jumps,
-            kicks,
+            hamiltonian: self.effective.iter().map(part).collect(),
+            jumps: self.jumps.iter().map(|c| c.parts.iter().map(part).collect()).collect(),
             groups: self.groups.clone(),
-            lift: Some(Lift { folded: self.folded.clone(), amplitudes: self.lift.iter().map(|p| (p.key.clone(), p.value.clone())).collect() }),
+            lift: (!self.folded.is_empty()).then(|| Lift { folded: self.folded.clone(), amplitudes: self.lift.iter().map(|p| (p.key.clone(), p.value.clone())).collect() }),
         }
     }
 }
