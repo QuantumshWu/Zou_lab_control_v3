@@ -538,10 +538,16 @@ pub struct Solution {
 /// trajectory runs.
 pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
     request.validate()?;
+    let run = run_of(request, alone(chief(request)))?;
+    solve_on(request, &run, checkpoint)
+}
+
+/// The run of a request at the reference populations `reference` (`solve`): its scene, the two-point check's P
+/// (`select::choose`) and its fold.
+pub(crate) fn run_of(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
     let scene = crate::scene::Scene::new(request)?;
     let selection = crate::select::choose(&scene)?;
-    let run = Selected::new(scene, selection, alone(chief(request)))?;
-    solve_on(request, &run, checkpoint)
+    Selected::new(scene, selection, reference)
 }
 
 /// The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
@@ -686,7 +692,7 @@ fn trap_of(run: &Selected, potential: &Potential, lit: &dyn Fn(usize) -> bool) -
 /// The reported trap of the ground populations p (SPEC §1.3; `Setting::reported`): the trap of their potential
 /// (`Selected::prepared`), every light's beams' pattern its scale (`trap_of`).
 pub(crate) fn reported(run: &Selected, p: &[f64; GROUND]) -> Result<Trap, String> {
-    trap_of(run, &run.prepared(p), &|_| true)
+    trap_of(run, &run.running(p), &|_| true)
 }
 
 /// The kick's largest curvature (`stable`), ω_k² = (ħ/m) λ_max ∂∂(V_s − V_ref) at the trap's centre over the ground
@@ -4917,12 +4923,11 @@ mod tests {
     }
 
     /// A scene's request (refs/scenes, or refs/requests where `requests`), its run at the ground state `state` (the
-    /// reference state) and that state's prepared trap, as the solve makes them (`solve`, `Prepared`). 临时入口：P 取全部
-    /// 32 态（`select::choose` 落地前；合并时改回 `choose`）.
+    /// reference state) and that state's prepared trap, as the solve makes them (`solve`, `run_of`, `Prepared`).
     fn scene_run(name: &str, requests: bool, state: usize) -> (Request, Selected, Trap) {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join(if requests { "requests" } else { "scenes" }).join(format!("{name}.json"));
         let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
-        let run = crate::model::selected::keeping(&request, (0..STATES).collect(), None, alone(state));
+        let run = run_of(&request, alone(state)).unwrap();
         let trap = Prepared::new(&run, alone(state)).unwrap().trap;
         (request, run, trap)
     }
@@ -4949,7 +4954,7 @@ mod tests {
         let file = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\tilt0.json";
         let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap()).unwrap();
         let b = chief(&request);
-        let run = crate::model::selected::keeping(&request, (0..STATES).collect(), None, alone(b));
+        let run = run_of(&request, alone(b)).unwrap();
         let trap = Prepared::new(&run, alone(b)).unwrap().trap;
         let domain = Domain { widest: Widest::of(&request) };
         let (speed, tau) = (thermal(&request, &run), 0.32610161451737907);
@@ -5107,7 +5112,7 @@ mod tests {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
             let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             let request = Request::from_native(&line).unwrap();
-            let run = crate::model::selected::keeping(&request, (0..STATES).collect(), None, alone(chief(&request)));
+            let run = run_of(&request, alone(chief(&request))).unwrap();
             let initial = components(&request);
             let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&run, alone(s)).unwrap()).collect();
             let hm = hbar_over_mass(request.mass_kg);

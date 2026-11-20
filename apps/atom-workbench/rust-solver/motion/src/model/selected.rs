@@ -65,10 +65,10 @@ use crate::field::Light;
 use crate::floquet::frame::{exact_sum, FrameKey, Ratio};
 use crate::floquet::{Frame, Hilbert};
 use crate::linalg::{inner, norm_sqr, C64, Mat, V3};
-use crate::model::rs::{ModelAt, ModelPart, Rs, Tweezer};
+use crate::model::rs::{ModelAt, Rs};
 use crate::model::{Beat, Cluster, Point, Quadratic, Scattering};
 use crate::request::{GROUND, STATES};
-use crate::scene::{Component, Components, Key, Scene};
+use crate::scene::{Key, Scene};
 use crate::select::Selection;
 use crate::step::{Emitted, Internal, Optical};
 use crate::units::{hbar_over_mass, rounding, RAD_PER_US_PER_MHZ};
@@ -89,6 +89,8 @@ pub struct Selected {
     hbar_over_mass: f64,
     /// The tweezer's unit fold's ground shift (rad/µs; `Scene::trap_potential`'s depth).
     depth: [f64; GROUND],
+    /// The other lights' smooth shifts of the ground states (`Scene::smooth`; the reported trap's potential).
+    smooth: Vec<(usize, [[f64; 2]; GROUND])>,
     /// The reference state's ground populations (V_ref's weights).
     reference: [f64; GROUND],
     /// Per state of P its decay's branching onto the ground states (a ground state's its own).
@@ -237,14 +239,11 @@ impl Selected {
         let theta = rs.keep.iter().map(|&s| frame.theta[s].iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum()).collect();
         let n = rs.keep.len();
         let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: vec![[0.0; 3]; n], waves_exact: vec![Beat::whole(vec![]); n], states: rs.keep.clone() };
-        // The tweezer's unit fold alone: its static part's ground diagonal (`Scene::trap_potential`'s depth).
-        let length = scene.generators.len();
-        let unit = Components {
-            parts: vec![Component { key: vec![0; length], frequency: 0.0, value: Mat::zeros(STATES, STATES), gradient: zeros(STATES, STATES) }],
-            tweezer: (C64::ONE, [C64::ZERO; 3]),
-        };
-        let folded = Tweezer::new(&scene).reference(&scene, &unit).0;
-        let depth = std::array::from_fn(|g| folded.still().value[(g, g)].re);
+        // The tweezer's unit fold's static part (`Tweezer::still`): its ground diagonal `Scene::trap_potential`'s depth, the
+        // whole the other lights' smooth shifts' (`Scene::smooth`, the reported trap's).
+        let unit = rs.tweezer().still();
+        let depth = std::array::from_fn(|g| unit[(g, g)].re);
+        let smooth = scene.smooth(&unit);
         let decay = |e: usize, g: usize| -> f64 { request.emission.iter().map(|c| c[(g, e)].norm_sqr()).sum() };
         let branching = rs
             .keep
@@ -273,6 +272,7 @@ impl Selected {
             theta,
             cluster,
             depth,
+            smooth,
             reference,
             branching,
             optical,
@@ -316,9 +316,16 @@ impl Selected {
         &self.light
     }
 
-    /// The prepared potential of the ground populations p (module documentation, # The rest of the model).
+    /// The prepared potential of the ground populations p (module documentation, # The rest of the model): the trap
+    /// light's (`Scene::trap_potential`).
     pub fn prepared(&self, p: &[f64; GROUND]) -> Potential<'_> {
-        Potential { model: self, weights: *p }
+        Potential { model: self, weights: *p, running: false }
+    }
+
+    /// The reported trap's potential of the ground populations p (SPEC §1.3): the trap light's with the other lights'
+    /// smooth shifts (`Scene::running_potential`).
+    pub fn running(&self, p: &[f64; GROUND]) -> Potential<'_> {
+        Potential { model: self, weights: *p, running: true }
     }
 
     /// A beat's value (rad/µs): n·(φ, Φ_tw, Φ_ν) + Σ_i p_i Φ_i, its own vector's, correctly rounded.
@@ -384,9 +391,19 @@ impl Selected {
         self.read(|b| (b.value.clone(), b.exact.clone()))
     }
 
-    /// The model at a point for the momentum κ (`Rs::at`).
+    /// The model at a point for the momentum κ (`Rs::local`), by the lab's frequencies (model/rs.rs, # Contractions):
+    /// every component in the group of its key's frequency at rest -- the frame's primitive vector, so that the beams of
+    /// one frequency are one group whatever their Doppler shifts (the fold's denominators keep those) --, each group under
+    /// the first of its keys met (`Selected::elements` reads a key's beats by its primitive vector alone).
     fn at(&self, r: V3, kappa: V3) -> ModelAt {
-        self.rs.at(&self.scene, &self.scene.components_at(r, kappa))
+        let local = self.rs.local(&self.scene, &self.scene.point_at(r, kappa));
+        let groups: RefCell<HashMap<Vec<Ratio>, Key>> = RefCell::new(HashMap::new());
+        let by_frequency = |key: &Key, f: f64| -> (Key, f64, C64) {
+            let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
+            let first = groups.borrow_mut().entry(self.frame.primitive(&v)).or_insert_with(|| key.clone()).clone();
+            (first, f, C64::ONE)
+        };
+        local.contract(&by_frequency, true)
     }
 
     /// The model at a point in the frame, by beats (`Node`; module documentation, # The generator by beats).
@@ -535,15 +552,7 @@ impl Selected {
             }
         }
         for (_, m) in by_fast {
-            let one = ModelAt {
-                states: model.states.clone(),
-                folded: model.folded.clone(),
-                groups: model.groups.clone(),
-                effective: vec![],
-                jumps: vec![],
-                lift: vec![ModelPart { key: vec![], frequency: 0.0, value: m, gradient: zeros(q, n) }],
-            };
-            let lifted = one.lift(&rho);
+            let lifted = crate::model::rs::lifted(&model.states, &model.folded, &m, &rho);
             for &s in &model.folded {
                 out[s] += lifted[s];
             }
@@ -553,10 +562,12 @@ impl Selected {
     }
 }
 
-/// A potential of the run (module documentation, # The rest of the model): Σ_g p_g V_g(r) of `Scene::trap_potential`.
+/// A potential of the run (module documentation, # The rest of the model): Σ_g p_g V_g(r) of `Scene::trap_potential`,
+/// or, `running`, of `Scene::running_potential` (the reported trap's).
 pub struct Potential<'a> {
     model: &'a Selected,
     weights: [f64; GROUND],
+    running: bool,
 }
 
 impl Potential<'_> {
@@ -568,7 +579,8 @@ impl Potential<'_> {
     /// Its expansion at r with the rounding of its value: `rounding` of its ground terms times their moduli
     /// (model/potential.rs `descend`).
     pub fn rounded(&self, r: V3) -> (Quadratic, f64) {
-        let wells = self.model.scene.trap_potential(r, &self.model.depth);
+        let (scene, depth) = (&self.model.scene, &self.model.depth);
+        let wells = if self.running { scene.running_potential(r, depth, &self.model.smooth) } else { scene.trap_potential(r, depth) };
         let mut out = Quadratic { value: 0.0, gradient: [0.0; 3], hessian: [[0.0; 3]; 3] };
         let mut scale = 0.0;
         for (w, q) in self.weights.iter().zip(&wells).filter(|(w, _)| **w != 0.0) {
@@ -970,22 +982,6 @@ impl crate::step::Dynamics for Selected {
     fn readout(&self, _cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
         self.rows(at, psi)
     }
-}
-
-/// 临时入口（`select::choose` 落地前用；合并时去掉）: a request's run on a given P, its selection's report the two
-/// points' errors given -- (populations, R, F) at the centre and at the edge, PYSEL's (pysel summary.md) -- or none
-/// (its error then the state's whole).
-#[cfg(test)]
-pub(crate) fn keeping(request: &crate::request::Request, mut keep: Vec<usize>, errors: Option<[[f64; 3]; 2]>, reference: [f64; GROUND]) -> Selected {
-    use crate::krylov::Route;
-    use crate::select::{Candidate, PointError};
-    keep.sort_unstable();
-    keep.dedup();
-    let point = |e: [f64; 3]| PointError { populations: e[0], rate: e[1], force: e[2], route: Route::Krylov };
-    let candidates = errors.map(|[c, e]| vec![Candidate { keep: keep.clone(), centre: point(c), edge: point(e) }]).unwrap_or_default();
-    let none = || (crate::floquet::Readouts::default(), Route::Krylov);
-    let report = Selection { keep, candidates, reference: [none(), none()], seconds: 0.0 };
-    Selected::new(Scene::new(request).unwrap(), report, reference).unwrap()
 }
 
 #[cfg(test)]

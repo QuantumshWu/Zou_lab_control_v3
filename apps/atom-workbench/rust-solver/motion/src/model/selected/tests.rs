@@ -1,28 +1,28 @@
 //! The selected model's checks (model/selected.rs): its frame keeps the fold's elements slow, its decay is its photons',
-//! its force at the frame's time zero is the model's (`ModelAt::force`), a dragged atom's mean force is the static
-//! model's (RUSTPLAN §6 C2), and the six scenes' first checkpoint. The scenes' P is PYSEL's (临时入口 `keeping`, until
-//! `select::choose` lands).
+//! its force at the frame's time zero is the model's (`Now::force`), a dragged atom's mean force is the static model's
+//! (RUSTPLAN §6 C2), and the six scenes' first checkpoint. Each scene's run is the solve's (`solve::run_of`: P by
+//! `select::choose`), its P PYSEL's.
 use super::*;
 use crate::step::{Brownian, Domain, Dynamics, Middle, Midway, Scratch, Trajectory};
 use rayon::prelude::*;
 
-/// The six scenes' requests (V3C_REQ: scratchpad final\req, as model/rs/tests.rs reads them) with PYSEL's P (the levels
-/// added to the ground states) and its errors at the centre and the edge, (populations, R, F) (pysel summary.md).
-fn scenes() -> Vec<(&'static str, Request, Vec<usize>, [[f64; 3]; 2])> {
-    let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ: the directory of the six scenes' requests (scratchpad final\\req)"));
-    let chosen: [(&str, &str, &[&str], [[f64; 3]; 2]); 6] = [
-        ("tilt0", "tilt0.json", &["D2-3", "D2-2"], [[7.9e-4, 1.2e-3, 1.6e-4], [5.2e-4, 3.5e-4, 3.5e-4]]),
-        ("tilt2", "tilt2.json", &["D2-3", "D2-2"], [[6.8e-4, 9.5e-4, 4.1e-5], [5.2e-4, 3.5e-4, 3.4e-4]]),
-        ("R4", "../../traj/req/R4_LIN_4.json", &["D2-2", "D2-3", "D2-1"], [[2.0e-6, 1.5e-6, 2.2e-11], [2.0e-5, 4.7e-5, 4.2e-14]]),
-        ("GMD1C", "GMD1C_1ms.json", &[], [[8.0e-5, 1.5e-3, 1.1e-3], [4.9e-6, 2.8e-4, 2.1e-4]]),
-        ("PGC3D", "PGC3D_1ms.json", &["D2-2", "D2-3"], [[9.6e-5, 4.0e-4, 4.2e-4], [9.1e-7, 5.8e-5, 7.0e-5]]),
-        ("TET", "TET_1ms.json", &["D2-2", "D2-3"], [[1.7e-3, 1.9e-3, 2.4e-3], [1.6e-6, 6.5e-6, 2.7e-5]]),
+/// The six scenes' own requests (V3C_REQ: scratchpad reqprec\req, as model/rs/tests.rs reads them) with PYSEL's P (the
+/// levels added to the ground states; pyexp2.status.md A).
+fn scenes() -> Vec<(&'static str, Request, Vec<usize>)> {
+    let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ: the directory of the six scenes' requests (scratchpad reqprec\\req)"));
+    let chosen: [(&str, &str, &[&str]); 6] = [
+        ("tilt0", "tilt0.json", &["D2-3", "D2-2"]),
+        ("tilt2", "tilt2.json", &["D2-3", "D2-2"]),
+        ("R4", "R4_LIN_4.json", &["D2-2", "D2-3", "D2-1"]),
+        ("GMD1C", "GMD1C_1ms.json", &[]),
+        ("PGC3D", "PGC3D_1ms.json", &["D2-2", "D2-3"]),
+        ("TET", "TET_1ms.json", &["D2-2", "D2-3"]),
     ];
     let only = std::env::var("V3E_SCENE").ok();
     chosen
         .into_iter()
         .filter(|(name, ..)| only.as_deref().is_none_or(|o| o == *name))
-        .map(|(name, file, levels, errors)| {
+        .map(|(name, file, levels)| {
             let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap();
             line["options"]["device"] = serde_json::json!("cpu");
             // These requests predate the outside forms' transitions, which the scene does not read.
@@ -36,17 +36,20 @@ fn scenes() -> Vec<(&'static str, Request, Vec<usize>, [[f64; 3]; 2])> {
                     label.starts_with("ground") || levels.iter().any(|l| label.starts_with(&format!("{l}-")))
                 })
                 .collect();
-            (name, request, keep, errors)
+            (name, request, keep)
         })
         .collect()
 }
 
 use crate::request::Request;
 
-/// A scene's run on PYSEL's P at its reference state (the solve's, `solve::chief`).
-fn run_of(request: &Request, keep: &[usize], errors: [[f64; 3]; 2]) -> Selected {
+/// A scene's run at its reference state as the solve makes it (`solve::run_of`, `solve::chief`): P chosen, said against
+/// PYSEL's.
+fn run_of(request: &Request, keep: &[usize]) -> Selected {
     let chief = crate::solve::chief(request);
-    keeping(request, keep.to_vec(), Some(errors), std::array::from_fn(|s| f64::from(u8::from(s == chief))))
+    let run = crate::solve::run_of(request, std::array::from_fn(|s| f64::from(u8::from(s == chief)))).unwrap();
+    eprintln!("P {} chosen (PYSEL's {}): {}", run.rs.keep.len(), keep.len(), if run.rs.keep == keep { "the same" } else { "apart" });
+    run
 }
 
 /// A state of P with every amplitude set (a fixed pattern of phases and sizes, normalized).
@@ -67,8 +70,8 @@ const POINTS: [(V3, V3); 2] = [([0.0; 3], [0.0; 3]), ([0.31, -0.17, 0.23], [5.0,
 #[test]
 fn the_selected_model_is_slow_in_its_frame() {
     let mut fast = Vec::new();
-    for (name, request, keep, errors) in scenes() {
-        let run = run_of(&request, &keep, errors);
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
         for (r, kappa) in POINTS {
             let model = run.at(r, kappa);
             let (mut elements, mut beyond) = (0, 0);
@@ -105,8 +108,8 @@ fn the_selected_model_is_slow_in_its_frame() {
 /// operators, to the rounding of the products (n u max|Γ|, n the states).
 #[test]
 fn the_selected_decay_is_its_photons() {
-    for (name, request, keep, errors) in scenes() {
-        let run = run_of(&request, &keep, errors);
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
         let (r, kappa) = POINTS[1];
         let n = keep.len();
         let middle = run.middle(0, r, 3.7);
@@ -139,8 +142,8 @@ fn the_selected_decay_is_its_photons() {
 /// amplitude set, to the rounding of the traces.
 #[test]
 fn the_selected_force_at_time_zero_is_the_model_s() {
-    for (name, request, keep, errors) in scenes() {
-        let run = run_of(&request, &keep, errors);
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
         let n = keep.len();
         let psi = spread(n);
         let mut rho = vec![C64::ZERO; n * n];
@@ -152,7 +155,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let node = middle.node(&path, 0.0);
             let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi)).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
-            let model = run.at(r, kappa).force(&rho);
+            let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
             let size = model.iter().chain(&ehrenfest).map(|x| x.abs()).fold(0.0, f64::max);
             let worst = (0..3).map(|i| (engine[i] - model[i]).abs()).fold(0.0, f64::max);
             eprintln!("{name} κ {kappa:?}: engine {engine:?}, model {model:?}, difference {worst:.2e}");
@@ -199,11 +202,11 @@ fn static_force(run: &Selected, r: V3, kappa: V3) -> f64 {
 #[test]
 #[ignore]
 fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
-    let (_, mut request, keep, errors) = scenes().into_iter().find(|s| s.0 == "tilt0").expect("tilt0");
+    let (_, mut request, keep) = scenes().into_iter().find(|s| s.0 == "tilt0").expect("tilt0");
     let waist = env("DRAG_WAIST", 1e5);
     let t = request.trap_beam;
     request.beams[t].waist = Some(waist);
-    let run = run_of(&request, &keep, errors);
+    let run = run_of(&request, &keep);
     let hm = run.hbar_over_mass();
     let vs: Vec<f64> = std::env::var("DRAG_VS").ok().map_or(vec![-0.1, 0.0, 0.1], |s| s.split(',').map(|x| x.trim().parse().unwrap()).collect());
     let count = env("DRAG_COUNT", 32.0) as u64;
@@ -286,22 +289,21 @@ fn first_result(name: &str, request: &Request, run: &Selected) -> bool {
 #[test]
 #[ignore]
 fn the_six_scenes_first_checkpoint_is_numbers() {
-    for (name, request, keep, errors) in scenes() {
-        let run = run_of(&request, &keep, errors);
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
         assert!(first_result(name, &request, &run), "{name}: a number that is none");
     }
 }
 
 /// The default scene's first solve (RUSTPLAN §6 C2): the app's start-up scene (V3E_DEFAULT: a native request's path, the
-/// accept kit's S1_5ms) to its first result, all numbers. 临时入口：P 取全部 32 态（`select::choose` 落地前；合并时改回
-/// `choose`）.
+/// accept kit's S1_5ms) to its first result, all numbers, its run the solve's (`solve::run_of`).
 #[test]
 #[ignore]
 fn the_default_scene_s_first_solve_is_numbers() {
     let path = std::env::var("V3E_DEFAULT").expect("V3E_DEFAULT: the default scene's native request");
     let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
     let chief = crate::solve::chief(&request);
-    let run = keeping(&request, (0..STATES).collect(), None, std::array::from_fn(|s| f64::from(u8::from(s == chief))));
+    let run = crate::solve::run_of(&request, std::array::from_fn(|s| f64::from(u8::from(s == chief)))).unwrap();
     assert!(first_result("default", &request, &run), "a number that is none");
 }
 
@@ -313,8 +315,8 @@ fn the_default_scene_s_first_solve_is_numbers() {
 #[ignore]
 fn a_step_s_time_on_the_selected_model() {
     let tau = env("V3E_TAU", 0.3256);
-    for (name, request, keep, errors) in scenes() {
-        let run = run_of(&request, &keep, errors);
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
         let chief = crate::solve::chief(&request);
         let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
         let kappa = [speed, 0.0, 0.0];

@@ -59,16 +59,19 @@
 //!   levels are). No decomposition. Where ρ ≥ 1 the series does not converge and the part is decomposed as Q's (its
 //!   results taken back to the states' basis, the part's own).
 //!
-//! # Two contractions of one fold (`Local`)
-//! - By frequency components (`Local::components`, the checkpoint's: the Floquet lattice needs each key apart): every
-//!   pair W_c′ M̂_c at its key c + c′, every channel's element at its fast index.
-//! - The value at a time t (`Local::now`, the trajectory's): Σ_c (·)⁽ᶜ⁾ e^{−if_c t}, summed before the products --
-//!   Z_γ(t) = Σ_{c: n_c = γ} e^{−if_c t} M̂_c and W_γ′(t) = Σ_{c′: n_c′ = γ′} e^{−if_c′ t} W_c′, the products W_γ′ Z_γ by
-//!   classes of the fast index, each element kept where it is slow (γ + γ′ − n_b + n_a = 0): the pairs' count is the
-//!   classes', not the components', so a moving atom, every beam its own component at its own Doppler shift, costs the
-//!   components' sums alone. The jumps the same way, each element into the channel of its fast index π + γ − n_b + n_a.
+//! # Contractions (`Local::contract`)
+//! One contraction of the fold at a point, by groups of its components: each component c enters its group g(c) with a
+//! weight w_c, a pair's group is the members' summed. The sums are made before the products: per block the amplitudes'
+//! Z_{γ,g} = Σ_{c: n_c = γ, g(c) = g} w_c M̂_c and the out-legs' W_{γ′,g′} likewise, each pair of sums one product
+//! W_{γ′,g′} Z_{γ,g}, its elements kept where they are slow (γ + γ′ − n_b + n_a = 0) at the group g + g′; the jumps the
+//! same way, each element into the channel of its fast index π + γ − n_b + n_a. The products' count is the groups' and
+//! classes', not the components'. Three groupings:
+//! - by key, weight one (`Local::components`, the checkpoint's: the Floquet lattice needs each key apart);
+//! - one group, weight e^{−if_c t} (`Local::now`: the value at a time t, Σ_c (·)⁽ᶜ⁾ e^{−if_c t});
+//! - by the frequency the integrator times them at (model/selected.rs: a trajectory's node, its components by the lab's
+//!   frequency, every beam of one frequency one group whatever its Doppler shift -- the fold's denominators keep it).
 //!
-//! The two are the same sums in two orders; `now` equals Σ components · e^{−ift} to rounding (tests,
+//! The groupings are the same sums in other orders; `now` equals Σ components · e^{−ift} to rounding (tests,
 //! `now_is_the_components_at_their_phases`). Against td_s.hilbert_rs's column-by-column inverse the fold is the same
 //! formula to the rounding of the decomposition, κ(V)u relative (tests, `the_fold_is_hilbert_rs_to_rounding`).
 
@@ -845,29 +848,38 @@ fn pair(w: &Mat, dw: &[Mat; 3], m: &Mat, dm: &[Mat; 3]) -> (Mat, [Mat; 3]) {
     (p, dp)
 }
 
-/// A class sum on one block: its class, its K indices (columns of an amplitude sum, rows of an out-leg sum), and the sum
-/// with its gradient.
+/// A contraction's grouping of the components (module documentation, # Contractions): of a component's key and
+/// frequency its group's key and frequency and the weight it enters with. A pair's group is the members' keys summed at
+/// their frequencies' sum, a conjugate's the negations.
+pub type Grouping<'a> = &'a dyn Fn(&Key, f64) -> (Key, f64, C64);
+
+/// A class sum on one block: its class and group, its K indices (columns of an amplitude sum, rows of an out-leg sum),
+/// and the sum with its gradient.
 struct Summed {
     class: [i64; 2],
+    group: (Key, f64),
     index: Vec<usize>,
     m: Mat,
     dm: [Mat; 3],
 }
 
-/// A member of a class sum: (block, class, frequency, K indices, value, gradient).
-type Member<'a> = (usize, [i64; 2], f64, &'a [usize], &'a Mat, &'a [Mat; 3]);
+/// A member of a class sum: (block, class, group, weight, K indices, value, gradient).
+type Member<'a> = (usize, [i64; 2], &'a (Key, f64), C64, &'a [usize], &'a Mat, &'a [Mat; 3]);
 
-/// Sums members by block and class at the time t, each times e^{−if t}, into `out` (one list per block): amplitudes
-/// (|B| × |cols|; `rows` false) or out-legs (|rows| × |B|; `rows` true).
-fn gather(members: &[Member], sizes: &[usize], n: usize, t: f64, rows: bool, out: &mut [Vec<Summed>]) {
+/// Sums members by block, class and group, each times its weight, into `out` (one list per block): amplitudes
+/// (|B| × |cols|; `rows` false) or out-legs (|rows| × |B|; `rows` true), `sizes` the blocks' |B|.
+fn gather(members: &[Member], sizes: &[usize], n: usize, rows: bool, out: &mut [Vec<Summed>]) {
     let mut place = vec![usize::MAX; n];
     for (block, &size) in sizes.iter().enumerate() {
-        let mut classes: Vec<[i64; 2]> = members.iter().filter(|m| m.0 == block).map(|m| m.1).collect();
-        classes.sort_unstable();
-        classes.dedup();
-        for class in classes {
-            let mine = || members.iter().filter(move |m| m.0 == block && m.1 == class);
-            let mut index: Vec<usize> = mine().flat_map(|m| m.3.iter().copied()).collect();
+        let mut tags: Vec<([i64; 2], &(Key, f64))> = Vec::new();
+        for m in members.iter().filter(|m| m.0 == block) {
+            if !tags.iter().any(|t| t.0 == m.1 && t.1 .0 == m.2 .0) {
+                tags.push((m.1, m.2));
+            }
+        }
+        for (class, group) in tags {
+            let mine = || members.iter().filter(move |m| m.0 == block && m.1 == class && m.2 .0 == group.0);
+            let mut index: Vec<usize> = mine().flat_map(|m| m.4.iter().copied()).collect();
             index.sort_unstable();
             index.dedup();
             for (i, &a) in index.iter().enumerate() {
@@ -875,31 +887,35 @@ fn gather(members: &[Member], sizes: &[usize], n: usize, t: f64, rows: bool, out
             }
             let (r, c) = if rows { (index.len(), size) } else { (size, index.len()) };
             let (mut m, mut dm) = (Mat::zeros(r, c), zeros(r, c));
-            for &(_, _, frequency, ids, value, gradient) in mine() {
-                let phase = C64::cis(-frequency * t);
+            for &(_, _, _, weight, ids, value, gradient) in mine() {
                 if rows {
                     for (i, &b) in ids.iter().enumerate() {
                         let to = place[b] * size;
-                        linalg::mul_add(false, &mut m.data[to..to + size], phase, &value.data[i * size..(i + 1) * size]);
+                        linalg::mul_add(false, &mut m.data[to..to + size], weight, &value.data[i * size..(i + 1) * size]);
                         for (d, g) in dm.iter_mut().zip(gradient) {
-                            linalg::mul_add(false, &mut d.data[to..to + size], phase, &g.data[i * size..(i + 1) * size]);
+                            linalg::mul_add(false, &mut d.data[to..to + size], weight, &g.data[i * size..(i + 1) * size]);
                         }
                     }
                 } else {
                     for k in 0..size {
                         for (j, &a) in ids.iter().enumerate() {
                             let to = place[a];
-                            m[(k, to)] += phase * value[(k, j)];
+                            m[(k, to)] += weight * value[(k, j)];
                             for (d, g) in dm.iter_mut().zip(gradient) {
-                                d[(k, to)] += phase * g[(k, j)];
+                                d[(k, to)] += weight * g[(k, j)];
                             }
                         }
                     }
                 }
             }
-            out[block].push(Summed { class, index, m, dm });
+            out[block].push(Summed { class, group: group.clone(), index, m, dm });
         }
     }
+}
+
+/// A pair's group: the members' keys summed at their frequencies' sum.
+fn joined(a: &(Key, f64), b: &(Key, f64)) -> (Key, f64) {
+    (sum_keys(&a.0, &b.0), a.1 + b.1)
 }
 
 impl Local<'_> {
@@ -919,12 +935,12 @@ impl Local<'_> {
         }
     }
 
-    /// A component's out-legs into the sideband parts (all K's rows, the identity basis), by block: Σ_t phase s_t F_t[K, B]
-    /// and its gradient Σ_t phase ∂s_t F_t[K, B], added into `legs`. An H component's (`fast`) from its fast entries
-    /// alone: a pair through a sideband part, W_c′[b, c] M_c[c, a] with c of fast part s, is slow (γ + γ′ − n_b + n_a = 0)
-    /// only where the leg's own element is fast, its fast index γ′ − n_b + s being minus the amplitude's γ − s + n_a ≠ 0.
-    /// A channel's from every entry (each element goes to the channel of its fast index).
-    fn sideband_legs(&self, held: &Held, phase: C64, fast: bool, legs: &mut Vec<(usize, Mat, [Mat; 3])>) {
+    /// A component's out-legs into the sideband parts (all K's rows, the identity basis), by block: Σ_t weight s_t
+    /// F_t[K, B] and its gradient Σ_t weight ∂s_t F_t[K, B], added into `legs`. An H component's (`fast`) from its fast
+    /// entries alone: a pair through a sideband part, W_c′[b, c] M_c[c, a] with c of fast part s, is slow (γ + γ′ − n_b
+    /// + n_a = 0) only where the leg's own element is fast, its fast index γ′ − n_b + s being minus the amplitude's γ − s
+    /// + n_a ≠ 0. A channel's from every entry (each element goes to the channel of its fast index).
+    fn sideband_legs(&self, held: &Held, weight: C64, fast: bool, legs: &mut Vec<(usize, Mat, [Mat; 3])>) {
         let n = self.states.len();
         self.entries(held, |delta| !fast || delta != held.class, |b, a, x, dx| {
             let (block, c) = self.sideband[a];
@@ -940,79 +956,124 @@ impl Local<'_> {
                 }
             };
             let (_, w, dw) = &mut legs[at];
-            add(w, dw, (b, c), phase * x, dx.map(|d| phase * d));
+            add(w, dw, (b, c), weight * x, dx.map(|d| weight * d));
         });
     }
 
-    /// The model by frequency components (the checkpoint's; module documentation, # Two contractions): H_eff's
-    /// components, the channels by (emission, fast index) with their components and photons' forms, the lift by keys.
-    pub fn components(&self) -> ModelAt {
+    fn sizes(&self) -> Vec<usize> {
+        self.blocks.iter().map(|b| b.rows.len()).collect()
+    }
+
+    /// The out-legs' class sums on each block, of components (`held`, each with its group, its weight and its out-legs
+    /// into Q): into Q from those, into the sideband parts from the terms (H's from their fast entries, `fast`;
+    /// `sideband_legs`), by class and group.
+    fn leg_sums<'b>(&self, fast: bool, held: impl Iterator<Item = (&'b Held, &'b (Key, f64), C64, &'b [Leg])>) -> Vec<Vec<Summed>> {
+        let n = self.states.len();
+        let mut out: Vec<Vec<Summed>> = (0..self.blocks.len()).map(|_| Vec::new()).collect();
+        let mut members: Vec<Member> = Vec::new();
+        // The sideband parts' sums by class and group, each added to in place.
+        let mut by: Vec<([i64; 2], &(Key, f64), Vec<(usize, Mat, [Mat; 3])>)> = Vec::new();
+        for (h, group, weight, into_q) in held {
+            members.extend(into_q.iter().map(|l| (l.block, h.class, group, weight, l.rows.as_slice(), &l.w, &l.dw)));
+            let at = match by.iter().position(|c| c.0 == h.class && c.1 .0 == group.0) {
+                Some(i) => i,
+                None => {
+                    by.push((h.class, group, Vec::new()));
+                    by.len() - 1
+                }
+            };
+            self.sideband_legs(h, weight, fast, &mut by[at].2);
+        }
+        let all: Vec<usize> = (0..n).collect();
+        for (class, group, legs) in by {
+            for (block, m, dm) in legs {
+                out[block].push(Summed { class, group: group.clone(), index: all.clone(), m, dm });
+            }
+        }
+        gather(&members, &self.sizes(), n, true, &mut out);
+        out
+    }
+
+    /// The one contraction (module documentation, # Contractions): the model by the groups `group` makes of its
+    /// components -- H_eff's parts by group, the channels by (emission, fast index) with their parts and, where `kicks`,
+    /// their photons' forms, the lift by group --, the sums made before the products: per block the amplitudes' and the
+    /// out-legs' sums by class and group, each pair of sums one product, each element kept where it is slow (H) or put
+    /// in the channel of its fast index (the jumps).
+    pub fn contract(&self, group: Grouping, kicks: bool) -> ModelAt {
         let n = self.states.len();
         let parts = &self.parts;
         let element = |class: [i64; 2], b: usize, a: usize| Sectors::element(class, parts[b], parts[a]);
-        let all: Vec<usize> = (0..n).collect();
-        // Every out-leg: into Q, made at the fold; into the sideband parts, from the terms.
-        let mut scratch = Vec::new();
-        let mut legs_of = |held: &Held, fast: bool, into_q: &mut dyn Iterator<Item = &Leg>| -> Vec<Leg> {
-            let mut out: Vec<Leg> = into_q.cloned().collect();
-            scratch.clear();
-            self.sideband_legs(held, C64::ONE, fast, &mut scratch);
-            out.extend(scratch.drain(..).map(|(block, w, dw)| Leg { block, rows: all.clone(), w, dw }));
-            out
-        };
+        let groups: Vec<((Key, f64), C64)> = self.pieces.iter().map(|p| group(&p.key, p.frequency)).map(|(k, f, w)| ((k, f), w)).collect();
+        // H_eff: the direct slow entries, then the pairs.
         let mut effective = Sums::new(n, n);
-        for p in &self.pieces {
-            let part = effective.part(&p.key, p.frequency);
-            self.entries(p, |delta| delta == p.class, |b, a, x, dx| add(&mut part.value, &mut part.gradient, (b, a), x, dx));
+        for (p, (g, w)) in self.pieces.iter().zip(&groups) {
+            let part = effective.part(&g.0, g.1);
+            self.entries(p, |delta| delta == p.class, |b, a, x, dx| add(&mut part.value, &mut part.gradient, (b, a), *w * x, dx.map(|d| *w * d)));
         }
-        for (c2, q) in self.pieces.iter().enumerate() {
-            for leg in legs_of(q, true, &mut self.legs.iter().filter(|(c, _)| *c == c2).map(|(_, l)| l)) {
-                for amp in self.amplitudes.iter().filter(|m| m.block == leg.block) {
-                    let c = &self.pieces[amp.piece];
-                    let class = plus(c.class, q.class);
-                    if !leg.rows.iter().any(|&b| amp.cols.iter().any(|&a| element(class, b, a) == [0; 2])) {
+        let members: Vec<Member> = self.amplitudes.iter().map(|a| (a.block, self.pieces[a.piece].class, &groups[a.piece].0, groups[a.piece].1, a.cols.as_slice(), &a.m, &a.dm)).collect();
+        let mut zs: Vec<Vec<Summed>> = (0..self.blocks.len()).map(|_| Vec::new()).collect();
+        gather(&members, &self.sizes(), n, false, &mut zs);
+        let mut legs: Vec<Vec<Leg>> = vec![Vec::new(); self.pieces.len()];
+        for (c, l) in &self.legs {
+            legs[*c].push(l.clone());
+        }
+        let ws = self.leg_sums(true, self.pieces.iter().zip(&groups).zip(&legs).map(|((p, (g, w)), l)| (p, g, *w, l.as_slice())));
+        for (zb, wb) in zs.iter().zip(&ws) {
+            for w in wb {
+                for z in zb {
+                    let class = plus(w.class, z.class);
+                    let kept: Vec<(usize, usize)> = (0..w.index.len()).flat_map(|i| (0..z.index.len()).map(move |j| (i, j))).filter(|&(i, j)| element(class, w.index[i], z.index[j]) == [0; 2]).collect();
+                    if kept.is_empty() {
                         continue;
                     }
-                    let (p, dp) = pair(&leg.w, &leg.dw, &amp.m, &amp.dm);
-                    let (key, frequency) = (sum_keys(&c.key, &q.key), c.frequency + q.frequency);
+                    let (p, dp) = pair(&w.m, &w.dm, &z.m, &z.dm);
+                    let (key, frequency) = joined(&z.group, &w.group);
                     for half in [false, true] {
                         let part = if half { effective.part(&negated(&key), -frequency) } else { effective.part(&key, frequency) };
-                        for (i, &b) in leg.rows.iter().enumerate() {
-                            for (j, &a) in amp.cols.iter().enumerate().filter(|&(_, &a)| element(class, b, a) == [0; 2]) {
-                                let (x, dx) = (p[(i, j)] * 0.5, dp.each_ref().map(|d| d[(i, j)] * 0.5));
-                                if half {
-                                    add(&mut part.value, &mut part.gradient, (a, b), x.conj(), dx.map(C64::conj));
-                                } else {
-                                    add(&mut part.value, &mut part.gradient, (b, a), x, dx);
-                                }
+                        for &(i, j) in &kept {
+                            let (b, a) = (w.index[i], z.index[j]);
+                            let (x, dx) = (p[(i, j)] * 0.5, dp.each_ref().map(|d| d[(i, j)] * 0.5));
+                            if half {
+                                add(&mut part.value, &mut part.gradient, (a, b), x.conj(), dx.map(C64::conj));
+                            } else {
+                                add(&mut part.value, &mut part.gradient, (b, a), x, dx);
                             }
                         }
                     }
                 }
             }
         }
+        // The jumps: each element in the channel of its fast index.
         let mut out: BTreeMap<(usize, [i64; 2]), [Sums; 2]> = BTreeMap::new();
         fn sums(out: &mut BTreeMap<(usize, [i64; 2]), [Sums; 2]>, n: usize, emission: usize, fast: [i64; 2]) -> &mut [Sums; 2] {
             out.entry((emission, fast)).or_insert_with(|| [Sums::new(n, n), Sums::new(n, n)])
         }
-        for jp in &self.jumps {
-            let p = &jp.held;
-            self.entries(p, |_| true, |b, a, x, dx| {
-                let part = sums(&mut out, n, jp.emission, element(p.class, b, a))[jp.which].part(&p.key, p.frequency);
-                add(&mut part.value, &mut part.gradient, (b, a), x, dx);
-            });
-            for leg in legs_of(p, false, &mut jp.legs.iter()) {
-                for amp in self.amplitudes.iter().filter(|m| m.block == leg.block) {
-                    let c = &self.pieces[amp.piece];
-                    let class = plus(p.class, c.class);
-                    let (v, dv) = pair(&leg.w, &leg.dw, &amp.m, &amp.dm);
-                    let (key, frequency) = (sum_keys(&p.key, &c.key), p.frequency + c.frequency);
-                    for (i, &b) in leg.rows.iter().enumerate() {
-                        for (j, &a) in amp.cols.iter().enumerate() {
-                            let (x, dx) = (v[(i, j)], dv.each_ref().map(|d| d[(i, j)]));
-                            if x != C64::ZERO || dx.iter().any(|d| *d != C64::ZERO) {
-                                let part = sums(&mut out, n, jp.emission, element(class, b, a))[jp.which].part(&key, frequency);
-                                add(&mut part.value, &mut part.gradient, (b, a), x, dx);
+        let jump_groups: Vec<((Key, f64), C64)> = self.jumps.iter().map(|j| group(&j.held.key, j.held.frequency)).map(|(k, f, w)| ((k, f), w)).collect();
+        for emission in 0..3 {
+            for which in 0..if kicks { 2 } else { 1 } {
+                let mine: Vec<usize> = (0..self.jumps.len()).filter(|&j| self.jumps[j].emission == emission && self.jumps[j].which == which).collect();
+                for &j in &mine {
+                    let (jp, (g, w)) = (&self.jumps[j], &jump_groups[j]);
+                    self.entries(&jp.held, |_| true, |b, a, x, dx| {
+                        let part = sums(&mut out, n, emission, element(jp.held.class, b, a))[which].part(&g.0, g.1);
+                        add(&mut part.value, &mut part.gradient, (b, a), *w * x, dx.map(|d| *w * d));
+                    });
+                }
+                let ws = self.leg_sums(false, mine.iter().map(|&j| (&self.jumps[j].held, &jump_groups[j].0, jump_groups[j].1, self.jumps[j].legs.as_slice())));
+                for (zb, wb) in zs.iter().zip(&ws) {
+                    for w in wb {
+                        for z in zb {
+                            let class = plus(w.class, z.class);
+                            let (p, dp) = pair(&w.m, &w.dm, &z.m, &z.dm);
+                            let (key, frequency) = joined(&w.group, &z.group);
+                            for (i, &b) in w.index.iter().enumerate() {
+                                for (j, &a) in z.index.iter().enumerate() {
+                                    let (x, dx) = (p[(i, j)], dp.each_ref().map(|d| d[(i, j)]));
+                                    if x != C64::ZERO || dx.iter().any(|d| *d != C64::ZERO) {
+                                        let part = sums(&mut out, n, emission, element(class, b, a))[which].part(&key, frequency);
+                                        add(&mut part.value, &mut part.gradient, (b, a), x, dx);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1024,181 +1085,57 @@ impl Local<'_> {
             .map(|((emission, fast), [parts, kicks])| Channel { emission, fast, parts: parts.done(), kicks: kicks.done() })
             .filter(|c| !c.parts.is_empty())
             .collect();
+        // The lift: M = V Z on Q's blocks, by group.
         let mut lift = Sums::new(self.folded.len(), n);
-        for amp in self.amplitudes.iter().filter(|m| self.blocks[m.block].part.is_none()) {
-            let (block, c) = (&self.blocks[amp.block], &self.pieces[amp.piece]);
-            let (m, dm) = (block.back(&amp.m), amp.dm.each_ref().map(|d| block.back(d)));
-            let part = lift.part(&c.key, c.frequency);
-            for (i, &row) in block.rows.iter().enumerate() {
-                for (j, &col) in amp.cols.iter().enumerate() {
-                    add(&mut part.value, &mut part.gradient, (row, col), m[(i, j)], dm.each_ref().map(|d| d[(i, j)]));
+        for (block, zb) in self.blocks.iter().zip(&zs).filter(|(b, _)| b.part.is_none()) {
+            let size = block.rows.len();
+            let mut by: Vec<((Key, f64), Mat, [Mat; 3])> = Vec::new();
+            for s in zb {
+                let at = match by.iter().position(|x| x.0 .0 == s.group.0) {
+                    Some(i) => i,
+                    None => {
+                        by.push((s.group.clone(), Mat::zeros(size, n), zeros(size, n)));
+                        by.len() - 1
+                    }
+                };
+                let (_, z, dz) = &mut by[at];
+                for k in 0..size {
+                    for (j, &a) in s.index.iter().enumerate() {
+                        z[(k, a)] += s.m[(k, j)];
+                        for (d, g) in dz.iter_mut().zip(&s.dm) {
+                            d[(k, a)] += g[(k, j)];
+                        }
+                    }
+                }
+            }
+            for (g, z, dz) in by {
+                let (m, dm) = (block.back(&z), dz.each_ref().map(|d| block.back(d)));
+                let part = lift.part(&g.0, g.1);
+                for (k, &row) in block.rows.iter().enumerate() {
+                    part.value.data[row * n..(row + 1) * n].iter_mut().zip(&m.data[k * n..(k + 1) * n]).for_each(|(x, y)| *x += *y);
+                    for (p, d) in part.gradient.iter_mut().zip(&dm) {
+                        p.data[row * n..(row + 1) * n].iter_mut().zip(&d.data[k * n..(k + 1) * n]).for_each(|(x, y)| *x += *y);
+                    }
                 }
             }
         }
         ModelAt { states: self.states.clone(), folded: self.folded.clone(), groups: self.groups.clone(), effective: effective.done(), jumps, lift: lift.done() }
     }
 
-    fn sizes(&self) -> Vec<usize> {
-        self.blocks.iter().map(|b| b.rows.len()).collect()
+    /// The model by frequency components (the checkpoint's): every component its own group, its key.
+    pub fn components(&self) -> ModelAt {
+        self.contract(&|key, f| (key.clone(), f, C64::ONE), true)
     }
 
-    /// The amplitudes' class sums at the time t on each block, Z_γ = Σ_{n_c = γ} e^{−if_c t} M̂_c.
-    fn sums(&self, t: f64) -> Vec<Vec<Summed>> {
-        let members: Vec<Member> = self.amplitudes.iter().map(|a| (a.block, self.pieces[a.piece].class, self.pieces[a.piece].frequency, a.cols.as_slice(), &a.m, &a.dm)).collect();
-        let mut out: Vec<Vec<Summed>> = (0..self.blocks.len()).map(|_| Vec::new()).collect();
-        gather(&members, &self.sizes(), self.states.len(), t, false, &mut out);
-        out
-    }
-
-    /// The out-legs' class sums at the time t on each block, W_γ′ = Σ_{n_c′ = γ′} e^{−if_c′ t} W_c′, of components
-    /// (`held`) with their out-legs into Q: into Q from those, into the sideband parts from the terms (H's from their fast
-    /// entries, `fast`; `sideband_legs`).
-    fn leg_sums<'b>(&self, t: f64, fast: bool, held: impl Iterator<Item = (&'b Held, &'b [Leg])>) -> Vec<Vec<Summed>> {
-        let n = self.states.len();
-        let mut out: Vec<Vec<Summed>> = (0..self.blocks.len()).map(|_| Vec::new()).collect();
-        let mut members: Vec<Member> = Vec::new();
-        // The sideband parts' sums by class, each added to in place.
-        let mut by_class: Vec<([i64; 2], Vec<(usize, Mat, [Mat; 3])>)> = Vec::new();
-        for (h, into_q) in held {
-            members.extend(into_q.iter().map(|l| (l.block, h.class, h.frequency, l.rows.as_slice(), &l.w, &l.dw)));
-            let at = match by_class.iter().position(|c| c.0 == h.class) {
-                Some(i) => i,
-                None => {
-                    by_class.push((h.class, Vec::new()));
-                    by_class.len() - 1
-                }
-            };
-            self.sideband_legs(h, C64::cis(-h.frequency * t), fast, &mut by_class[at].1);
-        }
-        let all: Vec<usize> = (0..n).collect();
-        for (class, legs) in by_class {
-            for (block, m, dm) in legs {
-                out[block].push(Summed { class, index: all.clone(), m, dm });
-            }
-        }
-        gather(&members, &self.sizes(), n, t, true, &mut out);
-        out
-    }
-
-    /// The model's value at the time t (module documentation, # Two contractions): H_eff(t) = Σ_c H⁽ᶜ⁾ e^{−if_c t} with its
-    /// gradient, each channel's L(t) with its gradient, and the lift M(t) on Q (|Q| × n), by class sums.
+    /// The model's value at the time t (the trajectory's): one group, each component at its phase e^{−if_c t}: H_eff(t)
+    /// with its gradient, each channel's L(t) with its gradient, and the lift M(t) on Q (|Q| × n).
     pub fn now(&self, t: f64) -> Now {
-        let n = self.states.len();
-        let parts = &self.parts;
-        let slow = |class: [i64; 2], b: usize, a: usize| Sectors::element(class, parts[b], parts[a]) == [0; 2];
-        let (mut h, mut dh) = (Mat::zeros(n, n), zeros(n, n));
-        for p in &self.pieces {
-            let phase = C64::cis(-p.frequency * t);
-            self.entries(p, |delta| delta == p.class, |b, a, x, dx| add(&mut h, &mut dh, (b, a), phase * x, dx.map(|d| phase * d)));
-        }
-        let zs = self.sums(t);
-        let mut legs: Vec<&[Leg]> = vec![&[]; self.pieces.len()];
-        let mut grouped: Vec<Vec<Leg>> = vec![Vec::new(); self.pieces.len()];
-        for (c, l) in &self.legs {
-            grouped[*c].push(l.clone());
-        }
-        for (c, g) in grouped.iter().enumerate() {
-            legs[c] = g;
-        }
-        let ws = self.leg_sums(t, true, self.pieces.iter().zip(legs));
-        for (zb, wb) in zs.iter().zip(&ws) {
-            for w in wb {
-                for z in zb {
-                    let class = plus(w.class, z.class);
-                    let kept: Vec<(usize, usize)> = (0..w.index.len()).flat_map(|i| (0..z.index.len()).map(move |j| (i, j))).filter(|&(i, j)| slow(class, w.index[i], z.index[j])).collect();
-                    if kept.is_empty() {
-                        continue;
-                    }
-                    let (p, dp) = pair(&w.m, &w.dm, &z.m, &z.dm);
-                    for (i, j) in kept {
-                        let (b, a) = (w.index[i], z.index[j]);
-                        let x = p[(i, j)] * 0.5;
-                        h[(b, a)] += x;
-                        h[(a, b)] += x.conj();
-                        for (g, d) in dh.iter_mut().zip(&dp) {
-                            let y = d[(i, j)] * 0.5;
-                            g[(b, a)] += y;
-                            g[(a, b)] += y.conj();
-                        }
-                    }
-                }
-            }
-        }
-        let jumps = self.channels(t, 0, &zs);
-        let mut lift = Mat::zeros(self.folded.len(), n);
-        for (block, zb) in self.blocks.iter().zip(&zs).filter(|(b, _)| b.part.is_none()) {
-            let mut z = Mat::zeros(block.rows.len(), n);
-            for s in zb {
-                for k in 0..block.rows.len() {
-                    for (j, &a) in s.index.iter().enumerate() {
-                        z[(k, a)] += s.m[(k, j)];
-                    }
-                }
-            }
-            let m = block.back(&z);
-            for (k, &row) in block.rows.iter().enumerate() {
-                lift.data[row * n..(row + 1) * n].copy_from_slice(&m.data[k * n..(k + 1) * n]);
-            }
-        }
-        Now { states: self.states.clone(), folded: self.folded.clone(), hamiltonian: h, gradient: dh, jumps, lift }
+        Now::of(self.contract(&|_, f| (Vec::new(), 0.0, C64::cis(-f * t)), false))
     }
 
     /// The channels' photons' forms at the time t (`now`'s channels' kicks: k∘L per element, folded alike).
     pub fn kicks(&self, t: f64) -> Vec<Moment> {
-        self.channels(t, 1, &self.sums(t))
-    }
-
-    /// The channels (`which` 0) or their photons' forms (1) at the time t from the amplitudes' class sums: direct, and
-    /// each out-leg class sum times each amplitude class sum, every element into the channel of its fast index.
-    fn channels(&self, t: f64, which: usize, zs: &[Vec<Summed>]) -> Vec<Moment> {
-        let n = self.states.len();
-        let parts = &self.parts;
-        let index = |class: [i64; 2], b: usize, a: usize| Sectors::element(class, parts[b], parts[a]);
-        let mut out: Vec<Moment> = Vec::new();
-        // The slot of each (emission, fast index): a table over the fast indices' range, the classes' and parts' sums.
-        let reach = self.pieces.iter().map(|p| p.class).chain(self.jumps.iter().map(|j| j.held.class)).chain(parts.iter().copied()).flat_map(|c| [c[0].abs(), c[1].abs()]).max().unwrap_or(0);
-        let side = (8 * reach + 1) as usize;
-        let mut table = vec![usize::MAX; 3 * side * side];
-        let mut at = |out: &mut Vec<Moment>, emission: usize, fast: [i64; 2]| -> usize {
-            let cell = emission * side * side + (fast[0] + 4 * reach) as usize * side + (fast[1] + 4 * reach) as usize;
-            if table[cell] == usize::MAX {
-                out.push(Moment { emission, fast, value: Mat::zeros(n, n), gradient: zeros(n, n) });
-                table[cell] = out.len() - 1;
-            }
-            table[cell]
-        };
-        for emission in 0..3 {
-            let mine: Vec<&JumpPart> = self.jumps.iter().filter(|j| j.emission == emission && j.which == which).collect();
-            for jp in &mine {
-                let phase = C64::cis(-jp.held.frequency * t);
-                self.entries(&jp.held, |_| true, |b, a, x, dx| {
-                    let slot = at(&mut out, emission, index(jp.held.class, b, a));
-                    let m = &mut out[slot];
-                    add(&mut m.value, &mut m.gradient, (b, a), phase * x, dx.map(|d| phase * d));
-                });
-            }
-            let ws = self.leg_sums(t, false, mine.iter().map(|jp| (&jp.held, jp.legs.as_slice())));
-            for (zb, wb) in zs.iter().zip(&ws) {
-                for w in wb {
-                    for z in zb {
-                        let class = plus(w.class, z.class);
-                        let (p, dp) = pair(&w.m, &w.dm, &z.m, &z.dm);
-                        for (i, &b) in w.index.iter().enumerate() {
-                            for (j, &a) in z.index.iter().enumerate() {
-                                let (x, dx) = (p[(i, j)], dp.each_ref().map(|d| d[(i, j)]));
-                                if x != C64::ZERO || dx.iter().any(|d| *d != C64::ZERO) {
-                                    let slot = at(&mut out, emission, index(class, b, a));
-                                    let m = &mut out[slot];
-                                    add(&mut m.value, &mut m.gradient, (b, a), x, dx);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out.sort_by(|x, y| (x.emission, x.fast).cmp(&(y.emission, y.fast)));
-        out
+        moments(&self.contract(&|_, f| (Vec::new(), 0.0, C64::cis(-f * t)), true), true)
     }
 }
 
@@ -1222,7 +1159,44 @@ pub struct Now {
     pub lift: Mat,
 }
 
+/// The 32 states' populations of ρ (n × n, row-major, on the model's `states`) with the `folded` states' lifted through
+/// M (|Q| × n): the model's ρ_aa, Q's (M ρ M†)_kk. The one readout of a fold's populations.
+pub fn lifted(states: &[usize], folded: &[usize], lift: &Mat, rho: &[C64]) -> [f64; STATES] {
+    let n = states.len();
+    let mut out = [0.0; STATES];
+    for (a, &state) in states.iter().enumerate() {
+        out[state] = rho[a * n + a].re;
+    }
+    let m = lift.product(&Mat { rows: n, cols: n, data: rho.to_vec() }).product(&lift.adjoint());
+    for (k, &state) in folded.iter().enumerate() {
+        out[state] = m[(k, k)].re;
+    }
+    out
+}
+
+/// A one-group contraction's channels (`Local::now`) as moments: their parts', or their photons' forms' (`kicks`).
+fn moments(model: &ModelAt, kicks: bool) -> Vec<Moment> {
+    let n = model.states.len();
+    model
+        .jumps
+        .iter()
+        .map(|c| {
+            let parts = if kicks { &c.kicks } else { &c.parts };
+            let (value, gradient) = parts.first().map_or_else(|| (Mat::zeros(n, n), zeros(n, n)), |p| (p.value.clone(), p.gradient.clone()));
+            Moment { emission: c.emission, fast: c.fast, value, gradient }
+        })
+        .collect()
+}
+
 impl Now {
+    /// The value of a one-group contraction (`Local::now`): its one part of each quantity, zero where it has none.
+    fn of(model: ModelAt) -> Now {
+        let (n, q) = (model.states.len(), model.folded.len());
+        let (hamiltonian, gradient) = model.effective.first().map_or_else(|| (Mat::zeros(n, n), zeros(n, n)), |p| (p.value.clone(), p.gradient.clone()));
+        let lift = model.lift.first().map_or_else(|| Mat::zeros(q, n), |p| p.value.clone());
+        Now { jumps: moments(&model, false), states: model.states, folded: model.folded, hamiltonian, gradient, lift }
+    }
+
     /// The force on ρ (n × n, row-major): the adjoint contraction −Re tr(∇H_eff ρ) and the folded light's absorbed
     /// momentum Σ_ch Im tr(ρ L_ch†∇L_ch) -- the force observable of the Lindbladian, −∂H + Σ_ch (L_ch†∂L_ch −
     /// ∂L_ch†L_ch)/2i, read on ρ.
@@ -1238,18 +1212,9 @@ impl Now {
         })
     }
 
-    /// The 32 states' populations of ρ (n × n, row-major) lifted through M(t): the model's ρ_aa, Q's (M ρ M†)_kk.
+    /// The 32 states' populations of ρ (n × n, row-major) lifted through M(t) (`lifted`).
     pub fn lift(&self, rho: &[C64]) -> [f64; STATES] {
-        let n = self.states.len();
-        let mut out = [0.0; STATES];
-        for (a, &state) in self.states.iter().enumerate() {
-            out[state] = rho[a * n + a].re;
-        }
-        let lifted = self.lift.product(&Mat { rows: n, cols: n, data: rho.to_vec() }).product(&self.lift.adjoint());
-        for (k, &state) in self.folded.iter().enumerate() {
-            out[state] = lifted[(k, k)].re;
-        }
-        out
+        lifted(&self.states, &self.folded, &self.lift, rho)
     }
 }
 

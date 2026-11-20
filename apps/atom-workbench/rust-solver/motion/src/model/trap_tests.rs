@@ -18,12 +18,11 @@ fn json(path: PathBuf) -> Value {
 
 /// The reported trap of a request as the solve makes it (solve.rs `reported`): the run at the reference state -- the
 /// initial component of the largest population --, its reported potential's trap there; none where the scene refuses the
-/// request (a light outside the allowed approximations, scene.rs `Scene::new`), with its reason. 临时入口：P 取全部 32
-/// 态（`select::choose` 落地前；合并时改回 `choose`）.
+/// request (a light outside the allowed approximations, scene.rs `Scene::new`), with its reason; its run the solve's
+/// (`solve::run_of`).
 fn reported(request: &Request) -> Result<Trap, String> {
-    crate::scene::Scene::new(request)?;
     let reference: [f64; GROUND] = std::array::from_fn(|s| f64::from(u8::from(s == crate::solve::chief(request))));
-    let run = crate::model::selected::keeping(request, (0..crate::request::STATES).collect(), None, reference);
+    let run = crate::solve::run_of(request, reference)?;
     crate::solve::reported(&run, &reference)
 }
 
@@ -45,8 +44,8 @@ fn the_reported_trap_is_the_references() {
             continue;
         }
         let id = expectation["id"].as_str().unwrap();
-        let request = Request::from_native(&json(refs().join(expectation["request"].as_str().unwrap()))).unwrap();
-        let reported = match reported(&request) {
+        let made = Request::from_native(&json(refs().join(expectation["request"].as_str().unwrap())));
+        let reported = match made.and_then(|request| reported(&request)) {
             Ok(trap) => trap,
             Err(why) => {
                 println!("{id}: refused: {why}");
