@@ -1877,8 +1877,7 @@ impl Picture {
     /// (ln N(σ) − ln(1 − O(σ)) + ln 1/u)/σ, at the root of its derivative (Newton within a bracket: the root is one, the
     /// function's numerator convex). A tone's forms are summed at its beat and a followed class moves the frequencies by
     /// its beat: V with the largest beat and the followed beats' spread. Where the ringing weighs as much as the diagonal,
-    /// O(0) ≥ 1, the series has no sum, and 1/N is analytic in a strip of half the fastest pair's ringing period about
-    /// the real axis: its tail e^{−bν} at the round-off, (2/π) ln(1/u) times the fastest pair's frequency. Its count: the
+    /// O(0) ≥ 1, the series has no sum: 1/N by its analytic strip about the real axis (below). Its count: the
     /// pairs' weights and per Newton step the sums with their two derivatives, an exponential and six multiply-adds an
     /// item, counted as seven.
     fn quotient_from(&mut self, from: f64) -> f64 {
@@ -1905,6 +1904,7 @@ impl Picture {
         let (mut numerator, mut ringing) = (std::mem::take(&mut self.numerator), std::mem::take(&mut self.ringing));
         numerator.clear();
         ringing.clear();
+        let mut diagonal = [(0.0, 0.0); crate::model::STATES];
         for a in (0..n).filter(|&a| self.held[a] && m[a] > 0.0) {
             for b in (a..n).filter(|&b| self.held[b] && m[b] > 0.0) {
                 let line = |s: f64, (d, slope): (f64, f64)| (m[a].ln() + m[b].ln() + (rates[a] + rates[b]) * s - d.ln(), rates[a] + rates[b] - slope / d);
@@ -1920,6 +1920,9 @@ impl Picture {
                 let (weight, nu) = (top.min(0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
                 let twice = if a == b { 1.0 } else { 2.0 };
                 numerator.push((twice * weight, nu));
+                if a == b {
+                    diagonal[a] = (weight, nu);
+                }
                 if a != b {
                     let o = self.overlaps[a * n + b];
                     if o > 0.0 {
@@ -1943,7 +1946,34 @@ impl Picture {
             high - low
         };
         let v = if total >= 1.0 {
-            2.0 / std::f64::consts::PI * log * fastest
+            // The series has no sum: 1/N by its analytic strip. N(u + iy) − N(u) = Σ_ab (R†R)_ab d_a* d_b (e^{z_ab y} − 1)
+            // with |z_ab| the pair's frequency (its rate along the imaginary time), within D Σ_ab p_ab' (e^{ν_ab y} − 1)
+            // over every pair, the diagonal's at its weight and twice its decay rate, the ringing's at the overlap's
+            // weight S(y); and N(u) ≥ c D on the piece, c the least N/D the state shows at the piece's start, middle and
+            // end (a point estimate, as the weights are). So 1/N is analytic where S(y) is below c -- the strip's half
+            // y* where it reaches it --, and on its half y₀ = y*/2 the quotient is within M = Σ p e^{νy₀}/(c − S(y₀)) of
+            // the forms' scale: its spectrum's tail beyond ν within M e^{−y₀ν}, at the round-off at (ln 1/u + ln M)/y₀.
+            let width = (self.half - from).abs();
+            let mut x = [C64::ZERO; crate::model::STATES];
+            let mut c = f64::INFINITY;
+            for (s, u) in [(0.0, from), (0.5 * width, from + 0.5 * (self.half - from)), (width, self.half)] {
+                self.at(u, &mut x[..n]);
+                let d: f64 = (0..n).filter(|&a| self.held[a]).map(|a| m[a] * m[a] * (2.0 * rates[a] * s).exp()).sum();
+                c = c.min(norm(&x[..n]).powi(2) / d.max(f64::MIN_POSITIVE));
+            }
+            let rise = |y: f64| diagonal[..n].iter().map(|&(p, nu)| p * (nu * y).exp_m1()).sum::<f64>() + ringing.iter().map(|&(p, nu)| p * (nu * y).exp_m1()).sum::<f64>();
+            let (mut lo, mut hi) = (0.0_f64, 1.0 / fastest.max(f64::MIN_POSITIVE));
+            while rise(hi) < c && hi.is_finite() {
+                (lo, hi) = (hi, 2.0 * hi);
+            }
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if rise(mid) < c { lo = mid } else { hi = mid }
+            }
+            count += (120 * (numerator.len() + ringing.len()) + 3 * (2 + n) * n) as f64;
+            let y = 0.5 * lo;
+            let scale = numerator.iter().map(|&(p, nu)| p * (nu * y).exp()).sum::<f64>() / (c - rise(y)).max(f64::MIN_POSITIVE);
+            if c > 0.0 && y > 0.0 { (log + scale.max(1.0).ln()) / y } else { 2.0 / std::f64::consts::PI * log * fastest }
         } else if ringing.is_empty() {
             // No ringing: the frequency above which the numerator's terms weigh within the round-off.
             numerator.sort_by(|x, y| y.1.total_cmp(&x.1));

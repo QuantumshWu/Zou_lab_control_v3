@@ -1138,21 +1138,20 @@ struct Rule {
     weights: Vec<f64>,
 }
 
-/// The rule of at least m nodes, made once for the run (`special::gauss_legendre`, m² a rule) and kept: m rounded up to
-/// five binary digits, so that a run's rules are at most sixteen an octave and a rule takes at most a sixteenth more
-/// nodes than it is asked -- what the cache holds; the accuracy is the asked rule's or better (`fewest`).
-fn rule(m: usize) -> std::sync::Arc<Rule> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-    static RULES: OnceLock<RwLock<HashMap<usize, Arc<Rule>>>> = OnceLock::new();
-    let shift = (usize::BITS - m.leading_zeros()).saturating_sub(5);
-    let m = m.div_ceil(1 << shift) << shift;
-    let rules = RULES.get_or_init(|| RwLock::new(HashMap::new()));
-    if let Some(rule) = rules.read().expect("the rules").get(&m) {
-        return rule.clone();
-    }
-    let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
-    rules.write().expect("the rules").entry(m).or_insert_with(|| Arc::new(Rule { nodes, weights })).clone()
+/// The largest rule a panel takes (`panels`): a rule of m nodes integrates a component of κ up to 2m less its Bessel
+/// tail's few nodes (`fewest`), so that its nodes a radian fall towards a half as m grows; at 256 they are within a
+/// twentieth of that limit, and a wider piece takes several panels of no more -- what the rules made once for the run
+/// cost (m² a rule, `special::gauss_legendre`) and what a jump's root takes again of its panel, no accuracy's number.
+const LARGEST: usize = 256;
+
+/// The rule of m nodes (at most `LARGEST`), made once for the run and kept.
+fn rule(m: usize) -> &'static Rule {
+    static RULES: OnceLock<Vec<OnceLock<Rule>>> = OnceLock::new();
+    let rules = RULES.get_or_init(|| (0..=LARGEST).map(|_| OnceLock::new()).collect());
+    rules[m.min(LARGEST)].get_or_init(|| {
+        let (nodes, weights) = crate::special::gauss_legendre(m.min(LARGEST)).into_iter().unzip();
+        Rule { nodes, weights }
+    })
 }
 
 thread_local! {
@@ -1213,15 +1212,21 @@ fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
     })
 }
 
-/// The one panel over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the
-/// round-off (`fewest`, of `nodes` nodes and more): its end b and its nodes and weights in their order from a to b. A
-/// step's piece is one panel, its nodes a rule's laid over it whole (CARRIER: at the quotient's bandwidth the nodes of a
-/// step were 1.2 to 2.6 times those of the panels of rules of up to 64 nodes at the forms' bandwidth before, which left
-/// the quotient's harmonics).
+/// The panels over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the round-off
+/// (`fewest`, of `nodes` nodes and more), in their order from a to b: each panel's end (b itself for the last) and its
+/// nodes and weights in their order. One panel where its rule is no larger than `LARGEST`, else the fewest equal
+/// panels whose rules are not (CARRIER: at the quotient's bandwidth one panel a step took 1.2 to 2.6 times the nodes of
+/// the panels of rules of up to 64 nodes at the forms' bandwidth before, which left the quotient's harmonics).
 fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
-    let rule = rule(fewest(bandwidth, b - a, nodes, degree));
-    let (centre, w) = (0.5 * (a + b), b - a);
-    std::iter::once((b, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k]))))
+    let mut count = fewest(bandwidth, b - a, nodes, degree).div_ceil(LARGEST).max(1);
+    while fewest(bandwidth, (b - a) / count as f64, nodes, degree) > LARGEST {
+        count += 1;
+    }
+    let (rule, w) = (rule(fewest(bandwidth, (b - a) / count as f64, nodes, degree)), (b - a) / count as f64);
+    (0..count).map(move |p| {
+        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
+        (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k])))
+    })
 }
 
 /// The nodes and weights over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the

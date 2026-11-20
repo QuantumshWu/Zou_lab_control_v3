@@ -10,6 +10,7 @@
 //! - `r1prop_solve`: the probe and the pilot as the solve runs them, their messages' times.
 //! - `r1prop_quadrature`: the kick's one panel at the quotients' bandwidth against brute force, by kind of piece.
 //! - `r1prop_jumps`: the jumps' times and the states they act on against the flow of the step's own generator.
+//! - `r1prop_step_time`: a step's time on one thread.
 
 use crate::model::selected::Selected;
 use crate::request::Request;
@@ -618,4 +619,89 @@ fn r1prop_jumps() {
             println!("R1-JUMP {name} tau {tau}: {count} jumps; the time's error as ln N's, at the most {worst_time:.2e}; the state's direction at the most {worst_state:.2e} (the flow's states {:.1e} µs apart)", tau / ((rk * tau / 0.948).ceil().max(20000.0)));
         }
     }
+}
+
+/// A step's time (the brief's tilt0, tilt2; on one thread, the caller pins it): from the moving point (trajectory 3) a
+/// burn-in of R1PROP_BURN steps (5) at each τ of R1PROP_TAUS (0.326, 0.948), then R1PROP_STEPS steps (10) timed, run
+/// R1PROP_REPEAT times (5) from the same state on a fresh scratch (the same steps to the bit): the least time a step.
+#[test]
+#[ignore]
+fn r1prop_step_time() {
+    let taus = list("R1PROP_TAUS", "0.326,0.948");
+    let (burn, steps, repeats) = (env("R1PROP_BURN", 5.0) as usize, env("R1PROP_STEPS", 10.0) as usize, env("R1PROP_REPEAT", 5.0) as usize);
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let mut t0 = start(&run, &request, chief, 3);
+            let mut scratch = Scratch::default();
+            for _ in 0..burn {
+                if let Ok(step) = Midway::new(&run, &t0, tau).and_then(|m| m.attempt(&t0, &Brownian::STILL, &[], &mut scratch, &Everywhere)) {
+                    t0 = step.end;
+                }
+            }
+            let mut best = f64::INFINITY;
+            let mut jumps = 0;
+            for _ in 0..repeats {
+                let (mut t, mut s) = (t0.clone(), Scratch::default());
+                let clock = std::time::Instant::now();
+                jumps = 0;
+                for _ in 0..steps {
+                    match Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere)) {
+                        Ok(step) => {
+                            jumps += step.made.iter().filter(|m| m.kick.is_some()).count();
+                            t = step.end;
+                        }
+                        Err(e) => {
+                            println!("R1-TIME {name} tau {tau}: refused {e:?}");
+                            break;
+                        }
+                    }
+                }
+                best = best.min(clock.elapsed().as_secs_f64() * 1e3 / steps as f64);
+            }
+            println!("R1-TIME {name} tau {tau}: {best:.2} ms a step (the least of {repeats} runs of {steps} steps, {jumps} jumps)");
+        }
+    }
+}
+
+/// The quotients' bandwidth along walks (a diagnosis): R1PROP_TRAJ trajectories (8) from the moving point, each
+/// R1PROP_STEPS steps (200) at each τ of R1PROP_TAUS (0.948), on all the threads, a refused step taken at its halves:
+/// per trajectory the largest ν_Q/B of a step's last launch and the slowest step's time.
+#[test]
+#[ignore]
+fn r1prop_quotient_scan() {
+    use rayon::prelude::*;
+    let taus = list("R1PROP_TAUS", "0.948");
+    let (count, steps) = (env("R1PROP_TRAJ", 8.0) as u64, env("R1PROP_STEPS", 200.0) as usize);
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let rows: Vec<String> = (0..count)
+                .into_par_iter()
+                .map(|i| {
+                    let mut t = start(&run, &request, chief, i);
+                    let mut scratch = Scratch::default();
+                    let (mut ratio, mut slowest, mut at, mut total) = (0.0_f64, 0.0_f64, 0, 0.0);
+                    for k in 0..steps {
+                        let clock = std::time::Instant::now();
+                        let mut refusals = [[0usize; 4]; 4];
+                        let Some(next) = halved(&run, &t, tau, &mut scratch, 3, &mut refusals) else { break };
+                        let ms = clock.elapsed().as_secs_f64() * 1e3;
+                        total += ms;
+                        let p = &scratch.picture;
+                        ratio = ratio.max(p.quotient / p.bandwidth.max(f64::MIN_POSITIVE));
+                        if ms > slowest {
+                            (slowest, at) = (ms, k);
+                        }
+                        t = next;
+                    }
+                    format!("R1-SCAN {name} tau {tau} traj {i}: nu_Q/B at the most {ratio:.2}; the slowest step {slowest:.1} ms (step {at}); {:.2} ms a step on the mean", total / steps as f64)
+                })
+                .collect();
+            for row in rows {
+                println!("{row}");
+            }
+        }
+    }
+    eprintln!("{}", crate::prof::report());
 }
