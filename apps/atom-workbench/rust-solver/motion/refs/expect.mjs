@@ -69,7 +69,7 @@ const temperatureSeries=(line,Ts,us)=>[{quantity:'T',total:true,regime:'any',ind
  * linear polarizations add their Hessians, and their pair term is the reference state's vector shift, Im Q ∝ ⟨J_z⟩ --
  * which the bias field leaves nonzero in |F, 0⟩ --: 2 Im Q_l′l sin(Δκ·r) has no curvature at the focus but the slope
  * 2 Im Q Δκ, so the minimum lies off the focus by −H⁻¹ of it, where the fringe's third derivative adds
- * (2 Im Q)²(ΔκᵀH⁻¹Δκ) ΔκΔκᵀ to the Hessian H (Δω/ω = 1.4e-5 on x and y for R1_CROSSED). The level chart's all-order
+ * (2 Im Q)²(ΔκᵀH⁻¹Δκ) ΔκΔκᵀ to the Hessian H. The level chart's all-order
  * shift of the same light is not this model: it differs by the fold's fourth order (the shift times Σ|X/δ|² over every
  * coupled level -- D1 and D2, both rotations --, and the cross terms with the states outside the model), the solver's
  * model error, which its ledger books (远失谐光的折叠) and the conditions list at the focus; the static couplings the
@@ -874,47 +874,6 @@ async function r4linear(){
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// R8: momentum diffusion of the held atom (characterization).
-
-/** R8 (characterization only, contract §6). The exact local momentum diffusion of R5051's atom held at its trap's centre
- * (the quantum regression theorem on the master equation with every D2 state explicit, the force operator −∇H, the
- * spontaneous photons' recoil: refs/data/qrt_R5051_n.jsonl, d⟨κ_a²⟩/dt = 2D_a, D in 1/(µm² µs)), with the force
- * correlation cut off by e^{−γτ}: γ → 0 holds the slow intra-state fluctuations a point particle's Ehrenfest force
- * leaves out (SPEC §8), which a moving atom's motion cuts off at about its trap frequency. The held atom (mass ×100,
- * scenes.mjs R8_HELD) does not cut them off; its T grows by ΔT_a = (ħ/Mm)·2D_a t/k_B, here at γ = 1/µs (the
- * cutoff kick.md compared the engines at) with u reaching the γ = 0.3/µs value -- reported, not judged; the γ = 0
- * values are in the info.
- * Held: the trap is a site of the retro-reflected tweezer's standing wave, 0.19 µm from the focus (the QRT's own
- * centre and its frequencies along the lab axes, ω_a² = (ħ/m)∂_a²V there, for ⁸⁷Rb: 1/√M of them here). With the
- * site's Hessian ω_⊥²(1 − nnᵀ) + ω_∥²nnᵀ about the tweezer's axis n (the two numbers fitted to the three lab values,
- * the fit's residual listed) the initial ensemble at k_BT ≪ ħω_⊥ is the site's ground state: spreads √(ħ/2Mmω) along
- * and across, to be far below the probe's wavelength (kσ ≪ 1) and the standing wave's period (2k_tσ_∥ ≪ 1); its
- * temperature along a lab axis is Σ_j (e_j·a)² ħω_j/2k_B, below ħω_a/2k_B of that axis' own frequency (the mean of the
- * roots against the root of the mean). */
-async function r8(){
-  const id='R8_R5051',line=read(`scenes/${id}.json`),times=grid(line),m=line.model.motion,r=hbarOverMass(m.massKg),{R8_HELD}=await import('./scenes.mjs');
-  const qrt=fs.readFileSync(path.join(here,'data','qrt_R5051_n.jsonl'),'utf8').split('\n').filter(x=>x.trim()).map(x=>JSON.parse(x));
-  const centre=qrt.slice(1).find(q=>q.offset.every(v=>v===0)),D=g=>centre.cutoffs.find(c=>c.gamma===g).D;
-  // The site: ω_a along the lab axes, and ω_⊥², ω_∥² by least squares on ω_a² = ω_⊥² + (ω_∥² − ω_⊥²) n_a².
-  const lab=qrt[0].trap.lab.map(w=>w/Math.sqrt(R8_HELD.mass)),tw=beamOf(line,m.trapBeamId),norm=Math.hypot(...tw.direction),n2=tw.direction.map(x=>(x/norm)**2);
-  const my=lab.reduce((t,w)=>t+w*w,0)/3,slope=lab.reduce((t,w,a)=>t+(w*w-my)*(n2[a]-1/3),0)/n2.reduce((t,x)=>t+(x-1/3)**2,0),across=Math.sqrt(my-slope/3),along=Math.sqrt(my-slope/3+slope);
-  const residual=Math.max(...lab.map((w,a)=>Math.abs(across**2+slope*n2[a]-w*w)/(w*w))),T=m.temperatureUK,spread=w=>Math.sqrt(r*KT_PER_UK*wignerTemperature(w,T))/w,probe=Math.max(...m.beams.filter(b=>b.id!==tw.id&&String(b.frequencyIndex)!==String(tw.frequencyIndex)).map(b=>b.waveNumberPerUm));
-  const series=['x','y','z'].map((a,i)=>({quantity:'Tincrease',axis:a,indices:all(line),values:times.map(t=>r*2*D(1)[i]*t/KT_PER_UK),u:times.map(t=>r*2*Math.abs(D(0.3)[i]-D(1)[i])*t/KT_PER_UK),target:OWN}));
-  write(id,{...expectation(id,'R8','R8 静止原子的动量扩散（R5051，QRT；只作表征）',line,{
-    derivation:'Held atom (mass ×100): Var κ_a grows as 2D_a t with the QRT diffusion of the exact master equation at the trap centre; D at the correlation cutoff γ = 1/µs, u to γ = 0.3/µs. The γ → 0 limit (slow intra-state fluctuations) is beyond the semiclassical point particle (SPEC §8).',
-    conditions:[{what:'photon rate at the centre (1/µs)',value:centre.photonRate},{what:'excited population',value:centre.excited},
-      {what:'held atom (mass factor, initial T in µK)',value:R8_HELD},{what:'the site’s centre from the focus (µm)',value:Math.hypot(...qrt[0].trap.centre)},
-      {what:'trap frequencies along x, y, z (kHz)',value:lab.map(kHz)},{what:'across and along the standing wave (kHz); the fit’s largest relative residual in ω_a²',value:[kHz(across),kHz(along),residual]},
-      {what:'ħω/k_BT across and along',value:[across,along].map(w=>w/(KT_PER_UK*T)),limit:'≫ 1: the site’s ground state'},
-      {what:'Wigner factor less 1, across and along: coth(ħω/2k_BT) − 1',value:[across,along].map(w=>1/Math.tanh(w/(2*KT_PER_UK*T))-1),limit:'≪ 1'},
-      {what:'position spread across and along (µm)',value:[spread(across),spread(along)]},{what:'the classical thermal part of it, √(k_BT/Mm)/ω (µm)',value:[across,along].map(w=>Math.sqrt(r*KT_PER_UK*T)/w)},
-      {what:'kσ: the probe’s wave number times the larger spread',value:probe*spread(across),limit:'≪ 1: held'},{what:'2k_tσ_∥: the standing wave’s phase over the spread along it',value:2*tw.waveNumberPerUm*spread(along),limit:'≪ 1: held'},
-      {what:'initial T along x, y, z (µK): Σ_j (e_j·a)² T*_j',value:n2.map(c=>c*wignerTemperature(along,T)+(1-c)*wignerTemperature(across,T))},
-      {what:'expected increase over the run along x, y, z (µK)',value:[0,1,2].map(i=>r*2*D(1)[i]*times.at(-1)/KT_PER_UK)}],
-    series,info:{source:'refs/data/qrt_R5051_n.jsonl',cutoffs:centre.cutoffs.map(c=>({gamma:c.gamma,D:c.D,Dforce:c.Dforce})),Drecoil:centre.Drecoil}}),kind:'characterization'});
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
 // R4D: the point particle's friction and its temperature against the exact theory of the same model (tool references).
 
 /** R4D, two references the worker cannot run (kind "tool": refs/r4d.mjs runs them through motion/examples/diffusion.rs
@@ -941,8 +900,8 @@ function r4d(){
     conditions:[{what:'second-order equation against the same model\'s quantum answer at 100, 500, 1000 µs (relative)',value:(()=>{const d=read('data/R4D_TW2.json');return [10,50,100].map(i=>d.secondOrder.TzUK[i]/d.quantum.TzUK[i]-1);})()}]});
 }
 
-const RUN={R1_TWEEZER:()=>r1('R1_TWEEZER'),R1_RETRO:()=>r1('R1_RETRO'),R1_SIGMA_P:()=>r1('R1_SIGMA_P'),R1_SIGMA_M:()=>r1('R1_SIGMA_M'),R1_CROSSED:()=>r1('R1_CROSSED'),
-  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R4_LINEAR:r4linear,R4D:r4d,R8_R5051:r8,R9_HEAT:r9heat,
+const RUN={R1_TWEEZER:()=>r1('R1_TWEEZER'),R1_SIGMA_P:()=>r1('R1_SIGMA_P'),R1_SIGMA_M:()=>r1('R1_SIGMA_M'),
+  R2_RECOIL:r2,R3_DOPPLER:r3,R5_PUMP:r5,R6_RAMAN_CO:()=>r6('R6_RAMAN_CO'),R6_RAMAN_COUNTER:()=>r6('R6_RAMAN_COUNTER'),R9_PUSH:r9,R4_TW1:()=>r4('R4_TW1'),R4_TW2:()=>r4('R4_TW2'),R4_LINEAR:r4linear,R4D:r4d,R9_HEAT:r9heat,
   ...Object.fromEntries(['ANTINODE','QUARTER','NODE'].flatMap(at=>[`R10_${at}`,`R10_HELD_${at}`]).map(id=>[id,()=>r10(id)]))};
 const ids=process.argv.slice(2);
 for(const [id,f] of Object.entries(RUN))if(!ids.length||ids.includes(id))await f();

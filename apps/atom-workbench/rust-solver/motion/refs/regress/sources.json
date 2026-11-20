@@ -1,5 +1,5 @@
 {
- "note": "Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state.",
+ "note": "Sources of the old gate scenes (contract §7 Q2): Codex re-export (codex_resume/export_scenes.mjs) kept each as <name>.scene.json. reproducesGatePayload: the app of this worktree re-exports the gate payload bit for bit (couplings, emission, H0, initial state), so the old truths compare state by state. refused: scenes with light the engine refuses (lib/contract.mjs).",
  "sources": {
   "DEFAULT": {
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/DEFAULT.scene.json",
@@ -49,40 +49,16 @@
    "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/CONTROL_CYCLE.json",
    "reproducesGatePayload": true
   },
-  "RETRO": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/RETRO.scene.json",
-   "sha256": "e6f1a8642b5497be08587f67684d9c29b023b4263fc1abec24142429cb2eccc1",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/RETRO.json",
-   "reproducesGatePayload": true
-  },
   "F10_28MHZ": {
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F10_28MHZ.scene.json",
    "sha256": "6d974aeaaaf1ad855bec99c42088fe254422c3fd21f07778c49d21ccc665bdd8",
    "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F10_28MHZ.json",
    "reproducesGatePayload": true
   },
-  "F5_RETRO80": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F5_RETRO80.scene.json",
-   "sha256": "0163539e48b130e2f405f76037b5ed22a0fe623b11a7290455a3ac26ed1187eb",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F5_RETRO80.json",
-   "reproducesGatePayload": true
-  },
   "B1_128": {
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/B1_128.scene.json",
    "sha256": "53f2a7252b5ed6bd3be5bd016731384f25e56ca21db283b5c2a9d4c3c277fd2b",
    "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/B1_128.json",
-   "reproducesGatePayload": true
-  },
-  "F9_CROSSED": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F9_CROSSED.scene.json",
-   "sha256": "78940dee928a11215e161929a3d6ba3eb69a32364f908f1dc90cdf0be8e06382",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F9_CROSSED.json",
-   "reproducesGatePayload": true
-  },
-  "F9_CROSSED_P": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/F9_CROSSED.scene.json",
-   "sha256": "78940dee928a11215e161929a3d6ba3eb69a32364f908f1dc90cdf0be8e06382",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/F9_CROSSED_P.json",
    "reproducesGatePayload": true
   },
   "PGC1D": {
@@ -139,12 +115,6 @@
    "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5021.json",
    "reproducesGatePayload": true
   },
-  "R5031": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5031.scene.json",
-   "sha256": "d4dbff81e2fd9ff5716f7c5c971e039de56676e19e406fb196bc13c418bb8b84",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5031.json",
-   "reproducesGatePayload": true
-  },
   "R5038": {
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5038.scene.json",
    "sha256": "97ecf70fbcee9adacc2bdf093251e1d6200987292a8912b69fa022d5836125a2",
@@ -167,18 +137,6 @@
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5068.scene.json",
    "sha256": "a935c5b02294de16f0593b92b47056e33bb6212c71705f538e2f5401cdc86579",
    "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5068.json",
-   "reproducesGatePayload": true
-  },
-  "R5006": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5006.scene.json",
-   "sha256": "04f0522656d3a0b2170e7eafa1ce2479deb599010ec5793d4bca54378776d452",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5006.json",
-   "reproducesGatePayload": true
-  },
-  "R5051": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5051.scene.json",
-   "sha256": "c7550b0d9bb36864cf862aa6a98f8b5916e0cedc724017cdd6d3bf2a805fcf28",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5051.json",
    "reproducesGatePayload": true
   },
   "R5013": {
@@ -211,18 +169,6 @@
    "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5029.json",
    "reproducesGatePayload": true
   },
-  "R5059": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5059.scene.json",
-   "sha256": "1d12e2e5652908024927495e8d22130030172b1d255e6ab1c7389b488ad86a2c",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5059.json",
-   "reproducesGatePayload": true
-  },
-  "R5063": {
-   "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5063.scene.json",
-   "sha256": "7c1381d9ef68683aa2ee530d6c08131cd282e0868c15db89f313bc6ac5872529",
-   "gatePayload": "C:/Users/eadri/AppData/Local/Temp/claude/C--Users-eadri-Dropbox-WorkCode-Github-Zou-lab-control-v3/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/gate/scenes/R5063.json",
-   "reproducesGatePayload": true
-  },
   "R5039": {
    "source": "C:/Users/eadri/AppData/Local/Temp/claude/c0815e347c54866c/8308d66c-699b-4483-ab9b-7305d93a9f7e/scratchpad/codex_resume/scenes/R5039.scene.json",
    "sha256": "fd666551e50ceedc60f7a0bffa3aed04644f22918d74e74036e6aa0a17dc4dfa",
@@ -248,5 +194,16 @@
    "reproducesGatePayload": true
   }
  },
- "missing": []
+ "missing": [],
+ "refused": [
+  "F5_RETRO80: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 852.0 nm",
+  "RETRO: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 852.0 nm",
+  "R5051: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 880.0 nm",
+  "R5006: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 911.0 nm",
+  "R5059: 光镊（反射） (tweezer-reflection) at the tweezer's frequency; 光镊（反射） (tweezer-reflection) 911.0 nm",
+  "F9_CROSSED: 第二束远失谐光 (second) at the tweezer's frequency; 第二束远失谐光 (second) 940.0 nm",
+  "F9_CROSSED_P: 第二束远失谐光 (second) at the tweezer's frequency; 第二束远失谐光 (second) 940.0 nm",
+  "R5031: 光镊（反射） (tweezer-reflection) at the tweezer's frequency",
+  "R5063: 光镊（反射） (tweezer-reflection) at the tweezer's frequency"
+ ]
 }

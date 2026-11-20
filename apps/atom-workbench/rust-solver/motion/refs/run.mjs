@@ -22,7 +22,6 @@ console.log(`worker ${WORKER}, limit ${limit} s, ${ids.length} runs`);
 for(const id of ids){
   const file=expectationFile(id);if(!file){console.log(id,'no expectation');continue;}
   const e=JSON.parse(fs.readFileSync(file,'utf8'));
-  if(e.excluded){console.log(id,'excluded:',e.excluded);continue;}
   if(e.members){console.log(id,'a relation of',e.members.map(m=>m.id).join(', '),'(run under their own ids)');continue;}
   if(e.tool){console.log(id,'a tool reference, not a request:',e.tool.command);continue;}
   const line=JSON.parse(fs.readFileSync(path.join(here,e.request),'utf8'));

@@ -121,9 +121,6 @@ const _: () = assert!(crate::units::MOST_TRAJECTORIES % GROUP == 0);
 /// The uniform deviates a member draws in its group's strata (module documentation, # Latin hypercube).
 const DEVIATES: usize = 8;
 
-/// Why a trap light with a plane wave in it is refused (SPEC §9; shown in the app): a plane wave's potential does not
-/// fall off, so the well has no far level to bind atoms below and no envelope of Gaussian beams.
-pub const PLANE_WAVE: &str = "与光镊同频的光束都需要束腰：平面波的势在远处不降为零，被俘获原子的初始系综无从定义";
 /// Why an initial component whose well's envelope is not positive is refused (SPEC §9; shown in the app): the trap light
 /// does not attract that state anywhere.
 pub const NO_WELL: &str = "光镊不约束原子：阱光对初态的势没有吸引的部分";
@@ -208,13 +205,12 @@ struct Mode {
     rayleigh: f64,
 }
 impl Mode {
-    fn new(g: &Geometry) -> Result<Mode, String> {
-        let (Some(waist), Some(rayleigh)) = (g.waist, g.rayleigh()) else {
-            return Err(PLANE_WAVE.into());
-        };
+    /// The mode of an envelope's beam: the trap light's, the tweezer alone, a Gaussian beam (`Request::validate`).
+    fn new(g: &Geometry) -> Mode {
+        let (waist, rayleigh) = g.waist.zip(g.rayleigh()).expect("the trap light is the tweezer, a Gaussian beam (Request::validate)");
         let n = g.direction;
         let (e1, e2) = perpendicular(n);
-        Ok(Mode { frame: [e1, e2, n], waist, rayleigh })
+        Mode { frame: [e1, e2, n], waist, rayleigh }
     }
     /// u = 2ρ²/w₀² + ζ²/z_R² at r.
     fn coordinate(&self, r: V3) -> f64 {
@@ -376,7 +372,7 @@ pub struct Evaluations {
 impl<'a> Ensemble<'a> {
     /// The ensemble of the initial components (basis state, population, its well) at the temperature T (µK), with ħ/m
     /// (µm²/µs); the populations normalized over them. Refused where a well holds no atom (its envelope's B is not
-    /// positive, `NO_WELL`) or its envelope is not one of Gaussian beams (`PLANE_WAVE`).
+    /// positive, `NO_WELL`).
     pub fn new(initial: &[(usize, f64, &'a dyn Well)], temperature_uk: f64, hbar_over_mass: f64) -> Result<Ensemble<'a>, String> {
         let kt = KT_PER_UK * temperature_uk;
         let total: f64 = initial.iter().map(|c| c.1).sum();
@@ -387,7 +383,7 @@ impl<'a> Ensemble<'a> {
                 if !(bound > 0.) || beams.is_empty() {
                     return Err(NO_WELL.to_string());
                 }
-                let modes = beams.iter().map(Mode::new).collect::<Result<Vec<_>, _>>()?;
+                let modes: Vec<Mode> = beams.iter().map(Mode::new).collect();
                 let a = bound / kt;
                 let (centre, axes, frequencies) = well.trap();
                 let ceiling = (-well.potential(centre).0 / kt).min(a);

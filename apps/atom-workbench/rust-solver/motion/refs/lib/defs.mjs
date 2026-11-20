@@ -2,10 +2,10 @@
 // physics has a clear, analytic or nearly analytic answer (R4's scaling law: a relation between three scenes). `build()` returns the app scene (before the app's importer
 // reads it back); a scene whose parameters depend on the atom (a detuning from a shifted line, a two-photon resonance)
 // takes them from the app's own level chart or model, never from the solver. A scene's `mass` multiplies the request's
-// mass (R10's held atom: a classical point in the same light); R0 and R8 edit the motion block in scenes.mjs: a mass
-// ×10⁶ and a temperature of 1e-3 µK hold the atom at the focus (the static limit).
+// mass (R10's held atom: a classical point in the same light); R0 edits the motion block in scenes.mjs: a mass ×10⁶
+// and a temperature of 1e-3 µK hold the atom at the focus (the static limit).
 import {laserMHz,levelShifts,motionRequest,transitionMHz,zeroFieldMHz} from './app.mjs';
-import {base,beam,reflection,tweezer} from './scene.mjs';
+import {base,beam,tweezer} from './scene.mjs';
 import {RAD_PER_MHZ,coupling,decayRates,index} from './phys.mjs';
 
 /** Γ/2π of the D lines (MHz), as the app's atomic data gives them (physics.ts RB87.gammaHz). */
@@ -22,7 +22,7 @@ export const R10_S0=0.02;
 /** R10's two settings. The app's scene: 87Rb at 2 µK, in the tweezer's radial ground state (ħω/k_B = 8.2 µK: the atom's
  * extent is the zero-point one, kσ_z = 0.15), 120 µs -- 43 photons at the antinode, 8 µK of heating along z at the
  * node; k_BT is below the solver's validated regime (its result says so per output: `classical`). And
- * the held atom: the request's mass ×100 (the R8 device) makes it a classical point in the same light and the same
+ * the held atom: the request's mass ×100 makes it a classical point in the same light and the same
  * springs -- the extent σ² = k_BT/mω² does not depend on the mass, ħω ∝ m^{−1/2} does: at 5 µK k_BT = 6.1ħω on the
  * stiff axes and kσ_z = 0.17 --, the recoil energy and with it every heating rate 100 times smaller: 7.2 ms (2700
  * photons at the antinode, 5 µK of heating along z at the node). */
@@ -50,20 +50,12 @@ export const SCENES={
   R1_TWEEZER:{ref:'R1',title:'R1 保守阱：默认光镊单独（852 nm，π 沿 B）',async build(){
     const s=await base({name:'R1 保守阱：光镊单独',initialStateId:'ground-2-0',temperatureUK:30,durationUs:1000,samples:101});
     await tweezer(s,{...DEFAULT_TWEEZER,along:'+x'});return s;}},
-  R1_RETRO:{ref:'R1',title:'R1 保守阱：光镊加反射光（R = 1，φ = 0，同偏振：驻波）',async build(){
-    const s=await base({name:'R1 保守阱：反射光驻波',initialStateId:'ground-2-0',temperatureUK:30,durationUs:1000,samples:101});
-    await tweezer(s,{...DEFAULT_TWEEZER,along:'+x'});await reflection(s,'tweezer',{reflectivity:1,phaseDeg:0,quarterWave:false});return s;}},
   R1_SIGMA_P:{ref:'R1',title:'R1 保守阱：σ⁺ 光镊沿 B，原子在 |2,+2⟩（矢量光移）',async build(){
     const s=await base({name:'R1 保守阱：σ+ 光镊 |2,+2>',initialStateId:'ground-2-2',temperatureUK:30,durationUs:1000,samples:101});
     await tweezer(s,{...DEFAULT_TWEEZER,along:'+z',ellipticityDeg:45});return s;}},
   R1_SIGMA_M:{ref:'R1',title:'R1 保守阱：σ⁺ 光镊沿 B，原子在 |2,−2⟩（矢量光移）',async build(){
     const s=await base({name:'R1 保守阱：σ+ 光镊 |2,-2>',initialStateId:'ground-2--2',temperatureUK:30,durationUs:1000,samples:101});
     await tweezer(s,{...DEFAULT_TWEEZER,along:'+z',ellipticityDeg:45});return s;}},
-  R1_CROSSED:{ref:'R1',title:'R1 保守阱：两束正交偏振的同频交叉远光（秩 2 的场）',async build(){
-    const s=await base({name:'R1 保守阱：交叉远光',initialStateId:'ground-2-0',temperatureUK:30,durationUs:1000,samples:101});
-    await tweezer(s,{...DEFAULT_TWEEZER,along:'+x',polarizationAngleDeg:90});
-    await beam(s,{id:'trap2',name:'第二束远光',wavelengthNm:852,line:'D2',intensityMWcm2:2*DEFAULT_TWEEZER.powerMW/(Math.PI*DEFAULT_TWEEZER.waistUm**2)*1e8,waistUm:DEFAULT_TWEEZER.waistUm,along:'+y',polarizationAngleDeg:0});
-    return s;}},
   // R2 -- the two-level atom |2,2⟩ ↔ |3′,3′⟩: photon rate, radiation pressure, recoil heating 7/5, 3/10, 3/10.
   R2_RECOIL:{ref:'R2',title:'R2 二能级辐射压与反冲加热（σ⁺ 光沿 B，δ = −100Γ，s = 200）',async build(){
     const s=await base({name:'R2 二能级反冲加热',initialStateId:'ground-2-2',temperatureUK:30,durationUs:1000,samples:101});

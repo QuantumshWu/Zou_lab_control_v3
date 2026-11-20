@@ -108,8 +108,8 @@
 //! no light shift in a denominator; proto.rs `Fold::prototype_held`), its own diagonal: W_s, the trap light's own shift
 //! of s. Made once a request, before the start's decision and apart from it; at a point only the coefficients change.
 //! Bilinear in the field's coefficients e = ε_k (ε_k* counter-rotating), ε_k = Σ_l γ_lk a_l(r), so a form of the beam
-//! pairs a_l'*a_l: its gradient and Hessian are the beams' amplitudes' jets, exactly (the trap's frequency holds no plane
-//! wave, ensemble.rs `PLANE_WAVE`: zero far from the focus). Linear in the populations it is weighed by:
+//! pairs a_l'*a_l: its gradient and Hessian are the beams' amplitudes' jets, exactly (the trap light is the tweezer, a
+//! Gaussian beam, `Request::validate`: zero far from the focus). Linear in the populations it is weighed by:
 //! - the reference, V_ref(r) = Σ_s p_ref,s V_s(r), the reference state's;
 //! - a prepared well, Σ_s p_s V_s(r) of an initial component's (`Onefold::prepared`);
 //! - the loss energy, (ħ/m)κ²/2 + V_run(r; p(ψ)), V_run = Σ_s p_s(ψ) V_s(r) on the state's ground populations (an

@@ -186,7 +186,8 @@ pub struct Request {
     pub beams: Vec<Beam>,
     /// One outside form per distinct frequency of the beams.
     pub outside_forms: Vec<OutsideForm>,
-    /// The trap beam (an index into `beams`): the tweezer, a Gaussian beam whose focus is the origin.
+    /// The trap beam (an index into `beams`): the tweezer, a Gaussian beam whose focus is the origin, and the one beam of
+    /// its frequency (`validate`).
     pub trap_beam: usize,
     /// The lowering dipole's components on the lab axes x, y, z (1/√µs, 32 × 32, ground ← excited): Σ_a D[C_a] is
     /// the model's spontaneous emission.
@@ -505,6 +506,18 @@ impl Request {
         if self.beams[self.trap_beam].waist.is_none() {
             return Err(NO_WAIST.into());
         }
+        // The tweezer's light is the one beam the user names: a beam of its frequency beside it -- its reflection or
+        // another beam of the same laser -- is neither tweezer light nor other light (the user's rule, 2026-11-20).
+        let tweezer = &self.beams[self.trap_beam];
+        if let Some(b) = self.beams.iter().enumerate().find(|&(l, b)| l != self.trap_beam && b.frequency_index == tweezer.frequency_index).map(|(_, b)| b) {
+            return Err(format!(
+                "光束 {}（{}）与光镊 {}（{}）同频：光镊的光只有指定的那一束，光镊不能有反射光或同一激光的其他光束",
+                b.name,
+                b.id,
+                tweezer.name,
+                tweezer.id
+            ));
+        }
         // Light other than the tweezer couples the 32 states on D1 and D2 alone (an allowed approximation, scene.rs).
         for (_, b) in self.beams.iter().enumerate().filter(|&(l, _)| l != self.trap_beam) {
             let wavelength = std::f64::consts::TAU / b.wave_number;
@@ -581,9 +594,9 @@ pub(crate) mod tests {
     use serde_json::json;
 
     /// A valid request of the contract's shape: the 32 states ground-F-m, D1-F-m, D2-F-m in the app's order; a
-    /// diagonal H0; one tweezer (Gaussian, π-polarized) and a plane wave of another frequency; their forms; emission
-    /// ground ← excited; the initial state ground-2-0; 101 times over 10 µs. Its numbers are placeholders of the right
-    /// shape, not physics: the request's checks read shapes and structure.
+    /// diagonal H0; one tweezer (Gaussian, π-polarized, 852 nm) and a plane wave of another frequency on D2; their forms;
+    /// emission ground ← excited; the initial state ground-2-0; 101 times over 10 µs. Its numbers are placeholders of the
+    /// right shape, not physics: the request's checks read shapes and structure.
     pub(crate) fn sample() -> Request {
         let mut states = vec![];
         for (manifold, fs) in [("ground", [1, 2]), ("D1", [1, 2])] {
@@ -601,11 +614,11 @@ pub(crate) mod tests {
         let ground: Vec<bool> = states.iter().map(|s| s.starts_with("ground")).collect();
         let zero = || Mat::zeros(STATES, STATES);
         let coupling = |scale: f64| Mat::from_fn(STATES, STATES, |i, j| if !ground[i] && ground[j] { C64::real(scale * (1 + i + j) as f64) } else { C64::ZERO });
-        let beam = |id: &str, name: &str, waist: Option<f64>, index: i32, field: [C64; 3]| Beam {
+        let beam = |id: &str, name: &str, waist: Option<f64>, index: i32, wave_number: f64, field: [C64; 3]| Beam {
             id: id.into(),
             name: name.into(),
             direction: [0.0, 0.0, 1.0],
-            wave_number: 7.37,
+            wave_number,
             waist,
             frequency_index: vec![index],
             coupling: coupling(0.01),
@@ -621,8 +634,8 @@ pub(crate) mod tests {
             frame_frequencies_mhz: ground.iter().map(|&g| if g { 0.0 } else { 3.8e8 }).collect(),
             frequencies_mhz: vec![1.0],
             beams: vec![
-                beam("tweezer", "光镊", Some(0.8), -4, [C64::ZERO, C64::real(1e5), C64::ZERO]),
-                beam("probe", "探测光", None, 0, [C64::real(10.0), C64::ZERO, C64::ZERO]),
+                beam("tweezer", "光镊", Some(0.8), -4, 7.37, [C64::ZERO, C64::real(1e5), C64::ZERO]),
+                beam("probe", "探测光", None, 0, 8.05, [C64::real(10.0), C64::ZERO, C64::ZERO]),
             ],
             outside_forms: vec![form(-4), form(0)],
             trap_beam: 0,
@@ -732,6 +745,24 @@ pub(crate) mod tests {
         refused(&|r| r.emission[1][(20, 0)] = C64::real(1.0), "ground ← excited");
         refused(&|r| r.mass_kg = 0.0, ATOM);
         refused(&|r| r.beams[1].wave_number = -1.0, "Beam probe needs a finite direction");
+    }
+
+    /// The tweezer's light is the one beam named (the user's rule, 2026-11-20): its reflection -- a beam of its frequency
+    /// beside it -- is refused with both beams named, even where the tweezer is at 808 nm, inside D1/D2, so that the
+    /// wavelength does not refuse it; a reflection of other light, on D1/D2, is taken.
+    #[test]
+    fn a_reflection_of_the_tweezer_is_refused_and_one_of_other_light_is_taken() {
+        let mut r = sample();
+        r.beams[0].wave_number = std::f64::consts::TAU / 0.808;
+        assert_eq!(r.validate(), Ok(()));
+        let reflection = |b: &Beam, id: &str, name: &str| Beam { id: id.into(), name: name.into(), direction: b.direction.map(|x| -x), ..b.clone() };
+        let mut tweezer = r.clone();
+        tweezer.beams.push(reflection(&r.beams[0], "tweezer-reflection", "光镊（反射）"));
+        let e = tweezer.validate().expect_err("the tweezer's reflection");
+        assert!(e.contains("光束 光镊（反射）（tweezer-reflection）与光镊 光镊（tweezer）同频") && e.contains("光镊不能有反射光"), "{e}");
+        let mut probe = r.clone();
+        probe.beams.push(reflection(&r.beams[1], "probe-reflection", "探测光（反射）"));
+        assert_eq!(probe.validate(), Ok(()));
     }
 
     /// The native line maps onto the request it was written from, every field (the times linspace(0, durationUs,

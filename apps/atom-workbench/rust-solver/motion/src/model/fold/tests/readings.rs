@@ -124,7 +124,8 @@ fn random_model(u: &mut dyn FnMut() -> f64) -> (Request, Request, Vec<(usize, Pa
                 }
             }
         }
-        let beams = 1 + (u() * 2.0) as usize;
+        // The tweezer's frequency (axis 0, its first beam the trap) has no other beam (validate).
+        let beams = if axis == 0 { 1 } else { 1 + (u() * 2.0) as usize };
         let first = if u() < 0.7 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
         for b in 0..beams {
             let direction = if b == 0 { first } else if u() < 0.6 { first.map(|x| -x) } else { [0.0, 1.0, 0.0] };

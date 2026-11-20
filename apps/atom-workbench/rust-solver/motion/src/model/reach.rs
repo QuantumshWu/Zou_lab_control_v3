@@ -1159,8 +1159,6 @@ impl Model {
 mod tests {
     use super::*;
     use crate::field::Light;
-    use crate::linalg::Mat;
-    use crate::model::far::pair;
     use crate::model::{Component, Unit};
     use crate::request::Request;
 
@@ -1174,11 +1172,6 @@ mod tests {
         let bare = Model::new(&request, &light, &[]).unwrap();
         let kept: Vec<Unit> = (0..light.frequencies.len()).filter(|&f| f != light.trap).flat_map(|frequency| bare.bare_units(Component { frequency, counter: false })).collect();
         Model::new(&request, &light, &kept).unwrap()
-    }
-
-    /// R8_R5051: a six-beam lattice of cooling light with its repump, in a tweezer.
-    fn lattice() -> Model {
-        at_the_atom("R8_R5051")
     }
 
     /// Points spread through a cell: its centre and a 5³ grid on and inside its faces.
@@ -1299,44 +1292,6 @@ mod tests {
         assert!((top / (-trap.minimum) - 0.9936).abs() < 5e-5 && last < top, "the top {} D above 1 mK's level {}", top / -trap.minimum, last / -trap.minimum);
     }
 
-    /// A region's bounds hold at every point of its cell (module documentation, # Provable extrema): on the six-beam
-    /// lattice, each beam's modulus between its least and its largest, each beam pair's coefficient within its radius of
-    /// the centre's.
-    #[test]
-    fn a_region_s_bounds_hold_over_its_cell() {
-        let model = lattice();
-        let within = |value: f64, bound: f64| value <= bound * (1.0 + 1e-12) + 1e-12;
-        let cells = [
-            Cell { centre: [0.13, -0.21, 0.07], half: [0.05, 0.08, 0.03] },
-            Cell { centre: [-0.4, 0.3, 0.25], half: [0.3, 0.2, 0.25] },
-            // Slabs and needles: thin along one or two axes, long along the others.
-            Cell { centre: [1.0, 0.2, -0.1], half: [3.0, 0.3, 0.004] },
-            Cell { centre: [0.1, -0.3, 2.0], half: [0.004, 0.25, 4.0] },
-            Cell { centre: [0.02, 0.01, -0.03], half: [0.5, 0.01, 0.01] },
-            Cell { centre: [0.0, 0.0, 0.0], half: [0.02, 2.0, 0.02] },
-            // Far along each axis and off it: along a focused beam, off its axis, its modulus rises before it falls.
-            Cell { centre: [6.0, 1.5, -1.0], half: [5.0, 1.0, 0.5] },
-            Cell { centre: [-1.5, 6.0, 2.0], half: [1.0, 5.0, 0.5] },
-            Cell { centre: [2.0, -1.0, 7.0], half: [0.5, 1.0, 6.0] },
-        ];
-        for cell in cells {
-            let region = model.region(model.spans(&cell));
-            for r in points(&cell) {
-                let a = model.light.amplitudes(r);
-                for (l, span) in region.spans.iter().enumerate() {
-                    assert!(within(a[l].value.abs(), span.most) && within(span.least, a[l].value.abs()), "beam {l} at {r:?}: |a| {} outside [{}, {}]", a[l].value.abs(), span.least, span.most);
-                }
-                for (w, f) in model.light.frequencies.iter().enumerate() {
-                    let n = f.beams.len();
-                    for x in 0..n * n {
-                        let (c, bound) = (pair(&a[f.beams[x / n]], &a[f.beams[x % n]]), &region.pairs[w][x]);
-                        assert!(within((c.value - bound.centre).abs(), bound.radius), "pair {w}/{x} at {r:?}: moved {} beyond {}", (c.value - bound.centre).abs(), bound.radius);
-                    }
-                }
-            }
-        }
-    }
-
     /// A focused beam's intensity over a cell far along its axis is read from its modulus's range there (`Span::moduli`,
     /// `pair_span`): R4_LIN_4's tweezer (waist 5 µm, Rayleigh range 92 µm) one and a half Rayleigh ranges from its focus, over
     /// a cell of 42 µm along the beam by 3 µm across it -- a cell of the gates' proofs over the reach at 120 µK. The pair's
@@ -1367,18 +1322,13 @@ mod tests {
     }
 
     /// The kick's curvature (module documentation, # The kick's curvature) on models whose every drive is folded with
-    /// the bare levels, where the bound holds all of the generator.
-    /// - A σ⁺ tweezer alone, the atoms in the state it holds the least (R1_SIGMA_P, |2,+2⟩): every other ground state's
-    ///   well is the same shape and deeper, so the bound is the largest ω_s² − ω_ref² of the states' own traps' largest
-    ///   rates (potential.rs `Model::trap`), to rounding (printed: a tenth of ω_ref² and more -- the step's edge is
-    ///   below 0.91 π). From the state it holds the most (R1_SIGMA_M, |2,−2⟩) every other well is the softer one: the
-    ///   bound is the reference's own, none.
-    /// - Six beams' cooling light with its repump in a retro-reflected tweezer (R8_R5051, every drive bare): at the
-    ///   trap's centre the second difference of ⟨x|Ĥ_h|x⟩ − V_ref along any direction, of any state of a cluster, is
-    ///   below the bound (16 directions and states a cluster; the largest found is printed beside it).
+    /// the bare levels, where the bound holds all of the generator: a σ⁺ tweezer alone, the atoms in the state it holds the
+    /// least (R1_SIGMA_P, |2,+2⟩): every other ground state's well is the same shape and deeper, so the bound is the largest
+    /// ω_s² − ω_ref² of the states' own traps' largest rates (potential.rs `Model::trap`), to rounding (printed: a tenth of
+    /// ω_ref² and more -- the step's edge is below 0.91 π). From the state it holds the most (R1_SIGMA_M, |2,−2⟩) every other
+    /// well is the softer one: the bound is the reference's own, none.
     #[test]
-    fn the_kick_s_curvature_is_the_wells_difference_and_bounds_the_fringes() {
-        use crate::step::Middle as _;
+    fn the_kick_s_curvature_is_the_wells_difference() {
         let alone = |s: usize| -> [f64; GROUND] { std::array::from_fn(|b| if b == s { 1.0 } else { 0.0 }) };
         let share = crate::estimate::unseen(crate::units::MOST_TRAJECTORIES as f64);
         for (scene, state) in [("R1_SIGMA_M", 3), ("R1_SIGMA_P", 7)] {
@@ -1393,38 +1343,6 @@ mod tests {
             assert!((kick - stiffest).abs() <= 1e-9 * own, "{scene}: the bound {kick}, the wells' difference {stiffest}");
             assert!(if scene == "R1_SIGMA_P" { kick > 0.1 * own } else { kick.abs() <= 1e-9 * own }, "{scene}: {kick} of {own}");
         }
-        let (request, _, model) = bare("R8_R5051");
-        let reference = alone((0..GROUND).find(|&s| request.initial_density[(s, s)].re > 0.0).unwrap());
-        let trap = model.trap(&reference, &model.prepared()).unwrap();
-        let reach = model.reach(&trap, &reference, request.temperature_uk, share);
-        let bound = model.kick_curvature(&reach, &model.moduli(&reach), &trap) / model.hbar_over_mass;
-        let (lights, prepared) = (model.running(), model.prepared());
-        let mut stream = crate::random::Stream::jump(11, 0, 0);
-        let mut largest = f64::NEG_INFINITY;
-        for cluster in 0..model.clusters.len() {
-            let n = model.clusters[cluster].states.len();
-            for _ in 0..16 {
-                let direction = { let d = stream.normals(); let norm = norm3(d); d.map(|x| x / norm) };
-                let x: Vec<C64> = (0..n).map(|_| { let z = stream.normals(); C64::new(z[0], z[1]) }).collect();
-                let norm = crate::linalg::norm_sqr(&x);
-                // ⟨x|Ĥ_h|x⟩ − V_ref along the direction, and its second difference over a fortieth of the light's
-                // shortest length (its error (qh)²/12 of the curvature: 5·10⁻⁵).
-                let step = model.shortest_length(&lights) / 40.0;
-                let value = |s: f64| {
-                    let r: [f64; 3] = std::array::from_fn(|a| trap.centre[a] + s * direction[a]);
-                    let middle = model.assemble(cluster, r, 0.0, &lights);
-                    let mut h = Mat::zeros(n, n);
-                    middle.generator(&middle.path([0.0; 3], [0.0; 3]), 0.0, &mut h);
-                    let form: C64 = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).map(|(a, b)| x[a].conj() * h[(a, b)] * x[b]).sum();
-                    form.re / norm - model.potential(r, &reference, &prepared)
-                };
-                let curvature = (value(step) - 2.0 * value(0.0) + value(-step)) / (step * step);
-                largest = largest.max(curvature);
-                assert!(curvature <= bound * (1.0 + 1e-3), "cluster {cluster}: a held state's curvature {curvature} above the bound {bound}");
-            }
-        }
-        eprintln!("R8_R5051, every drive bare: the largest curvature found {largest:.3} rad/µs/µm², the bound {bound:.3}");
-        assert!(largest > 0.0 && bound.is_finite(), "{largest} {bound}");
     }
 
     /// A reach above the potential's far value is held within the trap's region (module documentation, # The trap's
