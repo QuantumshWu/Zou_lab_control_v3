@@ -349,7 +349,8 @@ impl Selected {
         let labels = &self.scene.request.states;
         let mut levels: Vec<String> = Vec::new();
         for &s in &self.rs.keep {
-            let label = labels[s].rsplit_once('-').map_or(labels[s].as_str(), |(level, _)| level).to_string();
+            // The level of a label manifold-F-m (`request::Level::parse`): its manifold and F, whatever m's sign.
+            let label = labels[s].splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
             if !levels.contains(&label) {
                 levels.push(label);
             }
