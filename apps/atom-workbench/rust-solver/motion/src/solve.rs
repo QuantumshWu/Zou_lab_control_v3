@@ -368,15 +368,15 @@
 //!
 //! # Stopping (SPEC §3)
 //! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
-//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, from the fold's readings at the pilot's states -- its
-//! held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the optical sector's booking, and c
+//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the two points' measurement booked at the pilot's states
+//! -- its held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the optical sector's booking, and c
 //! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what the run's
 //! unresolved atoms carry, read before each batch's looks (# The unresolved atoms) --; S the statistics' interval. The
 //! run stops where every one of them lies within its target: the test the ledger flags an output by, at the outputs
 //! (`Look::met`). The stop reads the run's standard errors, its unresolved atoms, and nothing else of its estimates. A
 //! look that no run's trajectories bring within its target -- its need beyond `MOST_TRAJECTORIES`, or A² + c² ≥ ε²
-//! (`Look::fits`): the run's own decisions hold the fold within its share at every point, and what they leave is the
-//! model's error booked -- is not chased: the ledger flags it.
+//! (`Look::fits`): the model's error booked is the selected P's measurement, which no number of trajectories lowers -- is
+//! not chased: the ledger flags it.
 //!
 //! The trajectories a look needs (`Look::need`): the statistics may take the room R² = ε² − A² − c², and fall as
 //! N^{−1/2}; on what is shown they are no less than the unseen share at N (estimate.rs `unseen`, `draws_for`). A batch
@@ -435,7 +435,7 @@
 //! product's batches each total is a message: in a solve shorter than `CHECKPOINT` the first message is the product's
 //! first total, after the pilot (SPEC §9). A message is made by loops that run on the trajectories' own pool, between
 //! two trajectories of a thread (`run_groups`). What runs no trajectories sends nothing and looks at no clock: the
-//! run's construction, the fold's readings at the states, the prices.
+//! run's construction, the model's error at the states, the prices.
 use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
@@ -1478,7 +1478,7 @@ fn booked_at(run: &Selected, _state: &State) -> Vec<Booking> {
     vec![Booking::of(run.error()); READINGS.len() + 1]
 }
 
-/// The states the model is read at and the fold's readings there (SPEC §5.2; module documentation, # Where the atoms
+/// The states the model is read at and the model's error there (SPEC §5.2; module documentation, # Where the atoms
 /// went), at the analysis times the groups `parts` are read at (`Part::at`). At every analysis time after t = 0, of
 /// every group:
 /// - every member that holds its atom there: the error of its rows, read at its state there;
@@ -1503,7 +1503,7 @@ struct Sampled {
     lost: Vec<bool>,
 }
 impl Sampled {
-    /// The fold's errors as the decisions read them (`Measured`).
+    /// The model's errors as the decisions read them (`Measured`).
     fn measured(&self) -> Measured<'_> {
         Measured { errors: &self.errors, output: &self.at, row: &self.row, lost: &self.lost }
     }
@@ -1625,7 +1625,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // The scout (module documentation, # The pipeline): the first member of every pilot group at both levels, screened.
     // Where its rung stands on its reads, its course by the run's work from here, priced at its states at its analysis
     // times -- the rung, or one below where that is expected to cost the run less: the product's trajectories its looks
-    // ask beside the fold's readings at those states (`Prices`).
+    // ask beside the model's error at those states (`Prices`).
     let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, messages);
     if matches!(scouting, Settled::Pending) {
         let here = {
@@ -1718,7 +1718,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // made (`pilot_reads`).
     crate::ledger::optical(&mut context.ledger, read.counts.optical);
     {
-        // The ledger's items: each of the fold's readings' error on what is shown and on T (its largest over the
+        // The ledger's items: each account's error on what is shown and on T (its largest over the
         // analysis times, weighed by the pilot's held share as the totals are; a time where the pilot holds no atom
         // weighs nothing: its errors are their bounds, `Measured::means`).
         let held: Vec<f64> = read.estimates.iter().map(|e| 1. - e.loss).collect();
@@ -1742,7 +1742,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     Ok(assemble(&context, &e, &reads, &l, &c, parts.len() as u64 * GROUP))
 }
 
-/// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, the fold's readings
+/// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, the model's error
 /// at its states (`Sampled`), and the model's error per time -- the readings' combination and the optical sector's
 /// booking on T.
 struct PilotRead {
@@ -1753,7 +1753,7 @@ struct PilotRead {
 }
 
 /// The pilot's reads (`PilotRead`) of its groups `pilot`:
-/// - the model's error at the pilot's states (SPEC §5.2; # The model): the fold's readings' combination per time, the
+/// - the model's error at the pilot's states (SPEC §5.2; # The model): its accounts' combination per time, the
 ///   held atoms' mean and the lost atoms' along their paths (`Measured::combined`);
 /// - the optical sector's noise (ledger.rs `optical`): its booking on T at every time, a part of the model's error.
 fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales) -> PilotRead {
@@ -2246,15 +2246,13 @@ impl Plan {
 /// Counts over trajectories: the steps taken -- a step with jumps is one step, whatever the pieces its path is handed
 /// on by (adapt.rs, # The jumps) --, and the trajectories that ended with no outcome (estimate.rs, # What is counted),
 /// by why: the scheme could not advance them (adapt.rs `advance`'s refusal), a step's optical sector made no K (step.rs
-/// `Refused::Optical`, by its `Unmade`), or the run's fold does not exist where they were (`run`: a start that lands
+/// `Refused::Optical`, by its `Unmade`), or the model gives no number where they were (`run`: a start that lands
 /// nowhere, a readout that is no number -- the trajectory's one exit, said, never carried on as a number); and the
 /// trajectories stopped where a state of theirs scattered beyond every state of the atom (`Domain::runaway`),
-/// unresolved from there on (`run`); and the steps whose held forward read its series' ratio at one between two
-/// decisions (step.rs `Trajectory::unresolved_steps`; unify2 §2.7: booked at ρ = 1 in the trajectory's books, counted).
+/// unresolved from there on (`run`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Counts {
     steps: u64,
-    unresolved: u64,
     /// The trajectories ended by their steps (`Fate::Refused`), by a jump that gives no photon, by the optical sector.
     refused: Stopped,
     failed: Stopped,
@@ -2267,7 +2265,6 @@ struct Counts {
 impl Counts {
     fn add(&mut self, o: &Counts) {
         self.steps += o.steps;
-        self.unresolved += o.unresolved;
         self.refused.add(&o.refused);
         self.failed.add(&o.failed);
         for (stopped, other) in self.unmade.iter_mut().zip(&o.unmade) {
@@ -2301,28 +2298,20 @@ impl Stopped {
     }
 }
 
-/// A pilot trajectory's state at a time read (model.rs `Sample`) with the trajectory's number: where
-/// the fold's readings are read and a step is priced (`booked_at`, `work_at`) -- with what of the trajectory a step from
-/// it reads: its next jump, its held forms, its representation of the fold (step.rs `Held`: shared, a handle) and its
-/// switches' balance.
+/// A pilot trajectory's state at a time read (model.rs `Sample`) with the trajectory's number: where the model's error
+/// is read and a step is priced (`booked_at`, `work_at`) -- with what of the trajectory a step from it reads: its next
+/// jump and its held forms.
 #[derive(Clone)]
 struct State {
     sample: Sample,
     index: u64,
-    /// The trajectory's jumps up to the state, their counted work (step.rs `Trajectory::jumped`), the threshold of its next
-    /// one and what its last landing owes it.
+    /// The trajectory's jumps up to the state, their counted work (step.rs `Trajectory::jumped`) and the threshold of its
+    /// next one.
     jumps: u32,
     jumped: f64,
     threshold: f64,
-    owed: Option<crate::step::Owed>,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
     forms: crate::step::Forms,
-    /// Its representation (step.rs `Trajectory::held`).
-    held: crate::step::Held,
-    /// Its next decision time, and whether a step of its cell was unresolved (step.rs `Trajectory::next`,
-    /// `Trajectory::unresolved_cell`: its account reads ρ = 1 there, `booked_at`).
-    next: f64,
-    unresolved: bool,
 }
 impl State {
     /// A trajectory's state as it stands.
@@ -2333,16 +2322,12 @@ impl State {
             jumps: t.jumps,
             jumped: t.jumped,
             threshold: t.threshold,
-            owed: t.owed.clone(),
             forms: t.forms.clone(),
-            held: t.held.clone(),
-            next: t.next,
-            unresolved: t.unresolved_cell,
         }
     }
 
     /// The trajectory at the state, as far as a step from it reads it (`step::priced`): its place, momentum, internal
-    /// state and time, its next jump's threshold, its held forms, its representation and its balance, and its streams.
+    /// state and time, its next jump's threshold, its held forms and its streams.
     fn trajectory(&self) -> Trajectory {
         let Sample { cluster, at, psi } = &self.sample;
         Trajectory {
@@ -2352,7 +2337,6 @@ impl State {
             cluster: *cluster,
             time: at.t,
             threshold: self.threshold,
-            owed: self.owed.clone(),
             jumps: self.jumps,
             scattered: [0.; 2],
             lost: None,
@@ -2363,11 +2347,6 @@ impl State {
             jumped: 0.,
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
-            model: [0.; crate::step::MODEL],
-            unresolved_steps: 0,
-            next: self.next,
-            unresolved_cell: self.unresolved,
-            held: self.held.clone(),
             forms: self.forms.clone(),
         }
     }
@@ -2554,7 +2533,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let _p = crate::prof::scope(crate::prof::SOLVE_TRAJECTORY);
     let sizes = [plan.times.len(), plan.reads.len()];
-    let mut t = Trajectory::begun(model, start.state, start.r, start.kappa, SEED, index, plan.cell);
+    let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
     // The time the run's fold is found not to exist for it (# Exits): at its start where its start lands nowhere.
     let nowhere = std::cell::Cell::new((!t.forms.held.iter().all(|x| x.is_finite()) || !t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite())).then_some(0.));
     let mut scratch = Scratch::default();
@@ -2578,7 +2557,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         let _p = crate::prof::scope(crate::prof::SOLVE_RECORD);
         let mut rows = [0.; STATES];
         if nowhere.get().is_none() {
-            rows = shown.copied().unwrap_or_else(|| model.readout(t.cluster, &t.point(), &t.psi, &t.held));
+            rows = shown.copied().unwrap_or_else(|| model.readout(t.cluster, &t.point(), &t.psi));
             if !rows.iter().all(|x| x.is_finite()) {
                 nowhere.set(Some(t.time));
             }
@@ -2680,7 +2659,6 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     let optical = [t.booked[0], t.booked[1], t.booked[2], -(t.pending[0][0] + t.pending[1][1] + t.pending[2][2])];
     let counts = Counts {
         steps,
-        unresolved: t.unresolved_steps as u64,
         refused: stopped(refused),
         failed: stopped(failed && !refused && unmade.is_none() && nowhere.is_none()),
         unmade: [Unmade::Schur, Unmade::Singular, Unmade::Unfinite].map(|why| stopped(unmade == Some(why))),
@@ -3128,7 +3106,7 @@ fn weighed(h: f64, error: f64) -> f64 {
     if error.is_finite() { h * error } else { f64::INFINITY }
 }
 
-/// What the pilot measured of the fold (SPEC §5.2; module documentation, # The model): the fold's readings and their
+/// What the pilot measured of the model (SPEC §5.2; module documentation, # The model): its accounts and their
 /// combination read at the states (`Sampled`: the rows one after another, a row the readings' errors on the populations
 /// and on T in `READINGS`' order, their combination last), each read's time, whether it reads a lost atom's fate.
 struct Measured<'a> {
@@ -3156,7 +3134,7 @@ impl Measured<'_> {
         })
     }
 
-    /// Per time the fold's error (`means`): at each read the state's readings combined (`booked_at`: its row's last, the
+    /// Per time the model's error (`means`): at each read the state's readings combined (`booked_at`: its row's last, the
     /// books' own combination), and their means.
     fn combined(&self, outputs: usize, estimates: &[Estimate]) -> Vec<[f64; 2]> {
         self.reduced(outputs, estimates, 1, &|row, out| out[0] = row[READINGS.len()].error).into_iter().map(|o| o[0]).collect()
@@ -3201,7 +3179,7 @@ impl Measured<'_> {
     }
 }
 
-/// The model's error booked per time (SPEC §4; module documentation, # The model): the fold's combined readings
+/// The model's error booked per time (SPEC §4; module documentation, # The model): the accounts combined
 /// measured at the states (`Measured::combined`), a population's at most 1; none at t = 0, the request's state.
 fn model_error(combined: &[[f64; 2]]) -> Vec<[f64; 2]> {
     combined.iter().enumerate().map(|(k, c)| if k == 0 { [0.; 2] } else { [probability_error(c[0]), c[1]] }).collect()
@@ -3536,9 +3514,6 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     // counted).
     for said in ended(counts, true) {
         s.approximations.flag(said);
-    }
-    if counts.unresolved > 0 {
-        s.approximations.flag(format!("保持的前向有 {} 步（共 {} 步）未解析：两次决定之间级数之比到 1，折叠在格内可能失去存在；这些步的误差不在折叠的读数内", counts.unresolved, counts.steps));
     }
     if let Some(t) = counts.runaway.since {
         s.approximations.flag(format!("{} 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 {}）：它们在那里停下，此后按停下时的状态计入，所占的比例全部计入误差", counts.runaway.count, when(t)));
@@ -4229,7 +4204,7 @@ mod tests {
             method: String::new(),
         };
         let unmade = [Stopped::default(), Stopped { count: 2, since: Some(14.) }, Stopped::default()];
-        let counts = Counts { steps: 0, unresolved: 0, refused: Stopped { count: 4, since: Some(11.) }, failed: Stopped { count: 3, since: Some(12.5) }, unmade, nowhere: Stopped { count: 6, since: Some(16.) }, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
+        let counts = Counts { steps: 0, refused: Stopped { count: 4, since: Some(11.) }, failed: Stopped { count: 3, since: Some(12.5) }, unmade, nowhere: Stopped { count: 6, since: Some(16.) }, runaway: Stopped { count: 5, since: Some(15.) }, optical: [0.0; 4] };
         let s = assemble(&context, &estimates, &estimates, &listed, &counts, 8);
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
@@ -4504,7 +4479,7 @@ mod tests {
     /// A state at the time t of the trajectory `index` with `jumps` jumps, each of a unit of counted work: no step reads it
     /// (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, jumped: f64::from(jumps), threshold: 0.5, owed: None, forms: crate::step::Forms::default(), held: crate::step::Held::default(), next: 0., unresolved: false }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, jumped: f64::from(jumps), threshold: 0.5, forms: crate::step::Forms::default() }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
@@ -4982,7 +4957,7 @@ mod tests {
         for (index, axis) in [(3u64, 0usize), (5, 1), (7, 2)] {
             let mut kappa = [0.; 3];
             kappa[axis] = speed;
-            let mut t = Trajectory::begun(&run, b, trap.centre, kappa, SEED, index, 4. * tau);
+            let mut t = Trajectory::new(&run, b, trap.centre, kappa, SEED, index);
             let mut path = adapt::Path::new(SEED, index, 4. * tau, 2);
             let mut scratch = Scratch::default();
             while t.time < 60. && t.lost.is_none() {
@@ -5001,7 +4976,7 @@ mod tests {
                 let mut t = s.clone();
                 for _ in 0..count {
                     let started = Instant::now();
-                    let Ok(m) = crate::step::Midway::new(&run, &t, h, None) else { break };
+                    let Ok(m) = crate::step::Midway::new(&run, &t, h) else { break };
                     let Ok(step) = m.attempt(&t, &crate::step::Brownian::STILL, &[], &mut scratch, &domain) else { break };
                     wall += started.elapsed().as_secs_f64();
                     for (_, price) in &step.prices {
@@ -5047,7 +5022,7 @@ mod tests {
         let picks: Vec<Pick> = states.iter().enumerate().map(|(i, state)| Pick { state, group: i, weight: 1. + i as f64, jumping: 1e5 * i as f64 }).collect();
         for tau in [0.2, 0.4335] {
             let counted = |from: &Trajectory| {
-                let (through, mut scratch) = (crate::step::Midway::new(&run, from, tau, None).unwrap(), Scratch::default());
+                let (through, mut scratch) = (crate::step::Midway::new(&run, from, tau).unwrap(), Scratch::default());
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap();
                 through.attempt(from, &crate::step::Brownian::STILL, &[], &mut scratch, &widest).unwrap().work
             };
@@ -5174,7 +5149,7 @@ mod tests {
                 let start = Trajectory::new(&run, b, trap.centre, kappa, SEED, (3 * i + a) as u64);
                 let middle: V3 = std::array::from_fn(|x| trap.centre[x] + 0.5 * TAU_GUARD * run.hbar_over_mass() * kappa[x]);
                 let excitation = {
-                    let m = run.middle(start.cluster, middle, 0., &start.held, false);
+                    let m = run.middle(start.cluster, middle, 0.);
                     let mut h = crate::linalg::Mat::zeros(start.psi.len(), start.psi.len());
                     crate::step::Middle::generator(&m, &crate::step::Middle::path(&m, kappa, [0.; 3]), 0., &mut h);
                     crate::model::testing::decay_rate(&h, &start.psi) / widest.0

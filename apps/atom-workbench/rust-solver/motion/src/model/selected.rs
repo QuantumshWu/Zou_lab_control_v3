@@ -70,7 +70,7 @@ use crate::model::{Beat, Cluster, Point, Quadratic, Scattering};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Component, Components, Key, Scene};
 use crate::select::Selection;
-use crate::step::{Emitted, Held, Internal, Optical};
+use crate::step::{Emitted, Internal, Optical};
 use crate::units::{hbar_over_mass, rounding, RAD_PER_US_PER_MHZ};
 
 /// The selected model of a run (module documentation): the scene, the fold on P, the selection's report, the frame,
@@ -922,15 +922,15 @@ impl crate::step::Dynamics for Selected {
         0
     }
 
-    fn middle(&self, _cluster: usize, r: [f64; 3], t: f64, _held: &Held, _decide: bool) -> SelectedMiddle<'_> {
+    fn middle(&self, _cluster: usize, r: [f64; 3], t: f64) -> SelectedMiddle<'_> {
         SelectedMiddle { model: self, r, t, nodes: RefCell::new(Vec::new()), half: Cell::new(None), made: Cell::new(0.0) }
     }
 
     /// A jump's photon: on the step's middle at the jump's time and place, or at a point on a middle made there.
-    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&SelectedMiddle<'m>, &Path, f64)>, psi: &[C64], held: &Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&SelectedMiddle<'m>, &Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         match on {
             Some((middle, path, s)) => middle.emitted(path, s, psi, draw),
-            None => self.middle(cluster, at.r, at.t, held, false).emitted(&Path { kappa: at.kappa, velocity: [0.0; 3] }, 0.0, psi, draw),
+            None => self.middle(cluster, at.r, at.t).emitted(&Path { kappa: at.kappa, velocity: [0.0; 3] }, 0.0, psi, draw),
         }
     }
 
@@ -945,7 +945,7 @@ impl crate::step::Dynamics for Selected {
         self.light.outside(at.r) && self.energy(cluster, at, psi) > 0.0
     }
 
-    fn readout(&self, _cluster: usize, at: &Point, psi: &[C64], _held: &Held) -> [f64; STATES] {
+    fn readout(&self, _cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
         self.rows(at, psi)
     }
 }

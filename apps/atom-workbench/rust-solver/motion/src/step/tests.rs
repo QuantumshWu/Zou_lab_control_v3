@@ -329,7 +329,7 @@ impl Dynamics for Atom {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
         let (n, v) = (self.n(), self.trap.expansion(r));
         let mut m = Mat::zeros(n, n);
         let mut g = zeros(n);
@@ -385,7 +385,7 @@ impl Dynamics for Atom {
         parts.insert(0, Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g });
         Parts { waves: self.cluster.waves.clone(), parts, folded: (!self.folded.is_empty()).then(|| self.folded_at(r)), optical: self.optical }
     }
-    fn emit<'m>(&'m self, _: usize, at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], _: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit<'m>(&'m self, _: usize, at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let n = self.n();
         // The one class: the folded light's amplitude on the ground state with its kick, or the excited state's decay
         // into the ground state, the same on every axis.
@@ -407,7 +407,7 @@ impl Dynamics for Atom {
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
         at.r.iter().map(|x| x * x).sum::<f64>().sqrt() > self.region && self.energy(cluster, at, psi) > 0.0
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut rows = [0.0; STATES];
         for (s, &state) in self.cluster.states.iter().enumerate() {
@@ -437,7 +437,7 @@ fn relative(a: &[f64], b: &[f64]) -> f64 {
 /// reaches; and the states read, each on the step's path.
 fn step_read<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, brownian: &step::Brownian, reads: &[f64], scratch: &mut step::Scratch) -> Result<(step::Step, Vec<Trajectory>), step::Refused> {
     let free = Trajectory { threshold: 0.0, ..from.clone() };
-    let mut step = step::Midway::new(model, &free, tau, Some(tau.abs()))?.attempt(&free, brownian, reads, scratch, &Everywhere)?;
+    let mut step = step::Midway::new(model, &free, tau)?.attempt(&free, brownian, reads, scratch, &Everywhere)?;
     step.end.threshold = from.threshold;
     let read = step
         .made
@@ -889,7 +889,7 @@ fn a_step_s_norm_reaches_a_threshold_where_the_path_s_does_whatever_the_detuning
             let model = Atom::new(hm, flat, beams.to_vec(), detuning, GAMMA);
             let mut start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, v / hm]);
             start.threshold = theta;
-            let taken = step::Midway::new(&model, &start, tau, Some(tau.abs())).unwrap().attempt(&start, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+            let taken = step::Midway::new(&model, &start, tau).unwrap().attempt(&start, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
             let length = taken.made.iter().find(|made| made.kick.is_some()).unwrap_or_else(|| panic!("Δτ {turns}, v {v}: no jump within the step")).state.time;
             let error = (length - at) * rate;
             // Without the decay: the norm after the step.
@@ -1131,7 +1131,7 @@ fn engine_diffusion(model: &Atom, v: f64, tau: f64, burn: usize, span: usize, co
             for s in 0..burn + span {
                 (t.r, t.kappa) = ([0.0, 0.0, z0 + v * t.time], [0.0, 0.0, v / hm]);
                 let brownian = step::Brownian::over(tau, &[stream.normals(), stream.normals()]);
-                let step = step::Midway::new(model, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
+                let step = step::Midway::new(model, &t, tau).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
                 if s >= burn {
                     sum += step.end.kappa[2] - v / hm;
                 }
@@ -1277,7 +1277,7 @@ fn the_jumps_are_at_the_roots_of_the_norm() {
 fn stepped<D: Dynamics>(model: &D, start: &Trajectory, tau: f64, end: f64) -> (Trajectory, Vec<f64>, usize) {
     let (mut t, mut scratch, mut times, mut most) = (start.clone(), step::Scratch::default(), Vec::new(), 0);
     for k in 1..=(end / tau).round() as usize {
-        let taken = step::Midway::new(model, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let taken = step::Midway::new(model, &t, tau).unwrap().attempt(&t, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
         times.extend(taken.made.iter().map(|made| made.state.time));
         most = most.max(taken.made.len());
         t = taken.end;
@@ -1309,7 +1309,7 @@ fn a_jump_is_made_inside_its_step_where_the_step_s_own_propagation_reaches_the_t
     let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
     let (mut twin, mut scratch, mut jumps, mut most, mut crossed, mut kept) = (start.clone(), step::Scratch::default(), 0, 0, 0, 0);
     for k in 1..=(end / tau) as usize {
-        let taken = step::Midway::new(&model, &twin, tau, Some(tau.abs())).unwrap().attempt(&twin, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let taken = step::Midway::new(&model, &twin, tau).unwrap().attempt(&twin, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
         let free = step_of(&model, &twin, tau, &mut step::Scratch::default()).unwrap();
         let below = (norm(&free.end.psi) / twin.threshold).ln();
         if below.abs() > 1e-9 {
@@ -1710,7 +1710,7 @@ impl Dynamics for Wells {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
         let (mut m, mut g) = (Mat::zeros(2, 2), zeros(2));
         for s in 0..2 {
             let gradient: [f64; 3] = std::array::from_fn(|a| (self.reference[a] + self.own[s][a]) * r[a]);
@@ -1721,7 +1721,7 @@ impl Dynamics for Wells {
         }
         Parts { waves: self.cluster.waves.clone(), parts: vec![Part { omega: 0.0, wave: [0.0; 3], generator: m, force: g }], folded: None, optical: false }
     }
-    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, _: &[C64], _: &step::Held, _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the wells scatter nothing")
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
@@ -1730,7 +1730,7 @@ impl Dynamics for Wells {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
         let mut rows = [0.0; STATES];
         for (row, z) in rows.iter_mut().zip(psi) {
             *row = z.norm_sqr();
@@ -1867,7 +1867,7 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
     let lambda = 0.5 * (d - (d * d + 4.0 * c.norm_sqr()).sqrt());
     let mut dressed = bare.clone();
     dressed.psi = [C64::ONE, c / (lambda - d)].into_iter().collect();
-    dressed.forms = model.forms(dressed.cluster, &dressed.point(), &dressed.psi, &dressed.held);
+    dressed.forms = model.forms(dressed.cluster, &dressed.point(), &dressed.psi);
     for (name, start) in [("dressed", dressed), ("bare", bare)] {
         let mut misses = Vec::new();
         for tau in [0.2, 0.1, 0.05] {
@@ -2075,7 +2075,7 @@ fn a_following_state_s_kick_has_the_curvature_of_the_level_it_follows() {
                 let (c, d) = (model.coupling(0, t.r) + model.coupling(1, t.r), -detuning);
                 let lambda = 0.5 * (d - d.signum() * (d * d + 4.0 * c.norm_sqr()).sqrt());
                 t.psi = [C64::ONE, c / (lambda - d)].into_iter().collect();
-                t.forms = model.forms(t.cluster, &t.point(), &t.psi, &t.held);
+                t.forms = model.forms(t.cluster, &t.point(), &t.psi);
                 let mut z = vec![t.r[2]];
                 for _ in 0..steps {
                     t = step_of(&model, &t, tau, &mut step::Scratch::default()).unwrap().end;
@@ -2253,7 +2253,7 @@ impl Dynamics for Synthetic {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
         let (n, v, k) = (self.cluster.states.len(), self.trap.expansion(r), &self.cluster.waves);
         // An entry a ← b of wave vector q: its own q + K_a − K_b, and its phase at the point.
         let wave = |a: usize, b: usize, q: [f64; 3]| -> ([f64; 3], C64) {
@@ -2295,7 +2295,7 @@ impl Dynamics for Synthetic {
         }
         Parts { waves: k.clone(), parts, folded: None, optical: false }
     }
-    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, _: &[C64], _: &step::Held, _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         unreachable!("the cost harness takes no jump")
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
@@ -2304,7 +2304,7 @@ impl Dynamics for Synthetic {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut rows = [0.0; STATES];
         for (s, z) in psi.iter().enumerate() {
@@ -2413,14 +2413,14 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     fn cluster_of(&self, ground: usize) -> usize {
         self.model.cluster_of(ground)
     }
-    fn middle(&self, cluster: usize, r: [f64; 3], t: f64, held: &step::Held, decide: bool) -> Self::Middle<'_> {
+    fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_> {
         let mut calls = self.calls.get();
         calls[1] += 1;
         self.calls.set(calls);
-        Probe { middle: self.model.middle(cluster, r, t, held, decide), calls: &self.calls }
+        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls }
     }
-    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], held: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
-        self.model.emit(cluster, at, on.map(|(probe, path, s)| (&probe.middle, path, s)), psi, held, draw)
+    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+        self.model.emit(cluster, at, on.map(|(probe, path, s)| (&probe.middle, path, s)), psi, draw)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
         self.model.energy(cluster, at, psi)
@@ -2428,8 +2428,8 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
         self.model.lost(cluster, at, psi)
     }
-    fn readout(&self, cluster: usize, at: &Point, psi: &[C64], held: &step::Held) -> [f64; STATES] {
-        self.model.readout(cluster, at, psi, held)
+    fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.model.readout(cluster, at, psi)
     }
     fn photon_work(&self) -> f64 {
         self.model.photon_work()
@@ -2438,12 +2438,11 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
 
 /// µs per item of each of the `passes` over `items` items, on this thread: every pass timed in batches of as many
 /// repetitions as take the clock a millisecond, 24 rounds, the least mean of each -- the machine's other work only adds.
-/// The batches taken in turn (`Order::Turn`): the machine's pace weighs on every pass alike, and each batch starts on what
-/// the others left in the caches; or each pass's rounds back to back (`Order::Apart`): each batch on what its own last
-/// left. A whole that is timed in turn against its parts timed so too is not their sum: a whole touches more than any of
-/// its parts and refills more after the others (wire4 item 2: a step on S2Q's one-state sets 20.6 µs back to back, 30 in
-/// turn with its parts; after 17 ms streaming 64 MB 24.9).
-fn microseconds<const N: usize>(items: usize, order: Order, passes: &mut [&mut dyn FnMut() -> f64; N]) -> [f64; N] {
+/// The batches taken in turn: the machine's pace weighs on every pass alike, and each batch starts on what the others
+/// left in the caches. A whole that is timed in turn against its parts timed so too is not their sum: a whole touches
+/// more than any of its parts and refills more after the others (wire4 item 2: a step on S2Q's one-state sets 20.6 µs
+/// back to back, 30 in turn with its parts; after 17 ms streaming 64 MB 24.9).
+fn microseconds<const N: usize>(items: usize, passes: &mut [&mut dyn FnMut() -> f64; N]) -> [f64; N] {
     let mut batch = |pass: usize, repetitions: usize| {
         let clock = std::time::Instant::now();
         for _ in 0..repetitions {
@@ -2460,18 +2459,8 @@ fn microseconds<const N: usize>(items: usize, order: Order, passes: &mut [&mut d
     });
     let mut least = [f64::INFINITY; N];
     let mut time = |pass: usize| least[pass] = least[pass].min(batch(pass, repetitions[pass]) / repetitions[pass] as f64);
-    match order {
-        Order::Turn => (0..24).for_each(|_| (0..N).for_each(&mut time)),
-        Order::Apart => (0..N).for_each(|pass| (0..24).for_each(|_| time(pass))),
-    }
+    (0..24).for_each(|_| (0..N).for_each(&mut time));
     least.map(|t| 1e6 * t / items as f64)
-}
-
-/// How `microseconds` takes its passes' batches.
-#[derive(Clone, Copy)]
-enum Order {
-    Turn,
-    Apart,
 }
 
 /// The densities' sums are made lane by lane with fused multiply-adds (`step::accumulate`). They are the plain sums
@@ -2547,7 +2536,7 @@ fn fitted(n: usize) -> super::Scratch {
 /// middle.
 fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> f64 {
     // The atoms whose middle does not exist (`Midway::new` refused) are said, not timed.
-    let held: Vec<Trajectory> = starts.iter().filter(|s| step::Midway::new(model, s, tau, None).is_ok()).cloned().collect();
+    let held: Vec<Trajectory> = starts.iter().filter(|s| step::Midway::new(model, s, tau).is_ok()).cloned().collect();
     if held.len() < starts.len() {
         eprintln!("{name}: {} of {} atoms' middles do not exist", starts.len() - held.len(), starts.len());
     }
@@ -2573,7 +2562,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .zip(&steps)
         .map(|(from, taken)| {
             let free = Trajectory { threshold: 0.0, ..from.clone() };
-            let through = step::Midway::new(model, &free, tau, Some(tau.abs())).unwrap();
+            let through = step::Midway::new(model, &free, tau).unwrap();
             let (r_h, kappa_h) = through.reached;
             let kappa = super::predicted(&from.forms, kappa_h, tau, from.time + 0.5 * tau);
             let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
@@ -2592,7 +2581,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             .zip(starts)
             .map(|(p, s)| {
                 let from = if crossing { p.crossed.clone() } else { Trajectory { threshold: 0.0, ..s.clone() } };
-                step::Midway::new(model, &from, tau, Some(tau.abs())).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut kept.borrow_mut(), &Everywhere).unwrap().end.kappa[0]
+                step::Midway::new(model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut kept.borrow_mut(), &Everywhere).unwrap().end.kappa[0]
             })
             .sum::<f64>()
     };
@@ -2614,11 +2603,10 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .collect();
     let [whole, reference, point, generator, force, tones, middle, propagated, root, scattering, readout, gradient, optical, pace] = microseconds(
         count,
-        Order::Turn,
         &mut [
             &mut || starts.iter().map(|s| step_of(model, s, tau, &mut kept.borrow_mut()).unwrap().end.kappa[0]).sum::<f64>(),
             &mut || pieces.iter().map(|p| model.reference(p.at.0).value).sum::<f64>(),
-            &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1, &step::Held::default(), false).states() as f64).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.middle(s.cluster, p.at.0, p.at.1).states() as f64).sum::<f64>(),
             &mut || {
                 pieces.iter().zip(&paths).for_each(|(p, path)| p.through.generator.generator(path, 0.2 * tau, &mut h));
                 h.data[0].re
@@ -2633,7 +2621,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || propagation(false),
             &mut || propagation(true),
             &mut || pieces.iter().zip(&paths).zip(starts).map(|((p, path), s)| p.through.generator.scattering(path, &s.psi).0.force[0]).sum::<f64>(),
-            &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi, &s.held)[0]).sum::<f64>(),
+            &mut || pieces.iter().zip(starts).map(|(p, s)| model.readout(s.cluster, &Point { r: p.at.0, kappa: p.kappa, t: p.at.1 }, &s.psi)[0]).sum::<f64>(),
             &mut || {
                 // As a step asks them (`step::optical`): at the middle, with their slope along the path where it is not still.
                 pieces.iter().zip(&paths).for_each(|(p, path)| {
@@ -2717,7 +2705,7 @@ fn atoms<D: Dynamics>(model: &D, count: u64) -> Vec<Trajectory> {
             let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(s.normal(), s.normal())).collect();
             let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
             t.psi = psi.iter().map(|z| *z / norm).collect();
-            t.forms = model.forms(t.cluster, &t.point(), &t.psi, &t.held);
+            t.forms = model.forms(t.cluster, &t.point(), &t.psi);
             t.threshold = f64::MIN_POSITIVE;
             t
         })
@@ -2850,7 +2838,7 @@ fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate:
                 let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
                 let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
                 t.psi = psi.iter().map(|z| *z / norm).collect();
-                t.forms = run.forms(t.cluster, &t.point(), &t.psi, &t.held);
+                t.forms = run.forms(t.cluster, &t.point(), &t.psi);
                 t.threshold = f64::MIN_POSITIVE;
                 t
             })
@@ -2922,7 +2910,7 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
         let mut rise = [0.0_f64; 3];
         let points: Vec<f64> = (0..=20).map(|k| -h + tau * k as f64 / 20.0).collect();
         for start in starts {
-            let through = step::Midway::new(run, start, tau, Some(tau.abs())).unwrap();
+            let through = step::Midway::new(run, start, tau).unwrap();
             let (r_h, kappa_h) = through.reached;
             let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
             let velocity = kappa.map(|k| run.hbar_over_mass() * k);
@@ -3150,11 +3138,11 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         let at = Point { r, kappa: [0.0; 3], t: 0.0 };
         let (norm, photon) = (psi[0].norm_sqr(), &model.made(r, &psi)[0]);
         let (weight, b) = (photon.weight() / norm, k * epsilon / (phase.cos().powi(2) + (epsilon * phase.sin()).powi(2)));
-        let kick = model.emit(0, &at, None, &psi, &step::Held::default(), &mut |_| Some(0)).expect("the one class").kick;
+        let kick = model.emit(0, &at, None, &psi, &mut |_| Some(0)).expect("the one class").kick;
         let expected = b.min(k);
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;
-        let middle = model.middle(0, at.r, at.t, &step::Held::default(), false);
+        let middle = model.middle(0, at.r, at.t);
         let (scattered, _) = middle.scattering(&middle.path(at.kappa, [0.0; 3]), &psi);
         let (mean, second) = (scattered.force[2] + weight * kick[2], scattered.diffusion[2][2] + weight * kick[2] * kick[2]);
         let closed = (k * c * c * epsilon, k * k * c * c * (phase.sin().powi(2) + (epsilon * phase.cos()).powi(2)));
@@ -3301,7 +3289,7 @@ fn a_scene_s_step_error_by_the_split() {
         let label = format!("{ground}+{}", n - ground);
         let falls = |e: &[f64; 3]| format!("{:.3e} {:.3e} {:.3e} (falls {:.1}, {:.1})", e[0], e[1], e[2], e[0] / e[1], e[1] / e[2]);
         // Each atom's path of the step of τ, its frame's start state and the path's own flow to the span's end.
-        let middles: Vec<_> = starts.iter().map(|s| step::Midway::new(run, s, tau, Some(tau.abs())).unwrap()).collect();
+        let middles: Vec<_> = starts.iter().map(|s| step::Midway::new(run, s, tau).unwrap()).collect();
         let cases: Vec<_> = starts
             .iter()
             .zip(&middles)
@@ -3434,7 +3422,7 @@ fn walk<D: Dynamics>(model: &D, start: Trajectory, count: usize, (shortest, long
         let mut tau = between(&mut lengths, shortest, longest);
         let step = loop {
             let brownian = step::Brownian::over(tau, &[noise.normals(), noise.normals()]);
-            match step::Midway::new(model, &t, tau, Some(tau.abs())).and_then(|middle| middle.attempt(&t, &brownian, &[], &mut scratch, &Everywhere)) {
+            match step::Midway::new(model, &t, tau).and_then(|middle| middle.attempt(&t, &brownian, &[], &mut scratch, &Everywhere)) {
                 Ok(step) => break step,
                 Err(e) => {
                     tau *= 0.5;
@@ -3574,7 +3562,7 @@ fn a_held_atom_s_mean_force_is_the_master_equation_s_with_the_trap_s_pull() {
             while t.time < burn + span - 1e-9 {
                 (t.r, t.kappa) = (r, [0.0; 3]);
                 let brownian = step::Brownian::over(tau, &[noise.normals(), noise.normals()]);
-                let step = step::Midway::new(&model, &t, tau, Some(tau.abs())).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
+                let step = step::Midway::new(&model, &t, tau).unwrap().attempt(&t, &brownian, &[], &mut scratch, &Everywhere).unwrap();
                 if t.time >= burn - 1e-9 {
                     let m = step.momentum();
                     for a in 0..3 {
@@ -3672,7 +3660,7 @@ impl Dynamics for Lindblad {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, r: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
+    fn middle(&self, _: usize, r: [f64; 3], _: f64) -> Parts {
         let n = self.cluster.states.len();
         let mut parts = vec![Part { omega: 0.0, wave: [0.0; 3], generator: self.still.clone(), force: zeros(n) }];
         for (q, x) in &self.beats {
@@ -3696,7 +3684,7 @@ impl Dynamics for Lindblad {
         }
         Parts { waves: self.cluster.waves.clone(), parts, folded: None, optical: false }
     }
-    fn emit<'m>(&'m self, _: usize, at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], _: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit<'m>(&'m self, _: usize, at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         let third = (1.0_f64 / 3.0).sqrt();
         let u: step::Internal = self.jump_at(at.r).apply(psi).into_iter().map(|z| z * third).collect();
         draw(&[3.0 * crate::linalg::norm_sqr(&u)])?;
@@ -3708,7 +3696,7 @@ impl Dynamics for Lindblad {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
         let mut rows = [0.0; STATES];
         for (s, z) in psi.iter().enumerate() {
@@ -3767,7 +3755,7 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
 /// most the survival can rise by over the step -- and its decay's size, ∫λ_max.
 fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64, f64) {
     let (n, h) = (start.psi.len(), 0.5 * tau);
-    let through = step::Midway::new(model, start, tau, Some(tau.abs())).unwrap();
+    let through = step::Midway::new(model, start, tau).unwrap();
     let (_, kappa_h) = through.reached;
     let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
     let along = super::Along::new(&through.generator, kappa, kappa.map(|k| model.hbar_over_mass() * k));
@@ -3803,7 +3791,7 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
 /// survival does not take.
 fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> f64 {
     let n = start.psi.len();
-    let through = step::Midway::new(model, start, tau, Some(tau.abs())).unwrap();
+    let through = step::Midway::new(model, start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
     super::pictured(&along, &mut scratch, tau, None).unwrap();
@@ -3900,12 +3888,12 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
             let reach = s.uniform();
             let r = s.direction().map(|x| x * reach);
             let psi = random_state(&mut s, n);
-            let middle = model.middle(0, r, 0.0, &step::Held::default(), false);
+            let middle = model.middle(0, r, 0.0);
             let mut h = Mat::zeros(n, n);
             middle.generator(&[0.0; 3], 0.0, &mut h);
             let (hazard, form, scale) = rates(&h, &psi);
             let mut jumps = 0.0;
-            let _ = model.emit(0, &Point { r, kappa: [0.0; 3], t: 0.0 }, None, &psi, &step::Held::default(), &mut |w| {
+            let _ = model.emit(0, &Point { r, kappa: [0.0; 3], t: 0.0 }, None, &psi, &mut |w| {
                 jumps = w.iter().sum();
                 None
             });
@@ -3927,7 +3915,7 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
                 middle.generator(&path, 0.0, &mut h);
                 let (hazard, form, scale) = rates(&h, &start.psi);
                 let mut jumps = 0.0;
-                let _ = dynamics.emit(cluster, &at, None, &start.psi, &step::Held::default(), &mut |w| {
+                let _ = dynamics.emit(cluster, &at, None, &start.psi, &mut |w| {
                     jumps = w.iter().sum();
                     None
                 });
@@ -3976,7 +3964,7 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
         let held = (gamma / (size * (n * waves) as f64)).sqrt();
         model.jumps.iter_mut().for_each(|(_, m)| *m = m.scaled(C64::real(held)));
         let r = s.direction().map(|x| x * s.uniform());
-        let parts = model.middle(0, r, 0.0, &step::Held::default(), false);
+        let parts = model.middle(0, r, 0.0);
         let along = super::Along::new(&parts, velocity.map(|v| v / RB), velocity);
         let mut scratch = fitted(n);
         let scale = super::pictured(&along, &mut scratch, tau, None).unwrap();
@@ -4223,7 +4211,7 @@ impl Dynamics for Grouped {
     fn cluster_of(&self, _: usize) -> usize {
         0
     }
-    fn middle(&self, _: usize, _: [f64; 3], _: f64, _: &step::Held, _: bool) -> Parts {
+    fn middle(&self, _: usize, _: [f64; 3], _: f64) -> Parts {
         let n = 4;
         let matrix = |entries: &[(usize, usize, C64)]| Mat::from_fn(n, n, |a, b| entries.iter().filter(|e| (e.0, e.1) == (a, b)).map(|e| e.2).sum());
         let hermitian = |entries: &[(usize, usize, C64)]| {
@@ -4244,7 +4232,7 @@ impl Dynamics for Grouped {
         }
         Parts { waves: vec![[0.0; 3]; n], parts, folded: None, optical: false }
     }
-    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, _: &[C64], _: &step::Held, _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, _: &[C64], _: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         None
     }
     fn energy(&self, _: usize, at: &Point, _: &[C64]) -> f64 {
@@ -4253,7 +4241,7 @@ impl Dynamics for Grouped {
     fn lost(&self, _: usize, _: &Point, _: &[C64]) -> bool {
         false
     }
-    fn readout(&self, _: usize, _: &Point, psi: &[C64], _: &step::Held) -> [f64; STATES] {
+    fn readout(&self, _: usize, _: &Point, psi: &[C64]) -> [f64; STATES] {
         let mut rows = [0.0; STATES];
         for (s, z) in psi.iter().enumerate() {
             rows[s] = z.norm_sqr();
@@ -4284,7 +4272,7 @@ fn a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is() {
         from.psi = start.iter().enumerate().map(|(s, z)| if s >= 2 { *z * C64::cis(theta * h) } else { *z }).collect();
         from.threshold = 0.0;
         let mut scratch = step::Scratch::default();
-        let taken = step::Midway::new(&model, &from, tau, Some(tau.abs())).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let taken = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
         let psi: Vec<C64> = taken.end.psi.iter().enumerate().map(|(s, z)| if s >= 2 { *z * C64::cis(theta * h) } else { *z }).collect();
         let kick: [f64; 3] = std::array::from_fn(|a| taken.end.kappa[a] - from.kappa[a]);
         (psi, kick, scratch.picture.beats.len())
@@ -4320,10 +4308,10 @@ impl Dynamics for Emitting {
     fn cluster_of(&self, ground: usize) -> usize {
         self.0.cluster_of(ground)
     }
-    fn middle(&self, c: usize, r: [f64; 3], t: f64, held: &step::Held, decide: bool) -> Parts {
-        self.0.middle(c, r, t, held, decide)
+    fn middle(&self, c: usize, r: [f64; 3], t: f64) -> Parts {
+        self.0.middle(c, r, t)
     }
-    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], _: &step::Held, draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
+    fn emit<'m>(&'m self, _: usize, _: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         draw(&[psi[1].norm_sqr() + psi[2].norm_sqr()])?;
         let mut amplitudes: [step::Internal; 3] = std::array::from_fn(|_| step::Internal::zeros(psi.len()));
         (amplitudes[0][0], amplitudes[1][0]) = (psi[1], psi[2]);
@@ -4335,8 +4323,8 @@ impl Dynamics for Emitting {
     fn lost(&self, c: usize, at: &Point, psi: &[C64]) -> bool {
         self.0.lost(c, at, psi)
     }
-    fn readout(&self, c: usize, at: &Point, psi: &[C64], held: &step::Held) -> [f64; STATES] {
-        self.0.readout(c, at, psi, held)
+    fn readout(&self, c: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
+        self.0.readout(c, at, psi)
     }
     fn photon_work(&self) -> f64 {
         7.0
@@ -4360,10 +4348,10 @@ fn a_step_s_price_is_its_count_item_by_item() {
     let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
     from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
     from.threshold = 0.0;
-    let free = step::Midway::new(&model, &from, tau, None).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+    let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
     from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
     let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]) };
-    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau, None).unwrap(), step::Scratch::default());
+    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
     through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
     counted.calls.set([0; 5]);
     let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
@@ -4371,7 +4359,7 @@ fn a_step_s_price_is_its_count_item_by_item() {
     let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
     assert_eq!((jumps, taken.prices.len()), (1, 1), "one jump inside the step, one stretch");
     let (_, price) = taken.prices[0];
-    let costs = model.middle(0, [0.0; 3], 0.0, &step::Held::default(), false).work();
+    let costs = model.middle(0, [0.0; 3], 0.0).work();
     assert_eq!(taken.work, price.work(costs), "the step's count is its stretch's price");
     let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
     eprintln!("calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);

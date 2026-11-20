@@ -109,8 +109,7 @@ fn the_selected_decay_is_its_photons() {
         let run = run_of(&request, &keep, errors);
         let (r, kappa) = POINTS[1];
         let n = keep.len();
-        let held = Held::default();
-        let middle = run.middle(0, r, 3.7, &held, false);
+        let middle = run.middle(0, r, 3.7);
         let path = middle.path(kappa, [0.0; 3]);
         let mut h = Mat::zeros(n, n);
         middle.generator(&path, 0.0, &mut h);
@@ -147,8 +146,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
         let mut rho = vec![C64::ZERO; n * n];
         crate::step::density(&psi, &mut rho);
         for (r, kappa) in POINTS {
-            let held = Held::default();
-            let middle = run.middle(0, r, 0.0, &held, false);
+            let middle = run.middle(0, r, 0.0);
             let path = middle.path(kappa, [0.0; 3]);
             let ehrenfest = middle.force(&path, 0.0, &rho);
             let node = middle.node(&path, 0.0);
@@ -224,7 +222,7 @@ fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
             let mut scratch = Scratch::default();
             let (mut made, mut from) = (0.0, None);
             while t.time < burn + window - 1e-9 {
-                let step = Midway::new(&run, &t, tau, None).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step");
+                let step = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step");
                 let m = step.momentum();
                 t = step.end;
                 if from.is_some() {
@@ -251,40 +249,58 @@ fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
     assert!(beyond.is_empty(), "velocities beyond the interval: {beyond:?}");
 }
 
+/// A solve's first result (`solve::solve_on` on the run), the solve stopped there (its callback's own unwind, caught
+/// here), with its wall time: T, the populations and the loss at every output said, and whether all are numbers.
+fn first_result(name: &str, request: &Request, run: &Selected) -> bool {
+    struct First;
+    let clock = std::time::Instant::now();
+    let mut first: Option<crate::solve::Solution> = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::solve::solve_on(request, run, &mut |s, _| {
+            first = Some(s.clone());
+            std::panic::panic_any(First);
+        })
+    }));
+    let result = match outcome {
+        Ok(Ok(s)) => s,
+        Ok(Err(why)) => panic!("{name}: refused: {why}"),
+        Err(payload) if payload.is::<First>() => first.expect("the first result"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
+    let last = result.temperature_total_uk.len() - 1;
+    let finite = result.populations.iter().flatten().chain(&result.loss_probability).chain(&result.temperature_total_uk).all(|x| x.is_finite());
+    eprintln!(
+        "{name}: first result after {:.1} s: {} trajectories, τ {:.4} µs; T_total {:.3} µK at the last output, loss {:.4}, rows {:?}; all numbers {finite}",
+        clock.elapsed().as_secs_f64(),
+        result.trajectories,
+        result.time_step_us,
+        result.temperature_total_uk[last],
+        result.loss_probability[last],
+        result.populations[last].iter().enumerate().filter(|(_, x)| **x > 1e-3).map(|(s, x)| format!("{}:{x:.3}", request.states[s])).collect::<Vec<_>>()
+    );
+    finite
+}
+
 /// The six scenes' first checkpoint (RUSTPLAN §6 C2): each scene's solve on PYSEL's P (V3E_SCENE one of them) to its first
-/// result, which gives T, the populations and the loss at every output, all numbers, no panic. The solve is stopped at
-/// that result (its callback's own unwind, caught here). Said: the result's T, rows, loss, trajectories and step.
+/// result, which gives T, the populations and the loss at every output, all numbers, no panic.
 #[test]
 #[ignore]
 fn the_six_scenes_first_checkpoint_is_numbers() {
-    struct First;
     for (name, request, keep, errors) in scenes() {
         let run = run_of(&request, &keep, errors);
-        let clock = std::time::Instant::now();
-        let mut first: Option<crate::solve::Solution> = None;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::solve::solve_on(&request, &run, &mut |s, _| {
-                first = Some(s.clone());
-                std::panic::panic_any(First);
-            })
-        }));
-        let result = match outcome {
-            Ok(Ok(s)) => s,
-            Ok(Err(why)) => panic!("{name}: refused: {why}"),
-            Err(payload) if payload.is::<First>() => first.expect("the first result"),
-            Err(payload) => std::panic::resume_unwind(payload),
-        };
-        let last = result.temperature_total_uk.len() - 1;
-        let finite = result.populations.iter().flatten().chain(&result.loss_probability).chain(&result.temperature_total_uk).all(|x| x.is_finite());
-        eprintln!(
-            "{name}: first result after {:.1} s: {} trajectories, τ {:.4} µs; T_total {:.3} µK at the last output, loss {:.4}, rows {:?}; all numbers {finite}",
-            clock.elapsed().as_secs_f64(),
-            result.trajectories,
-            result.time_step_us,
-            result.temperature_total_uk[last],
-            result.loss_probability[last],
-            result.populations[last].iter().enumerate().filter(|(_, x)| **x > 1e-3).map(|(s, x)| format!("{}:{x:.3}", request.states[s])).collect::<Vec<_>>()
-        );
-        assert!(finite, "{name}: a number that is none");
+        assert!(first_result(name, &request, &run), "{name}: a number that is none");
     }
+}
+
+/// The default scene's first solve (RUSTPLAN §6 C2): the app's start-up scene (V3E_DEFAULT: a native request's path, the
+/// accept kit's S1_5ms) to its first result, all numbers. 临时入口：P 取全部 32 态（`select::choose` 落地前；合并时改回
+/// `choose`）.
+#[test]
+#[ignore]
+fn the_default_scene_s_first_solve_is_numbers() {
+    let path = std::env::var("V3E_DEFAULT").expect("V3E_DEFAULT: the default scene's native request");
+    let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+    let chief = crate::solve::chief(&request);
+    let run = keeping(&request, (0..STATES).collect(), None, std::array::from_fn(|s| f64::from(u8::from(s == chief))));
+    assert!(first_result("default", &request, &run), "a number that is none");
 }

@@ -20,19 +20,6 @@
 //! periods), where a step chosen from the last step's error drifts. The steps are then the run's length over τ: one
 //! propagation a step, whatever the jumps.
 //!
-//! # The decision times
-//! The model's representation changes at the run's decision times alone (DESIGN §11.3; model/fold/run.rs # The
-//! representation and the decision times): the ends of the Brownian path's cells (# The Brownian path), the coarsest
-//! level's grid, the caller's. A step decides where its end reaches or passes a cell's end -- the cell its end lies in
-//! is past the one its start lies in: integers, no comparison of times --, the cell's width its interval to the next,
-//! at its end: on the end state at its own point, a forward made there (`step::Midway::decided`); every step's middle
-//! holds the representation (`step::Midway::new`). So every level of a trajectory, and the halves a refused step is
-//! taken at, decide at the same times on their own states at their own points there, and switch there: two levels
-//! differ by the step's error alone. (Decided at the step's middle, on the end state, a level's switch took the state
-//! at the end by the fold τ/2 before it -- an error ∇T·vτ/2 of the first order between levels, measured: BRIEF_STEP4A
-//! 4c; the outer node at the end holds the middle's decomposition and H, its response first-order off too, and holds no
-//! readings: BRIEF_STEP4B (a).)
-//!
 //! # The reads
 //! A trajectory is read at the caller's times (the outputs) where they fall, inside a step, from what the step knows
 //! between its ends (step.rs, # The path between a step's ends): the internal state its propagation has there, the
@@ -105,27 +92,12 @@ use crate::random::Stream;
 use crate::step::{test_loss, Brownian, Domain, Dynamics, Midway, Refused, Scratch, Segment, Trajectory};
 use crate::units::rounding;
 
-/// The run's counts, said with each result and at the solve's end (`counted`; FOLDAPI §3: the safety net counts, never changes the
-/// representation): the steps taken and refused, the decisions made with their time (ns) and the states they held (sum),
-/// the time in steps (ns), the decisions' readings beyond the share and the folds that did not exist at a decision.
-static COUNTS: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
+/// The run's counts, said with each result and at the solve's end (`counted`): the steps taken and refused, and the
+/// time in steps (ns).
+static COUNTS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 pub(crate) const STEPS: usize = 0;
 pub(crate) const REFUSED: usize = 1;
-pub(crate) const DECISIONS: usize = 2;
-pub(crate) const DECIDING: usize = 3;
-pub(crate) const STATES: usize = 4;
-pub(crate) const STEPPING: usize = 5;
-pub(crate) const BEYOND: usize = 6;
-pub(crate) const ABSENT: usize = 7;
-/// The averaged terms' folded second order's reading (model/fold/run.rs # The averaged terms folded): its largest (the
-/// bits of a positive f64, ordered as the number) and the decisions where it is beyond the share.
-pub(crate) const FOLDED: usize = 8;
-pub(crate) const FOLDED_BEYOND: usize = 9;
-
-/// The largest of count i and x (a positive f64 by its bits).
-pub(crate) fn most(i: usize, x: f64) {
-    COUNTS[i].fetch_max(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
-}
+pub(crate) const STEPPING: usize = 2;
 
 /// Adds x to count i (`COUNTS`).
 pub(crate) fn count(i: usize, x: u64) {
@@ -136,20 +108,7 @@ pub(crate) fn count(i: usize, x: u64) {
 /// process), else read as they stand (a result's).
 pub(crate) fn counted(tally: bool) -> String {
     let g: Vec<u64> = COUNTS.iter().map(|c| if tally { c.swap(0, std::sync::atomic::Ordering::Relaxed) } else { c.load(std::sync::atomic::Ordering::Relaxed) }).collect();
-    let (steps, decisions) = (g[STEPS].max(1), g[DECISIONS].max(1));
-    format!(
-        "运行计数：步 {}（拒 {}），每步 {:.1} µs；格端决定 {}（每次 {:.1} µs，平均 {:.1} 态）；格端读数超份额 {} 次，格端折叠不存在 {} 次；平均项折叠的读数最大 {:.2e}，超份额 {} 次",
-        g[STEPS],
-        g[REFUSED],
-        1e-3 * g[STEPPING] as f64 / steps as f64,
-        g[DECISIONS],
-        1e-3 * g[DECIDING] as f64 / decisions as f64,
-        g[STATES] as f64 / decisions as f64,
-        g[BEYOND],
-        g[ABSENT],
-        f64::from_bits(g[FOLDED]),
-        g[FOLDED_BEYOND]
-    ) + &crate::prof::report()
+    format!("运行计数：步 {}（拒 {}），每步 {:.1} µs", g[STEPS], g[REFUSED], 1e-3 * g[STEPPING] as f64 / g[STEPS].max(1) as f64) + &crate::prof::report()
 }
 
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
@@ -281,11 +240,6 @@ pub fn advance<D: Dynamics>(
     each: &mut dyn FnMut(&Segment, f64),
 ) -> Result<(), Refused> {
     let mut next = at.partition_point(|&time| time <= trajectory.time);
-    // The next decision time (# The decision times): the end of the cell the trajectory stands in, where its own is behind
-    // it (a jump into another set looks over the cell to it: step.rs `Trajectory::next`).
-    if trajectory.next <= trajectory.time {
-        trajectory.next = ((trajectory.time / path.cell).floor() + 1.0) * path.cell;
-    }
     while trajectory.lost.is_none() && trajectory.time < to && trajectory.time < stop {
         let rest = to - trajectory.time;
         // The step taken from here: τ or the run's rest -- the rest too where a step of τ would end within the grid's
@@ -299,11 +253,9 @@ pub fn advance<D: Dynamics>(
             // path has it: the bin's end it ends at, or its own cut. The times read inside the step go with it.
             let (brownian, beyond) = path.reach(trajectory.time + length);
             let end = if length == rest { to } else { beyond.at };
-            // A decision time where the step's end reaches or passes a cell's end (# The decision times).
-            let decision = (beyond.bin >> path.depth > path.cursor.bin >> path.depth).then_some(path.cell);
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
             let clock = std::time::Instant::now();
-            let tried = Midway::new(model, trajectory, length, decision).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain));
+            let tried = Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain));
             count(STEPPING, clock.elapsed().as_nanos() as u64);
             count(if tried.is_ok() { STEPS } else { REFUSED }, 1);
             match tried {
