@@ -106,9 +106,14 @@ fn name(label: &str) -> String {
     if head == "ground" { format!("g{f}") } else { format!("e{}{f}", &head[1..]) }
 }
 
-/// The six scenes' requests (the directory `V3D_REQ`: scratchpad reqprec/req), each with its name in the prototype's
-/// files.
+/// The six scenes (`requests`).
 fn six() -> Vec<(&'static str, Scene)> {
+    requests().into_iter().map(|(name, request)| (name, Scene::new(&request).unwrap())).collect()
+}
+
+/// The six scenes' requests (the directory `V3D_REQ`: scratchpad reqprec/req; `PSTATE_SCENE` one of them), each with
+/// its name in the prototype's files.
+fn requests() -> Vec<(&'static str, crate::request::Request)> {
     let dir = std::path::PathBuf::from(std::env::var("V3D_REQ").expect("V3D_REQ: the six scenes' requests (scratchpad reqprec/req)"));
     [("tilt0.json", "tilt0"), ("tilt2.json", "tilt2"), ("R4_LIN_4.json", "r4"), ("GMD1C_1ms.json", "gmd1c"), ("PGC3D_1ms.json", "pgc3d"), ("TET_1ms.json", "tet")]
         .into_iter()
@@ -121,7 +126,7 @@ fn six() -> Vec<(&'static str, Scene)> {
             for form in line["model"]["motion"]["outsideForms"].as_array_mut().unwrap() {
                 form.as_object_mut().unwrap().entry("transitions").or_insert(serde_json::json!([]));
             }
-            (name, Scene::new(&crate::request::Request::from_native(&line).unwrap()).unwrap())
+            (name, crate::request::Request::from_native(&line).unwrap())
         })
         .collect()
 }
@@ -323,7 +328,8 @@ fn choose_cost() {
 /// Off the two points (PSTATE's risk, a measurement; `V3D_REQ`, `PSTATE_SCENE` one scene): the gate's measures of the
 /// base and of P against the full reference where the gate does not look -- the static points moved along each axis by
 /// λ/8 and λ/4 (λ the carrier's wavelength: the light's pattern there, its polarization and intensity, the mirror
-/// states' cancellations broken), the tweezer as the scene has it there and off; at rest. Each place's model on that
+/// states' cancellations broken), the tweezer as the scene has it there and off; the focus at a quarter, half and three
+/// quarters of the tweezer's intensity; at rest. Each place's model on that
 /// place's own frame, as the gate's own points. (At the thermal momentum along z the full reference of R4 at the centre
 /// outgrew 8 GB; tilt0 and tilt2 there: pstate.status.md.)
 #[test]
@@ -341,6 +347,11 @@ fn off_the_two_points() {
                 places.push((format!("{part} {axis}, tweezer"), r, 1.0));
                 places.push((format!("{part} {axis}, dark"), r, 0.0));
             }
+        }
+        // Between the two points: the focus at a quarter, half and three quarters of the tweezer's intensity (its
+        // amplitude the square root), where its light shift moves the levels part way.
+        for part in [0.25_f64, 0.5, 0.75] {
+            places.push((format!("tweezer at {part} intensity"), [0.0; 3], part.sqrt()));
         }
         let base = selection.base().keep.clone();
         let rows: Vec<(PointError, PointError)> = places
@@ -369,6 +380,188 @@ fn off_the_two_points() {
             }
         }
         eprintln!("  {:<20} {:.2e} {:.2e} {:.2e} | {:.2e} {:.2e} {:.2e}", "largest", most[0][0], most[0][1], most[0][2], most[1][0], most[1][1], most[1][2]);
+    }
+}
+
+/// One initial component's preparation well, as the solve's (solve.rs `Prepared`, private there; the same public parts):
+/// the run's prepared potential on the component's ground populations, its trap by the one descent from the trap
+/// light's shortest length (solve.rs `trap_of` with the trap light lit), the trap light's beams and the envelope's peak.
+struct Well<'a> {
+    light: &'a crate::field::Light,
+    potential: crate::model::selected::Potential<'a>,
+    trap: crate::model::Trap,
+}
+
+impl<'a> Well<'a> {
+    fn new(run: &'a crate::model::selected::Selected, populations: [f64; GROUND]) -> Well<'a> {
+        let (light, potential) = (run.light(), run.prepared(&populations));
+        let k = light.frequencies[light.trap].beams.iter().map(|&l| light.beams[l].wave_number).fold(0., f64::max);
+        let trap = crate::model::potential::descend(1. / k, crate::step::Dynamics::hbar_over_mass(run), &|r| light.outside(r), &|r| potential.rounded(r)).expect("the prepared trap");
+        Well { light, potential, trap }
+    }
+}
+
+impl crate::ensemble::Well for Well<'_> {
+    fn potential(&self, r: [f64; 3]) -> (f64, [f64; 3]) {
+        let q = self.potential.at(r);
+        (q.value, q.gradient)
+    }
+    fn trap(&self) -> ([f64; 3], [[f64; 3]; 3], [f64; 3]) {
+        (self.trap.centre, self.trap.axes, self.trap.frequencies)
+    }
+    fn envelope(&self) -> (Vec<crate::field::Geometry>, f64) {
+        (self.light.frequencies[self.light.trap].beams.iter().map(|&l| self.light.beams[l]).collect(), self.potential.peak())
+    }
+}
+
+/// The run's domain, as the solve's (solve.rs `Widest`, private there): a hazard above the fastest excited state's decay
+/// is a runaway.
+struct Widest(f64);
+
+impl crate::step::Domain for Widest {
+    fn runaway(&self, hazard: f64) -> bool {
+        hazard > self.0
+    }
+}
+
+/// One trajectory's end (`the_first_checkpoint_in_pairs`): F=1's and F=2's populations and the kinetic temperature
+/// where the atom is held, whether it is lost, its jumps, its start; and F=1's and F=2's populations at every output
+/// it is held at (none after).
+#[derive(Clone, Debug)]
+struct End {
+    populations: Option<[f64; 2]>,
+    lost: bool,
+    temperature: Option<f64>,
+    jumps: u32,
+    start: [f64; 3],
+    outputs: Vec<Option<[f64; 2]>>,
+}
+
+impl End {
+    /// F=1's and F=2's mean over the outputs from `from` (µs) on, where it is held at every one of them.
+    fn mean_from(&self, times: &[f64], from: f64) -> Option<[f64; 2]> {
+        let held: Vec<[f64; 2]> = times.iter().zip(&self.outputs).filter(|(t, _)| **t >= from).map(|(_, x)| *x).collect::<Option<_>>()?;
+        let n = held.len() as f64;
+        Some([held.iter().map(|x| x[0]).sum::<f64>() / n, held.iter().map(|x| x[1]).sum::<f64>() / n])
+    }
+}
+
+/// The first checkpoint in pairs (the coordinator's check of PSTATE's P, a measurement; `V3D_REQ`, `PSTATE_SCENE` one
+/// scene, `PSTATE_TAU` the step in µs -- the first result's --): the first result's trajectories -- the scout's, the
+/// first member of each pilot group (solve.rs: group numbers from MOST_TRAJECTORIES / GROUP, index = number·GROUP) --
+/// each on its own streams by its index (solve.rs `SEED`: its start by `Ensemble::draw`, its jumps, its Brownian path),
+/// run on the whole-level base's model and on P's (`Selected::new` on the selection with that P: the run as the solve
+/// makes it, which reads P alone), each advanced by the run's integrator (adapt.rs `advance`) at the same step to the
+/// last output. Per trajectory at the end: F=1's and F=2's populations of the held atom, lost or not, its kinetic
+/// temperature (ħ/m)|κ|²/(3k_B); and F=1's and F=2's means over the request's outputs (after t = 0, and over the
+/// second half) -- the same trajectories read at every output, as the result reads them; per quantity the pairs'
+/// differences (P − base), their mean and standard error; and the first output where a pair's F=1 parts by 0.05.
+#[test]
+#[ignore]
+fn the_first_checkpoint_in_pairs() {
+    use crate::step::Dynamics;
+    let tau: f64 = std::env::var("PSTATE_TAU").expect("PSTATE_TAU: the first result's step (µs)").parse().unwrap();
+    for (scene_name, request) in requests() {
+        let scene = Scene::new(&request).unwrap();
+        let mut selection = choose(&scene).unwrap();
+        let whole = Selection { keep: selection.base().keep.clone(), candidates: selection.candidates[..selection.whole].to_vec(), ..selection.clone() };
+        // `PSTATE_REMOVE` (labels, comma-separated): the second run on the base less these instead of on P (which removed
+        // state does it).
+        if let Ok(gone) = std::env::var("PSTATE_REMOVE") {
+            let gone: Vec<&str> = gone.split(',').collect();
+            selection.keep = whole.keep.iter().copied().filter(|&s| !gone.contains(&request.states[s].as_str())).collect();
+            eprintln!("{scene_name}: the second run on the base less {gone:?}");
+        }
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let runs: Vec<crate::model::selected::Selected> =
+            [whole, selection].into_iter().map(|s| crate::model::selected::Selected::new(Scene::new(&request).unwrap(), s, reference).unwrap()).collect();
+        let hm = crate::units::hbar_over_mass(request.mass_kg);
+        let initial = crate::solve::components(&request);
+        let decay = crate::model::far::decay(&request);
+        let domain = Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., f64::max));
+        let end = *request.times_us.last().unwrap();
+        let group = crate::ensemble::GROUP;
+        let first = crate::units::MOST_TRAJECTORIES / group;
+        let indices: Vec<u64> = (first..first + crate::solve::pilot_size() / group).map(|g| g * group).collect();
+        let manifold = |f: &str| -> Vec<usize> { (0..STATES).filter(|&s| request.states[s].starts_with(&format!("ground-{f}-"))).collect() };
+        let (one, two) = (manifold("1"), manifold("2"));
+        let clock = Instant::now();
+        let ends: Vec<Vec<End>> = runs
+            .iter()
+            .map(|run| {
+                let wells: Vec<Well> = initial.iter().map(|&(s, _)| Well::new(run, crate::solve::alone(s))).collect();
+                let components: Vec<(usize, f64, &dyn crate::ensemble::Well)> = initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn crate::ensemble::Well)).collect();
+                let ensemble = crate::ensemble::Ensemble::new(&components, request.temperature_uk, hm).unwrap();
+                let starts: Vec<(u64, crate::ensemble::Start)> = indices.iter().map(|&index| (index, ensemble.draw(crate::solve::SEED, index))).collect();
+                starts
+                    .into_par_iter()
+                    .map(|(index, start)| {
+                        let mut t = crate::step::Trajectory::new(run, start.state, start.r, start.kappa, crate::solve::SEED, index);
+                        let mut scratch = crate::step::Scratch::default();
+                        let mut path = crate::adapt::Path::new(crate::solve::SEED, index, 2. * tau, 1);
+                        let mut outputs: Vec<Option<[f64; 2]>> = vec![None; request.times_us.len()];
+                        let mut read = |k: usize, t: &crate::step::Trajectory, shown: Option<&[f64; STATES]>| {
+                            let r = shown.copied().unwrap_or_else(|| run.readout(t.cluster, &t.point(), &t.psi));
+                            outputs[k] = Some([one.iter().map(|&s| r[s]).sum::<f64>(), two.iter().map(|&s| r[s]).sum::<f64>()]);
+                        };
+                        let advanced = crate::adapt::advance(run, &domain, tau, &mut t, &mut scratch, &mut path, end, end, &request.times_us, &mut read, &mut |_, _| {});
+                        let lost = t.lost.is_some();
+                        let held = advanced.is_ok() && !lost;
+                        let rows = held.then(|| run.readout(t.cluster, &t.point(), &t.psi));
+                        End {
+                            populations: rows.map(|r| [one.iter().map(|&s| r[s]).sum::<f64>(), two.iter().map(|&s| r[s]).sum::<f64>()]),
+                            lost,
+                            temperature: held.then(|| hm * t.kappa.iter().map(|k| k * k).sum::<f64>() / (3. * crate::units::KT_PER_UK)),
+                            jumps: t.jumps,
+                            start: start.r,
+                            outputs,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        eprintln!(
+            "{scene_name}: {} trajectories (the scout's) at τ {tau} µs to {end} µs, the base P {} and P {}, {:.1} s",
+            indices.len(), runs[0].rs.keep.len(), runs[1].rs.keep.len(), clock.elapsed().as_secs_f64()
+        );
+        let said = |x: &End| match x.populations {
+            Some(q) => format!("F1 {:.4} F2 {:.4} T {:7.3} µK jumps {:5}", q[0], q[1], x.temperature.unwrap(), x.jumps),
+            None => format!("{} jumps {:5}", if x.lost { "lost" } else { "failed" }, x.jumps),
+        };
+        for (i, (b, p)) in ends[0].iter().zip(&ends[1]).enumerate() {
+            eprintln!("  #{}: base {} | P {}", indices[i], said(b), said(p));
+        }
+        let apart = ends[0].iter().zip(&ends[1]).map(|(b, p)| (0..3).map(|a| (b.start[a] - p.start[a]).abs()).fold(0., f64::max)).fold(0., f64::max);
+        eprintln!("  the pairs' starts apart by at most {apart:.2e} µm");
+        let times = &request.times_us;
+        let parted: Vec<String> = ends[0]
+            .iter()
+            .zip(&ends[1])
+            .map(|(b, p)| {
+                let k = b.outputs.iter().zip(&p.outputs).position(|(x, y)| matches!((x, y), (Some(x), Some(y)) if (x[0] - y[0]).abs() > 0.05));
+                k.map_or("never".into(), |k| format!("{:.0}", times[k]))
+            })
+            .collect();
+        eprintln!("  the pairs' F=1 first apart by 0.05 at (µs): {}", parted.join(" "));
+        let quantities: [(&str, &dyn Fn(&End) -> Option<f64>); 9] = [
+            ("F=1 at the end", &|x| x.populations.map(|p| p[0])),
+            ("F=2 at the end", &|x| x.populations.map(|p| p[1])),
+            ("F=1 over the outputs", &|x| x.mean_from(times, times[1]).map(|p| p[0])),
+            ("F=2 over the outputs", &|x| x.mean_from(times, times[1]).map(|p| p[1])),
+            ("F=1 over the second half", &|x| x.mean_from(times, 0.5 * end).map(|p| p[0])),
+            ("F=2 over the second half", &|x| x.mean_from(times, 0.5 * end).map(|p| p[1])),
+            ("lost", &|x| Some(f64::from(u8::from(x.lost)))),
+            ("T at the end (µK)", &|x| x.temperature),
+            ("jumps", &|x| Some(f64::from(x.jumps))),
+        ];
+        for (what, q) in quantities {
+            let d: Vec<(f64, f64)> = ends[0].iter().zip(&ends[1]).filter_map(|(b, p)| Some((q(b)?, q(p)?))).collect();
+            let n = d.len() as f64;
+            let (mb, mp) = (d.iter().map(|x| x.0).sum::<f64>() / n, d.iter().map(|x| x.1).sum::<f64>() / n);
+            let md = mp - mb;
+            let se = (d.iter().map(|x| (x.1 - x.0 - md).powi(2)).sum::<f64>() / (n - 1.) / n).sqrt();
+            eprintln!("  {what:<24} base {mb:.4} P {mp:.4}: P − base {md:+.4} ± {se:.4} (standard error of {} pairs; {:.1}σ)", d.len(), if se > 0. { md / se } else { 0. });
+        }
     }
 }
 
