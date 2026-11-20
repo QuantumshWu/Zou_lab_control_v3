@@ -8,6 +8,8 @@
 //! - `r1prop_refused`: the steps the decomposition refuses (`spectral::Refusal`), by why, at a step and at its halves.
 //! - `r1prop_remainder`: the remainder estimate (`Picture::remainder`) against the flow.
 //! - `r1prop_solve`: the probe and the pilot as the solve runs them, their messages' times.
+//! - `r1prop_quadrature`: the kick's one panel at the quotients' bandwidth against brute force, by kind of piece.
+//! - `r1prop_jumps`: the jumps' times and the states they act on against the flow of the step's own generator.
 
 use crate::model::selected::Selected;
 use crate::request::Request;
@@ -317,5 +319,303 @@ fn r1prop_solve() {
             Err(_) => "the product began".to_string(),
         };
         println!("R1-SOLVE {name} ended at {:.1} s: {how}", clock.elapsed().as_secs_f64());
+    }
+}
+
+/// The old rule's node count over a width at a bandwidth (until 2026-11-20, step.rs `plan`): rules of 2 to 64 nodes,
+/// panels within each rule's phase x_m (Davis & Rabinowitz's bound at the unit round-off), the fewest nodes.
+fn old_nodes(width: f64, bandwidth: f64) -> usize {
+    let u = crate::units::UNIT_ROUNDOFF;
+    let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
+    let mut least = usize::MAX;
+    for m in 2..=64usize {
+        let ln = ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
+        let phase = ((u.ln() + ln) / (2 * m) as f64).exp();
+        let panels = ((bandwidth * width.abs() / phase).ceil() as usize).max(1);
+        least = least.min(m * panels);
+        if panels == 1 {
+            break;
+        }
+    }
+    least
+}
+
+/// The kick's quadrature on a piece against brute force (NODES/CARRIER's nodesbench): the three nodes' Lagrange sums of
+/// the densities x x†/‖x‖² over [a, b] (`Sums` without tones), by the engine's one panel at the quotients' bandwidth
+/// (`Picture::quotient`) and by 32-node Gauss panels each 4 rad of it, 8 more (`split` times as many: its self-check).
+/// Returns the sums of each and the nodes the engine's took.
+fn piece_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, split: usize) -> ([Vec<crate::linalg::C64>; 3], [Vec<crate::linalg::C64>; 3], usize) {
+    use crate::linalg::{norm_sqr, C64};
+    let n = picture.states();
+    let mut x = [C64::ZERO; super::super::STATES];
+    let mut sums = vec![0.0; 2 * n * super::super::row(n) * super::super::SUMS];
+    let mut nodes = 0;
+    for (u, w) in super::super::quadrature(a, b, picture.quotient, super::super::FORMS, 2) {
+        picture.at(u, &mut x[..n]);
+        super::super::Sums { still: false, h, tones: &[] }.gather(u, w, &x[..n], None, &mut sums);
+        nodes += 1;
+    }
+    let engine: [Vec<C64>; 3] = std::array::from_fn(|j| {
+        let mut m = vec![C64::ZERO; n * n];
+        super::super::whole(&sums, j, n, &mut m);
+        m
+    });
+    let rule = crate::special::gauss_legendre(32);
+    let count = split * ((picture.quotient * (b - a).abs() / 4.0).ceil() as usize + 8);
+    let width = (b - a) / count as f64;
+    let mut brute: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+    for p in 0..count {
+        for &(t, g) in &rule {
+            let u = a + (p as f64 + 0.5 + 0.5 * t) * width;
+            picture.at(u, &mut x[..n]);
+            let norm = norm_sqr(&x[..n]);
+            let s = u / h;
+            let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
+            for (j, sum) in brute.iter_mut().enumerate() {
+                let f = 0.5 * width * g * lagrange[j] / norm;
+                for r in 0..n {
+                    let xr = x[r] * f;
+                    for c in 0..n {
+                        sum[r * n + c] += xr * x[c].conj();
+                    }
+                }
+            }
+        }
+    }
+    (engine, brute, nodes)
+}
+
+/// The integration to round-off (R1-PROP item 5; acceptance 2): per scene and τ of R1PROP_TAUS (0.3256, 0.948), a walk
+/// from the moving point (trajectory 3) at that τ, R1PROP_STEPS steps (24); on each step's picture three kinds of
+/// piece -- the step's start state over the step (plain), the state a jump of the step left over what was left of it
+/// (after a jump), and the bare start (the trajectory's first step) --: the sums by the engine's one panel at ν_Q against
+/// brute force, the worst per kind of S (per unit width), H = Σ_j tr(Γ_j S_j), K = Σ_j Re tr(Ĝ(s_j) S_j) over its
+/// largest component, H(a, u*) to u* = a + 0.618 w on its own panel (the root's span); the brute force against itself
+/// at twice its panels; the nodes against the old rule's at the forms' bandwidth; ν_Q/B; ν_Q's time and count.
+#[test]
+#[ignore]
+fn r1prop_quadrature() {
+    use crate::linalg::C64;
+    use crate::step::Middle;
+    use super::super::{pictured, predicted, Along, SUMS};
+    let taus = list("R1PROP_TAUS", "0.3256,0.948");
+    let steps = env("R1PROP_STEPS", 24.0) as usize;
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let h = 0.5 * tau;
+            let mut t = start(&run, &request, chief, 3);
+            let mut scratch = Scratch::default();
+            // Per kind: pieces, worst [S, H, K, H(u*)], brute's self-check, nodes, old nodes, ν_Q/B sum, ν_Q µs and count.
+            let mut tally = [(0usize, [0.0f64; 4], 0.0f64, 0usize, 0usize, 0.0f64, f64::INFINITY, 0.0f64); 3];
+            for k in 0..steps {
+                let Ok(midway) = Midway::new(&run, &t, tau) else { break };
+                let taken = midway.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Everywhere);
+                let n = t.psi.len();
+                let kappa_m = predicted(&t.forms, midway.reached.1, tau, t.time + h);
+                let along = Along::new(&midway.generator, kappa_m, kappa_m.map(|k| midway.hbar_over_mass * k));
+                // The pieces: (kind, launch time from the middle, the frame's state there).
+                let mut pieces = vec![(if k == 0 { 2 } else { 0 }, -h, along.turned(&t.psi, -h, true)[..n].to_vec())];
+                if let Ok(step) = &taken {
+                    if let Some(made) = step.made.iter().find(|m| m.kick.is_some() && m.state.cluster == t.cluster) {
+                        let u = (made.state.time - t.time) - h;
+                        if u < h {
+                            pieces.push((1, u, along.turned(&made.state.psi, u, true)[..n].to_vec()));
+                        }
+                    }
+                }
+                for (kind, from, x) in pieces {
+                    let mut s = Scratch::default();
+                    s.fit(n, SUMS);
+                    if pictured(&along, &mut s, tau, Some(&x)).is_err() {
+                        continue;
+                    }
+                    let picture = &mut s.picture;
+                    picture.launch(from, &x);
+                    let (_, counted) = crate::spectral::tests::quotient_of(picture, from);
+                    let us = (0..5)
+                        .map(|_| {
+                            let clock = std::time::Instant::now();
+                            std::hint::black_box(crate::spectral::tests::quotient_of(picture, from));
+                            clock.elapsed().as_secs_f64() * 1e6
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    let (engine, brute, nodes) = piece_sums(picture, from, h, h, 1);
+                    let (_, check, _) = piece_sums(picture, from, h, h, 2);
+                    let inner = from + 0.618 * (h - from);
+                    let (engine_in, brute_in, _) = piece_sums(picture, from, inner, h, 1);
+                    let width = (h - from).abs();
+                    let apart = |x: &[Vec<C64>; 3], y: &[Vec<C64>; 3]| x.iter().zip(y).flat_map(|(a, b)| a.iter().zip(b).map(|(p, q)| (*p - *q).abs())).fold(0.0, f64::max);
+                    let picture = &*picture;
+                    // Γ = i(G − G†) of the generator at the node, the picture's parabola of the static group.
+                    let hazard = |s: &[Vec<C64>; 3]| {
+                        let mut hz = 0.0;
+                        for (sj, u) in s.iter().zip([-h, 0.0, h]) {
+                            let at = |q: usize| picture.base.data[q] + picture.ends[0].data[q] * u + picture.ends[1].data[q] * (u * u);
+                            for a in 0..n {
+                                for b in 0..n {
+                                    let gamma = C64::I * (at(a * n + b) - at(b * n + a).conj());
+                                    hz += (gamma * sj[b * n + a]).re;
+                                }
+                            }
+                        }
+                        hz
+                    };
+                    let kick = |s: &[Vec<C64>; 3]| {
+                        let mut f = [0.0; 3];
+                        for (sj, u) in s.iter().zip([-h, 0.0, h]) {
+                            let g = along.middle.force(&along.path, u, sj);
+                            for c in 0..3 {
+                                f[c] += g[c];
+                            }
+                        }
+                        f
+                    };
+                    let (ke, kb) = (kick(&engine), kick(&brute));
+                    let scale = kb.iter().map(|x| x.abs()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
+                    let errors = [apart(&engine, &brute) / width, (hazard(&engine) - hazard(&brute)).abs(), ke.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max) / scale, (hazard(&engine_in) - hazard(&brute_in)).abs()];
+                    let entry = &mut tally[kind];
+                    entry.0 += 1;
+                    for (w, e) in entry.1.iter_mut().zip(errors) {
+                        *w = w.max(e);
+                    }
+                    entry.2 = entry.2.max(apart(&brute, &check) / width);
+                    entry.3 += nodes;
+                    entry.4 += old_nodes(h - from, picture.bandwidth).max(super::super::FORMS);
+                    entry.5 += picture.quotient / picture.bandwidth.max(f64::MIN_POSITIVE);
+                    entry.6 = entry.6.min(us);
+                    entry.7 = entry.7.max(counted);
+                }
+                match taken {
+                    Ok(step) => t = step.end,
+                    Err(_) => break,
+                }
+            }
+            for (kind, (pieces, worst, check, nodes, old, ratio, us, counted)) in tally.iter().enumerate() {
+                if *pieces == 0 {
+                    continue;
+                }
+                println!(
+                    "R1-QUAD {name} tau {tau} {}: {pieces} pieces | worst S {:.1e} H {:.1e} K {:.1e} H(u*) {:.1e} | brute's check {check:.1e} | nodes {:.1} a piece against the old rule's {:.1} ({:.2}) | nu_Q/B {:.2} | nu_Q {us:.1} us, {counted:.0} counted",
+                    ["plain", "after a jump", "start"][kind],
+                    worst[0],
+                    worst[1],
+                    worst[2],
+                    worst[3],
+                    *nodes as f64 / *pieces as f64,
+                    *old as f64 / *pieces as f64,
+                    *nodes as f64 / *old as f64,
+                    ratio / *pieces as f64
+                );
+            }
+        }
+    }
+}
+
+/// The jumps' times and the states they act on (acceptance 3): per scene and τ of R1PROP_TAUS (0.326, 0.163), a walk
+/// from the moving point (trajectory 3) at τ, R1PROP_STEPS steps (12); at each, its start state's step with the jump's
+/// threshold set where the flow of the step's own generator -- the picture's parabola and tones, RK4 at R1PROP_RK steps
+/// over 0.948 µs (400000), its norm the survival -- crosses it at 0.6 of the step: the jump's time as the step makes it
+/// against the flow's root, as ln N's error there (the time's error times the hazard), and the state the jump acts on
+/// (the propagation's at the step's root, its direction) against the flow's direction there.
+#[test]
+#[ignore]
+fn r1prop_jumps() {
+    use crate::linalg::{norm_sqr, C64};
+    use super::super::{pictured, predicted, Along, STATES, SUMS};
+    let taus = list("R1PROP_TAUS", "0.326,0.163");
+    let (steps, rk) = (env("R1PROP_STEPS", 12.0) as usize, env("R1PROP_RK", 400000.0));
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let h = 0.5 * tau;
+            let mut t = start(&run, &request, chief, 3);
+            let mut scratch = Scratch::default();
+            let (mut worst_time, mut worst_state, mut count) = (0.0_f64, 0.0_f64, 0);
+            for _ in 0..steps {
+                let Ok(midway) = Midway::new(&run, &t, tau) else { break };
+                let n = t.psi.len();
+                let kappa_m = predicted(&t.forms, midway.reached.1, tau, t.time + h);
+                let along = Along::new(&midway.generator, kappa_m, kappa_m.map(|k| midway.hbar_over_mass * k));
+                let launched = along.turned(&t.psi, -h, true);
+                let mut s = Scratch::default();
+                s.fit(n, SUMS);
+                if pictured(&along, &mut s, tau, Some(&launched[..n])).is_ok() {
+                    let picture = &mut s.picture;
+                    let generator = |u: f64| -> Vec<C64> {
+                        let mut g: Vec<C64> = (0..n * n).map(|q| picture.base.data[q] + picture.ends[0].data[q] * u + picture.ends[1].data[q] * (u * u)).collect();
+                        for tone in &picture.beats {
+                            for (member, beat) in tone.members.iter().zip([tone.beat, -tone.beat]) {
+                                let p = C64::cis(beat * u);
+                                for (q, g) in g.iter_mut().enumerate() {
+                                    *g += p * (member[0].data[q] + member[1].data[q] * u + member[2].data[q] * (u * u));
+                                }
+                            }
+                        }
+                        g
+                    };
+                    let slope = |u: f64, y: &[C64]| -> Vec<C64> {
+                        let g = generator(u);
+                        (0..n).map(|i| (0..n).map(|j| g[i * n + j] * y[j]).sum::<C64>() * C64::new(0.0, -1.0)).collect()
+                    };
+                    // The flow from the launch, its states kept along: (u, x(u)).
+                    let count_rk = ((rk * tau / 0.948).ceil() as usize).max(20000);
+                    let dt = tau / count_rk as f64;
+                    let mut y: Vec<C64> = launched[..n].to_vec();
+                    let mut path = vec![(-h, y.clone())];
+                    for i in 0..count_rk {
+                        let u = -h + i as f64 * dt;
+                        let k1 = slope(u, &y);
+                        let y2: Vec<C64> = y.iter().zip(&k1).map(|(a, b)| *a + *b * (0.5 * dt)).collect();
+                        let k2 = slope(u + 0.5 * dt, &y2);
+                        let y3: Vec<C64> = y.iter().zip(&k2).map(|(a, b)| *a + *b * (0.5 * dt)).collect();
+                        let k3 = slope(u + 0.5 * dt, &y3);
+                        let y4: Vec<C64> = y.iter().zip(&k3).map(|(a, b)| *a + *b * dt).collect();
+                        let k4 = slope(u + dt, &y4);
+                        for q in 0..n {
+                            y[q] += (k1[q] + k2[q] * 2.0 + k3[q] * 2.0 + k4[q]) * (dt / 6.0);
+                        }
+                        path.push((u + dt, y.clone()));
+                    }
+                    // The threshold where the flow's survival is at 0.6 of the step (its norm from the start's).
+                    let first = norm_sqr(&launched[..n]);
+                    let mark = (0.6 * count_rk as f64) as usize;
+                    let theta = norm_sqr(&path[mark].1) / first * norm_sqr(&t.psi);
+                    if theta < norm_sqr(&t.psi) * (1.0 - 1e-9) {
+                        let mut from = t.clone();
+                        from.threshold = theta;
+                        if let Ok(step) = midway.attempt(&from, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere) {
+                            if let Some(made) = step.made.iter().find(|m| m.kick.is_some()) {
+                                let u = (made.state.time - t.time) - h;
+                                // The flow's root: where its survival is θ, between the kept states, linear in ln N.
+                                let log = |x: &[C64]| (norm_sqr(x) / first * norm_sqr(&t.psi)).ln();
+                                let k = path.iter().position(|(_, x)| log(x) <= theta.ln()).unwrap_or(path.len() - 1).max(1);
+                                let (l0, l1) = (log(&path[k - 1].1), log(&path[k].1));
+                                let root = path[k - 1].0 + (theta.ln() - l0) / (l1 - l0) * dt;
+                                let rate = (l0 - l1) / dt;
+                                // The states the jump acts on: the propagation's at its root, the flow's at the flow's root.
+                                picture.launch(-h, &launched[..n]);
+                                let mut x = [C64::ZERO; STATES];
+                                picture.at(u, &mut x[..n]);
+                                let j = ((root + h) / dt).round() as usize;
+                                let reference = &path[j.min(path.len() - 1)].1;
+                                let (nx, nr) = (norm_sqr(&x[..n]).sqrt(), norm_sqr(reference).sqrt());
+                                let overlap: C64 = x[..n].iter().zip(reference).map(|(a, b)| a.conj() * *b).sum();
+                                let phase = if overlap.abs() > 0.0 { overlap / overlap.abs() } else { C64::ONE };
+                                let apart = x[..n].iter().zip(reference).map(|(a, b)| (*a * phase / nx - *b / nr).norm_sqr()).sum::<f64>().sqrt();
+                                worst_time = worst_time.max(((u - root) * rate).abs());
+                                worst_state = worst_state.max(apart);
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+                match midway.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Everywhere) {
+                    Ok(step) => t = step.end,
+                    Err(_) => break,
+                }
+            }
+            println!("R1-JUMP {name} tau {tau}: {count} jumps; the time's error as ln N's, at the most {worst_time:.2e}; the state's direction at the most {worst_state:.2e} (the flow's states {:.1e} µs apart)", tau / ((rk * tau / 0.948).ceil().max(20000.0)));
+        }
     }
 }

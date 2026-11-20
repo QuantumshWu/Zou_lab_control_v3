@@ -281,7 +281,9 @@
 //! norm, which with a decay is a sum of the pairs' exponentials of its own -- ringing wherever the state holds a fast
 //! pair's two states --, and a quotient of two such sums has no closed form. (The forms on the unnormalized state have
 //! one, pair by pair: the moments above. They would serve where the norm is one, which is no cluster that scatters.) A
-//! state there costs n exponentials and two products of n², against a hop's series and its exponential before.
+//! state there costs n exponentials and two products of n², against a hop's series and its exponential before. The
+//! quotient's own bandwidth, the forms' with the norm's ringing and its harmonics to the round-off, is the launch's
+//! (`Picture::quotient`, `quotient_from`): what the step's quadrature is laid at (step.rs, # The quadrature's tolerance).
 //!
 //! # The sums
 //! The picture's products -- the changes' change of basis (R⁻¹A)R, the following's D X, X D_s and its second pass, the
@@ -545,6 +547,15 @@ pub struct Picture {
     /// The bandwidth of the forms ⟨x|·|x⟩ on a state propagated by Ĥ₀ and followed (rad/µs): max|λ_a* − λ_b| -- their
     /// frequencies and decay rates -- and the followed classes' beats' spread.
     pub bandwidth: f64,
+    /// The bandwidth of the quotients ⟨x|·|x⟩/⟨x|x⟩ the step integrates over what is left of it from the last launch
+    /// (rad/µs; `quotient`, # What follows the generator's own frequencies): the forms' with the norm's ringing and its
+    /// harmonics to the round-off. And the eigenvectors' overlaps |(R†R)_ab| (R's columns of unit norm), n², what the
+    /// norm rings by.
+    pub quotient: f64,
+    overlaps: Vec<f64>,
+    /// The quotient's terms' items, (weight, frequency): the numerator's pairs and the norm's ringing (`quotient_from`).
+    numerator: Vec<(f64, f64)>,
+    ringing: Vec<(f64, f64)>,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
 }
@@ -597,6 +608,10 @@ impl Default for Picture {
             held: Vec::new(),
             coupled: Vec::new(),
             bandwidth: 0.0,
+            quotient: 0.0,
+            overlaps: Vec::new(),
+            numerator: Vec::new(),
+            ringing: Vec::new(),
             work: 0.0,
         }
     }
@@ -922,6 +937,7 @@ impl Picture {
             }
             self.hopped.resize(size, false);
             self.coupled.resize(size, false);
+            self.overlaps.resize(size, 0.0);
             self.reached.resize(n, false);
             self.held.resize(n, false);
             self.pivots.resize(n, 0);
@@ -1121,6 +1137,12 @@ impl Picture {
             *l = *value + scalar;
         }
         self.work += e.work;
+        // The eigenvectors' overlaps, what the norm rings by (`quotient`): R†R, n³.
+        linalg::adjoint_product(&e.vectors.data, &e.vectors.data, (n, n, n), &mut self.product[..n * n]);
+        for (o, z) in self.overlaps.iter_mut().zip(&self.product[..n * n]) {
+            *o = z.abs();
+        }
+        self.work += (n * n * n) as f64;
         lay(&e.vectors.data, n, &mut self.right);
         lay(&e.inverse.data, n, &mut self.left);
         if self.moving {
@@ -1838,6 +1860,140 @@ impl Picture {
             self.rate(h, end, &mut rest[..n]);
         }
         self.path = path;
+        self.quotient = self.quotient_from(from);
+    }
+
+    /// The bandwidth of the quotients a launch's piece integrates, from the time `from` to the step's end (module
+    /// documentation, # What follows the generator's own frequencies): to the round-off u of the forms' scale, on the
+    /// launch's coordinates m. In the eigenbasis the state is d(s) = e^{−iΛs} m (s from the launch, the following and
+    /// the hops' slow change apart), its norm N = Σ_ab d_a* (R†R)_ab d_b, R's columns of unit norm: the diagonal
+    /// D(s) = Σ_a |m_a|² e^{2 Im λ_a s} and the ringing O of the pairs a ≠ b. A form's quotient is
+    /// (1/D) Σ_ab d_a* F_ab d_b Σ_k (−O/D)^k: a sum of terms, each a numerator pair's times k ringing pairs', of the
+    /// weights p_ab = |m_a||m_b| e^{(Im λ_a + Im λ_b)s}/D(s) (the numerator's) and |(R†R)_ab| p_ab (the ringing's), at most
+    /// their largest over the piece -- log p_ab is concave in s (a line less a log-sum-exp), so within its two ends'
+    /// tangents --, and of the frequencies |λ_a* − λ_b| (the forms' bandwidth's pairs, their decays in) added. The terms
+    /// beyond the frequency V weigh in all at most e^{−σV} N(σ)/(1 − O(σ)) for any σ > 0 with O(σ) < 1, N(σ) and O(σ) the
+    /// weights' sums at e^{σν} (Chernoff's bound on the series' generating function): V the least over σ of
+    /// (ln N(σ) − ln(1 − O(σ)) + ln 1/u)/σ, at the root of its derivative (Newton within a bracket: the root is one, the
+    /// function's numerator convex). A tone's forms are summed at its beat and a followed class moves the frequencies by
+    /// its beat: V with the largest beat and the followed beats' spread. Where the ringing weighs as much as the diagonal,
+    /// O(0) ≥ 1, the series has no sum, and 1/N is analytic in a strip of half the fastest pair's ringing period about
+    /// the real axis: its tail e^{−bν} at the round-off, (2/π) ln(1/u) times the fastest pair's frequency. Its count: the
+    /// pairs' weights and per Newton step the sums with their two derivatives, an exponential and six multiply-adds an
+    /// item, counted as seven.
+    fn quotient_from(&mut self, from: f64) -> f64 {
+        let n = self.n;
+        let width = (self.half - from).abs();
+        let (mut m, mut rates) = ([0.0; crate::model::STATES], [0.0; crate::model::STATES]);
+        for a in 0..n {
+            (m[a], rates[a]) = (self.path[a].abs(), self.lambda[a].im);
+        }
+        // D and D' at the piece's two ends.
+        let ends = [0.0, width].map(|s| {
+            let (mut d, mut slope) = (0.0, 0.0);
+            for a in (0..n).filter(|&a| self.held[a]) {
+                let term = m[a] * m[a] * (2.0 * rates[a] * s).exp();
+                d += term;
+                slope += 2.0 * rates[a] * term;
+            }
+            (d, slope)
+        });
+        if !(ends[0].0 > 0.0 && ends[1].0 > 0.0) {
+            return self.bandwidth;
+        }
+        // The items: (weight, frequency), the numerator's and the ringing's.
+        let (mut numerator, mut ringing) = (std::mem::take(&mut self.numerator), std::mem::take(&mut self.ringing));
+        numerator.clear();
+        ringing.clear();
+        for a in (0..n).filter(|&a| self.held[a] && m[a] > 0.0) {
+            for b in (a..n).filter(|&b| self.held[b] && m[b] > 0.0) {
+                let line = |s: f64, (d, slope): (f64, f64)| (m[a].ln() + m[b].ln() + (rates[a] + rates[b]) * s - d.ln(), rates[a] + rates[b] - slope / d);
+                let ((f0, s0), (f1, s1)) = (line(0.0, ends[0]), line(width, ends[1]));
+                let top = if s0 <= 0.0 {
+                    f0
+                } else if s1 >= 0.0 {
+                    f1
+                } else {
+                    let t = (f1 - s1 * width - f0) / (s0 - s1);
+                    f0 + s0 * t
+                };
+                let (weight, nu) = (top.min(0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
+                let twice = if a == b { 1.0 } else { 2.0 };
+                numerator.push((twice * weight, nu));
+                if a != b {
+                    let o = self.overlaps[a * n + b];
+                    if o > 0.0 {
+                        ringing.push((twice * o * weight, nu));
+                    }
+                }
+            }
+        }
+        let mut count = (numerator.len() * 12) as f64;
+        let log = -UNIT_ROUNDOFF.ln();
+        let sums = |items: &[(f64, f64)], sigma: f64| {
+            items.iter().fold([0.0; 3], |[w, w1, w2], &(p, nu)| {
+                let e = p * (sigma * nu).exp();
+                [w + e, w1 + nu * e, w2 + nu * nu * e]
+            })
+        };
+        let fastest = numerator.iter().map(|&(_, nu)| nu).fold(0.0, f64::max);
+        let total: f64 = ringing.iter().map(|&(p, _)| p).sum();
+        let shift = self.beats.iter().map(|tone| tone.beat.abs()).fold(0.0, f64::max) + {
+            let (low, high) = self.classes.iter().filter(|class| class.followed && self.moving).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
+            high - low
+        };
+        let v = if total >= 1.0 {
+            2.0 / std::f64::consts::PI * log * fastest
+        } else if ringing.is_empty() {
+            // No ringing: the frequency above which the numerator's terms weigh within the round-off.
+            numerator.sort_by(|x, y| y.1.total_cmp(&x.1));
+            let mut above = 0.0;
+            numerator.iter().find(|&&(p, _)| {
+                above += p;
+                above > UNIT_ROUNDOFF
+            }).map_or(0.0, |&(_, nu)| nu)
+        } else {
+            // F(σ) = ln N − ln(1 − O) + ln 1/u, φ(σ) = σF′ − F, φ′ = σF″ > 0; V = F(σ*)/σ* at φ(σ*) = 0.
+            let f = |sigma: f64| {
+                let ([w, w1, w2], [o, o1, o2]) = (sums(&numerator, sigma), sums(&ringing, sigma));
+                let rest = 1.0 - o;
+                if !(rest > 0.0) {
+                    return None;
+                }
+                let value = w.ln() - rest.ln() + log;
+                let first = w1 / w + o1 / rest;
+                let second = w2 / w - (w1 / w).powi(2) + o2 / rest + (o1 / rest).powi(2);
+                Some((value, first, second))
+            };
+            let (mut lo, mut hi) = (0.0_f64, f64::INFINITY);
+            let mut sigma = 1.0 / fastest.max(f64::MIN_POSITIVE);
+            let mut best = f64::INFINITY;
+            for _ in 0..64 {
+                count += (7 * (numerator.len() + ringing.len())) as f64;
+                let Some((value, first, second)) = f(sigma) else {
+                    hi = sigma;
+                    sigma = 0.5 * (lo + hi);
+                    continue;
+                };
+                best = best.min(value / sigma);
+                let phi = sigma * first - value;
+                if phi < 0.0 {
+                    lo = sigma;
+                } else {
+                    hi = sigma;
+                }
+                let next = sigma - phi / (sigma * second);
+                let next = if next > lo && next < hi { next } else if hi.is_finite() { 0.5 * (lo + hi) } else { 2.0 * sigma };
+                if (next - sigma).abs() <= 1e-3 * sigma {
+                    break;
+                }
+                sigma = next;
+            }
+            best
+        };
+        self.work += count;
+        (self.numerator, self.ringing) = (numerator, ringing);
+        (v + shift).max(0.0)
     }
 
     /// The frame's state at the time u (from the middle; from the launch on) through the decomposition (module
@@ -1905,6 +2061,15 @@ pub(crate) mod tests {
             }
         }
         pairs
+    }
+
+    /// The quotients' bandwidth of a piece launched at `from` again, and its counted work (`Picture::quotient_from`).
+    pub(crate) fn quotient_of(picture: &mut Picture, from: f64) -> (f64, f64) {
+        let work = picture.work;
+        let nu = picture.quotient_from(from);
+        let counted = picture.work - work;
+        picture.work = work;
+        (nu, counted)
     }
 
     /// Whether some pair's change is followed: the split's choice on a step.
@@ -2353,12 +2518,12 @@ pub(crate) mod tests {
         assert!(both > 0);
     }
 
-    /// The outputs of a picture of the static group alone, bit by bit: its bandwidth, its count, and the states it gives
+    /// The outputs of a picture of the static group alone, bit by bit: its bandwidth and the states it gives
     /// -- launched at the step's start and read at times of the step, launched again inside the step and read on --
     /// folded into one number (FNV-1a over their bits), with their count.
     fn static_outputs(picture: &mut Picture) -> (u64, usize) {
         let (n, h) = (picture.n, picture.half);
-        let mut bits: Vec<u64> = vec![picture.bandwidth.to_bits(), picture.work.to_bits()];
+        let mut bits: Vec<u64> = vec![picture.bandwidth.to_bits()];
         let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * (0.5 + 0.1 * i as f64)).collect();
         let mut x = vec![C64::ZERO; n];
         let state = |x: &[C64], bits: &mut Vec<u64>| bits.extend(x.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
@@ -2374,7 +2539,6 @@ pub(crate) mod tests {
             picture.at(u, &mut x);
             state(&x, &mut bits);
         }
-        bits.push(picture.work.to_bits());
         let hash = bits.iter().flat_map(|b| b.to_le_bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
         (hash, bits.len())
     }
@@ -2385,7 +2549,9 @@ pub(crate) mod tests {
     /// asserted --, every output of the picture (`static_outputs`) is the one the propagation gave before the tones, to
     /// the bit (3640446e, read there by this test with the route and the price among the outputs). Since 2026-11-20 the
     /// picture has no other route and no price (module documentation, # Where the decomposition does not take the
-    /// step): the outputs without them were read on 80b9782e, before the strides went, and are the same to the bit.
+    /// step): the outputs without them were read on 80b9782e, before the strides went, and are the same to the bit. And
+    /// since the quotient's bandwidth (`quotient_from`) the picture's count holds its work too: read without the count,
+    /// on the code of R1-PROP's fourth item, whose states are 80b9782e's.
     #[test]
     fn the_static_group_alone_is_propagated_as_before_to_the_bit() {
         let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
@@ -2415,12 +2581,13 @@ pub(crate) mod tests {
             assert_eq!(route, wanted, "{name}: the route (moving, followed, a pair hopped beside)");
             found.push((name, static_outputs(&mut picture)));
         }
-        // Read at 80b9782e (the outputs without the route and the price).
+        // Read without the route, the price and the count (80b9782e's states: with the count 0x9468_5b73_6c10_bebe,
+        // 0xb016_cf29_078f_a7be, 0x1a10_0fbd_7124_71ef and 0x0034_f20d_4180_ef5f there).
         let before = [
-            ("slow pairs", (0x9468_5b73_6c10_bebe, 45)),
-            ("fast pairs", (0xb016_cf29_078f_a7be, 59)),
-            ("still", (0x1a10_0fbd_7124_71ef, 59)),
-            ("fast and slow pairs", (0x0034_f20d_4180_ef5f, 73)),
+            ("slow pairs", (0x731a_2d41_9979_9f33, 43)),
+            ("fast pairs", (0x0838_77ad_8ea4_eaa1, 57)),
+            ("still", (0xce22_6de1_ce12_9a6f, 57)),
+            ("fast and slow pairs", (0xbfde_6a7e_62be_5d20, 71)),
         ];
         for ((name, (hash, count)), (_, (was, _))) in found.iter().zip(before) {
             eprintln!("{name}: {count} outputs, {hash:#018x} (before {was:#018x})");

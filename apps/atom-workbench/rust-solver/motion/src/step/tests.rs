@@ -1602,17 +1602,17 @@ fn the_stumpff_functions_are_their_series() {
     }
 }
 
-/// Gauss–Legendre at its derived panel phases integrates e^{iνs} over [0, T] (`quadrature`), from a phase of 10⁻³ to
-/// 10³ and with a decay, against (e^{iνT} − 1)/(iν), to round-off, on the nodes the kick takes (`nodes`).
+/// One Gauss–Legendre panel at its derived node count integrates e^{iνs} over [0, T] (`quadrature`, `fewest`), from a
+/// phase of 10⁻³ to 10³ and with a decay, against (e^{iνT} − 1)/(iν), to round-off.
 #[test]
 fn the_quadrature_integrates_a_bandwidth_within_its_tolerance() {
     for (omega, decay, tau) in [(1.0, 0.0, 1e-3), (3.0, 0.0, 1.0), (40.0, 0.0, 0.7), (900.0, 0.0, 1.1), (60.0, 19.0, 0.3)] {
         let w = C64::new(omega, decay);
         let exact = ((C64::I * w * tau).exp() - C64::ONE) / (C64::I * w);
-        let nodes: Vec<(f64, f64)> = super::quadrature(0.0, tau, w.abs(), super::FORMS).collect();
+        let nodes: Vec<(f64, f64)> = super::quadrature(0.0, tau, w.abs(), super::FORMS, 0).collect();
         let sum: C64 = nodes.iter().map(|(s, weight)| (C64::I * w * *s).exp() * *weight).sum();
         assert!((sum - exact).abs() <= 1e-14 * tau, "ω {omega}, γ {decay}, τ {tau}: {sum:?} against {exact:?} on {} nodes", nodes.len());
-        assert_eq!(nodes.len(), super::nodes(tau, w.abs()), "the nodes the kick takes");
+        assert!(nodes.len() >= super::fewest(w.abs(), tau, super::FORMS, 0), "the nodes asked");
         eprintln!("ω {omega}, γ {decay}, τ {tau}: {} nodes", nodes.len());
     }
 }
@@ -2666,7 +2666,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             let _ = p.through.attempt(&Trajectory { threshold: 0.0, ..s.clone() }, &step::Brownian::STILL, &[], &mut scratch, &Everywhere);
         }
         let picture = &scratch.picture;
-        let found = [super::nodes(tau, picture.bandwidth) as f64, picture.bandwidth * tau];
+        let found = [super::nodes(tau, picture.quotient) as f64, picture.quotient * tau];
         std::array::from_fn(|i| sums[i] + found[i] / count as f64)
     });
     eprintln!(
@@ -4582,7 +4582,7 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
             }
             picture.prepare(h, false, Some(&x)).expect("the decomposition takes the step");
             picture.launch(-h, &x);
-            let mut stops: Vec<f64> = super::quadrature(-h, h, picture.bandwidth, super::FORMS).map(|(u, _)| u).collect();
+            let mut stops: Vec<f64> = super::quadrature(-h, h, picture.quotient, super::FORMS, 2).map(|(u, _)| u).collect();
             stops.extend([0.0, h]);
             stops.sort_by(f64::total_cmp);
             stops.dedup();
@@ -4631,9 +4631,11 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
                 time[1]
             );
             // The finding: the beat's following moves the forms' bandwidth to its beats' spread, and the quadrature
-            // follows it -- three orders more stops a step than the static group's (measured 28 610 against 22 at
-            // τ = 0.5 µs; 1.3·10³ to 2.0·10³ times at every τ).
-            assert!(nodes[0] > 100 * nodes[1], "stops {} against {}", nodes[0], nodes[1]);
+            // follows it -- two orders more stops a step than the static group's (measured 17 410 against 154 at
+            // τ = 0.5 µs and 8706 against 90 at 0.25 µs, one panel at the quotients' bandwidth a piece; with the panels
+            // at the forms' bandwidth before 2026-11-20, 28 610 against 22 -- the static group's quotient now holds its
+            // norm's harmonics, and a panel takes fewer nodes than many).
+            assert!(nodes[0] > 10 * nodes[1], "stops {} against {}", nodes[0], nodes[1]);
         }
     }
 }
