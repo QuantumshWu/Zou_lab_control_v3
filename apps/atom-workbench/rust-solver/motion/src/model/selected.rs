@@ -116,6 +116,8 @@ pub struct Selected {
     tables: Tables,
     /// The run's own number (the thread's buffers and pooled nodes are its).
     id: usize,
+    /// The beats the rounding rule kept and dropped (`prune`).
+    kept: Vec<(usize, f64, f64, bool)>,
     beats: RwLock<Beats>,
 }
 
@@ -150,7 +152,7 @@ struct Spherical {
 
 /// One product of the decay (`Selected::layout`): of the class's axis the components l ≤ r (indices into
 /// `Tables::jumps`), the generator's slots of their beats r − l and l − r.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Decay {
     left: usize,
     right: usize,
@@ -394,7 +396,7 @@ impl Selected {
         let lab = Grouping::new(rs.plan(), &labels);
         let n = rs.keep.len();
         let mut beats = Beats::default();
-        let still: Exact = ([0; 3], vec![Ratio::ZERO; request.frequencies_mhz.len()]);
+        let still: Exact = ([0; 3], vec![Ratio::ZERO; width]);
         beats.ids.insert(still.clone(), 0);
         beats.exact.push(still);
         beats.value.push(0.0);
@@ -415,12 +417,14 @@ impl Selected {
             template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 },
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            kept: Vec::new(),
             beats: RwLock::new(beats),
             rs,
             report,
             scene,
         };
         run.layout(&spherical);
+        run.prune();
         Ok(run)
     }
 
@@ -697,6 +701,77 @@ impl Selected {
         self.tables = tables;
     }
 
+    /// The node's beats by the rounding rule (coordinator 2026-11-20): a beat is the model's where its coefficients at
+    /// unit amplitude -- the node at the trap's centre at rest, every beam's amplitude one, the tweezer's full -- reach
+    /// ε times the largest of all its components' (H_eff's with the decay, θ left out; and the same of the gradient):
+    /// below it, in value and in gradient, the beat is the rounding of the products and no part of the model (no
+    /// candidate tone). The beats left and their two ratios are kept for the report (`Selected::beats_kept`).
+    fn prune(&mut self) {
+        let n = self.rs.keep.len();
+        let node = self.node([0.0; 3], [0.0; 3], false);
+        let mut largest = vec![0.0_f64; node.generator.len()];
+        for (k, (_, m)) in node.generator.iter().enumerate() {
+            for a in 0..n {
+                for b in 0..n {
+                    let x = if k == 0 && a == b { m[(a, b)] + C64::real(self.theta[a]) } else { m[(a, b)] };
+                    largest[k] = largest[k].max(x.abs());
+                }
+            }
+        }
+        let gradients: Vec<(usize, f64)> = node.gradient.iter().map(|(beat, g)| (*beat, g.iter().map(Mat::max_abs).fold(0.0, f64::max))).collect();
+        let (top, gtop) = (largest.iter().copied().fold(0.0, f64::max), gradients.iter().map(|g| g.1).fold(0.0, f64::max));
+        let epsilon = 2.0 * crate::units::UNIT_ROUNDOFF;
+        let mut keep = vec![true; node.generator.len()];
+        self.kept = Vec::new();
+        for (k, &(beat, _)) in node.generator.iter().enumerate() {
+            let value = largest[k] / top.max(f64::MIN_POSITIVE);
+            let slope = gradients.iter().find(|g| g.0 == beat).map_or(0.0, |g| g.1 / gtop.max(f64::MIN_POSITIVE));
+            keep[k] = k == 0 || value >= epsilon || slope >= epsilon;
+            self.kept.push((beat, value, slope, keep[k]));
+        }
+        // The slots left, and every place of the layout renumbered (a place at a beat dropped dropped with it).
+        let mut slot_of = vec![usize::MAX; keep.len()];
+        let mut generator = Vec::new();
+        for (k, g) in std::mem::take(&mut self.template.generator).into_iter().enumerate() {
+            if keep[k] {
+                slot_of[k] = generator.len();
+                generator.push(g);
+            }
+        }
+        self.template.generator = generator;
+        let kept_beats: Vec<usize> = self.template.generator.iter().map(|g| g.0).collect();
+        let mut gslot_of = vec![usize::MAX; self.template.gradient.len()];
+        let mut gradient = Vec::new();
+        for (k, g) in std::mem::take(&mut self.template.gradient).into_iter().enumerate() {
+            if kept_beats.contains(&g.0) {
+                gslot_of[k] = gradient.len();
+                gradient.push(g);
+            }
+        }
+        self.template.gradient = gradient;
+        for list in self.tables.h.iter_mut() {
+            // A place at a beat dropped keeps its entry (the outputs' order), marked: nothing is written there.
+            for e in list.iter_mut() {
+                *e = if slot_of[e.1 as usize] == usize::MAX { (e.0, u32::MAX, u32::MAX) } else { (e.0, slot_of[e.1 as usize] as u32, gslot_of[e.2 as usize] as u32) };
+            }
+        }
+        self.tables.decay = self
+            .tables
+            .decay
+            .iter()
+            .filter(|d| slot_of[d.forward] != usize::MAX && slot_of[d.back] != usize::MAX)
+            .map(|d| Decay { forward: slot_of[d.forward], back: slot_of[d.back], ..*d })
+            .collect();
+        // The pooled nodes were made on the layout before.
+        POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
+    }
+
+    /// The node's beats with their coefficients' ratios at unit amplitude (`prune`): (beat, value's, gradient's,
+    /// kept).
+    pub fn beats_kept(&self) -> &[(usize, f64, f64, bool)] {
+        &self.kept
+    }
+
     /// The model at a point in the frame, by beats (`Node`; module documentation, # The generator by beats), with the
     /// channels' photon forms where `kicked` (a jump's node): the fold at the point (`Rs::evaluate`), its contraction by
     /// the lab's frequencies, put in the node's structure (`layout`), all in the thread's buffers.
@@ -749,6 +824,9 @@ impl Selected {
         }
         for (list, c) in self.tables.h.iter().zip(&out.h) {
             for (k, &(x, g, d)) in list.iter().enumerate() {
+                if g == u32::MAX {
+                    continue;
+                }
                 let x = x as usize;
                 node.generator[g as usize].1.data[x] += c.value[k];
                 for (m, dg) in node.gradient[d as usize].1.iter_mut().zip(&c.gradient) {
