@@ -4826,3 +4826,164 @@ fn a_step_s_price_is_its_count_item_by_item() {
     assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "a jump's photons");
     assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "a step taken from the state");
 }
+
+/// The fast-tone check (RUSTPLAN 3.2): can the picture take a hyperfine-sized beat of the model as an exact tone? Three
+/// states g₁, g₂, e (e of width Γ = 38.1 rad/µs, detuned by δ = −40 rad/µs); a static drive g₂–e of 15 rad/µs; and the
+/// coupling g₁–e of Ω = 150 rad/µs beating at ν = 4.3·10⁴ rad/µs (Rb 87's ground splitting), H_{g₁e} = Ω e^{iνt}.
+/// Case A has no other coupling of g₁ (a frame on g₁ takes the beat away); case B adds a static coupling g₁–e of
+/// 10 rad/µs, so that one pair holds a static and a beating coupling (a Floquet problem no frame removes). The beat
+/// shifts g₁ by Ω²/ν = 0.52 rad/µs and scatters it at Ω²Γ/ν² = 4.6·10⁻⁴ /µs.
+///
+/// Reference: the exact flow over 1 µs, the period's propagator U_T by RK4 at 8000 points a period (its error
+/// (2π/8000)⁵/120 a point), its power, and the rest of the period the same way; read at 4000 points as well, the two
+/// differ by the reference's own error. The picture: steps of τ, each prepared as the engine does (`Picture::separate`
+/// with the beat as the one candidate, `prepare` at the engine's stops), launched at the step's start and advanced
+/// through the engine's quadrature nodes, its middle and its end. Against the same picture without the beating coupling
+/// and its own exact flow: the static group's own step error. Printed: the errors, the light shift's and the
+/// scattering's relative errors (case A from g₁), and per step the forms' bandwidth, the quadrature's nodes and the
+/// time.
+#[test]
+fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
+    use crate::spectral::Picture;
+    let (n, nu, omega, gamma, delta) = (3, 4.3e4, 150.0, 38.1, -40.0);
+    let period = std::f64::consts::TAU / nu;
+    let only = |i: usize, j: usize, z: f64| Mat::from_fn(n, n, |a, b| if (a, b) == (i, j) { C64::real(z) } else { C64::ZERO });
+    let (plus, minus) = (only(0, 2, omega), only(2, 0, omega));
+    let none = Mat::zeros(n, n);
+    let still = |c1: f64| {
+        let mut h = only(2, 2, delta);
+        h[(2, 2)] += C64::new(0.0, -0.5 * gamma);
+        for (i, c) in [(0, c1), (1, 15.0)] {
+            h[(i, 2)] += C64::real(c);
+            h[(2, i)] += C64::real(c);
+        }
+        h
+    };
+    // The generator at the time t: the static group and the beat's two members.
+    let at = |base: &Mat, p: &Mat, m: &Mat, t: f64| {
+        let mut g = base.clone();
+        g.add_scaled(C64::cis(nu * t), p);
+        g.add_scaled(C64::cis(-nu * t), m);
+        g
+    };
+    // RK4 of iẋ = H(t)x from t0 over `width` in `points` points, each column of `x` (n × n).
+    let rk4 = |h: &dyn Fn(f64) -> Mat, t0: f64, width: f64, points: usize, x: &mut Mat| {
+        let dt = width / points as f64;
+        let slope = |t: f64, y: &Mat| h(t).product(y).scaled(C64::new(0.0, -1.0));
+        for k in 0..points {
+            let t = t0 + k as f64 * dt;
+            let k1 = slope(t, x);
+            let mut y = x.clone();
+            y.add_scaled(C64::real(0.5 * dt), &k1);
+            let k2 = slope(t + 0.5 * dt, &y);
+            let mut y = x.clone();
+            y.add_scaled(C64::real(0.5 * dt), &k2);
+            let k3 = slope(t + 0.5 * dt, &y);
+            let mut y = x.clone();
+            y.add_scaled(C64::real(dt), &k3);
+            let k4 = slope(t + dt, &y);
+            for (z, ((a, b), (c, d))) in x.data.iter_mut().zip(k1.data.iter().zip(&k2.data).zip(k3.data.iter().zip(&k4.data))) {
+                *z += (*a + *b * 2.0 + *c * 2.0 + *d) * (dt / 6.0);
+            }
+        }
+    };
+    // The exact propagator over [0, 1 µs]: U_r U_T^N.
+    let exact = |base: &Mat, p: &Mat, m: &Mat, points: usize| -> Mat {
+        let h = |t: f64| at(base, p, m, t);
+        let periods = (1.0 / period).floor() as u64;
+        let mut one = Mat::identity(n);
+        rk4(&h, 0.0, period, points, &mut one);
+        let mut rest = Mat::identity(n);
+        let r = 1.0 - periods as f64 * period;
+        rk4(&h, 0.0, r, ((r / period) * points as f64).ceil() as usize, &mut rest);
+        let (mut power, mut e, mut sq) = (Mat::identity(n), periods, one);
+        while e > 0 {
+            if e & 1 == 1 {
+                power = sq.product(&power);
+            }
+            sq = sq.product(&sq);
+            e >>= 1;
+        }
+        rest.product(&power)
+    };
+    // The picture over [0, 1 µs] in steps of τ, as the engine takes a step; per step its bandwidth, stops and time.
+    let pictured = |base: &Mat, p: &Mat, m: &Mat, tau: f64, start: &[C64]| -> (Vec<C64>, f64, usize, f64, bool) {
+        let (h, steps) = (0.5 * tau, (1.0 / tau).round() as usize);
+        let toned = p.max_abs() > 0.0;
+        let mut picture = Picture::default();
+        picture.fit(n);
+        let (mut x, mut y) = (start.to_vec(), vec![C64::ZERO; n]);
+        let (mut bandwidth, mut count, mut through) = (0.0_f64, 0, true);
+        let clock = std::time::Instant::now();
+        for k in 0..steps {
+            let centre = (k as f64 + 0.5) * tau;
+            picture.base = at(base, p, m, centre);
+            picture.ends = [at(base, p, m, centre - h), at(base, p, m, centre + h)];
+            if toned {
+                picture.separate(
+                    h,
+                    |beats, keys| {
+                        beats.push(nu);
+                        keys.push(vec![1]);
+                    },
+                    |_, _, plus, minus| (*plus, *minus) = (p.scaled(C64::cis(nu * centre)), m.scaled(C64::cis(-nu * centre))),
+                );
+                assert_eq!(picture.beats.len(), 1, "the beat a tone");
+            }
+            picture.prepare(h, false, |bandwidth| super::nodes(tau, bandwidth) + 2, 0.0, Some(&x));
+            picture.launch(-h, &x);
+            let mut stops: Vec<f64> = super::quadrature(-h, h, picture.bandwidth, super::FORMS).map(|(u, _)| u).collect();
+            stops.extend([0.0, h]);
+            stops.sort_by(f64::total_cmp);
+            stops.dedup();
+            for &u in &stops {
+                picture.advance(u, &mut y);
+            }
+            (bandwidth, count, through) = (bandwidth.max(picture.bandwidth), count.max(stops.len()), through && picture.decomposed());
+            x.copy_from_slice(&y);
+        }
+        (x, bandwidth, count, clock.elapsed().as_secs_f64() * 1e6 / steps as f64, through)
+    };
+    let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt();
+    let starts: [[C64; 3]; 3] = [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ONE, C64::ZERO], [C64::real(0.6), C64::new(0.0, 0.8), C64::ZERO]];
+    let (shift, scattering) = (omega * omega / nu, omega * omega * gamma / (nu * nu));
+    eprintln!("shift Ω²/ν = {shift:.4} rad/µs, scattering Ω²Γ/ν² = {scattering:.3e} /µs");
+    for (case, c1) in [("A (g₁ coupled by the beat alone)", 0.0), ("B (g₁–e static and beating)", 10.0)] {
+        let base = still(c1);
+        let (full, coarse, bare) = (exact(&base, &plus, &minus, 8000), exact(&base, &plus, &minus, 4000), exact(&base, &none, &none, 8000));
+        let reference = full.data.iter().zip(&coarse.data).map(|(a, b)| (*a - *b).abs()).fold(0.0, f64::max);
+        eprintln!("case {case}: the reference's own error ≤ {reference:.1e}");
+        for tau in [0.5, 0.25, 0.125, 0.0625] {
+            let (mut tone, mut alone, mut effect, mut phase, mut norm) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0, 0.0);
+            let (mut bandwidth, mut nodes, mut time, mut through) = ([0.0; 2], [0; 2], [0.0; 2], true);
+            for (s, start) in starts.iter().enumerate() {
+                let (x, b, c, t, d) = pictured(&base, &plus, &minus, tau, start);
+                let (z, b0, c0, t0, _) = pictured(&base, &none, &none, tau, start);
+                let (truth, truth0) = (full.apply(start), bare.apply(start));
+                tone = tone.max(apart(&x, &truth));
+                alone = alone.max(apart(&z, &truth0));
+                effect = effect.max(apart(&truth, &truth0));
+                if s == 0 {
+                    phase = (x[0] / truth[0]).arg();
+                    norm = crate::linalg::norm_sqr(&x) - crate::linalg::norm_sqr(&truth);
+                }
+                (bandwidth, nodes, time, through) = ([b, b0], [c, c0], [t, t0], through && d);
+            }
+            eprintln!(
+                "  τ = {tau}: error {tone:.2e} (the beat's effect {effect:.2e}; the static group's own step {alone:.2e}); from g₁ the shift errs by {:.2e}, the scattering by {:.2e} (relative); bandwidth {:.3e} against {:.3e} rad/µs, stops a step {} against {}, {:.0} µs against {:.0} µs a step (n = 3), decomposed {through}",
+                phase.abs() / shift,
+                norm.abs() / scattering,
+                bandwidth[0],
+                bandwidth[1],
+                nodes[0],
+                nodes[1],
+                time[0],
+                time[1]
+            );
+            // The finding: the beat's following moves the forms' bandwidth to its beats' spread, and the quadrature
+            // follows it -- three orders more stops a step than the static group's (measured 28 610 against 22 at
+            // τ = 0.5 µs; 1.3·10³ to 2.0·10³ times at every τ).
+            assert!(nodes[0] > 100 * nodes[1], "stops {} against {}", nodes[0], nodes[1]);
+        }
+    }
+}
