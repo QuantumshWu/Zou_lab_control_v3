@@ -398,9 +398,11 @@ impl Scene {
     }
 
     /// The trap potential of each ground state at r (rad/µs): I_tw(r) (depth_g + Re O_tw(E_tw)_gg), `depth` the tweezer
-    /// fold's ground shift at unit intensity (model/rs.rs `fold`, the one fold), O_tw the tweezer's own outside shift --
-    /// zero where the tweezer is dark --, with its gradient and Hessian from I = |a|², ∇I = 2 Re(a*∇a),
-    /// ∇∇I = 2 Re(∇a* ∇aᵀ + a*∇∇a). The one source of V_ref, the prepared wells, the loss energy and the reported trap.
+    /// fold's ground shift at unit intensity (model/rs.rs `Tweezer::still`, the one fold), O_tw the tweezer's own outside
+    /// shift -- zero where the tweezer is dark --, with its gradient and Hessian from I = |a|², ∇I = 2 Re(a*∇a),
+    /// ∇∇I = 2 Re(∇a* ∇aᵀ + a*∇∇a). SPEC §1.3's V = Σ_b p_b W_b, the trap light's: the one source of V_ref, the prepared
+    /// wells (only the trap light on) and the loss energy (the tweezer's conservative potential alone); the reported trap
+    /// adds the other lights' smooth shifts to it (`running_potential`).
     pub fn trap_potential(&self, r: V3, depth: &[f64; GROUND]) -> [Quadratic; GROUND] {
         let request = &self.request;
         let tw = request.trap_beam;
@@ -416,6 +418,93 @@ impl Scene {
             let d = depth[g] + own[(g, g)].re;
             Quadratic { value: intensity * d, gradient: slope.map(|x| x * d), hessian: curvature.map(|row| row.map(|x| x * d)) }
         })
+    }
+}
+
+impl Scene {
+    /// The other lights' smooth shifts of the ground states, for the reported trap (SPEC §1.3; refs/lib/phys.mjs
+    /// `runningTrap`): each beam l of a frequency other than the tweezer's alone -- its own intensity, the phases between
+    /// beams averaged --, in second order at the atom's levels in the trap light, with the first order in the trap
+    /// light's intensity y (the focus' one): at the beam's focus amplitude,
+    ///   U_lg(y) = −Re x†M(y)⁻¹x,  M(y) = K(y) − E_g(y) − f_l,  x = X_l[e, g] on the excited states e,
+    ///   K(y) = H0_ee + (y − 1) O_ee + y S_ee − (i/2) D_ee,  E_g(y) = H0_gg + (y − 1) O_gg + y S_gg,
+    /// O the tweezer's outside form in its own field, S the tweezer fold's static part at unit intensity (`shift`,
+    /// model/rs.rs `Tweezer::still`: its ground diagonal the depth, its excited block the tweezer's shifts of the excited
+    /// states through the ground states), D = Σ_a C_a†C_a, f_l the beam's frequency at rest (its recoil in: `doppler` at
+    /// κ = 0), and
+    ///   U′_lg(1) = Re[(M⁻†x)† (O_ee + S_ee − (O_gg + S_gg)) (M⁻¹x)]   (dM/dy, M at y = 1).
+    /// For one excited level alone U is |X|²δ/(δ² + Γ²/4), δ the light's detuning from the line. The trap light moves the
+    /// levels and mixes those of one m across the hyperfine levels, so the matrix is kept whole. Returns each such beam's
+    /// index and per ground state (U_lg(1), U′_lg(1)) (rad/µs).
+    pub fn smooth(&self, shift: &Mat) -> Vec<(usize, [[f64; 2]; GROUND])> {
+        let request = &self.request;
+        let tw = request.trap_beam;
+        let index = &request.beams[tw].frequency_index;
+        let form = request.outside_forms.iter().find(|f| &f.frequency_index == index).expect("validated: one form per frequency");
+        let field = &request.beams[tw].field;
+        let own = bilinear(&form.matrices, field, field);
+        let excited: Vec<usize> = (GROUND..STATES).collect();
+        let mut decay = Mat::zeros(STATES, STATES);
+        for c in &self.jumps.emission {
+            decay.add_scaled(C64::ONE, &c.adjoint().product(c));
+        }
+        let rest = self.rates(&self.doppler([0.0; 3]));
+        let ne = excited.len();
+        let block = |m: &Mat| m.block(&excited, &excited);
+        let (h0, o, s, d) = (block(&request.hamiltonian), block(&own), block(shift), block(&decay));
+        request
+            .beams
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| &b.frequency_index != index)
+            .map(|(l, b)| {
+                let shifts = std::array::from_fn(|g| {
+                    let x: Vec<C64> = excited.iter().map(|&e| b.coupling[(e, g)]).collect();
+                    if x.iter().all(|z| *z == C64::ZERO) {
+                        return [0.0; 2];
+                    }
+                    let level = request.hamiltonian[(g, g)].re + shift[(g, g)].re + rest[l];
+                    let m = Mat::from_fn(ne, ne, |i, j| h0[(i, j)] + s[(i, j)] - d[(i, j)] * C64::new(0.0, 0.5) - if i == j { C64::real(level) } else { C64::ZERO });
+                    let slope = Mat::from_fn(ne, ne, |i, j| o[(i, j)] + s[(i, j)] - if i == j { C64::real(own[(g, g)].re + shift[(g, g)].re) } else { C64::ZERO });
+                    let (right, left) = (crate::linalg::Lu::new(&m).expect("M has an inverse: the excited states decay"), crate::linalg::Lu::new(&m.adjoint()).expect("M† too"));
+                    let (mut y, mut w) = (x.clone(), x.clone());
+                    right.solve(&mut y);
+                    left.solve(&mut w);
+                    let value = -crate::linalg::inner(&x, &y).re;
+                    let derivative = crate::linalg::inner(&w, &slope.apply(&y)).re;
+                    [value, derivative]
+                });
+                (l, shifts)
+            })
+            .collect()
+    }
+
+    /// The reported trap's potential of each ground state at r (SPEC §1.3, "运行阱"): the trap light's (`trap_potential`)
+    /// with the other lights' smooth shifts (`smooth`), each beam's own intensity I_l(r) = |a_l(r)|² times its shift to
+    /// first order in the trap light's intensity y(r) = I_tw(r): Σ_l I_l [U_lg + U′_lg (y − 1)], with the gradient and
+    /// Hessian of the products. At a centre where the trap light's coefficients are stationary (the focus) the Hessian is
+    /// ∂²V_prep (1 + U′/(O_gg + S_gg)) + the beams' own curvature, exactly; elsewhere the trap light's second order on the
+    /// lines is left out (SPEC §1.3).
+    pub fn running_potential(&self, r: V3, depth: &[f64; GROUND], smooth: &[(usize, [[f64; 2]; GROUND])]) -> [Quadratic; GROUND] {
+        let mut wells = self.trap_potential(r, depth);
+        let intensity = |a: &Amplitude| -> (f64, V3, [[f64; 3]; 3]) {
+            (a.value.norm_sqr(), std::array::from_fn(|i| 2.0 * (a.value.conj() * a.gradient[i]).re), std::array::from_fn(|i| std::array::from_fn(|j| 2.0 * (a.gradient[i].conj() * a.gradient[j] + a.value.conj() * a.hessian[i][j]).re)))
+        };
+        let (y, dy, ddy) = intensity(&self.geometry[self.request.trap_beam].amplitude(r));
+        for &(l, shifts) in smooth {
+            let (i, di, ddi) = intensity(&self.geometry[l].amplitude(r));
+            for (well, [u, slope]) in wells.iter_mut().zip(shifts) {
+                let f = u + slope * (y - 1.0);
+                well.value += i * f;
+                for a in 0..3 {
+                    well.gradient[a] += di[a] * f + i * slope * dy[a];
+                    for b in 0..3 {
+                        well.hessian[a][b] += ddi[a][b] * f + slope * (di[a] * dy[b] + dy[a] * di[b]) + i * slope * ddy[a][b];
+                    }
+                }
+            }
+        }
+        wells
     }
 }
 
@@ -447,5 +536,64 @@ mod tests {
         let (between, within) = gaps.split_at(levels - 1);
         eprintln!("levels {levels}: smallest gap between {:.3e}, largest within {:.3e}, rounding {rounding:.3e} rad/µs", between[levels - 2], within[0]);
         assert!(within[0] <= rounding && between[levels - 2] > rounding);
+    }
+
+    /// The reported trap (SPEC §1.3) of every reference scene that states trap frequencies (refs/expect, the references
+    /// refs/lib/phys.mjs `preparedTrap` / `runningTrap`), judged as refs/check.mjs judges them: |engine − reference| ≤
+    /// 2u, u the reference's own uncertainty. The engine's: the running potential (`running_potential`, the tweezer
+    /// fold's static part from model/rs.rs `Tweezer::still`) of the reference state -- the initial component of the
+    /// largest population --, its descent from the focus (model/potential.rs `descend`, the one descent) on every beam's
+    /// shortest length within the trap's region, the frequencies along the lab axes there. A scene the scene refuses is
+    /// said with its reason.
+    #[test]
+    fn the_running_trap_is_the_references() {
+        let refs = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs");
+        let json = |path: std::path::PathBuf| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap() };
+        let (mut seen, mut beyond) = (0, vec![]);
+        let mut paths: Vec<_> = std::fs::read_dir(refs.join("expect")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        paths.sort();
+        for path in paths {
+            let expectation = json(path);
+            let Some(series) = expectation["series"].as_array() else { continue };
+            let stated: Vec<&serde_json::Value> = series.iter().filter(|s| s["quantity"] == "trapFrequency").collect();
+            if stated.is_empty() {
+                continue;
+            }
+            let id = expectation["id"].as_str().unwrap();
+            let made = Request::from_native(&json(refs.join(expectation["request"].as_str().unwrap()))).and_then(|request| Scene::new(&request));
+            let scene = match made {
+                Ok(scene) => scene,
+                Err(why) => {
+                    println!("{id}: refused: {why}");
+                    continue;
+                }
+            };
+            let still = crate::model::rs::Tweezer::new(&scene).still();
+            let depth: [f64; GROUND] = std::array::from_fn(|g| still[(g, g)].re);
+            let smooth = scene.smooth(&still);
+            let request = &scene.request;
+            let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+            let k = request.beams.iter().map(|b| b.wave_number).fold(0.0, f64::max);
+            let tw = request.trap_beam;
+            let trap_light: Vec<usize> = (0..request.beams.len()).filter(|&l| request.beams[l].frequency_index == request.beams[tw].frequency_index).collect();
+            let outside = |r: V3| trap_light.iter().all(|&l| scene.geometry[l].amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY);
+            let expand = |r: V3| {
+                let q = scene.running_potential(r, &depth, &smooth)[chief];
+                let scale = q.value.abs();
+                (q, crate::units::rounding(GROUND + 2 * smooth.len()) * scale)
+            };
+            let trap = crate::model::potential::descend(1.0 / k, scene.hbar_over_mass, &outside, &expand).unwrap();
+            for s in stated {
+                let axis = ["x", "y", "z"].iter().position(|a| s["axis"] == *a).unwrap();
+                let (value, u) = (s["value"].as_f64().unwrap(), s["u"].as_f64().unwrap());
+                let engine = trap.lab[axis] / std::f64::consts::TAU * 1e3;
+                println!("{id} {}: engine {engine:.12e} reference {value:.12e} u {u:.3e} (d/u {:.4}; {} other beams)", s["axis"], (engine - value) / u, smooth.len());
+                if (engine - value).abs() > 2.0 * u {
+                    beyond.push(format!("{id} {}", s["axis"]));
+                }
+                seen += 1;
+            }
+        }
+        assert!(seen > 0 && beyond.is_empty(), "{} of {seen} axes beyond 2u: {beyond:?}", beyond.len());
     }
 }

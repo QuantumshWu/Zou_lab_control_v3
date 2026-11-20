@@ -1390,6 +1390,14 @@ impl Tweezer {
         Source { hamiltonian, jumps, generator }
     }
 
+    /// The unit fold's static part on the 32 states (rad/µs at the tweezer's focus intensity): its ground diagonal the
+    /// tweezer's ground shift (`Scene::trap_potential`'s depth), its excited block the tweezer's shifts of the excited
+    /// states (`Scene::smooth`).
+    pub fn still(&self) -> Mat {
+        let zero = self.shift.iter().find(|(key, _)| key.iter().all(|k| *k == 0)).map(|(_, m)| *m);
+        zero.map_or_else(|| Mat::zeros(STATES, STATES), |m| dense(&self.library, &[Term::one(m, C64::ONE)]).0)
+    }
+
     /// The full reference at a point as a dense model on the 32 states, with its generator.
     pub fn reference(&self, scene: &Scene, point: &Point) -> (ModelAt, ModelPart) {
         self.source(scene, point).model(&self.library, &self.groups)
@@ -1433,6 +1441,11 @@ impl Rs {
     pub fn local(&self, scene: &Scene, point: &Point) -> Local<'_> {
         let source = self.tweezer.source(scene, point);
         fold(&self.splits, &self.keep, &self.folded, &source, &self.sectors, MODEL, &self.tweezer.groups)
+    }
+
+    /// The tweezer's fold made once (`Tweezer::still`).
+    pub fn tweezer(&self) -> &Tweezer {
+        &self.tweezer
     }
 
     /// The model by frequency components for the scene's components at a point (the checkpoint's).
