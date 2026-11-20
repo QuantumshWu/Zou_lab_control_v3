@@ -3,10 +3,25 @@
 //! reference, the rest of the 32 folded by RS (`model::rs`). The only place P is decided. The points, the atom at rest:
 //! - the centre (0): the tweezer's focus, its light full (s = 1);
 //! - the edge (1): the focus' place with the tweezer off (s = 0), the other light as at the centre (its lattice phase);
-//! - the middle (2): on the tweezer's axis one Rayleigh range past the focus, +z_R n̂ (z_R = π w₀²/λ = k w₀²/2 of the
-//!   request's tweezer, `Geometry::rayleigh`), where the paraxial beam's intensity on its axis, 1/(1 + (z/z_R)²), is
-//!   half its peak (s = 1/2) -- every light there as it is at that place (its own lattice phase, no longer the
-//!   centre's). Between the two others in the tweezer's light, and the other light's pattern where it really is.
+//! - the middle (2): from the focus along n̂, the direction the light other than the tweezer's changes fastest in
+//!   there, to where the tweezer's intensity is half its peak (s = 1/2) -- every light there as it is at that place
+//!   (its own lattice phase, no longer the centre's): between the two others in the tweezer's light, and the other
+//!   light's pattern where it really is (`middle`).
+//!
+//! # The middle point's direction and distance
+//! Near the focus each frequency's field (its beams' fields summed coherently, `field::Light`) is E(r) = E(0) +
+//! (r·∇)E + O(r²), so along a unit n̂ its change is |E(t n̂) − E(0)|² = t² n̂ᵀ M_w n̂ + O(t³) with the real symmetric,
+//! positive semidefinite M_w = Re(∇E ∇E†), (M_w)_ij = Re Σ_q ∂_iE_q (∂_jE_q)*. The frequencies do not interfere in
+//! the time average, so their changes add: M = Σ_w M_w over the light other than the tweezer's. n̂ is the eigenvector
+//! of M's largest eigenvalue -- the maximum of the Rayleigh quotient n̂ᵀMn̂ over unit n̂ (Rayleigh–Ritz; Horn &
+//! Johnson, Matrix Analysis, Thm 4.2.2) --, its sign the one that makes its largest component positive. At a node
+//! E(0) = 0 the intensity itself grows as t² n̂ᵀMn̂, so n̂ is the way out of the node fastest -- where the tweezer's
+//! axis lies in the node's plane (R10's node scenes: the standing wave's nodal plane holds the axis), along the axis
+//! the light stays dark and along n̂ it does not. With no light but the tweezer's, M = 0 and n̂ is the tweezer's axis.
+//! The distance: the tweezer's paraxial Gaussian intensity |a(t n̂)|² = exp(−2ρ²/w(ζ)²)/(1 + ζ²/z_R²) (ζ = t n̂·d along
+//! its direction d, ρ = t|n̂ − (n̂·d)d|, w(ζ) = w₀√(1 + ζ²/z_R²)) falls strictly along every ray from the focus, both
+//! factors decreasing in t, so |a|² = 1/2 has one root t > 0, found by bisection to the rounding of t; along the axis
+//! it is the Rayleigh range z_R = k w₀²/2.
 //!
 //! # The gate
 //! At each point, the model's readouts against the reference's (td_s.cmp with the force as a vector):
@@ -61,7 +76,7 @@
 
 use crate::floquet::{assemble, readouts, select, Frame, Liouville, Readouts};
 use crate::krylov::{Route, Unsolved};
-use crate::linalg::{C64, Mat};
+use crate::linalg::{symmetric3_eigen, C64, Mat, V3};
 use crate::model::rs::{self, decay, levels, ModelAt, Rs};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Components, Scene};
@@ -371,14 +386,64 @@ where
 }
 
 /// The points' components (module documentation), the atom at rest (no Doppler shift): the centre, the tweezer full,
-/// and the edge, dark, both at the focus' place; the middle one Rayleigh range down the tweezer's axis, every light
-/// there as it is (the tweezer at its half intensity). The tweezer is a Gaussian beam (`Request::validate`).
+/// and the edge, dark, both at the focus' place; the middle at `middle`, every light there as it is (the tweezer at
+/// its half intensity).
 pub fn points(scene: &Scene) -> [Components; POINTS] {
     let zero = vec![0.0; scene.request.beams.len()];
-    let tweezer = &scene.geometry[scene.tweezer()];
-    let rayleigh = tweezer.rayleigh().expect("the tweezer is a Gaussian beam (Request::validate)");
-    let middle = tweezer.direction.map(|n| rayleigh * n);
-    [scene.components([0.0; 3], &zero, 1.0), scene.components([0.0; 3], &zero, 0.0), scene.components(middle, &zero, 1.0)]
+    [scene.components([0.0; 3], &zero, 1.0), scene.components([0.0; 3], &zero, 0.0), scene.components(middle(scene), &zero, 1.0)]
+}
+
+/// The middle point's place (µm from the focus; module documentation, # The middle point's direction and distance):
+/// n̂ the top eigenvector of M = Σ_w Re(∇E_w ∇E_w†) at the focus over the light other than the tweezer's (the
+/// tweezer's axis where M = 0), and along it the tweezer's half-intensity distance by bisection. The tweezer is a
+/// Gaussian beam (`Request::validate`).
+pub fn middle(scene: &Scene) -> V3 {
+    let light = crate::field::Light::new(&scene.request);
+    let mut m = [[0.0_f64; 3]; 3];
+    for frequency in light.frequencies.iter().enumerate().filter(|&(w, _)| w != light.trap).map(|(_, f)| f) {
+        // ∂_i E_q at the focus, the frequency's beams' fields summed.
+        let mut g = [[C64::ZERO; 3]; 3];
+        for (&l, field) in frequency.beams.iter().zip(&frequency.fields) {
+            let a = light.beams[l].amplitude_to([0.0; 3], 1).gradient;
+            for (gi, ai) in g.iter_mut().zip(a) {
+                for (x, e) in gi.iter_mut().zip(field) {
+                    *x += ai * *e;
+                }
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                m[i][j] += (0..3).map(|q| (g[i][q] * g[j][q].conj()).re).sum::<f64>();
+            }
+        }
+    }
+    let tweezer = &light.beams[light.frequencies[light.trap].beams[0]];
+    let (values, vectors) = symmetric3_eigen(&m);
+    let n = if values[2] > 0.0 {
+        let v = vectors[2];
+        let big = (0..3).fold(0, |b, i| if v[i].abs() > v[b].abs() { i } else { b });
+        if v[big] < 0.0 { v.map(|x| -x) } else { v }
+    } else {
+        tweezer.direction
+    };
+    let below = |t: f64| tweezer.amplitude_to(n.map(|x| t * x), 0).value.norm_sqr() - 0.5;
+    let (mut lo, mut hi) = (0.0, tweezer.rayleigh().expect("the tweezer is a Gaussian beam (Request::validate)"));
+    while below(hi) >= 0.0 {
+        (lo, hi) = (hi, 2.0 * hi);
+    }
+    loop {
+        let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        if below(mid) >= 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let t = if below(lo).abs() <= below(hi).abs() { lo } else { hi };
+    n.map(|x| t * x)
 }
 
 /// The light's reach at a point (scene2.ranking): per excited state e the largest first-order amplitude
