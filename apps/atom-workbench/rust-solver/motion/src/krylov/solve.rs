@@ -11,13 +11,14 @@
 //!    the direct solve (GMRES's first iterate is A⁻¹b; it then refines to the floor and is certified like the others).
 //!
 //! All three solve the same system to the same stop and certificate; the route only changes the work. The result is
-//! the first certified attempt's iterate; if none is certified, the attempt of least ζ, reported not certified. The
-//! record kept 96 of 96 solves certified on route 1 (FASTREF.md §8).
+//! the first certified attempt's iterate; if none is certified, the finite attempt of least ζ, reported not certified;
+//! if no attempt has a finite iterate (every block unfactorised or every run not finite: A singular), no result
+//! (`Unsolved::NoIterate`, every attempt in it). The record kept 96 of 96 solves certified on route 1 (FASTREF.md §8).
 
 use super::gmres::{gmres, Outcome, Rows};
 use super::precond::Schur;
 use super::split::split;
-use super::Inconsistent;
+use super::{Inconsistent, Unsolved};
 use crate::floquet::System;
 use crate::linalg::C64;
 use std::time::Instant;
@@ -65,8 +66,9 @@ pub struct Solved {
     pub seconds_split: f64,
 }
 
-/// fr.solve for ρ: Bd [ρ; μ] = [0; 1] by the route above; an inconsistent system (a zero row with b_i ≠ 0) is refused.
-pub fn solve(system: &System) -> Result<Solved, Inconsistent> {
+/// fr.solve for ρ: Bd [ρ; μ] = [0; 1] by the route above; an inconsistent system (a zero row with b_i ≠ 0) is refused,
+/// and so is one no route gives a finite iterate of (`Unsolved`).
+pub fn solve(system: &System) -> Result<Solved, Unsolved> {
     let a = &system.matrix;
     let n = a.rows;
     let mut b = vec![C64::ZERO; n];
@@ -74,7 +76,7 @@ pub fn solve(system: &System) -> Result<Solved, Inconsistent> {
     let rows = Rows::new(a);
     let inconsistent = rows.inconsistent(&b);
     if !inconsistent.is_empty() {
-        return Err(Inconsistent { rows: inconsistent });
+        return Err(Unsolved::Inconsistent(Inconsistent { rows: inconsistent }));
     }
     let clock = Instant::now();
     let (slow, split_tests) = split(a);
@@ -129,19 +131,16 @@ pub fn solve(system: &System) -> Result<Solved, Inconsistent> {
         }
     }
     let zeta = |t: &Attempt| t.run.as_ref().map_or(f64::INFINITY, |r| r.zeta);
+    // A finite iterate: a run whose certificate could be evaluated (a run that is not finite has ζ = ∞).
     let pick = accepted.or_else(|| {
-        (0..attempts.len()).filter(|&k| attempts[k].run.is_some()).min_by(|&p, &q| zeta(&attempts[p]).total_cmp(&zeta(&attempts[q])))
+        (0..attempts.len()).filter(|&k| zeta(&attempts[k]).is_finite()).min_by(|&p, &q| zeta(&attempts[p]).total_cmp(&zeta(&attempts[q])))
     });
+    let Some(k) = pick else { return Err(Unsolved::NoIterate { attempts }) };
     let rounds = attempts.iter().filter_map(|t| t.run.as_ref()).map(|r| r.iterations).sum();
-    let (rho, route, certificate) = match pick {
-        Some(k) => {
-            let route = attempts[k].route;
-            let run = attempts[k].run.as_mut().unwrap();
-            let x = std::mem::take(&mut run.x);
-            (x[..n - 1].to_vec(), route, run.zeta)
-        }
-        None => (vec![C64::ZERO; n - 1], Route::Direct, f64::INFINITY),
-    };
+    let route = attempts[k].route;
+    let run = attempts[k].run.as_mut().expect("a finite iterate is a run's");
+    let x = std::mem::take(&mut run.x);
+    let (rho, certificate) = (x[..n - 1].to_vec(), run.zeta);
     Ok(Solved {
         rho,
         route,

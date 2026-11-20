@@ -47,6 +47,30 @@ fn select_decide_takes_the_smallest_passing() {
     assert!(none.is_err());
 }
 
+/// A point without light is not judged (module documentation, # Points without light): with the edge dark its solve
+/// is never asked (the closure would panic), its errors read zero with no route, its reference none, the report says
+/// so; the base the first candidate passing at the centre (candidate 0 fails there, R 3 %). Both points dark: the
+/// first candidate, the ground states, with nothing solved.
+#[test]
+fn select_a_point_without_light_is_not_judged() {
+    let candidates = vec![vec![0], vec![0, 1]];
+    let error = |c: usize| [0.03, 0.005][c];
+    let out = decide_on(&candidates, [true, false], 1.0, |p, c| {
+        assert_eq!(p, 0, "the dark edge is solved");
+        Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, error), [1.0, 0.0, 0.0]), Route::Krylov))
+    })
+    .unwrap();
+    assert_eq!(out.keep, vec![0, 1]);
+    assert!(out.candidates.iter().all(|c| c.edge == PointError::unlit() && c.centre.route == Some(Route::Krylov)));
+    assert!(out.reference[0].is_some() && out.reference[1].is_none());
+    assert_eq!(out.notes(), vec!["边缘点无光、无唯一稳态，不判".to_string()]);
+    let dark = decide_on(&candidates, [false, false], 1.0, |_, _| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
+    assert_eq!((dark.keep.clone(), dark.whole), (vec![0], 1));
+    assert_eq!(dark.notes().len(), 2);
+    let refined = refine(dark, 1.0, &|_: usize, _: &[usize]| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
+    assert_eq!(refined.keep, vec![0]);
+}
+
 /// The leave-one-out by hand (module documentation, # The decision, 2): the ground states and four excited states
 /// GROUND..GROUND + 4 the base; a set's R error (both points alike) 0.001 plus each missing state's own (0.001, 0.0015,
 /// 0.0025, 0.02) plus 0.008 where the first two are both missing (the errors not additive: a pair that cancels).
@@ -166,7 +190,7 @@ fn choose_is_pysel() {
         // The full reference's readouts.
         let groups = levels(labels, &(0..STATES).collect::<Vec<_>>());
         for (i, point) in ["centre", "edge"].into_iter().enumerate() {
-            let (ours, route) = &selection.reference[i];
+            let (ours, route) = selection.reference[i].as_ref().expect("the six scenes' points are lit");
             let theirs = &python["full"][point];
             let f: Vec<f64> = theirs["F"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
             let r = theirs["R"].as_f64().unwrap();
@@ -225,7 +249,7 @@ fn choose_s_p_passes_at_both_points() {
         let two = TwoPoints::new(&scene);
         let model = |p: usize, keep: &[usize]| two.model(p, keep);
         let clock = Instant::now();
-        let _ = pair(&base.keep, &model).unwrap();
+        let _ = pair(&base.keep, two.lit, &model).unwrap();
         let check = clock.elapsed().as_secs_f64();
         let excited = selection.left_out.len();
         let mut order: Vec<&LeftOut> = selection.left_out.iter().collect();
@@ -628,6 +652,95 @@ fn choose_on_every_reference_scene() {
     }
     eprintln!("{} scenes in {:.1} s; {} failed", all.len(), clock.elapsed().as_secs_f64(), failed.len());
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Why no whole-level candidate passes (a diagnosis, ignored; `PSTATE_REFS` reference scenes by name, comma-separated):
+/// per scene the frame (its fast frequencies, every state's and generator's fast sector) and at both points the full
+/// reference's readouts -- the levels, R and its channels, F⃗, the force's scale kR -- and every whole-level
+/// candidate's, the largest (all 32 kept) included, each with the gate's three measures and the numbers they divide;
+/// and `choose`'s outcome.
+#[test]
+#[ignore]
+fn why_no_candidate_passes() {
+    let names = std::env::var("PSTATE_REFS").expect("PSTATE_REFS: reference scenes, comma-separated");
+    for name in names.split(',') {
+        let request = crate::model::testing::scene(name);
+        let scene = Scene::new(&request).unwrap();
+        let two = TwoPoints::new(&scene);
+        let labels = &request.states;
+        match choose(&scene) {
+            Ok(s) => eprintln!("{name}: choose: base P {} -> P {}, measured {:.3e}; {:?}", s.base().keep.len(), s.keep.len(), s.candidates.last().unwrap().worst(), s.notes()),
+            Err(why) => eprintln!("{name}: choose refused: {why}"),
+        }
+        eprintln!("{name}: generators (rad/µs) {:?}; tweezer beam {}", scene.generators.iter().map(|g| g.frequency).collect::<Vec<_>>(), request.trap_beam);
+        for (p, point) in ["centre", "edge"].into_iter().enumerate() {
+            let frame = &two.frames[p];
+            let sectors = frame.sectors();
+            eprintln!("  {point}: frame fast {:?}; generators' sectors {:?}", frame.fast, sectors.generators);
+            let mut by: Vec<(String, [i64; 2])> = Vec::new();
+            for (s, sector) in sectors.states.iter().enumerate() {
+                let level = labels[s].rsplit_once('-').map_or(labels[s].clone(), |(l, _)| l.trim_end_matches('-').to_string());
+                if !by.iter().any(|(l, x)| *l == level && x == sector) {
+                    by.push((level, *sector));
+                }
+            }
+            eprintln!("  {point}: the levels' sectors {by:?}");
+            let most = reach(&scene, &two.references[p], &two.points[p], &|_| true).iter().fold(0.0, |m: f64, &a| m.max(a));
+            eprintln!("  {point}: light reaches the atom: {} (the largest first-order amplitude {most:.3e})", two.lit[p]);
+            let (reference, route) = match two.reference(p) {
+                Ok(r) => r,
+                Err(why) => {
+                    eprintln!("  {point} reference: {why}");
+                    continue;
+                }
+            };
+            let scale = |r: &Readouts| (r.force.iter().map(|f| f * f).sum::<f64>().sqrt(), two.k * r.rate);
+            let (f, kr) = scale(&reference);
+            eprintln!(
+                "  {point} reference ({route:?}): levels {:?}; R {:.6e} (channels {:?}); F⃗ {:?} |F⃗| {f:.3e} kR {kr:.3e}",
+                reference.levels.iter().map(|x| format!("{x:.4e}")).collect::<Vec<_>>(), reference.rate, reference.rates.iter().map(|x| format!("{x:.3e}")).collect::<Vec<_>>(), reference.force
+            );
+            // The reference's solve itself: its elements, route, certificate, whether ρ is a number.
+            {
+                let liouville = Liouville::new(frame, &two.references[p].hilbert());
+                let elements = select(&liouville);
+                let system = assemble(&liouville, &elements);
+                let solved = crate::krylov::solve(&system).expect("the reference's solve (its error said above)");
+                let finite = solved.rho.iter().filter(|z| z.re.is_finite() && z.im.is_finite()).count();
+                let largest = solved.rho.iter().map(|z| z.abs()).fold(0., f64::max);
+                eprintln!(
+                    "  {point} reference's solve: {} elements, {:?}, certified {}, ρ finite {finite} of {}, max |ρ| {largest:.3e}",
+                    elements.order.len(), solved.route, solved.certified, solved.rho.len()
+                );
+                for a in &solved.attempts {
+                    eprintln!(
+                        "    attempt {:?}: unfactorised {:?}; run {}",
+                        a.route, a.unfactorised, a.run.as_ref().map_or("none".into(), |r| format!("{} iterations, ζ {:.3e}, η {:.3e}, certified {}, stop {:?}", r.iterations, r.zeta, r.eta, r.certified, r.stop))
+                    );
+                }
+                let ground = |f: &str| (0..STATES).find(|&s| labels[s].starts_with(&format!("ground-{f}-"))).unwrap();
+                eprintln!("  {point}: θ of ground-1 {:?}, of ground-2 {:?}; the frame's values {:?}; the request's axes (MHz) {:?}", frame.theta[ground("1")], frame.theta[ground("2")], frame.values, request.frequencies_mhz);
+            }
+            for keep in &two.candidates {
+                let (model, route) = two.model(p, keep).unwrap();
+                let e = errors(&model, &reference, two.k, route);
+                eprintln!(
+                    "    P {:2}: populations {:.3e} R {:.3e} F⃗ {:.3e}{} (80b9782e's worst, NaN dropped by f64::max: {:.3e}) | levels {:?}; R {:.6e}; F⃗ {:?}",
+                    keep.len(), e.populations, e.rate, e.force, if e.worst() <= GATE { "" } else { " (over)" }, e.populations.max(e.rate).max(e.force),
+                    model.levels.iter().map(|x| format!("{x:.4e}")).collect::<Vec<_>>(), model.rate, model.force
+                );
+            }
+            // All 32 kept on the frame's sectors with the hyperfine coordinate n_φ taken out (a diagnosis: what the
+            // model folds beyond the reference at P = 32 is K's fast elements by n_φ; the reference folds by n_tw alone).
+            let mut plain = frame.sectors();
+            plain.states.iter_mut().for_each(|s| s[0] = 0);
+            plain.generators.iter_mut().for_each(|g| g[0] = 0);
+            let all: Vec<usize> = (0..STATES).collect();
+            let (model, route) = solved(frame, &Rs::new(&scene, &all, plain).at(&scene, &two.points[p])).unwrap();
+            let e = errors(&model, &reference, two.k, route);
+            eprintln!("    P 32 without n_φ: populations {:.3e} R {:.3e} F⃗ {:.3e} | R {:.6e}; F⃗ {:?}", e.populations, e.rate, e.force, model.rate, model.force);
+        }
+    }
 }
 
 fn selection_k(scene: &Scene) -> f64 {

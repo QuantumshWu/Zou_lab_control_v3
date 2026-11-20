@@ -11,7 +11,21 @@
 //!   so a vanishing F⃗ (a balanced point) is judged against the scattering it could produce, not against zero.
 //!
 //! Each ≤ `GATE` at both points passes; a measure that is not a number passes no gate. The diffusion is not judged (the
-//! user: out of the model's gate), so only ρ is solved.
+//! user: out of the model's gate), so only ρ is solved. Every solve the gate reads is certified (krylov.rs: its
+//! backward error at the rounding floor); one that is not is an error of the selection, never a number read.
+//!
+//! # Points without light
+//! A point no light reaches -- every first-order amplitude of every beam there, the tweezer's too, each frequency's
+//! beams summed (`reach`), below the rounding, a < ε (the rounding rule's, `f64::EPSILON`) -- is not judged (`lit`):
+//! - the reference has no unique steady state there: nothing pumps, so every mixture of the ground states is
+//!   stationary (its system is singular, and `krylov::solve` refuses it);
+//! - every P is exact there: the fold's corrections are products of the couplings, every one of them zero to rounding,
+//!   so every model is the bare atom the reference is.
+//!
+//! There is nothing to compare: such a point's errors read zero (`PointError::unlit`), its reference none
+//! (`Selection::reference`), and the report says so (`Selection::notes`). A scene whose two points are both dark has
+//! the ground states -- the first whole-level candidate -- for its P. (R10's node scenes, the trap at a node of the
+//! standing wave, and R3's, the trap at a node of its two beams: their edge, the tweezer off, is dark.)
 //!
 //! # The decision
 //! One procedure in two stages:
@@ -40,7 +54,7 @@
 //! measured at e_i ≤ the gate less the base's worst (its prediction).
 
 use crate::floquet::{assemble, readouts, select, Frame, Liouville, Readouts};
-use crate::krylov::Route;
+use crate::krylov::{Route, Unsolved};
 use crate::linalg::{C64, Mat};
 use crate::model::rs::{self, decay, levels, ModelAt, Rs};
 use crate::request::{GROUND, STATES};
@@ -67,13 +81,20 @@ pub struct PointError {
     pub populations: f64,
     pub rate: f64,
     pub force: f64,
-    pub route: Route,
+    /// The model's solve's route; none at a point not judged.
+    pub route: Option<Route>,
 }
 
 impl PointError {
     /// The largest of the three (`largest`).
     pub fn worst(&self) -> f64 {
         largest(&[self.populations, self.rate, self.force])
+    }
+
+    /// A point not judged (module documentation, # Points without light): every model exact there, so every error
+    /// zero -- derived, not measured --, no solve.
+    pub fn unlit() -> PointError {
+        PointError { populations: 0.0, rate: 0.0, force: 0.0, route: None }
     }
 }
 
@@ -145,7 +166,8 @@ pub struct Selection {
     /// The states P leaves out of the base and the first removal's predicted error (`Descent`).
     pub removed: Vec<usize>,
     pub predicted: f64,
-    pub reference: [(Readouts, Route); 2],
+    /// The full reference's readouts and route at each point; none at a point not judged (# Points without light).
+    pub reference: Solved2,
     /// The time (s): the whole and its stages -- the base (the references and the whole levels), the leave-one-out, the
     /// descent's checks.
     pub seconds: f64,
@@ -157,7 +179,16 @@ impl Selection {
     pub fn base(&self) -> &Candidate {
         &self.candidates[self.whole - 1]
     }
+
+    /// What the report says beside the numbers (Chinese): each point not judged (# Points without light).
+    pub fn notes(&self) -> Vec<String> {
+        ["中心", "边缘"].iter().zip(&self.reference).filter(|(_, r)| r.is_none()).map(|(name, _)| format!("{name}点无光、无唯一稳态，不判")).collect()
+    }
 }
+
+/// The full reference's readouts and route at each point, none at a point not judged: a point is judged where its
+/// reference is.
+pub type Solved2 = [Option<(Readouts, Route)>; POINTS];
 
 /// The model's errors against the reference at one point; `k` the photon wave number of the force's scale kR.
 pub fn errors(model: &Readouts, reference: &Readouts, k: f64, route: Route) -> PointError {
@@ -167,34 +198,54 @@ pub fn errors(model: &Readouts, reference: &Readouts, k: f64, route: Route) -> P
     let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     let delta = [0, 1, 2].map(|i| model.force[i] - reference.force[i]);
     let force = norm(delta) / norm(reference.force).max(k * reference.rate);
-    PointError { populations, rate, force, route }
+    PointError { populations, rate, force, route: Some(route) }
 }
 
-/// A set judged: its models' readouts and routes at the two points against the references'.
-fn judged(keep: &[usize], models: &[(Readouts, Route)], reference: &[(Readouts, Route); 2], k: f64) -> Candidate {
-    let point = |p: usize| errors(&models[p].0, &reference[p].0, k, models[p].1);
+/// A set judged: its models' readouts and routes at the two points against the references' -- a point without its
+/// reference not judged (`PointError::unlit`).
+fn judged(keep: &[usize], models: &[Option<(Readouts, Route)>], reference: &Solved2, k: f64) -> Candidate {
+    let point = |p: usize| match (&models[p], &reference[p]) {
+        (Some(m), Some(r)) => errors(&m.0, &r.0, k, m.1),
+        _ => PointError::unlit(),
+    };
     Candidate { keep: keep.to_vec(), centre: point(0), edge: point(1) }
 }
 
-/// A set's models at both points at once.
-fn pair<F>(keep: &[usize], solve: &F) -> Result<Vec<(Readouts, Route)>, String>
+/// The points judged: those with a reference.
+fn judged_points(reference: &Solved2) -> [bool; POINTS] {
+    reference.each_ref().map(|r| r.is_some())
+}
+
+/// A set's models at the judged points, both at once; none at a point not judged.
+fn pair<F>(keep: &[usize], points: [bool; POINTS], solve: &F) -> Result<Vec<Option<(Readouts, Route)>>, String>
 where
     F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
 {
-    (0..POINTS).into_par_iter().map(|p| solve(p, keep)).collect()
+    (0..POINTS).into_par_iter().map(|p| if points[p] { solve(p, keep).map(Some) } else { Ok(None) }).collect()
 }
 
 /// The base (module documentation, # The decision, 1) over ranked candidates (each `keep` a superset of the one
-/// before): `solve(point, None)` is the full reference at a point, `solve(point, Some(c))` candidate c's model there,
-/// each giving the readouts and the route. The references, then the candidates in turn, each at both points at once;
-/// the base is the first candidate passing at both points. The report's P is the base, nothing left out yet
-/// (`refine` takes it on).
+/// before), both points judged (`decide_on`).
 pub fn decide<F>(candidates: &[Vec<usize>], k: f64, solve: F) -> Result<Selection, String>
 where
     F: Fn(usize, Option<usize>) -> Result<(Readouts, Route), String> + Sync,
 {
+    decide_on(candidates, [true; POINTS], k, solve)
+}
+
+/// The base over ranked candidates, the points `lit` judged (# Points without light): `solve(point, None)` is the
+/// full reference at a point, `solve(point, Some(c))` candidate c's model there, each giving the readouts and the
+/// route, never asked at a point not judged. The references, then the candidates in turn, each at the judged points
+/// at once; the base is the first candidate passing there. The report's P is the base, nothing left out yet (`refine`
+/// takes it on).
+pub fn decide_on<F>(candidates: &[Vec<usize>], lit: [bool; POINTS], k: f64, solve: F) -> Result<Selection, String>
+where
+    F: Fn(usize, Option<usize>) -> Result<(Readouts, Route), String> + Sync,
+{
     let clock = Instant::now();
-    let both = |c: Option<usize>| -> Result<Vec<(Readouts, Route)>, String> { (0..POINTS).into_par_iter().map(|p| solve(p, c)).collect() };
+    let both = |c: Option<usize>| -> Result<Vec<Option<(Readouts, Route)>>, String> {
+        (0..POINTS).into_par_iter().map(|p| if lit[p] { solve(p, c).map(Some) } else { Ok(None) }).collect()
+    };
     let reference = both(None)?;
     let reference = [reference[0].clone(), reference[1].clone()];
     let mut tried: Vec<Candidate> = Vec::new();
@@ -219,20 +270,23 @@ where
         }
     }
     let largest = candidates.last().map_or(0, |k| k.len());
-    Err(format!("no candidate P passes the {GATE} gate at both points (the largest has {largest} states)"))
+    Err(format!("no candidate P passes the {GATE} gate at the points judged (the largest has {largest} states)"))
 }
 
 /// Stage 2's measurements (module documentation, # The decision, 2): the base less each of its explicit excited states,
-/// every set at both points at once (rayon); `solve(point, keep)` a model's readouts and route at a point. In the
-/// base's order.
-pub fn leave_one_out<F>(base: &Candidate, reference: &[(Readouts, Route); 2], k: f64, solve: &F) -> Result<Vec<LeftOut>, String>
+/// every set at the judged points at once (rayon); `solve(point, keep)` a model's readouts and route at a point. In
+/// the base's order.
+pub fn leave_one_out<F>(base: &Candidate, reference: &Solved2, k: f64, solve: &F) -> Result<Vec<LeftOut>, String>
 where
     F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
 {
+    let lit = judged_points(reference);
     let states: Vec<usize> = base.keep.iter().copied().filter(|&s| s >= GROUND).collect();
     let sets: Vec<Vec<usize>> = states.iter().map(|&i| base.keep.iter().copied().filter(|&s| s != i).collect()).collect();
-    let models: Vec<(Readouts, Route)> =
-        (0..sets.len() * POINTS).into_par_iter().map(|j| solve(j % POINTS, &sets[j / POINTS])).collect::<Result<_, _>>()?;
+    let models: Vec<Option<(Readouts, Route)>> = (0..sets.len() * POINTS)
+        .into_par_iter()
+        .map(|j| if lit[j % POINTS] { solve(j % POINTS, &sets[j / POINTS]).map(Some) } else { Ok(None) })
+        .collect::<Result<_, _>>()?;
     Ok(states
         .iter()
         .zip(&sets)
@@ -242,9 +296,9 @@ where
 }
 
 /// Stage 2's decision (module documentation, # The decision, 2) at `gate` from the base, which passes it, and its
-/// leave-one-out: the removal the prediction allows, then the checks, each at both points at once, with the
+/// leave-one-out: the removal the prediction allows, then the checks, each at the judged points at once, with the
 /// put-backs. P the first set passing or, every state put back, the base. Err where the base does not pass the gate.
-pub fn descend<F>(base: &Candidate, left_out: &[LeftOut], gate: f64, reference: &[(Readouts, Route); 2], k: f64, solve: &F) -> Result<Descent, String>
+pub fn descend<F>(base: &Candidate, left_out: &[LeftOut], gate: f64, reference: &Solved2, k: f64, solve: &F) -> Result<Descent, String>
 where
     F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
 {
@@ -264,7 +318,7 @@ where
     let mut checks: Vec<Candidate> = Vec::new();
     while !removed.is_empty() {
         let keep: Vec<usize> = base.keep.iter().copied().filter(|s| removed.iter().all(|r| r.state != *s)).collect();
-        let candidate = judged(&keep, &pair(&keep, solve)?, reference, k);
+        let candidate = judged(&keep, &pair(&keep, judged_points(reference), solve)?, reference, k);
         let passes = candidate.within(gate);
         checks.push(candidate);
         if passes {
@@ -311,41 +365,61 @@ pub fn points(scene: &Scene) -> [Components; POINTS] {
     [scene.components([0.0; 3], &zero, 1.0), scene.components([0.0; 3], &zero, 0.0)]
 }
 
+/// The light's reach at a point (scene2.ranking): per excited state e the largest first-order amplitude
+/// |V_eg| / |E_g + f − E_e + iΓ_e/2| over the ground states g and the beams `beams` takes -- V the coupling of a
+/// frequency's beams together (its field: the beams of one frequency index summed, so that beams cancelling at the point
+/// cancel), at f and its conjugate at −f; E the reference's static energies at the point (the tweezer's shift in), Γ its
+/// decay. A beam with no component at the point couples nothing there.
+pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn Fn(usize) -> bool) -> [f64; STATES] {
+    let request = &scene.request;
+    let still = &reference.still().value;
+    let gamma = decay(&reference.jumps, STATES).0;
+    let mut score = [0.0_f64; STATES];
+    let mut seen: Vec<&Vec<i32>> = Vec::new();
+    for (l, beam) in request.beams.iter().enumerate().filter(|&(l, _)| beams(l)) {
+        if seen.contains(&&beam.frequency_index) {
+            continue;
+        }
+        seen.push(&beam.frequency_index);
+        let mut v = Mat::zeros(STATES, STATES);
+        for m in (0..request.beams.len()).filter(|&m| beams(m) && request.beams[m].frequency_index == beam.frequency_index) {
+            let key = scene.unit(m);
+            if let Some(c) = point.parts.iter().find(|c| c.key == key) {
+                v.add_scaled(C64::ONE, &c.value);
+            }
+        }
+        let f = scene.generators[l].frequency;
+        for (x, f) in [(v.clone(), f), (v.adjoint(), -f)] {
+            for e in GROUND..STATES {
+                for g in 0..GROUND {
+                    if x[(e, g)] != C64::ZERO {
+                        let away = C64::new(still[(g, g)].re + f - still[(e, e)].re, 0.5 * gamma[(e, e)].re);
+                        score[e] = score[e].max(x[(e, g)].abs() / away.abs());
+                    }
+                }
+            }
+        }
+    }
+    score
+}
+
+/// Whether light reaches the atom at a point (module documentation, # Points without light): some first-order
+/// amplitude of every beam's light there (`reach`, the tweezer's included) at or above the rounding, ε.
+pub fn lit(scene: &Scene, reference: &ModelAt, point: &Components) -> bool {
+    reach(scene, reference, point, &|_| true).iter().any(|&a| a >= f64::EPSILON)
+}
+
 /// The candidate levels in the order of their largest first-order amplitude at the two points (scene2.ranking): per
-/// excited state e the largest over the points of |V_eg| / |E_g + f − E_e + iΓ_e/2| over the ground states g and the
-/// light other than the tweezer -- V the coupling of a frequency's beams together (its field: the beams of one
-/// frequency index summed), at f and its conjugate at −f; E the reference's static energies at the point (the tweezer's
-/// shift in), Γ its decay --; a level's the largest of its states'. Each level its states (indices into the 32), the
-/// best first (a tie in the levels' order).
+/// excited state the largest over the points of the reach of the light other than the tweezer (`reach`); a level's
+/// the largest of its states'. Each level its states (indices into the 32), the best first (a tie in the levels'
+/// order).
 pub fn ranking(scene: &Scene, references: &[ModelAt], points: &[Components]) -> Vec<Vec<usize>> {
     let request = &scene.request;
     let tw = request.trap_beam;
     let mut score = [0.0_f64; STATES];
     for (reference, point) in references.iter().zip(points) {
-        let still = &reference.still().value;
-        let gamma = decay(&reference.jumps, STATES).0;
-        let mut seen: Vec<&Vec<i32>> = Vec::new();
-        for (l, beam) in request.beams.iter().enumerate().filter(|&(l, _)| l != tw) {
-            if seen.contains(&&beam.frequency_index) {
-                continue;
-            }
-            seen.push(&beam.frequency_index);
-            let mut v = Mat::zeros(STATES, STATES);
-            for m in (0..request.beams.len()).filter(|&m| m != tw && request.beams[m].frequency_index == beam.frequency_index) {
-                let key = scene.unit(m);
-                v.add_scaled(C64::ONE, &point.parts.iter().find(|c| c.key == key).expect("a beam's component").value);
-            }
-            let f = scene.generators[l].frequency;
-            for (x, f) in [(v.clone(), f), (v.adjoint(), -f)] {
-                for e in GROUND..STATES {
-                    for g in 0..GROUND {
-                        if x[(e, g)] != C64::ZERO {
-                            let away = C64::new(still[(g, g)].re + f - still[(e, e)].re, 0.5 * gamma[(e, e)].re);
-                            score[e] = score[e].max(x[(e, g)].abs() / away.abs());
-                        }
-                    }
-                }
-            }
+        for (s, a) in score.iter_mut().zip(reach(scene, reference, point, &|l| l != tw)) {
+            *s = s.max(a);
         }
     }
     let all: Vec<usize> = (0..STATES).collect();
@@ -359,23 +433,34 @@ pub fn ranking(scene: &Scene, references: &[ModelAt], points: &[Components]) -> 
 }
 
 /// One point's solve (the reference's or a model's): the Hilbert model through the one Liouville assembly, the rounding
-/// rule's elements and the solve (floquet, krylov), its readouts and route.
+/// rule's elements and the solve (floquet, krylov), its readouts and route. A system with no solution, or a solve that
+/// is not certified, is an error (module documentation, # The gate): no number is read off it.
 fn solved(frame: &Frame, model: &ModelAt) -> Result<(Readouts, Route), String> {
     let liouville = Liouville::new(frame, &model.hilbert());
     let system = assemble(&liouville, &select(&liouville));
-    let solved = crate::krylov::solve(&system).map_err(|e| format!("the checkpoint's system is inconsistent at {} rows", e.rows.len()))?;
+    let solved = crate::krylov::solve(&system).map_err(|e| match e {
+        Unsolved::Inconsistent(i) => format!("the checkpoint's system is inconsistent at {} rows", i.rows.len()),
+        Unsolved::NoIterate { attempts } => format!(
+            "the checkpoint's system has no solution: no route gave a finite iterate ({})",
+            attempts.iter().map(|a| format!("{:?}{}", a.route, a.unfactorised.as_ref().map_or(String::new(), |u| format!(": {u}")))).collect::<Vec<_>>().join("; ")
+        ),
+    })?;
+    if !solved.certified {
+        return Err(format!("the checkpoint's solve is not certified (route {:?}, ζ {:.3e})", solved.route, solved.certificate));
+    }
     Ok((readouts(&liouville, &system, &solved.rho), solved.route))
 }
 
 /// What every solve of a scene's selection reads: the two points (`points`), the full reference at each
-/// (`rs::reference`) and its frame (`Frame::new`: the reference there, no Doppler shift); the whole-level candidates --
-/// the ground states, then one level more at a time in `ranking`'s order --; the force's scale k, the carrier's wave
-/// number (ν/c, td_s's kref).
+/// (`rs::reference`) and its frame (`Frame::new`: the reference there, no Doppler shift), and whether light reaches
+/// the atom there (`lit`: the points judged); the whole-level candidates -- the ground states, then one level more at
+/// a time in `ranking`'s order --; the force's scale k, the carrier's wave number (ν/c, td_s's kref).
 pub struct TwoPoints<'a> {
     scene: &'a Scene,
     points: [Components; POINTS],
     references: Vec<ModelAt>,
     frames: Vec<Frame>,
+    pub lit: [bool; POINTS],
     pub candidates: Vec<Vec<usize>>,
     pub k: f64,
 }
@@ -394,7 +479,8 @@ impl<'a> TwoPoints<'a> {
             candidates.push(keep.clone());
         }
         let k = scene.generators.last().expect("the carrier").frequency / SPEED_OF_LIGHT;
-        TwoPoints { scene, points, references, frames, candidates, k }
+        let lit = std::array::from_fn(|p| lit(scene, &references[p], &points[p]));
+        TwoPoints { scene, points, references, frames, lit, candidates, k }
     }
 
     /// The full reference's readouts and route at point p.
@@ -408,11 +494,12 @@ impl<'a> TwoPoints<'a> {
     }
 }
 
-/// Chooses P for a scene (module documentation, # The decision): on the two points (`TwoPoints`) the base over the
-/// whole-level candidates (`decide`), then its leave-one-out and descent (`refine`); every solve the same (`solved`).
+/// Chooses P for a scene (module documentation, # The decision): on the two points (`TwoPoints`), those light reaches
+/// judged (# Points without light), the base over the whole-level candidates (`decide_on`), then its leave-one-out
+/// and descent (`refine`); every solve the same (`solved`).
 pub fn choose(scene: &Scene) -> Result<Selection, String> {
     let two = TwoPoints::new(scene);
-    let base = decide(&two.candidates, two.k, |p, c| match c {
+    let base = decide_on(&two.candidates, two.lit, two.k, |p, c| match c {
         None => two.reference(p),
         Some(c) => two.model(p, &two.candidates[c]),
     })?;
