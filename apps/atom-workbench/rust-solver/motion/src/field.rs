@@ -38,9 +38,9 @@
 //! undefined coordinate vanishes with the magnitude, so the force stays bounded).
 //!
 //! # The region
-//! An atom is outside the trap's region where every beam of the trap light -- the tweezer's frequency, its focused
-//! beams: the tweezer, its reflection, a crossed beam of the same laser -- is below `REGION_INTENSITY` of its focus
-//! value, |a_l(r)|² < 1/20 (SPEC §1.3, the UI's region; a lost atom is first outside it with its loss energy above the far
+//! An atom is outside the trap's region where the trap light -- the tweezer, the one beam of its frequency
+//! (`Request::validate`: neither its reflection nor another beam of its laser is input) -- is below `REGION_INTENSITY` of
+//! its focus value, |a(r)|² < 1/20 (SPEC §1.3, the UI's region; a lost atom is first outside it with its loss energy above the far
 //! value, model.rs `Model::lost`). Only the trap light makes the trap: a probe or a
 //! cooling beam given by its waist is focused too, on the millimetre scale, and an atom it pushes out of the tweezer
 //! moves along it for metres (√19 z_R) -- counted by its intensity, such an atom would never be lost.
@@ -312,8 +312,8 @@ pub struct Light {
     pub beams: Vec<Geometry>,
     /// Per distinct frequency of the beams its field, in the order of their first beams.
     pub frequencies: Vec<Frequency>,
-    /// The trap's frequency (an index into `frequencies`): the one of the tweezer, whose whole field is the trap light
-    /// (SPEC §1.3).
+    /// The trap's frequency (an index into `frequencies`): the one of the tweezer, whose field is the trap light -- the
+    /// tweezer alone, the one beam of its frequency (SPEC §1.3, `Request::validate`).
     pub trap: usize,
 }
 
@@ -350,8 +350,8 @@ impl Light {
         out.clear();
         out.extend(self.beams.iter().enumerate().map(|(l, b)| if of(l) { b.amplitude_to(r, order) } else { dark }));
     }
-    /// Whether the point r is outside the trap's region: every beam of the trap light there below `REGION_INTENSITY` of
-    /// its focus value (module documentation, # The region; the trap light holds no plane wave, `Request::validate`).
+    /// Whether the point r is outside the trap's region: the trap light there below `REGION_INTENSITY` of its focus value
+    /// (module documentation, # The region; the trap light is the tweezer, a Gaussian beam, `Request::validate`).
     pub fn outside(&self, r: V3) -> bool {
         self.frequencies[self.trap].beams.iter().all(|&l| self.beams[l].amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY)
     }
@@ -366,14 +366,16 @@ mod tests {
     use crate::units::{REGION_INTENSITY, UNIT_ROUNDOFF};
     use std::f64::consts::PI;
 
-    /// A request's light with these beams (direction, waist, frequency index, focus field), the first the tweezer, each
-    /// frequency with its (empty) outside form.
+    /// A request's light with these beams (direction, waist, frequency index, focus field): the first the tweezer (the
+    /// sample's, 852 nm), the others light beside it on D2 (the sample's probe), each frequency with its (empty) outside
+    /// form. A valid request: no other beam at the tweezer's frequency (`Request::validate`).
     fn light_of(beams: &[(V3, Option<f64>, i32, [C64; 3])]) -> Light {
         let mut r = sample();
-        let template = r.beams[0].clone();
+        let (tweezer, other) = (r.beams[0].clone(), r.beams[1].clone());
         r.beams = beams
             .iter()
-            .map(|&(direction, waist, index, field)| crate::request::Beam { direction, waist, frequency_index: vec![index], field, ..template.clone() })
+            .enumerate()
+            .map(|(l, &(direction, waist, index, field))| crate::request::Beam { direction, waist, frequency_index: vec![index], field, ..if l == 0 { tweezer.clone() } else { other.clone() } })
             .collect();
         let mut indices: Vec<i32> = beams.iter().map(|b| b.2).collect();
         indices.sort();
@@ -381,6 +383,14 @@ mod tests {
         r.outside_forms = indices.iter().map(|&i| OutsideForm { frequency_index: vec![i], ..r.outside_forms[0].clone() }).collect();
         r.validate().unwrap();
         Light::new(&r)
+    }
+    /// The tweezer of the lights `light_of` makes (852 nm, waist 0.8 µm, at the frequency index −4), and the frequency
+    /// index of the light beside it there.
+    const TWEEZER: (V3, Option<f64>, i32, [C64; 3]) = ([0.0, 0.0, 1.0], Some(0.8), -4, [C64::ZERO, C64::real(1e5), C64::ZERO]);
+    const BESIDE: i32 = 0;
+    /// The frequency of a light at the index `index`.
+    fn frequency(light: &Light, index: i32) -> &Frequency {
+        light.frequencies.iter().find(|f| f.index == [index]).expect("the frequency is lit")
     }
     /// Points spread over a few waists and Rayleigh ranges about the focus.
     fn points(count: usize, seed: u64) -> Vec<V3> {
@@ -491,9 +501,9 @@ mod tests {
             (vec![field([1e3, 0.0, 0.0], 0.0), field([0.0, 1e3, 0.0], 0.5), field([3.0, 0.0, 7e2], 0.1)], 3, 0.0),
         ];
         for (fields, rank, off) in cases {
-            let beams: Vec<(V3, Option<f64>, i32, [C64; 3])> = fields.iter().map(|&e| ([0.0, 0.0, 1.0], Some(0.8), -4, e)).collect();
+            let beams: Vec<(V3, Option<f64>, i32, [C64; 3])> = std::iter::once(TWEEZER).chain(fields.iter().map(|&e| ([0.0, 0.0, 1.0], Some(0.8), BESIDE, e))).collect();
             let light = light_of(&beams);
-            let f = &light.frequencies[0];
+            let f = frequency(&light, BESIDE);
             assert_eq!(f.rank(), rank, "{fields:?}");
             if fields.len() == 2 {
                 assert_eq!(parallel(&fields[0], &fields[1]), rank == 1, "{fields:?}");
@@ -525,11 +535,12 @@ mod tests {
     #[test]
     fn the_chart_is_bounded_and_gives_its_field_back() {
         let light = light_of(&[
-            ([0.0, 0.0, 1.0], Some(0.8), -4, [C64::new(2e4, 1e4), C64::real(9e4), C64::ZERO]),
-            ([0.0, 0.0, -1.0], Some(0.8), -4, [C64::ZERO, C64::new(-3e4, 5e3), C64::new(0.0, 4e4)]),
-            ([0.0, 1.0, 0.0], Some(1.5), -4, [C64::real(3e4), C64::ZERO, C64::new(1e4, -2e4)]),
+            TWEEZER,
+            ([0.0, 0.0, 1.0], Some(0.8), BESIDE, [C64::new(2e4, 1e4), C64::real(9e4), C64::ZERO]),
+            ([0.0, 0.0, -1.0], Some(0.8), BESIDE, [C64::ZERO, C64::new(-3e4, 5e3), C64::new(0.0, 4e4)]),
+            ([0.0, 1.0, 0.0], Some(1.5), BESIDE, [C64::real(3e4), C64::ZERO, C64::new(1e4, -2e4)]),
         ]);
-        let f = &light.frequencies[0];
+        let f = frequency(&light, BESIDE);
         assert_eq!((f.rank(), f.chart_dimension()), (3, 5));
         let coherence = |e: &[C64; 3]| -> Vec<C64> { (0..9).map(|i| e[i / 3] * e[i % 3].conj()).collect() };
         let third = UNIT_ROUNDOFF.cbrt();
@@ -574,27 +585,24 @@ mod tests {
         }
     }
 
-    /// The region (SPEC §1.3): outside where every beam of the trap light (the tweezer's frequency) is below 1/20 of its
-    /// focus value -- on the tweezer's axis beyond z = z_R√19, across it beyond ρ = w₀√(ln 20/2); a crossed beam of the
-    /// trap's frequency widens it, a beam of another frequency, focused or a plane wave, does not.
+    /// The region (SPEC §1.3): outside where the trap light (the tweezer alone) is below 1/20 of its focus value -- on the
+    /// tweezer's axis beyond z = z_R√19, across it beyond ρ = w₀√(ln 20/2); a beam of another frequency, focused or a
+    /// plane wave, does not widen it.
     #[test]
     fn the_region_is_where_a_focused_beam_is_bright() {
-        let (k, w) = (7.37, 0.8);
+        let (k, w) = (7.37, TWEEZER.1.unwrap());
         let zr = k * w * w / 2.0;
-        let e = [C64::ZERO, C64::real(1e5), C64::ZERO];
-        let probe = ([1.0, 0.0, 0.0], None, 0, [C64::real(10.0), C64::ZERO, C64::ZERO]);
-        let light = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), probe]);
+        let probe = ([1.0, 0.0, 0.0], None, BESIDE, [C64::real(10.0), C64::ZERO, C64::ZERO]);
+        let light = light_of(&[TWEEZER, probe]);
         let outside = |r: V3| light.outside(r);
         let (axial, radial) = (zr * (1.0 / REGION_INTENSITY - 1.0).sqrt(), w * ((1.0 / REGION_INTENSITY).ln() / 2.0).sqrt());
         let margin = 1.0 + 1e-9;
         assert!(!outside([0.0, 0.0, axial / margin]) && outside([0.0, 0.0, axial * margin]));
         assert!(!outside([radial / margin, 0.0, 0.0]) && outside([0.0, radial * margin, 0.0]));
-        // A crossed beam of the trap's laser widens the region; a probe focused on the millimetre scale, of another
-        // frequency, does not (the cut-over's finding: an atom it pushed out of the tweezer was never lost).
-        let crossed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), ([1.0, 0.0, 0.0], Some(w), -4, e), probe]);
-        assert!(!crossed.outside([3.0, 0.0, 0.0]) && crossed.outside([0.0, 3.0, 0.0]));
-        let wide = ([1.0, 0.0, 0.0], Some(1000.0), 0, [C64::real(10.0), C64::ZERO, C64::ZERO]);
-        let probed = light_of(&[([0.0, 0.0, 1.0], Some(w), -4, e), wide]);
+        // A probe focused on the millimetre scale, of another frequency, does not widen the region (the cut-over's
+        // finding: an atom it pushed out of the tweezer was never lost).
+        let wide = ([1.0, 0.0, 0.0], Some(1000.0), BESIDE, [C64::real(10.0), C64::ZERO, C64::ZERO]);
+        let probed = light_of(&[TWEEZER, wide]);
         assert!(probed.outside([0.0, 0.0, axial * margin]) && probed.outside([0.0, 0.0, 1e4]));
     }
 }
