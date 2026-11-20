@@ -47,6 +47,30 @@ fn select_decide_takes_the_smallest_passing() {
     assert!(none.is_err());
 }
 
+/// A point without light is not judged (module documentation, # Points without light): with the edge dark its solve
+/// is never asked (the closure would panic), its errors read zero with no route, its reference none, the report says
+/// so; the base the first candidate passing at the centre (candidate 0 fails there, R 3 %). Both points dark: the
+/// first candidate, the ground states, with nothing solved.
+#[test]
+fn select_a_point_without_light_is_not_judged() {
+    let candidates = vec![vec![0], vec![0, 1]];
+    let error = |c: usize| [0.03, 0.005][c];
+    let out = decide_on(&candidates, [true, false], 1.0, |p, c| {
+        assert_eq!(p, 0, "the dark edge is solved");
+        Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, error), [1.0, 0.0, 0.0]), Route::Krylov))
+    })
+    .unwrap();
+    assert_eq!(out.keep, vec![0, 1]);
+    assert!(out.candidates.iter().all(|c| c.edge == PointError::unlit() && c.centre.route == Some(Route::Krylov)));
+    assert!(out.reference[0].is_some() && out.reference[1].is_none());
+    assert_eq!(out.notes(), vec!["边缘点无光、无唯一稳态，不判".to_string()]);
+    let dark = decide_on(&candidates, [false, false], 1.0, |_, _| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
+    assert_eq!((dark.keep.clone(), dark.whole), (vec![0], 1));
+    assert_eq!(dark.notes().len(), 2);
+    let refined = refine(dark, 1.0, &|_: usize, _: &[usize]| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
+    assert_eq!(refined.keep, vec![0]);
+}
+
 /// The leave-one-out by hand (module documentation, # The decision, 2): the ground states and four excited states
 /// GROUND..GROUND + 4 the base; a set's R error (both points alike) 0.001 plus each missing state's own (0.001, 0.0015,
 /// 0.0025, 0.02) plus 0.008 where the first two are both missing (the errors not additive: a pair that cancels).
@@ -166,7 +190,7 @@ fn choose_is_pysel() {
         // The full reference's readouts.
         let groups = levels(labels, &(0..STATES).collect::<Vec<_>>());
         for (i, point) in ["centre", "edge"].into_iter().enumerate() {
-            let (ours, route) = &selection.reference[i];
+            let (ours, route) = selection.reference[i].as_ref().expect("the six scenes' points are lit");
             let theirs = &python["full"][point];
             let f: Vec<f64> = theirs["F"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
             let r = theirs["R"].as_f64().unwrap();
@@ -225,7 +249,7 @@ fn choose_s_p_passes_at_both_points() {
         let two = TwoPoints::new(&scene);
         let model = |p: usize, keep: &[usize]| two.model(p, keep);
         let clock = Instant::now();
-        let _ = pair(&base.keep, &model).unwrap();
+        let _ = pair(&base.keep, two.lit, &model).unwrap();
         let check = clock.elapsed().as_secs_f64();
         let excited = selection.left_out.len();
         let mut order: Vec<&LeftOut> = selection.left_out.iter().collect();
@@ -633,7 +657,8 @@ fn choose_on_every_reference_scene() {
 /// Why no whole-level candidate passes (a diagnosis, ignored; `PSTATE_REFS` reference scenes by name, comma-separated):
 /// per scene the frame (its fast frequencies, every state's and generator's fast sector) and at both points the full
 /// reference's readouts -- the levels, R and its channels, F⃗, the force's scale kR -- and every whole-level
-/// candidate's, the largest (all 32 kept) included, each with the gate's three measures and the numbers they divide.
+/// candidate's, the largest (all 32 kept) included, each with the gate's three measures and the numbers they divide;
+/// and `choose`'s outcome.
 #[test]
 #[ignore]
 fn why_no_candidate_passes() {
@@ -643,6 +668,10 @@ fn why_no_candidate_passes() {
         let scene = Scene::new(&request).unwrap();
         let two = TwoPoints::new(&scene);
         let labels = &request.states;
+        match choose(&scene) {
+            Ok(s) => eprintln!("{name}: choose: base P {} -> P {}, measured {:.3e}; {:?}", s.base().keep.len(), s.keep.len(), s.candidates.last().unwrap().worst(), s.notes()),
+            Err(why) => eprintln!("{name}: choose refused: {why}"),
+        }
         eprintln!("{name}: generators (rad/µs) {:?}; tweezer beam {}", scene.generators.iter().map(|g| g.frequency).collect::<Vec<_>>(), request.trap_beam);
         for (p, point) in ["centre", "edge"].into_iter().enumerate() {
             let frame = &two.frames[p];
@@ -656,7 +685,15 @@ fn why_no_candidate_passes() {
                 }
             }
             eprintln!("  {point}: the levels' sectors {by:?}");
-            let (reference, route) = two.reference(p).unwrap();
+            let most = reach(&scene, &two.references[p], &two.points[p], &|_| true).iter().fold(0.0, |m: f64, &a| m.max(a));
+            eprintln!("  {point}: light reaches the atom: {} (the largest first-order amplitude {most:.3e})", two.lit[p]);
+            let (reference, route) = match two.reference(p) {
+                Ok(r) => r,
+                Err(why) => {
+                    eprintln!("  {point} reference: {why}");
+                    continue;
+                }
+            };
             let scale = |r: &Readouts| (r.force.iter().map(|f| f * f).sum::<f64>().sqrt(), two.k * r.rate);
             let (f, kr) = scale(&reference);
             eprintln!(
@@ -668,7 +705,7 @@ fn why_no_candidate_passes() {
                 let liouville = Liouville::new(frame, &two.references[p].hilbert());
                 let elements = select(&liouville);
                 let system = assemble(&liouville, &elements);
-                let solved = crate::krylov::solve(&system).unwrap();
+                let solved = crate::krylov::solve(&system).expect("the reference's solve (its error said above)");
                 let finite = solved.rho.iter().filter(|z| z.re.is_finite() && z.im.is_finite()).count();
                 let largest = solved.rho.iter().map(|z| z.abs()).fold(0., f64::max);
                 eprintln!(

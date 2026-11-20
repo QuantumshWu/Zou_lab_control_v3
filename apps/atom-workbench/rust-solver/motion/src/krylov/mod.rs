@@ -33,9 +33,11 @@
 //! - h_{k+1,k} = 0 (Arnoldi breakdown): the Krylov space is invariant, this step's least-squares iterate is exact in
 //!   exact arithmetic; the iteration ends there.
 //! - a_i = 0 (a zero row): the row reads 0 = b_i. b_i = 0: no information, its residual is identically 0, weight 1.
-//!   b_i ≠ 0: the system is inconsistent, reported (`Inconsistent`), never solved around.
+//!   b_i ≠ 0: the system is inconsistent, reported (`Unsolved::Inconsistent`), never solved around.
 //! - A singular pivot of a preconditioner block (a block may be singular where S or A is not): its application is not
-//!   finite; the attempt stops uncertified and the route goes on.
+//!   finite; the attempt stops uncertified and the route goes on. Where no route gives a finite iterate -- A itself
+//!   singular, a steady state that is not unique --, the solve is refused (`Unsolved::NoIterate`), never answered by a
+//!   ρ no route produced.
 
 pub mod gmres;
 pub mod precond;
@@ -79,6 +81,15 @@ pub fn product(a: &Sparse, x: &[C64], y: &mut [C64]) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Inconsistent {
     pub rows: Vec<usize>,
+}
+
+/// Why `solve` gives no ρ: the system is inconsistent (`Inconsistent`), or no route gave a finite iterate -- every
+/// preconditioner unfactorised or its run not finite, as on a singular system (a steady state that is not unique) --,
+/// every attempt kept. Never a ρ that no route produced.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unsolved {
+    Inconsistent(Inconsistent),
+    NoIterate { attempts: Vec<Attempt> },
 }
 
 #[cfg(test)]

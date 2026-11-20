@@ -89,7 +89,18 @@ fn krylov_zero_row_weight_one_or_inconsistent() {
     assert!(rows.inconsistent(&b).is_empty());
     assert_eq!(rows.backward(&x, &b, &[C64::ZERO, C64::ZERO]), (0.0, 0.0));
     let s = system(2, &[(0, 0, 1.0)], &[0.0], &[0, 0]);
-    assert_eq!(solve(&s).unwrap_err(), Inconsistent { rows: vec![1] });
+    assert_eq!(solve(&s).unwrap_err(), Unsolved::Inconsistent(Inconsistent { rows: vec![1] }));
+}
+
+/// No route gives a finite iterate: two populations no row couples (each row holds the multiplier alone) and the
+/// border -- A singular, its steady state not unique (any ρ0 + ρ1 = 1). Refused with every attempt, never a ρ of zeros.
+#[test]
+fn krylov_singular_system_is_refused() {
+    let s = system(3, &[(0, 2, 1.0), (1, 2, 1.0), (2, 0, 1.0), (2, 1, 1.0)], &[1.0, 1.0], &[0, 0, 0]);
+    match solve(&s) {
+        Err(Unsolved::NoIterate { attempts }) => assert!(!attempts.is_empty() && attempts.iter().all(|t| t.run.as_ref().is_none_or(|r| !r.zeta.is_finite()))),
+        other => panic!("a singular system answered: {other:?}"),
+    }
 }
 
 /// Route 2 forced: elements 0, 1 are both populations, all unknowns slow (every disc holds 0); element 1's harmonic
