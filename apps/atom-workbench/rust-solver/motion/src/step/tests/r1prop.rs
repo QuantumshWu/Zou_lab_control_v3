@@ -202,3 +202,92 @@ fn r1prop_refused() {
         }
     }
 }
+
+/// The remainder estimate against the flow (spectral.rs `Picture::remainder`; STEPCOST's `stepcost_flow`): a walk from
+/// the moving point (trajectory 3) at τ = R1PROP_WALK (0.474), R1PROP_STEPS of its states (12); at each, one step of
+/// each τ of R1PROP_TAUS through the picture as the step prepares it, against RK4 of the picture's own generator
+/// (R1PROP_RK steps over 0.948 µs, 200000): the state's error at the step's end over its norm, E, their ratio; and E's
+/// time (the least of five) and count.
+#[test]
+#[ignore]
+fn r1prop_remainder() {
+    use crate::linalg::{norm_sqr, C64};
+    use super::super::{pictured, predicted, Along, STATES, SUMS};
+    let walk = env("R1PROP_WALK", 0.474);
+    let taus = list("R1PROP_TAUS", "0.474,0.948");
+    let (steps, rk) = (env("R1PROP_STEPS", 12.0) as usize, env("R1PROP_RK", 200000.0));
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        let mut t = start(&run, &request, chief, 3);
+        let mut scratch = Scratch::default();
+        for k in 0..steps {
+            for &tau in &taus {
+                let h = 0.5 * tau;
+                let Ok(midway) = Midway::new(&run, &t, tau) else { continue };
+                let n = t.psi.len();
+                let mut s = Scratch::default();
+                s.fit(n, SUMS);
+                let kappa_m = predicted(&t.forms, midway.reached.1, tau, t.time + h);
+                let along = Along::new(&midway.generator, kappa_m, kappa_m.map(|k| midway.hbar_over_mass * k));
+                let launched = along.turned(&t.psi, -h, true);
+                if let Err(e) = pictured(&along, &mut s, tau, Some(&launched[..n])) {
+                    println!("R1-REMAINDER {name} state {k} tau {tau}: refused {e:?}");
+                    continue;
+                }
+                let picture = &mut s.picture;
+                let generator = |u: f64| -> Vec<C64> {
+                    let mut g: Vec<C64> = (0..n * n).map(|q| picture.base.data[q] + picture.ends[0].data[q] * u + picture.ends[1].data[q] * (u * u)).collect();
+                    for tone in &picture.beats {
+                        for (member, beat) in tone.members.iter().zip([tone.beat, -tone.beat]) {
+                            let p = C64::cis(beat * u);
+                            for (q, g) in g.iter_mut().enumerate() {
+                                *g += p * (member[0].data[q] + member[1].data[q] * u + member[2].data[q] * (u * u));
+                            }
+                        }
+                    }
+                    g
+                };
+                let scalar = (0..n).map(|i| picture.base.data[i * n + i]).sum::<C64>() / n as f64;
+                let slope = |u: f64, y: &[C64]| -> Vec<C64> {
+                    let g = generator(u);
+                    (0..n).map(|i| ((0..n).map(|j| g[i * n + j] * y[j]).sum::<C64>() - scalar * y[i]) * C64::new(0.0, -1.0)).collect()
+                };
+                let count = ((rk * tau / 0.948).ceil() as usize).max(20000);
+                let dt = tau / count as f64;
+                let mut y: Vec<C64> = launched[..n].to_vec();
+                for i in 0..count {
+                    let u = -h + i as f64 * dt;
+                    let k1 = slope(u, &y);
+                    let y2: Vec<C64> = y.iter().zip(&k1).map(|(a, b)| *a + *b * (0.5 * dt)).collect();
+                    let k2 = slope(u + 0.5 * dt, &y2);
+                    let y3: Vec<C64> = y.iter().zip(&k2).map(|(a, b)| *a + *b * (0.5 * dt)).collect();
+                    let k3 = slope(u + 0.5 * dt, &y3);
+                    let y4: Vec<C64> = y.iter().zip(&k3).map(|(a, b)| *a + *b * dt).collect();
+                    let k4 = slope(u + dt, &y4);
+                    for q in 0..n {
+                        y[q] += (k1[q] + k2[q] * 2.0 + k3[q] * 2.0 + k4[q]) * (dt / 6.0);
+                    }
+                }
+                let phase = (C64::new(0.0, -tau) * scalar).exp();
+                y.iter_mut().for_each(|z| *z *= phase);
+                picture.launch(-h, &launched[..n]);
+                let (estimate, work) = picture.remainder();
+                let us = (0..5)
+                    .map(|_| {
+                        let clock = std::time::Instant::now();
+                        std::hint::black_box(picture.remainder());
+                        clock.elapsed().as_secs_f64() * 1e6
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                let mut x = [C64::ZERO; STATES];
+                picture.at(h, &mut x[..n]);
+                let error = x[..n].iter().zip(&y).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt() / norm_sqr(&y).sqrt();
+                println!("R1-REMAINDER {name} state {k} tau {tau}: n {n} error {error:.3e} E {estimate:.3e} E/error {:.3} | E's count {work:.0} complex MA, {us:.1} us ({:.2} G/s), the step's picture {:.0}", estimate / error, work / us * 1e-3, picture.work);
+            }
+            match Midway::new(&run, &t, walk).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Everywhere)) {
+                Ok(step) => t = step.end,
+                Err(_) => break,
+            }
+        }
+    }
+}

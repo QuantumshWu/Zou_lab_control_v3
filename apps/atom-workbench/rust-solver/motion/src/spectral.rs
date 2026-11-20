@@ -777,6 +777,11 @@ fn quintic(s: f64) -> ([f64; 3], [f64; 3]) {
     ([(1.0 + 3.0 * (s + 1.0)) * m2, middle * middle, (1.0 - 3.0 * (s - 1.0)) * p2], [(s + 1.0) * m2, s * middle * middle, (s - 1.0) * p2])
 }
 
+/// The 2-norm of a vector.
+fn norm(x: &[C64]) -> f64 {
+    x.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
+}
+
 /// The Frobenius norm of a matrix row by row.
 fn frobenius(m: &[C64]) -> f64 {
     m.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
@@ -1666,6 +1671,102 @@ impl Picture {
             *out = C64::new(z.im, -z.re);
         }
         self.work += ((2 + 4 * hopped) * n * n) as f64;
+    }
+
+    /// The propagation's leading remainders on the state last launched (`launch`), relative to its norm, read a
+    /// posteriori on its coordinates m at the launch (module documentation, # The split: what each route leaves):
+    /// E = E_f + E_h + E_L, and the complex multiply-adds that made it. The picture's own count (`work`) is left as it
+    /// stood: E is no part of the propagation.
+    /// - E_f, the following's third order, D₂'s fast entries left out (# The state at any time of the step): made whole
+    ///   at the nodes by the factors of 1 + X (`follow`), each entry of the static group's at its largest node value
+    ///   times what its turning integral reaches over what is left of the step, min(h − u₀, 2/|Ω|), on |m|;
+    /// - E_h, the hops' second Magnus term, −½∫∫[D̃₂(t₁), D̃₂(t₂)]: of each of the launch's two hops by its two halves'
+    ///   exponents J_a, J_b, ½‖[J_b, J_a] m‖ -- the term of a linear envelope at three quarters of its size --, summed;
+    /// - E_L, what the three nodes' parabola of D₂ misses of the change's own light shift between them on the hopped
+    ///   entries of the static group: the quartic of D X, (4/15) |h|⁵ |Σ_k B_ak B_kc/Ω_kc| over the followed (k, c), on
+    ///   |m_c|.
+    /// Each is the leading term of what its route leaves, at the state's own components, where the split's rule
+    /// (`followed`) takes the sizes of every pair together. Measured against the flow of the generator the step takes
+    /// (RK4; stepcost.status.md, 304 steps of seven scenes at 0.237 to 1.897 µs whose error lay above RK4's floor): E
+    /// within 0.25 and 11 times the state's error at the step's end, its median 0.77; the rule's own leading remainders
+    /// 10³ to 10⁶ times it. None where nothing moves (the propagation is then exact).
+    pub fn remainder(&mut self) -> (f64, f64) {
+        let (n, h) = (self.n, self.half);
+        if !self.moving {
+            return (0.0, 0.0);
+        }
+        let size = n * n;
+        let work = self.work;
+        let mut m = [C64::ZERO; crate::model::STATES];
+        m[..n].copy_from_slice(&self.path[..n]);
+        let size_of = norm(&m[..n]).max(f64::MIN_POSITIVE);
+        let mut counted = 0.0;
+        let (mut dropped, mut light) = (0.0, 0.0);
+        if self.followed {
+            // E_f: D₂ at the nodes as `follow` left it (the static group's part on its hopped entries taken out).
+            let count = if self.beats.is_empty() { 2 } else { 3 };
+            let wholes = &self.product[3 * size..(3 + count) * size];
+            let width = (h - self.origin).abs();
+            let group = &self.classes[0];
+            let mut total = 0.0;
+            for a in 0..n {
+                let mut row = 0.0;
+                for b in 0..n {
+                    let k = a * n + b;
+                    if group.fast[k] {
+                        let omega = (self.lambda[a] - self.lambda[b]).abs();
+                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, f64::max) * width.min(2.0 / omega) * m[b].abs();
+                    }
+                }
+                total += row * row;
+            }
+            dropped = total.sqrt() / size_of;
+            // E_L: the quartic u⁴|B|²/Ω of D X on the hopped entries, its parabola's miss (4/15)|h|⁵|Q| over the step.
+            let b = &group.change[2];
+            let mut total = 0.0;
+            for a in 0..n {
+                let mut row = 0.0;
+                for c in (0..n).filter(|&c| !group.fast[a * n + c]) {
+                    let q: C64 = (0..n).filter(|&k| group.fast[k * n + c]).map(|k| b[a * n + k] * b[k * n + c] / (self.lambda[k] - self.lambda[c])).sum();
+                    row += q.abs() * m[c].abs();
+                }
+                total += row * row;
+            }
+            light = 4.0 / 15.0 * h.abs().powi(5) * total.sqrt() / size_of;
+            counted += (3 * size + size * n) as f64;
+        }
+        // E_h: each hop by its two halves, from the launch to the middle of what is left and on to the step's end, on m
+        // where the hop meets it (the launch's and the middle stop's, `launch`).
+        let mut hopped = 0.0;
+        for (stop, u) in [(0, self.origin), (2, self.centre)] {
+            let w = self.spacing;
+            let mut x = [C64::ZERO; crate::model::STATES];
+            x[..n].copy_from_slice(&self.path[stop * n..(stop + 1) * n]);
+            let mut halves = std::mem::take(&mut self.product);
+            for (j, at) in [u, u + 0.5 * w].into_iter().enumerate() {
+                self.exponent(at, 0.5 * w);
+                self.turn(at - self.origin);
+                halves[j * size..(j + 1) * size].copy_from_slice(&self.matrix.data);
+            }
+            let apply = |matrix: &[C64], y: &[C64]| -> [C64; crate::model::STATES] {
+                let mut out = [C64::ZERO; crate::model::STATES];
+                for (row, z) in matrix.chunks_exact(n).zip(out.iter_mut()) {
+                    *z = row.iter().zip(y).map(|(a, b)| *a * *b).sum();
+                }
+                out
+            };
+            let (first, second) = (&halves[..size], &halves[size..2 * size]);
+            let (a, b) = (apply(first, &x[..n]), apply(second, &x[..n]));
+            let (ba, ab) = (apply(second, &a[..n]), apply(first, &b[..n]));
+            hopped += 0.5 * ba[..n].iter().zip(&ab[..n]).map(|(p, q)| (*p - *q).norm_sqr()).sum::<f64>().sqrt() / norm(&x[..n]).max(f64::MIN_POSITIVE);
+            self.product = halves;
+            counted += (4 * size) as f64;
+        }
+        // The hops' moments are a width's (`exponent`): made anew for the next hop.
+        self.width = f64::NAN;
+        counted += self.work - work;
+        self.work = work;
+        (dropped + hopped + light, counted)
     }
 
     /// Launches the picture from the frame's state x at the time `from` of the step (from the middle; the step's
