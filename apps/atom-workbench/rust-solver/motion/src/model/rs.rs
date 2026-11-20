@@ -282,8 +282,8 @@ impl Block {
             }
             let tail = rho / (1.0 - rho);
             loop {
-                let sum: Vec<C64> = (0..size).map(|i| out[(i, j)]).collect();
-                if inf(&w) * tail <= UNIT_ROUNDOFF * inf(&sum) {
+                let sum = (0..size).fold(0.0_f64, |m, i| m.max(out[(i, j)].abs()));
+                if inf(&w) * tail <= UNIT_ROUNDOFF * sum {
                     break;
                 }
                 for i in 0..size {
@@ -357,9 +357,38 @@ fn negligible(width: usize, leg: [f64; 2], m: [f64; 2], scale: [f64; 2]) -> bool
     w * leg[0] * m[0] < UNIT_ROUNDOFF * scale[0] && w * (leg[1] * m[0] + leg[0] * m[1]) < UNIT_ROUNDOFF * scale[1]
 }
 
+/// The decay Γ = Σ_ch Σ_c L_ch⁽ᶜ⁾† L_ch⁽ᶜ⁾ of jump channels (size × size) and its gradient.
+pub fn decay(jumps: &[Channel], size: usize) -> (Mat, [Mat; 3]) {
+    let (mut gamma, mut changes) = (Mat::zeros(size, size), zeros(size, size));
+    for p in jumps.iter().flat_map(|c| &c.parts) {
+        adjoint_product_onto(&p.value, &p.value, C64::ONE, &mut gamma);
+        for (d, dl) in changes.iter_mut().zip(&p.gradient) {
+            if nonzero(dl) {
+                adjoint_product_onto(dl, &p.value, C64::ONE, d);
+                adjoint_product_onto(&p.value, dl, C64::ONE, d);
+            }
+        }
+    }
+    (gamma, changes)
+}
+
+impl ModelAt {
+    /// The generator its folds are taken at: H's static part − (i/2)Γ (`decay`), with its gradient.
+    pub fn generator(&self) -> ModelPart {
+        let mut g = self.still().clone();
+        let (gamma, changes) = decay(&self.jumps, self.states.len());
+        g.value.add_scaled(C64::new(0.0, -0.5), &gamma);
+        for (d, c) in g.gradient.iter_mut().zip(&changes) {
+            d.add_scaled(C64::new(0.0, -0.5), c);
+        }
+        g
+    }
+}
+
 /// The one fold (module documentation): of `source`, keep the states `keep` (indices into the 32, among the source's)
-/// and their slow elements by `sectors` on the fast coordinates `axes`; fold the rest at the static generator
-/// `generator` (on the source's states, with its gradient).
+/// and their slow elements by `sectors` on the fast coordinates `axes`; fold the rest at the generator `generator` = G −
+/// (i/2)Γ (on the source's states, with its gradient: `ModelAt::generator`, or the full reference's made once,
+/// `Tweezer::reference`).
 pub fn fold(source: &ModelAt, generator: &ModelPart, keep: &[usize], sectors: &Sectors, axes: [bool; 2]) -> ModelAt {
     let place = |state: usize| source.states.iter().position(|&s| s == state).expect("a kept state of the source");
     let mut kept: Vec<usize> = keep.iter().map(|&s| place(s)).collect();
@@ -391,22 +420,8 @@ pub fn fold(source: &ModelAt, generator: &ModelPart, keep: &[usize], sectors: &S
     let mut blocks: Vec<Block> = Vec::new();
     for (rows, s) in sets {
         // G₀ = G − (i/2)Γ on the rows, with its gradient.
-        let mut g = generator.value.block(&rows, &rows);
-        let mut changes = generator.gradient.each_ref().map(|d| d.block(&rows, &rows));
-        let all: Vec<usize> = (0..size).collect();
-        for channel in &source.jumps {
-            for p in &channel.parts {
-                let l = p.value.block(&all, &rows);
-                adjoint_product_onto(&l, &l, C64::new(0.0, -0.5), &mut g);
-                for (d, dl) in changes.iter_mut().zip(&p.gradient) {
-                    if nonzero(dl) {
-                        let dl = dl.block(&all, &rows);
-                        adjoint_product_onto(&dl, &l, C64::new(0.0, -0.5), d);
-                        adjoint_product_onto(&l, &dl, C64::new(0.0, -0.5), d);
-                    }
-                }
-            }
-        }
+        let g = generator.value.block(&rows, &rows);
+        let changes = generator.gradient.each_ref().map(|d| d.block(&rows, &rows));
         let on: Vec<&Mat> = std::iter::once(&g).chain(changes.iter()).collect();
         for members in connected(&rows, &on) {
             let sub: Vec<usize> = members.iter().map(|&i| rows[i]).collect();
@@ -612,6 +627,9 @@ pub struct Tweezer {
     sectors: Sectors,
     shift: Vec<ModelPart>,
     channels: Vec<Channel>,
+    /// Σ C_q†C_q of the emission, and the unit fold's channels' Σ Ĵ†Ĵ (∝ |a_tw|²): the reference's decay.
+    emission: Mat,
+    scattering: Mat,
 }
 
 impl Tweezer {
@@ -626,15 +644,20 @@ impl Tweezer {
         }
         let states: Vec<usize> = (0..STATES).collect();
         let source = ModelAt { groups: levels(&scene.request.states, &states), states: states.clone(), folded: Vec::new(), effective, jumps: emission(scene.jumps(), length), lift: Vec::new() };
-        let generator = ModelPart { key: vec![0; length], frequency: 0.0, value: scene.request.hamiltonian.clone(), gradient: zeros(STATES, STATES) };
+        let emission = decay(&source.jumps, STATES).0;
+        let mut generator = ModelPart { key: vec![0; length], frequency: 0.0, value: scene.request.hamiltonian.clone(), gradient: zeros(STATES, STATES) };
+        generator.value.add_scaled(C64::new(0.0, -0.5), &emission);
         let sectors = Sectors::tweezer(scene);
         let unit = fold(&source, &generator, &states, &sectors, REFERENCE);
-        Tweezer { shift: unit.effective, channels: unit.jumps.into_iter().filter(|c| c.fast != [0; 2]).collect(), sectors }
+        let channels: Vec<Channel> = unit.jumps.into_iter().filter(|c| c.fast != [0; 2]).collect();
+        let scattering = decay(&channels, STATES).0;
+        Tweezer { shift: unit.effective, channels, sectors, emission, scattering }
     }
 
     /// The full reference at a point: the scene's components there, the tweezer's left out, their fold put in at its
-    /// amplitude a: the pairs times |a|², the channels with n_tw = 1 times a, with −1 times a*, each with its gradient.
-    pub fn reference(&self, scene: &Scene, components: &Components) -> ModelAt {
+    /// amplitude a: the pairs times |a|², the channels with n_tw = 1 times a, with −1 times a*, each with its gradient;
+    /// and its generator (`ModelAt::generator`) from the decay made once, Σ C†C + |a|² Σ Ĵ†Ĵ.
+    pub fn reference(&self, scene: &Scene, components: &Components) -> (ModelAt, ModelPart) {
         let tweezer = |key: &Key| self.sectors.key(key, REFERENCE) != [0; 2];
         let mut source = ModelAt::source(components, scene.jumps(), &scene.request.states, tweezer);
         let (a, da) = components.tweezer;
@@ -667,14 +690,20 @@ impl Tweezer {
                 source.jumps.push(Channel { emission: channel.emission, fast: channel.fast, parts, kicks: channel.kicks.iter().map(put).collect() });
             }
         }
-        source
+        let mut generator = source.still().clone();
+        generator.value.add_scaled(C64::new(0.0, -0.5), &self.emission);
+        generator.value.add_scaled(C64::new(0.0, -0.5 * power), &self.scattering);
+        for (d, dp) in generator.gradient.iter_mut().zip(dpower) {
+            d.add_scaled(C64::new(0.0, -0.5 * dp), &self.scattering);
+        }
+        (source, generator)
     }
 }
 
 /// The full reference for the scene's components at a point: the scene's model on the 32 states with the tweezer's
 /// sidebands folded (floquet's `Hilbert::full` is it).
 pub fn reference(scene: &Scene, components: &Components) -> ModelAt {
-    Tweezer::new(scene).reference(scene, components)
+    Tweezer::new(scene).reference(scene, components).0
 }
 
 /// The RS model on a kept set P: P, its complement, the frame's sectors and the tweezer's fold, fixed for the run.
@@ -701,8 +730,8 @@ impl Rs {
     /// The model for the scene's components at a point (`Scene::components_at`, or `Scene::components` for the
     /// checkpoint's): the full reference there, folded on P at its static part.
     pub fn at(&self, scene: &Scene, components: &Components) -> ModelAt {
-        let reference = self.tweezer.reference(scene, components);
-        fold(&reference, reference.still(), &self.keep, &self.sectors, MODEL)
+        let (reference, generator) = self.tweezer.reference(scene, components);
+        fold(&reference, &generator, &self.keep, &self.sectors, MODEL)
     }
 }
 

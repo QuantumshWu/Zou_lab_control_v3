@@ -58,7 +58,7 @@ fn model(doc: &serde_json::Value, which: usize) -> ModelAt {
     let jumps = Jumps { emission: [emission[0].clone(), emission[1].clone(), emission[2].clone()], wave_number: matrix(&doc["wave"]) };
     let source = ModelAt::source(&components(&doc["points"][which], length), &jumps, &labels, |_| false);
     let sectors = Sectors { states: vec![[0; 2]; STATES], generators: vec![[0; 2]; length] };
-    fold(&source, source.still(), &keep, &sectors, MODEL)
+    fold(&source, &source.generator(), &keep, &sectors, MODEL)
 }
 
 /// The fold is hilbert_rs to rounding (RUSTPLAN C1): on the six scenes' selected P at both points (centre: the tweezer
@@ -393,7 +393,10 @@ fn rs_at_is_the_exact_fold_to_rounding() {
         let rs = Rs::new(&scene, &keep, sectors(&scene));
         for (point, components) in points(&scene) {
             let model = rs.at(&scene, &components);
-            let reference = rs.tweezer.reference(&scene, &components);
+            let (reference, generator) = rs.tweezer.reference(&scene, &components);
+            let made = reference.generator();
+            let (g, scale) = apart(&generator.value, &made.value);
+            assert!(g <= 64.0 * UNIT_ROUNDOFF * scale, "{name} {point}: the generator made once against the point's: {g:e} of {scale:e}");
             let truth = exact(&reference, &rs.keep, &rs.sectors, MODEL);
             let errors = differ(&model, &truth);
             eprintln!("{name} {point}: P {} H {:.1e} ∇H {:.1e} L {:.1e} ∇L {:.1e} ({} parts, {} channels)", model.states.len(), errors[0], errors[1], errors[2], errors[3], model.effective.len(), model.jumps.len());
