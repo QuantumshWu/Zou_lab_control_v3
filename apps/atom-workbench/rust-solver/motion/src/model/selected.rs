@@ -430,8 +430,8 @@ impl Selected {
     }
 
     /// The selection's report (stderr): P by levels and state by state, the states left out, the selection's notes (a
-    /// point not judged and why: `Selection::notes`), each candidate's errors at the two points -- "不判" at a point not
-    /// judged, never its zero --, the time.
+    /// point not judged and why: `Selection::notes`), each candidate's errors at the gate's three points (centre, edge,
+    /// middle: `Candidate::points`) -- "不判" at a point not judged, never its zero --, the time.
     pub fn report(&self) -> String {
         let labels = &self.scene.request.states;
         let mut levels: Vec<String> = Vec::new();
@@ -443,7 +443,7 @@ impl Selected {
             }
         }
         let names = |states: &[usize]| states.iter().map(|&s| labels[s].as_str()).collect::<Vec<_>>().join(", ");
-        let mut out = format!("两点选态：P = {} 态 {:?}，用时 {:.2} s
+        let mut out = format!("三点选态：P = {} 态 {:?}，用时 {:.2} s
 ", self.rs.keep.len(), levels, self.report.seconds);
         out += &format!("  P 的态：{}
 ", names(&self.rs.keep));
@@ -462,18 +462,21 @@ impl Selected {
                     "不判".to_string()
                 }
             };
-            out += &format!("  候选 {} 态：中心 {}；边缘 {}{}
-", c.keep.len(), e(&c.centre, 0), e(&c.edge, 1), if c.passes() { "（过）" } else { "" });
+            let [centre, edge, middle] = c.points();
+            out += &format!("  候选 {} 态：中心 {}；边缘 {}；中间 {}{}
+", c.keep.len(), e(centre, 0), e(edge, 1), e(middle, 2), if c.passes() { "（过）" } else { "" });
         }
         out
     }
 
-    /// The model's error as the run books it (solve.rs `Booking`), measured at the two points on the chosen P: on the
-    /// populations the larger of its population errors (absolute), on T the largest of its rate's and force's
-    /// (relative) -- a rate or a force wrong by x moves T by x. No number where the selection holds no measurement of P.
+    /// The model's error as the run books it (solve.rs `Booking`), measured at the gate's points on the chosen P
+    /// (`Candidate::points`: the centre, the edge, the middle): on the populations the largest of its population errors
+    /// (absolute), on T the largest of its rates' and forces' (relative) -- a rate or a force wrong by x moves T by x. A
+    /// point not judged reads zero there (`Selection::notes`). No number where the selection holds no measurement of P.
     pub fn error(&self) -> [f64; 2] {
         self.report.candidates.last().filter(|c| c.keep == self.rs.keep).map_or([f64::NAN; 2], |c| {
-            [larger(c.centre.populations, c.edge.populations), largest(c.centre.rate, [c.centre.force, c.edge.rate, c.edge.force])]
+            let points = c.points();
+            [largest(0.0, points.iter().map(|p| p.populations)), largest(0.0, points.iter().flat_map(|p| [p.rate, p.force]))]
         })
     }
 
