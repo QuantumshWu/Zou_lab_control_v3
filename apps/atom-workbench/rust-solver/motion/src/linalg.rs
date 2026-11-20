@@ -1095,14 +1095,14 @@ impl Chebyshev {
     /// part's y = σr/2q within ln(f64::MAX)); the least degree K with 2(1 + √2) Σ_{k>K} y^k/k! ≤ u, the sum within its
     /// first term over 1 − y/(K + 2). Nothing to sum where X is zero.
     pub fn plan(rho: f64, gamma: f64) -> Chebyshev {
-        let sigma = rho.max(gamma);
+        let sigma = larger(rho, gamma);
         assert!(sigma.is_finite() && rho >= 0.0 && gamma >= 0.0, "the exponential of a matrix of bounds {rho}, {gamma}");
         if sigma == 0.0 {
             return Chebyshev { parts: 1, terms: 0 };
         }
         let corner = C64::new(rho / sigma, gamma / sigma);
         let r = (corner + (corner * corner - C64::ONE).sqrt()).abs();
-        let parts = ((sigma * gamma).sqrt().max(0.5 * sigma * r / f64::MAX.ln()).ceil() as usize).max(1);
+        let parts = (larger((sigma * gamma).sqrt(), 0.5 * sigma * r / f64::MAX.ln()).ceil() as usize).max(1);
         let y = 0.5 * sigma * r / parts as f64;
         let (mut terms, mut next) = (0, y);
         while !((terms + 2) as f64 > y && 2.0 * (1.0 + std::f64::consts::SQRT_2) * next / (1.0 - y / (terms + 2) as f64) <= UNIT_ROUNDOFF) {
@@ -1154,8 +1154,8 @@ pub fn bounds(x: &Mat, sums: &mut [C64]) -> Bounds {
     let (mut lo, mut hi, mut spread) = (C64::new(f64::INFINITY, f64::INFINITY), C64::new(f64::NEG_INFINITY, f64::NEG_INFINITY), C64::ZERO);
     for i in 0..n {
         let (d, r) = (x[(i, i)], sums[i]);
-        lo = C64::new(lo.re.min(d.re - r.re), lo.im.min(d.im - r.im));
-        hi = C64::new(hi.re.max(d.re + r.re), hi.im.max(d.im + r.im));
+        lo = C64::new(smaller(lo.re, d.re - r.re), smaller(lo.im, d.im - r.im));
+        hi = C64::new(larger(hi.re, d.re + r.re), larger(hi.im, d.im + r.im));
         spread += C64::new((d.re - mean.re).powi(2), (d.im - mean.im).powi(2));
     }
     let least = |lo: f64, hi: f64, squares: f64, mean: f64| {
@@ -1182,7 +1182,7 @@ pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebys
     }
     let plan = Chebyshev::plan(rho, gamma);
     if plan.terms > 0 {
-        let sigma = rho.max(gamma);
+        let sigma = larger(rho, gamma);
         let z = sigma / plan.parts as f64;
         for x in &mut a.data {
             *x *= 2.0 / sigma;

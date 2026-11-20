@@ -654,7 +654,7 @@ fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, 
         return (hops_converge.then_some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0) + 2.0 * coupled * r * x.powi(3);
+    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * linalg::smaller(x, 1.0) + 2.0 * coupled * r * x.powi(3);
     let hops = x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0) * (2.0 * decay).exp();
     let (light, cube) = (4.0 / 15.0 * second * (x * x), x.powi(3));
     match (r < 1.0, hops_converge) {
@@ -679,7 +679,7 @@ fn hop_size([slope, curvature, constant]: [f64; 3]) -> f64 {
 /// most: the least T with x^T/T! times the size within the unit round-off, the size no more than one -- the terms from T
 /// on are within the round-off of the state the integral acts on, or of its own first term where that is more.
 fn series(x: f64, size: f64) -> usize {
-    let (mut terms, mut next) = (1, x * size.min(1.0));
+    let (mut terms, mut next) = (1, x * linalg::smaller(size, 1.0));
     while next > UNIT_ROUNDOFF {
         terms += 1;
         next *= x / terms as f64;
@@ -898,7 +898,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
                 let omega = if c == 0 { between } else { C64::new(between.re + beat, between.im) };
                 let turn = omega.abs();
                 let (k, t) = (row * n + column, column * n + row);
-                let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
+                let r = if turn > 0.0 { linalg::larger(size(&classes[c], k, omega), size(&classes[partner], t, -omega)) } else { 0.0 };
                 let decay = omega.im.abs() * h.abs();
                 // The pair's hop exponent at its balancing similarity, its two ways' geometric mean with half the hop's
                 // growth; a state's own entry commutes with itself: its hops' series is its first term.
@@ -1585,7 +1585,7 @@ impl Picture {
     /// curvatures, D₂(t) = C + tA + t²B at the farther end of the hop from the middle, times the hopped entries' largest
     /// growth in the interaction picture over the step (`grown`, `followed`).
     fn moved(&self, u: f64, w: f64) -> f64 {
-        let far = u.abs().max((u + w).abs());
+        let far = linalg::larger(u.abs(), (u + w).abs());
         (self.slopes[0] + far * self.slopes[1] + far * far * self.slopes[2]) * w.abs() * self.grown
     }
 
@@ -1726,7 +1726,7 @@ impl Picture {
         let work = self.work;
         let mut m = [C64::ZERO; crate::model::STATES];
         m[..n].copy_from_slice(&self.path[..n]);
-        let size_of = norm(&m[..n]).max(f64::MIN_POSITIVE);
+        let size_of = linalg::larger(norm(&m[..n]), f64::MIN_POSITIVE);
         let mut counted = 0.0;
         let (mut dropped, mut light) = (0.0, 0.0);
         if self.followed {
@@ -1742,7 +1742,7 @@ impl Picture {
                     let k = a * n + b;
                     if group.fast[k] {
                         let omega = (self.lambda[a] - self.lambda[b]).abs();
-                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * width.min(2.0 / omega) * m[b].abs();
+                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * linalg::smaller(width, 2.0 / omega) * m[b].abs();
                     }
                 }
                 total += row * row;
@@ -1785,7 +1785,7 @@ impl Picture {
             let (first, second) = (&halves[..size], &halves[size..2 * size]);
             let (a, b) = (apply(first, &x[..n]), apply(second, &x[..n]));
             let (ba, ab) = (apply(second, &a[..n]), apply(first, &b[..n]));
-            hopped += 0.5 * ba[..n].iter().zip(&ab[..n]).map(|(p, q)| (*p - *q).norm_sqr()).sum::<f64>().sqrt() / norm(&x[..n]).max(f64::MIN_POSITIVE);
+            hopped += 0.5 * ba[..n].iter().zip(&ab[..n]).map(|(p, q)| (*p - *q).norm_sqr()).sum::<f64>().sqrt() / linalg::larger(norm(&x[..n]), f64::MIN_POSITIVE);
             self.product = halves;
             counted += (4 * size) as f64;
         }
@@ -1922,7 +1922,7 @@ impl Picture {
                     let t = (f1 - s1 * width - f0) / (s0 - s1);
                     f0 + s0 * t
                 };
-                let (weight, nu) = (top.min(0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
+                let (weight, nu) = (linalg::smaller(top, 0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
                 let twice = if a == b { 1.0 } else { 2.0 };
                 numerator.push((twice * weight, nu));
                 if a != b {
@@ -1975,7 +1975,7 @@ impl Picture {
                 // Newton within the bracket, a bisection where its step leaves it, doubling until a bracket stands; until the
                 // step, once bracketed, stops shrinking (the round-off's floor). Every σ's value bounds V: the least is taken.
                 let (mut lo, mut hi) = (0.0_f64, f64::INFINITY);
-                let mut sigma = 1.0 / fastest.max(f64::MIN_POSITIVE);
+                let mut sigma = 1.0 / linalg::larger(fastest, f64::MIN_POSITIVE);
                 let (mut best, mut last) = (f64::INFINITY, f64::INFINITY);
                 loop {
                     count += (7 * (numerator.len() + ringing.len())) as f64;
@@ -2200,7 +2200,7 @@ pub(crate) mod tests {
         let mut pairs = Vec::new();
         for a in 0..n {
             for b in a + 1..n {
-                let size = |j: usize| slopes[j][a * n + b].abs().max(slopes[j][b * n + a].abs());
+                let size = |j: usize| linalg::larger(slopes[j][a * n + b].abs(), slopes[j][b * n + a].abs());
                 pairs.push([(picture.lambda[a] - picture.lambda[b]).abs() * h, size(0) * h * h, size(1) * h * h * h]);
             }
         }
@@ -2575,7 +2575,7 @@ pub(crate) mod tests {
                 let start: Vec<C64> = (0..n).map(|state| if state < 2 { start[state] } else { C64::ZERO }).collect();
                 picture.launch(-half, &start);
                 for (place, times) in [&[half][..], &[-0.5 * half, 0.5 * half][..]].into_iter().enumerate() {
-                    worst[place] = worst[place].max(errors(&mut picture, &base, &a, &b, half, &start, times, 20_000));
+                    worst[place] = linalg::larger(worst[place], errors(&mut picture, &base, &a, &b, half, &start, times, 20_000));
                 }
             }
             found[treatment] = Some(worst);
@@ -2845,7 +2845,7 @@ pub(crate) mod tests {
             for (k, (c, a)) in class.change[0].iter().zip(&class.change[1]).enumerate() {
                 let between = picture.lambda[k / n] - picture.lambda[k % n];
                 let (x, s) = (C64::new(between.re + class.beat, between.im).abs() * h, (c.abs() + a.abs() * h) * h);
-                sum += if class.fast[k] { 2.0 * s.powi(3) * x.min(1.0) / x.powi(3) } else { x * s * s / 3.0 };
+                sum += if class.fast[k] { 2.0 * s.powi(3) * linalg::smaller(x, 1.0) / x.powi(3) } else { x * s * s / 3.0 };
             }
         }
         sum
@@ -3075,7 +3075,7 @@ pub(crate) mod tests {
                 assert!(e_pair > apart, "at νh = 2πk two steps through the nodes err by {e_pair:e}, and differ from their companion by {apart:e}");
                 blind = linalg::smaller(blind, e_pair / apart);
             }
-            (worst, nearest) = (worst.max(e_tone / e_hermitian), nearest.min(e_nodes / e_tone));
+            (worst, nearest) = (linalg::larger(worst, e_tone / e_hermitian), linalg::smaller(nearest, e_nodes / e_tone));
             cases += 1;
         }
         eprintln!("{cases} random decays: as tones at least {nearest:.0} times better than through the nodes, and at most {worst:.2} times the Hermitian tones of their members; at νh = 2πk two steps through the nodes erred at least {blind:.1} times their difference from the companion");
@@ -3165,8 +3165,8 @@ pub(crate) mod tests {
                         assert!(taken || y < std::f64::consts::PI, "y {y}: through the nodes beyond π");
                         for (k, found) in [chosen, before].into_iter().enumerate() {
                             sums[k] += found;
-                            worse[k] += usize::from(found > 1.5 * e_tone.min(e_nodes) + 1e-13);
-                            most[k] = most[k].max(found / e_tone.min(e_nodes).max(1e-13));
+                            worse[k] += usize::from(found > 1.5 * linalg::smaller(e_tone, e_nodes) + 1e-13);
+                            most[k] = linalg::larger(most[k], found / linalg::larger(linalg::smaller(e_tone, e_nodes), 1e-13));
                         }
                         statics += usize::from(!taken);
                         cases += 1;

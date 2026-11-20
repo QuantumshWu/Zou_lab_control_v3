@@ -492,19 +492,19 @@ fn r1prop_quadrature() {
                         f
                     };
                     let (ke, kb) = (kick(&engine), kick(&brute));
-                    let scale = kb.iter().map(|x| x.abs()).fold(0.0, crate::linalg::larger).max(f64::MIN_POSITIVE);
+                    let scale = crate::linalg::larger(kb.iter().map(|x| x.abs()).fold(0.0, crate::linalg::larger), f64::MIN_POSITIVE);
                     let errors = [apart(&engine, &brute) / width, (hazard(&engine) - hazard(&brute)).abs(), ke.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, crate::linalg::larger) / scale, (hazard(&engine_in) - hazard(&brute_in)).abs()];
                     let entry = &mut tally[kind];
                     entry.0 += 1;
                     for (w, e) in entry.1.iter_mut().zip(errors) {
                         *w = crate::linalg::larger(*w, e);
                     }
-                    entry.2 = entry.2.max(apart(&brute, &check) / width);
+                    entry.2 = crate::linalg::larger(entry.2, apart(&brute, &check) / width);
                     entry.3 += nodes;
                     entry.4 += old_nodes(h - from, picture.bandwidth).max(super::super::FORMS);
-                    entry.5 += picture.quotient / picture.bandwidth.max(f64::MIN_POSITIVE);
-                    entry.6 = entry.6.min(us);
-                    entry.7 = entry.7.max(counted);
+                    entry.5 += picture.quotient / crate::linalg::larger(picture.bandwidth, f64::MIN_POSITIVE);
+                    entry.6 = crate::linalg::smaller(entry.6, us);
+                    entry.7 = crate::linalg::larger(entry.7, counted);
                     let (kr, root) = (kick(&engine_root), &mut rooted[kind]);
                     let errors = [apart(&engine_root, &brute) / width, (hazard(&engine_root) - hazard(&brute)).abs(), kr.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, crate::linalg::larger) / scale];
                     for (w, e) in root.0.iter_mut().zip(errors) {
@@ -647,7 +647,7 @@ fn r1prop_jumps() {
                     Err(_) => break,
                 }
             }
-            println!("R1-JUMP {name} tau {tau}: {count} jumps; the time's error as ln N's, at the most {worst_time:.2e}; the state's direction at the most {worst_state:.2e} (the flow's states {:.1e} µs apart)", tau / ((rk * tau / 0.948).ceil().max(20000.0)));
+            println!("R1-JUMP {name} tau {tau}: {count} jumps; the time's error as ln N's, at the most {worst_time:.2e}; the state's direction at the most {worst_state:.2e} (the flow's states {:.1e} µs apart)", tau / (crate::linalg::larger((rk * tau / 0.948).ceil(), 20000.0)));
         }
     }
 }
@@ -720,7 +720,7 @@ fn r1prop_quotient_scan() {
                         let ms = clock.elapsed().as_secs_f64() * 1e3;
                         total += ms;
                         let p = &scratch.picture;
-                        ratio = crate::linalg::larger(ratio, p.quotient / p.bandwidth.max(f64::MIN_POSITIVE));
+                        ratio = crate::linalg::larger(ratio, p.quotient / crate::linalg::larger(p.bandwidth, f64::MIN_POSITIVE));
                         if ms > slowest {
                             (slowest, at) = (ms, k);
                         }
