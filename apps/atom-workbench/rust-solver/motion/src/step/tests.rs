@@ -207,8 +207,8 @@ impl Middle for Parts {
         }
         let mut h = Mat::zeros(n, n);
         self.generator(velocity, 0.0, &mut h);
-        let beat = if self.still() { 0.0 } else { self.parts.iter().map(|p| (p.omega + dot3(p.wave, *velocity)).abs()).fold(0.0, f64::max) };
-        let decay = (1..n).map(|e| -h[(e, e)].im).fold(f64::INFINITY, f64::min);
+        let beat = if self.still() { 0.0 } else { self.parts.iter().map(|p| (p.omega + dot3(p.wave, *velocity)).abs()).fold(0.0, crate::linalg::larger) };
+        let decay = (1..n).map(|e| -h[(e, e)].im).fold(f64::INFINITY, crate::linalg::smaller);
         Some(step::Optical { ground: 1, decay, beat })
     }
 }
@@ -296,7 +296,7 @@ impl Atom {
     }
     /// The folded light at a point (`Folded`).
     fn folded_at(&self, r: [f64; 3]) -> Folded {
-        Folded { field: self.field(r), absorbed: self.folded.iter().map(|(_, k)| crate::linalg::norm3(*k)).fold(0.0, f64::max), emission: self.emission }
+        Folded { field: self.field(r), absorbed: self.folded.iter().map(|(_, k)| crate::linalg::norm3(*k)).fold(0.0, crate::linalg::larger), emission: self.emission }
     }
     /// The folded light's one class of photons of the ground state's amplitude at a point, with its gradients.
     fn made(&self, r: [f64; 3], psi: &[C64]) -> Vec<Photon> {
@@ -428,8 +428,8 @@ const GAMMA: f64 = 38.117;
 
 /// The largest |a − b| over two vectors relative to the largest |b|.
 fn relative(a: &[f64], b: &[f64]) -> f64 {
-    let scale = b.iter().map(|x| x.abs()).fold(0.0, f64::max);
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max) / scale
+    let scale = b.iter().map(|x| x.abs()).fold(0.0, crate::linalg::larger);
+    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, crate::linalg::larger) / scale
 }
 
 /// One step of τ (negative: the reverse step) of the flow between jumps, on a part of a Brownian path, read at the
@@ -560,7 +560,7 @@ fn the_reference_s_highest_on_a_path_is_its_expansion_s() {
             let d: [f64; 3] = std::array::from_fn(|a| r[a] + v[a] * s - p[a]);
             q.value + dot3(q.gradient, d) + 0.5 * (0..3).map(|i| (0..3).map(|j| d[i] * hessian[i][j] * d[j]).sum::<f64>()).sum::<f64>()
         };
-        let sampled = (0..=4000).map(|i| at(half * (i as f64 / 2000.0 - 1.0))).fold(f64::NEG_INFINITY, f64::max);
+        let sampled = (0..=4000).map(|i| at(half * (i as f64 / 2000.0 - 1.0))).fold(f64::NEG_INFINITY, crate::linalg::larger);
         let curvature = (0..3).map(|i| (0..3).map(|j| v[i] * hessian[i][j] * v[j]).sum::<f64>()).sum::<f64>().abs();
         let between = 0.125 * curvature * (half / 2000.0).powi(2);
         let highest = flow.highest(r, v, half);
@@ -744,7 +744,7 @@ fn step_errors(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, tau: 
     let s = step_of(&model, &start, tau, &mut step::Scratch::default()).unwrap();
     let steps = ((2000.0 * detuning.abs() * tau) as usize).max(20_000);
     let (psi, kick) = substepped(beams, detuning, gamma, z0, v, [C64::ONE, C64::ZERO], tau, steps, None);
-    let state = (0..2).map(|a| (s.end.psi[a] - psi[a]).abs()).fold(0.0, f64::max);
+    let state = (0..2).map(|a| (s.end.psi[a] - psi[a]).abs()).fold(0.0, crate::linalg::larger);
     // The dressed state's dipole kick at the step's middle: −τ ∂_z(|c|²/Δ)-like, its size k|c|²τ/|Δ̃| at most.
     let size = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>().powi(2) * K * tau / detuning.hypot(0.5 * gamma);
     let impulse = (s.end.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size);
@@ -846,7 +846,7 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
                     }
                     let length = |x: [C64; 2]| (x[0].norm_sqr() + x[1].norm_sqr()).sqrt();
                     let (mine, theirs) = (length([t.psi[0], t.psi[1]]), length(exact));
-                    let state = (0..2).map(|a| (t.psi[a] / mine - exact[a] / theirs).abs()).fold(0.0, f64::max);
+                    let state = (0..2).map(|a| (t.psi[a] / mine - exact[a] / theirs).abs()).fold(0.0, crate::linalg::larger);
                     ([state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)], hopped)
                 })
                 .unzip();
@@ -1192,7 +1192,7 @@ fn a_moving_two_level_atom_diffuses_as_its_master_equation() {
                 let ratio = d / exact;
                 let epsilon = if standing { (2.0 * K * v / (0.5 * GAMMA)).powi(2) } else { 0.0 };
                 eprintln!("{} Ω₀ {:.0}Γ Δ {:+.0}Γ: D {d:.2} ± {se:.2} against {exact:.2}, {ratio:.4} ± {:.4} (ε_Q {epsilon:.2}; pending at the end {pending:.3e})", if standing { "standing" } else { "running " }, rabi / GAMMA, detuning / GAMMA, se / exact);
-                worst = worst.max((ratio - 1.0).abs() - 3.0 * se / exact);
+                worst = crate::linalg::larger(worst, (ratio - 1.0).abs() - 3.0 * se / exact);
                 if (ratio - 1.0).abs() > 0.05 + 3.0 * se / exact {
                     beyond.push(format!("{} Ω₀ {:.0}Γ Δ {:+.0}Γ: {ratio:.4} ± {:.4}", if standing { "standing" } else { "running" }, rabi / GAMMA, detuning / GAMMA, se / exact));
                 }
@@ -1234,9 +1234,9 @@ fn a_step_past_its_light_s_resolution_is_inaccurate_not_unstable() {
             let end = as_advanced(&model, &t, tau, &mut scratch).unwrap();
             let norm = crate::linalg::norm_sqr(&end.psi);
             assert!(norm.is_finite() && norm > 0.0, "v {v}: the norm {norm} after a step from one");
-            impulse = impulse.max((end.kappa[2] - t.kappa[2]).abs() / (tau * K * rabi));
-            hazard = hazard.max(-norm.ln() / (GAMMA * tau));
-            grown = grown.max(norm);
+            impulse = crate::linalg::larger(impulse, (end.kappa[2] - t.kappa[2]).abs() / (tau * K * rabi));
+            hazard = crate::linalg::larger(hazard, -norm.ln() / (GAMMA * tau));
+            grown = crate::linalg::larger(grown, norm);
             t = end;
             let scale = 1.0 / norm.sqrt();
             t.psi.iter_mut().for_each(|z| *z = *z * scale);
@@ -1525,8 +1525,8 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
             let full = step_of(&model, &start, tau, &mut step::Scratch::default()).unwrap();
             let first = step_of(&model, &start, 0.5 * tau, &mut step::Scratch::default()).unwrap();
             let second = step_of(&model, &first.end, 0.5 * tau, &mut step::Scratch::default()).unwrap();
-            let dk = (0..3).map(|a| (full.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, f64::max);
-            let dr = (0..3).map(|a| (full.end.r[a] - second.end.r[a]).abs()).fold(0.0, f64::max);
+            let dk = (0..3).map(|a| (full.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, crate::linalg::larger);
+            let dr = (0..3).map(|a| (full.end.r[a] - second.end.r[a]).abs()).fold(0.0, crate::linalg::larger);
             [dk, dr]
         };
         let d: Vec<[f64; 2]> = [0.4, 0.2, 0.1, 0.05].iter().map(|&tau| difference(tau)).collect();
@@ -1811,7 +1811,7 @@ fn a_read_inside_a_step_is_of_the_second_order_and_the_step_s_end_at_its_end() {
         (t.psi, t.threshold) = (psi.into_iter().collect(), f64::MIN_POSITIVE);
         t
     };
-    let apart = |a: &[f64; 3], b: &[f64; 3]| (0..3).map(|x| (a[x] - b[x]).abs()).fold(0.0, f64::max);
+    let apart = |a: &[f64; 3], b: &[f64; 3]| (0..3).map(|x| (a[x] - b[x]).abs()).fold(0.0, crate::linalg::larger);
     let relative_phase = |psi: &[C64]| (psi[1] * psi[0].conj()).arg() - 0.3;
     // The phases' distance on the circle.
     let turned = |a: f64, b: f64| (a - b).sin().atan2((a - b).cos()).abs();
@@ -1829,7 +1829,7 @@ fn a_read_inside_a_step_is_of_the_second_order_and_the_step_s_end_at_its_end() {
         let (_, ke, _) = model.exact(r, kappa, p, tau);
         end.push(apart(&step.end.kappa, &ke));
         // A read at the step's end is the step's end.
-        let state = (0..2).map(|s| (last.psi[s] - step.end.psi[s]).abs()).fold(0.0, f64::max);
+        let state = (0..2).map(|s| (last.psi[s] - step.end.psi[s]).abs()).fold(0.0, crate::linalg::larger);
         assert!(relative(&last.r, &step.end.r) < 1e-13 && relative(&last.kappa, &step.end.kappa) < 1e-13 && state < 1e-13 && last.time == step.end.time, "τ {tau}: the read at the end {last:?} against the end {:?}", step.end);
     }
     eprintln!("one step, κ at 0.3 τ: on the path {} (orders {:.2?}), with the kick at the middle {} ({:.2?}); r on the path {} ({:.2?}); κ at the end {} ({:.2?})", sizes(&inside), order(&inside), sizes(&middle_kick), order(&middle_kick), sizes(&position), order(&position), sizes(&end), order(&end));
@@ -1883,10 +1883,10 @@ fn the_state_read_inside_a_step_is_the_path_s() {
             .iter()
             .map(|read| {
                 let (exact, _) = substepped(&beams, detuning, GAMMA, z0, v, [C64::ONE, C64::ZERO], read.time, 40_000, None);
-                (0..2).map(|s| (read.psi[s] - exact[s]).abs()).fold(0.0, f64::max)
+                (0..2).map(|s| (read.psi[s] - exact[s]).abs()).fold(0.0, crate::linalg::larger)
             })
             .collect();
-        inside.push(errors[..9].iter().copied().fold(0.0, f64::max));
+        inside.push(errors[..9].iter().copied().fold(0.0, crate::linalg::larger));
         ends.push(errors[9]);
     }
     eprintln!("the state's error inside a step {}, at its end {}", sizes(&inside), sizes(&ends));
@@ -1922,8 +1922,8 @@ fn a_step_with_light_and_its_reverse_miss_beyond_the_scheme_s_order() {
             let back = step_of(&model, &there.end, -tau, &mut step::Scratch::default()).unwrap();
             let first = step_of(&model, &start, 0.5 * tau, &mut step::Scratch::default()).unwrap();
             let second = step_of(&model, &first.end, 0.5 * tau, &mut step::Scratch::default()).unwrap();
-            let miss = (0..3).map(|a| (back.end.kappa[a] - start.kappa[a]).abs()).fold(0.0, f64::max);
-            let doubling = (0..3).map(|a| (there.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, f64::max);
+            let miss = (0..3).map(|a| (back.end.kappa[a] - start.kappa[a]).abs()).fold(0.0, crate::linalg::larger);
+            let doubling = (0..3).map(|a| (there.end.kappa[a] - second.end.kappa[a]).abs()).fold(0.0, crate::linalg::larger);
             eprintln!("{name}, τ {tau}: forth and back misses κ by {miss:e}, the doubling differs by {doubling:e}");
             assert!(miss < doubling, "{name}, τ {tau}: miss {miss:e} against the doubling's {doubling:e}");
             misses.push(miss);
@@ -2013,7 +2013,7 @@ fn a_step_about_a_minimum_is_stable_below_the_edge_of_its_reference_s_turn_and_i
                     let [a, b, c, d] = matrix(&model, psi, axis, tau);
                     let expected = linear_trace(hm, reference[axis], mean, tau);
                     let scale = a.abs() + d.abs() + 2.0;
-                    worst = worst.max((a + d - expected).abs() / scale).max((a * d - b * c - 1.0).abs() / (a * d).abs().max(1.0));
+                    worst = crate::linalg::larger(worst, (a + d - expected).abs() / scale).max((a * d - b * c - 1.0).abs() / (a * d).abs().max(1.0));
                     assert!((a + d - expected).abs() < 1e-12 * scale && (a * d - b * c - 1.0).abs() < 1e-11 * (a * d).abs().max(1.0), "wells {own:?}, p {p:?}, axis {axis}, τ {tau}: trace {} against {expected}, determinant {}", a + d, a * d - b * c);
                 }
             }
@@ -2049,7 +2049,7 @@ fn a_step_about_a_minimum_is_stable_below_the_edge_of_its_reference_s_turn_and_i
         let (below, above) = (0.98 * predicted / omega, (predicted + 0.3 * (std::f64::consts::PI - predicted)) / omega);
         let [a, b, c, d] = matrix(&model, alone, 0, below);
         let ellipse = (-4.0 * b * c / (4.0 - (a + d) * (a + d))).sqrt();
-        let held = run(1e-3, below, 2000).iter().fold(0.0_f64, |m, x| m.max(x.abs())) / 1e-3;
+        let held = run(1e-3, below, 2000).iter().fold(0.0_f64, |m, x| crate::linalg::larger(m, x.abs())) / 1e-3;
         // As many steps as grow the run by e²⁰: what of it still shrinks is e⁻⁴⁰ of it by then. From a displacement
         // that stays small: the wells' two states turn against each other at their potentials' difference there.
         let mu = (0.5 * trace(above).abs()).acosh();
@@ -2135,7 +2135,7 @@ fn a_following_state_s_kick_has_the_curvature_of_the_level_it_follows() {
             for share in [0.3, 0.7, 0.95, 1.05, 1.3] {
                 let tau = share * predicted / omega;
                 let (measured, expected) = (run_trace(&run(tau, 6)), linear_trace(hm, reference, level, tau));
-                worst = worst.max((measured - expected).abs());
+                worst = crate::linalg::larger(worst, (measured - expected).abs());
                 eprintln!("{name}, ω_k² = {ratio} ω², τ = {share} of the edge's ({tau:.3} µs, |Δ|τ = {:.0}): trace {measured:.5} against {expected:.5}; a held state's {:.5}", detuning.abs() * tau, linear_trace(hm, reference, if phase == 0.0 { level } else { 0.0 }, tau));
                 assert!((measured - expected).abs() < hm * level * tau * tau * lag, "{name}, ω_k² = {ratio} ω², τ {tau}: trace {measured} against {expected}");
             }
@@ -2184,7 +2184,7 @@ fn conservative_trap(name: &str) {
     let hm = run.hbar_over_mass();
     let kt = KT_PER_UK * request.temperature_uk;
     let thermal = (kt / hm).sqrt();
-    let fastest = trap.frequencies.iter().copied().fold(0.0, f64::max);
+    let fastest = trap.frequencies.iter().copied().fold(0.0, crate::linalg::larger);
     let mut tau = 0.5 * (request.times_us[1] - request.times_us[0]);
     while fastest * 2.0 * tau >= std::f64::consts::PI {
         tau *= 0.5;
@@ -2538,7 +2538,7 @@ fn the_densities_sums_are_the_plain_sums_within_their_rounding() {
                         let (apart, bound) = ((sum[a * n + b] - plain).abs(), rounding(2 * states.len() + 10) * scale);
                         assert!(apart <= bound, "{n} states, sum {j} of {count}, entry ({a}, {b}): {apart:e} against {bound:e}");
                         assert!(a == b || sum[b * n + a] == sum[a * n + b].conj(), "{n} states, sum {j} of {count}: ({a}, {b}) against its mirror");
-                        worst = worst.max(apart / bound);
+                        worst = crate::linalg::larger(worst, apart / bound);
                     }
                 }
             }
@@ -2909,7 +2909,7 @@ fn a_scene_s_step_cost() {
             let norm = (0..n * n).map(|i| (h.data[i] - if i / n == i % n { mean } else { C64::ZERO }).norm_sqr()).sum::<f64>().sqrt();
             let rho: Vec<C64> = (0..n * n).map(|_| C64::real(1.0 / n as f64)).collect();
             let mut fastest = 0.0_f64;
-            middle.tones(&path, &rho, &mut |omega, _| fastest = fastest.max(omega.abs()));
+            middle.tones(&path, &rho, &mut |omega, _| fastest = crate::linalg::larger(fastest, omega.abs()));
             eprintln!(
                 "{name} cluster {cluster} ({}+{}, {}): its generator less its trace {norm:.3e} rad/µs, times τ {:.3e}; its fastest tone {fastest:.3e} rad/µs, times τ {:.3e}",
                 c.ground,
@@ -2945,7 +2945,7 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
         let decay = |m: &Mat| Mat::from_fn(n, n, |a, b| C64::I * (m[(a, b)] - m[(b, a)].conj()));
         let extremes = |g: &Mat| {
             let values = crate::linalg::hermitian_eigen(g).values;
-            (values.iter().copied().fold(f64::INFINITY, f64::min), values.iter().map(|v| v.abs()).fold(0.0, f64::max))
+            (values.iter().copied().fold(f64::INFINITY, crate::linalg::smaller), values.iter().map(|v| v.abs()).fold(0.0, crate::linalg::larger))
         };
         let mut kinds = [(f64::INFINITY, 0usize); 5];
         let mut rise = [0.0_f64; 3];
@@ -2985,7 +2985,7 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
                 let s = u / h;
                 let l = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
                 let parabola = Mat::from_fn(n, n, |a, b| (0..3).map(|j| nodes[j].0[(a, b)] * l[j]).sum());
-                let size = nodes.iter().map(|g| g.1).fold(0.0, f64::max);
+                let size = nodes.iter().map(|g| g.1).fold(0.0, crate::linalg::larger);
                 let (g, tables) = at(false, u);
                 let (_, high) = record(2, &g, tables);
                 let (g, exactly) = at(true, u);
@@ -3617,7 +3617,7 @@ fn a_held_atom_s_mean_force_is_the_master_equation_s_with_the_trap_s_pull() {
         }
         let n = count as f64;
         let mean = |v: &[[f64; 3]], a: usize| v.iter().map(|f| f[a]).sum::<f64>() / n;
-        let scale = exact.iter().map(|x| x.abs()).fold(0.0, f64::max);
+        let scale = exact.iter().map(|x| x.abs()).fold(0.0, crate::linalg::larger);
         for a in 0..3 {
             let f = mean(&whole, a);
             let error = (whole.iter().map(|x| (x[a] - f).powi(2)).sum::<f64>() / (n * (n - 1.0))).sqrt();
@@ -3771,7 +3771,7 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
         let size = 0.3 * 100.0_f64.powf(s.uniform());
         let mut model = Lindblad::new(&mut s, n, beats, waves, size);
         let speed = 10.0_f64.powf(-3.0 + 3.0 * s.uniform());
-        let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, f64::max) * 2.0;
+        let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, crate::linalg::larger) * 2.0;
         let turn = std::f64::consts::PI * 10.0_f64.powf(-2.0 + 3.3 * s.uniform());
         let tau = 2.0 * turn / (fastest * speed + size);
         let held = (size.min(20.0 / tau) / (size * (n * waves.max(1)) as f64)).sqrt();
@@ -3831,8 +3831,8 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
         let m = generator(s * h);
         let values = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |a, b| C64::I * (m[(a, b)] - m[(b, a)].conj()))).values;
         let weight = tau.abs() / 400.0 * if k == 0 || k == 400 { 0.5 } else { 1.0 };
-        negative += weight * (-values.iter().copied().fold(f64::INFINITY, f64::min)).max(0.0);
-        size += weight * values.iter().copied().fold(0.0, f64::max);
+        negative += weight * (-values.iter().copied().fold(f64::INFINITY, crate::linalg::smaller)).max(0.0);
+        size += weight * values.iter().copied().fold(0.0, crate::linalg::larger);
     }
     (negative, size)
 }
@@ -3856,7 +3856,7 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> Option<f6
         (0..n).for_each(|b| map[(b, a)] = y[b]);
     }
     let gram = Mat::from_fn(n, n, |i, j| (0..n).map(|k| map[(k, i)].conj() * map[(k, j)]).sum());
-    Some(crate::linalg::hermitian_eigen(&gram).values.iter().fold(0.0_f64, |m, v| m.max(*v)).sqrt())
+    Some(crate::linalg::hermitian_eigen(&gram).values.iter().fold(0.0_f64, |m, v| crate::linalg::larger(m, *v)).sqrt())
 }
 
 /// The norm is the probability of no jump, and the exact dynamics only lowers it (step.rs, # Jumps): over 400 random
@@ -3878,12 +3878,12 @@ fn the_survival_never_rises_whatever_the_generator_and_the_step() {
             }
             let end = crate::linalg::norm_sqr(&taken.end.psi);
             assert!(end.is_finite() && end > 0.0, "case {}, a step of {length}: {end}", start.index);
-            most = most.max((end / first).ln());
+            most = crate::linalg::larger(most, (end / first).ln());
             assert!((end / first).ln() <= allowed + 1e-12 * (1.0 + size), "the survival rose (case {}, turn {:.3}π, a step of {length}) by more than its decay's negative part {allowed:e}: {first} → {end}", start.index, turn / std::f64::consts::PI);
         }
         let tau = steps.last().expect("a step taken").0;
         if let Some(sigma) = map_growth(model, start, tau) {
-            widest = widest.max(sigma);
+            widest = crate::linalg::larger(widest, sigma);
             grown += usize::from(sigma > 1.0 + 1e-12);
         }
     });
@@ -3983,7 +3983,7 @@ fn a_generator_without_a_decay_keeps_the_survival() {
     let _ = random_steps(200, Some(0), &mut |_, _, steps, scale, _| {
         for psi in steps.iter().map(|(_, taken)| &taken.end.psi) {
             let off = (crate::linalg::norm_sqr(psi) - 1.0).abs();
-            most = most.max(off / (1.0 + scale));
+            most = crate::linalg::larger(most, off / (1.0 + scale));
             assert!(off < 1e-12 * (1.0 + scale), "‖ψ‖² − 1 = {off:e} at τ size n {scale}");
         }
     });
@@ -4084,13 +4084,13 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
         let heading = loop {
             let e = s.direction();
             let turns: Vec<f64> = pairs.iter().map(|w| dot3(*w, e).abs()).collect();
-            if turns.iter().copied().fold(f64::INFINITY, f64::min) >= 0.2 * turns.iter().copied().fold(0.0, f64::max) {
+            if turns.iter().copied().fold(f64::INFINITY, crate::linalg::smaller) >= 0.2 * turns.iter().copied().fold(0.0, crate::linalg::larger) {
                 break e;
             }
         };
         let tau = 0.5;
         let h = 0.5 * tau;
-        let least = pairs.iter().map(|w| dot3(*w, heading).abs()).fold(f64::INFINITY, f64::min);
+        let least = pairs.iter().map(|w| dot3(*w, heading).abs()).fold(f64::INFINITY, crate::linalg::smaller);
         let speed = (1.0 + s.uniform()) * std::f64::consts::PI / (least * h);
         let velocity = heading.map(|x| x * speed);
         let gamma = (0.1 + 0.9 * s.uniform()) / h;
@@ -4122,13 +4122,13 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
             let exact = -2.0 * form.im / crate::linalg::norm_sqr(&psi);
             let rounding = crate::units::rounding(4 * n + 10 + super::TONE * candidates) * (scale + 2.0 * g.data.iter().map(|z| z.abs()).sum::<f64>());
             assert!(hazard >= -rounding && (hazard - exact).abs() <= rounding, "case {case}, u {u:.3}: the hazard {hazard:e} against the decay's {exact:e} (rounding {rounding:e})");
-            worst = worst.max((hazard - exact).abs() / rounding);
+            worst = crate::linalg::larger(worst, (hazard - exact).abs() / rounding);
             // The three nodes' parabola at the same time.
             let t = u / h;
             let l = [0.5 * t * (t - 1.0), 1.0 - t * t, 0.5 * t * (t + 1.0)];
             let values = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |a, b| (0..3).map(|j| nodes[j][(a, b)] * l[j]).sum())).values;
-            let largest = values.iter().copied().fold(0.0, f64::max);
-            parabola = parabola.min(values.iter().copied().fold(f64::INFINITY, f64::min) / largest);
+            let largest = values.iter().copied().fold(0.0, crate::linalg::larger);
+            parabola = crate::linalg::smaller(parabola, values.iter().copied().fold(f64::INFINITY, crate::linalg::smaller) / largest);
         }
     }
     eprintln!("{tones} beating decays as tones: the hazard within {worst:.3} of its rounding of the decay at its time; through the three nodes the decay's least eigenvalue down to {parabola:.3} of its largest");
@@ -4164,16 +4164,16 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
                             }
                             Err(e) => panic!("R4_LIN_2 cluster {cluster}, τ {tau}, a step of {length}: {e:?}"),
                         };
-                        most = most.max((end / first).ln());
+                        most = crate::linalg::larger(most, (end / first).ln());
                         assert!(end <= first * (1.0 + 1e-12), "R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}, a step of {length}: the survival rose: {first} → {end}");
                     }
                     if let Some(sigma) = map_growth(run, &start, tau) {
-                        wide = wide.max(sigma);
+                        wide = crate::linalg::larger(wide, sigma);
                         grown += usize::from(sigma > 1.0 + 1e-12);
                         steps += 1;
                     }
                 }
-                widest = widest.max(wide);
+                widest = crate::linalg::larger(widest, wide);
                 eprintln!("R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}: the propagation's map at the most {wide:.6}");
             }
         });
@@ -4287,7 +4287,7 @@ fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
         let size = 0.3 * 100.0_f64.powf(s.uniform());
         let mut model = Lindblad::new(&mut s, n, beats, waves, size);
         let speed = 10.0_f64.powf(-3.0 + 3.0 * s.uniform());
-        let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, f64::max) * 2.0;
+        let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, crate::linalg::larger) * 2.0;
         let turn = std::f64::consts::PI * 10.0_f64.powf(-2.0 + 3.3 * s.uniform());
         let tau = 2.0 * turn / (fastest * speed + size);
         let held = (size.min(20.0 / tau) / (size * (n * waves) as f64)).sqrt();
@@ -4420,11 +4420,11 @@ fn a_frame_on_a_group_of_states_leaves_the_engine_s_step_as_it_is() {
     };
     let (psi, kick, tones) = step(0.0);
     assert_eq!(tones, 2, "the two tones taken");
-    let size = kick.iter().map(|k| k.abs()).fold(0.0, f64::max);
+    let size = kick.iter().map(|k| k.abs()).fold(0.0, crate::linalg::larger);
     for theta in [-61.0, 13.9, 42.0, 87.0] {
         let (other, pushed, taken) = step(theta);
-        let apart = other.iter().zip(&psi).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max);
-        let off = pushed.iter().zip(&kick).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        let apart = other.iter().zip(&psi).map(|(x, y)| (*x - *y).abs()).fold(0.0, crate::linalg::larger);
+        let off = pushed.iter().zip(&kick).map(|(x, y)| (x - y).abs()).fold(0.0, crate::linalg::larger);
         eprintln!("θ {theta:6.1} rad/µs (θτ {:5.1}): {taken} tones, the state {apart:.2e} off the first frame's, the kick {off:.2e} of {size:.2e}", theta * tau);
         assert!(taken == tones && apart < 1e-12 && off <= crate::units::QUADRATURE * size, "θ {theta}: {taken} tones, the state {apart:e} off, the kick {off:e} of {size:e}");
     }
@@ -4634,7 +4634,7 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
     for (case, c1) in [("A (g₁ coupled by the beat alone)", 0.0), ("B (g₁–e static and beating)", 10.0)] {
         let base = still(c1);
         let (full, coarse, bare) = (exact(&base, &plus, &minus, 8000), exact(&base, &plus, &minus, 4000), exact(&base, &none, &none, 8000));
-        let reference = full.data.iter().zip(&coarse.data).map(|(a, b)| (*a - *b).abs()).fold(0.0, f64::max);
+        let reference = full.data.iter().zip(&coarse.data).map(|(a, b)| (*a - *b).abs()).fold(0.0, crate::linalg::larger);
         eprintln!("case {case}: the reference's own error ≤ {reference:.1e}");
         for tau in [0.5, 0.25, 0.125, 0.0625] {
             let (mut tone, mut alone, mut effect, mut phase, mut norm) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0, 0.0);
@@ -4643,9 +4643,9 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
                 let (x, b, c, t) = pictured(&base, &plus, &minus, tau, start);
                 let (z, b0, c0, t0) = pictured(&base, &none, &none, tau, start);
                 let (truth, truth0) = (full.apply(start), bare.apply(start));
-                tone = tone.max(apart(&x, &truth));
-                alone = alone.max(apart(&z, &truth0));
-                effect = effect.max(apart(&truth, &truth0));
+                tone = crate::linalg::larger(tone, apart(&x, &truth));
+                alone = crate::linalg::larger(alone, apart(&z, &truth0));
+                effect = crate::linalg::larger(effect, apart(&truth, &truth0));
                 if s == 0 {
                     phase = (x[0] / truth[0]).arg();
                     norm = crate::linalg::norm_sqr(&x) - crate::linalg::norm_sqr(&truth);

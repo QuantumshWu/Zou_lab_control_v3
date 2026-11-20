@@ -284,7 +284,7 @@ fn r1prop_remainder() {
                         std::hint::black_box(picture.remainder());
                         clock.elapsed().as_secs_f64() * 1e6
                     })
-                    .fold(f64::INFINITY, f64::min);
+                    .fold(f64::INFINITY, crate::linalg::smaller);
                 let mut x = [C64::ZERO; STATES];
                 picture.at(h, &mut x[..n]);
                 let error = x[..n].iter().zip(&y).map(|(a, b)| (*a - *b).norm_sqr()).sum::<f64>().sqrt() / norm_sqr(&y).sqrt();
@@ -458,14 +458,14 @@ fn r1prop_quadrature() {
                             std::hint::black_box(crate::spectral::tests::quotient_of(picture, from));
                             clock.elapsed().as_secs_f64() * 1e6
                         })
-                        .fold(f64::INFINITY, f64::min);
+                        .fold(f64::INFINITY, crate::linalg::smaller);
                     let (engine, brute, nodes, _) = piece_sums(picture, from, h, h, 1, false);
                     let check = brute_sums(picture, from, h, h, 2);
                     let inner = from + 0.618 * (h - from);
                     let (engine_in, brute_in, _, _) = piece_sums(picture, from, inner, h, 1, false);
                     let (engine_root, nodes_root, panels_root) = engine_sums(picture, from, h, h, true);
                     let width = (h - from).abs();
-                    let apart = |x: &[Vec<C64>; 3], y: &[Vec<C64>; 3]| x.iter().zip(y).flat_map(|(a, b)| a.iter().zip(b).map(|(p, q)| (*p - *q).abs())).fold(0.0, f64::max);
+                    let apart = |x: &[Vec<C64>; 3], y: &[Vec<C64>; 3]| x.iter().zip(y).flat_map(|(a, b)| a.iter().zip(b).map(|(p, q)| (*p - *q).abs())).fold(0.0, crate::linalg::larger);
                     let picture = &*picture;
                     // Γ = i(G − G†) of the generator at the node, the picture's parabola of the static group.
                     let hazard = |s: &[Vec<C64>; 3]| {
@@ -492,12 +492,12 @@ fn r1prop_quadrature() {
                         f
                     };
                     let (ke, kb) = (kick(&engine), kick(&brute));
-                    let scale = kb.iter().map(|x| x.abs()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
-                    let errors = [apart(&engine, &brute) / width, (hazard(&engine) - hazard(&brute)).abs(), ke.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max) / scale, (hazard(&engine_in) - hazard(&brute_in)).abs()];
+                    let scale = kb.iter().map(|x| x.abs()).fold(0.0, crate::linalg::larger).max(f64::MIN_POSITIVE);
+                    let errors = [apart(&engine, &brute) / width, (hazard(&engine) - hazard(&brute)).abs(), ke.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, crate::linalg::larger) / scale, (hazard(&engine_in) - hazard(&brute_in)).abs()];
                     let entry = &mut tally[kind];
                     entry.0 += 1;
                     for (w, e) in entry.1.iter_mut().zip(errors) {
-                        *w = w.max(e);
+                        *w = crate::linalg::larger(*w, e);
                     }
                     entry.2 = entry.2.max(apart(&brute, &check) / width);
                     entry.3 += nodes;
@@ -506,9 +506,9 @@ fn r1prop_quadrature() {
                     entry.6 = entry.6.min(us);
                     entry.7 = entry.7.max(counted);
                     let (kr, root) = (kick(&engine_root), &mut rooted[kind]);
-                    let errors = [apart(&engine_root, &brute) / width, (hazard(&engine_root) - hazard(&brute)).abs(), kr.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max) / scale];
+                    let errors = [apart(&engine_root, &brute) / width, (hazard(&engine_root) - hazard(&brute)).abs(), kr.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, crate::linalg::larger) / scale];
                     for (w, e) in root.0.iter_mut().zip(errors) {
-                        *w = w.max(e);
+                        *w = crate::linalg::larger(*w, e);
                     }
                     (root.1, root.2) = (root.1 + panels_root, root.2 + nodes_root);
                 }
@@ -635,8 +635,8 @@ fn r1prop_jumps() {
                                 let overlap: C64 = x[..n].iter().zip(reference).map(|(a, b)| a.conj() * *b).sum();
                                 let phase = if overlap.abs() > 0.0 { overlap / overlap.abs() } else { C64::ONE };
                                 let apart = x[..n].iter().zip(reference).map(|(a, b)| (*a * phase / nx - *b / nr).norm_sqr()).sum::<f64>().sqrt();
-                                worst_time = worst_time.max(((u - root) * rate).abs());
-                                worst_state = worst_state.max(apart);
+                                worst_time = crate::linalg::larger(worst_time, ((u - root) * rate).abs());
+                                worst_state = crate::linalg::larger(worst_state, apart);
                                 count += 1;
                             }
                         }
@@ -688,7 +688,7 @@ fn r1prop_step_time() {
                         }
                     }
                 }
-                best = best.min(clock.elapsed().as_secs_f64() * 1e3 / steps as f64);
+                best = crate::linalg::smaller(best, clock.elapsed().as_secs_f64() * 1e3 / steps as f64);
             }
             println!("R1-TIME {name} tau {tau}: {best:.2} ms a step (the least of {repeats} runs of {steps} steps, {jumps} jumps)");
         }
@@ -720,7 +720,7 @@ fn r1prop_quotient_scan() {
                         let ms = clock.elapsed().as_secs_f64() * 1e3;
                         total += ms;
                         let p = &scratch.picture;
-                        ratio = ratio.max(p.quotient / p.bandwidth.max(f64::MIN_POSITIVE));
+                        ratio = crate::linalg::larger(ratio, p.quotient / p.bandwidth.max(f64::MIN_POSITIVE));
                         if ms > slowest {
                             (slowest, at) = (ms, k);
                         }

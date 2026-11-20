@@ -465,14 +465,14 @@ impl Estimate {
     /// The jackknife interval of what is shown of the atom at the confidence z (module documentation): the largest of the
     /// rows as shown and of the loss.
     pub fn shown_interval(&self) -> f64 {
-        self.shown_errors.iter().map(Spread::interval).fold(self.loss_error.interval(), f64::max)
+        self.shown_errors.iter().map(Spread::interval).fold(self.loss_error.interval(), crate::linalg::larger)
     }
     /// The statistics' error of what is shown (ledger.rs `Account::statistics`): the jackknife interval, at least what the
     /// trajectories leave unseen (`unseen`) -- a loss or a state none of them reached reads no spread --, and at most
     /// one: what is shown is probabilities, none of which errs by more than its range (an interval unread, or wider,
-    /// says no more than that).
+    /// says no more than that, and so does one that is no number: `linalg::larger`).
     pub fn shown_statistics(&self) -> f64 {
-        self.shown_interval().max(unseen(self.trajectories)).min(1.)
+        crate::linalg::larger(self.shown_interval(), unseen(self.trajectories)).min(1.)
     }
     /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
     /// is not read, or is none (atoms that do not move: no error is relative to it).
@@ -717,7 +717,7 @@ pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scale
             without.iter_mut().zip(&own).for_each(|(o, x)| *o += w * ((sum - x).powi(2) - (squares - x * x)));
             weight += w;
         }
-        let read = if q <= STATES { g } else { at.iter().map(|(_, j)| j.holding).fold(f64::INFINITY, f64::min) };
+        let read = if q <= STATES { g } else { at.iter().map(|(_, j)| j.holding).fold(f64::INFINITY, crate::linalg::smaller) };
         Some(Read {
             value: if groups >= 2 { whole / (weight * g * (g - 1.)) } else { f64::NAN },
             spread: if groups >= 3 { spread(without.iter().map(|w| w / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },

@@ -762,14 +762,14 @@ fn toned(diagonal: &[C64], beat: f64, half: f64, members: [&Mat; 2], reciprocals
             let (a, b) = (c * C64::new(0.0, sin / half), c * ((cos - 1.0) / (half * half)));
             let y_poly = if omega != C64::ZERO { following(omega.recip(), C64::ZERO, a, b) } else { [C64::ZERO; 3] };
             let at = |u: f64| y_poly[0] + y_poly[1] * u + y_poly[2] * (u * u);
-            let r = [-half, half].into_iter().map(|u| at(u).abs()).fold(0.0, f64::max);
+            let r = [-half, half].into_iter().map(|u| at(u).abs()).fold(0.0, linalg::larger);
             let changed = [size * sin.abs(), size * (1.0 - cos), 0.0];
             let (route, left) = followed(omega.abs() * h, omega.im.abs() * h, changed, r, 0.0, hop_size(changed) * (0.5 * omega.im.abs() * h).exp());
             if route.is_none() {
                 nodes = f64::INFINITY;
             }
             let missed = if route == Some(true) {
-                [-half, half].into_iter().map(|u| (at(u) - c / omega + C64::cis(nu * u) * c / combined).abs()).fold(0.0, f64::max)
+                [-half, half].into_iter().map(|u| (at(u) - c / omega + C64::cis(nu * u) * c / combined).abs()).fold(0.0, linalg::larger)
             } else {
                 let (beta, terms) = aliased(omega * half, y, reciprocals);
                 work += (4 * terms) as f64;
@@ -873,7 +873,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
     let size = |class: &Class, k: usize, omega: C64| {
         let [c, a, b] = envelope(class, k);
         let y = following(omega.recip(), c, a, b);
-        [-h, h].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, f64::max)
+        [-h, h].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, linalg::larger)
     };
     // The entry's own hop exponent over a hop, of its envelope's sizes over a half step (`hop_size`): its hops' radius.
     let own = |class: &Class, k: usize| {
@@ -902,8 +902,8 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
                 routed &= split.is_some();
                 let fast = split.unwrap_or(false);
                 if !fast {
-                    *spread = spread.max(turn);
-                    *grown = grown.max((2.0 * decay).exp());
+                    *spread = linalg::larger(*spread, turn);
+                    *grown = linalg::larger(*grown, (2.0 * decay).exp());
                 }
                 let (one, other) = both(classes, c, partner);
                 take(one, row * n + column, column * n + row, omega, fast, n * n, first);
@@ -1129,7 +1129,7 @@ impl Picture {
             return Err(Refusal::Decomposition);
         }
         let decay = |pick: fn(f64, f64) -> f64, from: f64| self.basis.values.iter().map(|l| l.im).fold(from, pick);
-        if !(self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(f64::max, f64::NEG_INFINITY) - decay(f64::min, f64::INFINITY))) <= exponential) {
+        if !(self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(linalg::larger, f64::NEG_INFINITY) - decay(linalg::smaller, f64::INFINITY))) <= exponential) {
             return Err(Refusal::Rounding);
         }
         let e = &self.basis;
@@ -1255,10 +1255,10 @@ impl Picture {
         let (lambda, held) = (&self.lambda, &self.held);
         // |λ_a* − λ_b + ν| is the pair's whichever way round.
         let pairs = move |beat: f64| (0..n).filter(move |&a| held[a]).flat_map(move |a| (a..n).filter(move |&b| held[b]).map(move |b| (lambda[a].conj() - lambda[b] + C64::real(beat)).abs()));
-        let mut bandwidth = pairs(0.0).fold(0.0, f64::max);
+        let mut bandwidth = pairs(0.0).fold(0.0, linalg::larger);
         if self.moving {
-            let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
-            bandwidth = self.beats.iter().flat_map(|tone| [tone.beat, -tone.beat]).flat_map(pairs).fold(bandwidth, f64::max) + high - low;
+            let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (linalg::smaller(low, class.beat), linalg::larger(high, class.beat)));
+            bandwidth = self.beats.iter().flat_map(|tone| [tone.beat, -tone.beat]).flat_map(pairs).fold(bandwidth, linalg::larger) + high - low;
         }
         self.bandwidth = bandwidth;
     }
@@ -1737,7 +1737,7 @@ impl Picture {
                     let k = a * n + b;
                     if group.fast[k] {
                         let omega = (self.lambda[a] - self.lambda[b]).abs();
-                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, f64::max) * width.min(2.0 / omega) * m[b].abs();
+                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * width.min(2.0 / omega) * m[b].abs();
                     }
                 }
                 total += row * row;
@@ -1939,10 +1939,10 @@ impl Picture {
                 [w + e, w1 + nu * e, w2 + nu * nu * e]
             })
         };
-        let fastest = numerator.iter().map(|&(_, nu)| nu).fold(0.0, f64::max);
+        let fastest = numerator.iter().map(|&(_, nu)| nu).fold(0.0, linalg::larger);
         let total: f64 = ringing.iter().map(|&(p, _)| p).sum();
-        let shift = self.beats.iter().map(|tone| tone.beat.abs()).fold(0.0, f64::max) + {
-            let (low, high) = self.classes.iter().filter(|class| class.followed && self.moving).fold((0.0_f64, 0.0_f64), |(low, high), class| (low.min(class.beat), high.max(class.beat)));
+        let shift = self.beats.iter().map(|tone| tone.beat.abs()).fold(0.0, linalg::larger) + {
+            let (low, high) = self.classes.iter().filter(|class| class.followed && self.moving).fold((0.0_f64, 0.0_f64), |(low, high), class| (linalg::smaller(low, class.beat), linalg::larger(high, class.beat)));
             high - low
         };
         let v = if total >= 1.0 {
@@ -1959,7 +1959,7 @@ impl Picture {
             for (s, u) in [(0.0, from), (0.5 * width, from + 0.5 * (self.half - from)), (width, self.half)] {
                 self.at(u, &mut x[..n]);
                 let d: f64 = (0..n).filter(|&a| self.held[a]).map(|a| m[a] * m[a] * (2.0 * rates[a] * s).exp()).sum();
-                c = c.min(norm(&x[..n]).powi(2) / d.max(f64::MIN_POSITIVE));
+                c = linalg::smaller(c, norm(&x[..n]).powi(2) / d.max(f64::MIN_POSITIVE));
             }
             let rise = |y: f64| diagonal[..n].iter().map(|&(p, nu)| p * (nu * y).exp_m1()).sum::<f64>() + ringing.iter().map(|&(p, nu)| p * (nu * y).exp_m1()).sum::<f64>();
             let (mut lo, mut hi) = (0.0_f64, 1.0 / fastest.max(f64::MIN_POSITIVE));
@@ -2005,7 +2005,7 @@ impl Picture {
                     sigma = 0.5 * (lo + hi);
                     continue;
                 };
-                best = best.min(value / sigma);
+                best = linalg::smaller(best, value / sigma);
                 let phi = sigma * first - value;
                 if phi < 0.0 {
                     lo = sigma;
@@ -2023,7 +2023,7 @@ impl Picture {
         };
         self.work += count;
         (self.numerator, self.ringing) = (numerator, ringing);
-        (v + shift).max(0.0)
+        linalg::larger(v + shift, 0.0)
     }
 
     /// The frame's state at the time u (from the middle; from the launch on) through the decomposition (module
@@ -2112,7 +2112,7 @@ pub(crate) mod tests {
         let (n, h) = (picture.n, picture.half);
         let size = n * n;
         let follow = &picture.classes[0].follow;
-        (0..n).map(|a| (0..n).map(|b| (follow[b * n + a] + follow[size + b * n + a] * h + follow[2 * size + b * n + a] * (h * h)).abs()).sum::<f64>()).fold(0.0, f64::max)
+        (0..n).map(|a| (0..n).map(|b| (follow[b * n + a] + follow[size + b * n + a] * h + follow[2 * size + b * n + a] * (h * h)).abs()).sum::<f64>()).fold(0.0, linalg::larger)
     }
 
     /// Dense RK4 of iẋ = (Ĥ₀ + uA + u²B)x from −h to h in `steps` steps: the tests' reference of a picture's state.
@@ -2157,7 +2157,7 @@ pub(crate) mod tests {
             let shifted = Mat::from_fn(n, n, |i, j| base[(i, j)] + a[(i, j)] * middle + b[(i, j)] * (middle * middle));
             let slope = Mat::from_fn(n, n, |i, j| a[(i, j)] + b[(i, j)] * (2.0 * middle));
             let exact = flow(&shifted, &slope, b, part, start, steps);
-            worst = worst.max(x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
+            worst = linalg::larger(worst, x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, linalg::larger));
         }
         worst
     }
@@ -2198,7 +2198,7 @@ pub(crate) mod tests {
                 for k in 1..=stops {
                     picture.at(if k == stops { half } else { -half + k as f64 * w }, &mut x);
                 }
-                let error = x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max);
+                let error = x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, linalg::larger);
                 // What the slopes move over a sixteenth of the step at its end: (h‖A‖ + h²‖B‖) w, its square the second
                 // order.
                 let moved = (half * 2.0 + half * half * 30.0) * 2.0_f64.sqrt() * w;
@@ -2284,12 +2284,12 @@ pub(crate) mod tests {
                 picture.launch(from, &state);
                 let mut x = vec![C64::ZERO; n];
                 picture.at(from, &mut x);
-                let own = x.iter().zip(&state).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max);
+                let own = x.iter().zip(&state).map(|(x, e)| (*x - *e).abs()).fold(0.0, linalg::larger);
                 assert!(own < 1e-13, "{name}, launched at {from}: the state there is {own:e} off the one given");
                 let mut worst = 0.0_f64;
                 for (&u, expected) in later.iter().zip(&first) {
                     picture.at(u, &mut x);
-                    worst = worst.max(x.iter().zip(expected).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
+                    worst = linalg::larger(worst, x.iter().zip(expected).map(|(x, e)| (*x - *e).abs()).fold(0.0, linalg::larger));
                 }
                 eprintln!("{name}, launched at {:.2} of the half step: the two launches differ by {worst:e} (within {within:e})", from / half);
                 assert!(worst < within, "{name}, launched at {from}: {worst:e} against {within:e}");
@@ -2333,7 +2333,7 @@ pub(crate) mod tests {
             for k in 0..n * n {
                 let (apart, bound) = ((found[k] - plain.data[k]).abs(), rounding(8 * n + 1) * size.data[k].re);
                 assert!(apart <= bound, "a slope's entry {k}: {apart:e} against {bound:e}");
-                worst = worst.max(apart / bound);
+                worst = linalg::larger(worst, apart / bound);
             }
         }
         eprintln!("the slopes in the eigenbasis: within {worst:.3} of their rounding's bound");
@@ -2374,7 +2374,7 @@ pub(crate) mod tests {
                 }
                 let (apart, bound) = ((x[row] - plain).abs(), rounding(8 * n + 9) * scale);
                 assert!(apart <= bound, "the state {row} at {u}: {apart:e} against {bound:e}");
-                worst = worst.max(apart / bound);
+                worst = linalg::larger(worst, apart / bound);
             }
         }
         eprintln!("a state at a time: within {worst:.3} of its rounding's bound");
@@ -2429,7 +2429,7 @@ pub(crate) mod tests {
         // The following's size on a pair of the turn x between two nodes (half = 1) and the change C + uA + u²B (`flag`).
         let across = |x: f64, a: C64, b: C64| {
             let y = super::following(C64::real(x).recip(), C64::ZERO, a, b);
-            [-1.0, 1.0].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, f64::max)
+            [-1.0, 1.0].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, linalg::larger)
         };
         // A second pair's slope that takes the first to a route, and the second pair (300 rad between two nodes) to one.
         let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| {
@@ -2715,7 +2715,7 @@ pub(crate) mod tests {
         at.iter().fold(0.0, |worst: f64, &u| {
             picture.at(u, &mut x);
             let exact = flowing(generator, half, u, start, steps);
-            worst.max(x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max))
+            linalg::larger(worst, x.iter().zip(&exact).map(|(x, e)| (*x - *e).abs()).fold(0.0, linalg::larger))
         })
     }
 
@@ -2773,8 +2773,8 @@ pub(crate) mod tests {
         let combined: Vec<f64> = (0..n * n).map(|k| (picture.lambda[k / n] - picture.lambda[k % n] + C64::real(beat)).abs()).collect();
         let (mut tone, mut nodes) = (0.0_f64, 0.0_f64);
         for start in &starts {
-            tone = tone.max(beating_errors(&mut picture, &generator, start, &times, 20_000));
-            nodes = nodes.max(beating_errors(&mut before, &generator, start, &times, 20_000));
+            tone = linalg::larger(tone, beating_errors(&mut picture, &generator, start, &times, 20_000));
+            nodes = linalg::larger(nodes, beating_errors(&mut before, &generator, start, &times, 20_000));
         }
         eprintln!("the edge's combined frequencies {combined:.2?} rad/µs; Bτ = {:.1}", beat * 2.0 * half);
         eprintln!("as an exact tone the state errs by {tone:.2e} (its treatments leave {within:.2e}); through the three nodes by {nodes:.2e}");
@@ -2847,19 +2847,19 @@ pub(crate) mod tests {
             let (mut e_nodes, mut e_held, mut e_static) = (0.0_f64, 0.0_f64, 0.0_f64);
             for _ in 0..3 {
                 let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
-                e_nodes = e_nodes.max(beating_errors(&mut nodes, &generator, &start, &times, 20_000));
+                e_nodes = linalg::larger(e_nodes, beating_errors(&mut nodes, &generator, &start, &times, 20_000));
                 if let Some(held) = held.as_mut() {
-                    e_held = e_held.max(beating_errors(held, &generator, &start, &times, 20_000));
+                    e_held = linalg::larger(e_held, beating_errors(held, &generator, &start, &times, 20_000));
                 }
-                e_static = e_static.max(beating_errors(&mut static_group, &alone, &start, &times, 20_000));
+                e_static = linalg::larger(e_static, beating_errors(&mut static_group, &alone, &start, &times, 20_000));
             }
             let allowed = within + e_static;
             let read = if held.is_some() { format!("{e_held:.2e}") } else { "refused".to_string() };
             eprintln!("n {n}, νh {:.1}, |A|τ/|C| {:.1}: at the nodes' values {e_nodes:.2e} (the treatments leave {within:.2e}, the static group's own step {e_static:.2e}), held at the middle {read}", beat * half, 2.0 * half * a.max_abs() / c.max_abs());
             assert!(e_nodes <= allowed, "n {n}, νh {:.1}: at the nodes' values the state errs by {e_nodes:e}, its treatments and the static group's step leave {allowed:e}", beat * half);
-            worst = worst.max(e_nodes / allowed);
+            worst = linalg::larger(worst, e_nodes / allowed);
             match held {
-                Some(_) => worst_held = worst_held.min(e_held / e_nodes),
+                Some(_) => worst_held = linalg::smaller(worst_held, e_held / e_nodes),
                 None => refused += 1,
             }
             cases += 1;
@@ -2944,22 +2944,22 @@ pub(crate) mod tests {
             let (mut e_tone, mut e_nodes, mut e_static, mut e_hermitian, mut e_pair, mut apart) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
             for _ in 0..3 {
                 let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
-                e_tone = e_tone.max(beating_errors(&mut picture, &generator, &start, &times, 20_000));
-                e_hermitian = e_hermitian.max(beating_errors(&mut hermitian_picture, &unitary, &start, &times, 20_000));
-                e_nodes = e_nodes.max(beating_errors(&mut before, &generator, &start, &times, 20_000));
-                e_static = e_static.max(beating_errors(&mut static_group, &alone, &start, &times, 20_000));
+                e_tone = linalg::larger(e_tone, beating_errors(&mut picture, &generator, &start, &times, 20_000));
+                e_hermitian = linalg::larger(e_hermitian, beating_errors(&mut hermitian_picture, &unitary, &start, &times, 20_000));
+                e_nodes = linalg::larger(e_nodes, beating_errors(&mut before, &generator, &start, &times, 20_000));
+                e_static = linalg::larger(e_static, beating_errors(&mut static_group, &alone, &start, &times, 20_000));
                 let halves = through(&mut second, &through(&mut first, &start));
                 let whole = through(&mut companion, &start);
                 let flow = flowing(&generator, 2.0 * half, 2.0 * half, &start, 40_000);
-                e_pair = e_pair.max(halves.iter().zip(&flow).map(|(x, e)| (*x - *e).abs()).fold(0.0, f64::max));
-                apart = apart.max(halves.iter().zip(&whole).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max));
+                e_pair = linalg::larger(e_pair, halves.iter().zip(&flow).map(|(x, e)| (*x - *e).abs()).fold(0.0, linalg::larger));
+                apart = linalg::larger(apart, halves.iter().zip(&whole).map(|(x, y)| (*x - *y).abs()).fold(0.0, linalg::larger));
             }
             let beats: Vec<f64> = tones.iter().map(|t| t.beat * half / std::f64::consts::TAU).collect();
             eprintln!("n {n}, {offsets} offsets, νh/2π {beats:.3?}, Γh {:.2}: as tones {e_tone:.2e} (the static group's own step {e_static:.2e}, Hermitian tones of its members {e_hermitian:.2e}, the treatments' leading terms {within:.2e}); through the nodes {e_nodes:.2e}, two steps {e_pair:.2e} off the flow and {apart:.2e} off their companion", decay * half);
             assert!(e_nodes > 20.0 * e_tone, "n {n}, {offsets} offsets: as tones the state errs by {e_tone:e}, through the nodes by {e_nodes:e}");
             if exact {
                 assert!(e_pair > apart, "at νh = 2πk two steps through the nodes err by {e_pair:e}, and differ from their companion by {apart:e}");
-                blind = blind.min(e_pair / apart);
+                blind = linalg::smaller(blind, e_pair / apart);
             }
             (worst, nearest) = (worst.max(e_tone / e_hermitian), nearest.min(e_nodes / e_tone));
             cases += 1;
@@ -3032,9 +3032,9 @@ pub(crate) mod tests {
                         let (mut e_tone, mut e_nodes) = (0.0_f64, 0.0_f64);
                         for _ in 0..3 {
                             let start: Vec<C64> = (0..n).map(|_| C64::new(s() - 0.5, s() - 0.5)).collect();
-                            e_tone = e_tone.max(beating_errors(&mut tone, &generator, &start, &times, 8_000));
+                            e_tone = linalg::larger(e_tone, beating_errors(&mut tone, &generator, &start, &times, 8_000));
                             if let Some(nodes) = nodes.as_mut() {
-                                e_nodes = e_nodes.max(beating_errors(nodes, &generator, &start, &times, 8_000));
+                                e_nodes = linalg::larger(e_nodes, beating_errors(nodes, &generator, &start, &times, 8_000));
                             }
                         }
                         // Where the decomposition takes no step through the nodes (`Refusal::Radius`), the rule takes
@@ -3110,9 +3110,9 @@ pub(crate) mod tests {
         let mut worst = 0.0_f64;
         for theta in [-61.0, -7.3, 13.9, 42.0, 87.0] {
             let found = states(theta);
-            let apart = found.iter().zip(&reference).flat_map(|(x, y)| x.iter().zip(y).map(|(x, y)| (*x - *y).abs())).fold(0.0, f64::max);
+            let apart = found.iter().zip(&reference).flat_map(|(x, y)| x.iter().zip(y).map(|(x, y)| (*x - *y).abs())).fold(0.0, linalg::larger);
             eprintln!("θ {theta:6.1} rad/µs (θτ {:5.1}): the state off the first frame's by {apart:.2e}", theta * 2.0 * half);
-            worst = worst.max(apart);
+            worst = linalg::larger(worst, apart);
         }
         assert!(worst < 1e-12, "{worst:e}");
     }

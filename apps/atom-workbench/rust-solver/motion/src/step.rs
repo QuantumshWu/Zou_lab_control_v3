@@ -1039,7 +1039,7 @@ impl Flow {
         let hm = self.hbar_over_mass;
         let d = [r[0] - self.centre[0], r[1] - self.centre[1], r[2] - self.centre[2]];
         let (mut r1, mut k1) = (self.centre, [0.0; 3]);
-        let mut sizes = [self.centre.iter().fold(0.0, |m: f64, x| m.max(x.abs())), 0.0];
+        let mut sizes = [self.centre.iter().fold(0.0, |m: f64, x| linalg::larger(m, x.abs())), 0.0];
         for i in 0..3 {
             let e = self.axes[i];
             let (y, k, lambda) = (linalg::dot3(e, d), linalg::dot3(e, kappa), self.curvatures[i]);
@@ -1078,7 +1078,7 @@ impl Flow {
     }
     /// The largest rate of the flow, max_i √((ħ/m)|λ_i|) (rad/µs): κ's frequency along its axes (a hyperbolic axis' rate).
     fn rate(&self) -> f64 {
-        self.curvatures.iter().map(|l| (self.hbar_over_mass * l.abs()).sqrt()).fold(0.0, f64::max)
+        self.curvatures.iter().map(|l| (self.hbar_over_mass * l.abs()).sqrt()).fold(0.0, linalg::larger)
     }
 }
 
@@ -1108,7 +1108,7 @@ const REACH: usize = 28;
 /// contraction too slow for a stable step.
 fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Result<(Flow, ([f64; 3], [f64; 3])), Refused> {
     let hm = model.hbar_over_mass();
-    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, f64::max);
+    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, linalg::larger);
     let mut p: [f64; 3] = std::array::from_fn(|a| r[a] + hm * kappa[a] * half);
     // The last move of the reach's position, the momentum it reached then, and the largest contraction measured (the
     // first round measures none: its move over no move before it is zero).
@@ -1120,7 +1120,7 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
         if !moved.is_finite() || !reached.1.iter().all(|k| k.is_finite()) {
             return Err(Refused::Overflow);
         }
-        contraction = contraction.max(moved / last);
+        contraction = linalg::larger(contraction, moved / last);
         let within = sizes.map(|size| rounding(REACH) * size);
         let next = [contraction * moved, contraction * apart(reached.1, before)];
         if moved <= within[0] || (last.is_finite() && next[0] <= within[0] && next[1] <= within[1]) {
@@ -1189,9 +1189,10 @@ fn grown(x: f64, from: usize) -> usize {
 /// Σ(2l + 1)j_l² = 1.
 fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
     let kappa = 0.5 * nu * width.abs();
-    if !(kappa > 0.0) {
+    if kappa <= 0.0 {
         return least;
     }
+    // No finite bandwidth -- ∞ or NaN, never read as none -- has a rule: its caller refuses it first (`Midway::stretch`).
     if !kappa.is_finite() {
         return usize::MAX;
     }
@@ -1731,7 +1732,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
             *size += laid(of(|k| plus[k] + minus[k], n), n, at, decay) + laid(of(|k| C64::I * (plus[k] - minus[k]), n), n, at + 1, decay);
         }
     }
-    let scale = sizes.into_iter().fold(0.0, f64::max);
+    let scale = sizes.into_iter().fold(0.0, linalg::larger);
     let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
     picture.prepare(h, still, start).map_err(Refused::Propagation)?;
     Ok(scale)
@@ -2014,11 +2015,12 @@ pub struct Made {
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
-/// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other); a state scatters faster than any state of the atom can
-/// (`Domain::runaway`: a fold far outside its validity); the middle state's cluster made no K of its optical sector
-/// (`Unmade`: # The optical sector's noise); or the decomposition of the generator does not take the step
-/// (spectral.rs `Refusal`, # Where the decomposition does not take the step). The advance takes the step at its half at
+/// state left the floating-point range, or a piece's quotient has no finite bandwidth (`Midway::stretch`); the norm
+/// reached its threshold with no photon to emit (`jump`: the model's decay and its photons contradict each other); a
+/// state scatters faster than any state of the atom can (`Domain::runaway`: a fold far outside its validity); the
+/// middle state's cluster made no K of its optical sector (`Unmade`: # The optical sector's noise); or the
+/// decomposition of the generator does not take the step (spectral.rs `Refusal`, # Where the decomposition does not
+/// take the step). The advance takes the step at its half at
 /// the first two and the last (adapt.rs, # The step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
@@ -2161,7 +2163,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     rate[a][b] += drawn[a][b] / step;
                 }
             }
-            size += (0..3).map(|a| drawn[a][a]).fold(0.0, f64::max) / step;
+            size += (0..3).map(|a| drawn[a][a]).fold(0.0, linalg::larger) / step;
             end.pending = pending;
         }
         if let Some((_, epsilon)) = optical {
@@ -2271,6 +2273,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             // The quotients' bandwidth over this piece, on the states its state can hold (`spectral::Picture::launch`,
             // `quotient`): the forms' with the norm's ringing.
             let bandwidth = picture.quotient;
+            // A quotient of no finite bandwidth lays no rule (`fewest`): the step is refused, as a state that left the
+            // numbers is (`Refused::Overflow`).
+            if !bandwidth.is_finite() {
+                return Err(Refused::Overflow);
+            }
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
             // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
             // the picture is moved or counted).

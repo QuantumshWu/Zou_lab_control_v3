@@ -696,7 +696,7 @@ impl Well for Prepared<'_> {
 /// of the beams of the frequencies `lit` (their pattern's scale), within the trap light's region.
 fn trap_of(run: &Selected, potential: &Potential, lit: &dyn Fn(usize) -> bool) -> Result<Trap, String> {
     let light = run.light();
-    let k = light.frequencies.iter().enumerate().filter(|(w, _)| lit(*w)).flat_map(|(_, f)| f.beams.iter().map(|&l| light.beams[l].wave_number)).fold(0., f64::max);
+    let k = light.frequencies.iter().enumerate().filter(|(w, _)| lit(*w)).flat_map(|(_, f)| f.beams.iter().map(|&l| light.beams[l].wave_number)).fold(0., crate::linalg::larger);
     descend(1. / k, run.hbar_over_mass(), &|r| light.outside(r), &|r| potential.rounded(r))
 }
 
@@ -717,9 +717,9 @@ fn kick_curvature(run: &Selected, trap: &Trap) -> f64 {
         .map(|s| {
             let own = run.prepared(&alone(s)).at(trap.centre).hessian;
             let more: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| own[a][b] - reference[a][b]));
-            symmetric3_eigen(&more).0.into_iter().fold(f64::NEG_INFINITY, f64::max)
+            symmetric3_eigen(&more).0.into_iter().fold(f64::NEG_INFINITY, crate::linalg::larger)
         })
-        .fold(f64::NEG_INFINITY, f64::max)
+        .fold(f64::NEG_INFINITY, crate::linalg::larger)
         * run.hbar_over_mass()
 }
 
@@ -737,7 +737,7 @@ fn kinetic_uk(trap: &Trap, temperature: f64) -> V3 {
 /// The largest wave number of the beams of every frequency but the trap's (1/µm): the light's pattern an atom crosses
 /// at its speed -- the trap's own frequency holds the atom, its pattern the trap's -- (`prior`). None, zero.
 fn pattern_wave_number(light: &Light) -> f64 {
-    light.frequencies.iter().enumerate().filter(|(w, _)| *w != light.trap).flat_map(|(_, f)| f.beams.iter().map(|&l| light.beams[l].wave_number)).fold(0., f64::max)
+    light.frequencies.iter().enumerate().filter(|(w, _)| *w != light.trap).flat_map(|(_, f)| f.beams.iter().map(|&l| light.beams[l].wave_number)).fold(0., crate::linalg::larger)
 }
 
 /// Whether a step of τ is below the edge of its reference's turn and its kick's curvature (module documentation, # The
@@ -797,7 +797,7 @@ fn first_rung(run: f64, prior: f64, frequency: f64, kick: f64) -> Option<f64> {
     }
     // The prior's bound is the rule itself (nothing else checks it): its ceiling. The edge's decides at each n: its
     // floor starts the count at or below the first n it allows, the rounding of the product taken one before it at most.
-    let least = [(run / (2. * prior)).ceil(), (run * frequency / PI).floor()].into_iter().fold(1., f64::max);
+    let least = [(run / (2. * prior)).ceil(), (run * frequency / PI).floor()].into_iter().fold(1., crate::linalg::larger);
     (least <= (MOST_STEPS / 2) as f64)
         .then(|| (least as u64..=MOST_STEPS / 2).map(|pairs| run / (2 * pairs) as f64).find(|&step| stable(step, frequency, kick) && stable(2. * step, frequency, kick)))
         .flatten()
@@ -833,7 +833,7 @@ struct Widest(f64);
 impl Widest {
     fn of(request: &Request) -> Widest {
         let decay = crate::model::far::decay(request);
-        Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., f64::max))
+        Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., crate::linalg::larger))
     }
 }
 impl crate::step::Domain for Widest {
@@ -992,7 +992,7 @@ fn readable(read: &Between) -> bool {
 /// pairs could give). (A value taken as it reads -- the rule before -- makes a read that the noise has put above b ask
 /// for no pairs, and the rung below was taken on it: measured, SPEC §2.2.)
 fn blind(own: &Between) -> Option<f64> {
-    read_looks(own).into_iter().filter(|(read, bound)| read.outcome(*bound, 1.) != Outcome::Within).map(|(read, bound)| asks(ends(&read), bound)).reduce(f64::max)
+    read_looks(own).into_iter().filter(|(read, bound)| read.outcome(*bound, 1.) != Outcome::Within).map(|(read, bound)| asks(ends(&read), bound)).reduce(crate::linalg::larger)
 }
 
 /// A look's far and near ends at one look, [F, L] (decide.rs `Read::most`, `Read::least`), the near end from zero:
@@ -1039,7 +1039,7 @@ fn foreseen(own: &Between, half: &Between, rung: &Between) -> Option<f64> {
     let mut looks = vec![look(&own.loss, ratio(&half.loss, &rung.loss), sp * sp)];
     looks.extend((0..STATES).map(|s| look(&own.shown[s], ratio(&half.shown[s], &rung.shown[s]), sp * sp)));
     looks.extend(own.temperature.map(|t| look(&t, half.temperature.zip(rung.temperature).map_or(f64::NAN, |(h, at)| ratio(&h, &at)), st * st)));
-    looks.into_iter().flatten().reduce(f64::max)
+    looks.into_iter().flatten().reduce(crate::linalg::larger)
 }
 
 /// What the step's check weighs its courses by (`course`, `remedy`; module documentation, ## The ladder): `work`, a
@@ -1125,7 +1125,7 @@ fn descending(prices: &Prices, tau: f64, end: f64, holding: Holding) -> f64 {
         if !(floor < least) {
             break;
         }
-        least = least.min(floor + (pilot - members) * above + (run - members) * here);
+        least = crate::linalg::smaller(least, floor + (pilot - members) * above + (run - members) * here);
         above = here;
     }
     least
@@ -1313,7 +1313,7 @@ struct Checked {
 fn checked(own: &Between, third: Option<&Between>, saw: bool) -> (Bound, [f64; 2]) {
     let read = worse(own, third, !saw);
     let resolution = |read: &Read| read.spread.interval().sqrt();
-    let shown = read.shown.iter().map(resolution).fold(resolution(&read.loss), f64::max);
+    let shown = read.shown.iter().map(resolution).fold(resolution(&read.loss), crate::linalg::larger);
     (if saw { estimated(&read) } else { unexcluded(&read) }, [shown, read.temperature.map_or(f64::INFINITY, |t| resolution(&t))])
 }
 
@@ -1321,7 +1321,7 @@ fn checked(own: &Between, third: Option<&Between>, saw: bool) -> (Bound, [f64; 2
 /// and the total T's; unbounded where a read is no number.
 fn estimated(read: &Between) -> Bound {
     let size = |read: &Read| if read.value.is_nan() { f64::INFINITY } else { read.value.max(0.).sqrt() };
-    Bound { shown: probability_error(read.shown.iter().map(size).fold(size(&read.loss), f64::max)), temperature: read.temperature.map_or(f64::INFINITY, |t| size(&t)) }
+    Bound { shown: probability_error(read.shown.iter().map(size).fold(size(&read.loss), crate::linalg::larger)), temperature: read.temperature.map_or(f64::INFINITY, |t| size(&t)) }
 }
 
 /// The step's part of the accounts as far as a rung's reads hold it (`attempt`: the product's need the check is priced at): per
@@ -1338,7 +1338,7 @@ fn standing(read: &Between) -> Bound {
 /// what is shown, and the total T's; unbounded where a read excludes nothing.
 fn unexcluded(read: &Between) -> Bound {
     let far = |read: &Read| read.most(1.).sqrt();
-    Bound { shown: probability_error(read.shown.iter().map(far).fold(far(&read.loss), f64::max)), temperature: read.temperature.map_or(f64::INFINITY, |t| far(&t)) }
+    Bound { shown: probability_error(read.shown.iter().map(far).fold(far(&read.loss), crate::linalg::larger)), temperature: read.temperature.map_or(f64::INFINITY, |t| far(&t)) }
 }
 
 /// What is shown of some groups: the estimates at the outputs, the listed outputs' atoms and the counts.
@@ -1604,7 +1604,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // The ladder's first rung (# The step): within the physics prior's step at the initial ensemble's mean kinetic
     // temperature in the reference state's trap (`kinetic_uk`), and below the step's edge.
     let kinetic = kinetic_uk(trap, request.temperature_uk).iter().sum::<f64>() / 3.;
-    let (frequency, end) = (trap.frequencies.iter().copied().fold(0., f64::max), plan.end);
+    let (frequency, end) = (trap.frequencies.iter().copied().fold(0., crate::linalg::larger), plan.end);
     let ladder = Ladder { run: end, prior: prior(pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick };
     let first_rung = ladder
         .first()
@@ -1741,7 +1741,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         let held: Vec<f64> = read.estimates.iter().map(|e| 1. - e.loss).collect();
         let means = read.sampled.measured().means(n, &read.estimates);
         for (i, label) in READINGS.iter().enumerate() {
-            let most = (1..n).filter(|&k| held[k] > 0.).map(|k| means[k][i][0].max(held[k] * means[k][i][1])).fold(0., f64::max);
+            let most = (1..n).filter(|&k| held[k] > 0.).map(|k| crate::linalg::larger(means[k][i][0], held[k] * means[k][i][1])).fold(0., crate::linalg::larger);
             context.ledger.item(label, most, MODEL_MEASURED);
         }
     }
@@ -2247,8 +2247,8 @@ impl Plan {
         let count = times.len().min(DISTRIBUTION_TIMES);
         let mut listed: Vec<usize> = (0..count).map(|i| ((i * last) as f64 / (count - 1) as f64).round() as usize).collect();
         listed.dedup();
-        let end = times[last] + halves[last].iter().fold(0., |a: f64, &b| a.max(b));
-        let window = TAU / frequencies.iter().copied().fold(0., f64::max);
+        let end = times[last] + halves[last].iter().fold(0., |a: f64, &b| crate::linalg::larger(a, b));
+        let window = TAU / frequencies.iter().copied().fold(0., crate::linalg::larger);
         let mut plan = Plan { end, times: times.to_vec(), halves, listed, cell: end, reads: vec![], read_halves: vec![], window, frequencies };
         plan.read_at(vec![0., end]);
         plan
@@ -3078,7 +3078,7 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
 /// The trajectories the looks a run's trajectories can meet need (`Look::fits`, `Look::need`), the most of them: what
 /// the product's next batch is made for (`batch`), and the product the step's check weighs its choice by (`Prices`).
 fn most_needed(looks: &[Look]) -> f64 {
-    looks.iter().filter(|l| l.fits()).map(Look::need).fold(0., f64::max)
+    looks.iter().filter(|l| l.fits()).map(Look::need).fold(0., crate::linalg::larger)
 }
 
 /// Each time's accounts of what is shown and of the total T (ledger.rs `Account`) by the run's estimates, the model's
@@ -3274,7 +3274,7 @@ fn over_the_run(picks: &[Pick], values: impl Iterator<Item = f64>, left: Option<
 /// n atoms of the fullest listed output (bins of about √n atoms each), made odd so that 0 is a bin's centre, and three at
 /// least -- the contract's grid has two points or more (contract §2.2), and the least odd count that has is three.
 fn histograms(listed: &[Vec<(V3, V3)>], outputs: &[usize], value: &dyn Fn(&(V3, V3)) -> f64) -> Distributions {
-    let reach = listed.iter().flatten().map(|s| value(s).abs()).fold(f64::MIN_POSITIVE, f64::max);
+    let reach = listed.iter().flatten().map(|s| value(s).abs()).fold(f64::MIN_POSITIVE, crate::linalg::larger);
     let most = listed.iter().map(Vec::len).fold(0, usize::max);
     let bins = ((most as f64).sqrt() as usize | 1).max(3);
     // Every bin as wide as the grid's spacing w = 2·reach/bins, the bins tiling [−reach, reach] exactly (the outermost
@@ -3432,7 +3432,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     // reads the rung stands by do not exclude (`Levels::told`, `checked`).
     let mut step = String::new();
     if let Some(check) = &c.checked {
-        let largest = (1..outputs).flat_map(|k| temperature[k].iter().map(|a| a.step).chain([population[k].step])).fold(0., f64::max);
+        let largest = (1..outputs).flat_map(|k| temperature[k].iter().map(|a| a.step).chain([population[k].step])).fold(0., crate::linalg::larger);
         let (doubled, third) = (step_reading(c.plan.end, 2. * c.tau), check.third.map(|(s, pairs)| (step_reading(c.plan.end, s), pairs)));
         let levels = third.as_ref().map_or(format!("τ 与 2τ（{doubled} μs）"), |(at, _)| format!("τ、2τ（{doubled} μs）与 4τ（{at} μs）"));
         // The pairs at each level: the third level's may be fewer than the rung's own (the scout's, or the pilot's
@@ -3452,7 +3452,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     }
     // What the unresolved atoms add (`apart`): its largest over the analysis times, weighed by the held share.
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
-        let largest = (1..reads.len()).map(|k| c.unresolved[k][i] * (1. - reads[k].loss)).fold(0., f64::max);
+        let largest = (1..reads.len()).map(|k| c.unresolved[k][i] * (1. - reads[k].loss)).fold(0., crate::linalg::larger);
         ledger.item(&format!("计算中停下的原子（{what}）"), largest, "在每个输出时刻统计：因散射率超过原子任何状态的上限而停下的原子（从那一步起），按它们所占的比例全部计入（布居上是原子数的比例，温度上是动能的比例）");
     }
     ledger.close(times, &population, &temperature, &allowed);
@@ -4731,7 +4731,7 @@ mod tests {
             }
         }
         let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
-        let span = 2. * plan.halves.iter().flatten().copied().fold(0., f64::max);
+        let span = 2. * plan.halves.iter().flatten().copied().fold(0., crate::linalg::larger);
         for stop in [plan.end, 17.6] {
             let mut windows = Windows::new(&plan.times, &plan.halves);
             windows.record(0, atom.clone());
@@ -5138,7 +5138,7 @@ mod tests {
             let kinetic = ensemble.kinetic(1 << 16);
             assert!(kinetic.iter().all(|k| k.eta > 0. && k.eta <= 1.), "{name}: η {kinetic:?}");
             let exact = ensemble.momentum(&kinetic.iter().map(|k| k.eta).collect::<Vec<_>>());
-            let quadrature = kinetic.iter().map(|k| k.difference / k.eta).fold(0., f64::max);
+            let quadrature = kinetic.iter().map(|k| k.difference / k.eta).fold(0., crate::linalg::larger);
             let draws: Vec<V3> = (0..1 << 12).map(|i| ensemble.draw(SEED, i).kappa.map(|k| hm * k * k)).collect();
             for a in 0..3 {
                 let groups: Vec<f64> = draws.chunks(GROUP as usize).map(|members| members.iter().map(|d| d[a]).sum::<f64>() / GROUP as f64).collect();
