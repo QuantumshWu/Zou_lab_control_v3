@@ -565,6 +565,71 @@ fn the_first_checkpoint_in_pairs() {
     }
 }
 
+/// `choose` on every reference scene (the coordinator's integration check before the merge; ignored): each request of
+/// the reference set (refs/scenes/*.json, not its *.scene.json app scenes nor the manifest; read as the model's tests
+/// read it, model/testing.rs `scene`) and the six scenes' own requests (`V3D_REQ`). The one assertion: on every one,
+/// `choose` gives a P that passes the gate at both points (`choose_s_p_passes_at_both_points`'s); a scene whose
+/// `choose` fails, errs or panics is a failure, all of them said at the end. Each scene's base P → P, the states left
+/// out, the predicted and the measured error, the checks, `choose`'s wall clock.
+#[test]
+#[ignore]
+fn choose_on_every_reference_scene() {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes");
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|f| f.ends_with(".json") && !f.ends_with(".scene.json") && f != "manifest.json")
+        .collect();
+    files.sort();
+    // Each scene's request, read where it is chosen (a request that does not read is a failure of its own).
+    let mut all: Vec<(String, Box<dyn Fn() -> crate::request::Request>)> = files
+        .iter()
+        .map(|f| {
+            let path = dir.join(f).to_string_lossy().into_owned();
+            (f.trim_end_matches(".json").to_string(), Box::new(move || crate::model::testing::scene(&path)) as Box<dyn Fn() -> crate::request::Request>)
+        })
+        .collect();
+    for (name, request) in requests() {
+        all.push((format!("{name} (reqprec)"), Box::new(move || request.clone())));
+    }
+    let clock = Instant::now();
+    let mut failed: Vec<String> = Vec::new();
+    for (name, read) in &all {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(crate::request::Request, Selection), String> {
+            let request = read();
+            let selection = choose(&Scene::new(&request)?)?;
+            Ok((request, selection))
+        }));
+        let (request, selection) = match outcome {
+            Ok(Ok(s)) => s,
+            Ok(Err(why)) => {
+                eprintln!("{name}: choose refused: {why}");
+                failed.push(format!("{name}: {why}"));
+                continue;
+            }
+            Err(payload) => {
+                let why = payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                eprintln!("{name}: choose panicked: {why}");
+                failed.push(format!("{name}: panicked: {why}"));
+                continue;
+            }
+        };
+        let p = selection.candidates.last().unwrap();
+        let passes = p.keep == selection.keep && p.passes();
+        let removed: Vec<&str> = selection.removed.iter().map(|&s| request.states[s].as_str()).collect();
+        eprintln!(
+            "{name}: base P {} -> P {} removing {removed:?}; predicted {:.3e}, measured {:.3e} ({}); {} checks; choose {:.2} s{}",
+            selection.base().keep.len(), selection.keep.len(), selection.predicted, p.worst(), said(p), selection.candidates.len() - selection.whole, selection.seconds,
+            if passes { "" } else { " -- DOES NOT PASS" }
+        );
+        if !passes {
+            failed.push(format!("{name}: P {} does not pass at both points: {}", selection.keep.len(), said(p)));
+        }
+    }
+    eprintln!("{} scenes in {:.1} s; {} failed", all.len(), clock.elapsed().as_secs_f64(), failed.len());
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
 fn selection_k(scene: &Scene) -> f64 {
     scene.generators.last().unwrap().frequency / SPEED_OF_LIGHT
 }
