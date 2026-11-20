@@ -17,5 +17,6 @@ pub mod estimate;
 pub mod decide;
 pub mod ledger;
 pub mod analysis;
+pub mod krylov;
 pub mod solve;
 pub mod prof;
