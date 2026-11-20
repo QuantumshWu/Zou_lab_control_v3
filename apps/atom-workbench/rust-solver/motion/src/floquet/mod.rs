@@ -8,11 +8,10 @@ pub mod select;
 pub mod assemble;
 
 use crate::linalg::{C64, Mat, V3};
-use crate::request::STATES;
 use crate::scene::{Components, Key, Scene};
 
 pub use assemble::{assemble, readouts, Liouville, Readouts, System};
-pub use frame::{Frame, Lattice};
+pub use frame::{Frame, Lattice, Sectors};
 pub use select::select;
 
 /// One frequency component of an operator of a Hilbert model: `value` e^{−i f t}, f the key's frequency.
@@ -84,7 +83,6 @@ impl Hilbert {
     /// The reference at a point: the 32 states with the tweezer's sidebands folded (the one fold, model/rs.rs `fold`),
     /// everything else explicit, along the analysis axis u.
     pub fn full(scene: &Scene, components: &Components, axis: V3) -> Hilbert {
-        let all: Vec<usize> = (0..STATES).collect();
-        crate::model::rs::fold(scene, components, &all, None).hilbert(axis)
+        crate::model::rs::reference(scene, components).hilbert(axis)
     }
 }

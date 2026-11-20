@@ -57,7 +57,8 @@ pub struct System {
     pub k2: Sparse,
     /// τ₀ over the elements: 1 at the k = 0 populations.
     pub trace: Vec<C64>,
-    /// Each unknown's harmonic (its (m, n) sector) as an index, for the harmonic preconditioner (fr.harmonic_ids).
+    /// Each unknown's harmonic, N + 1 of them (fr.harmonic_ids): the index of its slow lattice point m (not the (m, n)
+    /// sector) among the system's sorted distinct m; the multiplier's row takes the populations' m₀.
     pub harmonic: Vec<usize>,
 }
 

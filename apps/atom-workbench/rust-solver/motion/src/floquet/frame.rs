@@ -448,17 +448,30 @@ impl Frame {
         self.split(&v).0
     }
 
-    /// Whether a key is a tweezer sideband: n_tw ≠ 0 or n_ν ≠ 0 (`fast_index`). Folded in the reference and the model;
-    /// the hyperfine sidebands (n_φ ≠ 0 alone) only in the model.
-    pub fn tweezer(&self, key: &Key) -> bool {
-        let n = self.fast_index(key);
-        n[1] != 0 || n[2] != 0
+    /// The model's sectors (model/rs.rs `fold`): the fast part (n_φ, n_tw) of each state's θ_a and of each generator. An
+    /// element b ← a of a component with key c has the fast index Σ_l c_l generators_l + states_b − states_a. The carrier's
+    /// n_ν is not carried: under the RWA only the tweezer's counter-rotating coupling holds the carrier, with n_tw ≠ 0.
+    pub fn sectors(&self) -> Sectors {
+        let pick = |n: [i64; 3]| [n[0], n[1]];
+        let count = self.alpha.len();
+        Sectors {
+            states: self.theta.iter().map(|t| pick(self.split(t).0)).collect(),
+            generators: (0..count).map(|g| pick(self.fast_index(&(0..count).map(|h| (h == g) as i32).collect()))).collect(),
+        }
     }
 
     /// The value of a primitive vector (rad/µs), correctly rounded.
     fn value(&self, p: &[Ratio]) -> f64 {
         self.primitives.value(p)
     }
+}
+
+/// The fast parts (n_φ, n_tw) of the 32 states' frames and of the generators (`Frame::sectors`; the reference's, the
+/// tweezer's alone, model/rs.rs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sectors {
+    pub states: Vec<[i64; 2]>,
+    pub generators: Vec<[i64; 2]>,
 }
 
 /// The slow lattice: the Hermite basis of the slow remainders.

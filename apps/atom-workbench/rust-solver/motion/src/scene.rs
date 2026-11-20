@@ -169,6 +169,12 @@ impl Scene {
             .collect()
     }
 
+    /// The tweezer's generator (its beam's): its co-rotating coupling has the key e_tw, its counter-rotating one
+    /// −e_tw − 2e_ν, ν the carrier, the last generator.
+    pub fn tweezer(&self) -> usize {
+        self.request.trap_beam
+    }
+
     /// The key of one generator.
     pub fn unit(&self, g: usize) -> Key {
         (0..self.generators.len()).map(|h| (h == g) as i32).collect()
