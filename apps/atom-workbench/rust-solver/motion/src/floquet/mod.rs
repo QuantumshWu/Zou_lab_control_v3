@@ -6,8 +6,10 @@
 pub mod frame;
 pub mod select;
 pub mod assemble;
+#[cfg(test)]
+mod tests;
 
-use crate::linalg::{C64, Mat, V3};
+use crate::linalg::{C64, Mat};
 use crate::scene::{Components, Key, Scene};
 
 pub use assemble::{assemble, readouts, Liouville, Readouts, System};
@@ -20,8 +22,8 @@ pub struct Part {
     pub key: Key,
     /// n × n.
     pub value: Mat,
-    /// ∂value/∂u along the analysis axis u (n × n).
-    pub gradient: Mat,
+    /// ∂value/∂r_i, i = x, y, z (n × n).
+    pub gradient: [Mat; 3],
 }
 
 /// A Hilbert model at a point: n states (a subset `states` of the 32), H, the jumps and their photon-weighted forms by
@@ -32,12 +34,10 @@ pub struct Hilbert {
     pub states: Vec<usize>,
     /// H's components, each key with its −key's conjugate listed too (td_s.hilbert_full).
     pub hamiltonian: Vec<Part>,
-    /// Per jump channel (each fast channel of the fold, model/rs.rs `Channel`, its emission rotated onto (e1, e2, u), u the
-    /// analysis axis, weights 2/5, 2/5, 1/5) its components; `Part::gradient` holds ∂L/∂u.
+    /// Per jump channel (model/rs.rs `Channel`: one Cartesian emission axis, one fast index) its components; parts within a
+    /// channel interfere, channels do not. `Part::gradient` holds ∇L.
     pub jumps: Vec<Vec<Part>>,
-    /// Per jump channel √w (K ∘ C) by components: the photon's momentum along u (scene_x `jumpk`).
-    pub kicks: Vec<Vec<Part>>,
-    /// The levels (populations read per level): indices into `states`.
+    /// The levels (populations read per level): each level's states as indices into the 32.
     pub groups: Vec<Vec<usize>>,
     /// The fold's lift: M_f per key, a row per folded state or sideband.
     pub lift: Option<Lift>,
@@ -81,8 +81,8 @@ pub struct Sparse {
 
 impl Hilbert {
     /// The reference at a point: the 32 states with the tweezer's sidebands folded (the one fold, model/rs.rs `fold`),
-    /// everything else explicit, along the analysis axis u.
-    pub fn full(scene: &Scene, components: &Components, axis: V3) -> Hilbert {
-        crate::model::rs::reference(scene, components).hilbert(axis)
+    /// everything else explicit.
+    pub fn full(scene: &Scene, components: &Components) -> Hilbert {
+        crate::model::rs::reference(scene, components).hilbert()
     }
 }

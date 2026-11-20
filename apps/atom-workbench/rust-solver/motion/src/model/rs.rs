@@ -4,7 +4,7 @@
 //! components so that the checkpoint's points -- w = 0, the edge's tweezer dark -- are its input too).
 
 use crate::floquet::{Hilbert, Sectors};
-use crate::linalg::{Mat, V3};
+use crate::linalg::Mat;
 use crate::scene::{Components, Key, Scene};
 
 /// One frequency component of a model operator: `value` e^{−i f t}.
@@ -56,9 +56,9 @@ pub struct Rs {
 }
 
 impl ModelAt {
-    /// The model as a Hilbert model for the checkpoint along the analysis axis u (`channels(axis)`, `levels`).
-    pub fn hilbert(&self, axis: V3) -> Hilbert {
-        let _ = axis;
+    /// The model as a Hilbert model for the checkpoint (channels per Cartesian emission axis and fast index, three-axis
+    /// gradients, levels over the 32).
+    pub fn hilbert(&self) -> Hilbert {
         todo!()
     }
 }
