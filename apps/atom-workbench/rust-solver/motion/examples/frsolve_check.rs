@@ -161,7 +161,10 @@ fn main() {
                 let (slow, _) = split(a);
                 let n = a.dim();
                 let mask = if level == "direct" { vec![true; n] } else { slow };
-                let p = Schur::new(a, &mask, &vec![0usize; n]).ok().expect("unfactorised");
+                let p = match Schur::new(a, &mask, &vec![0usize; n]) {
+                    Ok(p) => p,
+                    Err(u) => panic!("unfactorised after {:.1} s: {}", clock.elapsed().as_secs_f64(), u.reason),
+                };
                 let t_setup = clock.elapsed().as_secs_f64();
                 let r = gmres(a, &system.rhs, &p, &rows);
                 let t = clock.elapsed().as_secs_f64();

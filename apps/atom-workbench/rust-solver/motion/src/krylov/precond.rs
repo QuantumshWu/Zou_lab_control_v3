@@ -39,10 +39,11 @@ struct Block {
     lu: Lu<usize, c64>,
 }
 
-/// A block's LU failed structurally (a structurally singular block); `cross`: S had entries outside the blocks.
-#[derive(Clone, Copy, Debug)]
+/// A block's LU failed (faer's error, e.g. a structurally singular block); `cross`: S had entries outside the blocks.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Unfactorised {
     pub cross: bool,
+    pub reason: String,
 }
 
 /// The preconditioner P for one partition of the slow unknowns.
@@ -169,7 +170,7 @@ impl Schur {
                 position[i] = k;
             }
         }
-        let blocks: Option<Vec<Block>> = members
+        let blocks: Result<Vec<Block>, String> = members
             .into_par_iter()
             .map(|m| {
                 // compressed columns of the block, rows ascending within each column
@@ -195,11 +196,11 @@ impl Schur {
                     }
                 }
                 let symbolic = SymbolicSparseColMatRef::new_checked(size, size, &count, None, &row_index);
-                let lu = SparseColMatRef::new(symbolic, &values).sp_lu().ok()?;
-                Some(Block { members: m, lu })
+                let lu = SparseColMatRef::new(symbolic, &values).sp_lu().map_err(|e| format!("{e:?}"))?;
+                Ok(Block { members: m, lu })
             })
             .collect();
-        let blocks = blocks.ok_or(Unfactorised { cross })?;
+        let blocks = blocks.map_err(|reason| Unfactorised { cross, reason })?;
         let apply_madds = (2 * f.len() + a_sf.nnz() + a_fs.nnz()) as f64;
         Ok(Schur { slow: s, fast: f, d_fast, a_sf, a_fs, blocks, cross, nnz_kept, apply_madds })
     }
