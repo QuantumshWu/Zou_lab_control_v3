@@ -1,19 +1,17 @@
 //! The pipeline: request, run, pilot, step's check, batches, checkpoints, result (SPEC §3, §5, §9).
 //!
 //! # The pipeline
-//! 1. The request's checks; the initial components; the run (model/fold/run.rs `Onefold`: the fold at the atom, one
-//!    object for every step of the solve, its structure decided at the points the atoms are at -- which excited nodes
-//!    are explicit is the run's own decision at its decision times, from its own readings, DESIGN §11 --); every initial
-//!    component's prepared well and the initial ensemble drawn in them, the reported trap, the kick's curvature
-//!    (`solve`, `Setting`); the outputs' plan, the first rung (# The step). Nothing of the model is decided before a
-//!    trajectory runs: no prior, no table, no unit kept.
+//! 1. The request's checks; the initial components; the run (model/selected.rs `Selected`: the scene, the two-point
+//!    check's P (select.rs `choose`) and its RS fold, one object for every step of the solve, decided once before any
+//!    trajectory runs, RUSTPLAN §3.2); every initial component's prepared well and the initial ensemble drawn in them,
+//!    the reported trap, the kick's curvature (`solve`, `Setting`); the outputs' plan, the first rung (# The step).
 //! 2. The scout: the first member of every pilot group, at the first rung and at twice it (# The step), screened; where
 //!    its rung stands on its reads, its states price the rungs (## The ladder) and the pilot runs at the one the run is
 //!    expected to spend least on. The pilot: the scout's groups whole, `pilot_size` trajectories at the run's two levels
 //!    (the scout's are its groups' first members and are not run again). Its groups have numbers of their own, from
 //!    trajectory `MOST_TRAJECTORIES` on: beyond every number a group of the product takes, which is its place in the
 //!    run's list (`product`). It checks the step -- on two levels, a third above and a rung below where they pay, and on
-//!    further pairs where they pay (# The step) --, and reads the fold's readings at every state of its run level at the
+//!    further pairs where they pay (# The step) --, and reads the model's error at every state of its run level at the
 //!    analysis times (# The model) -- every read at the analysis times, not at the outputs (# The analysis times). Its
 //!    trajectories at the run's step stay in the result: they are trajectories of the run and its step.
 //! 3. The product: batches of whole groups at the settled step, one level, every trajectory run to the run's end and
@@ -299,10 +297,8 @@
 //!   read is no end -- an interval whose reads lie on its line stands whole and adds no time. (First built with the
 //!   intervals bounded instead, by the slowest axis's window, every end a time: PGC3D 1 ms read at 26 analysis times,
 //!   2200 rows of the units, and took 1.23 times 717cb386's CPU over three alternating pairs.)
-//! - The fold's readings are no reading of the times: a state's is the books' profile its trajectory holds there
-//!   (`booked_at`), and the halving reads three times as many times as it keeps. A reading at a state is a function of its place, speed, internal
-//!   state and representation, whose ensemble the rows and T read (a hypothesis, not tested by itself: an error of the
-//!   fold narrower in time than those is stepped over).
+//! - The model's error is no reading of the times: it is the two points' measured error, the same at every state
+//!   (`booked_at`), read where the atoms went (# Where the atoms went).
 //! - What stands on them: the step's mean square (estimate.rs `between`, each time by its share of the run); every
 //!   state of the pilot's run level there, each group's every member held and every atom lost by then (`sampled`), the
 //!   model's error and the looks'; the product's looks, batches and unresolved atoms; the prices at one state of every
@@ -314,24 +310,14 @@
 //!   flagged at 11 of 1000 outputs, at most 5.4 % with 5.1 % of statistics, and 2 of 100, its reason "not finished".)
 //!
 //! # The model (SPEC §5.2)
-//! The model is the run's fold at the atom (model/fold/run.rs `Onefold`), one object: which excited nodes are explicit,
-//! how far each series sweeps, which decompositions are kept, are the run's decisions at its decision times, each the
-//! cheapest representation within the share by the fold's own readings there (DESIGN §11; run.rs # The nodes risen and
-//! fallen). The solve decides nothing of it: no prior, no table, no unit kept, no reach -- what the old engine decided
-//! before and between its attempts (a model closed at its atoms' starts, tables refined over a reach, units kept by the
-//! run's total work, a reach grown where its atoms outgrew it) is the run's at every point. What the solve does is book
-//! what the fold says of itself where the atoms went, as an adaptive integrator's tolerance is measured (QuTiP's way):
-//! the fold's readings at the pilot's states (`sampled`, `booked_at`): the books' profile each state's trajectory holds
-//! there (unify2 §2.7: per account the reading its cluster's last decision left, what every step books over its cell,
-//! step.rs `Trajectory::model`; no forward made) -- the series' rest, the reuse of a decomposition along the path, the
-//! centred rows, what the nodes left out leave (model/fold/proto.rs `KINDS`; `READINGS`; a landing's transient is booked
-//! exactly on its modes, read by none: model/fold/proto/transient.rs), each a
-//! rate's relative error at the state --, combined as one component's are, ρ² = Σ_k ρ_k² (the one combination of the
-//! decision's rule and of the books, DESIGN §1.5). A reading x books x on the populations (absolute) and x on T
-//! (relative), as a rate wrong by x moves them (`Booking::of`); one that is no number, or a state whose representation
-//! holds no decision there, the state's whole. The held forwards that read their series' ratio at one between two
-//! decisions (unresolved, unify2 §2.7) are counted and said (`Counts::unresolved`).
-//!
+//! The model is decided once, before any trajectory runs (RUSTPLAN §3.2; model/selected.rs `Selected`): P is the
+//! smallest set of the ground states and whole excited levels whose RS fold meets the 1 % gate against the full
+//! reference at the two points, the centre and the edge (select.rs `choose`), and the fold's formula and coefficients
+//! are fixed with it. The solve decides nothing of it. What the solve books of the model is that measurement
+//! (`Selected::error`), one account (`READINGS`): at every state the chosen P's largest population error at the two
+//! points on the populations (absolute) and its largest rate or force error on T (relative), as a rate or a force
+//! wrong by x moves T by x (`booked_at`); one that is no number -- a P no check measured -- the state's whole.
+
 //! ## Where the atoms went
 //! The model is judged where the atoms went, not only where the held ones are at the analysis times (`sampled`). What is
 //! shown at a time is every atom's fate there -- a held atom's rows, a lost one's loss --, so the model errs on it by the
@@ -363,13 +349,12 @@
 //!
 //! # Exits
 //! Two exits, each said where it is met, none carried on as a number (unify2 §7):
-//! - the request's (refused before a trajectory runs, with its reason): the run's construction (model/fold/run.rs
-//!   `Onefold::new`: a set the prototype does not hold, a far block that does not exist at the focus), a prepared trap
+//! - the request's (refused before a trajectory runs, with its reason): the run's construction (scene.rs `Scene::new`,
+//!   select.rs `choose`, model/selected.rs `Selected::new`), a prepared trap
 //!   that does not hold the atom (`trap_of`), no step below the edge (`first_rung`);
-//! - a trajectory's (`run`), where the run's fold does not exist for it: its start lands nowhere (no node left to rise:
-//!   its held forms no number, model/fold/run.rs `Dynamics::started`; or its fast part's photon none, step.rs
-//!   `Trajectory::new`), or its readout at a time read is no number (the loss energy is a number everywhere: model/fold/
-//!   run.rs # The rest of the model). It ends there with no outcome (`Counts::nowhere`, `Fate::Failed`
+//! - a trajectory's (`run`), where the model gives it no number: its start's held forms none, or its fast part's photon
+//!   none (step.rs `Trajectory::new`), or its readout at a time read is no number. It ends there with no outcome
+//!   (`Counts::nowhere`, `Fate::Failed`
 //!   from then on), counted, its share booked whole as every trajectory not counted is (estimate.rs, # What is counted),
 //!   and the ledger says how many and from when.
 //! Where every trajectory ends so, nothing is integrated, and the trajectory's exit is the request's: the pilot's
@@ -459,7 +444,7 @@ use crate::estimate::{allowance, between, draws_for, half_window, readings, semi
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
-use crate::model::fold::run::{Onefold, Reference};
+use crate::model::selected::{Potential, Selected};
 use crate::model::optical::Unmade;
 use crate::model::potential::descend;
 use crate::model::{Sample, Trap, GROUND};
@@ -487,18 +472,13 @@ const DISTRIBUTION_TIMES: usize = 21;
 /// interval. The other half is left to what runs between two messages and sends none (module documentation,
 /// # Checkpoints): a margin, not a bound derived from those stages' work. It times messages and decides no result.
 const CHECKPOINT: Duration = Duration::from_secs(60);
-/// What the engine did with the fold's error (the ledger's `action`, shown by the app): each of its readings read at the
-/// pilot's states where the atoms went (module documentation, # The model).
-const FOLD_MEASURED: &str = "按原子所在处折叠（一个对象），这一项误差由折叠在先导轨迹的状态上自己读出（原子到过的地方）";
+/// What the engine did with the model's error (the ledger's `action`, shown by the app): measured once, at the two
+/// points, against the full reference (module documentation, # The model).
+const MODEL_MEASURED: &str = "模型（选出的 P 及其 RS 折叠）在开头一次定下；这一项误差是中心、边缘两点上对完整参照的实测";
 
-/// The fold's readings a state's error is booked by (model/fold/proto.rs `KINDS`, the accounts' kinds, rate units; module
-/// documentation, # The model), each with the ledger's name of it; the state's error is their combination (√Σρ_k²).
-const READINGS: [&str; crate::step::READS] = [
-    "折叠的级数（H 自洽的下一遍）",
-    "分解沿路径的复用",
-    "居中（近块的居中拷贝、远块的能级）",
-    "略去的结点（激发能级、远块）",
-];
+/// The model's accounts a state's error is booked by, with the ledger's name of each (module documentation, # The
+/// model): the two points' measured error, one account; a state's row holds it and its combination (the same).
+const READINGS: [&str; 1] = ["选出的 P 的模型误差（中心、边缘两点实测）"];
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -550,45 +530,58 @@ pub struct Solution {
 /// The solve of a request (module documentation): every checkpoint handed to `checkpoint` with the estimated wall time
 /// left (ms) where the run's pace gives one, the final solution returned; partial results are never withheld.
 ///
-/// The run is one object, made once for the request and the same at every step of the solve (model/fold/run.rs
-/// `Onefold`: the fold at the atom, its structure the points' own): what the solve takes of it beside the steps -- the
+/// The run is one object, made once for the request and the same at every step of the solve (model/selected.rs
+/// `Selected`: the scene, the two-point check's P and its fold): what the solve takes of it beside the steps -- the
 /// prepared potentials and their traps, the initial ensemble drawn in them, the reported trap, the kick's curvature
-/// (`Setting`) -- is made from it here, and the pipeline runs once (`attempt`). A request it refuses (the run's
-/// construction, a trap that does not hold the atom, no step below the edge) is refused with its reason, before a
+/// (`Setting`) -- is made from it here, and the pipeline runs once (`attempt`). A request it refuses (the scene, the
+/// selection, a trap that does not hold the atom, no step below the edge) is refused with its reason, before a
 /// trajectory runs.
 pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
     request.validate()?;
+    let scene = crate::scene::Scene::new(request)?;
+    let selection = crate::select::choose(&scene)?;
+    let run = Selected::new(scene, selection, alone(chief(request)))?;
+    solve_on(request, &run, checkpoint)
+}
+
+/// The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
+pub(crate) fn chief(request: &Request) -> usize {
+    let initial = components(request);
+    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
+    initial[chief].0
+}
+
+/// The solve of a request on its run (`solve`): the selection's report to stderr, the run's setting, the pipeline.
+pub(crate) fn solve_on(request: &Request, run: &Selected, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request);
-    // The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
-    let chief = (0..initial.len()).max_by(|&a, &b| initial[a].1.total_cmp(&initial[b].1)).expect("a validated request's initial state holds a ground state");
+    let chief = initial.iter().position(|&(s, _)| s == chief(request)).expect("the reference state is a component");
     let reference = alone(initial[chief].0);
-    let run = Onefold::new(request, reference)?;
-    // The start's decision's report (model/fold/decide.rs), to stderr.
     eprint!("{}", run.report());
-    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&run, alone(s))).collect::<Result<_, _>>()?;
+    let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(run, alone(s))).collect::<Result<_, _>>()?;
     let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm)?;
     let trap = &wells[chief].trap;
-    let reported = reported(&run, &reference).ok();
-    let setting = Setting { run: &run, trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported, kick: kick_curvature(&run, trap) };
+    let reported = reported(run, &reference).ok();
+    let setting = Setting { run, trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported, kick: kick_curvature(run, trap) };
     let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
     let solved = attempt(request, &setting, &mut messages);
-    // The run's counts (adapt.rs `tally`): the safety net's readings beyond the share and absent folds, to stderr.
+    // The run's counts (adapt.rs `tally`), to stderr.
     eprintln!("{}", crate::adapt::counted(true));
     solved
 }
 
 /// What the solve takes of its run beside the steps (`solve`), made once.
 struct Setting<'a> {
-    run: &'a Onefold,
+    run: &'a Selected,
     /// The reference state's prepared trap.
     trap: &'a Trap,
     /// The initial ensemble, every component in its own well, and the depth at the reference state's bottom (k_BT).
     ensemble: &'a Ensemble<'a>,
     depth: f64,
     /// The trap every reported quantity describes (SPEC §1.3: trapFrequencyKHz, n̄, the validated regime and T's
-    /// windows): the trap light's potential with the other lights' phase-averaged shifts at the reference state
-    /// (model/fold/run.rs `Onefold::reported`). None where it has no minimum the descent reaches -- the atoms are not
+    /// windows): the reference state's potential (model/selected.rs `Selected::prepared`, `Scene::trap_potential`: one
+    /// potential, RUSTPLAN §2.3), its trap at every light's pattern's scale (`reported`). None where it has no minimum
+    /// the descent reaches -- the atoms are not
     /// held by the light they run in: a mathematical object that does not exist, not a kind of scene --: the prepared
     /// trap's is reported then, and flagged.
     reported: Option<Trap>,
@@ -654,25 +647,24 @@ pub(crate) fn alone(state: usize) -> [f64; GROUND] {
     std::array::from_fn(|s| if s == state { 1. } else { 0. })
 }
 
-/// One initial component's preparation well (ensemble.rs `Well`): its prepared potential -- the trap light's held forms
-/// on the run's fold at its ground populations (model/fold/run.rs `Onefold::prepared`), zero at the far level where the
-/// trap light is Gaussian beams, the ensemble refusing any other --, its trap (`trap_of`), the trap light's beams and
-/// the envelope's peak (`Reference::peak`).
+/// One initial component's preparation well (ensemble.rs `Well`): its prepared potential -- the tweezer's on the run's
+/// ground populations (model/selected.rs `Selected::prepared`), zero far from the trap --, its trap (`trap_of`), the
+/// trap light's beams and the envelope's peak (`Potential::peak`).
 struct Prepared<'a> {
     light: &'a Light,
-    potential: Reference,
+    potential: Potential<'a>,
     trap: Trap,
 }
 impl<'a> Prepared<'a> {
-    fn new(run: &'a Onefold, populations: [f64; GROUND]) -> Result<Prepared<'a>, String> {
+    fn new(run: &'a Selected, populations: [f64; GROUND]) -> Result<Prepared<'a>, String> {
         let (light, potential) = (run.light(), run.prepared(&populations));
-        let trap = trap_of(run, &potential, &|w| w == light.trap).map_err(|why| format!("准备阱不存在：{why}（准备阱是阱光在主折叠里的形式：它的外层形式与远块；近共振的阱光没有远块）"))?;
+        let trap = trap_of(run, &potential, &|w| w == light.trap).map_err(|why| format!("准备阱不存在：{why}（准备阱是光镊在这些基态布居上的势：它的 RS 折叠光移与外层形式）"))?;
         Ok(Prepared { light, potential, trap })
     }
 }
 impl Well for Prepared<'_> {
     fn potential(&self, r: V3) -> (f64, V3) {
-        let q = self.potential.at(self.light, r);
+        let q = self.potential.at(r);
         (q.value, q.gradient)
     }
     fn trap(&self) -> (V3, [V3; 3], V3) {
@@ -685,29 +677,28 @@ impl Well for Prepared<'_> {
 
 /// The trap of a potential of the run's light (model/potential.rs `descend`, the one descent): from the shortest length
 /// of the beams of the frequencies `lit` (their pattern's scale), within the trap light's region.
-fn trap_of(run: &Onefold, potential: &Reference, lit: &dyn Fn(usize) -> bool) -> Result<Trap, String> {
+fn trap_of(run: &Selected, potential: &Potential, lit: &dyn Fn(usize) -> bool) -> Result<Trap, String> {
     let light = run.light();
     let k = light.frequencies.iter().enumerate().filter(|(w, _)| lit(*w)).flat_map(|(_, f)| f.beams.iter().map(|&l| light.beams[l].wave_number)).fold(0., f64::max);
-    descend(1. / k, run.hbar_over_mass(), &|r| light.outside(r), &|r| potential.rounded(light, r))
+    descend(1. / k, run.hbar_over_mass(), &|r| light.outside(r), &|r| potential.rounded(r))
 }
 
-/// The reported trap of the ground populations p (SPEC §1.3; `Setting::reported`): the trap of the run's reported
-/// potential (model/fold/run.rs `Onefold::reported`: the trap light's held forms with the other lights' phase-averaged
-/// ones), every light's beams' pattern its scale (`trap_of`).
-pub(crate) fn reported(run: &Onefold, p: &[f64; GROUND]) -> Result<Trap, String> {
-    trap_of(run, &run.reported(p)?, &|_| true)
+/// The reported trap of the ground populations p (SPEC §1.3; `Setting::reported`): the trap of their potential
+/// (`Selected::prepared`), every light's beams' pattern its scale (`trap_of`).
+pub(crate) fn reported(run: &Selected, p: &[f64; GROUND]) -> Result<Trap, String> {
+    trap_of(run, &run.prepared(p), &|_| true)
 }
 
 /// The kick's largest curvature (`stable`), ω_k² = (ħ/m) λ_max ∂∂(V_s − V_ref) at the trap's centre over the ground
-/// states s (rad/µs²): how much stiffer than the reference's a state's own prepared well is there (`Onefold::prepared`),
+/// states s (rad/µs²): how much stiffer than the reference's a state's own prepared well is there (`Selected::prepared`),
 /// exactly. What else the kick's potential curves by -- the folded light's shifts along the pattern, an explicit
 /// excited state's well -- is the step's check's to find, as every part of the force is (step.rs, # The kick).
 /// Negative where every state's well is the softer one.
-fn kick_curvature(run: &Onefold, trap: &Trap) -> f64 {
+fn kick_curvature(run: &Selected, trap: &Trap) -> f64 {
     let reference = run.reference(trap.centre).hessian;
     (0..GROUND)
         .map(|s| {
-            let own = run.prepared(&alone(s)).at(run.light(), trap.centre).hessian;
+            let own = run.prepared(&alone(s)).at(trap.centre).hessian;
             let more: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| own[a][b] - reference[a][b]));
             symmetric3_eigen(&more).0.into_iter().fold(f64::NEG_INFINITY, f64::max)
         })
@@ -1046,7 +1037,7 @@ struct Prices<'a> {
 
 /// A trajectory's work a µs at every step at the states `rated` (`one_each`), the mean over the run's held states
 /// (`over_the_run`): at each, the step of τ taken from it on the run, as its count is made (step.rs `priced`: its
-/// stretches' counts, each with its cluster's counts at a node, `Onefold::costs`) over τ, and its jumps' counted work a
+/// stretches' counts, each with its middle's counts at a node, `step::Middle::work`) over τ, and its jumps' counted work a
 /// µs over its run (`Pick::jumping`: their photons and landings as they were made, step.rs `Trajectory::jumped`) -- a
 /// jump's work is the jump's whatever the step, so the step's count holds none of it: a landing's clock counted in the one
 /// step a state is priced at made the price a draw of whether that step held a jump (tilt0's scout: w(τ/2) below w(τ) by
@@ -1054,7 +1045,7 @@ struct Prices<'a> {
 /// run's would be, the runaway's rule the run's, `Widest`). The splitting's reference is a sum over the trap light's beam pairs, no part of the price. The step's
 /// check's `Prices::work`, each step's made once -- a check prices the same steps again as it goes on --, the states'
 /// steps on the pool, each by itself.
-fn work_at<'a>(run: &'a Onefold, widest: Widest, rated: &'a [Pick<'a>]) -> impl Fn(f64) -> f64 + 'a {
+fn work_at<'a>(run: &'a Selected, widest: Widest, rated: &'a [Pick<'a>]) -> impl Fn(f64) -> f64 + 'a {
     let made = std::cell::RefCell::new(Vec::<(f64, f64)>::new());
     move |tau: f64| {
         if let Some(&(_, work)) = made.borrow().iter().find(|(at, _)| *at == tau) {
@@ -1423,8 +1414,7 @@ fn classical(temperature: f64, frequency: f64) -> bool {
     KT_PER_UK * temperature >= CLASSICAL * frequency
 }
 
-/// A state's model error as the run books it (`Measured::means`): on the populations (absolute) and on T (relative)
-/// what one of its fold's readings books there.
+/// A state's model error as the run books it (`Measured::means`): on the populations (absolute) and on T (relative).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Booking {
     error: [f64; 2],
@@ -1433,12 +1423,11 @@ impl Booking {
     const NONE: Booking = Booking { error: [0.; 2] };
     const WHOLE: Booking = Booking { error: [1.; 2] };
 
-    /// A reading x at a state (rate units: a rate's relative error, model/fold/proto.rs `Cache::profile`): a rate wrong by x
-    /// moves a population by x at most, absolute, and T by x, relative. One that is no number or without bound -- a
-    /// fold read where it does not exist -- is the state's whole, as an unresolved atom is booked: every row of the atom
-    /// (a probability's range) and its whole part of T.
-    fn of(x: f64) -> Booking {
-        if x.is_finite() { Booking { error: [x; 2] } } else { Booking::WHOLE }
+    /// An error x at a state, on the populations and on T (`Selected::error`). One that is no number or without bound is
+    /// the state's whole, as an unresolved atom is booked: every row of the atom (a probability's range) and its whole
+    /// part of T.
+    fn of(x: [f64; 2]) -> Booking {
+        if x.iter().all(|e| e.is_finite()) { Booking { error: x } } else { Booking::WHOLE }
     }
 
     /// The error of a lost atom's fate (module documentation, # Where the atoms went): a reading's mean along the path
@@ -1482,23 +1471,11 @@ fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Opt
     Some(along)
 }
 
-/// The fold's readings at a state as the books take them (module documentation, # The model): the books' profile at its
-/// time -- per account (`READINGS`) the reading its cluster's last decision left on the trajectory's representation,
-/// what each of its steps books over the cell (unify2 §2.7; model/fold/run.rs `Onefold::profile`; step.rs
-/// `Trajectory::model`), no forward made -- and their combination (√Σρ_k², the books' whole), each booked as a state's
-/// error is (`Booking::of`); the state's whole where its representation holds no decision on its cluster.
-fn booked_at(run: &Onefold, state: &State) -> Vec<Booking> {
-    match run.profile(state.sample.cluster, &state.held) {
-        Some(profile) => {
-            let mut out: Vec<Booking> = profile.into_iter().map(Booking::of).collect();
-            // A cell with an unresolved step (unify2 §2.7): that account reads ρ = 1 at its states, said as it is.
-            if state.unresolved {
-                *out.last_mut().expect("the combination") = Booking::WHOLE;
-            }
-            out
-        }
-        None => vec![Booking::WHOLE; READINGS.len() + 1],
-    }
+/// The model's error at a state as the books take it (module documentation, # The model): the two points' measured
+/// error (`Selected::error`), the same at every state, and its combination (one account: itself); the state's whole
+/// where it is no number.
+fn booked_at(run: &Selected, _state: &State) -> Vec<Booking> {
+    vec![Booking::of(run.error()); READINGS.len() + 1]
 }
 
 /// The states the model is read at and the fold's readings there (SPEC §5.2; module documentation, # Where the atoms
@@ -1532,7 +1509,7 @@ impl Sampled {
     }
 }
 
-fn sampled(run: &Onefold, parts: &[&Part]) -> Sampled {
+fn sampled(run: &Selected, parts: &[&Part]) -> Sampled {
     // The states read -- a held atom's at a time, a lost atom's at t = 0 and at its path's end --, and per lost atom its
     // path's nodes (their times and rows); per group its held states' rows by time and its lost atoms' first times lost
     // and paths.
@@ -1748,7 +1725,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         let means = read.sampled.measured().means(n, &read.estimates);
         for (i, label) in READINGS.iter().enumerate() {
             let most = (1..n).filter(|&k| held[k] > 0.).map(|k| means[k][i][0].max(held[k] * means[k][i][1])).fold(0., f64::max);
-            context.ledger.item(label, most, FOLD_MEASURED);
+            context.ledger.item(label, most, MODEL_MEASURED);
         }
     }
 
@@ -1779,7 +1756,7 @@ struct PilotRead {
 /// - the model's error at the pilot's states (SPEC §5.2; # The model): the fold's readings' combination per time, the
 ///   held atoms' mean and the lost atoms' along their paths (`Measured::combined`);
 /// - the optical sector's noise (ledger.rs `optical`): its booking on T at every time, a part of the model's error.
-fn pilot_reads(run: &Onefold, pilot: &[&Part], scales: &Scales) -> PilotRead {
+fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales) -> PilotRead {
     let (estimates, counts) = (summarize(&reads_of(pilot), scales), counts_of(pilot));
     let sampled = sampled(run, pilot);
     let mut model = model_error(&sampled.measured().combined(estimates.len(), &estimates));
@@ -1872,7 +1849,7 @@ impl Levels {
 /// The members `members` of the groups `numbers` at the step `tau`, each trajectory through the plan in the `domain`
 /// (a companion's level takes `Domain::companion`): a hand-out of its own (`run_groups`).
 #[allow(clippy::too_many_arguments)]
-fn level(run: &Onefold, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
+fn level(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
     let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
     run_groups(&[hand], messages, progress).pop().expect("the hand-out's one level")
 }
@@ -1882,7 +1859,7 @@ fn level(run: &Onefold, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: 
 /// whatever either shows --, the finer level first, whose trajectories take twice the steps; the coarser one is the
 /// companion's (`Domain::companion`). `progress` takes the finer level's groups.
 #[allow(clippy::too_many_arguments)]
-fn pair(run: &Onefold, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
+fn pair(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
     let fine = Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
     let coarse = Hand { groups: numbers, members, shape: Shape::of(plan, false), record: &|i| trajectory(run, ensemble, domain, 2. * tau, plan, false, i) };
     let mut levels = run_groups(&[fine, coarse], messages, progress).into_iter();
@@ -1948,7 +1925,7 @@ enum Settled {
 /// On the scout and on the pilot alike the check stops where the rung's own read is in and not clearly beyond
 /// (`Settled::Pending`: `check` takes it up again, priced, once the states it is priced at are read).
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
+fn settle(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
     let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, numbers, members.clone(), true, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
@@ -1962,7 +1939,7 @@ fn settle(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Con
 /// where the check stops at that read (`Settled::Pending`, as `settle` takes it). The scout's check reads no rung it
 /// cannot see: where it is not clearly beyond it stands, or goes down where that costs the run less.
 #[allow(clippy::too_many_arguments)]
-fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: u64, above: &dyn Fn(f64) -> bool, prices: Option<&Prices>, messages: &mut Messages) -> Settled {
+fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: u64, above: &dyn Fn(f64) -> bool, prices: Option<&Prices>, messages: &mut Messages) -> Settled {
     // Whether the check is the pilot's: all the members of a group in.
     let pilot = members == GROUP;
     loop {
@@ -2105,7 +2082,7 @@ fn check(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Cont
 /// rung has could not see, `Remedy::Upper`): the rung above's coarser level, the pilot's groups `numbers` at 4τ,
 /// against its finer one, this rung's companion, held (`Levels::coarser`). Where its read excludes nothing on some
 /// look (`readable`: no output counts a trajectory at both levels), the rung above is unread.
-fn upper_on_the_pilot(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], messages: &mut Messages) {
+fn upper_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], messages: &mut Messages) {
     let coarser = level(run, ensemble, domain, &context.plan, 4. * context.tau, numbers, 0..GROUP, false, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
     let read = read_step(&context.plan.reads, context.plan.window, &levels.coarse.iter().collect::<Vec<_>>(), &coarser.iter().collect::<Vec<_>>(), &context.scales);
     if readable(&read) {
@@ -2123,7 +2100,7 @@ fn upper_on_the_pilot(run: &Onefold, ensemble: &Ensemble, domain: &Domain, conte
 /// a function of its number and step (`trajectory`) -- for the two reads on the same pairs, (τ/2, τ) and (τ, 2τ), whose
 /// noise's ratio foresees the rung below (`foreseen`). Their cost is the scout's pairs at three steps, a few dozen of
 /// the rung's trajectories against the hundreds of pairs it weighs.
-fn foresee(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &Levels, numbers: &[u64], messages: &mut Messages) -> (Vec<Part>, Between, Between) {
+fn foresee(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &Levels, numbers: &[u64], messages: &mut Messages) -> (Vec<Part>, Between, Between) {
     let (tau, plan) = (context.tau, &context.plan);
     let half = |i| trajectory(run, ensemble, domain, 0.5 * tau, plan, true, i);
     let own = |i| trajectory(run, ensemble, domain, tau, plan, false, i);
@@ -2169,7 +2146,7 @@ fn batch(need: f64, have: u64) -> u64 {
 /// model's error the pilot fixed, in the looks and in the results. Each batch's result is a checkpoint; returns the
 /// estimates, the listed atoms and the counts at its end, and the estimates at the analysis times.
 #[allow(clippy::too_many_arguments)]
-fn product(run: &Onefold, ensemble: &Ensemble, domain: &Domain, context: &mut Context, parts: &mut Vec<Part>, pilot: &[u64], messages: &mut Messages) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts, Vec<Estimate>) {
+fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, parts: &mut Vec<Part>, pilot: &[u64], messages: &mut Messages) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts, Vec<Estimate>) {
     let (started, from) = (Instant::now(), parts.len() as u64 * GROUP);
     // The model's error as the pilot fixed it.
     let booked = context.fixed.model.clone();
@@ -2799,7 +2776,7 @@ impl Part {
 /// Some groups of a level whose states are kept at the places `at` of their times read (`Part::at`), each with its
 /// trajectories' states there made again from their checkpoints (`replay`), in its members' order -- on the pool,
 /// trajectory by trajectory --: the level's model `run`, its `domain` and step `tau`, and the plan it ran through.
-fn parts_at(run: &Onefold, domain: &Domain, tau: f64, plan: &Plan, parts: &[&Part], at: &[usize]) -> Vec<Part> {
+fn parts_at(run: &Selected, domain: &Domain, tau: f64, plan: &Plan, parts: &[&Part], at: &[usize]) -> Vec<Part> {
     let times: Vec<f64> = at.iter().map(|&k| plan.reads[k]).collect();
     parts
         .par_iter()
@@ -2869,7 +2846,7 @@ impl Shape {
 /// Trajectory `index` of a run at the step τ: its initial state from the ensemble (ensemble.rs `Ensemble::draw`), run
 /// through the plan (`run`). A function of the index and the step: the same index at another step is the same atom on
 /// the same streams (module documentation, # The step).
-fn trajectory(model: &Onefold, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
+fn trajectory(model: &Selected, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
     run(model, domain, ensemble.draw(SEED, index), index, tau, plan, keep)
 }
 
@@ -4537,7 +4514,7 @@ mod tests {
     #[test]
     fn the_states_errors_are_the_outputs_means() {
         let width = READINGS.len() + 1;
-        let row = |x: f64| -> Vec<Booking> { (0..width).map(|i| Booking::of(x * (1 + i) as f64)).collect() };
+        let row = |x: f64| -> Vec<Booking> { (0..width).map(|i| Booking::of([x * (1 + i) as f64; 2])).collect() };
         let errors: Vec<Booking> = [row(0.01), row(0.02)].concat();
         let measured = Measured { errors: &errors, output: &[1, 2, 1], row: &[0, 0, 1], lost: &[false; 3] };
         let estimates: Vec<Estimate> = (0..4).map(|_| estimate([10.; 3], 0., 8.)).collect();
@@ -4554,9 +4531,9 @@ mod tests {
     #[test]
     fn a_reading_without_bound_is_the_state_s_whole() {
         for bad in [f64::INFINITY, f64::NAN] {
-            assert_eq!(Booking::of(bad), Booking { error: [1.; 2] });
+            assert_eq!(Booking::of([bad, 0.01]), Booking { error: [1.; 2] });
         }
-        assert_eq!(Booking::of(0.01), Booking { error: [0.01; 2] });
+        assert_eq!(Booking::of([0.01, 0.02]), Booking { error: [0.01, 0.02] });
     }
 
     /// A lost atom's fate is read along the path it was decided along (module documentation, # Where the atoms went;
@@ -4965,11 +4942,12 @@ mod tests {
     }
 
     /// A scene's request (refs/scenes, or refs/requests where `requests`), its run at the ground state `state` (the
-    /// reference state) and that state's prepared trap, as the solve makes them (`solve`, `Prepared`).
-    fn scene_run(name: &str, requests: bool, state: usize) -> (Request, Onefold, Trap) {
+    /// reference state) and that state's prepared trap, as the solve makes them (`solve`, `Prepared`). 临时入口：P 取全部
+    /// 32 态（`select::choose` 落地前；合并时改回 `choose`）.
+    fn scene_run(name: &str, requests: bool, state: usize) -> (Request, Selected, Trap) {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join(if requests { "requests" } else { "scenes" }).join(format!("{name}.json"));
         let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
-        let run = Onefold::new(&request, alone(state)).unwrap();
+        let run = crate::model::selected::keeping(&request, (0..STATES).collect(), None, alone(state));
         let trap = Prepared::new(&run, alone(state)).unwrap().trap;
         (request, run, trap)
     }
@@ -4980,52 +4958,8 @@ mod tests {
     }
 
     /// The rms speed along an axis of a request's atoms at its temperature, as a momentum over ħ (1/µm).
-    fn thermal(request: &Request, run: &Onefold) -> f64 {
+    fn thermal(request: &Request, run: &Selected) -> f64 {
         (KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt()
-    }
-
-    /// The PGC3D_1ms trajectory that hung on 2cd4e77d (e2e.status R1: its decisions rose by the state's population read off
-    /// a forward that did not exist, up to all six nodes -- the tweezer's D1 F′ = 1, 2 among them, 25 THz off --, and a
-    /// stretch planned 1.56·10⁷ Taylor steps): the reference state at the trap's centre, three thermal speeds along z,
-    /// trajectory 9, τ = end/800, the cells 2τ. It runs to the plan's end (or its loss), each cell's decisions taking the
-    /// remedy their attribution names (unify2 §3.4; a fold that does not exist rises the node of the most mixing of the
-    /// part that diverges): the explicit states of every cluster it holds said, and none of the tweezer's line.
-    #[test]
-    fn the_pgc3d_trajectory_that_hung_runs_through_on_its_own_light_s_nodes() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join("PGC3D_1ms.json");
-        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
-        let b = chief(&request);
-        let (request, run, trap) = scene_run("PGC3D_1ms", true, b);
-        let domain = Domain { widest: Widest::of(&request) };
-        let speed = thermal(&request, &run);
-        let mut plan = Plan::new(&[0., 100., 200.], trap.lab);
-        let tau = plan.end / 800.;
-        plan.cell = 2. * tau;
-        let kappa: V3 = [0., 0., 3. * speed];
-        let index = 9;
-        let mut t = Trajectory::begun(&run, b, trap.centre, kappa, SEED, index, plan.cell);
-        let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
-        let mut scratch = Scratch::default();
-        let started = std::time::Instant::now();
-        // The tweezer's line: the excited states its frequency drives from the ground (the request's couplings).
-        let trap_light = run.light().trap;
-        let tweezer: Vec<usize> = (0..crate::request::STATES - GROUND).filter(|&e| run.light().frequencies[trap_light].beams.iter().any(|&l| (0..GROUND).any(|g| request.beams[l].coupling[(GROUND + e, g)].abs() > 0.0))).collect();
-        let mut held: Vec<Vec<usize>> = vec![];
-        let mut ended = Ok(());
-        while t.time < plan.end && t.lost.is_none() {
-            let stop = t.time + 10.;
-            ended = adapt::advance(&run, &domain, tau, &mut t, &mut scratch, &mut path, plan.end, stop, &[], &mut |_, _, _| {}, &mut |_, _| {});
-            let explicit: Vec<usize> = run.cluster(t.cluster).states.iter().filter(|&&s| s >= GROUND).map(|&s| s - GROUND).collect();
-            if !held.contains(&explicit) {
-                held.push(explicit);
-            }
-            if ended.is_err() {
-                break;
-            }
-        }
-        eprintln!("the trajectory to {:.1} µs of {:.1} ({:?}; lost {:?}), {} jumps, {} unresolved steps, in {:.1} s; the explicit excited states of the clusters it held {held:?}; the tweezer's line {tweezer:?}", t.time, plan.end, ended, t.lost, t.jumps, t.unresolved_steps, started.elapsed().as_secs_f64());
-        assert!(ended.is_ok(), "it runs through");
-        assert!(held.iter().flatten().all(|e| !tweezer.contains(e)), "no node of the tweezer's line rises");
     }
 
     /// A step's count against its time (a measurement, ignored; tilt0's request where the scratchpad holds it): states of
@@ -5040,7 +4974,7 @@ mod tests {
         let file = r"C:\Users\eadri\AppData\Local\Temp\claude\c0815e347c54866c\8308d66c-699b-4483-ab9b-7305d93a9f7e\scratchpad\final\req\tilt0.json";
         let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap()).unwrap();
         let b = chief(&request);
-        let run = Onefold::new(&request, alone(b)).unwrap();
+        let run = crate::model::selected::keeping(&request, (0..STATES).collect(), None, alone(b));
         let trap = Prepared::new(&run, alone(b)).unwrap().trap;
         let domain = Domain { widest: Widest::of(&request) };
         let (speed, tau) = (thermal(&request, &run), 0.32610161451737907);
@@ -5186,7 +5120,7 @@ mod tests {
 
     /// The initial ensembles of the conservative reference traps (refs/scenes R1, the app's own requests: a lone tweezer, a
     /// standing wave, crossed beams of one frequency, a σ⁺ tweezer) in the run's prepared wells (`Prepared`: the trap
-    /// light's held forms on the fold) under their envelopes (`Reference::peak`): 2¹² draws each read the exact moments (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within their
+    /// light's potential) under their envelopes (`Potential::peak`): 2¹² draws each read the exact moments (ħ/m)⟨κ_a²⟩ = Σ_b p_b η_b k_BT (S_b²)_aa per lab axis within their
     /// intervals over the groups at the confidence z -- twelve looks, three axes of four traps -- and the quadrature's own
     /// error as the solve books it for T(0), its last two levels' relative difference (`Fixed::start`), here on 2¹⁶
     /// evaluations, fewer than a pilot's steps in these traps (88 trajectories of 800 steps or more). η lies in (0, 1]:
@@ -5198,7 +5132,7 @@ mod tests {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
             let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
             let request = Request::from_native(&line).unwrap();
-            let run = Onefold::new(&request, alone(chief(&request))).unwrap();
+            let run = crate::model::selected::keeping(&request, (0..STATES).collect(), None, alone(chief(&request)));
             let initial = components(&request);
             let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&run, alone(s)).unwrap()).collect();
             let hm = hbar_over_mass(request.mass_kg);
@@ -5439,7 +5373,7 @@ mod tests {
     }
 
     /// One trajectory through the plan (`run`) with its states not kept.
-    fn run_trajectory(run: &Onefold, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan) -> Record {
+    fn run_trajectory(run: &Selected, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan) -> Record {
         super::run(run, domain, start, index, tau, plan, false)
     }
 
