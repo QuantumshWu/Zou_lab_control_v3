@@ -1,0 +1,325 @@
+//! The selection's checks: the gate's measures and the two stages by hand; on the six scenes' requests the base
+//! against the prototype's whole-level selection (`choose_is_pysel`) and P at both points (`choose_s_p_passes_at_both_points`);
+//! the cost.
+use super::*;
+
+fn readouts(levels: &[f64], rate: f64, force: [f64; 3]) -> Readouts {
+    Readouts { levels: levels.to_vec(), rate, force, ..Default::default() }
+}
+
+/// The gate's three measures, by hand: populations 0.004 absolute, R 0.02 relative, F⃗ |(0.3, 0.4, 0)| = 0.5 over
+/// max(|F⃗| = 10, kR = 2·4 = 8) = 0.05; at a balanced point F⃗ = 0 the scale is kR = 8: |(0, 0, 0.08)| / 8 = 0.01. A
+/// measure that is not a number is the worst, and passes no gate.
+#[test]
+fn select_errors_by_hand() {
+    let reference = readouts(&[0.5, 0.5], 4.0, [6.0, 8.0, 0.0]);
+    let model = readouts(&[0.504, 0.496], 4.08, [6.3, 8.4, 0.0]);
+    let e = errors(&model, &reference, 2.0, Route::Krylov);
+    assert!((e.populations - 0.004).abs() < 1e-15 && (e.rate - 0.02).abs() < 1e-15 && (e.force - 0.05).abs() < 1e-15);
+    let balanced = readouts(&[0.5, 0.5], 4.0, [0.0; 3]);
+    let e = errors(&readouts(&[0.5, 0.5], 4.0, [0.0, 0.0, 0.08]), &balanced, 2.0, Route::Krylov);
+    assert!((e.force - 0.01).abs() < 1e-15);
+    let lost = errors(&readouts(&[0.5, 0.5], f64::NAN, [0.0; 3]), &balanced, 2.0, Route::Krylov);
+    assert!(lost.worst().is_nan());
+    let candidate = Candidate { keep: vec![0], centre: e, edge: lost };
+    assert!(candidate.worst().is_nan() && !candidate.within(1.0) && !candidate.passes());
+}
+
+/// The base takes the smallest candidate passing at both points, though a larger one passes too and a smaller one
+/// passes at one point only; the report keeps the candidates up to it, all whole-level ones, P the base. None passing
+/// is an error.
+#[test]
+fn select_decide_takes_the_smallest_passing() {
+    let candidates = vec![vec![0], vec![0, 1], vec![0, 1, 2]];
+    // R's relative error per (point, candidate): candidate 0 fails at the edge, 1 and 2 pass both
+    let error = |p: usize, c: usize| [[0.001, 0.005, 0.0], [0.03, 0.009, 0.0]][p][c];
+    let out = decide(&candidates, 1.0, |p, c| {
+        Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, |c| error(p, c)), [1.0, 0.0, 0.0]), Route::Krylov))
+    })
+    .unwrap();
+    assert_eq!(out.keep, vec![0, 1]);
+    assert_eq!((out.candidates.len(), out.whole), (2, 2));
+    assert!(!out.candidates[0].passes() && out.candidates[1].passes());
+    assert_eq!(out.base().keep, out.keep);
+    let none = decide(&candidates, 1.0, |_, c| {
+        Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, |_| 0.5), [1.0, 0.0, 0.0]), Route::Krylov))
+    });
+    assert!(none.is_err());
+}
+
+/// The leave-one-out by hand (module documentation, # The decision, 2): the ground states and four excited states
+/// GROUND..GROUND + 4 the base; a set's R error (both points alike) 0.001 plus each missing state's own (0.001, 0.0015,
+/// 0.0025, 0.02) plus 0.008 where the first two are both missing (the errors not additive: a pair that cancels).
+/// - e_i = 0.002, 0.0025, 0.0035, 0.021: the base less i, not the increment;
+/// - at 1 %: 0.001 + 0.002 + 0.0025 + 0.0035 = 0.009 ≤ 1 %, the fourth over; the three removed fail (0.014), the
+///   largest e_i (the third) put back, the two fail (0.0115), the second put back, the first alone passes (0.002): P
+///   the base less the first, three checks after the two whole levels, the last P's;
+/// - at 5 %: all four removed (0.03), the set passes (0.035): P the ground states;
+/// - at 0.25 %: the first already over (0.003): nothing removed, no check, P the base; below the base's 0.1 % an error.
+#[test]
+fn select_leave_one_out_by_hand() {
+    let own = [0.001, 0.0015, 0.0025, 0.02];
+    let base: Vec<usize> = (0..GROUND + 4).collect();
+    let error = |keep: &[usize]| -> f64 {
+        let missing = |s: usize| !keep.contains(&s);
+        let pair = if missing(GROUND) && missing(GROUND + 1) { 0.008 } else { 0.0 };
+        0.001 + (0..4).filter(|&i| missing(GROUND + i)).map(|i| own[i]).sum::<f64>() + pair
+    };
+    let solve = |_: usize, keep: &[usize]| -> Result<(Readouts, Route), String> {
+        Ok((readouts(&[1.0], 1.0 + error(keep), [1.0, 0.0, 0.0]), Route::Krylov))
+    };
+    let ground: Vec<usize> = (0..GROUND).collect();
+    let candidates = vec![ground.clone(), base.clone()];
+    let first = decide(&candidates, 1.0, |p, c| match c {
+        None => Ok((readouts(&[1.0], 1.0, [1.0, 0.0, 0.0]), Route::Krylov)),
+        Some(c) => solve(p, &candidates[c]),
+    })
+    .unwrap();
+    assert_eq!(first.keep, base);
+    let out = refine(first, 1.0, &solve).unwrap();
+    let e: Vec<f64> = out.left_out.iter().map(|l| l.e()).collect();
+    assert_eq!(out.left_out.iter().map(|l| l.state).collect::<Vec<_>>(), (GROUND..GROUND + 4).collect::<Vec<_>>());
+    assert!(e.iter().zip([0.002, 0.0025, 0.0035, 0.021]).all(|(a, b)| (a - b).abs() < 1e-15), "{e:?}");
+    let less = |gone: &[usize]| -> Vec<usize> { base.iter().copied().filter(|s| !gone.contains(s)).collect() };
+    assert_eq!(out.keep, less(&[GROUND]));
+    assert_eq!(out.removed, vec![GROUND]);
+    assert!((out.predicted - 0.009).abs() < 1e-15);
+    let checked: Vec<Vec<usize>> = out.candidates[out.whole..].iter().map(|c| c.keep.clone()).collect();
+    assert_eq!(checked, vec![less(&[GROUND, GROUND + 1, GROUND + 2]), less(&[GROUND, GROUND + 1]), less(&[GROUND])]);
+    let passing: Vec<bool> = out.candidates[out.whole..].iter().map(|c| c.passes()).collect();
+    assert_eq!(passing, vec![false, false, true]);
+    assert_eq!(out.candidates.last().unwrap().keep, out.keep);
+    let reference = out.reference.clone();
+    let wide = descend(out.base(), &out.left_out, 0.05, &reference, 1.0, &solve).unwrap();
+    assert_eq!((wide.keep, wide.checks.len()), (ground.clone(), 1));
+    assert!((wide.predicted - 0.03).abs() < 1e-15);
+    let narrow = descend(out.base(), &out.left_out, 0.0025, &reference, 1.0, &solve).unwrap();
+    assert_eq!((narrow.keep, narrow.removed.len(), narrow.checks.len()), (base.clone(), 0, 0));
+    assert!(descend(out.base(), &out.left_out, 0.0005, &reference, 1.0, &solve).is_err());
+}
+
+/// A level's name in the prototype's readouts (td_s: "g1", "g2", "e<line><F′>"), of its first state's label
+/// ("ground-F-m", "D<line>-F′-m").
+fn name(label: &str) -> String {
+    let mut parts = label.splitn(3, '-');
+    let (head, f) = (parts.next().unwrap(), parts.next().unwrap());
+    if head == "ground" { format!("g{f}") } else { format!("e{}{f}", &head[1..]) }
+}
+
+/// The six scenes' requests (the directory `V3D_REQ`: scratchpad reqprec/req), each with its name in the prototype's
+/// files.
+fn six() -> Vec<(&'static str, Scene)> {
+    let dir = std::path::PathBuf::from(std::env::var("V3D_REQ").expect("V3D_REQ: the six scenes' requests (scratchpad reqprec/req)"));
+    [("tilt0.json", "tilt0"), ("tilt2.json", "tilt2"), ("R4_LIN_4.json", "r4"), ("GMD1C_1ms.json", "gmd1c"), ("PGC3D_1ms.json", "pgc3d"), ("TET_1ms.json", "tet")]
+        .into_iter()
+        .filter(|(_, name)| std::env::var("PSTATE_SCENE").map_or(true, |only| only == *name))
+        .map(|(file, name)| {
+            let p = dir.join(file);
+            let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap();
+            line["options"]["device"] = serde_json::json!("cpu");
+            // These requests predate the outside forms' transitions, which the scene does not read.
+            for form in line["model"]["motion"]["outsideForms"].as_array_mut().unwrap() {
+                form.as_object_mut().unwrap().entry("transitions").or_insert(serde_json::json!([]));
+            }
+            (name, Scene::new(&crate::request::Request::from_native(&line).unwrap()).unwrap())
+        })
+        .collect()
+}
+
+/// The base (# The decision, 1) is the prototype's whole-level selection (PYEXP2, scratchpad pyexp2/sel_<scene>.json:
+/// PYSEL's procedure on each scene's own request, reqprec/req, its exports pysel/export2) on the six scenes' requests
+/// (`V3D_REQ`, the selections' `V3D_SEL`): the levels' ranking and the base the same; the full reference's readouts at
+/// both points -- F⃗, R, the levels' populations, each as the gate reads it -- the prototype's to the solves' accuracy;
+/// and per whole-level candidate the gate's three errors, which differ by what the two models differ by (the prototype
+/// folds the model's fast elements in Liouville space, fold2; this one in Hilbert space by RS, model/rs.rs: the same
+/// second order, apart in the next, v3c2.status.md §2.3), said.
+///
+/// Measured: the references' readouts within 3.4·10⁻¹³ on five scenes, the same element sets (GMD1C 4634 and 4428 as
+/// the prototype's); GMD1C's F⃗ 2.0·10⁻⁷ of its scale max(|F⃗|, kR) ≈ 6·10⁻⁴ (its force near balance), all of it the
+/// prototype's F_y: −1.2·10⁻¹⁰ at the centre where the scene's symmetry has none (here 5.7·10⁻¹⁵) -- the prototype's
+/// solve there agrees with its own direct LU to 10⁻¹¹ only (pyexp2.status.md, its condition). The bound read is 10⁻⁶
+/// of the gate's scale: four orders below the gate, the decisions the same where no error sits within it of 1 %.
+#[test]
+fn choose_is_pysel() {
+    let sel = std::path::PathBuf::from(std::env::var("V3D_SEL").expect("V3D_SEL: the prototype's selections (scratchpad pyexp2)"));
+    let json = |p: std::path::PathBuf| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).unwrap() };
+    let mut worst = [0.0_f64; 2];
+    for (scene_name, scene) in six() {
+        let python = json(sel.join(format!("sel_{scene_name}.json")));
+        let labels = &scene.request.states;
+        // The ranking.
+        let points = points(&scene);
+        let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(&scene, p)).collect();
+        let ours: Vec<String> = ranking(&scene, &references, &points).iter().map(|l| name(&labels[l[0]])).collect();
+        let theirs: Vec<String> = python["ranking"].as_array().unwrap().iter().map(|r| format!("e{}{}", &r[0].as_str().unwrap()[1..], r[1])).collect();
+        assert_eq!(ours, theirs, "{scene_name}: the ranking");
+        // The base.
+        let selection = choose(&scene).unwrap();
+        let p = python["P"].as_u64().unwrap() as usize;
+        eprintln!("{scene_name}: the base {} (prototype {p}), {} whole-level candidates, P {}, {:.2} s", selection.base().keep.len(), selection.whole, selection.keep.len(), selection.seconds);
+        assert_eq!(selection.base().keep.len(), p, "{scene_name}: the base");
+        // The full reference's readouts.
+        let groups = levels(labels, &(0..STATES).collect::<Vec<_>>());
+        for (i, point) in ["centre", "edge"].into_iter().enumerate() {
+            let (ours, route) = &selection.reference[i];
+            let theirs = &python["full"][point];
+            let f: Vec<f64> = theirs["F"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+            let r = theirs["R"].as_f64().unwrap();
+            let scale = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt().max(selection_k(&scene) * r);
+            let df = (0..3).map(|a| (ours.force[a] - f[a]).powi(2)).sum::<f64>().sqrt() / scale;
+            let dr = (ours.rate - r).abs() / r;
+            let dp = groups.iter().zip(&ours.levels).map(|(g, x)| (x - theirs["pops"][name(&labels[g[0]])].as_f64().unwrap()).abs()).fold(0.0, f64::max);
+            eprintln!("  {point} reference ({route:?}): F⃗ {df:.1e} R {dr:.1e} populations {dp:.1e}");
+            worst[0] = worst[0].max(df.max(dr).max(dp));
+            assert!(df.max(dr).max(dp) <= 1e-6, "{scene_name} {point}: the reference's readouts");
+        }
+        // Each whole-level candidate's gate errors.
+        for (c, step) in selection.candidates[..selection.whole].iter().zip(python["steps"].as_array().unwrap()) {
+            assert_eq!(c.keep.len() as u64, step["P"].as_u64().unwrap(), "{scene_name}: the candidates' sizes");
+            for (point, ours) in [("centre", &c.centre), ("edge", &c.edge)] {
+                let e = &step["err"][point];
+                let (f, r, pop) = (e["F"].as_f64().unwrap(), e["R"].as_f64().unwrap(), e["P"].as_f64().unwrap());
+                eprintln!(
+                    "  P {:2} {point}: F⃗ {:.4e} ({:.4e}) R {:.4e} ({:.4e}) populations {:.4e} ({:.4e}) -- ours (prototype's); {:?}",
+                    c.keep.len(), ours.force, f, ours.rate, r, ours.populations, pop, ours.route
+                );
+                worst[1] = worst[1].max(((ours.force - f).abs()).max((ours.rate - r).abs()).max((ours.populations - pop).abs()));
+            }
+        }
+    }
+    eprintln!("largest: the reference's readouts {:.1e}; the gate's errors apart by {:.1e}", worst[0], worst[1]);
+}
+
+/// A candidate's errors for the report: per point populations, R, F⃗.
+fn said(c: &Candidate) -> String {
+    let e = |p: &PointError| format!("{:.2e} {:.2e} {:.2e}", p.populations, p.rate, p.force);
+    format!("centre {} | edge {}", e(&c.centre), e(&c.edge))
+}
+
+fn as_json(c: &Candidate) -> serde_json::Value {
+    let e = |p: &PointError| serde_json::json!({"populations": p.populations, "rate": p.rate, "force": p.force, "route": format!("{:?}", p.route)});
+    serde_json::json!({"keep": c.keep, "worst": c.worst(), "centre": e(&c.centre), "edge": e(&c.edge)})
+}
+
+/// PSTATE's acceptance on the six scenes' requests (`V3D_REQ`; `PSTATE_SCENE` one of them): `choose`'s P passes the
+/// gate at both points -- the one assertion. Reported: the base, every e_i, the removal, its prediction and its
+/// measured errors, the checks, the time by stages beside one two-point check of the base and the budget (one check
+/// times one more than the explicit excited states); for the user's choice of a gate (the code's stays `GATE`), P at
+/// 2 % and 5 % -- the whole-level base at that gate with its own leave-one-out and descent, and the descent from the
+/// 1 % base (PFINE predict.py's). With `PSTATE_OUT` a directory, each scene's numbers to <scene>.json there.
+#[test]
+fn choose_s_p_passes_at_both_points() {
+    let out = std::env::var("PSTATE_OUT").ok().map(std::path::PathBuf::from);
+    for (scene_name, scene) in six() {
+        let labels = &scene.request.states;
+        let named = |states: &[usize]| states.iter().map(|&s| labels[s].clone()).collect::<Vec<_>>();
+        let selection = choose(&scene).unwrap();
+        let p = selection.candidates.last().unwrap();
+        assert!(p.keep == selection.keep && p.passes(), "{scene_name}: P {} does not pass at both points: {}", selection.keep.len(), said(p));
+        let base = selection.base();
+        let two = TwoPoints::new(&scene);
+        let model = |p: usize, keep: &[usize]| two.model(p, keep);
+        let clock = Instant::now();
+        let _ = pair(&base.keep, &model).unwrap();
+        let check = clock.elapsed().as_secs_f64();
+        let excited = selection.left_out.len();
+        let mut order: Vec<&LeftOut> = selection.left_out.iter().collect();
+        order.sort_by(|a, b| a.e().total_cmp(&b.e()));
+        eprintln!(
+            "{scene_name}: base P {} ({} explicit excited); P {} removing {:?}: predicted {:.3e}, measured {:.3e} ({}); {} checks",
+            base.keep.len(), excited, selection.keep.len(), named(&selection.removed), selection.predicted, p.worst(), said(p), selection.candidates.len() - selection.whole
+        );
+        eprintln!("  base: worst {:.3e} ({})", base.worst(), said(base));
+        for l in &order {
+            eprintln!("  e({}) = {:.3e} ({})", labels[l.state], l.e(), said(&l.candidate));
+        }
+        for c in &selection.candidates[selection.whole..] {
+            eprintln!("  check P {}: worst {:.3e} ({}){}", c.keep.len(), c.worst(), said(c), if c.passes() { " passes" } else { "" });
+        }
+        eprintln!(
+            "  time: choose {:.3} s = base {:.3} + leave-one-out {:.3} + checks {:.3}; one check of the base {:.3} s, the budget of the stage after the base {:.3} s ({} + 1 checks)",
+            selection.seconds, selection.stages[0], selection.stages[1], selection.stages[2], check, check * (1 + excited) as f64, excited
+        );
+        let mut gates = Vec::new();
+        for gate in [0.02, 0.05] {
+            let whole = selection.candidates[..selection.whole].iter().find(|c| c.within(gate)).expect("the base passes a wider gate");
+            let own = if whole.keep == base.keep { selection.left_out.clone() } else { leave_one_out(whole, &selection.reference, two.k, &model).unwrap() };
+            let at = descend(whole, &own, gate, &selection.reference, two.k, &model).unwrap();
+            let from = descend(base, &selection.left_out, gate, &selection.reference, two.k, &model).unwrap();
+            // P's measured worst: its check's, or its base's where nothing was removed.
+            let measured = |d: &Descent, from: &Candidate| d.checks.last().filter(|c| c.keep == d.keep).map_or(from.worst(), |c| c.worst());
+            eprintln!(
+                "  gate {:.0} %: the whole-level base {} -> P {} (removing {:?}, predicted {:.3e}, measured {:.3e}, {} checks); from the 1 % base -> P {} (removing {:?}, predicted {:.3e}, measured {:.3e}, {} checks)",
+                100.0 * gate, whole.keep.len(), at.keep.len(), named(&at.removed), at.predicted, measured(&at, whole), at.checks.len(),
+                from.keep.len(), named(&from.removed), from.predicted, measured(&from, base), from.checks.len()
+            );
+            gates.push(serde_json::json!({
+                "gate": gate, "whole_base": whole.keep.len(), "P": at.keep.len(), "removed": named(&at.removed), "predicted": at.predicted, "measured": measured(&at, whole), "checks": at.checks.len(),
+                "from_base": {"P": from.keep.len(), "removed": named(&from.removed), "predicted": from.predicted, "measured": measured(&from, base), "checks": from.checks.len()},
+            }));
+        }
+        if let Some(dir) = &out {
+            let record = serde_json::json!({
+                "scene": scene_name, "labels": labels, "base": as_json(base), "base_labels": named(&base.keep),
+                "whole": selection.candidates[..selection.whole].iter().map(as_json).collect::<Vec<_>>(),
+                "left_out": selection.left_out.iter().map(|l| serde_json::json!({"state": labels[l.state], "e": l.e(), "candidate": as_json(&l.candidate)})).collect::<Vec<_>>(),
+                "removed": named(&selection.removed), "predicted": selection.predicted, "P": selection.keep.len(), "P_labels": named(&selection.keep),
+                "checks": selection.candidates[selection.whole..].iter().map(as_json).collect::<Vec<_>>(),
+                "seconds": selection.seconds, "stages": selection.stages, "one_check": check, "gates": gates,
+            });
+            std::fs::write(dir.join(format!("{scene_name}.json")), serde_json::to_string_pretty(&record).unwrap()).unwrap();
+        }
+    }
+}
+
+/// The time of a checkpoint's stages per point (one thread for each stage, the solve's own threads aside): the
+/// reference, the frame, a candidate's model (`Rs::new` + `Rs::at`), and of each the Liouvillian, the elements, the
+/// assembly and the solve; and `choose`'s, the least of five, by its stages. On the six scenes' requests (`V3D_REQ`).
+#[test]
+#[ignore]
+fn choose_cost() {
+    for (file, scene) in six() {
+        let points = points(&scene);
+        let zero = vec![0.0; scene.request.beams.len()];
+        let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(&scene, p)).collect();
+        let order = ranking(&scene, &references, &points);
+        for (i, p) in points.iter().enumerate() {
+            let clock = Instant::now();
+            let reference = rs::reference(&scene, p);
+            let made = clock.elapsed().as_secs_f64();
+            let clock = Instant::now();
+            let frame = Frame::new(&scene, &reference.hilbert(), &zero);
+            let framed = clock.elapsed().as_secs_f64();
+            let keep: Vec<usize> = (0..GROUND).chain(order.iter().take(2).flatten().copied()).collect();
+            let clock = Instant::now();
+            let model = Rs::new(&scene, &keep, frame.sectors()).at(&scene, p);
+            let modelled = clock.elapsed().as_secs_f64();
+            for (what, m, built) in [("reference", &reference, made), ("model", &model, modelled)] {
+                let clock = Instant::now();
+                let liouville = Liouville::new(&frame, &m.hilbert());
+                let l = clock.elapsed().as_secs_f64();
+                let clock = Instant::now();
+                let elements = select(&liouville);
+                let e = clock.elapsed().as_secs_f64();
+                let clock = Instant::now();
+                let system = assemble(&liouville, &elements);
+                let a = clock.elapsed().as_secs_f64();
+                let clock = Instant::now();
+                let solved = crate::krylov::solve(&system).unwrap();
+                let k = clock.elapsed().as_secs_f64();
+                eprintln!("{file} point {i} {what} (n {}, {} elements): made {built:.3} frame {framed:.3} | Liouville {l:.3} elements {e:.3} assembly {a:.3} solve {k:.3} s ({:?})", m.states.len(), elements.order.len(), solved.route);
+            }
+        }
+        let runs: Vec<Selection> = (0..5).map(|_| choose(&scene).unwrap()).collect();
+        let least = |f: &dyn Fn(&Selection) -> f64| runs.iter().map(f).fold(f64::INFINITY, f64::min);
+        let s = &runs[0];
+        eprintln!(
+            "{file}: choose {:.3} s (the least of five; base {:.3}, leave-one-out {:.3}, checks {:.3}): base P {}, {} left out one at a time, P {}, {} checks",
+            least(&|s| s.seconds), least(&|s| s.stages[0]), least(&|s| s.stages[1]), least(&|s| s.stages[2]), s.base().keep.len(), s.left_out.len(), s.keep.len(), s.candidates.len() - s.whole
+        );
+    }
+}
+
+fn selection_k(scene: &Scene) -> f64 {
+    scene.generators.last().unwrap().frequency / SPEED_OF_LIGHT
+}
