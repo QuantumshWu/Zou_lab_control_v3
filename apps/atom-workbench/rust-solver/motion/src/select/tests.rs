@@ -630,6 +630,82 @@ fn choose_on_every_reference_scene() {
     assert!(failed.is_empty(), "{failed:#?}");
 }
 
+/// Why no whole-level candidate passes (a diagnosis, ignored; `PSTATE_REFS` reference scenes by name, comma-separated):
+/// per scene the frame (its fast frequencies, every state's and generator's fast sector) and at both points the full
+/// reference's readouts -- the levels, R and its channels, F⃗, the force's scale kR -- and every whole-level
+/// candidate's, the largest (all 32 kept) included, each with the gate's three measures and the numbers they divide.
+#[test]
+#[ignore]
+fn why_no_candidate_passes() {
+    let names = std::env::var("PSTATE_REFS").expect("PSTATE_REFS: reference scenes, comma-separated");
+    for name in names.split(',') {
+        let request = crate::model::testing::scene(name);
+        let scene = Scene::new(&request).unwrap();
+        let two = TwoPoints::new(&scene);
+        let labels = &request.states;
+        eprintln!("{name}: generators (rad/µs) {:?}; tweezer beam {}", scene.generators.iter().map(|g| g.frequency).collect::<Vec<_>>(), request.trap_beam);
+        for (p, point) in ["centre", "edge"].into_iter().enumerate() {
+            let frame = &two.frames[p];
+            let sectors = frame.sectors();
+            eprintln!("  {point}: frame fast {:?}; generators' sectors {:?}", frame.fast, sectors.generators);
+            let mut by: Vec<(String, [i64; 2])> = Vec::new();
+            for (s, sector) in sectors.states.iter().enumerate() {
+                let level = labels[s].rsplit_once('-').map_or(labels[s].clone(), |(l, _)| l.trim_end_matches('-').to_string());
+                if !by.iter().any(|(l, x)| *l == level && x == sector) {
+                    by.push((level, *sector));
+                }
+            }
+            eprintln!("  {point}: the levels' sectors {by:?}");
+            let (reference, route) = two.reference(p).unwrap();
+            let scale = |r: &Readouts| (r.force.iter().map(|f| f * f).sum::<f64>().sqrt(), two.k * r.rate);
+            let (f, kr) = scale(&reference);
+            eprintln!(
+                "  {point} reference ({route:?}): levels {:?}; R {:.6e} (channels {:?}); F⃗ {:?} |F⃗| {f:.3e} kR {kr:.3e}",
+                reference.levels.iter().map(|x| format!("{x:.4e}")).collect::<Vec<_>>(), reference.rate, reference.rates.iter().map(|x| format!("{x:.3e}")).collect::<Vec<_>>(), reference.force
+            );
+            // The reference's solve itself: its elements, route, certificate, whether ρ is a number.
+            {
+                let liouville = Liouville::new(frame, &two.references[p].hilbert());
+                let elements = select(&liouville);
+                let system = assemble(&liouville, &elements);
+                let solved = crate::krylov::solve(&system).unwrap();
+                let finite = solved.rho.iter().filter(|z| z.re.is_finite() && z.im.is_finite()).count();
+                let largest = solved.rho.iter().map(|z| z.abs()).fold(0., f64::max);
+                eprintln!(
+                    "  {point} reference's solve: {} elements, {:?}, certified {}, ρ finite {finite} of {}, max |ρ| {largest:.3e}",
+                    elements.order.len(), solved.route, solved.certified, solved.rho.len()
+                );
+                for a in &solved.attempts {
+                    eprintln!(
+                        "    attempt {:?}: unfactorised {:?}; run {}",
+                        a.route, a.unfactorised, a.run.as_ref().map_or("none".into(), |r| format!("{} iterations, ζ {:.3e}, η {:.3e}, certified {}, stop {:?}", r.iterations, r.zeta, r.eta, r.certified, r.stop))
+                    );
+                }
+                let ground = |f: &str| (0..STATES).find(|&s| labels[s].starts_with(&format!("ground-{f}-"))).unwrap();
+                eprintln!("  {point}: θ of ground-1 {:?}, of ground-2 {:?}; the frame's values {:?}; the request's axes (MHz) {:?}", frame.theta[ground("1")], frame.theta[ground("2")], frame.values, request.frequencies_mhz);
+            }
+            for keep in &two.candidates {
+                let (model, route) = two.model(p, keep).unwrap();
+                let e = errors(&model, &reference, two.k, route);
+                eprintln!(
+                    "    P {:2}: populations {:.3e} R {:.3e} F⃗ {:.3e}{} (80b9782e's worst, NaN dropped by f64::max: {:.3e}) | levels {:?}; R {:.6e}; F⃗ {:?}",
+                    keep.len(), e.populations, e.rate, e.force, if e.worst() <= GATE { "" } else { " (over)" }, e.populations.max(e.rate).max(e.force),
+                    model.levels.iter().map(|x| format!("{x:.4e}")).collect::<Vec<_>>(), model.rate, model.force
+                );
+            }
+            // All 32 kept on the frame's sectors with the hyperfine coordinate n_φ taken out (a diagnosis: what the
+            // model folds beyond the reference at P = 32 is K's fast elements by n_φ; the reference folds by n_tw alone).
+            let mut plain = frame.sectors();
+            plain.states.iter_mut().for_each(|s| s[0] = 0);
+            plain.generators.iter_mut().for_each(|g| g[0] = 0);
+            let all: Vec<usize> = (0..STATES).collect();
+            let (model, route) = solved(frame, &Rs::new(&scene, &all, plain).at(&scene, &two.points[p])).unwrap();
+            let e = errors(&model, &reference, two.k, route);
+            eprintln!("    P 32 without n_φ: populations {:.3e} R {:.3e} F⃗ {:.3e} | R {:.6e}; F⃗ {:?}", e.populations, e.rate, e.force, model.rate, model.force);
+        }
+    }
+}
+
 fn selection_k(scene: &Scene) -> f64 {
     scene.generators.last().unwrap().frequency / SPEED_OF_LIGHT
 }
