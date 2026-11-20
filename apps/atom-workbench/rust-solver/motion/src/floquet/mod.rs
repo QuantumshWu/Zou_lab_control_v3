@@ -6,12 +6,14 @@
 pub mod frame;
 pub mod select;
 pub mod assemble;
+#[cfg(test)]
+mod tests;
 
 use crate::linalg::{C64, Mat};
-use crate::scene::Key;
+use crate::scene::{Components, Key, Scene};
 
 pub use assemble::{assemble, readouts, Liouville, Readouts, System};
-pub use frame::{Frame, Lattice};
+pub use frame::{Frame, Lattice, Sectors};
 pub use select::select;
 
 /// One frequency component of an operator of a Hilbert model: `value` e^{−i f t}, f the key's frequency.
@@ -20,8 +22,8 @@ pub struct Part {
     pub key: Key,
     /// n × n.
     pub value: Mat,
-    /// ∂value/∂u along the analysis axis u (n × n).
-    pub gradient: Mat,
+    /// ∂value/∂r_i, i = x, y, z (n × n).
+    pub gradient: [Mat; 3],
 }
 
 /// A Hilbert model at a point: n states (a subset `states` of the 32), H, the jumps and their photon-weighted forms by
@@ -32,20 +34,19 @@ pub struct Hilbert {
     pub states: Vec<usize>,
     /// H's components, each key with its −key's conjugate listed too (td_s.hilbert_full).
     pub hamiltonian: Vec<Part>,
-    /// Per jump channel (e1, e2, u: the emission rotated onto the analysis axis u, weights 2/5, 2/5, 1/5) its components;
-    /// `Part::gradient` holds ∂L/∂u (zero for the full reference).
+    /// Per jump channel (model/rs.rs `Channel`: one Cartesian emission axis, one fast index) its components; parts within a
+    /// channel interfere, channels do not. `Part::gradient` holds ∇L.
     pub jumps: Vec<Vec<Part>>,
-    /// Per jump channel √w (K ∘ C) by components: the photon's momentum along u (scene_x `jumpk`).
-    pub kicks: Vec<Vec<Part>>,
-    /// The levels (populations read per level): indices into `states`.
+    /// The levels (populations read per level): each level's states as indices into the 32.
     pub groups: Vec<Vec<usize>>,
-    /// The RS lift (None for the full reference): the folded states Q (indices into the 32) and M_f (|Q| × n) per key.
+    /// The fold's lift: M_f per key, a row per folded state or sideband.
     pub lift: Option<Lift>,
 }
 
-/// The RS model's folded states and their amplitudes M_f = (E_a + f − G_QQ)⁻¹ H_QS,f.
+/// The fold's amplitudes M_f = (E_a + f − G)⁻¹ V_f on the folded rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lift {
+    /// Each row's state (an index into the 32).
     pub folded: Vec<usize>,
     pub amplitudes: Vec<(Key, Mat)>,
 }
@@ -79,10 +80,9 @@ pub struct Sparse {
 }
 
 impl Hilbert {
-    /// The full 32-state reference at r for the momentum κ, its gradients and jumps along the analysis axis u
-    /// (td_s.hilbert_full on scene_x.build).
-    pub fn full(scene: &crate::scene::Scene, r: crate::linalg::V3, kappa: crate::linalg::V3, axis: crate::linalg::V3) -> Hilbert {
-        let _ = (scene, r, kappa, axis);
-        todo!()
+    /// The reference at a point: the 32 states with the tweezer's sidebands folded (the one fold, model/rs.rs `fold`),
+    /// everything else explicit.
+    pub fn full(scene: &Scene, components: &Components) -> Hilbert {
+        crate::model::rs::reference(scene, components).hilbert()
     }
 }

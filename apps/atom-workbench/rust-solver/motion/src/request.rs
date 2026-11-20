@@ -39,6 +39,11 @@ pub const STATES: usize = 32;
 /// The ground manifold's states (5S₁/₂, F = 1 and 2).
 pub const GROUND: usize = 8;
 
+/// The wavelengths (µm) light other than the tweezer may have: the band of the D1 (795 nm) and D2 (780 nm) lines, 765–810
+/// nm -- the legal input range the user set on 2026-11-19 for the allowed approximation that non-tweezer light couples
+/// the 32 states on D1/D2 alone (scene.rs). An input range, not a model tolerance.
+pub const D_LINES_UM: (f64, f64) = (0.765, 0.810);
+
 /// Why a motion block along an axis or in a plane is refused (contract §2.4; shown in the app).
 pub const ONLY_3D: &str = "运动只按三维计算（半经典）：不计算沿单个轴或在平面内的运动";
 /// Why a tweezer without a waist is refused (contract §2.4; shown in the app).
@@ -499,6 +504,20 @@ impl Request {
         }
         if self.beams[self.trap_beam].waist.is_none() {
             return Err(NO_WAIST.into());
+        }
+        // Light other than the tweezer couples the 32 states on D1 and D2 alone (an allowed approximation, scene.rs).
+        for (_, b) in self.beams.iter().enumerate().filter(|&(l, _)| l != self.trap_beam) {
+            let wavelength = std::f64::consts::TAU / b.wave_number;
+            if !(D_LINES_UM.0..=D_LINES_UM.1).contains(&wavelength) {
+                return Err(format!(
+                    "光束 {}（{}）的波长 {:.1} nm 不在 D1/D2 的 {:.0}–{:.0} nm 内：光镊以外的光只按 D1/D2 线计算",
+                    b.name,
+                    b.id,
+                    wavelength * 1e3,
+                    D_LINES_UM.0 * 1e3,
+                    D_LINES_UM.1 * 1e3
+                ));
+            }
         }
         for m in &self.emission {
             square(m, "An emission operator")?;
