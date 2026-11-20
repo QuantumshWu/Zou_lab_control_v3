@@ -71,6 +71,35 @@ fn select_a_point_without_light_is_not_judged() {
     assert_eq!(refined.keep, vec![0]);
 }
 
+/// The middle point (module documentation, # The middle point's direction and distance), on two reference requests
+/// (refs/scenes): R10_NODE, the trap at a node of the standing wave whose nodal plane holds the tweezer's axis -- the
+/// middle leaves the plane (n̂ across the axis, |n̂·d| at rounding), the tweezer's intensity there half its peak to
+/// rounding, and the light other than the tweezer's reaches it (`reach` ≥ ε) where one Rayleigh range along the axis
+/// it does not; R1_TWEEZER, the tweezer alone (M = 0) --
+/// the middle on the axis at the Rayleigh range, z_R d, to rounding.
+#[test]
+fn select_the_middle_point_leaves_a_node() {
+    let half = |scene: &Scene, r: V3| scene.geometry[scene.tweezer()].amplitude_to(r, 0).value.norm_sqr();
+    let node = Scene::new(&crate::model::testing::scene("R10_NODE")).unwrap();
+    let r = middle(&node);
+    let d = node.geometry[node.tweezer()].direction;
+    let along = (0..3).map(|i| r[i] * d[i]).sum::<f64>() / crate::linalg::norm3(r);
+    assert!(along.abs() <= 8.0 * f64::EPSILON, "R10_NODE: the middle along the axis by {along:e}");
+    assert!((half(&node, r) - 0.5).abs() <= 8.0 * f64::EPSILON, "R10_NODE: the tweezer's intensity {}", half(&node, r));
+    let zero = vec![0.0; node.request.beams.len()];
+    let tw = node.tweezer();
+    let other = |point: &Components| reach(&node, &rs::reference(&node, point), point, &|l| l != tw).iter().fold(0.0, |m: f64, &a| m.max(a));
+    let at_middle = other(&node.components(r, &zero, 1.0));
+    let on_axis = other(&node.components(d.map(|x| x * node.geometry[tw].rayleigh().unwrap()), &zero, 1.0));
+    assert!(at_middle >= f64::EPSILON && on_axis < f64::EPSILON, "R10_NODE: the other light's reach {at_middle:e} at the middle, {on_axis:e} on the axis");
+    eprintln!("R10_NODE: the middle {r:?}, the other light's largest first-order amplitude {at_middle:.3e} there, {on_axis:.3e} on the axis");
+    let alone = Scene::new(&crate::model::testing::scene("R1_TWEEZER")).unwrap();
+    let tweezer = alone.geometry[alone.tweezer()];
+    let r = middle(&alone);
+    let z = tweezer.rayleigh().unwrap();
+    assert!((0..3).all(|i| (r[i] - z * tweezer.direction[i]).abs() <= 8.0 * f64::EPSILON * z), "R1_TWEEZER: {r:?} for z_R {z} along {:?}", tweezer.direction);
+}
+
 /// The leave-one-out by hand (module documentation, # The decision, 2): the ground states and four excited states
 /// GROUND..GROUND + 4 the base; a set's R error (every point alike) 0.001 plus each missing state's own (0.001, 0.0015,
 /// 0.0025, 0.02) plus 0.008 where the first two are both missing (the errors not additive: a pair that cancels).
