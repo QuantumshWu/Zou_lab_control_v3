@@ -118,13 +118,18 @@
 //! So the rule is laid at the quotient's own bandwidth ν_Q (spectral.rs `Picture::quotient`): the forms' with the
 //! norm's ringing and its harmonics to the round-off -- the quotient's terms, a numerator pair's times k ringing pairs'
 //! of the eigenvectors' overlaps, their weights the launched state's and their frequencies added, cut by Chernoff's
-//! bound on the series where what lies beyond weighs within the round-off --, one Gauss–Legendre panel over each piece
-//! of the step (`panels`, `fewest`). Measured against brute force on the six scenes' plain pieces, the pieces after a
-//! jump and the bare starts at τ = 0.3256 and 0.948 µs (step/tests/r1prop.rs `r1prop_quadrature`): the sums, the
-//! hazard, the kick and the hazard to a time inside the piece (a root's span) within 2·10⁻¹⁴, where the panels at the
-//! forms' bandwidth before left the norm's harmonics at 2B and 3B, up to 10⁻⁹ (motion3d_status/rewrite/
+//! bound on the series where what lies beyond weighs within the round-off --, over each piece of the step as many equal
+//! Gauss–Legendre panels as leave the fewest nodes to take (`count`: one where no jump's root lies in the piece, more
+//! where one does and the root's panel is taken again), each of the fewest nodes to the round-off (`fewest`), every
+//! rule made in O(m) to the round-off once for the process (`special::gauss_legendre`, `rule`). Measured against brute
+//! force on the six scenes' plain pieces, the pieces after a jump and the bare starts at τ = 0.3256 and 0.948 µs
+//! (step/tests/r1prop.rs `r1prop_quadrature`; tilt2 at 0.3256): the sums, the hazard, the kick and the hazard to a time
+//! inside the piece (a root's span) within 3·10⁻¹⁴, laid as one panel and as a root's piece's three to eight, where the
+//! panels at the forms' bandwidth before left the norm's harmonics at 2B and 3B, up to 10⁻⁹ (motion3d_status/rewrite/
 //! carrier.status.md); ν_Q 2.0 to 3.2 times the forms' bandwidth on the explicit clusters, 5.6 to 6.4 on GMD1C's ground
-//! states, the nodes 1.3 to 2.0 times the panels' before (2.1 to 2.5 on GMD1C, of 10 to 27 nodes).
+//! states, the nodes 1.3 to 2.0 times the panels' before (2.1 to 2.5 on GMD1C, of 9 to 27 nodes). The integration's
+//! time -- the stretch less its picture's making, along a walk on one thread (`r1prop_integration_time`) -- 1.1 to 2.1
+//! times the strides' before on PGC3D, TET, R4, GMD1C and tilt2, a fifth to nine tenths of it on tilt0.
 //!
 //! Why a quadrature and not a closed form. On the unnormalized state every form is a sum over the pairs of states of
 //! a slow factor times e^{−i(λ_b − λ_a*)s}, whose integral over the step is a closed form pair by pair (the moments
@@ -462,7 +467,7 @@
 //! falls by the decay the step takes and never rises (# Jumps) --, and how inaccurate is the check's to read
 //! (step/tests.rs: an atom past its standing wave's resolution).
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
@@ -1138,20 +1143,20 @@ struct Rule {
     weights: Vec<f64>,
 }
 
-/// The largest rule a panel takes (`panels`): a rule of m nodes integrates a component of κ up to 2m less its Bessel
-/// tail's few nodes (`fewest`), so that its nodes a radian fall towards a half as m grows; at 256 they are within a
-/// twentieth of that limit, and a wider piece takes several panels of no more -- what the rules made once for the run
-/// cost (m² a rule, `special::gauss_legendre`) and what a jump's root takes again of its panel, no accuracy's number.
-const LARGEST: usize = 256;
-
-/// The rule of m nodes (at most `LARGEST`), made once for the run and kept.
+/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is first asked and
+/// kept for the process -- the same rule whichever thread makes it.
 fn rule(m: usize) -> &'static Rule {
-    static RULES: OnceLock<Vec<OnceLock<Rule>>> = OnceLock::new();
-    let rules = RULES.get_or_init(|| (0..=LARGEST).map(|_| OnceLock::new()).collect());
-    rules[m.min(LARGEST)].get_or_init(|| {
-        let (nodes, weights) = crate::special::gauss_legendre(m.min(LARGEST)).into_iter().unzip();
-        Rule { nodes, weights }
-    })
+    static RULES: RwLock<Vec<Option<&'static Rule>>> = RwLock::new(Vec::new());
+    if let Some(&Some(rule)) = RULES.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(m) {
+        return rule;
+    }
+    let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
+    let made = Rule { nodes, weights };
+    let mut rules = RULES.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if rules.len() <= m {
+        rules.resize(m + 1, None);
+    }
+    *rules[m].get_or_insert_with(|| Box::leak(Box::new(made)))
 }
 
 thread_local! {
@@ -1212,17 +1217,47 @@ fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
     })
 }
 
-/// The panels over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the round-off
-/// (`fewest`, of `nodes` nodes and more), in their order from a to b: each panel's end (b itself for the last) and its
-/// nodes and weights in their order. One panel where its rule is no larger than `LARGEST`, else the fewest equal
-/// panels whose rules are not (CARRIER: at the quotient's bandwidth one panel a step took 1.2 to 2.6 times the nodes of
-/// the panels of rules of up to 64 nodes at the forms' bandwidth before, which left the quotient's harmonics).
-fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
-    let mut count = fewest(bandwidth, b - a, nodes, degree).div_ceil(LARGEST).max(1);
-    while fewest(bandwidth, (b - a) / count as f64, nodes, degree) > LARGEST {
-        count += 1;
+/// The panels' count over a piece of the width w at the bandwidth ν (`panels`; `fewest` of `nodes` nodes and more, on
+/// an integrand times a polynomial of `degree`): the n that leaves the fewest nodes to take, each node a state and its
+/// sums (`Midway::stretch`). The rules are made once for the process (`rule`): their making is no part of a piece's
+/// cost. On n equal panels of m = m(νw/n) nodes each (m(κ) ≈ κ/2 and the Bessel tail's few, the tail each panel's own):
+/// - a piece the survival does not end in takes them all: C(n) = n m;
+/// - a piece a jump's root lies in takes the panels before the root's, the root's panel's nodes as far as the norm's
+///   crossing -- which the root takes again, by its span from the panel's start (`root`, `fallen`) -- and that span,
+///   and no node past the root. Over the root's place -- uniform in the piece on the trajectories' thresholds, which are
+///   uniform in the survival, the survival taken linear between the piece's ends --, (n − 1)/2 panels before it, half
+///   the root's panel's nodes (a rule's nodes lie symmetric in its panel: the share before a uniform point is ½ on the
+///   mean) and the span at its mean, half the panel: C(n) = (n/2) m + m(νw/(2n)) -- the tail n times against what the
+///   root takes again, a panel's.
+/// Which one a piece is, `ends` tells (the propagation's norm at the piece's end at the trajectory's threshold or below:
+/// the survival to the propagation's accuracy, a stop's cost), asked only where the root's n is not one. n is the first
+/// past which C does not fall (each part of C is monotone in n, but for the node counts' steps of one).
+fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> usize {
+    let m = |n: usize| fewest(bandwidth, width / n as f64, nodes, degree) as f64;
+    let least = |cost: &dyn Fn(usize) -> f64| {
+        let (mut n, mut best) = (1, cost(1));
+        loop {
+            let next = cost(n + 1);
+            if !(next < best) {
+                break n;
+            }
+            (n, best) = (n + 1, next);
+        }
+    };
+    let rooted = least(&|n| 0.5 * n as f64 * m(n) + m(2 * n));
+    if rooted > 1 && ends() {
+        rooted
+    } else {
+        least(&|n| n as f64 * m(n))
     }
-    let (rule, w) = (rule(fewest(bandwidth, (b - a) / count as f64, nodes, degree)), (b - a) / count as f64);
+}
+
+/// The `count` equal panels over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, each
+/// to the round-off (`fewest`, of `nodes` nodes and more), in their order from a to b: each panel's end (b itself for
+/// the last) and its nodes and weights in their order.
+fn panels(a: f64, b: f64, count: usize, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+    let w = (b - a) / count as f64;
+    let rule = rule(fewest(bandwidth, w, nodes, degree));
     (0..count).map(move |p| {
         let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
         (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k])))
@@ -1230,9 +1265,9 @@ fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl I
 }
 
 /// The nodes and weights over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the
-/// round-off: one panel (`panels`).
+/// round-off, where no jump's root is sought (`count`).
 fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, bandwidth, nodes, degree).flat_map(|(_, nodes)| nodes)
+    panels(a, b, count(b - a, bandwidth, nodes, degree, || false), bandwidth, nodes, degree).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2250,7 +2285,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
-            for (b, nodes) in panels(from, h, bandwidth, FORMS, 2) {
+            // The panels: as many as leave the fewest nodes, on whether the survival ends in the piece (`count`).
+            let laid = count(h - from, bandwidth, FORMS, 2, || {
+                picture.at(h, &mut x[..n]);
+                norm_sqr(&x[..n]) <= march.state.threshold
+            });
+            for (b, nodes) in panels(from, h, laid, bandwidth, FORMS, 2) {
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);

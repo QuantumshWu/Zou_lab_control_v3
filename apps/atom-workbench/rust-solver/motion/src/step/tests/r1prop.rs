@@ -11,6 +11,7 @@
 //! - `r1prop_quadrature`: the kick's one panel at the quotients' bandwidth against brute force, by kind of piece.
 //! - `r1prop_jumps`: the jumps' times and the states they act on against the flow of the step's own generator.
 //! - `r1prop_step_time`: a step's time on one thread.
+//! - `r1prop_integration_time`: the stretch's and the picture's profile regions along a walk (feature `prof`).
 
 use crate::model::selected::Selected;
 use crate::request::Request;
@@ -342,16 +343,23 @@ fn old_nodes(width: f64, bandwidth: f64) -> usize {
 }
 
 /// The kick's quadrature on a piece against brute force (NODES/CARRIER's nodesbench): the three nodes' Lagrange sums of
-/// the densities x x†/‖x‖² over [a, b] (`Sums` without tones), by the engine's one panel at the quotients' bandwidth
-/// (`Picture::quotient`) and by 32-node Gauss panels each 4 rad of it, 8 more (`split` times as many: its self-check).
-/// Returns the sums of each and the nodes the engine's took.
-fn piece_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, split: usize) -> ([Vec<crate::linalg::C64>; 3], [Vec<crate::linalg::C64>; 3], usize) {
+/// the densities x x†/‖x‖² over [a, b] (`Sums` without tones), by the engine's panels at the quotients' bandwidth
+/// (`Picture::quotient`; `count`, a jump's root in the piece where `ends`) and by 32-node Gauss panels each 4 rad of it,
+/// 8 more (`split` times as many: its self-check). Returns the sums of each, the nodes the engine's took and its panels.
+fn piece_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, split: usize, ends: bool) -> ([Vec<crate::linalg::C64>; 3], [Vec<crate::linalg::C64>; 3], usize, usize) {
+    let (engine, nodes, panels) = engine_sums(picture, a, b, h, ends);
+    (engine, brute_sums(picture, a, b, h, split), nodes, panels)
+}
+
+/// The engine's sums of `piece_sums`, its nodes and its panels.
+fn engine_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, ends: bool) -> ([Vec<crate::linalg::C64>; 3], usize, usize) {
     use crate::linalg::{norm_sqr, C64};
     let n = picture.states();
     let mut x = [C64::ZERO; super::super::STATES];
     let mut sums = vec![0.0; 2 * n * super::super::row(n) * super::super::SUMS];
     let mut nodes = 0;
-    for (u, w) in super::super::quadrature(a, b, picture.quotient, super::super::FORMS, 2) {
+    let panels = super::super::count(b - a, picture.quotient, super::super::FORMS, 2, || ends);
+    for (u, w) in super::super::panels(a, b, panels, picture.quotient, super::super::FORMS, 2).flat_map(|(_, nodes)| nodes) {
         picture.at(u, &mut x[..n]);
         super::super::Sums { still: false, h, tones: &[] }.gather(u, w, &x[..n], None, &mut sums);
         nodes += 1;
@@ -361,6 +369,14 @@ fn piece_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, sp
         super::super::whole(&sums, j, n, &mut m);
         m
     });
+    (engine, nodes, panels)
+}
+
+/// The brute force's sums of `piece_sums`.
+fn brute_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, split: usize) -> [Vec<crate::linalg::C64>; 3] {
+    use crate::linalg::{norm_sqr, C64};
+    let n = picture.states();
+    let mut x = [C64::ZERO; super::super::STATES];
     let rule = crate::special::gauss_legendre(32);
     let count = split * ((picture.quotient * (b - a).abs() / 4.0).ceil() as usize + 8);
     let width = (b - a) / count as f64;
@@ -383,7 +399,7 @@ fn piece_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, sp
             }
         }
     }
-    (engine, brute, nodes)
+    brute
 }
 
 /// The integration to round-off (R1-PROP item 5; acceptance 2): per scene and τ of R1PROP_TAUS (0.3256, 0.948), a walk
@@ -407,8 +423,10 @@ fn r1prop_quadrature() {
             let h = 0.5 * tau;
             let mut t = start(&run, &request, chief, 3);
             let mut scratch = Scratch::default();
-            // Per kind: pieces, worst [S, H, K, H(u*)], brute's self-check, nodes, old nodes, ν_Q/B sum, ν_Q µs and count.
+            // Per kind: pieces, worst [S, H, K, H(u*)], brute's self-check, nodes, old nodes, ν_Q/B sum, ν_Q µs and count;
+            // and the root's layout (a jump's root in the piece: `count`): its worst [S, H, K], its panels and its nodes.
             let mut tally = [(0usize, [0.0f64; 4], 0.0f64, 0usize, 0usize, 0.0f64, f64::INFINITY, 0.0f64); 3];
+            let mut rooted = [([0.0f64; 3], 0usize, 0usize); 3];
             for k in 0..steps {
                 let Ok(midway) = Midway::new(&run, &t, tau) else { break };
                 let taken = midway.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Everywhere);
@@ -441,10 +459,11 @@ fn r1prop_quadrature() {
                             clock.elapsed().as_secs_f64() * 1e6
                         })
                         .fold(f64::INFINITY, f64::min);
-                    let (engine, brute, nodes) = piece_sums(picture, from, h, h, 1);
-                    let (_, check, _) = piece_sums(picture, from, h, h, 2);
+                    let (engine, brute, nodes, _) = piece_sums(picture, from, h, h, 1, false);
+                    let check = brute_sums(picture, from, h, h, 2);
                     let inner = from + 0.618 * (h - from);
-                    let (engine_in, brute_in, _) = piece_sums(picture, from, inner, h, 1);
+                    let (engine_in, brute_in, _, _) = piece_sums(picture, from, inner, h, 1, false);
+                    let (engine_root, nodes_root, panels_root) = engine_sums(picture, from, h, h, true);
                     let width = (h - from).abs();
                     let apart = |x: &[Vec<C64>; 3], y: &[Vec<C64>; 3]| x.iter().zip(y).flat_map(|(a, b)| a.iter().zip(b).map(|(p, q)| (*p - *q).abs())).fold(0.0, f64::max);
                     let picture = &*picture;
@@ -486,6 +505,12 @@ fn r1prop_quadrature() {
                     entry.5 += picture.quotient / picture.bandwidth.max(f64::MIN_POSITIVE);
                     entry.6 = entry.6.min(us);
                     entry.7 = entry.7.max(counted);
+                    let (kr, root) = (kick(&engine_root), &mut rooted[kind]);
+                    let errors = [apart(&engine_root, &brute) / width, (hazard(&engine_root) - hazard(&brute)).abs(), kr.iter().zip(&kb).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max) / scale];
+                    for (w, e) in root.0.iter_mut().zip(errors) {
+                        *w = w.max(e);
+                    }
+                    (root.1, root.2) = (root.1 + panels_root, root.2 + nodes_root);
                 }
                 match taken {
                     Ok(step) => t = step.end,
@@ -496,8 +521,9 @@ fn r1prop_quadrature() {
                 if *pieces == 0 {
                     continue;
                 }
+                let (root, panels, root_nodes) = rooted[kind];
                 println!(
-                    "R1-QUAD {name} tau {tau} {}: {pieces} pieces | worst S {:.1e} H {:.1e} K {:.1e} H(u*) {:.1e} | brute's check {check:.1e} | nodes {:.1} a piece against the old rule's {:.1} ({:.2}) | nu_Q/B {:.2} | nu_Q {us:.1} us, {counted:.0} counted",
+                    "R1-QUAD {name} tau {tau} {}: {pieces} pieces | worst S {:.1e} H {:.1e} K {:.1e} H(u*) {:.1e} | brute's check {check:.1e} | nodes {:.1} a piece against the old rule's {:.1} ({:.2}) | nu_Q/B {:.2} | nu_Q {us:.1} us, {counted:.0} counted | as a root's piece: {:.1} panels, {:.1} nodes, worst S {:.1e} H {:.1e} K {:.1e}",
                     ["plain", "after a jump", "start"][kind],
                     worst[0],
                     worst[1],
@@ -506,7 +532,12 @@ fn r1prop_quadrature() {
                     *nodes as f64 / *pieces as f64,
                     *old as f64 / *pieces as f64,
                     *nodes as f64 / *old as f64,
-                    ratio / *pieces as f64
+                    ratio / *pieces as f64,
+                    panels as f64 / *pieces as f64,
+                    root_nodes as f64 / *pieces as f64,
+                    root[0],
+                    root[1],
+                    root[2]
                 );
             }
         }
@@ -704,4 +735,44 @@ fn r1prop_quotient_scan() {
         }
     }
     eprintln!("{}", crate::prof::report());
+}
+
+/// The integration's time against the engine before it (R1-PROP's LARGEST root fix: the brief's budget ≤ 2.3 times),
+/// with the feature `prof`: per scene and τ of R1PROP_TAUS (0.3256, 0.948), one trajectory from the moving point
+/// (index 3) R1PROP_BURN steps (5) on, then R1PROP_STEPS steps (40) R1PROP_REPEAT times (3) from that state with a fresh
+/// scratch, on one thread; the profile's report after the burn and after each repeat -- the stretch's and the picture's
+/// regions read off between them (the integration: the stretch less its picture's making).
+#[test]
+#[ignore]
+fn r1prop_integration_time() {
+    let taus = list("R1PROP_TAUS", "0.3256,0.948");
+    let (burn, steps, repeats) = (env("R1PROP_BURN", 5.0) as usize, env("R1PROP_STEPS", 40.0) as usize, env("R1PROP_REPEAT", 3.0) as usize);
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let walk = |count: usize, t: &mut Trajectory, scratch: &mut Scratch| -> (usize, usize, f64) {
+                let clock = std::time::Instant::now();
+                let (mut taken, mut jumps) = (0, 0);
+                for _ in 0..count {
+                    match Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], scratch, &Everywhere)) {
+                        Ok(step) => {
+                            jumps += step.made.iter().filter(|m| m.kick.is_some()).count();
+                            *t = step.end;
+                            taken += 1;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                (taken, jumps, clock.elapsed().as_secs_f64())
+            };
+            let mut t0 = start(&run, &request, chief, 3);
+            walk(burn, &mut t0, &mut Scratch::default());
+            println!("R1-ITIME {name} {tau} burnt{}", crate::prof::report());
+            for r in 0..repeats {
+                let mut t = t0.clone();
+                let (taken, jumps, secs) = walk(steps, &mut t, &mut Scratch::default());
+                println!("R1-ITIME {name} {tau} repeat {r}: {taken} steps, {jumps} jumps, {:.4} s{}", secs, crate::prof::report());
+            }
+        }
+    }
 }

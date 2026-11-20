@@ -1617,6 +1617,39 @@ fn the_quadrature_integrates_a_bandwidth_within_its_tolerance() {
     }
 }
 
+/// A rule of many nodes (`special::gauss_legendre`, O(m)) at the widest phase its node count is laid for (`fewest`: the
+/// largest κ whose least rule on [−1, 1] is m nodes, by bisection) and at a resolved one (κ = m/2) and none (Σw = 2),
+/// m = 1000 to 64 000: Σ w_k e^{iκx_k} against ∫e^{iκt} = 2 sin κ/κ, summed with its error carried (Neumaier). Within
+/// what the rounding of the rule and the integrand leaves: each node's 8 round-offs and the product κx's one times κ
+/// (Σ w|x| = 1), and the expansion's weights' 24, the cosine's and the sum's 2 over Σ w = 2 -- the recurrence's few
+/// weights at the ends (their sum some 40π/m², `special::gauss_legendre`) carry (6m + 12)u of themselves, a part of
+/// u. (The imaginary part is the odd integrand's, nothing by the rule's symmetry.)
+#[test]
+fn a_rule_of_many_nodes_integrates_its_widest_phase_to_the_round_off() {
+    for m in [1000_usize, 4000, 16_000, 64_000] {
+        let rule = crate::special::gauss_legendre(m);
+        let (mut lo, mut hi) = (0.0_f64, 2.0 * m as f64);
+        for _ in 0..super::ROUNDS {
+            let mid = 0.5 * (lo + hi);
+            if super::fewest(mid, 2.0, 1, 0) <= m { lo = mid } else { hi = mid }
+        }
+        for kappa in [0.0, 0.5 * m as f64, lo] {
+            let (mut re, mut carried) = (0.0_f64, 0.0_f64);
+            for &(x, w) in &rule {
+                let term = w * (kappa * x).cos();
+                let sum = re + term;
+                carried += if re.abs() >= term.abs() { (re - sum) + term } else { (term - sum) + re };
+                re = sum;
+            }
+            let exact = if kappa == 0.0 { 2.0 } else { 2.0 * kappa.sin() / kappa };
+            let error = (re + carried - exact).abs();
+            let within = crate::units::rounding(9) * kappa + crate::units::rounding(2 * 24 + 2 * 2 + 2) + crate::units::rounding(1);
+            eprintln!("m {m}, κ {kappa:.1} ({:.4} of 2m): error {:.1} u, within {:.0} u", kappa / (2 * m) as f64, error / crate::units::UNIT_ROUNDOFF, within / crate::units::UNIT_ROUNDOFF);
+            assert!(error <= within, "m {m}, κ {kappa}: {} against {exact}", re + carried);
+        }
+    }
+}
+
 /// Errors as they are printed: each in three digits of its own size.
 fn sizes(errors: &[f64]) -> String {
     errors.iter().map(|e| format!("{e:.3e}")).collect::<Vec<_>>().join(", ")
