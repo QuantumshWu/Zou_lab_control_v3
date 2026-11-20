@@ -2229,7 +2229,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         (None, None) => break,
                     };
                     {
-                        let _p = crate::prof::scope(crate::prof::ADVANCE);
+                        let _p = crate::prof::scope(crate::prof::AT_NODES);
                         picture.at(u, &mut x[..n]);
                     }
                     read = looked(picture, reads, read, (start, h), u, met);

@@ -463,6 +463,20 @@ fn step_of<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut st
     step_on(model, from, tau, &step::Brownian::STILL, scratch)
 }
 
+/// A step of τ from a state as the advance takes it (adapt.rs, # The step): where the decomposition refuses it
+/// (`Refused::Propagation`: an entry beyond both its series' radii), its two halves, each so in its turn, down to the
+/// time's round-off. The state at its end.
+fn as_advanced<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, scratch: &mut step::Scratch) -> Result<Trajectory, step::Refused> {
+    match step_of(model, from, tau, scratch) {
+        Ok(taken) => Ok(taken.end),
+        Err(step::Refused::Propagation(_)) if from.time + 0.5 * tau > from.time => {
+            let middle = as_advanced(model, from, 0.5 * tau, scratch)?;
+            as_advanced(model, &middle, 0.5 * tau, scratch)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// A generator that is no number refuses the step (step.rs `pictured`, `Refused::Overflow`) -- where it is no number
 /// throughout, at every length -- and nothing panics: the trajectory fails, and the check reads it as an unbounded
 /// difference (estimate.rs `between`).
@@ -1192,8 +1206,9 @@ fn a_moving_two_level_atom_diffuses_as_its_master_equation() {
 /// A step past its light's resolution at its speed (solve.rs `resolves`: an entry's (|Ω| + |K| v) τ/2 beyond π) is
 /// inaccurate, not unstable (module documentation, # The domain): a two-level atom moving uniformly through a standing
 /// wave (Ω = Γ, Δ = −Γ/2), its second beam a beat of the residual wave vector 2k, steps of 2 µs at speeds where the
-/// beat turns by 2.6π to 20π from node to node, 200 steps each, the state set back to norm one after each. What a step
-/// does is bounded whatever the steps before it left:
+/// beat turns by 2.6π to 20π from node to node, 200 steps each, the state set back to norm one after each -- a step the
+/// decomposition refuses taken at its halves, as the advance takes it (`as_advanced`). What a step does is bounded
+/// whatever the steps before it left:
 /// - its impulse: the force on a state is at most |G_eg| ≤ kΩ; the impulse is the exact tones' integral on the middle
 ///   state plus the three nodes' parabola (Lebesgue constant 5/4) of the force on what the state does besides (a
 ///   difference of density matrices, trace norm at most 2): at most (1 + 5/2) τ kΩ (measured: 0.41 to 0.56);
@@ -1216,13 +1231,13 @@ fn a_step_past_its_light_s_resolution_is_inaccurate_not_unstable() {
         let mut t = held(&model, [0.0; 3], [0.0, 0.0, v / hm]);
         let (start, mut impulse, mut hazard, mut grown) = (t.kappa[2], 0.0_f64, 0.0_f64, 0.0_f64);
         for _ in 0..steps {
-            let s = step_of(&model, &t, tau, &mut scratch).unwrap();
-            let norm = crate::linalg::norm_sqr(&s.end.psi);
+            let end = as_advanced(&model, &t, tau, &mut scratch).unwrap();
+            let norm = crate::linalg::norm_sqr(&end.psi);
             assert!(norm.is_finite() && norm > 0.0, "v {v}: the norm {norm} after a step from one");
-            impulse = impulse.max((s.end.kappa[2] - t.kappa[2]).abs() / (tau * K * rabi));
+            impulse = impulse.max((end.kappa[2] - t.kappa[2]).abs() / (tau * K * rabi));
             hazard = hazard.max(-norm.ln() / (GAMMA * tau));
             grown = grown.max(norm);
-            t = s.end;
+            t = end;
             let scale = 1.0 / norm.sqrt();
             t.psi.iter_mut().for_each(|z| *z = *z * scale);
         }
@@ -3845,6 +3860,87 @@ fn the_survival_never_rises_whatever_the_generator_and_the_step() {
     assert!(grown > 0, "the random steps hold propagations whose map grows");
 }
 
+/// The survival does not rise where the propagation's own map grows (step.rs, # Jumps: the survival is the law's,
+/// ln N = −∫x̂†Γx̂, not the propagation's norm). A case made to grow: a two-level atom driven on resonance by a standing
+/// wave along z (Ω₀ = 15 rad/µs a beam, Γ = 38.1 rad/µs), moving at 2 µm/µs, one step of 0.1 µs. In its Doppler frame
+/// the first beam is static and the second beats at 2kv = 32 rad/µs, 3.2 rad over the step: a tone the propagation
+/// takes by hops and following in Ĥ₀'s eigenbasis (spectral.rs). Ĥ₀ -- the drive Ω₀/2 below Γ/4, the overdamped side
+/// of the exceptional point -- is far from normal: its two dressed states are far from orthogonal, and the
+/// eigenvectors R are no unitary change of basis. What the hops' first Magnus term and the following leave of the beat
+/// has no sign, and carried back through R it lifts the norm of the direction the flow damps least: the propagation's
+/// map over the step has a singular value above one (measured 1.034), where the flow of the very generator it takes --
+/// the same three nodes' parabola and tone, by RK4 -- contracts. From that direction, the map's largest right singular
+/// vector, the step's survival stays below its start. (This case stands for the propagations whose map grows: until
+/// 2026-11-20 R4_LIN_2's steps held some, `r4_lin_2_s_steps_never_raise_the_survival`; its model no longer makes them.)
+#[test]
+fn a_propagation_whose_map_grows_keeps_the_survival() {
+    let (rabi, tau, speed, z0, n) = (15.0, 0.1, 2.0, 0.11, 2);
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let beams = vec![Beam { k: [0.0, 0.0, K], rabi, phase: 0.0 }, Beam { k: [0.0, 0.0, -K], rabi, phase: 0.3 }];
+    let model = Atom::new(1e-9, flat, beams, 0.0, GAMMA);
+    let start = held(&model, [0.0, 0.0, z0], [0.0, 0.0, speed / 1e-9]);
+    // The propagation's map over the step from the step's start (`map_growth`'s), and the flow of the generator it
+    // takes: the static group's parabola through the three nodes and each tone's members at their phases.
+    let h = 0.5 * tau;
+    let through = step::Midway::new(&model, &start, tau).unwrap();
+    let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
+    let mut scratch = fitted(n);
+    super::pictured(&along, &mut scratch, tau, None).expect("the decomposition takes the step");
+    let picture = &mut scratch.picture;
+    let generator = |u: f64| {
+        let mut g = Mat::from_fn(n, n, |i, j| picture.base[(i, j)] + picture.ends[0][(i, j)] * u + picture.ends[1][(i, j)] * (u * u));
+        for tone in &picture.beats {
+            for (member, beat) in tone.members.iter().zip([tone.beat, -tone.beat]) {
+                let parabola = Mat::from_fn(n, n, |i, j| member[0][(i, j)] + member[1][(i, j)] * u + member[2][(i, j)] * (u * u));
+                g.add_scaled(C64::cis(beat * u), &parabola);
+            }
+        }
+        g
+    };
+    let mut exact = Mat::identity(n);
+    let steps = 20_000;
+    let dt = tau / steps as f64;
+    let slope = |u: f64, y: &Mat| generator(u).product(y).scaled(C64::new(0.0, -1.0));
+    for k in 0..steps {
+        let u = -h + k as f64 * dt;
+        let k1 = slope(u, &exact);
+        let mut y = exact.clone();
+        y.add_scaled(C64::real(0.5 * dt), &k1);
+        let k2 = slope(u + 0.5 * dt, &y);
+        let mut y = exact.clone();
+        y.add_scaled(C64::real(0.5 * dt), &k2);
+        let k3 = slope(u + 0.5 * dt, &y);
+        let mut y = exact.clone();
+        y.add_scaled(C64::real(dt), &k3);
+        let k4 = slope(u + dt, &y);
+        for (z, ((a, b), (c, d))) in exact.data.iter_mut().zip(k1.data.iter().zip(&k2.data).zip(k3.data.iter().zip(&k4.data))) {
+            *z += (*a + *b * 2.0 + *c * 2.0 + *d) * (dt / 6.0);
+        }
+    }
+    let mut map = Mat::zeros(n, n);
+    for a in 0..n {
+        let (mut x, mut y) = (vec![C64::ZERO; n], vec![C64::ZERO; n]);
+        x[a] = C64::ONE;
+        picture.launch(-h, &x);
+        picture.at(h, &mut y);
+        (0..n).for_each(|b| map[(b, a)] = y[b]);
+    }
+    let largest = |m: &Mat| {
+        let gram = Mat::from_fn(n, n, |i, j| (0..n).map(|k| m[(k, i)].conj() * m[(k, j)]).sum());
+        let e = crate::linalg::hermitian_eigen(&gram);
+        let top = (0..n).max_by(|&a, &b| e.values[a].total_cmp(&e.values[b])).unwrap();
+        (e.values[top].sqrt(), (0..n).map(|i| e.vectors[(i, top)]).collect::<Vec<C64>>())
+    };
+    let ((grows, direction), (flows, _)) = (largest(&map), largest(&exact));
+    // The step from that direction, its jump's threshold out of reach: its survival at the end.
+    let from = Trajectory { psi: direction.iter().copied().collect(), ..start.clone() };
+    let taken = step_of(&model, &from, tau, &mut step::Scratch::default()).unwrap();
+    let survival = crate::linalg::norm_sqr(&taken.end.psi);
+    eprintln!("the propagation's map's largest singular value {grows:.6}, the flow's {flows:.6}; from its direction the step's survival {survival:.6}");
+    assert!(grows > 1.0 + 1e-6 && flows <= 1.0 + 1e-12, "the map {grows}, the flow {flows}");
+    assert!(survival <= 1.0 + 1e-12, "the survival rose to {survival} where the map grows by {grows}");
+}
+
 /// The Hermitian part generates unitary motion: without a decay the survival is one at the end of every step of every
 /// length, whatever the propagation leaves of the state itself -- to the rounding of the generator's own Hermitian
 /// parts (each entry a sum of parts, a part and its adjoint apart: a few units of the round-off of n·size, over τ).
@@ -4010,9 +4106,10 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
 /// temperature and at two and four times its speeds, the reach's hot atoms --, one step each at the engine's τ of the
 /// measured runs (0.36 and 0.4335 µs) and at the companion's 2τ, and from the same state steps of seven eighths of it
 /// down to one: the survival at each step's end never rises from the start's beyond the sums' rounding (the trajectory's
-/// own states probe it; a reading's norm is no survival), where the propagation's own map over the same steps
-/// (`map_growth`) grows on some of them -- the line's survival, its norm, rose by as much (1.0095 at 0.36 µs:
-/// motion3d_status/rewrite/norm.status.md).
+/// own states probe it; a reading's norm is no survival). The propagation's own map over the same steps (`map_growth`)
+/// grew on some of them -- the line's survival, its norm, rose by as much (1.0095 at 0.36 µs:
+/// motion3d_status/rewrite/norm.status.md) --, and no longer does since the model changed (at most 0.958 at 80b9782e):
+/// the case it guarded, a map that grows, is `a_propagation_whose_map_grows_keeps_the_survival`'s.
 #[test]
 fn r4_lin_2_s_steps_never_raise_the_survival() {
     let (mut most, mut grown, mut widest, mut steps, mut refused) = (f64::NEG_INFINITY, 0, 0.0_f64, 0, 0);
@@ -4048,8 +4145,10 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
             }
         });
     }
+    // The propagation's own map, printed: it grew on some of these steps until the model changed (largest singular
+    // value 0.958 of 576 at 80b9782e), and the witness that it does is `a_propagation_whose_map_grows_keeps_the_survival`
+    // since 2026-11-20.
     eprintln!("R4_LIN_2: the survival's largest change over a step, ln: {most:e}; the propagation's own map: largest singular value {widest:.6}, above one on {grown} of {steps} steps; {refused} lengths refused by the decomposition");
-    assert!(grown > 0, "R4_LIN_2's steps hold propagations whose map grows");
 }
 
 /// What `advance` makes of a trajectory from `start` to the time `run` at the step τ (the Brownian path's grid the

@@ -158,36 +158,51 @@
 //! (step/tests.rs, `a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator`.)
 //!
 //! # The split
-//! Each entry takes one of three routes (`followed`), by what each leaves at the step's end. With the leading remainders
+//! Each entry takes one of three routes (`followed`): each route is a series, taken where it converges, and where both
+//! do, by what each leaves at the step's end. The two series' radii -- conditions of convergence, no numbers to tune:
+//! - the following's orders X⁽ᵏ⁾ ~ rᵏ (# The state at any time of the step) are the block diagonalization of Λ + D's
+//!   fast entries by 1 + X, a series in the change over the gap -- Schrieffer–Wolff's, or Bloch's, which converges where
+//!   the change is below the gap (Kato's sufficient condition ‖D‖ < gap/2; Bravyi, DiVincenzo & Loss 2011, Ann. Phys.
+//!   326, 2793) --: on the entry r < 1, r the following's size there, |Y| at the step's ends of what is followed --
+//!   a first-order class's change, a product's (# The second order by tones) own second order --, the larger of its two
+//!   ways round. At r ≥ 1 1 + X is no near identity and D₂'s fast entries left out are not of a higher order;
+//! - a hop's first Magnus term is the first of a series that converges where ∫‖Ã(t)‖₂ dt < π over the hop (Moan &
+//!   Niesen 2008, Found. Comput. Math. 8, 291: the sufficient condition). A constant similarity S takes the series
+//!   to S(·)S⁻¹ term by term, so it converges where the condition holds for any S Ã S⁻¹: of the entry and its
+//!   partner alone, Ã = [[0, Ã_ab], [Ã_ba, 0]], S = diag(d, 1) at the d that balances the two ways at the hop's
+//!   middle, ‖SÃ(t)S⁻¹‖₂ = √(|Ã_ab||Ã_ba|) e^{|Im Ω| |t − t_m|} -- the pair's growth in the interaction picture
+//!   (below) only over half the hop's width --, within s = √(s_ab s_ba) e^{|Im Ω| |h|/2} over the hop, s_ab =
+//!   S_C + S_A/2 + S_B/3 of the entry's own envelope's sizes over a half step (a hop's widest, from the step's start to
+//!   its middle and on; Cauchy–Schwarz for the mean): s < π. An entry that does not turn holds a state with itself (or
+//!   a degenerate pair, of the same rule), and a state's own entry commutes with itself: its series is its first
+//!   term.
+//! Where both converge the route is the one that leaves less, by the leading remainders
 //!   F = (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³    (the following's third order),
 //!   L = (4/15) S_B²/x                            (the parabola's miss of the change's own light shift),
 //!   J = x (S_C²/3 + S_A²/15 + S_B²/42)           (the hops' second Magnus term),
-//! and r the following's size on the entry, |Y| at the step's ends of what is followed there -- a first-order class's
-//! change, a product's (# The second order by tones) own second order --, the larger of its two ways round: the
-//! following's orders a series in r, their sum F/(1 − r). (An entry nothing changes on has r = 0: its following is
+//! the following's orders a series in r, their sum F/(1 − r). (An entry nothing changes on has r = 0: its following is
 //! none, whatever the sizes the rule reads.)
-//! - **followed** where the following converges, r < 1, and leaves no more than the hops: F/(1 − r) + L ≤ J -- of a
-//!   product (# The second order by tones) F with the third order its following X⁽²⁾ leaves on the entries the first
-//!   order's couplings carry it to, c X⁽²⁾, at most 2 S r over the step (S the couplings' size over a half step:
-//!   measured where it was left out, 3.3·10⁻² of a share of 4.5·10⁻² on PGC3D's steps, up to 39 at a few);
-//! - **hopped** where the hops leave less: J < F/(1 − r) + L with r < 1, or J < F + L with r ≥ 1 -- the hops hold
-//!   where the entry turns little between the nodes, which is where J is the less --, and an entry that does not turn
-//!   (x = 0). J is at the entry's modulus in the interaction picture, which grows by e^{|Im Ω| 2|h|} over the step
-//!   (`followed`): a pair apart in decay is hopped only where its hops leave less even so, and the hop's exponent
-//!   is summed and priced at that growth (`Picture::moved`);
-//! - **neither**, the step refused (`Refusal::Radius`; # Where the decomposition does not take the step), where the
-//!   following has no sum, r ≥ 1 -- 1 + X is no near identity and D₂'s fast entries left out are not of a higher
-//!   order --, and the hops leave more than even its leading term, J ≥ F + L: such an entry turns far between the
-//!   nodes, and hopped it turns by its decay rates' difference too, e^{|Im Ω| 2h} over the step, the hops' exponent
-//!   without bound (a standing wave's two-level atom at a step of 2 µs, its pair 27 rad/µs apart and Γ/2 in decay: the
-//!   hops' Chebyshev series of 10¹⁶ parts). The advance takes such a step at its half (adapt.rs, # The step).
-//! Each choice is the route that leaves the least of those that exist: where r < 1 the two compared are both sums, and
-//! where r ≥ 1 the hops are compared with the following's least -- its leading term -- so that the hops are taken
-//! only where they leave less than any following could. (Without the convergence a tone of a coupling stronger than
-//! its combined frequency, |C| > |Ω|, was followed at a step of |Ω||h| beyond a few radians, where F < J: the state
-//! through it grew by 10⁶ over a step of 10 µs and overflowed at 90 µs, tests,
-//! `the_survival_never_rises_whatever_the_generator_and_the_step`; a static group's slope is followed at r ≪ 1 at the
-//! scenes' steps, where nothing changed, tests, `the_static_group_alone_is_propagated_as_before_to_the_bit`.)
+//! - **followed** where the following converges, r < 1, and either the hops do not (s ≥ π) or the following leaves no
+//!   more than they do: F/(1 − r) + L ≤ J -- of a product (# The second order by tones) F with the third order its
+//!   following X⁽²⁾ leaves on the entries the first order's couplings carry it to, c X⁽²⁾, at most 2 S r over the step
+//!   (S the couplings' size over a half step: measured where it was left out, 3.3·10⁻² of a share of 4.5·10⁻² on
+//!   PGC3D's steps, up to 39 at a few);
+//! - **hopped** where the hops converge, s < π, and either the following does not (r ≥ 1) or the hops leave less:
+//!   J < F/(1 − r) + L -- the hops hold where the entry turns little between the nodes, which is where J is the less
+//!   --, and an entry that does not turn (x = 0). J is at the entry's modulus in the interaction picture, which grows
+//!   by e^{|Im Ω| 2|h|} over the step (`followed`): a pair apart in decay is hopped only where its hops leave less even
+//!   so, and the hop's exponent is summed and priced at that growth (`Picture::moved`);
+//! - **neither**, the step refused (`Refusal::Radius`; # Where the decomposition does not take the step), where neither
+//!   series converges, r ≥ 1 and s ≥ π: a change over a half step beyond both the entry's gap and π -- S > max(x, π)
+//!   in its sizes, as both radii fall with the step: S_A ~ h², x ~ h (stepcost.status.md). The advance takes such a
+//!   step at its half (adapt.rs, # The step), which brings it within them. (Until 2026-11-20 neither was where r ≥ 1
+//!   and the hops left more than the following's leading term, J ≥ F + L: a comparison of remainders, at all the
+//!   first-order classes' sizes together, where the series may not converge at all.)
+//! (Without the following's convergence a tone of a coupling stronger than its combined frequency, |C| > |Ω|, was
+//! followed at a step of |Ω||h| beyond a few radians, where F < J: the state through it grew by 10⁶ over a step of 10 µs
+//! and overflowed at 90 µs, tests, `the_survival_never_rises_whatever_the_generator_and_the_step`; a static group's
+//! slope is followed at r ≪ 1 at the scenes' steps, where nothing changed, tests,
+//! `the_static_group_alone_is_propagated_as_before_to_the_bit`.)
 //! F and L fall with x and J rises: the entries are split at one turn, and an entry that crosses it
 //! with the step changes its treatment where the two leave the same. For a slope alone that turn is x⁴ = 10 S_A -- a
 //! radian between two nodes where the change over a half step is a tenth, 0.56 rad where it is a hundredth --, for a
@@ -588,47 +603,56 @@ impl Default for Picture {
 }
 
 /// How a term that turns x = |Ω| |h| between two of the step's nodes is taken (module documentation, # The split), the
-/// changes over a half step being of the sizes `slope` = S_A, `curvature` = S_B and `constant` = S_C: followed (true)
-/// where what its following leaves, (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³ -- the leading term of the following's orders,
-/// a series in its size r, so over 1 − r -- and (4/15) S_B²/x, is no more than what its hops would,
-/// x (S_C²/3 + S_A²/15 + S_B²/42) -- the two times x³ --, hopped (false) where it is more; a term that does not turn is
-/// hopped. Where r ≥ 1 the following's series has no sum -- 1 + X no near identity --: the term is hopped where the
-/// hops leave less than the following's leading term would, and taken by no route of the decomposition (None) where
-/// they leave more -- the hops' own series is no better there: a pair that turns far between two nodes, hopped, turns
-/// by its decay rates' difference too, e^{|Im Ω| 2h} over the step, its exponent without bound (`Picture::prepare`
-/// refuses the step then, `Refusal::Radius`). r is the following's size on the entry, |Y| at the step's ends (`flag`). A
+/// changes over a half step being of the sizes `slope` = S_A, `curvature` = S_B and `constant` = S_C, and `hop` the
+/// term's own hop exponent's least 2-norm over a hop (module documentation, # The split: its two ways' geometric mean
+/// with half the hop's growth): each route where its series converges -- the following where its size r < 1, the hops
+/// where `hop` < π (Moan & Niesen's radius of the Magnus series) -- and where both do by what each leaves: followed (true) where
+/// what its following leaves, (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³ -- the leading term of the following's orders, a
+/// series in r, so over 1 − r -- and (4/15) S_B²/x, is no more than what its hops would, x (S_C²/3 + S_A²/15 +
+/// S_B²/42) -- the two times x³ --, hopped (false) where it is more; a term that does not turn is hopped where its hops
+/// converge. Taken by no route of the decomposition (None) where neither series converges (`Picture::prepare` refuses
+/// the step then, `Refusal::Radius`). r is the following's size on the entry, |Y| at the step's ends (`flag`). A
 /// product's following X⁽²⁾ (# The second order by tones) leaves besides the third order c X⁽²⁾ on the entries the
 /// first order's couplings carry it to, `coupled` the couplings' size over a half step, S_C + S_A + S_B: at most 2 S r
 /// over the step (the left-out term's turn there, min(x′, 1)/x′, at most one) -- the following's leading term with it.
-/// With the route, what it leaves at the step's end: the least of the two where r < 1, the hops' where they are taken
-/// at r ≥ 1, the following's leading term where neither is (the least any route could leave there); none where the term
-/// does not turn (its hops' second term is x times the sizes').
+/// With the route, what it leaves at the step's end (over x³): the route's own, the least of the two where both
+/// converge; the following's leading term where neither does (the least any following could leave there); none where
+/// the term does not turn (its hops' second term is x times the sizes').
 ///
 /// A hopped entry is the hops' in the interaction picture of Ĥ₀ (`Picture::turn`): turned to the launch, its modulus is
 /// e^{−Im Ω s} of the unturned one, s from the launch to its time -- at most the step, 2|h| --, and its partner's
 /// e^{+Im Ω s}. Every order of the Magnus series carries on the entry (a, b) the factor of its two states (in a product
 /// of the turned matrix the intermediate states' factors cancel but for their own decay over the hop's width), so the
 /// hops' remainder on it is the one at |e^{iΩs}| = 1 times e^{|Im Ω| 2|h|}, `decay` = |Im Ω| |h| -- and so is the hop's
-/// exponent itself, which the hop's exponential is summed and priced by (`Picture::moved`). The following takes Ω whole
-/// and grows by nothing. (Until 2026-11-18 the hops were read at a unit modulus: on S2Q an
+/// exponent itself, which its radius is read on and the hop's exponential is summed and priced by (`Picture::moved`).
+/// The following takes Ω whole and grows by nothing. (Until 2026-11-18 the hops were read at a unit modulus: on S2Q an
 /// F′ = 3 mode and a ground mode within a rad/µs of each other and Γ/2 apart in decay were hopped, their exponent 10² to
 /// 2.6·10⁶, the first Magnus term far out of its range and the hop's Chebyshev series up to 1.3·10⁶ parts.)
-fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64) -> (Option<bool>, f64) {
+fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, coupled: f64, hop: f64) -> (Option<bool>, f64) {
+    let hops_converge = hop < std::f64::consts::PI;
     if !(x > 0.0) {
-        return (Some(false), 0.0);
+        return (hops_converge.then_some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
     let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0) + 2.0 * coupled * r * x.powi(3);
     let hops = x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0) * (2.0 * decay).exp();
     let (light, cube) = (4.0 / 15.0 * second * (x * x), x.powi(3));
-    if r < 1.0 {
-        let following = leading / (1.0 - r) + light;
-        if following <= hops { (Some(true), following / cube) } else { (Some(false), hops / cube) }
-    } else if leading + light > hops {
-        (Some(false), hops / cube)
-    } else {
-        (None, (leading + light) / cube)
+    match (r < 1.0, hops_converge) {
+        (true, true) => {
+            let following = leading / (1.0 - r) + light;
+            if following <= hops { (Some(true), following / cube) } else { (Some(false), hops / cube) }
+        }
+        (true, false) => (Some(true), (leading / (1.0 - r) + light) / cube),
+        (false, true) => (Some(false), hops / cube),
+        (false, false) => (None, (leading + light) / cube),
     }
+}
+
+/// An entry's hop exponent's bound over a hop (`followed`, module documentation # The split), of its envelope's own
+/// sizes over a half step `own` = [S_A, S_B, S_C]: s = S_C + S_A/2 + S_B/3, the most ∫|C + uA + u²B| du over a hop of
+/// at most h from the step's start or its middle.
+fn hop_size([slope, curvature, constant]: [f64; 3]) -> f64 {
+    constant + 0.5 * slope + curvature / 3.0
 }
 
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
@@ -694,6 +718,7 @@ fn aliased(x: C64, y: f64, reciprocals: &mut Vec<f64>) -> (f64, usize) {
 ///   of a hop s_C |β(ωh, y)| (`aliased`); of a following the parabola's following against the beat's own
 ///   at its combined frequency at the step's ends, |−C/ω + Y(±h) + e^{±iy}C/(ω + ν)|, Y the polynomial of the change
 ///   (`following`): first order in C, both.
+/// An entry a route takes by no series of the decomposition (`followed`: neither converges) leaves all on that route.
 /// A tone where the static group leaves more, and wherever |ν| |h| ≥ π: the three nodes do not resolve a phase of more than
 /// π between two of them, and there the static group's miss of the beat is what the step and its companion at twice the
 /// step read alike (at νh = 2πk the nodes of both hold the beat's same values) -- the bound is the nodes', no number of
@@ -716,13 +741,18 @@ fn toned(diagonal: &[C64], beat: f64, half: f64, members: [&Mat; 2], reciprocals
             let combined = omega + C64::real(nu);
             // As a tone: its envelope at its combined frequency.
             let r = if combined != C64::ZERO { c.abs() / combined.abs() } else { 0.0 };
-            tone += followed(combined.abs() * h, combined.im.abs() * h, [0.0, 0.0, size], r, 0.0).1;
+            let (route, left) = followed(combined.abs() * h, combined.im.abs() * h, [0.0, 0.0, size], r, 0.0, size * (0.5 * combined.im.abs() * h).exp());
+            tone += if route.is_some() { left } else { f64::INFINITY };
             // In the static group: the parabola's slope and curvature at the entry's turn, and the beat it misses.
             let (a, b) = (c * C64::new(0.0, sin / half), c * ((cos - 1.0) / (half * half)));
             let y_poly = if omega != C64::ZERO { following(omega.recip(), C64::ZERO, a, b) } else { [C64::ZERO; 3] };
             let at = |u: f64| y_poly[0] + y_poly[1] * u + y_poly[2] * (u * u);
             let r = [-half, half].into_iter().map(|u| at(u).abs()).fold(0.0, f64::max);
-            let (route, left) = followed(omega.abs() * h, omega.im.abs() * h, [size * sin.abs(), size * (1.0 - cos), 0.0], r, 0.0);
+            let changed = [size * sin.abs(), size * (1.0 - cos), 0.0];
+            let (route, left) = followed(omega.abs() * h, omega.im.abs() * h, changed, r, 0.0, hop_size(changed) * (0.5 * omega.im.abs() * h).exp());
+            if route.is_none() {
+                nodes = f64::INFINITY;
+            }
             let missed = if route == Some(true) {
                 [-half, half].into_iter().map(|u| (at(u) - c / omega + C64::cis(nu * u) * c / combined).abs()).fold(0.0, f64::max)
             } else {
@@ -814,14 +844,21 @@ fn take(class: &mut Class, k: usize, t: usize, omega: C64, fast: bool, size: usi
 /// larger of its two ways' |Y| at the step's ends, Y its following of the class's `envelope` on the entry (C, A, B:
 /// a first-order class's change, a product's second order through the nodes) --; the largest |Ω| hopped into
 /// `spread`, and the largest growth e^{|Im Ω| 2|h|} of a hopped entry in the interaction picture into `grown`
-/// (`followed`). False where an entry is taken by no route of the decomposition (the rest is flagged as it would be,
-/// and not used).
+/// (`followed`), each route where its series converges: the following at r < 1, the hops where the entry's own
+/// envelope's hop exponent is within π (its two ways' geometric mean, `hop_size` of its sizes over a half step, with
+/// half the hop's growth; a state's own entry, which commutes with itself, has no radius). False where an entry is taken by no route of the decomposition
+/// (the rest is flagged as it would be, and not used).
 #[allow(clippy::too_many_arguments)]
 fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], coupled: f64, h: f64, spread: &mut f64, grown: &mut f64) -> bool {
     let size = |class: &Class, k: usize, omega: C64| {
         let [c, a, b] = envelope(class, k);
         let y = following(omega.recip(), c, a, b);
         [-h, h].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, f64::max)
+    };
+    // The entry's own hop exponent over a hop, of its envelope's sizes over a half step (`hop_size`): its hops' radius.
+    let own = |class: &Class, k: usize| {
+        let [c, a, b] = envelope(class, k);
+        hop_size([a.abs() * (h * h), b.abs() * (h * h * h).abs(), c.abs() * h.abs()])
     };
     let mut routed = true;
     let n = lambda.len();
@@ -838,7 +875,10 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
                 let (k, t) = (row * n + column, column * n + row);
                 let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
                 let decay = omega.im.abs() * h.abs();
-                let (split, _) = followed(turn * h.abs(), decay, sizes, r, coupled);
+                // The pair's hop exponent at its balancing similarity, its two ways' geometric mean with half the hop's
+                // growth; a state's own entry commutes with itself: its hops' series is its first term.
+                let hop = if c == 0 && row == column { 0.0 } else { (own(&classes[c], k) * own(&classes[partner], t)).sqrt() * (0.5 * decay).exp() };
+                let (split, _) = followed(turn * h.abs(), decay, sizes, r, coupled, hop);
                 routed &= split.is_some();
                 let fast = split.unwrap_or(false);
                 if !fast {
@@ -2081,7 +2121,9 @@ pub(crate) mod tests {
     /// The treatment the rule does not take is reached by what the rule reads, and by nothing else: it splits a pair by
     /// the sizes of all the pairs' changes together (module documentation, # The split). So a second pair, of two
     /// further states with no coupling to the first two and no amplitude of the start, changes the first pair's
-    /// treatment by its own slope and leaves that pair's state as it was. The slope is the least at which the rule
+    /// treatment by its own slope and leaves that pair's state as it was -- the second pair 300 rad apart between two
+    /// nodes, so that its own following converges at every slope read (r = slope/300, `followed`: each route where its
+    /// series does; at 3 rad, as until 2026-11-20, its slopes of the scan left it no route). The slope is the least at which the rule
     /// decides so, of eight a decade from 10⁻³ to 10²; where the rule decides so at none (a pair too slow to be followed
     /// beside any other) that treatment is not read.
     fn a_pair_s_remainders(parts: [f64; 2], size: f64, x: f64) -> [Option<[f64; 2]>; 3] {
@@ -2093,10 +2135,10 @@ pub(crate) mod tests {
             let y = super::following(C64::real(x).recip(), C64::ZERO, a, b);
             [-1.0, 1.0].into_iter().map(|u| (y[0] + y[1] * u + y[2] * (u * u)).abs()).fold(0.0, f64::max)
         };
-        // A second pair's slope that takes the first to a route, and the second pair (3 rad between two nodes) to one.
+        // A second pair's slope that takes the first to a route, and the second pair (300 rad between two nodes) to one.
         let beside = |fast: bool| (0..=40).map(|k| 10_f64.powf(-3.0 + k as f64 / 8.0)).find(|other| {
             let sizes = [own[0].hypot(*other), own[1], 0.0];
-            followed(x, 0.0, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0).0 == Some(fast) && followed(3.0, 0.0, sizes, across(3.0, C64::real(*other), C64::ZERO), 0.0).0.is_some()
+            followed(x, 0.0, sizes, across(x, C64::cis(0.7) * own[0], C64::cis(-0.4) * own[1]), 0.0, super::hop_size([own[0], own[1], 0.0])).0 == Some(fast) && followed(300.0, 0.0, sizes, across(300.0, C64::real(*other), C64::ZERO), 0.0, super::hop_size([*other, 0.0, 0.0])).0.is_some()
         });
         let mut found = [None; 3];
         for (treatment, wanted) in [Some(false), Some(true), None].into_iter().enumerate() {
@@ -2105,8 +2147,8 @@ pub(crate) mod tests {
                 Some(Some(other)) => (4, other),
                 Some(None) => continue,
             };
-            // The first pair's states and the second's: 0 and −ω; 7.3 and 3/h below it.
-            let base = Mat::from_fn(n, n, |i, j| if i == j { C64::real([0.0, -x / half, 7.3, 7.3 - 3.0 / half][i]) } else { C64::ZERO });
+            // The first pair's states and the second's: 0 and −ω; 7.3 and 300/h below it.
+            let base = Mat::from_fn(n, n, |i, j| if i == j { C64::real([0.0, -x / half, 7.3, 7.3 - 300.0 / half][i]) } else { C64::ZERO });
             let change = |z: C64, other: f64| {
                 Mat::from_fn(n, n, |i, j| match (i.min(j), i.max(j)) {
                     (0, 1) if i < j => z,

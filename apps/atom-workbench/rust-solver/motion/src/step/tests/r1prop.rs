@@ -5,6 +5,7 @@
 //! - `r1prop_bits`: the trajectories' states step by step, each step's hash and whether its propagation went through
 //!   the decomposition -- the regression of the propagation's change: the steps the decomposition took before are the
 //!   same to the bit.
+//! - `r1prop_refused`: the steps the decomposition refuses (`spectral::Refusal`), by why, at a step and at its halves.
 
 use crate::model::selected::Selected;
 use crate::request::Request;
@@ -118,41 +119,86 @@ fn r1prop_bits() {
     }
 }
 
-/// Where a step's result depends on its scratch's history (debugging the fresh-scratch test): the PGC3D_1ms reference's
-/// folded clusters (`scene_clusters`), R1PROP_ATOMS atoms (2) of each through R1PROP_STEPS steps (600) of 0.326 µs; at
-/// each step the same step from the same state on a fresh scratch: the first step where the two differ, with what
-/// the picture held.
+/// A step of τ from the trajectory's state as the advance takes it (adapt.rs: a refused step at its half, down to
+/// `depth` halvings): the end state, and per halving level the refusals by why -- [decomposition, rounding, radius,
+/// other].
+fn halved(run: &Selected, t: &Trajectory, tau: f64, scratch: &mut Scratch, depth: usize, refusals: &mut [[usize; 4]]) -> Option<Trajectory> {
+    use crate::spectral::Refusal;
+    use crate::step::Refused;
+    match Midway::new(run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], scratch, &Everywhere)) {
+        Ok(step) => Some(step.end),
+        Err(e) => {
+            let why = match e {
+                Refused::Propagation(Refusal::Decomposition) => 0,
+                Refused::Propagation(Refusal::Rounding) => 1,
+                Refused::Propagation(Refusal::Radius) => 2,
+                _ => 3,
+            };
+            refusals[0][why] += 1;
+            if why == 3 || depth == 0 {
+                return None;
+            }
+            let (rest, deeper) = refusals.split_at_mut(1);
+            let _ = rest;
+            let middle = halved(run, t, 0.5 * tau, scratch, depth - 1, deeper)?;
+            halved(run, &middle, 0.5 * tau, scratch, depth - 1, deeper)
+        }
+    }
+}
+
+/// The steps the decomposition refuses (`spectral::Refusal`), as STEPCOST's count of the steps with no route:
+/// R1PROP_TRAJ trajectories (128) from the moving point -- the velocity's signs by the trajectory's number --, each
+/// R1PROP_STEPS steps (200) at each τ of R1PROP_TAUS, on all the threads; a refused step taken at its halves as the
+/// advance takes it. Per τ the refusals by why at the step's own length and at its halves, the trajectories they fall
+/// on, the jumps' count, the wall time.
 #[test]
 #[ignore]
-fn r1prop_history() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/refs/requests/PGC3D_1ms.json");
-    let (atoms, steps) = (env("R1PROP_ATOMS", 2.0) as usize, env("R1PROP_STEPS", 600.0) as usize);
-    super::scene_clusters(path, &mut |_, _, cluster, run, starts| {
-        let tau = 0.326;
-        for (i, start) in starts.iter().enumerate().take(atoms) {
-            let mut t = start.clone();
-            t.threshold = crate::random::Stream::jump(17, i as u64, 0).open_uniform();
-            let mut scratch = Scratch::default();
-            for k in 0..steps {
-                let take = |scratch: &mut Scratch| Midway::new(run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], scratch, &Everywhere));
-                let (used, fresh) = (take(&mut scratch), take(&mut Scratch::default()));
-                let (a, b) = (used.as_ref().map(|s| format!("{:?}", s.end)), fresh.as_ref().map(|s| format!("{:?}", s.end)));
-                if a != b {
-                    let p = &scratch.picture;
-                    println!("R1-HISTORY cluster {cluster} atom {i} step {k}: differ; n {} beats {} followed {} bandwidth {}", p.states(), p.beats.len(), crate::spectral::tests::follows(p), p.bandwidth);
-                    break;
-                }
-                match used {
-                    Ok(s) => t = s.end,
-                    Err(e) => {
-                        println!("R1-HISTORY cluster {cluster} atom {i} step {k}: refused {e:?}");
-                        break;
+fn r1prop_refused() {
+    use rayon::prelude::*;
+    let taus = list("R1PROP_TAUS", "0.474,0.948");
+    let (count, steps) = (env("R1PROP_TRAJ", 128.0) as u64, env("R1PROP_STEPS", 200.0) as usize);
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let clock = std::time::Instant::now();
+            let each: Vec<([[usize; 4]; 4], u32, Option<String>)> = (0..count)
+                .into_par_iter()
+                .map(|i| {
+                    let mut t = start(&run, &request, chief, i);
+                    let mut scratch = Scratch::default();
+                    let mut refusals = [[0usize; 4]; 4];
+                    for k in 0..steps {
+                        match halved(&run, &t, tau, &mut scratch, 3, &mut refusals) {
+                            Some(next) => t = next,
+                            None => return (refusals, t.jumps, Some(format!("trajectory {i} ended at step {k}"))),
+                        }
+                    }
+                    (refusals, t.jumps, None)
+                })
+                .collect();
+            let mut total = [[0usize; 4]; 4];
+            for (r, _, _) in &each {
+                for (level, row) in r.iter().enumerate() {
+                    for (why, x) in row.iter().enumerate() {
+                        total[level][why] += x;
                     }
                 }
-                if k + 1 == steps {
-                    println!("R1-HISTORY cluster {cluster} atom {i}: {steps} steps alike");
-                }
             }
+            let on = each.iter().filter(|(r, _, _)| r[0].iter().sum::<usize>() > 0).count();
+            let jumps: u32 = each.iter().map(|e| e.1).sum();
+            let ended: Vec<&String> = each.iter().filter_map(|e| e.2.as_ref()).collect();
+            println!(
+                "R1-REFUSED {name} tau {tau}: {count} trajectories x {steps} steps = {}; refused at tau [decomposition, rounding, radius, other] {:?} ({:.3} %), on {on} trajectories; at tau/2 {:?}, tau/4 {:?}, tau/8 {:?}; {jumps} jumps; ended {}: {:?}; wall {:.1} s",
+                count as usize * steps,
+                total[0],
+                100.0 * total[0].iter().sum::<usize>() as f64 / (count as usize * steps) as f64,
+                total[1],
+                total[2],
+                total[3],
+                ended.len(),
+                ended.iter().take(3).collect::<Vec<_>>(),
+                clock.elapsed().as_secs_f64()
+            );
         }
-    });
+    }
 }
