@@ -1,8 +1,8 @@
 //! The fold against td_s.hilbert_rs (scratchpad v3c\rsx\export.py: the prototype's components at the six scenes' two
 //! points, its RS model on the selected P, and the components at r ± δ along the axis), read from the directory named by
-//! the environment variable `V3C_RSX`; and `Rs::at` on the six scenes' requests (scratchpad final\req, the directory
-//! named by `V3C_REQ`) against the fold with every block decomposed at the point. The data are the check's, not the
-//! crate's.
+//! the environment variable `V3C_RSX`; and `Rs::at` on the six scenes' own requests (scratchpad reqprec\req, the
+//! directory named by `V3C_REQ`) against the fold with every block decomposed at the point. The data are the check's,
+//! not the crate's.
 
 use super::*;
 use crate::floquet::Frame;
@@ -211,14 +211,14 @@ fn the_adjoint_force_is_the_finite_difference() {
 // ---------------------------------------------------------------------------------------------------------------------
 // Rs::at on the six scenes' requests.
 
-/// The six scenes' requests (V3C_REQ: scratchpad final\req) with their selected P (pysel.status.md A: the levels added to
-/// the ground states).
+/// The six scenes' own requests (V3C_REQ: scratchpad reqprec\req, PYEXP2's) with their selected P (pyexp2.status.md A,
+/// the same as PYSEL's: the levels added to the ground states).
 fn scenes() -> Vec<(&'static str, Scene, Vec<usize>)> {
-    let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ: the directory of the six scenes' requests (scratchpad final\\req)"));
+    let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ: the directory of the six scenes' requests (scratchpad reqprec\\req)"));
     let chosen: [(&str, &str, &[&str]); 6] = [
         ("tilt0", "tilt0.json", &["D2-3", "D2-2"]),
         ("tilt2", "tilt2.json", &["D2-3", "D2-2"]),
-        ("R4", "../../traj/req/R4_LIN_4.json", &["D2-2", "D2-3", "D2-1"]),
+        ("R4", "R4_LIN_4.json", &["D2-2", "D2-3", "D2-1"]),
         ("GMD1C", "GMD1C_1ms.json", &[]),
         ("PGC3D", "PGC3D_1ms.json", &["D2-2", "D2-3"]),
         ("TET", "TET_1ms.json", &["D2-2", "D2-3"]),
@@ -645,16 +645,14 @@ fn rs_at_cost() {
     }
 }
 
-/// The full reference is PYSEL's (scene_p.build with the tweezer's dissipative fold, scene_x's H0 convention; its
-/// exports pysel\export\*_full_rs.npz as JSON by scratchpad v3c2\tojson.py in the directory `V3C_FULL`) to rounding, on
-/// the six scenes at the checkpoint's centre (r = 0, the tweezer full) and edge (dark), no Doppler shift: H's components
-/// summed by the prototype's keys (its beams grouped by frequency, then the carrier and the frame's α) and their
-/// gradients along x, y, z; the emission's channels e₁, e₂, u (= x, y, z) and the tweezer's six (co- and
-/// counter-rotating, n_tw = ±1), their gradients; each relative to its quantity's largest entry over every key: to
-/// 10⁻¹² (measured ≤ 1.0·10⁻¹⁵ on R4, GMD1C, PGC3D, TET). The tilt scenes are read against the differences of their
-/// inputs, 10⁻⁷: PYSEL makes both from the tilt2 request (scene_x `angle_request`, the probe turned to 0° or 2° with its
-/// direction recomputed), while these requests store the direction to eight digits (0.0348995 for sin 2° =
-/// 0.034899497: ∇H 1.7·10⁻⁸) and tilt0's own emission differs from tilt2's by 1.1·10⁻⁷ absolute (L 2.2·10⁻⁸).
+/// The full reference is the prototype's (scene_p.build with the tweezer's dissipative fold, scene_x's H0 convention,
+/// each scene's own request: PYEXP2's exports pysel\export2\*_full_rs.npz as JSON by scratchpad v3c2\tojson.py in the
+/// directory `V3C_FULL`) to rounding, on the six scenes at the checkpoint's centre (r = 0, the tweezer full) and edge
+/// (dark), no Doppler shift: H's components summed by the prototype's keys (its beams grouped by frequency, then the
+/// carrier and the frame's α) and their gradients along x, y, z; the emission's channels e₁, e₂, u (= x, y, z) and the
+/// tweezer's six (co- and counter-rotating, n_tw = ±1), their gradients; each relative to its quantity's largest entry
+/// over every key: to 10⁻¹². (PYSEL's first exports made both tilt scenes of the tilt2 request, scene_x
+/// `angle_request`, which drops the probe's |Δm| ≥ 2 elements: another scene's numbers, not these requests' (REQPREC).)
 #[test]
 fn the_reference_is_pysel_to_rounding() {
     let dir = std::path::PathBuf::from(std::env::var("V3C_FULL").expect("V3C_FULL: PYSEL's full references as JSON (scratchpad v3c2/full)"));
@@ -723,11 +721,10 @@ fn the_reference_is_pysel_to_rounding() {
             assert_eq!(reference.jumps.len(), channels.len(), "{name} {point}: the channels");
             let errors: Vec<f64> = differences.iter().zip(&sizes).map(|(d, s)| d / s.max(f64::MIN_POSITIVE)).collect();
             eprintln!("{name} {point}: H {:.1e} ∇H {:.1e} L {:.1e} ∇L {:.1e} ({} channels)", errors[0], errors[1], errors[2], errors[3], channels.len());
-            let bound = if name.starts_with("tilt") { 1e-7 } else { 1e-12 };
-            worst = errors.iter().fold(worst, |w, e| w.max(e / bound));
+            worst = errors.iter().fold(worst, |w, e| w.max(*e));
         }
     }
-    assert!(worst <= 1.0, "{worst:e} of the bound");
+    assert!(worst <= 1e-12, "{worst:e}");
 }
 
 fn summed_parts(parts: &[ModelPart], gradient: Option<usize>) -> Mat {
