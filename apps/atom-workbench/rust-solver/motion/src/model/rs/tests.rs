@@ -7,7 +7,7 @@
 use super::*;
 use crate::floquet::Frame;
 use crate::request::Request;
-use crate::scene::Component;
+
 
 fn matrix(v: &serde_json::Value) -> Mat {
     let shape = v["shape"].as_array().expect("shape");
@@ -24,14 +24,40 @@ fn key(v: &serde_json::Value) -> Key {
     v.as_array().expect("key").iter().map(|k| k.as_i64().unwrap() as i32).collect()
 }
 
-/// The prototype's components at a point as the scene's: the static part and each component, gradients along z.
-fn components(point: &serde_json::Value, length: usize) -> Components {
-    let along = |g: Mat| [Mat::zeros(g.rows, g.cols), Mat::zeros(g.rows, g.cols), g];
-    let mut parts = vec![Component { key: vec![0; length], frequency: 0.0, value: matrix(&point["static"]), gradient: along(matrix(&point["static_grad"])) }];
+/// The prototype's model at a point as a fold's source: each component (the static part, then each key) its value and
+/// its gradient along z as two fixed matrices (terms 1·value and z-gradient-only 1·gradient), each nonzero key both
+/// ways; the Cartesian emission's channels with their photons' forms (the export's wave numbers); the generator the
+/// static part − (i/2) Σ C†C. Returns the library and the source.
+fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> (Vec<Fixed>, Source) {
+    let mut library: Vec<Fixed> = Vec::new();
+    let mut put = |m: &Mat| {
+        library.push(fixed(m));
+        library.len() - 1
+    };
+    let mut hamiltonian = Vec::new();
+    let mut piece = |key: Key, frequency: f64, value: &serde_json::Value, grad: &serde_json::Value| {
+        let terms = vec![Term::one(put(&matrix(value)), C64::ONE), Term { matrix: put(&matrix(grad)), adjoint: false, scale: C64::ZERO, gradient: [C64::ZERO, C64::ZERO, C64::ONE] }];
+        let p = Piece { key, frequency, terms };
+        let adjoint = p.key.iter().any(|k| *k != 0).then(|| p.adjoint());
+        hamiltonian.push(p);
+        hamiltonian.extend(adjoint);
+    };
+    piece(vec![0; length], 0.0, &point["static"], &point["static_grad"]);
     for c in point["comps"].as_array().unwrap() {
-        parts.push(Component { key: key(&c["key"]), frequency: c["f"].as_f64().unwrap(), value: matrix(&c["value"]), gradient: along(matrix(&c["grad"])) });
+        piece(key(&c["key"]), c["f"].as_f64().unwrap(), &c["value"], &c["grad"]);
     }
-    Components { parts, tweezer: (C64::ZERO, [C64::ZERO; 3]) }
+    let emission_matrices: Vec<Mat> = doc["emission"].as_array().unwrap().iter().map(matrix).collect();
+    let jumps = Jumps { emission: [emission_matrices[0].clone(), emission_matrices[1].clone(), emission_matrices[2].clone()], wave_number: matrix(&doc["wave"]) };
+    let (c, k, gamma) = emission(&jumps);
+    let mut put = |m: &Mat| {
+        library.push(fixed(m));
+        library.len() - 1
+    };
+    let (parts, kicks) = (c.each_ref().map(&mut put), k.each_ref().map(&mut put));
+    let decay = put(&gamma);
+    let mut generator = hamiltonian[0].terms.clone();
+    generator.push(Term::one(decay, C64::new(0.0, -0.5)));
+    (library, Source { hamiltonian, jumps: emission_channels(length, parts, kicks), generator })
 }
 
 /// The largest entry difference of two matrices and the larger of their largest entries.
@@ -50,15 +76,38 @@ fn exports() -> Vec<(String, serde_json::Value)> {
 
 /// The model of a document's point `which` (0: r, 1: r + δu, 2: r − δu, 3: r + 2δu, 4: r − 2δu): its source folded on P with no fast element
 /// (the prototype's hilbert_rs folds Q alone).
-fn model(doc: &serde_json::Value, which: usize) -> ModelAt {
+fn model(doc: &serde_json::Value, which: usize) -> (ModelAt, Now) {
     let labels: Vec<String> = doc["labels"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
-    let keep: Vec<usize> = doc["keep"].as_array().unwrap().iter().map(|k| k.as_u64().unwrap() as usize).collect();
+    let mut keep: Vec<usize> = doc["keep"].as_array().unwrap().iter().map(|k| k.as_u64().unwrap() as usize).collect();
+    keep.sort_unstable();
+    let folded: Vec<usize> = (0..STATES).filter(|s| keep.binary_search(s).is_err()).collect();
     let length = doc["out"]["H"][0]["key"].as_array().unwrap().len();
-    let emission: Vec<Mat> = doc["emission"].as_array().unwrap().iter().map(matrix).collect();
-    let jumps = Jumps { emission: [emission[0].clone(), emission[1].clone(), emission[2].clone()], wave_number: matrix(&doc["wave"]) };
-    let source = ModelAt::source(&components(&doc["points"][which], length), &jumps, &labels, |_| false);
+    let (library, source) = source(doc, &doc["points"][which], length);
     let sectors = Sectors { states: vec![[0; 2]; STATES], generators: vec![[0; 2]; length] };
-    fold(&source, &source.generator(), &keep, &sectors, MODEL)
+    let all: Vec<usize> = (0..STATES).collect();
+    let splits = Split::all(&library, &keep, &sectors, MODEL);
+    let local = fold(&splits, &keep, &folded, &source, &sectors, MODEL, &levels(&labels, &all));
+    (local.components(), local.now(0.0))
+}
+
+/// The sum of a model operator's components at the frame's time zero, or of their gradients along r_i.
+fn summed(parts: &[ModelPart], gradient: Option<usize>, size: usize) -> Mat {
+    let mut sum = Mat::zeros(size, size);
+    for p in parts {
+        sum.add_scaled(C64::ONE, gradient.map_or(&p.value, |i| &p.gradient[i]));
+    }
+    sum
+}
+
+/// A dense model's generator: H's static part − (i/2) Σ_ch Σ_c L†L, with its gradient.
+fn generator_of(model: &ModelAt) -> ModelPart {
+    let mut g = model.still().clone();
+    let (gamma, changes) = decay(&model.jumps, model.states.len());
+    g.value.add_scaled(C64::new(0.0, -0.5), &gamma);
+    for (d, c) in g.gradient.iter_mut().zip(&changes) {
+        d.add_scaled(C64::new(0.0, -0.5), c);
+    }
+    g
 }
 
 /// The fold is hilbert_rs to rounding (RUSTPLAN C1): on the six scenes' selected P at both points (centre: the tweezer
@@ -72,7 +121,7 @@ fn model(doc: &serde_json::Value, which: usize) -> ModelAt {
 fn the_fold_is_hilbert_rs_to_rounding() {
     let mut worst = 0.0_f64;
     for (name, doc) in exports() {
-        let at = model(&doc, 0);
+        let at = model(&doc, 0).0;
         let out = &doc["out"];
         // Per quantity its largest entry difference and its largest entry over every key (a key whose gradient is
         // nothing but rounding is read against the quantity's scale).
@@ -124,7 +173,8 @@ fn the_adjoint_force_is_the_finite_difference() {
     let mut worst = 0.0_f64;
     for (name, doc) in exports() {
         let delta = doc["delta"].as_f64().unwrap();
-        let [at, up, down, up2, down2] = [0, 1, 2, 3, 4].map(|w| model(&doc, w));
+        let (at, now) = model(&doc, 0);
+        let [up, down, up2, down2] = [1, 2, 3, 4].map(|w| model(&doc, w).0);
         let n = at.states.len();
         // Richardson's derivative of a matrix read off each fold.
         let derivative = |read: &dyn Fn(&ModelAt) -> Mat| {
@@ -140,7 +190,7 @@ fn the_adjoint_force_is_the_finite_difference() {
         let t = rho.trace();
         rho = rho.scaled(C64::real(1.0) / t);
         let trace = |x: &Mat| -> C64 { (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).map(|(i, j)| x[(i, j)] * rho[(j, i)]).sum() };
-        let adjoint = at.force(&rho.data)[2];
+        let adjoint = now.force(&rho.data)[2];
         let mut difference = -trace(&derivative(&|m: &ModelAt| summed(&m.effective, None, n))).re;
         for channel in &at.jumps {
             let l = summed(&channel.parts, None, n);
@@ -203,6 +253,34 @@ fn sectors(scene: &Scene) -> Sectors {
     Frame::new(scene, &crate::floquet::Hilbert::full(scene, &centre), &zero).sectors()
 }
 
+/// Model parts by key, accumulated element by element (the exact reference's sums).
+#[derive(Default)]
+struct Exact(BTreeMap<Key, ModelPart>);
+
+impl Exact {
+    /// Adds scale·x into the part of `key` (size × size), x's entry (i, j) -- or, `adjoint`, x's (j, i) conjugated -- at
+    /// (rows[i], cols[j]), where `keep(rows[i], cols[j])` holds.
+    #[allow(clippy::too_many_arguments)]
+    fn add(&mut self, key: &Key, frequency: f64, size: usize, x: (&Mat, [&Mat; 3]), adjoint: bool, rows: &[usize], cols: &[usize], scale: f64, keep: impl Fn(usize, usize) -> bool) {
+        let part = self.0.entry(key.clone()).or_insert_with(|| ModelPart { key: key.clone(), frequency, value: Mat::zeros(size, size), gradient: zeros(size, size) });
+        let read = |m: &Mat, i: usize, j: usize| if adjoint { m[(j, i)].conj() } else { m[(i, j)] };
+        for (i, &b) in rows.iter().enumerate() {
+            for (j, &a) in cols.iter().enumerate() {
+                if keep(b, a) {
+                    part.value[(b, a)] += read(x.0, i, j) * scale;
+                    for (g, d) in part.gradient.iter_mut().zip(x.1) {
+                        g[(b, a)] += read(d, i, j) * scale;
+                    }
+                }
+            }
+        }
+    }
+
+    fn parts(self) -> Vec<ModelPart> {
+        self.0.into_values().filter(|p| nonzero(&p.value) || p.gradient.iter().any(nonzero)).collect()
+    }
+}
+
 /// The fold with every block decomposed at the point and every column's resolvent its spectrum (64c973e8's fold, the
 /// formula of the module documentation without the series): the check's exact reference.
 fn exact(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 2]) -> ModelAt {
@@ -212,7 +290,7 @@ fn exact(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 2]) -
     let size = source.states.len();
     let others: Vec<usize> = (0..size).filter(|p| kept.binary_search(p).is_err()).collect();
     let n = kept.len();
-    let fast = |key: &Key, to: usize, from: usize| -> [i64; 2] { plus(sectors.key(key, axes), [sectors.state(source.states[to], axes)[0] - sectors.state(source.states[from], axes)[0], sectors.state(source.states[to], axes)[1] - sectors.state(source.states[from], axes)[1]]) };
+    let fast = |key: &Key, to: usize, from: usize| -> [i64; 2] { Sectors::element(sectors.key(key, axes), sectors.state(source.states[to], axes), sectors.state(source.states[from], axes)) };
     let still = source.still();
     let mut g0 = still.value.clone();
     let mut dg0 = still.gradient.clone();
@@ -285,7 +363,7 @@ fn exact(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 2]) -
     }
     let all_kept: Vec<usize> = (0..n).collect();
     let all: Vec<usize> = (0..size).collect();
-    let mut effective = Sums::default();
+    let mut effective = Exact::default();
     for c in &source.effective {
         let (block, moved) = (c.value.block(&kept, &kept), c.gradient.each_ref().map(|d| d.block(&kept, &kept)));
         effective.add(&c.key, c.frequency, n, (&block, moved.each_ref()), false, &all_kept, &all_kept, 1.0, |b, a| fast(&c.key, kept[b], kept[a]) == [0; 2]);
@@ -306,7 +384,7 @@ fn exact(source: &ModelAt, keep: &[usize], sectors: &Sectors, axes: [bool; 2]) -
             effective.add(&negated(&key), -frequency, n, (&a, da.each_ref()), true, &all_kept, &all_kept, 0.5, |b, x| slow(x, b));
         }
     }
-    let mut out: BTreeMap<(usize, [i64; 2]), Sums> = BTreeMap::new();
+    let mut out: BTreeMap<(usize, [i64; 2]), Exact> = BTreeMap::new();
     for channel in &source.jumps {
         for p in &channel.parts {
             let mut add = |key: &Key, frequency: f64, value: &Mat, gradient: [&Mat; 3]| {
@@ -393,8 +471,8 @@ fn rs_at_is_the_exact_fold_to_rounding() {
         let rs = Rs::new(&scene, &keep, sectors(&scene));
         for (point, components) in points(&scene) {
             let model = rs.at(&scene, &components);
-            let (reference, generator) = rs.tweezer.reference(&scene, &components);
-            let made = reference.generator();
+            let (reference, generator) = rs.tweezer.reference(&scene, &components.point);
+            let made = generator_of(&reference);
             let (g, scale) = apart(&generator.value, &made.value);
             assert!(g <= 64.0 * UNIT_ROUNDOFF * scale, "{name} {point}: the generator made once against the point's: {g:e} of {scale:e}");
             let truth = exact(&reference, &rs.keep, &rs.sectors, MODEL);
@@ -406,23 +484,163 @@ fn rs_at_is_the_exact_fold_to_rounding() {
     assert!(worst <= 1e-10, "{worst:e}");
 }
 
-/// The time of `Rs::at` per point (one thread), at the moving point of the check: the mean of repeated calls.
+/// The model keeps slow elements alone, by the frame's own rule (V3E's the_selected_model_is_slow_in_its_frame): on the
+/// six scenes' P at the checkpoint's centre and edge and at the moving point, every nonzero element b ← a of every H_eff
+/// component at key c has the frame vector c − θ_b + θ_a (floquet/frame.rs `element`, the assembly's) with no fast part
+/// (n_φ = n_tw = n_ν = 0, `Frame::split`); every element of a channel has the channel's fast index (n_φ, n_tw), and the
+/// channel's elements one n_ν (they beat together). The frame is the checkpoint's centre's (no Doppler shift).
 #[test]
-#[ignore]
-fn rs_at_cost() {
+fn the_model_is_slow_in_its_frame() {
+    let mut wrong = 0;
+    for (name, scene, keep) in scenes() {
+        let zero = vec![0.0; scene.request.beams.len()];
+        let centre = scene.components([0.0; 3], &zero, 1.0);
+        let frame = Frame::new(&scene, &crate::floquet::Hilbert::full(&scene, &centre), &zero);
+        let rs = Rs::new(&scene, &keep, frame.sectors());
+        for (point, components) in points(&scene) {
+            let model = rs.at(&scene, &components);
+            let n = model.states.len();
+            let vector = |key: &Key, b: usize, a: usize| -> [i64; 3] {
+                let (tb, ta) = (&frame.theta[model.states[b]], &frame.theta[model.states[a]]);
+                let v: crate::floquet::frame::FrameKey = (0..tb.len()).map(|i| crate::floquet::frame::element(key.get(i).map_or(0, |&k| i64::from(k)), tb[i], ta[i])).collect();
+                frame.split(&v).0
+            };
+            let entries = |p: &ModelPart| -> Vec<(usize, usize)> { (0..n).flat_map(|b| (0..n).map(move |a| (b, a))).filter(|&(b, a)| p.value[(b, a)] != C64::ZERO || p.gradient.iter().any(|g| g[(b, a)] != C64::ZERO)).collect() };
+            let (mut kept, mut fast) = (0, 0);
+            for p in &model.effective {
+                for (b, a) in entries(p) {
+                    kept += 1;
+                    fast += usize::from(vector(&p.key, b, a) != [0; 3]);
+                }
+            }
+            let (mut elements, mut astray) = (0, 0);
+            for c in &model.jumps {
+                let mut carrier = None;
+                for p in &c.parts {
+                    for (b, a) in entries(p) {
+                        let v = vector(&p.key, b, a);
+                        elements += 1;
+                        astray += usize::from([v[0], v[1]] != c.fast || *carrier.get_or_insert(v[2]) != v[2]);
+                    }
+                }
+            }
+            eprintln!("{name} {point}: H_eff {kept} elements kept, {fast} fast; {} channels, {elements} elements, {astray} astray", model.jumps.len());
+            wrong += fast + astray;
+        }
+    }
+    assert_eq!(wrong, 0);
+}
+
+/// The value at a time is the components at their phases (module documentation, # Two contractions): on the six scenes'
+/// P at the checkpoint's centre and edge and at the moving point, at t = 0 and two times off it (0.37 and −1.9 µs: every
+/// slow component's phase turned), H_eff(t) and its gradient, each channel's L(t) and its gradient, the photons' forms and
+/// the lift M(t), against Σ_c X⁽ᶜ⁾ e^{−if_c t} of the same fold's components (`Local::components`). The two are one set
+/// of sums taken in two orders, so they differ by rounding alone: per component, the phase -- e^{−if_c t}e^{−if_c′ t}
+/// against e^{−i(f_c + f_c′)t}, the frequency's own rounding u|f_c t| (a channel's absolute frequency reaches the
+/// tweezer's 10⁸ rad/µs) and the cis's, a few u: within 64u (1 + |f_c t|) max|X⁽ᶜ⁾| per component, summed over the
+/// quantity's components --, and the products in V's basis, pair by pair against class sum by class sum: κ(V)u relative
+/// to the quantity's largest entry (the decomposition's rounding, `rs_at_is_the_exact_fold_to_rounding`'s 10⁻¹⁰). The
+/// bound read is their sum (measured: within the phase term alone but for PGC3D's and TET's moving channels, 1.6·10⁻¹² of
+/// their largest entry).
+#[test]
+fn now_is_the_components_at_their_phases() {
+    let mut worst = 0.0_f64;
     for (name, scene, keep) in scenes() {
         let rs = Rs::new(&scene, &keep, sectors(&scene));
         for (point, components) in points(&scene) {
-            let start = std::time::Instant::now();
-            let mut calls = 0;
-            while start.elapsed().as_secs_f64() < 1.0 {
-                std::hint::black_box(rs.at(&scene, &components));
-                calls += 1;
+            let local = rs.local(&scene, &components.point);
+            let model = local.components();
+            let n = model.states.len();
+            for t in [0.0, 0.37, -1.9] {
+                let now = local.now(t);
+                let kicks = local.kicks(t);
+                // Σ_c X⁽ᶜ⁾ e^{−if_c t} and its rounding bound.
+                let at = |parts: &[ModelPart], gradient: Option<usize>, rows: usize, cols: usize| -> (Mat, f64) {
+                    let (mut sum, mut bound) = (Mat::zeros(rows, cols), 0.0);
+                    for p in parts {
+                        let x = gradient.map_or(&p.value, |i| &p.gradient[i]);
+                        sum.add_scaled(C64::cis(-p.frequency * t), x);
+                        bound += 64.0 * UNIT_ROUNDOFF * (1.0 + (p.frequency * t).abs()) * x.max_abs();
+                    }
+                    (sum, bound)
+                };
+                let mut ratios = [0.0_f64; 5];
+                let mut compare = |slot: usize, x: &Mat, (y, bound): (Mat, f64), scale: f64| ratios[slot] = ratios[slot].max(apart(x, &y).0 / (bound + 1e-10 * scale).max(f64::MIN_POSITIVE));
+                compare(0, &now.hamiltonian, at(&model.effective, None, n, n), now.hamiltonian.max_abs());
+                let scale = now.gradient.iter().map(Mat::max_abs).fold(0.0, f64::max);
+                for i in 0..3 {
+                    compare(1, &now.gradient[i], at(&model.effective, Some(i), n, n), scale);
+                }
+                let (lscale, dscale, kscale) = (
+                    now.jumps.iter().map(|c| c.value.max_abs()).fold(0.0, f64::max),
+                    now.jumps.iter().flat_map(|c| c.gradient.iter().map(Mat::max_abs)).fold(0.0, f64::max),
+                    kicks.iter().map(|c| c.value.max_abs()).fold(0.0, f64::max),
+                );
+                let zero = Mat::zeros(n, n);
+                let channels: std::collections::BTreeSet<(usize, [i64; 2])> = model.jumps.iter().map(|c| (c.emission, c.fast)).chain(now.jumps.iter().map(|c| (c.emission, c.fast))).collect();
+                for (emission, fast) in channels {
+                    let found = model.jumps.iter().find(|c| c.emission == emission && c.fast == fast);
+                    let mine = now.jumps.iter().find(|c| c.emission == emission && c.fast == fast);
+                    let kick = kicks.iter().find(|c| c.emission == emission && c.fast == fast);
+                    let none: &[ModelPart] = &[];
+                    let (parts, forms) = found.map_or((none, none), |c| (&c.parts[..], &c.kicks[..]));
+                    compare(2, mine.map_or(&zero, |c| &c.value), at(parts, None, n, n), lscale);
+                    for i in 0..3 {
+                        compare(2, mine.map_or(&zero, |c| &c.gradient[i]), at(parts, Some(i), n, n), dscale);
+                    }
+                    compare(3, kick.map_or(&zero, |c| &c.value), at(forms, None, n, n), kscale);
+                }
+                compare(4, &now.lift, at(&model.lift, None, model.folded.len(), n), now.lift.max_abs());
+                eprintln!("{name} {point} t {t}: of the bound H {:.1e} ∇H {:.1e} L {:.1e} K {:.1e} M {:.1e} ({} channels)", ratios[0], ratios[1], ratios[2], ratios[3], ratios[4], now.jumps.len());
+                worst = ratios.iter().fold(worst, |w, e| w.max(*e));
             }
-            let each = start.elapsed().as_secs_f64() / calls as f64;
-            let build = std::time::Instant::now();
-            let _ = std::hint::black_box(scene.components_at([0.13, -0.21, 0.37], [50.0, -80.0, 120.0]));
-            eprintln!("{name} {point}: Rs::at {:.1} µs per point ({calls} calls); components_at {:.1} µs", each * 1e6, build.elapsed().as_secs_f64() * 1e6);
+        }
+    }
+    assert!(worst <= 1.0, "{worst:e} of the rounding bound");
+}
+
+/// The time per point (one thread) of the trajectory's work -- the terms at the point (`Scene::point_at`), the fold there
+/// (`Rs::local`) and the value at a time (`Local::now`) -- and of the checkpoint's components (`Local::components`):
+/// the means of repeated calls, at the checkpoint's centre and edge and the moving point.
+#[test]
+#[ignore]
+fn rs_at_cost() {
+    let time = |f: &mut dyn FnMut()| {
+        let start = std::time::Instant::now();
+        let mut calls = 0;
+        while start.elapsed().as_secs_f64() < 0.5 {
+            f();
+            calls += 1;
+        }
+        start.elapsed().as_secs_f64() / calls as f64 * 1e6
+    };
+    for (name, scene, keep) in scenes() {
+        let rs = Rs::new(&scene, &keep, sectors(&scene));
+        for (point, components) in points(&scene) {
+            let terms = time(&mut || {
+                std::hint::black_box(scene.point_at([0.13, -0.21, 0.37], [50.0, -80.0, 120.0]));
+            });
+            let fold = time(&mut || {
+                std::hint::black_box(rs.local(&scene, &components.point));
+            });
+            let local = rs.local(&scene, &components.point);
+            let now = time(&mut || {
+                std::hint::black_box(local.now(0.37));
+            });
+            let by = time(&mut || {
+                std::hint::black_box(local.components());
+            });
+            let dense = time(&mut || {
+                std::hint::black_box(scene.components_at([0.13, -0.21, 0.37], [50.0, -80.0, 120.0]));
+            });
+            let sizes: Vec<usize> = local.blocks.iter().map(|b| b.rows.len()).collect();
+            eprintln!(
+                "{name} {point}: point_at {terms:.1} + Rs::local {fold:.1} + now {now:.1} = {:.1} µs per point; components {by:.1} µs; (components_at {dense:.1} µs); blocks {sizes:?}, {} amplitudes, {} legs, {} jump parts",
+                terms + fold + now,
+                local.amplitudes.len(),
+                local.legs.len(),
+                local.jumps.len()
+            );
         }
     }
 }

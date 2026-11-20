@@ -60,13 +60,75 @@ pub struct Component {
 }
 
 /// H(r) by its frequency components: the static part first, then each beam's co-rotating coupling (request order), the
-/// tweezer's counter-rotating coupling, then the outside forms' products that beat. With them the tweezer's amplitude
-/// a_tw(r) as they hold it (its scale applied) and its gradient: the tweezer's components are a_tw X_tw and a_tw* R_tw
-/// (`Scene::tweezer_couplings`), which the one fold folds at unit amplitude once (model/rs.rs `Tweezer`).
+/// tweezer's counter-rotating coupling, then the outside forms' products that beat -- the sums by key of the point's
+/// terms (`point`), which the fold reads (model/rs.rs; the tweezer's amplitude a_tw(r), its scale applied, is the
+/// point's).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Components {
     pub parts: Vec<Component>,
-    pub tweezer: (C64, [C64; 3]),
+    pub point: Point,
+}
+
+/// The factor a term of H takes at a point: of the beams' amplitudes there, a_l(r) (`Point::amplitudes`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Factor {
+    One,
+    /// a_l.
+    Beam(usize),
+    /// a_l*.
+    Conjugate(usize),
+    /// a_l* a_m.
+    Product(usize, usize),
+}
+
+impl Factor {
+    /// Its value and gradient at the beams' amplitudes.
+    pub fn at(self, a: &[Amplitude]) -> (C64, [C64; 3]) {
+        match self {
+            Factor::One => (C64::ONE, [C64::ZERO; 3]),
+            Factor::Beam(l) => (a[l].value, a[l].gradient),
+            Factor::Conjugate(l) => (a[l].value.conj(), a[l].gradient.map(C64::conj)),
+            Factor::Product(l, m) => {
+                let (al, am) = (&a[l], &a[m]);
+                (al.value.conj() * am.value, std::array::from_fn(|k| al.gradient[k].conj() * am.value + al.value.conj() * am.gradient[k]))
+            }
+        }
+    }
+}
+
+/// One term of H: `factor` times one of the scene's fixed matrices (`Scene::matrix`; its adjoint where `adjoint`), in the
+/// component of `key` at the rest-frame frequency `frequency`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Term {
+    pub key: Key,
+    pub frequency: f64,
+    pub matrix: usize,
+    pub adjoint: bool,
+    pub factor: Factor,
+}
+
+/// H at a point by its terms: the terms at the point's Doppler shifts (`Scene::terms`), the beams' amplitudes there
+/// (`Scene::amplitudes`) and the generators' rest-frame frequencies (`Scene::rates`). H's components are their sums by
+/// key (`Scene::components`); the fold contracts the factors with its own forms of the fixed matrices (model/rs.rs), so
+/// that a point costs the amplitudes and the contraction.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Point {
+    pub terms: Vec<Term>,
+    pub amplitudes: Vec<Amplitude>,
+    pub rates: Vec<f64>,
+}
+
+impl Point {
+    /// A key's frequency at the point (`frequency`).
+    pub fn frequency(&self, key: &Key) -> f64 {
+        frequency(&self.rates, key)
+    }
+}
+
+/// A key's frequency at the generators' rest-frame frequencies f_g: Σ_g key_g f_g (rad/µs). The one rule for every key's
+/// frequency -- the terms', and every key the folds make of them (model/rs.rs).
+pub fn frequency(rates: &[f64], key: &Key) -> f64 {
+    key.iter().zip(rates).map(|(&k, f)| f64::from(k) * f).sum()
 }
 
 /// The jumps: the request's emission and the photon wave number of each element.
@@ -90,8 +152,9 @@ pub struct Scene {
     pub geometry: Vec<Geometry>,
     /// H0 − Σ_ω O_ω(E_ω(0)): the bare atom with its Zeeman shift (every light off).
     base: Mat,
-    /// Each outside form's products of its beams (request order), l ≤ m: (l, m, B(E_l, E_m)).
-    products: Vec<Vec<(usize, usize, Mat)>>,
+    /// The outside forms' products of their beams (the forms in request order, each its beams', l ≤ m): (l, m,
+    /// B(E_l, E_m)).
+    products: Vec<(usize, usize, Mat)>,
     /// ħ/m (µm²/µs).
     hbar_over_mass: f64,
 }
@@ -156,7 +219,7 @@ impl Scene {
             .outside_forms
             .iter()
             .zip(&members)
-            .map(|(form, ls)| ls.iter().enumerate().flat_map(|(i, &l)| ls[i..].iter().map(move |&m| (l, m, bilinear(&form.matrices, &beams[l].field, &beams[m].field)))).collect())
+            .flat_map(|(form, ls)| ls.iter().enumerate().flat_map(move |(i, &l)| ls[i..].iter().map(move |&m| (l, m, bilinear(&form.matrices, &beams[l].field, &beams[m].field)))))
             .collect();
         Ok(Scene {
             request: request.clone(),
@@ -209,20 +272,66 @@ impl Scene {
         (0..self.generators.len()).map(|h| (h == g) as i32).collect()
     }
 
-    /// H's components at r for the momentum κ (1/µm).
-    pub fn components_at(&self, r: V3, kappa: V3) -> Components {
-        self.components(r, &self.doppler(kappa), 1.0)
+    /// The fixed matrices of H's terms (`Term::matrix`): 0 the base (H0 − Σ_ω O_ω(E_ω(0))), 1 + l beam l's co-rotating
+    /// coupling X_l, 1 + L (L beams) the tweezer's counter-rotating R_tw, then the outside forms' products B(E_l, E_m).
+    pub fn matrix(&self, index: usize) -> &Mat {
+        let beams = &self.request.beams;
+        match index {
+            0 => &self.base,
+            i if i <= beams.len() => &beams[i - 1].coupling,
+            i if i == beams.len() + 1 => &beams[self.request.trap_beam].counter_coupling,
+            i => &self.products[i - beams.len() - 2].2,
+        }
     }
 
-    /// H's components at r for given Doppler shifts w_l (rad/µs, one per beam, request order) with the tweezer's
-    /// amplitude scaled by `tweezer` (its log-gradient unchanged): the two-point check's points (select.rs) -- the
-    /// centre at 1, the edge at 0, both at w = 0.
-    pub fn components(&self, r: V3, doppler: &[f64], tweezer: f64) -> Components {
-        let request = &self.request;
-        let beams = &request.beams;
-        let tw = request.trap_beam;
-        let amplitude: Vec<Amplitude> = self
-            .geometry
+    /// The count of `matrix`'s indices.
+    pub fn matrices(&self) -> usize {
+        self.request.beams.len() + 2 + self.products.len()
+    }
+
+    /// H's terms at the Doppler shifts w_l (rad/µs, one per beam, request order): the static part's -- the base, and
+    /// each outside form's products that do not beat, conj(a_l) a_m B(E_l, E_m) with its conjugate for l ≠ m --, each
+    /// beam's a_l X_l at e_l, f_l = ω_l − w_l, the tweezer's a_tw* R_tw at −e_tw − 2e_ν, then the products that beat
+    /// (two beams of one frequency at different Doppler shifts) at e_m − e_l, f_m − f_l. The product of two beams of one
+    /// frequency and one Doppler shift beats at zero and is static.
+    pub fn terms(&self, doppler: &[f64]) -> Vec<Term> {
+        let beams = self.request.beams.len();
+        let tw = self.request.trap_beam;
+        let rates = self.rates(doppler);
+        let zero: Key = vec![0; self.generators.len()];
+        let term = |key: &Key, matrix: usize, adjoint: bool, factor: Factor| Term { key: key.clone(), frequency: frequency(&rates, key), matrix, adjoint, factor };
+        let mut terms = vec![term(&zero, 0, false, Factor::One)];
+        let mut beating = Vec::new();
+        for (i, &(l, m, _)) in self.products.iter().enumerate() {
+            let matrix = beams + 2 + i;
+            if l == m {
+                terms.push(term(&zero, matrix, false, Factor::Product(l, l)));
+            } else if doppler[l] == doppler[m] {
+                terms.push(term(&zero, matrix, false, Factor::Product(l, m)));
+                terms.push(term(&zero, matrix, true, Factor::Product(m, l)));
+            } else {
+                let key: Key = self.unit(m).iter().zip(self.unit(l)).map(|(x, y)| x - y).collect();
+                beating.push(term(&key, matrix, false, Factor::Product(l, m)));
+            }
+        }
+        for l in 0..beams {
+            terms.push(term(&self.unit(l), 1 + l, false, Factor::Beam(l)));
+        }
+        let [_, (key, _, _)] = self.tweezer_couplings();
+        terms.push(term(&key, beams + 1, false, Factor::Conjugate(tw)));
+        terms.extend(beating);
+        terms
+    }
+
+    /// The generators' rest-frame frequencies at the Doppler shifts w_l: every beam's f_l = ω_l − w_l, the carrier's ν.
+    pub fn rates(&self, doppler: &[f64]) -> Vec<f64> {
+        self.generators.iter().map(|g| g.frequency - g.beam.map_or(0.0, |l| doppler[l])).collect()
+    }
+
+    /// Each beam's amplitude a_l(r) with its gradient, the tweezer's scaled by `tweezer` (its log-gradient unchanged).
+    pub fn amplitudes(&self, r: V3, tweezer: f64) -> Vec<Amplitude> {
+        let tw = self.request.trap_beam;
+        self.geometry
             .iter()
             .enumerate()
             .map(|(l, g)| {
@@ -233,56 +342,54 @@ impl Scene {
                     a
                 }
             })
-            .collect();
-        let rest = |l: usize| self.generators[l].frequency - doppler[l];
-        // The static part: the base and the outside forms' products that do not beat.
-        let mut value = self.base.clone();
-        let mut gradient: [Mat; 3] = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
-        let mut beating = Vec::new();
-        for products in &self.products {
-            for &(l, m, ref b) in products {
-                let (al, am) = (&amplitude[l], &amplitude[m]);
-                let c = al.value.conj() * am.value;
-                let dc: [C64; 3] = std::array::from_fn(|k| al.gradient[k].conj() * am.value + al.value.conj() * am.gradient[k]);
-                if l == m {
-                    value.add_scaled(c, b);
-                    for k in 0..3 {
-                        gradient[k].add_scaled(dc[k], b);
-                    }
-                } else if doppler[l] == doppler[m] {
-                    let adjoint = b.adjoint();
-                    value.add_scaled(c, b);
-                    value.add_scaled(c.conj(), &adjoint);
-                    for k in 0..3 {
-                        gradient[k].add_scaled(dc[k], b);
-                        gradient[k].add_scaled(dc[k].conj(), &adjoint);
-                    }
-                } else {
-                    let key: Key = self.unit(m).iter().zip(self.unit(l)).map(|(x, y)| x - y).collect();
-                    beating.push(Component { key, frequency: rest(m) - rest(l), value: b.scaled(c), gradient: std::array::from_fn(|k| b.scaled(dc[k])) });
+            .collect()
+    }
+
+    /// H at r by its terms for the momentum κ (1/µm): what the fold reads at a point of a trajectory.
+    pub fn point_at(&self, r: V3, kappa: V3) -> Point {
+        self.point(r, &self.doppler(kappa), 1.0)
+    }
+
+    /// H at r by its terms for given Doppler shifts w_l with the tweezer's amplitude scaled by `tweezer` (`components`).
+    pub fn point(&self, r: V3, doppler: &[f64], tweezer: f64) -> Point {
+        Point { terms: self.terms(doppler), amplitudes: self.amplitudes(r, tweezer), rates: self.rates(doppler) }
+    }
+
+    /// H's components at r for the momentum κ (1/µm).
+    pub fn components_at(&self, r: V3, kappa: V3) -> Components {
+        self.components(r, &self.doppler(kappa), 1.0)
+    }
+
+    /// H's components at r for given Doppler shifts w_l (rad/µs, one per beam, request order) with the tweezer's
+    /// amplitude scaled by `tweezer` (its log-gradient unchanged): the two-point check's points (select.rs) -- the
+    /// centre at 1, the edge at 0, both at w = 0. Each the sum of its terms (`point`), in their order.
+    pub fn components(&self, r: V3, doppler: &[f64], tweezer: f64) -> Components {
+        let point = self.point(r, doppler, tweezer);
+        let mut parts: Vec<Component> = Vec::new();
+        for t in &point.terms {
+            let at = match parts.iter().rposition(|p| p.key == t.key) {
+                Some(i) => i,
+                None => {
+                    let gradient = std::array::from_fn(|_| Mat::zeros(STATES, STATES));
+                    parts.push(Component { key: t.key.clone(), frequency: t.frequency, value: Mat::zeros(STATES, STATES), gradient });
+                    parts.len() - 1
                 }
+            };
+            let (c, dc) = t.factor.at(&point.amplitudes);
+            let adjoint;
+            let m = if t.adjoint {
+                adjoint = self.matrix(t.matrix).adjoint();
+                &adjoint
+            } else {
+                self.matrix(t.matrix)
+            };
+            let part = &mut parts[at];
+            part.value.add_scaled(c, m);
+            for k in 0..3 {
+                part.gradient[k].add_scaled(dc[k], m);
             }
         }
-        let mut parts = vec![Component { key: vec![0; self.generators.len()], frequency: 0.0, value, gradient }];
-        for (l, b) in beams.iter().enumerate() {
-            let a = &amplitude[l];
-            parts.push(Component {
-                key: self.unit(l),
-                frequency: rest(l),
-                value: b.coupling.scaled(a.value),
-                gradient: std::array::from_fn(|k| b.coupling.scaled(a.gradient[k])),
-            });
-        }
-        let a = &amplitude[tw];
-        let [_, (key, frequency, counter)] = self.tweezer_couplings();
-        parts.push(Component {
-            key,
-            frequency: frequency + doppler[tw],
-            value: counter.scaled(a.value.conj()),
-            gradient: std::array::from_fn(|k| counter.scaled(a.gradient[k].conj())),
-        });
-        parts.extend(beating);
-        Components { parts, tweezer: (a.value, a.gradient) }
+        Components { parts, point }
     }
 
     /// The jump operators and the photons' wave numbers.

@@ -108,7 +108,7 @@ fn to_frame<'a>(parts: impl IntoIterator<Item = (&'a [i32], &'a Mat)>, theta: &[
         for r in 0..x.rows {
             for c in 0..x.cols {
                 if x[(r, c)] != C64::ZERO {
-                    let v: FrameKey = (0..theta[r].len()).map(|i| key.get(i).map_or(0, |&k| k as i64) - theta[r][i] + theta[c][i]).collect();
+                    let v: FrameKey = (0..theta[r].len()).map(|i| super::frame::element(key.get(i).map_or(0, |&k| k as i64), theta[r][i], theta[c][i])).collect();
                     entries.push((v, r, c));
                 }
             }

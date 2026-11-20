@@ -449,7 +449,8 @@ impl Frame {
     }
 
     /// The model's sectors (model/rs.rs `fold`): the fast part (n_φ, n_tw) of each state's θ_a and of each generator. An
-    /// element b ← a of a component with key c has the fast index Σ_l c_l generators_l + states_b − states_a. The carrier's
+    /// element b ← a of a component with key c has the fast index `Sectors::element`(Σ_l c_l generators_l, states_b,
+    /// states_a) = Σ_l c_l generators_l − states_b + states_a, the fast part of its frame vector (`element`). The carrier's
     /// n_ν is not carried: under the RWA only the tweezer's counter-rotating coupling holds the carrier, with n_tw ≠ 0.
     pub fn sectors(&self) -> Sectors {
         let pick = |n: [i64; 3]| [n[0], n[1]];
@@ -472,6 +473,22 @@ impl Frame {
 pub struct Sectors {
     pub states: Vec<[i64; 2]>,
     pub generators: Vec<[i64; 2]>,
+}
+
+/// One coordinate of the frame vector of the element b ← a (row b, column a) of a component at the vector c: c − θ_b +
+/// θ_a. In the frame ψ_a = e^{−iθ_a t} ψ̃_a, so H_ba e^{−ict} ψ_a enters i dψ̃_b/dt as H_ba e^{−i(c − θ_b + θ_a)t} ψ̃_a.
+/// The one definition: the assembly's on whole vectors (assemble.rs `to_frame`), the fold's on their fast parts
+/// (`Sectors::element`).
+pub fn element(c: i64, row: i64, col: i64) -> i64 {
+    c - row + col
+}
+
+impl Sectors {
+    /// The fast index of the element b ← a of a component whose key's fast part is `key`, `row` and `col` the fast parts
+    /// of b and a (`element` on the fast parts).
+    pub fn element(key: [i64; 2], row: [i64; 2], col: [i64; 2]) -> [i64; 2] {
+        std::array::from_fn(|i| element(key[i], row[i], col[i]))
+    }
 }
 
 /// The slow lattice: the Hermite basis of the slow remainders.
