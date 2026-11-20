@@ -1,5 +1,5 @@
 //! The selection's checks: the gate's measures and the two stages by hand; on the six scenes' requests the base
-//! against the prototype's whole-level selection (`choose_is_pysel`) and P at both points (`choose_s_p_passes_at_both_points`);
+//! against the prototype's whole-level selection (`choose_is_pysel`) and P at the three points (`choose_s_p_passes_at_the_three_points`);
 //! the cost.
 use super::*;
 
@@ -21,18 +21,18 @@ fn select_errors_by_hand() {
     assert!((e.force - 0.01).abs() < 1e-15);
     let lost = errors(&readouts(&[0.5, 0.5], f64::NAN, [0.0; 3]), &balanced, 2.0, Route::Krylov);
     assert!(lost.worst().is_nan());
-    let candidate = Candidate { keep: vec![0], centre: e, edge: lost };
+    let candidate = Candidate { keep: vec![0], centre: e.clone(), edge: lost, middle: e };
     assert!(candidate.worst().is_nan() && !candidate.within(1.0) && !candidate.passes());
 }
 
-/// The base takes the smallest candidate passing at both points, though a larger one passes too and a smaller one
-/// passes at one point only; the report keeps the candidates up to it, all whole-level ones, P the base. None passing
+/// The base takes the smallest candidate passing at the three points, though a larger one passes too and a smaller one
+/// passes at two points only; the report keeps the candidates up to it, all whole-level ones, P the base. None passing
 /// is an error.
 #[test]
 fn select_decide_takes_the_smallest_passing() {
     let candidates = vec![vec![0], vec![0, 1], vec![0, 1, 2]];
-    // R's relative error per (point, candidate): candidate 0 fails at the edge, 1 and 2 pass both
-    let error = |p: usize, c: usize| [[0.001, 0.005, 0.0], [0.03, 0.009, 0.0]][p][c];
+    // R's relative error per (point, candidate): candidate 0 fails at the edge, 1 and 2 pass at every point
+    let error = |p: usize, c: usize| [[0.001, 0.005, 0.0], [0.03, 0.009, 0.0], [0.002, 0.004, 0.0]][p][c];
     let out = decide(&candidates, 1.0, |p, c| {
         Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, |c| error(p, c)), [1.0, 0.0, 0.0]), Route::Krylov))
     })
@@ -49,30 +49,30 @@ fn select_decide_takes_the_smallest_passing() {
 
 /// A point without light is not judged (module documentation, # Points without light): with the edge dark its solve
 /// is never asked (the closure would panic), its errors read zero with no route, its reference none, the report says
-/// so; the base the first candidate passing at the centre (candidate 0 fails there, R 3 %). Both points dark: the
-/// first candidate, the ground states, with nothing solved.
+/// so; the base the first candidate passing at the centre and the middle (candidate 0 fails there, R 3 %). Every point
+/// dark: the first candidate, the ground states, with nothing solved.
 #[test]
 fn select_a_point_without_light_is_not_judged() {
     let candidates = vec![vec![0], vec![0, 1]];
     let error = |c: usize| [0.03, 0.005][c];
-    let out = decide_on(&candidates, [true, false], 1.0, |p, c| {
-        assert_eq!(p, 0, "the dark edge is solved");
+    let out = decide_on(&candidates, [true, false, true], 1.0, |p, c| {
+        assert_ne!(p, 1, "the dark edge is solved");
         Ok((readouts(&[1.0], 1.0 + c.map_or(0.0, error), [1.0, 0.0, 0.0]), Route::Krylov))
     })
     .unwrap();
     assert_eq!(out.keep, vec![0, 1]);
-    assert!(out.candidates.iter().all(|c| c.edge == PointError::unlit() && c.centre.route == Some(Route::Krylov)));
-    assert!(out.reference[0].is_some() && out.reference[1].is_none());
+    assert!(out.candidates.iter().all(|c| c.edge == PointError::unlit() && c.centre.route == Some(Route::Krylov) && c.middle.route == Some(Route::Krylov)));
+    assert!(out.reference[0].is_some() && out.reference[1].is_none() && out.reference[2].is_some());
     assert_eq!(out.notes(), vec!["边缘点无光、无唯一稳态，不判".to_string()]);
-    let dark = decide_on(&candidates, [false, false], 1.0, |_, _| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
+    let dark = decide_on(&candidates, [false; POINTS], 1.0, |_, _| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
     assert_eq!((dark.keep.clone(), dark.whole), (vec![0], 1));
-    assert_eq!(dark.notes().len(), 2);
+    assert_eq!(dark.notes().len(), POINTS);
     let refined = refine(dark, 1.0, &|_: usize, _: &[usize]| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
     assert_eq!(refined.keep, vec![0]);
 }
 
 /// The leave-one-out by hand (module documentation, # The decision, 2): the ground states and four excited states
-/// GROUND..GROUND + 4 the base; a set's R error (both points alike) 0.001 plus each missing state's own (0.001, 0.0015,
+/// GROUND..GROUND + 4 the base; a set's R error (every point alike) 0.001 plus each missing state's own (0.001, 0.0015,
 /// 0.0025, 0.02) plus 0.008 where the first two are both missing (the errors not additive: a pair that cancels).
 /// - e_i = 0.002, 0.0025, 0.0035, 0.021: the base less i, not the increment;
 /// - at 1 %: 0.001 + 0.002 + 0.0025 + 0.0035 = 0.009 ≤ 1 %, the fourth over; the three removed fail (0.014), the
@@ -155,10 +155,11 @@ fn requests() -> Vec<(&'static str, crate::request::Request)> {
         .collect()
 }
 
-/// The base (# The decision, 1) is the prototype's whole-level selection (PYEXP2, scratchpad pyexp2/sel_<scene>.json:
-/// PYSEL's procedure on each scene's own request, reqprec/req, its exports pysel/export2) on the six scenes' requests
+/// On the centre and the edge (`two_point_choice`: the prototype has those two points, not the middle), the base
+/// (# The decision, 1) is the prototype's whole-level selection (PYEXP2, scratchpad pyexp2/sel_<scene>.json: PYSEL's
+/// procedure on each scene's own request, reqprec/req, its exports pysel/export2) on the six scenes' requests
 /// (`V3D_REQ`, the selections' `V3D_SEL`): the levels' ranking and the base the same; the full reference's readouts at
-/// both points -- F⃗, R, the levels' populations, each as the gate reads it -- the prototype's to the solves' accuracy;
+/// the two points -- F⃗, R, the levels' populations, each as the gate reads it -- the prototype's to the solves' accuracy;
 /// and per whole-level candidate the gate's three errors, which differ by what the two models differ by (the prototype
 /// folds the model's fast elements in Liouville space, fold2; this one in Hilbert space by RS, model/rs.rs: the same
 /// second order, apart in the next, v3c2.status.md §2.3), said.
@@ -176,21 +177,21 @@ fn choose_is_pysel() {
     for (scene_name, scene) in six() {
         let python = json(sel.join(format!("sel_{scene_name}.json")));
         let labels = &scene.request.states;
-        // The ranking.
+        // The ranking on the two points.
         let points = points(&scene);
         let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(&scene, p)).collect();
-        let ours: Vec<String> = ranking(&scene, &references, &points).iter().map(|l| name(&labels[l[0]])).collect();
+        let ours: Vec<String> = ranking(&scene, &references[..2], &points[..2]).iter().map(|l| name(&labels[l[0]])).collect();
         let theirs: Vec<String> = python["ranking"].as_array().unwrap().iter().map(|r| format!("e{}{}", &r[0].as_str().unwrap()[1..], r[1])).collect();
         assert_eq!(ours, theirs, "{scene_name}: the ranking");
-        // The base.
-        let selection = choose(&scene).unwrap();
+        // The base on the two points.
+        let selection = two_point_choice(&scene).unwrap();
         let p = python["P"].as_u64().unwrap() as usize;
         eprintln!("{scene_name}: the base {} (prototype {p}), {} whole-level candidates, P {}, {:.2} s", selection.base().keep.len(), selection.whole, selection.keep.len(), selection.seconds);
         assert_eq!(selection.base().keep.len(), p, "{scene_name}: the base");
         // The full reference's readouts.
         let groups = levels(labels, &(0..STATES).collect::<Vec<_>>());
         for (i, point) in ["centre", "edge"].into_iter().enumerate() {
-            let (ours, route) = selection.reference[i].as_ref().expect("the six scenes' points are lit");
+            let (ours, route) = selection.reference[i].as_ref().expect("the six scenes' centre and edge are lit");
             let theirs = &python["full"][point];
             let f: Vec<f64> = theirs["F"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
             let r = theirs["R"].as_f64().unwrap();
@@ -222,31 +223,82 @@ fn choose_is_pysel() {
 /// A candidate's errors for the report: per point populations, R, F⃗.
 fn said(c: &Candidate) -> String {
     let e = |p: &PointError| format!("{:.2e} {:.2e} {:.2e}", p.populations, p.rate, p.force);
-    format!("centre {} | edge {}", e(&c.centre), e(&c.edge))
+    format!("centre {} | edge {} | middle {}", e(&c.centre), e(&c.edge), e(&c.middle))
 }
 
 fn as_json(c: &Candidate) -> serde_json::Value {
     let e = |p: &PointError| serde_json::json!({"populations": p.populations, "rate": p.rate, "force": p.force, "route": format!("{:?}", p.route)});
-    serde_json::json!({"keep": c.keep, "worst": c.worst(), "centre": e(&c.centre), "edge": e(&c.edge)})
+    serde_json::json!({"keep": c.keep, "worst": c.worst(), "centre": e(&c.centre), "edge": e(&c.edge), "middle": e(&c.middle)})
+}
+
+/// The selection on the centre and the edge alone -- the procedure before the middle point (the user's 2026-11-20) --:
+/// the ranking over those two, the middle not judged. For the prototype's comparison and for the three points'.
+fn two_point_choice(scene: &Scene) -> Result<Selection, String> {
+    let three = ThreePoints::new(scene);
+    let mut keep: Vec<usize> = (0..GROUND).collect();
+    let mut candidates = vec![keep.clone()];
+    for level in ranking(scene, &three.references[..2], &three.points[..2]) {
+        keep.extend(level);
+        keep.sort_unstable();
+        candidates.push(keep.clone());
+    }
+    let base = decide_on(&candidates, [three.lit[0], three.lit[1], false], three.k, |p, c| match c {
+        None => three.reference(p),
+        Some(c) => three.model(p, &candidates[c]),
+    })?;
+    refine(base, three.k, &|p: usize, keep: &[usize]| three.model(p, keep))
+}
+
+/// The two points beside the three (the user's change of 2026-11-20), for a scene and its three-point selection: the
+/// two-point P and its time; why the three points' P differs -- the ranking (the levels in order over two points and
+/// over three) or the middle point (the two-point P's errors there: populations, R, F⃗).
+fn beside(scene: &Scene, selection: Option<&Selection>) -> String {
+    let three = ThreePoints::new(scene);
+    let labels = &scene.request.states;
+    let order = |points: usize| -> Vec<String> {
+        ranking(scene, &three.references[..points], &three.points[..points]).iter().map(|l| name(&labels[l[0]])).collect()
+    };
+    let (two, three_ranked) = (order(2), order(POINTS));
+    let ranked = if two == three_ranked { "the ranking the same".to_string() } else { format!("the ranking {two:?} -> {three_ranked:?}") };
+    match two_point_choice(scene) {
+        Err(why) => format!("two points: refused ({why}); {ranked}"),
+        Ok(t) => {
+            let middle = if !three.lit[2] {
+                "dark".to_string()
+            } else {
+                match (three.reference(2), three.model(2, &t.keep)) {
+                    (Ok(r), Ok(m)) => {
+                        let e = errors(&m.0, &r.0, three.k, m.1);
+                        format!("{:.2e} {:.2e} {:.2e}{}", e.populations, e.rate, e.force, if e.worst() <= GATE { "" } else { " (over)" })
+                    }
+                    (Err(w), _) | (_, Err(w)) => format!("unsolved: {w}"),
+                }
+            };
+            let three_points = selection.map_or("refused".to_string(), |s| format!("base P {} -> P {} in {:.2} s", s.base().keep.len(), s.keep.len(), s.seconds));
+            format!("two points: base P {} -> P {} in {:.2} s, that P at the middle {middle}; three points: {three_points}; {ranked}", t.base().keep.len(), t.keep.len(), t.seconds)
+        }
+    }
 }
 
 /// PSTATE's acceptance on the six scenes' requests (`V3D_REQ`; `PSTATE_SCENE` one of them): `choose`'s P passes the
-/// gate at both points -- the one assertion. Reported: the base, every e_i, the removal, its prediction and its
-/// measured errors, the checks, the time by stages beside one two-point check of the base and the budget (one check
+/// gate at the three points -- the one assertion. Reported: the two points beside (`beside`); the base, every e_i, the
+/// removal, its prediction and its measured errors, the checks, the time by stages beside one check of the base and
+/// the budget (one check
 /// times one more than the explicit excited states); for the user's choice of a gate (the code's stays `GATE`), P at
 /// 2 % and 5 % -- the whole-level base at that gate with its own leave-one-out and descent, and the descent from the
 /// 1 % base (PFINE predict.py's). With `PSTATE_OUT` a directory, each scene's numbers to <scene>.json there.
 #[test]
-fn choose_s_p_passes_at_both_points() {
+fn choose_s_p_passes_at_the_three_points() {
     let out = std::env::var("PSTATE_OUT").ok().map(std::path::PathBuf::from);
     for (scene_name, scene) in six() {
         let labels = &scene.request.states;
         let named = |states: &[usize]| states.iter().map(|&s| labels[s].clone()).collect::<Vec<_>>();
         let selection = choose(&scene).unwrap();
         let p = selection.candidates.last().unwrap();
-        assert!(p.keep == selection.keep && p.passes(), "{scene_name}: P {} does not pass at both points: {}", selection.keep.len(), said(p));
+        assert!(p.keep == selection.keep && p.passes(), "{scene_name}: P {} does not pass at the three points: {}", selection.keep.len(), said(p));
+        eprintln!("{scene_name}: {}", beside(&scene, Some(&selection)));
         let base = selection.base();
-        let two = TwoPoints::new(&scene);
+        let two = ThreePoints::new(&scene);
         let model = |p: usize, keep: &[usize]| two.model(p, keep);
         let clock = Instant::now();
         let _ = pair(&base.keep, two.lit, &model).unwrap();
@@ -589,10 +641,11 @@ fn the_first_checkpoint_in_pairs() {
     }
 }
 
-/// `choose` on every reference scene (the coordinator's integration check before the merge; ignored): each request of
+/// `choose` on every reference scene (the coordinator's integration check before the merge; ignored; the two points
+/// beside the three, `beside`): each request of
 /// the reference set (refs/scenes/*.json, not its *.scene.json app scenes nor the manifest; read as the model's tests
 /// read it, model/testing.rs `scene`) and the six scenes' own requests (`V3D_REQ`). The one assertion: on every one,
-/// `choose` gives a P that passes the gate at both points (`choose_s_p_passes_at_both_points`'s); a scene whose
+/// `choose` gives a P that passes the gate at the three points (`choose_s_p_passes_at_the_three_points`'s); a scene whose
 /// `choose` fails, errs or panics is a failure, all of them said at the end. Each scene's base P → P, the states left
 /// out, the predicted and the measured error, the checks, `choose`'s wall clock.
 #[test]
@@ -621,8 +674,10 @@ fn choose_on_every_reference_scene() {
     for (name, read) in &all {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(crate::request::Request, Selection), String> {
             let request = read();
-            let selection = choose(&Scene::new(&request)?)?;
-            Ok((request, selection))
+            let scene = Scene::new(&request)?;
+            let selection = choose(&scene);
+            eprintln!("{name}: {}", beside(&scene, selection.as_ref().ok()));
+            Ok((request, selection?))
         }));
         let (request, selection) = match outcome {
             Ok(Ok(s)) => s,
@@ -647,7 +702,7 @@ fn choose_on_every_reference_scene() {
             if passes { "" } else { " -- DOES NOT PASS" }
         );
         if !passes {
-            failed.push(format!("{name}: P {} does not pass at both points: {}", selection.keep.len(), said(p)));
+            failed.push(format!("{name}: P {} does not pass at the three points: {}", selection.keep.len(), said(p)));
         }
     }
     eprintln!("{} scenes in {:.1} s; {} failed", all.len(), clock.elapsed().as_secs_f64(), failed.len());
@@ -655,7 +710,7 @@ fn choose_on_every_reference_scene() {
 }
 
 /// Why no whole-level candidate passes (a diagnosis, ignored; `PSTATE_REFS` reference scenes by name, comma-separated):
-/// per scene the frame (its fast frequencies, every state's and generator's fast sector) and at both points the full
+/// per scene the frame (its fast frequencies, every state's and generator's fast sector) and at the three points the full
 /// reference's readouts -- the levels, R and its channels, F⃗, the force's scale kR -- and every whole-level
 /// candidate's, the largest (all 32 kept) included, each with the gate's three measures and the numbers they divide;
 /// and `choose`'s outcome.
@@ -666,14 +721,14 @@ fn why_no_candidate_passes() {
     for name in names.split(',') {
         let request = crate::model::testing::scene(name);
         let scene = Scene::new(&request).unwrap();
-        let two = TwoPoints::new(&scene);
+        let two = ThreePoints::new(&scene);
         let labels = &request.states;
         match choose(&scene) {
             Ok(s) => eprintln!("{name}: choose: base P {} -> P {}, measured {:.3e}; {:?}", s.base().keep.len(), s.keep.len(), s.candidates.last().unwrap().worst(), s.notes()),
             Err(why) => eprintln!("{name}: choose refused: {why}"),
         }
         eprintln!("{name}: generators (rad/µs) {:?}; tweezer beam {}", scene.generators.iter().map(|g| g.frequency).collect::<Vec<_>>(), request.trap_beam);
-        for (p, point) in ["centre", "edge"].into_iter().enumerate() {
+        for (p, point) in ["centre", "edge", "middle"].into_iter().enumerate() {
             let frame = &two.frames[p];
             let sectors = frame.sectors();
             eprintln!("  {point}: frame fast {:?}; generators' sectors {:?}", frame.fast, sectors.generators);
