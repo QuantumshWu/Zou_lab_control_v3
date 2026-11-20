@@ -458,6 +458,11 @@ impl Class {
     }
 }
 
+/// The nodes' work an evaluation of the strip's V(y) costs at most (`Picture::strip`): its three points' two products by
+/// R, 2n² complex multiply-adds a point, against a node's product by R and its sums, no fewer than 2n² (step.rs
+/// `Sums`): three.
+const EVALUATION: f64 = 3.0;
+
 /// A generator along a step's path (module documentation): filled by the caller with its static group -- Ĥ₀ at the
 /// middle (`base`) and the group at the two ends (`ends`: at −h, at +h) -- and its exact tones (`beating`, `beats`),
 /// then prepared (`prepare`) and launched from a state at a time of the step (`launch`: the step's start state, and a
@@ -649,7 +654,7 @@ fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, 
         return (hops_converge.then_some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * x.min(1.0) + 2.0 * coupled * r * x.powi(3);
+    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * linalg::smaller(x, 1.0) + 2.0 * coupled * r * x.powi(3);
     let hops = x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0) * (2.0 * decay).exp();
     let (light, cube) = (4.0 / 15.0 * second * (x * x), x.powi(3));
     match (r < 1.0, hops_converge) {
@@ -674,7 +679,7 @@ fn hop_size([slope, curvature, constant]: [f64; 3]) -> f64 {
 /// most: the least T with x^T/T! times the size within the unit round-off, the size no more than one -- the terms from T
 /// on are within the round-off of the state the integral acts on, or of its own first term where that is more.
 fn series(x: f64, size: f64) -> usize {
-    let (mut terms, mut next) = (1, x * size.min(1.0));
+    let (mut terms, mut next) = (1, x * linalg::smaller(size, 1.0));
     while next > UNIT_ROUNDOFF {
         terms += 1;
         next *= x / terms as f64;
@@ -893,7 +898,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
                 let omega = if c == 0 { between } else { C64::new(between.re + beat, between.im) };
                 let turn = omega.abs();
                 let (k, t) = (row * n + column, column * n + row);
-                let r = if turn > 0.0 { size(&classes[c], k, omega).max(size(&classes[partner], t, -omega)) } else { 0.0 };
+                let r = if turn > 0.0 { linalg::larger(size(&classes[c], k, omega), size(&classes[partner], t, -omega)) } else { 0.0 };
                 let decay = omega.im.abs() * h.abs();
                 // The pair's hop exponent at its balancing similarity, its two ways' geometric mean with half the hop's
                 // growth; a state's own entry commutes with itself: its hops' series is its first term.
@@ -1580,7 +1585,7 @@ impl Picture {
     /// curvatures, D₂(t) = C + tA + t²B at the farther end of the hop from the middle, times the hopped entries' largest
     /// growth in the interaction picture over the step (`grown`, `followed`).
     fn moved(&self, u: f64, w: f64) -> f64 {
-        let far = u.abs().max((u + w).abs());
+        let far = linalg::larger(u.abs(), (u + w).abs());
         (self.slopes[0] + far * self.slopes[1] + far * far * self.slopes[2]) * w.abs() * self.grown
     }
 
@@ -1721,7 +1726,7 @@ impl Picture {
         let work = self.work;
         let mut m = [C64::ZERO; crate::model::STATES];
         m[..n].copy_from_slice(&self.path[..n]);
-        let size_of = norm(&m[..n]).max(f64::MIN_POSITIVE);
+        let size_of = linalg::larger(norm(&m[..n]), f64::MIN_POSITIVE);
         let mut counted = 0.0;
         let (mut dropped, mut light) = (0.0, 0.0);
         if self.followed {
@@ -1737,7 +1742,7 @@ impl Picture {
                     let k = a * n + b;
                     if group.fast[k] {
                         let omega = (self.lambda[a] - self.lambda[b]).abs();
-                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * width.min(2.0 / omega) * m[b].abs();
+                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * linalg::smaller(width, 2.0 / omega) * m[b].abs();
                     }
                 }
                 total += row * row;
@@ -1780,7 +1785,7 @@ impl Picture {
             let (first, second) = (&halves[..size], &halves[size..2 * size]);
             let (a, b) = (apply(first, &x[..n]), apply(second, &x[..n]));
             let (ba, ab) = (apply(second, &a[..n]), apply(first, &b[..n]));
-            hopped += 0.5 * ba[..n].iter().zip(&ab[..n]).map(|(p, q)| (*p - *q).norm_sqr()).sum::<f64>().sqrt() / norm(&x[..n]).max(f64::MIN_POSITIVE);
+            hopped += 0.5 * ba[..n].iter().zip(&ab[..n]).map(|(p, q)| (*p - *q).norm_sqr()).sum::<f64>().sqrt() / linalg::larger(norm(&x[..n]), f64::MIN_POSITIVE);
             self.product = halves;
             counted += (4 * size) as f64;
         }
@@ -1877,7 +1882,8 @@ impl Picture {
     /// (ln N(σ) − ln(1 − O(σ)) + ln 1/u)/σ, at the root of its derivative (Newton within a bracket: the root is one, the
     /// function's numerator convex). A tone's forms are summed at its beat and a followed class moves the frequencies by
     /// its beat: V with the largest beat and the followed beats' spread. Where the ringing weighs as much as the diagonal,
-    /// O(0) ≥ 1, the series has no sum: 1/N by its analytic strip about the real axis (below). Its count: the
+    /// O(0) ≥ 1, the series has no sum; there, and beside a series whose V is worth more nodes than it costs, the
+    /// quotient as F times 1/N on the state's own continuation (`strip`), the less of the two. Its count: the
     /// pairs' weights and per Newton step the sums with their two derivatives, an exponential and six multiply-adds an
     /// item, counted as seven.
     fn quotient_from(&mut self, from: f64) -> f64 {
@@ -1904,7 +1910,6 @@ impl Picture {
         let (mut numerator, mut ringing) = (std::mem::take(&mut self.numerator), std::mem::take(&mut self.ringing));
         numerator.clear();
         ringing.clear();
-        let mut diagonal = [(0.0, 0.0); crate::model::STATES];
         for a in (0..n).filter(|&a| self.held[a] && m[a] > 0.0) {
             for b in (a..n).filter(|&b| self.held[b] && m[b] > 0.0) {
                 let line = |s: f64, (d, slope): (f64, f64)| (m[a].ln() + m[b].ln() + (rates[a] + rates[b]) * s - d.ln(), rates[a] + rates[b] - slope / d);
@@ -1917,12 +1922,9 @@ impl Picture {
                     let t = (f1 - s1 * width - f0) / (s0 - s1);
                     f0 + s0 * t
                 };
-                let (weight, nu) = (top.min(0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
+                let (weight, nu) = (linalg::smaller(top, 0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
                 let twice = if a == b { 1.0 } else { 2.0 };
                 numerator.push((twice * weight, nu));
-                if a == b {
-                    diagonal[a] = (weight, nu);
-                }
                 if a != b {
                     let o = self.overlaps[a * n + b];
                     if o > 0.0 {
@@ -1945,36 +1947,7 @@ impl Picture {
             let (low, high) = self.classes.iter().filter(|class| class.followed && self.moving).fold((0.0_f64, 0.0_f64), |(low, high), class| (linalg::smaller(low, class.beat), linalg::larger(high, class.beat)));
             high - low
         };
-        let v = if total >= 1.0 {
-            // The series has no sum: 1/N by its analytic strip. N(u + iy) − N(u) = Σ_ab (R†R)_ab d_a* d_b (e^{z_ab y} − 1)
-            // with |z_ab| the pair's frequency (its rate along the imaginary time), within D Σ_ab p_ab' (e^{ν_ab y} − 1)
-            // over every pair, the diagonal's at its weight and twice its decay rate, the ringing's at the overlap's
-            // weight S(y); and N(u) ≥ c D on the piece, c the least N/D the state shows at the piece's start, middle and
-            // end (a point estimate, as the weights are). So 1/N is analytic where S(y) is below c -- the strip's half
-            // y* where it reaches it --, and on its half y₀ = y*/2 the quotient is within M = Σ p e^{νy₀}/(c − S(y₀)) of
-            // the forms' scale: its spectrum's tail beyond ν within M e^{−y₀ν}, at the round-off at (ln 1/u + ln M)/y₀.
-            let width = (self.half - from).abs();
-            let mut x = [C64::ZERO; crate::model::STATES];
-            let mut c = f64::INFINITY;
-            for (s, u) in [(0.0, from), (0.5 * width, from + 0.5 * (self.half - from)), (width, self.half)] {
-                self.at(u, &mut x[..n]);
-                let d: f64 = (0..n).filter(|&a| self.held[a]).map(|a| m[a] * m[a] * (2.0 * rates[a] * s).exp()).sum();
-                c = linalg::smaller(c, norm(&x[..n]).powi(2) / d.max(f64::MIN_POSITIVE));
-            }
-            let rise = |y: f64| diagonal[..n].iter().map(|&(p, nu)| p * (nu * y).exp_m1()).sum::<f64>() + ringing.iter().map(|&(p, nu)| p * (nu * y).exp_m1()).sum::<f64>();
-            let (mut lo, mut hi) = (0.0_f64, 1.0 / fastest.max(f64::MIN_POSITIVE));
-            while rise(hi) < c && hi.is_finite() {
-                (lo, hi) = (hi, 2.0 * hi);
-            }
-            for _ in 0..60 {
-                let mid = 0.5 * (lo + hi);
-                if rise(mid) < c { lo = mid } else { hi = mid }
-            }
-            count += (120 * (numerator.len() + ringing.len()) + 3 * (2 + n) * n) as f64;
-            let y = 0.5 * lo;
-            let scale = numerator.iter().map(|&(p, nu)| p * (nu * y).exp()).sum::<f64>() / (c - rise(y)).max(f64::MIN_POSITIVE);
-            if c > 0.0 && y > 0.0 { (log + scale.max(1.0).ln()) / y } else { 2.0 / std::f64::consts::PI * log * fastest }
-        } else if ringing.is_empty() {
+        let v = if ringing.is_empty() {
             // No ringing: the frequency above which the numerator's terms weigh within the round-off.
             numerator.sort_by(|x, y| y.1.total_cmp(&x.1));
             let mut above = 0.0;
@@ -1983,47 +1956,188 @@ impl Picture {
                 above > UNIT_ROUNDOFF
             }).map_or(0.0, |&(_, nu)| nu)
         } else {
-            // F(σ) = ln N − ln(1 − O) + ln 1/u, φ(σ) = σF′ − F, φ′ = σF″ > 0; V = F(σ*)/σ* at φ(σ*) = 0.
-            let f = |sigma: f64| {
-                let ([w, w1, w2], [o, o1, o2]) = (sums(&numerator, sigma), sums(&ringing, sigma));
-                let rest = 1.0 - o;
-                if !(rest > 0.0) {
-                    return None;
-                }
-                let value = w.ln() - rest.ln() + log;
-                let first = w1 / w + o1 / rest;
-                let second = w2 / w - (w1 / w).powi(2) + o2 / rest + (o1 / rest).powi(2);
-                Some((value, first, second))
-            };
-            let (mut lo, mut hi) = (0.0_f64, f64::INFINITY);
-            let mut sigma = 1.0 / fastest.max(f64::MIN_POSITIVE);
-            let mut best = f64::INFINITY;
-            for _ in 0..64 {
-                count += (7 * (numerator.len() + ringing.len())) as f64;
-                let Some((value, first, second)) = f(sigma) else {
-                    hi = sigma;
-                    sigma = 0.5 * (lo + hi);
-                    continue;
+            // The ringing's series where it has a sum (Chernoff's bound), and the quotient as F times 1/N on the
+            // state's own continuation (`strip`) where it has none or where the series' V is worth more nodes than
+            // the strip costs: the less of the two.
+            let series = if total < 1.0 {
+                // F(σ) = ln N − ln(1 − O) + ln 1/u, φ(σ) = σF′ − F, φ′ = σF″ > 0; V = F(σ*)/σ* at φ(σ*) = 0.
+                let f = |sigma: f64| {
+                    let ([w, w1, w2], [o, o1, o2]) = (sums(&numerator, sigma), sums(&ringing, sigma));
+                    let rest = 1.0 - o;
+                    if !(rest > 0.0) {
+                        return None;
+                    }
+                    let value = w.ln() - rest.ln() + log;
+                    let first = w1 / w + o1 / rest;
+                    let second = w2 / w - (w1 / w).powi(2) + o2 / rest + (o1 / rest).powi(2);
+                    Some((value, first, second))
                 };
-                best = linalg::smaller(best, value / sigma);
-                let phi = sigma * first - value;
-                if phi < 0.0 {
-                    lo = sigma;
-                } else {
-                    hi = sigma;
+                // Newton within the bracket, a bisection where its step leaves it, doubling until a bracket stands; until the
+                // step, once bracketed, stops shrinking (the round-off's floor). Every σ's value bounds V: the least is taken.
+                let (mut lo, mut hi) = (0.0_f64, f64::INFINITY);
+                let mut sigma = 1.0 / linalg::larger(fastest, f64::MIN_POSITIVE);
+                let (mut best, mut last) = (f64::INFINITY, f64::INFINITY);
+                loop {
+                    count += (7 * (numerator.len() + ringing.len())) as f64;
+                    let next = match f(sigma) {
+                        None => {
+                            hi = sigma;
+                            0.5 * (lo + hi)
+                        }
+                        Some((value, first, second)) => {
+                            best = linalg::smaller(best, value / sigma);
+                            let phi = sigma * first - value;
+                            if phi < 0.0 {
+                                lo = sigma;
+                            } else {
+                                hi = sigma;
+                            }
+                            let next = sigma - phi / (sigma * second);
+                            if next > lo && next < hi { next } else if hi.is_finite() { 0.5 * (lo + hi) } else { 2.0 * sigma }
+                        }
+                    };
+                    let step = (next - sigma).abs();
+                    if hi.is_finite() {
+                        if !(step < last) {
+                            break;
+                        }
+                        last = step;
+                    }
+                    sigma = next;
                 }
-                let next = sigma - phi / (sigma * second);
-                let next = if next > lo && next < hi { next } else if hi.is_finite() { 0.5 * (lo + hi) } else { 2.0 * sigma };
-                if (next - sigma).abs() <= 1e-3 * sigma {
-                    break;
-                }
-                sigma = next;
-            }
-            best
+                best
+            } else {
+                f64::INFINITY
+            };
+            let (strip, work) = self.strip(from, &mut numerator, fastest, log, series);
+            count += work;
+            linalg::smaller(series, strip)
         };
         self.work += count;
         (self.numerator, self.ringing) = (numerator, ringing);
         linalg::larger(v + shift, 0.0)
+    }
+
+    /// The quotient's bandwidth as F times 1/N (`quotient_from`): ∞ where it is not taken. q = F/N, F an exponential
+    /// sum of the numerator's frequencies whose coefficients sum to at most P D(s) of the forms' scale at s (P the
+    /// numerator's weights, D(s) the diagonal) and that holds nothing beyond B_F, the frequency above which its items
+    /// weigh within the round-off of the quotient's scale (their weights times D/N); 1/N analytic where N has no zero.
+    /// So q's spectrum beyond B_F + ν is within P D(s) times 1/N's beyond ν. N's continuation is N(s + iy) =
+    /// ⟨x(s − iy), x(s + iy)⟩, x(s ± iy) = R e^{±yΛ}d(s) (d(s) = e^{−iΛs}m from the launch); on the strip where it stays
+    /// within N(s) of N(s), |1/N(s + iy)| ≤ 1/(N(s) − |N(s + iy) − N(s)|), and 1/N's spectrum beyond ν is within that
+    /// times e^{−yν}. Hence V(y) = B_F + (ln 1/u + ln max_s P D(s)/(N(s) − |N(s + iy) − N(s)|))/y, the least over the
+    /// strip's y (V is unbounded at both its ends). N and its continuation are the state's own, exactly -- products by R,
+    /// the sum's cancellation in, where a bound term by term weighs every pair at its own size (after a jump the
+    /// eigen-coefficients cancel to a thousandth of their squares' sum, and the ringing's series has no sum) --, at the
+    /// piece's start, middle and end (a point estimate, as the weights are), the eigenvalues taken about the middle of
+    /// their frequencies (a common shift cancels in both).
+    ///
+    /// What it costs is weighed against what it can save, in nodes: V is worth |w|/4 nodes a unit (m ≈ κ/2, κ = V|w|/2),
+    /// an evaluation of V(y) costs `EVALUATION`. Beside a `series` that holds (the ringing's series has a sum) it is
+    /// taken only where that V over B_F is worth more than the search's first three evaluations; the search -- from
+    /// y = 1/fastest, halved to where the strip holds and on to three points about the least, then golden sections --
+    /// stops where V falls by less than an evaluation's worth. Returns V and its count: the three points' products,
+    /// 4n² multiply-adds each, and per evaluation its points' two products and 2n exponentials.
+    fn strip(&self, from: f64, numerator: &mut [(f64, f64)], fastest: f64, log: f64, series: f64) -> (f64, f64) {
+        let n = self.n;
+        let width = self.half - from;
+        let worth = 0.25 * width.abs();
+        let pays = |gain: f64| gain * worth > EVALUATION;
+        if series.is_finite() && !pays(series / 3.0) {
+            return (f64::INFINITY, 0.0);
+        }
+        let (low, high) = (0..n).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| (linalg::smaller(lo, self.lambda[a].re), linalg::larger(hi, self.lambda[a].re)));
+        let centre = C64::real(0.5 * (low + high));
+        let r = &self.basis.vectors;
+        let (lambda, path, held) = (&self.lambda, &self.path, &self.held);
+        let points = [0.0, 0.5 * width, width].map(|s| {
+            let mut d = [C64::ZERO; crate::model::STATES];
+            for a in 0..n {
+                d[a] = path[a] * (C64::new(0.0, -s) * lambda[a]).exp();
+            }
+            let diagonal: f64 = (0..n).filter(|&a| held[a]).map(|a| d[a].norm_sqr()).sum();
+            let norm: f64 = (0..n).map(|i| (0..n).fold(C64::ZERO, |p, a| p + r[(i, a)] * d[a]).norm_sqr()).sum();
+            (d, diagonal, norm)
+        });
+        let mut count = (3 * 4 * n * n) as f64;
+        if !points.iter().all(|&(_, _, norm)| norm > 0.0) {
+            return (f64::INFINITY, count);
+        }
+        let weight: f64 = numerator.iter().map(|&(p, _)| p).sum();
+        let inflation = points.iter().fold(0.0_f64, |most, &(_, diagonal, norm)| linalg::larger(most, diagonal / norm));
+        // B_F: the numerator's items from the highest frequency down, until they weigh more than the round-off.
+        numerator.sort_by(|x, y| y.1.total_cmp(&x.1));
+        let mut above = 0.0;
+        let band = numerator.iter().find(|&&(p, _)| {
+            above += p * inflation;
+            above > UNIT_ROUNDOFF
+        }).map_or(0.0, |&(_, nu)| nu);
+        if series.is_finite() && !pays((series - band) / 3.0) {
+            return (f64::INFINITY, count);
+        }
+        if !(fastest > 0.0 && fastest.is_finite()) {
+            return (band, count);
+        }
+        let mut evaluations = 0usize;
+        let mut at = |y: f64| -> f64 {
+            evaluations += 1;
+            let mut most = 0.0_f64;
+            for (d, diagonal, norm) in &points {
+                let (mut plus, mut minus) = ([C64::ZERO; crate::model::STATES], [C64::ZERO; crate::model::STATES]);
+                for a in 0..n {
+                    let e = ((lambda[a] - centre) * y).exp();
+                    (plus[a], minus[a]) = (d[a] * e, d[a] / e);
+                }
+                let mut continued = C64::ZERO;
+                for i in 0..n {
+                    let (mut p, mut q) = (C64::ZERO, C64::ZERO);
+                    for a in 0..n {
+                        (p, q) = (p + r[(i, a)] * plus[a], q + r[(i, a)] * minus[a]);
+                    }
+                    continued += q.conj() * p;
+                }
+                let within = norm - (continued - C64::real(*norm)).abs();
+                most = linalg::larger(most, if within > 0.0 { weight * diagonal / within } else { f64::INFINITY });
+            }
+            band + (log + most.ln()) / y
+        };
+        let falls = |a: f64, b: f64| a < b && pays(b - a);
+        let mut y = 1.0 / fastest;
+        let mut fy = at(y);
+        while fy == f64::INFINITY && y > 0.0 {
+            y *= 0.5;
+            fy = at(y);
+        }
+        let (mut lo, mut hi) = (0.5 * y, 2.0 * y);
+        let mut f = [at(lo), fy, at(hi)];
+        while falls(f[0], f[1]) {
+            (hi, y) = (y, lo);
+            lo = 0.5 * y;
+            f = [at(lo), f[0], f[1]];
+        }
+        while falls(f[2], f[1]) {
+            (lo, y) = (y, hi);
+            hi = 2.0 * y;
+            f = [f[1], f[2], at(hi)];
+        }
+        let golden = 0.5 * (5.0_f64.sqrt() - 1.0);
+        let (mut c, mut e) = (hi - golden * (hi - lo), lo + golden * (hi - lo));
+        let (mut fc, mut fe) = (at(c), at(e));
+        let mut best = f.into_iter().chain([fc, fe]).fold(f64::INFINITY, linalg::smaller);
+        while pays((fc - fe).abs()) && hi - lo > UNIT_ROUNDOFF * hi {
+            if fc < fe {
+                (hi, e, fe) = (e, c, fc);
+                c = hi - golden * (hi - lo);
+                fc = at(c);
+            } else {
+                (lo, c, fc) = (c, e, fe);
+                e = lo + golden * (hi - lo);
+                fe = at(e);
+            }
+            best = linalg::smaller(best, linalg::smaller(fc, fe));
+        }
+        count += (evaluations * 3 * (8 * n * n + 20 * n)) as f64;
+        (best, count)
     }
 
     /// The frame's state at the time u (from the middle; from the launch on) through the decomposition (module
@@ -2086,7 +2200,7 @@ pub(crate) mod tests {
         let mut pairs = Vec::new();
         for a in 0..n {
             for b in a + 1..n {
-                let size = |j: usize| slopes[j][a * n + b].abs().max(slopes[j][b * n + a].abs());
+                let size = |j: usize| linalg::larger(slopes[j][a * n + b].abs(), slopes[j][b * n + a].abs());
                 pairs.push([(picture.lambda[a] - picture.lambda[b]).abs() * h, size(0) * h * h, size(1) * h * h * h]);
             }
         }
@@ -2461,7 +2575,7 @@ pub(crate) mod tests {
                 let start: Vec<C64> = (0..n).map(|state| if state < 2 { start[state] } else { C64::ZERO }).collect();
                 picture.launch(-half, &start);
                 for (place, times) in [&[half][..], &[-0.5 * half, 0.5 * half][..]].into_iter().enumerate() {
-                    worst[place] = worst[place].max(errors(&mut picture, &base, &a, &b, half, &start, times, 20_000));
+                    worst[place] = linalg::larger(worst[place], errors(&mut picture, &base, &a, &b, half, &start, times, 20_000));
                 }
             }
             found[treatment] = Some(worst);
@@ -2731,7 +2845,7 @@ pub(crate) mod tests {
             for (k, (c, a)) in class.change[0].iter().zip(&class.change[1]).enumerate() {
                 let between = picture.lambda[k / n] - picture.lambda[k % n];
                 let (x, s) = (C64::new(between.re + class.beat, between.im).abs() * h, (c.abs() + a.abs() * h) * h);
-                sum += if class.fast[k] { 2.0 * s.powi(3) * x.min(1.0) / x.powi(3) } else { x * s * s / 3.0 };
+                sum += if class.fast[k] { 2.0 * s.powi(3) * linalg::smaller(x, 1.0) / x.powi(3) } else { x * s * s / 3.0 };
             }
         }
         sum
@@ -2961,7 +3075,7 @@ pub(crate) mod tests {
                 assert!(e_pair > apart, "at νh = 2πk two steps through the nodes err by {e_pair:e}, and differ from their companion by {apart:e}");
                 blind = linalg::smaller(blind, e_pair / apart);
             }
-            (worst, nearest) = (worst.max(e_tone / e_hermitian), nearest.min(e_nodes / e_tone));
+            (worst, nearest) = (linalg::larger(worst, e_tone / e_hermitian), linalg::smaller(nearest, e_nodes / e_tone));
             cases += 1;
         }
         eprintln!("{cases} random decays: as tones at least {nearest:.0} times better than through the nodes, and at most {worst:.2} times the Hermitian tones of their members; at νh = 2πk two steps through the nodes erred at least {blind:.1} times their difference from the companion");
@@ -3051,8 +3165,8 @@ pub(crate) mod tests {
                         assert!(taken || y < std::f64::consts::PI, "y {y}: through the nodes beyond π");
                         for (k, found) in [chosen, before].into_iter().enumerate() {
                             sums[k] += found;
-                            worse[k] += usize::from(found > 1.5 * e_tone.min(e_nodes) + 1e-13);
-                            most[k] = most[k].max(found / e_tone.min(e_nodes).max(1e-13));
+                            worse[k] += usize::from(found > 1.5 * linalg::smaller(e_tone, e_nodes) + 1e-13);
+                            most[k] = linalg::larger(most[k], found / linalg::larger(linalg::smaller(e_tone, e_nodes), 1e-13));
                         }
                         statics += usize::from(!taken);
                         cases += 1;

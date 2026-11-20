@@ -96,7 +96,7 @@ mod tests {
     /// the sum, so 53 terms further one is below the sum's round-off. A term costs three operations (the ratio, the
     /// product, the sum): the sum's rounding is within γ of three times its terms (`units::rounding`).
     fn terms(s: f64, x: f64) -> usize {
-        (2. * x - s).ceil().max(0.) as usize + 54
+        crate::linalg::larger((2. * x - s).ceil(), 0.) as usize + 54
     }
     /// The round-offs that x^s e^{−x} = e^{s ln x − x} carries from its exponent: the logarithm's and the product's on
     /// s ln x, the difference's on the exponent, each a round-off of the result per unit of its size, and the exponential's
@@ -296,8 +296,8 @@ mod tests {
                 let within = if expanded { rounding(24) } else { rounding(6 * n + 12) };
                 assert!(node <= rounding(8) && weight <= within, "n {n}, node {}: x {x} off by {:.1} u, w {w:e} by {:.1} u relative ({})", i + 1, node / u, weight / u, if expanded { "expansion" } else { "recurrence" });
                 assert!((x - xo).abs() <= rounding(8) + rounding(2), "n {n}, node {}: {x} against the recurrence's {xo}", i + 1);
-                worst = [worst[0].max(node / u), if expanded { worst[1].max(weight / u) } else { worst[1] }, if expanded { worst[2] } else { worst[2].max(weight / u) }];
-                before = [before[0].max(Twice::of(xo).add(rx.neg()).0.abs() / u), before[1].max(Twice::of(wo).add(rw.neg()).0.abs() / (rw.0 * u))];
+                worst = [crate::linalg::larger(worst[0], node / u), if expanded { crate::linalg::larger(worst[1], weight / u) } else { worst[1] }, if expanded { worst[2] } else { crate::linalg::larger(worst[2], weight / u) }];
+                before = [crate::linalg::larger(before[0], Twice::of(xo).add(rx.neg()).0.abs() / u), crate::linalg::larger(before[1], Twice::of(wo).add(rw.neg()).0.abs() / (rw.0 * u))];
             }
             eprintln!("n {n}: node {:.2} u, weight {:.1} u (expansion), {:.1} u (recurrence); the rule before: node {:.2} u, weight {:.1} u", worst[0], worst[1], worst[2], before[0], before[1]);
         }

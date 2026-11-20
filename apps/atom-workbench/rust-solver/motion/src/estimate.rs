@@ -163,7 +163,7 @@ pub fn tail_among(looks: f64) -> f64 {
 /// output's time, so the run goes on past its last output by half a period, and by no more than its own length
 /// (solve.rs `Plan`).
 pub fn half_window(frequency: f64, t: f64) -> f64 {
-    (0.5 * TAU / frequency).min(t)
+    crate::linalg::smaller(0.5 * TAU / frequency, t)
 }
 
 /// n̄ of a lab axis of frequency ω > 0 (rad/µs; module documentation): (ħ/m)Σ⟨κ²⟩ (rad/µs) summed over `atoms` atoms, over
@@ -411,7 +411,7 @@ pub struct Scales {
 pub fn semiclassical(scattered: [f64; 2], scales: &Scales) -> f64 {
     let recoil = if scattered[0] > 0. { scales.hbar_over_mass * scattered[1] / scattered[0] / KT_PER_UK } else { 0. };
     let zero_point = scales.frequencies.iter().sum::<f64>() / (6. * KT_PER_UK);
-    (SUB_DOPPLER_RECOILS * recoil).max(zero_point)
+    crate::linalg::larger(SUB_DOPPLER_RECOILS * recoil, zero_point)
 }
 
 /// T's allowance at a total T (µK) of the semiclassical scale `scale` (µK), relative to T (solve.rs, # T's allowance):
@@ -472,7 +472,8 @@ impl Estimate {
     /// one: what is shown is probabilities, none of which errs by more than its range (an interval unread, or wider,
     /// says no more than that, and so does one that is no number: `linalg::larger`).
     pub fn shown_statistics(&self) -> f64 {
-        crate::linalg::larger(self.shown_interval(), unseen(self.trajectories)).min(1.)
+        let interval = crate::linalg::larger(self.shown_interval(), unseen(self.trajectories));
+        if interval.is_nan() { 1. } else { crate::linalg::smaller(interval, 1.) }
     }
     /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
     /// is not read, or is none (atoms that do not move: no error is relative to it).

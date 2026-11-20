@@ -1,7 +1,7 @@
 //! The pipeline: request, run, pilot, step's check, batches, checkpoints, result (SPEC §3, §5, §9).
 //!
 //! # The pipeline
-//! 1. The request's checks; the initial components; the run (model/selected.rs `Selected`: the scene, the two-point
+//! 1. The request's checks; the initial components; the run (model/selected.rs `Selected`: the scene, the three-point
 //!    check's P (select.rs `choose`) and its RS fold, one object for every step of the solve, decided once before any
 //!    trajectory runs, RUSTPLAN §3.2); every initial component's prepared well and the initial ensemble drawn in them,
 //!    the reported trap, the kick's curvature (`solve`, `Setting`); the outputs' plan, the first rung (# The step).
@@ -308,7 +308,7 @@
 //!   read is no end -- an interval whose reads lie on its line stands whole and adds no time. (First built with the
 //!   intervals bounded instead, by the slowest axis's window, every end a time: PGC3D 1 ms read at 26 analysis times,
 //!   2200 rows of the units, and took 1.23 times 717cb386's CPU over three alternating pairs.)
-//! - The model's error is no reading of the times: it is the two points' measured error, the same at every state
+//! - The model's error is no reading of the times: it is the three points' measured error, the same at every state
 //!   (`booked_at`), read where the atoms went (# Where the atoms went).
 //! - What stands on them: the step's mean square (estimate.rs `between`, each time by its share of the run); every
 //!   state of the pilot's run level there, each group's every member held and every atom lost by then (`sampled`), the
@@ -323,9 +323,10 @@
 //! # The model (SPEC §5.2)
 //! The model is decided once, before any trajectory runs (RUSTPLAN §3.2; model/selected.rs `Selected`): P is the
 //! smallest set of the ground states and whole excited levels whose RS fold meets the 1 % gate against the full
-//! reference at the two points, the centre and the edge (select.rs `choose`), and the fold's formula and coefficients
+//! reference at the three points, the centre, the edge and on the tweezer's axis at +z_R, where its intensity is half
+//! (select.rs `choose`), and the fold's formula and coefficients
 //! are fixed with it. The solve decides nothing of it. What the solve books of the model is that measurement
-//! (`Selected::error`), one account (`READINGS`): at every state the chosen P's largest population error at the two
+//! (`Selected::error`), one account (`READINGS`): at every state the chosen P's largest population error at the three
 //! points on the populations (absolute) and its largest rate or force error on T (relative), as a rate or a force
 //! wrong by x moves T by x (`booked_at`); one that is no number -- a P no check measured -- the state's whole.
 
@@ -379,7 +380,7 @@
 //!
 //! # Stopping (SPEC §3)
 //! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
-//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the two points' measurement booked at the pilot's states
+//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the three points' measurement booked at the pilot's states
 //! -- its held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the optical sector's booking, and c
 //! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what the run's
 //! unresolved atoms carry, read before each batch's looks (# The unresolved atoms) --; S the statistics' interval. The
@@ -483,13 +484,13 @@ const DISTRIBUTION_TIMES: usize = 21;
 /// interval. The other half is left to what runs between two messages and sends none (module documentation,
 /// # Checkpoints): a margin, not a bound derived from those stages' work. It times messages and decides no result.
 const CHECKPOINT: Duration = Duration::from_secs(60);
-/// What the engine did with the model's error (the ledger's `action`, shown by the app): measured once, at the two
+/// What the engine did with the model's error (the ledger's `action`, shown by the app): measured once, at the three
 /// points, against the full reference (module documentation, # The model).
-const MODEL_MEASURED: &str = "模型（选出的 P 及其 RS 折叠）在开头一次定下；这一项误差是中心、边缘两点上对完整参照的实测";
+const MODEL_MEASURED: &str = "模型（选出的 P 及其 RS 折叠）在开头一次定下；这一项误差是中心、边缘和光镊轴上 +z_R（光强一半）处三点上对完整参照的实测";
 
 /// The model's accounts a state's error is booked by, with the ledger's name of each (module documentation, # The
-/// model): the two points' measured error, one account; a state's row holds it and its combination (the same).
-const READINGS: [&str; 1] = ["选出的 P 的模型误差（中心、边缘两点实测）"];
+/// model): the three points' measured error, one account; a state's row holds it and its combination (the same).
+const READINGS: [&str; 1] = ["选出的 P 的模型误差（中心、边缘、光镊轴上 +z_R 三点实测）"];
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -542,7 +543,7 @@ pub struct Solution {
 /// left (ms) where the run's pace gives one, the final solution returned; partial results are never withheld.
 ///
 /// The run is one object, made once for the request and the same at every step of the solve (model/selected.rs
-/// `Selected`: the scene, the two-point check's P and its fold): what the solve takes of it beside the steps -- the
+/// `Selected`: the scene, the three-point check's P and its fold): what the solve takes of it beside the steps -- the
 /// prepared potentials and their traps, the initial ensemble drawn in them, the reported trap, the kick's curvature
 /// (`Setting`) -- is made from it here, and the pipeline runs once (`attempt`). A request it refuses (the scene, the
 /// selection, a trap that does not hold the atom, no step below the edge) is refused with its reason, before a
@@ -553,7 +554,7 @@ pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64
     solve_on(request, &run, checkpoint)
 }
 
-/// The run of a request at the reference populations `reference` (`solve`): its scene, the two-point check's P
+/// The run of a request at the reference populations `reference` (`solve`): its scene, the three-point check's P
 /// (`select::choose`) and its fold.
 pub(crate) fn run_of(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
     let scene = crate::scene::Scene::new(request)?;
@@ -998,7 +999,7 @@ fn blind(own: &Between) -> Option<f64> {
 /// A look's far and near ends at one look, [F, L] (decide.rs `Read::most`, `Read::least`), the near end from zero:
 /// what the read does not exclude, and the least error it allows.
 fn ends(read: &Read) -> [f64; 2] {
-    [read.most(1.), read.least(1.).max(0.)]
+    [read.most(1.), crate::linalg::larger(read.least(1.), 0.)]
 }
 
 /// The pairs a look of the ends [F, L] could read within the bound b on at the best (`blind`), as a factor on those it
@@ -1100,7 +1101,7 @@ struct Holding {
 /// w(τ). The third level above is the course's to add where the rung buys it (`course`).
 fn staying(prices: &Prices, tau: f64, holding: Holding) -> f64 {
     let Holding { pilot, members, pairs, .. } = holding;
-    (pilot - members) * (prices.work)(2. * tau) + (prices.product.max(pilot).max(pairs) - pairs) * (prices.work)(tau)
+    (pilot - members) * (prices.work)(2. * tau) + (crate::linalg::larger(crate::linalg::larger(prices.product, pilot), pairs) - pairs) * (prices.work)(tau)
 }
 
 /// The run's expected work from here at the least of the rungs below the rung τ in hand (module documentation,
@@ -1114,7 +1115,7 @@ fn staying(prices: &Prices, tau: f64, holding: Holding) -> f64 {
 /// where that is no less than the least found, or to the bottom.
 fn descending(prices: &Prices, tau: f64, end: f64, holding: Holding) -> f64 {
     let Holding { pilot, members, below, .. } = holding;
-    let run = prices.product.max(pilot);
+    let run = crate::linalg::larger(prices.product, pilot);
     let (mut least, mut on_the_way, mut nearest) = (f64::INFINITY, 0., None);
     let (mut step, mut above) = (tau, (prices.work)(tau));
     while end / (0.5 * step) <= MOST_STEPS as f64 {
@@ -1158,7 +1159,7 @@ enum Course {
 /// the pilot's position: on the scout the pilot's purchase to come, priced into staying -- the course there is the
 /// pilot's to take); else it stands on its own two levels.
 fn course(prices: &Prices, tau: f64, end: f64, holding: Holding, third: bool) -> Course {
-    let whole = Holding { members: holding.pilot, pairs: holding.pairs.max(holding.pilot), ..holding };
+    let whole = Holding { members: holding.pilot, pairs: crate::linalg::larger(holding.pairs, holding.pilot), ..holding };
     let bought = third && buys(prices, tau, end, whole);
     let stay = staying(prices, tau, holding) + if bought { holding.pilot * (prices.work)(4. * tau) } else { 0. };
     if descending(prices, tau, end, holding) < stay {
@@ -1224,14 +1225,14 @@ fn remedy(own: &Between, upper: Option<Upper>, have: u64, pilot: u64, below: Opt
                 return None;
             }
             let base = if upper.held { upper.pairs as f64 } else { pilot };
-            (Some(n + (need - base).max(0.)), !upper.held, true)
+            (Some(n + crate::linalg::larger(need - base, 0.)), !upper.held, true)
         }
         upper => (None, false, upper.is_some_and(|upper| upper.held)),
     };
     // Nothing that cannot see asks nothing; pairs beyond a run's trajectories are none to be had.
     let at = match (own_at, upper_at) {
         (None, None) => return None,
-        (own, upper) => own.unwrap_or(n).max(upper.unwrap_or(n)),
+        (own, upper) => crate::linalg::larger(own.unwrap_or(n), upper.unwrap_or(n)),
     };
     if !buy && !(at <= MOST_TRAJECTORIES as f64 && have < MOST_TRAJECTORIES) {
         return None;
@@ -1242,10 +1243,10 @@ fn remedy(own: &Between, upper: Option<Upper>, have: u64, pilot: u64, below: Opt
     let half = below.asks.map_or(0., |factor| factor * n);
     let third = upper.is_none() && third && buys(prices, tau, end, Holding { pilot, members: pilot, pairs: at, below: below.ran as f64 });
     let stay = (at - n) * work(2. * tau)
-        + (at.max(product) - n) * work(tau)
+        + (crate::linalg::larger(at, product) - n) * work(tau)
         + if third || buy { pilot * work(4. * tau) } else { 0. }
         + if coarser { (at - n) * work(4. * tau) } else { 0. };
-    let down = (product.max(half).max(pilot) - below.ran as f64) * work(0.5 * tau) + (half - pilot).max(0.) * work(tau);
+    let down = (crate::linalg::larger(crate::linalg::larger(product, half), pilot) - below.ran as f64) * work(0.5 * tau) + crate::linalg::larger(half - pilot, 0.) * work(tau);
     (stay <= down).then_some(next)
 }
 
@@ -1320,7 +1321,7 @@ fn checked(own: &Between, third: Option<&Between>, saw: bool) -> (Bound, [f64; 2
 /// What a read estimates: each quantity's √max(M̂, 0), the rms of its step error as read, the largest on what is shown,
 /// and the total T's; unbounded where a read is no number.
 fn estimated(read: &Between) -> Bound {
-    let size = |read: &Read| if read.value.is_nan() { f64::INFINITY } else { read.value.max(0.).sqrt() };
+    let size = |read: &Read| if read.value.is_nan() { f64::INFINITY } else { crate::linalg::larger(read.value, 0.).sqrt() };
     Bound { shown: probability_error(read.shown.iter().map(size).fold(size(&read.loss), crate::linalg::larger)), temperature: read.temperature.map_or(f64::INFINITY, |t| size(&t)) }
 }
 
@@ -1330,7 +1331,7 @@ fn estimated(read: &Between) -> Bound {
 /// bounds the step's part the run will book, and a read below it is that part as read.
 fn standing(read: &Between) -> Bound {
     let (read, share) = (estimated(read), Bound::share());
-    Bound { shown: read.shown.min(share.shown), temperature: read.temperature.min(share.temperature) }
+    Bound { shown: crate::linalg::smaller(read.shown, share.shown), temperature: crate::linalg::smaller(read.temperature, share.temperature) }
 }
 
 /// What a read does not exclude (decide.rs `Read::most`): each quantity's far end, the rms it leaves open,
@@ -1488,7 +1489,7 @@ fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Opt
     Some(along)
 }
 
-/// The model's error at a state as the books take it (module documentation, # The model): the two points' measured
+/// The model's error at a state as the books take it (module documentation, # The model): the three points' measured
 /// error (`Selected::error`), the same at every state, and its combination (one account: itself); the state's whole
 /// where it is no number.
 fn booked_at(run: &Selected, _state: &State) -> Vec<Booking> {
@@ -1627,7 +1628,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         scales,
         initial: row,
         ledger,
-        method: "三维半经典运动：内态在两点选态一次定好的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），模型在开头只构造一次，整个求解共用".into(),
+        method: "三维半经典运动：内态在三点选态一次定好的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），模型在开头只构造一次，整个求解共用".into(),
     };
     context.plan.read_at(candidates.clone());
 
@@ -2258,7 +2259,7 @@ impl Plan {
     /// period of the axis on either side and cut at both ends of the run (estimate.rs `half_window`), so that it is
     /// centred on its time -- the trajectories run to the run's end and no further.
     fn read_at(&mut self, reads: Vec<f64>) {
-        self.read_halves = reads.iter().map(|&t| self.frequencies.map(|w| half_window(w, t).min(self.end - t))).collect();
+        self.read_halves = reads.iter().map(|&t| self.frequencies.map(|w| crate::linalg::smaller(half_window(w, t), self.end - t))).collect();
         self.reads = reads;
     }
 }
@@ -2316,7 +2317,7 @@ impl Stopped {
     fn add(&mut self, o: &Stopped) {
         self.count += o.count;
         self.since = match (self.since, o.since) {
-            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), Some(b)) => Some(crate::linalg::smaller(a, b)),
             (a, b) => a.or(b),
         };
     }
@@ -2454,7 +2455,7 @@ impl<'a> Windows<'a> {
             for side in 0..2 {
                 while self.next[a][side] < outputs && self.end(self.next[a][side], a, side) <= to {
                     let k = self.next[a][side];
-                    let at = self.end(k, a, side).max(from);
+                    let at = crate::linalg::larger(self.end(k, a, side), from);
                     let (m1, m2) = match made.iter().find(|(x, _)| *x == at) {
                         Some((_, same)) => *same,
                         None => {
@@ -3001,7 +3002,7 @@ fn room(target: f64, model: f64, step: f64) -> f64 {
 /// number is that whole -- nothing bounds it less (estimate.rs, # What is counted). Every cap of an error on what is
 /// shown is this one, so that no cap turns a number that is none into a bound.
 fn probability_error(error: f64) -> f64 {
-    if error.is_nan() { 1. } else { error.min(1.) }
+    if error.is_nan() { 1. } else { crate::linalg::smaller(error, 1.) }
 }
 
 /// One quantity held to its target at one time (module documentation, # Stopping): what is shown, or the total T.
@@ -3040,7 +3041,7 @@ impl Look {
             return f64::INFINITY;
         }
         let draws = self.trajectories * (self.interval / room).powi(2);
-        if self.shown { draws.max(draws_for(room)) } else { draws }
+        if self.shown { crate::linalg::larger(draws, draws_for(room)) } else { draws }
     }
 }
 
@@ -3555,7 +3556,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
             let uncounted = estimates[k].uncounted;
             let cause = if estimates[k].trajectories == 0. {
                 "没有一条轨迹计入估计".to_string()
-            } else if a.statistics >= a.model.max(a.step) {
+            } else if a.statistics >= crate::linalg::larger(a.model, a.step) {
                 if trajectories >= MOST_TRAJECTORIES {
                     format!("统计误差为目标的 {:.1} 倍：轨迹数已达上限 {MOST_TRAJECTORIES}", a.statistics / POPULATION_TARGET)
                 } else {
@@ -3927,7 +3928,7 @@ mod tests {
         let prices: [&dyn Fn(f64) -> f64; 3] = [&steep, &dear, &flat];
         for (p, work) in prices.into_iter().enumerate() {
             for product in [88., 200., 1000., MOST_TRAJECTORIES as f64] {
-                let total = |k: i32| (1..=k).map(|j| scout * work(rung(j))).sum::<f64>() + (pilot - scout) * (work(rung(k)) + work(rung(k - 1))) + (product.max(pilot) - pilot) * work(rung(k));
+                let total = |k: i32| (1..=k).map(|j| scout * work(rung(j))).sum::<f64>() + (pilot - scout) * (work(rung(k)) + work(rung(k - 1))) + (crate::linalg::larger(product, pilot) - pilot) * work(rung(k));
                 let rungs = (0..).take_while(|&k| end / rung(k) <= MOST_STEPS as f64);
                 let best = rungs.min_by(|&a, &b| total(a).total_cmp(&total(b))).unwrap();
                 let taken = ladder(&Prices { work, product });
@@ -3973,7 +3974,7 @@ mod tests {
     /// groups (the far end's interval Student's t at one look: the standard error back from it).
     fn logged(value: f64, most: f64, groups: f64, b: f64) -> Read {
         let t = Spread { error: 1., groups }.interval();
-        Read { value: value * b, spread: Spread { error: (most - value.max(0.)) * b / t, groups } }
+        Read { value: value * b, spread: Spread { error: (most - crate::linalg::larger(value, 0.)) * b / t, groups } }
     }
 
     /// A rung within on two levels reads its third level where there is one, and else stands on its two (`verdict`;
@@ -4650,7 +4651,7 @@ mod tests {
                     assert!(places.windows(2).all(|w| w[0] < w[1]), "{outputs} outputs: a pick twice");
                 }
                 let mean = over_the_run(&picks, picks.iter().map(|p| p.state.sample.at.t), None);
-                assert!((mean - 0.5 * (outputs + 1) as f64).abs() <= 0.5 * (outputs as f64 / n as f64).max(1.), "{outputs} outputs: {mean}");
+                assert!((mean - 0.5 * (outputs + 1) as f64).abs() <= 0.5 * crate::linalg::larger(outputs as f64 / n as f64, 1.), "{outputs} outputs: {mean}");
             }
         }
         // Losses: group g's trajectories are held to the output 100 (g + 1)/11, its last member to none.
@@ -4721,7 +4722,7 @@ mod tests {
         let tau = 0.37;
         let mut cuts = vec![0.];
         for i in 0.. {
-            let (start, step_end) = (i as f64 * tau, ((i + 1) as f64 * tau).min(plan.end));
+            let (start, step_end) = (i as f64 * tau, crate::linalg::smaller((i + 1) as f64 * tau, plan.end));
             if i % 3 == 2 && start + 0.43 * tau < step_end {
                 cuts.push(start + 0.43 * tau);
             }
@@ -4737,7 +4738,7 @@ mod tests {
             windows.record(0, atom.clone());
             let (mut next, mut most) = (1, 0);
             for piece in cuts.windows(2).filter(|p| p[0] < stop) {
-                let to = piece[1].min(stop);
+                let to = crate::linalg::smaller(piece[1], stop);
                 // The times in the piece read before it is added (the odd ones) and after it (the even ones).
                 let inside: Vec<usize> = (next..times.len()).take_while(|&k| times[k] <= to).collect();
                 inside.iter().filter(|&&k| k % 2 == 1).for_each(|&k| windows.record(k, atom.clone()));
@@ -4754,9 +4755,9 @@ mod tests {
                 };
                 assert!(times[k] <= stop, "stop {stop}, output {k} held after the loss");
                 for a in 0..3 {
-                    let (lo, hi) = (times[k] - plan.halves[k][a], (times[k] + plan.halves[k][a]).min(stop));
+                    let (lo, hi) = (times[k] - plan.halves[k][a], crate::linalg::smaller(times[k] + plan.halves[k][a], stop));
                     let exact: [f64; 3] = { let (p, q) = (antiderivative(a, lo), antiderivative(a, hi)); std::array::from_fn(|i| q[i] - p[i]) };
-                    let scale = 1e-12 * stop * amp[a].max(1.).powi(2) / exact[0];
+                    let scale = 1e-12 * stop * crate::linalg::larger(amp[a], 1.).powi(2) / exact[0];
                     assert!((h.kappa[a] - exact[1] / exact[0]).abs() <= scale && (h.kappa2[a] - exact[2] / exact[0]).abs() <= scale, "stop {stop}, output {k}, axis {a}: {} and {} against {} and {}", h.kappa[a], h.kappa2[a], exact[1] / exact[0], exact[2] / exact[0]);
                 }
             }

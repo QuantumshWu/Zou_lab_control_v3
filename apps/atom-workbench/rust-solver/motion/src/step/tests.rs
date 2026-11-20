@@ -747,7 +747,7 @@ fn step_errors(beams: &[Beam], detuning: f64, gamma: f64, z0: f64, v: f64, tau: 
     let state = (0..2).map(|a| (s.end.psi[a] - psi[a]).abs()).fold(0.0, crate::linalg::larger);
     // The dressed state's dipole kick at the step's middle: −τ ∂_z(|c|²/Δ)-like, its size k|c|²τ/|Δ̃| at most.
     let size = beams.iter().map(|b| 0.5 * b.rabi).sum::<f64>().powi(2) * K * tau / detuning.hypot(0.5 * gamma);
-    let impulse = (s.end.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size);
+    let impulse = (s.end.kappa[2] - start.kappa[2] - kick).abs() / crate::linalg::larger(kick.abs(), size);
     [state, impulse]
 }
 
@@ -847,7 +847,7 @@ fn a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the
                     let length = |x: [C64; 2]| (x[0].norm_sqr() + x[1].norm_sqr()).sqrt();
                     let (mine, theirs) = (length([t.psi[0], t.psi[1]]), length(exact));
                     let state = (0..2).map(|a| (t.psi[a] / mine - exact[a] / theirs).abs()).fold(0.0, crate::linalg::larger);
-                    ([state, (t.kappa[2] - start.kappa[2] - kick).abs() / kick.abs().max(size)], hopped)
+                    ([state, (t.kappa[2] - start.kappa[2] - kick).abs() / crate::linalg::larger(kick.abs(), size)], hopped)
                 })
                 .unzip();
             let falls: Vec<[f64; 2]> = (0..3).map(|i| std::array::from_fn(|q| errors[i][q] / errors[i + 1][q])).collect();
@@ -1597,7 +1597,7 @@ fn the_stumpff_functions_are_their_series() {
         let (c0, c1, c2) = super::stumpff(x);
         for (k, c) in [c0, c1, c2].into_iter().enumerate() {
             let s = series(k);
-            assert!((c - s).abs() <= 1e-13 * s.abs().max(1.0), "c{k}({x}) {c} against {s}");
+            assert!((c - s).abs() <= 1e-13 * crate::linalg::larger(s.abs(), 1.0), "c{k}({x}) {c} against {s}");
         }
     }
 }
@@ -2013,8 +2013,8 @@ fn a_step_about_a_minimum_is_stable_below_the_edge_of_its_reference_s_turn_and_i
                     let [a, b, c, d] = matrix(&model, psi, axis, tau);
                     let expected = linear_trace(hm, reference[axis], mean, tau);
                     let scale = a.abs() + d.abs() + 2.0;
-                    worst = crate::linalg::larger(worst, (a + d - expected).abs() / scale).max((a * d - b * c - 1.0).abs() / (a * d).abs().max(1.0));
-                    assert!((a + d - expected).abs() < 1e-12 * scale && (a * d - b * c - 1.0).abs() < 1e-11 * (a * d).abs().max(1.0), "wells {own:?}, p {p:?}, axis {axis}, τ {tau}: trace {} against {expected}, determinant {}", a + d, a * d - b * c);
+                    worst = crate::linalg::larger(crate::linalg::larger(worst, (a + d - expected).abs() / scale), (a * d - b * c - 1.0).abs() / crate::linalg::larger((a * d).abs(), 1.0));
+                    assert!((a + d - expected).abs() < 1e-12 * scale && (a * d - b * c - 1.0).abs() < 1e-11 * crate::linalg::larger((a * d).abs(), 1.0), "wells {own:?}, p {p:?}, axis {axis}, τ {tau}: trace {} against {expected}, determinant {}", a + d, a * d - b * c);
                 }
             }
         }
@@ -2500,7 +2500,7 @@ fn microseconds<const N: usize>(items: usize, passes: &mut [&mut dyn FnMut() -> 
         repetitions
     });
     let mut least = [f64::INFINITY; N];
-    let mut time = |pass: usize| least[pass] = least[pass].min(batch(pass, repetitions[pass]) / repetitions[pass] as f64);
+    let mut time = |pass: usize| least[pass] = crate::linalg::smaller(least[pass], batch(pass, repetitions[pass]) / repetitions[pass] as f64);
     (0..24).for_each(|_| (0..N).for_each(&mut time));
     least.map(|t| 1e6 * t / items as f64)
 }
@@ -2970,7 +2970,7 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
             let mut record = |kind: usize, g: &Mat, size: f64| {
                 let (low, high) = extremes(g);
                 if high > 0.0 {
-                    kinds[kind].0 = kinds[kind].0.min(low / high);
+                    kinds[kind].0 = crate::linalg::smaller(kinds[kind].0, low / high);
                 }
                 kinds[kind].1 += usize::from(low < -crate::units::rounding(4 * n) * size);
                 (low, high)
@@ -2996,9 +2996,9 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
             // The trapezoid over the 21 times.
             let integral = |f: &[f64]| tau / 20.0 * (f.iter().sum::<f64>() - 0.5 * (f[0] + f[20]));
             for (k, low) in lows.iter().enumerate() {
-                rise[k] = rise[k].max(integral(&low.iter().map(|l| (-l).max(0.0)).collect::<Vec<_>>()));
+                rise[k] = crate::linalg::larger(rise[k], integral(&low.iter().map(|l| crate::linalg::larger(-l, 0.0)).collect::<Vec<_>>()));
             }
-            rise[2] = rise[2].max(integral(&highs));
+            rise[2] = crate::linalg::larger(rise[2], integral(&highs));
         }
         each(cluster, c.ground, n - c.ground, &kinds, rise);
     });
@@ -3179,7 +3179,7 @@ fn a_jump_s_kick_is_one_photon_s_at_most() {
         let (norm, photon) = (psi[0].norm_sqr(), &model.made(r, &psi)[0]);
         let (weight, b) = (photon.weight() / norm, k * epsilon / (phase.cos().powi(2) + (epsilon * phase.sin()).powi(2)));
         let kick = model.emit(0, &at, None, &psi, &mut |_| Some(0)).expect("the one class").kick;
-        let expected = b.min(k);
+        let expected = crate::linalg::smaller(b, k);
         assert!((kick[2] - expected).abs() <= 1e-9 * k && kick[0] == 0.0 && kick[1] == 0.0, "kz = {phase}: the jump carries {kick:?} of b = {b}");
         carried_whole += (b <= k) as usize;
         let middle = model.middle(0, at.r, at.t);
@@ -3400,7 +3400,7 @@ fn a_scene_s_step_error_by_the_split() {
                         for [turn, slope, curvature] in crate::spectral::tests::pairs(&picture) {
                             let bin = [0.5, 1.0, 2.0, 4.0].iter().filter(|edge| turn >= **edge).count();
                             pairs[level][bin] += 1;
-                            sizes[level][bin] = [sizes[level][bin][0].max(slope), sizes[level][bin][1].max(curvature)];
+                            sizes[level][bin] = [crate::linalg::larger(sizes[level][bin][0], slope), crate::linalg::larger(sizes[level][bin][1], curvature)];
                         }
                     }
                     let from = x.clone();
@@ -3774,7 +3774,7 @@ fn random_steps(count: u64, waves: Option<usize>, each: &mut dyn FnMut(&Lindblad
         let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, crate::linalg::larger) * 2.0;
         let turn = std::f64::consts::PI * 10.0_f64.powf(-2.0 + 3.3 * s.uniform());
         let tau = 2.0 * turn / (fastest * speed + size);
-        let held = (size.min(20.0 / tau) / (size * (n * waves.max(1)) as f64)).sqrt();
+        let held = (crate::linalg::smaller(size, 20.0 / tau) / (size * (n * waves.max(1)) as f64)).sqrt();
         model.jumps.iter_mut().for_each(|(_, m)| *m = m.scaled(C64::real(held)));
         let (place, heading) = (s.direction(), s.direction());
         let reach = s.uniform();
@@ -3831,7 +3831,7 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
         let m = generator(s * h);
         let values = crate::linalg::hermitian_eigen(&Mat::from_fn(n, n, |a, b| C64::I * (m[(a, b)] - m[(b, a)].conj()))).values;
         let weight = tau.abs() / 400.0 * if k == 0 || k == 400 { 0.5 } else { 1.0 };
-        negative += weight * (-values.iter().copied().fold(f64::INFINITY, crate::linalg::smaller)).max(0.0);
+        negative += weight * crate::linalg::larger(-values.iter().copied().fold(f64::INFINITY, crate::linalg::smaller), 0.0);
         size += weight * values.iter().copied().fold(0.0, crate::linalg::larger);
     }
     (negative, size)
@@ -4032,7 +4032,7 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
             });
             let rounding = crate::units::rounding(4 * n + 10) * scale;
             assert!(hazard >= -rounding && (hazard - form).abs() <= rounding && (hazard - jumps).abs() <= 4.0 * rounding, "case {case}: the hazard {hazard:e}, −2 Im⟨x|Ĥ|x⟩ {form:e}, Σ‖J x‖² {jumps:e} (rounding {rounding:e})");
-            worst[0] = worst[0].max((hazard - jumps).abs() / rounding);
+            worst[0] = crate::linalg::larger(worst[0], (hazard - jumps).abs() / rounding);
         }
     }
     // A scene's clusters: the decay the step takes, exactly and from the tables, against the photons' rates.
@@ -4053,7 +4053,7 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
                     None
                 });
                 let apart = (hazard - jumps).abs() / hazard;
-                worst[1] = worst[1].max(if tables { apart } else { 0.0 });
+                worst[1] = crate::linalg::larger(worst[1], if tables { apart } else { 0.0 });
                 assert!(hazard > 0.0 && (hazard - form).abs() <= crate::units::rounding(4 * n + 10) * scale, "R4_LIN_2 cluster {cluster}: the hazard {hazard:e} against −2 Im⟨x|Ĥ|x⟩ {form:e}");
                 assert!(apart < if tables { 1e-3 } else { 1e-9 }, "R4_LIN_2 cluster {cluster} (tables {tables}): the hazard {hazard:e} against the photons' rates {jumps:e}");
             }
@@ -4290,7 +4290,7 @@ fn a_random_output_grid_leaves_a_random_trajectory_as_it_is() {
         let fastest = model.beats.iter().chain(&model.jumps).map(|(q, _)| crate::linalg::norm3(*q)).fold(0.0, crate::linalg::larger) * 2.0;
         let turn = std::f64::consts::PI * 10.0_f64.powf(-2.0 + 3.3 * s.uniform());
         let tau = 2.0 * turn / (fastest * speed + size);
-        let held = (size.min(20.0 / tau) / (size * (n * waves) as f64)).sqrt();
+        let held = (crate::linalg::smaller(size, 20.0 / tau) / (size * (n * waves) as f64)).sqrt();
         model.jumps.iter_mut().for_each(|(_, m)| *m = m.scaled(C64::real(held)));
         let steps = 1usize << (3 + (4.0 * s.uniform()) as usize);
         let run = tau * steps as f64;
@@ -4622,7 +4622,7 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
             for &u in &stops {
                 picture.at(u, &mut y);
             }
-            (bandwidth, count) = (bandwidth.max(picture.bandwidth), count.max(stops.len()));
+            (bandwidth, count) = (crate::linalg::larger(bandwidth, picture.bandwidth), count.max(stops.len()));
             x.copy_from_slice(&y);
         }
         (x, bandwidth, count, clock.elapsed().as_secs_f64() * 1e6 / steps as f64)

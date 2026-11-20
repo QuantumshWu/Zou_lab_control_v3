@@ -245,7 +245,7 @@ pub fn advance<D: Dynamics>(
         // The step taken from here: τ or the run's rest -- the rest too where a step of τ would end within the grid's
         // rounding of the run's end, which is then no step of its own --; half the length where the scheme refuses a
         // step, as far as the time's round-off.
-        let mut length = if path.ends(to, trajectory.time + tau) { rest } else { tau.min(rest) };
+        let mut length = if path.ends(to, trajectory.time + tau) { rest } else { crate::linalg::smaller(tau, rest) };
         let (step, end, beyond) = loop {
             // The step's part of the Brownian path, and where the trajectory stands on it at the step's end: on the
             // trajectory's clock the run's end where the step spans its rest -- not an ulp short of it (the sum of the

@@ -1019,8 +1019,8 @@ impl Flow {
             c += self.gradient[i] * y + 0.5 * self.curvatures[i] * y * y;
         }
         let h = half.abs();
-        let ends = (c + b * h + 0.5 * a * h * h).max(c - b * h + 0.5 * a * h * h);
-        if a < 0.0 && b.abs() <= -a * h { ends.max(c - 0.5 * b * b / a) } else { ends }
+        let ends = linalg::larger(c + b * h + 0.5 * a * h * h, c - b * h + 0.5 * a * h * h);
+        if a < 0.0 && b.abs() <= -a * h { linalg::larger(ends, c - 0.5 * b * b / a) } else { ends }
     }
     /// (r, κ) after the time t (either sign) from (r, κ) (module documentation, # The reference).
     pub fn advance(&self, from: ([f64; 3], [f64; 3]), t: f64) -> ([f64; 3], [f64; 3]) {
@@ -1346,7 +1346,7 @@ impl Segment {
     /// the bridge, Var B = τσ; ΔZ = −∫B, Cov(B(s), ∫B) = τ²σ/2, Var ∫B = τ³/12). Zero at the step's ends, 1/12 at the
     /// most; a time within the rounding of an end is the end.
     fn untold(theta: f64) -> f64 {
-        let sigma = (theta * (1.0 - theta)).max(0.0);
+        let sigma = linalg::larger(theta * (1.0 - theta), 0.0);
         sigma * (1.0 - 3.0 * sigma)
     }
     /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the path's part of the step:
@@ -1356,7 +1356,7 @@ impl Segment {
     /// step) -- so that a cut of a step has the diffusion's input up to it, as the whole step has. (The residual is the
     /// free flight's; the reference's rotation changes it by its (ωτ)² share, the third order.)
     pub fn moments(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
-        let (lo, hi) = (from.min(to), from.max(to));
+        let (lo, hi) = (linalg::smaller(from, to), linalg::larger(from, to));
         let sign = if to >= from { 1.0 } else { -1.0 };
         let (mut one, mut two) = ([0.0; 3], [0.0; 3]);
         if !(hi > lo) {
@@ -1914,7 +1914,7 @@ fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, 
             guess
         } else if round < ROUNDS {
             let mean = past.map_or(0.0, |(time, fell)| (fell - below.1) / (time - below.0));
-            let rate = hazard_at(picture, still, h, below.0, decay, part).max(mean);
+            let rate = linalg::larger(hazard_at(picture, still, h, below.0, decay, part), mean);
             (nodes, traces) = (nodes + 1, traces + 1);
             below.0 + left / rate
         } else {
