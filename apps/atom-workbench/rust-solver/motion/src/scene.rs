@@ -177,19 +177,32 @@ pub fn bilinear(m: &[Mat; 9], e: &[C64; 3], f: &[C64; 3]) -> Mat {
     out
 }
 
+/// Whether the tweezer's light is told apart from the other light: the tweezer is the one trap light, and its beats with
+/// every other beam -- its photons' frequency against that light's, the tweezer split's sidebands (the one fold folds
+/// them, model/rs.rs) -- are told by an axis of its own, one on which its index is nonzero and every other beam's zero
+/// (floquet/frame.rs `tweezer`). A tweezer with no other light has no such beat: every axis is its own, the request's
+/// frequencies as the app writes them -- a lone tweezer is its reference laser (full-master-model.ts: the most mixing),
+/// its index zero, its frequency the frame's carrier (R1_TWEEZER, R1_SIGMA_P) -- and its photons are counted by the
+/// fold's coordinate n_tw alone (`Rs::new`).
+fn own_axis(request: &Request) -> bool {
+    let tweezer = request.trap_beam;
+    let others = || request.beams.iter().enumerate().filter(move |&(l, _)| l != tweezer).map(|(_, b)| b);
+    let index = &request.beams[tweezer].frequency_index;
+    others().next().is_none() || (0..index.len()).any(|i| index[i] != 0 && others().all(|b| b.frequency_index[i] == 0))
+}
+
 impl Scene {
     /// Builds the scene; Err for a request outside the allowed approximations (`Request::validate`) or one whose tweezer
-    /// has no frequency axis of its own (its sidebands are told by that axis, floquet/frame.rs).
+    /// shares every axis it has with the other light (`own_axis`).
     pub fn new(request: &Request) -> Result<Scene, String> {
         request.validate()?;
-        let tweezer = request.trap_beam;
         let phi: Vec<f64> = request.frequencies_mhz.iter().map(|f| RAD_PER_US_PER_MHZ * f).collect();
         let axes = phi.len();
         let omega = |index: &[i32]| index.iter().zip(&phi).map(|(&i, p)| i as f64 * p).sum::<f64>();
         let beams = &request.beams;
-        let own = (0..axes).any(|i| beams[tweezer].frequency_index[i] != 0 && beams.iter().enumerate().all(|(l, b)| l == tweezer || b.frequency_index[i] == 0));
-        if !own {
-            return Err(format!("The tweezer {} needs a frequency axis of its own (its sidebands are folded by that axis)", beams[tweezer].id));
+        if !own_axis(request) {
+            let id = &beams[request.trap_beam].id;
+            return Err(format!("The tweezer {id} needs a frequency axis of its own beside the other light (its beats with that light are told by it)"));
         }
         let carrier: Vec<i32> = (0..axes).map(|i| (i + 1 == axes) as i32).collect();
         let generators = beams
@@ -526,6 +539,43 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tweezer's light told apart from the other light (`own_axis`): R1_TWEEZER and R1_SIGMA_P, the app's lone
+    /// tweezers (the reference laser: index zero on their one axis, the carrier), and R4_LIN_4's tweezer (an axis of its
+    /// own) are scenes, their coordinates the request's; the sample with its tweezer at the reference (index zero) beside
+    /// another beam, or on the other beam's axis, is refused; the sample's tweezer alone at index zero is a scene.
+    #[test]
+    fn a_tweezer_needs_an_axis_of_its_own_beside_other_light() {
+        for name in ["R1_TWEEZER", "R1_SIGMA_P", "R4_LIN_4"] {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+            let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let request = Request::from_native(&line).unwrap();
+            let scene = Scene::new(&request).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(scene.request.frequencies_mhz, request.frequencies_mhz);
+        }
+        let with = |tweezer: i32, other: Option<i32>| {
+            let mut r = crate::request::tests::sample();
+            r.beams[0].frequency_index = vec![tweezer];
+            r.outside_forms[0].frequency_index = vec![tweezer];
+            match other {
+                Some(i) => {
+                    r.beams[1].frequency_index = vec![i];
+                    r.outside_forms[1].frequency_index = vec![i];
+                }
+                None => {
+                    r.beams.truncate(1);
+                    r.outside_forms.truncate(1);
+                }
+            }
+            r
+        };
+        for (tweezer, other) in [(0, Some(1)), (-4, Some(1))] {
+            let e = Scene::new(&with(tweezer, other)).err().expect("refused");
+            assert!(e.contains("axis of its own"), "{e}");
+        }
+        assert!(Scene::new(&with(0, None)).is_ok());
+        assert!(Scene::new(&with(-4, Some(0))).is_ok());
+    }
 
     /// With every light off H is the bare atom (pysel.status.md, "H0 约定"): on R4_LIN_4 (B = 0) the spectrum of
     /// H0 − Σ_ω O_ω(E_ω(0)) is the hyperfine levels, each 2F + 1 fold degenerate, to the rounding of a Hermitian

@@ -8,7 +8,7 @@
 //! nonzero key with its conjugate at −key), and jump channels L_ch = Σ_c L_ch⁽ᶜ⁾ e^{−if_c t}. A fold keeps the states K
 //! and, among their elements, the slow ones: the element b ← a of the component c has the fast index n = n_c − n_b + n_a
 //! (`Sectors::element`, the fast part of its frame vector c − θ_b + θ_a, floquet/frame.rs `element`, the assembly's own;
-//! n_c = Σ_l c_l n_l over the key's generators, n_a the state's, the frame's integer fast parts (n_φ, n_tw)), slow where
+//! n_c = Σ_l c_l n_l over the key's generators, n_a the state's: n_φ the frame's, n_tw the tweezer's photons, `Rs::new`), slow where
 //! its folding coordinates (`axes`) are zero. Everything else is folded: every component of the other states F (= Q),
 //! and the fast elements within K (K's sidebands -- the hyperfine n_φ and the tweezer n_tw). The folded states'
 //! unperturbed generator is block diagonal,
@@ -932,24 +932,32 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
         (cr_key.clone(), fr, r.clone(), -1, 1),
         (negated(&cr_key), -fr, r.adjoint(), 1, 0),
     ];
-    // R^{j+1} H_c for each component and power.
+    // R^{j+1} H_c for each component and power, M_c[B, a] = (E_a + f_c − G₀_BB)⁻¹ H_Ba on the blocks B and columns a
+    // H_c holds (the request's structure: the couplings excited ← ground, `Request::validate`; a power's the same):
+    // elsewhere M_c is zero, the resolvent acting on nothing -- and there it may be singular, a ground state's own
+    // block at E_a + f_c = E_a where the tweezer is the frame's carrier (f_c = 0: a lone tweezer, scene.rs `own_axis`).
     let resolved: Vec<Vec<Mat>> = comps
         .iter()
         .map(|(_, freq, h, _, _)| {
             let z: Vec<f64> = energy.iter().map(|e| e + freq).collect();
+            let held: Vec<(&Vec<usize>, Vec<usize>)> = blocks
+                .iter()
+                .map(|rows| (rows, (0..STATES).filter(|&a| rows.iter().any(|&r| h[(r, a)] != C64::ZERO)).collect::<Vec<usize>>()))
+                .filter(|(_, cols)| !cols.is_empty())
+                .collect();
             let mut out = Vec::with_capacity(ORDERS);
             let mut y = h.clone();
             for _ in 0..ORDERS {
                 let mut m = Mat::zeros(STATES, STATES);
-                for rows in &blocks {
+                for (rows, cols) in &held {
                     let sub = g.block(rows, rows);
-                    let cols: Vec<usize> = (0..STATES).collect();
-                    let yb = y.block(rows, &cols);
+                    let yb = y.block(rows, cols);
+                    let zb: Vec<f64> = cols.iter().map(|&a| z[a]).collect();
                     let mut mb = Mat::default();
-                    fold::neumann_into(&sub, &z, &yb, &mut mb);
+                    fold::neumann_into(&sub, &zb, &yb, &mut mb);
                     for (i, &row) in rows.iter().enumerate() {
-                        for a in 0..STATES {
-                            m[(row, a)] = mb[(i, a)];
+                        for (k, &a) in cols.iter().enumerate() {
+                            m[(row, a)] = mb[(i, k)];
                         }
                     }
                 }
@@ -1044,8 +1052,18 @@ pub struct Rs {
 
 impl Rs {
     /// The model's fold on P = `keep` with the frame's sectors; the tweezer's fold, the splits and the fold's structure
-    /// made here once.
+    /// made here once. The tweezer's sidebands are its photons: a generator's n_tw is its count of them (the tweezer's
+    /// one, every other generator's none: `Sectors::tweezer`, the reference's), a state's the frame's, zero (θ holds no
+    /// tweezer photon: floquet/frame.rs chooses it on the other light). The frame counts them so on the tweezer's own
+    /// axis; a tweezer without other light has none (its index zero, its frequency the frame's carrier: scene.rs
+    /// `own_axis`), and its co- and counter-rotating channels, 2ν apart, are told apart by the count alone.
     pub fn new(scene: &Scene, keep: &[usize], sectors: Sectors) -> Rs {
+        let mut sectors = sectors;
+        let tw = scene.tweezer();
+        for (g, s) in sectors.generators.iter_mut().enumerate() {
+            s[1] = i64::from(g == tw);
+        }
+        assert!(sectors.states.iter().all(|s| s[1] == 0), "θ holds no tweezer photon");
         let mut keep = keep.to_vec();
         keep.sort_unstable();
         keep.dedup();

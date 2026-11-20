@@ -736,3 +736,43 @@ fn summed_parts(parts: &[ModelPart], gradient: Option<usize>) -> Mat {
 }
 
 
+
+/// The tweezer's sidebands are its photons (`Rs::new`): on R1_TWEEZER and R1_SIGMA_P (lone tweezers, the frame's
+/// reference: no axis of their own, scene.rs `own_axis`) and R4_LIN_4 (one of its own), the model on the ground states
+/// at the trap's centre has every channel's parts at one count of tweezer photons, the channel's n_tw, and the tweezer's
+/// co-rotating (n_tw = 1) and counter-rotating (n_tw = −1) channels apart: their interference, 2ν (R1) or 2(ω_tw + ν)
+/// apart, is not in the model. Every number finite and both channels lit: on the lone tweezers the co-rotating coupling
+/// is static (f = 0), and the unit fold resolves it on the blocks and columns it holds alone (`unit_fold`; a ground
+/// state's own block there is singular, and its 0·∞ made the channel NaN, which the largest entry does not show).
+#[test]
+fn the_tweezer_s_channels_are_its_photons() {
+    for name in ["R1_TWEEZER", "R1_SIGMA_P", "R4_LIN_4"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let scene = Scene::new(&Request::from_native(&line).unwrap()).unwrap();
+        let zero = vec![0.0; scene.request.beams.len()];
+        let centre = scene.components([0.0; 3], &zero, 1.0);
+        let frame = Frame::new(&scene, &crate::floquet::Hilbert::full(&scene, &centre), &zero);
+        let rs = Rs::new(&scene, &(0..crate::request::GROUND).collect::<Vec<_>>(), frame.sectors());
+        let model = rs.at(&scene, &centre);
+        let tw = scene.tweezer();
+        let mut counts = std::collections::BTreeSet::new();
+        let finite = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
+        assert!(model.effective.iter().all(|p| finite(&p.value) && p.gradient.iter().all(finite)), "{name}: H_eff finite");
+        let mut lit = std::collections::BTreeMap::new();
+        for c in &model.jumps {
+            for p in &c.parts {
+                assert_eq!(i64::from(p.key[tw]), c.fast[1], "{name}: channel {} {:?}, part at {:?}", c.emission, c.fast, p.key);
+                assert!(finite(&p.value) && p.gradient.iter().all(finite), "{name}: channel {} {:?} finite", c.emission, c.fast);
+                let size: &mut f64 = lit.entry(c.fast[1]).or_insert(0.0);
+                *size = size.max(p.value.max_abs());
+            }
+            counts.insert(c.fast[1]);
+        }
+        println!("{name}: the channels' largest entries by n_tw {lit:?}");
+        assert!(lit.get(&1).is_some_and(|&x| x > 0.0) && lit.get(&-1).is_some_and(|&x| x > 0.0), "{name}: both tweezer channels lit");
+        let frame_count = frame.fast_index(&scene.unit(tw))[1];
+        println!("{name}: {} channels, their tweezer photons {counts:?}; the frame's count of the tweezer's own key {frame_count}", model.jumps.len());
+        assert!(counts.contains(&1) && counts.contains(&-1), "{name}: the co- and counter-rotating channels");
+    }
+}

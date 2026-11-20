@@ -3565,15 +3565,16 @@ fn a_scene_s_decisions_take_the_attributed_remedy() {
 }
 
 /// A resonant two-level atom crossing a standing wave on its explicit cluster, its survival against its flow at every
-/// step (BRIEF_TAU; spectral.rs, # The strides): the request of the grid's test (s = 0.3 a beam, heavy), the trap beam
+/// step (BRIEF_TAU; the step's propagation, spectral.rs): the request of the grid's test (s = 0.3 a beam, heavy), the trap beam
 /// a plane wave over the path (its waist 10⁶ µm: its Gouy phase, 10⁻¹⁰ rad over the path at 10⁴ µm, put a floor of
 /// 4·10⁻⁹ under the errors), two slow trajectories from the bare ground state that hold the explicit cluster and draw
 /// no jump over 4 µs -- ln N = −76.6 and −74.4 --, at the steps 0.2 µs to 0.00625 µs. The exact survival is the flow
 /// of iψ̇ = Hψ, H = [[0, 2g cos kz], [2g cos kz, −iΓ/2]] on the path z₀ + vt (RK4, 4·10⁵ steps). At every level the
 /// error falls, and over the six it falls at the scheme's order at least (measured 1.1·10⁻⁷ to 2.8·10⁻¹¹ and
-/// 2.7·10⁻⁴ to 1.5·10⁻¹⁰: orders 2.4 and 4.2 on average). With the strides' exponentials truncated at the share of
-/// what the state forgets (until 2026-11-17) the first trajectory was within 10⁻⁷ at 0.2 to 0.025 µs, all on the
-/// decomposition, and 3.9·10⁻³ and 6.8·10⁻³ off at 0.0125 and 0.00625 µs, where the strides became the cheaper route.
+/// 2.7·10⁻⁴ to 1.5·10⁻¹⁰: orders 2.4 and 4.2 on average). With the former strides route (a split exponential, since
+/// removed) truncated at the share of what the state forgets (until 2026-11-17) the first trajectory was within 10⁻⁷ at
+/// 0.2 to 0.025 µs, all on the decomposition, and 3.9·10⁻³ and 6.8·10⁻³ off at 0.0125 and 0.00625 µs, where that
+/// route was taken.
 #[test]
 fn an_explicit_two_level_atom_s_survival_falls_to_its_flow_at_every_step() {
     use crate::step::{Dynamics, Midway, Trajectory};

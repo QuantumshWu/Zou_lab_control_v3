@@ -139,6 +139,49 @@ fn the_selected_decay_is_its_photons() {
     }
 }
 
+/// A lone tweezer's model (R1_TWEEZER, R1_SIGMA_P: the frame's reference, no axis of its own; scene.rs `own_axis`,
+/// `Rs::new`): its run as the solve makes it, the node at the trap's centre at rest holds the zero beat alone (the
+/// light shift is static in the tweezer's frame), its photons in two classes, the tweezer's co-rotating (n_tw = 1)
+/// and counter-rotating (n_tw = −1) scattering, every number finite, and its decay i(Ĥ − Ĥ†) the classes' Σ L†L to the
+/// rounding of the products and of H's Hermitian part (the request's forms Hermitian to their own rounding: σ⁺'s vector
+/// shift holds off-diagonal ones), n u (max|Γ| + max|Ĥ|) times 16 as `the_selected_decay_is_its_photons` bounds it.
+#[test]
+fn a_lone_tweezer_s_node_is_its_two_photon_classes() {
+    for name in ["R1_TWEEZER", "R1_SIGMA_P"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request = Request::from_native(&line).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = crate::solve::run_of(&request, crate::solve::alone(chief)).unwrap();
+        let n = run.rs.keep.len();
+        let node = run.node([0.0; 3], [0.0; 3], true);
+        let finite = |z: &C64| z.re.is_finite() && z.im.is_finite();
+        assert!(node.generator.iter().all(|(_, m)| m.data.iter().all(finite)), "{name}: the generator finite");
+        let fasts: Vec<[i64; 2]> = node.classes.iter().map(|c| c.fast).collect();
+        let mut gamma = Mat::zeros(n, n);
+        for class in &node.classes {
+            for axis in &class.axes {
+                let mut l = Mat::zeros(n, n);
+                for jump in axis {
+                    for e in &jump.elements {
+                        assert!(finite(&e.value) && finite(&e.kick), "{name}: a photon's element finite");
+                        l.data[e.at] += e.value;
+                    }
+                }
+                gamma.add_scaled(C64::ONE, &l.adjoint_product(&l));
+            }
+        }
+        let h = &node.generator[0].1;
+        let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
+        let (size, whole) = (gamma.max_abs(), h.max_abs());
+        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, f64::max);
+        eprintln!("{name}: P {n}, beats {:?}, classes {fasts:?}; |i(H − H†) − Σ L†L| {worst:.3e} of |Γ| {size:.3e}, |H| {whole:.3e}", node.generator.iter().map(|g| g.0).collect::<Vec<_>>());
+        assert_eq!(node.generator.len(), 1, "{name}: the zero beat alone");
+        assert!(fasts.contains(&[0, 1]) && fasts.contains(&[0, -1]) && fasts.len() == 2, "{name}: {fasts:?}");
+        assert!(size > 0.0 && worst <= n as f64 * crate::units::UNIT_ROUNDOFF * (size + whole) * 16.0, "{name}: {worst:e} of {size:e}, {whole:e}");
+    }
+}
+
 /// The node is the model's value in its frame (module documentation, # One cluster, one frame): a jump's node (with
 /// the photon forms) at the time t, every beat at its phase, against the same fold's components summed at their
 /// phases in one group (`Local::contract`, each component's weight e^{−iF_c t}, F_c its key's frequency in the frame)
