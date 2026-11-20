@@ -49,10 +49,10 @@ impl Pixels {
 
     /// A state message as the change since what this page was last told
     /// (delta.rs), of the sections it `reads`; nothing when that is nothing
-    /// and the request is not its own (`owns`).
-    pub fn send_state(&self, state: &Value, reads: impl Fn(&str) -> bool, owns: impl Fn(&Value) -> bool) -> Result<(), String> {
+    /// and the request is not its own (`owns`). Each section found changed is named to `changed`.
+    pub fn send_state(&self, state: &Value, reads: impl Fn(&str) -> bool, owns: impl Fn(&Value) -> bool, changed: impl FnMut(&str)) -> Result<(), String> {
         let Some(object) = state.as_object().filter(|object| object.get("type").and_then(Value::as_str) == Some("state")) else { return self.send(state) };
-        let text = { let _encode = crate::trace::span("ui.serialize", || json!({})); self.sent.borrow_mut().encode(object, reads, owns) };
+        let text = { let _encode = crate::trace::span("ui.serialize", || json!({})); self.sent.borrow_mut().encode_noting(object, reads, owns, changed) };
         match text { Some(text) => self.post(&text), None => Ok(()) }
     }
 
@@ -201,13 +201,12 @@ impl Pixels {
 
     /// The window's page as it is on screen -- its controls and every
     /// presented plot front -- as PNG bytes (Chromium's own capture of what it
-    /// composed). `done` runs on this thread once the page has answered.
-    pub fn capture(&self, done: impl FnOnce(Result<Vec<u8>, String>) + 'static) -> Result<(), String> {
+    /// composed). The page answers on this, the window's, thread; the answer is
+    /// read and decoded, and `done` runs, off it (`off_thread`).
+    pub fn capture(&self, done: impl FnOnce(Result<Vec<u8>, String>) + Send + 'static) -> Result<(), String> {
         let handler = webview2_com::CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, answer: String| {
-            done(result.map_err(|error| format!("Window capture: {error}")).and_then(|()| {
-                let answer: Value = serde_json::from_str(&answer).map_err(|error| format!("Window capture: {error}"))?;
-                base64(answer["data"].as_str().ok_or("Window capture returned no image")?)
-            }));
+            let result = result.map_err(|error| format!("Window capture: {error}"));
+            off_thread(move || done(result.and_then(|()| decode_capture(&answer))));
             Ok(())
         }));
         unsafe { self.core.CallDevToolsProtocolMethod(&HSTRING::from("Page.captureScreenshot"), &HSTRING::from(r#"{"format":"png"}"#), &handler) }
@@ -244,20 +243,27 @@ impl Pixels {
     }
 }
 
-/// Standard base64 (RFC 4648, padded) to bytes.
-fn base64(text: &str) -> Result<Vec<u8>, String> {
-    let value = |byte: u8| -> Result<u32, String> {
-        Ok(match byte { b'A'..=b'Z' => byte - b'A', b'a'..=b'z' => byte - b'a' + 26, b'0'..=b'9' => byte - b'0' + 52, b'+' => 62, b'/' => 63,
-                        _ => return Err("Window capture is not base64".into()) } as u32)
-    };
-    let bytes = text.trim_end_matches('=').as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    for chunk in bytes.chunks(4) {
-        let mut word = 0u32;
-        for (index, byte) in chunk.iter().enumerate() { word |= value(*byte)? << (18 - 6 * index); }
-        out.extend_from_slice(&word.to_be_bytes()[1..chunk.len()]);
-    }
-    Ok(out)
+/// The page's answer to `Page.captureScreenshot`: its PNG, carried as standard base64.
+fn decode_capture(answer: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let answer: Value = serde_json::from_str(answer).map_err(|error| format!("Window capture: {error}"))?;
+    let data = answer["data"].as_str().ok_or("Window capture returned no image")?;
+    base64::engine::general_purpose::STANDARD.decode(data).map_err(|error| format!("Window capture is not base64: {error}"))
+}
+
+/// Work the window's thread hands off -- a picture's decoding, encoding and writing -- done in turn on
+/// a thread of its own (`zlc-image`), so the windows' turns never wait on a file or a codec. Were that
+/// thread gone, the work is done here: no answer is ever lost.
+pub fn off_thread(job: impl FnOnce() + Send + 'static) {
+    type Job = Box<dyn FnOnce() + Send>;
+    static LANE: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> = std::sync::OnceLock::new();
+    let lane = LANE.get_or_init(|| {
+        let (sender, jobs) = std::sync::mpsc::channel::<Job>();
+        let _ = std::thread::Builder::new().name("zlc-image".into()).spawn(move || { for job in jobs { job(); } });
+        std::sync::Mutex::new(sender)
+    });
+    let sent = lane.lock().unwrap_or_else(|error| error.into_inner()).send(Box::new(job));
+    if let Err(std::sync::mpsc::SendError(job)) = sent { job(); }
 }
 
 /// A PNG's width and height (its IHDR).
@@ -277,5 +283,27 @@ impl Drop for Pixels {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A window's picture is decoded and written on the image thread, never on the window's.
+    #[test]
+    fn a_capture_is_decoded_and_written_off_the_window_thread() {
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x03\0\0\0\x02\x08\x06\0\0\0".to_vec();
+        use base64::Engine;
+        let answer = json!({"data": base64::engine::general_purpose::STANDARD.encode(&png)}).to_string();
+        assert_eq!(decode_capture(&answer), Ok(png.clone()));
+        assert!(decode_capture(r#"{"data": "not base64!"}"#).is_err());
+        assert!(decode_capture("{}").is_err());
+        let (told, heard) = std::sync::mpsc::channel();
+        let caller = std::thread::current().id();
+        off_thread(move || { let _ = told.send((std::thread::current().name().map(str::to_owned), std::thread::current().id(), png_size(&png))); });
+        let (name, thread, size) = heard.recv_timeout(std::time::Duration::from_secs(10)).expect("the image thread answers");
+        assert_eq!((name.as_deref(), size), (Some("zlc-image"), Some((3, 2))));
+        assert_ne!(thread, caller);
     }
 }

@@ -21,7 +21,6 @@ class DeviceControlWindow implements View {
   readonly root = element("div", "device-window");
   private view: DeviceControlView;
   private named = "";
-  private shownOnce = false;
   private settling = 0;
   /** Whether the window has stood forward once: its first time is its opening, which read already. */
   private forward = false;
@@ -47,22 +46,21 @@ class DeviceControlWindow implements View {
     this.view.update(device, state.request, Boolean(state.error), state.result);
     const title = `${device.role} control`;
     if (title !== this.named) { this.named = title; document.title = title; }
-    // v2: the window is built from the fields the device declares, so it opens once they are read, as tall as they are.
-    if (!this.shownOnce && device.fields) {
-      this.shownOnce = true;
-      requestAnimationFrame(() => {
-        this.root.classList.add("measuring");
-        // An overflowing box's scroll width leaves out its end padding.
-        const height = this.root.getBoundingClientRect().height;
-        const width = Math.ceil(this.view.root.scrollWidth + parseFloat(getComputedStyle(this.view.root).paddingRight));
-        this.root.classList.remove("measuring");
-        this.ctx.transport.post({ action: "fit_window", width, height });
-        this.ctx.transport.post({ action: "show_window", window: `control:${this.device}` });
-      });
-    }
+  }
+  /** v2: the window is built from the fields the device declares, so it opens once they are read -- in the units it
+   * shows them in -- as tall as they are. */
+  ready(): boolean { return this.view.complete(); }
+  measure(): { width: number; height: number } {
+    this.root.classList.add("measuring");
+    // An overflowing box's scroll width leaves out its end padding.
+    const height = this.root.getBoundingClientRect().height;
+    const width = Math.ceil(this.view.root.scrollWidth + parseFloat(getComputedStyle(this.view.root).paddingRight));
+    this.root.classList.remove("measuring");
+    return { width, height };
   }
   shown(): void { this.settle(); }
-  status(): void {}
+  /** The queue changed (an answer, a refusal that came as an error): the strip and the reason line say it. */
+  status(): void { this.view.status(); }
 }
 
 class DeviceLogWindow implements View {
@@ -71,13 +69,19 @@ class DeviceLogWindow implements View {
   readonly windowTitle: string;
   readonly root = element("div", "device-window");
   private named = "";
+  private view: DeviceLogView;
 
   constructor(private ctx: ViewContext, private device: string) {
     this.windowTitle = `${device} log@Zou lab`;
-    this.root.append(new DeviceLogView(device, ctx).root);
+    this.view = new DeviceLogView(device, ctx);
+    this.root.append(this.view.root);
   }
 
-  update(_state: State): void {
+  /** Shown with its log read: the text it exists to show is there. */
+  ready(): boolean { return this.view.read(); }
+
+  update(state: State): void {
+    this.view.accept(state.request, Boolean(state.error), state.result);
     const device = row(this.ctx, this.device);
     const title = `${device?.role ?? this.device} log@Zou lab`;
     if (title !== this.named) { this.named = title; document.title = title; }

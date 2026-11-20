@@ -1,14 +1,18 @@
-//! The pulse board and the Pulse Editor on the window's event loop
-//! (docs/PULSE_V3.md): the editor's jobs run on lanes off the window's
-//! turn (device: one at a time in order; SAFE beside it; a finite run's
-//! completion wait; the operator's scan program in the science interpreter;
-//! the preview's drawing), the board's SAFE is one of Stop all's safe actions,
-//! a plugin run's pulse commands are held to the run's claims, and the
-//! sequencer apparatus devices (`sequencer.virtual|hardware|local`) are
-//! native: opening one attaches the board the editor and the runs share.
-use std::collections::BTreeMap;
+//! The pulse board and the Pulse Editor (docs/PULSE_V3.md). The board's own commands -- a plugin
+//! run's play, report wait, Stop, estimate, a document's description and a lane's schedule -- are
+//! answered where they arrive by the [`PulseDesk`], off the window's turn: a run's commands are held
+//! to the claims the window last stated, and the window hears only a coalesced notice that what it
+//! shows of the board may have changed. The editor lives on the window's turn ([`PulseHost`]); its
+//! jobs run on lanes off it (device: one at a time in order, the board's and the pulse files'; SAFE
+//! beside it; a finite run's completion wait; the operator's scan program in the science
+//! interpreter; the preview's drawing), its files are read ahead and written off it, and its view is
+//! made only when something it shows changed. The board's SAFE is one of Stop all's safe actions,
+//! and the sequencer apparatus devices (`sequencer.virtual|hardware|local`) are native: opening one
+//! attaches the board the editor and the runs share.
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -26,10 +30,12 @@ use zlc_pulse::model::Sequence;
 use zlc_pulse::scan::ScanTable;
 use zlc_pulse::scan_plan::{ScanPlanRequest, effective_inner, prepare_application};
 use zlc_pulse::transport::Event;
-use zlc_pulse_editor::editor::{Deployed, Editor};
+use zlc_pulse_editor::editor::{Answer, Deployed, Editor, Writes};
 use zlc_pulse_editor::session::{Job, Outcome};
 use zlc_pulse_editor::{tables, to_value};
-use zlc_plugin_host::PluginHost;
+use zlc_plugin_host::{HostEvent, PluginHost};
+
+use zlc_workbench::diagnostics::{DocumentSource, NamedDocument};
 
 use crate::science::Front;
 
@@ -37,16 +43,31 @@ use crate::science::Front;
 pub const PREVIEW_PANEL: &str = "pulse-preview";
 /// Stop all's name for the board's SAFE.
 pub const SAFE_OUTPUT: &str = "pulse-streamer";
+/// The contract family of a pulse document chosen as a node's workspace resource.
+pub const PULSE_CONTRACT: &str = "zlc.pulse/";
 
-/// What a lane or a worker answers on the window's turn.
+/// The files a pulse document names: its Subpulse files, found as its reader finds them (beside it).
+pub fn named_by_pulse(path: &Path) -> Vec<PathBuf> {
+    zlc_pulse::codec::read_pulse_document(path).map(|(sequence, _)| sequence.components.iter().filter(|component| component.from_file())
+        .map(|component| PathBuf::from(&component.config_path)).collect()).unwrap_or_default()
+}
+
+/// What a lane, the desk or a worker tells the window's turn.
 pub enum PulseEvent {
     Outcome(Outcome),
-    /// A command answered later (a run, a completion wait); `run`: what a run's pulse_run leaves it holding.
-    Reply { request: u64, result: Result<Value, String>, touched: bool, run: Option<RunReply> },
-    /// Someone else drove the board: the editor asks it again.
+    /// The answer to a board command the window or a client of the bus gave.
+    Reply { request: u64, result: Result<Value, String> },
+    /// What the window shows of the board may have changed (coalesced: one notice until it is taken).
     Touched,
-    /// A native sequencer device opened (or did not).
-    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String> },
+    /// The file an editor command reads was read ahead: the command runs now.
+    Read(Box<ReadAhead>),
+    /// The files an editor command wrote are on the disk (or are not).
+    Written(Box<Written>),
+    /// A Subpulse file the open pulse resolves changed on the disk.
+    FilesChanged,
+    /// A native sequencer device opened (or did not); `took`: its own open (its world's and its board's);
+    /// `faults`: each serial port that would not open on its way (its server's).
+    Opened { instance: String, result: Result<(Arc<Board>, Option<Served>), String>, took: Duration, faults: Vec<zlc_workbench::SerialFault> },
     Closed { instance: String, error: Option<String> },
     /// A preview front, the words above it and its axes (what the page hit-tests).
     Preview { result: Result<(Front, String, Vec<Value>), String>, key: String },
@@ -55,9 +76,22 @@ pub enum PulseEvent {
     PreviewSaved(Result<PathBuf, String>),
     /// A line of a native sequencer's device log (the local pulse server's narration).
     Log { instance: String, line: String },
+    /// The local pulse server says who owns its board now (its `pulse-owner` line): a client's
+    /// address, or None while nobody does.
+    Owner { instance: String, owner: Option<String> },
+    /// Closing the window: the board is SAFE and every connection let go (`PulseHost::shutdown`).
+    ShutDown,
 }
 
+/// An editor command waiting for the file it reads.
+pub struct ReadAhead { action: String, args: Map<String, Value>, operator: bool, request: u64, path: PathBuf }
+
+/// An editor command's files, written: its answer once they are.
+pub struct Written { request: u64, writes: Writes, result: Result<(), String>, answer: Answer }
+
 pub type Post = Arc<dyn Fn(PulseEvent) + Send + Sync>;
+
+fn lock<T>(held: &Mutex<T>) -> MutexGuard<'_, T> { held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) }
 
 /// One worker thread taking work in order.
 pub(crate) struct Lane(mpsc::Sender<Box<dyn FnOnce() + Send>>);
@@ -85,27 +119,12 @@ impl World for PluginWorld {
     fn safe(&self) { let _ = self.host.spi(&self.instance, "safe", json!([]), json!({}), Duration::from_secs(5)); }
 }
 
-/// How a command was answered.
-pub enum Handled { Now(Result<Value, String>), Later }
-
-/// What one of a run's `pulse_run`s leaves the run holding: the document it
-/// read (pinned at the first), the FIRE it sent, the program a `load` stage
-/// put on the board (its accepted receipt).
-pub struct RunReply { run: String, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<Arc<Value>> }
-
-/// A plugin run's use of the board: each pulse document as its first fire read
-/// it (a later fire of a changed file is refused: a run's record names one
-/// pulse), the FIRE it sent last, the program its `load` stage put on the board,
-/// and its `pulse_run`s still on the lane.
-#[derive(Default)]
-struct RunUse { pinned: BTreeMap<PathBuf, Arc<Sequence>>, fire: Option<u32>, loaded: Option<Arc<Value>>, in_flight: usize, ended: bool }
-
-/// The words a refused fire of a changed pulse file says (a node ends its batch on them).
-pub const PULSE_CHANGED: &str = "changed during this run";
 
 /// One `pulse_run` stage of a run (or a client): `load` (LOAD only, v2
 /// `arm_sequencer`), `fire` (FIRE what that LOAD put on the board) or both.
-fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, loaded: Option<&Value>, values: &[(String, (f64, String))],
+/// `pinned`: the pulse the run began with, its Subpulses resolved -- played as it is, the file
+/// not read again (a run plays the pulse it began with, whatever the file holds meanwhile).
+fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Arc<Sequence>>, loaded: Option<&Value>, values: &[(String, (f64, String))],
         scan: Option<&ScanRows>, native: Option<&ScanPlanRequest>, runs: u64, sweeps: u64) -> (Result<Value, String>, Option<(PathBuf, Arc<Sequence>)>, Option<u32>, Option<Arc<Value>>) {
     let fired = |receipt: &Json| receipt.get("command_id").and_then(Json::as_int).map(|id| id as u32);
     if stage == "fire" {
@@ -129,12 +148,10 @@ fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, 
             Err(error) => (Err(error.message), None, None, None),
         };
     }
-    let (path, sequence) = match read_document(document) { Ok(read) => read, Err(error) => return (Err(error.message), None, None, None) };
-    if pinned.is_some_and(|pinned| *pinned != sequence) {
-        let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
-        return (Err(format!("the pulse {name} {PULSE_CHANGED}: the run's record names the pulse it began with, so the changed file is not played; \
-                             start the run again to play it")), None, None, None);
-    }
+    let (path, sequence) = match pinned {
+        Some(pinned) => (zlc_pulse::codec::absolute(document), pinned.clone()),
+        None => match read_document(document) { Ok((path, sequence)) => (path, Arc::new(sequence)), Err(error) => return (Err(error.message), None, None, None) },
+    };
     let played = if let Some(native)=native {
         prepare_application(&sequence,native,values,&board.description().geometry)
             .and_then(|plan|apply_run_plan(board,&plan,(stage!="load").then_some((runs,sweeps))))
@@ -144,7 +161,7 @@ fn play(board: &Board, stage: &str, document: &Path, pinned: Option<&Sequence>, 
         Ok(receipt) => {
             let loaded = (stage == "load").then(|| Arc::new(to_value(&receipt)));
             let id = fired(&receipt);
-            (Ok(to_value(&receipt)), Some((path, Arc::new(sequence))), id, loaded)
+            (Ok(to_value(&receipt)), Some((path, sequence)), id, loaded)
         }
     }
 }
@@ -171,12 +188,89 @@ fn accept_native_receipt(plugins: &PluginHost, run: &str, handle: &str, request:
 /// board the plugin instance of its world side (line D's simulation.board, simulation group).
 /// `published`: Remote on -- the board's own pulse server admits other computers,
 /// one of which now drives it; this application leaves it alone (Stop excepted).
-struct Given { instance: String, child: Option<Served>, world: Option<String>, published: bool }
+/// `holder`: who holds the board, as its local pulse server last said.
+struct Given { instance: String, child: Option<Served>, world: Option<String>, published: bool, holder: Holder }
+
+/// Who holds the board of the pulse server this application started, as the server says
+/// (`pulse-owner`): this application's own client (also until the server says otherwise), another
+/// client of the server (`Elsewhere`: a bench peer while Remote is on, or another program on this
+/// computer), or nobody since that other client let it go (`Released`). Held elsewhere or let go,
+/// this application's client sends the board nothing ([`Board::hold_elsewhere`]): a request would
+/// take the board over, and nothing here takes it over unasked. Remote off takes it back
+/// ([`PulseHost::admit_peers`]), as does opening the device again; a peer that leaves while Remote is
+/// on leaves the board SAFE and held by nobody, published as the operator left it.
+#[derive(Clone, Debug, PartialEq)]
+enum Holder { Here, Elsewhere(String), Released(String) }
+
+impl Holder {
+    /// Why this application's client sends the board nothing, and what takes it back (None: it is this application's).
+    fn refusal(&self, published: bool) -> Option<String> {
+        let back = if published { "withdraw Remote to take it back here" } else { "open the device again to take it back here" };
+        match self {
+            Holder::Here => None,
+            Holder::Elsewhere(who) => Some(format!("the pulse board is held by {who}: its pulse server gave that client the board, so this \
+                                                    application sends it nothing -- {back}")),
+            Holder::Released(who) => Some(format!("the pulse board is held by nobody: {who} held it and let it go (its pulse server made it SAFE), \
+                                                   and this application has not taken it back -- {back}")),
+        }
+    }
+
+    /// The device's `held_by` fact: who holds the board while it is not this application's.
+    fn held_by(&self) -> Option<String> {
+        match self { Holder::Here => None, Holder::Elsewhere(who) => Some(who.clone()), Holder::Released(who) => Some(format!("nobody ({who} let it go)")) }
+    }
+
+    /// The device log's line for a change to this holder.
+    fn line(&self, published: bool) -> String {
+        match self {
+            Holder::Here => "ZLC HELD HERE: this application's client holds the board again".into(),
+            Holder::Elsewhere(who) => format!("ZLC HELD BY {who}: this application's commands to the board are refused until it is this application's again"),
+            Holder::Released(who) => format!("ZLC HELD BY NOBODY: {who} let the board go (its pulse server made it SAFE); this application does not take \
+                                              it back by itself -- {}", if published { "withdraw Remote to take it back" } else { "open the device again to take it back" }),
+        }
+    }
+}
+
+/// Who `owner` (`ip:port`, as the pulse server names a client) is to the operator: a bench peer by
+/// its address, or another program on this computer.
+fn holder_name(owner: &str) -> String {
+    match owner.parse::<std::net::SocketAddr>() {
+        Ok(address) if address.ip().to_canonical().is_loopback() => format!("another program on this computer ({owner})"),
+        Ok(address) => format!("{} (bench peer)", address.ip().to_canonical()),
+        Err(_) => owner.to_owned(),
+    }
+}
 
 /// The pulse server this application started for `sequencer.local`: its
 /// process, its port, and the line it hears admission on (`admit` / `refuse`;
-/// the line closing ends the server, which drives the board SAFE first).
-pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin> }
+/// the line closing ends the server, which drives the board SAFE first); the
+/// transport its row asked for (`backend`) and what its ready line says it took.
+/// Its job ends it and what it started (Vivado) with this application, crash or not.
+pub struct Served { child: std::process::Child, port: u16, control: Option<std::process::ChildStdin>, backend: String, ready: Value, _job: zlc_core::process::Job }
+
+/// The transport a local board's server took, as its `device_info` says it: `UART COM5`,
+/// `JTAG-to-AXI (Vivado)`, `memory mock`; `ready` is the server's ready line.
+fn transport_taken(ready: &Value) -> String {
+    match ready["transport"].as_str() {
+        Some("uart") => format!("UART {}", ready["uart_port"].as_str().unwrap_or("?")),
+        Some("jtag-axi") => "JTAG-to-AXI (Vivado)".into(),
+        Some("memory") => "memory mock".into(),
+        other => other.unwrap_or("unknown").to_owned(),
+    }
+}
+
+/// Each port the server's probe tried, with what it came to.
+fn probe_attempts(ready: &Value) -> Vec<&str> { ready["attempts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect() }
+
+/// What the Init or Apply line says of the open: a row on Auto (`backend`) that came up over JTAG
+/// (a resident Vivado of 1-2 GB, a 20 s open) rather than its UART, with what the server's probe
+/// tried -- the one note whether Init found no UART first or the row named a port no board answered on.
+fn transport_note(backend: &str, ready: &Value) -> Option<String> {
+    if backend != "auto" || ready["transport"] != "jtag-axi" { return None; }
+    let attempts = probe_attempts(ready);
+    let tried = if attempts.is_empty() { String::new() } else { format!(": no board UART answered ({})", attempts.join("; ")) };
+    Some(format!("opened over JTAG-to-AXI under Auto, not its UART{tried}"))
+}
 
 impl Served {
     fn end(mut self) {
@@ -191,21 +285,519 @@ impl Served {
     }
 }
 
-const PUBLISHED_BOARD: &str = "the pulse board is published on the bench fabric: another computer drives it -- withdraw Remote to use it here";
-
 /// The virtual sequencer's world side: one plugin instance it opens and closes with itself, so
 /// the apparatus has one virtual sequencer row as in v2 (whose sequencer.virtual drove the world).
 fn world_instance(instance: &str) -> String { format!("{instance}_world") }
 
-pub struct PulseHost {
-    pub editor: Editor,
+
+// ---------------------------------------------------------------- the desk
+/// A plugin run's use of the board: its name, each pulse document as its first play read it (every
+/// later stage plays that pulse, never the file again: a run plays the pulse it began with), each
+/// of those whose file it has said changed meanwhile (said once), the FIRE it sent last, the
+/// program its `load` stage put on the board, its `pulse_run`s still on the lane, and whether it has ended.
+#[derive(Default)]
+struct RunUse { name: String, pinned: BTreeMap<PathBuf, Arc<Sequence>>, told: BTreeSet<PathBuf>, fire: Option<u32>, loaded: Option<Arc<Value>>,
+                in_flight: usize, ended: bool }
+
+/// What the window last stated of the workbench's runs, by their node's plugin instance: each
+/// active run's name and the devices it claims (a run's board commands are held to them).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Claims(pub BTreeMap<String, (String, Vec<String>)>);
+
+/// The apparatus device the board is, as the desk needs it: its instance, its world's plugin
+/// instance (the virtual board's), and whether another computer drives it now (Remote on).
+#[derive(Clone)]
+struct Device { instance: String, world: Option<String>, published: bool }
+
+/// Who asked a board command.
+pub enum Who {
+    /// A plugin run: the plugin host's id of it and its node's plugin instance.
+    Run { hosted: String, instance: String },
+    /// The window or a client of the bus; `claimant`: the run that holds the board, if one does.
+    Client { claimant: Option<String> },
+}
+
+/// Where an answer goes: the asking run's request, or the window's turn.
+pub type Reply = Box<dyn FnOnce(Result<Value, String>) + Send>;
+
+/// One board command, as asked.
+struct Asked { who: Who, action: String, command: Value, reply: Reply }
+
+/// What a watch thread hears: the board changed, or its run (or its board) is gone.
+enum Heard { Changed, Ended }
+
+/// One run's watch of one lane's schedule: the plugin host's id of the run, the watch's name.
+#[derive(Clone)]
+struct Watch { lane: String, run: String, id: String }
+
+/// A board command that drives the board: refused while another computer drives it.
+fn drives(action: &str) -> bool {
+    matches!(action, "pulse_fire" | "pulse_hold" | "pulse_step" | "pulse_run" | "pulse_wait_done" | "pulse_sync" | "pulse_estimate")
+}
+
+const PUBLISHED_BOARD: &str = "the pulse board is published on the bench fabric: another computer drives it -- withdraw Remote to use it here";
+
+/// Why a published board's drive command is refused here: who holds it, when another client
+/// does, else that it is published.
+fn published_refusal(board: Option<&Board>) -> String { board.and_then(Board::held_elsewhere).unwrap_or_else(|| PUBLISHED_BOARD.into()) }
+
+/// The board commands a plugin run gives that the desk answers.
+const RUN_COMMANDS: [&str; 6] = ["pulse_run", "pulse_wait_done", "pulse_stop", "pulse_estimate", "pulse_describe", "pulse_schedule"];
+/// Those the window's and the bus's clients give it (their Stop is the editor's).
+const CLIENT_COMMANDS: [&str; 5] = ["pulse_run", "pulse_wait_done", "pulse_estimate", "pulse_describe", "pulse_schedule"];
+
+#[derive(Default)]
+struct Held {
+    board: Option<Arc<Board>>,
+    device: Option<Device>,
+    /// None until the window first states them.
+    claims: Option<Claims>,
+    /// A run's commands asked before the window stated its claims: judged at the next statement.
+    parked: Vec<Asked>,
+}
+
+struct Desk {
+    /// The board's lane: one piece of board or pulse-file work at a time, in order (the editor's too).
     device: Lane,
     safe: Lane,
+    post: Post,
+    /// The workspace a relative document path is in.
+    root: Mutex<PathBuf>,
+    plugins: Mutex<Option<PluginHost>>,
+    held: Mutex<Held>,
+    runs: Mutex<BTreeMap<String, RunUse>>,
+    /// Each watch of a lane's schedule, and how its thread is told to end.
+    watches: Mutex<Vec<(Watch, mpsc::Sender<Heard>)>>,
+    /// Watch threads still running.
+    watching: AtomicUsize,
+    /// A notice for the window is on its way.
+    noticed: AtomicBool,
+    /// Each pulse document played on the board this session (a run's, a client's, the editor's).
+    played: Mutex<BTreeSet<PathBuf>>,
+}
+
+/// The board's commands, answered off the window's turn by whoever owns each fact: the board its
+/// play and its reports, the desk the runs' use of it, the window's last statement their claims.
+#[derive(Clone)]
+pub struct PulseDesk(Arc<Desk>);
+
+/// A thread that counts itself among the desk's watch threads while it runs.
+struct Watching(Arc<Desk>);
+impl Drop for Watching { fn drop(&mut self) { self.0.watching.fetch_sub(1, Ordering::SeqCst); } }
+
+fn refused(message: String) -> zlc_plugin_host::CallError { zlc_plugin_host::CallError::new(zlc_plugin_host::ErrorKind::Refused, message) }
+
+impl PulseDesk {
+    pub fn new(post: Post) -> PulseDesk {
+        PulseDesk(Arc::new(Desk { device: Lane::new("pulse-command"), safe: Lane::new("pulse-safe"), post, root: Mutex::default(),
+            plugins: Mutex::default(), held: Mutex::default(), runs: Mutex::default(), watches: Mutex::default(),
+            watching: AtomicUsize::new(0), noticed: AtomicBool::new(false), played: Mutex::default() }))
+    }
+
+    pub fn set_plugins(&self, plugins: Option<PluginHost>) { *lock(&self.0.plugins) = plugins; }
+    fn plugins(&self) -> Option<PluginHost> { lock(&self.0.plugins).clone() }
+    pub(crate) fn device_lane(&self) -> &Lane { &self.0.device }
+    pub(crate) fn safe_lane(&self) -> &Lane { &self.0.safe }
+    /// How many watch threads are running.
+    #[cfg(test)]
+    pub fn watching(&self) -> usize { self.0.watching.load(Ordering::SeqCst) }
+
+    /// A plugin host event, before the window hears it: a run's board command is answered here
+    /// (None: taken), and a run's end lets its use of the board go.
+    pub fn hears(&self, event: HostEvent) -> Option<HostEvent> {
+        match event {
+            HostEvent::Request { instance, run, ticket, op, params, .. }
+                if op == "core" && !run.is_empty() && params["command"].as_str().is_some_and(|name| RUN_COMMANDS.contains(&name)) => {
+                let action = params["command"].as_str().unwrap_or("").to_owned();
+                let mut command = params.get("params").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+                let host = self.plugins();
+                let reply: Reply = Box::new(move |result| if let Some(host) = host { host.respond(ticket, result.map_err(refused)); });
+                // As every catalogue command is: its parameters checked, a control one written in the journal.
+                let spec = zlc_bus::catalog::find(&action).expect("the run commands are catalogue commands");
+                if let Err(error) = spec.validate(&crate::remote::parameters(&command)) { reply(Err(format!("Invalid {action}: {error}"))); return None; }
+                if !spec.read_only { zlc_core::journal::note_with("app", "action", || json!({"action": action, "run": run, "command": command})); }
+                crate::remote::workspace_paths(&mut command, &lock(&self.0.root));
+                self.ask(Who::Run { hosted: run, instance }, &action, command, reply);
+                None
+            }
+            HostEvent::RunFinished { ref run, .. } => { self.ended(run); Some(event) }
+            event => Some(event),
+        }
+    }
+
+    /// A board command the window or a client gave: answered off the window's turn, as a
+    /// [`PulseEvent::Reply`] (false: not one of the desk's).
+    pub fn client(&self, action: &str, command: &Value, request: u64, claimant: Option<String>) -> bool {
+        if !CLIENT_COMMANDS.contains(&action) { return false; }
+        let post = self.0.post.clone();
+        self.ask(Who::Client { claimant }, action, crate::remote::parameters(command), Box::new(move |result| post(PulseEvent::Reply { request, result })));
+        true
+    }
+
+    /// The window's record of the runs and their claims: the commands held for it are judged now.
+    pub fn stated(&self, claims: Claims) {
+        let parked = {
+            let mut held = lock(&self.0.held);
+            if held.claims.as_ref() == Some(&claims) && held.parked.is_empty() { return; }
+            held.claims = Some(claims);
+            std::mem::take(&mut held.parked)
+        };
+        for asked in parked { self.judge(asked, true); }
+    }
+
+    /// The board the editor shows (the apparatus' or its own): each watch is told it, then its changes.
+    pub(crate) fn set_board(&self, board: Option<Arc<Board>>) {
+        lock(&self.0.held).board = board;
+        let watches = std::mem::take(&mut *lock(&self.0.watches));
+        for (watch, ending) in watches {
+            let _ = ending.send(Heard::Ended);
+            self.tell(watch, true);
+        }
+    }
+
+    fn set_device(&self, device: Option<Device>) { lock(&self.0.held).device = device; }
+    fn set_published(&self, published: bool) { if let Some(device) = lock(&self.0.held).device.as_mut() { device.published = published; } }
+
+    /// The window took the notice: the next change is told again.
+    pub fn noticed(&self) { self.0.noticed.store(false, Ordering::SeqCst); }
+    fn notice(&self) { if !self.0.noticed.swap(true, Ordering::SeqCst) { (self.0.post)(PulseEvent::Touched); } }
+
+    pub(crate) fn world(&self) -> Option<Arc<dyn World>> {
+        let host = self.plugins()?;
+        let instance = lock(&self.0.held).device.as_ref()?.world.clone()?;
+        Some(Arc::new(PluginWorld { host, instance }))
+    }
+
+    pub(crate) fn ask(&self, who: Who, action: &str, command: Value, reply: Reply) {
+        self.judge(Asked { who, action: action.to_owned(), command, reply }, false);
+    }
+
+    /// One command, held to its asker's rights (`decided`: the window has stated the claims since it
+    /// was asked, so a run it does not name holds nothing), then answered.
+    fn judge(&self, asked: Asked, decided: bool) {
+        let mut held = lock(&self.0.held);
+        if drives(&asked.action) && held.device.as_ref().is_some_and(|device| device.published) {
+            let refusal = published_refusal(held.board.as_deref());
+            drop(held);
+            return (asked.reply)(Err(refusal));
+        }
+        // A run may drive only the sequencer it claims; a client may not while a run holds it (v2 device use).
+        let verdict = match &asked.who {
+            Who::Run { instance, .. } if matches!(asked.action.as_str(), "pulse_run" | "pulse_wait_done" | "pulse_stop") => {
+                match (held.claims.as_ref().and_then(|claims| claims.0.get(instance)), &held.device) {
+                    (None, _) if !decided => None,
+                    (None, _) => Some(Err(format!("the run of {instance} does not claim the pulse board; its node must require sequencer.streamer"))),
+                    (Some((run, _)), None) => Some(Err(format!("run {run} cannot drive the pulse board: no sequencer device is open in the apparatus"))),
+                    (Some((run, devices)), Some(device)) if !devices.contains(&device.instance) =>
+                        Some(Err(format!("run {run} does not claim the sequencer {}; its node must require sequencer.streamer", device.instance))),
+                    (Some((run, _)), Some(_)) => Some(Ok(Some(run.clone()))),
+                }
+            }
+            Who::Client { claimant: Some(holder) } if matches!(asked.action.as_str(), "pulse_run" | "pulse_wait_done") => {
+                Some(Err(format!("device is in use by {holder}")))
+            }
+            _ => Some(Ok(None)),
+        };
+        let name = match verdict {
+            // Asked before the window stated its run: judged at its next statement.
+            None => { held.parked.push(asked); return; }
+            Some(Err(message)) => { drop(held); return (asked.reply)(Err(message)); }
+            Some(Ok(name)) => name,
+        };
+        let board = held.board.clone();
+        drop(held);
+        let Asked { who, action, command, reply } = asked;
+        match action.as_str() {
+            "pulse_describe" => {
+                let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
+                let _ = std::thread::Builder::new().name("zlc-pulse-describe".into())
+                    .spawn(move || reply(describe_document(&document).map(|description| to_value(&description)).map_err(|error| error.message)));
+            }
+            // A read whoever holds the board: a camera aligning its frames to the lane that triggers it claims no sequencer.
+            // A run that watches it (`_watch`) is answered now and then told each change by the board itself.
+            "pulse_schedule" => {
+                let lane = command["lane"].as_str().unwrap_or("").to_owned();
+                // Watched from before the answer is read: no change falls between the two.
+                let watch = match (&who, command["_watch"].as_str()) {
+                    (Who::Run { hosted, .. }, Some(id)) => Some(Watch { lane: lane.clone(), run: hosted.clone(), id: id.to_owned() }),
+                    _ => None,
+                };
+                if let Some(watch) = &watch { self.tell(watch.clone(), false); }
+                let answer = schedule(board.as_deref(), &lane);
+                if let (Some(watch), Err(_)) = (&watch, &answer) { self.unwatch(|held| held.run == watch.run && held.id == watch.id); }
+                reply(answer);
+            }
+            _ => {
+                let Some(board) = board else {
+                    let missing = if action == "pulse_estimate" { "no pulse board is attached: an estimate compiles for the board's geometry and Config" } else { "no pulse board is attached" };
+                    return reply(Err(missing.into()));
+                };
+                match action.as_str() {
+                    "pulse_run" => self.play(who, name, board, command, reply),
+                    // A run's Stop answers with what the board said (v2 nodes' sequencer.safe()), before the run goes on.
+                    "pulse_stop" => {
+                        let desk = self.clone();
+                        self.0.safe.run(move || {
+                            let result = board.safe().map(|readback| json!({"status": readback.status, "command_id": readback.command_id}))
+                                .map_err(|error| format!("the board did not go SAFE: {}", error.message));
+                            reply(result);
+                            desk.notice();
+                        });
+                    }
+                    "pulse_wait_done" => self.wait(who, board, command, reply),
+                    "pulse_estimate" => {
+                        let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
+                        let points: Vec<_> = command["api_points"].as_array().map(|points| points.iter().map(api_values).collect()).unwrap_or_default();
+                        let axes = command["scan"].is_object().then(|| ScanAxes { fields: strings(&command["scan"]["fields"]), columns: rows(&command["scan"]["columns"]) });
+                        let _ = std::thread::Builder::new().name("zlc-pulse-estimate".into()).spawn(move || {
+                            reply(estimate_document(&board, &document, &points, axes.as_ref()).map(|estimate| to_value(&estimate)).map_err(|error| error.message));
+                        });
+                    }
+                    other => reply(Err(format!("{other} is not a board command"))),
+                }
+            }
+        }
+    }
+
+    /// `pulse_run`: one stage of a run's play (or a client's whole play), on the board's lane; what it
+    /// leaves the run holding is kept before the run hears its answer.
+    fn play(&self, who: Who, name: Option<String>, board: Arc<Board>, command: Value, reply: Reply) {
+        let hosted = match &who { Who::Run { hosted, .. } => Some(hosted.clone()), Who::Client { .. } => None };
+        let stage = command["stage"].as_str().unwrap_or("run").to_owned();
+        if stage != "run" && hosted.is_none() { return reply(Err("stage load and fire are a run's two-step play".into())); }
+        board.set_world(self.world());
+        let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
+        let values = api_values(&command["api_values"]);
+        let scan = command["scan"].is_object().then(|| ScanRows { fields: strings(&command["scan"]["fields"]), rows: rows(&command["scan"]["rows"]) });
+        let plugins = self.plugins();
+        let native = if command["scan_plan"].is_object() {
+            if scan.is_some() { return reply(Err("scan and scan_plan are mutually exclusive".into())); }
+            let (Some(hosted), Some(plugins)) = (hosted.as_deref(), plugins.as_ref()) else { return reply(Err("scan_plan belongs to a live plugin run".into())) };
+            let Some(handle) = command["scan_plan"]["handle"].as_str().filter(|s| !s.is_empty()) else { return reply(Err("scan_plan needs its native handle".into())) };
+            let Some(outer_index) = command["scan_plan"]["outer_index"].as_u64().and_then(|v| usize::try_from(v).ok()) else {
+                return reply(Err("scan_plan needs an outer point index".into()));
+            };
+            match crate::plugin_services::scan_plan(plugins, hosted, handle) {
+                Ok(plan) => Some((ScanPlanRequest { plan, outer_index }, handle.to_owned())),
+                Err(error) => return reply(Err(error.to_string())),
+            }
+        } else { None };
+        let (runs, sweeps) = (command["run_repeats"].as_u64().unwrap_or(1), command["scan_repeats"].as_u64().unwrap_or(1));
+        if let Some((native, _)) = &native {
+            let expected_sweeps = if native.plan.outer_axis_count() == 0 { native.plan.spec().scan_repeats } else { 1 };
+            if stage != "load" && (runs as u128 != native.plan.spec().run_repeats as u128 || sweeps as u128 != expected_sweeps as u128) {
+                return reply(Err("pulse repeats differ from the armed native scan plan".into()));
+            }
+        }
+        let absolute = zlc_pulse::codec::absolute(&document);
+        let (pinned, told, loaded) = hosted.as_ref().map_or((None, false, None), |hosted| {
+            let mut runs = lock(&self.0.runs);
+            let used = runs.entry(hosted.clone()).or_default();
+            used.name = name.clone().unwrap_or_default();
+            used.in_flight += 1;
+            (used.pinned.get(&absolute).cloned(), used.told.contains(&absolute), used.loaded.clone())
+        });
+        let desk = self.clone();
+        self.0.device.run(move || {
+            let descriptor = native.as_ref().map(|(request, handle)| json!({"handle": handle, "outer_index": request.outer_index}));
+            let mismatch = stage == "fire" && loaded.as_ref().and_then(|value| value.get("native_scan")) != descriptor.as_ref();
+            let (mut result, pin, fired, mut loaded) = if mismatch {
+                (Err("stage fire must use the native scan handle and outer point accepted by stage load".into()), None, None, None)
+            } else {
+                play(&board, &stage, &document, pinned.as_ref(), loaded.as_deref(), &values, scan.as_ref(), native.as_ref().map(|(request, _)| request), runs, sweeps)
+            };
+            // The file is looked at only to say, once, that it no longer holds the pulse the run plays.
+            let changed = stage != "fire" && !told
+                && pinned.as_ref().is_some_and(|pinned| !matches!(read_document(&document), Ok((_, read)) if read == **pinned));
+            if let (true, Some(hosted)) = (changed, &hosted) { desk.kept(hosted, &absolute); }
+            if let (Some((native, handle)), Some(hosted)) = (&native, &hosted) {
+                if let Some(value) = &mut loaded { Arc::make_mut(value)["native_scan"] = descriptor.clone().unwrap_or_default(); }
+                if let (Ok(receipt), Some(plugins)) = (&mut result, &plugins) {
+                    if let Err(error) = accept_native_receipt(plugins, hosted, handle, native, &board, receipt) { result = Err(error); }
+                }
+            }
+            if let Some((path, _)) = &pin { lock(&desk.0.played).insert(path.clone()); }
+            if let Some(hosted) = &hosted { desk.played(hosted, pin, fired, loaded); }
+            reply(result);
+            desk.notice();
+        });
+    }
+
+    /// The pulse documents a diagnostics archive carries: each played on the board this session, the
+    /// pulse the board holds now as it holds it, and the Config values it compiles against (its
+    /// file, or the values when it follows none). Asks the board: off the window's turn.
+    pub fn diagnostic_documents(&self) -> Vec<NamedDocument> {
+        let file = |why: &str, path: PathBuf| NamedDocument { why: why.into(), contract: PULSE_CONTRACT.into(), source: DocumentSource::File(path) };
+        let held = |why: &str, name: &str, text: String| NamedDocument { why: why.into(), contract: String::new(),
+            source: DocumentSource::Held { name: name.into(), bytes: text.into_bytes() } };
+        let mut documents: Vec<NamedDocument> = lock(&self.0.played).iter().map(|path| file("played on the board", path.clone())).collect();
+        let Some(board) = lock(&self.0.held).board.clone() else { return documents };
+        // Held by another client of its server, the board is not asked (a request would take it over): who holds it is said instead.
+        match board.held_elsewhere().map_or_else(|| board.applied().map_err(|error| ("the board did not say what it holds", "board-held-pulse-error.txt", error.message)),
+                                                 |holder| Err(("who holds the board: another client of its pulse server", "board-holder.txt", holder))) {
+            Ok(Some(applied)) => if let Some(source) = applied.source {
+                documents.push(held("held by the board (as loaded, its Subpulses resolved)", "board-held-pulse.json", zlc_pulse::codec::sequence_to_tree(&source).readable()));
+            },
+            Ok(None) => {}
+            Err((why, name, text)) => documents.push(held(why, name, text)),
+        }
+        let (values, _, path) = board.config().held();
+        match path {
+            Some(path) => documents.push(NamedDocument { contract: String::new(), ..file("Config values the board compiles against", path) }),
+            None if !values.is_empty() => if let Ok(tree) = zlc_pulse::codec::config_values_to_tree(&values) {
+                documents.push(held("Config values the board compiles against (held, no file)", "board-config-values.json", tree.readable()));
+            },
+            None => {}
+        }
+        documents
+    }
+
+    /// The editor's document, played on the board by its own Fire, Hold or Step.
+    fn editor_played(&self, path: &str) { if !path.is_empty() { lock(&self.0.played).insert(zlc_pulse::codec::absolute(Path::new(path))); } }
+
+    /// What one of a run's `pulse_run`s left it holding; a run that ended meanwhile is let go once its last is in.
+    fn played(&self, hosted: &str, pinned: Option<(PathBuf, Arc<Sequence>)>, fired: Option<u32>, loaded: Option<Arc<Value>>) {
+        let settle = {
+            let mut runs = lock(&self.0.runs);
+            let used = runs.entry(hosted.to_owned()).or_default();
+            used.in_flight = used.in_flight.saturating_sub(1);
+            if let Some((path, sequence)) = pinned { used.pinned.entry(path).or_insert(sequence); used.loaded = loaded; }
+            if fired.is_some() { used.fire = fired; }
+            used.ended && used.in_flight == 0
+        };
+        if settle { self.settle(hosted); }
+    }
+
+    /// A run's pulse file changed during the run: the sequencer's log says so once for that run, and
+    /// that the run keeps playing the pulse it began with.
+    fn kept(&self, hosted: &str, path: &Path) {
+        let run = {
+            let mut runs = lock(&self.0.runs);
+            let Some(used) = runs.get_mut(hosted) else { return };
+            if !used.told.insert(path.to_owned()) { return; }
+            used.name.clone()
+        };
+        let file = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let line = format!("ZLC PULSE KEPT for {run}: {file} changed during this run; the run keeps playing the pulse it began with, \
+                            and the change applies at the next Start");
+        let instance = lock(&self.0.held).device.as_ref().map(|device| device.instance.clone());
+        if let Some((instance, line)) = instance.zip(narration(&line)) { (self.0.post)(PulseEvent::Log { instance, line }); }
+    }
+
+    /// `pulse_wait_done`: FIRE `command_id`'s report, taken by whoever waits for it (taking it frees the
+    /// board for the next FIRE). A run that watches it (`_watch`) is answered at once -- the report if it
+    /// is in, else not done -- and told once when the board reports (or can no longer report); any other
+    /// wait is answered when the report is in or its `timeout_seconds` ran out.
+    fn wait(&self, who: Who, board: Arc<Board>, command: Value, reply: Reply) {
+        let id = command["command_id"].as_u64().unwrap_or(0) as u32;
+        let report = |report: zlc_pulse::Result<Option<zlc_pulse::device::DoneReport>>| report.map(|report| to_value(&done_json(report.as_ref()))).map_err(|error| error.message);
+        let desk = self.clone();
+        if let (Who::Run { hosted, .. }, Some(watch)) = (&who, command["_watch"].as_str()) {
+            let now = board.wait_report(id, Some(Duration::ZERO));
+            let taken = matches!(now, Ok(Some(_)));
+            let pending = matches!(now, Ok(None));
+            reply(report(now));
+            if taken { self.notice(); }
+            let Some(host) = self.plugins().filter(|_| pending) else { return };
+            let (run, watch) = (hosted.clone(), watch.to_owned());
+            self.0.watching.fetch_add(1, Ordering::SeqCst);
+            let watching = Watching(self.0.clone());
+            let _ = std::thread::Builder::new().name("zlc-pulse-done".into()).spawn(move || {
+                let _watching = watching;
+                // Ends with its FIRE: a report, or the SAFE that a Stop or the run's end sends.
+                let done = board.wait_report(id, None);
+                let taken = matches!(done, Ok(Some(_)));
+                let _ = host.tell_watch(&run, &watch, report(done));
+                if taken { desk.notice(); }
+            });
+            return;
+        }
+        let timeout = Duration::from_secs_f64(command["timeout_seconds"].as_f64().unwrap_or(0.0).clamp(0.0, 600.0));
+        let _ = std::thread::Builder::new().name("zlc-pulse-wait".into()).spawn(move || {
+            let done = board.wait_report(id, Some(timeout));
+            // Only a report taken changes the board (its FIRE is over); a wait that ran out touched nothing.
+            let taken = matches!(done, Ok(Some(_)));
+            reply(report(done));
+            if taken { desk.notice(); }
+        });
+    }
+
+    /// Tell `watch` the attached board's schedule (`now`: at once) and then each change of it, on a
+    /// thread of its own: the board says when it changed, nothing asks, and the window's turn is not
+    /// in the way. It ends when its run ends, when the board is replaced (the watch is then told the
+    /// new one) or when the run no longer hears it.
+    fn tell(&self, watch: Watch, now: bool) {
+        let Some(host) = self.plugins() else { return };
+        let board = lock(&self.0.held).board.clone();
+        let (ending, heard) = mpsc::channel();
+        if let Some(board) = &board {
+            let changed = ending.clone();
+            board.on_change(move |_| changed.send(Heard::Changed).is_ok());
+        }
+        lock(&self.0.watches).push((watch.clone(), ending));
+        let board = board.as_ref().map(Arc::downgrade);
+        self.0.watching.fetch_add(1, Ordering::SeqCst);
+        let watching = Watching(self.0.clone());
+        let _ = std::thread::Builder::new().name("zlc-pulse-watch".into()).spawn(move || {
+            let _watching = watching;
+            let told = |board: Option<&Board>| host.tell_watch(&watch.run, &watch.id, schedule(board, &watch.lane)).is_ok();
+            if now && !told(board.as_ref().and_then(std::sync::Weak::upgrade).as_deref()) { return; }
+            let Some(board) = board else { return };
+            while let Ok(Heard::Changed) = heard.recv() {
+                // Changes that came together are told once, as the board now is.
+                loop {
+                    match heard.try_recv() {
+                        Ok(Heard::Changed) => {}
+                        Ok(Heard::Ended) => return,
+                        Err(_) => break,
+                    }
+                }
+                let Some(board) = board.upgrade() else { return };
+                if !told(Some(&*board)) { return; }
+            }
+        });
+    }
+
+    /// End the watches `which` names.
+    fn unwatch(&self, which: impl Fn(&Watch) -> bool) {
+        lock(&self.0.watches).retain(|(watch, ending)| if which(watch) { let _ = ending.send(Heard::Ended); false } else { true });
+    }
+
+    /// A run is over -- its node returned, failed or was stopped, or its process died: its watches
+    /// end, and once its last `pulse_run` is in it is let go ([`Self::settle`]).
+    fn ended(&self, hosted: &str) {
+        self.unwatch(|watch| watch.run == hosted);
+        let settle = lock(&self.0.runs).get_mut(hosted).is_some_and(|used| { used.ended = true; used.in_flight == 0 });
+        if settle { self.settle(hosted); }
+    }
+
+    /// A run let go: its pins go, and a FIRE of its that is still unreported (a run that ended
+    /// without its own Stop) is made SAFE, as each v2 node's finally did.
+    fn settle(&self, hosted: &str) {
+        let Some(used) = lock(&self.0.runs).remove(hosted) else { return };
+        let (board, instance) = { let held = lock(&self.0.held); (held.board.clone(), held.device.as_ref().map(|device| device.instance.clone())) };
+        let (Some(fire), Some(board)) = (used.fire, board) else { return };
+        if board.last_fire() != Some((fire, Fate::Pending)) { return; }
+        let (desk, run) = (self.clone(), used.name);
+        self.0.safe.run(move || {
+            let outcome = match board.safe() {
+                Ok(_) => format!("ZLC SAFE after {run}: it ended with FIRE {fire} unreported"),
+                Err(error) => format!("ZLC SAFE FAILED after {run} ended with FIRE {fire} unreported: {}", error.message),
+            };
+            if let Some((instance, line)) = instance.zip(narration(&outcome)) { (desk.0.post)(PulseEvent::Log { instance, line }); }
+            desk.notice();
+        });
+    }
+}
+
+pub struct PulseHost {
+    pub editor: Editor,
+    /// The board's commands, answered off the window's turn; its lanes are the editor's board lanes.
+    pub desk: PulseDesk,
     program: Lane,
     preview: Lane,
     post: Post,
     safe_actions: SafeActions,
-    plugins: Option<PluginHost>,
     given: Option<Given>,
     python: Option<PathBuf>,
     session: Arc<Mutex<Option<PlotSession>>>,
@@ -223,11 +815,571 @@ pub struct PulseHost {
     /// The workbench's record of outside drivers: the session's sequencer is "PulseGUI"'s while
     /// the editor's own pulse plays (v2 `_drive_lease`), so no run may claim it meanwhile.
     pub users: zlc_workbench::DeviceUsers,
-    /// Each plugin run's use of the board, until it has ended and its replies are in.
-    runs: BTreeMap<String, RunUse>,
     /// What the sequencer device last stated of itself, and the board and revision that was of.
     facts: Value,
-    facts_of: Option<(usize, u64)>,
+    facts_of: Option<(usize, u64, Option<String>)>,
+    /// Something the window shows changed since its view was last made.
+    dirty: bool,
+    /// Editor commands whose files are being written: the view waits for them.
+    writing: usize,
+    /// Closing the window: told once the board's close, begun by `shutdown`, has ended.
+    closing: Option<mpsc::Receiver<()>>,
+    /// The board's close at the window's close has ended.
+    closed: bool,
+}
+
+/// How a command was answered.
+pub enum Handled { Now(Result<Value, String>), Later }
+
+impl PulseHost {
+    /// The editor's pulses folder is the workspace's; its value files live beside it (v2 Workspace.prepare made both).
+    pub fn new(desk: PulseDesk, post: Post, safe_actions: SafeActions, plugins: Option<PluginHost>, pulses: &Path) -> PulseHost {
+        let deployed = Deployed::load().map_err(|error| eprintln!("{}", json!({"type": "pulse-error", "error": error.message}))).ok();
+        if let Some(workspace) = pulses.parent() {
+            let _ = std::fs::create_dir_all(workspace.join(zlc_pulse::codec::CONFIG_VALUES_DIRECTORY));
+            *lock(&desk.0.root) = workspace.to_path_buf();
+        }
+        desk.set_plugins(plugins);
+        let python = zlc_plugin_host::plugin_python().ok();
+        PulseHost { editor: Editor::new(deployed, pulses.to_path_buf()), desk, program: Lane::new("pulse-program"),
+                    preview: Lane::new("pulse-preview"), post, safe_actions, given: None, python, session: Arc::new(Mutex::new(None)),
+                    dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
+                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(),
+                    facts: Value::Null, facts_of: None, dirty: true, writing: 0, closing: None, closed: false }
+    }
+
+    /// The pulse section of a state message: the editor's view plus the preview's frame.
+    pub fn state(&mut self) -> Value {
+        let _span = crate::trace::span("pulse.state", || json!({}));
+        let mut state = self.editor.state();
+        state["preview"]["panel"] = json!(PREVIEW_PANEL);
+        state["preview"]["frame"] = self.frame.map_or(Value::Null, |(width, height, sequence)| json!({"width": width, "height": height, "sequence": sequence}));
+        state["preview"]["axes"] = Value::Array(self.axes.clone());
+        state["apparatus_device"] = self.given.as_ref().map_or(Value::Null, |given| json!(given.instance));
+        state
+    }
+
+    /// The pulse section when something it shows changed since it was last made (and no command's
+    /// files are still being written): made at most once per change, never for a reply alone.
+    pub fn view(&mut self) -> Option<Value> {
+        if !self.dirty || self.writing > 0 { return None; }
+        self.dirty = false;
+        Some(self.state())
+    }
+
+    /// A pulse section once it is sent: the editor takes its unchanged schedule cards back for the next one.
+    pub fn recycle(&mut self, pulse: &mut Value) { self.editor.recycle(pulse); }
+
+    /// The apparatus' sequencer device instance, when the board is one.
+    pub fn apparatus_device(&self) -> Option<String> { self.given.as_ref().map(|given| given.instance.clone()) }
+
+    /// Run the editor's jobs on their lanes; move Stop all's SAFE and the desk with the board.
+    pub fn dispatch(&mut self) {
+        // Every editor change ends here: the record is current before any later start is admitted.
+        let users = self.given.as_ref().filter(|_| self.editor.drives()).map(|given| (given.instance.clone(), "PulseGUI".to_owned()));
+        if let Ok(mut record) = self.users.lock() { *record = users.into_iter().collect(); }
+        if let Some(board) = self.editor.take_board_change() {
+            self.safe_actions.unregister(SAFE_OUTPUT);
+            if let Some(board) = &board {
+                let held = board.clone();
+                self.safe_actions.register(SAFE_OUTPUT, Arc::new(move || held.safe().map(|_| ()).map_err(|error| error.message)));
+            }
+            self.desk.set_board(board);
+        }
+        if let Some(board) = self.editor.board() { board.set_world(self.desk.world()); }
+        for job in self.editor.take_jobs() {
+            let post = self.post.clone();
+            match job {
+                Job::Device { work, done } => self.desk.device_lane().run(move || { let outcome = work(); done.set(); post(PulseEvent::Outcome(outcome)); }),
+                Job::Safe { work } => self.desk.safe_lane().run(move || post(PulseEvent::Outcome(work()))),
+                Job::Completion { work } => { let _ = std::thread::Builder::new().name("zlc-pulse-completion".into()).spawn(move || post(PulseEvent::Outcome(work()))); }
+                Job::Program { source, fields } => {
+                    let python = self.python.clone();
+                    self.program.run(move || {
+                        let table = run_scan_program(python.as_deref(), &source);
+                        post(PulseEvent::Outcome(Outcome::Program { source, fields, table }));
+                    });
+                }
+            }
+        }
+        self.refresh_preview();
+    }
+
+    /// The status poll: the board asked how it is, and the Subpulse files the open pulse resolves
+    /// looked at off the window's turn (a changed one is told as [`PulseEvent::FilesChanged`]).
+    pub fn poll(&mut self) {
+        self.editor.poll();
+        self.dispatch();
+        let post = self.post.clone();
+        self.desk.device_lane().run(move || if !zlc_pulse::codec::changed_subpulses().is_empty() { post(PulseEvent::FilesChanged) });
+    }
+
+    /// A Subpulse file changed on the disk: what the pages show of it is worked out again.
+    pub fn files_changed(&mut self) { self.editor.subpulse_files_changed(); self.dirty = true; }
+
+    /// Someone else drove the board: the editor asks it again.
+    pub fn touched(&mut self) {
+        self.desk.noticed();
+        self.editor.board_touched();
+        self.dispatch();
+        self.dirty = true;
+    }
+
+    /// A lane's answer to the editor: whether what the window shows may have changed.
+    pub fn deliver(&mut self, outcome: Outcome) {
+        if self.editor.deliver(outcome) { self.dirty = true; }
+        self.dispatch();
+    }
+
+    /// The run holding the session's sequencer changed: the editor may (not) drive it now.
+    pub fn claimed_by(&mut self, claimant: Option<String>) {
+        if self.editor.set_claimed_by(claimant) { self.editor.poll(); self.dispatch(); self.dirty = true; }
+    }
+
+    /// Draw the preview again when its page is shown and what it draws changed.
+    pub fn refresh_preview(&mut self) {
+        if self.editor.page() != zlc_pulse_editor::editor::PREVIEW_PAGE && self.session.lock().map(|s| s.is_none()).unwrap_or(true) { return; }
+        let Some(request) = self.editor.preview_request() else { return };
+        let (sequence, include_off, pinned) = match request {
+            Ok(request) => request,
+            Err(message) => { self.editor.set_preview_status(message, "error"); self.dirty = true; return; }
+        };
+        let key = format!("{:?}|{include_off}|{pinned:?}|{}", zlc_pulse::codec::sequence_to_tree(&sequence).canonical(), self.dpr);
+        if key == self.preview_key { return; }
+        if self.preview_busy { self.preview_wanted = true; return; }
+        self.preview_busy = true;
+        self.editor.set_preview_status("drawing preview…", "task");
+        self.dirty = true;
+        let (session, post, dpr) = (self.session.clone(), self.post.clone(), self.dpr);
+        self.preview.run(move || {
+            let result = (|| -> Result<(Front, String, Vec<Value>), String> {
+                let preview = zlc_pulse_editor::timeline::preview_candidate(&sequence, include_off, pinned.as_deref()).map_err(|e| e.message)?;
+                let mut held = session.lock().map_err(|_| "preview lost")?;
+                let failure = |error: zlc_plot::configuration::error::PlotError| error.to_string();
+                match held.as_mut() {
+                    None => *held = Some(PlotSession::pulse_timeline(preview.data.clone(), PlotLabels::default(), Some(&preview.size), None, dpr, None,
+                                                                    services()).map_err(failure)?),
+                    Some(open) => {
+                        open.set_device_pixel_ratio(dpr).map_err(failure)?;
+                        open.set_size(&preview.size).map_err(failure)?;
+                        open.update_pulse(preview.data.clone(), None).map_err(failure)?;
+                    }
+                }
+                let (front, axes) = drawn(held.as_mut().expect("drawn")).map_err(failure)?;
+                let words = [zlc_pulse_editor::text::counted(preview.periods, "period"), zlc_pulse_editor::text::counted(preview.rows, "channel"),
+                             zlc_pulse_editor::text::readable(preview.total_ns), preview.size.clone()].join(zlc_pulse_editor::text::SEPARATOR);
+                Ok((front, words, axes))
+            })();
+            post(PulseEvent::Preview { result, key });
+        });
+    }
+
+    /// A preview the lane drew: the front for Pixels, the words for the page.
+    pub fn preview_drawn(&mut self, result: Result<(Front, String, Vec<Value>), String>, key: String) -> Option<(u64, Front)> {
+        self.preview_busy = false;
+        self.dirty = true;
+        let drawn = match result {
+            Ok((front, words, axes)) => {
+                self.preview_key = key;
+                self.editor.set_preview_status(words, "task");
+                Some(self.presented(front, axes))
+            }
+            Err(error) => { self.preview_key = key; self.editor.set_preview_status(format!("cannot draw this pulse: {error}"), "error"); None }
+        };
+        if std::mem::take(&mut self.preview_wanted) { self.refresh_preview(); }
+        drawn
+    }
+
+    fn presented(&mut self, front: Front, axes: Vec<Value>) -> (u64, Front) {
+        self.frames += 1;
+        self.frame = Some((front.width, front.height, self.frames));
+        self.axes = axes;
+        self.dirty = true;
+        (self.frames, front)
+    }
+
+    /// A pointer message on the preview (the page sends it as a panel's,
+    /// `panel: "pulse-preview"`): zoom, pan and the selectors of the drawn
+    /// timeline, in order on the preview's lane, while the page's Selectors
+    /// switch is on (v2 `set_interaction_enabled`; off, the picture takes no
+    /// input). A newer move replaces one not yet handled.
+    pub fn pointer(&mut self, command: Value) {
+        let gesture_end = matches!(command["event"].as_str(), Some("release" | "cancel" | "leave"));
+        if !self.editor.preview_selectors() && !gesture_end { return; }
+        if self.pointers.back_mut().is_some_and(|last| crate::pointer_queue::merge_scroll(last, &command)) {
+            self.next_pointer();
+            return;
+        }
+        if command["event"] == "move" && self.pointers.back().is_some_and(|last| last["event"] == "move") { self.pointers.pop_back(); }
+        self.pointers.push_back(command);
+        self.next_pointer();
+    }
+
+    fn next_pointer(&mut self) {
+        if self.pointer_busy { return; }
+        let Some(command) = self.pointers.pop_front() else { return };
+        self.pointer_busy = true;
+        let (session, post) = (self.session.clone(), self.post.clone());
+        self.preview.run(move || {
+            let result = session.lock().map_err(|_| "preview lost".to_owned()).and_then(|mut held| {
+                let Some(open) = held.as_mut() else { return Ok(None) };
+                let failure = |error: zlc_plot::configuration::error::PlotError| error.to_string();
+                let event = zlc_plot::document::pointer_event(&command, None).map_err(failure)?;
+                if !open.raster_pointer_event(&event).map_err(failure)? { return Ok(None); }
+                drawn(open).map(Some).map_err(failure)
+            });
+            post(PulseEvent::Gesture(result));
+        });
+    }
+
+    /// The lane handled a pointer message: a changed picture goes to Pixels.
+    pub fn gestured(&mut self, result: Result<Option<(Front, Vec<Value>)>, String>) -> Option<(u64, Front)> {
+        self.pointer_busy = false;
+        let presented = match result {
+            Ok(Some((front, axes))) => Some(self.presented(front, axes)),
+            Ok(None) => None,
+            Err(error) => { self.editor.set_preview_status(format!("preview gesture: {error}"), "error"); self.dirty = true; None }
+        };
+        self.next_pointer();
+        presented
+    }
+
+    /// `save_preview_image`: the drawn preview as PNG, beside the pulse.
+    fn save_preview(&mut self, path: Option<String>) -> Result<Value, String> {
+        self.dirty = true;
+        if self.session.lock().map(|s| s.is_none()).unwrap_or(true) { self.editor.warn("There is no preview to save"); return Ok(Value::Null); }
+        if self.preview_busy {
+            self.editor.set_preview_status("preview is busy; save again when the drawing is ready", "warning");
+            return Ok(Value::Null);
+        }
+        let name = self.editor.sequence().map_or_else(|| "pulse".to_owned(), |s| if s.name.is_empty() { "pulse".into() } else { s.name.clone() });
+        let target = path.map(PathBuf::from).unwrap_or_else(|| tables::unique_path(&PathBuf::from(self.editor.state_folder()), &name, ".png"));
+        let (session, post) = (self.session.clone(), self.post.clone());
+        self.editor.set_preview_status("saving preview…", "task");
+        self.preview.run(move || {
+            let result = session.lock().map_err(|_| "preview lost".to_owned()).and_then(|mut held| {
+                let bytes = held.as_mut().ok_or("There is no preview to save")?.save_image("png").map_err(|error| error.to_string())?;
+                zlc_pulse::codec::atomic_write(&target, &bytes).map_err(|error| error.message)?;
+                Ok(target)
+            });
+            post(PulseEvent::PreviewSaved(result));
+        });
+        Ok(json!({"accepted": true}))
+    }
+
+    pub fn preview_saved(&mut self, result: Result<PathBuf, String>) {
+        self.dirty = true;
+        match result {
+            Ok(path) => self.editor.set_preview_status(format!("saved {}", path.display()), "task"),
+            Err(error) => self.editor.warn(format!("Cannot save the preview: {error}")),
+        }
+    }
+
+    /// One `pulse_*` command the window or a client of the bus gave (the operator's path already
+    /// asked where a file goes: main.rs, dialog.rs). The board's own commands are the desk's; the
+    /// editor's run here, the file they read read ahead and the files they write written off the
+    /// window's turn. `claimant`: the run that holds the session's sequencer, if one does.
+    pub fn command(&mut self, action: &str, command: &Value, operator: bool, request: u64, claimant: Option<String>) -> Handled {
+        self.claimed_by(claimant.clone());
+        if self.desk.client(action, command, request, claimant) { return Handled::Later; }
+        // Published, the board is the other computer's: nothing here plays it (Stop still makes it safe).
+        if drives(action) && self.given.as_ref().is_some_and(|given| given.published) { return Handled::Now(Err(published_refusal(self.editor.board().map(|board| &**board)))); }
+        match action {
+            // v2 save_preview_image: the drawing as it is, beside the pulse under a fresh name (no dialog).
+            "pulse_preview" if command["save"].as_bool() == Some(true) => return Handled::Now(self.save_preview(command["path"].as_str().map(str::to_owned))),
+            "pulse_ready" => { self.dpr = command["dpr"].as_f64().filter(|dpr| *dpr > 0.0).unwrap_or(1.0); self.dispatch(); return Handled::Now(Ok(Value::Null)); }
+            _ => {}
+        }
+        let args: Map<String, Value> = crate::remote::parameters(command).as_object().cloned().unwrap_or_default();
+        if let Some(path) = self.editor.reads(action, &args) {
+            let (post, action) = (self.post.clone(), action.to_owned());
+            self.desk.device_lane().run(move || {
+                zlc_pulse::codec::read_ahead(&path);
+                post(PulseEvent::Read(Box::new(ReadAhead { action, args, operator, request, path })));
+            });
+            return Handled::Later;
+        }
+        self.edit(action, &args, operator, request)
+    }
+
+    /// The file an editor command reads is in: the command runs. Its answer, and the request it answers.
+    pub fn read(&mut self, ahead: ReadAhead) -> (u64, Handled) {
+        let ReadAhead { action, args, operator, request, path } = ahead;
+        let handled = self.edit(&action, &args, operator, request);
+        zlc_pulse::codec::forget_read_ahead(&path);
+        (request, handled)
+    }
+
+    fn edit(&mut self, action: &str, args: &Map<String, Value>, operator: bool, request: u64) -> Handled {
+        let answer = self.editor.command(action, args, operator);
+        if answer.is_ok() && matches!(action, "pulse_fire" | "pulse_hold" | "pulse_step") { self.desk.editor_played(&self.editor.path); }
+        self.dirty = true;
+        // Selectors off ends a drag in progress (v2 cancelled the active interaction).
+        if action == "pulse_preview" && args.get("selectors") == Some(&Value::Bool(false)) { self.pointer(json!({"event": "cancel", "x": 0.0, "y": 0.0})); }
+        let writes = self.editor.take_writes();
+        self.dispatch();
+        let Some(writes) = writes else { return Handled::Now(answer) };
+        // On the board's lane: a FIRE after a save plays what was saved.
+        self.writing += 1;
+        let post = self.post.clone();
+        self.desk.device_lane().run(move || {
+            let result = writes.files.iter().try_for_each(|(path, bytes)| zlc_pulse::codec::write_file(path, bytes)
+                .map_err(|error| format!("{}: {}", path.display(), error.message)));
+            post(PulseEvent::Written(Box::new(Written { request, writes, result, answer })));
+        });
+        Handled::Later
+    }
+
+    /// An editor command's files were written (or not): its answer, and the request it answers.
+    pub fn written(&mut self, written: Written) -> (u64, Result<Value, String>) {
+        let Written { request, writes, result, answer } = written;
+        self.writing = self.writing.saturating_sub(1);
+        self.dirty = true;
+        let answer = self.editor.written(writes, result, answer);
+        self.dispatch();
+        (request, answer)
+    }
+
+    /// A pulse a Figure recorded, opened as an unsaved draft.
+    pub fn open_recorded(&mut self, document: &str, discard_changes: bool) -> Result<Value, String> {
+        let answer = self.editor.open_recorded(document, discard_changes);
+        self.dirty = true;
+        self.dispatch();
+        answer
+    }
+
+    // ------------------------------------------------------------- native devices
+    /// The apparatus opens a sequencer device: on the device lane.
+    pub fn open_device(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value) {
+        let post = self.post.clone();
+        if let Some(given) = &self.given {
+            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)), took: Duration::ZERO,
+                                      faults: Vec::new() });
+            return;
+        }
+        let (instance, type_id, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
+        let world = (type_id == "sequencer.virtual").then(|| (self.desk.plugins(), world_instance(&instance), context["simulation"].clone()));
+        self.desk.device_lane().run(move || {
+            let began = std::time::Instant::now();
+            let watch = zlc_pulse::serial::FaultWatch::start();
+            // The world opens first: a virtual board without one would play into nothing.
+            if let Some((plugins, name, group)) = &world {
+                let opened = plugins.as_ref().ok_or_else(|| "the virtual sequencer needs the plugin host for its world".to_owned())
+                    .and_then(|host| host.open(name, "simulation.board", json!({}), if group.is_object() { group.clone() } else { json!({}) })
+                        .map_err(|error| format!("its world side: {error}")));
+                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error), took: began.elapsed(), faults: Vec::new() }); return; }
+            }
+            let (told, name) = (post.clone(), instance.clone());
+            let heard = Box::new(move |said| told(match said {
+                Said::Narration(line) => PulseEvent::Log { instance: name.clone(), line },
+                Said::Owner(owner) => PulseEvent::Owner { instance: name.clone(), owner },
+            }));
+            let result = open_device(&type_id, &parameters, heard).map(|(board, child)| (Arc::new(board), child));
+            if let Some(line) = result.as_ref().ok().and_then(|(board, _)| connected_line(board)) { post(PulseEvent::Log { instance: instance.clone(), line }); }
+            if result.is_err() { if let Some((Some(host), name, _)) = &world { let _ = host.close(name); } }
+            post(PulseEvent::Opened { instance, result, took: began.elapsed(), faults: serial_faults(&watch) });
+        });
+    }
+
+    /// The open finished: the editor shows the session's board, locked, under the device's
+    /// `label` (v2 set_device_label: its role).
+    pub fn device_opened(&mut self, instance: &str, label: &str, result: Result<(Arc<Board>, Option<Served>), String>) -> Result<Value, String> {
+        let (board, child) = result?;
+        if self.given.is_some() { let _ = board.close(); return Err("the pulse board is already attached".into()); }
+        let description = board.description().clone();
+        let world = (board.is_virtual() && self.desk.plugins().is_some()).then(|| world_instance(instance));
+        self.desk.set_device(Some(Device { instance: instance.to_owned(), world: world.clone(), published: false }));
+        self.given = Some(Given { instance: instance.to_owned(), child, published: false, world, holder: Holder::Here });
+        self.editor.attach_given(board, label);
+        // The desk takes the board here; each watch is then told this one's schedule, then its changes.
+        self.dispatch();
+        self.dirty = true;
+        // `snapshot`: it reports its state for the bench a Start records (`bench_snapshot`).
+        let facts = self.device_facts().map_or(Value::Null, |(_, facts)| facts);
+        let board = self.editor.board().map(|b| b.name().to_owned());
+        // What the board says of itself (PLUGIN_PROTOCOL `device_info`), from the description its open read:
+        // which board, the protocol it speaks, and the build its layout and target fingerprints name.
+        let mut info = json!({"board": board, "board_protocol": zlc_pulse::wire::LAYOUT_STRUCT_VERSION, "clock_hz": description.clock_hz,
+            "layout_fingerprint": format!("{:08x}", description.layout_fingerprint()), "target_abi_fingerprint": description.target.abi_fingerprint()});
+        // The board on this computer: the transport its server took, and what its probe tried.
+        let served = self.given.as_ref().and_then(|given| given.child.as_ref());
+        if let Some(served) = served {
+            info["transport"] = json!(transport_taken(&served.ready));
+            let attempts = probe_attempts(&served.ready);
+            if !attempts.is_empty() { info["probe"] = json!(attempts.join("; ")); }
+        }
+        Ok(json!({"board": board, "ports": description.target.ports.len(), "clock_hz": description.clock_hz, "snapshot": true, "facts": facts,
+                  "device_info": info, "note": served.and_then(|served| transport_note(&served.backend, &served.ready))}))
+    }
+
+    /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
+    /// trigger lanes -- `{trigger_lanes: [{lane, port, label, frames}], held_by}`, `frames` how often the
+    /// lane rises in one shot of what the board holds, null while it holds nothing; `held_by` who holds
+    /// the board while it is not this application's ([`Holder`]), else null. Worked out when the board
+    /// changes what it holds or who holds it, not at every turn; the workbench is told (`Event::Facts`)
+    /// and asks its drafts again.
+    pub fn device_facts(&mut self) -> Option<(String, Value)> {
+        let given = self.given.as_ref()?;
+        let (instance, held_by) = (given.instance.clone(), given.holder.held_by());
+        let board = self.editor.board()?.clone();
+        let key = (std::sync::Arc::as_ptr(&board) as usize, board.revision(), held_by.clone());
+        if self.facts_of.as_ref() == Some(&key) { return None; }
+        self.facts_of = Some(key);
+        let counts = board.trigger_counts().ok().and_then(|(_, counts)| counts);
+        let lanes: Vec<Value> = board.trigger_lanes().into_iter().enumerate().map(|(at, (lane, port, label))| json!({
+            "lane": lane, "port": port, "label": label, "frames": counts.as_ref().and_then(|counts| counts.get(at).copied())})).collect();
+        let facts = json!({"trigger_lanes": lanes, "held_by": held_by});
+        if self.facts == facts { return None; }
+        self.facts = facts.clone();
+        Some((instance, facts))
+    }
+
+    /// The apparatus board's `snapshot`, read off the window's turn (a pulse server's client waits
+    /// behind a LOAD) and given up after `wait`: the work to run on a thread of its own.
+    pub fn bench_snapshot(&self, wait: Duration) -> impl FnOnce() -> Result<Value, String> + Send + 'static {
+        let board = self.given.as_ref().and(self.editor.board().cloned());
+        move || {
+            let board = board.ok_or("no pulse board is attached")?;
+            let (sender, answer) = mpsc::channel();
+            std::thread::Builder::new().name("zlc-pulse-bench".into()).spawn(move || { let _ = sender.send(bench_entry(&board)); })
+                .map_err(|error| error.to_string())?;
+            answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("the pulse board did not answer within {} s", wait.as_secs())))
+        }
+    }
+
+    pub fn close_device(&mut self, instance: &str) {
+        let post = self.post.clone();
+        if self.given.as_ref().is_none_or(|given| given.instance != instance) {
+            post(PulseEvent::Closed { instance: instance.to_owned(), error: None });
+            return;
+        }
+        self.let_go(instance, true);
+    }
+
+    /// The board's computer is gone (the workbench holds the device failed): the editor lets it go, nobody is told it closed.
+    pub fn lose_device(&mut self, instance: &str) {
+        if self.given.as_ref().is_some_and(|given| given.instance == instance) { self.let_go(instance, false); }
+    }
+
+    fn let_go(&mut self, instance: &str, closed: bool) {
+        let post = self.post.clone();
+        let given = self.given.take().expect("checked");
+        let board = self.editor.board().cloned();
+        self.desk.set_device(None);
+        self.editor.detach_given();
+        // No board: each watch is told nothing is held any more.
+        self.dispatch();
+        self.dirty = true;
+        let instance = instance.to_owned();
+        let plugins = self.desk.plugins();
+        self.desk.device_lane().run(move || {
+            let error = board.and_then(|board| board.close().err()).map(|error| error.message);
+            if let Some(served) = given.child { served.end(); }
+            if let (Some(host), Some(world)) = (plugins, &given.world) { let _ = host.close(world); }
+            if closed { post(PulseEvent::Closed { instance, error }); }
+        });
+    }
+
+    /// Closing the window: SAFE, then let every connection go -- on the board's SAFE lane, as Stop
+    /// all's SAFE is, never on the window's turn, which goes on meanwhile (the runs it stops end and
+    /// are answered). Each step is bounded as it always was (the board's own call, the local
+    /// server's end); [`PulseEvent::ShutDown`] says it is done, [`PulseHost::shut_down`] reads it.
+    pub fn shutdown(&mut self) {
+        if self.closing.is_some() || self.closed { return; }
+        let board = self.editor.board().cloned();
+        let served = self.given.take().and_then(|mut given| given.child.take());
+        self.safe_actions.unregister(SAFE_OUTPUT);
+        let (done, closing) = mpsc::channel();
+        self.closing = Some(closing);
+        let post = self.post.clone();
+        self.desk.safe_lane().run(move || {
+            if let Some(board) = board { let _ = board.close(); }
+            if let Some(served) = served { served.end(); }
+            let _ = done.send(());
+            post(PulseEvent::ShutDown);
+        });
+    }
+
+    /// Whether the board's close begun by [`PulseHost::shutdown`] has ended.
+    pub fn shut_down(&mut self) -> bool {
+        if self.closing.as_ref().is_some_and(|closing| !matches!(closing.try_recv(), Err(mpsc::TryRecvError::Empty))) {
+            self.closing = None;
+            self.closed = true;
+        }
+        self.closed
+    }
+
+    /// The application ends: a board close begun by [`PulseHost::shutdown`] is waited for, so
+    /// the board is SAFE before the process goes, whichever way it ends.
+    pub fn await_shutdown(&mut self) {
+        if let Some(closing) = self.closing.take() { let _ = closing.recv(); self.closed = true; }
+    }
+
+    /// Remote on/off for the board on this computer (v2: a local pulse board's
+    /// own server admits peers while published). Off drops the other computer
+    /// (its server drives the board SAFE) and this application takes it back.
+    /// Answers what the fabric announces: the board's server port.
+    pub fn admit_peers(&mut self, instance: &str, published: bool) -> Result<u16, String> {
+        use std::io::Write;
+        let given = self.given.as_mut().filter(|given| given.instance == instance).ok_or_else(|| format!("{instance} is not the open pulse board"))?;
+        let served = given.child.as_mut().ok_or_else(|| format!("{instance} is not a board plugged into this computer: other computers reach it at its own pulse server"))?;
+        let control = served.control.as_mut().ok_or("the local pulse server no longer listens to this application")?;
+        control.write_all(if published { b"admit\n" } else { b"refuse\n" }).and_then(|()| control.flush())
+            .map_err(|error| format!("the local pulse server did not take the change: {error}"))?;
+        given.published = published;
+        let port = served.port;
+        self.desk.set_published(published);
+        // Remote off takes the board back (the rejoin below): it is this application's again from here, whoever held it.
+        if !published && given.holder != Holder::Here {
+            given.holder = Holder::Here;
+            if let Some(line) = narration(&format!("{} (Remote withdrawn)", Holder::Here.line(false))) { (self.post)(PulseEvent::Log { instance: instance.to_owned(), line }); }
+            self.dirty = true;
+        }
+        if !published {
+            if let Some(board) = self.editor.board().cloned() {
+                let (desk, post, instance) = (self.desk.clone(), self.post.clone(), instance.to_owned());
+                self.desk.device_lane().run(move || {
+                    if let Err(error) = board.rejoin() {
+                        if let Some(line) = narration(&format!("ZLC REJOIN FAILED: {}", error.message)) { post(PulseEvent::Log { instance, line }); }
+                    }
+                    desk.notice();
+                });
+            }
+        }
+        Ok(port)
+    }
+
+    /// The local pulse server says who owns its board now ([`Holder`]): this application's client
+    /// (its own end of the command lane), another client, or nobody. A change is applied to the
+    /// board's client (it sends nothing while the board is not this application's), said in the
+    /// device's log and stated as the device's `held_by` fact; the editor asks the board again.
+    pub fn owner_changed(&mut self, instance: &str, owner: Option<String>) {
+        let Some(board) = self.editor.board().cloned() else { return };
+        let Some(given) = self.given.as_mut().filter(|given| given.instance == instance) else { return };
+        let here = owner.as_deref().and_then(|owner| owner.parse::<std::net::SocketAddr>().ok()).is_some_and(|owner| Some(owner) == board.client_address());
+        let holder = match (&owner, &given.holder) {
+            (Some(_), _) if here => Holder::Here,
+            (Some(owner), _) => Holder::Elsewhere(holder_name(owner)),
+            // The other client let it go: nobody holds it, and nothing here takes it unasked.
+            (None, Holder::Elsewhere(who)) => Holder::Released(who.clone()),
+            // Nobody between this application's own connections (its rejoin), or still nobody.
+            (None, holder) => holder.clone(),
+        };
+        if holder == given.holder { return; }
+        board.hold_elsewhere(holder.refusal(given.published));
+        if let Some(line) = narration(&holder.line(given.published)) { (self.post)(PulseEvent::Log { instance: instance.to_owned(), line }); }
+        given.holder = holder;
+        self.dirty = true;
+        self.desk.notice();
+    }
+}
+
+/// `pulse_schedule` of `board` (none attached: nothing held, nothing played).
+fn schedule(board: Option<&Board>, lane: &str) -> Result<Value, String> {
+    match board {
+        None => Ok(json!({"revision": 0, "state": "none", "lane": lane, "points": []})),
+        Some(board) => board.trigger_schedule(lane).map(|schedule| to_value(&schedule)).map_err(|error| error.message),
+    }
 }
 
 /// The preview's front and its axes, as panels report theirs.
@@ -281,15 +1433,14 @@ else:
 
 fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTable>, String> {
     use std::io::{Read, Write};
-    use std::os::windows::process::CommandExt;
     let python = python.ok_or_else(|| format!("{} (scan programs run in it)", zlc_plugin_host::NOT_INSTALLED))?;
     // Run as the plugin processes are (no -I: the same packages, user site and PYTHONPATH; no
     // PYTHONHOME; the base installation's DLLs and the thread policy); a console program, given no
     // console window (this application has none).
-    let mut child = std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER]).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .spawn().map_err(|error| error.to_string())?;
-    let job = crate::job::limit(&child, Some(2048));
+    let job = zlc_core::process::Job::new(Some(2048)).map_err(|error| format!("the scan program's job: {error}"))?;
+    let mut child = job.spawn(std::process::Command::new(python).env_remove("PYTHONHOME").envs(zlc_plugin_host::plugin_environment(python)).args(["-c", SCAN_RUNNER])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()),
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(source.as_bytes()); }
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let status = loop {
@@ -319,43 +1470,60 @@ fn run_scan_program(python: Option<&Path>, source: &str) -> Result<Option<ScanTa
 /// this machine (the server owns the hardware, as v2's local service did);
 /// the board is its loopback client. Other computers are admitted only while
 /// the operator has Remote on for it (v2 `admit_peers`), told on its stdin.
-/// `narrate` takes the server's lifecycle lines as v2's device log wrote them
-/// (its `zlc_pulse.remote` logger: `[HH:MM:SS] ZLC <event> ...`).
-fn serve_locally(parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Served), String> {
+/// `heard` takes what the server says after how it came up ([`Said`]): its lifecycle lines as
+/// v2's device log wrote them (its `zlc_pulse.remote` logger: `[HH:MM:SS] ZLC <event> ...`), and
+/// each change of its board's owner.
+fn serve_locally(parameters: &Value, heard: Box<dyn Fn(Said) + Send>) -> Result<(Board, Served), String> {
     use std::io::BufRead;
-    use std::os::windows::process::CommandExt;
     let server = std::env::current_exe().map_err(|error| error.to_string())?.with_file_name("zlc-pulse-server.exe");
     if !server.is_file() { return Err(format!("{} is not built", server.display())); }
     let (backend, arguments) = server_arguments(parameters)?;
     // A console program, given no console window; its errors go where this application's go.
-    let mut child = std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit())
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .spawn().map_err(|error| error.to_string())?;
+    let job = zlc_core::process::Job::new(None).map_err(|error| format!("the local pulse server's job: {error}"))?;
+    let mut child = job.spawn(std::process::Command::new(&server).args(&arguments).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()),
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).map_err(|error| error.to_string())?;
     let control = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no server output")?;
-    let (found, port) = mpsc::channel();
+    let (found, said) = mpsc::channel::<Result<Value, String>>();
     std::thread::spawn(move || {
         let mut lines = std::io::BufReader::new(stdout).lines();
         for line in lines.by_ref().map_while(Result::ok) {
-            if let Some(rest) = line.strip_prefix("{\"type\":\"pulse-server\",\"port\":") {
-                let _ = found.send(rest.trim_end_matches('}').parse::<u16>().ok());
+            // Its one line on how it came up (zlc-pulse-server): ready, with the transport it took, or why it could not.
+            if line.starts_with("{\"type\":\"pulse-server\"") {
+                let ready: Value = serde_json::from_str(&line).unwrap_or_default();
+                // The ports it could not open are this open's, as if met here.
+                for fault in zlc_workbench::SerialFault::listed(ready.get("serial_faults")) { zlc_pulse::serial::told(&fault.port, fault.code.unwrap_or_default()); }
+                let _ = found.send(ready["error"].as_str().map_or(Ok(ready.clone()), |error| Err(error.to_owned())));
                 break;
             }
-            if let Some(line) = narration(&line) { narrate(line); }
+            if let Some(said) = server_said(&line) { heard(said); }
         }
-        for line in lines.map_while(Result::ok) { if let Some(line) = narration(&line) { narrate(line); } }
+        for line in lines.map_while(Result::ok) { if let Some(said) = server_said(&line) { heard(said); } }
     });
     // A JTAG board waits for Vivado to come up and open its target first.
     let startup = if matches!(backend, "uart" | "memory") { Duration::ZERO } else { zlc_pulse::axi::STARTUP_TIMEOUT };
-    let port = match port.recv_timeout(Duration::from_secs(60) + startup) {
-        Ok(Some(port)) => port,
-        _ => { let _ = child.kill(); return Err("the local pulse server did not start (see its log)".into()); }
+    let ended = |mut child: std::process::Child, error: String| { let _ = child.kill(); let _ = child.wait(); Err(error) };
+    let (ready, port) = match said.recv_timeout(Duration::from_secs(60) + startup) {
+        Ok(Ok(ready)) => match ready["port"].as_u64().and_then(|port| u16::try_from(port).ok()) {
+            Some(port) => (ready, port),
+            None => return ended(child, format!("the local pulse server said it was ready without a port: {ready}")),
+        },
+        // Its own words, typed as it raised them: a UART port that cannot be opened is `SerialPortUnusable`.
+        Ok(Err(error)) => return ended(child, error),
+        Err(_) => return ended(child, "the local pulse server did not start (see its log)".into()),
     };
+    let asked = parameters["backend"].as_str().unwrap_or("auto").to_owned();
     match Board::remote("127.0.0.1", port) {
-        Ok(board) => Ok((board, Served { child, port, control })),
-        Err(error) => { let _ = child.kill(); Err(error.message) }
+        Ok(board) => Ok((board, Served { child, port, control, backend: asked, ready, _job: job })),
+        Err(error) => ended(child, error.message),
     }
+}
+
+/// Each serial port that would not open while `watch` was held, as the workbench is told them.
+pub fn serial_faults(watch: &zlc_pulse::serial::FaultWatch) -> Vec<zlc_workbench::SerialFault> {
+    watch.met().iter().map(|failure| zlc_workbench::SerialFault { port: zlc_pulse::serial::com_name(&failure.port), fault: failure.fault.words().to_owned(),
+                                                                  code: Some(failure.code) }).collect()
 }
 
 /// The local server's backend and command line for a row. It never probes a port: Init found
@@ -377,14 +1545,15 @@ fn server_arguments(parameters: &Value) -> Result<(&str, Vec<String>), String> {
 /// How long the local board's UART is looked for on Init: what its server's start was given for the same probe.
 pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
 
-/// `resolve` of the local board (`sequencer.local`) before it opens: its blank UART port, looked
-/// for on the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's
-/// own handshake, against the deployed config its server loads. A JTAG or memory board has nothing
-/// to find; `auto` with no UART answering opens over JTAG, `uart` fails with what it tried.
+/// `resolve` of the local board (`sequencer.local`) before it opens: its UART port, looked for on
+/// the free ports only (a bound one -- an IMU's COM3 -- is never opened) with the server's own
+/// handshake, against the deployed config its server loads. A JTAG or memory board has nothing to
+/// find; `auto` with no UART answering finds nothing and opens this once without a port, over JTAG
+/// (`this_open`: the row keeps the port it had), and `uart` fails with what it tried.
 pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Duration) -> Result<Value, String> {
     if type_id != "sequencer.local" { return Err(format!("{type_id} finds nothing before it opens")); }
     let backend = parameters["backend"].as_str().unwrap_or("auto").to_owned();
-    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"parameters": {}, "note": ""})); }
+    if matches!(backend.as_str(), "jtag-axi" | "memory") { return Ok(json!({"found": {}, "note": ""})); }
     let bound: Vec<String> = excluded.iter().filter_map(|resource| resource.strip_prefix("serial:")).map(str::to_owned).collect();
     let (sender, answer) = mpsc::channel();
     std::thread::Builder::new().name("zlc-pulse-probe".into()).spawn(move || {
@@ -399,36 +1568,62 @@ pub fn resolve(type_id: &str, parameters: &Value, excluded: &[String], wait: Dur
         let _ = sender.send(probed.map(|(port, attempts)| (port, attempts, passed)).map_err(|error| error.message));
     }).map_err(|error| error.to_string())?;
     let (port, attempts, passed) = answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("its UART was not found within {} s", wait.as_secs())))?;
-    // What it tried (the one that answered aside) and what it passed over, as the line says them.
+    // What it tried (the one taken aside) and what it passed over, as the line says them.
     let mut said: Vec<String> = Vec::new();
-    let tried = &attempts[..attempts.len() - usize::from(port.is_some())];
+    let tried: Vec<String> = attempts.iter().filter(|attempt| Some(&attempt.port) != port.as_ref()).map(ToString::to_string).collect();
     if !tried.is_empty() { said.push(format!("tried {}", tried.join("; "))); }
     if !passed.is_empty() { said.push(format!("passed over {}: bound", passed.join(", "))); }
     let context = if said.is_empty() { String::new() } else { format!(" ({})", said.join("; ")) };
     match port {
-        Some(port) => Ok(json!({"parameters": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
+        Some(port) => Ok(json!({"found": {"uart_port": port}, "note": format!("board UART found on {port}{context}")})),
         None if backend == "uart" => Err(format!("no board UART on the free ports{}", if context.is_empty() { " (no COM port is free)".to_owned() } else { context })),
-        None => Ok(json!({"parameters": {}, "note": format!("no board UART on the free ports{context}; opening over JTAG")})),
+        None => Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": format!("no board UART on the free ports{context}; it opens over JTAG-to-AXI this time")})),
     }
+}
+
+/// What the local pulse server says on its stdout besides how it came up.
+enum Said { Narration(String), Owner(Option<String>) }
+
+/// A server stdout line: a change of its board's owner (`{"type":"pulse-owner","owner":...}`),
+/// or its narration as a device log line; anything else neither.
+fn server_said(line: &str) -> Option<Said> {
+    if line.starts_with("{\"type\":\"pulse-owner\"") {
+        let owner: Value = serde_json::from_str(line).ok()?;
+        return Some(Said::Owner(owner["owner"].as_str().map(str::to_owned)));
+    }
+    narration(line).map(Said::Narration)
 }
 
 /// A server stdout line as a device log line: its `ZLC ...` narration, at this
 /// computer's local time; anything else is not narration.
 fn narration(line: &str) -> Option<String> {
     let message = line.split_once("] ").map_or(line, |(_, rest)| rest);
-    if !message.starts_with("ZLC ") { return None; }
-    let mut time = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
-    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut time) };
-    Some(format!("[{:02}:{:02}:{:02}] {message}", time.wHour, time.wMinute, time.wSecond))
+    message.starts_with("ZLC ").then(|| stamped(message))
 }
 
-fn open_device(type_id: &str, parameters: &Value, narrate: Box<dyn Fn(String) + Send>) -> Result<(Board, Option<Served>), String> {
+/// `message` as a device log line: stamped with the local time.
+fn stamped(message: &str) -> String {
+    let mut time = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut time) };
+    format!("[{:02}:{:02}:{:02}] {message}", time.wHour, time.wMinute, time.wSecond)
+}
+
+/// The line a board reached over a pulse server leaves in its device log once connected: where,
+/// which protocol, and the fingerprints its description proved. None for the virtual board.
+fn connected_line(board: &Board) -> Option<String> {
+    if board.is_virtual() { return None; }
+    let description = board.description();
+    Some(stamped(&format!("ZLC CONNECTED {} (pulse server, board protocol v{}): clock {} Hz, layout fingerprint {:08x}, target ABI fingerprint {}",
+        board.name(), zlc_pulse::wire::LAYOUT_STRUCT_VERSION, description.clock_hz, description.layout_fingerprint(), description.target.abi_fingerprint())))
+}
+
+fn open_device(type_id: &str, parameters: &Value, heard: Box<dyn Fn(Said) + Send>) -> Result<(Board, Option<Served>), String> {
     let (board, child) = match type_id {
         "sequencer.virtual" => (Board::virtual_board(None).map_err(|error| error.message)?, None),
         "sequencer.hardware" => (Board::remote(parameters["host"].as_str().unwrap_or("127.0.0.1"),
                                                parameters["port"].as_u64().unwrap_or(zlc_pulse::remote::DEFAULT_PORT.into()) as u16)
                                      .map_err(|error| error.message)?, None),
-        "sequencer.local" => { let (board, child) = serve_locally(parameters, narrate)?; (board, Some(child)) }
+        "sequencer.local" => { let (board, child) = serve_locally(parameters, heard)?; (board, Some(child)) }
         other => return Err(format!("{other} is not a native sequencer type")),
     };
     if let Some(path) = parameters["config_file"].as_str().filter(|path| !path.trim().is_empty()) {
@@ -494,537 +1689,6 @@ pub fn device_descriptors() -> Vec<Value> {
     types
 }
 
-impl PulseHost {
-    /// The editor's pulses folder is the workspace's; its value files live beside it (v2 Workspace.prepare made both).
-    pub fn new(post: Post, safe_actions: SafeActions, plugins: Option<PluginHost>, pulses: &Path) -> PulseHost {
-        let deployed = Deployed::load().map_err(|error| eprintln!("{}", json!({"type": "pulse-error", "error": error.message}))).ok();
-        if let Some(workspace) = pulses.parent() { let _ = std::fs::create_dir_all(workspace.join(zlc_pulse::codec::CONFIG_VALUES_DIRECTORY)); }
-        let python = zlc_plugin_host::plugin_python().ok();
-        PulseHost { editor: Editor::new(deployed, pulses.to_path_buf()), device: Lane::new("pulse-command"), safe: Lane::new("pulse-safe"), program: Lane::new("pulse-program"),
-                    preview: Lane::new("pulse-preview"), post, safe_actions, plugins, given: None, python, session: Arc::new(Mutex::new(None)),
-                    dpr: 1.0, preview_busy: false, preview_key: String::new(), preview_wanted: false, frame: None, frames: 0,
-                    axes: Vec::new(), pointers: Default::default(), pointer_busy: false, users: Default::default(), runs: BTreeMap::new(),
-                    facts: Value::Null, facts_of: None }
-    }
-
-    /// The pulse section of a state message: the editor's view plus the preview's frame.
-    pub fn state(&mut self) -> Value {
-        let _span = crate::trace::span("pulse.state", || json!({}));
-        let mut state = self.editor.state();
-        state["preview"]["panel"] = json!(PREVIEW_PANEL);
-        state["preview"]["frame"] = self.frame.map_or(Value::Null, |(width, height, sequence)| json!({"width": width, "height": height, "sequence": sequence}));
-        state["preview"]["axes"] = Value::Array(self.axes.clone());
-        state["apparatus_device"] = self.given.as_ref().map_or(Value::Null, |given| json!(given.instance));
-        state
-    }
-
-    /// A pulse section once it is sent: the editor takes its unchanged schedule cards back for the next one.
-    pub fn recycle(&mut self, pulse: &mut Value) { self.editor.recycle(pulse); }
-
-    /// The apparatus' sequencer device instance, when the board is one.
-    pub fn apparatus_device(&self) -> Option<String> { self.given.as_ref().map(|given| given.instance.clone()) }
-
-    fn world(&self) -> Option<Arc<dyn World>> {
-        let host = self.plugins.clone()?;
-        let instance = self.given.as_ref()?.world.clone()?;
-        Some(Arc::new(PluginWorld { host, instance }))
-    }
-
-    /// Run the editor's jobs on their lanes; move Stop all's SAFE with the board.
-    pub fn dispatch(&mut self) {
-        // Every editor change ends here: the record is current before any later start is admitted.
-        let users = self.given.as_ref().filter(|_| self.editor.drives()).map(|given| (given.instance.clone(), "PulseGUI".to_owned()));
-        if let Ok(mut record) = self.users.lock() { *record = users.into_iter().collect(); }
-        if let Some(board) = self.editor.take_board_change() {
-            self.safe_actions.unregister(SAFE_OUTPUT);
-            if let Some(board) = board {
-                let held = board.clone();
-                self.safe_actions.register(SAFE_OUTPUT, Arc::new(move || held.safe().map(|_| ()).map_err(|error| error.message)));
-            }
-        }
-        if let Some(board) = self.editor.board() { board.set_world(self.world()); }
-        for job in self.editor.take_jobs() {
-            let post = self.post.clone();
-            match job {
-                Job::Device { work, done } => self.device.run(move || { let outcome = work(); done.set(); post(PulseEvent::Outcome(outcome)); }),
-                Job::Safe { work } => self.safe.run(move || post(PulseEvent::Outcome(work()))),
-                Job::Completion { work } => { let _ = std::thread::Builder::new().name("zlc-pulse-completion".into()).spawn(move || post(PulseEvent::Outcome(work()))); }
-                Job::Program { source, fields } => {
-                    let python = self.python.clone();
-                    self.program.run(move || {
-                        let table = run_scan_program(python.as_deref(), &source);
-                        post(PulseEvent::Outcome(Outcome::Program { source, fields, table }));
-                    });
-                }
-            }
-        }
-        self.refresh_preview();
-    }
-
-    /// Draw the preview again when its page is shown and what it draws changed.
-    pub fn refresh_preview(&mut self) {
-        if self.editor.page() != zlc_pulse_editor::editor::PREVIEW_PAGE && self.session.lock().map(|s| s.is_none()).unwrap_or(true) { return; }
-        let Some(request) = self.editor.preview_request() else { return };
-        let (sequence, include_off, pinned) = match request {
-            Ok(request) => request,
-            Err(message) => { self.editor.set_preview_status(message, "error"); return; }
-        };
-        let key = format!("{:?}|{include_off}|{pinned:?}|{}", zlc_pulse::codec::sequence_to_tree(&sequence).canonical(), self.dpr);
-        if key == self.preview_key { return; }
-        if self.preview_busy { self.preview_wanted = true; return; }
-        self.preview_busy = true;
-        self.editor.set_preview_status("drawing preview…", "task");
-        let (session, post, dpr) = (self.session.clone(), self.post.clone(), self.dpr);
-        self.preview.run(move || {
-            let result = (|| -> Result<(Front, String, Vec<Value>), String> {
-                let preview = zlc_pulse_editor::timeline::preview_candidate(&sequence, include_off, pinned.as_deref()).map_err(|e| e.message)?;
-                let mut held = session.lock().map_err(|_| "preview lost")?;
-                let failure = |error: zlc_plot::configuration::error::PlotError| error.to_string();
-                match held.as_mut() {
-                    None => *held = Some(PlotSession::pulse_timeline(preview.data.clone(), PlotLabels::default(), Some(&preview.size), None, dpr, None,
-                                                                    services()).map_err(failure)?),
-                    Some(open) => {
-                        open.set_device_pixel_ratio(dpr).map_err(failure)?;
-                        open.set_size(&preview.size).map_err(failure)?;
-                        open.update_pulse(preview.data.clone(), None).map_err(failure)?;
-                    }
-                }
-                let (front, axes) = drawn(held.as_mut().expect("drawn")).map_err(failure)?;
-                let words = [zlc_pulse_editor::text::counted(preview.periods, "period"), zlc_pulse_editor::text::counted(preview.rows, "channel"),
-                             zlc_pulse_editor::text::readable(preview.total_ns), preview.size.clone()].join(zlc_pulse_editor::text::SEPARATOR);
-                Ok((front, words, axes))
-            })();
-            post(PulseEvent::Preview { result, key });
-        });
-    }
-
-    /// A preview the lane drew: the front for Pixels, the words for the page.
-    pub fn preview_drawn(&mut self, result: Result<(Front, String, Vec<Value>), String>, key: String) -> Option<(u64, Front)> {
-        self.preview_busy = false;
-        let drawn = match result {
-            Ok((front, words, axes)) => {
-                self.preview_key = key;
-                self.editor.set_preview_status(words, "task");
-                Some(self.presented(front, axes))
-            }
-            Err(error) => { self.preview_key = key; self.editor.set_preview_status(format!("cannot draw this pulse: {error}"), "error"); None }
-        };
-        if std::mem::take(&mut self.preview_wanted) { self.refresh_preview(); }
-        drawn
-    }
-
-    fn presented(&mut self, front: Front, axes: Vec<Value>) -> (u64, Front) {
-        self.frames += 1;
-        self.frame = Some((front.width, front.height, self.frames));
-        self.axes = axes;
-        (self.frames, front)
-    }
-
-    /// A pointer message on the preview (the page sends it as a panel's,
-    /// `panel: "pulse-preview"`): zoom, pan and the selectors of the drawn
-    /// timeline, in order on the preview's lane, while the page's Selectors
-    /// switch is on (v2 `set_interaction_enabled`; off, the picture takes no
-    /// input). A newer move replaces one not yet handled.
-    pub fn pointer(&mut self, command: Value) {
-        let gesture_end = matches!(command["event"].as_str(), Some("release" | "cancel" | "leave"));
-        if !self.editor.preview_selectors() && !gesture_end { return; }
-        if self.pointers.back_mut().is_some_and(|last| crate::pointer_queue::merge_scroll(last, &command)) {
-            self.next_pointer();
-            return;
-        }
-        if command["event"] == "move" && self.pointers.back().is_some_and(|last| last["event"] == "move") { self.pointers.pop_back(); }
-        self.pointers.push_back(command);
-        self.next_pointer();
-    }
-
-    fn next_pointer(&mut self) {
-        if self.pointer_busy { return; }
-        let Some(command) = self.pointers.pop_front() else { return };
-        self.pointer_busy = true;
-        let (session, post) = (self.session.clone(), self.post.clone());
-        self.preview.run(move || {
-            let result = session.lock().map_err(|_| "preview lost".to_owned()).and_then(|mut held| {
-                let Some(open) = held.as_mut() else { return Ok(None) };
-                let failure = |error: zlc_plot::configuration::error::PlotError| error.to_string();
-                let event = zlc_plot::document::pointer_event(&command, None).map_err(failure)?;
-                if !open.raster_pointer_event(&event).map_err(failure)? { return Ok(None); }
-                drawn(open).map(Some).map_err(failure)
-            });
-            post(PulseEvent::Gesture(result));
-        });
-    }
-
-    /// The lane handled a pointer message: a changed picture goes to Pixels.
-    pub fn gestured(&mut self, result: Result<Option<(Front, Vec<Value>)>, String>) -> Option<(u64, Front)> {
-        self.pointer_busy = false;
-        let presented = match result {
-            Ok(Some((front, axes))) => Some(self.presented(front, axes)),
-            Ok(None) => None,
-            Err(error) => { self.editor.set_preview_status(format!("preview gesture: {error}"), "error"); None }
-        };
-        self.next_pointer();
-        presented
-    }
-
-    /// `save_preview_image`: the drawn preview as PNG, beside the pulse.
-    fn save_preview(&mut self, path: Option<String>) -> Result<Value, String> {
-        if self.session.lock().map(|s| s.is_none()).unwrap_or(true) { self.editor.warn("There is no preview to save"); return Ok(Value::Null); }
-        if self.preview_busy {
-            self.editor.set_preview_status("preview is busy; save again when the drawing is ready", "warning");
-            return Ok(Value::Null);
-        }
-        let name = self.editor.sequence().map_or_else(|| "pulse".to_owned(), |s| if s.name.is_empty() { "pulse".into() } else { s.name.clone() });
-        let target = path.map(PathBuf::from).unwrap_or_else(|| tables::unique_path(&self.editor_save_folder(), &name, ".png"));
-        let (session, post) = (self.session.clone(), self.post.clone());
-        self.editor.set_preview_status("saving preview…", "task");
-        self.preview.run(move || {
-            let result = session.lock().map_err(|_| "preview lost".to_owned()).and_then(|mut held| {
-                let bytes = held.as_mut().ok_or("There is no preview to save")?.save_image("png").map_err(|error| error.to_string())?;
-                zlc_pulse::codec::atomic_write(&target, &bytes).map_err(|error| error.message)?;
-                Ok(target)
-            });
-            post(PulseEvent::PreviewSaved(result));
-        });
-        Ok(json!({"accepted": true}))
-    }
-
-    fn editor_save_folder(&self) -> PathBuf { PathBuf::from(self.editor.state_folder()) }
-
-    pub fn preview_saved(&mut self, result: Result<PathBuf, String>) {
-        match result {
-            Ok(path) => self.editor.set_preview_status(format!("saved {}", path.display()), "task"),
-            Err(error) => self.editor.warn(format!("Cannot save the preview: {error}")),
-        }
-    }
-
-    /// A pulse command a plugin run sent must be one the run may give.
-    /// A run that names a run (`_run`) may drive only the sequencer it claims.
-    fn check_claims(&self, run: Option<&str>, claims: impl Fn(&str) -> Vec<String>) -> Result<(), String> {
-        let Some(run) = run else { return Ok(()) };
-        let held = self.given.as_ref().is_some_and(|given| claims(run).contains(&given.instance));
-        if held { return Ok(()); }
-        Err(match &self.given {
-            None => format!("run {run} cannot drive the pulse board: no sequencer device is open in the apparatus"),
-            Some(given) => format!("run {run} does not claim the sequencer {}; its node must require sequencer.streamer", given.instance),
-        })
-    }
-
-    /// One `pulse_*` command, whoever sent it; `dialog` asks the operator for a path.
-    pub fn command(&mut self, action: &str, command: &Value, operator: bool, request: u64, claims: impl Fn(&str) -> Vec<String>,
-                   claimant: Option<String>, dialog: impl Fn(&str, &str, bool, &Path, &Path) -> Result<Option<String>, String>) -> Handled {
-        self.editor.set_claimed_by(claimant.clone());
-        // Published, the board is the other computer's: nothing here plays it (Stop still makes it safe).
-        let drives = matches!(action, "pulse_fire" | "pulse_hold" | "pulse_step" | "pulse_run" | "pulse_wait_done" | "pulse_sync" | "pulse_estimate");
-        if drives && self.given.as_ref().is_some_and(|given| given.published) { return Handled::Now(Err(PUBLISHED_BOARD.into())); }
-        let run = command["_run"].as_str();
-        // The plugin host's id of the asking run: its native scan plan is held under it.
-        let plugin_run = command["_plugin_run"].as_str();
-        let mut args: Map<String, Value> = crate::remote::parameters(command).as_object().cloned().unwrap_or_default();
-        match action {
-            "pulse_describe" => return Handled::Now(describe_document(Path::new(command["document"].as_str().unwrap_or("")))
-                .map(|description| to_value(&description)).map_err(|error| error.message)),
-            // A read whoever holds the board: a camera aligning its frames to the lane that triggers it claims no sequencer.
-            "pulse_schedule" => return Handled::Now(match self.editor.board() {
-                None => Ok(json!({"revision": 0, "state": "none", "lane": command["lane"], "points": []})),
-                Some(board) => board.trigger_schedule(command["lane"].as_str().unwrap_or(""), command["known"].as_u64())
-                    .map(|schedule| to_value(&schedule)).map_err(|error| error.message),
-            }),
-            "pulse_run" | "pulse_wait_done" | "pulse_stop" if run.is_some() => {
-                if let Err(error) = self.check_claims(run, &claims) { return Handled::Now(Err(error)); }
-            }
-            // A run holding the board is the only client that may play on it or take its reports (v2 device use).
-            "pulse_run" | "pulse_wait_done" => if let Some(holder) = &claimant { return Handled::Now(Err(format!("device is in use by {holder}"))); },
-            _ => {}
-        }
-        match action {
-            "pulse_run" => {
-                let Some(board) = self.editor.board().cloned() else { return Handled::Now(Err("no pulse board is attached".into())) };
-                let stage = command["stage"].as_str().unwrap_or("run").to_owned();
-                if stage != "run" && run.is_none() { return Handled::Now(Err("stage load and fire are a run's two-step play".into())); }
-                board.set_world(self.world());
-                let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
-                let values = api_values(&command["api_values"]);
-                let scan = command["scan"].is_object().then(|| ScanRows { fields: strings(&command["scan"]["fields"]), rows: rows(&command["scan"]["rows"]) });
-                let native = if command["scan_plan"].is_object() {
-                    if scan.is_some() { return Handled::Now(Err("scan and scan_plan are mutually exclusive".into())); }
-                    let (Some(plugin_run), Some(plugins)) = (plugin_run.filter(|_| run.is_some()), self.plugins.as_ref()) else { return Handled::Now(Err("scan_plan belongs to a live plugin run".into())); };
-                    let Some(handle) = command["scan_plan"]["handle"].as_str().filter(|s|!s.is_empty()) else { return Handled::Now(Err("scan_plan needs its native handle".into())); };
-                    let Some(outer_index) = command["scan_plan"]["outer_index"].as_u64().and_then(|v|usize::try_from(v).ok()) else { return Handled::Now(Err("scan_plan needs an outer point index".into())); };
-                    let plan = match crate::plugin_services::scan_plan(plugins,plugin_run,handle) { Ok(plan)=>plan,Err(error)=>return Handled::Now(Err(error.to_string())) };
-                    Some((ScanPlanRequest { plan, outer_index },handle.to_owned()))
-                } else { None };
-                let (runs, sweeps) = (command["run_repeats"].as_u64().unwrap_or(1), command["scan_repeats"].as_u64().unwrap_or(1));
-                if let Some((native,_)) = &native {
-                    let expected_sweeps = if native.plan.outer_axis_count() == 0 { native.plan.spec().scan_repeats } else { 1 };
-                    if stage != "load" && (runs as u128 != native.plan.spec().run_repeats as u128 || sweeps as u128 != expected_sweeps as u128) {
-                        return Handled::Now(Err("pulse repeats differ from the armed native scan plan".into()));
-                    }
-                }
-                let owner = run.map(str::to_owned);
-                let plugin_owner = plugin_run.map(str::to_owned);
-                let used = owner.as_ref().map(|run| self.runs.entry(run.clone()).or_default());
-                let (pinned, loaded) = used.map_or((None, None), |used| {
-                    used.in_flight += 1;
-                    (used.pinned.get(&zlc_pulse::codec::absolute(&document)).cloned(), used.loaded.clone())
-                });
-                let post = self.post.clone();
-                let plugins = self.plugins.clone();
-                self.device.run(move || {
-                    let descriptor = native.as_ref().map(|(request,handle)|json!({"handle":handle,"outer_index":request.outer_index}));
-                    let mismatch = stage == "fire" && loaded.as_ref().and_then(|value|value.get("native_scan")) != descriptor.as_ref();
-                    let (mut result, pin, fired, mut loaded) = if mismatch {
-                        (Err("stage fire must use the native scan handle and outer point accepted by stage load".into()),None,None,None)
-                    } else {
-                        play(&board, &stage, &document, pinned.as_deref(), loaded.as_deref(), &values, scan.as_ref(), native.as_ref().map(|(request,_)|request), runs, sweeps)
-                    };
-                    if let Some((native,handle)) = &native {
-                        if let Some(value) = &mut loaded { Arc::make_mut(value)["native_scan"] = descriptor.clone().unwrap(); }
-                        if let Ok(receipt) = &mut result {
-                            if let Err(error) = accept_native_receipt(plugins.as_ref().unwrap(),plugin_owner.as_deref().unwrap(),handle,native,&board,receipt) { result=Err(error); }
-                        }
-                    }
-                    let run = owner.map(|run| RunReply { run, pinned: pin, fired, loaded });
-                    post(PulseEvent::Reply { request, result, touched: true, run });
-                });
-                return Handled::Later;
-            }
-            // A run's Stop answers with what the board said (v2 nodes' sequencer.safe()), before the
-            // run goes on; the editor's and a client's Stop is the editor's.
-            "pulse_stop" if run.is_some() => {
-                let Some(board) = self.editor.board().cloned() else { return Handled::Now(Err("no pulse board is attached".into())) };
-                let post = self.post.clone();
-                self.safe.run(move || {
-                    let result = board.safe().map(|readback| json!({"status": readback.status, "command_id": readback.command_id}))
-                        .map_err(|error| format!("the board did not go SAFE: {}", error.message));
-                    post(PulseEvent::Reply { request, result, touched: true, run: None });
-                });
-                return Handled::Later;
-            }
-            "pulse_wait_done" => {
-                let Some(board) = self.editor.board().cloned() else { return Handled::Now(Err("no pulse board is attached".into())) };
-                let id = command["command_id"].as_u64().unwrap_or(0) as u32;
-                let timeout = Duration::from_secs_f64(command["timeout_seconds"].as_f64().unwrap_or(0.0).clamp(0.0, 600.0));
-                let post = self.post.clone();
-                let _ = std::thread::Builder::new().name("zlc-pulse-wait".into()).spawn(move || {
-                    let result = board.wait_report(id, Some(timeout)).map(|report| to_value(&done_json(report.as_ref()))).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request, result, touched: true, run: None });
-                });
-                return Handled::Later;
-            }
-            "pulse_estimate" => {
-                let Some(board) = self.editor.board().cloned() else {
-                    return Handled::Now(Err("no pulse board is attached: an estimate compiles for the board's geometry and Config".into()));
-                };
-                let document = PathBuf::from(command["document"].as_str().unwrap_or(""));
-                let points: Vec<_> = command["api_points"].as_array().map(|points| points.iter().map(api_values).collect()).unwrap_or_default();
-                let axes = command["scan"].is_object().then(|| ScanAxes { fields: strings(&command["scan"]["fields"]), columns: rows(&command["scan"]["columns"]) });
-                let post = self.post.clone();
-                let _ = std::thread::Builder::new().name("zlc-pulse-estimate".into()).spawn(move || {
-                    let result = estimate_document(&board, &document, &points, axes.as_ref()).map(|estimate| to_value(&estimate)).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request, result, touched: false, run: None });
-                });
-                return Handled::Later;
-            }
-            // v2 save_preview_image: the drawing as it is, beside the pulse under a fresh name (no dialog).
-            "pulse_preview" if command["save"].as_bool() == Some(true) => return Handled::Now(self.save_preview(command["path"].as_str().map(str::to_owned))),
-            "pulse_ready" => { self.dpr = command["dpr"].as_f64().filter(|dpr| *dpr > 0.0).unwrap_or(1.0); self.dispatch(); return Handled::Now(Ok(Value::Null)); }
-            _ => {}
-        }
-        // The window asks where a file goes when its command does not say.
-        if operator {
-            // v2: Save Pulse always asks, at the file it has (a Save as… of Value Config, or a first save, likewise).
-            if let Some((title, filter, save, start, home)) = self.editor.file_dialog(action, &args) {
-                match dialog(title, filter, save, &start, &home) {
-                    Ok(Some(path)) => { args.insert("path".into(), json!(path)); }
-                    Ok(None) => return Handled::Now(Ok(Value::Null)),
-                    Err(error) => return Handled::Now(Err(error)),
-                }
-            }
-        }
-        let answer = self.editor.command(action, &args, operator);
-        // Selectors off ends a drag in progress (v2 cancelled the active interaction).
-        if action == "pulse_preview" && args.get("selectors") == Some(&Value::Bool(false)) { self.pointer(json!({"event": "cancel", "x": 0.0, "y": 0.0})); }
-        self.dispatch();
-        Handled::Now(answer)
-    }
-
-    /// A reply arrived: what a run's pulse_run leaves it holding is kept, and
-    /// anything that drove the board makes the editor ask it again.
-    pub fn replied(&mut self, touched: bool, run: Option<RunReply>) {
-        if let Some(RunReply { run, pinned, fired, loaded }) = run {
-            let used = self.runs.entry(run.clone()).or_default();
-            used.in_flight = used.in_flight.saturating_sub(1);
-            if let Some((path, sequence)) = pinned { used.pinned.entry(path).or_insert(sequence); used.loaded = loaded; }
-            if fired.is_some() { used.fire = fired; }
-            if used.ended && used.in_flight == 0 { self.settle_run(&run); }
-        }
-        if touched { self.editor.board_touched(); self.dispatch(); }
-    }
-
-    /// The runs that have ended (`active`: whether the workbench still runs one) are
-    /// let go once their replies are in: see [`Self::settle_run`].
-    pub fn settle_runs(&mut self, active: impl Fn(&str) -> bool) {
-        let ended: Vec<String> = self.runs.iter_mut().filter(|(run, used)| !used.ended && !active(run))
-            .map(|(run, used)| { used.ended = true; run.clone() }).collect();
-        for run in ended { if self.runs.get(&run).is_some_and(|used| used.in_flight == 0) { self.settle_run(&run); } }
-    }
-
-    /// A run is over -- its node returned, failed or was stopped, or its process
-    /// died: its pins go, and a FIRE of its that is still unreported (a run that
-    /// ended without its own Stop) is made SAFE and its report settled, as each
-    /// v2 node's finally did.
-    fn settle_run(&mut self, run: &str) {
-        let Some(used) = self.runs.remove(run) else { return };
-        let (Some(fire), Some(board)) = (used.fire, self.editor.board().cloned()) else { return };
-        if board.last_fire() != Some((fire, Fate::Pending)) { return; }
-        let (post, instance, run) = (self.post.clone(), self.given.as_ref().map(|given| given.instance.clone()), run.to_owned());
-        self.safe.run(move || {
-            let outcome = match board.safe() {
-                Ok(_) => format!("ZLC SAFE after {run}: it ended with FIRE {fire} unreported"),
-                Err(error) => format!("ZLC SAFE FAILED after {run} ended with FIRE {fire} unreported: {}", error.message),
-            };
-            if let Some((instance, line)) = instance.zip(narration(&outcome)) { post(PulseEvent::Log { instance, line }); }
-            post(PulseEvent::Touched);
-        });
-    }
-
-    // ------------------------------------------------------------- native devices
-    /// The apparatus opens a sequencer device: on the device lane.
-    pub fn open_device(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value) {
-        let post = self.post.clone();
-        if let Some(given) = &self.given {
-            post(PulseEvent::Opened { instance: instance.to_owned(), result: Err(format!("the pulse board is already attached as {}", given.instance)) });
-            return;
-        }
-        let (instance, type_id, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
-        let world = (type_id == "sequencer.virtual").then(|| (self.plugins.clone(), world_instance(&instance), context["simulation"].clone()));
-        self.device.run(move || {
-            // The world opens first: a virtual board without one would play into nothing.
-            if let Some((plugins, name, group)) = &world {
-                let opened = plugins.as_ref().ok_or_else(|| "the virtual sequencer needs the plugin host for its world".to_owned())
-                    .and_then(|host| host.open(name, "simulation.board", json!({}), if group.is_object() { group.clone() } else { json!({}) })
-                        .map_err(|error| format!("its world side: {error}")));
-                if let Err(error) = opened { post(PulseEvent::Opened { instance, result: Err(error) }); return; }
-            }
-            let (logs, name) = (post.clone(), instance.clone());
-            let narrate = Box::new(move |line| logs(PulseEvent::Log { instance: name.clone(), line }));
-            let result = open_device(&type_id, &parameters, narrate).map(|(board, child)| (Arc::new(board), child));
-            if result.is_err() { if let Some((Some(host), name, _)) = &world { let _ = host.close(name); } }
-            post(PulseEvent::Opened { instance, result });
-        });
-    }
-
-    /// The open finished: the editor shows the session's board, locked, under the device's
-    /// `label` (v2 set_device_label: its role).
-    pub fn device_opened(&mut self, instance: &str, label: &str, result: Result<(Arc<Board>, Option<Served>), String>) -> Result<Value, String> {
-        let (board, child) = result?;
-        if self.given.is_some() { let _ = board.close(); return Err("the pulse board is already attached".into()); }
-        let description = board.description().clone();
-        let world = (board.is_virtual() && self.plugins.is_some()).then(|| world_instance(instance));
-        self.given = Some(Given { instance: instance.to_owned(), child, world, published: false });
-        self.editor.attach_given(board, label);
-        self.dispatch();
-        // `snapshot`: it reports its state for the bench a Start records (`bench_snapshot`).
-        let facts = self.device_facts().map_or(Value::Null, |(_, facts)| facts);
-        Ok(json!({"board": self.editor.board().map(|b| b.name().to_owned()), "ports": description.target.ports.len(),
-                  "clock_hz": description.clock_hz, "snapshot": true, "facts": facts}))
-    }
-
-    /// What the apparatus' sequencer states of itself, when it differs from what was last said: its
-    /// trigger lanes -- `{trigger_lanes: [{lane, port, label, frames}]}`, `frames` how often the lane rises
-    /// in one shot of what the board holds, null while it holds nothing. Worked out when the board changes
-    /// what it holds, not at every turn; the workbench is told (`Event::Facts`) and asks its drafts again.
-    pub fn device_facts(&mut self) -> Option<(String, Value)> {
-        let instance = self.given.as_ref()?.instance.clone();
-        let board = self.editor.board()?.clone();
-        let key = (std::sync::Arc::as_ptr(&board) as usize, board.revision());
-        if self.facts_of == Some(key) { return None; }
-        self.facts_of = Some(key);
-        let counts = board.trigger_counts().ok().and_then(|(_, counts)| counts);
-        let lanes: Vec<Value> = board.trigger_lanes().into_iter().enumerate().map(|(at, (lane, port, label))| json!({
-            "lane": lane, "port": port, "label": label, "frames": counts.as_ref().and_then(|counts| counts.get(at).copied())})).collect();
-        let facts = json!({"trigger_lanes": lanes});
-        if self.facts == facts { return None; }
-        self.facts = facts.clone();
-        Some((instance, facts))
-    }
-
-    /// The apparatus board's `snapshot`, read off the window's turn (a pulse server's client waits
-    /// behind a LOAD) and given up after `wait`: the work to run on a thread of its own.
-    pub fn bench_snapshot(&self, wait: Duration) -> impl FnOnce() -> Result<Value, String> + Send + 'static {
-        let board = self.given.as_ref().and(self.editor.board().cloned());
-        move || {
-            let board = board.ok_or("no pulse board is attached")?;
-            let (sender, answer) = mpsc::channel();
-            std::thread::Builder::new().name("zlc-pulse-bench".into()).spawn(move || { let _ = sender.send(bench_entry(&board)); })
-                .map_err(|error| error.to_string())?;
-            answer.recv_timeout(wait).unwrap_or_else(|_| Err(format!("the pulse board did not answer within {} s", wait.as_secs())))
-        }
-    }
-
-    pub fn close_device(&mut self, instance: &str) {
-        let post = self.post.clone();
-        if self.given.as_ref().is_none_or(|given| given.instance != instance) {
-            post(PulseEvent::Closed { instance: instance.to_owned(), error: None });
-            return;
-        }
-        self.let_go(instance, true);
-    }
-
-    /// The board's computer is gone (the workbench holds the device failed): the editor lets it go, nobody is told it closed.
-    pub fn lose_device(&mut self, instance: &str) {
-        if self.given.as_ref().is_some_and(|given| given.instance == instance) { self.let_go(instance, false); }
-    }
-
-    fn let_go(&mut self, instance: &str, closed: bool) {
-        let post = self.post.clone();
-        let given = self.given.take().expect("checked");
-        let board = self.editor.board().cloned();
-        self.editor.detach_given();
-        self.dispatch();
-        let instance = instance.to_owned();
-        let plugins = self.plugins.clone();
-        self.device.run(move || {
-            let error = board.and_then(|board| board.close().err()).map(|error| error.message);
-            if let Some(served) = given.child { served.end(); }
-            if let (Some(host), Some(world)) = (plugins, &given.world) { let _ = host.close(world); }
-            if closed { post(PulseEvent::Closed { instance, error }); }
-        });
-    }
-
-    /// Closing the window: SAFE, then let every connection go.
-    pub fn shutdown(&mut self) {
-        if let Some(board) = self.editor.board().cloned() { let _ = board.close(); }
-        if let Some(mut given) = self.given.take() { if let Some(served) = given.child.take() { served.end(); } }
-        self.safe_actions.unregister(SAFE_OUTPUT);
-    }
-
-    /// Remote on/off for the board on this computer (v2: a local pulse board's
-    /// own server admits peers while published). Off drops the other computer
-    /// (its server drives the board SAFE) and this application takes it back.
-    /// Answers what the fabric announces: the board's server port.
-    pub fn admit_peers(&mut self, instance: &str, published: bool) -> Result<u16, String> {
-        use std::io::Write;
-        let given = self.given.as_mut().filter(|given| given.instance == instance).ok_or_else(|| format!("{instance} is not the open pulse board"))?;
-        let served = given.child.as_mut().ok_or_else(|| format!("{instance} is not a board plugged into this computer: other computers reach it at its own pulse server"))?;
-        let control = served.control.as_mut().ok_or("the local pulse server no longer listens to this application")?;
-        control.write_all(if published { b"admit\n" } else { b"refuse\n" }).and_then(|()| control.flush())
-            .map_err(|error| format!("the local pulse server did not take the change: {error}"))?;
-        given.published = published;
-        let port = served.port;
-        if !published {
-            if let Some(board) = self.editor.board().cloned() {
-                let post = self.post.clone();
-                self.device.run(move || {
-                    let result = board.rejoin().map(|()| json!({})).map_err(|error| error.message);
-                    post(PulseEvent::Reply { request: 0, result, touched: true, run: None });
-                });
-            }
-        }
-        Ok(port)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1041,14 +1705,14 @@ mod tests {
     use std::sync::mpsc::{Receiver, channel};
 
     /// A pulse host with the virtual board as the apparatus' sequencer, its lanes' events in a
-    /// channel, and a pulse document of its own (the run claims "sequencer").
+    /// channel (nobody turns the window's loop unless a test does), and a pulse document of its own.
     fn host(name: &str) -> (PulseHost, Receiver<PulseEvent>, PathBuf) {
         let folder = std::env::temp_dir().join(format!("zlc_pulse_host_{}_{name}", std::process::id()));
         std::fs::create_dir_all(folder.join("pulses")).unwrap();
         let (sender, events) = channel();
         let sender = Mutex::new(sender);
         let post: Post = Arc::new(move |event| { let _ = sender.lock().unwrap().send(event); });
-        let mut host = PulseHost::new(post, SafeActions::new(), None, &folder.join("pulses"));
+        let mut host = PulseHost::new(PulseDesk::new(post.clone()), post, SafeActions::new(), None, &folder.join("pulses"));
         let board = Arc::new(Board::virtual_board(None).unwrap());
         host.device_opened("sequencer", "sequencer", Ok((board, None))).unwrap();
         let document = folder.join("pulses").join("shot.json");
@@ -1056,44 +1720,148 @@ mod tests {
         (host, events, document)
     }
 
-    /// One command, answered now or by a lane (the editor's outcomes delivered meanwhile).
+    /// As the window states the workbench's runs: each named run (its node's instance is its own
+    /// name here) claims the sequencer.
+    fn claim(host: &PulseHost, runs: &[&str]) {
+        host.desk.stated(Claims(runs.iter().map(|run| (run.to_string(), (run.to_string(), vec!["sequencer".to_owned()]))).collect()));
+    }
+
+    /// A run's board command, answered by the desk where it arrives: the window's loop does not turn.
+    fn run_asks(host: &PulseHost, run: &str, action: &str, command: Value) -> Result<Value, String> {
+        let (sender, answer) = channel();
+        host.desk.ask(Who::Run { hosted: run.to_owned(), instance: run.to_owned() }, action, command, Box::new(move |result| { let _ = sender.send(result); }));
+        answer.recv_timeout(Duration::from_secs(30)).expect("an answer")
+    }
+
+    /// A client's command, answered now or on a later turn of the window's loop (which this turns).
     fn ask(host: &mut PulseHost, events: &Receiver<PulseEvent>, action: &str, command: Value, claimant: Option<&str>) -> Result<Value, String> {
-        let handled = host.command(action, &command, false, 1, |_| vec!["sequencer".to_owned()], claimant.map(str::to_owned), |_, _, _, _, _| Ok(None));
-        match handled {
-            Handled::Now(answer) => answer,
-            Handled::Later => loop {
-                match events.recv_timeout(Duration::from_secs(30)).expect("an answer") {
-                    PulseEvent::Reply { result, touched, run, .. } => { host.replied(touched, run); return result; }
-                    PulseEvent::Outcome(outcome) => { host.editor.deliver(outcome); host.dispatch(); }
-                    _ => {}
-                }
-            },
+        let mut handled = host.command(action, &command, false, 1, claimant.map(str::to_owned));
+        loop {
+            if let Handled::Now(answer) = handled { return answer; }
+            handled = match events.recv_timeout(Duration::from_secs(30)).expect("an answer") {
+                PulseEvent::Reply { result, .. } => Handled::Now(result),
+                PulseEvent::Read(ahead) => host.read(*ahead).1,
+                PulseEvent::Written(written) => Handled::Now(host.written(*written).1),
+                PulseEvent::Outcome(outcome) => { host.deliver(outcome); Handled::Later }
+                PulseEvent::Touched => { host.touched(); Handled::Later }
+                _ => Handled::Later,
+            };
         }
     }
 
-    fn played(document: &Path, run: &str, repeats: u64) -> Value {
-        json!({"document": document.display().to_string(), "run_repeats": repeats, "_run": run})
+    fn played(document: &Path, repeats: u64) -> Value {
+        json!({"document": document.display().to_string(), "run_repeats": repeats})
     }
 
     fn board(host: &PulseHost) -> Arc<Board> { host.editor.board().unwrap().clone() }
 
-    /// A run's record names one pulse: a later fire of its file changed meanwhile is refused;
-    /// another run plays the new one.
+    /// A diagnostics archive carries the pulse documents the board played this session, as files, and
+    /// the pulse it holds now, as it holds it.
+    #[test]
+    fn the_pulses_played_and_held_are_named_for_a_diagnostics_archive() {
+        let (host, _events, document) = host("diagnostics");
+        claim(&host, &["scan#1"]);
+        let held = |documents: &[NamedDocument]| documents.iter().find_map(|named| match &named.source {
+            DocumentSource::Held { name, bytes } if name == "board-held-pulse.json" => Some(bytes.clone()), _ => None });
+        let before = host.desk.diagnostic_documents();
+        assert!(before.iter().all(|named| named.why != "played on the board") && held(&before).is_none(), "nothing played, nothing held");
+        run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap();
+        let documents = host.desk.diagnostic_documents();
+        let files: Vec<(&str, &str, &Path)> = documents.iter().filter_map(|named| match &named.source {
+            DocumentSource::File(path) => Some((named.why.as_str(), named.contract.as_str(), path.as_path())), _ => None }).collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!((files[0].0, files[0].1, files[0].2.file_name()), ("played on the board", PULSE_CONTRACT, document.file_name()));
+        let held: Value = serde_json::from_slice(&held(&documents).expect("the board holds what it played")).unwrap();
+        assert!(held.is_object(), "a pulse document: {held}");
+    }
+
+    /// A run's play, its report wait and its Stop are answered off the window's turn: nothing here
+    /// turns the loop, and what the board did reaches the window as one coalesced notice.
+    #[test]
+    fn a_runs_board_commands_are_answered_while_the_window_does_not_turn() {
+        let (host, events, document) = host("offloop");
+        claim(&host, &["scan#1"]);
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap()["command_id"].as_u64().unwrap();
+        let done = run_asks(&host, "scan#1", "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30})).unwrap();
+        assert_eq!(done["status"], "done");
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 0)).unwrap()["command_id"].as_u64().unwrap() as u32;
+        assert!(run_asks(&host, "scan#1", "pulse_stop", json!({})).unwrap()["status"].is_u64());
+        assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
+        let notices: Vec<PulseEvent> = events.try_iter().collect();
+        assert_eq!(notices.iter().filter(|event| matches!(event, PulseEvent::Touched)).count(), 1, "one notice until the window takes it");
+        assert!(!notices.iter().any(|event| matches!(event, PulseEvent::Reply { .. })), "a run's answer never passes the window");
+    }
+
+    /// A run that asks before the window stated it (its start reply still on the way) is answered
+    /// at the window's next statement: held to the claims then, refused when it holds none.
+    #[test]
+    fn a_run_asking_before_its_claims_are_stated_is_judged_at_the_next_statement() {
+        let (host, _events, document) = host("parked");
+        claim(&host, &[]);
+        let (sender, answer) = channel();
+        for run in ["early#1", "stranger#1"] {
+            let sender = sender.clone();
+            host.desk.ask(Who::Run { hosted: run.to_owned(), instance: run.to_owned() }, "pulse_run", played(&document, 1),
+                          Box::new(move |result| { let _ = sender.send((run, result)); }));
+        }
+        assert!(answer.recv_timeout(Duration::from_millis(200)).is_err(), "held until the window states its runs");
+        claim(&host, &["early#1"]);
+        let mut answers: Vec<(&str, Result<Value, String>)> = (0..2).map(|_| answer.recv_timeout(Duration::from_secs(30)).unwrap()).collect();
+        answers.sort_by_key(|(run, _)| *run);
+        assert!(answers[0].1.as_ref().unwrap()["command_id"].is_u64(), "{:?}", answers[0]);
+        assert!(answers[1].1.as_ref().unwrap_err().contains("does not claim"), "{:?}", answers[1]);
+        let id = answers[0].1.as_ref().unwrap()["command_id"].as_u64().unwrap();
+        run_asks(&host, "early#1", "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30})).unwrap();
+    }
+
+    /// One play of `document` by `run` that reports: the digest of the program the board played.
+    fn played_digest(host: &PulseHost, run: &str, document: &Path) -> String {
+        let receipt = run_asks(host, run, "pulse_run", played(document, 1)).unwrap();
+        let done = run_asks(host, run, "pulse_wait_done", json!({"command_id": receipt["command_id"], "timeout_seconds": 30})).unwrap();
+        assert_eq!(done["status"], "done");
+        receipt["timing"]["digest"].as_str().unwrap().to_owned()
+    }
+
+    /// `file`, its JSON changed by `change`.
+    fn rewrite(file: &Path, change: impl FnOnce(&mut Value)) {
+        let mut tree: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        change(&mut tree);
+        std::fs::write(file, tree.to_string()).unwrap();
+    }
+
+    /// A run whose pulse `changed` (its document or a Subpulse file it resolves) between two plays
+    /// keeps playing the pulse it began with and says so once; a new run plays the changed file.
+    fn a_run_keeps_its_pulse(host: &PulseHost, events: &Receiver<PulseEvent>, document: &Path, changed: impl FnOnce()) {
+        claim(host, &["scan#1", "scan#2"]);
+        let began = played_digest(host, "scan#1", document);
+        let kept = || events.try_iter().filter(|event| matches!(event, PulseEvent::Log { line, .. } if line.contains("ZLC PULSE KEPT for scan#1"))).count();
+        assert_eq!(kept(), 0, "nothing changed yet");
+        changed();
+        for _ in 0..2 { assert_eq!(played_digest(host, "scan#1", document), began, "the run plays the pulse it began with"); }
+        assert_eq!(kept(), 1, "the change is said once for the run");
+        assert_ne!(played_digest(host, "scan#2", document), began, "a new run plays the changed file");
+        assert_eq!(kept(), 0, "the new run began with the changed file: nothing to say");
+    }
+
     #[test]
     fn a_run_plays_the_pulse_it_began_with() {
-        let (mut host, events, document) = host("pinned");
-        let receipt = ask(&mut host, &events, "pulse_run", played(&document, "scan#1", 1), None).unwrap();
-        let id = receipt["command_id"].as_u64().unwrap();
-        let done = ask(&mut host, &events, "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30, "_run": "scan#1"}), None).unwrap();
-        assert_eq!(done["status"], "done");
-        let mut tree: Value = serde_json::from_str(&std::fs::read_to_string(&document).unwrap()).unwrap();
-        tree["periods"][1]["duration"] = json!(0.03);
-        std::fs::write(&document, tree.to_string()).unwrap();
-        let refused = ask(&mut host, &events, "pulse_run", played(&document, "scan#1", 1), None).unwrap_err();
-        assert!(refused.contains(PULSE_CHANGED), "{refused}");
-        let other = ask(&mut host, &events, "pulse_run", played(&document, "scan#2", 0), None).unwrap();
-        assert!(other["command_id"].is_u64());
-        ask(&mut host, &events, "pulse_stop", json!({"_run": "scan#2"}), None).unwrap();
+        let (host, events, document) = host("pinned");
+        a_run_keeps_its_pulse(&host, &events, &document, || rewrite(&document, |tree| tree["periods"][1]["duration"] = json!(0.03)));
+    }
+
+    /// The pulse a run began with includes its Subpulse files as they were then.
+    #[test]
+    fn a_run_plays_the_subpulses_it_began_with() {
+        let (host, events, document) = host("pinned_subpulse");
+        let (sequence, _) = zlc_pulse::codec::read_pulse_document(&document).unwrap();
+        let period = sequence.periods[1].period_id.clone();
+        let grouped = zlc_pulse::components::group_component(&sequence, &[period], "part", Some("part"), &[]).unwrap();
+        let subpulse = document.with_file_name("part.json");
+        std::fs::write(&subpulse, zlc_pulse::codec::subpulse_to_tree(&zlc_pulse::components::extract_subpulse(&grouped, "part").unwrap()).readable()).unwrap();
+        let sourced = zlc_pulse::components::set_subpulse_source(&grouped, "part", "config", Some("part.json")).unwrap()
+            .with(|parts| parts.config_enabled = true).unwrap();
+        std::fs::write(&document, zlc_pulse::codec::sequence_to_tree(&sourced).readable()).unwrap();
+        a_run_keeps_its_pulse(&host, &events, &document, || rewrite(&subpulse, |tree| tree["periods"][0]["duration"] = json!(0.03)));
     }
 
     /// v2 device use: while a run holds the board, no other client plays on it, takes its
@@ -1108,28 +1876,50 @@ mod tests {
         }
     }
 
-    /// v2 nodes' sequencer.safe(): a run's Stop answers once the board is SAFE.
-    #[test]
-    fn a_runs_stop_answers_with_the_safe() {
-        let (mut host, events, document) = host("stop");
-        let id = ask(&mut host, &events, "pulse_run", played(&document, "cal#1", 0), None).unwrap()["command_id"].as_u64().unwrap() as u32;
-        let answer = ask(&mut host, &events, "pulse_stop", json!({"_run": "cal#1"}), None).unwrap();
-        assert!(answer["status"].is_u64(), "{answer}");
-        assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
-    }
-
     /// A run that ends with its FIRE unreported -- its process died, say -- leaves the board SAFE.
     #[test]
     fn a_run_ended_without_its_stop_leaves_the_board_safe() {
-        let (mut host, events, document) = host("ended");
-        let id = ask(&mut host, &events, "pulse_run", played(&document, "scan#1", 0), None).unwrap()["command_id"].as_u64().unwrap() as u32;
-        host.settle_runs(|_| true);
+        let (host, events, document) = host("ended");
+        claim(&host, &["scan#1"]);
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 0)).unwrap()["command_id"].as_u64().unwrap() as u32;
         assert_eq!(board(&host).last_fire(), Some((id, Fate::Pending)), "still running");
-        host.settle_runs(|_| false);
+        let finished = HostEvent::RunFinished { instance: "scan#1".into(), run: "scan#1".into(), outcome: "failed".into(), result: Value::Null,
+                                                error: None, generation: None };
+        assert!(host.desk.hears(finished).is_some(), "the window still hears a run's end");
         loop {
-            if let PulseEvent::Touched = events.recv_timeout(Duration::from_secs(30)).expect("the SAFE") { break; }
+            if let PulseEvent::Log { line, .. } = events.recv_timeout(Duration::from_secs(30)).expect("the SAFE") { assert!(line.contains("ZLC SAFE after scan#1"), "{line}"); break; }
         }
         assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)));
+    }
+
+    /// Closing the window does not wait for the board: its SAFE close runs on the SAFE lane, however
+    /// slow, and is told when done; the application's end waits for it, so the board is SAFE first.
+    #[test]
+    fn the_windows_close_makes_the_board_safe_off_the_turn_and_its_end_waits_for_it() {
+        struct SlowSafe(Mutex<Option<std::time::Instant>>);
+        impl World for SlowSafe {
+            fn play_run(&self, _timeline: &Json, _stop: &Arc<Event>) -> zlc_pulse::Result<()> { Ok(()) }
+            fn safe(&self) { std::thread::sleep(Duration::from_millis(600)); *lock(&self.0) = Some(std::time::Instant::now()); }
+        }
+        for awaited in [false, true] {
+            let (mut host, events, _document) = host(if awaited { "shutdown_awaited" } else { "shutdown" });
+            let world = Arc::new(SlowSafe(Mutex::new(None)));
+            board(&host).set_world(Some(world.clone()));
+            let began = std::time::Instant::now();
+            host.shutdown();
+            host.shutdown();
+            assert!(began.elapsed() < Duration::from_millis(300), "the turn goes on: {:?}", began.elapsed());
+            assert!(!host.shut_down() && lock(&world.0).is_none(), "the board is still closing");
+            if awaited {
+                // The application ends while it closes: its end waits for the SAFE.
+                host.await_shutdown();
+            } else {
+                loop { if let PulseEvent::ShutDown = events.recv_timeout(Duration::from_secs(30)).expect("the close is told") { break; } }
+            }
+            assert!(host.shut_down());
+            let safed = lock(&world.0).expect("SAFE at the window's close");
+            assert!(safed - began >= Duration::from_millis(600));
+        }
     }
 
     /// The local board's UART is found on Init (it binds that port): a JTAG or memory board has
@@ -1141,7 +1931,7 @@ mod tests {
         assert_eq!((&local["resources"], &local["queries"]), (&json!(["serial:{uart_port}"]), &json!(["resolve"])));
         for backend in ["jtag-axi", "memory"] {
             let answer = resolve("sequencer.local", &json!({"backend": backend, "uart_port": ""}), &["serial:COM3".to_owned()], Duration::from_secs(1));
-            assert_eq!(answer.unwrap(), json!({"parameters": {}, "note": ""}), "{backend}");
+            assert_eq!(answer.unwrap(), json!({"found": {}, "note": ""}), "{backend}");
         }
         let line = |parameters: Value| server_arguments(&parameters).map(|(backend, arguments)| (backend.to_owned(), arguments.join(" ")));
         let (backend, arguments) = line(json!({"backend": "auto", "uart_port": " ", "port": 18861})).unwrap();
@@ -1152,34 +1942,137 @@ mod tests {
         assert!(line(json!({"backend": "uart", "uart_port": "COM5"})).unwrap().1.ends_with("--backend uart --port 0 --uart-port COM5"));
     }
 
+    /// The transport the server took is the board's `device_info`, and a row on Auto that came up
+    /// over JTAG says so on the Init line -- from the server's ready line, whichever way it got there.
+    #[test]
+    fn the_transport_taken_is_said_and_jtag_under_auto_is_noted() {
+        let uart = json!({"type": "pulse-server", "port": 1, "transport": "uart", "uart_port": "COM5", "attempts": ["COM5: word63 fingerprint matched"]});
+        assert_eq!((transport_taken(&uart), transport_note("auto", &uart)), ("UART COM5".to_owned(), None));
+        let probed = json!({"transport": "jtag-axi", "attempts": ["COM10: opened, no board answered (timeout)"]});
+        assert_eq!((transport_taken(&probed), probe_attempts(&probed)), ("JTAG-to-AXI (Vivado)".to_owned(), vec!["COM10: opened, no board answered (timeout)"]));
+        assert_eq!(transport_note("auto", &probed).unwrap(),
+                   "opened over JTAG-to-AXI under Auto, not its UART: no board UART answered (COM10: opened, no board answered (timeout))");
+        // Init found no UART first (its resolve said what it tried): the server was sent to JTAG and probed nothing.
+        let sent = json!({"transport": "jtag-axi", "attempts": [], "reason": "explicit jtag-axi backend"});
+        assert_eq!(transport_note("auto", &sent).unwrap(), "opened over JTAG-to-AXI under Auto, not its UART");
+        assert_eq!(transport_note("jtag-axi", &sent), None, "chosen, not fallen back to");
+    }
+
+    /// The local pulse server says who owns its board; while another client holds it this
+    /// application's client sends nothing -- a run's play and Stop are refused with who holds it, the
+    /// archive says it, the device log and `held_by` fact name it -- and once that client lets it go
+    /// nothing here takes it back unasked; taken back, it is this application's again.
+    #[test]
+    fn a_board_held_by_another_client_of_its_server_is_said_and_never_taken_unasked() {
+        use zlc_pulse::remote::{PulseRemoteServer, RemotePulseStreamer};
+        // The board's own server, on the memory twin of the deployed board, telling its owner as its stdout line does.
+        let found = zlc_pulse::wire::load_streamer_config(None).unwrap();
+        let config = zlc_pulse::wire::require_streamer_config(found.source.as_ref().unwrap()).unwrap();
+        let target = zlc_pulse::manifest::target_from_config(&config, None, None).unwrap();
+        let memory = Arc::new(zlc_pulse::transport::MemoryRegisterTransport::new(&config.params, false, false).unwrap());
+        let streamer = zlc_pulse::device::PulseStreamer::new(memory, config.params, config.clock_hz, target).unwrap();
+        streamer.open().unwrap();
+        let mut server = PulseRemoteServer::bind("127.0.0.1:0", streamer, false).unwrap();
+        let (told, owners) = channel::<String>();
+        let told = Mutex::new(told);
+        server.on_owner(move |owner| { let _ = lock(&told).send(Json::object(vec![("type", Json::str("pulse-owner")), ("owner", Json::opt_str(owner))]).compact_text()); });
+        server.start().unwrap();
+        let port = server.address().port();
+        let folder = std::env::temp_dir().join(format!("zlc_pulse_host_{}_held", std::process::id()));
+        std::fs::create_dir_all(folder.join("pulses")).unwrap();
+        let (sender, events) = channel();
+        let sender = Mutex::new(sender);
+        let post: Post = Arc::new(move |event| { let _ = sender.lock().unwrap().send(event); });
+        let mut host = PulseHost::new(PulseDesk::new(post.clone()), post, SafeActions::new(), None, &folder.join("pulses"));
+        host.device_opened("sequencer", "sequencer", Ok((Arc::new(Board::remote("127.0.0.1", port).unwrap()), None))).unwrap();
+        let document = folder.join("pulses").join("shot.json");
+        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../zlc-pulse/tests/pulses/imaging_template.json"), &document).unwrap();
+        // Each owner line as the stdout reader hears it, applied on the window's turn.
+        let hear = |host: &mut PulseHost| {
+            let line = owners.recv_timeout(Duration::from_secs(10)).expect("an owner line");
+            let Some(Said::Owner(owner)) = server_said(&line) else { panic!("{line} is an owner line") };
+            host.owner_changed("sequencer", owner.clone());
+            owner
+        };
+        let logged = |events: &Receiver<PulseEvent>, start: &str| loop {
+            if let PulseEvent::Log { line, .. } = events.recv_timeout(Duration::from_secs(10)).expect("a log line") { if line.contains(start) { return line; } }
+        };
+        // The device's `held_by` fact as it now states it (said to the workbench only when it changed).
+        let held_by = |host: &mut PulseHost| { host.device_facts(); host.facts["held_by"].clone() };
+        assert_eq!(hear(&mut host).and_then(|owner| owner.parse().ok()), board(&host).client_address(), "its own client owns it");
+        assert_eq!(held_by(&mut host), Value::Null);
+        claim(&host, &["scan#1"]);
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 0)).unwrap()["command_id"].as_u64().unwrap() as u32;
+        // Another program on this computer takes the board over: nobody while its takeover SAFE runs, then it.
+        let other = RemotePulseStreamer::new("127.0.0.1", port, None, Duration::from_secs(2)).unwrap();
+        other.open().unwrap();
+        let holder = format!("another program on this computer ({})", other.local_address().unwrap());
+        assert_eq!(hear(&mut host), None);
+        assert_eq!(hear(&mut host), Some(other.local_address().unwrap().to_string()));
+        let line = logged(&events, "ZLC HELD BY");
+        assert!(line.ends_with(&format!("ZLC HELD BY {holder}: this application's commands to the board are refused until it is this application's again")), "{line}");
+        let refusal = format!("the pulse board is held by {holder}: its pulse server gave that client the board, so this application sends it nothing -- \
+                               open the device again to take it back here");
+        assert_eq!(board(&host).last_fire(), Some((id, Fate::Safed)), "the takeover SAFEd what this application played");
+        let refused = run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap_err();
+        assert!(refused.contains(&refusal) && !refused.contains("not open"), "not a connection error: {refused}");
+        assert_eq!(run_asks(&host, "scan#1", "pulse_stop", json!({})).unwrap_err(), format!("the board did not go SAFE: {refusal}"));
+        assert!(other.snapshot().is_ok(), "nothing here took it back");
+        let documents = host.desk.diagnostic_documents();
+        let named: Vec<(&str, Option<&[u8]>)> = documents.iter().map(|named| match &named.source {
+            DocumentSource::Held { name, bytes } => (name.as_str(), Some(bytes.as_slice())), DocumentSource::File(_) => ("file", None) }).collect();
+        assert!(named.contains(&("board-holder.txt", Some(refusal.as_bytes()))) && !named.iter().any(|(name, _)| name.starts_with("board-held-pulse")), "{named:?}");
+        assert_eq!(held_by(&mut host), json!(holder));
+        // It lets the board go: SAFE and held by nobody, and this application does not take it unasked.
+        other.disconnect();
+        assert_eq!(hear(&mut host), None);
+        assert!(logged(&events, "ZLC HELD BY NOBODY").contains(&format!("{holder} let the board go")));
+        assert_eq!(held_by(&mut host), json!(format!("nobody ({holder} let it go)")));
+        assert!(run_asks(&host, "scan#1", "pulse_run", played(&document, 1)).unwrap_err().starts_with("the pulse board is held by nobody: "));
+        // Taken back (what Remote off does): its own again.
+        board(&host).rejoin().unwrap();
+        assert_eq!(hear(&mut host).and_then(|owner| owner.parse().ok()), board(&host).client_address());
+        logged(&events, "ZLC HELD HERE");
+        assert_eq!(held_by(&mut host), Value::Null);
+        let id = run_asks(&host, "scan#1", "pulse_run", played(&document, 0)).unwrap()["command_id"].as_u64().unwrap();
+        assert!(id > 0);
+        run_asks(&host, "scan#1", "pulse_stop", json!({})).unwrap();
+        host.shutdown();
+        host.await_shutdown();
+        server.close();
+    }
+
     /// v2 slm_rearrangement: the Pulse is loaded first and the FIRE is then the FIRE alone.
     #[test]
     fn a_run_loads_then_fires() {
-        let (mut host, events, document) = host("stages");
-        let mut load = played(&document, "rearrangement#1", 1);
+        let (host, _events, document) = host("stages");
+        claim(&host, &["rearrangement#1"]);
+        let mut load = played(&document, 1);
         load["stage"] = json!("load");
-        let loaded = ask(&mut host, &events, "pulse_run", load, None).unwrap();
+        let loaded = run_asks(&host, "rearrangement#1", "pulse_run", load).unwrap();
         assert!(loaded.get("command_id").is_none() && loaded["timing"]["periods"].is_array(), "{loaded}");
         assert_eq!(board(&host).last_fire(), None, "loaded, not fired");
-        let mut fire = played(&document, "rearrangement#1", 1);
+        let mut fire = played(&document, 1);
         fire["stage"] = json!("fire");
-        let fired = ask(&mut host, &events, "pulse_run", fire, None).unwrap();
+        let fired = run_asks(&host, "rearrangement#1", "pulse_run", fire).unwrap();
         let id = fired["command_id"].as_u64().unwrap();
-        let done = ask(&mut host, &events, "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30, "_run": "rearrangement#1"}), None).unwrap();
+        let done = run_asks(&host, "rearrangement#1", "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30})).unwrap();
         assert_eq!(done["status"], "done");
     }
+
     #[test]
     fn split_scan_receipt_preserves_loaded_columns_and_api_values() {
-        let (mut host, events, document) = host("scan_receipt");
-        let mut load=played(&document,"scan#1",1);
+        let (host, _events, document) = host("scan_receipt");
+        claim(&host, &["scan#1"]);
+        let mut load=played(&document,1);
         load["stage"]=json!("load");
         load["api_values"]=json!({"duration:short":[0.000100003,"s"]});
         load["scan"]=json!({"fields":["duration:long_after","duration:long_before"],
             "rows":[[0.000400003,0.000200007],[0.000500003,0.000300007]]});
-        let loaded=ask(&mut host,&events,"pulse_run",load,None).unwrap();
-        let mut fire=played(&document,"scan#1",1);fire["stage"]=json!("fire");
-        let fired=ask(&mut host,&events,"pulse_run",fire.clone(),None).unwrap();
-        let done=ask(&mut host,&events,"pulse_wait_done",json!({"command_id":fired["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
+        let loaded=run_asks(&host,"scan#1","pulse_run",load).unwrap();
+        let mut fire=played(&document,1);fire["stage"]=json!("fire");
+        let fired=run_asks(&host,"scan#1","pulse_run",fire.clone()).unwrap();
+        let done=run_asks(&host,"scan#1","pulse_wait_done",json!({"command_id":fired["command_id"],"timeout_seconds":30})).unwrap();
         assert_eq!(done["status"],"done");
         assert_eq!(fired["scan"],loaded["scan"],"FIRE must retain LOAD's named, quantized table");
         assert_eq!(fired["api_values"],loaded["api_values"],"calibration consumes these too");
@@ -1192,19 +2085,52 @@ mod tests {
         let board=board(&host);let held=board.applied().unwrap().unwrap();
         let mut rows=(*held.rows).clone();rows.reverse();
         board.load(held.program.clone(),held.source.clone(),rows).unwrap();
-        let refused=ask(&mut host,&events,"pulse_run",fire,None).unwrap_err();
+        let refused=run_asks(&host,"scan#1","pulse_run",fire).unwrap_err();
         assert!(refused.contains("loaded"),"{refused}");
-        let mut load=played(&document,"scan#1",1);load["stage"]=json!("load");
+        let mut load=played(&document,1);load["stage"]=json!("load");
         load["api_values"]=json!({"duration:short":[0.0002,"s"]});
-        let loaded=ask(&mut host,&events,"pulse_run",load,None).unwrap();
-        let mut fire=played(&document,"scan#1",1);fire["stage"]=json!("fire");
-        let again=ask(&mut host,&events,"pulse_run",fire.clone(),None).unwrap();
+        let loaded=run_asks(&host,"scan#1","pulse_run",load).unwrap();
+        let mut fire=played(&document,1);fire["stage"]=json!("fire");
+        let again=run_asks(&host,"scan#1","pulse_run",fire.clone()).unwrap();
         assert!(again.get("scan").is_none(),"an API-only LOAD must not retain an earlier scan table");
         assert_eq!(again["api_values"],loaded["api_values"]);
-        ask(&mut host,&events,"pulse_wait_done",json!({"command_id":again["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
-        let direct=ask(&mut host,&events,"pulse_run",played(&document,"scan#1",1),None).unwrap();
-        ask(&mut host,&events,"pulse_wait_done",json!({"command_id":direct["command_id"],"timeout_seconds":30,"_run":"scan#1"}),None).unwrap();
-        assert!(ask(&mut host,&events,"pulse_run",fire,None).unwrap_err().contains("load it first"),"a combined run supersedes any staged LOAD");
+        run_asks(&host,"scan#1","pulse_wait_done",json!({"command_id":again["command_id"],"timeout_seconds":30})).unwrap();
+        let direct=run_asks(&host,"scan#1","pulse_run",played(&document,1)).unwrap();
+        run_asks(&host,"scan#1","pulse_wait_done",json!({"command_id":direct["command_id"],"timeout_seconds":30})).unwrap();
+        assert!(run_asks(&host,"scan#1","pulse_run",fire).unwrap_err().contains("load it first"),"a combined run supersedes any staged LOAD");
+    }
+
+    /// The Pulse Editor's open and save read and write their file off the window's turn: the
+    /// command waits for its file, and its answer for the file it wrote.
+    #[test]
+    fn open_and_save_read_and_write_their_files_off_the_window() {
+        let (mut host, events, document) = host("files");
+        let path = document.display().to_string();
+        assert!(matches!(host.command("pulse_open", &json!({"path": path, "discard_changes": true}), false, 7, None), Handled::Later), "the file is read first");
+        let PulseEvent::Read(ahead) = events.recv_timeout(Duration::from_secs(30)).unwrap() else { panic!("the read-ahead") };
+        let (request, opened) = host.read(*ahead);
+        assert_eq!(request, 7);
+        let Handled::Now(Ok(opened)) = opened else { panic!("opened") };
+        assert_eq!(opened["path"], json!(path));
+        let copy = document.with_file_name("copy.json");
+        assert!(matches!(host.command("pulse_save", &json!({"path": copy.display().to_string()}), false, 8, None), Handled::Later), "written first");
+        assert!(host.view().is_none(), "no view while its file is being written");
+        let written = loop {
+            match events.recv_timeout(Duration::from_secs(30)).unwrap() {
+                PulseEvent::Written(written) => break written,
+                PulseEvent::Outcome(outcome) => host.deliver(outcome),
+                _ => {}
+            }
+        };
+        let (request, saved) = host.written(*written);
+        assert_eq!((request, saved.unwrap()["path"].as_str().map(str::to_owned)), (8, Some(copy.display().to_string())));
+        assert!(copy.is_file());
+        assert!(host.view().is_some_and(|view| view["dirty"] == false), "saved");
+        // A file that cannot be written leaves the draft unsaved, and says why.
+        let blocked = document.with_file_name("missing").join("deeper");
+        std::fs::write(document.with_file_name("missing"), b"a file, not a folder").unwrap();
+        assert!(ask(&mut host, &events, "pulse_save", json!({"path": blocked.display().to_string()}), None).unwrap_err().contains("Cannot save"));
+        assert_eq!(host.editor.path, copy.display().to_string(), "still the file it was saved to");
     }
 
     #[test]
@@ -1214,17 +2140,20 @@ mod tests {
         use zlc_core::dataset::{DataBlock,Validity};
         use zlc_core::runtime::{Bundle,Declaration,Input,Runtime,Storage};
         use zlc_core::schema::{Axis,Coordinates,DatasetSchema,Domain,ValueSchema,ValidityContract};
-        use zlc_plugin_host::{HostConfig,HostEvent,RunRequest};
+        use zlc_plugin_host::{HostConfig,RunRequest};
         let Some(python)=std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
-        let (mut pulse,events,document)=host("native_scan_bridge");
+        let (pulse,_events,document)=host("native_scan_bridge");
+        claim(&pulse,&["scan"]);
         let root=PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let runtime=Runtime::new();
         let (sender,plugin_events)=channel(); let sender=Mutex::new(sender);
+        // As the window's loop is reached: through the desk, which answers the board's commands itself.
+        let desk=pulse.desk.clone();
         let plugins=PluginHost::new(HostConfig {python:python.into(),python_path:vec![root.join("../../science/src"),root.join("../zlc-plugin-host/tests/plugins")],
             packages:vec!["zlc_test_plugins".into()],memory_limit_mib:Some(3072)},runtime.clone(),SafeActions::new(),
-            move|event|{let _=sender.lock().unwrap().send(event);}).unwrap();
+            move|event|{if let Some(event)=desk.hears(event){let _=sender.lock().unwrap().send(event);}}).unwrap();
         crate::plugin_services::install(&plugins).unwrap();
-        pulse.plugins=Some(plugins.clone());
+        pulse.desk.set_plugins(Some(plugins.clone()));
         let singleton=Domain::new(vec![1],vec![],vec![]).unwrap();
         let site=Axis::new("site".into(),"site".into(),"coordinate".into(),Coordinates::Index {origin:0,len:1},None,None,None,None).unwrap();
         let schema=DatasetSchema::new(singleton.clone(),singleton,Domain::dense(vec![1],vec![site]).unwrap(),
@@ -1236,39 +2165,21 @@ mod tests {
         let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),device_units:Default::default(),devices:Default::default(),shared: Default::default(), reads: Default::default(),
             values:json!({"spec":spec.to_string(),"mode":"seamless","configure_first":true,"effective_inner":""}),origin:Origin::Operator,
             resources:json!({}),source_signal:Some("source".into()),run_directory:None,outputs:[("scan".into(),"output".into())].into(),record_devices:false}).unwrap();
-        let mut fired=false; let mut saw_load=false;
+        // The FIRE is followed by its shots, as a camera it triggers would deliver them.
+        let mut fired=false;
         let (outcome,result,error)=loop {
-            match plugin_events.recv_timeout(Duration::from_secs(30)).expect("native scan event") {
-                HostEvent::Request {run:id,ticket,op,params,..} if id==run=>{
-                    assert_eq!(op,"core");
-                    let action=params["command"].as_str().unwrap();
-                    // As the workbench forwards it: its own run name, and the host's id of the run.
-                    let mut command=params["params"].clone(); command["_run"]=json!("scan#1"); command["_plugin_run"]=json!(run);
-                    assert!(command.get("scan").is_none(),"plugin expanded the board table");
-                    let answer=ask(&mut pulse,&events,action,command.clone(),None);
-                    if action=="pulse_run" {
-                        let receipt=answer.as_ref().expect("native pulse accepted");
-                        assert!(receipt["scan"].get("rows").is_none());
-                        assert!(receipt["applied"]["program"].get("rows").is_none());
-                        assert_eq!(receipt["scan"]["row_count"],2);
-                        assert!(receipt.to_string().len()<4096);
-                        if command["stage"]=="load" {
-                            saw_load=true;
-                            assert_eq!(pulse.runs["scan#1"].loaded.as_ref().unwrap()["applied"]["program"]["rows"].as_array().unwrap().len(),2);
-                        }
-                    }
-                    plugins.respond(ticket,answer.map_err(zlc_plugin_host::CallError::from));
-                    if action=="pulse_run" && command["stage"]=="fire" {
-                        assert!(saw_load); fired=true;
-                        for ordinal in 0..8 {
-                            let data=DataBlock::new(schema.clone(),OwnedBuffer::from_vec(vec![ordinal as u16]).into(),Validity::Uniform(true),None).unwrap();
-                            runtime.commit(&source,&Bundle {inputs:vec![Input::Event {signal:"source".into(),ordinal,data,origin:None,shot_time:None}],
-                                metadata:json!({}),parents:vec![]}).unwrap();
-                        }
-                    }
-                },
-                HostEvent::RunFinished {run:id,outcome,result,error,..} if id==run=>break(outcome,result,error),
-                HostEvent::Failed {reason,..}=>panic!("plugin failed: {reason}"),
+            if !fired && board(&pulse).last_fire().is_some() {
+                fired=true;
+                for ordinal in 0..8 {
+                    let data=DataBlock::new(schema.clone(),OwnedBuffer::from_vec(vec![ordinal as u16]).into(),Validity::Uniform(true),None).unwrap();
+                    runtime.commit(&source,&Bundle {inputs:vec![Input::Event {signal:"source".into(),ordinal,data,origin:None,shot_time:None}],
+                        metadata:json!({}),parents:vec![]}).unwrap();
+                }
+            }
+            match plugin_events.recv_timeout(Duration::from_millis(20)) {
+                Ok(HostEvent::RunFinished {run:id,outcome,result,error,..}) if id==run=>break(outcome,result,error),
+                Ok(HostEvent::Request {op,params,..}) => panic!("the window was asked {op} {params}: the desk answers the board's commands"),
+                Ok(HostEvent::Failed {reason,..})=>panic!("plugin failed: {reason}"),
                 _=>{},
             }
         };
@@ -1279,7 +2190,102 @@ mod tests {
         assert_eq!(latest.canonical().unwrap().written_cells(),8);
         assert_eq!(latest.run().metadata["device_snapshots"]["sequencer"]["program"]["rows"].as_array().unwrap().len(),2);
         assert_ne!(latest.run().metadata["plan"]["axes"][0]["values"][0],json!(0.000200003));
-        plugins.shutdown(); pulse.shutdown();
+        plugins.shutdown(); let mut pulse=pulse; pulse.shutdown();
     }
 
+    /// A plugin host for a test of runs that watch the board, its events (as the window would hear
+    /// them, past the desk) in a channel.
+    fn watching_host(pulse: &PulseHost, python: std::ffi::OsString) -> (PluginHost, Receiver<HostEvent>) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let (sender, plugin_events) = channel(); let sender = Mutex::new(sender);
+        let desk = pulse.desk.clone();
+        let plugins = PluginHost::new(zlc_plugin_host::HostConfig { python: python.into(), python_path: vec![root.join("../../science/src"), root.join("../zlc-plugin-host/tests/plugins")],
+            packages: vec!["zlc_test_plugins".into()], memory_limit_mib: Some(3072) }, zlc_core::runtime::Runtime::new(), SafeActions::new(),
+            move |event| { if let Some(event) = desk.hears(event) { let _ = sender.lock().unwrap().send(event); } }).unwrap();
+        crate::plugin_services::install(&plugins).unwrap();
+        pulse.desk.set_plugins(Some(plugins.clone()));
+        (plugins, plugin_events)
+    }
+
+    fn start(plugins: &PluginHost, instance: &str, values: Value) -> String {
+        plugins.start_run(instance, zlc_plugin_host::RunRequest { prepared: None, device_labels: Default::default(), device_units: Default::default(), devices: Default::default(),
+            shared: Default::default(), reads: Default::default(), values, origin: zlc_core::control::Origin::Operator, resources: json!({}), source_signal: None,
+            run_directory: None, outputs: Default::default(), record_devices: false }).unwrap()
+    }
+
+    /// The desk's watch threads end once their runs have (none is left waiting for a board change).
+    fn no_watch_left(pulse: &PulseHost) {
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while pulse.desk.watching() > 0 { assert!(std::time::Instant::now() < until, "a watch outlived its run"); std::thread::sleep(Duration::from_millis(10)); }
+    }
+
+    /// A run that watches a lane's schedule (ctx.watch) asks once; each later change reaches it as
+    /// the board makes it -- a FIRE played meanwhile is told without the run asking again -- and its
+    /// watch ends with it, not at the board's next change.
+    #[test]
+    fn a_watching_run_is_told_each_play_without_asking() {
+        let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let (pulse, _events, document) = host("watch");
+        claim(&pulse, &["scan#1"]);
+        // A first play, so the lane that rises in this pulse is known.
+        let first = run_asks(&pulse, "scan#1", "pulse_run", played(&document, 1)).unwrap();
+        run_asks(&pulse, "scan#1", "pulse_wait_done", json!({"command_id": first["command_id"], "timeout_seconds": 30})).unwrap();
+        let counts = board(&pulse).trigger_counts().unwrap().1.unwrap();
+        let lane = board(&pulse).trigger_lanes()[counts.iter().position(|count| *count > 0).unwrap()].0.clone();
+        let (plugins, plugin_events) = watching_host(&pulse, python);
+        plugins.open("camera", "watcher", json!({}), json!({})).unwrap();
+        let run = start(&plugins, "camera", json!({"lane": lane}));
+        let mut fired = None;
+        let (outcome, result, error) = loop {
+            match plugin_events.recv_timeout(Duration::from_secs(30)).expect("a watcher event") {
+                HostEvent::Request { op, params, .. } => panic!("the window was asked {op} {params}: the desk answers the schedule"),
+                // Watching: the board plays again, and nobody asks it what.
+                HostEvent::RunReady { run: id, .. } if id == run => {
+                    fired = run_asks(&pulse, "scan#1", "pulse_run", played(&document, 1)).unwrap()["command_id"].as_u64();
+                }
+                HostEvent::RunFinished { run: id, outcome, result, error, .. } if id == run => break (outcome, result, error),
+                HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+                _ => {}
+            }
+        };
+        assert_eq!(outcome, "completed", "{error:?}");
+        assert_eq!(result["states"][0], "done", "answered with what the board held when the watch began");
+        assert_eq!((result["states"].as_array().unwrap().last().unwrap(), result["command_id"].as_u64()), (&json!("playing"), fired), "{result}");
+        assert_eq!(result["points"], 1);
+        no_watch_left(&pulse);
+        let id = fired.unwrap();
+        run_asks(&pulse, "scan#1", "pulse_wait_done", json!({"command_id": id, "timeout_seconds": 30})).unwrap();
+        plugins.shutdown(); let mut pulse = pulse; pulse.shutdown();
+    }
+
+    /// A run that watches its FIRE's report is told it when the board has it (nobody polls); one
+    /// stopped meanwhile is told its FIRE can no longer report, and no wait outlives it.
+    #[test]
+    fn a_run_is_told_its_report_and_its_wait_ends_with_it() {
+        let Some(python) = std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let (pulse, _events, document) = host("done_watch");
+        claim(&pulse, &["fire"]);
+        let (plugins, plugin_events) = watching_host(&pulse, python);
+        plugins.open("fire", "fire_watcher", json!({}), json!({})).unwrap();
+        let finished = |run: &str, stop: bool| loop {
+            match plugin_events.recv_timeout(Duration::from_secs(30)).expect("a run event") {
+                HostEvent::Request { op, params, .. } => panic!("the window was asked {op} {params}: the desk answers the board's commands"),
+                HostEvent::RunReady { run: id, .. } if id == run && stop => { plugins.stop_run("fire", &id).unwrap(); }
+                HostEvent::RunFinished { run: id, outcome, result, error, .. } if id == run => break (outcome, result, error),
+                HostEvent::Failed { reason, .. } => panic!("plugin failed: {reason}"),
+                _ => {}
+            }
+        };
+        let run = start(&plugins, "fire", json!({"document": document.display().to_string(), "repeats": 1}));
+        let (outcome, result, error) = finished(&run, false);
+        assert_eq!((outcome.as_str(), &result["status"]), ("completed", &json!("done")), "{error:?} {result}");
+        assert_eq!(board(&pulse).last_fire(), Some((result["command_id"].as_u64().unwrap() as u32, Fate::Reported)), "the watch took the report");
+        no_watch_left(&pulse);
+        let run = start(&plugins, "fire", json!({"document": document.display().to_string(), "repeats": 0}));
+        let (_, result, _) = finished(&run, true);
+        assert_eq!(result["first_done"], false);
+        assert!(result["error"].as_str().is_some_and(|error| error.contains("cancelled") || error.contains("can no longer report")), "{result}");
+        no_watch_left(&pulse);
+        plugins.shutdown(); let mut pulse = pulse; pulse.shutdown();
+    }
 }

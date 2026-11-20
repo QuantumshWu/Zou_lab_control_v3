@@ -17,17 +17,18 @@ class Node:
 
 class Camera:
     def __init__(self, *, fail_close=False, fail_destroy=False, fail_open=False):
-        self.calls = []; self.attached = True; self.grabbing = False
+        self.calls = []; self.attached = True; self.grabbing = False; self.opened = not fail_open
         self.fail_close = fail_close; self.fail_destroy = fail_destroy; self.fail_open = fail_open
         for name in ['TriggerSelector', 'TriggerMode', 'TriggerSource', 'TriggerActivation']:
             setattr(self, name, Node())
+    def IsOpen(self): return self.opened
     def IsGrabbing(self): return self.grabbing
     def StopGrabbing(self): self.calls.append('stop'); self.grabbing = False
     def Open(self):
         self.calls.append('open')
         if self.fail_open: raise RuntimeError('SDK open failed')
     def Close(self):
-        self.calls.append('close')
+        self.calls.append('close'); self.opened = False
         if self.fail_close: raise RuntimeError('SDK close failed')
     def DestroyDevice(self):
         self.calls.append('destroy')
@@ -53,6 +54,16 @@ class PylonLifecycle(unittest.TestCase):
         adapter.close()
         self.assertEqual(camera.calls, ['close', 'destroy'])
 
+    def test_a_camera_gone_off_the_bus_still_closes_and_gives_its_handle_back(self):
+        camera = Camera(); camera.grabbing = True; adapter = self.adapter(camera)
+        class Gone:
+            def SetValue(self, value): raise RuntimeError('device removed')
+            def GetValue(self): raise RuntimeError('device removed')
+        camera.TriggerSelector = camera.TriggerMode = camera.TriggerSource = Gone()
+        adapter.close()
+        self.assertEqual(camera.calls, ['stop', 'close', 'destroy'])
+        self.assertIsNone(adapter._camera)
+
     def test_failed_destroy_retains_ownership_for_retry(self):
         camera = Camera(fail_destroy=True); adapter = self.adapter(camera)
         with self.assertRaisesRegex(RuntimeError, 'SDK destroy failed'): adapter.close()
@@ -71,6 +82,19 @@ class PylonLifecycle(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'SDK open failed'): adapter.open()
         self.assertEqual(camera.calls, ['open', 'close', 'destroy'])
         self.assertFalse(camera.attached)
+        self.assertIsNone(adapter._camera)
+
+    def test_an_open_pylon_says_is_held_elsewhere_is_device_held_and_still_gives_its_handle_back(self):
+        from zlc_plugin import DeviceHeld
+        camera = Camera(fail_open=True)
+        info = types.SimpleNamespace(GetSerialNumber=lambda: '123')
+        factory = types.SimpleNamespace(EnumerateDevices=lambda: [info], CreateDevice=lambda info: object(),
+                                        IsDeviceAccessible=lambda asked: asked is not info)
+        pylon = types.SimpleNamespace(TlFactory=types.SimpleNamespace(GetInstance=lambda: factory), InstantCamera=lambda device: camera)
+        adapter = PylonCameraAdapter(PylonCameraConfig('123'))
+        with patch.dict(sys.modules, {'pypylon': types.SimpleNamespace(pylon=pylon)}):
+            with self.assertRaisesRegex(DeviceHeld, "'123' is open in another client: SDK open failed"): adapter.open()
+        self.assertEqual(camera.calls, ['open', 'close', 'destroy'])
         self.assertIsNone(adapter._camera)
 
     def test_receiver_is_joined_before_sdk_destruction(self):

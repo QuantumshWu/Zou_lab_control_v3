@@ -126,6 +126,7 @@ pub struct Dense {
 impl DataView {
     /// `_dense_tensor_projection(refs, aggregation, uncertainty)`.
     pub fn dense_tensor_projection(&self, refs: &[AxisRef], aggregation: Reduction, uncertainty: bool) -> Result<Option<Dense>> {
+        let uncertainty = self.sem_wanted(uncertainty);
         if refs.is_empty() { return Ok(None); }
         let aggregation = aggregation.statistic();
         let (domains, mut codes, mut dimensions) = match self.axis_projection(refs) {
@@ -380,6 +381,7 @@ impl DataView {
     /// `_segmented_axes`: the ordinary axis reduction applied to the scratch.
     pub fn segmented_axes(&self, axis_codes: &[Arc<[i64]>], dimensions: &[usize], sizes: &[usize], aggregation: Reduction,
                           uncertainty: bool) -> Result<Segmented> {
+        let uncertainty = self.sem_wanted(uncertainty);
         if let Some((values, counts, presence)) = self.accumulated(axis_codes, dimensions, sizes, aggregation, uncertainty)? {
             return Ok(Segmented { values, counts, presence, sem: None });
         }

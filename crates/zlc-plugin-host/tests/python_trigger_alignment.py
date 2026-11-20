@@ -54,9 +54,15 @@ class RecordedSessions(unittest.TestCase):
 
     def test_a_camera_started_in_the_middle_of_a_shot_begins_with_the_next_whole_one(self):
         times = [stamp / 1e6 for stamp in RECORDED["second"]][1:]
-        shots, extras = sort(TriggerAlignment(schedule(), from_first_trigger=False, separation=EXPOSURE), times, start=1)
-        self.assertEqual(extras, [210])
-        self.assertEqual(shots[0].frames, (3, 4, 5), "the two frames of the shot it began inside are no shot")
+        alignment = TriggerAlignment(schedule(), from_first_trigger=False, separation=EXPOSURE)
+        found = [item for position, time in enumerate(times, 1) for item in alignment.accept(time, position)]
+        shots = [item for item in found if isinstance(item, Shot)]
+        extras = [item for item in found if isinstance(item, Extra)]
+        # The two frames of the shot it began inside are no shot: dropped, and said why, as every other drop is.
+        self.assertEqual([(extra.frame, extra.reason) for extra in extras[:2]],
+                         [(1, "the camera started in the middle of its shot"), (2, "the camera started in the middle of its shot")])
+        self.assertEqual([extra.frame for extra in extras], [1, 2, 210])
+        self.assertEqual(shots[0].frames, (3, 4, 5))
         self.assertTrue(all(shot.complete for shot in shots))
         self.assertEqual(len(shots), 83)
 

@@ -1,9 +1,11 @@
 """A camera measurement that names its trigger lane follows what the board plays: nothing is
 published until a pulse plays; each FIRE is a play of its own; a frame at no trigger's time is
 dropped; a trigger with no frame leaves its shot published invalid; a pulse with another cycle
-size is refused rather than published under the old one."""
+size is refused rather than published under the old one. What the board plays reaches the run
+as the board tells it (ctx.watch), never asked for again."""
 import pathlib
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -11,6 +13,8 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "science" / "src"))
 from zlc_atom.nodes.camera import measurement
 from zlc_atom.nodes.camera.alignment import AlignmentError
+from zlc_plugin import host
+from zlc_plugin.context import RunContext
 
 RISING = (0.82, 1.091, 1.134)
 SHOT = 1.154
@@ -42,14 +46,14 @@ class Bench:
         node._next_record_ordinal = 0
         node._capture_group_ends = frozenset()
         node._aligned_frames = None
-        self.batches, self.board, self.asked, self.published, self.said = [], answer(0, "none"), [], [], []
+        self.batches, self.board, self.published, self.said = [], answer(0, "none"), [], []
         node.camera = types.SimpleNamespace(read_frame_records=lambda count, **options: self.batches.pop(0) if self.batches else ())
         self.capture = measurement.AlignedCapture(node, commit_live=lambda outputs: self.published.append(outputs["frames"]),
                                                   schedule=self.schedule, armed_us=ARMED, say=lambda text: self.said.append(text))
 
-    def schedule(self, known):
-        self.asked.append(known)
-        return {"revision": self.board["revision"], "unchanged": True} if known == self.board["revision"] else self.board
+    def schedule(self):
+        """The newest answer the board told (the same object until it tells another)."""
+        return self.board
 
     def poll(self, *frames, now_us=0):
         """Read these frames; ``now_us`` is this computer's clock at the read (0: no time has passed)."""
@@ -75,7 +79,10 @@ class AlignedCapture(unittest.TestCase):
         bench.poll(frame(1, 10 + RISING[0]), frame(2, 10 + RISING[1]), frame(3, 10 + 1.11), frame(4, 10 + RISING[2]))
         self.assertEqual(bench.published, [((1, 2, 4), (True, True, True), {"shot": 0, "missing": []})])
         self.assertEqual((bench.capture.dropped, bench.node._aligned_frames), (2, 3))
-        self.assertEqual(bench.asked[:3], [None, 0, 1], "the board is asked only for what changed")
+        # Nothing told since: the same answer sorts the next frames as before.
+        aligned = bench.capture._alignment
+        bench.poll()
+        self.assertIs(bench.capture._alignment, aligned)
         # The second shot lacks its middle frame: published, with that frame marked invalid.
         bench.poll(frame(5, 10 + SHOT + RISING[0]), frame(6, 10 + SHOT + RISING[2]), frame(7, 10 + 2 * SHOT + RISING[0]))
         self.assertEqual(bench.published[1], ((5, 5, 6), (True, False, True), {"shot": 1, "missing": [1]}))
@@ -87,6 +94,19 @@ class AlignedCapture(unittest.TestCase):
                    frame(9, 90 + RISING[0], host_us=late), frame(10, 90 + RISING[1], host_us=late), frame(11, 90 + RISING[2], host_us=late))
         self.assertEqual(len(bench.published), 3)
         self.assertEqual(bench.published[2], ((9, 10, 11), (True, True, True), {"shot": 0, "missing": []}))
+
+    def test_the_frames_of_the_shot_a_camera_started_inside_are_journaled_as_dropped(self):
+        bench = Bench()
+        # The play began before the camera was armed: the alignment finds its place from the frames' spacing.
+        bench.board = answer(1, "playing", command_id=1, sent_us=ARMED - 1)
+        with mock.patch.object(measurement.journal, "note") as note:
+            bench.poll(frame(0, RISING[1]), frame(1, RISING[2]),
+                       *(frame(2 + 3 * shot + at, (shot + 1) * SHOT + edge) for shot in range(2) for at, edge in enumerate(RISING)))
+        dropped = [call.kwargs for call in note.call_args_list if call.args == ("camera", "frame_dropped")]
+        self.assertEqual(dropped, [{"key": "qcmos", "ordinal": ordinal, "reason": "the camera started in the middle of its shot"}
+                                   for ordinal in (0, 1)])
+        self.assertEqual(bench.capture.dropped, 2)
+        self.assertEqual([item[0] for item in bench.published], [(2, 3, 4), (5, 6, 7)])
 
     def test_a_shot_whose_last_frames_never_come_is_published_once_its_length_has_passed(self):
         bench = Bench()
@@ -124,6 +144,51 @@ class AlignedCapture(unittest.TestCase):
         times = [start + edge for start, point in zip(starts, points) for edge in point[0]]
         bench.poll(*(frame(ordinal, time) for ordinal, time in enumerate(times)))
         self.assertEqual([published[0] for published in bench.published], [(0, 1), (2, 3)])
+
+
+class WatchedSchedule(unittest.TestCase):
+    """ctx.watch: answered once, then told each change by the core; the run reads the newest."""
+
+    def setUp(self):
+        self.asked = []
+        def request(op, params):
+            self.asked.append((op, params))
+            return self.first
+        process = types.SimpleNamespace(request=request)
+        self.instance = types.SimpleNamespace(name="camera", process=process, runs={})
+        self.run = types.SimpleNamespace(instance=self.instance, run_id="run-1", lock=threading.Lock(), watches={})
+        self.instance.runs["run-1"] = self.run
+        self.process = types.SimpleNamespace(instances={"camera": self.instance}, arena=None)
+
+    def told(self, value=None, error=None, run="run-1", watch="0"):
+        told = {"value": value} if error is None else {"error": error}
+        host.Process._event(self.process, {"op": "run.watched", "p": {"instance": "camera", "run": run, "watch": watch, "told": told}})
+
+    def test_the_watch_is_answered_once_then_told_each_change(self):
+        self.first = answer(1, "loaded")
+        board = RunContext(self.run).watch("pulse_schedule", lane="ch11")
+        self.assertEqual(self.asked, [("core", {"instance": "camera", "run": "run-1", "command": "pulse_schedule",
+                                                 "params": {"_watch": "0", "lane": "ch11"}})])
+        self.assertIs(board.latest, self.first)
+        playing = answer(2, "playing", command_id=7, sent_us=ARMED)
+        self.told(playing)
+        self.told(answer(9, "playing"), run="ended-run")
+        self.assertIs(board.latest, playing, "another run's telling is not this watch's")
+        self.assertIs(board.latest, playing, "the same answer until something new is told")
+        self.told(error="lane ch99 is not a digital lane of this board")
+        with self.assertRaises(RuntimeError) as refusal:
+            board.latest
+        self.assertIn("ch99", str(refusal.exception))
+        self.assertEqual(len(self.asked), 1, "nothing asks the core again")
+
+    def test_a_change_told_before_the_first_answer_arrives_is_the_newer(self):
+        playing = answer(2, "playing", command_id=7, sent_us=ARMED)
+        def request(op, params):
+            self.told(playing)   # the board changed while the answer was on its way
+            return answer(1, "loaded")
+        self.instance.process.request = request
+        board = RunContext(self.run).watch("pulse_schedule", lane="ch11")
+        self.assertIs(board.latest, playing)
 
 
 if __name__ == "__main__": unittest.main()

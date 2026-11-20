@@ -6,8 +6,17 @@ use zlc_pulse_editor::editor::{Deployed, Editor};
 fn args(value: Value) -> Map<String, Value> { value.as_object().cloned().unwrap() }
 
 fn command(editor: &mut Editor, action: &str, value: Value) -> Value {
-    editor.command(action, &args(value), true).unwrap_or_else(|error| panic!("{action}: {error}"))
+    let answer = editor.command(action, &args(value), true);
+    written(editor, answer).unwrap_or_else(|error| panic!("{action}: {error}"))
 }
+
+/// As the host does: the files a command wrote put on the disk, then its answer settled.
+fn written(editor: &mut Editor, answer: zlc_pulse_editor::editor::Answer) -> zlc_pulse_editor::editor::Answer {
+    let Some(writes) = editor.take_writes() else { return answer };
+    let result = writes.files.iter().try_for_each(|(path, bytes)| zlc_pulse::codec::write_file(path, bytes).map_err(|error| error.message));
+    editor.written(writes, result, answer)
+}
+
 
 fn refused(editor: &mut Editor, action: &str, value: Value) -> String {
     editor.command(action, &args(value), true).expect_err("refused")
@@ -195,4 +204,36 @@ fn the_boards_copy_reads_under_the_drafts_bracket_names() {
     assert_eq!(copy.brackets[0].name, "Bracket 1");
     assert_ne!(*copy, *draft);
     assert_eq!(*copy.bracket_names_of(&draft), *draft);
+}
+
+/// A Subpulse source is read once per change of its file: views made meanwhile read nothing (a
+/// file rewritten with its stamp kept is not read again), and a changed file, once the poll has
+/// found it, is read again.
+#[test]
+fn a_subpulse_source_is_read_again_only_when_its_file_changes() {
+    let (folder, mut editor) = pulse("source_cache");
+    let ids = period_ids(&mut editor);
+    command(&mut editor, "pulse_subpulse", json!({"op": "group", "items": [["period", ids[1]], ["period", ids[2]]]}));
+    let component = editor.state()["subpulse"]["contexts"].as_array().unwrap().iter().find_map(|c| c[0].as_str().filter(|id| !id.is_empty()).map(str::to_owned)).unwrap();
+    command(&mut editor, "pulse_subpulse", json!({"op": "select", "component_id": component}));
+    let file = folder.join("source.subpulse.json");
+    command(&mut editor, "pulse_subpulse", json!({"op": "save_as", "component_id": component, "path": file.display().to_string()}));
+    command(&mut editor, "pulse_config", json!({"op": "mode", "enabled": true}));
+    command(&mut editor, "pulse_subpulse", json!({"op": "source", "component_id": component, "source": "config", "path": file.display().to_string()}));
+    let error = |editor: &mut Editor| { editor.state(); editor.control_state()["config"]["error"].as_str().unwrap_or("").to_owned() };
+    assert_eq!(error(&mut editor), "", "the file resolves");
+    // The same stamp, other bytes: not read again, even for a new revision's view.
+    let stamp = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let length = std::fs::metadata(&file).unwrap().len() as usize;
+    std::fs::write(&file, " ".repeat(length)).unwrap();
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(stamp).unwrap();
+    edit(&mut editor, json!({"edit": "duration", "period_id": ids[0], "value": "3", "unit": "µs"}));
+    assert_eq!(error(&mut editor), "", "an unchanged file is not read again");
+    let source = zlc_pulse::codec::absolute(&file);
+    assert!(!zlc_pulse::codec::changed_subpulses().contains(&source));
+    // Changed: the poll finds it, and the view reads it again.
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(stamp + std::time::Duration::from_secs(2)).unwrap();
+    assert!(zlc_pulse::codec::changed_subpulses().contains(&source));
+    editor.subpulse_files_changed();
+    assert!(error(&mut editor).contains("Cannot resolve Subpulse"), "the changed file is read again");
 }

@@ -51,6 +51,8 @@ class LmsLibrary(Protocol):
 
     def get_power_limits(self, handle: int) -> tuple[int, int]: ...
 
+    def device_info(self, handle: int) -> dict[str, object]: ...
+
 
 class CtypesLmsLibrary:
     """The real DLL behind the Protocol.  Windows only, by the vendor."""
@@ -77,7 +79,8 @@ class CtypesLmsLibrary:
 
         if not isinstance(dll_path, str) or not dll_path.strip():
             raise ValueError("the Vaunix DLL path is required")
-        self._dll = ctypes.CDLL(dll_path.strip())
+        self._path = dll_path.strip()
+        self._dll = ctypes.CDLL(self._path)
         # Real hardware, not the vendor's built-in simulator.
         self._dll.fnLMS_SetTestMode(ctypes.c_bool(False))
 
@@ -142,6 +145,30 @@ class CtypesLmsLibrary:
             int(self._dll.fnLMS_GetMinPwr(handle)),
             int(self._dll.fnLMS_GetMaxPwr(handle)),
         )
+
+    def device_info(self, handle: int) -> dict[str, object]:
+        """What the loaded DLL says of itself and of the open brick: the DLL file, its API version,
+        and the model name it enumerated -- a lookup in the DLL's own device table, no USB
+        traffic.  Only what this DLL exports is asked; a getter it lacks is left out, one that
+        refuses is named under ``unanswered``."""
+
+        import ctypes
+
+        facts: dict[str, object] = {"dll": self._path}
+        version = getattr(self._dll, "fnLMS_GetDLLVersion", None)
+        if version is not None:
+            facts["sdk"] = f"vnx_fmsynth 0x{int(version()) & 0xFFFFFFFF:04X}"
+        # The ANSI getter where the DLL has both; the older DLLs export only the plain name.
+        model = getattr(self._dll, "fnLMS_GetModelNameA", None) or getattr(self._dll, "fnLMS_GetModelName", None)
+        if model is not None:
+            # MAX_MODELNAME is 32 characters with its terminator; the buffer leaves room.
+            name = ctypes.create_string_buffer(64)
+            status = int(model(handle, name)) & 0xFFFFFFFF
+            if status & 0x80000000:
+                facts["unanswered"] = f"model (status 0x{status:08X})"
+            else:
+                facts["model"] = name.value.decode("ascii", errors="replace")
+        return facts
 
 
 @dataclass(frozen=True)
@@ -240,6 +267,12 @@ class VaunixLmsRfSource(RfSourceBase):
         del channel
         low, high = self._library.get_power_limits(self._handle)
         return float(low) * POWER_UNIT_DBM, float(high) * POWER_UNIT_DBM
+
+    def device_info(self) -> dict[str, object]:
+        """The serial the brick was opened by (``open_device`` matched it exactly) and what the
+        vendor library says of it (``LmsLibrary.device_info``)."""
+
+        return {"serial": int(self.config.serial), **self._library.device_info(self._handle)}
 
     def close(self) -> None:
         self._library.close_device(self._handle)

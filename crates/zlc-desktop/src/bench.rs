@@ -42,7 +42,7 @@ impl Bench {
         let port = parameters["port"].as_u64().and_then(|port| u16::try_from(port).ok()).unwrap_or(zlc_fabric::DEFAULT_PORT);
         let published = parameters["instance_id"].as_str().map(str::trim).filter(|id| !id.is_empty()).ok_or_else(|| invalid("Published instance is required"))?;
         let (link, attached) = Link::open(address, port, published, self.bench(), host.registry().clone()).map_err(|error| CallError::new(ErrorKind::Failed, error))?;
-        let point = json!({"tunable": attached.tunable, "snapshot": attached.snapshot,
+        let point = json!({"tunable": attached.tunable, "snapshot": attached.snapshot, "device_info": attached.device_info,
             "snapshot_unavailable": attached.snapshot.is_none().then_some("the publisher does not advertise snapshots; update the publishing computer"),
             "reads": attached.reads, "descriptor": crate::workbench_host::descriptor(&attached.descriptor),
             "remote": {"host": address, "port": port, "instance_id": published, "publisher": attached.publisher, "role": attached.role,
@@ -50,14 +50,15 @@ impl Bench {
         // What it says for itself (an SLM Editor's draft, its log) is this core's to hear, as a local device's.
         let (told, local) = (host.clone(), instance.to_owned());
         link.on_event(move |op, params, lends| told.remote_event(&local, op, params, lends));
-        if let Err(error) = host.attach(instance, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap_or(false), attached.reads) {
+        if let Err(error) = host.attach(instance, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap_or(false), attached.reads,
+                                        attached.device_info) {
             zlc_plugin_host::Endpoint::close(&link);
             return Err(error);
         }
         let (lost, name) = (host.clone(), instance.to_owned());
         let (noted, again) = (self.0.note.clone(), instance.to_owned());
         link.on_failure(move |reason| noted(&name, &format!("FABRIC BROKE {reason}")), move |reason| lost.lost(&again, reason));
-        (self.0.note)(instance, &format!("FABRIC LINKED {} on {} ({}:{port})", published, attached.publisher, address));
+        (self.0.note)(instance, &format!("FABRIC LINKED {} on {} ({}:{port}, bench fabric protocol v{})", published, attached.publisher, address, zlc_fabric::FABRIC_VERSION));
         Ok(point)
     }
 
@@ -66,19 +67,40 @@ impl Bench {
     /// when a bench computer at its `host` announces that server, the fabric says when that
     /// computer withdraws it or goes away -- the link, beats and words a remote.device's are
     /// lost by -- and `lost` is told why. A server no bench computer announces is not watched.
+    /// Either way the device's log says so: watched by whom, or not watched and why.
     pub fn watch(&self, registry: Arc<Registry>, instance: &str, type_id: &str, parameters: &Value, lost: impl Fn(&str) + Send + Sync + 'static) {
-        let Some(host) = parameters["host"].as_str().map(str::trim).filter(|host| !host.is_empty()) else { return };
+        let say = |line: String| (self.0.note)(instance, &line);
+        let Some(host) = parameters["host"].as_str().map(str::trim).filter(|host| !host.is_empty()) else {
+            return say(format!("FABRIC NOT WATCHED {type_id}: it names no host, so no bench computer's announcement of its server can be followed"));
+        };
+        let server = format!("{host}:{}", parameters["port"]);
         // Where a fabric listens on that host: a named peer there, else this bench's port.
-        let mut ports: Vec<u16> = zlc_fabric::named_peers().iter().filter_map(|peer| match peer.rsplit_once(':') {
+        let mut ports: Vec<u16> = Vec::new();
+        let named = zlc_fabric::named_peers().into_iter().filter_map(|peer| match peer.rsplit_once(':') {
             Some((name, port)) => (name == host).then(|| port.parse().ok()).flatten(),
             None => (peer == host).then_some(zlc_fabric::DEFAULT_PORT),
-        }).collect();
-        ports.push(zlc_fabric::port());
-        let Some(link) = ports.into_iter().find_map(|port| Link::watch(host, port, type_id, &parameters["port"], self.bench(), registry.clone()).ok()) else { return };
-        let (noted, name) = (self.0.note.clone(), instance.to_owned());
-        link.on_failure(move |reason| noted(&name, &format!("FABRIC BROKE {reason}")), lost);
-        if let Some(old) = lock(&self.0.watches).insert(instance.to_owned(), link) { old.close(); }
+        });
+        for port in named.chain([zlc_fabric::port()]) { if !ports.contains(&port) { ports.push(port); } }
+        let mut refused = Vec::new();
+        for port in ports {
+            match Link::watch(host, port, type_id, &parameters["port"], self.bench(), registry.clone()) {
+                Ok((link, watched)) => {
+                    say(format!("FABRIC WATCHING {type_id} at {server}: announced by {} as {} (bench fabric {host}:{port}, protocol v{})",
+                                watched.publisher, watched.instance, zlc_fabric::FABRIC_VERSION));
+                    let (noted, name) = (self.0.note.clone(), instance.to_owned());
+                    link.on_failure(move |reason| noted(&name, &format!("FABRIC BROKE {reason}")), lost);
+                    if let Some(old) = lock(&self.0.watches).insert(instance.to_owned(), link) { old.close(); }
+                    return;
+                }
+                Err(error) => refused.push(format!("{host}:{port}: {error}")),
+            }
+        }
+        say(format!("FABRIC NOT WATCHED {type_id} at {server}: no bench computer announces it ({}); \
+                     that computer going away is noticed only when a request to its server fails", refused.join("; ")));
     }
+
+    /// A line of the fabric's in `instance`'s log.
+    pub fn say(&self, instance: &str, line: &str) { (self.0.note)(instance, line); }
 
     /// The device closed here: nothing to watch for it any more.
     pub fn unwatch(&self, instance: &str) {
@@ -139,5 +161,28 @@ impl Bench {
     pub fn discover(&self, host: &PluginHost) -> Value {
         let (found, notes) = zlc_fabric::discover(&self.bench(), zlc_fabric::port(), &zlc_fabric::named_peers(), host.registry(), Duration::from_secs(1));
         json!({"found": found, "notes": notes})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A watch that cannot be made is said in the device's log, with why: no host, or no bench
+    /// computer there announcing the server.
+    #[test]
+    fn a_watch_says_its_outcome_in_the_device_log() {
+        let (said, heard) = std::sync::mpsc::channel();
+        let said = Mutex::new(said);
+        let bench = Bench::new(Arc::new(move |instance: &str, line: &str| { let _ = said.lock().unwrap().send((instance.to_owned(), line.to_owned())); }));
+        let registry = Registry::standalone("watch-outcome");
+        bench.watch(registry.clone(), "slm", "slm.hamamatsu_x15213", &json!({"port": 5}), |_| {});
+        bench.watch(registry, "board", "sequencer.hardware", &json!({"host": "127.0.0.1", "port": 18861}), |_| {});
+        let lines: Vec<(String, String)> = heard.try_iter().collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].0 == "slm" && lines[0].1.starts_with("FABRIC NOT WATCHED slm.hamamatsu_x15213: it names no host"), "{lines:?}");
+        assert!(lines[1].0 == "board" && lines[1].1.starts_with("FABRIC NOT WATCHED sequencer.hardware at 127.0.0.1:18861: no bench computer announces it (127.0.0.1:"),
+                "{lines:?}");
+        assert!(lock(&bench.0.watches).is_empty());
     }
 }

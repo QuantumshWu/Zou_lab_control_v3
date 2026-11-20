@@ -38,7 +38,7 @@ pub fn table_text(rows: &[Vec<f64>], columns: &[ScanColumnSpec]) -> String {
 /// `_read_text_table`: comma-separated rows, `#` lines and blanks skipped,
 /// the first other line naming the columns when it is not numbers.
 pub fn read_text_table(path: &Path) -> Result<ScanTable> {
-    let text = std::fs::read_to_string(path).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", path.display())))?;
+    let text = zlc_pulse::codec::read_text(path)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#')).collect();
     let mut names: Vec<String> = lines.first().map(|line| line.split(',').map(|cell| cell.trim().to_owned()).collect()).unwrap_or_default();
@@ -100,7 +100,7 @@ fn size_of(descr: &str) -> Result<usize> {
 /// A `.npy` scan table: a named (structured) array gives each column its
 /// field; a plain one is rows, a 1-D one a single field's points.
 pub fn read_npy_table(path: &Path, slots: usize) -> Result<ScanTable> {
-    let bytes = std::fs::read(path).map_err(|error| Error::new(Kind::Io, format!("{}: {error}", path.display())))?;
+    let bytes = zlc_pulse::codec::read_file(path)?;
     if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" { return Err(value_error("not a NumPy .npy file")); }
     let (length, start) = match bytes[6] {
         1 => (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10),
@@ -162,8 +162,8 @@ pub fn read_table(path: &Path, slots: usize) -> Result<ScanTable> {
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("npy")) { read_npy_table(path, slots) } else { read_text_table(path) }
 }
 
-/// Save array: one float64 field per column the table drives (`array[field_id]`).
-pub fn write_named_npy(path: &Path, fields: &[(String, String)], rows: &[Vec<f64>]) -> Result<()> {
+/// Save array: one float64 field per column the table drives (`array[field_id]`), as a `.npy` file's bytes.
+pub fn named_npy(fields: &[(String, String)], rows: &[Vec<f64>]) -> Vec<u8> {
     let descr = fields.iter().map(|(field, _)| format!("({}, '<f8')", repr(field))).collect::<Vec<_>>().join(", ");
     let mut header = format!("{{'descr': [{descr}], 'fortran_order': False, 'shape': ({},), }}", rows.len());
     let (prefix, version) = if header.len() + 11 < 65536 { (10, 1u8) } else { (12, 2u8) };
@@ -175,8 +175,7 @@ pub fn write_named_npy(path: &Path, fields: &[(String, String)], rows: &[Vec<f64
     if version == 1 { bytes.extend((header.len() as u16).to_le_bytes()); } else { bytes.extend((header.len() as u32).to_le_bytes()); }
     bytes.extend(header.as_bytes());
     for row in rows { for value in row { bytes.extend(value.to_le_bytes()); } }
-    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-    zlc_pulse::codec::atomic_write(path, &bytes)
+    bytes
 }
 
 /// `unique_path(folder, stem, suffix)`'s name: the stem made safe, then

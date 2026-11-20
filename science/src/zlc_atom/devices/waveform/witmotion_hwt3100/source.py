@@ -40,7 +40,8 @@ from uuid import uuid4
 import numpy as np
 
 from zlc_atom.authoring import AuthoringField, TunableField, TuneRefused
-from zlc_atom.devices import RecordQueue, free_serial_ports
+from zlc_atom.devices import RecordQueue, free_serial_ports, open_serial_port, search_serial_ports
+from zlc_atom.devices.vendor import installed_distribution
 from zlc_atom.devices.waveform.contract import (
     WaveformAcquisitionMode,
     WaveformCaptureTerminalRecord,
@@ -108,9 +109,7 @@ class Hwt3100Config:
 
 
 def open_serial(port: str, baud: int):
-    import serial
-
-    return serial.Serial(port, baud, timeout=0.005, write_timeout=1.0)
+    return open_serial_port(port, baud, timeout=0.005, write_timeout=1.0)
 
 
 def rate_refusal(rate_hz: float, baud: int) -> str:
@@ -132,12 +131,8 @@ class Hwt3100WaveformSource:
     def __init__(self, config: Hwt3100Config, *, serial_port=None, establish=modbus.establish_baud) -> None:
         self.config = config
         if serial_port is None:
-            try:
-                serial_port = open_serial(config.port, config.baud)
-            except Exception as error:  # noqa: BLE001 -- pyserial's own words, with the port named
-                raise RuntimeError(
-                    f"could not open {config.port} at {config.baud} baud for the HWT3100: {error}"
-                ) from error
+            # A port that cannot be opened says so in the shared wording (SerialPortError).
+            serial_port = open_serial(config.port, config.baud)
         self._serial = serial_port
         self._stop = threading.Event()
         self._settings_lock = threading.RLock()
@@ -274,6 +269,19 @@ class Hwt3100WaveformSource:
     @property
     def identity(self) -> str:
         return f"witmotion-hwt3100:{self.config.port}"
+
+    def device_info(self) -> dict[str, object]:
+        """Where the sensor answered when it opened -- port, Modbus address, the baud it is on and
+        how that baud was found -- and the pyserial that reached it.  The sensor has no register
+        that states its model or firmware (``modbus``), so nothing is asked."""
+
+        return {
+            "port": self.config.port,
+            "address": f"0x{self.config.address:02X}",
+            "baud": self._baud,
+            "baud_note": self._baud_note,
+            "driver": installed_distribution("pyserial"),
+        }
 
     @property
     def outputs(self) -> tuple[WaveformOutput, ...]:
@@ -438,12 +446,10 @@ def probe_port(device: str, addresses: tuple[int, ...], *, opener=open_serial, t
     Discovery cannot listen for this sensor -- it speaks only when asked --
     so each candidate port gets one READ request (function 0x03) per
     address and supported baud.  Nothing is ever written to a register.
+    A port that cannot be opened raises (:class:`SerialPortError` with its class).
     """
 
-    try:
-        port = opener(device, SUPPORTED_BAUDS[0])
-    except Exception:  # noqa: BLE001 -- held by another program, or gone
-        return None
+    port = opener(device, SUPPORTED_BAUDS[0])
     try:
         for baud in (DEFAULT_BAUD, *(b for b in SUPPORTED_BAUDS if b != DEFAULT_BAUD)):
             port.baudrate = baud
@@ -467,18 +473,15 @@ def discover_hwt3100(
     ports: tuple[str, ...] | None = None,
     first: bool = False,
     opener=open_serial,
+    unopened: list[str] | None = None,
 ) -> tuple[tuple[str, int, int], ...]:
-    """``(port, address, baud)`` for every free serial port an HWT3100 answers on."""
+    """``(port, address, baud)`` for every free serial port an HWT3100 answers on, every port asked
+    at once (:func:`zlc_atom.devices.search_serial_ports`); ``first``: only the first listed that
+    answers; ``unopened``: told each port that could not be opened, with its class."""
 
-    found = []
-    for device in free_serial_ports(excluded)[0] if ports is None else ports:
-        hit = probe_port(device, addresses, opener=opener)
-        if hit is not None:
-            found.append((device, *hit))
-            if first:
-                break
-    return tuple(found)
-
+    listed = free_serial_ports(excluded)[0] if ports is None else ports
+    return tuple((device, *hit) for device, hit in search_serial_ports(
+        listed, lambda device: probe_port(device, addresses, opener=opener), first=first, unopened=unopened))
 
 __all__ = [
     "DEFAULT_BAUD",

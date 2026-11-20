@@ -253,12 +253,20 @@ export class LogicEditorView {
         placeholder: "(not selected)", choices: row.source_choices, ...(row.source_tree ? { tree: row.source_tree } : {}), held: locked },
         commit: value => this.intents.editDraft(row.node_id, { source_signal: value }, sourceLabel) });
     }
+    // A device a field turns on stands under that field (as Occupancy's post-selection rows stand
+    // under its switch); the others stand here, before the fields.
+    const gates = row.device_gates ?? {};
+    const drawnFields = new Set(row.controls.filter(control => !control.hidden).map(control => control.name));
+    const underField = new Map<string, typeof specs>();
     for (const [argument, choices] of Object.entries(row.device_choices)) {
       const label = row.device_labels[argument] ?? argument;
       // v2 _add_selector_row(_device_label(name)): a device row carries no ` *` (only Signal does).
-      specs.push({ key: `device:${argument}`, spec: { name: `device-${argument}`, label, kind: "choice", value: row.device_keys[argument] ?? null,
+      const item = { key: `device:${argument}`, spec: { name: `device-${argument}`, label, kind: "choice" as const, value: row.device_keys[argument] ?? null,
         required: false, allow_none: true, placeholder: "(not selected)", choices, held: locked },
-        commit: value => this.intents.editDraft(row.node_id, { device_keys: { [argument]: value } }, label) });
+        commit: (value: Value) => this.intents.editDraft(row.node_id, { device_keys: { [argument]: value } }, label) };
+      const gate = gates[argument];
+      if (gate && drawnFields.has(gate)) underField.set(gate, [...(underField.get(gate) ?? []), item]);
+      else specs.push(item);
     }
     // The node's own editors (one model, or a stack of them) draw the fields
     // and files their models say they manage.
@@ -270,10 +278,14 @@ export class LogicEditorView {
     const managed = new Set(drawn.flatMap(model => model.manages));
     const managedFiles = new Set(drawn.flatMap(model => (model.manages_artifacts as string[] | undefined) ?? []));
     for (const control of row.controls) {
-      if (managed.has(control.name)) continue;
+      if (managed.has(control.name) || control.hidden) continue;
       specs.push({ key: `value:${control.name}`, group: control.group, spec: { ...control, held: locked },
         commit: value => this.intents.editDraft(row.node_id, { values: { [control.name]: value } }, control.label) });
+      for (const device of underField.get(control.name) ?? []) specs.push({ ...device, group: control.group });
+      underField.delete(control.name);
     }
+    // A gate an editor draws: its devices after the form's fields.
+    for (const devices of underField.values()) specs.push(...devices);
     // A reason several rows share is said once above them (with the Task gate), and those
     // rows are held; a reason of one row stays under it.
     const byReason = new Map<string, string[]>();

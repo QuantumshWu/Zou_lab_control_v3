@@ -81,6 +81,14 @@ pub struct SelectionMapping { pub plot_kind: String, pub selector_kind: String, 
 #[serde(default)]
 pub struct WorkspaceResource { pub field: String, pub contract: String, pub directory: String, pub suffixes: Vec<String>, pub argument: String }
 
+impl WorkspaceResource {
+    /// The file `selected` names: a whole path as written, else one in its collection's folder under `root`.
+    pub fn path(&self, root: &std::path::Path, selected: &str) -> std::path::PathBuf {
+        let chosen = std::path::Path::new(selected.trim());
+        if chosen.is_absolute() { chosen.to_path_buf() } else { root.join(&self.directory).join(chosen) }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct InputSpec {
@@ -107,8 +115,6 @@ pub struct DeviceRequirement {
     /// The run only reads the device (the methods it lists as reads): it claims nothing of it, protects
     /// none of its fields, and runs beside whoever does hold it.
     pub reads_only: bool,
-    /// A draft may leave it unset, or name a device that is not open: the node is then built without it.
-    pub optional: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

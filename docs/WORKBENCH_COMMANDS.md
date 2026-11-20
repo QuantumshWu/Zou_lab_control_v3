@@ -77,18 +77,23 @@ Windows, as v2 had them: Devices@Zou lab (`devices`), TaskConsole@Zou lab
 PulseGUI@Zou lab (`pulse-editor`), and each open device's `<role> control` (`control:<device>`) and
 `<role> log@Zou lab` (`log:<device>`), and a run's point review (`review:<node>`), one native window and page each; `get_state` lists
 them as `windows: [{window, title, visible, size}]`. Devices opens first, and each
-other window is made when it is first shown, as v2 made its windows; Init (the apparatus
+other window is made when it is first shown, as v2 made its windows. Every window is made hidden
+and comes on screen once its page has drawn its first whole state (the page's `window_ready`), so
+it never opens empty or half laid out; a page that fails first is shown as it stands, its error
+said, and one whose script never started is shown when it has loaded. Init (the apparatus
 initialized) shows TaskConsole in front, Shut down hides it and shows Devices; `open`
 shows a FigureViewer with the Figure (closing it drops its Figure); a sequencer's Control shows PulseGUI
 (closing hides it); another device's Control reads it and opens its control window
-once its fields are in, at least half the standard width and as tall as its content
+once its fields are in, each in the unit it shows it in (a refused reading opens it saying why),
+at least half the standard width and as tall as its content
 (v2's snug fit; closing hides it), Log opens its log window at 0.45 of the screen fit
 (closing ends it), and a device that closes takes both; closing Devices or TaskConsole
 closes the experiment. Each page is sent only the sections its view reads (TaskConsole:
 the live board and the workbench; Devices: the workbench; a FigureViewer: its `viewer`;
 PulseGUI: `pulse`; a device's windows: `devices`) and its own plot fronts; each numbers
 its commands from its own base (`?base=`, a multiple of 1e12 per window made).
-`show_window {window}` brings one forward; `close_window {window}` closes one as its ×
+`show_window {window}` brings one forward and answers once it is on screen (a window just made:
+once its page has drawn its first whole state; an error if it closes or is hidden first); `close_window {window}` closes one as its ×
 does (a Figure Viewer drops its Figure; a control or PulseGUI hides; a log ends); `save_image {path?, window?}` captures the
 named window (the asking window, a remote client's default TaskConsole).
 
@@ -126,6 +131,7 @@ Each `types` row also has `family_label` (the family in words, for card titles).
  "parameters": {...}, "controls": [Control...],   // the draft's Init settings
  "state": "draft" | "opening" | "open" | "closing" | "failed",  // live state of this instance
  "resolving": false,                               // opening, what it leaves blank being found first (§4.2 apply_devices)
+ "refused_ports": ["COM10"],                       // serial ports its open or search found refused by their driver (§4.2 restart_serial_port)
  "pending": "add" | "change" | "remove" | null,     // what apply_devices would do to it
  "error": null | "text",
  "claimed_by": [{"node_id": "camera_measurement", "run": "camera_measurement#2", "protected_fields": ["exposure"]}],
@@ -336,13 +342,14 @@ plugin event changes `state` again (use `wait`).
 | `edit_device` | `device`, `role?`, `type_id?`, `parameters?` (partial) | control | Rename role / change type (parameters reset to the new type's defaults) / edit settings: draft only. |
 | `edit_simulation` | `values` (partial) | control | Simulation world settings of the draft. |
 | `use_template` | `template` (`virtual`/`hardware`) | control | New from template: replaces the draft. |
-| `discover_devices` | — | control | Scan hardware: every type with a scan (`types[].discoverable`) at once, in its own plugin process (PLUGIN_PROTOCOL `discover`), one 20 s deadline from the scan's start; fills `apparatus.discovered` (with each find's `type_id`) and answers `{found, message, severity}` once every family answered or the deadline passed (`discovered N devices; <families>: <reason>`, `no answer within 20s`, v2's words); a family's answer after the deadline is dropped. Every scan is handed the resources the apparatus binds (PLUGIN_PROTOCOL §2 `resources`: every row's, every live device's) and opens none of them; the line names those of a kind a scanned type binds (`· passed over COM3 (n100)`). `apparatus.busy` says Scanning hardware; while the scan runs, or a family past the deadline still answers, `apply_devices` and another scan are refused (`hardware scan still running: <families>`). |
+| `discover_devices` | — | control | Scan hardware: every type with a scan (`types[].discoverable`) at once, in its plugin process (PLUGIN_PROTOCOL `discover`), but types whose declared resources share a kind (`serial` of `serial:{port}`, `visa`) one after another in catalogue order -- each probes every free resource of its kind at once, so two at a time would find each other's ports in use; types of other kinds and types that bind nothing scan beside them. Each type has one 20 s deadline from its ask (the scan's start, or the answer of the type of its kind before it); a type that misses it is reported and the next of its kind is asked; fills `apparatus.discovered` (with each find's `type_id`) and answers `{found, message, severity}` once every family answered or the deadline passed (`discovered N devices; <families>: <reason>`, `no answer within 20s`, v2's words); a family's answer after the deadline is dropped. Every scan is handed the resources the apparatus binds (PLUGIN_PROTOCOL §2 `resources`: every row's, every live device's) and opens none of them; the line names those of a kind a scanned type binds (`· passed over COM3 (n100)`). `apparatus.busy` says Scanning hardware; while the scan runs, or a family past the deadline still answers, `apply_devices` and another scan are refused (`hardware scan still running: <families>`). |
 | `add_discovered` | `instance_id` | control | Copies a discovered entry into the draft. |
 | `load_apparatus` | `path?` | control | Replaces the draft from a `zlc.installation` file, entry by entry: an entry v2 would refuse is left out (`skipped`, with why) and the rest load; dropped settings are `notes`. The Devices@ line says both. |
 | `save_apparatus` | `path?`, `replace_unread?` | control | Writes the draft (atomic, strict). A file the draft was not read from in full (it could not be read, or entries or settings were left out: `apparatus.unread` says why) is replaced only with `replace_unread` (the window's Save goes through Save as). |
-| `apply_devices` | — | control | Init / Apply: opens what the draft adds or changes (in parallel, admitted in operator order), closes what it removes; runs that claim a closing device are stopped first. Partial failures stay per instance. One physical resource, one row: a row binding one an earlier row or another live device binds fails before it opens (`RuntimeError: serial:COM3 is already bound (to n100)`). A row of a resolvable type that leaves a resource blank (the board's UART, an IMU's port) is `opening` and `resolving`: it is resolved first (PLUGIN_PROTOCOL `resolve`), one row at a time in operator order and handed every bound resource but its own, while every other row opens at once (`busy`: `… · finding sequencer's UART port`). What it finds is written into its draft row -- the apparatus reads unsaved; Save keeps it -- and the row opens with it under the same checks; the line says it (`sequencer: board UART found on COM5 (…), written into the apparatus -- Save to keep it`). What it cannot find fails the row with what it tried and passed over. Shut down, Close or an Apply that takes the row out drop its resolve; a late answer opens and pins nothing, and the next row is asked once it is in. |
+| `apply_devices` | — | control | Init / Apply: opens what the draft adds or changes (in parallel, admitted in operator order), closes what it removes; runs that claim a closing device are stopped first. Partial failures stay per instance. One physical resource, one row: a row binding one an earlier row or another live device binds fails before it opens (`RuntimeError: serial:COM3 is already bound (to n100)`). A row of a resolvable type that leaves a resource blank (the board's UART, an IMU's port) is `opening` and `resolving`: it is resolved first (PLUGIN_PROTOCOL `resolve`), one row at a time in operator order and handed every bound resource but its own, while every other row opens at once (`busy`: `… · finding sequencer's UART port`). A resolve searches every free port at once (about one port's timeout, attempts said in the listing's order). What it finds is written into its draft row -- the apparatus reads unsaved; Save keeps it -- and the row opens with it under the same checks; the line says it (`sequencer: board UART found on COM5 (…), written into the apparatus -- Save to keep it`) and the device log as `found: …`. A search that finds nothing never writes the row: what the device opens with instead (the board on Auto without a port, over JTAG) is for that open only, and the row keeps the port it had (device log: `not found: no board UART on the free ports (…); it opens over JTAG-to-AXI this time; the apparatus keeps UART port COM10`), so the next Init or Apply opens that port first. What it cannot find and cannot open without fails the row with what it tried and passed over. A row whose named serial port fails to open with `SerialPortUnusable` (not present, driver refused) is resolved the same way, once, without that port (`n100: COM3 could not be opened: not present (…); looked again: N100 streaming on COM5, written into the apparatus -- Save to keep it`); a `SerialPortBusy` port is not looked past. An open may add a `note` to the line (`sequencer: opened over JTAG-to-AXI under Auto, not its UART`). Every open, resolve or close failure is also a line in that device's log. Shut down, Close or an Apply that takes the row out drop its resolve; a late answer opens and pins nothing, and the next row is asked once it is in. |
 | `close_device` | `device` | control | Close one live instance (its claiming runs are stopped first); the draft keeps it, so `apply_devices` reopens it. |
 | `shut_down_devices` | — | control | Shut down: stops every run, closes every instance. Never refused. |
+| `restart_serial_port` | `device`, `port` | control | A USB-serial adapter can get stuck: its COM port is listed and Device Manager says it works, yet every open fails with `driver refused` (ERROR_INVALID_FUNCTION / ERROR_GEN_FAILURE). Each open or resolve of a row on this computer carries the serial ports that would not open on its way (PLUGIN_PROTOCOL §7 `serial_faults`, from the one shared serial-open path, Rust and Python alike); a row that stands failed or open having met one refused on a port it was looking on -- one its row names or its open takes, or, for its search, a free port it probed -- and that no other row binds lists it in `devices[].refused_ports` (a fault an open meets on any other port, beside it in the same plugin process, is not the row's), and the Devices window offers *Restart USB device and retry* beside it (an Auto board that opened over JTAG because its UART was refused too, its row keeping that port). The command restarts the device node that owns the port (the Ports-class node whose PortName it is: a CH340/CP210x's USB device, an FTDI adapter's FTDIBUS node) with `pnputil /restart-device`, elevated, so Windows asks the operator once (`busy`: `restarting COM10's USB device`; Init/Apply and another restart are refused meanwhile), within 60 s, off the event loop; answered `{device, port, restart: {outcome, node?, words?}}` once done. `restarted`: the row opens again as Apply opens it (a failed one opened, an open one closed and opened, its runs stopped first), and the line says how once it settles (`COM10's USB device restarted · n100 opened again · 2 devices loaded`); `declined` (the Windows confirmation), `absent` (`COM10 is no longer on this PC: nothing was restarted`) and `failed` (pnputil's words) open nothing and are said on the line. Each is a `device_port_restart` journal line and a line in the device's log. Not offered for `remote.device` rows: that computer's own app offers it. |
 | `read_device` | `device`, `units?`, `keep?` | read | Device Control open/Refresh: reads `fields` (PLUGIN_PROTOCOL ops `fields`, `values`); `units` {field: spelling} reads those fields in that unit from now on (the device converts: an RF level depends on its load); `keep`: the operator picked them, and the apparatus entry keeps them (`units`, saved with it): the device opens in them, its recorded state is converted into them and a scan offers its axes in them. |
 | `tune_device` | `device`, `field`, `value`, `unit?` | control | Device Control Apply of one field (`value` in `unit`, else the field's own); the reply holds the readback in that unit. Refused when protected by a claim, or claimed and not `live_write`, or claimed without the operator's risk acceptance. |
 | `accept_device_risk` | `device`, `accepted` | control | Device Control's Accept risk: allow tuning unprotected live-safe fields of a device a run claims (bound to that claim). |
@@ -431,6 +438,9 @@ that ends before `ready` answers too. `produced`/`panel` waits are unchanged.
   error, and `apply_devices` reopens it.
 - `stop_all` stops every run and drives every registered output safe: the pulse board's
   SAFE and each open device's `physical_outputs` (PLUGIN_PROTOCOL §7). Never refused.
+  Every output is asked at once, off the window's turn; the state's `stop_all.state` is
+  `making_safe` until each has answered, then `safe` or `not_safe` (with `failures`),
+  and the command is answered then.
 
 ## 6. Plugin host interface (B ↔ A)
 
@@ -453,7 +463,7 @@ pub trait Plugins {
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>);     // operator input (None cancels)
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>); // reply to RunAcquire
     fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]);       // a type's scan; excluded: the bound resources
-    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]); // {parameters, note}
+    fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]); // {found, this_open?, note}
 }
 ```
 The host's application requests map as: `run.operator_input` → `RunRequest`
@@ -461,8 +471,10 @@ The host's application requests map as: `run.operator_input` → `RunRequest`
 inside the run directory, `run.acquire` → `RunAcquire`, `core {command, params}` → that
 catalogue command, sent exactly as a remote client's call under the run's origin, its
 result answering the run; the command arrives with
-`_run` (the asking run id) beside its parameters, and `Workbench::run_claims(run)`
-names the devices that run holds. Device instances open when the
+`_run` (the asking run id) beside its parameters. The pulse board's own commands are
+answered before they reach the window (PULSE_V3 "Run claims"), held to
+`Workbench::active_runs()` -- each active run by its node's plugin instance, with the
+devices it holds -- as the window last stated them. Device instances open when the
 apparatus is applied and stay open across runs; a run claims them by `RunSpec.devices`.
 `RunSpec`: `run`, `node_id`, `type_id`, `values` (enabled fields), `source_signal`,
 `devices` (argument → instance_id), `artifacts` (name → path or frame claims),
@@ -524,6 +536,9 @@ once at terminal: `{"schema": "zlc.task-run", "run_id", "task", "input", "status
 {"state", "started_at", "ended_at", "progress", "stop_reason"}, "artifacts": [{"name",
 "path", "role", "contract_id", "size_bytes"}], "error"}`. Nothing in between; a
 crash leaves only `start.json`. Measurements and processors have no run directory.
+The directory and `start.json` are made by the run's start, off the window's turn and
+before the plugin hears of the run (`Event::RunDirectory` names it); `run.json` is
+written off the turn too, and `get_run` answers the record it wrote.
 
 ## 8. v2 design mistakes fixed here
 

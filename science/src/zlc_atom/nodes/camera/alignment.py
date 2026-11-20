@@ -126,7 +126,8 @@ class Shot(Generic[Frame]):
 
 @dataclass(frozen=True)
 class Extra(Generic[Frame]):
-    """A frame that is no trigger of the pulse, and why it is thought so."""
+    """A frame that is in no shot, and why: it is no trigger of the pulse, or the camera saw
+    only the end of its shot."""
 
     frame: Frame
     reason: str
@@ -261,7 +262,7 @@ class TriggerAlignment(Generic[Frame]):
                 out.extend(self._close(duration))
             return out
 
-    def _close(self, duration: float) -> list[Shot[Frame]]:
+    def _close(self, duration: float) -> list[Shot[Frame] | Extra[Frame]]:
         shot = Shot(self._index, tuple(self._filled))
         partial, self._partial = self._partial, False
         assert self._start is not None
@@ -269,8 +270,11 @@ class TriggerAlignment(Generic[Frame]):
         self._index += 1
         self._filled = [None] * self.frames
         self._open = [None] * self.frames
-        # A shot no frame of was seen says nothing; nor does the one the camera started in the middle of.
-        return [] if partial or not any(frame is not None for frame in shot.frames) else [shot]
+        # A shot no frame of was seen says nothing; the one the camera started in the middle of is no
+        # shot, and each frame of it that came is dropped as every frame outside a shot is (said so).
+        if partial:
+            return [Extra(frame, "the camera started in the middle of its shot") for frame in shot.frames if frame is not None]
+        return [shot] if any(frame is not None for frame in shot.frames) else []
 
     def flush(self) -> list[Shot[Frame] | Extra[Frame]]:
         """The play is over (or its last frame is overdue): the shot in hand as it stands."""

@@ -705,26 +705,139 @@ pub fn student_score(t: f64, dof: f64) -> (f64, f64) {
     }
 }
 
-/// `compiled_point_terms`: `(raw, squared, cost, gradient_factor,
-/// information_factor, finite)`.
+/// The noise an observation carries: the likelihood its point term is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Likelihood {
+    /// A value with Gaussian noise of an unknown scale (relative to its
+    /// sigma when it has one).
+    Gaussian,
+    /// A histogram bin's count.
+    Poisson,
+    /// A proportion `k / n` of `n` Bernoulli trials (the MEAN of booleans).
+    Binomial,
+}
+
+impl Likelihood {
+    /// The model fixes the noise (no free scale): Poisson and binomial.
+    pub fn fixes_noise(self) -> bool { self != Likelihood::Gaussian }
+
+    /// Whether a model value lies in the likelihood's support: a
+    /// probability in `[0, 1]`, a mean count `>= 0`.  Outside it the
+    /// likelihood does not exist (`deviance_residual` is infinite there).
+    pub fn supports(self, predicted: f64) -> bool {
+        match self {
+            Likelihood::Gaussian => true,
+            Likelihood::Poisson => predicted >= 0.0,
+            Likelihood::Binomial => (0.0..=1.0).contains(&predicted),
+        }
+    }
+
+    /// The likelihood's name as the fit annotation prints it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Likelihood::Gaussian => "Gaussian",
+            Likelihood::Poisson => "Poisson",
+            Likelihood::Binomial => "binomial",
+        }
+    }
+}
+
+/// A counting likelihood's model value as its deviance reads it, and the
+/// point's Fisher information per unit squared model derivative,
+/// `slope / curvature`.  Poisson: `f` floored at `COUNT_FLOOR`, `1 / f`.
+/// Binomial with `trials` `n`: `f` itself, `n / (f (1 - f))` with `f` in
+/// `[COUNT_FLOOR, 1 - COUNT_FLOOR]` (finite on the support's edges).
 #[inline(always)]
-pub fn point_terms(predicted: f64, observed: f64, poisson: bool, weight: f64, use_weights: bool, loss_code: i64) -> Zr<(f64, f64, f64, f64, f64, bool)> {
+fn counting_terms(likelihood: Likelihood, predicted: f64, trials: f64) -> (f64, f64, f64) {
+    match likelihood {
+        Likelihood::Binomial => {
+            let inner = pmin(pmax(predicted, COUNT_FLOOR), 1.0 - COUNT_FLOOR);
+            (predicted, trials, inner * (1.0 - inner))
+        }
+        _ => {
+            let expected = pmax(predicted, COUNT_FLOOR);
+            (expected, 1.0, expected)
+        }
+    }
+}
+
+/// A Poisson or binomial point: its signed deviance residual
+/// `sign(f - y) sqrt(d)` and that residual's derivative by the model value
+/// (the Gauss-Newton scale of its Jacobian row).  Poisson:
+/// `d = 2 (f - y + y ln(y/f))`, `f` floored at `COUNT_FLOOR`; binomial with
+/// `trials` `n`: `d = 2 n (y ln(y/f) + (1 - y) ln((1 - y)/(1 - f)))`, exact
+/// on `[0, 1]` (infinite where the data contradict an edge: `y > 0` at
+/// `f = 0`, `y < 1` at `f = 1`); a `0 ln 0` term 0, `d >= 0`.  Where the
+/// residual vanishes the scale is its limit, the Fisher scale.  A model
+/// value outside the likelihood's support has no likelihood: its residual
+/// is infinite (a solve steps back from it, a profile ends there).
+#[inline(always)]
+pub fn deviance_residual(likelihood: Likelihood, predicted: f64, observed: f64, trials: f64) -> Zr<(f64, f64)> {
+    if !likelihood.supports(predicted) {
+        return Ok((f64::INFINITY, 0.0));
+    }
+    let (expected, slope, curvature) = counting_terms(likelihood, predicted, trials);
+    let deviance = if likelihood == Likelihood::Binomial {
+        let term = |part: f64, model: f64| if part > 0.0 { part * (part / model).ln() } else { 0.0 };
+        2.0 * trials * pmax(term(observed, expected) + term(1.0 - observed, 1.0 - expected), 0.0)
+    } else {
+        let logarithm = if observed > 0.0 { observed * div(observed, expected)?.ln() } else { 0.0 };
+        2.0 * pmax(expected - observed + logarithm, 0.0)
+    };
+    let mut raw = deviance.sqrt();
+    if expected < observed {
+        raw = -raw;
+    }
+    let absolute = raw.abs();
+    let scale = if absolute > COUNT_FLOOR {
+        div(slope * (expected - observed).abs(), curvature * pmax(absolute, COUNT_FLOOR))?
+    } else {
+        div(slope.sqrt(), curvature.sqrt())?
+    };
+    Ok((raw, scale))
+}
+
+/// The support's edges a free step crosses, for `trf::along_edges`: at
+/// each used point whose model value leaves the support at the trial
+/// (`moved`), its free Jacobian row and its distance to the nearest edge
+/// at the current values, signed so that `a . step <= c` keeps it inside.
+/// `jacobian` is row-major `points x count`.
+pub fn support_edges(likelihood: Likelihood, values: &[f64], jacobian: &[f64], moved: &[f64], used: &dyn Fn(usize) -> bool, free: &[usize]) -> Vec<(Vec<f64>, f64)> {
+    let (count, mut edges) = (if values.is_empty() { 0 } else { jacobian.len() / values.len() }, Vec::new());
+    for point in (0..values.len()).filter(|&point| used(point) && !likelihood.supports(moved[point])) {
+        let row = free.iter().map(|&parameter| jacobian[point * count + parameter]);
+        // Above the support (a probability past 1), or below it (past 0).
+        if likelihood == Likelihood::Binomial && moved[point] > 1.0 {
+            edges.push((row.collect(), 1.0 - values[point]));
+        } else {
+            edges.push((row.map(|a| -a).collect(), values[point]));
+        }
+    }
+    edges
+}
+
+/// The row scale of a point's Fisher information `(scale j)(scale j)^T`
+/// at the model value: the weight (1 without) for a Gaussian point,
+/// `1/sqrt(f)` Poisson, `sqrt(n / (f (1 - f)))` binomial (`counting_terms`).
+#[inline(always)]
+pub fn information_scale(likelihood: Likelihood, predicted: f64, trials: f64, weight: f64) -> Zr<f64> {
+    if !likelihood.fixes_noise() {
+        return Ok(weight);
+    }
+    let (_expected, slope, curvature) = counting_terms(likelihood, predicted, trials);
+    div(slope.sqrt(), curvature.sqrt())
+}
+
+/// `compiled_point_terms`: `(raw, squared, cost, gradient_factor,
+/// information_factor, finite)`.  `trials` is the point's Bernoulli trials
+/// (read by the binomial likelihood only).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn point_terms(predicted: f64, observed: f64, likelihood: Likelihood, trials: f64, weight: f64, use_weights: bool, loss_code: i64) -> Zr<(f64, f64, f64, f64, f64, bool)> {
     let mut raw;
     let residual_jacobian_scale;
-    if poisson {
-        let expected = pmax(predicted, COUNT_FLOOR);
-        let logarithm = if observed > 0.0 { observed * div(observed, expected)?.ln() } else { 0.0 };
-        let deviance = 2.0 * pmax(expected - observed + logarithm, 0.0);
-        raw = deviance.sqrt();
-        if expected < observed {
-            raw = -raw;
-        }
-        let absolute = raw.abs();
-        residual_jacobian_scale = if absolute > COUNT_FLOOR {
-            div((expected - observed).abs(), expected * pmax(absolute, COUNT_FLOOR))?
-        } else {
-            div(1.0, expected.sqrt())?
-        };
+    if likelihood.fixes_noise() {
+        (raw, residual_jacobian_scale) = deviance_residual(likelihood, predicted, observed, trials)?;
     } else {
         raw = predicted - observed;
         residual_jacobian_scale = if use_weights { weight } else { 1.0 };
@@ -781,11 +894,20 @@ pub struct ObjectiveData<'a> {
     pub valid: &'a [bool],
     pub weights: &'a [f64],
     pub use_weights: bool,
-    pub poisson: bool,
+    pub likelihood: Likelihood,
+    /// Per point, the Bernoulli trials of a binomial observation; empty
+    /// for the other likelihoods.
+    pub trials: &'a [f64],
     pub loss_code: i64,
     /// Per point, the degrees of freedom of its sigma (the Student-t
     /// likelihood, `student_terms`); empty for the loss above.
     pub dof: &'a [f64],
+}
+
+impl ObjectiveData<'_> {
+    /// The point's Bernoulli trials (NaN where the likelihood reads none).
+    #[inline(always)]
+    pub fn trials_at(&self, point: usize) -> f64 { self.trials.get(point).copied().unwrap_or(f64::NAN) }
 }
 
 impl Kernel {
@@ -808,7 +930,7 @@ impl Kernel {
         // Specialized for the common case (every parameter free, plain
         // least squares) so the loop bounds and branches are constants;
         // the operations and their order are the same in every instance.
-        let plain = !data.poisson && !data.use_weights && data.loss_code == LOSS_LINEAR;
+        let plain = data.likelihood == Likelihood::Gaussian && !data.use_weights && data.loss_code == LOSS_LINEAR;
         let identity = free.len() == params.len() && free.iter().enumerate().all(|(i, &p)| i == p);
         macro_rules! run {
             ($kernel:expr, $n:literal) => {{
@@ -842,7 +964,7 @@ impl Kernel {
 /// The shared body of every `_objective_<model>`: the accumulators live in
 /// fixed arrays (same operations, same order) and are written out once.
 /// `N > 0`: all `N` parameters free in order; `PLAIN`: linear loss, no
-/// weights, no Poisson deviance.
+/// weights, the Gaussian likelihood.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn objective_loop<const N: usize, const PLAIN: bool, F: FnMut(usize, &mut [f64]) -> Zr<f64>>(
@@ -872,11 +994,11 @@ fn objective_loop<const N: usize, const PLAIN: bool, F: FnMut(usize, &mut [f64])
         let row: &mut [f64] = if derivatives { &mut full[..count] } else { &mut full[..0] };
         let predicted = point_fn(point, row)?;
         let (_raw, squared, point_cost, gradient_factor, information_factor, finite) = if PLAIN {
-            point_terms(predicted, observations[point], false, 1.0, false, LOSS_LINEAR)?
+            point_terms(predicted, observations[point], Likelihood::Gaussian, f64::NAN, 1.0, false, LOSS_LINEAR)?
         } else {
             let weight = if data.use_weights { data.weights[point] } else { 1.0 };
             if data.dof.is_empty() {
-                point_terms(predicted, observations[point], data.poisson, weight, data.use_weights, data.loss_code)?
+                point_terms(predicted, observations[point], data.likelihood, data.trials_at(point), weight, data.use_weights, data.loss_code)?
             } else {
                 student_terms(predicted, observations[point], weight, data.dof[point])
             }

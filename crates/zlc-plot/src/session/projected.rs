@@ -167,6 +167,8 @@ pub struct FitSelection {
     pub selected_indices: Option<Arc<[i64]>>,
     pub observation_sigma: Option<Arc<[f64]>>,
     pub observation_dof: Option<Arc<[f64]>>,
+    /// The Bernoulli trials of each proportion: the binomial likelihood.
+    pub observation_trials: Option<Arc<[f64]>>,
     pub facet_index: Option<usize>,
     pub selector_kind: Option<SelectorKind>,
     pub regular_image: Option<Arc<RegularImageFitInput>>,
@@ -714,7 +716,18 @@ impl FitProjection {
             let error = if result.covariance_valid && !fixed && result.standard_errors[index].is_finite() {
                 Some(self.display_parameter(&units, spec, result.standard_errors[index], true, None)?.0.abs())
             } else { None };
-            rows.push(FitParameterDisplay::new(&spec.name, spec.display_label.as_deref().unwrap_or(&spec.name), value, error, &unit).map_err(fit_error)?);
+            let row = FitParameterDisplay::new(&spec.name, spec.display_label.as_deref().unwrap_or(&spec.name), value, error, &unit).map_err(fit_error)?;
+            // A likelihood interval may be one-sided: its two sides in painted units.
+            let row = match (&result.intervals, error) {
+                (Some(intervals), Some(_)) => {
+                    let [low, high] = intervals[index];
+                    let side = |distance: f64| self.display_parameter(&units, spec, distance, true, None).map(|(v, _)| v.abs());
+                    let (below, above) = (side(result.parameter_values[index] - low)?, side(high - result.parameter_values[index])?);
+                    row.with_interval(below, above).map_err(fit_error)?
+                }
+                _ => row,
+            };
+            rows.push(row);
         }
         Ok(rows)
     }
@@ -800,7 +813,7 @@ impl FitProjection {
         Ok(FitOverlay {
             polylines, ellipse_glyph: self.overlay_ellipse(result, &parameters)?, success: true,
             formula: result.model.formula.clone().unwrap_or_default(), parameter_display: parameters, diagnostic: result.message.clone(),
-            facet_index: selection.facet_index, group_key: selection.group_key.clone(), headline_parameter: headline, evidence,
+            facet_index: selection.facet_index, group_key: selection.group_key.clone(), headline_parameter: headline, evidence, error_basis: result.error_basis_text(),
         })
     }
 }
@@ -862,6 +875,7 @@ impl PreparedSelection {
             data_revision: selected.data_revision, scope: selected.scope, coordinates: selected.coordinates.iter().map(floats).collect(),
             observations: floats(&selected.observations), selected_indices: selected.selected_indices.as_ref().map(|indices| indices.slice::<i64>().into()),
             observation_sigma: selected.observation_sigma.as_ref().map(floats), observation_dof: selected.observation_dof.as_ref().map(floats),
+            observation_trials: selected.observation_trials.as_ref().map(floats),
             facet_index: selected.facet_index,
             selector_kind: selected.selector_kind.map(selector_kind_of_fit), regular_image, group_key: selected.group_key,
         })

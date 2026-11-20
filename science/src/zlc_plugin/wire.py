@@ -254,6 +254,15 @@ class Refused(ValueError):
     """Rejected before anything was written: the device is as it was."""
 
 
+class DeviceHeld(PluginError):
+    """The device's SDK says another client has it open (pylon's exclusive open): this
+    open changed nothing.  The core then names the processes on this computer that
+    have the type's ``sdk_modules`` loaded, beside this error."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("refused", message)
+
+
 def error_payload(error: BaseException, *, kind: str | None = None) -> dict[str, Any]:
     if kind is None:
         if isinstance(error, PluginError):
@@ -262,8 +271,13 @@ def error_payload(error: BaseException, *, kind: str | None = None) -> dict[str,
             kind = "refused"
         else:
             kind = "failed"
-    return {"kind": kind, "type": _qualified(type(error)), "message": str(error),
-            "traceback": "".join(traceback.format_exception(error))}
+    payload = {"kind": kind, "type": _qualified(type(error)), "message": str(error),
+               "traceback": "".join(traceback.format_exception(error))}
+    # The serial ports that would not open on the way to it, as the call that watched them put them on it.
+    faults = getattr(error, "serial_faults", None)
+    if faults:
+        payload["serial_faults"] = [dict(fact) for fact in faults]
+    return payload
 
 
 _BUILTIN = {name: getattr(builtins, name) for name in ("TimeoutError", "ValueError", "TypeError", "RuntimeError", "KeyError", "LookupError",

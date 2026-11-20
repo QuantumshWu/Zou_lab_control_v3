@@ -331,7 +331,7 @@ fn a_small_group_fits_as_a_panel_fit_does() {
     for group in 0..repeats / every {
         let [x, y, sem, dof] = panel_series(&stage.runtime, group * every..(group + 1) * every, sites);
         let cell = |dof: Option<Arc<[f64]>>| FitCell { data: CellData::Points { coordinates: vec![x.clone().into()], observations: Some(y.clone().into()) },
-            sigma: Some(sem.clone().into()), sigma_dof: dof, selected_indices: None, data_revision: 0, warm_start: warm.clone() };
+            sigma: Some(sem.clone().into()), sigma_dof: dof, trials: None, selected_indices: None, data_revision: 0, warm_start: warm.clone() };
         let panel = engine.fit(&model, &cell(Some(dof.clone().into())), &FitRequest::default()).unwrap();
         let gaussian = engine.fit(&model, &cell(None), &FitRequest::default()).unwrap();
         assert!(panel.success, "group {group}: {}", panel.message);

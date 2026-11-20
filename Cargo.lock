@@ -2979,12 +2979,14 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "zlc-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "png",
  "rayon",
  "serde_json",

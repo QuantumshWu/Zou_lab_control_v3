@@ -135,14 +135,18 @@ export interface BasisState { mi: number; mj: number }
 export interface Eigenstate extends Level { basis: BasisState[]; vector: number[] }
 const matrix = (n: number): Matrix => Array.from({length:n},()=>Array(n).fill(0));
 
-/** Real symmetric Jacobi eigensolver. Fixed-m blocks have dimension at most four. */
+/** Real symmetric Jacobi eigensolver. Fixed-m blocks have dimension at most four. It rotates until every
+ * off-diagonal entry is at the rounding of the input, ≤ ε·max|h| (no absolute tolerance: a fixed one in MHz left
+ * the D-line eigenvectors 10⁻¹⁴ off, 100 roundings), and refuses rather than return an unconverged basis. */
 function eigen(matrixIn: Matrix): { value: number; vector: number[] }[] {
   const a = matrixIn.map(row=>row.slice()), n = a.length, v = matrix(n);
+  const rounding=Number.EPSILON*Math.max(...matrixIn.map(row=>Math.max(...row.map(Math.abs))));
   for (let i=0;i<n;i++) v[i]![i]=1;
-  for (let iteration=0;iteration<100;iteration++) {
+  for (let iteration=0;;iteration++) {
     let p=0,q=0,max=0;
     for(let i=0;i<n;i++) for(let j=i+1;j<n;j++) if(Math.abs(a[i]![j]!)>max) {max=Math.abs(a[i]![j]!);p=i;q=j;}
-    if(max<1e-11) break;
+    if(max<=rounding) break;
+    if(iteration===100) throw new Error(`磁场本征态对角化未收敛（剩余非对角元 ${max} MHz）。`);
     const apq=a[p]![q]!, app=a[p]![p]!, aqq=a[q]![q]!;
     const theta=0.5*Math.atan2(2*apq,aqq-app), c=Math.cos(theta), s=Math.sin(theta);
     for(let k=0;k<n;k++) {

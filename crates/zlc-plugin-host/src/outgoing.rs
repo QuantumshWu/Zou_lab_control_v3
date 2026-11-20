@@ -8,7 +8,15 @@ use crate::{CallError, ErrorKind, frame};
 
 const QUEUED:u8=0;const WRITING:u8=1;const CANCELLED:u8=2;
 const NORMAL_LIMIT:usize=64;const CONTROL_LIMIT:usize=64;
-struct Job {message:Value,until:Instant,state:Arc<AtomicU8>,reply:mpsc::Sender<Result<(),CallError>>}
+/// How long a frame may wait for the writer before it is given up.
+const SEND_WITHIN:Duration=Duration::from_secs(10);
+/// Who learns how a frame went: a sender waiting for it, or work the writer does itself
+/// (a posted frame's caller has gone on; its failure is handled where it is known).
+enum Done {Wait(mpsc::Sender<Result<(),CallError>>),Then(Box<dyn FnOnce(Result<(),CallError>)+Send>)}
+impl Done {
+    fn tell(self,result:Result<(),CallError>){match self{Done::Wait(reply)=>{let _=reply.send(result);}Done::Then(then)=>then(result)}}
+}
+struct Job {message:Value,until:Instant,state:Arc<AtomicU8>,done:Done}
 #[derive(Default)]
 struct Queue {normal:VecDeque<Job>,control:VecDeque<Job>,closed:bool}
 #[derive(Default)]
@@ -57,7 +65,7 @@ impl Outgoing {
             };
             if Instant::now()>=job.until || job.state.compare_exchange(QUEUED,WRITING,Ordering::AcqRel,Ordering::Acquire).is_err(){
                 job.state.store(CANCELLED,Ordering::Release);
-                let _=job.reply.send(Err(CallError::new(ErrorKind::Timeout,"request expired before its wire frame was written")));continue;
+                job.done.tell(Err(CallError::new(ErrorKind::Timeout,"request expired before its wire frame was written")));continue;
             }
             let mut message=job.message;
             if message.get("deadline_ms").is_some(){
@@ -66,26 +74,30 @@ impl Outgoing {
             worker.writing.store(true,Ordering::Release);
             let answer=frame::write(&mut sink,&message).map_err(|error|CallError::lost(format!("cannot write to the plugin: {error}")));
             worker.writing.store(false,Ordering::Release);
-            let _=job.reply.send(answer);
+            job.done.tell(answer);
         }).expect("start plugin wire writer");
         Arc::new(Self{shared})
     }
-    pub fn send_until(&self,message:&Value,until:Instant)->Result<(),SendError>{
-        if Instant::now()>=until{return Err(SendError{error:CallError::new(ErrorKind::Timeout,"request expired before send"),started:false});}
+    /// Queue a frame for the writer: its state, or why it was not queued.
+    fn admit(&self,message:&Value,until:Instant,done:Done)->Result<Arc<AtomicU8>,(SendError,Done)>{
+        if Instant::now()>=until{return Err((SendError{error:CallError::new(ErrorKind::Timeout,"request expired before send"),started:false},done));}
         let mut message=message.clone();
         stamp_deadline(&mut message,until);
-        let state=Arc::new(AtomicU8::new(QUEUED));let(reply,received)=mpsc::channel();
+        let state=Arc::new(AtomicU8::new(QUEUED));
         let control=message["t"]!="req" || matches!(message["op"].as_str(),Some("ping"|"exit"|"close"|"make_safe"))
             || (message["op"]=="command" && message["p"]["name"]=="stop")
             || (message["op"]=="spi" && matches!(message["p"]["method"].as_str(),Some("stop"|"make_safe")));
-        {
-            let mut queue=self.shared.queue.lock().unwrap();
-            if queue.closed{return Err(SendError{error:CallError::lost("the plugin writer has closed"),started:false});}
-            let jobs=if control{&mut queue.control}else{&mut queue.normal};
-            if jobs.len()>=if control{CONTROL_LIMIT}else{NORMAL_LIMIT}{return Err(SendError{error:CallError::new(ErrorKind::Refused,"the plugin wire queue is full"),started:false});}
-            jobs.push_back(Job{message,until,state:state.clone(),reply});
-            self.shared.ready.notify_one();
-        }
+        let mut queue=self.shared.queue.lock().unwrap();
+        if queue.closed{return Err((SendError{error:CallError::lost("the plugin writer has closed"),started:false},done));}
+        let jobs=if control{&mut queue.control}else{&mut queue.normal};
+        if jobs.len()>=if control{CONTROL_LIMIT}else{NORMAL_LIMIT}{return Err((SendError{error:CallError::new(ErrorKind::Refused,"the plugin wire queue is full"),started:false},done));}
+        jobs.push_back(Job{message,until,state:state.clone(),done});
+        self.shared.ready.notify_one();
+        Ok(state)
+    }
+    pub fn send_until(&self,message:&Value,until:Instant)->Result<(),SendError>{
+        let(reply,received)=mpsc::channel();
+        let state=self.admit(message,until,Done::Wait(reply)).map_err(|(error,_)|error)?;
         match received.recv_timeout(until.saturating_duration_since(Instant::now())){
             Ok(Ok(()))=>Ok(()),
             Ok(Err(error))=>Err(SendError{error,started:state.load(Ordering::Acquire)==WRITING}),
@@ -98,18 +110,25 @@ impl Outgoing {
             }
         }
     }
-    pub fn send(&self,message:&Value)->Result<(),CallError>{self.send_until(message,Instant::now()+Duration::from_secs(10)).map_err(|error|error.error)}
+    pub fn send(&self,message:&Value)->Result<(),CallError>{self.send_until(message,Instant::now()+SEND_WITHIN).map_err(|error|error.error)}
+    /// Queue a frame and go on: `done` learns how it went, on the writer's thread (or at once,
+    /// here, when it could not be queued). It must not wait for this writer.
+    pub fn post(&self,message:&Value,done:impl FnOnce(Result<(),CallError>)+Send+'static){
+        if let Err((error,done))=self.admit(message,Instant::now()+SEND_WITHIN,Done::Then(Box::new(done))){done.tell(Err(error.error));}
+    }
     #[cfg(test)]
     pub fn pause(&self)->std::sync::MutexGuard<'_,()>{self.shared.gate.lock().unwrap()}
     #[cfg(test)]
     pub fn writing(&self)->bool{self.shared.writing.load(Ordering::Acquire)}
     pub fn close(&self){
-        let mut queue=self.shared.queue.lock().unwrap();queue.closed=true;
-        let jobs:Vec<_>=queue.control.drain(..).collect();
-        for job in jobs.into_iter().chain(queue.normal.drain(..)){
-            job.state.store(CANCELLED,Ordering::Release);let _=job.reply.send(Err(CallError::lost("the plugin writer closed")));
-        }
+        let jobs:Vec<Job>={
+            let mut queue=self.shared.queue.lock().unwrap();queue.closed=true;
+            let control:Vec<Job>=queue.control.drain(..).collect();
+            control.into_iter().chain(queue.normal.drain(..).collect::<Vec<_>>()).collect()
+        };
         self.shared.ready.notify_all();
+        // Told outside the queue: what a posted frame does on failure may post again.
+        for job in jobs{job.state.store(CANCELLED,Ordering::Release);job.done.tell(Err(CallError::lost("the plugin writer closed")));}
     }
 }
 
@@ -175,4 +194,26 @@ print(json.dumps({'executed':executed,'answer':answers[0]}))
         writer.close();
     }
 
+    #[test]fn a_posted_frame_returns_at_once_and_its_failure_is_handled_by_the_writer(){
+        let(entered,inside)=mpsc::channel();let(release,wait)=mpsc::channel();let bytes=Arc::new(Mutex::new(Vec::new()));
+        let writer=Outgoing::new(Blocked{entered,release:wait,bytes:bytes.clone(),first:true});
+        let(told,heard)=mpsc::channel();
+        let first=told.clone();
+        writer.post(&serde_json::json!({"t":"res","id":1,"ok":1}),move|sent|{let _=first.send(sent.is_ok());});
+        inside.recv_timeout(Duration::from_secs(1)).unwrap();
+        // The writer is stuck inside a frame: posting another does not wait for it.
+        let started=Instant::now();
+        let second=told.clone();
+        writer.post(&serde_json::json!({"t":"res","id":2,"ok":2}),move|sent|{let _=second.send(sent.is_ok());});
+        assert!(started.elapsed()<Duration::from_millis(50),"a response never waits for the writer");
+        release.send(()).unwrap();
+        assert!(heard.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert!(heard.recv_timeout(Duration::from_secs(1)).unwrap());
+        // Once closed, a posted frame is refused at once and its failure handler runs.
+        writer.close();
+        let refused=told.clone();
+        writer.post(&serde_json::json!({"t":"res","id":3,"ok":3}),move|sent|{let _=refused.send(sent.is_ok());});
+        assert!(!heard.recv_timeout(Duration::from_secs(1)).unwrap());
+        let text=String::from_utf8_lossy(&bytes.lock().unwrap()).to_string();assert!(text.contains("\"id\":2"));
+    }
 }

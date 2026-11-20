@@ -120,6 +120,44 @@ fn a_consumer_catching_up_holds_nothing_back() {
     assert_eq!(last, Some(9));
 }
 
+/// A chain (frames -> occupancy -> survival): a consumer that has answered the newest and
+/// waits for more is caught up, not gone. While its own consumer still owes that shot, the
+/// source waits with them: the picture and its judgement are never split by the slower stage
+/// (the lab's occupied overlay blinked off for a moment on every shot).
+#[test]
+fn a_caught_up_consumer_keeps_its_source_with_its_own_consumers_shot() {
+    let (plane, schema) = (Runtime::new(), schema());
+    let declare = |signal: &str| vec![Declaration { signal: signal.into(), schema: schema.clone(), storage: Storage::Latest }];
+    let block = DataBlock::new(schema.clone(), OwnedBuffer::from_vec(vec![0.0]).into(), Validity::Uniform(true), None).unwrap();
+    let commit = |run: &Generation, signal: &str, ordinal: u64, parents: Vec<Arc<Publication>>|
+        plane.commit(run, &Bundle { inputs: vec![Input::Event { signal: signal.into(), ordinal, data: block.clone(), origin: None, shot_time: None }], metadata: json!({}), parents }).unwrap();
+    let source = plane.begin("frames", declare("frames"), json!({})).unwrap();
+    let first_feed = plane.subscribe(&source, vec!["frames".into()], FOLLOW, Start::Next).unwrap();
+    let first = plane.begin_consuming("occupancy", declare("occupied"), json!({}), "frames".into(), Some(source.id())).unwrap();
+    plane.bind_consumer(&first, first_feed.ticket()).unwrap();
+    let second_feed = plane.subscribe(&first, vec!["occupied".into()], FOLLOW, Start::Next).unwrap();
+    let second = plane.begin_consuming("survival", declare("survival"), json!({}), "occupied".into(), Some(first.id())).unwrap();
+    plane.bind_consumer(&second, second_feed.ticket()).unwrap();
+    let mut front = Front::default();
+    let mut board = || {
+        let requests = [(source.clone(), Arc::<str>::from("frames"), None), (first.clone(), Arc::<str>::from("occupied"), None),
+                        (second.clone(), Arc::<str>::from("survival"), None)];
+        plane.read_coherent_views(&requests, &mut front).iter().map(|read| read.as_ref().ok().and_then(|read| read.key().ordinal)).collect::<Vec<_>>()
+    };
+    let take = |feed: &Subscription| feed.next(Duration::ZERO).unwrap().expect("a delivery");
+    for ordinal in 0..4u64 {
+        commit(&source, "frames", ordinal, vec![]);
+        let delivery = take(&first_feed);
+        commit(&first, "occupied", ordinal, vec![delivery.publications[0].clone()]);
+        assert!(first_feed.next(Duration::ZERO).unwrap().is_none(), "occupancy is caught up");
+        let delivery = take(&second_feed);
+        if ordinal > 0 { assert_eq!(board(), vec![Some(ordinal - 1); 3], "survival owes the newest: the three wait at one shot"); }
+        commit(&second, "survival", ordinal, vec![delivery.publications[0].clone()]);
+        assert!(second_feed.next(Duration::ZERO).unwrap().is_none());
+        assert_eq!(board(), vec![Some(ordinal); 3], "together");
+    }
+}
+
 /// A consumer whose feed is not told keeps its group, as it always did.
 #[test]
 fn a_consumer_with_no_known_feed_keeps_its_group() {

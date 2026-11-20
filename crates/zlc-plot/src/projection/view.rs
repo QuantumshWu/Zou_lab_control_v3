@@ -282,6 +282,21 @@ impl DataView {
     /// `acquired_repeat_count(snapshot)`.
     pub fn acquired_repeat_count(&self) -> usize { acquired_repeat_count(&self.snapshot) }
 
+    // --------------------------------------------------------- uncertainty
+    /// Whether a MEAN of this view's samples is a proportion: boolean
+    /// samples are Bernoulli trials (docs/UNCERTAINTY.md).
+    pub fn proportion(&self) -> bool { self.schema.value.dtype == DType::Bool }
+
+    /// Whether a requested uncertainty is a standard error computed from the
+    /// samples' moments: a proportion's is read from its trials instead.
+    pub fn sem_wanted(&self, uncertainty: bool) -> bool { uncertainty && !self.proportion() }
+
+    /// What a requested uncertainty of reduced points is read from.
+    pub fn spread<'a>(&self, uncertainty: bool, sem: Option<&'a [f64]>) -> super::output::Spread<'a> {
+        use super::output::Spread;
+        if uncertainty && self.proportion() { Spread::Trials } else { sem.map_or(Spread::None, Spread::Sem) }
+    }
+
     // ------------------------------------------------------------- scratch
     /// `_segment_arrays(sigma=...)`: one packed numeric scratch for this view.
     pub fn packed(&self, sigma: bool) -> Result<Arc<Packed>> {

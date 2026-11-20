@@ -13,6 +13,7 @@ mod choices;
 pub mod diagnostics;
 mod layout;
 mod logic;
+mod port_restart;
 
 pub mod scan;
 
@@ -27,8 +28,19 @@ use zlc_core::control::Origin;
 pub use bench::SNAPSHOT_WAIT;
 pub use choices::viewer_signal_tree;
 pub use layout::INTERVALS;
+pub use port_restart::{PortRestart, REFUSED, SerialFault};
 pub use types::{TypeCatalog, TypeDescriptor};
 pub use workspace::Workspace;
+
+/// Work the owner turn hands off (prepare off the turn, apply on it): reading or writing a
+/// workspace document, an archive. Its result comes back as [`Event::Answered`] for its ticket.
+pub type Work = Box<dyn FnOnce() -> Result<Value, String> + Send>;
+
+/// Where handed-off work waits its turn. `Files`: workspace documents, in the order asked (a
+/// save never overtakes an earlier one, a read sees every earlier write). `Export`: an archive,
+/// which may take long and holds no document back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane { Files, Export }
 
 /// The plugin host as the workbench drives it (PLUGIN_PROTOCOL; line A).
 /// Every call returns at once; completion arrives as an [`Event`].
@@ -68,6 +80,23 @@ pub trait Plugins {
     fn discovering(&self) -> bool { false }
     /// Offer an open device to another bench computer (Remote on) or take it back.
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool);
+    /// Do `work` off the owner turn on `lane`; its result is answered as `ticket`.
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work);
+    /// Restart the device node that owns serial port `port` on this computer (Windows asks the
+    /// operator to allow it), off the owner turn and within a deadline: answered as `ticket` with
+    /// a [`PortRestart`].
+    fn restart_port(&mut self, ticket: u64, port: &str);
+}
+
+/// The working point's word for how long a device's own open took (ms), as its opener timed it
+/// around the open alone (a plugin's, a link's, a native board's): put there by the opener
+/// ([`with_open_time`]) and taken out again into the session's `device_opened` line.
+pub const OPEN_MS: &str = "open_ms";
+
+/// `working_point` with how long the open that answered it took ([`OPEN_MS`]).
+pub fn with_open_time(mut working_point: Value, took: std::time::Duration) -> Value {
+    if let Value::Object(fields) = &mut working_point { fields.insert(OPEN_MS.into(), json!(took.as_secs_f64() * 1e3)); }
+    working_point
 }
 
 /// Facts the plugin host reports.
@@ -76,15 +105,21 @@ pub enum Event {
     /// Lifecycle work is ordered by its host, but its reply can already be in
     /// the UI queue when a newer Open/Close supersedes it. Check at consumption.
     Lifecycle { current: std::sync::Arc<std::sync::atomic::AtomicU64>, revision: u64, event: Box<Event> },
+    /// A device's working point carries how long its own open took ([`with_open_time`]).
     Opened { instance: String, working_point: Value },
     Failed { instance: String, error: String },
     Closed { instance: String, error: Option<String> },
+    /// `event`, the outcome of an open or a resolve of `instance` on this computer, with each serial
+    /// port that would not open on its way (PLUGIN_PROTOCOL §7 `serial_faults`; [`Event::met_serial_faults`]).
+    SerialFaults { instance: String, faults: Vec<SerialFault>, event: Box<Event> },
     /// What an open device states of itself changed (its trigger lanes, what it holds): the drafts
     /// that name devices are asked again.
     Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
     Log { instance: String, line: String },
     RunStarted { run: String },
+    /// A Task's run directory was made (with its `start.json`) by the start, off the owner turn.
+    RunDirectory { run: String, directory: PathBuf },
     RunReady { run: String },
     RunProgress { run: String, message: String, current: Option<u64>, total: Option<u64> },
     RunRequest { run: String, request: Value },
@@ -104,10 +139,17 @@ impl Event {
             Event::Opened { instance, .. } => json!({"fact": "opened", "instance": instance}),
             Event::Failed { instance, error } => json!({"fact": "failed", "instance": instance, "error": error}),
             Event::Closed { instance, error } => json!({"fact": "closed", "instance": instance, "error": error}),
+            Event::SerialFaults { instance, faults, event } => {
+                let mut inner = event.journal();
+                inner["serial_faults"] = json!(faults);
+                inner["serial_faults_of"] = json!(instance);
+                inner
+            }
             Event::Facts { instance, facts } => json!({"fact": "device_facts", "instance": instance, "facts": facts}),
             Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
             Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
             Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
+            Event::RunDirectory { run, directory } => json!({"fact": "run_directory", "run": run, "directory": directory}),
             Event::RunReady { run } => json!({"fact": "run_ready", "run": run}),
             Event::RunProgress { run, message, current, total } => json!({"fact": "run_progress", "run": run, "message": message, "current": current, "total": total}),
             Event::RunRequest { run, request } => json!({"fact": "run_request", "run": run, "kind": request.get("kind")}),
@@ -145,8 +187,8 @@ pub struct RunSpec {
     pub artifacts: Map<String, Value>,
     /// Workspace resources by build argument, resolved (a pulse: its description).
     pub resources: Map<String, Value>,
-    /// Task run directory.
-    pub directory: Option<PathBuf>,
+    /// A Task's run directory, made by the start off the owner turn.
+    pub folder: Option<workspace::RunFolder>,
     /// Output name -> the signal the run publishes it as.
     pub outputs: BTreeMap<String, String>,
     pub origin: String,
@@ -185,11 +227,15 @@ pub trait Host {
     /// event's (null before one); None while the Runtime has no such signal.
     fn schemas(&self, _signal: &str) -> Option<(Value, Value)> { None }
     /// What the application adds to a diagnostics archive beside the journal and the board: the data it
-    /// keeps of recent publications, as archive members (name, bytes).
-    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { Vec::new() }
+    /// keeps of recent publications, taken now and encoded as archive members (name, bytes) by whoever
+    /// writes the archive, off the owner turn.
+    fn diagnostic_data(&self) -> DiagnosticData { Box::new(Vec::new) }
     /// Keep recent data within `mib` MiB from now on (0: none).
     fn keep_recent_data(&mut self, _mib: u64) {}
 }
+
+/// Recent data taken for an archive, encoded when called.
+pub type DiagnosticData = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 
 /// What an answered ticket was for.
 #[derive(Clone, Debug)]
@@ -209,6 +255,24 @@ pub(crate) enum Ticket {
     Selection { node: String, panel: String, selection: Value },
     /// One device's settings for an acquisition observation in flight.
     Snapshot { run: String, device: String },
+    /// An apparatus file read for `load_apparatus` (`request`), or again once discovery answered (None).
+    ApparatusRead { path: PathBuf, request: Option<u64> },
+    /// The apparatus written as `tree`.
+    ApparatusSaved { path: PathBuf, tree: Value, request: u64 },
+    /// A layout file read, to load (`stop_running`) or only to read.
+    LayoutRead { path: PathBuf, request: u64, load: Option<bool> },
+    /// The board written as `document`.
+    LayoutSaved { document: Value, request: u64 },
+    /// A diagnostics archive written.
+    Diagnostics { request: u64 },
+    /// A Task run's `run.json` written.
+    RunRecord { run: String, record: Value },
+    /// Recipes read: listed, or one run (`run`: whether it starts, and who asked).
+    Recipes { request: u64, run: Option<(bool, String)> },
+    /// The files a draft names, read (`key`: the selections read); for a Start when `start`.
+    DraftFiles { node: String, key: Value, start: bool },
+    /// The device node owning a serial port a row met refused, restarted (`restart_serial_port`).
+    Restart { device: String, port: String, request: u64 },
 }
 
 pub struct Workbench {
@@ -232,17 +296,27 @@ pub struct Workbench {
     /// When the Apply or Close under way began (its wait for the runs it stops is bounded).
     pub(crate) settling_since: Option<std::time::Instant>,
     /// The Task Console's one line of what just happened (v2 ConsolePresenter._report):
-    /// "selectors disabled", "added <node>", "<node> started", "board cleared", ...
+    /// "selectors disabled", "added <node>", "<node> started" (then "is stopping" and how the run
+    /// ended, while it is still the line: `run_said`), "board cleared", ...
     /// Said when it happens, never re-derived per state push.
     pub(crate) console_report: (String, &'static str),
     /// What the line last said of the notes and of the running Task (v2 `_shown_task_status`):
     /// each is said again only when it changes.
     pub(crate) notes_said: Vec<String>,
     pub(crate) task_said: Option<(String, String)>,
+    /// A panel's own line (v2 update_panel_state: "<panel> is preparing <signal>", or that its
+    /// signal has not published): the panel, and the line, which goes once that panel has drawn.
+    pub(crate) panel_said: Option<(String, (String, &'static str))>,
+    /// A run's own line (`logic::follow_run_line`): the run, and the line last said of it, which
+    /// follows the run while it is still the line shown.
+    pub(crate) run_said: Option<(String, (String, &'static str))>,
     pub(crate) tickets: BTreeMap<u64, Ticket>,
     pub(crate) next_ticket: u64,
     pub(crate) replies: Vec<(u64, Result<Value, String>)>,
     pub(crate) logs: BTreeMap<String, VecDeque<String>>,
+    /// How often each device instance has been opened in this process (or refused before it could
+    /// be): every device seen this session, and whether an open is a retry.
+    pub(crate) device_opens: BTreeMap<String, u64>,
     /// The simulation settings the live simulated instances were opened with.
     pub(crate) applied_simulation: Option<Map<String, Value>>,
     /// A hardware scan in flight.
@@ -252,9 +326,13 @@ pub struct Workbench {
     pub(crate) resolution: Option<(u64, Option<String>)>,
     /// What this Init's or Apply's resolves found, said on its line once it settles.
     pub(crate) found: Vec<String>,
-    /// Each node's source bundle as its queries read it (`bundle`): node -> (what it was
-    /// built from, the members).
-    pub(crate) bundles: BTreeMap<String, (String, Value)>,
+    /// The restart of a serial port's device node under way (`restart_serial_port`).
+    pub(crate) restarting: Option<port_restart::Restarting>,
+    /// Each node's source bundle as its queries were last told it (`bundle`).
+    pub(crate) bundles: BTreeMap<String, logic::SourceBundle>,
+    /// A draft names a source its bundle was not built for: its bundle readers ask once the
+    /// command or event that changed it is done and the host can build that bundle.
+    pub(crate) bundles_stale: bool,
     /// v2 `selection_restore`: (node, draft field) -> the panel whose region set it, and
     /// what it held before.
     pub(crate) selection_restore: BTreeMap<(String, String), (String, Value)>,
@@ -264,6 +342,8 @@ pub struct Workbench {
     pub(crate) device_users: DeviceUsers,
     /// A processor follows its source across its runs (the apparatus's); a Figure Viewer's data has no next run.
     pub(crate) follows_sources: bool,
+    /// The documents the application holds or used beside the board's, for a diagnostics archive.
+    pub(crate) diagnostic_documents: Option<diagnostics::DiagnosticDocuments>,
 }
 
 /// v2 DeviceUseCoordinator's other owners: each device driven from outside the workbench, by
@@ -274,15 +354,19 @@ pub type DeviceUsers = std::sync::Arc<std::sync::Mutex<BTreeMap<String, String>>
 pub const COMMANDS: &[&str] = &[
     "list_plugins", "get_device_log", "estimate_node", "list_runs", "get_run", "read_layout", "list_recipes",
     "add_device", "remove_device", "edit_device", "edit_simulation", "use_template", "discover_devices", "add_discovered",
-    "load_apparatus", "save_apparatus", "apply_devices", "close_device", "shut_down_devices",
+    "load_apparatus", "save_apparatus", "apply_devices", "close_device", "shut_down_devices", "restart_serial_port",
     "read_device", "tune_device", "accept_device_risk", "publish_device",
     "add_node", "rename_node", "edit_node", "check_node", "revert_node", "start_node", "stop_node", "remove_node", "answer_request",
     "order_panels", "rename_panel", "set_panel_interval", "set_panel_overlay", "publish_panel_outputs", "set_board",
     "save_layout", "load_layout", "clear_board", "run_recipe", "export_diagnostics", "set_diagnostics",
 ];
 
+/// The most lines an instance's log keeps (its newest), as its Log window shows them.
+pub(crate) const LOG_LINES: usize = 2000;
+
 /// Commands that leave the result to a later plugin event.
-const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device"];
+const DEFERRED: &[&str] = &["estimate_node", "read_device", "tune_device", "discover_devices", "publish_device", "restart_serial_port",
+    "read_layout", "load_layout", "save_layout", "load_apparatus", "save_apparatus", "export_diagnostics", "list_recipes", "run_recipe"];
 
 pub(crate) fn text<'a>(params: &'a Value, name: &str) -> Result<&'a str, String> {
     params[name].as_str().ok_or_else(|| format!("{name} is required"))
@@ -293,8 +377,10 @@ impl Workbench {
         let mut workbench = Self::document(root, plugins)?;
         workbench.follows_sources = true;
         let path = workbench.workspace.apparatus();
+        // Read here, before the window's loop runs; later reads are handed off.
         if path.is_file() {
-            if let Err(error) = workbench.load_apparatus(&path) { workbench.notes.push(error); }
+            let read = workspace::read_strict(&path, &apparatus::what(&path));
+            if let Err(error) = workbench.apparatus_read(&path, read) { workbench.notes.push(error); }
         } else {
             // v2 DeviceManagerPresenter.load on a workspace without one.
             workbench.report = (format!("no apparatus at {} yet; add devices and save", apparatus::file_name(&path)), "task");
@@ -311,10 +397,11 @@ impl Workbench {
             devices: BTreeMap::new(), nodes: Vec::new(), runs: Vec::new(), run_sequences: BTreeMap::new(), board: layout::Board::default(), notes: Vec::new(),
             report: (String::new(), "idle"), settling: None, settling_since: None,
             // v2 set_deriving(False) when the console is built.
-            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None,
-            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), applied_simulation: None, scan: None,
-            resolution: None, found: Vec::new(), bundles: BTreeMap::new(),
-            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false })
+            console_report: ("selectors disabled".into(), "task"), notes_said: Vec::new(), task_said: None, panel_said: None, run_said: None,
+            tickets: BTreeMap::new(), next_ticket: 1, replies: Vec::new(), logs: BTreeMap::new(), device_opens: BTreeMap::new(), applied_simulation: None, scan: None,
+            resolution: None, found: Vec::new(), restarting: None, bundles: BTreeMap::new(), bundles_stale: false,
+            selection_restore: BTreeMap::new(), routed_selections: BTreeMap::new(), device_users: DeviceUsers::default(), follows_sources: false,
+            diagnostic_documents: None })
     }
 
     pub fn handles(name: &str) -> bool { COMMANDS.contains(&name) }
@@ -325,14 +412,8 @@ impl Workbench {
     /// discovery answered says nothing about which types are installed.
     pub fn refresh_catalog(&mut self) {
         self.catalog = self.plugins.catalog();
-        let path = self.apparatus.path.clone();
-        if self.devices.is_empty() && !self.apparatus.edited() && path.is_file() {
-            self.notes.clear();
-            if let Err(error) = self.load_apparatus(&path) { self.notes.push(error); }
-        } else {
-            for note in self.uninstalled_draft() { if !self.notes.contains(&note) { self.notes.push(note); } }
-        }
-        self.say_new_notes();
+        if self.apparatus_rereadable() { self.read_apparatus_file(&self.apparatus.path.clone(), None); }
+        else { self.draft_checked(); }
     }
     pub fn workspace(&self) -> &Workspace { &self.workspace }
     pub fn catalog(&self) -> &TypeCatalog { &self.catalog }
@@ -356,6 +437,10 @@ impl Workbench {
     }
     /// Workspace resources of `contract_prefix...` resolve through `resolver` (the application knows the formats).
     pub fn add_resource_resolver(&mut self, contract_prefix: &str, resolver: workspace::Resolver) { self.workspace.add_resolver(contract_prefix, resolver); }
+    /// The files a workspace resource of `contract_prefix...` names are found by `names` (its format's own reader).
+    pub fn add_resource_names(&mut self, contract_prefix: &str, names: workspace::Names) { self.workspace.add_names(contract_prefix, names); }
+    /// What a diagnostics archive carries beside the board's documents (the pulse host's).
+    pub fn set_diagnostic_documents(&mut self, documents: diagnostics::DiagnosticDocuments) { self.diagnostic_documents = Some(documents); }
 
     pub(crate) fn ticket(&mut self, ticket: Ticket) -> u64 {
         let id = self.next_ticket;
@@ -372,7 +457,7 @@ impl Workbench {
                 zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error}));
                 self.replies.push((request, Err(error)));
             }
-            return;
+            return self.refresh_stale_bundles(host);
         }
         let result = self.dispatch(name, params, origin, request, host);
         if let Err(error) = &result { zlc_core::journal::note("workbench", "refused", json!({"name": name, "request": request, "error": error})); }
@@ -381,6 +466,7 @@ impl Workbench {
             Ok(reply) => self.replies.push((request, Ok(reply.unwrap_or_else(|| json!({}))))),
             Err(error) => self.replies.push((request, Err(error))),
         }
+        self.refresh_stale_bundles(host);
         self.sync_console_report(host);
     }
 
@@ -399,7 +485,6 @@ impl Workbench {
                 "add_node" => answer.as_ref().and_then(|answer| answer["node"].as_str()).and_then(|id| self.node(id)).map(|node| (format!("added {}", node.name), "task")),
                 "rename_node" => renamed.zip(node_name(self)).filter(|(before, after)| before != after).map(|(before, after)| (format!("renamed {before} to {after}"), "task")),
                 "set_board" => params["selectors"].as_bool().map(|on| ((if on { "selectors enabled" } else { "selectors disabled" }).to_owned(), "task")),
-                "save_layout" => params["path"].as_str().map(|path| (format!("layout saved to {}", self.workspace.resolve(path).display()), "task")),
                 _ => None,
             };
             if let Some(line) = line { self.console_report = line; }
@@ -410,6 +495,21 @@ impl Workbench {
     /// The desktop's own console commands (a blank panel added) say their line here too.
     pub fn console_note(&mut self, text: String) { self.console_report = (text, "task"); }
     pub fn console_warning(&mut self, text: String) { self.console_report = (text, "warning"); }
+    /// A panel's own line of what it is waiting for (`task`: its signal is being prepared; `warning`:
+    /// its signal has not published): it stands until that panel has drawn (`panels_drawn`) or closed.
+    pub fn console_panel_note(&mut self, panel: &str, text: String, severity: &'static str) {
+        self.console_report = (text, severity);
+        self.panel_said = Some((panel.to_owned(), self.console_report.clone()));
+    }
+    /// Panels have drawn: a line still saying what one of them was waiting for is no longer true.
+    pub fn panels_drawn<'a>(&mut self, drawn: impl IntoIterator<Item = &'a str>) {
+        let Some((panel, _)) = &self.panel_said else { return };
+        if drawn.into_iter().any(|drawn| drawn == panel) { self.panel_line_over(); }
+    }
+    fn panel_line_over(&mut self) {
+        // Only the line it set: a later line (a run started meanwhile) stays.
+        if self.panel_said.take().is_some_and(|(_, line)| line == self.console_report) { self.console_report = (String::new(), "idle"); }
+    }
 
     fn dispatch_command(&mut self, name: &str, params: &Value, origin: &Origin, request: u64, host: &mut dyn Host) -> Result<Option<Value>, String> {
         let origin_text = match origin { Origin::Operator => "operator".to_owned(), Origin::Remote(client) => client.clone() };
@@ -417,19 +517,14 @@ impl Workbench {
             "list_plugins" => Ok(Some(self.list_plugins(params["type_id"].as_str()))),
             "get_device_log" => {
                 let device = text(params, "device")?;
-                let lines = params["lines"].as_u64().unwrap_or(200).min(2000) as usize;
-                let mut log = self.logs.get(device).map(|log| log.iter().skip(log.len().saturating_sub(lines)).cloned().collect::<Vec<_>>()).unwrap_or_default();
-                // v2's words for a device whose code tells its log nothing.
-                if self.devices.get(device).is_some_and(|live| live.working_point["narrates"] == false) {
-                    log.insert(0, "(this device type does not narrate its own interactions yet; fabric lines naming it appear once published)".into());
-                }
-                Ok(Some(json!({"device": device, "lines": log})))
+                let lines = params["lines"].as_u64().unwrap_or(200).min(LOG_LINES as u64) as usize;
+                Ok(Some(json!({"device": device, "lines": self.device_log(device, lines)})))
             }
             "estimate_node" => self.estimate_node(text(params, "node")?, request).map(|()| None),
             "list_runs" => Ok(Some(self.list_runs(params["node"].as_str(), params["limit"].as_u64().unwrap_or(50).min(200) as usize))),
             "get_run" => self.get_run(text(params, "run")?).map(Some),
-            "read_layout" => self.read_layout(text(params, "path")?, host).map(Some),
-            "list_recipes" => self.list_recipes(params["name"].as_str()).map(Some),
+            "read_layout" => { let path = self.workspace.resolve(text(params, "path")?); self.read_layout_file(&path, request, None); Ok(None) }
+            "list_recipes" => { self.read_recipes(params["name"].as_str(), None, None, request); Ok(None) }
             "add_device" => self.add_device(params).map(Some),
             "remove_device" => self.remove_device(text(params, "device")?).map(Some),
             "edit_device" => self.edit_device(params).map(Some),
@@ -437,14 +532,15 @@ impl Workbench {
             "use_template" => self.use_template(text(params, "template")?).map(Some),
             "discover_devices" => self.discover_devices(request),
             "add_discovered" => self.add_discovered(text(params, "instance_id")?).map(Some),
-            "load_apparatus" => { let path = self.workspace.resolve(text(params, "path")?); self.load_apparatus(&path).map(Some) }
+            "load_apparatus" => { let path = self.workspace.resolve(text(params, "path")?); self.read_apparatus_file(&path, Some(request)); Ok(None) }
             "save_apparatus" => {
                 let path = self.workspace.resolve(text(params, "path")?);
-                self.save_apparatus(&path, params["replace_unread"].as_bool().unwrap_or(false)).map(Some)
+                self.save_apparatus(&path, params["replace_unread"].as_bool().unwrap_or(false), request).map(|()| None)
             }
             "apply_devices" => self.apply_devices(host).map(Some),
             "close_device" => self.close_device(text(params, "device")?, host).map(Some),
             "shut_down_devices" => self.shut_down_devices(host).map(Some),
+            "restart_serial_port" => self.restart_serial_port(text(params, "device")?, text(params, "port")?, request).map(|()| None),
             "read_device" => self.read_device(text(params, "device")?, params["units"].as_object(), params["keep"] == true, Some(request)).map(|()| None),
             "tune_device" => self.tune_device(params, request).map(|()| None),
             "accept_device_risk" => self.accept_device_risk(text(params, "device")?, params["accepted"].as_bool().unwrap_or(false)).map(Some),
@@ -468,12 +564,13 @@ impl Workbench {
                 if let Some(selectors) = params["selectors"].as_bool() { self.board.selectors = selectors; }
                 Ok(Some(json!({"paused": self.board.paused, "selectors": self.board.selectors})))
             }
-            "save_layout" => { let path = self.workspace.resolve(text(params, "path")?); self.save_layout(&path, host).map(Some) }
+            "save_layout" => { let path = self.workspace.resolve(text(params, "path")?); self.save_layout(&path, request, host); Ok(None) }
             "load_layout" => {
                 let path = self.workspace.resolve(text(params, "path")?);
-                self.load_layout(&path, params["stop_running"].as_bool().unwrap_or(false), host).map(Some)
+                self.read_layout_file(&path, request, Some(params["stop_running"].as_bool().unwrap_or(false)));
+                Ok(None)
             }
-            "export_diagnostics" => self.export_diagnostics(params["data"].as_bool().unwrap_or(true), host).map(Some),
+            "export_diagnostics" => { self.export_diagnostics(params["data"].as_bool().unwrap_or(true), request, host); Ok(None) }
             "set_diagnostics" => {
                 let mib = params["budget_mib"].as_u64().ok_or("budget_mib is required: the memory recent data is kept within, in MiB (0 keeps none)")?;
                 host.keep_recent_data(mib);
@@ -481,7 +578,11 @@ impl Workbench {
                 Ok(Some(json!({"budget_mib": mib})))
             }
             "clear_board" => self.clear_board(params["stop_running"].as_bool().unwrap_or(false), host).map(Some),
-            "run_recipe" => self.run_recipe(text(params, "name")?, &params["parameters"], params["start"].as_bool().unwrap_or(true), &origin_text, host).map(Some),
+            "run_recipe" => {
+                let parameters = params["parameters"].as_object().cloned().unwrap_or_default();
+                self.read_recipes(Some(text(params, "name")?), Some(parameters), Some((params["start"].as_bool().unwrap_or(true), origin_text)), request);
+                Ok(None)
+            }
             _ => Err(format!("{name} is not a workbench command")),
         }
     }
@@ -500,12 +601,16 @@ impl Workbench {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
                 return;
             }
-            Event::Log { instance, line } => {
-                let log = self.logs.entry(instance).or_default();
-                if log.len() >= 2000 { log.pop_front(); }
-                log.push_back(line);
+            Event::SerialFaults { instance, faults, event } => {
+                // A resolve's answer is its search's; any other, an open's.
+                let searched = matches!(*event, Event::Answered { .. });
+                self.serial_faults_met(&instance, faults, searched);
+                self.on_event(*event, host);
+                return;
             }
+            Event::Log { instance, line } => self.log_line(&instance, line),
             Event::RunStarted { run } => self.run_started(&run),
+            Event::RunDirectory { run, directory } => self.run_directory(&run, directory),
             Event::RunReady { run } => self.run_ready(&run),
             Event::RunProgress { run, message, current, total } => {
                 if let Some(record) = self.run_mut(&run) { record.progress = Some(json!({"message": message, "current": current, "total": total})); }
@@ -516,8 +621,33 @@ impl Workbench {
             Event::RunSnapshot { run, ticket, wait } => self.run_snapshot(&run, ticket, wait),
             Event::RunFinished { run, outcome, error, generation } => self.run_finished(&run, &outcome, error, generation, host),
         }
+        self.refresh_stale_bundles(host);
         self.poll_recipe(host);
         self.sync_console_report(host);
+    }
+
+    /// One line into a device's log (its Log window, `logs/devices/<instance>.log`), the oldest
+    /// going once it holds `LOG_LINES`.
+    pub(crate) fn log_line(&mut self, instance: &str, line: String) {
+        let log = self.logs.entry(instance.to_owned()).or_default();
+        if log.len() >= LOG_LINES { log.pop_front(); }
+        log.push_back(line);
+    }
+
+    /// What the workbench itself says into a device's log -- its open failing, its being looked for
+    /// again -- stamped as the device's own lines are (`[HH:MM:SS] ...`), so the Log window and the
+    /// diagnostics archive have it beside them, for every device type.
+    pub(crate) fn log_device(&mut self, instance: &str, what: &str) {
+        self.log_line(instance, format!("[{}] {what}", workspace::local_clock()));
+    }
+
+    /// A device's Log window: its newest `lines` lines, after v2's words when its code tells its log nothing.
+    pub(crate) fn device_log(&self, device: &str, lines: usize) -> Vec<String> {
+        let mut log = self.logs.get(device).map(|log| log.iter().skip(log.len().saturating_sub(lines)).cloned().collect::<Vec<_>>()).unwrap_or_default();
+        if self.devices.get(device).is_some_and(|live| live.working_point["narrates"] == false) {
+            log.insert(0, "(this device type does not narrate its own interactions yet; fabric lines naming it appear once published)".into());
+        }
+        log
     }
 
     fn answered(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
@@ -543,6 +673,16 @@ impl Workbench {
             Ticket::Publish { device, published, request } => self.published(&device, published, request, result),
             Ticket::Selection { node, panel, selection } => self.selection_patched(&node, &panel, &selection, result),
             Ticket::Snapshot { run, device } => self.bench_answered(&run, &device, ticket, result),
+            Ticket::ApparatusRead { path, request: Some(request) } => { let loaded = self.apparatus_read(&path, result); self.replies.push((request, loaded)); }
+            Ticket::ApparatusRead { path, request: None } => self.apparatus_reread(&path, result),
+            Ticket::ApparatusSaved { path, tree, request } => { let saved = self.apparatus_saved(&path, tree, result); self.replies.push((request, saved)); }
+            Ticket::LayoutRead { path, request, load } => { let read = self.layout_read(&path, load, result, host); self.replies.push((request, read)); }
+            Ticket::LayoutSaved { document, request } => { let saved = self.layout_saved(document, result, host); self.replies.push((request, saved)); }
+            Ticket::Diagnostics { request } => { let exported = self.diagnostics_exported(result); self.replies.push((request, exported)); }
+            Ticket::RunRecord { run, record } => self.run_recorded(&run, record, result),
+            Ticket::Recipes { request, run } => { let read = self.recipes_read(run, result, host); self.replies.push((request, read)); }
+            Ticket::DraftFiles { node, key, start } => self.draft_files_read(&node, ticket, key, start, result, host),
+            Ticket::Restart { device, port, request } => self.port_restarted(&device, &port, request, result, host),
             Ticket::Tune { device, request } => {
                 let reply = result.clone().map(|readback| json!({"device": device, "readback": readback}));
                 self.replies.push((request, reply));
@@ -673,14 +813,17 @@ impl Workbench {
     pub fn panel_added(&mut self, panel: &str) { self.board.add(panel); }
     /// A closed panel's region gives back what it set (v2 `_remove_panel_now`).
     pub fn panel_closed(&mut self, panel: &str) {
+        if self.panel_said.as_ref().is_some_and(|(said, _)| said == panel) { self.panel_line_over(); }
         self.board.remove(panel);
         self.routed_selections.remove(panel);
         self.restore_producer_draft(panel);
     }
 
-    /// The device instances an active run holds (a `core` command checks its asking run against them).
-    pub fn run_claims(&self, run: &str) -> Vec<String> {
-        self.run(run).filter(|record| !record.terminal()).map(|record| record.claims.iter().map(|claim| claim.device.clone()).collect()).unwrap_or_default()
+    /// Each active run as its node's plugin instance knows it: (that instance, the run, the device
+    /// instances it claims). The pulse desk holds a run's board commands to them.
+    pub fn active_runs(&self) -> Vec<(String, String, Vec<String>)> {
+        self.nodes.iter().filter_map(|node| self.active_run(node).map(|run| (zlc_core::control::node_instance(&node.id), run.id.clone(),
+            run.claims.iter().map(|claim| claim.device.clone()).collect()))).collect()
     }
 
     /// The active run that holds a device instance, if one does (the pulse

@@ -8,7 +8,8 @@ param(
 )
 # The engine release a lab PC runs without a toolchain: build executables from the
 # committed Rust sources; place the engine in bin\engine and zlc-mcp in bin\ai
-# (neither is in git) and pack both into target\engine-releases\zlc-engine-<version>.zip; write
+# (neither is in git) and pack both into target\engine-releases\zlc-engine-<version>.tar.xz
+# (tools\release_archive.py), checked by unpacking it as a lab PC does (tools\tar_xz.cs); write
 # bin\release.json, which names that release (version yyyy.M.d.N, its tag, the source stamp and
 # commit it was built from, the archive's name, size and sha256); commit that file with the four
 # programs at the checkout's root. installation.exe downloads the archive from the release's
@@ -22,16 +23,16 @@ $archives = Join-Path $root 'target\engine-releases'
 
 if ($Publish) {
     $release = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
-    $zip = Join-Path $archives $release.asset.name
-    if (-not (Test-Path -LiteralPath $zip)) { throw "$zip is not here: publish from the machine that built the release." }
-    if ((Get-Item -LiteralPath $zip).Length -ne $release.asset.size -or (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $release.asset.sha256) {
-        throw "$zip is not the archive bin\release.json names."
+    $archive = Join-Path $archives $release.asset.name
+    if (-not (Test-Path -LiteralPath $archive)) { throw "$archive is not here: publish from the machine that built the release." }
+    if ((Get-Item -LiteralPath $archive).Length -ne $release.asset.size -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $release.asset.sha256) {
+        throw "$archive is not the archive bin\release.json names."
     }
     # The release is the commit that wrote bin\release.json; GitHub tags it there, so it is pushed first.
     $at = "$(& git -C $root log -1 --format=%H -- bin/release.json)".Trim()
     if (-not $at) { throw 'bin\release.json is not committed.' }
     if (-not @(& git -C $root branch -r --contains $at).Count) { throw "Push $at (the release commit) first." }
-    $arguments = @('release', 'create', $release.tag, $zip, '--repo', $ZlcRepository, '--target', $at, '--title', "v$($release.version)", '--latest',
+    $arguments = @('release', 'create', $release.tag, $archive, '--repo', $ZlcRepository, '--target', $at, '--title', "v$($release.version)", '--latest',
                    '--notes', "The engine built from commit $($release.commit); installation.exe downloads it.")
     Write-Host "gh $($arguments -join ' ')"
     if ($DryRun) { Write-Host 'Dry run: nothing was published.'; return }
@@ -98,28 +99,38 @@ foreach ($relative in $files.Keys) {
 }
 Set-Content -LiteralPath (Join-Path (Get-ZlcReleaseProducts) 'SOURCE') -Value @("source $stamp", "commit $commit", "version $version") -Encoding ascii
 
-# The archive: bin\engine and bin\ai as engine\ and ai\.
-Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+# The archive: bin\engine and bin\ai as engine\ and ai\, then unpacked as fetch_engine.ps1 does
+# into exactly those files.
+$parts = @('engine', 'ai')
 New-Item -ItemType Directory -Force -Path $archives | Out-Null
-$asset = "zlc-engine-$version.zip"
-$zip = Join-Path $archives $asset
-if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
-$archive = [IO.Compression.ZipFile]::Open($zip, 'Create')
-try {
-    foreach ($part in 'engine', 'ai') {
-        $folder = Join-Path $root "bin\$part"
-        foreach ($item in Get-ChildItem -LiteralPath $folder -Recurse -File) {
-            $entry = "$part/$($item.FullName.Substring($folder.Length + 1).Replace('\', '/'))"
-            [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $item.FullName, $entry, [IO.Compression.CompressionLevel]::Optimal)
+$asset = "zlc-engine-$version.tar.xz"
+$archive = Join-Path $archives $asset
+if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive }
+Write-Host "Packing $asset ..."
+& (Get-ZlcSciencePython) -I (Join-Path $PSScriptRoot 'release_archive.py') $archive (Join-Path $root 'bin') @parts
+if ($LASTEXITCODE -ne 0) { throw 'tools\release_archive.py could not pack the release.' }
+# Each file of the folders as "<part>\<path> <sha256>", in order.
+function Get-Listing([string]$Folder) {
+    @(foreach ($part in $parts) {
+        $top = Join-Path $Folder $part
+        foreach ($item in Get-ChildItem -LiteralPath $top -Recurse -File) {
+            "$part\$($item.FullName.Substring($top.Length + 1)) $((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash)"
         }
-    }
+    }) | Sort-Object
 }
-finally { $archive.Dispose() }
+Add-Type -Path (Join-Path $PSScriptRoot 'tar_xz.cs')
+$unpacked = "$archive.check"
+if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
+try {
+    [ZlcTarXz]::Extract($archive, $unpacked)
+    if ((@(Get-Listing $unpacked) -join "`n") -ne (@(Get-Listing (Join-Path $root 'bin')) -join "`n")) { throw "$archive does not unpack to bin\engine and bin\ai." }
+}
+finally { Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue }
 if ((Get-ZlcSourceStamp) -ne $stamp) { throw 'Rust sources changed before recording the release.' }
 $release = [ordered]@{ version = $version; tag = "v$version"; source = $stamp; commit = $commit
-                       asset = [ordered]@{ name = $asset; size = (Get-Item -LiteralPath $zip).Length; sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() } }
+                       asset = [ordered]@{ name = $asset; size = (Get-Item -LiteralPath $archive).Length; sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() } }
 Set-Content -LiteralPath $record -Value ($release | ConvertTo-Json -Depth 3) -Encoding ascii
-Write-Host "Release v${version}: $($files.Count) files from $commit (sources $stamp), $zip ($([math]::Round($release.asset.size / 1MB, 1)) MB)."
+Write-Host "Release v${version}: $($files.Count) files from $commit (sources $stamp), $archive ($([math]::Round($release.asset.size / 1MB, 1)) MB)."
 
 $paths = @('bin/release.json')
 $message = "Release v${version}: installer assets from $($commit.Substring(0, 12)) (bin\release.json)"

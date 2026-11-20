@@ -10,14 +10,15 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use super::models::{loss_code, Axes, Kernel, ObjectiveData};
+use super::models::{loss_code, support_edges, Axes, Kernel, Likelihood, ObjectiveData};
 use super::num::{numpy_sum, pmax, Zr};
 use super::prepare::Seeds;
+use super::profile::{interval_covariance, Profile};
 use super::radial::{self, RegularImageFitInput};
-use super::result::{Bounds, FitError, FitOptions, FitResult, ObservationArrays, ParamValues, SolveDiagnostics};
+use super::result::{Bounds, ErrorBasis, FitError, FitOptions, FitResult, ObservationArrays, ParamValues, SolveDiagnostics};
 use super::shared::{
-    authored_seed, binned_curve_statistics, fixed_parameter_partition, histogram_bounds, observation_count, poisson_deviance_residual, sigma_weights, solver_bounds,
-    too_few_points,
+    authored_seed, binned_curve_statistics, check_proportions, deviance_residuals, finite_points, fixed_parameter_partition, histogram_bounds, kept, observation_count,
+    observation_likelihood, sigma_weights, solver_bounds, too_few_points,
 };
 use super::spec::{default_fit_registry, FitModelRegistry, FitModelSpec, Pin, DOMAIN_ANCHORED, REGULAR_IMAGE_RADIAL, REGULAR_IMAGE_SEPARABLE};
 use super::trf::{self, CellObjective, FinalizeError, STATUS_INVALID, STATUS_MAX_NFEV, STATUS_NO_CANDIDATE};
@@ -42,6 +43,11 @@ pub struct FitCell {
     /// known otherwise. With any finite one (and the linear loss) the fit
     /// is the Student-t likelihood's (`student_dof`).
     pub sigma_dof: Option<Arc<[f64]>>,
+    /// The Bernoulli trials behind each observation: an observation with
+    /// trials `n` is the proportion `k / n` of `n` independent trials (the
+    /// MEAN of boolean samples) and is fitted by the binomial likelihood.
+    /// A cell with trials carries no sigma.
+    pub trials: Option<Arc<[f64]>>,
     pub selected_indices: Option<Arc<[i64]>>,
     pub data_revision: i64,
     /// A previous solution, one value per parameter.
@@ -54,13 +60,14 @@ impl FitCell {
             data: CellData::Points { coordinates: coordinates.into_iter().map(Into::into).collect(), observations: Some(observations.into()) },
             sigma: None,
             sigma_dof: None,
+            trials: None,
             selected_indices: None,
             data_revision: 0,
             warm_start: None,
         }
     }
     pub fn image(input: RegularImageFitInput) -> Self {
-        FitCell { data: CellData::Image(Arc::new(input)), sigma: None, sigma_dof: None, selected_indices: None, data_revision: 0, warm_start: None }
+        FitCell { data: CellData::Image(Arc::new(input)), sigma: None, sigma_dof: None, trials: None, selected_indices: None, data_revision: 0, warm_start: None }
     }
 }
 
@@ -122,6 +129,9 @@ struct Prepared {
     weights: Option<Vec<f64>>,
     /// The Student-t degrees of freedom beside `weights` (`student_dof`).
     dof: Option<Vec<f64>>,
+    likelihood: Likelihood,
+    /// The Bernoulli trials beside binomial observations.
+    trials: Option<Vec<f64>>,
     binned: bool,
     revision: u64,
     origin: f64,
@@ -146,6 +156,8 @@ struct Solved {
     errors: Vec<f64>,
     reduced: f64,
     covariance_valid: bool,
+    /// A likelihood fit's profile intervals (`profile.rs`).
+    intervals: Option<Vec<[f64; 2]>>,
 }
 
 struct PointObjective<'a> {
@@ -160,6 +172,19 @@ impl CellObjective for PointObjective<'_> {
         self.kernel.objective(&self.coords, &self.data, params, free, gradient, information, jacobian_row, derivatives)
     }
     fn selected(&self) -> usize { self.selected }
+    fn along_support(&self, params: &[f64], free: &[usize], step: &[f64]) -> Option<Vec<f64>> {
+        if !self.data.likelihood.fixes_noise() {
+            return None;
+        }
+        let (values, jacobian) = self.kernel.value_jacobian(&self.coords, params, true).ok()?;
+        let mut trial = params.to_vec();
+        for (k, &parameter) in free.iter().enumerate() {
+            trial[parameter] += step[k];
+        }
+        let (moved, _) = self.kernel.value_jacobian(&self.coords, &trial, false).ok()?;
+        let edges = support_edges(self.data.likelihood, &values, &jacobian, &moved, &|point| self.data.valid[point], free);
+        (!edges.is_empty()).then(|| trf::along_edges(&edges, step))
+    }
 }
 
 fn bucket_failure(error: &FinalizeError) -> String { error.to_string() }
@@ -205,7 +230,7 @@ impl FitEngine {
                 let outcomes = self.fit_compiled_batch(model, kernel, std::slice::from_ref(cell), request, &options)?;
                 let result = outcomes.into_iter().next().expect("one cell").map_err(|m| FitError::value(if m.is_empty() { "compiled fit failed".to_string() } else { m }))?;
                 let nested = self.nested_population_fit(model, std::slice::from_ref(cell), request.bounds.as_ref(), &options, request.cancelled)?;
-                self.settle_population(model, result, nested.into_iter().next().flatten().as_ref(), &options, student_dof(model, cell, &options).is_some())
+                self.settle_population(model, result, nested.into_iter().next().flatten().as_ref(), &options, cell)
             }
             None => super::lsq::fit_fallback(self, model, cell, request, &options),
         }
@@ -286,8 +311,7 @@ impl FitEngine {
             let outcome = match outcome {
                 Ok(result) if model.reduction.is_some() => {
                     let nested = nested_by_local.get(&local).cloned().flatten();
-                    let student = student_dof(model, &compiled[local], &options).is_some();
-                    match self.settle_population(model, result, nested.as_ref(), &options, student) {
+                    match self.settle_population(model, result, nested.as_ref(), &options, &compiled[local]) {
                         Ok(settled) => Ok(settled),
                         Err(FitError::Cancelled) => return Err(FitError::Cancelled),
                         Err(error) => Err(error.failure_text()),
@@ -327,9 +351,11 @@ impl FitEngine {
         Ok(solved.into_iter().map(Result::ok).collect())
     }
 
-    /// `_settle_population(spec, result, nested, options)`; `student`: both
-    /// were solved with the Student-t likelihood (`student_dof`).
-    pub fn settle_population(&self, spec: &Arc<FitModelSpec>, result: FitResult, nested: Option<&FitResult>, options: &FitOptions, student: bool) -> Result<FitResult, FitError> {
+    /// `_settle_population(spec, result, nested, options)`; `cell`: the
+    /// observations both were solved on (their trials, if binomial).  Both
+    /// answers were solved by the same likelihood, which the result's
+    /// `error_basis` names.
+    pub fn settle_population(&self, spec: &Arc<FitModelSpec>, result: FitResult, nested: Option<&FitResult>, options: &FitOptions, cell: &FitCell) -> Result<FitResult, FitError> {
         let (Some(reduction), Some(threshold)) = (&spec.reduction, options.min_bic_gain) else { return Ok(result) };
         if !result.success {
             return Ok(result);
@@ -339,39 +365,51 @@ impl FitEngine {
         let wide_free = spec.parameters.len() as i64 - result.fixed_parameter_names.len() as i64;
         let narrow_free = nested_spec.parameters.len() as i64 - nested.fixed_parameter_names.len() as i64;
         let extra = wide_free - narrow_free;
-        let evidence = if spec.counted() {
-            // Counts: the Poisson deviance, with the shots as the sample size.
-            let wide_fitted = result.fitted_values();
-            let wide_residuals = result.residuals();
-            let wide_observed: Vec<f64> = wide_fitted.iter().zip(wide_residuals.iter()).map(|(f, r)| f + r).collect();
-            let narrow_fitted = nested.fitted_values();
-            let narrow_residuals = nested.residuals();
-            let narrow_observed: Vec<f64> = narrow_fitted.iter().zip(narrow_residuals.iter()).map(|(f, r)| f + r).collect();
-            let wide_root = poisson_deviance_residual(&wide_fitted, &wide_observed);
-            let narrow_root = poisson_deviance_residual(&narrow_fitted, &narrow_observed);
-            let deviance_wide = super::blas::ddot(&wide_root, &wide_root);
-            let deviance_narrow = super::blas::ddot(&narrow_root, &narrow_root);
-            let clipped: Vec<f64> = wide_observed.iter().map(|&v| if v < 0.0 { 0.0 } else { v }).collect();
-            let shots = numpy_sum(&clipped);
-            (deviance_narrow - deviance_wide) - extra as f64 * pmax(shots, 1.0).ln()
-        } else if student {
-            // Means of repeats with their own standard errors: -2 ln L is
-            // twice each solve's cost (the Student-t likelihood carries
-            // its scales, nothing is profiled), so BIC = 2 cost + k ln n.
-            let points = result.residuals().len().max(1) as f64;
-            match (result.diagnostics, nested.diagnostics) {
-                (Some(wide), Some(narrow)) => 2.0 * (narrow.cost - wide.cost) - extra as f64 * points.ln(),
-                _ => f64::NAN,
+        let evidence = match result.error_basis {
+            ErrorBasis::Likelihood(likelihood) => {
+                // Counts and proportions: the deviance, with the shots (the
+                // trials) as the sample size.
+                let trials = match (&cell.trials, &cell.data) {
+                    (Some(trials), CellData::Points { coordinates, observations: Some(observations) }) => Some(kept(trials, &finite_points(coordinates, observations))),
+                    _ => None,
+                };
+                let deviance = |fit: &FitResult| -> Result<f64, FitError> {
+                    let fitted = fit.fitted_values();
+                    let observed: Vec<f64> = fitted.iter().zip(fit.residuals().iter()).map(|(f, r)| f + r).collect();
+                    let root = deviance_residuals(likelihood, &fitted, &observed, trials.as_deref())?;
+                    Ok(super::blas::ddot(&root, &root))
+                };
+                let (deviance_wide, deviance_narrow) = (deviance(&result)?, deviance(nested)?);
+                let shots = match &trials {
+                    Some(trials) => numpy_sum(trials),
+                    None => {
+                        let fitted = result.fitted_values();
+                        let clipped: Vec<f64> = fitted.iter().zip(result.residuals().iter()).map(|(f, r)| f + r).map(|v| if v < 0.0 { 0.0 } else { v }).collect();
+                        numpy_sum(&clipped)
+                    }
+                };
+                (deviance_narrow - deviance_wide) - extra as f64 * pmax(shots, 1.0).ln()
             }
-        } else {
-            // A series: Gaussian errors of one unknown scale (relative to
-            // the observation sigma when there is one), the scale profiled
-            // out: BIC = n ln(chi^2/n) + k ln n, chi^2 the (weighted) sum of
-            // squares each solve reports as reduced chi-square x dof.
-            let points = result.residuals().len() as i64;
-            let chi_square = |fit: &FitResult, free: i64| fit.reduced_chi_square * (points - free).max(1) as f64;
-            let (wide, narrow) = (chi_square(&result, wide_free), chi_square(nested, narrow_free));
-            points as f64 * (narrow / wide).ln() - extra as f64 * (points.max(1) as f64).ln()
+            ErrorBasis::Sandwich { .. } => {
+                // Means of repeats with their own standard errors: -2 ln L is
+                // twice each solve's cost (the Student-t likelihood carries
+                // its scales, nothing is profiled), so BIC = 2 cost + k ln n.
+                let points = result.residuals().len().max(1) as f64;
+                match (result.diagnostics, nested.diagnostics) {
+                    (Some(wide), Some(narrow)) => 2.0 * (narrow.cost - wide.cost) - extra as f64 * points.ln(),
+                    _ => f64::NAN,
+                }
+            }
+            ErrorBasis::Residuals { .. } => {
+                // A series: Gaussian errors of one unknown scale (relative to
+                // the observation sigma when there is one), the scale profiled
+                // out: BIC = n ln(chi^2/n) + k ln n, chi^2 the (weighted) sum of
+                // squares each solve reports as reduced chi-square x dof.
+                let points = result.residuals().len() as i64;
+                let chi_square = |fit: &FitResult, free: i64| fit.reduced_chi_square * (points - free).max(1) as f64;
+                let (wide, narrow) = (chi_square(&result, wide_free), chi_square(nested, narrow_free));
+                points as f64 * (narrow / wide).ln() - extra as f64 * (points.max(1) as f64).ln()
+            }
         };
         if !evidence.is_finite() {
             return Ok(result);
@@ -400,6 +438,17 @@ impl FitEngine {
             .collect();
         let mut covariance = vec![0.0; count * count];
         let mut errors = vec![0.0; count];
+        // The nested answer's intervals at the shared parameters; a pinned
+        // or fixed one's is its value.
+        let intervals = nested.intervals.as_ref().map(|narrow| {
+            let mut wide: Vec<[f64; 2]> = values.iter().map(|&v| [v, v]).collect();
+            for (w, n) in &reduction.shared {
+                if let (Ok(wi), Ok(ni)) = (spec.parameter_index(w), nested_spec.parameter_index(n)) {
+                    wide[wi] = narrow[ni];
+                }
+            }
+            wide
+        });
         if nested.covariance_valid {
             let narrow_count = nested_spec.parameters.len();
             let wide: Vec<usize> = reduction.shared.iter().map(|(w, _)| spec.parameter_index(w).expect("shared")).collect();
@@ -441,6 +490,8 @@ impl FitEngine {
             reduced: true,
             evidence,
             diagnostics: nested.diagnostics,
+            error_basis: nested.error_basis,
+            intervals,
         })
     }
 
@@ -480,23 +531,20 @@ impl FitEngine {
                 if coordinates.iter().any(|a| a.len() != values.len()) {
                     return Err(FitError::value("coordinates and observations must have equal flattened shape"));
                 }
-                if let Some(sigma) = &cell.sigma {
-                    if sigma.len() != values.len() {
-                        return Err(FitError::value("observation_sigma must match observations"));
-                    }
-                    if counted {
-                        return Err(FitError::value("histogram targets weight themselves by counts; an external sigma has no meaning there"));
-                    }
-                }
+                let likelihood = observation_likelihood(counted, values.len(), cell.sigma.as_deref(), cell.trials.as_deref())?;
                 if let Some(indices) = &cell.selected_indices {
                     if indices.len() != values.len() {
                         return Err(FitError::value("selected_indices must match observations"));
                     }
                 }
-                let finite: Vec<bool> = (0..values.len()).map(|i| values[i].is_finite() && coordinates.iter().all(|a| a[i].is_finite())).collect();
-                let keep = |source: &[f64]| -> Vec<f64> { source.iter().zip(&finite).filter(|(_, f)| **f).map(|(&v, _)| v).collect() };
+                let finite = finite_points(coordinates, values);
+                let keep = |source: &[f64]| kept(source, &finite);
                 let coords: Vec<Vec<f64>> = coordinates.iter().map(|a| keep(a)).collect();
                 let values_kept = keep(values);
+                let trials_kept = cell.trials.as_ref().map(|t| keep(t));
+                if let Some(trials) = &trials_kept {
+                    check_proportions(&values_kept, trials)?;
+                }
                 let indices: Vec<i64> = match &cell.selected_indices {
                     Some(indices) => indices.iter().zip(&finite).filter(|(_, f)| **f).map(|(&v, _)| v).collect(),
                     None => (0..values.len() as i64).zip(&finite).filter(|(_, f)| **f).map(|(v, _)| v).collect(),
@@ -546,7 +594,7 @@ impl FitEngine {
                 let mut binned = false;
                 if let Some(sigma) = &sigma_kept {
                     weights = sigma_weights(sigma);
-                } else if !counted && !free_indices.is_empty() && model.independent_arity == 1 && opts.loss == "linear" {
+                } else if likelihood == Likelihood::Gaussian && !free_indices.is_empty() && model.independent_arity == 1 && opts.loss == "linear" {
                     if let Some(max_exact) = opts.max_exact_points {
                         if values_kept.len() as i64 > 2 * max_exact {
                             if let Some((x, y, w)) = binned_curve_statistics(&coords[0], &values_kept, max_exact) {
@@ -572,6 +620,8 @@ impl FitEngine {
                     solver_values,
                     weights,
                     dof: dof_kept,
+                    likelihood,
+                    trials: trials_kept,
                     binned,
                     revision: cell.data_revision as u64,
                     origin,
@@ -615,8 +665,8 @@ impl FitEngine {
                     return Err(FitError::runtime("fixed fit evaluation is non-finite"));
                 }
                 let residuals: Vec<f64> = item.values.iter().zip(&fitted).map(|(v, f)| v - f).collect();
-                let quality: Vec<f64> = if counted {
-                    poisson_deviance_residual(&fitted, &item.values)
+                let quality: Vec<f64> = if item.likelihood.fixes_noise() {
+                    deviance_residuals(item.likelihood, &fitted, &item.values, item.trials.as_deref())?
                 } else {
                     match &item.weights {
                         None => residuals.clone(),
@@ -624,6 +674,9 @@ impl FitEngine {
                     }
                 };
                 let reduced = super::blas::ddot(&quality, &quality) / item.values.len() as f64;
+                if !reduced.is_finite() {
+                    return Err(FitError::value("the fixed parameters put the model outside its likelihood's support"));
+                }
                 let count = parameter_count;
                 Ok(FitResult {
                     model: item.model.clone(),
@@ -642,6 +695,8 @@ impl FitEngine {
                     reduced: false,
                     evidence: f64::NAN,
                     diagnostics: None,
+                    error_basis: ErrorBasis::of(item.likelihood, item.dof.is_some(), item.values.len(), 0),
+                    intervals: item.likelihood.fixes_noise().then(|| fixed_values.iter().map(|&v| [v, v]).collect()),
                 })
             })();
             outcomes[index] = Some(match outcome {
@@ -660,7 +715,7 @@ impl FitEngine {
         // cells is one bucket, and a Stop does not wait for all of it.
         for bucket in &buckets {
             check.check()?;
-            match solve_bucket(kernel, &prepared, bucket, &base_lower, &base_upper, counted, loss, parameter_count, &check)? {
+            match solve_bucket(kernel, &prepared, bucket, &base_lower, &base_upper, loss, parameter_count, &check)? {
                 Ok(list) => {
                     check.check()?;
                     for (cell, outcome) in list {
@@ -800,7 +855,7 @@ fn form_buckets(prepared: &[Option<Prepared>], active: &[usize], counted: bool, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, base_lower: &[f64], base_upper: &[f64], counted: bool, loss: i64, parameter_count: usize, check: &Check) -> Result<Result<Vec<(usize, CellOutcome)>, String>, FitError> {
+fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, base_lower: &[f64], base_upper: &[f64], loss: i64, parameter_count: usize, check: &Check) -> Result<Result<Vec<(usize, CellOutcome)>, String>, FitError> {
     let use_weights = bucket.cells.iter().any(|&c| prepared[c].as_ref().expect("cell").weights.is_some());
     let max_nfev = match &bucket.layout {
         Layout::Shared => bucket.budget,
@@ -813,7 +868,7 @@ fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, 
         .map(|(local, &cell)| {
             check.check()?;
             let item = prepared[cell].as_ref().expect("cell");
-            Ok((cell, solve_one(kernel, item, &bucket.layout, local, base_lower, base_upper, counted, loss, use_weights, max_nfev)))
+            Ok((cell, solve_one(kernel, item, &bucket.layout, local, base_lower, base_upper, loss, use_weights, max_nfev)))
         })
         .collect::<Result<_, FitError>>()?;
     // A prepare- or finalize-time exception fails the whole bucket.
@@ -830,16 +885,17 @@ fn solve_bucket(kernel: Kernel, prepared: &[Option<Prepared>], bucket: &Bucket, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, base_lower: &[f64], base_upper: &[f64], counted: bool, loss: i64, use_weights: bool, max_nfev: i64) -> Result<Solved, String> {
+fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, base_lower: &[f64], base_upper: &[f64], loss: i64, use_weights: bool, max_nfev: i64) -> Result<Solved, String> {
     // The coordinates and observations the kernel sees: the cell's own, or
     // the union grid with this cell's points marked valid.
-    let (grid_coords, grid_values, grid_valid, grid_weights, grid_dof): (Vec<Vec<f64>>, Vec<f64>, Vec<bool>, Vec<f64>, Vec<f64>) = match layout {
+    let (grid_coords, grid_values, grid_valid, grid_weights, grid_dof, grid_trials): (Vec<Vec<f64>>, Vec<f64>, Vec<bool>, Vec<f64>, Vec<f64>, Vec<f64>) = match layout {
         Layout::Shared => (
             item.compiled_coords.clone(),
             item.solver_values.clone(),
             vec![true; item.solver_values.len()],
             item.weights.clone().unwrap_or_else(|| vec![1.0; item.solver_values.len()]),
             item.dof.clone().unwrap_or_default(),
+            item.trials.clone().unwrap_or_default(),
         ),
         Layout::Masked { grid, positions, .. } => {
             let mut values = vec![0.0; grid.len()];
@@ -863,7 +919,17 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
                 }
                 None => Vec::new(),
             };
-            (vec![grid.clone()], values, valid, weights, dof)
+            let trials = match &item.trials {
+                Some(trials) => {
+                    let mut grid_trials = vec![f64::NAN; grid.len()];
+                    for (k, &p) in positions[local].iter().enumerate() {
+                        grid_trials[p] = trials[k];
+                    }
+                    grid_trials
+                }
+                None => Vec::new(),
+            };
+            (vec![grid.clone()], values, valid, weights, dof, trials)
         }
     };
     let axes = if grid_coords.len() == 1 { Axes::one(&grid_coords[0]) } else { Axes::two(&grid_coords[0], &grid_coords[1]) };
@@ -893,16 +959,25 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
     let objective = PointObjective {
         kernel,
         coords: axes,
-        data: ObjectiveData { observations: &grid_values, valid: &grid_valid, weights: weights_slice, use_weights, poisson: counted, loss_code: loss, dof: &grid_dof },
+        data: ObjectiveData { observations: &grid_values, valid: &grid_valid, weights: weights_slice, use_weights, likelihood: item.likelihood, trials: &grid_trials, loss_code: loss, dof: &grid_dof },
         selected: grid_valid.iter().filter(|&&v| v).count(),
     };
-    let solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, 1.0e-8, 1.0e-8, 1.0e-8, item.warm.is_some(), prepared.status);
+    let solution = trf::solve_cell(&objective, &prepared.seeds, &prepared.lower, &prepared.upper, &item.free_indices, max_nfev, trf::TOLERANCE, trf::TOLERANCE, trf::TOLERANCE, item.warm.is_some(), prepared.status);
     // Finalize on the cell's selected points.
     let selected_coords: Vec<Vec<f64>> = grid_coords.iter().map(|axis| axis.iter().zip(&grid_valid).filter(|(_, v)| **v).map(|(&x, _)| x).collect()).collect();
     let selected_axes = if selected_coords.len() == 1 { Axes::one(&selected_coords[0]) } else { Axes::two(&selected_coords[0], &selected_coords[1]) };
     let value_jacobian = |with_jacobian: bool| kernel.value_jacobian(&selected_axes, &solution.parameters, with_jacobian);
-    let finalized = trf::finalize_one(&value_jacobian, &grid_values, &grid_valid, &solution.parameters, &item.free_indices, weights_slice, use_weights, counted, loss, &grid_dof).map_err(|e| bucket_failure(&e))?;
+    let finalized = trf::finalize_one(&value_jacobian, &grid_values, &grid_valid, &solution.parameters, &item.free_indices, weights_slice, use_weights, item.likelihood, &grid_trials, loss, &grid_dof)
+        .map_err(|e| bucket_failure(&e))?;
     let covariance_valid = finalized.covariance_valid && solution.status >= STATUS_MAX_NFEV;
+    // A likelihood that fixes the noise: the errors are its profile intervals'.
+    let (mut covariance, mut errors) = (finalized.covariance, finalized.errors);
+    let intervals = (item.likelihood.fixes_noise() && covariance_valid).then(|| {
+        let profile = Profile { objective: &objective, parameters: &solution.parameters, free: &item.free_indices, lower: &prepared.lower, upper: &prepared.upper, budget: max_nfev };
+        let intervals = profile.intervals(&errors);
+        interval_covariance(&mut covariance, &mut errors, &intervals, &item.free_indices);
+        intervals
+    });
     // Back from the grid to the cell's own points.
     let (fitted, residuals) = match layout {
         Layout::Shared => (finalized.fitted, finalized.residuals),
@@ -922,10 +997,11 @@ fn solve_one(kernel: Kernel, item: &Prepared, layout: &Layout, local: usize, bas
         status: solution.status,
         fitted,
         residuals,
-        covariance: finalized.covariance,
-        errors: finalized.errors,
+        covariance,
+        errors,
         reduced: finalized.reduced,
         covariance_valid,
+        intervals,
     })
 }
 
@@ -1037,5 +1113,7 @@ fn finish_cell(item: &Prepared, mut solved: Solved, parameter_count: usize) -> C
         reduced: false,
         evidence: f64::NAN,
         diagnostics: Some(solved.diagnostics),
+        error_basis: ErrorBasis::of(item.likelihood, item.dof.is_some(), item.values.len(), free_count),
+        intervals: solved.intervals.filter(|_| covariance_valid),
     })
 }

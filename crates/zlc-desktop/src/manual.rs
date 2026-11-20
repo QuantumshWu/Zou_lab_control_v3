@@ -372,8 +372,8 @@ pub struct Apply {
 
 /// What an intent asks of the viewer beyond the copy itself.
 /// `Save`: Save as… onto the archive `path` (None: the window's Save dialog asks), writing
-/// over files already there only when `overwrite`.
-pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String, path: Option<String>, overwrite: bool, suggested: String }, Discarded { panel: Option<String>, signal: String } }
+/// over files already there only when `overwrite`; `asked`: the Save dialog chose `path`, asking before replacing it.
+pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String, path: Option<String>, asked: bool, overwrite: bool, suggested: String }, Discarded { panel: Option<String>, signal: String } }
 
 /// The document `save` a Save as… onto the archive `path` becomes: its picture beside it
 /// (v2 `with_suffix(".png")`; a name's own dots, "scan_1.5us", stay), writing over no file
@@ -382,7 +382,7 @@ pub enum Effect { None, Apply(Box<Apply>), Save { editor: String, panel: String,
 pub fn save_command(id: &Value, panel: &str, document: u32, path: &str, asked: bool, overwrite: bool) -> Value {
     let image = match path.strip_suffix(".npz").or_else(|| path.strip_suffix(".NPZ")) { Some(stem) => format!("{stem}.png"), None => format!("{path}.png") };
     let agreed = if overwrite { json!(true) } else if asked { json!([path]) } else { json!(false) };
-    json!({"id": id, "action": "save", "panel": panel, "path": image, "document": document, "overwrite": agreed})
+    json!({"id": id, "action": "save", "panel": panel, "path": image, "_document": document, "overwrite": agreed})
 }
 
 pub struct Draft {
@@ -1020,7 +1020,7 @@ impl Draft {
                 if self.modified || self.applied.is_none() { return Err("Apply & preview the current data before saving".into()); }
                 if !self.save_ready { return Err("the preview Panel has not accepted this data yet".into()); }
                 return Ok(Effect::Save { editor: self.id.clone(), panel: self.panel.clone(), path: op["path"].as_str().map(str::to_owned),
-                                        overwrite: op["overwrite"].as_bool().unwrap_or(false), suggested: self.suggested() });
+                                        asked: op["asked"].as_bool().unwrap_or(false), overwrite: op["overwrite"].as_bool().unwrap_or(false), suggested: self.suggested() });
             }
             other => return Err(format!("unknown data edit operation {}", python_quote(other))),
         }
@@ -1535,7 +1535,7 @@ mod tests {
             let mut command = save_command(&json!(request), "preview", 1, &archive.display().to_string(), asked, overwrite);
             assert_eq!(command["path"], json!(image.display().to_string()), "the picture beside the archive");
             // Which document it is for is the host's to read (main.rs), not the document's.
-            assert_eq!(command.as_object_mut().unwrap().remove("document"), Some(json!(1)));
+            assert_eq!(command.as_object_mut().unwrap().remove("_document"), Some(json!(1)));
             let state = document.execute(&command.to_string(), Default::default(), None, None).unwrap().state;
             document.finish_presentation(&all, &all);
             assert!(state["error"].is_null(), "{}", state["error"]);

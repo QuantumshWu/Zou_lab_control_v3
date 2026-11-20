@@ -111,7 +111,7 @@ try{
   const meanParsed=normalizeDynamicsResult(mean,scene,settings.initialStateId,settings.meanHorizonUs);
   assert.equal(meanParsed.mean.converged,true,'Smoke mean must be qualified, never the finite endpoint');
   // Motion: the 3D tweezer PGC example's motion request, its first 50 us, through the same path.
-  const tweezer=exampleScene('pgc3d').scene,motion=motionRequest(tweezer.dynamics),{motion:moves,...dynamics}=tweezer.dynamics;
+  const tweezer=exampleScene('pgc3d'),motion=motionRequest(tweezer.dynamics),{motion:moves,...dynamics}=tweezer.dynamics;
   const motionSettings={...dynamics,durationUs:50,samples:6,meanOnly:false,includeMean:false,motion,device:moves.device};
   const moving=await request('motion',motionSettings,tweezer);
   const movingParsed=normalizeDynamicsResult(moving,tweezer,motionSettings.initialStateId,motionSettings.meanHorizonUs,motion);

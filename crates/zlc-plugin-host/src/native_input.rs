@@ -7,6 +7,8 @@ use zlc_core::runtime::{DeliveryKind, GenerationId, Read, RuntimeError};
 use crate::{CallError, ErrorKind, Feed, Source};
 
 const CONTROL_SLICE: Duration = Duration::from_millis(20);
+/// Why a source that ends during collection fails the scan rather than being followed to its next run.
+const FIXED_SOURCE: &str = "a scan's source cannot change once collection began";
 
 pub(crate) struct CoreInput {
     sources: Receiver<Source>,
@@ -56,7 +58,7 @@ impl CoreInput {
             };
             let Feed::Live(subscription) = &source.feed else {
                 self.current = None;
-                if terminal_errors { return Err(CallError::new(ErrorKind::Failed, "the source signal has already ended")); }
+                if terminal_errors { return Err(CallError::new(ErrorKind::Failed, format!("the source run had already ended; {FIXED_SOURCE}"))); }
                 continue;
             };
             match subscription.next(wait) {
@@ -69,7 +71,7 @@ impl CoreInput {
                 Ok(None) => if Instant::now() >= deadline { return Ok(None); },
                 Ok(Some(_)) | Err(RuntimeError::Sealed | RuntimeError::UnknownGeneration) => {
                     self.current = None;
-                    if terminal_errors { return Err(CallError::new(ErrorKind::Failed, "the source signal ended during collection")); }
+                    if terminal_errors { return Err(CallError::new(ErrorKind::Failed, format!("the source run ended during collection; {FIXED_SOURCE}"))); }
                 }
                 Err(error) => return Err(CallError::new(ErrorKind::Failed, format!("scan input: {error}"))),
             }
@@ -135,7 +137,8 @@ mod tests {
         assert_eq!(read.key().generation, new.id());
         assert!(Arc::ptr_eq(read.anchor().data().unwrap(), &data));
         runtime.seal(&new, json!({"status":"completed"})).unwrap();
-        assert!(input.next(Duration::ZERO, &stop, true).err().unwrap().message.contains("source signal ended"));
+        let ended = input.next(Duration::ZERO, &stop, true).err().unwrap().message;
+        assert!(ended.contains("source run ended during collection") && ended.contains("cannot change once collection began"), "{ended}");
     }
 
     #[test]

@@ -49,7 +49,7 @@ fn attach(core: &Core, port: u16, instance: &str, local: &str, bench: Bench) -> 
     let (told, name) = (core.host.clone(), local.to_owned());
     link.on_event(move |op, params, lends| told.remote_event(&name, op, params, lends));
     assert!(attached.reads.iter().any(|name| name == "convert_tunable_value"));
-    core.host.attach(local, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap_or(false), attached.reads).unwrap();
+    core.host.attach(local, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap_or(false), attached.reads, attached.device_info).unwrap();
     let (lost, name) = (core.host.clone(), local.to_owned());
     link.on_failure(|_| {}, move |reason| lost.lost(&name, reason));
     link
@@ -77,6 +77,8 @@ fn a_published_device_serves_another_core_through_its_blocks_claims_and_safe_act
 
     let user = bench("pc1");
     let link = attach(&b, publisher.port(), "echo", "remote_echo", user.clone());
+    // What the device said of itself at its open there comes with it (a fact with no value left out).
+    assert_eq!(b.host.device_info("remote_echo"), json!({"model": "echo", "serial": "gain-2.0"}));
     // A frame lands in a block of the using core.
     let reply = b.host.spi("remote_echo", "frame", json!([256, 5]), json!({}), Duration::from_secs(10)).unwrap();
     let frame = reply.array(&reply.value).unwrap();
@@ -174,7 +176,7 @@ fn remote_snapshots_equal_the_same_local_device_for_tunables_native_state_and_un
         publisher.publish(name, name).unwrap();
         let (link, attached) = Link::open("127.0.0.1", publisher.port(), name, bench("consumer"), b.host.registry().clone()).unwrap();
         assert_eq!(attached.snapshot, Some(reports));
-        b.host.attach(name, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap(), attached.reads).unwrap();
+        b.host.attach(name, attached.descriptor, Arc::new(link.clone()), attached.tunable, attached.snapshot.unwrap(), attached.reads, attached.device_info).unwrap();
         assert_eq!(b.host.snapshot(name, &json!({}), Duration::from_secs(2)).unwrap(), local, "{kind}: preserve the owner's entire answer");
         // A second socket may list devices, but snapshot is still an owned
         // instance operation: it cannot bypass attach or borrow this owner's claim.
@@ -249,7 +251,8 @@ fn a_device_with_its_own_server_is_announced_as_the_client_type_another_machine_
     assert_eq!(found[0]["parameters"], json!({"port": 18990, "host": "127.0.0.1"}));
     // A core using it as that client watches the announcement: the withdrawal reaches it as a remote.device's does.
     assert!(Link::watch("127.0.0.1", publisher.port(), "test.echo", &json!(1), bench("pc1"), b.host.registry().clone()).is_err(), "nothing there");
-    let watch = Link::watch("127.0.0.1", publisher.port(), "test.echo", &json!(18990), bench("pc1"), b.host.registry().clone()).unwrap();
+    let (watch, watched) = Link::watch("127.0.0.1", publisher.port(), "test.echo", &json!(18990), bench("pc1"), b.host.registry().clone()).unwrap();
+    assert_eq!((watched.instance.as_str(), watched.publisher.as_str()), ("served", "pc2"), "who announces it");
     let (sender, lost) = mpsc::channel();
     let sender = Mutex::new(sender);
     watch.on_failure(|_| {}, move |reason| { let _ = sender.lock().unwrap().send(reason.to_owned()); });
@@ -392,7 +395,8 @@ fn first_publication_waits_for_local_calls_and_duplicate_publish_cannot_replace_
     publisher.on_note(move |_, line| { let _ = noting.send(line.to_owned()); });
     let publishing = publisher.clone();
     let publish = std::thread::spawn(move || publishing.publish("rf", "RF"));
-    assert!(notes.recv_timeout(Duration::from_secs(3)).unwrap().contains("RETIRING"));
+    let waiting = notes.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(waiting.contains("FABRIC PUBLISH WAITING") && !waiting.contains("RETIRING"), "a first publication retires nothing: {waiting}");
     assert!(publisher.publish("rf", "duplicate").is_err());
     assert!(Link::open("127.0.0.1", publisher.port(), "rf", bench("early"), b.host.registry().clone()).is_err());
     assert!(!publish.is_finished());

@@ -11,8 +11,8 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 use zlc_pulse::binding::{apply_config_values, field_label, prune_orphaned_bindings, refuse_new_label_clash, pulse_field_value, resolve_api_parameters,
                          resolve_subpulse_sources, stale_subpulse_bindings};
-use zlc_pulse::codec::{ConfigValues, EditorSection, absolute, atomic_write, document_to_tree, read_config_values, read_pulse_document,
-                       read_subpulse, write_config_values, write_subpulse};
+use zlc_pulse::codec::{ConfigValues, EditorSection, absolute, config_values_to_tree, document_to_tree, read_config_values, read_pulse_document,
+                       read_subpulse, subpulse_to_tree};
 use zlc_pulse::compile::{CompiledProgram, compile_sequence};
 use zlc_pulse::components::{extract_subpulse, group_component, insert_subpulse, remove_component, replace_component,
                             set_subpulse_source, ungroup_component};
@@ -120,7 +120,27 @@ pub struct Editor {
     pub(crate) operator: bool,
     /// The schedule's cards last sent, to take back the unchanged ones (`project::Cards`).
     cards: std::cell::RefCell<crate::project::Cards>,
+    /// The open pulse with its Subpulse sources resolved, as of (revision, path): what every page
+    /// of one view reads, worked out once per change rather than once per page.
+    resolution: std::cell::RefCell<Option<((u64, String), Result<Sequence>)>>,
+    /// The files the last command wrote, for the host to put on the disk off the window's turn,
+    /// and what was saved before them (put back if they cannot be written).
+    writes: Vec<(PathBuf, Vec<u8>)>,
+    marks: Option<Marks>,
 }
+
+/// What says which drafts are saved where: a command that writes files changes it at once, and it
+/// is put back when they cannot be written.
+struct Marks {
+    saved: EditorState, path: String, config_path: String, config_saved_rows: Vec<[String; 3]>, config_loaded_path: String,
+    config_loaded_values: ConfigValues, config_read_error: String, subpulse_saved: Option<Subpulse>, subpulse_path: String,
+    instance_saved: BTreeMap<String, Subpulse>, summary_note: Option<String>,
+    board_config: Option<(ConfigValues, String, Option<PathBuf>)>, operator: bool,
+}
+
+/// Files a command wrote, to be put on the disk off the window's turn ([`Editor::take_writes`]);
+/// [`Editor::written`] then settles the command's answer.
+pub struct Writes { pub files: Vec<(PathBuf, Vec<u8>)>, marks: Marks, operator: bool }
 
 fn arg<'a>(args: &'a Map<String, Value>, name: &str) -> std::result::Result<&'a Value, String> {
     args.get(name).ok_or_else(|| format!("missing argument {name}"))
@@ -146,8 +166,92 @@ impl Editor {
             subpulse_path: String::new(), subpulse_visible: None, scan_progress: (String::new(), "task"), scan_running: false,
             target_feedback: (String::new(), "idle"), target_feedback_at: 0, include_off: false, pinned_size: None, selectors: true, page: "Edit".into(),
             preview_status: (String::new(), "task"), message: None, messages: 0, last_warning: String::new(), summary_note: None,
-            jobs: Vec::new(), operator: false, cards: Default::default(),
+            jobs: Vec::new(), operator: false, cards: Default::default(), resolution: Default::default(), writes: Vec::new(), marks: None,
         }
+    }
+
+    // ------------------------------------------------------------- files
+    /// The file a command reads (its `path`, or the file it reloads), for the host to read ahead
+    /// off the window's turn (`zlc_pulse::codec::read_ahead`); None: it reads none.
+    pub fn reads(&self, action: &str, args: &Map<String, Value>) -> Option<PathBuf> {
+        let op = args.get("op").and_then(Value::as_str).unwrap_or("");
+        let path = optional_text(args, "path");
+        let named = match (action, op) {
+            ("pulse_open", _) | ("pulse_config", "load") | ("pulse_subpulse", "open" | "insert_file") | ("pulse_scan", "load_array" | "load_program") => path,
+            ("pulse_subpulse", "source") => path.map(|text| self.subpulse_source_path(&text)),
+            // A block's own file, opened where it is edited.
+            ("pulse_subpulse", "select" | "context" | "open_source") => optional_text(args, "component_id").and_then(|key| self.state.sequence.as_ref()
+                .and_then(|sequence| sequence.components.iter().find(|component| component.component_id == key).map(|component| component.config_path.clone())))
+                .filter(|path| !path.is_empty()),
+            ("pulse_config", "refresh") => Some(self.config_path.clone()).filter(|path| !path.is_empty()),
+            ("pulse_config", "mode") if flag(args, "enabled") => Some(self.active_config_path()).filter(|path| !path.is_empty()),
+            _ => None,
+        };
+        named.map(|path| absolute(Path::new(&path)))
+    }
+
+    /// Where a Subpulse source named `text` is: relative to the pulse's folder.
+    fn subpulse_source_path(&self, text: &str) -> String {
+        let location = PathBuf::from(text);
+        let location = if location.is_absolute() { location } else { self.save_folder().join(location) };
+        absolute(&location).display().to_string()
+    }
+
+    /// Put `bytes` in `path`: written by the host off the window's turn once the command is done.
+    fn write(&mut self, path: &Path, bytes: Vec<u8>) {
+        if self.marks.is_none() {
+            self.marks = Some(Marks { saved: self.saved.clone(), path: self.path.clone(), config_path: self.config_path.clone(),
+                config_saved_rows: self.config_saved_rows.clone(), config_loaded_path: self.config_loaded_path.clone(),
+                config_loaded_values: self.config_loaded_values.clone(), config_read_error: self.config_read_error.clone(),
+                subpulse_saved: self.subpulse_saved.clone(), subpulse_path: self.subpulse_path.clone(), instance_saved: self.instance_saved.clone(),
+                summary_note: self.summary_note.clone(), board_config: self.link.board.as_ref().map(|board| board.config().held()),
+                operator: self.operator });
+        }
+        self.writes.push((path.to_path_buf(), bytes));
+    }
+
+    /// The files the last command wrote, if it wrote any.
+    pub fn take_writes(&mut self) -> Option<Writes> {
+        let marks = self.marks.take()?;
+        let operator = marks.operator;
+        Some(Writes { files: std::mem::take(&mut self.writes), marks, operator })
+    }
+
+    /// The host wrote them (or could not): the command's `answer` stands, or the drafts are marked
+    /// as they were before it and the failure is its answer.
+    pub fn written(&mut self, writes: Writes, result: std::result::Result<(), String>, answer: Answer) -> Answer {
+        // Whatever the pages showed of those files is worked out again.
+        self.revision += 1;
+        let Err(error) = result else { return answer };
+        let Marks { saved, path, config_path, config_saved_rows, config_loaded_path, config_loaded_values, config_read_error,
+                    subpulse_saved, subpulse_path, instance_saved, summary_note, board_config, .. } = writes.marks;
+        (self.saved, self.path, self.config_path, self.config_saved_rows, self.config_loaded_path) = (saved, path, config_path, config_saved_rows, config_loaded_path);
+        (self.config_loaded_values, self.config_read_error, self.subpulse_saved, self.subpulse_path) = (config_loaded_values, config_read_error, subpulse_saved, subpulse_path);
+        (self.instance_saved, self.summary_note) = (instance_saved, summary_note);
+        if let (Some(board), Some(held)) = (&self.link.board, board_config) { board.config().restore(held); }
+        let message = format!("Cannot save: {error}");
+        if writes.operator { self.warn(message.clone()); } else { self.last_warning = message.clone(); }
+        Err(message)
+    }
+
+    /// Subpulse files changed on the disk: what the pages show of them is worked out again.
+    pub fn subpulse_files_changed(&mut self) {
+        if self.state.sequence.as_ref().is_some_and(|sequence| sequence.config_enabled && sequence.components.iter().any(|c| c.from_file())) {
+            self.revision += 1;
+        }
+    }
+
+    /// `sequence` with its Subpulse sources resolved; the open pulse's once per revision.
+    pub(crate) fn resolved(&self, sequence: &Sequence) -> Result<Sequence> {
+        let base = self.base_directory();
+        let current = self.state.sequence.as_deref().is_some_and(|open| std::ptr::eq(open, sequence));
+        if !current { return resolve_subpulse_sources(sequence, base.as_deref()); }
+        let key = (self.revision, self.path.clone());
+        let mut held = self.resolution.borrow_mut();
+        if let Some((_, resolved)) = held.as_ref().filter(|(of, _)| *of == key) { return resolved.clone(); }
+        let resolved = resolve_subpulse_sources(sequence, base.as_deref());
+        *held = Some((key, resolved.clone()));
+        resolved
     }
 
     pub fn sequence(&self) -> Option<&Arc<Sequence>> { self.state.sequence.as_ref() }
@@ -263,7 +367,7 @@ impl Editor {
         let Some(sequence) = &self.state.sequence else { return false };
         if self.state.section.scan_rows.is_empty() { return false; }
         let held: BTreeSet<&str> = self.state.section.scan_fields.iter().map(|(field, _)| field.as_str()).collect();
-        resolve_subpulse_sources(sequence, self.base_directory().as_deref())
+        self.resolved(sequence)
             .is_ok_and(|resolved| resolved.scan_bindings().iter().any(|b| held.contains(b.field_id().as_str())))
     }
 
@@ -278,7 +382,7 @@ impl Editor {
     /// and Subpulse files in force, never the Config draft.
     pub(crate) fn effective_sequence(&self, sequence: &Sequence) -> Result<Sequence> {
         if sequence.config_enabled && !self.config_read_error.is_empty() { return Err(Error::new(Kind::Value, self.config_read_error.clone())); }
-        let resolved = resolve_subpulse_sources(sequence, self.base_directory().as_deref())?;
+        let resolved = self.resolved(sequence)?;
         let base = self.played_scan(&resolved)?;
         let effective = apply_config_values(&resolved, &self.active_config_values(), Some(&base))?.0;
         if effective.bindings == resolved.bindings { return Ok(effective); }
@@ -289,7 +393,7 @@ impl Editor {
     /// `_execution_sequence`: the document On Pulse plays and the digest compares.
     pub(crate) fn execution_sequence(&self) -> Result<Sequence> {
         let sequence = self.state.sequence.as_ref().ok_or_else(|| Error::new(Kind::Runtime, "no pulse is open"))?;
-        let resolved = resolve_subpulse_sources(sequence, self.base_directory().as_deref())?;
+        let resolved = self.resolved(sequence)?;
         self.played_scan(&resolve_api_parameters(&resolved, None)?)
     }
 
@@ -368,9 +472,7 @@ impl Editor {
             self.edit_state(Some(Arc::new(named)), |_| {});
         }
         let sequence = self.state.sequence.clone().expect("open");
-        if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
-        let text = document_to_tree(&sequence, &self.state.section).readable();
-        atomic_write(&target, text.as_bytes()).map_err(|error| format!("Cannot save {}: {error}", target.display()))?;
+        self.write(&target, document_to_tree(&sequence, &self.state.section).readable().into_bytes());
         self.path = target.display().to_string();
         self.saved = self.state.clone();
         // v2 save_pulse: said to the operator (a dialog), else left in the summary.
@@ -632,7 +734,12 @@ impl Editor {
     /// a small local file); the draft follows when `load_draft`.
     fn config_file(&mut self, path: &str, entries: Option<&ConfigValues>, load_draft: bool, activate: bool) -> Answer {
         let result = (|| -> Result<ConfigValues> {
-            if let Some(entries) = entries { write_config_values(Path::new(path), entries)?; }
+            if let Some(entries) = entries {
+                // What it writes is what it holds: the file need not be read back.
+                self.write(Path::new(path), config_values_to_tree(entries)?.readable().into_bytes());
+                if activate { if let Some(board) = &self.link.board { board.config().hold_file(Path::new(path), entries.clone()); } }
+                return Ok(entries.clone());
+            }
             if activate {
                 match &self.link.board {
                     Some(board) => { board.config().load_file(Some(Path::new(path)))?; Ok(board.config().values()) }
@@ -855,11 +962,7 @@ impl Editor {
                     Some(Value::Null) => current.config_path.clone(),
                     Some(value) => {
                         let text = py_str(value);
-                        if text.is_empty() { String::new() } else {
-                            let location = PathBuf::from(&text);
-                            let location = if location.is_absolute() { location } else { self.save_folder().join(location) };
-                            absolute(&location).display().to_string()
-                        }
+                        if text.is_empty() { String::new() } else { self.subpulse_source_path(&text) }
                     }
                 };
                 let editing = self.selected_subpulse == key;
@@ -930,8 +1033,7 @@ impl Editor {
                     .ok_or_else(|| value_error("supply path explicitly when saving a Subpulse to a new file"))?;
                 let mut target = absolute(Path::new(&target));
                 if !target.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) { target.as_mut_os_string().push(".subpulse.json"); }
-                if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
-                write_subpulse(&target, &fragment)?;
+                self.write(&target, subpulse_to_tree(&fragment).readable().into_bytes());
                 if !context.is_empty() {
                     let written = target.display().to_string();
                     if let Some(sequence) = &self.state.sequence {
@@ -1077,13 +1179,13 @@ impl Editor {
 
     // ------------------------------------------------------------- Scan authoring
     pub(crate) fn scan_fields(&self) -> Vec<(String, String)> {
-        self.state.sequence.as_ref().and_then(|s| resolve_subpulse_sources(s, self.base_directory().as_deref()).ok())
+        self.state.sequence.as_ref().and_then(|s| self.resolved(s).ok())
             .map(|s| s.scan_bindings().iter().map(|b| (b.field_id(), b.unit.clone())).collect()).unwrap_or_default()
     }
 
     fn has_scan_slots(&self) -> std::result::Result<(), String> {
         let Some(sequence) = &self.state.sequence else { return Err("Bind at least one field to a scan slot first (click a dot in the Edit tab)".into()) };
-        match resolve_subpulse_sources(sequence, self.base_directory().as_deref()) {
+        match self.resolved(sequence) {
             Ok(resolved) if !resolved.scan_bindings().is_empty() => Ok(()),
             Ok(_) => Err("Bind at least one field to a scan slot first (click a dot in the Edit tab)".into()),
             Err(error) => Err(error.message),
@@ -1139,7 +1241,7 @@ impl Editor {
                 let kind = text_arg(args, "kind")?;
                 let sequence = self.state.sequence.clone().expect("checked");
                 let (geometry, _) = self.compiler_target().map_err(|e| e.message)?;
-                let resolved = resolve_subpulse_sources(&sequence, self.base_directory().as_deref()).map_err(|e| e.message)?;
+                let resolved = self.resolved(&sequence).map_err(|e| e.message)?;
                 let source = scan_table_template(&kind, &scan_columns_for(&resolved, &geometry).map_err(|e| e.message)?).map_err(|e| e.message)?;
                 self.edit_state(None, |section| { section.scan_source = source; section.scan_source_dirty = true; });
                 Ok(Value::Null)
@@ -1151,7 +1253,7 @@ impl Editor {
             }
             "load_program" => {
                 let path = optional_text(args, "path").ok_or("load_scan_program requires an explicit path")?;
-                let source = std::fs::read_to_string(&path).map_err(|error| format!("Cannot read {path}: {error}"))?;
+                let source = zlc_pulse::codec::read_text(Path::new(&path)).map_err(|error| format!("Cannot read {path}: {}", error.message))?;
                 self.edit_state(None, |section| { section.scan_source = source; section.scan_source_dirty = true; });
                 self.say_scan(format!("Loaded scan source from {path}"), "task");
                 Ok(Value::Null)
@@ -1188,10 +1290,10 @@ impl Editor {
                         crate::tables::unique_path(&self.save_folder(), &name, ".npy")
                     }
                 };
-                match crate::tables::write_named_npy(&path, &self.state.section.scan_fields, &self.state.section.scan_rows) {
-                    Ok(()) => { self.say_scan(format!("Saved {}", path.display()), "task"); Ok(json!({"path": path.display().to_string()})) }
-                    Err(error) => { let message = format!("Cannot save the scan table: {}", error.message); self.say_scan(message.clone(), "error"); Err(message) }
-                }
+                let bytes = crate::tables::named_npy(&self.state.section.scan_fields, &self.state.section.scan_rows);
+                self.write(&path, bytes);
+                self.say_scan(format!("Saved {}", path.display()), "task");
+                Ok(json!({"path": path.display().to_string()}))
             }
             "clear" => {
                 let dirty = !self.state.section.scan_source.is_empty();
@@ -1316,7 +1418,7 @@ impl Editor {
             "progress_polling": false}) };
         let rows = &self.state.section.scan_rows;
         let columns = self.compiler_target().and_then(|(geometry, _)| {
-            let resolved = resolve_subpulse_sources(sequence, self.base_directory().as_deref())?;
+            let resolved = self.resolved(sequence)?;
             Ok((scan_columns_for(&resolved, &geometry)?, resolved, geometry))
         });
         let (columns, resolved, geometry) = match columns {

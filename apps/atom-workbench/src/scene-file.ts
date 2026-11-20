@@ -3,7 +3,8 @@
 // earlier version is refused with the reason -- nothing is migrated.
 import type {AxisName,Direction,DynamicsSettings,FrequencyDisplayUnit,FrequencyExpr,InitialStateSpec,Laser,LaserFrequencyAnchor,LaserIntensityAnchor,
   LaserReflection,MagneticField,MotionSettings,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Scene} from './types.js';
-import {DEFAULT_PLATE_ANGLE_DEG,MAXIMUM_DURATION_US,MAXIMUM_LASERS,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION,defaultScene} from './types.js';
+import {DEFAULT_PLATE_ANGLE_DEG,MAXIMUM_DURATION_US,MAXIMUM_LASERS,MAXIMUM_SAMPLES,MEAN_HORIZONS_US,SCENE_VERSION} from './types.js';
+import {STARTUP_EXAMPLE,exampleScene} from './examples.js';
 import {DERIVED_CURVE_IDS} from './population-selection.js';
 import {DURATION_UNITS} from './duration.js';
 import {analyze,resolveSceneFrequencies} from './physics.js';
@@ -211,9 +212,9 @@ function readScene(input:unknown):Scene {
   return scene;
 }
 
-/** The scene the app starts with: always the default. Scenes are loaded only by the operator
- * (导入、示例); scene data an earlier version kept in this browser storage is removed. */
+/** The scene the app starts with: always the default, the example STARTUP_EXAMPLE (examples.ts). Scenes are
+ * loaded only by the operator (导入、示例); scene data an earlier version kept in this browser storage is removed. */
 export function startupScene(storage:Pick<Storage,'removeItem'>|undefined,prefix:string):Scene{
   for(const suffix of ['','-unreadable','-baseline','-state-labels'])try{storage?.removeItem(prefix+suffix);}catch{/* storage unavailable */}
-  return defaultScene();
+  return exampleScene(STARTUP_EXAMPLE);
 }

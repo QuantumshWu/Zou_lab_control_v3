@@ -8,7 +8,11 @@
 //! a panel never staged joins the board's next crossing (at once on a board that
 //! has shown nothing). A late turn shows the newest data and never replays the shots
 //! it missed. A panel inside its interval keeps the data it shows, so its fit and
-//! readouts do not move.
+//! readouts do not move. A board turn stages every panel it took new data for, whether
+//! or not that panel's own data had moved: the interval caps how often the board turns,
+//! not only how often a picture changes, and a panel whose data is quiet keeps the beat
+//! of the others (with a fast source beside it the board turns once per crossing, not
+//! once per publication).
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +25,8 @@ pub struct Cadence {
     staged: BTreeMap<String, Instant>,
     /// When the board's current job was dispatched (a panel it presents staged then).
     dispatched: Option<Instant>,
+    /// The panels the current board turn takes new data for (none for an operator's edit).
+    covered: BTreeSet<String>,
     /// When a panel held back may take its new data.
     next: Option<Instant>,
 }
@@ -43,16 +49,19 @@ impl Cadence {
         self.next = held.values().min().copied();
         if !intervals.is_empty() && held.len() == intervals.len() { return None; }
         self.dispatched = Some(now);
+        self.covered = intervals.keys().filter(|panel| !held.contains_key(panel.as_str())).cloned().collect();
         Some(held.into_keys().map(str::to_owned).collect())
     }
 
     /// A command of the board's own (an operator's edit) stages its panel now, as v2's owed presentation.
-    pub fn dispatch(&mut self, now: Instant) { self.dispatched = Some(now); }
+    pub fn dispatch(&mut self, now: Instant) { self.dispatched = Some(now); self.covered.clear(); }
 
-    /// The panels a completed job put new pictures of on screen staged at its dispatch.
+    /// A completed job staged at its dispatch: the panels it put new pictures of on screen, and
+    /// every panel a board turn took new data for.
     pub fn presented<'a>(&mut self, panels: impl IntoIterator<Item = &'a String>) {
+        let covered = std::mem::take(&mut self.covered);
         let Some(at) = self.dispatched else { return };
-        for panel in panels { self.staged.insert(panel.clone(), at); }
+        for panel in panels.into_iter().cloned().chain(covered) { self.staged.insert(panel, at); }
     }
 
     /// Whether a held panel's interval has passed (once: the board then syncs).
@@ -146,8 +155,35 @@ mod tests {
         cadence.presented(&["panel-1".to_owned(), "panel-3".to_owned()]);
         // The 800 crossing is every interval's: all three in one turn.
         assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(800)), Some(BTreeSet::new()));
-        // A due panel that showed nothing new keeps its old staging: due at once later.
+        // A turn stages every panel it took new data for, a picture changed or not: the next
+        // turn is the next crossing, not the next publication.
         cadence.presented(&[]);
-        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(810)), Some(BTreeSet::new()));
+        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(810)), None);
+        assert_eq!(cadence.wake_at(), Some(start + Duration::from_millis(900)));
+        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(900)), Some(["panel-2".to_owned()].into()));
+        // An operator's edit stages only the panel it showed.
+        cadence.presented(&[]);
+        cadence.dispatch(start + Duration::from_millis(950));
+        cadence.presented(&["panel-3".to_owned()]);
+        assert_eq!(cadence.plan(&intervals, start + Duration::from_millis(1000)), Some(["panel-2".to_owned()].into()));
+    }
+
+    /// A source publishing every 10 ms beside quiet panels: the board turns once per 100 ms
+    /// crossing, not once per publication (the lab's waveform at 100 Hz turned it 20 times a second).
+    #[test]
+    fn a_fast_source_beside_quiet_panels_turns_the_board_once_per_crossing() {
+        let mut cadence = Cadence::default();
+        let intervals = board(&[("camera", 100), ("survival", 100), ("waveform", 100)]);
+        let start = Instant::now();
+        let mut turns = 0;
+        for tick in 0..100u64 {
+            let now = start + Duration::from_millis(tick * 10);
+            if cadence.plan(&intervals, now).is_some() {
+                turns += 1;
+                // Only the waveform had new data; the camera and survival panels showed what they did.
+                cadence.presented(&["waveform".to_owned()]);
+            }
+        }
+        assert_eq!(turns, 10, "one turn per crossing over one second");
     }
 }

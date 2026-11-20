@@ -37,7 +37,7 @@ pub mod link;
 pub mod discover;
 
 pub use discover::discover;
-pub use link::{Attached, Link};
+pub use link::{Attached, Link, Watched};
 pub use server::Publisher;
 
 /// The wire vocabulary; either side refuses a peer of another version by name.

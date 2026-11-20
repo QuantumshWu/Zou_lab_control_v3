@@ -77,6 +77,9 @@ pub struct FitSelection {
     pub observation_sigma: Option<Array>,
     /// The degrees of freedom of each sigma (`CurveSeries::sem_dof`).
     pub observation_dof: Option<Array>,
+    /// The Bernoulli trials of each proportion (`CurveSeries::trials`): the
+    /// fit reads them by the binomial likelihood.
+    pub observation_trials: Option<Array>,
     pub facet_index: Option<usize>,
     pub selector_kind: Option<SelectorKind>,
     pub regular_image: Option<RegularImage>,
@@ -89,12 +92,15 @@ impl FitSelection {
         let regular = self.regular_image.as_ref().map(|r| json!({"type": "RegularImageFitInput", "x_coordinates": arrays.array(&r.x),
             "y_coordinates": arrays.array(&r.y), "observations": arrays.array(&r.observations),
             "valid_mask": optional(arrays, &r.valid_mask), "selected_indices": Value::Null}));
-        json!({"type": "FitSelection", "data_revision": self.data_revision, "scope": self.scope.value(),
+        let mut value = json!({"type": "FitSelection", "data_revision": self.data_revision, "scope": self.scope.value(),
                "coordinates": self.coordinates.iter().map(|c| arrays.array(c)).collect::<Vec<_>>(),
                "observations": arrays.array(&self.observations), "selected_indices": optional(arrays, &self.selected_indices),
                "observation_sigma": optional(arrays, &self.observation_sigma), "facet_index": self.facet_index,
                "selector_kind": self.selector_kind.map(SelectorKind::value), "regular_image": regular.unwrap_or(Value::Null),
-               "group_key": self.group_key.iter().map(AxisValue::golden).collect::<Vec<_>>()})
+               "group_key": self.group_key.iter().map(AxisValue::golden).collect::<Vec<_>>()});
+        // A proportion's trials: the oracle has none (AGREEMENT.md, "Proportions").
+        if let Some(trials) = &self.observation_trials { value["observation_trials"] = arrays.array(trials); }
+        value
     }
 }
 
@@ -321,6 +327,7 @@ impl PreparedFitSelection {
                 Ok(FitSelection { data_revision: revision, scope, coordinates: vec![coordinates], observations: Array::vector(keep(&y, &valid)),
                     selected_indices: Some(indices_of(&valid)), observation_sigma: source.sem.as_ref().map(|s| Array::vector(keep(&floats(s), &valid))),
                     observation_dof: source.sem_dof.as_ref().map(|d| Array::vector(keep(&floats(d), &valid))),
+                    observation_trials: source.trials.as_ref().map(|n| Array::vector(keep(&floats(n), &valid))),
                     facet_index, selector_kind: kind, regular_image: None, group_key: vec![] })
             }
             Payload::Image(image) if self.regular_image => {
@@ -338,7 +345,7 @@ impl PreparedFitSelection {
                 let storage = if observations.dtype() == DType::Bool { Array::from_vec(observations.bools().iter().map(|b| u8::from(*b)).collect::<Vec<u8>>(), observations.shape().to_vec()) } else { observations };
                 let valid_mask = valid.filter(|v| !v.iter().all(|k| *k)).map(|v| Array::from_vec(v, storage.shape().to_vec()));
                 Ok(FitSelection { data_revision: revision, scope, coordinates: vec![x.clone(), y.clone()], observations: storage.clone(), selected_indices: None,
-                    observation_sigma: None, observation_dof: None, facet_index, selector_kind: kind,
+                    observation_sigma: None, observation_dof: None, observation_trials: None, facet_index, selector_kind: kind,
                     regular_image: Some(RegularImage { x, y, observations: storage, valid_mask }), group_key: vec![] })
             }
             Payload::Histogram(histogram) if selection.histogram() => {
@@ -372,7 +379,7 @@ impl PreparedFitSelection {
                 };
                 let coordinates = to_solver(keep(&centers, &valid), &histogram.centers, &solver[0])?;
                 Ok(FitSelection { data_revision: revision, scope, coordinates: vec![coordinates], observations: Array::vector(keep(&counts, &valid)),
-                    selected_indices: Some(indices_of(&valid)), observation_sigma: None, observation_dof: None, facet_index, selector_kind: kind, regular_image: None,
+                    selected_indices: Some(indices_of(&valid)), observation_sigma: None, observation_dof: None, observation_trials: None, facet_index, selector_kind: kind, regular_image: None,
                     group_key: histogram.group_keys[group].clone() })
             }
             _ if selection.histogram() => Err(ProjectionError::new(ErrorKind::Runtime, "histogram projection did not produce histogram data")),
@@ -398,7 +405,7 @@ impl PreparedFitSelection {
                     }
                 };
                 Ok(FitSelection { data_revision: revision, scope, coordinates, observations: Array::vector(selected), selected_indices: Some(Array::vector(chosen)),
-                    observation_sigma: None, observation_dof: None, facet_index, selector_kind: kind, regular_image: None, group_key: vec![] })
+                    observation_sigma: None, observation_dof: None, observation_trials: None, facet_index, selector_kind: kind, regular_image: None, group_key: vec![] })
             }
             _ => Err(ProjectionError::type_error("unsupported fit projection payload")),
         }

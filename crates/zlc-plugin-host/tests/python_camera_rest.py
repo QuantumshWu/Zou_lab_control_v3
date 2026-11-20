@@ -4,6 +4,7 @@ import pathlib
 import sys
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -18,19 +19,26 @@ def camera():
 
 
 def arm(device):
-    began = time.monotonic()
-    device.arm(1, source_group_sizes=(1,), buffer_frame_count=4, timeout=1.0)
-    return began, time.monotonic()
+    """Arm once: (when the arm returned, how long it rested -- as its own journal line says)."""
+
+    said = []
+    with mock.patch.object(zlc_plugin.journal, "note", lambda src, ev, **facts: said.append((src, ev, facts))):
+        device.arm(1, source_group_sizes=(1,), buffer_frame_count=4, timeout=1.0)
+    (rested,) = [facts["rested_seconds"] for src, ev, facts in said if (src, ev) == ("camera", "arm")]
+    return time.monotonic(), rested
 
 
 class CaptureRest(unittest.TestCase):
     def test_a_capture_begins_only_after_the_rest_since_the_last_one_ended(self):
         device = camera()
-        began, armed = arm(device)
-        self.assertLess(armed - began, CAPTURE_REST_SECONDS / 2, "the first capture waits for nothing")
+        _, rested = arm(device)
+        self.assertEqual(rested, 0.0, "the first capture waits for nothing")
         device.finish_record_capture()
-        ended = time.monotonic()
-        _, armed = arm(device)
+        # The rest runs from when the capture came to its end (the camera's own mark), not from when
+        # finish returned; the clock's tick on Windows (~15.6 ms) is the only slack.
+        ended = device._capture_ended_at
+        armed, rested = arm(device)
+        self.assertGreater(rested, 0.0)
         self.assertGreaterEqual(armed - ended, CAPTURE_REST_SECONDS - 0.02)
         device.finish_record_capture()
 
@@ -40,8 +48,8 @@ class CaptureRest(unittest.TestCase):
         device.finish_record_capture()
         time.sleep(CAPTURE_REST_SECONDS)
         device.finish_record_capture()  # a cleanup's second finish: no capture ended here
-        began, armed = arm(device)
-        self.assertLess(armed - began, CAPTURE_REST_SECONDS / 2)
+        _, rested = arm(device)
+        self.assertEqual(rested, 0.0)
         device.finish_record_capture()
 
 

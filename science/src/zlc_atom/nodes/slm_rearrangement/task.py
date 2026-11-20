@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from math import sqrt
 from pathlib import Path
 from time import perf_counter, monotonic, time_ns
 import sys
@@ -26,6 +25,7 @@ from zlc_plugin.figures import (
     PlotLabels,
 )
 from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_plugin.statistics import proportion_interval
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
@@ -35,8 +35,10 @@ from zlc_atom.devices.slm.solver import (
 )
 from zlc_atom.nodes.slm.rearrangement import compact_target, run_rearrangement
 from zlc_atom.nodes.calibration import TrapCalibration
-from zlc_atom.nodes.calibration.calibration import reads_photoelectrons, registration_order as _registration_order
-from zlc_atom.nodes._framework.pulse import PULSE_CHANGED, STATUS_DONE, PulseBoard, check_cancelled, pulse_description
+from zlc_atom.nodes.calibration.calibration import (
+    acquisition_cautions, reads_photoelectrons, refuse_other_count_scale,
+    registration_order as _registration_order, tell_acquisition_cautions)
+from zlc_atom.nodes._framework.pulse import STATUS_DONE, PulseBoard, check_cancelled, pulse_description
 from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementNode, CameraMeasurementRequest, frames_snapshot)
 from zlc_atom.nodes.slm import plain_json as _plain_json
@@ -328,6 +330,10 @@ class SlmRearrangementTask:
         classification_started = perf_counter()
         point = node.actual_working_point
         roi = (*tuple(point.roi_origin_yx)[::-1], *tuple(point.roi_shape_yx)[::-1])
+        refuse_other_count_scale(self.calibration, point.readout_mode, name="the selected Calibration")
+        tell_acquisition_cautions(context, "slm_rearrangement", acquisition_cautions(
+            self.calibration, point.exposure_seconds, point.readout_mode,
+            exposure_step_seconds=point.exposure_step_seconds, name="the selected Calibration"), self._cautions_said)
         cal = self.calibration.rebased(roi, point.binning_yx, point.frame_shape_yx)
         wanted = reads_photoelectrons(cal)
         if wanted is not None and wanted != node.reads_photoelectrons:
@@ -722,10 +728,8 @@ class SlmRearrangementTask:
             occupied = sum(outcome[kind]["occupied"] for outcome in accepted for kind in kinds)
             entry = {"judged": judged, "occupied": occupied, "fraction": None, "fraction_1sigma": None}
             if judged:
-                fraction = occupied / judged
-                centre = (fraction + 1 / (2 * judged)) / (1 + 1 / judged)
-                half = sqrt(fraction * (1 - fraction) / judged + 1 / (4 * judged * judged)) / (1 + 1 / judged)
-                entry.update(fraction=fraction, fraction_1sigma=[centre - half, centre + half])
+                low, high = proportion_interval(occupied, judged)
+                entry.update(fraction=occupied / judged, fraction_1sigma=[float(low), float(high)])
             occupancy[name] = entry
         completed = [report for report in reports if report["status"] == "completed"]
         timings = {}
@@ -799,6 +803,7 @@ class SlmRearrangementTask:
         prepared = capture = None
         self._snapshots, self._available_outputs, self._committed = {}, set(), set()
         self._device_snapshots, self._overlay_geometry = {}, None
+        self._cautions_said: list[str] = []
         self._camera_site_indices = self._camera_path_affine = None
         self._shot, self._shot_reports = 1, []
         self._start_shot()
@@ -970,7 +975,7 @@ class SlmRearrangementTask:
                             firing_started+self._pulse_timing['after_end_seconds']-monotonic()+camera_timeout)
 
                     terminal = capture.read_cycles(photograph)
-                    report = board.wait_report(receipt["command_id"], context.cancel_requested)
+                    report = board.wait_report(board.watch_done(receipt["command_id"]), context.cancel_requested)
                     if report["status"] != STATUS_DONE:
                         raise RuntimeError(f"Pulse did not complete successfully: {report.get('fault') or report['status']}")
                     if not terminal.no_more_frames or capture.completed_cycles != 2:
@@ -1019,8 +1024,7 @@ class SlmRearrangementTask:
                     self._shot_reports.append(self._save(context, "completed"))
                     self._shot_saved = True
                 except Exception as error:
-                    # A changed pulse file fails every later shot alike: the batch ends.
-                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError) or PULSE_CHANGED in str(error):
+                    if self.shots == 1 or context.cancel_requested() or isinstance(error, InterruptedError):
                         raise
                     # One shot of a batch failed: make the board safe, keep what it
                     # recorded and fire the next one -- unless the board could not be

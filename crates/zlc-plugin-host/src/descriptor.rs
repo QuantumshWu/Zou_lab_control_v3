@@ -68,6 +68,10 @@ pub struct TypeDescriptor {
     /// arbitrates them and hands every scan and resolve the bound ones (PLUGIN_PROTOCOL §2).
     #[serde(default)]
     pub resources: Vec<String>,
+    /// The vendor transport library's file names (`Pylon*`): when an open fails because the
+    /// device is held, the processes with one loaded are named (`zlc_core::process::holders`).
+    #[serde(default)]
+    pub sdk_modules: Vec<String>,
 }
 
 fn yes() -> bool { true }

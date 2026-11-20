@@ -86,10 +86,17 @@ pub(super) fn readout(map: &PointMapData, target: &SeriesTarget, mode: &str) -> 
         label.push_str(if value == 0.0 { "false" } else { "true" });
     } else {
         label.push_str(&format_g(value, 6));
-        if let Some(sigma) = map.sigma.as_ref().map(|s| s.get_f64(index)).filter(|s| s.is_finite() && *s >= 0.0) {
-            let central = map.values.canonical.get_f64(index);
+        // The point's 68 % interval: a proportion's Wilson interval from its
+        // trials, else value +- its standard uncertainty (docs/UNCERTAINTY.md).
+        let central = map.values.canonical.get_f64(index);
+        let interval = match (&map.trials, &map.sigma) {
+            (Some(trials), _) => { let n = trials.get_f64(index); Some(zlc_core::scientific::statistics::proportion_interval(central * n, n)) }
+            (None, Some(sigma)) => Some(sigma.get_f64(index)).filter(|s| s.is_finite() && *s >= 0.0).map(|s| (central - s, central + s)),
+            (None, None) => None,
+        };
+        if let Some((low, high)) = interval {
             let display = |v| convert(v, &map.values.canonical_unit, &map.values.display_unit);
-            let (a,b) = (display(central - sigma), display(central + sigma));
+            let (a,b) = (display(low), display(high));
             if a.is_finite() && b.is_finite() {
                 let (minus,plus) = (value - a.min(b), a.max(b) - value);
                 if (minus - plus).abs() <= 1e-12 * (1.0 + plus.abs()) {

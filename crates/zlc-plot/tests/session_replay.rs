@@ -877,7 +877,6 @@ fn replay_measured(directory: &Path, timed: bool, native: bool) -> Outcome {
 
 fn compare_answer(suite: &Suite, answer: &zlc_plot::document::Execution<CorpusRead>, expected: &Value, publisher: &Publisher, out: &mut Vec<String>) {
     let mut state = answer.state.clone();
-    state.as_object_mut().unwrap().remove("scientific_ms");
     // A model's parameters with their symbols, and a live panel's bound Window row, are the console's (v2 workbench
     // panel_state), not the recorded document's.
     for panel in state["panels"].as_array_mut().into_iter().flatten() {

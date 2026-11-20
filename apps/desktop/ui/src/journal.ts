@@ -24,6 +24,16 @@ const words = (text: string | null | undefined): string | undefined => {
   return said ? said.slice(0, WORDS_LIMIT) : undefined;
 };
 
+/** What the operator was shown as a control's name, as assistive technology names it: the elements
+ * `aria-labelledby` points at, else `aria-label`, else -- a field's value aside -- the text it shows
+ * (rendered text only: a state's words kept hidden beside it are not what was clicked), else its title. */
+export function label(control: Element, field: boolean): string | undefined {
+  const shown = (element: Element): string | undefined => words(element instanceof HTMLElement ? element.innerText : element.textContent);
+  const labelledBy = (control.getAttribute("aria-labelledby") ?? "").split(/\s+/).map(id => id && document.getElementById(id)).filter((element): element is HTMLElement => !!element);
+  return words(labelledBy.map(element => element.innerText).join(" ")) ?? words(control.getAttribute("aria-label"))
+    ?? (field ? undefined : shown(control)) ?? words(control.getAttribute("title"));
+}
+
 /** What a control is, for someone who was not looking: its kind, its own words, and the item, panel or
  * card it stands in. Never its value. */
 export function describe(target: EventTarget | null): Record<string, unknown> {
@@ -35,8 +45,8 @@ export function describe(target: EventTarget | null): Record<string, unknown> {
     role: control.getAttribute("role") ?? undefined,
     id: control.id || undefined,
     class: words(control.getAttribute("class")),
-    // A field's words are its label and its name; a button's are what it says.
-    words: words(control.getAttribute("aria-label")) ?? words(control.getAttribute("title")) ?? (field ? undefined : words(control.textContent)),
+    // A field's words are its label and its name; a button's are what it shows.
+    words: label(control, field),
     name: field ? (control as HTMLInputElement).name || undefined : undefined,
     item: target.closest<HTMLElement>("[data-item]")?.dataset.item,
     panel: target.closest<HTMLElement>("[data-panel]")?.dataset.panel,

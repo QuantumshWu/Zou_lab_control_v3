@@ -7,6 +7,9 @@
 //! newcomer takes over only after the old owner's outputs are verified SAFE, and
 //! a lost connection or a server shutdown drives SAFE too. `wait_done` and the
 //! owner's Stop travel on connections of their own, beside the command lane.
+//! Whoever embeds the server hears each change of the owner
+//! ([`PulseRemoteServer::on_owner`]): the application that started it learns so
+//! when another client took its board, and when it let it go.
 use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -372,11 +375,18 @@ fn is_loopback(address: &SocketAddr) -> bool {
 }
 
 // ------------------------------------------------------------------ server
-struct Ownership { epoch: u64, client: Option<String>, connection: Option<u64>, token: Option<String>, fault: Option<String> }
+/// Who owns the board: a client while no takeover or disconnect SAFE is pending (`fault`), and
+/// the owner last told ([`ServerShared::told`]).
+struct Ownership { epoch: u64, client: Option<String>, connection: Option<u64>, token: Option<String>, fault: Option<String>, told: Option<String> }
+
+/// Hears the board's owner each time it changes: the owning client's address (`ip:port`), or
+/// None while nobody owns it (between an owner's going and the next claim, or after a failed SAFE).
+pub type OwnerSink = Box<dyn Fn(Option<&str>) + Send>;
 
 struct ServerShared {
     streamer: PulseStreamer,
     ownership: Mutex<Ownership>,
+    owner_sink: Mutex<Option<OwnerSink>>,
     command_lane: Mutex<()>,
     peers: AtomicBool,
     connections: Mutex<Vec<(u64, TcpStream)>>,
@@ -405,6 +415,15 @@ fn drop_connection(stream: &TcpStream) { let _ = stream.shutdown(Shutdown::Both)
 impl ServerShared {
     fn ownership(&self) -> MutexGuard<'_, Ownership> { self.ownership.lock().unwrap_or_else(|p| p.into_inner()) }
 
+    /// The owner as `owner` now has it, told if it changed: under the ownership lock, so the
+    /// changes are heard in the order they happened.
+    fn told(&self, owner: &mut Ownership) {
+        let now = owner.client.clone().filter(|_| owner.fault.is_none());
+        if now == owner.told { return; }
+        owner.told = now;
+        if let Some(sink) = self.owner_sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() { sink(owner.told.as_deref()); }
+    }
+
     fn drop_registered(&self, connection: u64) {
         if let Some((_, stream)) = self.connections.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(id, _)| *id == connection) {
             drop_connection(stream);
@@ -429,6 +448,7 @@ impl ServerShared {
                 owner.client = Some(client.to_owned());
                 owner.connection = Some(connection);
                 owner.token = Some(token());
+                self.told(&mut owner);
                 return Ok(());
             }
             let previous = owner.client.take();
@@ -436,6 +456,7 @@ impl ServerShared {
             owner.token = None;
             owner.epoch += 1;
             owner.fault = Some("takeover SAFE has not completed".into());
+            self.told(&mut owner);
             (previous, to_drop, owner.epoch)
         };
         if let Some(previous) = &previous { server_log("CLIENT REPLACED", Some(previous), &format!("by={client}")); }
@@ -451,6 +472,7 @@ impl ServerShared {
                 owner.client = Some(client.to_owned());
                 owner.connection = Some(connection);
                 owner.token = Some(token());
+                self.told(&mut owner);
                 Ok(())
             }
             Err(error) => {
@@ -627,6 +649,7 @@ impl ServerShared {
             owner.token = None;
             owner.epoch += 1;
             owner.fault = Some("disconnect SAFE has not completed".into());
+            self.told(&mut owner);
             if let Some(old) = to_drop { self.drop_registered(old); }
             owner.epoch
         };
@@ -754,13 +777,19 @@ impl PulseRemoteServer {
                     address.rsplit(':').next().unwrap_or(address))))?;
         let address = listener.local_addr()?;
         Ok(PulseRemoteServer { listener, address, thread: None, shared: Arc::new(ServerShared {
-            streamer, ownership: Mutex::new(Ownership { epoch: 0, client: None, connection: None, token: None, fault: None }),
-            command_lane: Mutex::new(()), peers: AtomicBool::new(peers), connections: Mutex::new(Vec::new()),
+            streamer, ownership: Mutex::new(Ownership { epoch: 0, client: None, connection: None, token: None, fault: None, told: None }),
+            owner_sink: Mutex::new(None), command_lane: Mutex::new(()), peers: AtomicBool::new(peers), connections: Mutex::new(Vec::new()),
             next_connection: AtomicU64::new(1), closing: AtomicBool::new(false), served: AtomicBool::new(false),
         }) })
     }
 
     pub fn address(&self) -> SocketAddr { self.address }
+
+    /// `sink` hears each later change of the board's owner, in order ([`OwnerSink`]).
+    pub fn on_owner(&self, sink: impl Fn(Option<&str>) + Send + 'static) {
+        *self.shared.owner_sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(sink));
+    }
+
     pub fn streamer(&self) -> &PulseStreamer { &self.shared.streamer }
 
     /// Whether clients on other machines are admitted; withdrawing drops theirs.
@@ -814,8 +843,9 @@ impl Drop for PulseRemoteServer {
 }
 
 // ------------------------------------------------------------------ client
+/// The command lane: its connection while open, and why the last one ended (`ended`) once it has.
 struct ClientLane { stream: Option<TcpStream>, request_id: u64, cancel_token: Option<String>, fire_command_id: Option<u32>,
-                    description: Option<BoardDescription>, loaded: Option<AppliedState> }
+                    description: Option<BoardDescription>, loaded: Option<AppliedState>, ended: Option<String> }
 
 /// The device surface of a board served by another process, plus its TCP
 /// connection lifecycle. The command lane is one connection; Stop never queues
@@ -830,6 +860,10 @@ pub struct RemotePulseStreamer {
     stopping: Mutex<HashSet<ThreadId>>,
     cancel_token: Mutex<Option<String>>,
     config: ConfigHolder,
+    /// This client's end of its command lane (`ip:port`, as the server names its owner), while connected.
+    local: Mutex<Option<SocketAddr>>,
+    /// Why this client sends nothing now: another client of its server holds the board ([`Self::refuse`]).
+    refusal: Mutex<Option<String>>,
 }
 
 impl RemotePulseStreamer {
@@ -838,12 +872,28 @@ impl RemotePulseStreamer {
         if port == 0 { return value_error("remote port is outside the TCP range"); }
         Ok(RemotePulseStreamer { host: host.to_owned(), port, automatic_timeout: request_timeout.is_none(),
             request_timeout: request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT), connect_timeout,
-            lane: Mutex::new(ClientLane { stream: None, request_id: 0, cancel_token: None, fire_command_id: None, description: None, loaded: None }),
-            stopping: Mutex::new(HashSet::new()), cancel_token: Mutex::new(None), config: ConfigHolder::default() })
+            lane: Mutex::new(ClientLane { stream: None, request_id: 0, cancel_token: None, fire_command_id: None, description: None, loaded: None, ended: None }),
+            stopping: Mutex::new(HashSet::new()), cancel_token: Mutex::new(None), config: ConfigHolder::default(),
+            local: Mutex::new(None), refusal: Mutex::new(None) })
     }
 
     fn lane(&self) -> MutexGuard<'_, ClientLane> { self.lane.lock().unwrap_or_else(|p| p.into_inner()) }
     pub fn config(&self) -> &ConfigHolder { &self.config }
+
+    /// This client's end of its command lane while it is connected: the address its server names
+    /// it by when it owns the board. Read without waiting for a call in flight.
+    pub fn local_address(&self) -> Option<SocketAddr> { *self.local.lock().unwrap_or_else(|p| p.into_inner()) }
+
+    /// While `reason` is set this client sends its server nothing -- no call, no completion wait,
+    /// no Stop -- and every call answers `reason` (a `RuntimeError`): another client of the server
+    /// holds the board, and a request from here would take it over. [`Self::open`] after clearing
+    /// it takes the board back.
+    pub fn refuse(&self, reason: Option<String>) { *self.refusal.lock().unwrap_or_else(|p| p.into_inner()) = reason; }
+
+    /// Why this client sends nothing now ([`Self::refuse`]).
+    pub fn refusal(&self) -> Option<String> { self.refusal.lock().unwrap_or_else(|p| p.into_inner()).clone() }
+
+    fn refused(&self) -> Result<()> { self.refusal().map_or(Ok(()), |reason| Err(Error::new(Kind::Runtime, reason))) }
 
     fn connect(&self) -> Result<TcpStream> {
         let addresses: Vec<SocketAddr> = (self.host.as_str(), self.port).to_socket_addrs()
@@ -866,6 +916,7 @@ impl RemotePulseStreamer {
 
     fn disconnect_locked(&self, lane: &mut ClientLane) {
         if let Some(stream) = lane.stream.take() { drop_connection(&stream); }
+        *self.local.lock().unwrap_or_else(|p| p.into_inner()) = None;
         lane.cancel_token = None;
         *self.cancel_token.lock().unwrap_or_else(|p| p.into_inner()) = None;
         lane.fire_command_id = None;
@@ -873,8 +924,22 @@ impl RemotePulseStreamer {
         lane.loaded = None;
     }
 
+    /// The command lane is not open: why its connection ended, when one did.
+    fn not_open(lane: &ClientLane) -> Error {
+        Error::new(Kind::Connection, lane.ended.as_ref().map_or_else(|| "remote PulseStreamer is not open".to_owned(),
+                                                                     |ended| format!("remote PulseStreamer is not open: {ended}")))
+    }
+
+    /// The lane ends on `error`: it is dropped, and later calls say why.
+    fn ended_locked(&self, lane: &mut ClientLane, error: Error) -> Error {
+        self.disconnect_locked(lane);
+        lane.ended = Some(error.message.clone());
+        error
+    }
+
     fn call_locked(&self, lane: &mut ClientLane, method: &str, params: Json) -> Result<Json> {
-        let Some(stream) = lane.stream.as_mut() else { return Err(Error::new(Kind::Connection, "remote PulseStreamer is not open")) };
+        self.refused()?;
+        let Some(stream) = lane.stream.as_mut() else { return Err(Self::not_open(lane)) };
         lane.request_id += 1;
         let id = lane.request_id;
         let request = Json::object(vec![("id", Json::Int(id.into())), ("method", Json::str(method)), ("params", params)]);
@@ -891,34 +956,39 @@ impl RemotePulseStreamer {
         })();
         let response = match exchanged {
             Ok(Some(response)) => response,
-            Ok(None) => { self.disconnect_locked(lane); return Err(Error::new(Kind::Connection, CONNECTION_ENDED)); }
+            Ok(None) => return Err(self.ended_locked(lane, Error::new(Kind::Connection, CONNECTION_ENDED))),
             Err(error) => {
-                self.disconnect_locked(lane);
-                return Err(match error.kind {
+                return Err(self.ended_locked(lane, match error.kind {
                     Kind::Timeout => Error::new(Kind::Connection, format!("the pulse server did not answer within {:.3}s", started.elapsed().as_secs_f64())),
                     Kind::Value => Error::new(Kind::Connection, format!("the pulse server's reply could not be read: {}", error.message)),
                     _ => Error::new(Kind::Connection, format!("{CONNECTION_ENDED} ({})", error.message)),
-                });
+                }));
             }
         };
         let protocol = |message: &str| Error::new(Kind::Connection, message.to_owned());
-        if response.get("id").and_then(Json::as_int) != Some(id.into()) { self.disconnect_locked(lane); return Err(protocol("remote response id differs from the request")); }
+        if response.get("id").and_then(Json::as_int) != Some(id.into()) { return Err(self.ended_locked(lane, protocol("remote response id differs from the request"))); }
         match response.get("ok").and_then(Json::as_bool) {
             Some(true) => Ok(response.get("result").cloned().unwrap_or(Json::Null)),
             Some(false) => {
                 let error = response.get("error").cloned().unwrap_or(Json::Null);
                 match (error.get("type").and_then(Json::as_str), error.get("message").and_then(Json::as_str)) {
                     (Some(kind), Some(message)) => Err(remote_error(kind, message)),
-                    _ => { self.disconnect_locked(lane); Err(protocol("remote error response differs from the protocol")) }
+                    _ => Err(self.ended_locked(lane, protocol("remote error response differs from the protocol"))),
                 }
             }
-            None => { self.disconnect_locked(lane); Err(protocol("remote response ok field is not boolean")) }
+            None => Err(self.ended_locked(lane, protocol("remote response ok field is not boolean"))),
         }
     }
 
     pub fn open(&self) -> Result<()> {
+        self.refused()?;
         let mut lane = self.lane();
-        if lane.stream.is_none() { lane.stream = Some(self.connect()?); }
+        if lane.stream.is_none() {
+            let stream = self.connect()?;
+            *self.local.lock().unwrap_or_else(|p| p.into_inner()) = stream.local_addr().ok();
+            lane.stream = Some(stream);
+            lane.ended = None;
+        }
         let answer = self.call_locked(&mut lane, "open", Json::object(vec![("board_protocol", Json::Int(LAYOUT_STRUCT_VERSION.into())),
                                                                           ("operation_budget", Json::Bool(true))]));
         let checked = answer.and_then(|answer| {
@@ -947,9 +1017,11 @@ impl RemotePulseStreamer {
         Ok(description)
     }
 
+    /// Ask the server to close the board, then let the connection go. A client refused its server
+    /// ([`Self::refuse`]) only lets its connection go: the board is not its to close.
     pub fn close(&self) -> Result<()> {
         let mut lane = self.lane();
-        if lane.stream.is_none() { return Ok(()); }
+        if lane.stream.is_none() || self.refusal().is_some() { self.disconnect_locked(&mut lane); return Ok(()); }
         let result = self.call_locked(&mut lane, "close", Json::Object(vec![]));
         self.disconnect_locked(&mut lane);
         match result { Err(error) if error.message.starts_with(CONNECTION_ENDED) => Ok(()), other => other.map(|_| ()) }
@@ -1029,13 +1101,15 @@ impl RemotePulseStreamer {
     pub fn wait_done(&self, timeout: Option<Duration>, command_id: Option<u32>) -> Result<Option<DoneReport>> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let (token, command_id) = {
+            self.refused()?;
             let lane = self.lane();
-            if lane.stream.is_none() { return Err(Error::new(Kind::Connection, "remote PulseStreamer is not open")); }
+            if lane.stream.is_none() { return Err(Self::not_open(&lane)); }
             if command_id.is_some() && command_id != lane.fire_command_id { return Ok(None); }
             (lane.cancel_token.clone(), lane.fire_command_id)
         };
         let Some(command_id) = command_id else { return Ok(None) };
         loop {
+            self.refused()?;
             let mut slice = WAIT_SLICE.min(self.request_timeout / 2);
             if let Some(deadline) = deadline { slice = slice.min(deadline.saturating_duration_since(Instant::now())); }
             let mut lane = self.connect().map_err(|error| Error::new(Kind::Connection, format!("{CONNECTION_ENDED} ({})", error.message)))?;
@@ -1105,6 +1179,7 @@ impl RemotePulseStreamer {
     }
 
     fn cancel_pending(&self) {
+        if self.refusal().is_some() { return; }
         let Some(token) = self.cancel_token.lock().unwrap_or_else(|p| p.into_inner()).clone() else { return };
         let Ok(mut lane) = self.connect() else { return };
         let request = Json::object(vec![("id", Json::Int(1)), ("method", Json::str("cancel")), ("params", Json::object(vec![("token", Json::str(token))]))]);

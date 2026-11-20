@@ -564,6 +564,7 @@ def per_site_fidelity(
     dark_out = np.full(values.shape[1], np.nan, dtype="<f8")
     bright_out = np.full(values.shape[1], np.nan, dtype="<f8")
     evaluated = np.zeros(values.shape[1], dtype=int)
+    correct = np.zeros(values.shape[1], dtype=int)
     for site in range(values.shape[1]):
         selected = valid[:, site]
         evaluated[site] = int(np.count_nonzero(selected))
@@ -571,14 +572,15 @@ def per_site_fidelity(
             continue
         actual = truth[selected, site]
         predicted = prediction[selected, site]
-        overall[site] = float(np.count_nonzero(predicted == actual)) / len(actual)
+        correct[site] = int(np.count_nonzero(predicted == actual))
+        overall[site] = float(correct[site]) / len(actual)
         dark = int(np.count_nonzero(~actual))
         bright = int(np.count_nonzero(actual))
         if dark:
             dark_out[site] = float(np.count_nonzero(~predicted & ~actual)) / dark
         if bright:
             bright_out[site] = float(np.count_nonzero(predicted & actual)) / bright
-    return PerSiteConfusion(overall, dark_out, bright_out, evaluated)
+    return PerSiteConfusion(overall, dark_out, bright_out, evaluated, correct)
 
 
 @dataclass(frozen=True)
@@ -590,6 +592,9 @@ class PerSiteConfusion:
     bright: np.ndarray
     #: How many labelled shots each site was evaluated on.
     evaluated: np.ndarray
+    #: How many of them it read right: ``overall`` is ``correct / evaluated``, a
+    #: proportion whose interval is its counting (Wilson) interval.
+    correct: np.ndarray
 
 
 __all__ = [

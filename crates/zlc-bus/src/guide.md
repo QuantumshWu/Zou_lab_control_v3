@@ -85,7 +85,7 @@ Two ways to play a pulse document (`zlc.pulse` JSON in `pulses/`):
 - Directly on the board: `pulse_describe {document}` lists its API fields in play order (field_id, label,
   unit, value), scan fields and periods; `pulse_run {document, api_values: {field_id: [value, unit]},
   run_repeats}` compiles, loads and fires, answering `command_id`; `pulse_wait_done {command_id,
-  timeout_seconds}` reports it once (done, status); `pulse_stop` makes the board safe. `pulse_estimate`
+  timeout_seconds}` reports it once (done, status; a run watches it and is told); `pulse_stop` makes the board safe. `pulse_estimate`
   times a scan plan. While a run holds the sequencer, only that run plays on it.
 - The Pulse Editor (what the operator sees): `pulse_open {path}`, `pulse_state` (periods, ports, bindings,
   scan table, Config, board), `pulse_edit`, `pulse_scan`, `pulse_config`, `pulse_subpulse`, `pulse_target`,
@@ -119,12 +119,14 @@ frame; frames taken at another exposure get their own row, e.g. `[{"path": LOAD,
 `frames: []` is kept and not read. The row's `editor_facts` say which frames each file reads. With
 `post_selection: true` (off by default) counts and occupied are valid only where a condition on two frames
 holds (`mode: relation` with `frame_a`, `frame_b`, `relation`; or `mode: values` with `value_a`/`value_b`
-true, false or any).
+true, false or any); a cycle without those frames keeps nothing (published invalid, said once).
 
 Frame Survival (`frame_survival`) reads `occupied` and publishes the later verdict where the earlier frame
 was occupied and both were judged: its mean over trials is conditional survival, per site. `selection`:
 `all`, `consecutive`, `from_first`, `to_last` (resolved against the frames the source carries), `none`, or
 `custom` with `custom_pairs: [{start, end, selected}]`; ends are `0`/`first`, `last` or a middle number.
+A cycle carrying none of the selected pairs (one frame per cycle, or every selected pair absent) is published
+with one `no pair` entry and every value invalid, said once on the node; the run keeps going.
 
 Derive (`derive`) is algebra on one producer's bundle. `values.variables` is a list of rows `{name, terms,
 statistic?, over?, publish?}`; a term is `{of}` (a member or another variable), `{number}` or `{boolean}`,

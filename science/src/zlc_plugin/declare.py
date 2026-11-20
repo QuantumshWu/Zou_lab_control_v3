@@ -222,10 +222,17 @@ class DeviceType:
     #: ``resolve`` the bound ones as ``excluded``: they touch none. A blank value binds nothing yet.
     resources: tuple[str, ...] = ()
     #: What a row leaves blank, found before it opens (Init, one row at a time):
-    #: ``resolve(parameters, excluded)`` answers ``{"parameters": {name: value}, "note": "..."}``,
+    #: ``resolve(parameters, excluded)`` answers ``{"found": {name: value}, "note": "..."}``,
     #: the values the core pins into the apparatus and opens the row with (none: as authored),
-    #: or raises with what it tried and what it passed over.
+    #: and, when what it opens with this time is not something it found, ``"this_open": {name:
+    #: value}``, used for that open only and never written (a search that finds nothing never erases
+    #: the row's values); or raises with what it tried and what it passed over.
     resolve: Callable[[Mapping[str, Any], frozenset[str]], Mapping[str, Any]] | None = None
+    #: The file names of the vendor transport library a process that can hold this device
+    #: has loaded (``("Pylon*", "GCBase*Basler*")``; ``*`` any run, ``?`` one character, case
+    #: ignored).  When an open fails with :class:`DeviceHeld`, the core names the processes
+    #: on this computer that have one of them loaded.
+    sdk_modules: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.family:
@@ -240,6 +247,9 @@ class DeviceType:
         object.__setattr__(self, "log_channels", tuple(str(name) for name in self.log_channels))
         if any(not name for name in self.log_channels):
             raise ValueError(f"{self.type_id}: log_channels must be non-empty logger names")
+        object.__setattr__(self, "sdk_modules", tuple(str(pattern) for pattern in self.sdk_modules))
+        if any(not pattern.strip("*?") for pattern in self.sdk_modules):
+            raise ValueError(f"{self.type_id}: sdk_modules must name files, not match every module")
         names = [command.name for command in self.commands]
         if len(set(names)) != len(names):
             raise ValueError(f"{self.type_id}: command names must be unique")
@@ -259,7 +269,7 @@ class DeviceType:
             "queries": [name for name, answer in (("discover", self.discover), ("resolve", self.resolve)) if answer is not None],
             "addable": self.addable, "concurrent": list(self.concurrent), "control_window": self.control_window,
             "announces": self.announce[0] if self.announce is not None else "",
-            "identity": self.identity, "resources": list(self.resources),
+            "identity": self.identity, "resources": list(self.resources), "sdk_modules": list(self.sdk_modules),
         }
 
 
@@ -318,8 +328,6 @@ class DeviceRequirement:
     #: as reads, beside whoever holds it.  A device the core implements itself is then handed to draft
     #: queries as what it states of itself (``facts``) and to the build as its key alone.
     reads_only: bool = False
-    #: A draft may leave it unset or name a device that is not open; the build is then called without it.
-    optional: bool = False
 
 
 #: NodeType callables answered through ``query`` (PLUGIN_PROTOCOL.md §2), each
@@ -342,7 +350,7 @@ QUERY_PARAMETERS: dict[str, tuple[str, ...]] = {
 }
 #: Facts a query's callable is handed by name when it has a parameter of that name (the v2
 #: callables that never took them are called as before).
-QUERY_OPTIONAL: dict[str, tuple[str, ...]] = {"describe_output_frames": ("devices",)}
+QUERY_OPTIONAL: dict[str, tuple[str, ...]] = {"describe_output_frames": ("devices",), "resolve_defaults": ("devices",)}
 NODE_QUERIES = tuple(QUERY_PARAMETERS)
 #: Every node answers it, from its schema, admit_resources and artifact codecs (host._admit).
 ADMIT = "admit"
@@ -491,8 +499,7 @@ class NodeType:
                             for item in self.outputs],
                 "devices": [{"capability": item.capability_token, "argument": item.argument_name,
                              "protected_fields": None if item.protected_fields is None else list(item.protected_fields),
-                             "enabled_when": plain(item.enabled_when), "reads_only": bool(item.reads_only),
-                             "optional": bool(item.optional)} for item in self.device_requirements],
+                             "enabled_when": plain(item.enabled_when), "reads_only": bool(item.reads_only)} for item in self.device_requirements],
                 "previews": previews, "reports_ready": self.reports_ready,
                 "acquisition_input": self.acquisition_input, "acquisition_completion": self.acquisition_completion,
                 "artifact_outputs": [{"name": item.name, "contract": item.contract_id} for item in self.artifact_outputs],

@@ -129,6 +129,7 @@ def _build(
     *,
     camera: object = None,
     camera_key: str = "",
+    sequencer: object = None,  # the core's own board: driven by its key, never an authored value
     sequencer_key: str = "",
     slm: object,
     slm_key: str,

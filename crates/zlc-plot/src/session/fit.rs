@@ -53,7 +53,8 @@ impl PlotSession {
         let count = evaluation.model.parameters.len();
         let result = FitResult::new(evaluation.model.clone(), vec![f64::NAN; count], vec![f64::NAN; count], vec![f64::NAN; count * count],
                                     FitResult::eager(Vec::new(), Vec::new(), Vec::new()), evaluation.source_revision(), false,
-                                    evaluation.failure_messages[0].as_deref().unwrap_or("fit failed"), 0.0, false, Vec::new())
+                                    evaluation.failure_messages[0].as_deref().unwrap_or("fit failed"), 0.0, false, Vec::new(),
+                                    crate::fit::ErrorBasis::Residuals { dof: 0 })
             .map_err(fit_error)?;
         result.with_parameter_units(&evaluation.parameter_units).map_err(fit_error)
     }

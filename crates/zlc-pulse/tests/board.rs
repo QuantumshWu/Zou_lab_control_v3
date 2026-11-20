@@ -172,16 +172,18 @@ fn the_board_says_when_a_lane_rises_in_each_shot_and_which_play_that_is() {
     let board = Board::virtual_board(None).unwrap();
     let lanes = board.trigger_lanes();
     assert!(!lanes.is_empty(), "the target's digital ports");
-    let nothing = board.trigger_schedule(&lanes[0].0, None).unwrap();
+    let nothing = board.trigger_schedule(&lanes[0].0).unwrap();
     assert_eq!((nothing.get("state").and_then(Json::as_str), nothing.get("points").and_then(Json::as_array).map(|points| points.len())), (Some("none"), Some(0)));
     assert_eq!(board.trigger_counts().unwrap().1, None, "nothing held: no count");
 
+    // A watcher is told each change as it happens, by whoever made it.
+    let changes = board.changes();
     let document = pulses().join("imaging_template.json");
     let receipt = run_document(&board, &document, &[("duration:long_before".into(), (10.0, "ms".into()))], None, 2, 1).unwrap();
     let (revision, counts) = board.trigger_counts().unwrap();
     let counts = counts.expect("a program is held");
     let at = counts.iter().position(|count| *count > 0).expect("a lane that rises");
-    let schedule = board.trigger_schedule(&lanes[at].0, None).unwrap();
+    let schedule = board.trigger_schedule(&lanes[at].0).unwrap();
     assert_eq!(schedule.get("state").and_then(Json::as_str), Some("playing"));
     assert_eq!(schedule.get("revision").and_then(Json::as_int), Some(revision as i128));
     assert_eq!(schedule.get("command_id").and_then(Json::as_int), Some(command_id(&receipt) as i128));
@@ -197,20 +199,21 @@ fn the_board_says_when_a_lane_rises_in_each_shot_and_which_play_that_is() {
     let timing = receipt.get("timing").unwrap();
     let clock = timing.get("clock_hz").and_then(Json::as_f64).unwrap();
     assert_eq!(duration, timing.get("duration_ticks").and_then(Json::as_int).unwrap() as f64 / clock, "the shot the receipt times");
-    // The port's key names the same lane; a reader that has this revision is told so, not sent it again.
-    let by_key = board.trigger_schedule(&lanes[at].1, None).unwrap();
+    assert_eq!(changes.try_iter().last(), Some(revision), "the LOAD and the FIRE were told, the FIRE last");
+    // The port's key names the same lane.
+    let by_key = board.trigger_schedule(&lanes[at].1).unwrap();
     assert_eq!(by_key.get("points"), schedule.get("points"));
-    let same = board.trigger_schedule(&lanes[at].0, Some(revision)).unwrap();
-    assert_eq!((same.get("unchanged").and_then(Json::as_bool), same.get("points")), (Some(true), None));
 
     // The play ends, and every later change is a new revision.
     board.wait_done(Some(Duration::from_secs(5)), Some(command_id(&receipt))).unwrap().expect("a report");
-    let done = board.trigger_schedule(&lanes[at].0, Some(revision)).unwrap();
+    let done = board.trigger_schedule(&lanes[at].0).unwrap();
     assert_eq!(done.get("state").and_then(Json::as_str), Some("done"));
     assert!(done.get("revision").and_then(Json::as_int).unwrap() > revision as i128);
+    assert_eq!(changes.try_iter().collect::<Vec<_>>(), vec![board.revision()], "the report was told, once");
+    assert!(changes.try_recv().is_err(), "nothing changes while nothing is done");
     run_document(&board, &document, &[], None, 0, 1).unwrap();
-    assert_eq!(board.trigger_schedule(&lanes[at].0, None).unwrap().get("run_repeats").and_then(Json::as_int), Some(0), "played until stopped");
+    assert_eq!(board.trigger_schedule(&lanes[at].0).unwrap().get("run_repeats").and_then(Json::as_int), Some(0), "played until stopped");
     board.safe().unwrap();
-    assert_eq!(board.trigger_schedule(&lanes[at].0, None).unwrap().get("state").and_then(Json::as_str), Some("stopped"));
+    assert_eq!(board.trigger_schedule(&lanes[at].0).unwrap().get("state").and_then(Json::as_str), Some("stopped"));
     board.close().unwrap();
 }

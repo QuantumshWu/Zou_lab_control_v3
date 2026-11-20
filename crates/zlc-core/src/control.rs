@@ -50,12 +50,41 @@ impl SafeActions {
     /// The registered outputs' names.
     pub fn outputs(&self) -> Vec<String> { self.lock().keys().cloned().collect() }
 
-    /// Drive every registered output safe, outside the lock (a device may
-    /// report back); every action runs even when an earlier one fails.
-    /// Returns the outputs that did not report safe, with the error.
+    /// Drive every registered output safe, all at once and outside the lock (a device may
+    /// report back): every action runs even when another fails or is slow to answer, and
+    /// none waits behind another. Returns the outputs that did not report safe, with the error.
     pub fn make_safe(&self) -> Vec<String> {
         let actions: Vec<(String, SafeAction)> = self.lock().iter().map(|(name, action)| (name.clone(), action.clone())).collect();
-        actions.into_iter().filter_map(|(name, action)| action().err().map(|error| format!("{name}: {error}"))).collect()
+        let said = |name: &str, outcome: std::thread::Result<Result<(), String>>| match outcome {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("{name}: {error}")),
+            Err(_) => Some(format!("{name}: its safe action failed unexpectedly")),
+        };
+        std::thread::scope(|scope| {
+            let running: Vec<(&String, Result<std::thread::ScopedJoinHandle<'_, Result<(), String>>, SafeAction>)> = actions.iter().map(|(name, action)| {
+                let asked = action.clone();
+                // A thread that cannot start still has its output asked, here.
+                (name, std::thread::Builder::new().name(format!("zlc-safe-{name}")).spawn_scoped(scope, move || asked()).map_err(|_| action.clone()))
+            }).collect();
+            running.into_iter().filter_map(|(name, running)| match running {
+                Ok(handle) => said(name, handle.join()),
+                Err(action) => said(name, Ok(action())),
+            }).collect()
+        })
+    }
+
+    /// [`SafeActions::make_safe`] off the caller's thread (the window's turn goes on meanwhile):
+    /// `done` is told the outputs that did not report safe.
+    pub fn make_safe_then(&self, done: impl FnOnce(Vec<String>) + Send + 'static) {
+        fn tell<F: FnOnce(Vec<String>)>(slot: &Mutex<Option<F>>, failures: Vec<String>) {
+            let done = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+            if let Some(done) = done { done(failures); }
+        }
+        let slot = Arc::new(Mutex::new(Some(done)));
+        let (safe, told) = (self.clone(), slot.clone());
+        let spawned = std::thread::Builder::new().name("zlc-stop-all".into()).spawn(move || tell(&told, safe.make_safe()));
+        // No thread for it: every output is still asked, here.
+        if spawned.is_err() { tell(&slot, self.make_safe()); }
     }
 }
 
@@ -123,6 +152,25 @@ mod tests {
         let name = tool_name("a__b", "c");
         assert_eq!(name.split_once("__").unwrap(), (tool_word("a__b").as_str(), "c"));
         assert_ne!(name, tool_name("a", "b__c"));
+    }
+
+    #[test]
+    fn stop_all_asks_every_output_at_once_and_reports_off_the_callers_thread() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        // Each output answers only once the other has been asked: one after the other, neither would.
+        let safe = SafeActions::new();
+        let (a_asked, a_heard) = mpsc::channel::<()>();
+        let (b_asked, b_heard) = mpsc::channel::<()>();
+        let (a_heard, b_heard) = (Mutex::new(a_heard), Mutex::new(b_heard));
+        safe.register("coil-a", Arc::new(move || { a_asked.send(()).unwrap(); b_heard.lock().unwrap().recv_timeout(Duration::from_secs(5)).map_err(|_| "b was never asked".to_owned()) }));
+        safe.register("coil-b", Arc::new(move || { b_asked.send(()).unwrap(); a_heard.lock().unwrap().recv_timeout(Duration::from_secs(5)).map_err(|_| "a was never asked".to_owned()) }));
+        safe.register("board", Arc::new(|| Err("board not answering".into())));
+        let (told, failures) = mpsc::channel();
+        let asked = Instant::now();
+        safe.make_safe_then(move |failed| told.send(failed).unwrap());
+        assert!(asked.elapsed() < Duration::from_millis(500), "the caller does not wait for the outputs");
+        assert_eq!(failures.recv_timeout(Duration::from_secs(10)).unwrap(), vec!["board: board not answering".to_owned()]);
     }
 
     #[test]

@@ -112,10 +112,19 @@ def readout_summary(
         signals = np.asarray(model_report["short_signals"], dtype=float)
         dark_right = np.asarray(model_report["site_fidelity_dark"], dtype=float)
         bright_right = np.asarray(model_report["site_fidelity_bright"], dtype=float)
+        fidelity = np.asarray(model_report["site_fidelity"], dtype=float)
+        # The worst site is the minimum of noisy per-site counts: its counting
+        # interval says whether it is a bad trap or a few unlucky shots.
+        ranked = np.flatnonzero(usable & np.isfinite(fidelity))
+        worst = int(ranked[np.argmin(fidelity[ranked])]) if ranked.size else None
+        interval = np.asarray(model_report["site_fidelity_interval"], dtype=float)
         entry: dict[str, Any] = {
             "usable_sites": int(np.count_nonzero(usable)),
             "evaluated_shots": int(np.sum(model_report["site_n_actual"])),
-            "fidelity": _numbers(model_report["site_fidelity"], usable),
+            "fidelity": {
+                **_numbers(fidelity, usable),
+                "worst_site_interval": None if worst is None else [float(interval[0, worst]), float(interval[1, worst])],
+            },
             "gaussian_fidelity": _numbers(
                 model_report["site_gaussian_fidelity"], usable
             ),
@@ -231,7 +240,7 @@ def summary_lines(summary: Mapping[str, Any]) -> tuple[str, ...]:
         mark = "*" if name == summary.get("best_model") else "-"
         lines.append(
             f"{mark} {name:11s} fidelity {_percent(entry['fidelity']['mean'])} "
-            f"(worst site {_percent(entry['fidelity']['min'])}), "
+            f"(worst site {_percent(entry['fidelity']['min'])}{_interval(entry['fidelity']['worst_site_interval'])}), "
             f"Gaussian {_percent(entry['gaussian_fidelity']['mean'])}, "
             f"fallback {entry['empirical_fallback_sites']}, "
             f"dark->bright {_percent(entry['error_rate']['dark_called_bright']['mean'])}, "
@@ -243,6 +252,11 @@ def summary_lines(summary: Mapping[str, Any]) -> tuple[str, ...]:
 
 def _percent(value: float | None) -> str:
     return "--" if value is None else f"{100.0 * float(value):.2f}%"
+
+
+def _interval(bounds: list[float] | None) -> str:
+    """A proportion's 68 % counting interval, as `` [low-high%]``."""
+    return "" if bounds is None else f" [{100.0 * bounds[0]:.2f}-{100.0 * bounds[1]:.2f}%]"
 
 
 def _value(value: float | None) -> str:

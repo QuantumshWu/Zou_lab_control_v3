@@ -34,7 +34,10 @@ request that engine before opening the interface.
   control shows what it is told and hands each operator intent to its owner.
 - `src/shell.ts` hosts the page's one view (`views/index.ts` maps each window
   to its view); a view brings another window forward through the host
-  (`show_window`). A view implements `View`. `#gallery` (development only)
+  (`show_window`). A view implements `View`: `ready()` says when it holds its
+  first whole state, `measure()` sizes a window to its content; the shell then
+  says `window_ready` and the host shows the window, which was made hidden.
+  `#gallery` (development only)
   shows every control with fake data.
 - `src/transport.ts` is the page's connection: `send` (feedback words while
   pending), `request` (a query; resolves with the state's `result`), errors.

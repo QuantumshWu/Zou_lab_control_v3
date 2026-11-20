@@ -30,6 +30,15 @@ the point axis of the occupancy signal, and their pairs sit on the point
 axis here, alongside any other Point coordinates such as scan axes. Without
 a scan the structure reads ``(cycles) x (pairs) x (sites)``, and a grid gives
 each pair its own cell without anyone naming an axis.
+A cycle that carries NONE of the selected pairs -- one frame per cycle, or
+every selected pair absent -- is data, not a fault: each of its shots is
+published with the pair axis holding the one entry :data:`NO_PAIR` and every
+value invalid (no trial), so a rolling panel keeps rolling and a same-shot
+group is answered for that shot.  The axis cannot be empty -- a dataset
+domain has no zero-length axis -- and an entry named after a pair the cycle
+lacks would claim a pair that is not there; ``no pair`` says what is.  The
+node says it once a run (its status line and the journal); a source that
+carries a pair again publishes it.
 Each pair's value is the later frame's VERDICT -- the same boolean the
 occupancy it came from published -- and its validity is that pair's OWN
 denominator: the earlier frame loaded AND both frames judgeable.  The
@@ -57,7 +66,7 @@ from zlc_data import (
     ValueSchema,
     owned_snapshot_from_arrays,
 )
-from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput
+from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput, journal
 
 SURVIVAL_OUTPUTS = (
     # index_by_source: a rolling panel needs one cell per parent cycle, so
@@ -69,6 +78,12 @@ SURVIVAL_OUTPUTS = (
         "survival", "frame_survival.survival", index_by_source=True
     ),
 )
+
+
+#: The pair axis' one entry while a cycle carries none of the selected pairs.
+NO_PAIR = "no pair"
+#: What the node and its editor say of a one-frame cycle.
+ONE_FRAME = "One frame per cycle: no pairs"
 
 
 def pair_label(start: object, end: object) -> str:
@@ -161,7 +176,9 @@ def _selected_pairs(selection, overrides, count):
     absent = []
     for start, end, selected in edits:
         first, last = resolve_frame(start, count), resolve_frame(end, count)
-        if first is None or last is None:
+        # A pair needs its later frame after its earlier one in this cycle:
+        # in a one-frame cycle "0" and "last" are the same frame.
+        if first is None or last is None or first >= last:
             absent.append((start, end, selected))
             continue
         pair = (first, last)
@@ -170,6 +187,17 @@ def _selected_pairs(selection, overrides, count):
         else:
             wanted.pop(pair, None)
     return tuple(sorted(wanted) if named else wanted), tuple(absent)
+
+
+def no_pair_note(count: int, absent) -> str:
+    """What the node says while a ``count``-frame cycle carries none of the
+    selected pairs (``absent``: the edits :func:`_selected_pairs` left out)."""
+
+    kept = ", ".join(pair_label(start, end) for start, end, selected in absent if selected)
+    said = ONE_FRAME if count < 2 else (
+        f"This {count}-frame cycle has none of the selected pairs"
+        + (f" (kept for a longer cycle: {kept})" if kept else ""))
+    return f"{said}; survival is published with every value invalid until the source carries a pair"
 
 
 def _frame_rows(schema: DatasetSchema, frame_axis: AxisSpec) -> np.ndarray:
@@ -223,6 +251,28 @@ class FrameSurvivalProcessor:
         self.parked_pairs = tuple(parked_pairs)
         # Event and canonical geometry coexist; neither evicts the other's plan.
         self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
+        #: The run this processor publishes in, and what it last said there.
+        self._context: object | None = None
+        self._said = ""
+
+    def bind_run(self, context: object) -> None:
+        """The run whose node says when this cycle shape has no pair (``_say``)."""
+
+        self._context = context
+        self._said = ""
+
+    def _say(self, note: str) -> None:
+        """Say ``note`` once: on the node's status line and in the journal.
+        An empty note, once pairs are published again, returns the status
+        line to running."""
+
+        if note == self._said:
+            return
+        self._said = note
+        if note:
+            journal.note("frame_survival", "no_pair", reason=note)
+        if self._context is not None:
+            self._context.report_progress(note)
 
     # -- schema -------------------------------------------------------------
 
@@ -255,13 +305,11 @@ class FrameSurvivalProcessor:
                 "occupancy processor's 'occupied' signal, not "
                 f"'counts' ({schema.value_schema.dtype})"
             )
-        frames = frame_axes[0].size
-        if frames < 2:
-            raise ValueError(
-                "frame survival needs at least two frames per cycle and the "
-                f"source carries {frames}"
-            )
         return frame_axes[0], cell_axes[0]
+
+    @property
+    def _pair_axis_id(self) -> AxisId:
+        return AxisId(f"{self.instance_id}.pair")
 
     def _output_schema(
         self, source: DatasetSchema, *, frame_rows: np.ndarray,
@@ -274,31 +322,32 @@ class FrameSurvivalProcessor:
         # written out, numbers or names.  The pair an operator reads is the
         # one the frame axis already showed them.
         frame_names = frame_axis.labels()
+        labels = tuple(
+            pair_label(frame_names[condition], frame_names[value])
+            for condition, value in pairs
+        ) or (NO_PAIR,)
         pair_axis = AxisSpec(
-            AxisId(f"{self.instance_id}.pair"),
+            self._pair_axis_id,
             "pair",
             READOUT_EVENT,
-            len(pairs),
-            tuple(range(len(pairs))),
-            coordinate_labels=tuple(
-                pair_label(frame_names[condition], frame_names[value])
-                for condition, value in pairs
-            ),
+            len(labels),
+            tuple(range(len(labels))),
+            coordinate_labels=labels,
         )
         # Replace only the frame axis. Every other Point coordinate keeps
         # its own forward pairs, in the source groups' physical order.
         point_codes = tuple(
-            tuple(np.tile(np.arange(len(pairs)), len(frame_rows)).tolist())
+            tuple(np.tile(np.arange(len(labels)), len(frame_rows)).tolist())
             if axis.axis_id == frame_axis.axis_id
             else tuple(np.repeat(
-                source.point_domain.codes(axis.axis_id)[frame_rows[:, 0]], len(pairs),
+                source.point_domain.codes(axis.axis_id)[frame_rows[:, 0]], len(labels),
             ).tolist())
             for axis in source.point_domain.axes
         )
         return DatasetSchema(
             source.repeat_domain,
             DomainSpec(
-                (len(frame_rows) * len(pairs),),
+                (len(frame_rows) * len(labels),),
                 tuple(
                     pair_axis if axis.axis_id == frame_axis.axis_id else axis
                     for axis in source.point_domain.axes
@@ -322,36 +371,38 @@ class FrameSurvivalProcessor:
             return saved[1]
         frame_axis, _site_axis = self._source_axes(schema)
         # A selected pair the cycle does not carry stays authored and is left
-        # out of this source's pairs: the pair axis names what is published.
-        pairs, absent = _selected_pairs(self.pairs, self.pair_overrides, frame_axis.size)
-        if not pairs:
-            kept = ", ".join(pair_label(start, end) for start, end, selected in absent if selected)
-            raise ValueError(
-                f"this {frame_axis.size}-frame source has no selected frame survival pair"
-                + (f" (kept for a longer cycle: {kept})" if kept else "")
-            )
+        # out of this source's pairs: the pair axis names what is published,
+        # NO_PAIR when that is none of them.
+        pairs, _absent = _selected_pairs(self.pairs, self.pair_overrides, frame_axis.size)
         rows = _frame_rows(schema, frame_axis)
         output = self._output_schema(schema, frame_rows=rows, pairs=pairs)
         if canonical:
             # Groups are inserted in first-physical-row order by _frame_rows.
             plan = (output, np.min(rows, axis=1), np.max(rows, axis=1), pairs)
         else:
-            indices = np.asarray(pairs, dtype=np.intp)
+            indices = np.asarray(pairs, dtype=np.intp).reshape(-1, 2)
             plan = (output, rows[:, indices[:, 0]].reshape(-1), rows[:, indices[:, 1]].reshape(-1), pairs)
         self._plans[canonical] = (schema, plan)
         return plan
 
     def _pair(self, occupied: OwnedSnapshot) -> OwnedSnapshot:
         schema = occupied.block.schema
-        output_schema, condition, later, _pairs = self._plan(schema)
+        output_schema, condition, later, pairs = self._plan(schema)
         values = np.asarray(occupied.materialize().block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
-        # The denominator stays per-site validity, independently in each
-        # Point group: loaded before and judgeable in both frames.
-        eligible = (
-            values[:, condition, :] & valid[:, condition, :] & valid[:, later, :]
-        )
-        survival = eligible & values[:, later, :]
+        if pairs:
+            # The denominator stays per-site validity, independently in each
+            # Point group: loaded before and judgeable in both frames.
+            eligible = (
+                values[:, condition, :] & valid[:, condition, :] & valid[:, later, :]
+            )
+            survival = eligible & values[:, later, :]
+        else:
+            # No pair in this cycle: no site of any shot is a trial.
+            eligible = np.zeros(
+                (values.shape[0], output_schema.point_domain.size, values.shape[2]), dtype=bool
+            )
+            survival = eligible
         return owned_snapshot_from_arrays(
             output_schema,
             survival,
@@ -366,7 +417,8 @@ class FrameSurvivalProcessor:
         source_schema = snapshot.block.schema
         frame_axis, _site_axis = self._source_axes(source_schema)
         frames = frame_axis.size
-        pair_count = len(self._plan(source_schema)[3])
+        self._say("" if self._plan(source_schema)[3] else no_pair_note(
+            frames, _selected_pairs(self.pairs, self.pair_overrides, frames)[1]))
         if signal_value.canonical_schema is None:
             # A monitor event: Runtime keeps it as the latest, unplaced.
             return {SURVIVAL_OUTPUTS[0].name: LiveDatasetOutput(SURVIVAL_OUTPUTS[0], survival)}
@@ -382,7 +434,8 @@ class FrameSurvivalProcessor:
             or np.any(last_rows[first:stop] >= end)
         ):
             raise ValueError("frame survival event placement must contain whole cycles")
-        origin = (signal_value.cell_origin[0], int(first) * pair_count)
+        entries = canonical.point_domain.axis(self._pair_axis_id).size
+        origin = (signal_value.cell_origin[0], int(first) * entries)
         return {
             SURVIVAL_OUTPUTS[0].name: LiveDatasetOutput(
                 SURVIVAL_OUTPUTS[0],
@@ -412,4 +465,5 @@ class FrameSurvivalProcessor:
         }
 
 
-__all__ = ["PAIR_RULES", "SURVIVAL_OUTPUTS", "FrameSurvivalProcessor", "pair_label"]
+__all__ = ["NO_PAIR", "ONE_FRAME", "PAIR_RULES", "SURVIVAL_OUTPUTS", "FrameSurvivalProcessor", "no_pair_note",
+           "pair_label"]

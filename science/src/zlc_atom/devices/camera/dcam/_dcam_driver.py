@@ -69,6 +69,24 @@ class DcamProperty(IntEnum):
     IMAGE_ROW_BYTES = 4_325_936
 
 
+class DcamIdString(IntEnum):
+    """What ``dcamdev_getstring`` is asked (``DCAMDEV_STRING.iString``, dcamapi4.h ``DCAM_IDSTR``)."""
+
+    BUS = 0x04000101
+    CAMERAID = 0x04000102
+    VENDOR = 0x04000103
+    MODEL = 0x04000104
+    CAMERAVERSION = 0x04000105
+    DRIVERVERSION = 0x04000106
+    MODULEVERSION = 0x04000107
+    DCAMAPIVERSION = 0x04000108
+
+
+#: The text buffer one ``dcamdev_getstring`` answer is written into, terminator
+#: included (the size the vendor's own samples pass).
+_DCAMDEV_STRING_BYTES = 256
+
+
 class DcamValue(IntEnum):
     MODE_OFF = 1
     MODE_ON = 2
@@ -116,6 +134,25 @@ class _DcamDeviceOpen(ctypes.Structure):
         super().__init__()
         self.size = ctypes.sizeof(type(self))
         self.index = int(index)
+
+
+class _DcamDeviceString(ctypes.Structure):
+    """``DCAMDEV_STRING``: which string, and the caller's buffer it is written into."""
+
+    _pack_ = 8
+    _fields_ = [
+        ("size", ctypes.c_int32),
+        ("string_id", ctypes.c_int32),
+        ("text", ctypes.c_void_p),
+        ("text_bytes", ctypes.c_int32),
+    ]
+
+    def __init__(self, string_id: int, buffer: ctypes.Array) -> None:
+        super().__init__()
+        self.size = ctypes.sizeof(type(self))
+        self.string_id = int(string_id)
+        self.text = ctypes.cast(buffer, ctypes.c_void_p)
+        self.text_bytes = len(buffer)
 
 
 class _DcamPropertyAttributes(ctypes.Structure):
@@ -266,6 +303,11 @@ class DcamSdkDriver:
         dll.dcamdev_open.restype = ctypes.c_int32
         dll.dcamdev_close.argtypes = [ctypes.c_void_p]
         dll.dcamdev_close.restype = ctypes.c_int32
+        dll.dcamdev_getstring.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_DcamDeviceString),
+        ]
+        dll.dcamdev_getstring.restype = ctypes.c_int32
         dll.dcamprop_getattr.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(_DcamPropertyAttributes),
@@ -382,6 +424,18 @@ class DcamSdkDevice:
     def _require_open(self) -> None:
         if self._closed:
             raise RuntimeError("DCAM device is closed")
+
+    def get_string(self, string_id: int) -> str:
+        """One string the open camera states of itself (``dcamdev_getstring``)."""
+
+        self._require_open()
+        buffer = ctypes.create_string_buffer(_DCAMDEV_STRING_BYTES)
+        request = _DcamDeviceString(string_id, buffer)
+        _checked(
+            f"dcamdev_getstring(0x{int(string_id):08X})",
+            self._dll.dcamdev_getstring(self._handle, ctypes.byref(request)),
+        )
+        return buffer.value.decode("ascii", errors="replace")
 
     def get_property(self, property_id: int) -> float:
         self._require_open()
@@ -568,6 +622,7 @@ class DcamSdkDevice:
 
 __all__ = [
     "DcamDriverError",
+    "DcamIdString",
     "DcamProperty",
     "DcamSdkDevice",
     "DcamSdkDriver",

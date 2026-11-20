@@ -294,7 +294,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.17 唯一的场景格式（2026-10-28）
 
 - 场景只有一种格式：`types.ts` 的 `Scene`，`version: 3`（`SCENE_VERSION`；2026-11-03 起：光镊由操作者指定，运动只有三维，§6.20–§6.21）。`scene-file.ts` 严格按它校验：必需字段齐全且在范围内，没有任何其它字段。早先版本写的文件不再读入、也不迁移：导入时拒绝并写明原因（如"场景文件不符合当前格式（version 3）：version 为 2，应为 3"或"lasers[0] 缺少 showLightShift"）。
-- 场景只由操作者载入（导入、示例）。界面不自动保存场景，启动时总是默认场景（`scene-file.ts` 的 `startupScene`），早先版本存在本机浏览器存储里的场景、编辑基准和能级标签在启动时删除；本机只保留求解失败的诊断记录，它不是场景数据。能级标签 1、2 只在本次运行中有效。"替换当前场景"的确认只比较本次载入或导出之后的修改。
+- 场景只由操作者载入（导入、示例）。界面不自动保存场景，启动时总是默认场景（`scene-file.ts` 的 `startupScene`：示例“光镊 · 3D PGC”，`examples.ts` 的 `STARTUP_EXAMPLE`），早先版本存在本机浏览器存储里的场景、编辑基准和能级标签在启动时删除；本机只保留求解失败的诊断记录，它不是场景数据。能级标签 1、2 只在本次运行中有效。"替换当前场景"的确认只比较本次载入或导出之后的修改。
 - 必需：`name`、`fields`、`lasers`、`referenceFrequencies`、`references`、`marks`、`dynamics`；磁场的 `direction`；激光的 `frequency`、`frequencyUnit`、`line`（派生，读入后按频率重算）、`showLightShift`、`intensityMode`、`intensityMWcm2`、`powerUnit`、`waistUnit`、`intensityUnit`、`direction`、`polarizationAngleDeg`、`ellipticityDeg`、`phaseDeg`，以及所选强度方式的输入（功率与束腰：`powerMW`、`waistUm`；功率与 NA：`powerMW`、`numericalAperture`）；参考频率的 `frequency`、`frequencyUnit`；参考能级的 `anchorId`、`anchorMode`、`offsetMHz`、`offsetUnit`；`dynamics` 的 `initialStateId`、`monitoredStateIds`、`monitorMode`、`monitoredGroupIds`（F 布居分组与"丢失" `loss`）、`durationUs`、`durationUnit`、`samples`、`meanHorizonUs`、`motion`（`{enabled, temperatureUK, temperatureUnit, device}`，§6.20）。
 - 可选（本身就是可有可无的）：`display`（读数偏好）；`tweezerId`（光镊，场景中一束激光的 ID，§6.21）；激光的 `referenceStateId`、`referenceProcess`，以及别的强度方式留下的 `powerMW`、`waistUm`、`numericalAperture`；激光的 `reflection`（反射光的反射镜，§6.23）；参考能级的 `photon`；混合初态的 `dynamics.initialState`，热分布时还有 `dynamics.temperatureUnit`（且只在热分布时有）；派生的 `frequencyAnchor`、`intensityAnchor`（没有时由输入算出，有时只在指纹相符时使用）。
 - 取消的旧写法：`initialF/initialM`、`dynamics.laserId`、`dynamics.quality`、`dynamics.populationTolerance`、激光的 `regime`、`detuningMHz/referenceTransition/frequencyMode/wavelengthNm/detuningUnit`、以角度 `thetaDeg/phiDeg` 和 `directionAnchor` 写的方向、预设与跟随标记，以及缺省 `meanHorizonUs`、单位、`showLightShift`、`phaseDeg`、`intensityMode` 时的补齐。
@@ -317,7 +317,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 
 取代原来的 1D、2D 径向与"3D（半经典）"三种运动轴（2026-11-02）：运动只有一种，三维，半经典。
 
-- **默认打开**：新场景与启动时的默认场景运动都打开（`dynamics.motion.enabled`），布居演化计算光镊中单个原子的内态与三维运动一起演化；只有操作者关闭"运动"时才只算内态，原子静止于焦点。示例中有光镊的（光镊 + 探测光 + 回泵光、光镊 · 3D PGC）运动打开；只讲内态物理的示例（单束光、循环跃迁、Rabi、光抽运等）关闭光镊，运动也关闭（运动需要势阱）。
+- **默认打开**：启动时的默认场景与每个示例运动都打开（`dynamics.motion.enabled`），布居演化计算光镊中单个原子的内态与三维运动一起演化；只有操作者关闭"运动"时才只算内态，原子静止于焦点。三个示例都有光镊，初始温度都是 100 μK（§6.21）。
 - **光镊**：运动的势阱是操作者指定的光镊（§6.21）。没有光镊，或光镊关闭、强度为零、按局域强度给出（平面波）时不计算，状态栏（错误）与图区写明原因并点名（`tweezer.ts` `tweezerRefusal`），例如"运动需要光镊：请在一束激光的参数中打开“设为光镊”，或在布居演化页关闭“运动”。"或"运动需要光镊：光镊「光镊」已关闭。"
 - **设置**：布居演化页设置区的"运动"一组：开关"运动"，打开后有"初始温度"与"计算设备"，没有"运动轴"。"初始温度"是 v3 Field（K / mK / μK，≈ 规则；按 §0.4 换单位保留数字，存为 μK 与单位），各轴相同：初态势阱中束缚原子的降低的等温分布 f ∝ e^{−E/k_BT} − 1（E 从远处的值算起，只取 E < 0；阱深比 k_BT 大得多时即动量为 Maxwell 分布、位置为 Boltzmann 分布，浅阱里动能温度低于 T），各轴（势阱的主轴）再按谐振子的热 Wigner 分布放大到 T* = (ħω/2k_B)·coth(ħω/2k_BT)。"计算设备"是分段控件 GPU · CPU，默认 GPU（本版本两者都在 CPU 上计算，见下一条）。关闭时这两行不显示，设置保留在场景中。三组设置并排放不下时换行。
 - **计算设备**：请求选项 `device`（"gpu" | "cpu"，只与运动同在；缺省为 GPU）。本版本只有 CPU 引擎：两种取值都在 CPU 上计算，结果的 `diagnostics.device` 是 "cpu"；选了 GPU 时 `diagnostics.deviceNote` 写"GPU 计算尚未提供：本次在 CPU 上计算"，状态栏在"运动已计算"之后写出它，详情的计算详情也写出。设备是场景的一部分，进入轨迹的缓存键：换设备即重新计算。
@@ -351,7 +351,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.21 光镊：操作者指定（2026-11-03）
 
 - **数据**：场景的 `tweezerId`（可选）是光镊那束激光的 ID；没有它即没有光镊。一个场景至多一束光镊：把另一束设为光镊即改为它（`tweezer.ts` `setTweezer`）。任何一束光都可以，反射光也可以；指定只说明哪一束是势阱，不改变光束本身。光阱是它连同与它同频的各束光（它的反射光、同一激光的交叉光束）的相干光场：引擎的阱光、丢失的区域都按这些光束算（rust-solver/motion SPEC §1.3）。场景文件校验它是场景中一束激光的 ID。删除光镊（或删除它所属的源与反射光）时一并取消（`keepTweezer`），删除前的确认写明"删除后运动没有光镊，需要另设一束"。
-- **默认与示例**：默认场景的 852 nm 光镊已指定且打开；"光镊 · 3D PGC"与"光镊 + 探测光 + 回泵光"的光镊也已指定。"光镊 · 径向 1D PGC"已删除。"光镊 + 探测光 + 回泵光"是拉曼共振的 Λ：默认光镊（852 nm，4 mW，束腰 1.2 μm，沿 +x）中，探测光在 F=2 → F′=2、回泵光在 F=1 → F′=2 上（自由空间共振），两束沿偏置磁场 +z（3 G），各 1 mW/cm²；|2,0⟩，30 μK，三维运动，1 ms，1001 个采样（examples.ts `LAMBDA_TWEEZER`），打开时显示布居演化。早先按"按功率与束腰或数值孔径给出强度的光就是聚焦光"认定光镊的规则已取消：新激光默认就按功率与束腰给出（§6.22），这些光都是高斯光束，但不是光镊。
+- **默认与示例**：示例只有三个（`examples.ts`，2026-11-13），都是 Rb87 D2 上、852 nm 光镊中三维运动的单个原子，初态 |2,+2⟩，初始温度 100 μK，1 ms，1001 个采样，打开时显示布居演化；反射光都是镜子的反射（§6.23），不是另一束激光。启动时的默认场景是第一个（3D PGC：三个示例中启动时的自动求解最轻，1 ms 约 14 s）。（1）“光镊 · 3D PGC”：B = 0（参考轴 x）；运动需要光镊，所以保留光镊（3.5 mW，束腰 1 μm，沿 z，π）；沿 +x、+y、+z 各一束圆偏振冷却光（F=2 → F′=3 下 6Γ，各 3 mW/cm²），各经镜子与两次通过的 λ/4 片反射回来（σ+σ−，z 对与 x、y 对旋向相反），回泵光沿 +x 在 F=1 → F′=2 上共振，共 8 束。（2）“光镊 + 探测光 + 回泵光 · 零场”（实验室场景）：B = 0；默认光镊沿 +x，7.25 mW，阱深 1.5 mK；探测光 π，沿 +y 向光镊轴偏 4°，1 mW、束腰 1 mm，F=2 → F′=3 红失谐 20 MHz，经 45° 的 λ/4 片反射回来（lin⊥lin）；回泵光（＋ 新建的光）在 F=1 → F′=2 上。（3）“光镊 + 探测光 + 1D PGC · 3 G”：同样的光镊与回泵光，B = 3 G 沿 +z（光镊对它是 π）；探测光沿 +z、σ+，仍红失谐 20 MHz；PGC 光沿 −z、σ−，功率与束腰同探测光，比探测光红 2 g_F μ_B B/h ≈ 2 × 0.70 MHz/G × 3 G = 4.20 MHz（−24.20 MHz）：这对光把 |2,m⟩ 与 |2,m+2⟩ 的双光子（拉曼）跃迁对静止原子调到共振；在绕 B 以拉莫尔频率转动的参考系里基态塞曼项消失，两束光落到同一频率，成为零场的 σ+σ− 黏团，冷却到 v = 0（推导见 `examples.ts`）。早先的示例（单束光、循环跃迁、Rabi、光抽运、D1 + D2、倾斜磁场、拉曼共振 Λ）与“默认场景”菜单项已删除。早先按"按功率与束腰或数值孔径给出强度的光就是聚焦光"认定光镊的规则已取消：新激光默认就按功率与束腰给出（§6.22），这些光都是高斯光束，但不是光镊。
 - **界面**：
   - 场景列表：光镊名字后有"光镊"徽标（浅底小标签，名字过长时先省略名字）。
   - 检查器：每束光（反射光也是）的第一节"运动"只有一个开关"设为光镊"（悬停说明：运动以这束光为光镊，原子在它的焦点处；一个场景至多一束光镊，打开即取消另一束的光镊身份；光镊须按功率与束腰或功率与数值孔径给出强度）。开关下一行：这束光是光镊而不能约束原子时（关闭、强度为零或是平面波）用警告色写明原因；另一束是光镊时写"现在的光镊是「光镊」。"。
@@ -361,7 +361,7 @@ interface ReferenceLevel { id; name; anchorId:string; anchorMode:'follow'|'zero-
 ### 6.22 新激光：按功率与束腰（2026-11-03）
 
 - 场景面板"激光"的"＋"加的激光（types.ts `newLaser`）按"功率与束腰"给出强度：50 μW、束腰 1 mm（types.ts `NEW_LASER_POWER_MW`、`NEW_LASER_WAIST_UM`，单位 μW、mm，强度读数 mW/cm²），原子处 I = 2P/(πw₀²) ≈ 3.2 mW/cm²，约为 D2 循环跃迁饱和强度的两倍：冷却光或探测光的典型值，束腰是这类光束毫米量级的尺寸。频率仍是所选 D 线的 F=2 → F′=3（D1 为 F″=2），沿 +x。
-- 这样新光是焦点在原子处的高斯光束（运动中带它的光束形状，毫米束腰对原子的运动范围几乎是平面波），不是光镊；光镊由操作者指定（§6.21）。仍可在"指定方式"中改为局域强度（平面波）。默认场景与示例中的光照旧（探测光按局域强度，光镊按功率与束腰）。
+- 这样新光是焦点在原子处的高斯光束（运动中带它的光束形状，毫米束腰对原子的运动范围几乎是平面波），不是光镊；光镊由操作者指定（§6.21）。仍可在"指定方式"中改为局域强度（平面波）。示例中：3D PGC 的冷却光与回泵光按局域强度（平面波）；另两个示例的探测光、PGC 光与回泵光按功率与束腰；光镊都按功率与束腰。
 
 ### 6.23 反射光（2026-11-02）
 

@@ -10,6 +10,7 @@ committed later must be declared before that with ``declare_output``.
 from __future__ import annotations
 
 import collections.abc
+import threading
 import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
@@ -239,6 +240,63 @@ def snapshot_from_wire(read: Mapping[str, Any], refs: RunRefs | None = None) -> 
     return zlc_data.OwnedSnapshot(block.ref(zlc_data.StreamGenerationId(str(key["generation"]))), block)
 
 
+class Watched:
+    """A catalogue read a run watches (:meth:`RunContext.watch`): answered once when the watch
+    begins, then told by the core each time what it reads changes -- nothing asks again.
+
+    ``latest`` is the newest answer, the same object until something new is told; a read the
+    core could not answer is raised there. :meth:`wait` sleeps until something new is told.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Condition()
+        self._told: tuple[Any, str | None] | None = None
+        self._count = 0
+
+    def tell(self, told: Mapping[str, Any]) -> None:
+        """What the core told: ``{value}`` or ``{error}``."""
+
+        with self._lock:
+            self._told = (told.get("value"), None if told.get("error") is None else str(told["error"]))
+            self._count += 1
+            self._lock.notify_all()
+
+    def answered(self, value: Any) -> None:
+        """The watch's first answer -- unless a change was told before it arrived, which is newer."""
+
+        with self._lock:
+            if self._told is None:
+                self._told = (value, None)
+                self._count += 1
+                self._lock.notify_all()
+
+    @property
+    def count(self) -> int:
+        """How many answers it has been told: what :meth:`wait` compares."""
+
+        with self._lock:
+            return self._count
+
+    def wait(self, since: int, timeout: float) -> int:
+        """Sleep until it has been told more than ``since`` answers (a :attr:`count`) or ``timeout``
+        seconds passed; the count then."""
+
+        with self._lock:
+            self._lock.wait_for(lambda: self._count > since, timeout)
+            return self._count
+
+    @property
+    def latest(self) -> Any:
+        with self._lock:
+            told = self._told
+        if told is None:
+            raise RuntimeError("the watch has not been answered yet")
+        value, error = told
+        if error is not None:
+            raise RuntimeError(error)
+        return value
+
+
 class RunContext:
     """The capabilities and identity one node run publishes with."""
 
@@ -398,17 +456,20 @@ class RunContext:
                                                  "frame_ms": int(frame_ms)})
         return pathlib.Path(answer["path"])
 
-    def fit(self, model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None, sigma_dof: Any = None) -> Any:
+    def fit(self, model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None, sigma_dof: Any = None,
+            trials: Any = None) -> Any:
         """One independent fit per row of ``y`` ``(cells, n)`` over ``x`` ``(n)`` by the core's
         fit engine; ``sigma`` as ``y``, ``warm`` ``(cells, parameters)`` beside the engine's
         own seeds (a row with a NaN is none), ``sigma_dof`` each sigma's degrees of freedom
-        as a panel's fit has them (infinite: known otherwise). Answers a ``zlc_plugin.fit.FitAnswer``: a
+        as a panel's fit has them (infinite: known otherwise), ``trials`` as ``y`` when each
+        ``y`` is a proportion of that many Bernoulli trials (binomial likelihood, no sigma).
+        Answers a ``zlc_plugin.fit.FitAnswer``: a
         cell that cannot be fitted is that cell's ``success`` False. The run's Stop ends
         the batch and raises here."""
 
         from .fit import fit_answer, fit_request
 
-        request = fit_request(model_id, x, y, sigma, warm, sigma_dof)
+        request = fit_request(model_id, x, y, sigma, warm, sigma_dof, trials)
         if self._run.cancel.is_set():
             raise PluginError("cancelled", "the run was stopped")
         return fit_answer(self._request("run.fit", request))
@@ -471,6 +532,18 @@ class RunContext:
         """Run one catalogue command under this run's origin (its claims apply)."""
 
         return self._request("core", {"command": command, "params": params})
+
+    def watch(self, command: str, **params: Any) -> Watched:
+        """Watch one catalogue read under this run's origin: the core answers it now and then tells
+        each change of it as the device that owns it makes it (``pulse_schedule``: the board's
+        every LOAD, FIRE, stop and report), so the run reads :attr:`Watched.latest` and never asks again."""
+
+        watched = Watched()
+        with self._run.lock:
+            name = str(len(self._run.watches))
+            self._run.watches[name] = watched
+        watched.answered(self.core(command, _watch=name, **params))
+        return watched
 
     # ---------------------------------------------------------- publication
 

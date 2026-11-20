@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use zlc_core::control::Origin;
 use zlc_core::runtime::{Generation, GenerationId, Runtime};
 use zlc_plugin_host::{HostEvent, Lent, PluginHost, RunRequest};
-use zlc_workbench::{Event, Host, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog, Workbench};
+use zlc_workbench::{Event, Host, Lane, PanelContent, Plugins, RunSpec, SerialFault, SignalInfo, TypeCatalog, Work, Workbench};
 
 use crate::panels::Panels;
 
@@ -104,7 +104,10 @@ impl Host for DesktopHost<'_> {
         }
     }
     fn schemas(&self, signal: &str) -> Option<(Value, Value)> { schemas(self.runtime, signal) }
-    fn diagnostic_data(&self) -> Vec<(String, Vec<u8>)> { crate::recent_export::members(self.runtime) }
+    fn diagnostic_data(&self) -> zlc_workbench::DiagnosticData {
+        let recent = self.runtime.recent();
+        Box::new(move || crate::recent_export::members(recent))
+    }
     fn keep_recent_data(&mut self, mib: u64) { crate::recent_export::set_budget_mib(self.runtime, mib); }
 }
 
@@ -167,8 +170,8 @@ pub struct Stand {
     runs: Arc<Mutex<Runs>>,
     /// Host events of a run whose start reply has not arrived yet.
     unmapped: Vec<HostEvent>,
-    /// Run directory per workbench run (artifacts must live inside it).
-    directories: BTreeMap<String, std::path::PathBuf>,
+    /// Run directory per workbench run (artifacts must live inside it), made by the run's start.
+    directories: Arc<Mutex<BTreeMap<String, std::path::PathBuf>>>,
     /// Operator requests: request id -> host ticket.
     requests: BTreeMap<String, u64>,
     /// A run's `core` request goes on the bus as a remote call does.
@@ -190,6 +193,23 @@ pub struct Stand {
     /// Where `run.fit` batches are solved: off the window's turn and the channel's thread.
     fits: zlc_plugin_host::workers::Workers,
     artifacts: Arc<crate::run_artifacts::Store>,
+    /// Where the workbench's file work runs, each lane in the order asked.
+    files: FileLane,
+    exports: FileLane,
+}
+
+/// One thread doing work in the order it was handed over.
+struct FileLane(std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>);
+
+impl FileLane {
+    fn new(name: &str) -> Self {
+        let (sender, work) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let _ = std::thread::Builder::new().name(format!("zlc-workbench-{name}")).spawn(move || { for job in work { job(); } });
+        Self(sender)
+    }
+    fn run(&self, job: impl FnOnce() + Send + 'static) -> Result<(), String> {
+        self.0.send(Box::new(job)).map_err(|_| "the workbench's file lane has ended".to_owned())
+    }
 }
 
 /// Workbench runs and plugin-host runs. A run's host id is known only when its start
@@ -239,7 +259,7 @@ pub enum NativeRequest {
     /// Remote on/off for the pulse board (its own server admits the other computers).
     Publish { ticket: u64, instance: String, role: String, published: bool },
     /// What a native row leaves blank, found before it opens (the local board's UART), off the window's turn.
-    Resolve { ticket: u64, type_id: String, parameters: Value, excluded: Vec<String> },
+    Resolve { ticket: u64, instance: String, type_id: String, parameters: Value, excluded: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -324,9 +344,9 @@ impl Builtin {
     pub fn new(runtime: Runtime, host: Option<PluginHost>, reply: Arc<dyn Fn(Event) + Send + Sync>,
                core: Arc<dyn Fn(crate::remote::RemoteCall) -> Result<(), String> + Send + Sync>) -> Self {
         Self(Rc::new(RefCell::new(Stand { runtime, host, missing: None, catalog_ready: false, reply, instances: BTreeMap::new(), runs: Arc::default(),
-            unmapped: Vec::new(), directories: BTreeMap::new(), requests: BTreeMap::new(), core, events: Vec::new(), camera: None,
+            unmapped: Vec::new(), directories: Arc::default(), requests: BTreeMap::new(), core, events: Vec::new(), camera: None,
             acquisition: json!({"state": "idle", "produced": 0}), native: None, native_instances: BTreeMap::new(), bench: None, scanning: Arc::default(), lifecycles: BTreeMap::new(),
-            fits: zlc_plugin_host::workers::Workers::new("zlc-plugin-fit"), artifacts: Arc::default() })))
+            fits: zlc_plugin_host::workers::Workers::new("zlc-plugin-fit"), artifacts: Arc::default(), files: FileLane::new("files"), exports: FileLane::new("export") })))
     }
     /// Native device types (their descriptors) and the handler their instances' requests go to.
     pub fn set_native(&self, types: Vec<Value>, handler: Rc<dyn Fn(NativeRequest)>) { self.0.borrow_mut().native = Some((types, handler)); }
@@ -426,7 +446,7 @@ impl Builtin {
                 let mut stand = self.0.borrow_mut();
                 stand.runs.lock().unwrap().mapped.remove(&run);
                 stand.artifacts.retire(&ours);
-                stand.directories.remove(&ours);
+                stand.directories.lock().unwrap().remove(&ours);
                 stand.requests.retain(|request, _| !request.starts_with(&format!("{ours}:")));
                 vec![Event::RunFinished { run: ours, outcome, error, generation }]
             }
@@ -477,7 +497,7 @@ impl Builtin {
         match op {
             "run.figure" | "run.animation" => {
                 // Drawn off the window's turn; the run's thread waits for the paths.
-                let (directory, host) = { let stand = self.0.borrow(); (stand.directories.get(&run).cloned(), stand.host.clone()) };
+                let (directory, host) = { let stand = self.0.borrow(); (stand.directories.lock().unwrap().get(&run).cloned(), stand.host.clone()) };
                 let Some(host) = host else { return Vec::new() };
                 let figure = op == "run.figure";
                 let spawned = std::thread::Builder::new().name("zlc-plugin-figure".into()).spawn(move || {
@@ -503,7 +523,7 @@ impl Builtin {
             "run.artifacts" | "run.artifact" => {
                 let stand=self.0.borrow();
                 let Some(host)=stand.host.clone() else{return Vec::new()};
-                let directory=stand.directories.get(&run).cloned();
+                let directory=stand.directories.lock().unwrap().get(&run).cloned();
                 let store=stand.artifacts.clone();let reply=stand.reply.clone();
                 let legacy=op=="run.artifact";
                 let mut params=params;
@@ -555,16 +575,24 @@ impl Builtin {
     /// computer is gone decides it for this one too, and it is lost with that reason -- a plugin
     /// device as a remote.device is (`PluginHost::lost`), the native board through the workbench.
     fn watch(&self, instance: &str, type_id: &str, parameters: &Value) {
-        let (bench, host, reply, announced) = {
+        let (bench, host, reply, native) = {
             let stand = self.0.borrow();
             let native = stand.native.as_ref().is_some_and(|(types, _)| types.iter().any(|item| item["announces"] == type_id));
-            let plugin = || stand.host.as_ref().and_then(|host| host.catalog().ok()).is_some_and(|catalog| catalog.types.iter().any(|item| item.announces == type_id));
-            (stand.bench.clone(), stand.host.clone(), stand.reply.clone(), native || plugin())
+            (stand.bench.clone(), stand.host.clone(), stand.reply.clone(), native)
         };
-        let Some(bench) = bench.filter(|_| announced) else { return };
+        let Some(bench) = bench else { return };
         let (name, kind, parameters) = (instance.to_owned(), type_id.to_owned(), parameters.clone());
         let registry = host.as_ref().map(|host| host.registry().clone()).unwrap_or_else(|| zlc_plugin_host::Registry::standalone("fabric-watch"));
+        // Whether a plugin type is another computer's client is the catalogue's to say, read here,
+        // off the window's turn: the catalogue may still be in discovery.
         let _ = std::thread::Builder::new().name("zlc-fabric-watch".into()).spawn(move || {
+            let announced = native || match host.as_ref().map(|host| host.catalog()) {
+                Some(Ok(catalog)) => catalog.types.iter().any(|item| item.announces == kind),
+                // Whether it is another computer's client cannot be known: said, not passed over.
+                Some(Err(error)) => { bench.say(&name, &format!("FABRIC NOT WATCHED {kind}: the plugin catalogue could not be read ({error})")); false }
+                None => false,
+            };
+            if !announced { return; }
             let lost = name.clone();
             bench.watch(registry, &name, &kind, &parameters, move |reason| match host.as_ref().filter(|host| host.descriptor(&lost).is_some()) {
                 Some(host) => host.lost(&lost, reason),
@@ -639,9 +667,30 @@ impl Plugins for Builtin {
         let group = if group.is_object() { group } else { json!({}) };
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
         let (turn, gate) = self.turn(instance);
-        let started = self.spawn("open", move |host| gate.event(turn, gate.run(turn, || match match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) } {
-            Ok(point) => Event::Opened { instance: name, working_point: point },
-            Err(error) => Event::Failed { instance: name, error: error.to_string() },
+        let reply = self.0.borrow().reply.clone();
+        let started = self.spawn("open", move |host| gate.event(turn, gate.run(turn, || {
+            let endpoint = format!("{}:{}", parameters["host"].as_str().unwrap_or_default(), parameters["port"]);
+            // The device's own open, timed around it alone (not its turn's wait).
+            let began = std::time::Instant::now();
+            let instance_name = name.clone();
+            let opened = match &bench { Some(bench) => bench.open(host, &name, &parameters), None => host.open(&name, &kind, parameters, group) };
+            // The serial ports an open on this computer met that would not open (another computer's are its own).
+            let faults = if bench.is_some() { Vec::new() } else {
+                SerialFault::listed(match &opened { Ok(point) => point.get("serial_faults"), Err(error) => error.serial_faults.as_ref() })
+            };
+            let outcome = match opened {
+                Ok(point) => {
+                    // A client of another computer's own server (the catalogue's announced types) says where it
+                    // connected and what the server said it is, as a native board does.
+                    if bench.is_none() && host.catalog().is_ok_and(|catalog| catalog.types.iter().any(|item| item.announces == kind)) {
+                        let said = point.get("device_info").filter(|info| !info.is_null()).map_or_else(|| "it says nothing of itself".to_owned(), Value::to_string);
+                        reply(Event::Log { instance: name.clone(), line: format!("SERVER CONNECTED {kind} at {endpoint}: {said}") });
+                    }
+                    Event::Opened { instance: name, working_point: zlc_workbench::with_open_time(point, began.elapsed()) }
+                }
+                Err(error) => Event::Failed { instance: name, error: error.to_string() },
+            };
+            Event::met_serial_faults(&instance_name, faults, outcome)
         })));
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Failed { instance: instance.into(), error }); }
     }
@@ -701,11 +750,10 @@ impl Plugins for Builtin {
     }
     fn start(&mut self, run: &RunSpec) {
         self.rename(&run.instance, &run.node_name);
-        let runs = self.0.borrow().runs.clone();
+        let (runs, directories, reply) = { let stand = self.0.borrow(); (stand.runs.clone(), stand.directories.clone(), stand.reply.clone()) };
         runs.lock().unwrap().starting.insert(run.run.clone(), false);
         {
             let mut stand = self.0.borrow_mut();
-            if let Some(directory) = &run.directory { stand.directories.insert(run.run.clone(), directory.clone()); }
             if let (CAMERA_MEASUREMENT, Some(signal)) = (run.type_id.as_str(), run.outputs.get("frames")) {
                 stand.camera = Some((run.run.clone(), signal.as_str().into()));
                 stand.acquisition = json!({"state": "starting", "produced": 0});
@@ -719,22 +767,36 @@ impl Plugins for Builtin {
         let (devices, native): (Vec<_>, Vec<_>) = { let stand = self.0.borrow(); run.devices.iter()
             .map(|(argument, instance)| (argument.clone(), instance.clone())).partition(|(_, instance)| !stand.native_instances.contains_key(instance)) };
         let keys = native.into_iter().map(|(argument, instance)| (format!("{argument}_key"), json!(instance)));
-        let request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), device_units: run.device_units.clone(), shared: run.shared.clone(), reads: run.reads.clone(), origin: origin(&run.origin),
+        let mut request = RunRequest { prepared: run.prepared.clone(), values: Value::Object(run.values.clone()), devices: devices.into_iter().collect(), device_labels: run.device_labels.clone(), device_units: run.device_units.clone(), shared: run.shared.clone(), reads: run.reads.clone(), origin: origin(&run.origin),
             // Build arguments beside the values: chosen artifacts and resolved workspace resources.
             resources: Value::Object(run.artifacts.iter().chain(&run.resources).map(|(key, value)| (key.clone(), value.clone())).chain(keys).collect()), source_signal: (!run.source_signal.is_empty()).then(|| run.source_signal.clone()),
-            run_directory: run.directory.clone(), outputs: run.outputs.clone(), record_devices: run.record_devices };
-        let prepared = run.prepared.clone();
-        let started = self.spawn("start", move |host| match host.start_run(&node, request) {
-            Ok(hosted) => {
-                // Mapped, and a Stop asked while it was starting goes now: no Stop is lost.
-                let stop = { let mut runs = runs.lock().unwrap(); runs.mapped.insert(hosted.clone(), (node.clone(), ours.clone())); runs.starting.remove(&ours).unwrap_or(false) };
-                if stop { let _ = host.stop_run(&node, &hosted); }
-                Event::RunStarted { run: ours }
-            }
-            Err(error) => {
-                if let Some(token) = prepared { let _ = host.call(&node, "run.discard", json!({"prepared": token}), CALL); }
-                runs.lock().unwrap().starting.remove(&ours);
-                Event::RunFinished { run: ours, outcome: "failed".into(), error: Some(json!({"type": error.kind.name(), "message": error.message})), generation: None }
+            run_directory: None, outputs: run.outputs.clone(), record_devices: run.record_devices };
+        let (prepared, folder) = (run.prepared.clone(), run.folder.clone());
+        let started = self.spawn("start", move |host| {
+            // A Task's directory is made here, before the plugin hears of the run: its artifacts live in it.
+            let made = folder.as_ref().map(zlc_workbench::workspace::RunFolder::create).transpose()
+                .map_err(|error| zlc_plugin_host::CallError::new(zlc_plugin_host::ErrorKind::Failed, error));
+            let hosted = made.and_then(|directory| {
+                if let Some(directory) = directory {
+                    directories.lock().unwrap().insert(ours.clone(), directory.clone());
+                    reply(Event::RunDirectory { run: ours.clone(), directory: directory.clone() });
+                    request.run_directory = Some(directory);
+                }
+                host.start_run(&node, request)
+            });
+            match hosted {
+                Ok(hosted) => {
+                    // Mapped, and a Stop asked while it was starting goes now: no Stop is lost.
+                    let stop = { let mut runs = runs.lock().unwrap(); runs.mapped.insert(hosted.clone(), (node.clone(), ours.clone())); runs.starting.remove(&ours).unwrap_or(false) };
+                    if stop { let _ = host.stop_run(&node, &hosted); }
+                    Event::RunStarted { run: ours }
+                }
+                Err(error) => {
+                    if let Some(token) = prepared { let _ = host.call(&node, "run.discard", json!({"prepared": token}), CALL); }
+                    runs.lock().unwrap().starting.remove(&ours);
+                    directories.lock().unwrap().remove(&ours);
+                    Event::RunFinished { run: ours, outcome: "failed".into(), error: Some(json!({"type": error.kind.name(), "message": error.message})), generation: None }
+                }
             }
         });
         if let Err(error) = started {
@@ -783,7 +845,8 @@ impl Plugins for Builtin {
         let (type_id, excluded) = (type_id.to_owned(), excluded.to_vec());
         // The bench part of the scan: what other computers publish (v2's remote family).
         let bench = self.bench().filter(|_| type_id == zlc_fabric::REMOTE_TYPE);
-        // v2 _scan_families: one deadline from the scan's start, the process's start inside it. A family
+        // v2 _scan_families: one deadline from the family's ask (the scan's start, or, for a type asked
+        // after one of its resource kind, that one's answer), the process's start inside it. A family
         // that misses it is reported so, its answer when it comes is dropped, and until then it is still
         // scanning (Init, Apply and another scan wait for it).
         let until = std::time::Instant::now() + SCAN;
@@ -812,18 +875,37 @@ impl Plugins for Builtin {
     }
     fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) {
         if let Some(handler) = self.native_handler(Some(type_id), instance) {
-            handler(NativeRequest::Resolve { ticket, type_id: type_id.to_owned(), parameters: parameters.clone(), excluded: excluded.to_vec() });
+            handler(NativeRequest::Resolve { ticket, instance: instance.to_owned(), type_id: type_id.to_owned(), parameters: parameters.clone(), excluded: excluded.to_vec() });
             return;
         }
-        let (type_id, parameters, excluded) = (type_id.to_owned(), parameters.clone(), excluded.to_vec());
-        // A resolve probes as a scan does, port by port with a bounded wait each, so it is held to a
+        let (instance, type_id, parameters, excluded) = (instance.to_owned(), type_id.to_owned(), parameters.clone(), excluded.to_vec());
+        // A resolve probes as a scan does, every free port at once with a bounded wait each, so it is held to a
         // family's scan deadline (the process's start inside it); Init waits for nothing longer.
-        let started = self.spawn("resolve", move |host| Event::Answered { ticket,
-            result: host.resolve(&type_id, parameters, &excluded, SCAN).map_err(|error| error.to_string()) });
+        let started = self.spawn("resolve", move |host| {
+            let result = host.resolve(&type_id, parameters, &excluded, SCAN);
+            let faults = SerialFault::listed(match &result { Ok(answer) => answer.get("serial_faults"), Err(error) => error.serial_faults.as_ref() });
+            Event::met_serial_faults(&instance, faults, Event::Answered { ticket, result: result.map_err(|error| error.to_string()) })
+        });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
+    }
+    fn restart_port(&mut self, ticket: u64, port: &str) {
+        let (reply, port) = (self.0.borrow().reply.clone(), port.to_owned());
+        // Windows' confirmation and pnputil wait on a thread of their own, never on the window's turn.
+        let started = std::thread::Builder::new().name("zlc-port-restart".into())
+            .spawn(move || reply(Event::Answered { ticket, result: serde_json::to_value(crate::port_restart::restart(&port)).map_err(|error| error.to_string()) }));
+        if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error.to_string()) }); }
     }
     fn scanning(&self) -> Vec<String> { self.0.borrow().scanning.lock().unwrap().iter().cloned().collect() }
     fn discovering(&self) -> bool { let stand = self.0.borrow(); stand.host.is_some() && !stand.catalog_ready }
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work) {
+        let stand = self.0.borrow();
+        let reply = stand.reply.clone();
+        let lane = match lane { Lane::Files => &stand.files, Lane::Export => &stand.exports };
+        if let Err(error) = lane.run(move || reply(Event::Answered { ticket, result: work() })) {
+            drop(stand);
+            self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) });
+        }
+    }
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool) {
         let (instance, role) = (instance.to_owned(), role.to_owned());
         let Some(bench) = self.bench() else {

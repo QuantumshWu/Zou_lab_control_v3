@@ -38,6 +38,7 @@ from zlc_plugin.figures import (
     PlotLabels,
 )
 from zlc_plugin import DatasetOutputDeclaration, LiveDatasetOutput, PluginError
+from zlc_plugin.statistics import proportion_uncertainty
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
@@ -668,12 +669,11 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     shot_count = np.count_nonzero(classified, axis=0)
     loading = np.full(sites, np.nan, dtype=float)
     loading_error = np.full(sites, np.nan, dtype=float)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        fraction = bright_count / shot_count
-        loading[separated] = fraction[separated]
-        loading_error[separated] = np.sqrt(
-            fraction[separated] * (1.0 - fraction[separated]) / shot_count[separated]
-        )
+    # The loading rate is a proportion of the batch's shots: its standard
+    # uncertainty is the half-width of its Wilson interval (never zero).
+    if separated.any():
+        loading[separated] = bright_count[separated] / shot_count[separated]
+        loading_error[separated] = proportion_uncertainty(bright_count[separated], shot_count[separated])
     return {
         "contrast": contrast,
         "standard_error": error,
@@ -2478,13 +2478,13 @@ class SlmFeedbackTask:
             except Exception:
                 # Preserve a board fault that stopped the triggers; otherwise
                 # retain the camera's original failure. Never repeat the batch.
-                report = self._board.wait_done(command_id, 0.0)
+                report = self._board.reported(self._board.watch_done(command_id))
                 if report is None or report.get("status") == STATUS_DONE:
                     raise
                 raise RuntimeError(f"the pulse failed: {report.get('status')}")
             else:
                 check_cancelled(context)
-                report = self._board.wait_report(command_id, context.cancel_requested)
+                report = self._board.wait_report(self._board.watch_done(command_id), context.cancel_requested)
                 if report.get("status") != STATUS_DONE:
                     raise RuntimeError(f"the pulse did not confirm DONE: status={report.get('status')}")
                 completed = True

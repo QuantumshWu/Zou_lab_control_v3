@@ -137,9 +137,17 @@ fn mkstemp(directory: &Path, prefix: &str, suffix: &str) -> Result<(PathBuf, Fil
     Err(ArchiveError::new(ErrorKind::FileExists, "[Errno 17] No usable temporary file name found"))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The directories this thread flushed, in order (what a test counts).
+    static FLUSHED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[cfg(windows)]
 fn flush_handle(directory: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
+    #[cfg(test)]
+    FLUSHED.with(|flushed| flushed.borrow_mut().push(directory.to_path_buf()));
     // GENERIC_WRITE (FlushFileBuffers needs it), shared read/write/delete,
     // FILE_FLAG_BACKUP_SEMANTICS for a directory handle.
     std::fs::OpenOptions::new().access_mode(0x4000_0000).share_mode(0x7).custom_flags(0x0200_0000).open(directory)?.sync_all()
@@ -181,7 +189,8 @@ pub fn durable_mkdir(directory: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// `durable_makedirs`: confirm the nearest existing anchor, then create each missing level.
+/// `durable_makedirs`: create each missing level durably (it and the entry in its parent);
+/// levels that already exist are only confirmed to be directories, never flushed again.
 pub fn durable_makedirs(directory: &Path) -> Result<PathBuf> {
     let target = resolve(directory)?;
     let mut missing = Vec::new();
@@ -191,7 +200,6 @@ pub fn durable_makedirs(directory: &Path) -> Result<PathBuf> {
         match anchor.parent() { Some(parent) => anchor = parent.to_path_buf(), None => break }
     }
     if !anchor.is_dir() { return Err(not_a_directory(&anchor)); }
-    durable_mkdir(&anchor)?;
     for level in missing.iter().rev() { durable_mkdir(level)?; }
     Ok(target)
 }
@@ -312,6 +320,15 @@ mod staged_tests {
         let root=folder("unique");let target=root.join("data.bin");std::fs::write(&target,b"old").unwrap();
         let mut staged=StagedWrite::new(&target).unwrap();std::fs::write(staged.temporary(),b"new").unwrap();let saved=staged.finish(true).unwrap();
         assert_ne!(saved,target);assert_eq!(std::fs::read(target).unwrap(),b"old");assert_eq!(std::fs::read(saved).unwrap(),b"new");drop(staged);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]fn makedirs_flushes_only_the_levels_it_creates_and_their_parents(){
+        let root=resolve(&folder("makedirs")).unwrap();
+        let flushed=|work:&dyn Fn()|{FLUSHED.with(|flushed|flushed.borrow_mut().clear());work();FLUSHED.with(|flushed|flushed.borrow().clone())};
+        let (day,run)=(root.join("2026_11_12"),root.join("2026_11_12").join("run"));
+        assert_eq!(flushed(&||{durable_makedirs(&run).unwrap();}),[day.clone(),root.clone(),run.clone(),day.clone()],"each new level and the entry in its parent");
+        assert!(flushed(&||{durable_makedirs(&run).unwrap();}).is_empty(),"a folder that is there is not flushed again");
+        assert!(flushed(&||{durable_makedirs(&root).unwrap();}).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]fn failed_directory_acknowledgement_preserves_visible_publication(){
         let root=folder("ack");let target=root.join("data.bin");let mut staged=StagedWrite::new(&target).unwrap();std::fs::write(staged.temporary(),b"complete").unwrap();

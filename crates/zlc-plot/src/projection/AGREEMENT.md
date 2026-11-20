@@ -140,6 +140,26 @@ NEP 50 makes numpy do so (a Python float meeting a float32 array).
 Any other difference fails the golden tests. A tolerance is never applied to
 a Level 1 or Level 2 quantity to make a test pass; the order is fixed instead.
 
+## Proportions -- a deliberate departure
+
+The oracle gave a MEAN of boolean samples the standard error of its zeros
+and ones, `sqrt(p (1 - p) / (n - 1))`: zero at `p = 0` and `p = 1`, and as a
+fit weight the heaviest exactly there.  v3 reads a proportion by its trials
+(`docs/UNCERTAINTY.md`): a curve series and a point map carry `trials` (each
+point's sample count) instead of `sem`/`sigma`, a fit selection carries
+`observation_trials` instead of `observation_sigma`, the error bar is the
+Wilson interval and the fit likelihood binomial.  A rolling window pools a
+proportion's trials (`sum k / sum n`), grouped or not; values of a window
+whose group carries several samples per shot therefore weight shots by
+their samples, as the trials do.
+
+The goldens compare everything else as before.  Where the native payload
+carries trials, the oracle's standard error is not compared: it is
+recomputed from the native point and trials by the oracle's formula and must
+agree to 1e-12 relative (the recomputation's rounding, not the payload's),
+which checks that the trials are the counts the oracle reduced
+(`golden::proportion_departure`).
+
 ## Out of scope here (owned elsewhere)
 
 Resolution of the configuration into `ProjectionPlan` (spec defaults, fate

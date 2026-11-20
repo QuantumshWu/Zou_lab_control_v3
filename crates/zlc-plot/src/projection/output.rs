@@ -69,17 +69,38 @@ impl PartialEq for AxisValue {
     }
 }
 
+/// What the uncertainty of reduced MEAN points is read from
+/// (docs/UNCERTAINTY.md): a standard error per point, or -- for a proportion
+/// -- the trials each point counts.
+#[derive(Clone, Copy, Debug)]
+pub enum Spread<'a> { None, Sem(&'a [f64]), Trials }
+
+/// The 68.27 % interval of each point, canonical unit: `y +- sem`, or a
+/// proportion's Wilson interval of `y n` successes in `n` trials.
+pub fn point_intervals(y: &[f64], sem: Option<&Array>, trials: Option<&Array>) -> Option<(Vec<f64>, Vec<f64>)> {
+    use zlc_core::scientific::statistics::proportion_interval;
+    if let Some(trials) = trials {
+        return Some(y.iter().zip(trials.to_f64()).map(|(p, n)| proportion_interval(p * n, n)).unzip());
+    }
+    let sem = sem?.to_f64();
+    Some(y.iter().zip(&sem).map(|(c, s)| (c - s, c + s)).unzip())
+}
+
 #[derive(Clone, Debug)]
 pub struct CurveSeries {
     pub x: QuantityArray,
     pub y: QuantityArray,
     pub valid: Array,
-    /// Standard error of each MEAN point, canonical unit.
+    /// Standard error of each MEAN point of real samples, canonical unit.
     pub sem: Option<Array>,
     /// The degrees of freedom of each `sem`: `n - 1` where the point's own
     /// `n` repeats estimated it, infinite where a stated sigma did (one
     /// repeat). The fit reads it (the Student-t likelihood).
     pub sem_dof: Option<Array>,
+    /// The Bernoulli trials of each MEAN point of boolean samples: the
+    /// point is the proportion `y` of them, its interval Wilson's and its fit
+    /// likelihood binomial. Exclusive with `sem`.
+    pub trials: Option<Array>,
     pub x_labels: Option<Vec<String>>,
     pub group_key: Vec<AxisValue>,
     pub label: String,
@@ -122,8 +143,10 @@ pub struct PointMapData {
     pub indices: Vec<usize>,
     pub values: QuantityArray,
     pub valid: Array,
-    /// Standard uncertainty, in canonical value units.
+    /// Standard uncertainty, in canonical value units (real samples).
     pub sigma: Option<Array>,
+    /// The Bernoulli trials of each proportion (a MEAN of boolean samples).
+    pub trials: Option<Array>,
     pub boolean: bool,
 }
 
@@ -274,11 +297,16 @@ fn keys_json(keys: &[Vec<AxisValue>]) -> Value {
 
 impl CurveData {
     pub fn golden(&self, arrays: &mut GoldenArrays) -> Value {
-        let series: Vec<Value> = self.series.iter().map(|s| json!({
-            "type": "CurveSeries", "x": s.x.golden(arrays), "y": s.y.golden(arrays), "valid": arrays.array(&s.valid),
-            "sem": arrays.optional(&s.sem), "x_labels": s.x_labels, "label": s.label,
-            "group_key": Value::Array(s.group_key.iter().map(AxisValue::golden).collect()),
-        })).collect();
+        let series: Vec<Value> = self.series.iter().map(|s| {
+            let mut value = json!({
+                "type": "CurveSeries", "x": s.x.golden(arrays), "y": s.y.golden(arrays), "valid": arrays.array(&s.valid),
+                "sem": arrays.optional(&s.sem), "x_labels": s.x_labels, "label": s.label,
+                "group_key": Value::Array(s.group_key.iter().map(AxisValue::golden).collect()),
+            });
+            // A proportion's trials: the oracle has none (AGREEMENT.md, "Proportions").
+            if let Some(trials) = &s.trials { value["trials"] = arrays.array(trials); }
+            value
+        }).collect();
         json!({"type": "CurveData", "revision": self.revision, "generation": self.generation.as_ref(), "x_ref": optional_ref(&self.x_ref),
                "group_by": self.group_by.iter().map(axis_ref_json).collect::<Vec<_>>(), "series": series,
                "x_role": self.x_role.as_deref()})
@@ -315,10 +343,14 @@ impl Payload {
         match self {
             Payload::Curve(p) => p.golden(arrays),
             Payload::Image(p) => p.golden(arrays),
-            Payload::PointMap(p) => json!({"type": "PointMapData", "revision": p.revision, "generation": p.generation.as_ref(),
-                "site": axis_ref_json(&p.site), "coordinates": p.coordinates.iter().map(scalar_json).collect::<Vec<_>>(),
-                "point_ids": p.indices.iter().map(|&i| &p.geometry.points[i].id).collect::<Vec<_>>(),
-                "values": p.values.golden(arrays), "valid": arrays.array(&p.valid), "sigma": arrays.optional(&p.sigma), "boolean": p.boolean}),
+            Payload::PointMap(p) => {
+                let mut value = json!({"type": "PointMapData", "revision": p.revision, "generation": p.generation.as_ref(),
+                    "site": axis_ref_json(&p.site), "coordinates": p.coordinates.iter().map(scalar_json).collect::<Vec<_>>(),
+                    "point_ids": p.indices.iter().map(|&i| &p.geometry.points[i].id).collect::<Vec<_>>(),
+                    "values": p.values.golden(arrays), "valid": arrays.array(&p.valid), "sigma": arrays.optional(&p.sigma), "boolean": p.boolean});
+                if let Some(trials) = &p.trials { value["trials"] = arrays.array(trials); }
+                value
+            }
             Payload::Histogram(p) => p.golden(arrays),
             Payload::Facet(p) => json!({"type": "FacetData", "revision": p.revision, "generation": p.generation.as_ref(),
                 "cells": p.cells.iter().map(|cell| json!({"type": "FacetCell", "facet_index": cell.facet_index,

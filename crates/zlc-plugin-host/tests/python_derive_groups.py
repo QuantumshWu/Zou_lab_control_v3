@@ -19,7 +19,7 @@ import zlc_plugin.fit
 from zlc_data import DatasetSchema, DomainSpec, SCALAR_DOMAIN, ValidityContract, ValueSchema, owned_snapshot_from_arrays
 from zlc_data.axis import REPEAT, SCAN_POINT, SITE, AxisId, AxisRoleId, AxisSpec
 from zlc_data.codec import dataset_schema_from_tree
-from zlc_atom.nodes.derive.expression import Operand, evaluate, typed_variables, published
+from zlc_atom.nodes.derive.expression import Operand, evaluate, pick_values, typed_variables, published
 from zlc_atom.nodes.derive.groups import restricted
 from zlc_atom.nodes.derive.logic_node import DERIVE_SCHEMA, _ROWS
 from zlc_atom.nodes.derive.editor import derive_editor_facts
@@ -46,10 +46,12 @@ def fake_fit(model, x, y, sigma=None, warm=None, sigma_dof=None):
 
 
 class Context:
-    def __init__(self): self.warms, self.dofs = [], []
-    def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None):
+    def __init__(self): self.warms, self.dofs, self.sigmas, self.trials = [], [], [], []
+    def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None, trials=None):
         self.warms.append(warm)
         self.dofs.append(sigma_dof)
+        self.sigmas.append(sigma)
+        self.trials.append(trials)
         return fake_fit(model, x, y, sigma, warm, sigma_dof)
 
 
@@ -167,6 +169,12 @@ def _reduced(values, valid, whole, by_axis, operation):
         spread = np.where(valid, (values.astype(np.float64) - expanded) ** 2, 0).sum(axis=axes)
         if operation == 'std':
             return np.sqrt(np.divide(spread, count, out=np.full(count.shape, np.nan), where=ok)), ok, None
+        if values.dtype.kind == 'b':
+            # A proportion: the half-width of its Wilson interval (docs/UNCERTAINTY.md),
+            # never the spread of its zeros and ones.
+            with np.errstate(invalid='ignore', divide='ignore'):
+                half = np.sqrt(total * (count - total) / count + 0.25) / (count + 1.0)
+            return mean, ok, np.where(ok, half, np.nan)
         sem = np.sqrt(np.divide(spread, count * (count - 1.0), out=np.full(count.shape, np.nan), where=count > 1))
         return mean, ok, sem
     if operation == 'min':
@@ -242,7 +250,7 @@ class Moments(unittest.TestCase):
                         want, ok = np.reshape(want, got.shape), np.reshape(ok, got.shape)
                         np.testing.assert_array_equal(got_valid, ok, name)
                         close(got, want, ok)
-                        if sem is not None and not boolean:
+                        if sem is not None:
                             finite = ok & np.isfinite(np.reshape(sem, got.shape))
                             close(plane['sigma'][cut], np.reshape(sem, got.shape), finite)
 
@@ -430,6 +438,24 @@ class Fit(unittest.TestCase):
         run(over, sealed_route(self.schema, self.values, valid), context)
         self.assertIsNone(context.dofs[0])
 
+    def test_a_fit_reads_a_proportion_by_its_trials(self):
+        """A mean of booleans reaches the fit as trials, never as a sigma (docs/UNCERTAINTY.md)."""
+        schema = schema_of(6, 8, (3,), dtype=bool)
+        rng = np.random.default_rng(11)
+        values = rng.random(schema.physical_shape) < 0.7
+        valid = rng.random(schema.physical_shape) > 0.2
+        rows = rows_of({'name': 'a', 'publish': False, 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['repeat'], 'by': 'repeat', 'every': 2},
+                       {'name': 'rabi', 'terms': [{'of': 'a'}], 'statistic': 'fit', 'over': ['duration'], 'model': 'line'})
+        for route in (live_route, sealed_route):
+            context = Context()
+            run(rows, route(schema, values, valid), context)
+            self.assertIsNone(context.sigmas[0])
+            self.assertIsNone(context.dofs[0])
+            # Group 0 is repeats 0 and 1: per (cell, duration) the valid samples are the trials.
+            want = valid[0:2].sum(axis=0).T.astype(float)
+            got = context.trials[0][:3]
+            np.testing.assert_array_equal(np.where(want > 0, got, 0), want)
+
     def test_an_inverse_unit_reads_as_the_panels(self):
         from zlc_data.units import DEFAULT_UNITS
         for unit, inverse in (('µs', 'MHz'), ('kHz', 'ms'), ('V', 'V^-1'), ('mV', 'mV^-1'), ('V^-1', 'V'), ('V^2', 'V^-2'), ('V*µs', 'V^-1*µs^-1'), ('1', '1')):
@@ -447,7 +473,7 @@ class Fit(unittest.TestCase):
 
     def test_an_undetermined_parameter_is_invalid_alone(self):
         class Undetermined(Context):
-            def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None):
+            def fit(self, model, x, y, sigma=None, warm=None, sigma_dof=None, trials=None):
                 answer = fake_fit(model, x, y, sigma, warm, sigma_dof)
                 answer.errors[:, 0] = np.nan
                 return answer
@@ -477,12 +503,15 @@ class Fit(unittest.TestCase):
         self.assertIn('exactly one axis', refused({'name': 'r', **fit, 'over': ['duration', 'repeat']})[0])
         self.assertIn('no fit model', refused({'name': 'r', **fit, 'model': 'nope', 'over': ['duration']})[0])
         self.assertIn('choose a model', refused({'name': 'r', **fit, 'model': '', 'over': ['duration']})[0])
-        self.assertIn('no groups', refused({'name': 'r', **fit, 'over': ['duration'], 'by': 'duration', 'every': 2})[0])
+        self.assertEqual(refused({'name': 'r', **fit, 'over': ['duration'], 'by': 'duration', 'every': 2}), [])
+        self.assertIn('not among', refused({'name': 'r', **fit, 'over': ['duration'], 'by': 'repeat', 'every': 2})[0])
         self.assertIn('not among', refused({'name': 'a', 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['Site0'], 'by': 'repeat', 'every': 2})[0])
         changing = {axis.axis_id: () for axis in schema.point_domain.axes}
-        self.assertIn('changes with each publication', refused({'name': 'r', **fit, 'over': ['duration']}, changing=changing)[0])
+        self.assertIn('arrives part by part', refused({'name': 'r', **fit, 'over': ['duration']}, changing=changing)[0])
         group = {'name': 'a', 'publish': False, 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['repeat'], 'by': 'repeat', 'every': 2}
-        self.assertIn('closes group by group', refused(group, {'name': 'r', **fit, 'terms': [{'of': 'a'}], 'over': ['repeat']})[0])
+        self.assertIn('arrives part by part', refused(group, {'name': 'r', **fit, 'terms': [{'of': 'a'}], 'over': ['repeat']})[0])
+        # What closes group by group reduced whole is a block of its own: it closes with the last group.
+        self.assertEqual(refused(group, {'name': 'w', 'terms': [{'of': 'a'}], 'statistic': 'mean', 'over': ['repeat']}), [])
         self.assertIn('closed groups and a publication', refused(group, {'name': 'b', 'terms': [{'of': 'a'}, {'op': '+', 'of': 'counts'}]})[0])
         other = {**group, 'name': 'c', 'every': 3}
         self.assertTrue(any('different times' in text for text in refused(group, other, {'name': 'b', 'terms': [{'of': 'a'}, {'op': '+', 'of': 'c'}]})))
@@ -505,6 +534,123 @@ class Fit(unittest.TestCase):
         self.assertTrue(any(item['value'] == 'rabi_slope' for item in cards[2]['lines'][0]['operands']))
         self.assertIn('fit', [choice[0] for choice in statistic['choices']])
         self.assertEqual(facts['defaults']['variable']['every'], 0)
+
+
+def finite(schema):
+    """What a finite run's publications carry one part at a time: its Repeat and Point axes."""
+    from zlc_atom.nodes.derive.expression import RunAxes
+    changing = RunAxes({axis.axis_id: () for domain in (schema.repeat_domain, schema.point_domain) for axis in domain.axes})
+    changing.finite = True
+    return changing
+
+
+def blocks_of(x, y, every):
+    """A straight line per consecutive block of ``every`` x, by NumPy: (slope, offset) rows."""
+    return np.array([np.polyfit(x[k:k + every], y[k:k + every], 1) for k in range(0, x.size, every)])
+
+
+class Blocks(unittest.TestCase):
+    """One rule: an axis is read in blocks, each evaluated once all of it arrived."""
+
+    def setUp(self):
+        self.schema = schema_of(6, 8, (3,))
+        rng = np.random.default_rng(11)
+        self.x = np.arange(8) * 2.0 + 1.0
+        # A slope that changes along x: 1 over the first four points, 3 over the last four.
+        line = np.where(self.x < 8, self.x, 3.0 * self.x - 16.0)
+        self.values = line[None, :, None] + rng.normal(0, 0.01, self.schema.physical_shape)
+        self.valid = np.ones(self.schema.physical_shape, bool)
+
+    def test_a_fit_in_blocks_of_its_x(self):
+        rows = rows_of({'name': 'a', 'publish': False, 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['repeat'], 'by': 'repeat', 'every': 2},
+                       {'name': 'rabi', 'terms': [{'of': 'a'}], 'statistic': 'fit', 'over': ['duration'], 'by': 'duration', 'every': 4, 'model': 'line'})
+        answer = typed_variables(rows, {'counts': self.schema})[1]
+        self.assertIsNone(answer['error'])
+        duration = answer['fit']['rabi_slope'].point_domain.axes[0]
+        self.assertEqual(duration.name, 'duration')
+        np.testing.assert_allclose(np.asarray(duration), [4.0, 12.0])
+        live, _each, _p = run(rows, live_route(self.schema, self.values, self.valid))
+        sealed, _each, _p = run(rows, sealed_route(self.schema, self.values, self.valid))
+        slope = live.planes['rabi_slope']['values']
+        self.assertEqual(slope.shape, (3, 2, 3))
+        close(slope, sealed.planes['rabi_slope']['values'], np.ones(slope.shape, bool))
+        a = self.values.reshape(3, 2, 8, 3).mean(axis=1)
+        for r in range(3):
+            for cell in range(3):
+                want = blocks_of(self.x, a[r, :, cell], 4)
+                np.testing.assert_allclose(slope[r, :, cell], want[:, 0], atol=1e-9)
+                np.testing.assert_allclose(live.planes['rabi_offset']['values'][r, :, cell], want[:, 1], atol=1e-8)
+        np.testing.assert_allclose(slope, np.broadcast_to([[1.0], [3.0]], slope.shape), atol=0.05)
+
+    def test_a_fit_in_blocks_of_a_cell_axis(self):
+        site = AxisSpec(AxisId('site'), 'Site', SITE, 9, coordinates=np.arange(9) * 1.0)
+        schema = DatasetSchema(DomainSpec((1,), (), ()), DomainSpec((1,), (), ()), DomainSpec((9,), (site,)),
+                               ValueSchema(ValidityContract.components(site.axis_id), np.dtype(float), 'V', name='counts'))
+        values = (np.arange(9) * 2.0 + 5.0)[None, None, :]
+        rows = rows_of({'name': 'f', 'terms': [{'of': 'counts'}], 'statistic': 'fit', 'over': ['Site'], 'by': 'Site', 'every': 4, 'model': 'line'})
+        result = evaluate(rows, {'counts': Operand(schema, values)}, fake_fit)
+        # Blocks of 4, 4 and 1: the last too short for a line, so invalid alone.
+        self.assertEqual(result['f_slope'].values.shape, (1, 1, 3))
+        np.testing.assert_allclose(result['f_slope'].values[0, 0, :2], 2.0)
+        self.assertEqual(result['f_slope'].valid[0, 0].tolist(), [True, True, False])
+        np.testing.assert_allclose(np.asarray(result['f_slope'].schema.cell_domain.axes[0]), [1.5, 5.5, 8.0])
+
+    def test_a_whole_axis_of_a_finite_run_is_one_block(self):
+        rows = rows_of({'name': 'a', 'terms': [{'of': 'counts'}], 'statistic': 'mean', 'over': ['repeat']},
+                       {'name': 'rabi', 'terms': [{'of': 'a'}], 'statistic': 'fit', 'over': ['duration'], 'model': 'line'})
+        answers = typed_variables(rows, {'counts': self.schema}, finite(self.schema))
+        self.assertEqual([answer['error'] for answer in answers], [None, None])
+        self.assertEqual(answers[0]['group'], 0)
+        live, each, _p = run(rows, live_route(self.schema, self.values, self.valid))
+        # Nothing until the last shot: then the one block, and the fit that reads it.
+        self.assertEqual(each, [0] * (len(each) - 1) + [1])
+        mean = self.values.mean(axis=0)
+        close(live.planes['a']['values'][0], mean, np.ones(mean.shape, bool))
+        sem = self.values.std(axis=0, ddof=1) / np.sqrt(6)
+        close(live.planes['a']['sigma'][0], sem, np.ones(sem.shape, bool))
+        for cell in range(3):
+            want = np.polyfit(self.x, mean[:, cell], 1)
+            np.testing.assert_allclose(live.planes['rabi_slope']['values'][0, 0, cell], want[0], atol=1e-9)
+        # A seal before the end gives the block with what arrived.
+        cut = [(r, p) for r in range(6) for p in range(8)][:20]
+        early, each, _p = run(rows, live_route(self.schema, self.values, self.valid, order=lambda _all: cut))
+        self.assertEqual(sum(each), 0)
+        np.testing.assert_allclose(early.planes['a']['values'][0, :4, 0], self.values[:3, :4, 0].mean(axis=0))
+
+    def test_a_pick_of_a_finite_runs_rows(self):
+        labels = list(pick_values(self.schema, 'duration'))[:4]
+        rows = rows_of({'name': 'early', 'publish': False, 'terms': [{'of': 'counts', 'at': 'duration', 'labels': labels}]},
+                       {'name': 'a', 'terms': [{'of': 'early'}], 'statistic': 'mean', 'over': ['repeat']},
+                       {'name': 'rabi', 'terms': [{'of': 'a'}], 'statistic': 'fit', 'over': ['duration'], 'model': 'line'})
+        answers = typed_variables(rows, {'counts': self.schema}, finite(self.schema))
+        self.assertEqual([answer['error'] for answer in answers], [None, None, None])
+        self.assertEqual(answers[0]['rows'], 'duration')
+        self.assertIsNone(answers[1]['rows'])
+        live, _each, _p = run(rows, live_route(self.schema, self.values, self.valid))
+        sealed, _each, _p = run(rows, sealed_route(self.schema, self.values, self.valid))
+        want = self.values[:, :4].mean(axis=0)
+        close(live.planes['a']['values'][0], want, np.ones(want.shape, bool))
+        # A sealed run's one publication carries all of it: nothing waits, one evaluation.
+        whole = sealed.chunks['a'][0].snapshot.materialize().block.values
+        close(whole[0], want, np.ones(want.shape, bool))
+        np.testing.assert_allclose(live.planes['rabi_slope']['values'][0, 0], 1.0, atol=0.05)
+        # The rows a pick keeps reach a signal or a fit only through a block.
+        def refused(*variables, changing):
+            projected = _ROWS.draft_values({'variables': list(variables)})['variables']
+            return [str(answer['error']) for answer in typed_variables(projected, {'counts': self.schema}, changing)
+                    if answer['error'] is not None]
+        pick = {'name': 'early', 'terms': [{'of': 'counts', 'at': 'duration', 'labels': labels}]}
+        self.assertIn('publish that', refused(pick, changing=finite(self.schema))[0])
+        self.assertIn('arrives part by part', refused({**pick, 'publish': False}, {'name': 'r', 'terms': [{'of': 'early'}], 'statistic': 'fit',
+                                                                                     'over': ['duration'], 'model': 'line'}, changing=finite(self.schema))[0])
+        self.assertIn('fit that', refused({**pick, 'publish': False}, {'name': 'r', 'terms': [{'of': 'early'}], 'statistic': 'fit',
+                                                                         'over': ['Site0'], 'model': 'line'}, changing=finite(self.schema))[0])
+        self.assertIn('not known while it runs', refused({**pick, 'terms': [{'of': 'counts', 'at': 'duration', 'labels': ['last']}]},
+                                                         changing=finite(self.schema))[0])
+        # A monitor's shots have no whole: no pick.
+        monitor = {axis.axis_id: () for axis in self.schema.repeat_domain.axes}
+        self.assertIn('changes with each publication', refused({**pick, 'terms': [{'of': 'counts', 'at': 'repeat', 'labels': ['1']}]},
+                                                               changing=monitor)[0])
 
 
 @unittest.skipUnless(os.environ.get('ZLC_DERIVE_FILE'), 'ZLC_DERIVE_FILE names a real dataset')

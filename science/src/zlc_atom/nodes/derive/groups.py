@@ -1,6 +1,8 @@
-"""What stands between publications: statistics in groups over a Repeat or Point axis.
+"""What stands between publications: statistics in blocks over a Repeat or Point axis.
 
-A group over such an axis spans events, so each open group keeps, per kept
+A block is a group (``by`` + ``every``) or, over an axis a finite run's
+publications carry one part at a time, the whole axis.  A group spans
+events, so each open group keeps, per kept
 cell, the moments of what has arrived and never a sample: Runtime alone stores
 data.  An increment is whatever one delivery carries; a sealed source's whole
 dataset is one increment that closes every group, a live source's events are
@@ -26,9 +28,10 @@ from . import native_ops
 
 from .expression import (
     Operand, _answering, _axis, _axis_labels, _domains, _primary, _reduce_plan, _schema, _structure,
-    _unit, evaluate, fit_cells, fit_operands, fit_schemas, fit_target, formula, group_domain, reads_for_fit,
-    statistic_of, typed_variables,
+    _unit, bundle_axes, evaluate, fit_cells, fit_operands, fit_schemas, formula, reader, reads_for_fit,
+    row_fit_target, statistic_of, typed_variables,
 )
+from zlc_data.selection import EmptySelection
 
 
 def restricted(schema: DatasetSchema, origin: Sequence[int], extent: Sequence[int]) -> DatasetSchema:
@@ -66,10 +69,11 @@ class Accumulator:
     (Repeat, Point) cell.
     """
 
-    def __init__(self, row: Mapping[str, object], reducible: DatasetSchema, *, spanning: bool, transient: bool = False):
+    def __init__(self, row: Mapping[str, object], reducible: DatasetSchema, domain: int, *, spanning: bool,
+                 transient: bool = False):
         self.row, self.reducible = row, reducible
         self.operation, self.spanning = str(row["statistic"]), spanning
-        self.domain = group_domain(row, reducible)
+        self.domain = domain
         self.schema, plans = _reduce_plan(reducible, self.operation, row["over"], row["by"], row["every"])
         mapped = {plan[1]: plan[2] for plan in plans if plan[0] == "mapped"}
         self._cell_plans = tuple(plan for plan in plans if plan[0] != "mapped")
@@ -82,7 +86,7 @@ class Accumulator:
         self._transient, self._finished = transient, False
         self._handle = native_ops.call(
             "scientific.group.create", statistic=self.operation, domain=self.domain,
-            spanning=self.spanning, every=int(row["every"]), counts_r=self._counts[0].astype("<i8"),
+            spanning=self.spanning, every=max(1, int(row["every"])), counts_r=self._counts[0].astype("<i8"),
             counts_p=self._counts[1].astype("<i8"), source_points=domains[1].size,
             output_points=_domains(self.schema)[1].size, lines=lines, steps=steps)["handle"]
 
@@ -142,14 +146,18 @@ class Accumulator:
                 size = (len(rows), _domains(self.schema)[1].size if self.domain == 0 else len(columns))
                 origin, ordinal = (rows[0], columns[0]), None
                 schema = restricted(self.schema, origin, size)
-            chunks.append(Chunk(Operand(schema, part["values"], part["valid"], part.get("sigma"), part.get("dof")), origin, ordinal))
+            chunks.append(Chunk(Operand(schema, part["values"], part["valid"], part.get("sigma"), part.get("dof"), part.get("trials")), origin, ordinal))
         return tuple(chunks)
 
 
 def _repeat_lines(schema: DatasetSchema, by: str) -> tuple[np.ndarray, np.ndarray]:
-    """(line, place along ``by``) of each Repeat row of a schema grouped by it."""
+    """(line, place along ``by``) of each Repeat row of a schema grouped by it.
+    A whole block (no ``by``) is each output row's own line, closed only by
+    its count or the seal: one place on it."""
 
     domain = _domains(schema)[0]
+    if not by:
+        return np.arange(domain.size, dtype=np.int64), np.zeros(domain.size, np.int64)
     axes = _primary(domain)
     others = [domain.codes(axis.axis_id) for axis in axes if axis.name != by]
     line = np.unique(np.column_stack(others), axis=0, return_inverse=True)[1].reshape(-1) if others else np.zeros(domain.size, np.int64)
@@ -181,7 +189,11 @@ class Accumulation:
         primary = inputs[names[0]]
         self.finite = primary.canonical_schema is not None
         schemas = {name: inputs[name].canonical_schema or inputs[name].snapshot.block.schema for name in names}
-        answers = typed_variables(self.rows, {name: schemas.get(name) for name in names})
+        # A finite run's publications carry parts of its whole; a sealed one
+        # (its whole in one publication) and a monitor's carry none here.
+        changing = bundle_axes((inputs[name].canonical_schema, inputs[name].snapshot.block.schema) for name in names
+                               if inputs[name].canonical_schema not in (None, inputs[name].snapshot.block.schema))
+        answers = typed_variables(self.rows, {name: schemas.get(name) for name in names}, changing)
         for position, answer in enumerate(answers):
             if answer["error"] is not None and answer["live"]:
                 raise answer["error"]
@@ -216,15 +228,15 @@ class Accumulation:
         """A monitor's event holds its Point rows whole, and its Repeat rows whole
         unless there is one to a coordinate: only then do its groups span events."""
 
-        reducible = step.answer["reducible"]
-        spanning = (not self.finite and group_domain(step.row, reducible) == 0
+        reducible, domain = step.answer["reducible"], step.answer["group"]
+        spanning = (not self.finite and domain == 0 and bool(step.row["by"])
                     and _axis(reducible, step.row["by"], "the value", "reduce")[1].size == 1)
         if self.finite or spanning:
             found = self.accumulators.get(step.position)
             if found is None:
-                found = self.accumulators[step.position] = Accumulator(step.row, reducible, spanning=spanning)
+                found = self.accumulators[step.position] = Accumulator(step.row, reducible, domain, spanning=spanning)
             return found
-        return Accumulator(step.row, reducible, spanning=False, transient=True)
+        return Accumulator(step.row, reducible, domain, spanning=False, transient=True)
 
     def step(self, members: Mapping[str, Operand] | None, sources, ordinal: int | None, fit) -> dict[str, list[Chunk]]:
         """One delivery's chunks by output name; ``members`` None: the source sealed."""
@@ -244,10 +256,14 @@ class Accumulation:
                 ) for k in range(len(fresh[reads[0]])))
             else:
                 feeds = () if values is None else ((values, sources, ordinal),)
-            is_group = group_domain(row, step.answer["reducible"]) is not None
+            is_group = step.answer["group"] is not None
             given = []
             for reading, where, shot in feeds:
-                value = formula(row, reading.__getitem__, True)
+                try:
+                    value = formula(row, reader(reading), True)
+                except EmptySelection:
+                    # Nothing of a pick's rows in this publication.
+                    continue
                 if is_group:
                     given.extend(self._accumulator(step).feed(value, where, shot))
                 else:
@@ -286,7 +302,7 @@ class Accumulation:
         last good answer of its cell: so a whole dataset and its events alike."""
 
         row = step.row
-        target = fit_target(value.schema, row["over"])
+        target = row_fit_target(value.schema, row)
         schemas = fit_schemas(value.schema, target, row)
         d = step.answer["clock"][0]
         rows = _domains(value.schema)[d].size
@@ -296,7 +312,7 @@ class Accumulation:
             origin[d], extent[d] = k, 1
             one = _take_rows(value, d, k, origin, extent)
             warm = self.warm.get(step.position)
-            answer = fit_cells(one, fit_target(one.schema, row["over"]), row["model"], fit, warm)
+            answer = fit_cells(one, row_fit_target(one.schema, row), row["model"], fit, warm)
             parts.append(answer)
             values, _errors, success = answer
             width = values.shape[-1]
@@ -311,7 +327,7 @@ class Accumulation:
 def _take_rows(value: Operand, d: int, k: int, origin, extent) -> Operand:
     cut = (slice(None),) * d + (slice(k, k + 1),)
     return Operand(restricted(value.schema, origin, extent), value.values[cut], value.valid[cut],
-                   None if value.sigma is None else value.sigma[cut], None if value.dof is None else value.dof[cut])
+                   *(None if plane is None else plane[cut] for plane in (value.sigma, value.dof, value.trials)))
 
 
 def _origin(result: Operand, whole: DatasetSchema, where) -> tuple[int, int]:

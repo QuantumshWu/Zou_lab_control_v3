@@ -188,6 +188,11 @@ class TekScopeWaveformSource:
         serial = fields[2] if len(fields) > 2 and fields[2] else self.config.resource
         return f"tek-scope:{serial}"
 
+    def device_info(self) -> dict[str, str]:
+        """What the scope said of itself when it opened (its ``*IDN?``)."""
+
+        return visa.idn_device_info(self._identity, self.config.resource)
+
     def _query_float(self, command: str) -> float:
         return float(self._link.query(command).strip())
 

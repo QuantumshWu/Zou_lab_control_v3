@@ -9,12 +9,13 @@
 use std::sync::Arc;
 
 use super::engine::{evaluate_model, Check, FitCell, FitEngine, FitRequest, CellData};
-use super::models::{point_terms, Axes};
+use super::models::{information_scale, point_terms, support_edges, Axes, Likelihood};
+use super::profile::{interval_covariance, Profile};
 use super::num::{nextafter, pmax, pmin, Zr, EPSILON};
-use super::result::{Bounds, FitError, FitOptions, FitResult};
+use super::result::{Bounds, ErrorBasis, FitError, FitOptions, FitResult};
 use super::shared::{
-    binned_curve_statistics, expand_fixed_covariance, fixed_parameter_partition, histogram_bounds, observation_count, poisson_deviance_residual, sigma_weights, solver_bounds,
-    too_few_points, FIT_RSS_TIE_RELATIVE,
+    binned_curve_statistics, check_proportions, deviance_residuals, expand_fixed_covariance, finite_points, fixed_parameter_partition, histogram_bounds, kept,
+    observation_count, observation_likelihood, sigma_weights, solver_bounds, too_few_points, FIT_RSS_TIE_RELATIVE,
 };
 use super::spec::{Evaluator, FitModelSpec, DOMAIN_ANCHORED};
 use super::trf::{self, CellObjective};
@@ -24,7 +25,9 @@ struct ResidualObjective<'a> {
     coords: &'a [Vec<f64>],
     values: &'a [f64],
     weights: Option<&'a [f64]>,
-    counted: bool,
+    likelihood: Likelihood,
+    /// The Bernoulli trials beside binomial observations.
+    trials: Option<&'a [f64]>,
     loss: i64,
     lower: &'a [f64],
     upper: &'a [f64],
@@ -32,6 +35,9 @@ struct ResidualObjective<'a> {
 }
 
 impl ResidualObjective<'_> {
+    /// The point's Bernoulli trials (NaN where the likelihood reads none).
+    fn trials_at(&self, point: usize) -> f64 { self.trials.map_or(f64::NAN, |t| t[point]) }
+
     fn predict(&self, params: &[f64]) -> Option<Vec<f64>> {
         let predicted = evaluate_model(self.model, self.coords, params).ok()?;
         if predicted.len() != self.values.len() || predicted.iter().any(|v| !v.is_finite()) {
@@ -97,7 +103,7 @@ impl CellObjective for ResidualObjective<'_> {
         let mut rss = 0.0;
         for i in 0..predicted.len() {
             let weight = self.weights.map_or(1.0, |w| w[i]);
-            let (_raw, squared, point_cost, gf, inf, finite) = point_terms(predicted[i], self.values[i], self.counted, weight, self.weights.is_some(), self.loss)?;
+            let (_raw, squared, point_cost, gf, inf, finite) = point_terms(predicted[i], self.values[i], self.likelihood, self.trials_at(i), weight, self.weights.is_some(), self.loss)?;
             if !finite {
                 return Ok((f64::INFINITY, f64::INFINITY, false));
             }
@@ -116,6 +122,19 @@ impl CellObjective for ResidualObjective<'_> {
         Ok((cost, rss, true))
     }
     fn selected(&self) -> usize { self.values.len() }
+    fn along_support(&self, params: &[f64], free: &[usize], step: &[f64]) -> Option<Vec<f64>> {
+        if !self.likelihood.fixes_noise() {
+            return None;
+        }
+        let (values, jacobian) = (self.predict(params)?, self.jacobian(params)?);
+        let mut trial = params.to_vec();
+        for (k, &parameter) in free.iter().enumerate() {
+            trial[parameter] += step[k];
+        }
+        let moved = self.predict(&trial)?;
+        let edges = support_edges(self.likelihood, &values, &jacobian, &moved, &|_| true, free);
+        (!edges.is_empty()).then(|| trf::along_edges(&edges, step))
+    }
 }
 
 /// `fit()` for a model without a compiled descriptor.
@@ -131,23 +150,20 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
         return Err(FitError::value("coordinates and observations must have equal flattened shape"));
     }
     let counted = spec.counted();
-    if let Some(sigma) = &cell.sigma {
-        if sigma.len() != observations.len() {
-            return Err(FitError::value("observation_sigma must match observations"));
-        }
-        if counted {
-            return Err(FitError::value("histogram targets weight themselves by counts; an external sigma has no meaning there"));
-        }
-    }
+    let likelihood = observation_likelihood(counted, observations.len(), cell.sigma.as_deref(), cell.trials.as_deref())?;
     if let Some(indices) = &cell.selected_indices {
         if indices.len() != observations.len() {
             return Err(FitError::value("selected_indices must match observations"));
         }
     }
-    let finite: Vec<bool> = (0..observations.len()).map(|i| observations[i].is_finite() && coordinates.iter().all(|a| a[i].is_finite())).collect();
-    let keep = |s: &[f64]| -> Vec<f64> { s.iter().zip(&finite).filter(|(_, f)| **f).map(|(&v, _)| v).collect() };
+    let finite = finite_points(coordinates, observations);
+    let keep = |s: &[f64]| kept(s, &finite);
     let coords: Vec<Vec<f64>> = coordinates.iter().map(|a| keep(a)).collect();
     let values = keep(observations);
+    let trials = cell.trials.as_ref().map(|t| keep(t));
+    if let Some(trials) = &trials {
+        check_proportions(&values, trials)?;
+    }
     let indices: Vec<i64> = match &cell.selected_indices {
         Some(i) => i.iter().zip(&finite).filter(|(_, f)| **f).map(|(&v, _)| v).collect(),
         None => (0..observations.len() as i64).zip(&finite).filter(|(_, f)| **f).map(|(v, _)| v).collect(),
@@ -169,7 +185,7 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     let (mut solver_coords, mut solver_values, mut weights, mut binned) = (coords.clone(), values.clone(), None, false);
     if let Some(sigma) = &sigma {
         weights = sigma_weights(sigma);
-    } else if !free_indices.is_empty() && !counted && spec.independent_arity == 1 && opts.loss == "linear" {
+    } else if !free_indices.is_empty() && likelihood == Likelihood::Gaussian && spec.independent_arity == 1 && opts.loss == "linear" {
         if let Some(max_exact) = opts.max_exact_points {
             if values.len() as i64 > 2 * max_exact {
                 if let Some((x, y, w)) = binned_curve_statistics(&coords[0], &values, max_exact) {
@@ -200,8 +216,8 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
             return Err(FitError::runtime("fixed fit evaluation is non-finite"));
         }
         let residuals: Vec<f64> = values.iter().zip(&fitted).map(|(v, f)| v - f).collect();
-        let quality: Vec<f64> = if counted {
-            poisson_deviance_residual(&fitted, &values)
+        let quality: Vec<f64> = if likelihood.fixes_noise() {
+            deviance_residuals(likelihood, &fitted, &values, trials.as_deref())?
         } else {
             match &weights {
                 None => residuals.clone(),
@@ -209,7 +225,11 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
             }
         };
         let reduced = super::blas::ddot(&quality, &quality) / values.len() as f64;
-        return FitResult::new(spec, lower, vec![0.0; count], vec![0.0; count * count], FitResult::eager(fitted, residuals, indices), cell.data_revision as u64, true, "all parameters fixed", reduced, true, fixed_names);
+        if !reduced.is_finite() {
+            return Err(FitError::value("the fixed parameters put the model outside its likelihood's support"));
+        }
+        return FitResult::new(spec, lower, vec![0.0; count], vec![0.0; count * count], FitResult::eager(fitted, residuals, indices), cell.data_revision as u64, true, "all parameters fixed", reduced, true, fixed_names, ErrorBasis::of(likelihood, false, values.len(), 0))
+            .map(|result| FitResult { intervals: likelihood.fixes_noise().then(|| result.parameter_values.iter().map(|&v| [v, v]).collect()), ..result });
     }
     let complete_seeds = super::pylane::initial_candidates(&spec, &solver_coords, &solver_values, request.initial.as_ref(), cell.warm_start.as_deref())?;
     let mut seeds: Vec<Vec<f64>> = Vec::new();
@@ -227,7 +247,18 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
         }
     }
     let loss = super::models::loss_code(&opts.loss).expect("validated loss");
-    let objective = ResidualObjective { model: &spec, coords: &solver_coords, values: &solver_values, weights: weights.as_deref(), counted, loss, lower: &lower, upper: &upper, free: &free_indices };
+    let objective = ResidualObjective {
+        model: &spec,
+        coords: &solver_coords,
+        values: &solver_values,
+        weights: weights.as_deref(),
+        likelihood,
+        trials: trials.as_deref(),
+        loss,
+        lower: &lower,
+        upper: &upper,
+        free: &free_indices,
+    };
     let free_lower: Vec<f64> = free_indices.iter().map(|&i| lower[i]).collect();
     let free_upper: Vec<f64> = free_indices.iter().map(|&i| upper[i]).collect();
     let mut successful: Vec<(f64, f64, Vec<f64>, i32)> = Vec::new();
@@ -235,7 +266,7 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     let budget = opts.evaluation_budget(values.len());
     for (seed_index, seed) in seeds.iter().enumerate() {
         check.check()?;
-        let outcome = match trf::solve_seed(&objective, &lower, &free_indices, seed, &free_lower, &free_upper, budget, 1e-8, 1e-8, 1e-8) {
+        let outcome = match trf::solve_seed(&objective, &lower, &free_indices, seed, &free_lower, &free_upper, budget, trf::TOLERANCE, trf::TOLERANCE, trf::TOLERANCE) {
             Ok(o) => o,
             Err(_) => continue,
         };
@@ -281,7 +312,14 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
     let reduced = rss / degrees;
     // The modified Jacobian at the solution, and the SVD rank test.
     let (free_covariance, covariance_valid) = covariance_at(&objective, &solved, &free_indices, reduced);
-    let (covariance, errors) = expand_fixed_covariance(count, &free_indices, &free_covariance, covariance_valid);
+    let (mut covariance, mut errors) = expand_fixed_covariance(count, &free_indices, &free_covariance, covariance_valid);
+    // A likelihood that fixes the noise: the errors are its profile intervals'.
+    let intervals = (likelihood.fixes_noise() && covariance_valid).then(|| {
+        let profile = Profile { objective: &objective, parameters: &solved, free: &free_indices, lower: &lower, upper: &upper, budget };
+        let intervals = profile.intervals(&errors);
+        interval_covariance(&mut covariance, &mut errors, &intervals, &free_indices);
+        intervals
+    });
     let result = FitResult::new(
         spec.clone(),
         solved,
@@ -294,14 +332,18 @@ pub fn fit_fallback(engine: &FitEngine, spec_in: &Arc<FitModelSpec>, cell: &FitC
         reduced,
         covariance_valid,
         fixed_names,
+        ErrorBasis::of(likelihood, false, values.len(), free_indices.len()),
     )?;
+    let result = FitResult { intervals, ..result };
     let nested_cell = FitCell { warm_start: None, ..cell.clone() };
     let nested = engine.nested_population_fit(spec_in, std::slice::from_ref(&nested_cell), request.bounds.as_ref(), opts, request.cancelled)?;
-    engine.settle_population(&spec, result, nested.into_iter().next().flatten().as_ref(), opts, false)
+    engine.settle_population(&spec, result, nested.into_iter().next().flatten().as_ref(), opts, cell)
 }
 
 /// `_covariance(jac, reduced)`: the identified inverse information of the
-/// loss-scaled Jacobian at the solution.
+/// loss-scaled Jacobian at the solution: the inverse Fisher information
+/// for a likelihood that fixes the noise, scaled by the reduced chi-square
+/// (floored at the rounding scatter) for Gaussian residuals.
 fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], reduced: f64) -> (Vec<f64>, bool) {
     let n = free.len();
     let invalid = (vec![f64::NAN; n * n], false);
@@ -319,19 +361,14 @@ fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], 
         let weight = objective.weights.map_or(1.0, |w| w[i]);
         let rounding = EPSILON * predicted[i].abs() * weight;
         rounding_rss += rounding * rounding;
-        let Ok((raw, _sq, _c, _g, _inf, finite)) = point_terms(predicted[i], objective.values[i], objective.counted, weight, objective.weights.is_some(), objective.loss) else { return invalid };
+        let trials = objective.trials_at(i);
+        let Ok((raw, _sq, _c, _g, _inf, finite)) = point_terms(predicted[i], objective.values[i], objective.likelihood, trials, weight, objective.weights.is_some(), objective.loss) else { return invalid };
         if !finite {
             return invalid;
         }
         let Ok((_r0, rho1, rho2)) = super::models::rho(raw * raw, objective.loss) else { return invalid };
         let robust = pmax(rho1 + 2.0 * rho2 * raw * raw, EPSILON).sqrt();
-        let scale = if objective.counted {
-            let expected = pmax(predicted[i], super::models::COUNT_FLOOR);
-            let absolute = raw.abs();
-            if absolute > super::models::COUNT_FLOOR { (expected - objective.values[i]).abs() / (expected * pmax(absolute, super::models::COUNT_FLOOR)) } else { 1.0 / expected.sqrt() }
-        } else {
-            weight
-        };
+        let Ok(scale) = information_scale(objective.likelihood, predicted[i], trials, weight) else { return invalid };
         for (k, &f) in free.iter().enumerate() {
             scaled[i * n + k] = jac[i * p + f] * scale * robust;
         }
@@ -343,8 +380,8 @@ fn covariance_at(objective: &ResidualObjective, solved: &[f64], free: &[usize], 
     // Rank and identifiability on unit-norm columns (identify.rs): an
     // undetermined parameter's row and column are NaN, the rest stand.
     let Ok(Some(identified)) = super::identify::from_factor(n, &r, points.max(n)) else { return invalid };
-    let floor = if objective.counted { 0.0 } else { rounding_rss / (points - n) as f64 };
-    let covariance = identified.covariance(pmax(reduced, floor));
+    let factor = if objective.likelihood.fixes_noise() { 1.0 } else { pmax(reduced, rounding_rss / (points - n) as f64) };
+    let covariance = identified.covariance(factor);
     let defined = &identified.defined;
     if (0..n).any(|a| defined[a] && (covariance[a * n + a] < 0.0 || (0..n).any(|b| defined[b] && !covariance[a * n + b].is_finite()))) {
         return invalid;

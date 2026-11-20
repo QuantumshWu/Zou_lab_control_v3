@@ -261,6 +261,12 @@ class Axis(unittest.TestCase):
         self.assertFalse([c for c in sim.commands if c[:2] in ('PA', 'PR', 'OR', 'MM', 'RS', 'ST') or c[:2] in ('VA', 'SL', 'SR') and c[2:] != '?'])
         self.assertEqual(axis.identity, 'newport-smc100:COM9/1')
 
+    def test_what_it_says_of_itself_is_what_it_read_at_open(self):
+        axis, sim = stage()
+        asked = len(sim.commands)
+        self.assertEqual(axis.device_info(), {'version': sim.version, 'stage': sim.stage, 'port': 'COM9', 'address': '1'})
+        self.assertEqual(len(sim.commands), asked, 'nothing is asked again')
+
     def test_unreferenced_move_is_refused_and_never_homes(self):
         axis, sim = stage()
         with self.assertRaises(TuneRefused) as refused:

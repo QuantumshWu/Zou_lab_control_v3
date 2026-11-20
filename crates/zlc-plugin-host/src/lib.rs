@@ -44,7 +44,8 @@ use zlc_core::schema::{DatasetSchema, DomainRole};
 
 pub use blocks::{Lend, Registry};
 pub use descriptor::{Catalog, CommandDescriptor, FileParam, TypeDescriptor};
-use process::{Incoming, Job, PluginProcess};
+use process::{Incoming, KILL_WAIT, PluginProcess};
+use zlc_core::process::Job;
 
 pub const PROTOCOL: [u32; 2] = [3, 0];
 
@@ -70,21 +71,35 @@ impl ErrorKind {
 
 /// A failed call: its kind says what is known about the device (§7).
 #[derive(Clone, Debug)]
-pub struct CallError { pub kind: ErrorKind, pub message: String, pub remote_type: String, pub traceback: String }
+pub struct CallError {
+    pub kind: ErrorKind, pub message: String, pub remote_type: String, pub traceback: String,
+    /// An open refused because another client holds the device ([`DEVICE_HELD`]): the
+    /// processes on this computer with the type's `sdk_modules` loaded (`zlc_core::process::Holders`).
+    pub holders: Option<Value>,
+    /// Each serial port that would not open while the call ran (`[{port, fault, code}]`, PLUGIN_PROTOCOL §7).
+    pub serial_faults: Option<Value>,
+}
+
+/// The exception a plugin raises when the device's SDK says another client has it open.
+pub const DEVICE_HELD: &str = "zlc_plugin.wire:DeviceHeld";
 
 impl CallError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), remote_type: String::new(), traceback: String::new() }
+        Self { kind, message: message.into(), remote_type: String::new(), traceback: String::new(), holders: None, serial_faults: None }
     }
     pub fn lost(message: impl Into<String>) -> Self { Self::new(ErrorKind::Lost, message) }
     pub fn from_wire(error: &Value) -> Self {
         Self { kind: ErrorKind::parse(error["kind"].as_str().unwrap_or("failed")),
                message: error["message"].as_str().unwrap_or("").to_owned(),
                remote_type: error["type"].as_str().unwrap_or("").to_owned(),
-               traceback: error["traceback"].as_str().unwrap_or("").to_owned() }
+               traceback: error["traceback"].as_str().unwrap_or("").to_owned(),
+               holders: error.get("holders").cloned(), serial_faults: error.get("serial_faults").cloned() }
     }
     pub fn wire(&self) -> Value {
-        json!({"kind": self.kind.name(), "type": self.remote_type, "message": self.message, "traceback": self.traceback})
+        let mut wire = json!({"kind": self.kind.name(), "type": self.remote_type, "message": self.message, "traceback": self.traceback});
+        if let Some(holders) = &self.holders { wire["holders"] = holders.clone(); }
+        if let Some(faults) = &self.serial_faults { wire["serial_faults"] = faults.clone(); }
+        wire
     }
     /// The plugin raised this Python exception type (e.g. "builtins:TimeoutError").
     pub fn is(&self, remote_type: &str) -> bool { self.remote_type == remote_type }
@@ -352,6 +367,8 @@ struct Instance {
     snapshot: bool,
     /// The read-only methods the opened device implements (its open reply): what a draft query may call.
     reads: Vec<String>,
+    /// What the device said of itself at its open (`device_info`; a remote one's, its publisher's open); Null when it says nothing.
+    device_info: Value,
     /// The runs that claim this device, each exclusively or not (v2 DeviceClaim): two
     /// exclusive claims never hold one device; a shared one (a scan's axis) sits beside either.
     claims: Vec<(String, bool)>,
@@ -382,8 +399,8 @@ struct State {
     instances: BTreeMap<String, Instance>,
     leases: HashMap<u64, (u32, Read)>,
     next_lease: u64,
-    /// Plugin requests the application has yet to answer: ticket -> (process, request id).
-    requests: HashMap<u64, (Arc<PluginProcess>, Value)>,
+    /// Plugin requests the application has yet to answer, by ticket.
+    requests: HashMap<u64, Asked>,
     next_ticket: u64,
     closed: bool,
     /// Non-processor runs reading a source signal by name (a scan over the camera it
@@ -393,6 +410,10 @@ struct State {
     /// instance -> (source signal, its input subscribed at that generation's run.begin).
     awaiting: HashMap<String, (String, Option<Source>)>,
 }
+
+/// A plugin request the application has yet to answer: the process and request id the answer
+/// goes to, and the instance that asked (a run's, or a draft query's).
+struct Asked { process: Arc<PluginProcess>, id: Value, instance: String }
 
 struct Follower { instance: String, run: String, signal: String, input: Value, sources: std::sync::mpsc::Sender<Source> }
 
@@ -415,7 +436,8 @@ struct Inner {
     safe: SafeActions,
     registry: Arc<Registry>,
     job: Job,
-    catalog: Mutex<Option<Arc<Catalog>>>,
+    /// The one discovery's answer, once it has answered (a failed one stays this host's answer).
+    catalog: Mutex<Option<Result<Arc<Catalog>, String>>>,
     state: Mutex<State>,
     /// Live plugin processes by pid, apart from `state`: a lent block is released
     /// to its owner from whichever thread drops it, which may hold `state` (the
@@ -426,7 +448,8 @@ struct Inner {
     /// One gate per process key: finding or starting its process, and letting one that
     /// nothing uses go, are each one step, so instances opened together (Init opens them
     /// in parallel) share one process, and a closing one never ends a process another is joining.
-    gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// It holds the processes of its key started and not yet seen gone.
+    gates: Mutex<HashMap<String, Arc<Mutex<Vec<Arc<PluginProcess>>>>>>,
     /// Where a node's device calls wait, beside the channels they arrived on.
     device_calls: workers::Workers,
     service_calls: workers::Workers,
@@ -445,6 +468,11 @@ const LOST_CLOSE: Duration = Duration::from_secs(10);
 /// How long an instance may take to close when the application ends.
 const SHUTDOWN_CLOSE: Duration = Duration::from_secs(3);
 const SAFE_DEADLINE: Duration = Duration::from_secs(2);
+/// A retiring process is asked to exit within this, then given as long again before it is killed.
+const RETIRE_ASK: Duration = Duration::from_secs(5);
+/// How long a successor waits for an earlier process of its key to be gone: a retiring
+/// one's two waits and its kill.
+const RETIRE_WAIT: Duration = Duration::from_secs(2 * RETIRE_ASK.as_secs() + KILL_WAIT.as_secs());
 /// An unanswered request this long past its deadline makes the instance unresponsive.
 const OVERDUE_GRACE: Duration = Duration::from_secs(5);
 /// The key of the one plugin process every type shares unless it is `isolated`.
@@ -459,7 +487,7 @@ impl PluginHost {
     pub fn new(config: HostConfig, runtime: Runtime, safe: SafeActions,
                events: impl Fn(HostEvent) + Send + Sync + 'static) -> Result<Self, String> {
         let session = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
-        let job = Job::new(config.memory_limit_mib)?;
+        let job = Job::new(config.memory_limit_mib).map_err(|error| format!("Cannot create the plugin job: {error}"))?;
         let inner = Arc::new_cyclic(|weak: &Weak<Inner>| {
             let owner = weak.clone();
             let registry = Registry::new(session.clone(), Box::new(move |pid, names| {
@@ -480,9 +508,17 @@ impl PluginHost {
 
     /// Every discoverable plugin type: discovery runs once per host, and only when
     /// the catalogue kept for these sources and this environment is not current (cache.rs).
+    /// Its answer, a failure too, is kept: a later call never runs it again, nor waits for
+    /// anything but a discovery in progress.
     pub fn catalog(&self) -> Result<Arc<Catalog>, String> {
         let mut cached = self.inner.catalog.lock().unwrap();
-        if let Some(catalog) = cached.as_ref() { return Ok(catalog.clone()); }
+        if let Some(answer) = cached.as_ref() { return answer.clone(); }
+        let answer = self.discover_types().map(Arc::new);
+        *cached = Some(answer.clone());
+        answer
+    }
+
+    fn discover_types(&self) -> Result<Catalog, String> {
         let key = cache::key(&self.inner.config, &self.inner.environment);
         let kept = cache::read(&key).and_then(|describe| serde_json::from_slice::<Catalog>(&describe).ok());
         let catalog = match kept {
@@ -503,8 +539,6 @@ impl PluginHost {
             return Err(format!("Plugins speak protocol {}, the core {}", catalog.protocol[0], PROTOCOL[0]));
         }
         for error in &catalog.errors { eprintln!("{}", json!({"type": "plugin-discovery-error", "module": error.module, "error": error.error})); }
-        let catalog = Arc::new(catalog);
-        *cached = Some(catalog.clone());
         Ok(catalog)
     }
 
@@ -527,28 +561,54 @@ impl PluginHost {
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
         }
-        let process = inner.acquire(&Self::key_of(&descriptor), Some(instance))?;
-        let opened = process.request("open", json!({"instance": instance, "type_id": type_id, "module": descriptor.module,
-            "parameters": parameters, "simulation": simulation, "plain": true}), OPEN_DEADLINE);
-        let reply = match opened {
-            Ok(reply) => reply,
-            Err(error) => {
-                process.instances.lock().unwrap().remove(instance);
-                inner.release_process(&process);
-                return Err(error);
+        let (began, key) = (Instant::now(), Self::key_of(&descriptor));
+        let mut pid = None;
+        let opened = (|| {
+            let process = inner.acquire(&key, Some(instance))?;
+            pid = Some(process.pid());
+            let reply = match process.request("open", json!({"instance": instance, "type_id": type_id, "module": descriptor.module,
+                "parameters": parameters, "simulation": simulation, "plain": true}), OPEN_DEADLINE) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    process.instances.lock().unwrap().remove(instance);
+                    inner.release_process(&process);
+                    return Err(error);
+                }
+            };
+            let tunable = reply.message["ok"]["tunable"].as_bool().unwrap_or(false);
+            let snapshot = reply.message["ok"]["snapshot"] == true;
+            let reads = reply.message["ok"]["reads"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            inner.admit(instance, descriptor.clone(), Serving::Process(process), tunable, snapshot, reads, reply.message["ok"]["device_info"].clone())?;
+            Ok(reply.message["ok"].clone())
+        })();
+        // Held by another client: who on this computer has the vendor's transport loaded, looked up once, now.
+        let opened = opened.map_err(|mut error| {
+            if error.is(DEVICE_HELD) && !descriptor.sdk_modules.is_empty() {
+                let holders = zlc_core::process::holders(&descriptor.sdk_modules);
+                let named = holders.describe(&descriptor.sdk_modules.join(" / "));
+                (inner.events)(HostEvent::DeviceLog { instance: instance.to_owned(), line: format!("Open refused, the device is held. {named}") });
+                error.message = format!("{} -- {named}", error.message);
+                error.holders = Some(holders.json());
             }
-        };
-        let tunable = reply.message["ok"]["tunable"].as_bool().unwrap_or(false);
-        let snapshot = reply.message["ok"]["snapshot"] == true;
-        let reads = reply.message["ok"]["reads"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        inner.admit(instance, descriptor, Serving::Process(process), tunable, snapshot, reads)?;
-        Ok(reply.message["ok"].clone())
+            error
+        });
+        // How the plugin side of a device's open went: in which process, how long, and a failure whole
+        // (its Python traceback); what the device is and was opened with is the apparatus's to say.
+        if descriptor.is_device() {
+            zlc_core::journal::lifecycle("plugins", "device_open", json!({"instance": instance, "type_id": type_id, "process": key, "pid": pid,
+                "ms": began.elapsed().as_secs_f64() * 1e3, "outcome": if opened.is_ok() { "opened" } else { "failed" },
+                "error": opened.as_ref().err().map(CallError::wire)}));
+        }
+        opened
     }
 
     /// Admit a device instance served by `endpoint` (another core's published
     /// device) under `descriptor`, the type it has there: its outputs join this
-    /// core's Stop all (made safe through the endpoint), its commands the catalogue.
-    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, snapshot: bool, reads: Vec<String>) -> Result<(), CallError> {
+    /// core's Stop all (made safe through the endpoint), its commands the catalogue; `device_info` is
+    /// what it said of itself at its open there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach(&self, instance: &str, descriptor: TypeDescriptor, endpoint: Arc<dyn Endpoint>, tunable: bool, snapshot: bool, reads: Vec<String>,
+                  device_info: Value) -> Result<(), CallError> {
         if !descriptor.is_device() { return Err(CallError::new(ErrorKind::Invalid, format!("{} is not a device type", descriptor.type_id))); }
         named(instance)?;
         {
@@ -556,7 +616,7 @@ impl PluginHost {
             if state.closed { return Err(CallError::lost("the plugin host is closed")); }
             if state.instances.contains_key(instance) { return Err(CallError::new(ErrorKind::Refused, format!("{instance} is already open"))); }
         }
-        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, snapshot, reads)
+        self.inner.admit(instance, Arc::new(descriptor), Serving::Remote(endpoint), tunable, snapshot, reads, device_info)
     }
 
     /// The type an open instance has (a remote device's is its publisher's).
@@ -567,6 +627,10 @@ impl PluginHost {
     /// Whether an open device speaks the tunable quartet.
     pub fn tunable(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.tunable) }
     pub fn reports_settings(&self, instance: &str) -> bool { self.inner.state.lock().unwrap().instances.get(instance).is_some_and(|entry| entry.snapshot) }
+    /// What an open device said of itself at its open (`device_info`); Null when it said nothing.
+    pub fn device_info(&self, instance: &str) -> Value {
+        self.inner.state.lock().unwrap().instances.get(instance).map_or(Value::Null, |entry| entry.device_info.clone())
+    }
     pub fn reads(&self, instance: &str) -> Vec<String> {
         self.inner.state.lock().unwrap().instances.get(instance).map(|entry| entry.reads.clone()).unwrap_or_default()
     }
@@ -698,19 +762,51 @@ impl PluginHost {
             for process in processes { process.request("close", json!({"instance": instance}), deadline)?; }
             return Ok(());
         };
+        // Said for a device: where it was served, how long its close took, and a failure whole.
+        let (began, pid) = (Instant::now(), serving.pid());
+        let closed = self.close_admitted(instance, serving, &descriptor, deadline);
+        if descriptor.is_device() {
+            zlc_core::journal::lifecycle("plugins", "device_close", json!({"instance": instance, "type_id": descriptor.type_id, "pid": (pid != 0).then_some(pid),
+                "ms": began.elapsed().as_secs_f64() * 1e3, "outcome": if closed.is_ok() { "closed" } else { "failed" },
+                "error": closed.as_ref().err().map(CallError::wire)}));
+        }
+        closed
+    }
+
+    /// Close an admitted instance served by `serving`.
+    fn close_admitted(&self, instance: &str, serving: Serving, descriptor: &Arc<TypeDescriptor>, deadline: Duration) -> Result<(), CallError> {
+        let inner = &self.inner;
         let process = match serving {
             Serving::Process(process) => process,
-            Serving::Remote(endpoint) => { inner.forget(instance, &descriptor); endpoint.close(); return Ok(()); }
+            Serving::Remote(endpoint) => { inner.forget(instance, descriptor); endpoint.close(); return Ok(()); }
         };
+        self.end_waits(instance);
         // A refused/failed close still owns its handle. Keep the host entry so
         // another Init cannot open over it; a later Close retries that owner.
         process.request("close", json!({"instance": instance}), deadline)?;
-        inner.forget(instance, &descriptor);
+        inner.forget(instance, descriptor);
         // A node closed (removed, or its layout replaced) takes its signals with it (v2 retire).
         if !descriptor.is_device() { let _ = inner.runtime.withdraw(public_instance(instance)); }
         process.instances.lock().unwrap().remove(instance);
         inner.release_process(&process);
         Ok(())
+    }
+
+    /// A close is its instance's Stop: the run it carries is stopped as Stop stops it (it ends
+    /// stopped, and what it waits for in the core ends), and what it waits for the application
+    /// to answer is refused now -- the application closing it may be the very one that would
+    /// have answered, busy closing it (its window's turn closes its plugins).
+    fn end_waits(&self, instance: &str) {
+        let (run, asked) = {
+            let mut state = self.inner.state.lock().unwrap();
+            let run = state.instances.get(instance).and_then(|entry| entry.run.as_ref()).map(|run| run.id.clone());
+            let tickets: Vec<u64> = state.requests.iter().filter(|(_, asked)| asked.instance == instance).map(|(ticket, _)| *ticket).collect();
+            (run, tickets.into_iter().filter_map(|ticket| state.requests.remove(&ticket)).collect::<Vec<_>>())
+        };
+        if let Some(run) = run { let _ = self.stop_run(instance, &run); }
+        for asked in asked {
+            self.inner.answer(&asked.process, &asked.id, Err(CallError::new(ErrorKind::Cancelled, format!("{instance} is closing"))));
+        }
     }
 
     /// Refused while a run claims `instance` or another core holds it.
@@ -900,9 +996,10 @@ impl PluginHost {
     }
 
     /// Answer a plugin's `HostEvent::Request` (operator input, artifact, acquisition, core command).
+    /// The answer is queued for the plugin's writer and never waited for (the window's turn answers).
     pub fn respond(&self, ticket: u64, result: Result<Value, CallError>) {
         let waiting = self.inner.state.lock().unwrap().requests.remove(&ticket);
-        if let Some((process, id)) = waiting { self.inner.answer(&process, &id, result.map(|value| (value, Vec::new()))); }
+        if let Some(asked) = waiting { self.inner.answer(&asked.process, &asked.id, result.map(|value| (value, Vec::new()))); }
     }
 
     /// Freeze the application's configured device state before this run publishes.
@@ -938,6 +1035,20 @@ impl PluginHost {
         current.map_or_else(|| Arc::new(AtomicBool::new(true)), |current| current.stop.0.clone())
     }
 
+    /// Tell a run what a core read it watches now says (`ctx.watch`): `watch` names the watch,
+    /// `answer` is the read's new answer or its refusal. Refused (StaleRun) once the run has ended, so the teller stops.
+    pub fn tell_watch(&self, run: &str, watch: &str, answer: Result<Value, String>) -> Result<(), CallError> {
+        let (instance, process) = {
+            let state = self.inner.state.lock().unwrap();
+            let (instance, entry) = state.instances.iter().find(|(_, entry)| entry.run.as_ref().is_some_and(|current| current.id == run))
+                .ok_or_else(|| CallError::new(ErrorKind::StaleRun, format!("{run} has ended")))?;
+            let process = entry.serving.process().cloned().ok_or_else(|| CallError::new(ErrorKind::Invalid, format!("{instance} is not a node of this core")))?;
+            (instance.clone(), process)
+        };
+        let told = match answer { Ok(value) => json!({"value": value}), Err(error) => json!({"error": error}) };
+        process.event("run.watched", json!({"instance": instance, "run": run, "watch": watch, "told": told}))
+    }
+
     /// Open instances: (id, type, pid; 0 for one another core serves).
     pub fn instances(&self) -> Vec<(String, String, u32)> {
         let state = self.inner.state.lock().unwrap();
@@ -952,27 +1063,52 @@ impl PluginHost {
 
     /// Close everything and end every plugin process.
     pub fn shutdown(&self) {
-        let names: Vec<String> = { let mut state = self.inner.state.lock().unwrap(); state.closed = true; state.instances.keys().cloned().collect() };
+        // Nodes close before the devices they use: a run ends what it began on a device (a capture,
+        // a playback) while that device is still open, so the device closes idle, after it.
+        let (devices, nodes): (Vec<_>, Vec<_>) = {
+            let mut state = self.inner.state.lock().unwrap();
+            state.closed = true;
+            state.instances.iter().map(|(name, entry)| (name.clone(), entry.descriptor.is_device())).partition(|(_, device)| *device)
+        };
         // Shutdown alone may end the owner. A full pipe can hold even close/exit
         // behind a frame already being written, so the existing close + exit
-        // budget needs an independent timer that does not acquire the writer.
+        // budget (the nodes' closes, the devices', the exits) needs an independent
+        // timer that does not acquire the writer.
         let owned: Vec<_> = self.inner.processes.lock().unwrap().values().cloned().collect();
         let closing = self.inner.clone();
         let (finished, finish) = std::sync::mpsc::channel::<()>();
         let watchdog = std::thread::spawn(move || {
             if matches!(finish.recv_timeout(SHUTDOWN_CLOSE + Duration::from_secs(10)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
-                for process in &owned { process.retiring.store(true, Ordering::Release); }
-                if let Err(error) = closing.job.terminate() {
-                    eprintln!("Plugin shutdown could not terminate its job: {error}");
-                    for process in owned { if !process.wait_exit(Duration::ZERO) { process.kill(); } }
-                }
+                let left: Vec<_> = owned.iter().filter(|process| !process.wait_exit(Duration::ZERO)).collect();
+                for process in &left { process.retiring.store(true, Ordering::Release); }
+                let terminated = closing.job.terminate();
+                let how = match &terminated {
+                    Ok(()) => "terminated with the plugin job: shutdown overran its bound".to_owned(),
+                    Err(error) => format!("killed: shutdown overran its bound and the plugin job could not be terminated ({error})"),
+                };
+                for process in &left { process.ended_as(&how); }
+                zlc_core::journal::lifecycle("plugins", "shutdown_overran", json!({"pids": left.iter().map(|process| process.pid()).collect::<Vec<_>>(),
+                    "keys": left.iter().map(|process| process.key.clone()).collect::<Vec<_>>(), "bound_s": (SHUTDOWN_CLOSE + Duration::from_secs(10)).as_secs_f64(),
+                    "job_terminated": terminated.is_ok(), "error": terminated.as_ref().err().map(ToString::to_string)}));
+                if terminated.is_err() { for process in left { process.kill(&how); } }
             }
         });
-        // Every instance closes at once and within a bound: a run that does not stop (a scan
-        // waiting for an input that will not come) cannot hold the application open.
-        let closers: Vec<_> = names.into_iter().map(|name| { let host = self.clone();
-            std::thread::spawn(move || { if let Err(error) = host.close_within(&name, SHUTDOWN_CLOSE) { eprintln!("Plugin {name} close: {error}"); } }) }).collect();
-        for closer in closers { let _ = closer.join(); }
+        // Every node closes at once and within a bound, then every device: a run that does not stop
+        // (a scan waiting for an input that will not come) cannot hold the application open.
+        for names in [nodes, devices] {
+            let closers: Vec<_> = names.into_iter().map(|(name, device)| { let host = self.clone();
+                std::thread::spawn(move || {
+                    let (began, pid) = (Instant::now(), host.instances().into_iter().find(|(open, _, _)| *open == name).map(|(_, _, pid)| pid));
+                    // A device's close is said by `close_within` (device_close); a node's failed close is said here.
+                    if let Err(error) = host.close_within(&name, SHUTDOWN_CLOSE) {
+                        if !device {
+                            zlc_core::journal::lifecycle("plugins", "node_close", json!({"instance": name, "pid": pid.filter(|pid| *pid != 0),
+                                "ms": began.elapsed().as_secs_f64() * 1e3, "outcome": "failed", "at": "shutdown", "error": error.wire()}));
+                        }
+                    }
+                }) }).collect();
+            for closer in closers { let _ = closer.join(); }
+        }
         let processes: Vec<_> = self.inner.processes.lock().unwrap().drain().map(|(_, process)| process).collect();
         let retirers: Vec<_> = processes.into_iter().map(|process| { let inner = self.inner.clone();
             std::thread::spawn(move || inner.retire(&process)) }).collect();
@@ -983,14 +1119,33 @@ impl PluginHost {
 }
 
 impl Inner {
-    fn gate(&self, key: &str) -> Arc<Mutex<()>> { self.gates.lock().unwrap().entry(key.to_owned()).or_default().clone() }
+    fn gate(&self, key: &str) -> Arc<Mutex<Vec<Arc<PluginProcess>>>> { self.gates.lock().unwrap().entry(key.to_owned()).or_default().clone() }
 
     /// The live process of `key`, started if there is none, now in use by `instance`
     /// (or by a request that is no instance's, until [`Inner::done`]).
     fn acquire(self: &Arc<Self>, key: &str, instance: Option<&str>) -> Result<Arc<PluginProcess>, String> {
         let gate = self.gate(key);
-        let _held = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let process = match self.live(key) { Some(process) => process, None => self.spawn(key)? };
+        let mut started = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let process = match self.live(key) {
+            Some(process) => process,
+            None => {
+                // An earlier process of this key still ending may hold hardware its successor is
+                // about to open (a Basler is exclusive to one process): the new one starts once
+                // every earlier one is gone -- its interpreter, not only its launcher. `retire`
+                // ends one within RETIRE_WAIT, killing it if it must.
+                for earlier in started.iter() {
+                    if !earlier.wait_exit(RETIRE_WAIT) {
+                        let reason = format!("the earlier plugin process {} (pid {}) of {key} has not ended {:.0} s after it was {}; a device it holds could not be opened by its successor",
+                            earlier.key, earlier.pid(), RETIRE_WAIT.as_secs_f64(), earlier.ended_by().map_or("told to".to_owned(), |how| format!("ended ({how})")));
+                        zlc_core::journal::lifecycle("plugins", "process_not_gone", json!({"key": key, "pid": earlier.pid(), "waited_s": RETIRE_WAIT.as_secs_f64(),
+                            "ended_by": earlier.ended_by()}));
+                        return Err(reason);
+                    }
+                }
+                started.clear();
+                self.spawn(key, &mut started)?
+            }
+        };
         match instance {
             Some(instance) => { process.instances.lock().unwrap().insert(instance.to_owned()); }
             None => { process.users.fetch_add(1, Ordering::AcqRel); }
@@ -1004,10 +1159,10 @@ impl Inner {
         self.release_process(process);
     }
 
-    /// A live, non-retiring process of `key`.
+    /// A live process of `key` the core is not ending.
     fn live(&self, key: &str) -> Option<Arc<PluginProcess>> {
         self.processes.lock().unwrap().values()
-            .find(|process| process.key == key && process.alive.load(Ordering::Acquire) && !process.retiring.load(Ordering::Acquire)).cloned()
+            .find(|process| process.key == key && process.alive.load(Ordering::Acquire) && !process.retiring.load(Ordering::Acquire) && !process.ending()).cloned()
     }
 
     fn command(&self) -> Command {
@@ -1024,37 +1179,51 @@ impl Inner {
         // threads on a solver's matrices wait on each other): the plugin processes do the
         // science (WGS solves, fits).
         command.envs(self.environment.iter().map(|(name, value)| (name, value)));
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         command
     }
 
-    fn spawn(self: &Arc<Self>, key: &str) -> Result<Arc<PluginProcess>, String> {
-        let child = self.command().args(["-m", "zlc_plugin", "host"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+    /// Start a plugin process of `key`, joining `started` (its gate's) the moment it
+    /// exists; its start, or why it did not, is the session's.
+    fn spawn(self: &Arc<Self>, key: &str, started: &mut Vec<Arc<PluginProcess>>) -> Result<Arc<PluginProcess>, String> {
+        let began = Instant::now();
+        let started = self.start_process(key, started);
+        let ms = began.elapsed().as_secs_f64() * 1e3;
+        match &started {
+            Ok(process) => zlc_core::journal::lifecycle("plugins", "process_started", json!({"key": key, "pid": process.pid(), "ms": ms,
+                "python": self.config.python})),
+            Err(error) => zlc_core::journal::lifecycle("plugins", "process_not_started", json!({"key": key, "ms": ms, "python": self.config.python, "error": error})),
+        }
+        started
+    }
+
+    fn start_process(self: &Arc<Self>, key: &str, started: &mut Vec<Arc<PluginProcess>>) -> Result<Arc<PluginProcess>, String> {
+        // In the job before its first instruction: the venv launcher's interpreter is born in it.
+        let child = self.job.spawn(self.command().args(["-m", "zlc_plugin", "host"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()),
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
             .map_err(|error| format!("Cannot start a plugin process with {}: {error}", self.config.python.display()))?;
         let (process, stdout, stderr) = PluginProcess::new(key.to_owned(), child);
-        if let Err(error) = self.job.assign(process.raw_handle()) { process.kill(); return Err(error); }
+        started.push(process.clone());
         let label = key.to_owned();
-        process.read_log(stderr, move |line| eprintln!("[plugin {label}] {line}"));
+        process.read_log(stderr, move |us, line| eprintln!("[{}] [plugin {label}] {line}", zlc_core::process::local_time(us)));
         let (weak, reading) = (Arc::downgrade(self), process.clone());
         std::thread::Builder::new().name(format!("zlc-plugin-read-{key}"))
             .spawn(move || read_loop(weak, reading, stdout)).map_err(|error| error.to_string())?;
         let hello = match process.request("hello", json!({"protocol": PROTOCOL, "session": self.session}), OPEN_DEADLINE) {
             Ok(hello) => hello,
-            Err(error) => { process.kill(); return Err(format!("Plugin process handshake: {error}; {}", process.tail(8).join(" | "))); }
+            Err(error) => { process.kill("killed: its handshake failed"); return Err(format!("Plugin process handshake: {error}; {}", process.tail(8).join(" | "))); }
         };
         if hello.message["ok"]["protocol"][0].as_u64() != Some(u64::from(PROTOCOL[0])) {
             self.retire(&process);
             return Err(format!("Plugin process speaks protocol {}", hello.message["ok"]["protocol"]));
         }
-        // A venv's python.exe is a launcher: the interpreter, which names and
-        // owns the blocks, is its child, and reports its own pid.
-        let pid = hello.message["ok"]["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
-            .ok_or("Plugin process handshake has no pid")?;
-        process.set_pid(pid);
-        // Which process a plugin is: what the journal says of a process's use of the machine names it by pid.
-        zlc_core::journal::note("plugins", "process", json!({"key": key, "pid": pid}));
+        // A venv's python.exe is a launcher: the interpreter, which names and owns the
+        // blocks and opens the devices, is its child, and reports its own pid.
+        let named = hello.message["ok"]["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()).ok_or_else(|| "Plugin process handshake has no pid".to_owned())
+            .and_then(|pid| process.adopt_interpreter(pid, &self.job).map(|()| pid));
+        let pid = match named {
+            Ok(pid) => pid,
+            Err(error) => { process.kill("killed: its handshake named no interpreter of its own"); return Err(error); }
+        };
         self.processes.lock().unwrap().insert(pid, process.clone());
         Ok(process)
     }
@@ -1077,9 +1246,11 @@ impl Inner {
     }
 
     /// An opened instance joins the host: its outputs Stop all, its commands the catalogue.
-    fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, snapshot: bool, reads: Vec<String>) -> Result<(), CallError> {
+    #[allow(clippy::too_many_arguments)]
+    fn admit(self: &Arc<Self>, instance: &str, descriptor: Arc<TypeDescriptor>, serving: Serving, tunable: bool, snapshot: bool, reads: Vec<String>,
+             device_info: Value) -> Result<(), CallError> {
         self.state.lock().unwrap().instances.insert(instance.to_owned(),
-            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, snapshot, reads, claims: Vec::new(), published: None,
+            Instance { display_name: public_instance(instance).to_owned(), descriptor: descriptor.clone(), serving, tunable, snapshot, reads, device_info, claims: Vec::new(), published: None,
                 local_requests: Arc::default(), run: None });
         for output in &descriptor.physical_outputs {
             let (weak, name, port) = (Arc::downgrade(self), instance.to_owned(), output.name.clone());
@@ -1094,7 +1265,8 @@ impl Inner {
 
     fn release_to(&self, pid: u32, names: Vec<String>) {
         let process = self.processes.lock().unwrap().get(&pid).cloned();
-        if let Some(process) = process { let _ = process.event("release", json!({"blocks": names})); }
+        // Posted: a release may be told from the plugin writer's own thread (a failed answer's blocks).
+        if let Some(process) = process { process.post(&json!({"t": "evt", "op": "release", "p": {"blocks": names}}), |_| {}); }
     }
 
     /// An instance left: its outputs leave Stop all and its run ends.
@@ -1129,6 +1301,10 @@ impl Inner {
         let Some((descriptor, run)) = held else { return };
         let reason = format!("{instance} did not answer within its deadline; it was taken out of the plugin process");
         eprintln!("Plugin {}:{}: {reason}", process.key, process.pid());
+        if descriptor.is_device() {
+            zlc_core::journal::lifecycle("plugins", "device_unresponsive", json!({"instance": instance, "type_id": descriptor.type_id,
+                "pid": process.pid(), "reason": reason}));
+        }
         let _ = process.event("abandon", json!({"instance": instance}));
         if let Some(run) = run { self.end_run(instance, &run, "failed", &json!({"error": reason})); }
         self.forget(instance, &descriptor);
@@ -1137,10 +1313,17 @@ impl Inner {
         self.release_process(process);
     }
 
+    /// Ask a process to exit, and kill it if it has not within [`RETIRE_ASK`]; a
+    /// successor of its key waits for it to be gone ([`Inner::acquire`]).
     fn retire(&self, process: &Arc<PluginProcess>) {
         process.retiring.store(true, Ordering::Release);
-        let _ = process.request("exit", json!({}), Duration::from_secs(5));
-        if !process.wait_exit(Duration::from_secs(5)) { process.kill(); }
+        // Said before it is asked: it may be gone, and its end told, before the ask returns.
+        process.ended_as("exited when asked");
+        let _ = process.request("exit", json!({}), RETIRE_ASK);
+        if !process.wait_exit(RETIRE_ASK) && !process.kill(&format!("killed: it did not exit within {:.0} s of being asked", RETIRE_ASK.as_secs_f64())) {
+            zlc_core::journal::lifecycle("plugins", "process_not_gone", json!({"key": process.key, "pid": process.pid(),
+                "waited_s": KILL_WAIT.as_secs_f64(), "ended_by": process.ended_by()}));
+        }
         self.processes.lock().unwrap().remove(&process.pid());
     }
 
@@ -1177,11 +1360,18 @@ impl Inner {
         self.registry.holder_gone(process.pid());
         let retiring = process.retiring.load(Ordering::Acquire);
         let names: Vec<String> = process.instances.lock().unwrap().iter().cloned().collect();
-        // The channel closes when the interpreter ends; its launcher follows with its code.
-        process.wait_exit(Duration::from_secs(2));
+        // The channel closes when the interpreter ends; its launcher follows with its code. One
+        // that closed its channel without ending (and that `retire` is not ending) is unusable: it goes.
+        if !retiring && !process.wait_exit(RETIRE_ASK) {
+            process.kill(&format!("killed: its channel closed and it had not exited {:.0} s later", RETIRE_ASK.as_secs_f64()));
+        }
         let code = process.exit_code().map(|code| format!(" (exit code {code})")).unwrap_or_default();
         let tail = process.tail(6);
         let detail = if tail.is_empty() { format!("{reason}{code}") } else { format!("{reason}{code}; last log: {}", tail.join(" | ")) };
+        // `expected`: it was asked to end (nothing used it any more, or the application closed); else it crashed.
+        // `ended_by`: how the core ended it (asked, killed, the job terminated); none: it ended on its own.
+        zlc_core::journal::lifecycle("plugins", "process_ended", json!({"key": process.key, "pid": process.pid(), "reason": reason,
+            "exit_code": process.exit_code(), "expected": retiring, "ended_by": process.ended_by(), "instances": names, "last_log": process.tail(40)}));
         for name in &names {
             let (descriptor, run) = {
                 let state = self.state.lock().unwrap();
@@ -1194,7 +1384,7 @@ impl Inner {
         let released: Vec<_> = {
             self.processes.lock().unwrap().remove(&process.pid());
             let mut state = self.state.lock().unwrap();
-            state.requests.retain(|_, (asking, _)| !Arc::ptr_eq(asking, process));
+            state.requests.retain(|_, asked| !Arc::ptr_eq(&asked.process, process));
             let held: Vec<u64> = state.leases.iter().filter(|(_, (holder, _))| *holder == process.pid()).map(|(lease, _)| *lease).collect();
             held.into_iter().filter_map(|lease| state.leases.remove(&lease)).collect()
         };
@@ -1316,7 +1506,7 @@ impl Inner {
                     Ok(origin) => {
                         state.next_ticket += 1;
                         let ticket = state.next_ticket;
-                        state.requests.insert(ticket, (process.clone(), id));
+                        state.requests.insert(ticket, Asked { process: process.clone(), id, instance: instance.clone() });
                         drop(state);
                         (self.events)(HostEvent::Request { instance, run, ticket, op: op.clone(), params: params.clone(), origin, lent: Lent(lends) });
                         return;
@@ -1334,11 +1524,14 @@ impl Inner {
             Ok((value, blocks)) => json!({"t": "res", "id": id, "ok": value, "blocks": blocks}),
             Err(error) => json!({"t": "res", "id": id, "error": error.wire()}),
         };
-        if let Err(error) = process.send(&message) {
-            let blocks: Vec<_> = message["blocks"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-            self.registry.released_by(process.pid(), &blocks);
-            eprintln!("Plugin {} answer: {error}", process.key);
-        }
+        // Queued, never waited for: whoever answers (the window's turn, a read loop) goes on at once.
+        // A frame the writer could not write gives its blocks back and is said, from the writer.
+        let blocks: Vec<_> = message["blocks"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        let (registry, pid, key) = (self.registry.clone(), process.pid(), process.key.clone());
+        process.post(&message, move |error| {
+            registry.released_by(pid, &blocks);
+            eprintln!("Plugin {key} answer: {error}");
+        });
     }
 
     fn run_of<'a>(state: &'a mut State, params: &Value) -> Result<&'a mut RunState, CallError> {
@@ -1936,9 +2129,9 @@ fn watch(weak: Weak<Inner>) {
             // An overdue request of no instance's (the handshake) is the process's own.
             let missed = process.missed_pings.load(Ordering::Relaxed);
             if overdue.iter().any(Option::is_none) || missed >= MISSED_PINGS {
-                eprintln!("Plugin {}:{} is unresponsive ({}); ending it", process.key, process.pid(),
-                          if missed >= MISSED_PINGS { format!("{missed} pings unanswered") } else { "a request is overdue".to_owned() });
-                process.kill();
+                let why = if missed >= MISSED_PINGS { format!("{missed} pings unanswered") } else { "a request of its own is overdue".to_owned() };
+                eprintln!("Plugin {}:{} is unresponsive ({why}); ending it", process.key, process.pid());
+                process.kill(&format!("killed: unresponsive ({why})"));
                 continue;
             }
             if let Some(inner) = weak.upgrade() { for instance in overdue.into_iter().flatten() { inner.unresponsive(&process, &instance); } }
@@ -1951,6 +2144,19 @@ fn watch(weak: Weak<Inner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_discovery_is_the_hosts_answer_and_is_never_run_again() {
+        let missing = std::env::temp_dir().join(format!("zlc-no-python-{}", std::process::id())).join("python.exe");
+        let host = PluginHost::new(HostConfig { python: missing, python_path: Vec::new(), packages: vec!["zlc_test_plugins".into()], memory_limit_mib: None },
+            Runtime::new(), SafeActions::new(), |_| {}).unwrap();
+        let failed = host.catalog().unwrap_err();
+        let asked = Instant::now();
+        assert_eq!(host.catalog().unwrap_err(), failed);
+        assert!(asked.elapsed() < Duration::from_millis(100), "asked again, it answers at once");
+        assert!(host.inner.processes.lock().unwrap().is_empty());
+        host.shutdown();
+    }
 
     #[test]
     fn local_admission_is_pending_before_the_request_reaches_the_plugin() {

@@ -89,6 +89,7 @@ A type descriptor (JSON, the only form the core sees):
   "announces": "",                       // device only: the client type its own server is opened as (section 10)
   "identity": "visa:{resource}",         // device only: the instrument a row names, over its parameters ("" = every row its own)
   "resources": ["serial:{port}"],        // device only: the physical resources a row binds, over its parameters (below)
+  "sdk_modules": ["Pylon*.dll"],         // device only: its vendor transport's file names, to name who holds it (section 7)
   "node": {                              // node only
     "node_kind": "measurement",          // measurement | task | processor
     "inputs": [{"name": "source", "contract": "zlc.camera.frames", "delivery": "exact", "select_bundle": false}],
@@ -97,7 +98,7 @@ A type descriptor (JSON, the only form the core sees):
     "outputs": [{"name": "frames", "contract": "zlc.camera.frames", "index_by_source": false}],
     "devices": [{"capability": "camera.adapter", "argument": "camera",
                  "protected_fields": ["exposure", "roi_x"], "enabled_when": null,
-                 "reads_only": false, "optional": false}],
+                 "reads_only": false}],
     "previews": [...], "reports_ready": true, "acquisition_input": "", "acquisition_completion": "ready",
     "artifact_outputs": [...], "selection_mappings": [...], "workspace_resources": [...],
     "replaces": {"post_selected_occupancy": {"post_selection": true}},  // types it took over: a saved row naming one loads as this type, these values over its own
@@ -186,6 +187,30 @@ without an instance: `discover` (its hardware scan; an SDK `discover` that takes
 `resolve(parameters, excluded)`): a row of such a type with a resource still blank is
 resolved before it opens, one row at a time in the operator's order while the other
 rows open, and what it finds is pinned into the apparatus (WORKBENCH_COMMANDS §4.2).
+A resolve answers what it **found** apart from what the row opens with **this time
+only**: only found values are written into the row, so a search that finds nothing
+never erases the row's last-known values (the board on Auto without a UART opens over
+JTAG with `this_open: {uart_port: ""}` while its row keeps `COM10`). One search probes
+its free ports at once, each opened at most once and all released before it answers
+(`zlc_atom.devices.search_serial_ports`, Rust `zlc_pulse::serial::search_ports`): it
+takes about one port's timeout, says its attempts in the listing's order and takes the
+first listed port that answers.
+
+**A filled-in serial port is a record of an earlier resolve.** Every serial open says
+its failure one way (SDK `zlc_atom.devices.open_serial_port`, Rust
+`zlc_pulse::serial::OpenFailure`): `COM10 could not be opened: driver refused (os error
+1: Incorrect function) -- serial ports on this PC: COM3 (USB-SERIAL CH340)` -- the OS
+error's class (`not present`, `in use by another program`, `driver refused`, else
+`refused`) with its code and text, then the ports this PC has. It is raised as
+`SerialPortUnusable` when the port cannot be used at all and `SerialPortBusy` when
+another program holds it. An open of a row whose type resolves that fails with
+`SerialPortUnusable` is not the row's failure yet: the core runs the type's resolve once
+more with the row's serial ports blank, pins what it finds (the Init line says the port
+that failed and what was found) and opens that; nothing found fails the row with both
+reasons, or opens it as the resolve says for this open only, the row's port kept. A
+held port is not looked past, and an open of what a resolve found is not looked for
+again. Every device's open failure, resolve outcome and close failure is
+also written into that device's own log (`[HH:MM:SS] open failed: ...`).
 
 Packages may export `configuration.APPARATUS_SCHEMAS`: a mapping from apparatus
 namespace to an authoring schema. Discovery serializes these under
@@ -210,16 +235,17 @@ spawned -> ready -> open -> (idle <-> running) -> closing -> closed
 | Step | Core sends | Plugin does | Reply |
 |---|---|---|---|
 | handshake (process) | `hello {protocol, session}` | creates its block arena | `{protocol, pid, python, sdk}` |
-| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot}` |
+| open | `open {instance, type_id, module, parameters, simulation}` | imports the type's module; device: `factory(instance, projected parameters)` builds and opens the adapter; node: keeps the draft | `{state, tunable, reads, narrates, snapshot, device_info?}`; `device_info`: what the device states of itself, when its adapter has `device_info()` -- a mapping of text (`model`, `serial`, `firmware`, `driver`, `sdk`, ...; `sdk`/`driver` as the installed distribution's version, `zlc_atom.devices.vendor.installed_distribution`, never a module's optional `__version__`; `unanswered`: what the device refused to say, and why) from reads the adapter already made while opening, without side effects; a failure to say is `{error}`, never the open's failure. The core keeps it with the open in the session journal; `note?`: what the open says on the Init or Apply line (the local pulse board on Auto that came up over JTAG) |
 | configure | `configure {instance, parameters}` | device: `adapter.reconfigure(values)` or refuses | `{state}` |
 | prepare (node) | `query {instance, name: "prepare_run", values, devices, resources, source_signal}` | projects and builds a candidate with read-only device proxies; the active run is untouched | `{prepared: token}` |
 | discard (node) | `run.discard {instance, prepared}` | releases an unstarted candidate; idempotent | `{}` |
 | start (node) | `run.start {instance, run, prepared?, values, devices, resources, source_signal, run_directory, origin}` | consumes the prepared candidate and binds its proxies to the acquired run; without a token, builds on the run thread for direct SDK clients | `{run}` immediately; terminal via tokenized `run.begin_terminal` / `run.finish` requests |
 | stop (node) | event `run.stop {instance, run}` | sets the run's cancel flag | none |
+| told (node) | event `run.watched {instance, run, watch, told: {value} or {error}}` | a read the run watches (`ctx.watch`) changed: its newest answer, kept for the run | none |
 | health | `ping` | answered by the reader thread (proves the interpreter and GIL are alive) | `{}` |
 | catalogue (process) | `describe {packages}` | imports every leaf module on a thread of its own | the descriptor document (section 2) |
 | hardware scan (process) | `discover {type_id, module, excluded}` (no instance; in the process its instances open in, so a vendor runtime that is a process singleton -- DCAM -- is the one its devices use; `excluded`: the bound resources, section 2) | the type's `discover(excluded=...)` (or `discover()`) on a thread of its own | `{found: [{instance_id, role, parameters}], notes}`; the core stops waiting at its deadline (20 s, v2) and drops a late answer |
-| resolve (process) | `resolve {type_id, module, parameters, excluded}` (no instance; Init, before the row opens; `excluded`: the bound resources but the row's own) | the type's `resolve(projected parameters, excluded)` on a thread of its own | `{parameters: {name: value}, note}`: the values found (none: open as authored), pinned into the row; an error fails the row and says what it tried and passed over. Deadline 20 s |
+| resolve (process) | `resolve {type_id, module, parameters, excluded}` (no instance; Init, before the row opens; `excluded`: the bound resources but the row's own) | the type's `resolve(projected parameters, excluded)` on a thread of its own | `{found: {name: value}, this_open?: {name: value}, note}`: `found`, the values found (none: open as authored), pinned into the row; `this_open`, values this open uses over the row's without writing them (what a search that found nothing opens with); an error fails the row and says what it tried and passed over. Deadline 20 s |
 | close | `close {instance}` | device: its closer (stop capture, release SDK); node: stop run | `{state}`; a process left with nothing to serve ends |
 | abandon | event `abandon {instance}` | stop accepting work for the instance; keep its name reserved until the overrunning call returns and cleanup succeeds | none |
 | exit (process) | `exit` | closes what is left | `{}`, then exits 0 |
@@ -330,7 +356,7 @@ adapter; `get:<name>` reads a property), `command {name, params}` (section 8),
 {output}`, `publish {published}` (Remote of a type that `announces`: section 10), `query {name, values?, devices?, resources?, source?, output_name?,
 installation?}` (the facts by name; the SDK calls the v2 callable with them in v2's
 positional order, `zlc_plugin.declare.QUERY_PARAMETERS`; `devices` become proxies), `run.start`. Events: `release
-{blocks}`, `run.stop {run}`. A request with `"plain": true` gets its result as
+{blocks}`, `run.stop {run}`, `run.watched {run, watch, told}`. A request with `"plain": true` gets its result as
 plain JSON (dataclasses as objects, tuples as lists, dtypes and enums as their
 values, arrays still as references); the core always asks for that, while a
 plugin-to-plugin call keeps the tagged types of section 6.
@@ -447,10 +473,10 @@ Plugin -> core (only during a run, bound to its run id):
 | `run.artifact {name, path, role, contract_id}` | Legacy registration spelling, routed through the same confined artifact store. |
 | `run.figure {path, data, overlay, recipe, source, lineage, image}` | Save one figure (`RunContext.save_figure`, `zlc_plugin.figures`): the core writes the `zlc.figure` archive `<path stem>.npz` and, when `image`, renders `path` (`.png`/`.pdf`/`.svg`; no suffix = `.png`). `data` is one complete dataset `{schema, data: {values, validity, sigma}, block_id, revision, generation}` (`validity` true/false or its storage mask). `recipe` is `{spec, parameters, size}` plus any of `viewport, classifier_thresholds, facet_focus, fit, selectors, interaction, presentation`: `spec` is the archive recipe's spec tree; the core completes `parameters` with the kind's defaults, validates `size` and normalizes `classifier_thresholds` as a plot session keeps them (v2 `encode_plot_recipe`). `overlay` is null or `{revision, coordinates (N,2), point_ids, labels, static_statuses, status (a dataset), paths_xy (N,K,2)}`. `source`/`lineage` go into the archive's sections as v2's `save_figure_artifact` put them. Answers `{archive, image}` (`image` null when not drawn). Registering them as artifacts stays the plugin's. |
 | `run.animation {path, images, frame_ms}` | A looping GIF of the run's images (its figure previews, inside the run directory), `frame_ms` each, each frame on its own palette (v2's Pillow save of the recording previews); answers `{path}`. `RunContext.save_animation`. |
-| `run.fit {model, x, y, sigma, sigma_dof, warm}` | One independent fit per row of `y` `(cells, n)` over `x` `(n)` by the core's fit engine with its default options (`RunContext.fit`, `zlc_plugin.fit`); `sigma` as `y` or null, `sigma_dof` (each sigma's degrees of freedom, as a panel's fit weighs them) as `y` or null, `warm` `(cells, parameters)` or null, a row with a non-finite value being none. `model` is an id of the read-only catalogue command `fit_models` (`{models: [{id, label, parameters: [{name, unit_relation}]}]}`, series models only; `zlc_plugin.fit_models`, also from a draft query). Answers `{parameters, values, errors, success, reduced_chi_square, messages}`, a row per cell, null for NaN. A cell that cannot be fitted (too few finite points, a solver failure) is `success: false` with its reason, not a failed call; non-finite points are dropped by the engine. Solved on a standing worker, off the window's turn and the channel's thread; the run's Stop ends the batch with `cancelled`. |
+| `run.fit {model, x, y, sigma, sigma_dof, trials, warm}` | One independent fit per row of `y` `(cells, n)` over `x` `(n)` by the core's fit engine with its default options (`RunContext.fit`, `zlc_plugin.fit`); `sigma` as `y` or null, `sigma_dof` (each sigma's degrees of freedom, as a panel's fit weighs them) as `y` or null, `trials` as `y` or null (each `y` the proportion `k / n` of `n` Bernoulli trials, fitted by the binomial likelihood; refused beside a sigma, docs/UNCERTAINTY.md), `warm` `(cells, parameters)` or null, a row with a non-finite value being none. `model` is an id of the read-only catalogue command `fit_models` (`{models: [{id, label, parameters: [{name, unit_relation}]}]}`, series models only; `zlc_plugin.fit_models`, also from a draft query). Answers `{parameters, values, errors, success, reduced_chi_square, messages}`, a row per cell, null for NaN. A cell that cannot be fitted (too few finite points, a solver failure) is `success: false` with its reason, not a failed call; non-finite points are dropped by the engine. Solved on a standing worker, off the window's turn and the channel's thread; the run's Stop ends the batch with `cancelled`. |
 | `run.acquire {node, completion}` | Start the acquisition node this run drives (v2's `restart_logic`); answered at `ready` or `terminal`. |
 | `run.snapshot {wait}` | Record configured acquisition state (`wait: false`) or join an existing observation before publication (`wait: true`). A ready parent/child context shares one observation; without an explicit capture, publication adds no empty or retrospective record. |
-| `core {command, params}` | Run one catalogue command (e.g. a Pulse operation) under the run's origin; the run's claims apply (a `pulse_*` command needs the sequencer claimed). From a draft query (`zlc_plugin.core`, `run: null`) only a `read` command is answered: an estimate's `pulse_estimate`. |
+| `core {command, params}` | Run one catalogue command (e.g. a Pulse operation) under the run's origin; the run's claims apply (a `pulse_*` command needs the sequencer claimed). From a draft query (`zlc_plugin.core`, `run: null`) only a `read` command is answered: an estimate's `pulse_estimate`. With `params._watch` (`ctx.watch`, a read the device that owns it can tell: `pulse_schedule`, and `pulse_wait_done`, whose report is told once) the answer is the first, and each change after it is told as event `run.watched` the moment the device makes it, off the window's turn, until the run ends; the run reads the newest (`Watched.latest`, or sleeps on `Watched.wait`) and never asks again. The board's own commands (`pulse_run`, `pulse_wait_done`, `pulse_stop`, `pulse_estimate`, `pulse_describe`, `pulse_schedule`) are answered where they arrive, never on the window's turn: held to the run's claims as the window last stated them (a run that asks before its start is stated waits for the next statement). |
 | `device {argument, method, args, kwargs}` | Call a claimed device's SPI (section 7 checks apply). `tunable_fields` answers the same rows as the `fields` op, as data. |
 | `runtime.read {signal, mode, width}` | Read a Runtime signal: `event | dataset | window` (the event of a dataset publication, e.g. a Fit over a finite run, is its dataset). Returns `{lease, key, schema, window, segments: [{origin, extent, data}], metadata, run_record, placement, lineage}`, `lineage` its ancestry nearest first, each publication once: `[{key, run_record, event_record}]`; the lease is released (event `release {leases}`) when the SDK's `Read` is garbage. |
 
@@ -796,6 +822,25 @@ outcome distinctions:
 | `cancelled` | Stopped by `run.stop` | as reported |
 | `stale_run`, `unknown_op`, `not_claimed` | Protocol/authority refusals | known old |
 
+An open the device's SDK refuses because another client has the device open
+raises `zlc_plugin.DeviceHeld` (kind `refused`). The core then names, once, the
+processes on this computer that have one of the type's `sdk_modules` loaded
+(`DeviceType(sdk_modules=("Pylon*.dll", ...))`, file-name patterns: `*` any run,
+`?` one character, case ignored): each one's pid, executable, command line, start
+time and whether it is this application's, in the error's message, as
+`error.holders` (`{processes, uninspected}`), in the session journal's
+`device_open` line and in the device's log.
+
+An `open` or `resolve` carries each serial port that would not open on its way,
+beside its answer or in its error, as `serial_faults: [{port, fault, code}]`
+(`fault` the shared class: `not present`, `in use by another program`,
+`driver refused`, `refused`). Every serial open goes through
+`zlc_atom.devices.open_serial_port`, which tells each failure to the calls
+watching (`zlc_plugin.faults.watching_serial_faults`, on any thread, a search's
+probes too); the native board's twin is `zlc_pulse::serial::FaultWatch`, and its
+server's ready or error line carries the same list. A port refused by its driver
+offers its USB device's restart (WORKBENCH_COMMANDS §4.2 `restart_serial_port`).
+
 Python exceptions round-trip: a plugin calling another plugin through `device`
 receives the original type when it is a builtin (`TimeoutError`, `ValueError`,
 `RuntimeError`, `TypeError`, ...) or `zlc_plugin.PluginError(kind, ...)` otherwise,
@@ -856,9 +901,9 @@ into its channel's load). Anything that changes the device is refused.
 
 A requirement with `reads_only` is read, never claimed: the run holds nothing of the
 device, beside whoever does hold it, and its `device` calls are answered only for the
-reads above (`this run only reads <device>; <method> is not a read` otherwise). With
-`optional` a draft may leave it unset or name a device that is not open; the build is
-then called without it.
+reads above (`this run only reads <device>; <method> is not a read` otherwise). A
+device a node needs only in some configurations is required under `enabled_when` (a
+camera's trigger source, while its Trigger by channel switch is on); off, it is not asked for.
 
 **Facts.** A device may state facts of itself that a draft needs before any run: plain
 JSON under `facts` in its working point, said again whenever they change (a sequencer:
@@ -922,7 +967,7 @@ Declarations: `DeviceType`, `Opened`, `NodeType`, `NodeKind`, `Command`,
 Fields are the plugin package's own `AuthoringField`/`AuthoringSchema` (read by
 attribute; the SDK has no second field grammar). Runtime side: `RunContext`
 (section 5), `LiveDatasetOutput`, `Read`, `allocate(shape, dtype)`, `share`,
-`group`, `PluginError`, `Refused`. Porting a v2 device: replace
+`group`, `PluginError`, `Refused`, `DeviceHeld`. Porting a v2 device: replace
 `DeviceTypeDescriptor(type_id, domain, schema, capabilities, factory=...)` with
 `DeviceType(type_id, family, schema, capabilities, factory=...)`; the factory
 takes `(key, projected values)` and returns the adapter, or `Opened(adapter,

@@ -76,6 +76,7 @@ impl DataView {
 
     /// `_factored_planes(row_refs, groups, aggregation, uncertainty)`.
     pub fn factored_planes(&self, row_refs: &[AxisRef], groups: &[AxisRef], aggregation: Reduction, uncertainty: bool) -> Result<Option<FactoredPlanes>> {
+        let uncertainty = self.sem_wanted(uncertainty);
         let aggregation = aggregation.statistic();
         if !matches!(aggregation, Reduction::Mean | Reduction::Sum | Reduction::Min | Reduction::Max) { return Ok(None); }
         if !self.packs_whole() || row_refs.is_empty() { return Ok(None); }

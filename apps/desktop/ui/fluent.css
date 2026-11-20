@@ -452,7 +452,8 @@ select.unit-picker { flex: none; width: auto; field-sizing: content; }
 .field > .field-error { grid-column: 2 / -1; }
 /* Why the row cannot be edited, said as plainly but not as a fault. */
 .field > .field-error.field-note { color: var(--muted-ink); }
-.form-note { grid-column: 1 / -1; margin: 0; }
+/* A note in a form is a line of the form's own: across both columns, never in the label column. */
+.form-note, .form > .note { grid-column: 1 / -1; margin: 0; }
 /* A whole page held (a running task, a frozen panel), or a reason several rows share: said
  * once, above its rows, a line each. */
 .held-note { color: var(--muted-ink); white-space: pre-line; overflow-wrap: anywhere; }
@@ -710,6 +711,8 @@ dialog.dialog::backdrop { background: transparent; }
 /* ---------- FluentPopup beside its FluentSettingsPopupAnchor ----------- */
 .popup { position: fixed; inset: auto; margin: 0; padding: 0; color: var(--text); box-shadow: none; overflow: auto; }
 .popup:popover-open { display: flex; flex-direction: column; }
+/* A form in a popup fills the card, a card's inset from its border. */
+.popup > .form { flex: 1; padding: var(--card-inset); }
 /* A .beside popup's gap from its command; flipped above it (and sideways) where the window has no room. */
 .beside {
   margin: var(--popup-gap) 0; position-area: block-end span-inline-end;

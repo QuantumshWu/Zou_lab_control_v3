@@ -39,6 +39,32 @@ class Scientific(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another coordinate"):
             call("scientific.reduce_plan", schema=dataset_schema_to_tree(schema), statistic="mean", names=["time"], by="", every=0)
 
+    def test_a_proportion_has_its_wilson_interval_never_a_zero_width_one(self):
+        # docs/UNCERTAINTY.md: k of n trials, z = 1, against the textbook form.
+        from zlc_plugin.statistics import proportion_interval, proportion_uncertainty
+        rng = np.random.default_rng(20261119)
+        n = rng.integers(1, 400, 2000).astype(float)
+        k = np.floor(rng.random(2000) * (n + 1))
+        k[:50], k[50:100] = 0, n[50:100]          # every success and every failure
+        low, high = proportion_interval(k, n)
+        p = k / n
+        centre = (p + 1 / (2 * n)) / (1 + 1 / n)
+        half = np.sqrt(p * (1 - p) / n + 1 / (4 * n * n)) / (1 + 1 / n)
+        np.testing.assert_allclose(low, centre - half, rtol=0, atol=1e-14)
+        np.testing.assert_allclose(high, centre + half, rtol=0, atol=1e-14)
+        np.testing.assert_allclose(proportion_uncertainty(k, n), half, rtol=0, atol=1e-14)
+        self.assertTrue(np.all((low >= 0) & (low <= p) & (p <= high) & (high <= 1)))
+        self.assertTrue(np.all(high - low >= 1 / (n + 1) - 1e-14))
+        # A boolean mean publishes that half-width as its sigma, with its trials.
+        data = rng.random((50, 3)) < np.array([0.0, 0.5, 1.0])
+        answer = call("scientific.reduce", values=data, valid=True, plans=[{"kind": "dense", "axes": [0], "expand": False}],
+                      statistic="mean", errors=True)
+        np.testing.assert_array_equal(answer["trials"], [50, 50, 50])
+        np.testing.assert_allclose(answer["sigma"], proportion_uncertainty(data.sum(axis=0), 50), rtol=0, atol=1e-15)
+        self.assertNotIn("dof", answer)
+        nothing = proportion_interval(np.array([0.0]), np.array([0.0]))
+        self.assertTrue(np.isnan(nothing[0]).all() and np.isnan(nothing[1]).all())
+
     def test_complex_arithmetic_is_refused_as_the_existing_derive_contract_requires(self):
         with self.assertRaisesRegex(ValueError, "real numeric"):
             call("scientific.reduce", values=np.array([1 + 2j]), valid=True,

@@ -101,6 +101,7 @@ def _build(
     slm: object,
     slm_key: str,
     calibration_path: object,
+    sequencer: object = None,  # the core's own board: driven by its key, never an authored value
     sequencer_key: str = "",
     science_context_path: object,
     pulse_resource: object,

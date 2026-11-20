@@ -1,4 +1,28 @@
 //! Uncertainty and mergeable moments shared by live derivation and plotting.
+//! The rules are `docs/UNCERTAINTY.md`: a mean of real samples carries its
+//! standard error, a mean of boolean samples (a proportion) its trials.
+
+/// The 68.27 % (z = 1) Wilson score interval of a proportion of `successes`
+/// out of `trials` Bernoulli trials: `c +- h` with `c = (k + 1/2) / (n + 1)`
+/// and `h = sqrt(k (n - k) / n + 1/4) / (n + 1)`.  It lies in [0, 1],
+/// contains `k / n` and is `1 / (n + 1)` wide at `k = 0` or `k = n`.  NaN
+/// without a trial.
+pub fn proportion_interval(successes: f64, trials: f64) -> (f64, f64) {
+    let (centre, half) = wilson(successes, trials);
+    (centre - half, centre + half)
+}
+
+/// The standard uncertainty of a proportion where one symmetric number is
+/// needed (a published sigma, a relative error): the half-width of its
+/// Wilson interval, never zero for `trials >= 1`.
+pub fn proportion_uncertainty(successes: f64, trials: f64) -> f64 { wilson(successes, trials).1 }
+
+fn wilson(successes: f64, trials: f64) -> (f64, f64) {
+    if !(trials >= 1.0 && trials.is_finite() && successes.is_finite()) { return (f64::NAN, f64::NAN); }
+    // A proportion read back as mean x count may sit a rounding off [0, n].
+    let k = successes.clamp(0.0, trials);
+    ((k + 0.5) / (trials + 1.0), (k * (trials - k) / trials + 0.25).sqrt() / (trials + 1.0))
+}
 
 /// Standard error from population first/second moments. A single sample can
 /// stand on its stated uncertainty; an unobserved bucket has no uncertainty.

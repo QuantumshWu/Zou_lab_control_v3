@@ -4,10 +4,21 @@ use std::rc::Rc;
 
 use serde_json::{Value, json};
 
-use crate::{Host, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog};
+use crate::{Event, Host, Lane, PanelContent, Plugins, RunSpec, SignalInfo, TypeCatalog, Work};
+
+thread_local! {
+    /// Work handed off and facts its starts produced, until a test lets them land (`settle`):
+    /// each test runs on its own thread.
+    static HANDED: RefCell<(Vec<(u64, Lane, Work)>, Vec<Event>)> = RefCell::default();
+}
+
+/// The work handed off and the facts produced since, taken.
+pub fn handed() -> (Vec<(u64, Lane, Work)>, Vec<Event>) { HANDED.with(|handed| std::mem::take(&mut *handed.borrow_mut())) }
 
 #[derive(Default)]
-pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>, pub Vec<(String, u64, Result<Value, String>)>);
+/// What the fake plugin host was asked: calls in words, runs started, queries and calls with their
+/// arguments, acquisitions answered, and every open with the parameters it was handed.
+pub struct Calls(pub Vec<String>, pub Vec<RunSpec>, pub Vec<(String, u64, Value)>, pub Vec<(String, u64, Result<Value, String>)>, pub Vec<(String, Value)>);
 
 pub struct FakePlugins { pub calls: Rc<RefCell<Calls>>, pub catalog: Value }
 
@@ -30,11 +41,17 @@ impl Plugins for LatePlugins {
     fn discover(&mut self, ticket: u64, type_id: &str, excluded: &[String]) { self.plugins.discover(ticket, type_id, excluded) }
     fn resolve(&mut self, ticket: u64, instance: &str, type_id: &str, parameters: &Value, excluded: &[String]) { self.plugins.resolve(ticket, instance, type_id, parameters, excluded) }
     fn publish(&mut self, ticket: u64, instance: &str, role: &str, published: bool) { self.plugins.publish(ticket, instance, role, published) }
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work) { self.plugins.work(ticket, lane, work) }
+    fn restart_port(&mut self, ticket: u64, port: &str) { self.plugins.restart_port(ticket, port) }
 }
 
 impl Plugins for FakePlugins {
     fn catalog(&mut self) -> TypeCatalog { TypeCatalog::from_describe(&self.catalog).unwrap() }
-    fn open(&mut self, instance: &str, type_id: &str, _: &Value, _: &Value) { self.calls.borrow_mut().0.push(format!("open {instance} {type_id}")); }
+    fn open(&mut self, instance: &str, type_id: &str, parameters: &Value, _: &Value) {
+        let mut calls = self.calls.borrow_mut();
+        calls.0.push(format!("open {instance} {type_id}"));
+        calls.4.push((instance.to_owned(), parameters.clone()));
+    }
     fn close(&mut self, instance: &str) { self.calls.borrow_mut().0.push(format!("close {instance}")); }
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value) {
         let mut calls = self.calls.borrow_mut();
@@ -46,7 +63,17 @@ impl Plugins for FakePlugins {
         calls.0.push(format!("call {instance} {ticket} {op}"));
         calls.2.push((op.to_owned(), ticket, params.clone()));
     }
-    fn start(&mut self, run: &RunSpec) { let mut calls = self.calls.borrow_mut(); calls.0.push(format!("start {}", run.run)); calls.1.push(run.clone()); }
+    fn start(&mut self, run: &RunSpec) {
+        let mut calls = self.calls.borrow_mut(); calls.0.push(format!("start {}", run.run)); calls.1.push(run.clone());
+        // As the application's start does, before the plugin hears of the run.
+        if let Some(folder) = &run.folder {
+            let made = match folder.create() {
+                Ok(directory) => Event::RunDirectory { run: run.run.clone(), directory },
+                Err(error) => Event::RunFinished { run: run.run.clone(), outcome: "failed".into(), error: Some(json!({"message": error})), generation: None },
+            };
+            HANDED.with(|handed| handed.borrow_mut().1.push(made));
+        }
+    }
     fn stop(&mut self, run: &str) { self.calls.borrow_mut().0.push(format!("stop {run}")); }
     fn answer(&mut self, run: &str, request: &str, response: Option<&Value>) { self.calls.borrow_mut().0.push(format!("answer {run} {request} {}", response.is_some())); }
     fn acquired(&mut self, run: &str, ticket: u64, result: Result<Value, String>) {
@@ -65,6 +92,8 @@ impl Plugins for FakePlugins {
         calls.2.push(("resolve".into(), ticket, json!({"instance": instance, "parameters": parameters, "excluded": excluded})));
     }
     fn publish(&mut self, ticket: u64, instance: &str, _: &str, published: bool) { self.calls.borrow_mut().0.push(format!("publish {ticket} {instance} {published}")); }
+    fn work(&mut self, ticket: u64, lane: Lane, work: Work) { HANDED.with(|handed| handed.borrow_mut().0.push((ticket, lane, work))); }
+    fn restart_port(&mut self, ticket: u64, port: &str) { self.calls.borrow_mut().0.push(format!("restart {ticket} {port}")); }
 }
 
 #[derive(Default)]
@@ -149,24 +178,31 @@ mod tests {
         (Workbench::new(root, Box::new(plugins)).unwrap(), calls)
     }
 
+    /// A command's reply: at once, or once the work it handed off has landed.
     fn apply(workbench: &mut Workbench, host: &mut FakeHost, name: &str, params: Value) -> Result<Value, String> {
         workbench.apply(name, &params, &Origin::Operator, 1, host);
-        let result = workbench.take_replies().pop().unwrap().1;
-        settle_preparations(workbench, host);
+        let mut replies = workbench.take_replies();
+        if replies.is_empty() { settle(workbench, host); replies = workbench.take_replies(); }
+        let result = replies.pop().unwrap().1;
+        settle(workbench, host);
         result
     }
 
-    fn settle_preparations(workbench: &mut Workbench, host: &mut FakeHost) {
+    /// Every preparation answered, every handed-off work done and its answer applied, until none is left.
+    fn settle(workbench: &mut Workbench, host: &mut FakeHost) {
         loop {
             let tickets: Vec<u64> = workbench.tickets.iter().filter_map(|(ticket, value)| matches!(value, crate::Ticket::Prepare { .. }).then_some(*ticket)).collect();
-            if tickets.is_empty() { break; }
-            for ticket in tickets { workbench.on_event(Event::Answered { ticket, result: Ok(json!({"prepared": format!("test-{ticket}")})) }, host); }
+            for ticket in &tickets { workbench.on_event(Event::Answered { ticket: *ticket, result: Ok(json!({"prepared": format!("test-{ticket}")})) }, host); }
+            let (works, events) = handed();
+            if tickets.is_empty() && works.is_empty() && events.is_empty() { break; }
+            for event in events { workbench.on_event(event, host); }
+            for (ticket, _, work) in works { workbench.on_event(Event::Answered { ticket, result: work() }, host); }
         }
     }
 
     fn event(workbench: &mut Workbench, event: Event, host: &mut FakeHost) {
         workbench.on_event(event, host);
-        settle_preparations(workbench, host);
+        settle(workbench, host);
     }
 
     #[test]
@@ -184,6 +220,7 @@ mod tests {
         assert!(apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap_err().contains("still being discovered"));
         ready.set(true);
         workbench.refresh_catalog();
+        settle(&mut workbench, &mut host);
         assert!(workbench.notes.len() == 1 && workbench.notes[0].starts_with("old: device type camera.gone is not installed"), "only what discovery lacks: {:?}", workbench.notes);
         assert!(!workbench.console_report.0.contains("virtual_mot"));
         let applied = apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
@@ -273,7 +310,7 @@ mod tests {
         let spec = calls.borrow().1.last().cloned().unwrap();
         assert_eq!((spec.run.as_str(), spec.devices["sequencer"].as_str()), ("seamless_scan#1", "sequencer"));
         assert_eq!(spec.outputs["scan"], "@logic/seamless_scan/scan");
-        let directory = spec.directory.clone().unwrap();
+        let directory = workbench.run("seamless_scan#1").unwrap().directory.clone().unwrap();
         assert!(directory.starts_with(workbench.workspace.today()) && directory.ends_with("seamless_scan"));
         let start = workspace::read_strict(&directory.join("start.json"), "start").unwrap();
         assert_eq!(start["schema"], "zlc.task-start");
@@ -531,6 +568,133 @@ mod tests {
         assert_eq!(args["bundle"], expected);
         event(&mut workbench,Event::Answered { ticket, result: Ok(json!(["bad · term 2: and needs booleans"])) }, &mut host);
         assert!(issues(&workbench, &host).as_array().unwrap().iter().any(|issue| issue == "bad · term 2: and needs booleans"));
+        // Each launch of the source's producer is a new generation with the schemas it had: the
+        // reader is told nothing new, so nothing is asked of it (nor, through an editor, of the bench).
+        let count = || calls.borrow().2.len();
+        let before = count();
+        for generation in ["g2", "g3", "g4"] {
+            host.signals[0].generation = generation.into();
+            workbench.on_runtime(&mut host);
+        }
+        assert_eq!(count(), before, "a publication with the same schemas asks nothing");
+        // A schema that changes is told, to the queries that read the bundle only.
+        host.schemas.insert("@logic/camera_measurement/frames".into(), (json!({"tree": "run2"}), json!({"tree": "event"})));
+        host.signals[0].generation = "g5".into();
+        workbench.on_runtime(&mut host);
+        let asked: Vec<String> = calls.borrow().2[before..].iter().map(|(query, ..)| query.clone()).collect();
+        assert_eq!(asked, ["editor_facts", "admit_source"]);
+    }
+
+    /// An edit of a bundle reader's source asks its readers once, with the bundle of the
+    /// source it now names (not first with the old source's, then again).
+    #[test]
+    fn a_source_edit_asks_a_bundle_reader_once_with_the_new_bundle() {
+        let root = scratch("bundle-edit");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact", "select_bundle": true}], "outputs": [],
+                     "queries": ["editor_facts", "admit_source"]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement", "node_id": "next_camera"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
+        for (owner, schema) in [("camera_measurement", "a"), ("next_camera", "b")] {
+            let signal = format!("@logic/{owner}/frames");
+            host.signals.push(SignalInfo { name: signal.clone(), generation: owner.into(), owner: owner.into(), published: true, sealed: false, shape: String::new() });
+            host.schemas.insert(signal, (json!({"tree": schema}), json!({"tree": "event"})));
+        }
+        let bundle = |schema: &str| json!([{"name": "frames", "schema": {"tree": schema}, "event_schema": {"tree": "event"}}]);
+        let told = |from: usize| calls.borrow().2[from..].iter().filter(|(query, ..)| query == "editor_facts" || query == "admit_source")
+            .map(|(query, _, args)| (query.clone(), args["bundle"].clone())).collect::<Vec<_>>();
+        // Opened before any runtime turn built its bundle: asked once, with it.
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        assert_eq!(told(0), [("editor_facts".to_owned(), bundle("a")), ("admit_source".to_owned(), bundle("a"))]);
+        let before = calls.borrow().2.len();
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": "derive", "source_signal": "@logic/next_camera/frames"})).unwrap();
+        workbench.on_runtime(&mut host);
+        assert_eq!(told(before), [("editor_facts".to_owned(), bundle("b")), ("admit_source".to_owned(), bundle("b"))]);
+    }
+
+    /// A relaunch of a bundle reader's source is no change of what it reads: between the old
+    /// run and the new one's first event the member is absent, then has not published, and
+    /// neither asks the reader anything (lab 2026-11-12: two editor_facts per relaunch of the
+    /// scan's source, each re-reading the bench's devices). A relaunch with other schemas
+    /// asks once, as soon as they are known.
+    #[test]
+    fn a_relaunch_of_the_source_asks_a_bundle_reader_nothing() {
+        let root = scratch("bundle-relaunch");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact", "select_bundle": true}], "outputs": [],
+                     "queries": ["editor_facts", "admit_source"]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        let signal = "@logic/camera_measurement/frames";
+        let run = |generation: &str, published: bool| SignalInfo { name: signal.into(), generation: generation.into(), owner: "camera_measurement".into(),
+            published, sealed: false, shape: String::new() };
+        let bundle = |schema: &str| json!([{"name": "frames", "schema": {"tree": schema}, "event_schema": {"tree": "event"}}]);
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": signal})).unwrap();
+        host.signals = vec![run("g1", true)];
+        host.schemas.insert(signal.into(), (json!({"tree": "run"}), json!({"tree": "event"})));
+        workbench.on_runtime(&mut host);
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        let told = |from: usize| calls.borrow().2[from..].iter().map(|(query, _, args)| (query.clone(), args["bundle"].clone())).collect::<Vec<_>>();
+        assert_eq!(told(0), [("editor_facts".to_owned(), bundle("run")), ("admit_source".to_owned(), bundle("run"))]);
+        let before = calls.borrow().2.len();
+        // The old run retires (the member is absent), the new one begins (no event yet), then publishes.
+        let relaunch = |workbench: &mut Workbench, host: &mut FakeHost, generation: &str, schema: &str, early: bool| {
+            host.signals.clear(); host.schemas.clear();
+            workbench.on_runtime(host);
+            if early {
+                host.signals = vec![run(generation, false)];
+                host.schemas.insert(signal.into(), (json!({"tree": schema}), Value::Null));
+                workbench.on_runtime(host);
+            }
+            host.signals = vec![run(generation, true)];
+            host.schemas.insert(signal.into(), (json!({"tree": schema}), json!({"tree": "event"})));
+            workbench.on_runtime(host);
+        };
+        relaunch(&mut workbench, &mut host, "g2", "run", true);
+        relaunch(&mut workbench, &mut host, "g3", "run", false);
+        assert_eq!(told(before), [], "a relaunch with the schemas it had asks nothing");
+        relaunch(&mut workbench, &mut host, "g4", "run2", false);
+        assert_eq!(told(before), [("editor_facts".to_owned(), bundle("run2")), ("admit_source".to_owned(), bundle("run2"))], "another schema is told once");
+    }
+
+    /// A producer asked again (the bench changed) that answers the same frames tells its readers
+    /// nothing: they are not asked again for it.
+    #[test]
+    fn the_same_frames_under_a_new_revision_do_not_ask_the_readers_again() {
+        let root = scratch("frames-same");
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
+            "node": {"node_kind": "processor", "inputs": [{"name": "bundle", "delivery": "exact"}], "outputs": [], "queries": ["editor_facts"]}}));
+        for item in catalog["types"].as_array_mut().unwrap().iter_mut().filter(|item| item["type_id"] == "camera_measurement") {
+            item["node"]["queries"] = json!(["describe_output_frames"]);
+        }
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "camera_measurement"})).unwrap();
+        apply(&mut workbench, &mut host, "add_node", json!({"type_id": "derive", "source_signal": "@logic/camera_measurement/frames"})).unwrap();
+        event(&mut workbench, Event::Opened { instance: node_instance("camera_measurement"), working_point: Value::Null }, &mut host);
+        event(&mut workbench, Event::Opened { instance: node_instance("derive"), working_point: Value::Null }, &mut host);
+        let frames = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "describe_output_frames").unwrap().1;
+        let editors = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().filter(|(query, ..)| query == "editor_facts").count();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
+        let told = editors(&calls);
+        // Asked again (a check), it answers the same frames: the reader is not asked again.
+        apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
+        assert_eq!(editors(&calls), told);
+        // Other frames are told.
+        apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
+        event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1", "2"]])) }, &mut host);
+        assert_eq!(editors(&calls), told + 1);
     }
 
     /// A whole-bundle input is offered one entry per producer, as v2's `_source_choices`:
@@ -1025,10 +1189,14 @@ mod tests {
     #[test]
     fn a_device_a_node_only_reads_is_never_claimed_and_tells_the_draft_its_facts() {
         let mut catalog = catalog();
-        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher", "parameters": [],
-            "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices"],
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "watcher", "kind": "node", "label": "Watcher",
+            "parameters": [{"name": "frames_per_cycle", "type": "int", "label": "Frames per cycle", "default": 1, "enabled_when": ["trigger_by_channel", [false]]},
+                           {"name": "trigger_by_channel", "type": "bool", "label": "Trigger by channel", "default": true},
+                           {"name": "trigger_channel", "type": "str", "label": "Trigger channel", "enabled_when": ["trigger_by_channel", [true]]}],
+            "node": {"node_kind": "measurement", "outputs": [{"name": "frames"}], "queries": ["resolve_field_choices", "resolve_defaults"],
                      "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []},
-                                 {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true, "optional": true}]}}));
+                                 {"capability": "sequencer.streamer", "argument": "trigger_source", "protected_fields": [], "reads_only": true,
+                                  "enabled_when": ["trigger_by_channel", [true]]}]}}));
         let (_root, mut workbench, calls, mut host) = rig("reads-only", catalog);
         let lanes = |frames: Value| json!({"trigger_lanes": [{"lane": "ch11", "port": "emCCD", "label": "emCCD", "frames": frames}]});
         event(&mut workbench, Event::Opened { instance: "sequencer".into(), working_point: json!({"facts": lanes(Value::Null)}) }, &mut host);
@@ -1046,6 +1214,8 @@ mod tests {
         event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
         assert_eq!(asked(&calls).1, second, "the same facts said again ask nothing");
         event(&mut workbench, Event::Answered { ticket: second, result: Ok(json!({})) }, &mut host);
+        let defaults = calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_defaults").cloned().unwrap();
+        event(&mut workbench, Event::Answered { ticket: defaults.1, result: Ok(json!({})) }, &mut host);
 
         apply(&mut workbench, &mut host, "start_node", json!({"node": node})).unwrap();
         let prepared = calls.borrow().2.iter().rev().find(|(query, ..)| query == "prepare_run").cloned().unwrap();
@@ -1058,10 +1228,32 @@ mod tests {
         apply(&mut workbench, &mut host, "stop_node", json!({"node": node})).unwrap();
         event(&mut workbench, Event::RunFinished { run: spec.run.clone(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
 
-        // Without the sequencer the node still starts: an optional device that is not there is not asked for.
+        // Without the sequencer, the switch on asks for one; off, nothing of any sequencer is asked.
         event(&mut workbench, Event::Closed { instance: "sequencer".into(), error: None }, &mut host);
-        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
+        let row = workbench.state(&host)["logic"][0].clone();
+        assert!(row["issues"].to_string().contains("sequencer.streamer"), "{}", row["issues"]);
+        // The device the switch turns on stands under the switch, with the channel; both are drawn while it is on.
+        assert_eq!(row["device_gates"], json!({"trigger_source": "trigger_by_channel"}));
+        assert!(row["controls"].as_array().unwrap().iter().all(|control| control.get("hidden").is_none()));
+        // On, Frames per cycle stays, held: the switch decides it, it is not one of the switch's own rows.
+        let frames = |row: &Value| row["controls"].as_array().unwrap().iter().find(|control| control["name"] == "frames_per_cycle").unwrap().clone();
+        assert_eq!(frames(&row)["enabled"], false);
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": false}})).unwrap();
+        let row = workbench.state(&host)["logic"][0].clone();
+        let issues = row["issues"].to_string();
         assert!(!issues.contains("sequencer") && !issues.contains("trigger_source"), "{issues}");
+        // Off, the switch's rows are not drawn: no device row is offered, the channel is hidden.
+        assert!(row["device_choices"].get("trigger_source").is_none());
+        let channel = row["controls"].as_array().unwrap().iter().find(|control| control["name"] == "trigger_channel").unwrap();
+        assert_eq!(channel["hidden"], true);
+        assert_eq!((frames(&row)["enabled"].clone(), frames(&row).get("hidden").cloned()), (json!(true), None));
+        // On again, the field shows the count the node says the lane makes; the typed 1 stays in the draft.
+        apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": true}})).unwrap();
+        let (_, ticket, _) = calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_defaults").cloned().unwrap();
+        event(&mut workbench, Event::Answered { ticket, result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        let row = workbench.state(&host)["logic"][0].clone();
+        assert_eq!((frames(&row)["value"].clone(), frames(&row)["enabled"].clone()), (json!(3), json!(false)));
+        assert_eq!(workbench.node(&node).unwrap().draft.values.get("frames_per_cycle").cloned().unwrap_or(json!(1)), json!(1));
     }
 
     /// v2 _active_differs: a failed device and changed simulation settings are an Apply, not a Shut down.
@@ -1170,7 +1362,7 @@ mod tests {
     fn ports_catalog() -> Value {
         let mut catalog = catalog();
         let types = catalog["types"].as_array_mut().unwrap();
-        types.push(json!({"type_id": "waveform.n100", "kind": "device", "family": "waveform", "label": "IMU", "resources": ["serial:{port}"], "queries": ["discover"],
+        types.push(json!({"type_id": "waveform.n100", "kind": "device", "family": "waveform", "label": "IMU", "resources": ["serial:{port}"], "queries": ["discover", "resolve"],
             "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": "", "blank_label": "found on Init"}]}));
         types.push(json!({"type_id": "sequencer.local", "kind": "device", "family": "sequencer", "label": "Board", "resources": ["serial:{uart_port}"], "queries": ["resolve"],
             "parameters": [{"name": "backend", "type": "str", "label": "Board transport", "default": "auto"},
@@ -1208,7 +1400,7 @@ mod tests {
         let state = wb.apparatus_state();
         assert_eq!((state["busy"].as_str(), state["dirty"].as_bool()), (Some("initializing devices · finding sequencer's UART port"), Some(false)));
         assert_eq!((wb.device_rows()[0]["state"].as_str(), wb.device_rows()[0]["resolving"].as_bool()), (Some("opening"), Some(true)));
-        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"uart_port": "COM5"},
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": {"uart_port": "COM5"},
             "note": "board UART found on COM5 (passed over COM3: bound)"})) }, &mut host);
         assert_eq!(count(&calls, "open sequencer sequencer.local"), 1, "opened with what was found");
         assert_eq!(wb.apparatus.draft[0].parameters["uart_port"], "COM5");
@@ -1261,6 +1453,299 @@ mod tests {
         assert_eq!(resolves(&calls).len(), 2, "Apply looks again");
     }
 
+    /// The shared wording of a serial port that is not there (zlc_pulse::serial::OpenFailure, zlc_atom.devices.SerialPortError).
+    const GONE: &str = "SerialPortUnusable: COM3 could not be opened: not present (os error 2: The system cannot find the file specified) \
+                        -- serial ports on this PC: COM5 (USB-SERIAL CH340)";
+
+    /// Types whose resources share a kind scan one after another (each opens every free port of its
+    /// kind at once); a type of another kind and one that binds nothing scan beside them. A type that
+    /// misses its deadline frees its kind for the next, and the reply waits for every type, said in
+    /// the catalogue's order.
+    #[test]
+    fn a_scan_asks_types_of_one_resource_kind_one_after_another() {
+        let mut catalog = ports_catalog();
+        let types = catalog["types"].as_array_mut().unwrap();
+        types[0]["queries"] = json!(["discover"]);
+        types.push(json!({"type_id": "waveform.hwt", "kind": "device", "family": "waveform", "label": "Magnetometer", "resources": ["serial:{port}"],
+            "queries": ["discover"], "parameters": [{"name": "port", "type": "str", "label": "Serial port", "default": ""}]}));
+        types.push(json!({"type_id": "rf.scope", "kind": "device", "family": "rf", "label": "Scope", "resources": ["visa:{resource}"],
+            "queries": ["discover"], "parameters": [{"name": "resource", "type": "str", "label": "VISA resource", "default": ""}]}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut wb = Workbench::new(&scratch("scan-kinds"), Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        let asked = |calls: &Rc<RefCell<Calls>>| -> Vec<(u64, String)> { calls.borrow().0.iter().filter_map(|call| {
+            let mut parts = call.split(' ');
+            (parts.next()? == "discover").then_some(())?;
+            Some((parts.next()?.parse().ok()?, parts.next()?.to_owned()))
+        }).collect() };
+        let ticket = |calls: &Rc<RefCell<Calls>>, type_id: &str| asked(calls).iter().find(|(_, asked)| asked == type_id).unwrap().0;
+        let names = |calls: &Rc<RefCell<Calls>>| asked(calls).into_iter().map(|(_, type_id)| type_id).collect::<Vec<_>>();
+        wb.apply("discover_devices", &json!({}), &Origin::Operator, 7, &mut host);
+        assert_eq!(names(&calls), ["camera.virtual_mot", "waveform.n100", "rf.scope"], "the second serial type waits; the others scan beside");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "rf.scope"), result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "camera.virtual_mot"), result: Ok(json!({"found": [], "notes": []})) }, &mut host);
+        assert_eq!(names(&calls).len(), 3, "the serial kind is still taken");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "waveform.n100"), result: Ok(json!({"found": [{"instance_id": "n100_COM5", "parameters": {"port": "COM5"}}], "notes": []})) }, &mut host);
+        assert_eq!(names(&calls), ["camera.virtual_mot", "waveform.n100", "rf.scope", "waveform.hwt"], "asked once the one before it answered");
+        assert!(wb.take_replies().is_empty(), "the reply waits for every type");
+        assert_eq!(apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap_err(), "hardware scan still running: waveform.hwt");
+        event(&mut wb, Event::Answered { ticket: ticket(&calls, "waveform.hwt"), result: Err("no answer within 20s".into()) }, &mut host);
+        let (request, reply) = wb.take_replies().pop().unwrap();
+        assert_eq!((request, reply.unwrap()["message"].as_str().map(str::to_owned)),
+                   (7, Some("discovered 1 device; waveform.hwt: no answer within 20s; camera: No module named pypylon".to_owned())));
+        assert_eq!(wb.apparatus_state()["discovered"][0]["parameters"]["port"], "COM5");
+    }
+
+    /// A filled-in port is a record of an earlier find: a row whose port cannot be used at all is
+    /// looked for again with its type's resolve (without that port), found elsewhere, pinned and
+    /// opened there, and the Init line and the row's own log say what happened.
+    #[test]
+    fn a_named_port_that_is_gone_is_looked_for_again_and_found_elsewhere() {
+        let (mut wb, calls, mut host) = ports_rig("stale", &[("n100", "waveform.n100", json!({"port": "COM3"}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!((count(&calls, "open n100 waveform.n100"), resolves(&calls).len()), (1, 0), "a named port opens at once");
+        event(&mut wb, Event::Failed { instance: "n100".into(), error: GONE.into() }, &mut host);
+        let asked = resolves(&calls);
+        assert_eq!((asked.len(), &asked[0].1["parameters"]["port"]), (1, &json!("")), "looked for without the port it named");
+        assert_eq!((wb.device_rows()[0]["state"].as_str(), wb.device_rows()[0]["resolving"].as_bool()), (Some("opening"), Some(true)));
+        assert_eq!(wb.apparatus_state()["busy"], "initializing devices · finding n100's serial port");
+        let log = wb.device_log("n100", 10);
+        assert!(log[0].ends_with(&format!("] open failed: {GONE}")) && log[1].ends_with("] looking for it again on the serial ports there are"), "{log:?}");
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": {"port": "COM5"}, "note": "N100 streaming on COM5"})) }, &mut host);
+        assert_eq!((count(&calls, "open n100 waveform.n100"), wb.apparatus.draft[0].parameters["port"].as_str()), (2, Some("COM5")));
+        assert_eq!(wb.apparatus_state()["dirty"], true, "pinned into the apparatus, not saved");
+        event(&mut wb, Event::Opened { instance: "n100".into(), working_point: json!({}) }, &mut host);
+        let found = "COM3 could not be opened: not present (os error 2: The system cannot find the file specified); looked again: \
+                     N100 streaming on COM5, written into the apparatus -- Save to keep it";
+        assert_eq!(wb.apparatus_state()["report"]["text"], format!("1 device initialized: n100 · n100: {found}"));
+        assert!(wb.device_log("n100", 10)[2].ends_with(&format!("] found: {found}")));
+    }
+
+    /// Looked for again and not found, the row fails with both failures; a port another program holds
+    /// is not looked past; and the open of what a resolve found is not looked for once more. Every
+    /// failure is in the device's own log.
+    #[test]
+    fn a_port_looked_for_again_fails_once_with_both_reasons() {
+        let (mut wb, calls, mut host) = ports_rig("stale-error", &[("n100", "waveform.n100", json!({"port": "COM3"})),
+            ("imu", "waveform.n100", json!({"port": "COM7"})), ("board", "sequencer.local", json!({"uart_port": "COM10"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        event(&mut wb, Event::Failed { instance: "n100".into(), error: GONE.into() }, &mut host);
+        let nothing = "RuntimeError: no WHEELTEC N100 streams on the free serial ports (listened to COM5)";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Err(nothing.into()) }, &mut host);
+        let busy = "SerialPortBusy: COM7 could not be opened: in use by another program (os error 5: Access is denied) -- serial ports on this PC: COM7";
+        event(&mut wb, Event::Failed { instance: "imu".into(), error: busy.into() }, &mut host);
+        assert_eq!(resolves(&calls).len(), 1, "a held port is not looked past");
+        // The board's COM10 refused: found again on COM4, whose open then fails the same way -- once.
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- this PC has no serial port";
+        event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
+        assert_eq!(resolves(&calls)[1].1["parameters"]["uart_port"], "");
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"found": {"uart_port": "COM4"}, "note": "board UART found on COM4"})) }, &mut host);
+        let again = refused.replace("COM10", "COM4");
+        event(&mut wb, Event::Failed { instance: "board".into(), error: again.clone() }, &mut host);
+        assert_eq!(resolves(&calls).len(), 2, "what a resolve found is not looked for again");
+        let rows = wb.device_rows();
+        assert_eq!(rows.iter().map(|row| row["state"].as_str().unwrap()).collect::<Vec<_>>(), ["failed", "failed", "failed"]);
+        assert_eq!((rows[0]["error"].as_str(), rows[1]["error"].as_str(), rows[2]["error"].as_str()),
+                   (Some(format!("{GONE}; looked again: {nothing}").as_str()), Some(busy), Some(again.as_str())));
+        assert!(wb.device_log("n100", 10).last().unwrap().ends_with(&format!("] not found: {GONE}; looked again: {nothing}")));
+        assert!(wb.device_log("imu", 10).last().unwrap().ends_with(&format!("] open failed: {busy}")));
+        assert!(wb.device_log("board", 10).last().unwrap().ends_with(&format!("] open failed: {again}")));
+    }
+
+    /// The local board on Auto that came up over JTAG says so on the Init line, from its open: after
+    /// Init found no UART for it, the row stays as it was (nothing found to pin), it opens without a
+    /// port this once, and its log says it was not found and what it opens with.
+    #[test]
+    fn an_open_says_its_note_on_the_init_line() {
+        let (mut wb, calls, mut host) = ports_rig("open-note", &[("sequencer", "sequencer.local", json!({}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let tried = "no board UART on the free ports (tried COM4: opened, no board answered (timeout)); it opens over JTAG-to-AXI this time";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": tried})) }, &mut host);
+        assert_eq!((count(&calls, "open sequencer sequencer.local"), wb.apparatus_state()["dirty"].as_bool()), (1, Some(false)), "nothing to write");
+        assert!(wb.device_log("sequencer", 10).last().unwrap().ends_with(&format!("] not found: {tried}")), "a blank row has no port to keep");
+        event(&mut wb, Event::Opened { instance: "sequencer".into(), working_point: json!({"note": "opened over JTAG-to-AXI under Auto, not its UART"}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"],
+                   format!("1 device initialized: sequencer · sequencer: {tried} · sequencer: opened over JTAG-to-AXI under Auto, not its UART"));
+    }
+
+    /// The lab's case: the board's COM10 refused by its driver is looked for again; nothing answers, so
+    /// it opens over JTAG this once -- and the row keeps COM10, for the next Init or Apply to open first.
+    /// A search that finds nothing never writes the row; the log says it was not found, what it opens
+    /// with and what the apparatus keeps, and nothing reads as changed.
+    #[test]
+    fn a_search_that_finds_nothing_keeps_the_rows_port() {
+        let (mut wb, calls, mut host) = ports_rig("keep-port", &[("board", "sequencer.local", json!({"uart_port": "COM10"}))]);
+        apply(&mut wb, &mut host, "save_apparatus", json!({"path": "apparatus.json"})).unwrap();
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- serial ports on this PC: COM10 (USB-SERIAL CH340)";
+        event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
+        assert_eq!(resolves(&calls)[0].1["parameters"]["uart_port"], "", "looked for without the port it named");
+        let tried = "no board UART on the free ports (tried COM13: opened, no board answered (timeout)); it opens over JTAG-to-AXI this time";
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": tried})) }, &mut host);
+        let opens: Vec<(String, Value)> = calls.borrow().4.clone();
+        assert_eq!(opens.iter().map(|(id, parameters)| (id.as_str(), parameters["uart_port"].as_str().unwrap())).collect::<Vec<_>>(),
+                   [("board", "COM10"), ("board", "")], "this open goes without a port (over JTAG)");
+        assert_eq!(wb.apparatus.draft[0].parameters["uart_port"], "COM10", "the row keeps its last-known port");
+        let row = &wb.device_rows()[0];
+        assert_eq!((wb.apparatus_state()["dirty"].as_bool(), &row["pending"]), (Some(false), &Value::Null), "nothing written, nothing to apply");
+        let line = format!("COM10 could not be opened: driver refused (os error 1: Incorrect function); looked again: {tried}; \
+                            the apparatus keeps UART port COM10");
+        assert!(wb.device_log("board", 10).last().unwrap().ends_with(&format!("] not found: {line}")), "{:?}", wb.device_log("board", 10));
+        event(&mut wb, Event::Opened { instance: "board".into(), working_point: json!({}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"], format!("1 device initialized: board · board: {line}"));
+        // What was found is written, and its log says found.
+        apply(&mut wb, &mut host, "shut_down_devices", json!({})).unwrap();
+        event(&mut wb, Event::Closed { instance: "board".into(), error: None }, &mut host);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        assert_eq!(calls.borrow().4.last().unwrap().1["uart_port"], "COM10", "the next Init opens the kept port first");
+        event(&mut wb, Event::Failed { instance: "board".into(), error: refused.into() }, &mut host);
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"found": {"uart_port": "COM13"}, "note": "board UART found on COM13"})) }, &mut host);
+        assert_eq!((wb.apparatus.draft[0].parameters["uart_port"].as_str(), calls.borrow().4.last().unwrap().1["uart_port"].as_str()), (Some("COM13"), Some("COM13")));
+        assert!(wb.device_log("board", 10).last().unwrap().ends_with("] found: COM10 could not be opened: driver refused (os error 1: Incorrect function); \
+                                                                 looked again: board UART found on COM13, written into the apparatus -- Save to keep it"));
+    }
+
+    /// A serial fault as the shared serial-open path tells it.
+    fn fault(port: &str, fault: &str, code: u32) -> crate::SerialFault { crate::SerialFault { port: port.into(), fault: fault.into(), code: Some(code) } }
+
+    /// The restart a `restart_serial_port` asked of the host, last: (ticket, port).
+    fn restart_asked(calls: &Rc<RefCell<Calls>>) -> Option<(u64, String)> {
+        calls.borrow().0.iter().rev().find_map(|call| call.strip_prefix("restart ")).map(|rest| {
+            let (ticket, port) = rest.split_once(' ').unwrap();
+            (ticket.parse().unwrap(), port.to_owned())
+        })
+    }
+
+    /// `restart_serial_port`'s reply, which comes once the host answered.
+    fn restart(wb: &mut Workbench, host: &mut FakeHost, device: &str, port: &str) -> Option<Result<Value, String>> {
+        wb.apply("restart_serial_port", &json!({"device": device, "port": port}), &Origin::Operator, 9, host);
+        wb.take_replies().pop().map(|(_, reply)| reply)
+    }
+
+    /// A port its driver refused, met by a row's open and by the search that looked for it again,
+    /// is offered for its USB device's restart once the row failed -- only that port: not one that
+    /// is merely absent, nor one another row binds (met beside it in the same plugin process).
+    /// Restarted, the row opens again as Apply opens it, and the line says so once it settles.
+    #[test]
+    fn a_port_its_driver_refused_restarts_its_usb_device_and_the_row_opens_again() {
+        let (mut wb, calls, mut host) = ports_rig("refused", &[("n100", "waveform.n100", json!({"port": "COM10"})), ("imu", "waveform.n100", json!({"port": "COM3"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        event(&mut wb, Event::Opened { instance: "imu".into(), working_point: json!({}) }, &mut host);
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 31: A device attached to the system is not functioning) \
+                       -- serial ports on this PC: COM10 (USB-SERIAL CH340), COM3";
+        // Its open met its own COM10 refused; COM3 (the imu's) and COM9 (a free port it never names) were met
+        // beside it in the same plugin process, and are not this open's.
+        event(&mut wb, Event::met_serial_faults("n100", vec![fault(r"\\.\com10", "driver refused", 31), fault("COM3", "driver refused", 1),
+            fault("COM9", "driver refused", 1)], Event::Failed { instance: "n100".into(), error: refused.into() }), &mut host);
+        assert_eq!(wb.device_rows()[0]["refused_ports"], json!([]), "looked for again first: nothing offered while it opens");
+        let nothing = "RuntimeError: no WHEELTEC N100 streams on the free serial ports (listened to COM10, COM5; COM10: could not open (driver refused))";
+        event(&mut wb, Event::met_serial_faults("n100", vec![fault("COM10", "driver refused", 31), fault("COM5", "not present", 2)],
+            Event::Answered { ticket: resolves(&calls)[0].0, result: Err(nothing.into()) }), &mut host);
+        let rows = wb.device_rows();
+        assert_eq!((rows[0]["state"].as_str(), &rows[0]["refused_ports"], &rows[1]["refused_ports"]), (Some("failed"), &json!(["COM10"]), &json!([])));
+        // Only a port the row met refused, and one restart at a time.
+        assert_eq!(restart(&mut wb, &mut host, "n100", "COM5").unwrap().unwrap_err(), "n100: COM5 is not a serial port its open or search found refused by its driver");
+        assert_eq!(restart(&mut wb, &mut host, "imu", "COM3").unwrap().unwrap_err(), "imu: COM3 is not a serial port its open or search found refused by its driver");
+        assert_eq!(restart(&mut wb, &mut host, "n100", " com10"), None, "answered once the host has restarted it");
+        let (ticket, port) = restart_asked(&calls).unwrap();
+        assert_eq!(port, "COM10");
+        assert_eq!(wb.apparatus_state()["busy"], "restarting COM10's USB device");
+        assert_eq!(apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap_err(), "COM10's USB device is being restarted; try again once that is done");
+        assert_eq!(restart(&mut wb, &mut host, "n100", "COM10").unwrap().unwrap_err(), "COM10's USB device is being restarted; try again once that is done");
+        let node = r"USB\VID_1A86&PID_7523\5&2F0D1A6F&0&3";
+        event(&mut wb, Event::Answered { ticket, result: Ok(json!({"outcome": "restarted", "node": node})) }, &mut host);
+        assert_eq!(wb.take_replies().pop().unwrap().1.unwrap(), json!({"device": "n100", "port": "COM10", "restart": {"outcome": "restarted", "node": node}}));
+        assert_eq!(count(&calls, "open n100 waveform.n100"), 2, "opened again with the port its row names");
+        assert_eq!(wb.apparatus_state()["busy"], "opening n100 again");
+        event(&mut wb, Event::Opened { instance: "n100".into(), working_point: json!({}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"], "COM10's USB device restarted · n100 opened again · 2 devices loaded");
+        assert_eq!(wb.device_rows()[0]["refused_ports"], json!([]), "the open that followed met nothing");
+        let log = wb.device_log("n100", 10);
+        assert!(log.iter().any(|line| line.ends_with("] restarting the USB device of COM10, which its driver refused (Windows asks to allow it)")), "{log:?}");
+        assert!(log.iter().any(|line| line.ends_with(&format!("] COM10's USB device ({node}) restarted"))), "{log:?}");
+    }
+
+    /// A restart that did not happen is said as it was -- declined, the port gone, pnputil's words
+    /// -- and the row stays as it stood, still offering it.
+    #[test]
+    fn a_restart_that_did_not_happen_says_why_and_opens_nothing() {
+        let (mut wb, calls, mut host) = ports_rig("refused-outcomes", &[("n100", "waveform.n100", json!({"port": "COM10"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- this PC has no serial port";
+        event(&mut wb, Event::met_serial_faults("n100", vec![fault("COM10", "driver refused", 1)], Event::Failed { instance: "n100".into(), error: refused.into() }), &mut host);
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[0].0, result: Err("RuntimeError: no WHEELTEC N100 streams on the free serial ports".into()) }, &mut host);
+        let node = r"FTDIBUS\VID_0403+PID_6001+A50285BIA\0000";
+        for (answer, line, severity) in [
+            (Ok(json!({"outcome": "declined", "node": node})), "COM10's USB device was not restarted: the Windows confirmation was declined", "warning"),
+            (Ok(json!({"outcome": "absent"})), "COM10 is no longer on this PC: nothing was restarted", "warning"),
+            (Ok(json!({"outcome": "failed", "node": node, "words": "Failed to restart device: Access is denied. (pnputil exit code 5)"})),
+             "COM10's USB device could not be restarted: Failed to restart device: Access is denied. (pnputil exit code 5)", "error"),
+            (Err("the restart could not start".to_owned()), "COM10's USB device could not be restarted: the restart could not start", "error"),
+        ] {
+            assert_eq!(restart(&mut wb, &mut host, "n100", "COM10"), None);
+            event(&mut wb, Event::Answered { ticket: restart_asked(&calls).unwrap().0, result: answer }, &mut host);
+            assert!(wb.take_replies().pop().unwrap().1.is_ok());
+            assert_eq!((wb.apparatus_state()["report"]["text"].as_str(), wb.apparatus_state()["report"]["severity"].as_str()), (Some(line), Some(severity)));
+            assert!(wb.device_log("n100", 1)[0].ends_with(&format!("] {line}")));
+            assert_eq!((count(&calls, "open n100 waveform.n100"), &wb.device_rows()[0]["refused_ports"]), (1, &json!(["COM10"])), "nothing opened: {line}");
+            assert_eq!(wb.apparatus_state()["busy"], Value::Null);
+        }
+    }
+
+    /// The local board on Auto whose Init search met its UART refused opens over JTAG with that
+    /// note, and still offers the restart: restarted, it is closed and opened again, and its search
+    /// then looks for its UART once more.
+    #[test]
+    fn a_board_on_jtag_whose_uart_was_refused_offers_the_restart_and_is_opened_again() {
+        let (mut wb, calls, mut host) = ports_rig("refused-jtag", &[("sequencer", "sequencer.local", json!({}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        let tried = "no board UART on the free ports (tried COM10: could not open (driver refused)); it opens over JTAG-to-AXI this time";
+        event(&mut wb, Event::met_serial_faults("sequencer", vec![fault("COM10", "driver refused", 31)],
+            Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": tried})) }), &mut host);
+        event(&mut wb, Event::Opened { instance: "sequencer".into(), working_point: json!({"note": "opened over JTAG-to-AXI under Auto, not its UART"}) }, &mut host);
+        assert_eq!((wb.device_rows()[0]["state"].as_str(), &wb.device_rows()[0]["refused_ports"]), (Some("open"), &json!(["COM10"])));
+        assert_eq!(restart(&mut wb, &mut host, "sequencer", "COM10"), None);
+        event(&mut wb, Event::Answered { ticket: restart_asked(&calls).unwrap().0, result: Ok(json!({"outcome": "restarted", "node": r"USB\VID_10C4&PID_EA60\0001"})) }, &mut host);
+        assert_eq!(count(&calls, "close sequencer"), 1, "closed to open again");
+        event(&mut wb, Event::Closed { instance: "sequencer".into(), error: None }, &mut host);
+        assert_eq!(resolves(&calls).len(), 2, "its UART is looked for again");
+        event(&mut wb, Event::Answered { ticket: resolves(&calls)[1].0, result: Ok(json!({"found": {"uart_port": "COM10"}, "note": "board UART found on COM10"})) }, &mut host);
+        event(&mut wb, Event::Opened { instance: "sequencer".into(), working_point: json!({}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"], "COM10's USB device restarted · sequencer opened again · 1 device loaded · \
+                   sequencer: board UART found on COM10, written into the apparatus -- Save to keep it");
+    }
+
+    /// The lab's case: the board's named COM10 refused by its driver; looked for again, nothing answers
+    /// (COM10 refused again, COM13 silent, COM3 the imu's and never probed), so it opens over JTAG this
+    /// once and the row keeps COM10. It offers COM10's restart -- the port it names and searched on --
+    /// and no other; restarted, it is closed and opened again on the COM10 its row still names.
+    #[test]
+    fn the_board_that_kept_its_refused_port_offers_its_restart_and_opens_on_it_again() {
+        let (mut wb, calls, mut host) = ports_rig("refused-kept", &[("board", "sequencer.local", json!({"uart_port": "COM10"})), ("imu", "waveform.n100", json!({"port": "COM3"}))]);
+        apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
+        event(&mut wb, Event::Opened { instance: "imu".into(), working_point: json!({}) }, &mut host);
+        let refused = "SerialPortUnusable: COM10 could not be opened: driver refused (os error 1: Incorrect function) -- serial ports on this PC: COM10 (USB-SERIAL CH340)";
+        event(&mut wb, Event::met_serial_faults("board", vec![fault("COM10", "driver refused", 1)], Event::Failed { instance: "board".into(), error: refused.into() }), &mut host);
+        let tried = "no board UART on the free ports (tried COM10: could not open (driver refused); COM13: opened, no board answered (timeout)); \
+                     it opens over JTAG-to-AXI this time";
+        event(&mut wb, Event::met_serial_faults("board", vec![fault("COM10", "driver refused", 1), fault("COM3", "driver refused", 1)],
+            Event::Answered { ticket: resolves(&calls)[0].0, result: Ok(json!({"found": {}, "this_open": {"uart_port": ""}, "note": tried})) }), &mut host);
+        event(&mut wb, Event::Opened { instance: "board".into(), working_point: json!({"note": "opened over JTAG-to-AXI under Auto, not its UART"}) }, &mut host);
+        assert_eq!(wb.apparatus.draft[0].parameters["uart_port"], "COM10", "the row keeps its port");
+        let rows = wb.device_rows();
+        assert_eq!((rows[0]["state"].as_str(), &rows[0]["refused_ports"], &rows[1]["refused_ports"]), (Some("open"), &json!(["COM10"]), &json!([])));
+        assert_eq!(restart(&mut wb, &mut host, "board", "COM10"), None);
+        event(&mut wb, Event::Answered { ticket: restart_asked(&calls).unwrap().0, result: Ok(json!({"outcome": "restarted", "node": r"USB\VID_1A86&PID_7523\5&2F0D1A6F&0&3"})) }, &mut host);
+        assert_eq!(count(&calls, "close board"), 1, "closed to open again");
+        event(&mut wb, Event::Closed { instance: "board".into(), error: None }, &mut host);
+        assert_eq!((resolves(&calls).len(), calls.borrow().4.last().unwrap().1["uart_port"].as_str()), (1, Some("COM10")), "opened on the port its row names");
+        event(&mut wb, Event::Opened { instance: "board".into(), working_point: json!({}) }, &mut host);
+        assert_eq!(wb.apparatus_state()["report"]["text"], "COM10's USB device restarted · board opened again · 2 devices loaded");
+        assert_eq!(wb.device_rows()[0]["refused_ports"], json!([]));
+    }
+
     /// Two rows to be found are found one after the other, the second passing over what the first found.
     #[test]
     fn rows_to_be_found_are_found_one_at_a_time() {
@@ -1268,10 +1753,10 @@ mod tests {
         apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
         let asked = resolves(&calls);
         assert_eq!((asked.len(), &asked[0].1["instance"], &asked[0].1["excluded"]), (1, &json!("board"), &json!([])));
-        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"parameters": {"uart_port": "COM5"}, "note": ""})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked[0].0, result: Ok(json!({"found": {"uart_port": "COM5"}, "note": ""})) }, &mut host);
         let asked = resolves(&calls);
         assert_eq!((asked.len(), &asked[1].1["instance"], &asked[1].1["excluded"]), (2, &json!("board2"), &json!(["serial:COM5"])));
-        event(&mut wb, Event::Answered { ticket: asked[1].0, result: Ok(json!({"parameters": {"uart_port": "COM6"}, "note": ""})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked[1].0, result: Ok(json!({"found": {"uart_port": "COM6"}, "note": ""})) }, &mut host);
         assert_eq!((count(&calls, "open board sequencer.local"), count(&calls, "open board2 sequencer.local")), (1, 1));
         let ports: Vec<&Value> = wb.apparatus.draft.iter().map(|entry| &entry.parameters["uart_port"]).collect();
         assert_eq!(ports, [&json!("COM5"), &json!("COM6")]);
@@ -1282,7 +1767,7 @@ mod tests {
     #[test]
     fn a_row_taken_out_while_it_is_found_opens_nothing() {
         let (mut wb, calls, mut host) = ports_rig("resolve-cancel", &[("board", "sequencer.local", json!({})), ("n100", "waveform.n100", json!({"port": "COM3"}))]);
-        let found = || Ok(json!({"parameters": {"uart_port": "COM5"}, "note": "board UART found on COM5"}));
+        let found = || Ok(json!({"found": {"uart_port": "COM5"}, "note": "board UART found on COM5"}));
         apply(&mut wb, &mut host, "apply_devices", json!({})).unwrap();
         let first = resolves(&calls)[0].0;
         apply(&mut wb, &mut host, "shut_down_devices", json!({})).unwrap();
@@ -1638,7 +2123,7 @@ mod tests {
         apply(&mut wb,&mut host,"edit_node",json!({"node":"dynamic","values":{"output":"new"}})).unwrap();
         event(&mut wb,Event::Answered{ticket:asked(&calls,"declare_outputs"),result:Ok(json!([{"name":"new"}]))},&mut host);
         event(&mut wb,Event::RunFinished{run:"dynamic#1".into(),outcome:"completed".into(),error:None,generation:None},&mut host);
-        host.signals[0].generation="g2".into(); wb.follow_sources(&mut host); settle_preparations(&mut wb, &mut host);
+        host.signals[0].generation="g2".into(); wb.follow_sources(&mut host); settle(&mut wb, &mut host);
         let spec=calls.borrow().1.last().unwrap().clone();
         assert_eq!(spec.values["output"],"old"); assert_eq!(spec.outputs.keys().collect::<Vec<_>>(),["old"]);
     }
@@ -1777,6 +2262,128 @@ mod tests {
         assert_eq!(count(&calls,"stop camera_measurement#1"),0);
         assert_eq!(wb.node_row(wb.node("camera_measurement").unwrap(),&[])["state"],"warning");
     }
+    /// Who holds a board while another client of its own pulse server does (its `held_by` fact) is the
+    /// Device Manager's line and its row's, and its return is said too.
+    #[test]
+    fn a_board_held_by_another_client_is_said_on_the_device_line_and_row() {
+        let (_root,mut wb,_calls,mut host)=rig("held-by",catalog());
+        let facts=|held_by:Value|json!({"trigger_lanes":[],"held_by":held_by});
+        event(&mut wb,Event::Facts{instance:"sequencer".into(),facts:facts(Value::Null)},&mut host);
+        let role=wb.device_role("sequencer").to_owned();
+        let row=|wb:&Workbench|wb.device_rows().into_iter().find(|row|row["instance_id"]=="sequencer").unwrap()["held_by"].clone();
+        assert_eq!(row(&wb),Value::Null);
+        event(&mut wb,Event::Facts{instance:"sequencer".into(),facts:facts(json!("192.168.50.1 (bench peer)"))},&mut host);
+        assert_eq!(wb.report,(format!("{role}: held by 192.168.50.1 (bench peer)"),"warning"));
+        assert_eq!(row(&wb),json!("192.168.50.1 (bench peer)"));
+        event(&mut wb,Event::Facts{instance:"sequencer".into(),facts:facts(Value::Null)},&mut host);
+        assert_eq!(wb.report,(format!("{role}: held here again"),"task"));
+    }
+    /// The console's line of a run follows it (lab 2026-11-12: after Stop and its run's end it still
+    /// said "camera_measurement started"): started, is stopping, then how it ended -- while it is
+    /// still the line shown; a later line of anything else stands.
+    #[test]
+    fn the_consoles_run_line_follows_the_run_to_its_end() {
+        let (_root,mut wb,_calls,mut host)=rig("run-line",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        let start=|wb:&mut Workbench,host:&mut FakeHost| {
+            apply(wb,host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+            let run=wb.node("camera_measurement").unwrap().run.clone().unwrap();
+            event(wb,Event::RunStarted{run:run.clone()},host);
+            run
+        };
+        let run=start(&mut wb,&mut host);
+        assert_eq!(wb.console_report,("camera_measurement started".into(),"task"));
+        apply(&mut wb,&mut host,"stop_node",json!({"node":"camera_measurement"})).unwrap();
+        assert_eq!(wb.console_report,("camera_measurement is stopping".into(),"task"));
+        event(&mut wb,Event::RunFinished{run,outcome:"stopped".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.console_report,("camera_measurement stopped".into(),"task"));
+        let run=start(&mut wb,&mut host);
+        event(&mut wb,Event::RunFinished{run,outcome:"failed".into(),error:Some(json!({"message":"the camera was lost"})),generation:None},&mut host);
+        assert_eq!(wb.console_report,("camera_measurement failed: the camera was lost".into(),"error"));
+        let run=start(&mut wb,&mut host);
+        wb.console_note("layout saved to board.json".into());
+        event(&mut wb,Event::RunFinished{run,outcome:"completed".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.console_report,("layout saved to board.json".into(),"task"),"another line said since stands");
+        let run=start(&mut wb,&mut host);
+        event(&mut wb,Event::RunFinished{run,outcome:"completed".into(),error:None,generation:None},&mut host);
+        assert_eq!(wb.console_report,("camera_measurement completed".into(),"task"));
+    }
+    #[test]
+    fn a_panels_preparing_line_goes_once_it_has_drawn() {
+        let (_root,mut wb,_calls,_host)=rig("panel-line",catalog());
+        wb.console_panel_note("panel-6","panel-6 is preparing survival".into(),"task");
+        wb.panels_drawn(["panel-2"]);
+        assert_eq!(wb.console_report.0,"panel-6 is preparing survival","another panel's drawing leaves it");
+        wb.panels_drawn(["panel-6"]);
+        assert_eq!(wb.console_report,(String::new(),"idle"));
+        // A later line is not taken away by the panel's drawing.
+        wb.console_panel_note("panel-6","frames has not published yet; panel-6 remains ready".into(),"warning");
+        wb.console_note("camera started".into());
+        wb.panels_drawn(["panel-6"]);
+        assert_eq!(wb.console_report.0,"camera started");
+        // A panel closed before it drew takes its line with it.
+        wb.console_panel_note("panel-7","panel-7 is preparing frames".into(),"task");
+        wb.panel_closed("panel-7");
+        assert_eq!(wb.console_report,(String::new(),"idle"));
+    }
+
+    #[test]
+    fn a_restarted_run_says_it_was_restarted_and_a_displaced_one_why() {
+        let (_root,mut wb,_calls,mut host)=rig("restart-reason",catalog());
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"camera_measurement", "node_id":"next_camera"}));
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        event(&mut wb,Event::RunStarted{run:"camera_measurement#1".into()},&mut host);
+        apply(&mut wb,&mut host,"start_node",json!({"node":"camera_measurement"})).unwrap();
+        let run=wb.run("camera_measurement#1").unwrap();
+        assert_eq!((run.state.as_str(),run.stop_reason.as_deref()),("stopping",Some("it was restarted")));
+        event(&mut wb,Event::RunFinished{run:"camera_measurement#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        let restarted=wb.node("camera_measurement").unwrap().run.clone().unwrap();
+        event(&mut wb,Event::RunStarted{run:restarted.clone()},&mut host);
+        // Another node's start that needs the same camera: that run says so.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"next_camera"})).unwrap();
+        assert_eq!(wb.run(&restarted).unwrap().stop_reason.as_deref(),Some("another start needs its devices"));
+    }
+
+    /// A run that fails because an upstream node's restart ended its source run says which
+    /// node and why, down the chain (lab 2026-11-12: occupancy restarted mid-scan; frame
+    /// survival failed "the source run was replaced", the scan "the source signal ended").
+    #[test]
+    fn a_consumer_failed_by_an_upstream_restart_names_the_restarted_node() {
+        let mut catalog=catalog(); catalog["types"][3]["node"]["artifact_inputs"]=json!([]);
+        for (type_id,input,output) in [("survival","occupied","survival"),("reader","survival","read")] {
+            catalog["types"].as_array_mut().unwrap().push(json!({"type_id":type_id,"kind":"node","label":type_id,"parameters":[],
+                "node":{"node_kind":"processor","inputs":[{"name":input,"delivery":"exact"}],"outputs":[{"name":output}]}}));
+        }
+        let (_root,mut wb,_calls,mut host)=rig("upstream-restart",catalog);
+        add_open_node(&mut wb,&mut host,json!({"type_id":"occupancy","source_signal":"@logic/camera_measurement/frames"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"survival","source_signal":"@logic/occupancy/occupied"}));
+        add_open_node(&mut wb,&mut host,json!({"type_id":"reader","source_signal":"@logic/survival/survival"}));
+        for (signal,owner) in [("@logic/camera_measurement/frames","camera_measurement"),("@logic/occupancy/occupied","occupancy"),("@logic/survival/survival","survival")] {
+            host.signals.push(SignalInfo{name:signal.into(),owner:owner.into(),generation:format!("{owner}-1"),published:true,sealed:false,shape:"".into()});
+        }
+        for node in ["occupancy","survival","reader"] {
+            if let Err(error)=apply(&mut wb,&mut host,"start_node",json!({"node":node})) { panic!("{node}: {error}"); }
+            event(&mut wb,Event::RunStarted{run:format!("{node}#1")},&mut host);
+        }
+        // The operator restarts occupancy: survival's source run is replaced, and so, through it, the reader's.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"occupancy"})).unwrap();
+        event(&mut wb,Event::RunFinished{run:"occupancy#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
+        event(&mut wb,Event::RunFinished{run:"survival#1".into(),outcome:"failed".into(),error:Some(json!({"message":"the source run was replaced"})),generation:None},&mut host);
+        event(&mut wb,Event::RunFinished{run:"reader#1".into(),outcome:"failed".into(),
+            error:Some(json!({"message":"the source run ended during collection; a scan's source cannot change once collection began"})),generation:None},&mut host);
+        assert_eq!(wb.run("survival#1").unwrap().error.as_ref().unwrap()["cause"],"occupancy was restarted");
+        let error=|wb:&Workbench,node:&str|wb.node(node).unwrap().error.clone().unwrap();
+        assert!(error(&wb,"survival").ends_with("the source run was replaced (occupancy was restarted)"),"{}",error(&wb,"survival"));
+        assert!(error(&wb,"reader").ends_with("a scan's source cannot change once collection began (occupancy was restarted)"),"{}",error(&wb,"reader"));
+        // A failure no upstream end explains says only what it says.
+        apply(&mut wb,&mut host,"start_node",json!({"node":"reader"})).unwrap();
+        let again=wb.node("reader").unwrap().run.clone().unwrap();
+        event(&mut wb,Event::RunStarted{run:again.clone()},&mut host);
+        event(&mut wb,Event::RunFinished{run:again.clone(),outcome:"failed".into(),error:Some(json!({"message":"bad input"})),generation:None},&mut host);
+        assert!(error(&wb,"reader").ends_with("bad input"),"{}",error(&wb,"reader"));
+    }
+
     #[test]
     fn restart_to_an_unpublished_source_stops_the_previous_run() {
         let mut catalog=catalog(); catalog["types"][3]["node"]["artifact_inputs"]=json!([]);
@@ -1793,7 +2400,7 @@ mod tests {
         event(&mut wb,Event::RunFinished{run:"occupancy#1".into(),outcome:"stopped".into(),error:None,generation:None},&mut host);
         assert_eq!(calls.borrow().1.iter().filter(|run|run.node_id=="occupancy").count(),1);
         host.signals.push(SignalInfo{name:"@logic/next_camera/frames".into(),owner:"next_camera".into(),generation:"g2".into(),published:true,sealed:false,shape:"".into()});
-        wb.follow_sources(&mut host); settle_preparations(&mut wb,&mut host);
+        wb.follow_sources(&mut host); settle(&mut wb,&mut host);
         assert_eq!(calls.borrow().1.last().unwrap().source_signal,"@logic/next_camera/frames");
     }
 
@@ -2103,6 +2710,88 @@ mod tests {
             assert_eq!(snapshot_reply(&calls, "seamless_scan#1", 402).unwrap().unwrap(), Value::Null);
             assert!(snapshot_calls(&calls).is_empty(), "no capture means no empty apparatus record or later hardware read");
         }
+    }
+
+    /// File work a command needs is handed off: no reply until it is done, then applied on the turn.
+    #[test]
+    fn documents_are_read_and_written_off_the_owner_turn_and_applied_on_it() {
+        let (root, mut wb, _calls, mut host) = rig("off-turn", catalog());
+        let ask = |wb: &mut Workbench, host: &mut FakeHost, name: &str, params: Value| -> Vec<(u64, Lane, Work)> {
+            wb.apply(name, &params, &Origin::Operator, 9, host);
+            assert!(wb.take_replies().is_empty(), "{name} answers once its file work is done");
+            handed().0
+        };
+        let done = |wb: &mut Workbench, host: &mut FakeHost, works: Vec<(u64, Lane, Work)>| -> Result<Value, String> {
+            for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, host); }
+            wb.take_replies().pop().unwrap().1
+        };
+        // A save writes the board as it was asked; an edit made meanwhile leaves the board changed.
+        let saved = ask(&mut wb, &mut host, "save_layout", json!({"path": "layouts/mine.json"}));
+        assert!(saved.len() == 1 && saved[0].1 == Lane::Files && !root.join("layouts/mine.json").exists());
+        wb.apply("add_node", &json!({"type_id": "camera_measurement"}), &Origin::Operator, 10, &mut host);
+        assert_eq!(done(&mut wb, &mut host, saved).unwrap()["path"], json!(root.join("layouts").join("mine.json")));
+        assert!(wb.board.dirty, "the node added while it was written is not in the file");
+        assert!(workspace::read_strict(&root.join("layouts/mine.json"), "layout").unwrap()["logic"].as_array().unwrap().is_empty());
+        let again = ask(&mut wb, &mut host, "save_layout", json!({"path": "layouts/mine.json"}));
+        done(&mut wb, &mut host, again).unwrap();
+        assert!(!wb.board.dirty && wb.console_report.0.starts_with("layout saved to"));
+        // A read refuses as before, once read.
+        let missing = ask(&mut wb, &mut host, "load_apparatus", json!({"path": "nowhere.json"}));
+        assert!(done(&mut wb, &mut host, missing).unwrap_err().starts_with("Cannot read"));
+        assert_eq!(wb.report.1, "error");
+        let read = ask(&mut wb, &mut host, "read_layout", json!({"path": "layouts/mine.json"}));
+        assert_eq!(done(&mut wb, &mut host, read).unwrap()["nodes"].as_array().unwrap().len(), 1);
+        // The archive is written on its own lane and said when it is.
+        let export = ask(&mut wb, &mut host, "export_diagnostics", json!({"data": false}));
+        assert!(export.len() == 1 && export[0].1 == Lane::Export);
+        let exported = done(&mut wb, &mut host, export).unwrap();
+        assert!(std::path::Path::new(exported["path"].as_str().unwrap()).is_file());
+        assert!(wb.console_report.0.starts_with("diagnostics exported to"));
+    }
+
+    /// The files a draft names are read off the turn at each boundary (a change, a Start): its
+    /// row says so meanwhile, and a Start waits for its own read.
+    #[test]
+    fn a_draft_reads_the_files_it_names_off_the_turn_and_a_start_reads_them_again() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "player", "kind": "node", "label": "Player",
+            "parameters": [{"name": "pulse", "type": "str", "label": "Pulse", "default": ""}],
+            "node": {"node_kind": "measurement", "outputs": [], "workspace_resources": [
+                {"field": "pulse", "contract": "zlc.pulse/1", "directory": "pulses", "suffixes": [".json"], "argument": "description"}]}}));
+        let (root, mut wb, calls, mut host) = rig("draft-files", catalog);
+        std::fs::write(root.join("pulses").join("a.json"), b"{}").unwrap();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = reads.clone();
+        wb.add_resource_resolver("zlc.pulse/", std::sync::Arc::new(move |path: &std::path::Path| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"read": path}))
+        }));
+        wb.apply("add_node", &json!({"type_id": "player", "values": {"pulse": "a.json"}}), &Origin::Operator, 1, &mut host);
+        wb.on_event(Event::Opened { instance: node_instance("player"), working_point: Value::Null }, &mut host);
+        let row = |wb: &Workbench| wb.node_row(wb.node("player").unwrap(), &[]);
+        assert!(row(&wb)["issues"].as_array().unwrap().contains(&json!(crate::logic::READING)), "{}", row(&wb));
+        let (works, _) = handed();
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing is read on the turn");
+        for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, &mut host); }
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(wb.node("player").unwrap().resources["pulse"]["read"], json!(root.join("pulses").join("a.json")));
+        assert!(row(&wb)["issues"].as_array().unwrap().is_empty(), "{}", row(&wb));
+        // Start reads the file again, and waits for it.
+        wb.apply("start_node", &json!({"node": "player"}), &Origin::Operator, 2, &mut host);
+        assert_eq!(wb.take_replies().pop().unwrap().1.unwrap()["phase"], "checking");
+        let (works, _) = handed();
+        assert_eq!(works.len(), 1);
+        for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, &mut host); }
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        settle(&mut wb, &mut host);
+        let spec = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!(spec.resources["description"]["read"], json!(root.join("pulses").join("a.json")));
+        // A file gone by a Start refuses it with the reason, once read.
+        apply(&mut wb, &mut host, "stop_node", json!({"node": "player"})).unwrap();
+        event(&mut wb, Event::RunFinished { run: spec.run.clone(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        std::fs::remove_file(root.join("pulses").join("a.json")).unwrap();
+        assert!(apply(&mut wb, &mut host, "start_node", json!({"node": "player"})).is_ok());
+        assert_eq!(wb.node("player").unwrap().error.as_deref(), Some("Pulse must be a file in pulses/"));
     }
 
 }

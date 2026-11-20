@@ -21,6 +21,7 @@ pub mod parameters;
 pub mod restrict;
 pub mod checkout;
 pub mod journal;
+pub mod process;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DType {

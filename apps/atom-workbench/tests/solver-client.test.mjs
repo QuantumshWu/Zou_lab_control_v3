@@ -99,7 +99,7 @@ test('the stream speaks checkpoints and one final result only',async t=>{
 test('a checkpoint may carry its run\'s estimate of the time left; a final result, or anything but a finite number ≥ 0, is refused',()=>{
  // One reader for both: a population checkpoint and a motion checkpoint.
  const scene=scenario(),request={clientId:'eta',sequence:1},population=()=>checkpoint(scene,request,[0,.02,.01]);
- const pgc=exampleScene('pgc3d').scene;pgc.dynamics.samples=3;const motion=motionRequest(pgc.dynamics);
+ const pgc=exampleScene('pgc3d');pgc.dynamics.samples=3;const motion=motionRequest(pgc.dynamics);
  const moving=()=>{const states=buildFullMasterModel(pgc,pgc.dynamics).states,timesUs=[0,pgc.dynamics.durationUs/2,pgc.dynamics.durationUs];
    return {...motionResult({states,initialIndex:states.findIndex(s=>s.id===pgc.dynamics.initialStateId),timesUs}),progress:true};};
  const left=(data,ms)=>{data.diagnostics.estimatedRemainingMs=ms;return data;};

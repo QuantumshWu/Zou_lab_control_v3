@@ -52,9 +52,16 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert_eq!(host.registry().owner_of(&first).unwrap(), pid);
     drop((frame, reply));
     assert_eq!(host.registry().holds(&first), 0);
+    // A size's pace is known from its second frame on (the arena gives a size back once it has gone
+    // unallocated for longer than its own longest gap): within that pace a released block is recycled.
     std::thread::sleep(Duration::from_millis(200));
-    let again = host.spi("echo", "frame", json!([256, 8]), json!({}), Duration::from_secs(10)).unwrap();
-    assert_eq!(block_of(&again.array(&again.value).unwrap().values), first, "a released block is recycled");
+    let paced = host.spi("echo", "frame", json!([256, 8]), json!({}), Duration::from_secs(10)).unwrap();
+    let second = block_of(&paced.array(&paced.value).unwrap().values);
+    drop(paced);
+    assert_eq!(host.registry().holds(&second), 0);
+    std::thread::sleep(Duration::from_millis(50));
+    let again = host.spi("echo", "frame", json!([256, 9]), json!({}), Duration::from_secs(10)).unwrap();
+    assert_eq!(block_of(&again.array(&again.value).unwrap().values), second, "a released block is recycled within its size's pace");
     drop(again);
     assert_eq!(host.spi("echo", "get:opened_with", json!([]), json!({}), Duration::from_secs(5)).unwrap().value, json!({"gain": 2.0}));
 
@@ -420,7 +427,7 @@ fn scans_and_resolves_are_handed_the_bound_resources() {
     let old = host.discover("test.scanned", &["serial:COM3".to_owned()], wait).unwrap();
     assert_eq!((old["found"][0]["instance_id"].as_str(), &old["notes"]), (Some("scanned"), &json!(["scanned as before"])));
     let pinned = host.resolve("test.wired", json!({"port": ""}), &["serial:COM3".to_owned(), "serial:COM4".to_owned()], wait).unwrap();
-    assert_eq!(pinned, json!({"parameters": {"port": "COM5"}, "note": "found on COM5 (given '')"}));
+    assert_eq!(pinned, json!({"found": {"port": "COM5"}, "this_open": {}, "note": "found on COM5 (given '')"}));
     let all: Vec<String> = ["COM3", "COM4", "COM5"].iter().map(|port| format!("serial:{port}")).collect();
     let refused = host.resolve("test.wired", json!({}), &all, wait).unwrap_err();
     assert_eq!(refused.to_string(), "RuntimeError: no free wire (tried none; passed over COM3, COM4, COM5: bound)");

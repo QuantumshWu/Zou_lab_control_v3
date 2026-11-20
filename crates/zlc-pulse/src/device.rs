@@ -147,6 +147,16 @@ impl ConfigHolder {
         Ok(())
     }
 
+    /// Bind a file whose values are `entries` (written by whoever binds it), without reading it.
+    pub fn hold_file(&self, path: &Path, entries: ConfigValues) {
+        let path = crate::codec::absolute(path);
+        *self.guard() = (entries, path.display().to_string(), Some(path));
+    }
+
+    /// What it holds now, for [`ConfigHolder::restore`].
+    pub fn held(&self) -> (ConfigValues, String, Option<PathBuf>) { self.guard().clone() }
+    pub fn restore(&self, held: (ConfigValues, String, Option<PathBuf>)) { *self.guard() = held; }
+
     fn refresh(&self) -> Result<()> {
         let mut state = self.guard();
         if let Some(path) = state.2.clone() { state.0 = read_config_values(&path)?; }

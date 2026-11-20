@@ -100,6 +100,10 @@ class InMemoryLmsLibrary:
         self._registers(handle)
         return self.POWER_LIMIT_UNITS
 
+    def device_info(self, handle: int) -> dict[str, object]:
+        self._registers(handle)
+        return {"model": "virtual LMS"}
+
 
 def virtual_rf_source(config: VaunixLmsConfig) -> VaunixLmsRfSource:
     """The production driver, with only its USB layer replaced."""

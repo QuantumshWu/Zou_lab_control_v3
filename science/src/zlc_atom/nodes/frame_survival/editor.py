@@ -17,7 +17,7 @@ from dataclasses import replace
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.nodes._framework.frames import frame_identity, resolve_frame
 
-from .processor import PAIR_RULES, _checked_pairs, _rule_pairs, _selected_pairs, pair_label
+from .processor import ONE_FRAME, PAIR_RULES, _checked_pairs, _rule_pairs, _selected_pairs, pair_label
 
 #: The fields the matrix writes; the Edit page's plain form leaves them out.
 PAIR_MATRIX_FIELDS = ("selection", "pairs", "custom_pairs")
@@ -82,7 +82,7 @@ def pair_matrix_facts(values: Mapping[str, object], source: Sequence | None, *, 
     if frames is None or problem:
         # A source of one frame per cycle is known, not awaited.
         facts["summary"] = ("Waiting for the source frames" if carried is None
-                            else "One frame per cycle: no pairs" if frames is None else labels.get(selection, selection))
+                            else ONE_FRAME if frames is None else labels.get(selection, selection))
         return facts
     count = len(frames)
 

@@ -23,8 +23,9 @@ _EXPORTS = {
     **{name: "context" for name in ("LiveDatasetOutput", "LiveEvents", "Read", "RunContext")},
     **{name: "declare" for name in ("Command", "DatasetInput", "DatasetOutputDeclaration", "DeviceRequirement", "DeviceType", "FileParam", "NodeKind", "NodeType", "Opened", "PhysicalOutput")},
     **{name: "fit" for name in ("FitAnswer", "fit_models")},
+    **{name: "statistics" for name in ("proportion_interval", "proportion_uncertainty")},
     **{name: "host" for name in ("allocate", "core", "notifier", "share", "simulation_parameters")},
-    **{name: "wire" for name in ("PluginError", "Refused")},
+    **{name: "wire" for name in ("DeviceHeld", "PluginError", "Refused")},
 }
 __all__ = list(_EXPORTS)
 

@@ -132,7 +132,10 @@ LOGIC_NODE = NodeType(
         "picked. Endpoints use text "
         "'0'/'last'; numbered middle frames keep their index when the cycle changes, and "
         "a selected pair whose middle frame the source lacks is kept and left out of the "
-        "run, which fails only when no selected pair is left. "
+        "run. A cycle that carries none of the selected pairs (one frame per cycle, or every "
+        "selected pair absent) is data, not a fault: each shot is published with one 'no pair' "
+        "entry on the pair axis and every value invalid, said once on the node, so panels and "
+        "same-shot groups keep going; pairs are published again once the source carries them. "
         "Feed survival to Seamless Scan and use a site Facet with native Exponential "
         "fitting for per-site lifetimes."
     ),

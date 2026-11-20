@@ -41,9 +41,12 @@ class FitAnswer:
     messages: tuple[str, ...]
 
 
-def fit_request(model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None, sigma_dof: Any = None) -> dict[str, Any]:
+def fit_request(model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = None, sigma_dof: Any = None,
+                trials: Any = None) -> dict[str, Any]:
     """The ``run.fit`` request: ``y`` ``(cells, n)`` over ``x`` ``(n)``, ``sigma`` as ``y``,
-    ``warm`` ``(cells, parameters)``, ``sigma_dof`` each sigma's degrees of freedom, as ``y``."""
+    ``warm`` ``(cells, parameters)``, ``sigma_dof`` each sigma's degrees of freedom, as ``y``;
+    ``trials`` as ``y``: each ``y`` is the proportion ``k / n`` of ``n`` Bernoulli trials (the
+    mean of booleans), fitted by the binomial likelihood -- no sigma beside it."""
 
     x, y = np.asarray(x, dtype="<f8"), np.asarray(y, dtype="<f8")
     if x.ndim != 1 or y.ndim != 2 or y.shape[1] != x.size:
@@ -56,11 +59,17 @@ def fit_request(model_id: str, x: Any, y: Any, sigma: Any = None, warm: Any = No
         sigma_dof = np.asarray(sigma_dof, dtype="<f8")
         if sigma is None or sigma_dof.shape != y.shape:
             raise ValueError(f"sigma_dof has shape {sigma_dof.shape}; it stands beside a sigma, as y's {y.shape}")
+    if trials is not None:
+        trials = np.asarray(trials, dtype="<f8")
+        if trials.shape != y.shape:
+            raise ValueError(f"trials has shape {trials.shape}, not y's {y.shape}")
+        if sigma is not None:
+            raise ValueError("trials fix the noise of their proportions; a sigma beside them has no meaning")
     if warm is not None:
         warm = np.asarray(warm, dtype="<f8")
         if warm.ndim != 2 or warm.shape[0] != y.shape[0]:
             raise ValueError(f"warm has shape {warm.shape}, not (cells, parameters) for {y.shape[0]} cells")
-    return {"model": str(model_id), "x": x, "y": y, "sigma": sigma, "warm": warm, "sigma_dof": sigma_dof}
+    return {"model": str(model_id), "x": x, "y": y, "sigma": sigma, "warm": warm, "sigma_dof": sigma_dof, "trials": trials}
 
 
 def fit_answer(reply: Mapping[str, Any]) -> FitAnswer:

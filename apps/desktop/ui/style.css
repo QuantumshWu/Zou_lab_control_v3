@@ -721,8 +721,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; }
 }
 .slm-operator-grid .spin { max-width: none; }
 .slm-reset { display: flex; }
-/* A popup form: every form's label column, a card's inset; its rows share the popup's height (its grid stretched to the popup's minimum, as Qt's is). */
-.slm-popup-form { flex: 1; grid-auto-rows: 1fr; padding: var(--card-inset); }
+/* The SLM's popup forms: their rows share the popup's height (the grid stretched to the popup's minimum, as Qt's is). */
+.slm-popup-form { grid-auto-rows: 1fr; }
 .slm-popup-form .spin { max-width: none; }
 .slm-popup-form .form-actions { margin-top: 0; }
 /* v2 left_panel_stub: where the hidden side panels stood, what they hold and Show under it. */

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema, TunableField
-from zlc_plugin import Command, DeviceType, FileParam, Opened, PhysicalOutput, allocate, notifier
+from zlc_plugin import Command, DeviceHeld, DeviceType, FileParam, Opened, PhysicalOutput, allocate, notifier
 
 SCHEMA = AuthoringSchema((AuthoringField("gain", "float", "Gain", 1.0, minimum=0.0),))
 SIZE = AuthoringSchema((AuthoringField("size", "int", "Size", 4, required=True, minimum=1),))
@@ -19,6 +19,10 @@ class EchoDevice:
         self.opened_with = dict(values)
         self.safe = []
         self.amplitude = 0.0
+
+    def device_info(self):
+        """What it says of itself at open; a fact it has no value for is left out."""
+        return {"model": "echo", "serial": f"gain-{self.opened_with.get('gain')}", "firmware": None}
 
     def fail_close_once(self):
         self._fail_close = True
@@ -158,7 +162,7 @@ def _pin_wire(values, excluded):
     free = [port for port in WIRES if f"serial:{port}" not in excluded]
     if not free:
         raise RuntimeError(f"no free wire (tried none; passed over {', '.join(WIRES)}: bound)")
-    return {"parameters": {"port": free[0]}, "note": f"found on {free[0]} (given {values['port']!r})"}
+    return {"found": {"port": free[0]}, "note": f"found on {free[0]} (given {values['port']!r})"}
 
 
 def _served(key, values):
@@ -192,7 +196,14 @@ class FailedInitDevice:
         Path(self.path).write_text("released", encoding="utf-8")
 
 
+def _held(key, values):
+    """A device its SDK says another client has open, as pylon says of an exclusively opened camera."""
+    raise DeviceHeld("the test SDK says another client has this device open")
+
+
 DEVICE_TYPES = (
+    # Held elsewhere: the processes with the fixture "SDK" (a DLL a test helper loads) are named.
+    DeviceType("test.held", "test", SCHEMA, ("test.echo",), factory=_held, sdk_modules=("zlc_fixture_sdk_*.dll",)),
     DeviceType("test.fabric", "test", SCHEMA, ("test.echo",), factory=lambda key, values: FabricDevice(values),
                concurrent=("slow_write",), physical_outputs=(PhysicalOutput("beam"),)),
     DeviceType("test.plain", "test", SCHEMA, ("test.echo",), factory=lambda key, values: PlainDevice()),

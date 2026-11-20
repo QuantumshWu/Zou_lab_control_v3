@@ -157,6 +157,7 @@ impl Capture {
                     valid: self.array(&s["valid"]),
                     sem: if s["sem"].is_null() { None } else { Some(self.array(&s["sem"])) },
                     sem_dof: None,
+                    trials: None,
                     x_labels: s["x_labels"].as_array().map(|v| v.iter().map(|t| t.as_str().unwrap().to_owned()).collect()),
                     group_key: s["group_key"].as_array().unwrap().iter().map(|v| self.axis_value(v)).collect(),
                     label: s["label"].as_str().unwrap().to_owned(),
@@ -263,6 +264,7 @@ impl Capture {
             name: doc["name"].as_str().unwrap().to_owned(), label: doc["label"].as_str().unwrap().to_owned(), value: num(&doc["value"]),
             standard_error: if doc["standard_error"].is_null() { None } else { Some(num(&doc["standard_error"])) },
             unit: doc["unit"].as_str().unwrap().to_owned(),
+            interval: None,
         }
     }
 
@@ -284,6 +286,7 @@ impl Capture {
             group_key: doc["group_key"].as_array().unwrap().iter().map(|v| self.axis_value(v)).collect(),
             headline_parameter: if doc["headline_parameter"].is_null() { None } else { Some(self.parameter(&doc["headline_parameter"])) },
             evidence: doc["evidence"].as_str().unwrap().to_owned(),
+            error_basis: doc["error_basis"].as_str().unwrap_or_default().to_owned(),
         }
     }
 }
