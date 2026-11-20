@@ -27,7 +27,9 @@
 //! # The nodes
 //! A middle evaluates `Rs::at` where the step asks for the model -- its middle and its two outer nodes, at the path's
 //! momentum κ_m (the fold's denominators at their Doppler frequencies, D2) --, once each, and every form of the step
-//! is read off those three (`Node`). A jump's photon is the model at the jump's own place and time.
+//! is read off those three (`Node`). A jump's photon is the model at the jump's own place and time, the one node that
+//! holds the channels' photon forms (the photon's wave number; `Making`). A jump component holds its elements alone
+//! (`Element`): a channel lands on the ground states, its components have a few of P × P's elements each.
 //!
 //! # The photons
 //! A class is a fast index of the channels (n_φ, n_tw): its photons land on P's ground states, its three Cartesian
@@ -36,7 +38,7 @@
 //! the largest wave number of the beams its channels' keys hold; the step carries the rest, Σ_c (1 − s_c) Σ_a
 //! Im⟨u_a|∇u_a⟩ and 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ − s_c² W_c b_c b_cᵀ] (model/photon.rs, # The absorbed light's
 //! momentum: the one rule). The photon's wave number is the class's rate-weighted mean of the elements' k_eg, read on the
-//! channels' photon forms (`Channel::kicks`): Σ_a Re⟨u_a|K_aψ⟩/W.
+//! channels' photon forms (`Channel::kicks`, made at a jump's node alone): Σ_a Re⟨u_a|K_aψ⟩/W.
 //!
 //! # The rest of the model
 //! The splitting's reference, the prepared wells, the loss energy and the reported trap are one potential
@@ -45,7 +47,7 @@
 //! state's own (an explicit excited state's by its decay's branching). The unit fold's ground shift is the one fold's
 //! (`Tweezer::reference` of the tweezer alone at unit amplitude). The displayed rows are P's populations with Q's lifted
 //! through M_c (`ModelAt::lift`), each fast index of the lift apart (its terms do not interfere over time), over their
-//! sum.
+//! sum; a readout's contraction makes the lift alone.
 //!
 //! # What is not here
 //! No landing transient, no decision, no representation per trajectory: the integrator's plain landing L_qψ/‖·‖ is the
@@ -65,7 +67,7 @@ use crate::field::Light;
 use crate::floquet::frame::{exact_sum, FrameKey, Ratio};
 use crate::floquet::{Frame, Hilbert};
 use crate::linalg::{inner, norm_sqr, C64, Mat, V3};
-use crate::model::rs::{ModelAt, Rs};
+use crate::model::rs::{Making, ModelAt, Rs};
 use crate::model::{Beat, Cluster, Point, Quadratic, Scattering};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Key, Scene};
@@ -133,12 +135,20 @@ enum Of {
     Lift,
 }
 
-/// One jump component of a class's axis: its beat, L, ∇L and the photon form K = k∘L.
+/// One jump component of a class's axis: its beat and its elements in P × P, in their places' order (row-major).
 pub struct Jump {
     pub beat: usize,
-    pub value: Mat,
-    pub gradient: [Mat; 3],
-    pub kick: Mat,
+    pub elements: Vec<Element>,
+}
+
+/// An element of a jump component: its place x = row·n + column in P × P, L, ∇L and the photon form K = k∘L (zero in a
+/// node made without the forms, `Node::kicked`).
+#[derive(Clone, Copy, Debug)]
+pub struct Element {
+    pub at: usize,
+    pub value: C64,
+    pub gradient: [C64; 3],
+    pub kick: C64,
 }
 
 /// A class of photons (module documentation, # The photons): its fast index, k_c, and per Cartesian axis its
@@ -150,14 +160,16 @@ pub struct Class {
 }
 
 /// The model at one point of a path in the frame (module documentation, # The nodes): the generator's components by
-/// beat, H_eff's gradient's, the photon classes; the point and momentum it was made at; its counted work (real
-/// multiply-adds of putting the model in the frame; `Rs::at`'s own is not counted, its count not given).
+/// beat, H_eff's gradient's, the photon classes and whether they hold the photon forms (a jump's node); the point and
+/// momentum it was made at; its counted work (real multiply-adds of putting the model in the frame, P × P's matrices
+/// counted whole; `Rs::at`'s own is not counted, its count not given).
 pub struct Node {
     pub kappa: V3,
     pub at: V3,
     pub generator: Vec<(usize, Mat)>,
     pub gradient: Vec<(usize, [Mat; 3])>,
     pub classes: Vec<Class>,
+    pub kicked: bool,
     pub work: f64,
 }
 
@@ -209,6 +221,54 @@ fn trace(a: &Mat, rho: &[C64]) -> C64 {
         }
     }
     sum
+}
+
+/// A jump component's L by its rows (a jump lands on the ground states): the rows and the columns it holds, in order,
+/// each row's (column, L) in column order, and a column's place among the columns.
+struct Held {
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+    by_row: Vec<Vec<(usize, C64)>>,
+    place: Vec<usize>,
+}
+
+impl Held {
+    fn of(jump: &Jump, n: usize) -> Held {
+        let (mut rows, mut cols, mut by_row) = (Vec::new(), Vec::new(), Vec::<Vec<(usize, C64)>>::new());
+        for e in jump.elements.iter().filter(|e| e.value != C64::ZERO) {
+            let (row, col) = (e.at / n, e.at % n);
+            if rows.last() != Some(&row) {
+                rows.push(row);
+                by_row.push(Vec::new());
+            }
+            by_row.last_mut().expect("the row").push((col, e.value));
+            cols.push(col);
+        }
+        cols.sort_unstable();
+        cols.dedup();
+        let mut place = vec![usize::MAX; n];
+        for (i, &c) in cols.iter().enumerate() {
+            place[c] = i;
+        }
+        Held { rows, cols, by_row, place }
+    }
+
+    /// Z_ab = Σ_g L(g, a)* L'(g, b) of this component's L and the right one's L', over the rows both hold in their
+    /// order (this one's columns × the right one's, row-major).
+    fn product(&self, right: &Held) -> Vec<C64> {
+        let width = right.cols.len();
+        let mut z = vec![C64::ZERO; self.cols.len() * width];
+        for (g, row) in self.rows.iter().zip(&self.by_row) {
+            let Ok(k) = right.rows.binary_search(g) else { continue };
+            for &(a, x) in row {
+                let (x, at) = (x.conj(), self.place[a] * width);
+                for &(b, y) in &right.by_row[k] {
+                    z[at + right.place[b]] += x * y;
+                }
+            }
+        }
+        z
+    }
 }
 
 /// The place of a beat's component in a list by beats, made (zero) where it is not there yet.
@@ -394,8 +454,9 @@ impl Selected {
     /// The model at a point for the momentum κ (`Rs::local`), by the lab's frequencies (model/rs.rs, # Contractions):
     /// every component in the group of its key's frequency at rest -- the frame's primitive vector, so that the beams of
     /// one frequency are one group whatever their Doppler shifts (the fold's denominators keep those) --, each group under
-    /// the first of its keys met (`Selected::elements` reads a key's beats by its primitive vector alone).
-    fn at(&self, r: V3, kappa: V3) -> ModelAt {
+    /// the first of its keys met (`Selected::elements` reads a key's beats by its primitive vector alone); what `making`
+    /// asks for.
+    fn at(&self, r: V3, kappa: V3, making: Making) -> ModelAt {
         let local = self.rs.local(&self.scene, &self.scene.point_at(r, kappa));
         let groups: RefCell<HashMap<Vec<Ratio>, Key>> = RefCell::new(HashMap::new());
         let by_frequency = |key: &Key, f: f64| -> (Key, f64, C64) {
@@ -403,12 +464,13 @@ impl Selected {
             let first = groups.borrow_mut().entry(self.frame.primitive(&v)).or_insert_with(|| key.clone()).clone();
             (first, f, C64::ONE)
         };
-        local.contract(&by_frequency, true)
+        local.contract(&by_frequency, making)
     }
 
-    /// The model at a point in the frame, by beats (`Node`; module documentation, # The generator by beats).
-    pub fn node(&self, at: V3, kappa: V3) -> Node {
-        let model = self.at(at, kappa);
+    /// The model at a point in the frame, by beats (`Node`; module documentation, # The generator by beats), with the
+    /// channels' photon forms where `kicked` (a jump's node).
+    pub fn node(&self, at: V3, kappa: V3, kicked: bool) -> Node {
+        let model = self.at(at, kappa, Making { model: true, kicks: kicked, lift: false });
         let n = model.states.len();
         let mut work = 0;
         let mut statics = Mat::zeros(n, n);
@@ -434,13 +496,17 @@ impl Selected {
             }
             work += 4 * n * n;
         }
-        // The photon classes: each channel's components by their slow beats, on its axis of its class.
+        // The photon classes: each channel's components by their slow beats, on its axis of its class -- a component's
+        // elements where its parts hold one, an element's parts summed in their order.
         let mut classes: Vec<Class> = Vec::new();
+        // Per class and axis the parts' elements as met: (component, place, L, ∇L, K).
+        let mut met: Vec<[Vec<(usize, usize, C64, [C64; 3], C64)>; 3]> = Vec::new();
         for channel in &model.jumps {
             let place = match classes.iter().position(|c| c.fast == channel.fast) {
                 Some(i) => i,
                 None => {
                     classes.push(Class { fast: channel.fast, absorbed: 0.0, axes: Default::default() });
+                    met.push(Default::default());
                     classes.len() - 1
                 }
             };
@@ -460,48 +526,68 @@ impl Selected {
                     let i = match axis.iter().position(|j| j.beat == beat) {
                         Some(i) => i,
                         None => {
-                            axis.push(Jump { beat, value: Mat::zeros(n, n), gradient: zeros(n, n), kick: Mat::zeros(n, n) });
+                            axis.push(Jump { beat, elements: Vec::new() });
                             axis.len() - 1
                         }
                     };
-                    let jump = &mut axis[i];
-                    jump.value.data[x] += z;
-                    jump.kick.data[x] += k;
-                    for (g, d) in jump.gradient.iter_mut().zip(dz) {
-                        g.data[x] += d;
-                    }
+                    met[place][channel.emission].push((i, x, z, dz, k));
                 }
                 work += 5 * n * n;
             }
         }
-        // The decay −(i/2) Σ_ch L(t)†L(t) by beats: L_k'†L_k e^{−i(Ω_k − Ω_k')t} at the beat k − k', each product over the
-        // rows and columns its two factors hold (a jump lands on the ground states alone).
-        let held = |m: &Mat| -> (Vec<usize>, Vec<usize>) {
-            let rows = (0..n).filter(|&g| (0..n).any(|b| m.data[g * n + b] != C64::ZERO)).collect();
-            let cols = (0..n).filter(|&b| (0..n).any(|g| m.data[g * n + b] != C64::ZERO)).collect();
-            (rows, cols)
-        };
-        for class in &classes {
-            for axis in &class.axes {
-                let pattern: Vec<(Vec<usize>, Vec<usize>)> = axis.iter().map(|j| held(&j.value)).collect();
-                for (left, (left_rows, left_cols)) in axis.iter().zip(&pattern) {
-                    for (right, (right_rows, right_cols)) in axis.iter().zip(&pattern) {
-                        let beat = if left.beat == right.beat { 0 } else { self.difference(right.beat, left.beat) };
-                        let i = slot(&mut generator, beat, || Mat::zeros(n, n));
-                        let rows: Vec<usize> = left_rows.iter().copied().filter(|g| right_rows.contains(g)).collect();
-                        let decay = &mut generator[i].1.data;
-                        for &a in left_cols {
-                            for &b in right_cols {
-                                let z: C64 = rows.iter().map(|&g| left.value.data[g * n + a].conj() * right.value.data[g * n + b]).sum();
-                                decay[a * n + b] += C64::new(0.0, -0.5) * z;
-                            }
-                        }
-                        work += rows.len() * left_cols.len() * right_cols.len();
+        for (class, axes) in classes.iter_mut().zip(met) {
+            for (axis, mut entries) in class.axes.iter_mut().zip(axes) {
+                // By component and place, an element's parts in their order (the sort is stable).
+                entries.sort_by_key(|e| (e.0, e.1));
+                for (i, x, z, dz, k) in entries {
+                    let elements = &mut axis[i].elements;
+                    if elements.last().is_none_or(|e| e.at != x) {
+                        elements.push(Element { at: x, value: C64::ZERO, gradient: [C64::ZERO; 3], kick: C64::ZERO });
+                    }
+                    let e = elements.last_mut().expect("the element");
+                    e.value += z;
+                    e.kick += k;
+                    for (g, d) in e.gradient.iter_mut().zip(dz) {
+                        *g += d;
                     }
                 }
             }
         }
-        Node { kappa, at, generator, gradient, classes, work: crate::decide::COMPLEX * work as f64 }
+        // The decay −(i/2) Σ_ch L(t)†L(t) by beats: L_k'†L_k e^{−i(Ω_k − Ω_k')t} at the beat k − k', each product over the
+        // rows and columns its two factors hold (a jump lands on the ground states alone), made once a pair: (k', k)'s is
+        // (k, k')'s adjoint.
+        let half = C64::new(0.0, -0.5);
+        for class in &classes {
+            for axis in &class.axes {
+                let held: Vec<Held> = axis.iter().map(|j| Held::of(j, n)).collect();
+                let m = axis.len();
+                let mut products: Vec<Option<Vec<C64>>> = vec![None; m * m];
+                for (l, (left, lh)) in axis.iter().zip(&held).enumerate() {
+                    for (r, (right, rh)) in axis.iter().zip(&held).enumerate() {
+                        let beat = if left.beat == right.beat { 0 } else { self.difference(right.beat, left.beat) };
+                        let i = slot(&mut generator, beat, || Mat::zeros(n, n));
+                        let decay = &mut generator[i].1.data;
+                        if l <= r {
+                            let z = products[l * m + r].get_or_insert_with(|| lh.product(rh));
+                            for (ia, &a) in lh.cols.iter().enumerate() {
+                                for (ib, &b) in rh.cols.iter().enumerate() {
+                                    decay[a * n + b] += half * z[ia * rh.cols.len() + ib];
+                                }
+                            }
+                        } else {
+                            let z = products[r * m + l].as_ref().expect("the pair's adjoint, made at its left factor");
+                            for (ia, &a) in lh.cols.iter().enumerate() {
+                                for (ib, &b) in rh.cols.iter().enumerate() {
+                                    decay[a * n + b] += half * z[ib * lh.cols.len() + ia].conj();
+                                }
+                            }
+                        }
+                        work += lh.rows.iter().filter(|g| rh.rows.contains(g)).count() * lh.cols.len() * rh.cols.len();
+                    }
+                }
+            }
+        }
+        Node { kappa, at, generator, gradient, classes, kicked, work: crate::decide::COMPLEX * work as f64 }
     }
 
     /// The ground populations of a state of P (an explicit excited state's by its decay's branching), over its norm.
@@ -521,7 +607,7 @@ impl Selected {
     /// P's, and Q's lifted through M_c (`ModelAt::lift`) of each fast index of the lift apart, each element at its slow
     /// beat's phase; over their sum.
     fn rows(&self, at: &Point, psi: &[C64]) -> [f64; STATES] {
-        let model = self.at(at.r, at.kappa);
+        let model = self.at(at.r, at.kappa, Making { model: false, kicks: false, lift: true });
         let n = model.states.len();
         let mut rho = vec![C64::ZERO; n * n];
         crate::step::density(psi, &mut rho);
@@ -605,12 +691,21 @@ impl Potential<'_> {
 
 impl SelectedMiddle<'_> {
     /// The node at the time s from the middle along the path, made where first asked for.
-    fn node(&self, path: &Path, s: f64) -> Rc<Node> {
+    fn node(&self, path: &Path, s: f64, kicked: bool) -> Rc<Node> {
         let at: V3 = std::array::from_fn(|i| self.r[i] + path.velocity[i] * s);
-        if let Some(node) = self.nodes.borrow().iter().find(|x| x.kappa == path.kappa && x.at == at) {
-            return node.clone();
+        let made = self.nodes.borrow().iter().position(|x| x.kappa == path.kappa && x.at == at);
+        if let Some(i) = made {
+            let node = self.nodes.borrow()[i].clone();
+            if node.kicked || !kicked {
+                return node;
+            }
+            // A jump at a node made without the photon forms: the node again with them, in its place, its work counted
+            // once.
+            let node = Rc::new(self.model.node(at, path.kappa, true));
+            self.nodes.borrow_mut()[i] = node.clone();
+            return node;
         }
-        let node = Rc::new(self.model.node(at, path.kappa));
+        let node = Rc::new(self.model.node(at, path.kappa, kicked));
         self.made.set(self.made.get() + node.work);
         if s != 0.0 {
             self.half.set(Some(s.abs()));
@@ -674,7 +769,7 @@ impl SelectedMiddle<'_> {
     /// A jump's photon of the state ψ at the time s from the middle, at the jump's place (module documentation,
     /// # The photons): the classes' rates, the class `draw` picks and its photon.
     fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let node = self.node(path, s);
+        let node = self.node(path, s, true);
         let photons = self.model.read(|b| photons(&node, &b.value, self.t + s, psi));
         let rates: Vec<f64> = photons.iter().map(|p| p.weight).collect();
         let k = draw(&rates)?;
@@ -682,12 +777,14 @@ impl SelectedMiddle<'_> {
         let n = psi.len();
         let amplitudes = p.u.each_ref().map(|u| u.iter().copied().collect::<Internal>());
         let jumps: usize = node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum::<usize>()).sum();
-        Some(Emitted { landing: 0, wave_number: p.wave_number, amplitudes, kick: p.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
+        let wave_number = p.wave_number.expect("a jump's node holds the photon forms");
+        Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
     }
 }
 
 /// A class's photons of a state (module documentation, # The photons): u_a, its rate W, the moments Σ Im⟨u|∇u⟩ and
-/// Σ Re⟨∇u|⊗|∇u⟩ (these three over ‖ψ‖²), the share s of b a jump carries and s b, and the photon's wave number.
+/// Σ Re⟨∇u|⊗|∇u⟩ (these three over ‖ψ‖²), the share s of b a jump carries and s b, and the photon's wave number where
+/// the node holds the photon forms (`Node::kicked`).
 struct Photons {
     u: [Vec<C64>; 3],
     weight: f64,
@@ -695,7 +792,7 @@ struct Photons {
     second: [[f64; 3]; 3],
     share: f64,
     kick: [f64; 3],
-    wave_number: f64,
+    wave_number: Option<f64>,
 }
 
 /// Every class's photons of the state ψ at the time t on a node (module documentation, # The photons).
@@ -711,16 +808,19 @@ fn photons(node: &Node, values: &[f64], t: f64, psi: &[C64]) -> Vec<Photons> {
             for (a, axis) in class.axes.iter().enumerate() {
                 for jump in axis {
                     let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
-                    let apply = |m: &Mat, out: &mut Vec<C64>| {
-                        for (row, o) in out.iter_mut().enumerate() {
-                            let z: C64 = (0..n).map(|col| m.data[row * n + col] * psi[col]).sum();
-                            *o += f * z;
+                    // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
+                    let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
+                        for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
+                            let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
+                            out[row[0].at / n] += f * z;
                         }
                     };
-                    apply(&jump.value, &mut u[a]);
-                    apply(&jump.kick, &mut ku[a]);
-                    for (i, d) in jump.gradient.iter().enumerate() {
-                        apply(d, &mut du[i][a]);
+                    apply(&|e| e.value, &mut u[a]);
+                    if node.kicked {
+                        apply(&|e| e.kick, &mut ku[a]);
+                    }
+                    for (i, d) in du.iter_mut().enumerate() {
+                        apply(&|e| e.gradient[i], &mut d[a]);
                     }
                 }
             }
@@ -730,7 +830,7 @@ fn photons(node: &Node, values: &[f64], t: f64, psi: &[C64]) -> Vec<Photons> {
             let b: [f64; 3] = mean.map(|x| if weight > 0.0 { x / weight } else { 0.0 });
             let size = b.iter().map(|x| x * x).sum::<f64>().sqrt();
             let share = if size > class.absorbed { class.absorbed / size } else { 1.0 };
-            let wave_number = if weight > 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 };
+            let wave_number = node.kicked.then(|| if weight > 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
             Photons { u, weight: weight / norm, mean: mean.map(|x| x / norm), second: second.map(|r| r.map(|x| x / norm)), share, kick: b.map(|x| share * x), wave_number }
         })
         .collect()
@@ -757,7 +857,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     /// Ĥ(s) = Σ_k G_k(s) e^{−iΩ_k(t_m + s)} (module documentation, # The generator by beats).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
-        let node = self.node(path, s);
+        let node = self.node(path, s, false);
         h.data.fill(C64::ZERO);
         self.model.read(|b| {
             for (beat, g) in &node.generator {
@@ -781,7 +881,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// Candidate m's members at s: G_plus(s) e^{iν t_m} and G_minus(s) e^{−iν t_m} (their parts of `generator`).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         let c = &self.candidates(path)[m];
-        let node = self.node(path, s);
+        let node = self.node(path, s, false);
         self.model.read(|b| {
             for (member, out) in [(c.plus, plus), (c.minus, minus)] {
                 out.data.fill(C64::ZERO);
@@ -802,7 +902,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         let n = self.states();
         let mut out = [0.0; 3];
         for &(s, re, im) in sums {
-            let node = self.node(path, s);
+            let node = self.node(path, s, false);
             let sigma: Vec<C64> = re.iter().zip(im).map(|(r, i)| *r + C64::I * *i).collect();
             let dagger: Vec<C64> = (0..n * n).map(|x| sigma[(x % n) * n + x / n].conj()).collect();
             let forms = self.model.read(|b| {
@@ -831,14 +931,14 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     /// Re tr(Ĝ(s) ρ): H_eff's gradient at the time s, every beat at its phase.
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
-        let node = self.node(path, s);
+        let node = self.node(path, s, false);
         let f = self.model.read(|b| SelectedMiddle::contract(&node, |beat| Some(self.phase(&b.value, beat, s)), rho));
         f.map(|z| z.re)
     }
 
     /// The gradient at the middle by its beats: Ω_m = −Ω_k with Re tr(∂H_k e^{−iΩ_k t_m} ρ).
     fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        let node = self.node(path, 0.0);
+        let node = self.node(path, 0.0, false);
         let values = self.model.read(|b| b.value.clone());
         for (beat, _) in &node.gradient {
             let f = SelectedMiddle::contract(&node, |k| (k == *beat).then(|| self.phase(&values, k, 0.0)), rho);
@@ -849,7 +949,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// The light the state scatters at the middle beside the Ehrenfest force and the jumps (module documentation,
     /// # The photons).
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
-        let node = self.node(path, 0.0);
+        let node = self.node(path, 0.0, false);
         let photons = self.model.read(|b| photons(&node, &b.value, self.t, psi));
         let mut force = [0.0; 3];
         let mut diffusion = [[0.0; 3]; 3];
@@ -901,12 +1001,12 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                 }
             }
         };
-        let node = self.node(path, s);
+        let node = self.node(path, s, false);
         at(&node, s, false, g);
         let mut counted = 3.0 * node.gradient.len() as f64 * (n * n) as f64;
         if let Some(slope) = slope {
             let h = self.half.get().expect("the step's outer nodes: its picture's ends");
-            let (before, after) = (self.node(path, -h), self.node(path, h));
+            let (before, after) = (self.node(path, -h, false), self.node(path, h, false));
             let mut minus: [Vec<C64>; 3] = Default::default();
             // The envelopes' chord at the middle's phases, and the phases' turn on the middle's envelopes.
             at(&before, 0.0, false, &mut minus);

@@ -73,7 +73,7 @@ fn the_selected_model_is_slow_in_its_frame() {
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
         for (r, kappa) in POINTS {
-            let model = run.at(r, kappa);
+            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false });
             let (mut elements, mut beyond) = (0, 0);
             for part in &model.effective {
                 let table = run.elements(&part.key, Of::Generator);
@@ -116,14 +116,17 @@ fn the_selected_decay_is_its_photons() {
         let path = middle.path(kappa, [0.0; 3]);
         let mut h = Mat::zeros(n, n);
         middle.generator(&path, 0.0, &mut h);
-        let node = middle.node(&path, 0.0);
+        let node = middle.node(&path, 0.0, false);
         let (values, _) = run.components();
         let mut gamma = Mat::zeros(n, n);
         for class in &node.classes {
             for axis in &class.axes {
                 let mut l = Mat::zeros(n, n);
                 for jump in axis {
-                    l.add_scaled(if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * 3.7) }, &jump.value);
+                    let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * 3.7) };
+                    for e in &jump.elements {
+                        l.data[e.at] += f * e.value;
+                    }
                 }
                 gamma.add_scaled(C64::ONE, &l.adjoint_product(&l));
             }
@@ -134,6 +137,127 @@ fn the_selected_decay_is_its_photons() {
         eprintln!("{name}: |i(H − H†) − Σ L†L| {worst:.3e} of {size:.3e}");
         assert!(worst <= n as f64 * crate::units::UNIT_ROUNDOFF * size * 16.0, "{name}: {worst:e} of {size:e}");
     }
+}
+
+/// The node is the model's value in its frame (module documentation, # One cluster, one frame): a jump's node (with
+/// the photon forms) at the time t, every beat at its phase, against the same fold's components summed at their
+/// phases in one group (`Local::contract`, each component's weight e^{−iF_c t}, F_c its key's frequency in the frame)
+/// put in the frame, x_a = e^{iθ_a t} ψ_a: H_eff's Hermitian part with θ on its diagonal, H_eff's gradient, each
+/// class's axis L(t) and ∇L(t) and its photon form K(t), each channel up to one phase of modulus one (its fast index's,
+/// common to its elements). At t = 0 that sum is `Local::now(0)` itself. F_c is the frame's, at rest: the node's beats
+/// do not hold the Doppler shifts (its motion is its place along the path) nor the recoil shifts ħk²/2m the point's
+/// rates hold (`Scene::doppler`), so at t ≠ 0 `now(t)` differs from the node by those phases by construction. At the
+/// centre and off it at rest and at the moving point, t = 0, 0.37 and −1.9 µs. The two are one set of sums taken in two
+/// orders (by beats, one group): they differ by rounding alone, bounded as `now_is_the_components_at_their_phases`
+/// bounds it -- per component 64u(1 + |F_c t| + 2 max|θ t|) max|X⁽ᶜ⁾| summed over the quantity's components, and κ(V)u
+/// relative to its largest entry (10⁻¹⁰).
+#[test]
+fn the_node_is_the_model_now_in_its_frame() {
+    use crate::floquet::frame::FrameKey;
+    use crate::model::rs::ModelPart;
+    use crate::units::UNIT_ROUNDOFF;
+    let mut worst = 0.0_f64;
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let n = keep.len();
+        let frequency = |key: &Key| -> f64 {
+            let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
+            run.value(&run.frame.split(&v))
+        };
+        for (r, kappa) in [([0.0; 3], [0.0; 3]), (POINTS[1].0, [0.0; 3]), POINTS[1]] {
+            let node = run.node(r, kappa, true);
+            // The beats as they stand once the node is made (a beat is made where first met).
+            let (values, _) = run.components();
+            let local = run.rs.local(&run.scene, &run.scene.point_at(r, kappa));
+            let components = local.components();
+            for t in [0.0, 0.37, -1.9] {
+                let phase = |beat: usize| if beat == 0 { C64::ONE } else { C64::cis(-values[beat] * t) };
+                let turn = |x: &Mat| Mat::from_fn(n, n, |a, b| C64::cis(run.theta[a] * t) * x[(a, b)] * C64::cis(-run.theta[b] * t));
+                let theta = run.theta.iter().map(|x| (x * t).abs()).fold(0.0, f64::max);
+                let bound = |parts: &mut dyn Iterator<Item = (&ModelPart, &Mat)>, scale: f64| -> f64 {
+                    parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
+                };
+                let sum = local.contract(&|key, _| (Vec::new(), 0.0, C64::cis(-frequency(key) * t)), Making { model: true, kicks: true, lift: false });
+                if t == 0.0 {
+                    let now = local.now(0.0);
+                    assert!(sum.effective.first().is_none_or(|p| p.value == now.hamiltonian), "{name}: the sum at t = 0 is now(0)");
+                }
+                let zero = Mat::zeros(n, n);
+                let mut ratios = [0.0_f64; 4];
+                // H_eff: the generator's Hermitian part with θ on its diagonal.
+                let mut g = Mat::zeros(n, n);
+                for (beat, m) in &node.generator {
+                    g.add_scaled(phase(*beat), m);
+                }
+                let h = Mat::from_fn(n, n, |a, b| (g[(a, b)] + g[(b, a)].conj()) * 0.5 + if a == b { C64::real(run.theta[a]) } else { C64::ZERO });
+                let want = turn(sum.effective.first().map_or(&zero, |p| &p.value));
+                let scale = want.max_abs();
+                ratios[0] = apart(&h, &want) / bound(&mut components.effective.iter().map(|p| (p, &p.value)), scale).max(f64::MIN_POSITIVE);
+                for i in 0..3 {
+                    let mut d = Mat::zeros(n, n);
+                    for (beat, m) in &node.gradient {
+                        d.add_scaled(phase(*beat), &m[i]);
+                    }
+                    let want = turn(sum.effective.first().map_or(&zero, |p| &p.gradient[i]));
+                    let scale = want.max_abs();
+                    ratios[1] = ratios[1].max(apart(&d, &want) / bound(&mut components.effective.iter().map(|p| (p, &p.gradient[i])), scale).max(f64::MIN_POSITIVE));
+                }
+                // The channels: L, ∇L and K of each class's axis against the channel (emission, fast index).
+                let mut seen = 0;
+                for (class, a) in node.classes.iter().flat_map(|c| (0..3).map(move |a| (c, a))) {
+                    let axis = &class.axes[a];
+                    let summed = |m: &dyn Fn(&Element) -> C64| -> Mat {
+                        let mut out = Mat::zeros(n, n);
+                        for jump in axis {
+                            for e in &jump.elements {
+                                out.data[e.at] += phase(jump.beat) * m(e);
+                            }
+                        }
+                        out
+                    };
+                    let channel = sum.jumps.iter().find(|c| c.emission == a && c.fast == class.fast);
+                    if axis.is_empty() && channel.is_none() {
+                        continue;
+                    }
+                    seen += 1;
+                    let channel = channel.expect("the channel in the sum");
+                    let part = components.jumps.iter().find(|c| c.emission == a && c.fast == class.fast).expect("the channel's components");
+                    let (value, kick) = (&channel.parts[0], channel.kicks.first());
+                    let l = summed(&|e| e.value);
+                    let want = turn(&value.value);
+                    // The channel's phase, read where L is largest.
+                    let at = (0..n * n).max_by(|x, y| want.data[*x].abs().total_cmp(&want.data[*y].abs())).expect("an element");
+                    let common = l.data[at] * want.data[at].conj() * (1.0 / want.data[at].norm_sqr());
+                    let turned = |x: &Mat| {
+                        let y = turn(x);
+                        Mat::from_fn(n, n, |a, b| common * y[(a, b)])
+                    };
+                    let scale = want.max_abs();
+                    let unit = (common.abs() - 1.0).abs() * scale;
+                    ratios[2] = ratios[2].max((apart(&l, &turned(&value.value)) + unit) / bound(&mut part.parts.iter().map(|p| (p, &p.value)), scale).max(f64::MIN_POSITIVE));
+                    for i in 0..3 {
+                        let d = summed(&|e| e.gradient[i]);
+                        let want = turned(&value.gradient[i]);
+                        let scale = want.max_abs();
+                        ratios[2] = ratios[2].max(apart(&d, &want) / bound(&mut part.parts.iter().map(|p| (p, &p.gradient[i])), scale).max(f64::MIN_POSITIVE));
+                    }
+                    let k = summed(&|e| e.kick);
+                    let want = turned(kick.map_or(&zero, |k| &k.value));
+                    let scale = want.max_abs();
+                    ratios[3] = ratios[3].max(apart(&k, &want) / bound(&mut part.kicks.iter().map(|p| (p, &p.value)), scale).max(f64::MIN_POSITIVE));
+                }
+                assert_eq!(seen, sum.jumps.len(), "{name}: the node's channels are the sum's");
+                eprintln!("{name} r {r:?} κ {kappa:?} t {t}: of the bound H {:.1e} ∇H {:.1e} L, ∇L {:.1e} K {:.1e} ({seen} channels)", ratios[0], ratios[1], ratios[2], ratios[3]);
+                worst = ratios.iter().fold(worst, |w, e| w.max(*e));
+            }
+        }
+    }
+    assert!(worst <= 1.0, "the node and the components at their phases apart by {worst:.2} of their rounding's bound");
+}
+
+/// The largest entry of |a − b|.
+fn apart(a: &Mat, b: &Mat) -> f64 {
+    a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max)
 }
 
 /// The force at the frame's time zero is the model's (model/rs.rs `ModelAt::force`, the Lindbladian's force observable):
@@ -152,7 +276,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let middle = run.middle(0, r, 0.0);
             let path = middle.path(kappa, [0.0; 3]);
             let ehrenfest = middle.force(&path, 0.0, &rho);
-            let node = middle.node(&path, 0.0);
+            let node = middle.node(&path, 0.0, false);
             let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi)).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
             let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
@@ -308,8 +432,10 @@ fn the_default_scene_s_first_solve_is_numbers() {
 }
 
 /// A step's time on the selected model (a measurement, ignored; V3E_SCENE one of the six): from the reference state at
-/// the trap's centre at the thermal speed along x, the model at a point (`Selected::node`, and its `Rs::at` alone) and a whole step
-/// at τ = V3E_TAU µs (0.3256), each on one thread, timed (µs, the least of five); the step's candidate tones and their
+/// the trap's centre at the thermal speed along x, each on one thread, timed (µs, the least of five): the model at a
+/// point -- the fold there (`Rs::local`), its contraction by the lab's frequencies, the whole node (`Selected::node`)
+/// and a jump's node (with the photon forms) --, now(t)'s contraction beside them, and a whole step at τ = V3E_TAU µs
+/// (0.3256), the three nodes it makes (its middle and its two outer nodes) apart; the step's candidate tones and their
 /// largest beat.
 #[test]
 #[ignore]
@@ -319,25 +445,36 @@ fn a_step_s_time_on_the_selected_model() {
         let run = run_of(&request, &keep);
         let chief = crate::solve::chief(&request);
         let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
-        let kappa = [speed, 0.0, 0.0];
+        let (r, kappa) = ([0.1, 0.2, 0.3], [speed, 0.0, 0.0]);
         let least = |f: &mut dyn FnMut()| (0..5).map(|_| {
             let clock = std::time::Instant::now();
             f();
             clock.elapsed().as_secs_f64() * 1e6
         }).fold(f64::INFINITY, f64::min);
-        let node = least(&mut || {
-            std::hint::black_box(run.node([0.1, 0.2, 0.3], kappa));
+        let point = run.scene.point_at(r, kappa);
+        let local = run.rs.local(&run.scene, &point);
+        let fold = least(&mut || {
+            std::hint::black_box(run.rs.local(&run.scene, &point));
+        });
+        let now = least(&mut || {
+            std::hint::black_box(local.now(0.37));
         });
         let model = least(&mut || {
-            std::hint::black_box(run.at([0.1, 0.2, 0.3], kappa));
+            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false }));
         });
-        let t = Trajectory::new(&run, chief, [0.1, 0.2, 0.3], kappa, 7, 0);
+        let node = least(&mut || {
+            std::hint::black_box(run.node(r, kappa, false));
+        });
+        let jump = least(&mut || {
+            std::hint::black_box(run.node(r, kappa, true));
+        });
+        let t = Trajectory::new(&run, chief, r, kappa, 7, 0);
         let mut scratch = Scratch::default();
         let step = least(&mut || {
             let m = Midway::new(&run, &t, tau).unwrap();
             std::hint::black_box(m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere).unwrap());
         });
-        let middle = run.middle(0, [0.1, 0.2, 0.3], 0.0);
+        let middle = run.middle(0, r, 0.0);
         let path = middle.path(kappa, kappa.map(|k| run.hbar_over_mass() * k));
         let mut h = Mat::zeros(keep.len(), keep.len());
         for s in [0.0, -0.5 * tau, 0.5 * tau] {
@@ -345,6 +482,15 @@ fn a_step_s_time_on_the_selected_model() {
         }
         let (mut beats, mut keys) = (vec![], vec![]);
         middle.beats(&path, &mut beats, &mut keys);
-        eprintln!("{name}: P {}, node {node:.0} µs (Rs::at {model:.0}), step {step:.0} µs; {} candidate tones, the largest {:.4e} rad/µs", keep.len(), beats.len(), beats.iter().copied().fold(0.0, f64::max));
+        eprintln!(
+            "{name}: P {}; fold {fold:.0}, now's contraction {:.0}, the node's {:.0}, node {node:.0}, a jump's node {jump:.0} µs; step {step:.0} µs, of it three nodes {:.0} and the rest {:.0}; {} candidate tones, the largest {:.4e} rad/µs",
+            keep.len(),
+            now,
+            model - fold.min(model),
+            3.0 * node,
+            step - 3.0 * node,
+            beats.len(),
+            beats.iter().copied().fold(0.0, f64::max)
+        );
     }
 }
