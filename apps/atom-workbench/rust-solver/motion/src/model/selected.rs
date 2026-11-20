@@ -65,7 +65,7 @@
 //! exact beat with their values (`Selected::components`), H_eff's gradient's, and the photon classes. A propagation that
 //! takes the model once a step (STEPBENCH L2) asks for the middle's alone; the onefold integrator asks for three.
 
-use crate::linalg::{larger, smaller};
+use crate::linalg::{larger, largest, smaller};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -429,7 +429,9 @@ impl Selected {
         Ok(run)
     }
 
-    /// The selection's report (stderr): P by levels, each candidate's errors at the two points, the time.
+    /// The selection's report (stderr): P by levels and state by state, the states left out, the selection's notes (a
+    /// point not judged and why: `Selection::notes`), each candidate's errors at the two points -- "不判" at a point not
+    /// judged, never its zero --, the time.
     pub fn report(&self) -> String {
         let labels = &self.scene.request.states;
         let mut levels: Vec<String> = Vec::new();
@@ -440,10 +442,28 @@ impl Selected {
                 levels.push(label);
             }
         }
-        let mut out = format!("两点选态：P = {} 态 {:?}，用时 {:.2} s\n", self.rs.keep.len(), levels, self.report.seconds);
+        let names = |states: &[usize]| states.iter().map(|&s| labels[s].as_str()).collect::<Vec<_>>().join(", ");
+        let mut out = format!("两点选态：P = {} 态 {:?}，用时 {:.2} s
+", self.rs.keep.len(), levels, self.report.seconds);
+        out += &format!("  P 的态：{}
+", names(&self.rs.keep));
+        out += &format!("  删去 {} 态：{}
+", self.rs.folded.len(), if self.rs.folded.is_empty() { "无".to_string() } else { names(&self.rs.folded) });
+        for note in self.report.notes() {
+            out += &format!("  注：{note}
+");
+        }
+        let judged: Vec<bool> = self.report.reference.iter().map(Option::is_some).collect();
         for c in &self.report.candidates {
-            let e = |p: &crate::select::PointError| format!("布居 {:.2e} R {:.2e} F {:.2e}", p.populations, p.rate, p.force);
-            out += &format!("  候选 {} 态：中心 {}；边缘 {}{}\n", c.keep.len(), e(&c.centre), e(&c.edge), if c.passes() { "（过）" } else { "" });
+            let e = |p: &crate::select::PointError, at: usize| {
+                if judged[at] {
+                    format!("布居 {:.2e} R {:.2e} F {:.2e}", p.populations, p.rate, p.force)
+                } else {
+                    "不判".to_string()
+                }
+            };
+            out += &format!("  候选 {} 态：中心 {}；边缘 {}{}
+", c.keep.len(), e(&c.centre, 0), e(&c.edge, 1), if c.passes() { "（过）" } else { "" });
         }
         out
     }
@@ -453,7 +473,7 @@ impl Selected {
     /// (relative) -- a rate or a force wrong by x moves T by x. No number where the selection holds no measurement of P.
     pub fn error(&self) -> [f64; 2] {
         self.report.candidates.last().filter(|c| c.keep == self.rs.keep).map_or([f64::NAN; 2], |c| {
-            [c.centre.populations.max(c.edge.populations), c.centre.rate.max(c.centre.force).max(c.edge.rate).max(c.edge.force)]
+            [larger(c.centre.populations, c.edge.populations), largest(c.centre.rate, [c.centre.force, c.edge.rate, c.edge.force])]
         })
     }
 
