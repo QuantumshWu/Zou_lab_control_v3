@@ -7,6 +7,7 @@
 use super::*;
 use crate::floquet::Frame;
 use crate::request::Request;
+use crate::linalg;
 
 
 fn matrix(v: &serde_json::Value) -> Mat {
@@ -25,22 +26,28 @@ fn key(v: &serde_json::Value) -> Key {
 }
 
 /// The prototype's model at a point as a fold's source: each component (the static part, then each key) its value and
-/// its gradient along z as two fixed matrices (terms 1·value and z-gradient-only 1·gradient), each nonzero key both
+/// its gradient along z as two fixed matrices (factors: one, and zero with the gradient (0, 0, 1)), each nonzero key both
 /// ways; the Cartesian emission's channels with their photons' forms (the export's wave numbers); the generator the
-/// static part − (i/2) Σ C†C. Returns the library and the source.
-fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> (Vec<Fixed>, Source) {
+/// static part − (i/2) Σ C†C. Returns the library, the source and its values.
+fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> (Vec<Fixed>, Source, Values) {
     let mut library: Vec<Fixed> = Vec::new();
     let mut put = |m: &Mat| {
         library.push(fixed(m));
         library.len() - 1
     };
     let mut hamiltonian = Vec::new();
+    let mut frequencies = Vec::new();
     let mut piece = |key: Key, frequency: f64, value: &serde_json::Value, grad: &serde_json::Value| {
-        let terms = vec![Term::one(put(&matrix(value)), C64::ONE), Term { matrix: put(&matrix(grad)), adjoint: false, scale: C64::ZERO, gradient: [C64::ZERO, C64::ZERO, C64::ONE] }];
-        let p = Piece { key, frequency, terms };
-        let adjoint = p.key.iter().any(|k| *k != 0).then(|| p.adjoint());
+        let terms = vec![Term::one(0, put(&matrix(value))), Term::one(1, put(&matrix(grad)))];
+        let nonzero = key.iter().any(|k| *k != 0);
+        let p = Piece { key, terms };
+        let adjoint = nonzero.then(|| Piece { key: p.key.iter().map(|k| -k).collect(), terms: p.terms.iter().map(|t| Term { adjoint: true, ..t.clone() }).collect() });
         hamiltonian.push(p);
-        hamiltonian.extend(adjoint);
+        frequencies.push(frequency);
+        if let Some(a) = adjoint {
+            hamiltonian.push(a);
+            frequencies.push(-frequency);
+        }
     };
     piece(vec![0; length], 0.0, &point["static"], &point["static_grad"]);
     for c in point["comps"].as_array().unwrap() {
@@ -56,8 +63,12 @@ fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> 
     let (parts, kicks) = (c.each_ref().map(&mut put), k.each_ref().map(&mut put));
     let decay = put(&gamma);
     let mut generator = hamiltonian[0].terms.clone();
-    generator.push(Term::one(decay, C64::new(0.0, -0.5)));
-    (library, Source { hamiltonian, jumps: emission_channels(length, parts, kicks), generator })
+    generator.push(Term { factor: 0, adjoint: false, scale: C64::new(0.0, -0.5), matrices: vec![(decay, 0)] });
+    let jumps = emission_channels(length, 0, parts, kicks);
+    frequencies.extend(std::iter::repeat_n(0.0, 6));
+    let source = Source { hamiltonian, jumps, generator, varying: vec![false, true], coefficients: 1 };
+    let values = Values { factors: vec![(C64::ONE, [C64::ZERO; 3]), (C64::ZERO, [C64::ZERO, C64::ZERO, C64::ONE])], coefficients: vec![1.0], frequencies };
+    (library, source, values)
 }
 
 /// The largest entry difference of two matrices and the larger of their largest entries.
@@ -80,13 +91,12 @@ fn model(doc: &serde_json::Value, which: usize) -> (ModelAt, Now) {
     let labels: Vec<String> = doc["labels"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
     let mut keep: Vec<usize> = doc["keep"].as_array().unwrap().iter().map(|k| k.as_u64().unwrap() as usize).collect();
     keep.sort_unstable();
-    let folded: Vec<usize> = (0..STATES).filter(|s| keep.binary_search(s).is_err()).collect();
     let length = doc["out"]["H"][0]["key"].as_array().unwrap().len();
-    let (library, source) = source(doc, &doc["points"][which], length);
+    let (library, source, values) = source(doc, &doc["points"][which], length);
     let sectors = Sectors { states: vec![[0; 2]; STATES], generators: vec![[0; 2]; length] };
     let all: Vec<usize> = (0..STATES).collect();
-    let splits = Split::all(&library, &keep, &sectors, MODEL);
-    let local = fold(&splits, &keep, &folded, &source, &sectors, MODEL, &levels(&labels, &all));
+    let folding = Folding::new(&library, &source, &keep, &sectors, MODEL, &levels(&labels, &all));
+    let local = folding.at(&values);
     (local.components(), local.now(0.0))
 }
 
@@ -633,14 +643,8 @@ fn rs_at_cost() {
             let dense = time(&mut || {
                 std::hint::black_box(scene.components_at([0.13, -0.21, 0.37], [50.0, -80.0, 120.0]));
             });
-            let sizes: Vec<usize> = local.blocks.iter().map(|b| b.rows.len()).collect();
-            eprintln!(
-                "{name} {point}: point_at {terms:.1} + Rs::local {fold:.1} + now {now:.1} = {:.1} µs per point; components {by:.1} µs; (components_at {dense:.1} µs); blocks {sizes:?}, {} amplitudes, {} legs, {} jump parts",
-                terms + fold + now,
-                local.amplitudes.len(),
-                local.legs.len(),
-                local.jumps.len()
-            );
+            let sizes = rs.plan().blocks();
+            eprintln!("{name} {point}: point_at {terms:.1} + Rs::local {fold:.1} + now {now:.1} = {:.1} µs per point; components {by:.1} µs; (components_at {dense:.1} µs); blocks {sizes:?}", terms + fold + now);
         }
     }
 }
@@ -730,3 +734,5 @@ fn the_reference_is_pysel_to_rounding() {
 fn summed_parts(parts: &[ModelPart], gradient: Option<usize>) -> Mat {
     summed(parts, gradient, STATES)
 }
+
+

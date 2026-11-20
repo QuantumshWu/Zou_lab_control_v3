@@ -494,3 +494,6 @@ fn a_step_s_time_on_the_selected_model() {
         );
     }
 }
+
+#[path = "golden.rs"]
+mod golden;

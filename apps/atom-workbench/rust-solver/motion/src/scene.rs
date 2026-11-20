@@ -290,10 +290,11 @@ impl Scene {
     }
 
     /// H's terms at the Doppler shifts w_l (rad/µs, one per beam, request order): the static part's -- the base, and
-    /// each outside form's products that do not beat, conj(a_l) a_m B(E_l, E_m) with its conjugate for l ≠ m --, each
-    /// beam's a_l X_l at e_l, f_l = ω_l − w_l, the tweezer's a_tw* R_tw at −e_tw − 2e_ν, then the products that beat
-    /// (two beams of one frequency at different Doppler shifts) at e_m − e_l, f_m − f_l. The product of two beams of one
-    /// frequency and one Doppler shift beats at zero and is static.
+    /// each outside form's own intensity terms |a_l|² B(E_l, E_l) --, each beam's a_l X_l at e_l, f_l = ω_l − w_l, the
+    /// tweezer's a_tw* R_tw at −e_tw − 2e_ν, then the products of two beams of one frequency, conj(a_l) a_m B(E_l, E_m) at
+    /// e_m − e_l, f_m − f_l (its conjugate the other way). The terms are the same at every Doppler shift (the structure is
+    /// made once, model/rs.rs): a product of two beams at one Doppler shift has the frequency zero, it is not the static
+    /// part (whose key is zero), and the static generator G₀ of a fold does not hold it.
     pub fn terms(&self, doppler: &[f64]) -> Vec<Term> {
         let beams = self.request.beams.len();
         let tw = self.request.trap_beam;
@@ -306,9 +307,6 @@ impl Scene {
             let matrix = beams + 2 + i;
             if l == m {
                 terms.push(term(&zero, matrix, false, Factor::Product(l, l)));
-            } else if doppler[l] == doppler[m] {
-                terms.push(term(&zero, matrix, false, Factor::Product(l, m)));
-                terms.push(term(&zero, matrix, true, Factor::Product(m, l)));
             } else {
                 let key: Key = self.unit(m).iter().zip(self.unit(l)).map(|(x, y)| x - y).collect();
                 beating.push(term(&key, matrix, false, Factor::Product(l, m)));
@@ -348,6 +346,23 @@ impl Scene {
     /// H at r by its terms for the momentum κ (1/µm): what the fold reads at a point of a trajectory.
     pub fn point_at(&self, r: V3, kappa: V3) -> Point {
         self.point(r, &self.doppler(kappa), 1.0)
+    }
+
+    /// What the fold reads at a point of a trajectory (model/rs.rs `Tweezer::values`) into a buffer: the beams'
+    /// amplitudes with their gradients at r and the generators' rest-frame frequencies at the momentum κ; no terms (the
+    /// fold's structure is made once).
+    pub fn point_into(&self, r: V3, kappa: V3, point: &mut Point) {
+        point.terms.clear();
+        point.amplitudes.clear();
+        point.amplitudes.extend(self.geometry.iter().map(|g| g.amplitude_to(r, 1)));
+        point.rates.clear();
+        for g in &self.generators {
+            let w = g.beam.map_or(0.0, |l| {
+                let k = self.geometry[l].wave_vector();
+                self.hbar_over_mass * (dot3(k, kappa) + 0.5 * dot3(k, k))
+            });
+            point.rates.push(g.frequency - w);
+        }
     }
 
     /// H at r by its terms for given Doppler shifts w_l with the tweezer's amplitude scaled by `tweezer` (`components`).
