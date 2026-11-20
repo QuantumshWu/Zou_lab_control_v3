@@ -5,7 +5,7 @@
 //! - route (default): `krylov::solve` (ρ), the clock the least of N runs;
 //! - exact / direct: ρ on that route alone (the split, the exact S or P = A, GMRES), forced -- the fallbacks' cost;
 //! - --select: `select::decide` per scene (the filter names the scenes) on the full references and the fold2 models
-//!   of every P on the scene's path (`<scene>_manifest.json`), F as (0, 0, F_z) -- the exported rows hold z only.
+//!   of every P on the scene's path (`<scene>_manifest.json`); F⃗ from the rows 'Fx', 'Fy', 'Fz' ('F' = z alone).
 //! Readouts (the exported rows, as mdlat.readouts): F = Re(f·ρ), R = Re(r·ρ), populations Re(p_g·ρ) over their sum.
 //! Measures as td_s.cmp: F by max(|F|, kR), R relative, populations absolute; ρ by max |Δ| / max |Python's|.
 
@@ -54,8 +54,8 @@ impl Row {
     }
 }
 
-/// The system and its readout rows (F, R, the populations by group).
-fn load(dir: &str, tag: &str) -> (System, Row, Row, Vec<(String, Row)>) {
+/// The system and its readout rows (F⃗ -- 'F' is z alone --, R, the populations by group).
+fn load(dir: &str, tag: &str) -> (System, [Row; 3], Row, Vec<(String, Row)>) {
     let b = bytes(&format!("{dir}/{tag}.sys"));
     assert_eq!(&b[..8], b"FRSYS001");
     let mut p = 8;
@@ -64,7 +64,8 @@ fn load(dir: &str, tag: &str) -> (System, Row, Row, Vec<(String, Row)>) {
     let _rhs = c64s(&b, &mut p, n);
     let harmonic = u32s(&b, &mut p, n);
     let rows = u64_at(&b, &mut p) as usize;
-    let (mut force, mut rate, mut pops) = (Row(vec![], vec![]), Row(vec![], vec![]), Vec::new());
+    let empty_row = || Row(vec![], vec![]);
+    let (mut force, mut rate, mut pops) = ([empty_row(), empty_row(), empty_row()], empty_row(), Vec::new());
     for _ in 0..rows {
         let len = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize;
         p += 4;
@@ -73,7 +74,9 @@ fn load(dir: &str, tag: &str) -> (System, Row, Row, Vec<(String, Row)>) {
         let count = u64_at(&b, &mut p) as usize;
         let row = Row(u32s(&b, &mut p, count), c64s(&b, &mut p, count));
         match name.as_str() {
-            "F" => force = row,
+            "Fx" => force[0] = row,
+            "Fy" => force[1] = row,
+            "F" | "Fz" => force[2] = row,
             "R" => rate = row,
             _ => pops.push((name[4..].to_string(), row)),
         }
@@ -125,14 +128,14 @@ fn memory() -> (f64, f64, f64) {
     (mb(c.pagefile), mb(c.peak_pagefile), mb(c.peak_working_set))
 }
 
-/// The readouts of ρ from the exported rows (levels over their sum, F along z).
-fn readouts(rho: &[C64], force: &Row, rate: &Row, pops: &[(String, Row)]) -> Readouts {
+/// The readouts of ρ from the exported rows (levels over their sum).
+fn readouts(rho: &[C64], force: &[Row; 3], rate: &Row, pops: &[(String, Row)]) -> Readouts {
     let raw: Vec<f64> = pops.iter().map(|(_, row)| row.read(rho)).collect();
     let total: f64 = raw.iter().sum();
     Readouts {
         levels: raw.iter().map(|v| v / total).collect(),
         rate: rate.read(rho),
-        force: [0.0, 0.0, force.read(rho)],
+        force: [force[0].read(rho), force[1].read(rho), force[2].read(rho)],
         ..Default::default()
     }
 }
@@ -163,7 +166,10 @@ fn select_scene(dir: &str, scene: &str) {
     let errors: Vec<String> = out
         .candidates
         .iter()
-        .map(|c| format!("P{} {:.2e}/{:.2e}", c.keep.len(), c.centre.worst(), c.edge.worst()))
+        .map(|c| {
+            let e = |p: &atom_motion::select::PointError| format!("{:.16e},{:.16e},{:.16e}", p.force, p.rate, p.populations);
+            format!("P{} {:.2e}/{:.2e} [c {} e {}]", c.keep.len(), c.centre.worst(), c.edge.worst(), e(&c.centre), e(&c.edge))
+        })
         .collect();
     println!("{scene:<6} P {} | {:.3} s | {}", out.keep.len(), out.seconds, errors.join(" | "));
 }
@@ -271,7 +277,7 @@ fn main() {
         let (f0, r0) = (r["F"].as_f64().unwrap(), r["R"].as_f64().unwrap());
         let raw: Vec<f64> = pops.iter().map(|(_, row)| row.read(&rho)).collect();
         let total: f64 = raw.iter().sum();
-        let d_f = (force.read(&rho) - f0).abs() / f0.abs().max(kph * r0);
+        let d_f = (force[2].read(&rho) - f0).abs() / f0.abs().max(kph * r0);
         let d_r = (rate.read(&rho) - r0).abs() / r0.abs();
         let d_p = pops
             .iter()
