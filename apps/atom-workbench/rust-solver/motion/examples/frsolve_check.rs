@@ -251,8 +251,7 @@ fn main() {
                 let rows = Rows::new(a);
                 let (slow, _) = split(a);
                 let n = a.rows;
-                let mask = if level == "direct" { vec![true; n] } else { slow };
-                let p = match Schur::new(a, &mask, &vec![0usize; n]) {
+                let p = match if level == "direct" { Schur::exact(a, &slow) } else { Schur::new(a, &slow, &vec![0usize; n]) } {
                     Ok(p) => p,
                     Err(u) => panic!("unfactorised after {:.1} s: {}", clock.elapsed().as_secs_f64(), u.reason),
                 };

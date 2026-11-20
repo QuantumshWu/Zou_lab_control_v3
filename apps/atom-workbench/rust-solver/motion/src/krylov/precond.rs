@@ -8,9 +8,8 @@
 //!   P⁻¹ r:  t = D_f⁻¹ r_f;   S_blocks z_s = r_s − A_sf t;   z_f = D_f⁻¹ (r_f − A_fs z_s).
 //! ```
 //!
-//! The partition is the one decision: the harmonics (S_h = blockdiag_j S_jj, the adopted first level), one block (the
-//! exact S, the second level), or -- with every unknown slow -- one block of A itself (P = A: the direct LU, the
-//! third). A − P = diag(S − S_blocks, A_ff − D_f), so P⁻¹A − I is set by S_blocks⁻¹ S_cross (a harmonic's response to
+//! The partition is the one decision of routes 1 and 2 (`Schur::new`): the harmonics (S_h = blockdiag_j S_jj, route 1)
+//! or one block (the exact S, route 2). A − P = diag(S − S_blocks, A_ff − D_f), so P⁻¹A − I is set by S_blocks⁻¹ S_cross (a harmonic's response to
 //! another's source against its own gap) and D_f⁻¹ O_f (fast-fast coupling against the fast gap); the slow-fast
 //! coupling (light shifts, pumping through fast elements) is exact in P. S is S's own second-order fold of the fast
 //! elements, with dissipation.
@@ -26,19 +25,33 @@
 //! preconditioner unavailable (`Unfactorised`, with faer's error); a numerically zero pivot shows as a non-finite
 //! application, which GMRES stops on.
 //!
-//! Known limit (frsolve.status.md): the direct route on the largest system (tilt2's edge reference, 30097 unknowns,
-//! 110 entries a row) is out of reach of faer. Its supernodal form sizes its storage from the structure of AᵀA, an
-//! upper bound over every pivot sequence, which is near dense there: out of memory at 8 GB after 44 s. Its left-looking
-//! form grows with the actual fill but has no dense kernels: over 5 minutes. (SuperLU, with a dynamic supernodal
-//! structure, took 49 s in the prototype.) The route has never been needed: every solve so far is certified on route 1.
+//!
+//! # Route 3: P = A, by the same split with both replacements undone (`Schur::exact`)
+//! The fast-fast block is factorised exactly and the slow Schur complement S = A_ss − A_sf A_ff⁻¹ A_fs is formed in
+//! full and factorised dense: then P = A, the direct solve, by block elimination with A_ff as the pivot block.
+//! - A_ff is strictly diagonally dominant by rows: a fast unknown's disc excludes 0 (a disc holding 0 is slow by
+//!   construction), so |A_yy| > R_y ≥ Σ_{fast z≠y} |A_yz|. Hence A_ff is regular (Gershgorin) and its elimination is
+//!   stable, the growth factor at most 2 (Higham 2002, Thm 9.9).
+//! - S is the exact one: its dense LU (partial pivoting) needs n_s² numbers and n_s³/3 multiply-adds, no symbolic
+//!   bound. The whole matrix's sparse LU is out of reach on the largest system (tilt2's edge, 30097 unknowns, 110
+//!   entries a row): faer's supernodal form sizes its storage from the structure of AᵀA, an upper bound over every
+//!   pivot sequence and near dense there (out of memory at 8 GB after 44 s), its left-looking form has no dense kernels
+//!   (over 5 minutes); SuperLU took 49 s in the prototype.
+//! - Forming S takes one solve with A_ff's factors per slow column (in parallel), each followed by A_sf's product.
+//! - Measured on tilt2's edge (frsolve.status.md): 270 s on 16 threads (A_ff's LU 54 s -- its fill is large, the fast
+//!   coherences couple across sectors --, forming S 197 s, S's dense LU 17 s), peak 5.8 GB; over 5 minutes on one
+//!   thread. Within the limits, but only just: the route has never been needed (every solve so far is certified on
+//!   route 1). Tried and out of the limits: faer's LU of A or of Aᵀ (out of memory at 8 GB), its left-looking LU of A
+//!   (over 5 minutes).
 
 use super::{diagonal, row};
 use crate::floquet::Sparse;
 use crate::linalg::C64;
 use faer::linalg::solvers::Solve;
 use faer::sparse::linalg::solvers::Lu;
-use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
-use faer::{c64, MatMut};
+use faer::linalg::solvers::PartialPivLu;
+use faer::sparse::{SparseColMatRef, SparseRowMatRef, SymbolicSparseColMatRef, SymbolicSparseRowMatRef};
+use faer::{c64, MatMut, MatRef};
 use rayon::prelude::*;
 
 /// One diagonal block of the slow Schur complement, factorised: its slow-local members (ascending) and the LU.
@@ -62,6 +75,8 @@ pub struct Schur {
     a_sf: Sparse,
     a_fs: Sparse,
     blocks: Vec<Block>,
+    /// Route 3: A_ff's LU (in place of D_f) and S's dense LU (in place of the blocks).
+    exact: Option<(Lu<usize, c64>, PartialPivLu<c64>)>,
     /// S has an entry outside the blocks (then the blocks are not the exact S).
     pub cross: bool,
     /// Entries of S formed (inside the blocks).
@@ -211,7 +226,7 @@ impl Schur {
             .collect();
         let blocks = blocks.map_err(|reason| Unfactorised { cross, reason })?;
         let apply_madds = (2 * f.len() + a_sf.indices.len() + a_fs.indices.len()) as f64;
-        Ok(Schur { slow: s, fast: f, d_fast, a_sf, a_fs, blocks, cross, nnz_kept, apply_madds })
+        Ok(Schur { slow: s, fast: f, d_fast, a_sf, a_fs, blocks, exact: None, cross, nnz_kept, apply_madds })
     }
 
     /// Number of slow unknowns and of blocks.
@@ -219,13 +234,115 @@ impl Schur {
         (self.slow.len(), self.blocks.len())
     }
 
+    /// Route 3's P = A for the slow mask `slow`: A_ff's sparse LU and the exact S's dense LU (module docs).
+    pub fn exact(a: &Sparse, slow: &[bool]) -> Result<Schur, Unfactorised> {
+        let n = a.rows;
+        let s: Vec<usize> = (0..n).filter(|&i| slow[i]).collect();
+        let f: Vec<usize> = (0..n).filter(|&i| !slow[i]).collect();
+        let mut local = vec![0usize; n];
+        for (k, &i) in s.iter().enumerate() {
+            local[i] = k;
+        }
+        for (k, &i) in f.iter().enumerate() {
+            local[i] = k;
+        }
+        let pick = |rows: &[usize], want_slow: bool| -> Sparse {
+            let mut indptr = vec![0usize];
+            let (mut indices, mut values) = (Vec::new(), Vec::new());
+            for &i in rows {
+                let (c, v) = row(a, i);
+                for (&j, &x) in c.iter().zip(v) {
+                    if slow[j] == want_slow {
+                        indices.push(local[j]);
+                        values.push(x);
+                    }
+                }
+                indptr.push(indices.len());
+            }
+            let cols = if want_slow { s.len() } else { f.len() };
+            Sparse { rows: rows.len(), cols, indptr, indices, values }
+        };
+        let (a_ss, a_sf, a_fs, a_ff) = (pick(&s, true), pick(&s, false), pick(&f, true), pick(&f, false));
+        let unfactorised = |reason: String| Unfactorised { cross: false, reason };
+        let values: Vec<c64> = a_ff.values.iter().map(|x| c64::new(x.re, x.im)).collect();
+        let symbolic = SymbolicSparseRowMatRef::new_unsorted_checked(f.len(), f.len(), &a_ff.indptr, None, &a_ff.indices);
+        let fast_lu = SparseRowMatRef::new(symbolic, &values).sp_lu().map_err(|e| unfactorised(format!("A_ff: {e:?}")))?;
+        // S's columns: e_j's column of A_ss less A_sf A_ff⁻¹ (A_fs's column j), A_fs and A_ss by columns
+        let (ns, nf) = (s.len(), f.len());
+        let columns = |m: &Sparse| -> Vec<Vec<(usize, C64)>> {
+            let mut out = vec![Vec::new(); ns];
+            for i in 0..m.rows {
+                let (c, v) = row(m, i);
+                for (&j, &x) in c.iter().zip(v) {
+                    out[j].push((i, x));
+                }
+            }
+            out
+        };
+        let (fs_columns, ss_columns) = (columns(&a_fs), columns(&a_ss));
+        let mut dense = vec![c64::new(0.0, 0.0); ns * ns];
+        dense.par_chunks_mut(ns.max(1)).enumerate().for_each(|(j, out)| {
+            let mut x = vec![c64::new(0.0, 0.0); nf];
+            for &(k, v) in &fs_columns[j] {
+                x[k] = c64::new(v.re, v.im);
+            }
+            fast_lu.solve_in_place(MatMut::from_column_major_slice_mut(&mut x, nf, 1));
+            for (i, o) in out.iter_mut().enumerate() {
+                let (c, v) = row(&a_sf, i);
+                let t: C64 = c.iter().zip(v).map(|(&k, &e)| e * C64::new(x[k].re, x[k].im)).sum();
+                *o = c64::new(-t.re, -t.im);
+            }
+            for &(i, v) in &ss_columns[j] {
+                out[i] += c64::new(v.re, v.im);
+            }
+        });
+        let schur_lu = MatRef::from_column_major_slice(&dense, ns, ns).partial_piv_lu();
+        drop(dense);
+        let diag = diagonal(a);
+        let d_fast = f.iter().map(|&i| diag[i]).collect();
+        let apply_madds = (a_sf.indices.len() + a_fs.indices.len() + ns * ns) as f64;
+        Ok(Schur {
+            slow: s,
+            fast: f,
+            d_fast,
+            a_sf,
+            a_fs,
+            blocks: Vec::new(),
+            exact: Some((fast_lu, schur_lu)),
+            cross: false,
+            nnz_kept: ns * ns,
+            apply_madds,
+        })
+    }
+
+    /// The fast block's inverse on a fast vector: D_f⁻¹, or A_ff⁻¹ on route 3.
+    fn fast_inverse(&self, v: Vec<C64>) -> Vec<C64> {
+        match &self.exact {
+            None => v.iter().zip(&self.d_fast).map(|(&x, &d)| x / d).collect(),
+            Some((lu, _)) => {
+                let mut buf: Vec<c64> = v.iter().map(|x| c64::new(x.re, x.im)).collect();
+                let m = buf.len();
+                lu.solve_in_place(MatMut::from_column_major_slice_mut(&mut buf, m, 1));
+                buf.iter().map(|x| C64::new(x.re, x.im)).collect()
+            }
+        }
+    }
+
     /// z = P⁻¹ r.
     pub fn apply(&self, r: &[C64], z: &mut [C64]) {
-        let t: Vec<C64> = self.fast.iter().zip(&self.d_fast).map(|(&i, &d)| r[i] / d).collect();
+        let t = self.fast_inverse(self.fast.iter().map(|&i| r[i]).collect());
         let mut rs: Vec<C64> = self.slow.iter().map(|&i| r[i]).collect();
         for (k, ri) in rs.iter_mut().enumerate() {
             let (c, v) = row(&self.a_sf, k);
             *ri -= c.iter().zip(v).map(|(&j, &x)| x * t[j]).sum::<C64>();
+        }
+        if let Some((_, lu)) = &self.exact {
+            let mut buf: Vec<c64> = rs.iter().map(|x| c64::new(x.re, x.im)).collect();
+            let m = buf.len();
+            lu.solve_in_place(MatMut::from_column_major_slice_mut(&mut buf, m, 1));
+            for (&i, x) in self.slow.iter().zip(&buf) {
+                z[i] = C64::new(x.re, x.im);
+            }
         }
         let solved: Vec<Vec<c64>> = self
             .blocks
@@ -242,10 +359,14 @@ impl Schur {
                 z[self.slow[i]] = C64::new(x.re, x.im);
             }
         }
-        for (k, (&i, &d)) in self.fast.iter().zip(&self.d_fast).enumerate() {
-            let (c, v) = row(&self.a_fs, k);
-            let coupled: C64 = c.iter().zip(v).map(|(&j, &x)| x * z[self.slow[j]]).sum();
-            z[i] = (r[i] - coupled) / d;
+        let rest: Vec<C64> = (0..self.fast.len())
+            .map(|k| {
+                let (c, v) = row(&self.a_fs, k);
+                r[self.fast[k]] - c.iter().zip(v).map(|(&j, &x)| x * z[self.slow[j]]).sum::<C64>()
+            })
+            .collect();
+        for (&i, x) in self.fast.iter().zip(self.fast_inverse(rest)) {
+            z[i] = x;
         }
     }
 }

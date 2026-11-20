@@ -7,8 +7,8 @@
 //! 1. `Route::Krylov` -- the Gershgorin split, D_f for the fast-fast block, S on its harmonic-diagonal blocks;
 //! 2. `Route::ExactSchur` -- the same split, S exact (one block); tried only if S has entries outside the harmonic
 //!    blocks (otherwise it is route 1's operator: one harmonic, M = 0);
-//! 3. `Route::Direct` -- every unknown slow, one block: P = A, the direct sparse LU (GMRES's first iterate is A⁻¹b; it
-//!    then refines to the floor and is certified like the others).
+//! 3. `Route::Direct` -- the same split with both replacements undone: A_ff and S exact (`Schur::exact`), so P = A,
+//!    the direct solve (GMRES's first iterate is A⁻¹b; it then refines to the floor and is certified like the others).
 //!
 //! All three solve the same system to the same stop and certificate; the route only changes the work. The result is
 //! the first certified attempt's iterate; if none is certified, the attempt of least ζ, reported not certified. The
@@ -80,7 +80,6 @@ pub fn solve(system: &System) -> Result<Solved, Inconsistent> {
     let (slow, split_tests) = split(a);
     let seconds_split = clock.elapsed().as_secs_f64();
     let one = vec![0usize; n];
-    let everything = vec![true; n];
     let mut attempts: Vec<Attempt> = Vec::new();
     let mut accepted: Option<usize> = None;
     let mut cross = true;
@@ -89,13 +88,12 @@ pub fn solve(system: &System) -> Result<Solved, Inconsistent> {
         if route == Route::ExactSchur && !cross {
             continue;
         }
-        let (mask, group) = match route {
-            Route::Krylov => (&slow[..], &system.harmonic[..]),
-            Route::ExactSchur => (&slow[..], &one[..]),
-            Route::Direct => (&everything[..], &one[..]),
-        };
         let clock = Instant::now();
-        let p = Schur::new(a, mask, group);
+        let p = match route {
+            Route::Krylov => Schur::new(a, &slow, &system.harmonic),
+            Route::ExactSchur => Schur::new(a, &slow, &one),
+            Route::Direct => Schur::exact(a, &slow),
+        };
         let mut attempt = Attempt {
             route,
             slow: 0,
