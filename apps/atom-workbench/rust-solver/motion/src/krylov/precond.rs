@@ -21,29 +21,30 @@
 //! run in the prototype's order (T = (A_sf D_f⁻¹) A_fs first, then A_ss − T), so the result does not depend on the
 //! thread count.
 //!
-//! The sparse LU is faer's (COLAMD column order, partial row pivoting) -- see Cargo.toml -- in its left-looking
-//! (Gilbert–Peierls, "simplicial") form: L and U grow with the fill the pivots actually make, as SuperLU's do. faer's
-//! supernodal form instead sizes its storage from the structure of AᵀA, an upper bound over every pivot sequence; on
-//! tilt2's edge reference (30097 unknowns, 110 entries a row) that bound is near dense and the factorisation runs out
-//! of memory (8 GB), where the actual fill is a few hundred MB. A block whose factorisation fails makes the
+//! The sparse LU is faer's `sp_lu` (COLAMD column order, partial row pivoting; faer picks its supernodal or its
+//! left-looking form by its flop estimate) -- see Cargo.toml. A block whose factorisation fails makes the
 //! preconditioner unavailable (`Unfactorised`, with faer's error); a numerically zero pivot shows as a non-finite
 //! application, which GMRES stops on.
+//!
+//! Known limit (frsolve.status.md): the direct route on the largest system (tilt2's edge reference, 30097 unknowns,
+//! 110 entries a row) is out of reach of faer. Its supernodal form sizes its storage from the structure of AᵀA, an
+//! upper bound over every pivot sequence, which is near dense there: out of memory at 8 GB after 44 s. Its left-looking
+//! form grows with the actual fill but has no dense kernels: over 5 minutes. (SuperLU, with a dynamic supernodal
+//! structure, took 49 s in the prototype.) The route has never been needed: every solve so far is certified on route 1.
 
 use super::{diagonal, row};
 use crate::floquet::Sparse;
 use crate::linalg::C64;
-use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::sparse::linalg::lu::{factorize_symbolic_lu, LuRef, LuSymbolicParams, NumericLu, SymbolicLu};
-use faer::sparse::linalg::SupernodalThreshold;
+use faer::linalg::solvers::Solve;
+use faer::sparse::linalg::solvers::Lu;
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
-use faer::{c64, Conj, MatMut, Par};
+use faer::{c64, MatMut};
 use rayon::prelude::*;
 
 /// One diagonal block of the slow Schur complement, factorised: its slow-local members (ascending) and the LU.
 struct Block {
     members: Vec<usize>,
-    symbolic: SymbolicLu<usize>,
-    numeric: NumericLu<usize, c64>,
+    lu: Lu<usize, c64>,
 }
 
 /// A block's LU failed (faer's error, e.g. a structurally singular block); `cross`: S had entries outside the blocks.
@@ -204,19 +205,8 @@ impl Schur {
                     }
                 }
                 let symbolic = SymbolicSparseColMatRef::new_checked(size, size, &count, None, &row_index);
-                let matrix = SparseColMatRef::new(symbolic, &values);
-                let params = LuSymbolicParams {
-                    supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
-                    ..Default::default()
-                };
-                let symbolic = factorize_symbolic_lu(matrix.symbolic(), params).map_err(|e| format!("{e:?}"))?;
-                let mut numeric = NumericLu::new();
-                let scratch = symbolic.factorize_numeric_lu_scratch::<c64>(Par::Seq, Default::default());
-                let mut memory = MemBuffer::try_new(scratch).map_err(|e| format!("{e:?}"))?;
-                symbolic
-                    .factorize_numeric_lu(&mut numeric, matrix, Par::Seq, MemStack::new(&mut memory), Default::default())
-                    .map_err(|e| format!("{e:?}"))?;
-                Ok(Block { members: m, symbolic, numeric })
+                let lu = SparseColMatRef::new(symbolic, &values).sp_lu().map_err(|e| format!("{e:?}"))?;
+                Ok(Block { members: m, lu })
             })
             .collect();
         let blocks = blocks.map_err(|reason| Unfactorised { cross, reason })?;
@@ -243,13 +233,7 @@ impl Schur {
             .map(|b| {
                 let mut buf: Vec<c64> = b.members.iter().map(|&i| c64::new(rs[i].re, rs[i].im)).collect();
                 let m = buf.len();
-                let mut memory = MemBuffer::new(b.symbolic.solve_in_place_scratch::<c64>(1, Par::Seq));
-                LuRef::new_unchecked(&b.symbolic, &b.numeric).solve_in_place_with_conj(
-                    Conj::No,
-                    MatMut::from_column_major_slice_mut(&mut buf, m, 1),
-                    Par::Seq,
-                    MemStack::new(&mut memory),
-                );
+                b.lu.solve_in_place(MatMut::from_column_major_slice_mut(&mut buf, m, 1));
                 buf
             })
             .collect();
