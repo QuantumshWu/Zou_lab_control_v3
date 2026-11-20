@@ -393,3 +393,38 @@ fn r1_node_parts() {
         eprintln!("R1SIZES {name}: zs ws h_pairs j_pairs h_flops j_flops {:?}; amplitudes {}", run.lab.sizes(plan), plan.amplitudes.len());
     }
 }
+
+/// R1-MODEL item 2: every beat of the node's generator and of its gradient with its frequency, its exact vector and its
+/// largest element at the centre and at the moving point -- H_eff's part (θ and the decay left out) and the decay's apart
+/// --, and the step's candidate tones; per scene (V3E_SCENE one of them).
+#[test]
+#[ignore]
+fn r1_tones() {
+    for (name, request, keep) in runs() {
+        let run = run_of(&request, &keep);
+        let n = keep.len();
+        for (point, r, kappa) in [nodes(&run)[0], nodes(&run)[2]] {
+            let full = run.node(r, kappa, false);
+            // H_eff alone: the node without the decay (its classes' values zeroed before the decay is made).
+            let mut bare = run.template.clone();
+            let mut work = Work::default();
+            run.scene.point_into(r, kappa, &mut work.point);
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local);
+            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false });
+            run.fill(&mut bare, &work.out, false, &mut work.jumps, &mut work.product);
+            let (values, exact) = run.components();
+            for (k, ((beat, g), (_, gb))) in full.generator.iter().zip(&bare.generator).enumerate() {
+                let total = g.max_abs();
+                let _ = gb;
+                let grad = full.gradient.iter().find(|x| x.0 == *beat).map_or(0.0, |x| x.1.iter().map(Mat::max_abs).fold(0.0, f64::max));
+                eprintln!("R1TONE {name} {point}: slot {k} beat {beat} Ω {:+.6e} rad/µs exact {:?}: generator max {total:.3e}, gradient max {grad:.3e}", values[*beat], exact[*beat]);
+            }
+            let middle = run.middle(0, r, 0.0);
+            let path = middle.path(kappa, [0.0; 3]);
+            let _ = middle.node(&path, 0.0, false);
+            let (mut beats, mut keys) = (vec![], vec![]);
+            middle.beats(&path, &mut beats, &mut keys);
+            eprintln!("R1TONE {name} {point}: {} candidate tones {:?} (n {n})", beats.len(), beats);
+        }
+    }
+}

@@ -126,11 +126,23 @@ static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::ne
 struct Tables {
     h: Vec<Vec<(u32, u32, u32)>>,
     channels: Vec<Vec<(u32, u32, u8, u32, u32)>>,
-    /// Every jump component (class, axis, component) with its columns and its elements' places among ground × columns
-    /// (row-major), the decay's factors in that order; where each one's numbers start in the thread's buffer.
-    jumps: Vec<(usize, usize, usize, Vec<usize>, Vec<usize>)>,
+    /// The decay's factors: every spherical jump component; where each one's numbers start in the thread's buffer.
+    jumps: Vec<Spherical>,
     starts: Vec<usize>,
     decay: Vec<Decay>,
+}
+
+/// A jump component in the emission's spherical basis (`Selected::layout`): its class, channel q and beat, its columns
+/// and rows, and per element its place among ground × columns (row-major) with the Cartesian elements it sums (axis,
+/// component, element, U_qa).
+#[derive(Clone, Debug)]
+struct Spherical {
+    class: usize,
+    q: usize,
+    beat: usize,
+    cols: Vec<usize>,
+    rows: Vec<usize>,
+    elements: Vec<(usize, Vec<(usize, usize, usize, C64)>)>,
 }
 
 /// One product of the decay (`Selected::layout`): of the class's axis the components l ≤ r (indices into
@@ -333,23 +345,26 @@ impl Selected {
         let waves = scene.geometry.iter().enumerate().filter(|(l, _)| *l != scene.tweezer()).map(|(_, g)| g.wave_vector()).collect();
         // The fold's pieces by the lab's frequency at rest -- the frame's primitive vector of their keys --, each group
         // under the first of its keys met.
-        let mut first: Vec<(Vec<Ratio>, Key)> = Vec::new();
-        let labels: Vec<Key> = rs
-            .folding
-            .keys()
-            .iter()
-            .map(|key| {
-                let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
-                let p = frame.primitive(&v);
-                match first.iter().find(|f| f.0 == p) {
-                    Some(f) => f.1.clone(),
-                    None => {
-                        first.push((p, key.clone()));
-                        key.clone()
+        let label = |keys: &[Key]| -> Vec<Key> {
+            let mut first: Vec<(Vec<Ratio>, Key)> = Vec::new();
+            keys.iter()
+                .map(|key| {
+                    let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
+                    let p = frame.primitive(&v);
+                    match first.iter().find(|f| f.0 == p) {
+                        Some(f) => f.1.clone(),
+                        None => {
+                            first.push((p, key.clone()));
+                            key.clone()
+                        }
                     }
-                }
-            })
-            .collect();
+                })
+                .collect()
+        };
+        let labels = label(rs.folding.keys());
+        // The decay's structure: the same fold with its channels in the emission's spherical basis.
+        let spherical = rs.spherical();
+        let spherical = Grouping::new(&spherical, &label(spherical.keys()));
         let lab = Grouping::new(rs.plan(), &labels);
         let n = rs.keep.len();
         let mut beats = Beats::default();
@@ -379,7 +394,7 @@ impl Selected {
             report,
             scene,
         };
-        run.layout();
+        run.layout(&spherical);
         Ok(run)
     }
 
@@ -508,7 +523,7 @@ impl Selected {
     /// The node's structure (module documentation, # The nodes), made once from the fold's lab grouping: the beats of
     /// H_eff's and its gradient's structural elements, each output element's place, the photon classes with their
     /// channels' components by beat and their elements, and the decay's products between them.
-    fn layout(&mut self) {
+    fn layout(&mut self, spherical: &Grouping) {
         let n = self.rs.keep.len();
         let lab = &self.lab;
         let mut template = Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 };
@@ -575,35 +590,81 @@ impl Selected {
             }
             tables.channels.push(list);
         }
-        // The decay −(i/2) Σ_ch L(t)†L(t) by beats: per class and axis each pair of its components (l ≤ r), L_l†L_r at the
-        // beat r − l and its adjoint at l − r (a jump lands on the ground states: each component's rows are theirs).
-        for (ci, class) in template.classes.iter().enumerate() {
-            for (axis, jumps) in class.axes.iter().enumerate() {
-                let first = tables.jumps.len();
-                for (j, jump) in jumps.iter().enumerate() {
-                    assert!(jump.elements.iter().all(|e| e.at / n < GROUND), "a jump lands on the ground states");
-                    let mut cols: Vec<usize> = jump.elements.iter().map(|e| e.at % n).collect();
-                    cols.sort_unstable();
-                    cols.dedup();
-                    let places = jump.elements.iter().map(|e| (e.at / n) * cols.len() + cols.binary_search(&(e.at % n)).expect("its column")).collect();
-                    tables.jumps.push((ci, axis, j, cols, places));
+        // The decay −(i/2) Σ_ch L(t)†L(t) = −(i/2) Σ_ch Σ_q ℓ_q†ℓ_q by beats, its channels in the emission's spherical
+        // basis ℓ_q = Σ_a U_qa L_a (rs.rs `channel_basis`): their structure the spherical fold's (`spherical`), each element
+        // of ℓ_q the Cartesian elements of its place and beat with their coefficients; per class and q each pair of its
+        // components (l ≤ r) whose rows meet, ℓ_l†ℓ_r at the beat r − l and its adjoint at l − r (a jump lands on the
+        // ground states: each component's rows are theirs).
+        let basis = self.rs.tweezer().basis;
+        let mut comps: Vec<(usize, usize, usize, Vec<usize>)> = Vec::new();
+        for (co, (q, fast, which, key, _)) in spherical.channel_outputs.iter().enumerate() {
+            if *which != 0 {
+                continue;
+            }
+            let beats = self.elements(key, Of::Jump);
+            let class = match template.classes.iter().position(|c| c.fast == *fast) {
+                Some(i) => i,
+                None => continue,
+            };
+            for x in spherical.channel_lists[co].iter().map(|&x| x as usize) {
+                let beat = beats[x];
+                match comps.iter_mut().find(|c| c.0 == class && c.1 == *q && c.2 == beat) {
+                    Some(c) => c.3.push(x),
+                    None => comps.push((class, *q, beat, vec![x])),
                 }
-                for l in 0..jumps.len() {
-                    for r in l..jumps.len() {
-                        let (bl, br) = (jumps[l].beat, jumps[r].beat);
-                        let forward = if bl == br { 0 } else { self.difference(br, bl) };
-                        let back = if bl == br { 0 } else { self.difference(bl, br) };
-                        let forward = slot(&mut template.generator, forward, || Mat::zeros(n, n));
-                        let back = slot(&mut template.generator, back, || Mat::zeros(n, n));
-                        tables.decay.push(Decay { left: first + l, right: first + r, forward, back });
+            }
+        }
+        comps.sort_by_key(|c| (c.0, c.1, c.2));
+        for (class, q, beat, mut places) in comps {
+            places.sort_unstable();
+            places.dedup();
+            assert!(places.iter().all(|x| x / n < GROUND), "a jump lands on the ground states");
+            let mut cols: Vec<usize> = places.iter().map(|x| x % n).collect();
+            cols.sort_unstable();
+            cols.dedup();
+            let mut elements = Vec::new();
+            for &x in &places {
+                let at = (x / n) * cols.len() + cols.binary_search(&(x % n)).expect("its column");
+                let mut sources = Vec::new();
+                for (a, &u) in basis[q].iter().enumerate() {
+                    if u == C64::ZERO {
+                        continue;
+                    }
+                    let axis = &template.classes[class].axes[a];
+                    if let Some(j) = axis.iter().position(|j| j.beat == beat) {
+                        if let Some(e) = axis[j].elements.iter().position(|e| e.at == x) {
+                            sources.push((a, j, e, u));
+                        }
                     }
                 }
+                elements.push((at, sources));
+            }
+            let rows: Vec<usize> = {
+                let mut r: Vec<usize> = places.iter().map(|x| x / n).collect();
+                r.dedup();
+                r
+            };
+            tables.jumps.push(Spherical { class, q, beat, cols, rows, elements });
+        }
+        let count = tables.jumps.len();
+        for l in 0..count {
+            for r in l..count {
+                let (jl, jr) = (&tables.jumps[l], &tables.jumps[r]);
+                if jl.class != jr.class || jl.q != jr.q || !jl.rows.iter().any(|x| jr.rows.contains(x)) {
+                    continue;
+                }
+                let (bl, br) = (jl.beat, jr.beat);
+                let forward = if bl == br { 0 } else { self.difference(br, bl) };
+                let back = if bl == br { 0 } else { self.difference(bl, br) };
+                let forward = slot(&mut template.generator, forward, || Mat::zeros(n, n));
+                let back = slot(&mut template.generator, back, || Mat::zeros(n, n));
+                tables.decay.push(Decay { left: l, right: r, forward, back });
             }
         }
         let mut at = 0;
         tables.starts = tables.jumps.iter().map(|j| {
             let here = at;
-            at += GROUND * j.3.len();
+            at += GROUND * j.cols.len();
             here
         }).collect();
         self.template = template;
@@ -685,18 +746,19 @@ impl Selected {
                 }
             }
         }
-        // The decay: the components on the ground rows and their columns, then each pair's product.
+        // The decay: the spherical components on the ground rows and their columns, then each pair's product.
         jumps.clear();
-        for &(c, a, j, ref cols, ref places) in &self.tables.jumps {
+        for j in &self.tables.jumps {
             let at = jumps.len();
-            jumps.resize(at + GROUND * cols.len(), C64::ZERO);
-            for (e, &p) in node.classes[c].axes[a][j].elements.iter().zip(places) {
-                jumps[at + p] = e.value;
+            jumps.resize(at + GROUND * j.cols.len(), C64::ZERO);
+            let axes = &node.classes[j.class].axes;
+            for (p, sources) in &j.elements {
+                jumps[at + p] = sources.iter().map(|&(a, c, e, u)| u * axes[a][c].elements[e].value).sum();
             }
         }
         let half = C64::new(0.0, -0.5);
         for d in &self.tables.decay {
-            let ((_, _, _, cl, _), (_, _, _, cr, _)) = (&self.tables.jumps[d.left], &self.tables.jumps[d.right]);
+            let (cl, cr) = (&self.tables.jumps[d.left].cols, &self.tables.jumps[d.right].cols);
             let (sl, sr) = (self.tables.starts[d.left], self.tables.starts[d.right]);
             product.clear();
             product.resize(cl.len() * cr.len(), C64::ZERO);

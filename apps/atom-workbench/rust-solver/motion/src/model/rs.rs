@@ -669,11 +669,68 @@ pub struct Tweezer {
     sectors: Sectors,
     groups: Vec<Vec<usize>>,
     source: Source,
+    /// The same source with its channels in the emission's spherical basis (`channel_basis`): the decay's structure.
+    spherical: Source,
+    /// The spherical basis: per channel q its Cartesian axes' coefficients (ℓ_q = Σ_a U_qa L_a).
+    pub basis: [[C64; 3]; 3],
     factors: Factors,
     /// Per sign σ of the tweezer's absorbed photon (+: its keys e_tw, e_tw + 2e_ν; −: their negations) and power j the
     /// largest entry of its matrices (the series' rule), and the static part at δ = 0 (`still`).
     sizes: [[f64; ORDERS]; 2],
     still: Mat,
+}
+
+/// The emission's channels in the basis that holds the fewest entries (by the rounding rule, `rounded`) among the
+/// Cartesian axes and the spherical bases about each of them, ℓ_± = ∓(L_b ± iL_c)/√2, ℓ_0 = L_a (a, b, c cyclic): the
+/// basis of the states' quantization axis, where each channel changes m by one number and the decay Σ_q ℓ_q†ℓ_q =
+/// Σ_a L_a†L_a holds no element of the axes' cancellations (Δm = 2 of the Cartesian x and y: diaga.status.md 4.3). Any
+/// unitary basis gives the same decay; this one gives it its structure.
+pub fn channel_basis(c: &[Mat; 3]) -> [[C64; 3]; 3] {
+    let r = std::f64::consts::FRAC_1_SQRT_2;
+    let cyclic = |a: usize| -> [[C64; 3]; 3] {
+        let (b, cc) = ((a + 1) % 3, (a + 2) % 3);
+        let mut u = [[C64::ZERO; 3]; 3];
+        u[0][b] = C64::real(-r);
+        u[0][cc] = C64::new(0.0, -r);
+        u[1][b] = C64::real(r);
+        u[1][cc] = C64::new(0.0, -r);
+        u[2][a] = C64::ONE;
+        u
+    };
+    let identity = [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ONE, C64::ZERO], [C64::ZERO, C64::ZERO, C64::ONE]];
+    let count = |u: &[[C64; 3]; 3]| -> usize {
+        u.iter()
+            .map(|row| {
+                let mut m = Mat::zeros(STATES, STATES);
+                for (a, &x) in row.iter().enumerate() {
+                    if x != C64::ZERO {
+                        m.add_scaled(x, &c[a]);
+                    }
+                }
+                rounded(&m).data.iter().filter(|z| **z != C64::ZERO).count()
+            })
+            .sum()
+    };
+    let mut best = (count(&identity), identity);
+    for a in [2, 0, 1] {
+        let u = cyclic(a);
+        let n = count(&u);
+        if n < best.0 {
+            best = (n, u);
+        }
+    }
+    best.1
+}
+
+/// Σ_a U_qa M_a of three matrices.
+fn combined(row: &[C64; 3], m: [&Mat; 3]) -> Mat {
+    let mut out = Mat::zeros(m[0].rows, m[0].cols);
+    for (x, mi) in row.iter().zip(m) {
+        if *x != C64::ZERO {
+            out.add_scaled(*x, mi);
+        }
+    }
+    out
 }
 
 /// The coefficient index of the power j ≥ 1 of the sign σ (0: +, 1: −); coefficient 0 is one.
@@ -756,15 +813,46 @@ impl Tweezer {
             let kicks = kicks.iter().map(|x| piece(&mut library, &mut sizes, x)).collect();
             jumps.push(SourceChannel { emission: *emission, fast: *fast, parts, kicks });
         }
+        // The same channels in the spherical basis: the emission's, and the tweezer's per fast index, key, sign and power.
+        let basis = channel_basis(&c);
+        let mut spherical_jumps = Vec::new();
+        for (q, row) in basis.iter().enumerate() {
+            let m = put(&mut library, &rounded(&combined(row, [&c[0], &c[1], &c[2]])));
+            spherical_jumps.push(SourceChannel { emission: q, fast: [0; 2], parts: vec![Piece { key: vec![0; length], terms: vec![Term::one(one, m)] }], kicks: Vec::new() });
+        }
+        let fasts: Vec<[i64; 2]> = {
+            let mut f: Vec<[i64; 2]> = unit.channels.keys().map(|(_, fast)| *fast).collect();
+            f.sort_unstable();
+            f.dedup();
+            f
+        };
+        for fast in fasts {
+            let factor = if fast[1] > 0 { a } else { a_conj };
+            let axes: Vec<&BTreeMap<Key, Vec<(usize, usize, Mat)>>> = (0..3).map(|axis| &unit.channels[&(axis, fast)].0).collect();
+            for (q, row) in basis.iter().enumerate() {
+                let mut parts = Vec::new();
+                for (key, by) in axes[0] {
+                    let mut matrices = Vec::new();
+                    for (sign, j, _) in by {
+                        let pick = |axis: usize| -> &Mat { &axes[axis][key].iter().find(|x| x.0 == *sign && x.1 == *j).expect("the axes' powers").2 };
+                        let m = rounded(&combined(row, [pick(0), pick(1), pick(2)]));
+                        matrices.push((put(&mut library, &m), power(*sign, *j)));
+                    }
+                    parts.push(Piece { key: key.clone(), terms: vec![Term { factor, adjoint: false, scale: C64::ONE, matrices }] });
+                }
+                spherical_jumps.push(SourceChannel { emission: q, fast, parts, kicks: Vec::new() });
+            }
+        }
         let mut generator = hamiltonian.iter().find(|p| p.key.iter().all(|k| *k == 0)).expect("H's static part").terms.clone();
         generator.push(Term { factor: one, adjoint: false, scale: C64::new(0.0, -0.5), matrices: vec![(rate, 0)] });
         let scattering: Vec<(usize, usize)> = unit.scattering.iter().map(|(sign, j, m)| (put(&mut library, &rounded(m)), power(*sign, *j))).collect();
         generator.push(Term { factor: power_f, adjoint: false, scale: C64::new(0.0, -0.5), matrices: scattering });
         let varying = factors.0.iter().map(|f| f.varying(Some(scene))).collect();
         let source = Source { hamiltonian, jumps, generator, varying, coefficients: 1 + 2 * (ORDERS - 1) };
+        let spherical = Source { jumps: spherical_jumps, ..source.clone() };
         let all: Vec<usize> = (0..STATES).collect();
         let groups = levels(&scene.request.states, &all);
-        Tweezer { library, sectors, groups, source, factors, sizes, still: unit.still }
+        Tweezer { library, sectors, groups, source, spherical, basis, factors, sizes, still: unit.still }
     }
 
     /// The source's numbers at a point (scene.rs `Point`): the factors at its amplitudes, the tweezer's Doppler powers
@@ -991,6 +1079,12 @@ impl Rs {
     /// The tweezer's fold made once (`Tweezer::still`).
     pub fn tweezer(&self) -> &Tweezer {
         &self.tweezer
+    }
+
+    /// The fold's structure with its channels in the emission's spherical basis (`channel_basis`): the decay's
+    /// structure, made where asked for (a trajectory's model, once).
+    pub fn spherical(&self) -> fold::Plan {
+        Folding::new(&self.tweezer.library, &self.tweezer.spherical, &self.keep, &self.sectors, MODEL, &self.tweezer.groups).plan
     }
 
     /// The model by frequency components for the scene's components at a point (the checkpoint's).

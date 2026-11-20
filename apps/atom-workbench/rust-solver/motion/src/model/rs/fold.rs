@@ -374,6 +374,11 @@ impl Plan {
     pub fn pieces(&self) -> usize {
         self.keys.len()
     }
+
+    /// The pieces' keys (`Source::pieces`' order).
+    pub fn keys(&self) -> &[Key] {
+        &self.keys
+    }
 }
 
 /// Where an entry of a term falls in a fold of K and Q.
