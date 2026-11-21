@@ -750,7 +750,8 @@ pub struct Local {
     hats: Vec<Vec<(usize, Mat)>>,
     energies: Vec<f64>,
     slopes: [Vec<f64>; 3],
-    /// Per block its batch's M̂ (|B| × total) and ∂M̂ (|B| × 3 total: per amplitude its three axes side by side).
+    /// Per block its batch's M̂ (|B| × total) and ∂M̂ (|B| × 3 total: each row the three axes' rows of the batch in
+    /// turn).
     m: Vec<Mat>,
     dm: Vec<Mat>,
     /// Scratch: the generator's and the pieces' terms' factors, a block's denominators, products' operands.
@@ -933,37 +934,31 @@ impl Local {
                             let mv = d[k * total + off + j] * xv;
                             m.data[k * total + off + j] = mv;
                             for a in 0..3 {
-                                dm.data[k * 3 * total + 3 * off + a * count + j] = dx[a] - mv * slopes[a][r.cols[j]];
+                                dm.data[k * 3 * total + a * total + off + j] = dx[a] - mv * slopes[a][r.cols[j]];
                             }
                         }
                     }
                 }
-                // Σ_σ ∂σ T̂_σ M̂, one product per varying factor for the whole batch; then D ∘.
+                // Σ_σ ∂σ T̂_σ M̂: one product per varying factor for the whole batch, each axis's share onto that axis's
+                // row of ∂M̂ at once; then D ∘.
                 for (sigma, hat) in &hats[b] {
                     product(hat, m, t);
                     work += (size * size * total) as f64;
                     let ds = v.factors[*sigma].1;
-                    for (&i, &(off, _)) in batch.amplitudes.iter().zip(&batch.offsets) {
-                        let count = plan.amplitudes[i].cols.len();
+                    for k in 0..size {
                         for (a, da) in ds.iter().enumerate() {
-                            if *da == C64::ZERO {
-                                continue;
-                            }
-                            for k in 0..size {
-                                let to = k * 3 * total + 3 * off + a * count;
-                                linalg::mul_add(false, &mut dm.data[to..to + count], *da, &t.data[k * total + off..k * total + off + count]);
+                            if *da != C64::ZERO {
+                                let to = k * 3 * total + a * total;
+                                linalg::mul_add(false, &mut dm.data[to..to + total], *da, &t.data[k * total..(k + 1) * total]);
                             }
                         }
                     }
                 }
-                for (&i, &(off, _)) in batch.amplitudes.iter().zip(&batch.offsets) {
-                    let count = plan.amplitudes[i].cols.len();
-                    for k in 0..size {
-                        for a in 0..3 {
-                            for j in 0..count {
-                                let at = k * 3 * total + 3 * off + a * count + j;
-                                dm.data[at] = d[k * total + off + j] * dm.data[at];
-                            }
+                for k in 0..size {
+                    let dk = &d[k * total..(k + 1) * total];
+                    for row in dm.data[k * 3 * total..(k + 1) * 3 * total].chunks_exact_mut(total) {
+                        for (x, dd) in row.iter_mut().zip(dk) {
+                            *x = *dd * *x;
                         }
                     }
                 }
@@ -984,7 +979,7 @@ impl Local {
                             };
                             y.data[k * total + off + j] = value;
                             for a in 0..3 {
-                                t.data[k * 3 * total + 3 * off + a * count + j] = dx[a];
+                                t.data[k * 3 * total + a * total + off + j] = dx[a];
                             }
                         }
                     }
@@ -1006,21 +1001,14 @@ impl Local {
                                 if moving {
                                     x += gs.data[k * total + off + j];
                                 }
-                                t.data[k * 3 * total + 3 * off + a * count + j] += x;
+                                t.data[k * 3 * total + a * total + off + j] += x;
                             }
                         }
                     }
                 }
-                // Each gradient column at its component's z: per component its three axes' columns side by side.
-                zc.clear();
-                for (&i, &(off, _)) in batch.amplitudes.iter().zip(&batch.offsets) {
-                    let count = plan.amplitudes[i].cols.len();
-                    for _ in 0..3 {
-                        zc.extend(z[off..off + count].iter().map(|&x| C64::real(x)));
-                    }
-                }
-                z.clear();
-                z.extend(zc.iter().map(|x| x.re));
+                // Each gradient column at its component's z: the three axes' rows of columns in turn.
+                z.extend_from_within(..total);
+                z.extend_from_within(..total);
                 work += series.resolve(&g[b], z, t, dm);
             }
         }
@@ -1111,7 +1099,7 @@ impl Local {
                         let mv = d * xv;
                         ms[k * total + off + j] = mv;
                         for a in 0..3 {
-                            dms[k * 3 * total + 3 * off + a * count + j] = dx[a] + mv * self.slopes[a][r.cols[j]].abs();
+                            dms[k * 3 * total + a * total + off + j] = dx[a] + mv * self.slopes[a][r.cols[j]].abs();
                         }
                     }
                 }
@@ -1131,7 +1119,7 @@ impl Local {
                                 let w = da.abs() * hat[k * size + q];
                                 if w != 0.0 {
                                     for j in 0..count {
-                                        dms[k * 3 * total + 3 * off + a * count + j] += w * ms[q * total + off + j];
+                                        dms[k * 3 * total + a * total + off + j] += w * ms[q * total + off + j];
                                     }
                                 }
                             }
@@ -1144,7 +1132,7 @@ impl Local {
                 for k in 0..size {
                     for a in 0..3 {
                         for j in 0..count {
-                            dms[k * 3 * total + 3 * off + a * count + j] *= reciprocal(k, off + j);
+                            dms[k * 3 * total + a * total + off + j] *= reciprocal(k, off + j);
                         }
                     }
                 }
@@ -1384,15 +1372,15 @@ impl Out {
                 for (member, map) in &s.members {
                     let (mb, off) = plan.place[*member];
                     let (a, da) = (&local.m[mb], &local.dm[mb]);
-                    let (total, c) = (a.cols, plan.amplitudes[*member].cols.len());
+                    let total = a.cols;
                     let w = weight(plan.amplitudes[*member].piece);
                     for k in 0..size {
                         let (row, drow) = (&mut zv.data[k * width..(k + 1) * width], &mut zd.data[k * 3 * width..(k + 1) * 3 * width]);
-                        let (av, dv) = (&a.data[k * total + off..], &da.data[k * 3 * total + 3 * off..]);
+                        let (av, dv) = (&a.data[k * total + off..], &da.data[k * 3 * total + off..]);
                         for &(from, to) in map {
                             row[o + to] += w * av[from];
                             for d in 0..3 {
-                                drow[d * width + o + to] += w * dv[d * c + from];
+                                drow[d * width + o + to] += w * dv[d * total + from];
                             }
                         }
                     }
@@ -1617,13 +1605,13 @@ impl Out {
                 for (member, map) in &s.members {
                     let (mb, off) = plan.place[*member];
                     let (a, da) = &shadows[mb];
-                    let (total, c) = (local.m[mb].cols, plan.amplitudes[*member].cols.len());
+                    let total = local.m[mb].cols;
                     let w = weight(plan.amplitudes[*member].piece).abs();
                     for k in 0..size {
                         for &(from, to) in map {
                             zv[k * width + o + to] += w * a[k * total + off + from];
                             for d in 0..3 {
-                                zd[k * 3 * width + d * width + o + to] += w * da[k * 3 * total + 3 * off + d * c + from];
+                                zd[k * 3 * width + d * width + o + to] += w * da[k * 3 * total + d * total + off + from];
                             }
                         }
                     }
