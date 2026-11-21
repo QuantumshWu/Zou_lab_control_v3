@@ -183,7 +183,8 @@ impl Moments {
     /// carries: s and s b. Of a class without a rate the mean is nothing (its sum's every term holds an amplitude), and
     /// so is what its jumps, of which there are none, carry.
     pub fn new(weight: f64, mean: [f64; 3], second: [[f64; 3]; 3], absorbed: f64, states: usize) -> Moments {
-        let b: [f64; 3] = mean.map(|x| if weight > 0.0 { x / weight } else { 0.0 });
+        // W is a sum of squares: zero is the one rate without a mean, and a W that is not a number goes on.
+        let b: [f64; 3] = mean.map(|x| if weight != 0.0 { x / weight } else { 0.0 });
         let size = b.iter().map(|x| x * x).sum::<f64>().sqrt();
         let share = if size > absorbed { absorbed / size } else { 1.0 };
         Moments { weight, mean, second, share, kick: b.map(|x| share * x), states }
@@ -232,7 +233,7 @@ impl Scattering {
         let (mut force, mut diffusion, mut sizes) = ([0.0; 3], [[0.0; 3]; 3], [0.0; 3]);
         let mut chain = 0;
         for m in classes {
-            let b: [f64; 3] = m.mean.map(|x| if m.weight > 0.0 { x / m.weight } else { 0.0 });
+            let b: [f64; 3] = m.mean.map(|x| if m.weight != 0.0 { x / m.weight } else { 0.0 });
             for i in 0..3 {
                 force[i] += (1.0 - m.share) * m.mean[i];
                 for j in 0..3 {

@@ -145,7 +145,8 @@ pub trait Well: Sync {
 /// e^k P(s, k) = k^s/Γ(s + 1) (1 + Σ_{n≥1} k^n/((s + 1)…(s + n))), the lowering is subtracted from the series' first term
 /// exactly; elsewhere P is one less the upper function.
 pub fn kept(s: f64, y: f64, k: f64, shift: f64) -> f64 {
-    if !(k > 0.) {
+    // A k that is not a number goes on through the formulas: the kept share is not a number either.
+    if k <= 0. {
         return 0.;
     }
     let g = gamma(s + 1.);
@@ -171,6 +172,8 @@ fn root(f: impl Fn(f64) -> (f64, f64), target: f64, mut lo: f64, mut hi: f64) ->
     loop {
         let (value, slope) = f(v);
         let g = value - target;
+        // A value that is not a number would read as above the target, and bisection would end on a number.
+        assert!(!g.is_nan(), "the ensemble's inversion meets a value that is not a number at {v}");
         if g == 0. {
             return v;
         }
@@ -430,6 +433,8 @@ impl<'a> Ensemble<'a> {
             self.proposed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
+            // A potential that is not a number would be rejected at every proposal, and the draw would never end.
+            assert!(!y.is_nan() && gradient.iter().all(|g| !g.is_nan()), "the prepared potential is not a number at {r:?}: the well's model is broken");
             if y > c.ceiling + rounding(self.components.len()) * c.top {
                 self.over.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -494,6 +499,8 @@ impl<'a> Ensemble<'a> {
                         let r: V3 = std::array::from_fn(|a| c.centre[a] + rho * (0..3).map(|i| widths[i] * unit[i] * c.axes[i][a]).sum::<f64>());
                         let (v, gradient) = c.well.potential(r);
                         let y = -v / self.kt;
+                        // A potential that is not a number would be left out of the integral as a place unbound.
+                        assert!(!y.is_nan(), "the prepared potential is not a number at {r:?}: the well's model is broken");
                         if y > 0. {
                             let weight = volume * w_mu * (TAU / n as f64) * 0.5 * w_z * rho * rho / ((1. - tau) * (1. - tau));
                             for (sum, value) in sums.iter_mut().zip(of(r, y, gradient)) {
@@ -679,6 +686,29 @@ mod tests {
         fn envelope(&self) -> (Vec<Geometry>, f64) {
             (vec![Geometry::new([0., 0., 1.], TAU / (std::f64::consts::PI * self.waist * self.waist / self.rayleigh), Some(self.waist))], self.depth)
         }
+    }
+
+    /// A well whose potential is not a number off its bottom (the harmonic well's at its centre, NaN elsewhere): the
+    /// draw stops at its first proposal with the potential's error, where a rejection would go on for ever.
+    #[test]
+    #[should_panic(expected = "the prepared potential is not a number")]
+    fn a_draw_on_a_potential_that_is_not_a_number_stops_with_its_error() {
+        struct Broken(Harmonic);
+        impl Well for Broken {
+            fn potential(&self, r: V3) -> (f64, V3) {
+                if r == [0.; 3] { self.0.potential(r) } else { (f64::NAN, [0.; 3]) }
+            }
+            fn trap(&self) -> (V3, [V3; 3], V3) {
+                self.0.trap()
+            }
+            fn envelope(&self) -> (Vec<Geometry>, f64) {
+                self.0.envelope()
+            }
+        }
+        let kt = KT_PER_UK * 1.;
+        let well = Broken(Harmonic { depth: 30. * kt, waist: 1.0, rayleigh: 3.0, hbar_over_mass: 1e-12 });
+        let ensemble = Ensemble::new(&[(0, 1., &well as &dyn Well)], 1., 1e-12).unwrap();
+        ensemble.draw(3, 0);
     }
 
     /// What a level leaves out of the ensemble (`Ensemble::beyond`) against the harmonic well's closed forms. A well

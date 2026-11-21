@@ -1544,6 +1544,17 @@ fn the_doubling_estimate_falls_as_tau_cubed() {
 // ---------------------------------------------------------------------------------------------------------------------
 // The step's own pieces.
 
+/// A diffusion that is not a number is no null direction (step.rs `factor`, `split`): its factor is not a number, and
+/// so is the kick it makes -- where a pivot compared with its rounding would read as none and the kick as zero.
+#[test]
+fn a_diffusion_that_is_not_a_number_makes_a_factor_that_is_not_one() {
+    let rate = [[1.0, 0.0, 0.0], [0.0, f64::NAN, 0.0], [0.0, 0.0, 0.5]];
+    assert!(super::factor(&rate, 1.0, 10).iter().flatten().all(|x| x.is_nan()));
+    assert!(super::factor(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], f64::NAN, 10).iter().flatten().all(|x| x.is_nan()));
+    let (drawn, pending) = super::split(&rate);
+    assert!(drawn.iter().flatten().any(|x| x.is_nan()) && pending.iter().flatten().all(|x| !x.is_nan()), "drawn {drawn:?}, pending {pending:?}");
+}
+
 /// The Stumpff functions are their series Σ_j (−x)^j/(k + 2j)! on both signs, near zero and far from it, to round-off
 /// of their scale.
 /// A diffusion's factor (`factor`) has its rate, Λ Λᵀ = 2D to the entries' rounding, and no column in a null direction

@@ -1189,6 +1189,8 @@ fn grown(x: f64, from: usize) -> usize {
 /// Σ(2l + 1)j_l² = 1.
 fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
     let kappa = 0.5 * nu * width.abs();
+    // A beat that is not a number would size the rule by a recurrence that stops at once: no rule is sized for it.
+    assert!(!kappa.is_nan(), "a tone's frequency is not a number");
     if kappa <= 0.0 {
         return least;
     }
@@ -2804,7 +2806,8 @@ fn split(c: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
     let (values, vectors) = linalg::symmetric3_eigen(c);
     let (mut drawn, mut pending) = ([[0.0; 3]; 3], [[0.0; 3]; 3]);
     for (lambda, v) in values.iter().zip(&vectors) {
-        let part = if *lambda > 0.0 { &mut drawn } else { &mut pending };
+        // An eigenvalue that is not a number is drawn (the step's factor carries it to the momentum), not kept pending.
+        let part = if !(*lambda <= 0.0) { &mut drawn } else { &mut pending };
         for a in 0..3 {
             for b in 0..3 {
                 part[a][b] += lambda * v[a] * v[b];
@@ -2834,6 +2837,10 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
         order.swap(r, largest);
         let p = order[r];
         let moved = 3.0 * rounding(links) * scale * (1.0 + ((3 - r) * (4_usize.pow(r as u32) - 1)) as f64 / 3.0);
+        // A pivot or a scale that is not a number is no direction to drop: the factor is not a number, and so is the kick.
+        if c[p][p].is_nan() || moved.is_nan() {
+            return [[f64::NAN; 3]; 3];
+        }
         if !(c[p][p] > moved) {
             break;
         }

@@ -20,8 +20,12 @@ use crate::linalg::{dot3, symmetric3_eigen};
 /// (µm) up, within the trap's region (`outside`: the trap light's region left); ħ/m `hbar_over_mass` makes the
 /// frequencies.
 pub(crate) fn descend(length: f64, hbar_over_mass: f64, outside: &dyn Fn([f64; 3]) -> bool, expand: &dyn Fn([f64; 3]) -> (Quadratic, f64)) -> Result<Trap, String> {
+    let not_a_number = |r: [f64; 3]| format!("光镊的势能在 {r:?} µm 处不是数（模型的缺陷）");
     let mut r = [0.0; 3];
     let mut here = expand(r);
+    if here.0.value.is_nan() {
+        return Err(not_a_number(r));
+    }
     let mut radius = length;
     loop {
         let (values, vectors) = symmetric3_eigen(&here.0.hessian);
@@ -56,6 +60,10 @@ pub(crate) fn descend(length: f64, hbar_over_mass: f64, outside: &dyn Fn([f64; 3
                 return Err("光镊不约束原子：原子的势能从焦点往下走，一直走出了光镊的范围".into());
             }
             let there = expand(next);
+            // A value that is not a number would read as no fall, and the descent would end beside it on a number.
+            if there.0.value.is_nan() {
+                return Err(not_a_number(next));
+            }
             if there.0.value < here.0.value {
                 r = next;
                 here = there;
@@ -66,5 +74,23 @@ pub(crate) fn descend(length: f64, hbar_over_mass: f64, outside: &dyn Fn([f64; 3
             }
             radius = crate::linalg::smaller(radius, size) * 0.5;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A potential that is not a number ends the descent with its error: at the focus, and at a step's next point --
+    /// where a comparison with it would read as no fall and the descent would end beside it on a number.
+    #[test]
+    fn a_potential_that_is_not_a_number_ends_the_descent() {
+        let bowl = |r: [f64; 3]| Quadratic { value: -1.0 + r.iter().map(|x| x * x).sum::<f64>(), gradient: r.map(|x| 2.0 * x), hessian: [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]] };
+        let at_focus = descend(0.1, 1.0, &|_| false, &|_| (Quadratic { value: f64::NAN, ..bowl([0.0; 3]) }, 1e-16));
+        assert!(at_focus.as_ref().is_err_and(|e| e.contains("不是数")), "{at_focus:?}");
+        let off = |r: [f64; 3]| [r[0] - 0.3, r[1], r[2]];
+        let beside = descend(0.1, 1.0, &|_| false, &|r| (if r == [0.0; 3] { bowl(off(r)) } else { Quadratic { value: f64::NAN, ..bowl(off(r)) } }, 1e-16));
+        assert!(beside.as_ref().is_err_and(|e| e.contains("不是数")), "{beside:?}");
+        assert!(descend(0.1, 1.0, &|_| false, &|r| (bowl(r), 1e-16)).is_ok_and(|t| t.centre == [0.0; 3]));
     }
 }

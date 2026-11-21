@@ -200,7 +200,7 @@ fn span(fields: &[[C64; 3]]) -> (Vec<[C64; 3]>, Vec<f64>) {
         }
     }
     let floor = residual.frobenius() + rounding(fields.len() + 6) * g.trace().re;
-    let kept: Vec<usize> = (0..3).rev().filter(|&k| e.values[k] > floor).collect();
+    let kept: Vec<usize> = (0..3).rev().filter(|&k| !(e.values[k] <= floor)).collect();
     (kept.iter().map(|&k| std::array::from_fn(|q| e.vectors[(q, k)])).collect(), kept.iter().map(|&k| e.values[k]).collect())
 }
 
@@ -269,7 +269,8 @@ impl Frequency {
         // Re and Im of e_k* ∂_a e_k.
         let dot: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).re));
         let turn: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im));
-        let over = |x: f64, y: f64| if y > 0.0 { x / y } else { 0.0 };
+        // y is a size (never negative): zero is the one case without a quotient, and a y that is not a number goes on.
+        let over = |x: f64, y: f64| if y != 0.0 { x / y } else { 0.0 };
         let mut chart = Chart { value: [0.0; 5], gradient: [[0.0; 3]; 5] };
         chart.value[0] = smaller(size[..r].iter().sum::<f64>() / n, 1.0);
         chart.gradient[0] = std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n);

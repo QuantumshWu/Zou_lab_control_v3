@@ -1160,7 +1160,7 @@ fn photons(node: &Node, values: &[f64], t: f64, psi: &[C64]) -> Vec<Photons> {
             }
             let moments = Moments::of(&u, &du, class.absorbed);
             let weight = moments.weight;
-            let wave_number = node.kicked.then(|| if weight > 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
+            let wave_number = node.kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
             Photons { u, moments: moments.over(norm), wave_number }
         })
         .collect()
@@ -1364,7 +1364,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     fn optical(&self, path: &Path) -> Option<Optical> {
         let decay = self.model.optical?;
         let (most, least) = self.model.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (larger(most, x), smaller(least, x)));
-        Some(Optical { ground: GROUND, decay, beat: if most >= least { most - least } else { 0.0 } })
+        Some(Optical { ground: GROUND, decay, beat: if most < least { 0.0 } else { most - least } })
     }
 }
 
