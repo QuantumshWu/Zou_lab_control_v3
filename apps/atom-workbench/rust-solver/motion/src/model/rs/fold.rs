@@ -1071,7 +1071,7 @@ impl Series {
         self.tail.resize(count, 0.0);
         for i in 0..size {
             for (t, x) in self.tail.iter_mut().zip(&self.inverse[i * count..(i + 1) * count]) {
-                *t = t.max(self.spread[i] * self.spread[i] * x.norm_sqr());
+                *t = linalg::larger(*t, self.spread[i] * self.spread[i] * x.norm_sqr());
             }
         }
         let converges = self.tail.iter().all(|&r2| r2 < 1.0);
@@ -1087,18 +1087,19 @@ impl Series {
             out.data.copy_from_slice(&self.w);
             let floor = UNIT_ROUNDOFF * UNIT_ROUNDOFF;
             loop {
-                // Per column the largest |w|² and |out|²: done when every column's remainder is below its rounding.
+                // Per column the largest |w|² and |out|²: done when no column's remainder is known to be above its
+                // rounding (a column of NaN is done: the NaN is in `out`, and goes on with it).
                 self.wmax.clear();
                 self.wmax.resize(count, 0.0);
                 self.omax.clear();
                 self.omax.resize(count, 0.0);
                 for i in 0..size {
                     for j in 0..count {
-                        self.wmax[j] = self.wmax[j].max(self.w[i * count + j].norm_sqr());
-                        self.omax[j] = self.omax[j].max(out.data[i * count + j].norm_sqr());
+                        self.wmax[j] = linalg::larger(self.wmax[j], self.w[i * count + j].norm_sqr());
+                        self.omax[j] = linalg::larger(self.omax[j], out.data[i * count + j].norm_sqr());
                     }
                 }
-                if (0..count).all(|j| self.wmax[j] * self.tail[j] <= floor * self.omax[j]) {
+                if !(0..count).any(|j| self.wmax[j] * self.tail[j] > floor * self.omax[j]) {
                     break;
                 }
                 self.next.clear();

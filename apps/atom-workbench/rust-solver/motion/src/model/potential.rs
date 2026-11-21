@@ -346,8 +346,8 @@ impl Model {
 /// The trap of a potential (module documentation, # The trap): the descent from the focus to its local minimum, on its
 /// second-order expansion with the rounding of its value at a point (`expand`), from the light's shortest length `length`
 /// (µm) up, within the trap's region (`outside`: the trap light's region left); ħ/m `hbar_over_mass` makes the
-/// frequencies. The one algorithm of every trap: the old model's (`Model::trap`) and the fold's reference potential's
-/// (model/fold/run.rs `Reference`; solve.rs).
+/// frequencies. The one algorithm of every trap: the trajectory's model's wells and reported trap (solve.rs `Prepared`,
+/// `reported`) and the old model's (`Model::trap`).
 pub(crate) fn descend(length: f64, hbar_over_mass: f64, outside: &dyn Fn([f64; 3]) -> bool, expand: &dyn Fn([f64; 3]) -> (Quadratic, f64)) -> Result<Trap, String> {
     let mut r = [0.0; 3];
     let mut here = expand(r);
@@ -393,7 +393,7 @@ pub(crate) fn descend(length: f64, hbar_over_mass: f64, outside: &dyn Fn([f64; 3
                 }
                 break;
             }
-            radius = radius.min(size) * 0.5;
+            radius = crate::linalg::smaller(radius, size) * 0.5;
         }
     }
 }

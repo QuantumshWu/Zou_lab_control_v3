@@ -402,6 +402,8 @@ fn r1_node_parts() {
 fn r1_tones() {
     for (name, request, keep) in runs() {
         let run = run_of(&request, &keep);
+        // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+        let keep = run.rs.keep.clone();
         let n = keep.len();
         for (point, r, kappa) in [nodes(&run)[0], nodes(&run)[2]] {
             let full = run.node(r, kappa, false);
