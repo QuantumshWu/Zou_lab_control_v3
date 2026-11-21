@@ -45,7 +45,7 @@ pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
     order.sort_by(|&a, &b| d[a].total_cmp(&d[b]));
     let row_sum = |i: usize, side: &[usize]| -> f64 { side.iter().filter(|&&j| j != i).map(|&j| g[(i, j)].abs()).sum() };
     let spread = |side: &[usize]| -> f64 {
-        let (lo, hi) = side.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| (lo.min(d[i]), hi.max(d[i])));
+        let (lo, hi) = side.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| (crate::linalg::smaller(lo, d[i]), larger(hi, d[i])));
         let off = if side.len() > 1 { side.iter().map(|&i| row_sum(i, side)).fold(0.0, larger) } else { 0.0 };
         hi - lo + 2.0 * off
     };

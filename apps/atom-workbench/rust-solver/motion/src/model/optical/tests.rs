@@ -410,61 +410,74 @@ fn renewal(h: &Mat, g: &[Vec<C64>; 3], k: &[Vec<C64>; 3], ground: usize, e: [f64
     (trap(&|i| s[i] * w[i]) / tau, d_e, trap(&|i| s[i] * p[i]) / tau)
 }
 
-/// The fold gate (DESIGN §3.3): a drive kept explicit and the same drive folded at the atom give the atom one
-/// absorbed-momentum diffusion where the fold holds. Kept (the cycling |2,2⟩ ↔ |3′,3′⟩, every jump back in |2,2⟩): what the
-/// trajectory carries of its Ehrenfest force, D_E, and the optical sector's noise it draws, E[within_Q], each by the renewal
-/// integrals of the cluster's no-jump path, with the generator, its gradient and K_Q of the model's own middle at rest
-/// (`Middle::optical`, every other cluster at the point beside it); folded: half the absorbed light's second moment's rate
-/// of the photons of |2,2⟩ (`Photon::moments`), along the probe's wave vector -- R2_RECOIL's running probe 100Γ off and
-/// R3_DOPPLER's standing wave at Γ/2, s ≈ 0.02. They differ by the transition's saturation, which the fold leaves out --
-/// the dipole fluctuations' (1 + s)⁻³ is 3s = 6 p_e of the excited share p_e at first order -- and by the recoil shift the
-/// fold's response holds and the generator at rest does not: within 8 p_e and the shift's ratio to the half-width.
+/// The fold gate (DESIGN §3.3): a drive kept explicit and the same drive folded give the atom one absorbed-momentum
+/// diffusion where the fold holds. On the trajectory's model (model/selected.rs) of P = every ground state with the
+/// cycling |3′,3′⟩ explicit, and of P = the ground states alone (the drive folded), both from the selection's own
+/// numbers (`Selected::new` on the chosen selection with that P). Kept (|2,2⟩ ↔ |3′,3′⟩, every jump back in |2,2⟩): what
+/// the trajectory carries of its Ehrenfest force, D_E, and the optical sector's noise it draws, E[within_Q], each by the
+/// renewal integrals of the pair's no-jump path, with the generator, its gradient and K_Q of the pair's block of the
+/// model's own middle at rest -- the block the drive joins; its other couplings, printed, are no part of the drive's
+/// diffusion --, and the kept model's own folded classes from |2,2⟩ (its other drives, folded in both) at its ground
+/// share; folded: half the absorbed light's second moment's rate of the photons of |2,2⟩ (model.rs `Moments`), along the
+/// probe's wave vector -- R2_RECOIL's running probe 100Γ off and R3_DOPPLER's standing wave at Γ/2, s ≈ 0.02. They
+/// differ by the transition's saturation, which the fold leaves out -- the dipole fluctuations' (1 + s)⁻³ is 3s = 6 p_e
+/// of the excited share p_e at first order -- and by the recoil shift the fold's denominators hold and the generator at
+/// rest does not: within 8 p_e and the shift's ratio to the half-width.
 #[test]
 fn a_kept_and_a_folded_drive_diffuse_alike() {
-    use crate::field::Light;
-    use crate::model::{Component, Model, Point, Unit};
-    use crate::step::Middle as _;
-    let scene = |name: &str| {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
-        crate::request::Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap()
-    };
+    use crate::linalg::larger;
+    use crate::model::selected::Selected;
+    use crate::request::GROUND;
+    use crate::scene::Scene;
+    use crate::select::Selection;
+    use crate::step::{Dynamics as _, Middle as _};
     for (name, id) in [("R2_RECOIL", "probe"), ("R3_DOPPLER", "cool-plus")] {
-        let request = scene(name);
-        let light = Light::new(&request);
-        let beam = request.beams.iter().position(|b| b.id == id).unwrap();
-        let probe = light.frequencies.iter().position(|f| f.beams.contains(&beam)).unwrap();
-        let bare = Model::new(&request, &light, &[]).unwrap();
-        let lifted: Vec<Unit> = bare.bare_units(Component { frequency: probe, counter: false });
+        let request = crate::model::testing::scene(name);
+        let beam = request.beams.iter().position(|x| x.id == id).unwrap();
         let (b, e) = (7, 31);
-        let folded = Model::new(&request, &light, &lifted).unwrap();
-        let kept = Model::new(&request, &light, &lifted.iter().cloned().chain([Unit::Drive { component: Component { frequency: probe, counter: false }, excited: e, ground: b }]).collect::<Vec<_>>()).unwrap();
-        let c = kept.cluster_of(b);
-        assert_eq!(kept.clusters()[c].states, vec![b, e]);
-        assert!((0..crate::request::GROUND).filter(|&x| x != b).all(|x| kept.emission.iter().all(|m| m[(x, e)] == C64::ZERO)), "{name}: |3′,3′⟩ decays to |2,2⟩ alone");
-        let k = light.beams[beam].wave_vector();
+        assert!((0..GROUND).filter(|&x| x != b).all(|x| request.emission.iter().all(|m| m[(x, e)] == C64::ZERO)), "{name}: |3′,3′⟩ decays to |2,2⟩ alone");
+        let chosen = crate::select::choose(&Scene::new(&request).unwrap()).unwrap();
+        let with = |keep: Vec<usize>| Selected::new(Scene::new(&request).unwrap(), Selection { keep, ..chosen.clone() }, crate::solve::alone(b)).unwrap();
+        let folded = with((0..GROUND).collect());
+        let kept = with((0..GROUND).chain([e]).collect());
+        let n = kept.rs.keep.len();
+        let pair = [b, n - 1];
+        assert_eq!((kept.rs.keep[b], kept.rs.keep[n - 1]), (b, e));
+        let k = kept.light().beams[beam].wave_vector();
         let axis = k.map(|x| x / crate::linalg::norm3(k));
-        let half = 0.5 * kept.decay[(e - crate::request::GROUND, e - crate::request::GROUND)].re;
+        let along = |m: &[[f64; 3]; 3]| -> f64 { (0..3).map(|i| (0..3).map(|j| axis[i] * m[i][j] * axis[j]).sum::<f64>()).sum() };
+        let half = 0.5 * kept.scene.jumps.decay()[(e, e)].re;
         for r in [[0.1, 0.2, -0.3], [-0.4, 0.05, 0.25]] {
-            let at = Point { r, kappa: [0.0; 3], t: 0.37 };
-            let middle = kept.assemble(c, r, at.t, &kept.running());
+            let t = 0.37;
+            let middle = kept.middle(0, r, t);
             let path = middle.path([0.0; 3], [0.0; 3]);
-            let mut h = Mat::zeros(2, 2);
-            middle.generator(&path, 0.0, &mut h);
-            let mut g: [Vec<C64>; 3] = Default::default();
-            middle.gradient(&path, 0.0, &mut g, None);
+            let mut whole = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut whole);
+            let mut gradient: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+            middle.gradient(&path, 0.0, &mut gradient, None);
+            // The pair's block, and the largest coupling of the pair to the rest of P beside it.
+            let h = Mat::from_fn(2, 2, |i, j| whole[(pair[i], pair[j])]);
+            let g: [Vec<C64>; 3] = std::array::from_fn(|a| (0..4).map(|x| gradient[a][pair[x / 2] * n + pair[x % 2]]).collect());
+            let beside = (0..n).filter(|x| !pair.contains(x)).flat_map(|x| pair.map(|p| larger(whole[(p, x)].abs(), whole[(x, p)].abs()))).fold(0.0, larger);
+            assert!(middle.optical(&path).is_some(), "{name}: an explicit excited state");
             let mut sector = Sector::default();
-            assert!(middle.optical(&path).is_some() && sector.make(&h, &g, 1, None).is_ok(), "an explicit cluster");
-            let dt = 0.02 / h.max_abs().max(half);
+            assert!(sector.make(&h, &g, 1, None).is_ok(), "{name}: K of the pair");
+            let dt = 0.02 / larger(h.max_abs(), half);
             let (within, d_e, excited) = renewal(&h, &g, sector.operators().expect("K"), 1, axis, dt);
-            let photons = folded.photons(folded.cluster_of(b), &at, &[C64::ONE]);
-            let second: f64 = photons.iter().map(|ph| ph.moments().second).map(|m| (0..3).map(|i| (0..3).map(|j| axis[i] * m[i][j] * axis[j]).sum::<f64>()).sum::<f64>()).sum();
+            let one = |size: usize, at: usize| -> Vec<C64> { (0..size).map(|x| if x == at { C64::ONE } else { C64::ZERO }).collect() };
+            let fm = folded.middle(0, r, t);
+            let fp = fm.path([0.0; 3], [0.0; 3]);
+            let second: f64 = fm.moments(&fp, &one(folded.rs.keep.len(), b)).iter().map(|m| along(&m.second)).sum();
             // The kept model's own folded classes from |2,2⟩ (its other drives, folded in both), at its ground share.
-            let rest: f64 = kept.photons(c, &at, &[C64::ONE, C64::ZERO]).iter().map(|ph| ph.moments().second).map(|m| (0..3).map(|i| (0..3).map(|j| axis[i] * m[i][j] * axis[j]).sum::<f64>()).sum::<f64>()).sum();
+            let rest: f64 = middle.moments(&path, &one(n, b)).iter().map(|m| along(&m.second)).sum();
             let (ours, fold) = (d_e + within + 0.5 * rest * (1.0 - excited), 0.5 * second);
-            eprintln!("  the kept model's folded classes {:.3e}", 0.5 * rest);
             let recoil = kept.hbar_over_mass() * 0.5 * crate::linalg::dot3(k, k) / half;
             let within_tolerance = 8.0 * excited + recoil;
-            eprintln!("{name} at {r:?}: kept D_E {d_e:.6e} + E[within_Q] {within:.6e} = {ours:.6e} against the fold's {fold:.6e} ({:+.2e} relative; excited share {excited:.2e}, recoil {recoil:.1e})", ours / fold - 1.0);
+            eprintln!(
+                "{name} at {r:?}: kept D_E {d_e:.6e} + E[within_Q] {within:.6e} + the kept model's folded classes {:.3e} = {ours:.6e} against the fold's {fold:.6e} ({:+.2e} relative; excited share {excited:.2e}, recoil {recoil:.1e}; the pair's largest coupling beside it {beside:.2e} rad/µs)",
+                0.5 * rest,
+                ours / fold - 1.0
+            );
             assert!((ours / fold - 1.0).abs() <= within_tolerance, "{name}: kept {ours} folded {fold}");
         }
     }

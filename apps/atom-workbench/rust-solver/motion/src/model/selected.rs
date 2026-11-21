@@ -77,7 +77,7 @@ use crate::floquet::{Frame, Hilbert};
 use crate::linalg::{inner, norm_sqr, C64, Mat, V3};
 use crate::model::rs::fold::{Grouping, Local, Out};
 use crate::model::rs::{model_of, Making, ModelAt, Rs};
-use crate::model::{Beat, Cluster, Point, Quadratic, Scattering};
+use crate::model::{Beat, Cluster, Moments, Point, Quadratic, Scattering};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Key, Scene};
 use crate::select::Selection;
@@ -738,7 +738,7 @@ impl Selected {
             for a in 0..n {
                 for b in 0..n {
                     let x = if k == 0 && a == b { m[(a, b)] + C64::real(self.theta[a]) } else { m[(a, b)] };
-                    largest[k] = largest[k].max(x.abs());
+                    largest[k] = larger(largest[k], x.abs());
                 }
             }
         }
@@ -1109,27 +1109,23 @@ impl SelectedMiddle<'_> {
     fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
         let node = self.node(path, s, true);
         let photons = self.model.read(|b| photons(&node, &b.value, self.t + s, psi));
-        let rates: Vec<f64> = photons.iter().map(|p| p.weight).collect();
+        let rates: Vec<f64> = photons.iter().map(|p| p.moments.weight).collect();
         let k = draw(&rates)?;
         let p = &photons[k];
         let n = psi.len();
         let amplitudes = p.u.each_ref().map(|u| u.iter().copied().collect::<Internal>());
         let jumps: usize = node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum::<usize>()).sum();
         let wave_number = p.wave_number.expect("a jump's node holds the photon forms");
-        Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
+        Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.moments.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
     }
 }
 
-/// A class's photons of a state (module documentation, # The photons): u_a, its rate W, the moments Σ Im⟨u|∇u⟩ and
-/// Σ Re⟨∇u|⊗|∇u⟩ (these three over ‖ψ‖²), the share s of b a jump carries and s b, and the photon's wave number where
-/// the node holds the photon forms (`Node::kicked`).
+/// A class's photons of a state (module documentation, # The photons): u_a, its moments over ‖ψ‖² (model.rs `Moments`,
+/// the one rule: the rate W, Σ Im⟨u|∇u⟩, Σ Re⟨∇u|⊗|∇u⟩, the share s of b a jump carries and s b), and the photon's wave
+/// number where the node holds the photon forms (`Node::kicked`).
 struct Photons {
     u: [Vec<C64>; 3],
-    weight: f64,
-    mean: [f64; 3],
-    second: [[f64; 3]; 3],
-    share: f64,
-    kick: [f64; 3],
+    moments: Moments,
     wave_number: Option<f64>,
 }
 
@@ -1162,16 +1158,21 @@ fn photons(node: &Node, values: &[f64], t: f64, psi: &[C64]) -> Vec<Photons> {
                     }
                 }
             }
-            let weight: f64 = (0..3).map(|a| norm_sqr(&u[a])).sum();
-            let mean: [f64; 3] = std::array::from_fn(|i| (0..3).map(|a| inner(&u[a], &du[i][a]).im).sum());
-            let second: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|a| inner(&du[i][a], &du[j][a]).re).sum()));
-            let b: [f64; 3] = mean.map(|x| if weight > 0.0 { x / weight } else { 0.0 });
-            let size = b.iter().map(|x| x * x).sum::<f64>().sqrt();
-            let share = if size > class.absorbed { class.absorbed / size } else { 1.0 };
+            let moments = Moments::of(&u, &du, class.absorbed);
+            let weight = moments.weight;
             let wave_number = node.kicked.then(|| if weight > 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
-            Photons { u, weight: weight / norm, mean: mean.map(|x| x / norm), second: second.map(|r| r.map(|x| x / norm)), share, kick: b.map(|x| share * x), wave_number }
+            Photons { u, moments: moments.over(norm), wave_number }
         })
         .collect()
+}
+
+#[cfg(test)]
+impl SelectedMiddle<'_> {
+    /// Every class's photon moments of the state ψ at the middle (model.rs `Moments`, over ‖ψ‖²; the tests').
+    pub(crate) fn moments(&self, path: &Path, psi: &[C64]) -> Vec<Moments> {
+        let node = self.node(path, 0.0, false);
+        self.model.read(|b| photons(&node, &b.value, self.t, psi)).into_iter().map(|p| p.moments).collect()
+    }
 }
 
 impl crate::step::Middle for SelectedMiddle<'_> {
@@ -1289,22 +1290,8 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
         let node = self.node(path, 0.0, false);
         let photons = self.model.read(|b| photons(&node, &b.value, self.t, psi));
-        let mut force = [0.0; 3];
-        let mut diffusion = [[0.0; 3]; 3];
-        let mut size = 0.0_f64;
-        for p in &photons {
-            let b: [f64; 3] = p.mean.map(|x| if p.weight > 0.0 { x / p.weight } else { 0.0 });
-            for i in 0..3 {
-                force[i] += (1.0 - p.share) * p.mean[i];
-                for j in 0..3 {
-                    diffusion[i][j] += p.second[i][j] - p.share * p.share * p.weight * b[i] * b[j];
-                }
-                size = size.max(p.second[i][i].abs() + 2.0 * p.weight * b[i] * b[i]);
-            }
-        }
         let n = self.states();
-        let links = n * (3 * node.classes.len() + 1);
-        (Scattering { force, diffusion, size, links }, crate::decide::COMPLEX * (12 * n * n * node.classes.len()) as f64)
+        (Scattering::of_moments(&photons.iter().map(|p| p.moments).collect::<Vec<_>>()), crate::decide::COMPLEX * (12 * n * n * node.classes.len()) as f64)
     }
 
     fn work(&self) -> [f64; 3] {

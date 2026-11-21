@@ -582,8 +582,8 @@ fn the_first_checkpoint_in_pairs() {
             [whole, selection].into_iter().map(|s| crate::model::selected::Selected::new(Scene::new(&request).unwrap(), s, reference).unwrap()).collect();
         let hm = crate::units::hbar_over_mass(request.mass_kg);
         let initial = crate::solve::components(&request);
-        let decay = crate::model::far::decay(&request);
-        let domain = Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., f64::max));
+        let decay = runs[0].scene.jumps.decay();
+        let domain = Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., crate::linalg::larger));
         let end = *request.times_us.last().unwrap();
         let group = crate::ensemble::GROUP;
         let first = crate::units::MOST_TRAJECTORIES / group;

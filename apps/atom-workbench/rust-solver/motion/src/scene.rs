@@ -142,6 +142,19 @@ pub struct Jumps {
     pub wave_number: Mat,
 }
 
+impl Jumps {
+    /// Γ = Σ_a C_a†C_a (32 × 32; the decay on the excited states, nothing on the ground states): each axis's product
+    /// whole before the axes are added. The one decay of the request's states: the model's (model/rs.rs `emission`),
+    /// the frame's linewidths (floquet/frame.rs), the averaged light's denominators (`Scene::smooth`).
+    pub fn decay(&self) -> Mat {
+        let mut gamma = Mat::zeros(STATES, STATES);
+        for c in &self.emission {
+            gamma.add_scaled(C64::ONE, &c.adjoint_product(c));
+        }
+        gamma
+    }
+}
+
 /// The scene built from a request.
 #[derive(Clone, Debug)]
 pub struct Scene {
@@ -477,10 +490,7 @@ impl Scene {
         let field = &request.beams[tw].field;
         let own = bilinear(&form.matrices, field, field);
         let excited: Vec<usize> = (GROUND..STATES).collect();
-        let mut decay = Mat::zeros(STATES, STATES);
-        for c in &self.jumps.emission {
-            decay.add_scaled(C64::ONE, &c.adjoint().product(c));
-        }
+        let decay = self.jumps.decay();
         let rest = self.rates(&self.doppler([0.0; 3]));
         let ne = excited.len();
         let block = |m: &Mat| m.block(&excited, &excited);
@@ -697,5 +707,44 @@ mod tests {
             }
         }
         assert!(seen > 0 && beyond.is_empty(), "{} of {seen} axes beyond 2u: {beyond:?}", beyond.len());
+    }
+
+    /// A lone Gaussian tweezer (R1_TWEEZER, π along B): each ground state's potential is its own multiple of the beam's
+    /// intensity, V = V_min |a(r)|² with |a|² = e^{−2ρ²/(w₀²(1+s))}/(1 + s), s = ζ²/z_R² (`Scene::trap_potential`, the
+    /// unit fold's ground shift with the tweezer's own outside form). The descent (model/potential.rs `descend`) ends at
+    /// the focus as it stands -- its slope vanishes there exactly --, and the analytic Hessian is V_min times |a|²'s,
+    /// −4/w₀² across and −2/z_R² along: ω_ρ² = 4|V_min|(ħ/m)/w₀², ω_ζ² = 2|V_min|(ħ/m)/z_R², the closed forms of contract
+    /// §6 R1, exact for the scene's paraxial beam.
+    #[test]
+    fn a_lone_tweezer_s_trap_frequencies_are_the_gaussian_beam_s() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R1_TWEEZER.json");
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let scene = Scene::new(&request).unwrap();
+        let still = crate::model::rs::Tweezer::new(&scene).still();
+        let depth: [f64; GROUND] = std::array::from_fn(|g| still[(g, g)].re);
+        let chief = (0..GROUND).max_by(|&a, &b| request.initial_density[(a, a)].re.total_cmp(&request.initial_density[(b, b)].re)).unwrap();
+        let tw = request.trap_beam;
+        let beam = &request.beams[tw];
+        let outside = |r: V3| scene.geometry[tw].amplitude_to(r, 0).value.norm_sqr() < crate::units::REGION_INTENSITY;
+        let expand = |r: V3| {
+            let q = scene.trap_potential(r, &depth)[chief];
+            (q, crate::units::rounding(GROUND) * q.value.abs())
+        };
+        let trap = crate::model::potential::descend(1.0 / beam.wave_number, scene.hbar_over_mass, &outside, &expand).unwrap();
+        assert_eq!(trap.centre, [0.0; 3]);
+        let (w, k) = (beam.waist.unwrap(), beam.wave_number);
+        let zr = k * w * w / 2.0;
+        let u = -trap.minimum;
+        assert!(u > 0.0, "the tweezer holds the state: {}", trap.minimum);
+        let hm = scene.hbar_over_mass;
+        let (radial, axial) = ((4.0 * u * hm).sqrt() / w, (2.0 * u * hm).sqrt() / zr);
+        let mut expected = [radial, radial, axial];
+        expected.sort_by(|a, b| a.total_cmp(b));
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-10 * larger(a.abs(), b.abs());
+        for i in 0..3 {
+            assert!(close(trap.frequencies[i], expected[i]), "{:?} against {:?}", trap.frequencies, expected);
+        }
+        // Along the lab axes: the beam runs along x.
+        assert!(close(trap.lab[0], axial) && close(trap.lab[1], radial) && close(trap.lab[2], radial), "{:?}", trap.lab);
     }
 }

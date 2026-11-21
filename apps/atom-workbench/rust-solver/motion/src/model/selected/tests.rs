@@ -72,6 +72,8 @@ fn the_selected_model_is_slow_in_its_frame() {
     let mut fast = Vec::new();
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
+        // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+        let keep = run.rs.keep.clone();
         for (r, kappa) in POINTS {
             let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false });
             let (mut elements, mut beyond) = (0, 0);
@@ -110,6 +112,8 @@ fn the_selected_model_is_slow_in_its_frame() {
 fn the_selected_decay_is_its_photons() {
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
+        // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+        let keep = run.rs.keep.clone();
         let (r, kappa) = POINTS[1];
         let n = keep.len();
         let middle = run.middle(0, r, 3.7);
@@ -203,6 +207,8 @@ fn the_node_is_the_model_now_in_its_frame() {
     let mut worst = 0.0_f64;
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
+        // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+        let keep = run.rs.keep.clone();
         let n = keep.len();
         let frequency = |key: &Key| -> f64 {
             let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
@@ -317,6 +323,8 @@ fn apart(a: &Mat, b: &Mat) -> f64 {
 fn the_selected_force_at_time_zero_is_the_model_s() {
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
+        // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+        let keep = run.rs.keep.clone();
         let n = keep.len();
         let psi = spread(n);
         let mut rho = vec![C64::ZERO; n * n];
@@ -326,7 +334,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let path = middle.path(kappa, [0.0; 3]);
             let ehrenfest = middle.force(&path, 0.0, &rho);
             let node = middle.node(&path, 0.0, false);
-            let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi)).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.mean[i]));
+            let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi)).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.moments.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
             let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
             let size = model.iter().chain(&ehrenfest).map(|x| x.abs()).fold(0.0, f64::max);
@@ -380,6 +388,8 @@ fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
     let t = request.trap_beam;
     request.beams[t].waist = Some(waist);
     let run = run_of(&request, &keep);
+    // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+    let keep = run.rs.keep.clone();
     let hm = run.hbar_over_mass();
     let vs: Vec<f64> = std::env::var("DRAG_VS").ok().map_or(vec![-0.1, 0.0, 0.1], |s| s.split(',').map(|x| x.trim().parse().unwrap()).collect());
     let count = env("DRAG_COUNT", 32.0) as u64;
@@ -492,6 +502,8 @@ fn a_step_s_time_on_the_selected_model() {
     let tau = env("V3E_TAU", 0.3256);
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
+        // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
+        let keep = run.rs.keep.clone();
         let chief = crate::solve::chief(&request);
         let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
         let (r, kappa) = ([0.1, 0.2, 0.3], [speed, 0.0, 0.0]);
@@ -561,4 +573,42 @@ fn the_report_lists_p_the_states_left_out_and_the_notes() {
     let notes = run.report.notes();
     assert!(!notes.is_empty() && notes.iter().all(|n| report.contains(n.as_str())), "{report}");
     assert!(report.contains("不判"), "{report}");
+}
+
+
+/// The prepared potential's envelope bounds it everywhere (`Potential::peak`, ensemble.rs `Well::envelope`): at points
+/// across the trap and far out, −V_prep(r) ≤ B max_l A_l(r), A_l = 1/(1 + 2ρ²/w₀² + ζ²/z_R²) of the trap light's beams
+/// (|a_l|² ≤ A_l of a paraxial beam) -- the bound the initial ensemble draws under. R1_TWEEZER and R1_SIGMA_P from their
+/// initial state, the run as the solve makes it (`solve::run_of`).
+#[test]
+fn the_envelope_bounds_the_prepared_potential() {
+    use crate::linalg::dot3;
+    for name in ["R1_TWEEZER", "R1_SIGMA_P"] {
+        let request = crate::model::testing::scene(name);
+        let p = crate::solve::alone(crate::solve::chief(&request));
+        let run = crate::solve::run_of(&request, p).unwrap();
+        let potential = run.prepared(&p);
+        let light = run.light();
+        let beams: Vec<&crate::field::Geometry> = light.frequencies[light.trap].beams.iter().map(|&l| &light.beams[l]).collect();
+        let bound = potential.peak();
+        let mut x = 12345_u64;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for i in 0..2000 {
+            let scale = if i % 2 == 0 { 2.0 } else { 20.0 };
+            let r = [next() * scale, next() * scale, next() * scale];
+            let v = potential.at(r).value;
+            let brightest = beams
+                .iter()
+                .map(|beam| {
+                    let (w, z) = (beam.waist.expect("a tweezer"), beam.rayleigh().expect("a tweezer"));
+                    let zeta = dot3(beam.direction, r);
+                    1.0 / (1.0 + 2.0 * (dot3(r, r) - zeta * zeta) / (w * w) + zeta * zeta / (z * z))
+                })
+                .fold(0.0, crate::linalg::larger);
+            assert!(-v <= bound * brightest * (1.0 + 1e-12) + 1e-12, "{name}: −V = {} above its bound {} at {r:?}", -v, bound * brightest);
+        }
+    }
 }

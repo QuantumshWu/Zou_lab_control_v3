@@ -369,9 +369,15 @@ pub struct Photon {
     pub gradients: [[Vec<C64>; 3]; 3],
 }
 
-/// What the light a class's photons absorb does to the momentum per unit time, at the state the photons were made of and
-/// in its norm (divide by ‖ψ‖²; SPEC §1.6): the local Kramers–Moyal coefficients of the method's own expansion, none of
-/// them divided by the class's rate.
+/// What the light a class's photons absorb does to the momentum per unit time (SPEC §1.6, the one rule; every model's
+/// photons are read by it: model/selected.rs, and the classes `Photon` holds), at the state the photons were made of: the
+/// local Kramers–Moyal coefficients of the method's own expansion, summed over the emitted photon's polarizations a --
+/// the scattering force Σ_a Im⟨u_a|∇u_a⟩ and the second moment's rate Σ_a Re⟨∇u_a|⊗|∇u_a⟩, neither divided by the
+/// class's rate W = Σ_a ‖u_a‖² (both smooth and finite where the light interferes away). A jump of the class carries its
+/// conditional mean b = Σ_a Im⟨u_a|∇u_a⟩/W as far as one absorbed photon's momentum goes, s b with s = min(1, k_c/|b|):
+/// b is the beams' wave vectors weighted, within their convex hull while the weights are positive, and beyond k_c only
+/// where they interfere to both signs -- there it is no photon's momentum. What the jumps do not carry is the step's
+/// (`Scattering::of_moments`). In the state's norm as made (`Moments::of`), or over ‖ψ‖² (`Moments::over`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Moments {
     /// W = Σ_a ‖u_a‖²: the class's rate.
@@ -380,21 +386,102 @@ pub struct Moments {
     pub mean: [f64; 3],
     /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩ (1/µm²): the second moment's rate.
     pub second: [[f64; 3]; 3],
-    /// s b (1/µm): what a jump of the class carries of its conditional mean b = mean/W -- all of it up to one absorbed
-    /// photon's momentum, s = min(1, k_c/|b|).
+    /// s = min(1, k_c/|b|): the share of b a jump of the class carries (a ratio: the same in any norm).
+    pub share: f64,
+    /// s b (1/µm): what a jump of the class carries of its conditional mean b = mean/W.
     pub kick: [f64; 3],
+    /// n: the landing states u_a lives on (the rounding's count, `Scattering::of_moments`).
+    pub states: usize,
+}
+
+impl Moments {
+    /// The moments of W, the mean and the second moment (in one norm) with k_c = `absorbed` the bound of what a jump
+    /// carries: s and s b. Of a class without a rate the mean is nothing (its sum's every term holds an amplitude), and
+    /// so is what its jumps, of which there are none, carry.
+    pub fn new(weight: f64, mean: [f64; 3], second: [[f64; 3]; 3], absorbed: f64, states: usize) -> Moments {
+        let b: [f64; 3] = mean.map(|x| if weight > 0.0 { x / weight } else { 0.0 });
+        let size = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let share = if size > absorbed { absorbed / size } else { 1.0 };
+        Moments { weight, mean, second, share, kick: b.map(|x| share * x), states }
+    }
+    /// The moments of a class's amplitudes u_a and their gradients ∇_i u_a (`du[i][a]`; empty where none were made: no
+    /// mean and no second moment) in the state's norm, k_c = `absorbed`.
+    pub fn of(u: &[Vec<C64>; 3], du: &[[Vec<C64>; 3]; 3], absorbed: f64) -> Moments {
+        use crate::linalg::{inner, norm_sqr};
+        let weight: f64 = (0..3).map(|a| norm_sqr(&u[a])).sum();
+        let mean: [f64; 3] = std::array::from_fn(|i| (0..3).map(|a| inner(&u[a], &du[i][a]).im).sum());
+        let second: [[f64; 3]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|a| inner(&du[i][a], &du[j][a]).re).sum()));
+        Moments::new(weight, mean, second, absorbed, u[0].len())
+    }
+    /// Over the state's norm ‖ψ‖² = `norm`: W, the mean and the second moment divided by it; s and s b as they are.
+    pub fn over(self, norm: f64) -> Moments {
+        Moments { weight: self.weight / norm, mean: self.mean.map(|x| x / norm), second: self.second.map(|row| row.map(|x| x / norm)), ..self }
+    }
 }
 
 /// The light's action on the momentum per unit time beside the Ehrenfest force and the jumps' kicks (SPEC §1.6), at a
 /// state and a point: the scattering force the jumps do not carry (1/µm/µs), the second moment's rate they do not carry,
 /// 2D (1/µm²/µs; positive semidefinite by Cauchy–Schwarz), and the rounding of 2D's entries as they are summed -- `size`
-/// the largest sum of a diagonal entry's terms' moduli, `links` the operations behind an entry.
+/// the largest sum of a diagonal entry's terms' moduli, `links` the operations behind an entry (`of_moments`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Scattering { pub force: [f64; 3], pub diffusion: [[f64; 3]; 3], pub size: f64, pub links: usize }
 
 impl Scattering {
     /// No light scattered.
     pub const NONE: Scattering = Scattering { force: [0.0; 3], diffusion: [[0.0; 3]; 3], size: 0.0, links: 0 };
+
+    /// What a state's classes' photons give the momentum beside their jumps (`Moments`, each in the state's norm 1:
+    /// `Moments::over`): the force Σ_c (1 − s_c) Σ_a Im⟨u_a|∇u_a⟩ and the diffusion 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ −
+    /// s_c² W_c b_c b_cᵀ]. A plane wave's jump carries its k and leaves nothing; a standing wave's carries nothing and
+    /// leaves k² R₀ sin² kz, the dipole force's fluctuations.
+    ///
+    /// The rounding of 2D's entries (step.rs `factor`). A class's three sums -- W, the mean m_i, the second moment
+    /// M_ij, each of 3n products on its n landing states -- err by γ_{3n} of their products' moduli: W and M_ii
+    /// themselves (their terms are positive), √(W M_ii) for m_i (Cauchy–Schwarz). Its diagonal entry M_ii −
+    /// s² m_i²/W then errs by at most γ_{3n} M_ii for the second moment, 2γ_{3n} M_ii for the two means in the
+    /// subtracted term (|m_i| ≤ √(W M_ii)) and the few operations of b, s and their products on s² W b_i²: within
+    /// γ_{9n + 6} of M_ii + s² W b_i², the moduli of its terms (an off-diagonal entry within the geometric mean of two
+    /// diagonal ones', Cauchy–Schwarz). Summed over the C classes: `size` = max_i Σ_c (M_ii + s_c² W_c b_ci²), the
+    /// diagonal's terms of every class, and `links` = max_c (9 n_c + 6) + C − 1, the longest chain of operations behind
+    /// an entry with the classes' sum.
+    pub fn of_moments(classes: &[Moments]) -> Scattering {
+        let (mut force, mut diffusion, mut sizes) = ([0.0; 3], [[0.0; 3]; 3], [0.0; 3]);
+        let mut chain = 0;
+        for m in classes {
+            let b: [f64; 3] = m.mean.map(|x| if m.weight > 0.0 { x / m.weight } else { 0.0 });
+            for i in 0..3 {
+                force[i] += (1.0 - m.share) * m.mean[i];
+                for j in 0..3 {
+                    diffusion[i][j] += m.second[i][j] - m.share * m.share * m.weight * b[i] * b[j];
+                }
+                sizes[i] += m.second[i][i].abs() + m.share * m.share * m.weight * b[i] * b[i];
+            }
+            chain = chain.max(9 * m.states + 6);
+        }
+        let links = if classes.is_empty() { 0 } else { chain + classes.len() - 1 };
+        Scattering { force, diffusion, size: crate::linalg::largest(0.0, sizes), links }
+    }
+
+    /// The scattering of a state of the norm ‖ψ‖² = `norm` from its classes' photons made with their gradients
+    /// (`of_moments` of their moments over the norm).
+    pub fn of(photons: &[Photon], norm: f64) -> Scattering {
+        Scattering::of_moments(&photons.iter().map(|p| p.moments().over(norm)).collect::<Vec<_>>())
+    }
+}
+
+impl Photon {
+    /// The class's rate W = Σ_a ‖u_a‖² in its state's norm (`Moments::of` sums it the same).
+    pub fn weight(&self) -> f64 {
+        self.amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum()
+    }
+    /// The absorbed light's moments of the class (`Moments::of`), in its state's norm.
+    pub fn moments(&self) -> Moments {
+        Moments::of(&self.amplitudes, &self.gradients, self.absorbed)
+    }
+    /// The mean a jump of the class carries (`Moments::kick`): at most one absorbed photon's momentum k_c.
+    pub fn kick(&self) -> [f64; 3] {
+        self.moments().kick
+    }
 }
 
 /// The model: a request's states and light with a set of units kept (SPEC §1).

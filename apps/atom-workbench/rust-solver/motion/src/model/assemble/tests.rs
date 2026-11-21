@@ -534,9 +534,16 @@ fn a_state_s_photons_in_parts_are_its_photons() {
             Model::forget_quartic();
             let counted = model.photons_counted(cluster, &at, &psi, tables);
             assert_eq!((&whole, work), (&counted.0, counted.1), "{name}, cluster {cluster}: the photons by the cluster's own plan and table");
-            // A step's scattering reads the same photons where they are made: the same sums in the same order.
+            // A step's scattering reads the same photons where they are made, by the one rule (model.rs `Moments`): the
+            // site's sums by lanes, the photons' by inner products -- the same terms, to the rounding of their sums.
             let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-            assert_eq!(model.scattering_of(&plan, table, &at, &psi).0, crate::model::Scattering::of(&whole, norm), "{name}, cluster {cluster}: the scattering");
+            let (sited, made) = (model.scattering_of(&plan, table, &at, &psi).0, crate::model::Scattering::of(&whole, norm));
+            let bound = 4.0 * crate::units::rounding(made.links) * made.size;
+            let near = |a: f64, b: f64| (a - b).abs() <= bound.max(1e-13 * a.abs().max(b.abs()));
+            assert!(
+                sited.links == made.links && near(sited.size, made.size) && (0..3).all(|i| near(sited.force[i], made.force[i]) && (0..3).all(|j| near(sited.diffusion[i][j], made.diffusion[i][j]))),
+                "{name}, cluster {cluster}: the scattering {sited:?} against its photons' {made:?}"
+            );
             let bare = model.photons_of(&plan, table, &at, &psi, Gradients::None).0;
             assert_eq!(bare, run.photon_amplitudes(cluster, &at, &psi));
             // A class of no amplitude is a photon of the whole alone, its gradients' second moment (photon.rs
@@ -553,7 +560,11 @@ fn a_state_s_photons_in_parts_are_its_photons() {
                     Some(drawn)
                 };
                 let emitted = crate::step::Dynamics::emit(run, cluster, &at, None, &psi, &mut draw).expect("the class drawn");
-                assert!((emitted.landing, emitted.wave_number, emitted.kick) == (photon.landing, photon.wave_number, photon.kick()) && (0..3).all(|a| emitted.amplitudes[a][..] == alone.amplitudes[a][..]), "{name}, cluster {cluster}, class {}: a jump's photon", photon.class);
+                // The kick by the one rule from the site's sums and from the photon's vectors: to their rounding -- b's
+                // mean sums 3n products of moduli at most √(W M_ii) (Cauchy–Schwarz), over W.
+                let m = photon.moments();
+                let rounded = |i: usize| 4.0 * crate::units::rounding(9 * m.states + 6) * ((m.weight * m.second[i][i]).sqrt() / m.weight + m.kick[i].abs());
+                assert!((emitted.landing, emitted.wave_number) == (photon.landing, photon.wave_number) && (0..3).all(|i| (emitted.kick[i] - m.kick[i]).abs() <= rounded(i)) && (0..3).all(|a| emitted.amplitudes[a][..] == alone.amplitudes[a][..]), "{name}, cluster {cluster}, class {}: a jump's photon {:?} against {:?}", photon.class, emitted.kick, m.kick);
                 classes += 1;
                 folded += photon.gradients.iter().flatten().flatten().filter(|z| **z != C64::ZERO).count().min(1);
             }

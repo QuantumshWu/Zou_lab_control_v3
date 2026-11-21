@@ -288,7 +288,7 @@ impl Model {
         self.classes_on(plan, at.t, psi, Gradients::Of(drawn?), &mut site, made, &mut |_, class, sums, with| {
             let n = class.states;
             let amplitudes = std::array::from_fn(|a| (0..n).map(|b| amplitude(sums, a * n + b)).collect());
-            emitted = Some(Emitted { landing: class.landing, wave_number: class.wave_number, amplitudes, kick: moments(sums, with, class.absorbed).kick, work: 0.0 });
+            emitted = Some(Emitted { landing: class.landing, wave_number: class.wave_number, amplitudes, kick: moments(sums, with, class.absorbed, n).kick, work: 0.0 });
         });
         Some(emitted.expect("the drawn class at the state it was drawn at"))
     }
@@ -482,13 +482,13 @@ impl Model {
     pub(crate) fn scattering_on(&self, plan: &Arc<Plan>, table: Option<&NearTable>, r: Option<[f64; 3]>, kappa: [f64; 3], t: f64, psi: &[C64], site: &mut Site, laid: bool) -> (Scattering, f64) {
         let made = self.sited(plan, table, r, kappa, 1, site, laid);
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
-        let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
+        let mut classes = Vec::new();
         let mut read = 0.0;
         let work = self.classes_on(plan, t, psi, Gradients::All, site, made, &mut |_, class, sums, with| {
-            out.add(&mut sizes, &moments(sums, with, class.absorbed), class.states);
+            classes.push(moments(sums, with, class.absorbed, class.states).over(norm));
             read += moments_work(class.rows, with);
         });
-        (out.over(sizes, norm), work + read)
+        (Scattering::of_moments(&classes), work + read)
     }
 
 }
@@ -556,7 +556,7 @@ fn lanes<const A: usize, const B: usize, const C: usize, const D: usize>(sums: &
 /// gradients) and its absorbed light's wave number k_c: W, the folded part's Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate
 /// Σ_a Re⟨∇u_a|⊗|∇u_a⟩, and the mean a jump of the class carries. Each of the ten sums is one pass over the rows, a
 /// partial sum a lane.
-fn moments(sums: &[f64], with: bool, absorbed: f64) -> Moments {
+fn moments(sums: &[f64], with: bool, absorbed: f64, states: usize) -> Moments {
     debug_assert!(sums.len() % (8 * LANES) == 0);
     // The columns' parts: 0 and 1 u's real and imaginary parts, 2 + 2i and 3 + 2i those of ∇_i u.
     let weight = lanes::<0, 0, 1, 1>(sums, 1.0);
@@ -571,89 +571,6 @@ fn moments(sums: &[f64], with: bool, absorbed: f64) -> Moments {
             }
         }
     }
-    // |b| against k_c as |mean|² against (k_c W)²: no root is taken within the bound. Beyond it the jump carries k_c
-    // along the mean, which is not zero there; within it b itself, mean/W -- of a class without a rate the mean is
-    // nothing (its sum's every term holds an amplitude), and so is what its jumps, of which there are none, carry.
-    let (square, bound) = (crate::linalg::dot3(mean, mean), absorbed * weight);
-    let kick = if square > bound * bound {
-        let size = square.sqrt();
-        mean.map(|x| absorbed * x / size)
-    } else if weight > 0.0 {
-        mean.map(|x| x / weight)
-    } else {
-        [0.0; 3]
-    };
-    Moments { weight, mean, second, kick }
+    Moments::new(weight, mean, second, absorbed, states)
 }
 
-impl Scattering {
-    /// The scattering per unit time of a state of the norm ‖ψ‖² = `norm` from its classes' photons made with their
-    /// gradients (module documentation, # The absorbed light's momentum): the force and the second moment's rate their
-    /// jumps do not carry, over ‖ψ‖². An entry of 2D is summed from each class's 3n products of its gradients (n its
-    /// landing cluster's states) and the carried mean's product over the weight's own 3n: `links` counts them, `size`
-    /// their moduli on the diagonal.
-    pub fn of(photons: &[Photon], norm: f64) -> Scattering {
-        let (mut out, mut sizes) = (Scattering::NONE, [0.0; 3]);
-        for photon in photons {
-            out.add(&mut sizes, &photon.moments(), photon.amplitudes[0].len());
-        }
-        out.over(sizes, norm)
-    }
-
-    /// One class's part (`of`) in the state's norm: its moments on `states` landing states, the diagonal's terms'
-    /// moduli to `sizes`.
-    fn add(&mut self, sizes: &mut [f64; 3], m: &Moments, states: usize) {
-        for i in 0..3 {
-            self.force[i] += m.mean[i] - m.weight * m.kick[i];
-            sizes[i] += m.second[i][i] + m.weight * m.kick[i] * m.kick[i];
-            for j in 0..3 {
-                self.diffusion[i][j] += m.second[i][j] - m.weight * m.kick[i] * m.kick[j];
-            }
-        }
-        self.links += 9 * states + 6;
-    }
-
-    /// The classes' parts summed (`add`) over the state's norm ‖ψ‖², once: the scattering per unit time.
-    fn over(mut self, sizes: [f64; 3], norm: f64) -> Scattering {
-        self.force = self.force.map(|x| x / norm);
-        self.diffusion = self.diffusion.map(|row| row.map(|x| x / norm));
-        self.size = sizes.into_iter().fold(0.0, f64::max) / norm;
-        self
-    }
-}
-
-impl Photon {
-    /// The class's rate W = Σ_a ‖u_a‖² in its state's norm.
-    pub fn weight(&self) -> f64 {
-        self.amplitudes.iter().map(|u| crate::linalg::norm_sqr(u)).sum()
-    }
-
-    /// The absorbed light's moments of the class per unit time (module documentation, # The absorbed light's momentum),
-    /// of a photon made with its gradients: W, the folded part's Σ_a Im⟨u_a|∇u_a⟩, the second moment's rate Σ_a
-    /// Re⟨∇u_a|⊗|∇u_a⟩, and the mean a jump of the class carries.
-    pub fn moments(&self) -> Moments {
-        // Its vectors as the sums they were made from (`Model::classes_at`): the same rows, the same moments.
-        let n = self.amplitudes[0].len();
-        let rows = (3 * n).div_ceil(LANES) * LANES;
-        let mut sums = [0.0; 8 * 3 * STATES];
-        let mut lay = |column: usize, a: usize, vector: &[C64]| {
-            for (b, z) in vector.iter().enumerate() {
-                let at = laid(a * n + b, column, 4);
-                (sums[at], sums[at + LANES]) = (z.re, z.im);
-            }
-        };
-        for a in 0..3 {
-            lay(0, a, &self.amplitudes[a]);
-            for i in 0..3 {
-                lay(1 + i, a, &self.gradients[i][a]);
-            }
-        }
-        let with = self.gradients.iter().flatten().any(|g| !g.is_empty());
-        moments(&sums[..8 * rows], with, self.absorbed)
-    }
-
-    /// The mean a jump of the class carries (`Moments::kick`): at most one absorbed photon's momentum k_c.
-    pub fn kick(&self) -> [f64; 3] {
-        self.moments().kick
-    }
-}

@@ -318,8 +318,8 @@ impl Frame {
         // first), entries row-major.
         let fixed = reference.hamiltonian.iter().find(|p| p.key.iter().all(|&k| k == 0)).expect("a static part");
         let energy: Vec<f64> = (0..STATES).map(|s| fixed.value[(s, s)].re).collect();
-        let gamma: Vec<f64> =
-            (0..STATES).map(|e| scene.jumps.emission.iter().map(|c| (0..STATES).map(|g| c[(g, e)].norm_sqr()).sum::<f64>()).sum()).collect();
+        let decay = scene.jumps.decay();
+        let gamma: Vec<f64> = (0..STATES).map(|e| decay[(e, e)].re).collect();
         let unit = |g: usize| -> Vec<Ratio> { (0..count).map(|h| Ratio::int((h == g) as i64)).collect() };
         let mut groups: Vec<(Vec<Ratio>, usize, f64, Mat)> = Vec::new();
         let values: Vec<f64> = generators.iter().map(|g| g.frequency - g.beam.map_or(0.0, |l| doppler[l])).collect();

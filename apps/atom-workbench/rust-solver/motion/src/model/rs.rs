@@ -634,18 +634,12 @@ impl ModelAt {
 // ---------------------------------------------------------------------------------------------------------------------
 // The emission, the tweezer's fold, the reference and the model.
 
-/// The request's Cartesian emission as fixed matrices: C_a, k∘C_a (the photons' forms), and Σ_a C_a†C_a, each axis's
-/// product whole before the axes are added (`decay`).
+/// The request's Cartesian emission as fixed matrices: C_a, k∘C_a (the photons' forms), and Σ_a C_a†C_a (scene.rs
+/// `Jumps::decay`, the one decay).
 pub fn emission(jumps: &Jumps) -> ([Mat; 3], [Mat; 3], Mat) {
     let photon = |c: &Mat| Mat::from_fn(STATES, STATES, |i, j| c[(i, j)] * jumps.wave_number[(i, j)].re);
     let kicks = jumps.emission.each_ref().map(photon);
-    let mut gamma = Mat::zeros(STATES, STATES);
-    for c in &jumps.emission {
-        let mut g = Mat::zeros(STATES, STATES);
-        adjoint_product_onto(c, c, C64::ONE, &mut g);
-        gamma.add_scaled(C64::ONE, &g);
-    }
-    (jumps.emission.clone(), kicks, gamma)
+    (jumps.emission.clone(), kicks, jumps.decay())
 }
 
 /// The emission's three channels (n_tw = n_φ = 0) on the library's matrices `parts` and `kicks`, factor `one`.
@@ -785,7 +779,7 @@ impl Tweezer {
         let mut sizes = [[0.0_f64; ORDERS]; 2];
         for (key, by) in &unit.shift {
             let matrices: Vec<(usize, usize)> = by.iter().map(|(sign, j, m)| {
-                sizes[*sign][*j] = sizes[*sign][*j].max(m.max_abs());
+                sizes[*sign][*j] = crate::linalg::larger(sizes[*sign][*j], m.max_abs());
                 (put(&mut library, &rounded(m)), power(*sign, *j))
             }).collect();
             let term = Term { factor: power_f, adjoint: false, scale: C64::ONE, matrices };
@@ -804,7 +798,7 @@ impl Tweezer {
                     adjoint: false,
                     scale: C64::ONE,
                     matrices: by.iter().map(|(sign, j, m)| {
-                        sizes[*sign][*j] = sizes[*sign][*j].max(m.max_abs());
+                        sizes[*sign][*j] = crate::linalg::larger(sizes[*sign][*j], m.max_abs());
                         (put(library, &rounded(m)), power(*sign, *j))
                     }).collect(),
                 }],
