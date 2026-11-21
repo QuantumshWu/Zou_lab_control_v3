@@ -77,6 +77,7 @@ const types=await from('dist/js/atom-workbench/src/types.js'),physics=await from
 const reflection=await from('dist/js/atom-workbench/src/reflection.js'),intensity=await from('dist/js/atom-workbench/src/laser-intensity.js');
 const spectroscopy=await from('dist/js/atom-workbench/src/spectroscopy.js'),sceneFile=await from('dist/js/atom-workbench/src/scene-file.js');
 const {motionRequest}=await from('dist/js/atom-workbench/src/motion.js'),{normalizeDynamicsResult}=await from('dist/js/atom-workbench/src/solver-client.js');
+const {readStage}=await from('dist/js/atom-workbench/src/solver-types.js');
 const {NATIVE_PROTOCOL,FULL_MODEL_SCHEMA}=await from('dist/js/atom-workbench/src/solver-protocol.js');
 const {prepareNativeSolve,nativeCapabilities}=await from('scripts/native-protocol.mjs'),{nativeChildEnvironment}=await from('scripts/native-child-env.mjs');
 const model=JSON.parse(readFileSync(join(here,'sanity/model.json'),'utf8'));
@@ -192,13 +193,17 @@ function worker(){
   child.stdout.on('data',t=>{buffer+=t;for(let end;(end=buffer.indexOf('\n'))>=0;){
     const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!line.trim())continue;
     const message=JSON.parse(line),job=waiting;if(!job)continue;
-    if(message.progress!==undefined){try{job.onCheckpoint?.(message);}catch(e){job.reject(e);}continue;}
+    // Progress, read as the app reads it (scripts/serve.mjs, src/solver-client.ts): a checkpoint carries a result; a stage
+    // (motion_adapter.rs `stage`: where the pipeline stands) none, and the app's readStage reads it; any other progress
+    // fails the solve, as it fails the app's. Neither is the final line.
+    if(message.progress==='checkpoint'||message.progress==='stage'){try{(message.progress==='stage'?job.onStage:job.onCheckpoint)?.(message);}catch(e){job.reject(e);}continue;}
+    if(message.progress!==undefined){job.reject(new Error(`Unexpected native progress message: ${JSON.stringify(message.progress).slice(0,80)}`));continue;}
     waiting=null;clearTimeout(job.timer);job.resolve({message,ms:performance.now()-job.sent});
   }});
   child.on('close',code=>{if(waiting){clearTimeout(waiting.timer);waiting.reject(new Error(`the worker ended (exit code ${code}): ${stderr.trim().slice(-300)}`));}});
   return {child,
-    ask:(message,onCheckpoint)=>new Promise((accept,reject)=>{
-      const job={resolve:accept,reject,onCheckpoint,sent:performance.now(),timer:setTimeout(()=>{child.kill();reject(new Error(`no reply in ${LIMIT_MS/1000} s: aborted (the 5-minute rule)`));},LIMIT_MS)};
+    ask:(message,onCheckpoint,onStage)=>new Promise((accept,reject)=>{
+      const job={resolve:accept,reject,onCheckpoint,onStage,sent:performance.now(),timer:setTimeout(()=>{child.kill();reject(new Error(`no reply in ${LIMIT_MS/1000} s: aborted (the 5-minute rule)`));},LIMIT_MS)};
       waiting=job;child.stdin.write(JSON.stringify(message)+'\n');}),
     end:()=>new Promise(done=>{if(child.exitCode!==null)return done();child.once('close',done);child.stdin.end();setTimeout(()=>child.kill(),2000).unref();})};
 }
@@ -226,7 +231,7 @@ async function solve(scene,name){
   const native=prepareNativeSolve({modelSchema:FULL_MODEL_SCHEMA,scene,options}),token={clientId:'sanity',sequence:2};
   const read=r=>normalizeDynamicsResult(native.respond(r,token),scene,types.resolveInitialState(settings),settings.meanHorizonUs,motion);
   // A checkpoint the app's reader rejects is recorded (the app would show "求解结果不完整或无效") and the run read on.
-  let checkpoints=0;const rejected=[];
+  let checkpoints=0,stages=0;const rejected=[];
   try{
     if(!old){
       nativeCapabilities((await w.ask({op:'capabilities',id:0})).message);
@@ -234,11 +239,13 @@ async function solve(scene,name){
       if(warm.message.error||warm.message.ready!==true||warm.message.protocol!==NATIVE_PROTOCOL)throw new Error(`warmup: ${JSON.stringify(warm.message).slice(0,200)}`);
     }
     const t0=performance.now();
-    const reply=await w.ask({id:2,...(old?oldFormat(native.payload):native.payload),progress:true},m=>{checkpoints++;if(!old)try{read(m.result);}catch(e){rejected.push(`checkpoint ${checkpoints}: ${e.message}`);}});
+    const reply=await w.ask({id:2,...(old?oldFormat(native.payload):native.payload),progress:true},m=>{checkpoints++;if(!old)try{read(m.result);}catch(e){rejected.push(`checkpoint ${checkpoints}: ${e.message}`);}},
+      // A stage the app cannot read fails the solve (src/solver-client.ts: "求解进度无效").
+      m=>{try{readStage(m.stage);}catch{throw new Error(`求解进度无效：the app cannot read the stage ${JSON.stringify(m.stage).slice(0,200)}`);}stages++;});
     const solveS=(performance.now()-t0)/1000;
     if(reply.message.error)return {name,error:`the worker answered an error: ${reply.message.error}`,solveS,checkpoints};
     const raw=reply.message.result;
-    return {name,solveS,checkpoints,rejected,engine:raw.diagnostics?.engine,...series(old?null:read(raw),raw,raw.states??native.payload.model.states)};
+    return {name,solveS,checkpoints,stages,rejected,engine:raw.diagnostics?.engine,...series(old?null:read(raw),raw,raw.states??native.payload.model.states)};
   }catch(error){return {name,error:error.message,solveS:(performance.now()-started)/1000,checkpoints};}
   finally{await w.end();}
 }
@@ -262,7 +269,7 @@ const ok=b=>b?'PASS':'FAIL';
 function judge(sceneId,f,r){
   const out=[],add=(pass,what,detail)=>out.push({pass,what,detail});
   if(r.error){add(false,'run',r.error);return out;}
-  add(true,'run',`completed in ${r.solveS.toFixed(1)} s, ${r.checkpoints} checkpoint(s)`);
+  add(true,'run',`completed in ${r.solveS.toFixed(1)} s, ${r.checkpoints} checkpoint(s), ${r.stages??0} stage(s)`);
   if(!old)add(!r.rejected.length,'run: the app\'s reader accepts every checkpoint and the result',r.rejected.length?`${r.rejected.length} rejected -- ${r.rejected[0]} (the app shows this error)`:'');
   const finite=[...r.Ttotal,...r.loss].every(x=>x===null||Number.isFinite(x));add(finite,'run: numbers finite','');
   if(sceneId==='S3'||sceneId==='S3c'||sceneId==='S4')return out;

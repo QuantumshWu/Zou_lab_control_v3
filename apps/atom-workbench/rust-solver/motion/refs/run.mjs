@@ -1,7 +1,9 @@
 // node run.mjs <id>... | --r | --r0 | --regress [--limit=<s>] -- runs references through the app's own worker
-// (lib/worker.mjs: the request line on stdin, its checkpoints and the final result on stdout, contract §2.1) and keeps
-// each run in out/results/<id>.json: the final line (or, aborted at the limit, the last checkpoint), every checkpoint's
-// wall time (the app kills a solve that sends none for 120 s, contract §2.5), the wall time. An id names an expectation
+// (lib/worker.mjs: the request line on stdin, its progress lines and the final result on stdout, contract §2.1, the
+// progress read as the app reads it) and keeps each run in out/results/<id>.json: the final line (or, aborted at the
+// limit, the last checkpoint), every checkpoint's wall time (check.mjs prints the first), the wall time. The app kills a
+// solve that sends no checkpoint and no stage for 120 s (contract §2.5): the line printed says the first message's time
+// and the widest gap between messages. An id names an expectation
 // (expect/<id>.json or expect/regress/<id>.json), whose `request` is run. Runs go one at a time on all cores; a run over
 // the limit (5 minutes, the user's rule) is aborted and reported as a finding. Then: node check.mjs <id>...
 import fs from 'node:fs';
@@ -19,6 +21,10 @@ if(args.includes('--r'))ids.push(...listed(path.join(here,'expect')).filter(id=>
 if(args.includes('--r0'))ids.push(...listed(path.join(here,'expect')).filter(id=>id.startsWith('R0_')));
 if(args.includes('--regress'))ids.push(...listed(path.join(here,'expect','regress')));
 console.log(`worker ${WORKER}, limit ${limit} s, ${ids.length} runs`);
+/** The times of a run's messages (checkpoints and stages: each restarts the app's deadline), and the widest gap from the
+ * request through them to the end of the run. */
+const messages=run=>[...run.checkpoints,...run.stages].map(m=>m.s).sort((a,b)=>a-b);
+const gap=run=>{const t=[0,...messages(run),run.wallS];return Math.max(...t.slice(1).map((x,i)=>x-t[i]));};
 for(const id of ids){
   const file=expectationFile(id);if(!file){console.log(id,'no expectation');continue;}
   const e=JSON.parse(fs.readFileSync(file,'utf8'));
@@ -30,5 +36,6 @@ for(const id of ids){
   fs.mkdirSync(path.join(here,'out','results'),{recursive:true});fs.writeFileSync(path.join(here,'out','results',`${id}.json`),JSON.stringify(out));
   const r=run.final.result;
   console.log(id.padEnd(22),run.final.error?`ERROR ${run.final.error}`:`${r.populationAccuracy?.status} traj ${r.motion?.trajectories??'-'}`,
-    `${run.wallS.toFixed(1)} s`,run.aborted?'ABORTED (limit)':'',`checkpoints ${run.checkpoints.length}`,run.checkpoints.length?`first ${run.checkpoints[0].s.toFixed(1)} s`:'');
+    `${run.wallS.toFixed(1)} s`,run.aborted?'ABORTED (limit)':'',`checkpoints ${run.checkpoints.length}`,run.checkpoints.length?`first ${run.checkpoints[0].s.toFixed(1)} s`:'',
+    `stages ${run.stages.length}`,`messages: first ${messages(run)[0]?.toFixed(1)??'-'} s, widest gap ${gap(run).toFixed(1)} s`);
 }
