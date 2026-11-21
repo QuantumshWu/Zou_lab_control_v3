@@ -269,6 +269,22 @@
 //! part of X, the right side and D (6n²) and its hops' envelopes and moments; the middle's solve where there are tones
 //! (n³ + n³/3 + n³); and per beating class followed three products of n³ for a state at a time, 4n² more each.
 //!
+//! How far the classes merge. The harmonics of one beat ν -- tilt2's four tones at ν, 2ν, 3ν and 4ν (ν = 13.19 rad/µs,
+//! its tilt's Larmor beat) -- are one periodic envelope G(u) = Σ_k e^{ikνu} G_k(u), and its following is harmonic by
+//! harmonic: Ω_ab Y_ab − iẎ_ab + E_ab = 0 at each class's combined frequency Ω = ω_ab + kν (# The state at any time of
+//! the step), the polynomial of `following` -- X_k = −D_k/(ω + kν) at its leading order --, which nothing here changes.
+//! With exact labels the products fall into the classes of their harmonics' sums: tilt2's first order ±1…±4 ν and its
+//! products ±2…±8 ν, ±1…±3 ν and 0 make the classes 0, ±1…±8 ν -- 17, of which 16 beat and are followed. A state at a
+//! time is then R(1 + X(u)) d assembled once from those 16 (`at`: (2 + 4·16)n² multiply-adds and 4n, against
+//! (2 + 4·40)n² with the products of one beat apart); one class for the whole periodic envelope would not take less: each
+//! harmonic is three matrices of n², the same in a sum over k as in a sum over classes, and of the harmonics' phases
+//! z^k = e^{ikνu} only the exponentials would be shared, n a point against 16. Measured where the model labelled its
+//! candidates by unit vectors (until 2026-11-21: a sum of two keys zero only for a candidate's two members, so that
+//! 4ν − 3ν and ν were two classes of one beat): tilt2's 41 classes, 40 of them followed, at 17.2 ms a step (one thread,
+//! τ 0.326 µs); labelled by the exact vectors 17 and 16 at 10.1 ms, the steps from the same 64 states within 3.7·10⁻⁸
+//! (2.2–6·10⁻¹⁶ on the median; a few entries change their route with the merged envelope) (motion3d_status/rewrite/
+//! r2prop2.status.md).
+//!
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
 //! times the step are. The step's forms are read on the state at times of a quadrature (step.rs `propagate`), and
@@ -2392,6 +2408,19 @@ pub(crate) mod tests {
     /// Whether some pair's change is followed: the split's choice on a step.
     pub(crate) fn follows(picture: &Picture) -> bool {
         picture.followed
+    }
+
+    /// A picture's classes as prepared (a measurement): the states, the tones' beats, the classes (first order and in
+    /// all), those followed and those hopped, and per class its beat, whether it is followed and hopped, and its
+    /// followed entries' count.
+    pub(crate) fn census(picture: &Picture) -> String {
+        let order = 1 + 2 * picture.beats.len();
+        let classes = &picture.classes;
+        let followed = classes.iter().filter(|c| c.followed).count();
+        let hopped = classes.iter().filter(|c| c.hops).count();
+        let beats: Vec<String> = picture.beats.iter().map(|t| format!("{:.4}", t.beat)).collect();
+        let each: Vec<String> = classes.iter().enumerate().map(|(i, c)| format!("{i}:{:.4}{}{}/{}", c.beat, if c.followed { "f" } else { "" }, if c.hops { "h" } else { "" }, c.fast.iter().filter(|&&f| f).count())).collect();
+        format!("n {} tones {} [{}] classes {} of order {} followed {followed} hopped {hopped} | {}", picture.n, picture.beats.len(), beats.join(" "), classes.len(), order, each.join(" "))
     }
 
     /// The largest row sum of |X| at the step's end: the size of the following there.
