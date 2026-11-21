@@ -128,7 +128,7 @@ fn r1prop_bits() {
 /// A step of τ from the trajectory's state as the advance takes it (adapt.rs: a refused step at its half, down to
 /// `depth` halvings): the end state, and per halving level the refusals by why -- [decomposition, rounding, radius,
 /// other].
-fn halved(run: &Selected, t: &Trajectory, tau: f64, scratch: &mut Scratch, depth: usize, refusals: &mut [[usize; 4]]) -> Option<Trajectory> {
+fn halved(run: &Selected, t: &Trajectory, tau: f64, scratch: &mut Scratch, depth: usize, refusals: &mut [[usize; 5]]) -> Option<Trajectory> {
     use crate::spectral::Refusal;
     use crate::step::Refused;
     match Midway::new(run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], scratch, &Everywhere)) {
@@ -138,10 +138,11 @@ fn halved(run: &Selected, t: &Trajectory, tau: f64, scratch: &mut Scratch, depth
                 Refused::Propagation(Refusal::Decomposition) => 0,
                 Refused::Propagation(Refusal::Rounding) => 1,
                 Refused::Propagation(Refusal::Radius) => 2,
-                _ => 3,
+                Refused::Propagation(Refusal::Growth) => 3,
+                _ => 4,
             };
             refusals[0][why] += 1;
-            if why == 3 || depth == 0 {
+            if why == 4 || depth == 0 {
                 return None;
             }
             let (rest, deeper) = refusals.split_at_mut(1);
@@ -167,12 +168,12 @@ fn r1prop_refused() {
         let (run, chief) = run_of(&request);
         for &tau in &taus {
             let clock = std::time::Instant::now();
-            let each: Vec<([[usize; 4]; 4], u32, Option<String>)> = (0..count)
+            let each: Vec<([[usize; 5]; 4], u32, Option<String>)> = (0..count)
                 .into_par_iter()
                 .map(|i| {
                     let mut t = start(&run, &request, chief, i);
                     let mut scratch = Scratch::default();
-                    let mut refusals = [[0usize; 4]; 4];
+                    let mut refusals = [[0usize; 5]; 4];
                     for k in 0..steps {
                         match halved(&run, &t, tau, &mut scratch, 3, &mut refusals) {
                             Some(next) => t = next,
@@ -182,7 +183,7 @@ fn r1prop_refused() {
                     (refusals, t.jumps, None)
                 })
                 .collect();
-            let mut total = [[0usize; 4]; 4];
+            let mut total = [[0usize; 5]; 4];
             for (r, _, _) in &each {
                 for (level, row) in r.iter().enumerate() {
                     for (why, x) in row.iter().enumerate() {
@@ -194,7 +195,7 @@ fn r1prop_refused() {
             let jumps: u32 = each.iter().map(|e| e.1).sum();
             let ended: Vec<&String> = each.iter().filter_map(|e| e.2.as_ref()).collect();
             println!(
-                "R1-REFUSED {name} tau {tau}: {count} trajectories x {steps} steps = {}; refused at tau [decomposition, rounding, radius, other] {:?} ({:.3} %), on {on} trajectories; at tau/2 {:?}, tau/4 {:?}, tau/8 {:?}; {jumps} jumps; ended {}: {:?}; wall {:.1} s",
+                "R1-REFUSED {name} tau {tau}: {count} trajectories x {steps} steps = {}; refused at tau [decomposition, rounding, radius, growth, other] {:?} ({:.3} %), on {on} trajectories; at tau/2 {:?}, tau/4 {:?}, tau/8 {:?}; {jumps} jumps; ended {}: {:?}; wall {:.1} s",
                 count as usize * steps,
                 total[0],
                 100.0 * total[0].iter().sum::<usize>() as f64 / (count as usize * steps) as f64,
@@ -715,7 +716,7 @@ fn r1prop_quotient_scan() {
                     let (mut ratio, mut slowest, mut at, mut total) = (0.0_f64, 0.0_f64, 0, 0.0);
                     for k in 0..steps {
                         let clock = std::time::Instant::now();
-                        let mut refusals = [[0usize; 4]; 4];
+                        let mut refusals = [[0usize; 5]; 4];
                         let Some(next) = halved(&run, &t, tau, &mut scratch, 3, &mut refusals) else { break };
                         let ms = clock.elapsed().as_secs_f64() * 1e3;
                         total += ms;
