@@ -27,13 +27,13 @@ import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,inten
 import {meanInputsKey,trajectoryInputsKey} from './dynamics-cache-key.js';
 import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
-import {CourseStrip,clockChangesInMs,courseMark,courseView,type Course} from './solve-progress.js';
+import {CourseStrip,addMark,clockChangesInMs,courseMark,courseView,currentStep,type Course} from './solve-progress.js';
 import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import type {ScopeNote} from './spectroscopy.js';
 import {newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal} from './solver-types.js';
+import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal,SolveStage} from './solver-types.js';
 import {SEMICLASSICAL_REGIME} from './solver-types.js';
 import {MOTION_AXES,motionRefusal,motionRequest,motionTemperatureReading,setMotionTemperature} from './motion.js';
 import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
@@ -103,8 +103,8 @@ type Submitted={kind:SolveKind;inputs:SolveInputs;epochs:{trajectory:number;mean
 /** The running solve's latest checkpoint and when it arrived (the status line counts its estimate of
  * the time left down from then): never drawn; on 停止 (or a failure) it becomes the result. */
 let lastCheckpoint:(Submitted&{record:SolvedRecord;arrived:number})|undefined;
-/** The running motion solve's course: its checkpoints' numbers, shown under the status strip while it runs
- * (solve-progress.ts); none for any other solve. */
+/** The running motion solve's course: its stages and its checkpoints' numbers, shown under the status strip while it
+ * runs (solve-progress.ts); none for any other solve. */
 let course:Course|undefined;
 /** The status line's next re-render while it counts a running solve's remaining time down, or the course its clock. */
 let countdownTimer=0;
@@ -151,7 +151,7 @@ const detailsCommand=command('详情',()=>showView('details'),{role:'quiet'});de
 strip.trailing.prepend(detailsCommand.root);
 // 超出模型范围: under the status line on every page, while a laser's effect is outside the model.
 const scopeLine=element('div','model-scope');scopeLine.id='model-scope';scopeLine.setAttribute('role','note');scopeLine.hidden=true;
-// Under the status line while a motion solve runs: its course, checkpoint by checkpoint (solve-progress.ts).
+// Under the status line while a motion solve runs: its course, step by step (solve-progress.ts).
 const courseStrip=new CourseStrip();courseStrip.root.id='solve-progress';
 workbench.prepend(header,strip.root,courseStrip.root,scopeLine);
 
@@ -357,7 +357,7 @@ function refreshStatus():void{
   detailsCommand.hidden=!currentSolverError();
   const shown=shownCourse(),now=performance.now();courseStrip.show(shown&&courseView(shown,now));
   // The countdown says its next value when it changes, at least once a second; the course's clock at its next second.
-  clearTimeout(countdownTimer);const changes=[busy?remainingTime()?.changesInMs:undefined,shown&&clockChangesInMs(now-shown.startedAt)].filter((ms):ms is number=>ms!==undefined);
+  clearTimeout(countdownTimer);const changes=[busy?remainingTime()?.changesInMs:undefined,shown&&clockChangesInMs(now-shown.startedAt,currentStep(shown).sinceMs)].filter((ms):ms is number=>ms!==undefined);
   if(changes.length)countdownTimer=window.setTimeout(refreshStatus,Math.min(1000,...changes));
 }
 
@@ -1050,12 +1050,15 @@ function requestSolve():void{
   // A checkpoint is kept, not drawn: the page shows the final result, rendered once.
   lastCheckpoint=undefined;
   // A motion solve -- the client sends the motion with a trajectory alone (solver-client.ts motionOf) -- keeps its course.
-  const options=solveOptions(kind),started:Course|undefined=!options.includeMean&&motionRequest(submittedSettings)?{startedAt:submittedAt,marks:[]}:undefined;course=started;
+  const options=solveOptions(kind),started:Course|undefined=!options.includeMean&&motionRequest(submittedSettings)?{startedAt:submittedAt,stages:[],marks:[]}:undefined;course=started;
   const submittedOptions={...options,onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
     lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon},arrived:performance.now()};
-    const mark=started&&courseMark(result,performance.now()-started.startedAt);if(mark)started!.marks.push(mark);
+    const mark=started&&courseMark(result,performance.now()-started.startedAt);if(mark)addMark(started!,mark);
     refreshStatus();
+  },onStage:(stage:SolveStage)=>{
+    if(!stillCurrent()||!started)return;
+    started.stages.push({atMs:performance.now()-started.startedAt,stage});refreshStatus();
   }};
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();

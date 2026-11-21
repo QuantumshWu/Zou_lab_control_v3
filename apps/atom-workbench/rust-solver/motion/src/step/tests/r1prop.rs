@@ -309,7 +309,8 @@ fn r1prop_solve() {
     for (name, request) in scenes() {
         let clock = std::time::Instant::now();
         let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::solve::solve(&request, &mut |s, remaining| {
+            crate::solve::solve(&request, &mut |m| {
+                let crate::solve::Message::Checkpoint(s, remaining) = m else { return };
                 println!("R1-SOLVE {name} {:.1} s: {} trajectories, tau {} us, remaining {remaining:?}", clock.elapsed().as_secs_f64(), s.trajectories, s.time_step_us);
                 if s.trajectories > pilot {
                     panic!("R1-SOLVE the product's first batch");

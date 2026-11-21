@@ -451,7 +451,8 @@ fn first_result(name: &str, request: &Request, run: &Selected) -> bool {
     let clock = std::time::Instant::now();
     let mut first: Option<crate::solve::Solution> = None;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::solve::solve_on(request, run, &mut |s, _| {
+        crate::solve::solve_on(request, run, &mut |m| {
+            let crate::solve::Message::Checkpoint(s, _) = m else { return };
             first = Some(s.clone());
             std::panic::panic_any(First);
         })

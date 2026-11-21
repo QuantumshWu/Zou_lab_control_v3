@@ -1,7 +1,7 @@
 //! The protocol bridge to the 3D motion solver (`atom_motion`): an rb87-full/2 request whose model carries the motion
 //! block (src/full-master-model.ts `MotionModel`), mapped by `atom_motion::request` (the one JSON → request mapping and its
 //! checks), solved on the CPU, the solution returned in the one result contract (contract §2.2), every checkpoint
-//! streamed first.
+//! streamed first, and beside them every stage of the solve's pipeline (`stage`).
 //!
 //! # Device
 //! Only the CPU solver exists (SPEC §0, §9). `options.device` is read ("gpu" when absent); every solve runs on the CPU,
@@ -20,7 +20,7 @@
 use crate::{lattice_core_adapter, Device, Model, Options};
 use atom_motion::ledger::{percent, Ledger, Total};
 use atom_motion::request::{Request, STATES};
-use atom_motion::solve::{self as engine, Distributions, Solution, POPULATION_TARGET};
+use atom_motion::solve::{self as engine, Distributions, Message, Solution, Stage, Step, POPULATION_TARGET};
 use atom_population_core::lattice::accuracy;
 use atom_population_core::lattice::pipeline;
 use serde_json::{json, Value};
@@ -110,23 +110,52 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
     Ok(result)
 }
 
+/// A stage of the solve's pipeline (atom_motion::solve, # Steps) in the contract's shape: `step` -- "select", "model",
+/// "scout", "pilot", "product" --, `stepUs` the rung τ the scout, the pilot or the product runs at, and a product's batch:
+/// `batch` its number from 1, `trajectories` in hand, `want` the number it brings the run to and `worst` its looks'
+/// largest total over its target (absent where that is no number). Read by `readStage` in src/solver-client.ts for the
+/// app's course of a running solve (src/solve-progress.ts) alone: no part of the result, kept nowhere.
+fn stage(stage: &Stage) -> Value {
+    let step = match stage.step {
+        Step::Select => "select",
+        Step::Model => "model",
+        Step::Scout => "scout",
+        Step::Pilot => "pilot",
+        Step::Product => "product",
+    };
+    let mut out = json!({"step": step});
+    if let Some(tau) = stage.tau {
+        out["stepUs"] = json!(tau);
+    }
+    if let Some(b) = &stage.batch {
+        (out["batch"], out["trajectories"], out["want"]) = (json!(b.number), json!(b.trajectories), json!(b.want));
+        if let Some(worst) = b.worst {
+            out["worst"] = json!(worst);
+        }
+    }
+    out
+}
+
 /// A motion request -- its whole native line mapped and checked by `atom_motion::request::Request::from_native` (a trajectory
 /// alone of the complete 32-state model on a finite grid) -- through the solver: every checkpoint published as it is made,
-/// the final solution returned.
-pub fn solve(model: &Model, line: &Value, options: &Options, publish: &mut dyn FnMut(&Value)) -> Result<Value, String> {
+/// every stage of its pipeline handed to `staged` as it comes (`stage`), the final solution returned.
+pub fn solve(model: &Model, line: &Value, options: &Options, publish: &mut dyn FnMut(&Value), staged: &mut dyn FnMut(&Value)) -> Result<Value, String> {
     let started = Instant::now();
     let request = Request::from_native(line)?;
     let (_, groups) = lattice_core_adapter::groups(model)?;
     let initial: Vec<f64> = (0..STATES).map(|i| request.initial_density[(i, i)].re).collect();
     let gpu = options.device == Device::Gpu;
     let mut failure: Option<String> = None;
-    let mut observe = |checkpoint: &Solution, remaining: Option<f64>| {
+    let mut observe = |message: Message| {
         if failure.is_some() {
             return;
         }
-        match result(&request, &initial, checkpoint, &groups, Some(remaining), gpu, started) {
-            Ok(value) => publish(&value),
-            Err(e) => failure = Some(e),
+        match message {
+            Message::Checkpoint(checkpoint, remaining) => match result(&request, &initial, checkpoint, &groups, Some(remaining), gpu, started) {
+                Ok(value) => publish(&value),
+                Err(e) => failure = Some(e),
+            },
+            Message::Stage(s) => staged(&stage(s)),
         }
     };
     let solution = engine::solve(&request, &mut observe)?;
