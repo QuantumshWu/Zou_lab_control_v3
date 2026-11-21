@@ -5,7 +5,8 @@
 //! # Structure once
 //! Which entries count, which components and which products, which elements are slow and which channel an element
 //! falls in, are read once off the fixed matrices (their rounding rule: rs.rs `fixed`) and the frame's integer fast
-//! parts. A point puts in the factors (the beams' amplitudes, the tweezer's intensity, its Doppler series' powers) and
+//! parts. So are the parts of G₀ and of X no point changes -- the entries of a factor that does not vary, at the first
+//! coefficient (one) -- summed once into dense blocks (`Block::fixed`, `Batch::fixed`): a point adds the rest. A point puts in the factors (the beams' amplitudes, the tweezer's intensity, its Doppler series' powers) and
 //! the frequencies; it makes the folded blocks' spectra at their local generator and the products.
 //!
 //! # At a point, per component m and kept state a
@@ -108,6 +109,9 @@ pub(crate) struct Routed {
     cols: Vec<usize>,
     entries: Vec<Entry>,
     single: Option<usize>,
+    /// The entries a point puts in (`Batch::fixed` holds the others, made once): a coefficient other than the first,
+    /// or a factor that varies along a path under a component of more than one factor.
+    rest: Vec<Entry>,
 }
 
 /// A block's amplitudes in one batch (`Plan::batches`): their indices, per one its column offsets in the batch's values
@@ -118,6 +122,10 @@ struct Batch {
     offsets: Vec<(usize, usize)>,
     total: usize,
     wide: usize,
+    /// X's part no point changes (|B| × wide, as `Local::evaluate` lays X), made once (module documentation, # Structure
+    /// once): of a component of one factor its entries at the first coefficient (the factor comes after V⁻¹X), of one of
+    /// more its entries of a factor that does not vary, at the first coefficient, times the term's scale.
+    fixed: Vec<C64>,
 }
 
 /// A folded block: Q's (its rows Q's indices) or a sideband part of K (its rows K's positions, its fast part).
@@ -128,6 +136,11 @@ struct Block {
     /// The generator's entries on the block (row, column in the block), and those of its varying factors apart.
     generator: Vec<Entry>,
     varying: Vec<(usize, Vec<Entry>)>,
+    /// G₀'s part no point changes (|B| × |B|), made once: the entries of a factor that does not vary at the first
+    /// coefficient, times the term's scale (such a factor is one, `rs.rs` `Factor::varying`); and the entries a point
+    /// puts in, the others.
+    fixed: Vec<C64>,
+    rest: Vec<Entry>,
 }
 
 /// The fold's structure for a kept set K (module documentation, # Structure once).
@@ -231,7 +244,7 @@ impl Plan {
             for (r, &i) in members.iter().enumerate() {
                 q_of[i] = (blocks.len(), r);
             }
-            blocks.push(Block { rows: members, sideband: None, generator: Vec::new(), varying: Vec::new() });
+            blocks.push(Block { rows: members, sideband: None, generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new() });
         }
         let piece_classes: Vec<[i64; 2]> = classes[..hamiltonian].to_vec();
         let mut by_part: BTreeMap<[i64; 2], Vec<usize>> = BTreeMap::new();
@@ -249,7 +262,7 @@ impl Plan {
                 for (r, &a) in sub.iter().enumerate() {
                     s_of[a] = (blocks.len(), r);
                 }
-                blocks.push(Block { rows: sub, sideband: Some(*s), generator: Vec::new(), varying: Vec::new() });
+                blocks.push(Block { rows: sub, sideband: Some(*s), generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new() });
             }
         }
         // The generator's entries by block, and K's diagonal.
@@ -283,7 +296,7 @@ impl Plan {
                 }
             });
         }
-        let generator_terms = source.generator.iter().map(|t| (t.factor, t.scale)).collect();
+        let generator_terms: Vec<(usize, C64)> = source.generator.iter().map(|t| (t.factor, t.scale)).collect();
         // The amplitudes (H's pieces) and the legs (every piece) by block, the direct K × K entries.
         let order = |a: usize| (parts[a], a);
         let mut amplitudes = Vec::new();
@@ -339,14 +352,14 @@ impl Plan {
                 cols.sort_by_key(|&a| order(a));
                 cols.dedup();
                 let entries = list.iter().map(|&(r, a, t, c, v)| Entry { row: r as u32, col: cols.iter().position(|&x| x == a).unwrap() as u32, term: t as u32, coefficient: c as u32, value: v }).collect();
-                amplitudes.push(Routed { block: b, piece: index, rows: Vec::new(), cols, entries, single });
+                amplitudes.push(Routed { block: b, piece: index, rows: Vec::new(), cols, entries, single, rest: Vec::new() });
             }
             for (b, list) in leg {
                 let mut rows: Vec<usize> = list.iter().map(|e| e.0).collect();
                 rows.sort_by_key(|&a| order(a));
                 rows.dedup();
                 let entries = list.iter().map(|&(i, r, t, c, v)| Entry { row: rows.iter().position(|&x| x == i).unwrap() as u32, col: r as u32, term: t as u32, coefficient: c as u32, value: v }).collect();
-                legs.push(Routed { block: b, piece: index, rows, cols: Vec::new(), entries, single });
+                legs.push(Routed { block: b, piece: index, rows, cols: Vec::new(), entries, single, rest: Vec::new() });
             }
             direct.push(own);
         }
@@ -365,6 +378,42 @@ impl Plan {
             batch.offsets.push((batch.total, batch.wide));
             batch.total += count;
             batch.wide += if r.single.is_some() { count } else { 4 * count };
+        }
+        // The parts no point changes, made once (`Block::fixed`, `Batch::fixed`): G₀'s and X's entries of a factor that
+        // does not vary at the first coefficient; the rest a point puts in.
+        for block in blocks.iter_mut() {
+            let size = block.rows.len();
+            let mut fixed = vec![C64::ZERO; size * size];
+            for e in &block.generator {
+                let (f, scale) = generator_terms[e.term as usize];
+                if e.coefficient == 0 && !source.varying[f] {
+                    fixed[e.row as usize * size + e.col as usize] += scale * e.value;
+                } else {
+                    block.rest.push(*e);
+                }
+            }
+            block.fixed = fixed;
+        }
+        for (b, batch) in batches.iter_mut().enumerate() {
+            let size = blocks[b].rows.len();
+            let mut fixed = vec![C64::ZERO; size * batch.wide];
+            for (&i, &(_, xoff)) in batch.amplitudes.iter().zip(&batch.offsets) {
+                let r = &mut amplitudes[i];
+                let mut rest = Vec::new();
+                for e in &r.entries {
+                    let at = e.row as usize * batch.wide + xoff + e.col as usize;
+                    let (f, scale) = terms[r.piece][e.term as usize];
+                    if e.coefficient == 0 && r.single.is_some() {
+                        fixed[at] += e.value;
+                    } else if e.coefficient == 0 && !source.varying[f] {
+                        fixed[at] += scale * e.value;
+                    } else {
+                        rest.push(*e);
+                    }
+                }
+                r.rest = rest;
+            }
+            batch.fixed = fixed;
         }
         Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct }
     }
@@ -814,8 +863,10 @@ impl Local {
                 continue;
             }
             let size = block.rows.len();
-            sized(&mut g[b], size, size);
-            for e in &block.generator {
+            (g[b].rows, g[b].cols) = (size, size);
+            g[b].data.clear();
+            g[b].data.extend_from_slice(&block.fixed);
+            for e in &block.rest {
                 let (s, _) = gen[e.term as usize];
                 let c = e.value * v.coefficients[e.coefficient as usize];
                 g[b].data[e.row as usize * size + e.col as usize] += s * c;
@@ -881,8 +932,11 @@ impl Local {
             if batch.amplitudes.is_empty() {
                 continue;
             }
-            // X: per component its columns (one factor: X without it; else X and ∂X side by side), and each column's z.
-            sized(x, size, wide);
+            // X: per component its columns (one factor: X without it; else X and ∂X side by side), and each column's z;
+            // its part no point changes made once (`Batch::fixed`).
+            (x.rows, x.cols) = (size, wide);
+            x.data.clear();
+            x.data.extend_from_slice(&batch.fixed);
             z.clear();
             z.resize(total, 0.0);
             for (&i, &(off, xoff)) in batch.amplitudes.iter().zip(&batch.offsets) {
@@ -893,7 +947,7 @@ impl Local {
                 for (j, &a) in r.cols.iter().enumerate() {
                     z[off + j] = energies[a] + f;
                 }
-                for e in &r.entries {
+                for e in &r.rest {
                     let k = v.coefficients[e.coefficient as usize];
                     if k == 0.0 {
                         continue;
