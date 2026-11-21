@@ -12,7 +12,6 @@ pub mod floquet;
 pub mod krylov;
 pub mod select;
 pub mod model;
-pub mod table;
 pub mod spectral;
 pub mod step;
 pub mod adapt;

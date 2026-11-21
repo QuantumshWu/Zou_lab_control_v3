@@ -330,8 +330,14 @@
 //! its converged step, the error growing with the span (stepcost.status.md).)
 
 use crate::linalg::{self, combine, C64, Mat, LANES};
-use crate::model::assemble::laid;
 use crate::units::UNIT_ROUNDOFF;
+
+/// Where row `row` of column `column` lies among `count` columns laid for the lanes -- each column's rows in blocks of
+/// `LANES`, a block's real parts and then its imaginary parts --, from their start: its real part, its imaginary part
+/// `LANES` after it.
+pub(crate) fn laid(row: usize, column: usize, count: usize) -> usize {
+    ((row / LANES) * count + column) * 2 * LANES + row % LANES
+}
 
 /// Why the decomposition does not take a step (module documentation, # Where the decomposition does not take the
 /// step): the step is refused (step.rs `Refused::Propagation`), and the advance takes it at its half.

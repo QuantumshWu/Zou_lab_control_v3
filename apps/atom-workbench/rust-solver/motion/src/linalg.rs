@@ -190,7 +190,7 @@ impl Sum for C64 {
     }
 }
 
-// The kernels below (`axpy`, `dot`, `combine`; table.rs `blend`) are written once, for 256-bit vectors of reals with fused
+// The kernels below (`axpy`, `dot`, `combine`) are written once, for 256-bit vectors of reals with fused
 // multiply-add, and the whole build takes those instructions (apps/atom-workbench/.cargo/config.toml; a build that sets
 // RUSTFLAGS itself names them there): no second, scalar form and no choice at run time. Without the features a fused
 // multiply-add is a library call per number -- so such a build is refused here instead of running many times slower.
@@ -767,21 +767,6 @@ pub fn hermitian_eigen(h: &Mat) -> Hermitian {
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| a[(i, i)].re.total_cmp(&a[(j, j)].re));
     Hermitian { values: order.iter().map(|&i| a[(i, i)].re).collect(), vectors: Mat::from_fn(n, n, |i, k| u[(i, order[k])]) }
-}
-
-/// `hermitian_eigen` in place, asking the heap for nothing: `a` (n × n, row by row) becomes its Hermitian part's diagonal
-/// form (the eigenvalues on its diagonal, unordered), `u` its eigenvectors' columns.
-pub(crate) fn hermitian_in_place(a: &mut [C64], u: &mut [C64], n: usize) {
-    for i in 0..n {
-        for j in i..n {
-            let x = (a[i * n + j] + a[j * n + i].conj()) * 0.5;
-            a[i * n + j] = x;
-            a[j * n + i] = x.conj();
-        }
-    }
-    u.fill(C64::ZERO);
-    (0..n).for_each(|i| u[i * n + i] = C64::ONE);
-    jacobi(a, u, n);
 }
 
 /// A = R diag(λ) R⁻¹ of a general square matrix: the eigenvalues (in the complex Schur form's order), R with columns

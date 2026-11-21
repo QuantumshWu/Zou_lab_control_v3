@@ -23,7 +23,6 @@
 //! beam is its own component, at its own Doppler shift (D2); two beams of one frequency and one Doppler shift beat at zero,
 //! so their outside-form product is static.
 
-use crate::linalg::larger;
 use crate::field::{Amplitude, Geometry};
 use crate::linalg::{dot3, C64, Mat, V3};
 use crate::model::Quadratic;
@@ -143,16 +142,22 @@ pub struct Jumps {
 }
 
 impl Jumps {
-    /// Γ = Σ_a C_a†C_a (32 × 32; the decay on the excited states, nothing on the ground states): each axis's product
-    /// whole before the axes are added. The one decay of the request's states: the model's (model/rs.rs `emission`),
-    /// the frame's linewidths (floquet/frame.rs), the averaged light's denominators (`Scene::smooth`).
+    /// The decay of the request's states (`decay`).
     pub fn decay(&self) -> Mat {
-        let mut gamma = Mat::zeros(STATES, STATES);
-        for c in &self.emission {
-            gamma.add_scaled(C64::ONE, &c.adjoint_product(c));
-        }
-        gamma
+        decay(&self.emission)
     }
+}
+
+/// Γ = Σ_a C_a†C_a of the emission C_a (32 × 32; the decay on the excited states, nothing on the ground states): each
+/// axis's product whole before the axes are added. The one decay of the request's states: the model's (model/rs.rs
+/// `emission`), the frame's linewidths (floquet/frame.rs), the averaged light's denominators (`Scene::smooth`), the
+/// run's domain (solve.rs `Widest`).
+pub fn decay(emission: &[Mat; 3]) -> Mat {
+    let mut gamma = Mat::zeros(STATES, STATES);
+    for c in emission {
+        gamma.add_scaled(C64::ONE, &c.adjoint_product(c));
+    }
+    gamma
 }
 
 /// The scene built from a request.
@@ -554,6 +559,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::larger;
 
     /// The tweezer's own axis (`tweezer_axis`): R1_TWEEZER and R1_SIGMA_P, the app's lone tweezers (the reference laser:
     /// index zero on their one axis, the carrier), have none and are scenes; R4_LIN_4's tweezer has one; on the sample with

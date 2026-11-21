@@ -302,7 +302,7 @@
 //! # The absorbed light's momentum (SPEC §1.6)
 //! Per unit time the light an atom scatters gives its momentum a mean and a second moment that are smooth in the
 //! position and finite where the light interferes away -- the local Kramers–Moyal coefficients Σ Im⟨u|∇u⟩ and
-//! Σ Re⟨∇u|⊗|∇u⟩ of the jumps' amplitudes u = Jψ, neither divided by the jumps' rate (model/photon.rs). They are
+//! Σ Re⟨∇u|⊗|∇u⟩ of the jumps' amplitudes u = Jψ, neither divided by the jumps' rate (model.rs `Moments`). They are
 //! delivered so that no increment of the momentum is a quotient by a rate:
 //! - a jump carries the emitted photon's recoil −k_φ n and its class's conditional mean as far as one absorbed photon's
 //!   momentum goes (`Emitted::kick`: at most k_φ + k_c in all);
@@ -490,23 +490,23 @@ pub trait Dynamics {
     fn hbar_over_mass(&self) -> f64;
 
     /// The reference potential's second-order expansion at r (SPEC §2.1): the fixed reference state's trap potential --
-    /// `Model::expansion(r, p_ref, &model.prepared())`, or the trap light's held forms on the fold (model/fold/run.rs,
-    /// # The rest of the model). The splitting is exact for any reference; this one moves the trap's harmonic part, and its
+    /// the trajectory model's prepared potential of the reference state (model/selected.rs, # The rest of the model). The
+    /// splitting is exact for any reference; this one moves the trap's harmonic part, and its
     /// gradient and curvature at the step's middle, exactly.
     fn reference(&self, r: [f64; 3]) -> Quadratic;
 
-    /// A cluster: its states and its Doppler frame K_s (`Model::clusters()[c]`).
+    /// A cluster: its states and its Doppler frame K_s (model.rs `Cluster`).
     fn cluster(&self, cluster: usize) -> &Cluster;
 
-    /// The cluster a ground state belongs to (`Model::cluster_of`).
+    /// The cluster a ground state belongs to.
     fn cluster_of(&self, ground: usize) -> usize;
 
     /// The cluster's generator at the position r and the time t with every light on, for every momentum and along every
     /// straight path through the point (`Middle`): made once a step, at its middle.
     fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_>;
 
-    /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/photon.rs
-    /// `Model::emission_of`): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
+    /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/selected.rs, # The
+    /// photons): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
     /// classes' order; `draw` picks one of them by its place among those rates, or none; and the model makes the photon
     /// of the class drawn (`Emitted`) -- the one class whose amplitudes and kick a jump reads. None where `draw` picks
     /// none. Inside a step the point is on the step's path: `on` is the cluster's middle there with the path and the
@@ -521,13 +521,13 @@ pub trait Dynamics {
         Landing::On(Landed::plain(f.iter().copied().collect(), threshold))
     }
 
-    /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (`Model::energy`, rad/µs).
+    /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (rad/µs).
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64;
 
-    /// The loss test at a point (`Model::lost`): outside the region and E_s above its far value.
+    /// The loss test at a point: outside the region and E_s above its far value.
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool;
 
-    /// The displayed rows of the cluster's state at a point (`Model::readout`).
+    /// The displayed rows of the cluster's state at a point.
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
     /// A cluster's state's held forms at a point (module documentation, # The path's momentum: `Forms`, at the point's
@@ -561,7 +561,7 @@ pub trait Dynamics {
 
     /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
     /// trajectory's work. The one count of a step's run that is not counted where it is made (`Price`): the model makes
-    /// the photon (model.rs `Run::emit`) and does not hand its count on; so it is priced at the dearest class's of every
+    /// the photon (`Dynamics::emit`) and does not hand its count on; so it is priced at the dearest class's of every
     /// cluster at the focus, once a run.
     fn photon_work(&self) -> f64 {
         0.0
@@ -644,7 +644,7 @@ pub trait Middle {
     }
 
     /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
-    /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
+    /// jumps' kicks (model.rs `Scattering::of_moments`): the force and the second moment's rate the jumps do not carry, of the
     /// state ψ at the middle's time and the path's momentum; and the counted real multiply-adds that made it. Asked of
     /// the middle, which holds the point: the model makes nothing there a second time.
     fn scattering(&self, path: &Self::Path, psi: &[C64]) -> (Scattering, f64);
@@ -2396,7 +2396,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 });
                 // The states kept stand as far as the root: the middle state; a time read, its state as the propagation
                 // passed it (`looked`), in the lab. A reading is read as ρ/tr ρ alone -- its rows, its place, a sample of
-                // the units' errors (model.rs `Model::readout`, units.rs `Model::state_populations`) --, so its norm is
+                // the model's error (`Dynamics::readout`) --, so its norm is
                 // the propagation's there and nothing of the survival is integrated for it: the loss and the jumps are
                 // the trajectory's own states' (adapt.rs, # The reads).
                 for &(kind, u, state) in met.iter().filter(|m| root.is_none_or(|r| ahead(m.1) < ahead(r))) {
@@ -2815,7 +2815,7 @@ fn split(c: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
 }
 
 /// A factor Λ of a diffusion's second-moment rate C = 2D, Λ Λᵀ = C (positive semidefinite: the second moment's rate less
-/// what the jumps carry of it, Cauchy–Schwarz; model/photon.rs): its Cholesky factor's columns, so that Λ on a Brownian
+/// what the jumps carry of it, Cauchy–Schwarz; model.rs `Scattering::of_moments`): its Cholesky factor's columns, so that Λ on a Brownian
 /// increment of unit rate has the covariance C τ.
 ///
 /// In a null direction of C -- a plane wave's absorption leaves nothing beside its jumps' k -- a pivot is the rounding

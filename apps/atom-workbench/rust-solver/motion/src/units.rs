@@ -70,12 +70,11 @@ pub const CLASSICAL: f64 = 4.0;
 /// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every beam of the trap light (the tweezer's
 /// frequency) is at the atom below this share of its value at the focus -- the contract's region, the UI's text word for
 /// word (src/model-notes.ts: "与光镊同频的各束光在原子处的强度都低于各自焦点处的 1/20"). A lost atom is one first outside it
-/// with its loss energy above the far value (model.rs `Model::lost`), as the same sentence of the UI goes on.
+/// with its loss energy above the far value (`step::Dynamics::lost`), as the same sentence of the UI goes on.
 pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// The most trajectories a solve runs (SPEC §3; contract §2.3, whose reason text names 16384): reached, the solve
 /// returns as usual, partial. A cap of the contract, not derived; beside the work it sets the least statistics a
-/// solve books, z²/(N + z²) (estimate.rs `unseen`), and through it the reach's share and the tables' shares
-/// (model/tabulate.rs `shares`).
+/// solve books, z²/(N + z²) (estimate.rs `unseen`).
 pub const MOST_TRAJECTORIES: u64 = 1 << 14;
 /// The most steps of the run's constant step a trajectory's run may hold (SPEC §2.2; contract §2.3): the step's ladder
 /// goes no further down than the run's length over it; where its error still lies clearly beyond what it may take

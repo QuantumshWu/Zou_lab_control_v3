@@ -1,8 +1,7 @@
 //! The light (SPEC §1.2, §1.3): each beam's amplitude a_l(r) relative to its focus value with its analytic gradient
 //! and Hessian; one coherent field per frequency, E_ω(r) = Σ_{l∈ω} a_l(r) E_l, on the basis of its beams' span; the
-//! bounded chart of each frequency's field with its gradient (the coordinates of the near light's tables, model/tabulate.rs);
-//! and the trap's region by intensity. The far light's shifts, linear in T_ω = E_ω E_ω†, are the model's (model/far.rs), as
-//! are the potential, the trap and the reach.
+//! bounded chart of each frequency's field with its gradient; and the trap's region by intensity. The light's model is the
+//! scene's (scene.rs: the couplings and the outside forms at the beams' amplitudes) and its one fold's (model/rs.rs).
 //!
 //! # Beams
 //! A plane wave a = e^{ikζ}; a paraxial Gaussian beam focused at the origin a = e^{ikζ} exp(−ρ²/(w₀²q))/q,
@@ -41,11 +40,11 @@
 //! An atom is outside the trap's region where the trap light -- the tweezer, the one beam of its frequency
 //! (`Request::validate`: neither its reflection nor another beam of its laser is input) -- is below `REGION_INTENSITY` of
 //! its focus value, |a(r)|² < 1/20 (SPEC §1.3, the UI's region; a lost atom is first outside it with its loss energy above the far
-//! value, model.rs `Model::lost`). Only the trap light makes the trap: a probe or a
+//! value, the trajectory model's loss test, model/selected.rs). Only the trap light makes the trap: a probe or a
 //! cooling beam given by its waist is focused too, on the millimetre scale, and an atom it pushes out of the tweezer
 //! moves along it for metres (√19 z_R) -- counted by its intensity, such an atom would never be lost.
 
-use crate::linalg::{larger, smaller};
+use crate::linalg::smaller;
 use crate::linalg::{dot3, hermitian_eigen, Mat, C64, V3};
 use crate::units::rounding;
 use crate::request::Request;
@@ -361,6 +360,7 @@ impl Light {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::larger;
     use crate::linalg::norm3;
     use crate::random::{Purpose, Stream};
     use crate::request::{tests::sample, OutsideForm};

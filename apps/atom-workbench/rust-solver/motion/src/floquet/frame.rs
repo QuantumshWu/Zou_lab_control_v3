@@ -551,7 +551,7 @@ pub struct Sectors {
 
 /// One coordinate of the frame vector of the element b ← a (row b, column a) of a component at the vector c: c − θ_b +
 /// θ_a. In the frame ψ_a = e^{−iθ_a t} ψ̃_a, so H_ba e^{−ict} ψ_a enters i dψ̃_b/dt as H_ba e^{−i(c − θ_b + θ_a)t} ψ̃_a.
-/// The one definition: the assembly's on whole vectors (assemble.rs `to_frame`), the fold's on their fast parts
+/// The one definition: the assembly's on whole vectors (floquet/assemble.rs `to_frame`), the fold's on their fast parts
 /// (`Sectors::element`).
 pub fn element(c: i64, row: i64, col: i64) -> i64 {
     c - row + col

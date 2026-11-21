@@ -73,7 +73,7 @@
 //!
 //! # What a level leaves out
 //! A set of phase space given by the kinetic energy it holds at each place, {(r, κ) : (ħ/m)κ²/2 ≤ A(r)} (the model's
-//! reach: A = V_min + L − V(r), reach.rs), leaves out a share of the ensemble as it is drawn -- the classical draw
+//! reach of a level L above the bottom, A = V_min + L − V(r)), leaves out a share of the ensemble as it is drawn -- the classical draw
 //! (r, κ) mapped by the Wigner factor to (r′, Sκ), r′ = r + Σ_i (s_i − 1)(e_i·K⁻¹∇V(r)) e_i, S = Σ_i s_i e_i e_iᵀ. At r the
 //! classical momenta are isotropic with the kinetic energy K (in k_BT) of density ∝ (e^{y−K} − 1) K^{1/2} on [0, y]; a
 //! momentum along n (its components on the well's axes) has the mapped kinetic energy q(n) K, q = Σ_i s_i² n_i², and
@@ -91,7 +91,7 @@
 //! over n on one octant of the sphere (q is even in every n_i) by Gauss–Legendre in cos θ on (0, 1) and the midpoint
 //! rule in the azimuth on (0, π/2), with the level's node count; every count is doubled as `kinetic`'s are, and the
 //! last two levels' difference is the share's own error (`Share`). In a classical harmonic well (s_i = 1, V quadratic)
-//! the two are Q(3, L) and Q(4, L) (reach.rs, # The reach's level).
+//! the two are Q(3, L) and Q(4, L), the regularized upper incomplete gamma functions.
 //!
 //! # Latin hypercube
 //! A group's members draw each of the `DEVIATES` uniform deviates of a first proposal and a momentum -- the component, the

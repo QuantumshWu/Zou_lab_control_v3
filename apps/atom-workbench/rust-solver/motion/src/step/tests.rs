@@ -2153,7 +2153,7 @@ fn a_following_state_s_kick_has_the_curvature_of_the_level_it_follows() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The model's far light (`model::Run`) on the R1 scenes: a conservative trap.
+// The trajectory's model (model/selected.rs `Selected`) on reference scenes: a conservative trap.
 
 /// A scene's request through the one parser: a reference scene by name (refs/scenes, the app's native request), or any
 /// native request file by its path.
@@ -2163,8 +2163,24 @@ fn scene(name: &str) -> crate::request::Request {
     crate::request::Request::from_native(&line).unwrap()
 }
 
-/// R1 (contract §6): a conservative far-light trap holds its atoms' energies. The scene's model (every unit folded: the far
-/// light alone), its run (`model::Run`) from the reference state, sixteen atoms of the scene's temperature in the trap's
+/// A scene's trajectory model as the solve makes it (`solve::run_of`: the scene, its two-point selection, the selected
+/// model) from its reference state -- the initial component of the largest population --, that state, and its prepared
+/// trap: the one descent (model/potential.rs `descend`) on the prepared potential from the trap light's shortest length,
+/// as the solve's wells take it (solve.rs `Prepared`).
+fn scene_run(name: &str) -> (crate::request::Request, crate::model::selected::Selected, usize, crate::model::Trap) {
+    let request = scene(name);
+    let state = crate::solve::chief(&request);
+    let p = crate::solve::alone(state);
+    let run = crate::solve::run_of(&request, p).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let light = run.light();
+    let k = light.frequencies[light.trap].beams.iter().map(|&l| light.beams[l].wave_number).fold(0.0, crate::linalg::larger);
+    let potential = run.prepared(&p);
+    let trap = crate::model::potential::descend(1.0 / k, run.hbar_over_mass(), &|r| light.outside(r), &|r| potential.rounded(r)).expect("the prepared trap");
+    (request, run, state, trap)
+}
+
+/// R1 (contract §6): a conservative far-light trap holds its atoms' energies. The scene's trajectory model and its
+/// prepared trap (`scene_run`: a lone tweezer's P is its ground states, the tweezer folded), sixteen atoms of the scene's temperature in the trap's
 /// harmonic approximation (Gaussian positions and momenta of k_BT along the principal axes), each advanced through the
 /// scene's outputs at one constant step, the ladder's second rung (SPEC §2.2: half the largest power-of-two fraction of
 /// the output interval below the trap's resonance ω τ = π). None is lost; between
@@ -2173,14 +2189,7 @@ fn scene(name: &str) -> crate::request::Request {
 /// energy keeps its time-averaged level (T constant): its second half's mean within the first half's statistics.
 fn conservative_trap(name: &str) {
     use crate::units::{KT_PER_UK, STEP_SHARE, TEMPERATURE_TARGET};
-    let request = scene(name);
-    let light = crate::field::Light::new(&request);
-    let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
-    let state = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let mut p = [0.0; crate::model::GROUND];
-    p[state] = 1.0;
-    let trap = model.trap(&p, &model.prepared()).unwrap();
-    let run = crate::model::Run::new(&model, p);
+    let (request, run, state, trap) = scene_run(name);
     let hm = run.hbar_over_mass();
     let kt = KT_PER_UK * request.temperature_uk;
     let thermal = (kt / hm).sqrt();
@@ -2753,24 +2762,17 @@ fn atoms<D: Dynamics>(model: &D, count: u64) -> Vec<Trajectory> {
         .collect()
 }
 
-/// An R1 scene's cost case: the scene's far-light model (`model::Run`) from its reference state, sixteen atoms of the
-/// scene's temperature in the trap's harmonic approximation (as `conservative_trap`), held, one step of τ each.
+/// An R1 scene's cost case: the scene's trajectory model (`scene_run`), sixteen atoms of the scene's temperature in the
+/// trap's harmonic approximation (as `conservative_trap`), held, one step of τ each.
 fn scene_cost(name: &str, tau: f64) -> f64 {
     let mut time = 0.0;
     scene_atoms(name, &mut |run, starts| time = cost(name, run, starts, tau));
     time
 }
 
-/// An R1 scene's far-light model and its atoms, to `each`.
-fn scene_atoms(name: &str, each: &mut dyn FnMut(&crate::model::Run, &[Trajectory])) {
-    let request = scene(name);
-    let light = crate::field::Light::new(&request);
-    let model = crate::model::Model::new(&request, &light, &[]).expect("the far light folds");
-    let state = (0..crate::model::GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let mut p = [0.0; crate::model::GROUND];
-    p[state] = 1.0;
-    let trap = model.trap(&p, &model.prepared()).unwrap();
-    let run = crate::model::Run::new(&model, p);
+/// An R1 scene's trajectory model and its atoms, to `each`.
+fn scene_atoms(name: &str, each: &mut dyn FnMut(&crate::model::selected::Selected, &[Trajectory])) {
+    let (request, run, state, trap) = scene_run(name);
     let kt = crate::units::KT_PER_UK * request.temperature_uk;
     let starts: Vec<Trajectory> = (0..16)
         .map(|i| {
@@ -2798,8 +2800,8 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
 }
 
 /// A trajectory stopped at step ends and taken up again with a fresh scratch is the trajectory run through (adapt.rs
-/// `advance`'s stops; step.rs `Scratch`: nothing of a step is carried to the next), on its class: PGC3D_1ms's model as
-/// the solve closes it, with its near tables (`scene_clusters`), six atoms of each cluster through 600 steps of
+/// `advance`'s stops; step.rs `Scratch`: nothing of a step is carried to the next), on its class: PGC3D_1ms's
+/// trajectory model as the solve makes it (`scene_clusters`), six atoms of its cluster through 600 steps of
 /// 0.326 µs on their own jump thresholds -- tens of jumps each --, each run through at once and run again stopped at
 /// twelve random times, at every stop the trajectory and its path copied and its scratch made anew: every piece of
 /// every step's path (its jumps') and the end state the same to the bit. (Until 2026-11-20 the picture's counts chose
@@ -2808,7 +2810,7 @@ fn thermal(trap: &crate::model::Trap, hm: f64, kt: f64, stream: &mut crate::rand
 fn a_trajectory_stopped_and_taken_up_with_a_fresh_scratch_is_the_one_run_through() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/refs/requests/PGC3D_1ms.json");
     let mut atoms = 0;
-    scene_clusters(path, &mut |_, _, cluster, run, starts| {
+    scene_clusters(path, &mut |_, cluster, run, starts| {
         let (tau, steps) = (0.326, 600);
         let end = steps as f64 * tau;
         for (i, start) in starts.iter().enumerate().take(6) {
@@ -2843,53 +2845,46 @@ fn a_trajectory_stopped_and_taken_up_with_a_fresh_scratch_is_the_one_run_through
     assert!(atoms > 0, "{atoms} atoms");
 }
 
-/// A scene's model closed by its units' errors at its reference state (model.rs `Model::closed_at`) with its near tables (`Model::tabulate`), and what the ensemble's draw meets (the prepared well's
-/// depth at its bottom against its envelope's top), said; then per cluster sixteen atoms of the scene's temperature in
-/// the trap's harmonic approximation, each a random state of the cluster, held: to `each` the model, its prepared
-/// trap, the cluster's number, the run and the atoms.
-fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate::model::Trap, usize, &crate::model::Run, &[Trajectory])) {
-    use crate::model::{Model, Run, GROUND};
-    let request = scene(name);
-    let light = crate::field::Light::new(&request);
-    let state = (0..GROUND).max_by(|&x, &y| request.initial_density[(x, x)].re.total_cmp(&request.initial_density[(y, y)].re)).unwrap();
-    let mut p = [0.0; GROUND];
-    p[state] = 1.0;
+/// A scene's trajectory model as the solve makes it (`scene_run`) and what the ensemble's draw meets (the prepared
+/// well's depth at its bottom against its envelope's top), said with the selection's report; then sixteen atoms of the
+/// scene's temperature in the trap's harmonic approximation, each a random state of the model's one cluster (P), held:
+/// to `each` the prepared trap, the cluster's number, the run and the atoms.
+fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Trap, usize, &crate::model::selected::Selected, &[Trajectory])) {
     let started = std::time::Instant::now();
-    let (model, kept, trap, reach) = Model::closed_at(&request, &light, vec![], state, request.temperature_uk);
-    let closure = started.elapsed();
-    let started = std::time::Instant::now();
-    let tables = model.tabulate(&reach, 1 << 20);
-    eprintln!("{name}: closure {closure:.2?}, {} units kept, tabulate {:.2?}, {} tables", kept.len(), started.elapsed(), tables.tables.len());
-    let run = Run::tabulated(&model, &tables, p);
+    let (request, run, state, trap) = scene_run(name);
+    let p = crate::solve::alone(state);
     let kt = crate::units::KT_PER_UK * request.temperature_uk;
     // What the ensemble's draw meets (ensemble.rs): the prepared well's depth at its bottom against its envelope's top.
     eprintln!(
-        "{name}: the prepared well at {:?} is {:.3} k_BT deep, its envelope's top {:.3} k_BT; trap frequencies {:?} rad/µs",
+        "{name}: the run made in {:.2?}; the prepared well at {:?} is {:.3} k_BT deep, its envelope's top {:.3} k_BT; trap frequencies {:?} rad/µs
+{}",
+        started.elapsed(),
         trap.centre,
-        -model.potential(trap.centre, &p, &model.prepared()) / kt,
-        model.envelope(&p).peak() / kt,
-        trap.frequencies
+        -run.prepared(&p).at(trap.centre).value / kt,
+        run.prepared(&p).peak() / kt,
+        trap.frequencies,
+        run.report()
     );
-    for (cluster, c) in model.clusters().iter().enumerate() {
-        let starts: Vec<Trajectory> = (0..16)
-            .map(|i| {
-                let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
-                let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
-                let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
-                let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
-                let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-                t.psi = psi.iter().map(|z| *z / norm).collect();
-                t.forms = run.forms(t.cluster, &t.point(), &t.psi);
-                t.threshold = f64::MIN_POSITIVE;
-                t
-            })
-            .collect();
-        each(&model, &trap, cluster, &run, &starts);
-    }
+    let cluster = 0;
+    let c = run.cluster(cluster).clone();
+    let starts: Vec<Trajectory> = (0..16)
+        .map(|i| {
+            let mut stream = crate::random::Stream::new(17, crate::random::Purpose::Initial, i, cluster as u32);
+            let (r, kappa) = thermal(&trap, run.hbar_over_mass(), kt, &mut stream);
+            let mut t = Trajectory::new(&run, c.states[0], r, kappa, 17, i);
+            let psi: Vec<C64> = t.psi.iter().map(|_| C64::new(stream.normal(), stream.normal())).collect();
+            let norm = psi.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            t.psi = psi.iter().map(|z| *z / norm).collect();
+            t.forms = run.forms(t.cluster, &t.point(), &t.psi);
+            t.threshold = f64::MIN_POSITIVE;
+            t
+        })
+        .collect();
+    each(&trap, cluster, &run, &starts);
 }
 
 /// A scene's step on its own model (run by name, alone: `SCENE=<a reference scene's name or a native request's path>
-/// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`: what the
+/// TAU=<µs> … a_scene_s_step_cost -- --ignored --nocapture`), on the atoms of `scene_clusters`: what the
 /// propagation meets (the generator at the trap's centre, at rest, less its trace, its fastest tone, each times τ, and
 /// the bounds of its Hermitian and decay parts) and a cost case (`cost`), one step of τ an atom.
 #[test]
@@ -2897,8 +2892,8 @@ fn scene_clusters(name: &str, each: &mut dyn FnMut(&crate::model::Model, &crate:
 fn a_scene_s_step_cost() {
     let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
     let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
-    scene_clusters(&name, &mut |model, trap, cluster, run, starts| {
-        let c = &model.clusters()[cluster];
+    scene_clusters(&name, &mut |trap, cluster, run, starts| {
+        let c = run.cluster(cluster);
         // What the propagation meets: the generator at the trap's centre, at rest, less its trace, and its fastest tone.
         {
             let (middle, n) = (run.middle(cluster, trap.centre, 0.0), c.states.len());
@@ -2921,52 +2916,44 @@ fn a_scene_s_step_cost() {
             let crate::linalg::Bounds { rho, gamma, .. } = crate::linalg::bounds(&h, &mut vec![C64::ZERO; n]);
             eprintln!("{name} cluster {cluster}: its generator's bounds ρ {rho:.3e}, γ {gamma:.3e} rad/µs, times τ {:.3e}, {:.3e}", rho * tau, gamma * tau);
         }
-        eprintln!("{name} cluster {cluster}: {}", run.described(cluster));
         cost(&format!("{}+{} of {}", c.ground, c.states.len() - c.ground, std::path::Path::new(&name).file_stem().unwrap().to_string_lossy()), run, starts, tau);
     });
 }
 
 /// What `decay_along` reads of a scene's decay, kind by kind.
-const DECAYS: [&str; 5] = ["tables at the nodes", "exact at the nodes", "tables inside", "exact inside", "parabola inside"];
+const DECAYS: [&str; 3] = ["the model at the nodes", "the model inside", "parabola inside"];
 
-/// The decay along a scene's steps of τ (step.rs, # Jumps), per cluster on the atoms of `scene_clusters`, each on its
-/// own step's path (the momentum predicted as the step predicts it): the generator's decay Γ(u) = i(Ĥ(u) − Ĥ(u)†) --
-/// the model's from its near tables (`Run::tabulated`) and exactly (`Run::new`), at the step's three nodes and at 21
-/// times across the step, and the parabola through the tables' three nodes the step takes there (`DECAYS`). To `each`
-/// per cluster: its ground and explicit states; per kind the least λ_min/max|λ| over the atoms and times and the times
-/// it is negative beyond the rounding of the generator's sums; and the most a step's survival could rise by,
-/// ∫max(0, −λ_min(Γ(u)))du, of the parabola and of the exact decay, with the largest decay of a step ∫λ_max.
-fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &[(f64, usize); 5], [f64; 3])) {
+/// The decay along a scene's steps of τ (step.rs, # Jumps), on the atoms of `scene_clusters`, each on its own step's
+/// path (the momentum predicted as the step predicts it): the generator's decay Γ(u) = i(Ĥ(u) − Ĥ(u)†) of the
+/// trajectory's model at the step's three nodes and at 21 times across the step, and the parabola through the three
+/// nodes the step takes there (`DECAYS`). To `each` per cluster: its ground and explicit states; per kind the least
+/// λ_min/max|λ| over the atoms and times and the times it is negative beyond the rounding of the generator's sums; and
+/// the most a step's survival could rise by, ∫max(0, −λ_min(Γ(u)))du, of the parabola and of the model's decay, with
+/// the largest decay of a step ∫λ_max.
+fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &[(f64, usize); 3], [f64; 3])) {
     let h = 0.5 * tau;
-    scene_clusters(name, &mut |model, _, cluster, run, starts| {
-        let c = &model.clusters()[cluster];
+    scene_clusters(name, &mut |_, cluster, run, starts| {
+        let c = run.cluster(cluster).clone();
         let n = c.states.len();
-        let exact = crate::model::Run::new(model, run.reference);
         let decay = |m: &Mat| Mat::from_fn(n, n, |a, b| C64::I * (m[(a, b)] - m[(b, a)].conj()));
         let extremes = |g: &Mat| {
             let values = crate::linalg::hermitian_eigen(g).values;
             (values.iter().copied().fold(f64::INFINITY, crate::linalg::smaller), values.iter().map(|v| v.abs()).fold(0.0, crate::linalg::larger))
         };
-        let mut kinds = [(f64::INFINITY, 0usize); 5];
+        let mut kinds = [(f64::INFINITY, 0usize); 3];
         let mut rise = [0.0_f64; 3];
         let points: Vec<f64> = (0..=20).map(|k| -h + tau * k as f64 / 20.0).collect();
         for start in starts {
             let through = step::Midway::new(run, start, tau).unwrap();
-            let (r_h, kappa_h) = through.reached;
-            let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
+            let kappa = super::predicted(&start.forms, through.reached.1, tau, start.time + h);
             let velocity = kappa.map(|k| run.hbar_over_mass() * k);
-            let exact_middle = exact.middle(cluster, r_h, start.time + h);
-            let (path, exact_path) = (through.generator.path(kappa, velocity), exact_middle.path(kappa, velocity));
+            let path = through.generator.path(kappa, velocity);
             let mut m = Mat::zeros(n, n);
-            let mut at = |exactly: bool, u: f64| {
-                if exactly {
-                    exact_middle.generator(&exact_path, u, &mut m);
-                } else {
-                    through.generator.generator(&path, u, &mut m);
-                }
+            let mut at = |u: f64| {
+                through.generator.generator(&path, u, &mut m);
                 (decay(&m), m.max_abs())
             };
-            let nodes = [-h, 0.0, h].map(|u| at(false, u));
+            let nodes = [-h, 0.0, h].map(&mut at);
             let mut record = |kind: usize, g: &Mat, size: f64| {
                 let (low, high) = extremes(g);
                 if high > 0.0 {
@@ -2975,10 +2962,8 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
                 kinds[kind].1 += usize::from(low < -crate::units::rounding(4 * n) * size);
                 (low, high)
             };
-            for (u, (g, size)) in [-h, 0.0, h].iter().zip(&nodes) {
+            for (g, size) in &nodes {
                 record(0, g, *size);
-                let (g, size) = at(true, *u);
-                record(1, &g, size);
             }
             let (mut lows, mut highs) = ([Vec::new(), Vec::new()], Vec::new());
             for &u in &points {
@@ -2986,11 +2971,10 @@ fn decay_along(name: &str, tau: f64, each: &mut dyn FnMut(usize, usize, usize, &
                 let l = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
                 let parabola = Mat::from_fn(n, n, |a, b| (0..3).map(|j| nodes[j].0[(a, b)] * l[j]).sum());
                 let size = nodes.iter().map(|g| g.1).fold(0.0, crate::linalg::larger);
-                let (g, tables) = at(false, u);
-                let (_, high) = record(2, &g, tables);
-                let (g, exactly) = at(true, u);
-                lows[1].push(record(3, &g, exactly).0);
-                lows[0].push(record(4, &parabola, size).0);
+                let (g, exactly) = at(u);
+                let (low, high) = record(1, &g, exactly);
+                lows[1].push(low);
+                lows[0].push(record(2, &parabola, size).0);
                 highs.push(high);
             }
             // The trapezoid over the 21 times.
@@ -3016,14 +3000,14 @@ fn a_scene_s_decay_along_its_steps() {
         for (kind, (least, negative)) in DECAYS.iter().zip(kinds) {
             eprintln!("  {kind:<22}: least λ_min/max|λ| {least:+.3e}, negative beyond the sums' rounding at {negative} times");
         }
-        eprintln!("  the most a step's ln N could rise by: parabola {:.3e}, the exact decay {:.3e}; the largest decay a step ∫λ_max {:.3e}", rise[0], rise[1], rise[2]);
+        eprintln!("  the most a step's ln N could rise by: parabola {:.3e}, the model's decay {:.3e}; the largest decay a step ∫λ_max {:.3e}", rise[0], rise[1], rise[2]);
     });
 }
 
-/// The decay a scene's steps take is positive definite (step.rs, # Jumps): on the clusters of R4_LIN_2 (explicit
-/// excited states and folds, τ 0.4335 µs) and of PGC3D_1ms (a six beams' fold, τ 0.7125 µs) as the solve closes them,
-/// sixteen thermal atoms each on its own step's path (`decay_along`): the decay from the near tables and exactly at the
-/// step's three nodes and at 21 times across the step, and the parabola through the three nodes the survival takes
+/// The decay a scene's steps take is positive definite (step.rs, # Jumps): on the trajectory models of R4_LIN_2
+/// (explicit excited states and folds, τ 0.4335 µs) and of PGC3D_1ms (a six beams' fold, τ 0.7125 µs) as the solve
+/// makes them, sixteen thermal atoms each on its own step's path (`decay_along`): the model's decay at the step's three
+/// nodes and at 21 times across the step, and the parabola through the three nodes the survival takes
 /// there -- its least eigenvalue nowhere below zero (measured beside these: GMD1C, S3, S3c, S1, R3_DOPPLER, TET and a
 /// two-level atom at 10 Γ alike, the least ratio 6·10⁻⁷ on GMD1C).
 #[test]
@@ -3040,7 +3024,7 @@ fn a_scene_s_decay_is_positive_along_its_steps() {
 }
 
 /// The step's cost (run by name, alone: `the_step_s_cost -- --ignored --nocapture`): µs per `step_of` and per phase,
-/// single-threaded, on R1_TWEEZER's far light (a static path), on a two-level atom
+/// single-threaded, on R1_TWEEZER's trajectory model (a lone tweezer folded), on a two-level atom
 /// with its excited state explicit in a standing wave in a tweezer -- near resonance, and twenty linewidths off it at
 /// the steps 0.0625 and 0.5 µs --, and on clusters of 1, 3, 5 and 8 ground states at a near-resonant light's sizes
 /// (`Synthetic`) on a static path (Doppler frames), on a standing wave's beating one (a pair of beat parts) and on six
@@ -3298,7 +3282,7 @@ fn a_diffusion_s_energy_input_does_not_know_the_trap() {
 
 /// What the split of the propagation's pairs does to a scene's step (run by name, alone: `SCENE=<a reference scene's
 /// name or a native request's path> TAU=<µs> …
-/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), per cluster on the atoms of `scene_clusters`:
+/// a_scene_s_step_error_by_the_split -- --ignored --nocapture`), on the atoms of `scene_clusters`:
 /// - what the split meets: the pairs of the middle's generator by their turn x = |ω| h, and the sizes of their change
 ///   over a half step, its slope's and its curvature's parts (`spectral::Picture::pairs`), at τ, τ/2 and τ/4;
 /// - the propagation's own error: the frame's state over the span τ on the step's path (the path of the step of τ:
@@ -3323,9 +3307,9 @@ fn a_scene_s_step_error_by_the_split() {
     let name = std::env::var("SCENE").expect("SCENE: a reference scene's name or a request file's path");
     let tau: f64 = std::env::var("TAU").expect("TAU: the step (µs)").parse().expect("TAU: a number");
     let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(x, y)| (*x - *y).norm_sqr()).sum::<f64>().sqrt();
-    scene_clusters(&name, &mut |model, _, cluster, run, starts| {
+    scene_clusters(&name, &mut |_, cluster, run, starts| {
         let (hm, n, count) = (run.hbar_over_mass(), starts[0].psi.len(), starts.len() as f64);
-        let ground = model.clusters()[cluster].ground;
+        let ground = run.cluster(cluster).ground;
         let label = format!("{ground}+{}", n - ground);
         let falls = |e: &[f64; 3]| format!("{:.3e} {:.3e} {:.3e} (falls {:.1}, {:.1})", e[0], e[1], e[2], e[0] / e[1], e[1] / e[2]);
         // Each atom's path of the step of τ, its frame's start state and the path's own flow to the span's end.
@@ -3553,15 +3537,17 @@ fn a_step_s_momentum_parts_add_up_to_its_whole() {
     assert!(jumped > steps / 10 && pulled == steps, "the scenes' steps exercise the parts: {jumped} with jumps, {pulled} with a flow, of {steps}");
 }
 
-/// The same decomposition on reference scenes' own models (`scene_clusters`: the solve's closure with its near tables),
-/// optical pumping to a dark state (R5_PUMP: jumps that land in another cluster) and lin⊥lin Sisyphus cooling (R4_LIN_1:
-/// explicit excited states, the optical sector's noise), from thermal atoms off the trap's centre in random internal
-/// states with random thresholds: every step's parts add up to its whole, and the steps hold jumps.
+/// The same decomposition on a reference scene's own trajectory model (`scene_clusters`, as the solve makes it):
+/// lin⊥lin Sisyphus cooling (R4_LIN_1: explicit excited states, the optical sector's noise), from thermal atoms off the
+/// trap's centre in random internal states with random thresholds: every step's parts add up to its whole, and the
+/// steps hold jumps. (R5_PUMP, optical pumping to a dark state on D1 with a D2 repump, is out until the model's exact
+/// blocks: its F = 1 and F = 2 levels are two blocks whose frames are 4.5·10⁷ rad/µs apart on the one cluster's
+/// diagonal, and a step takes 18 s a µs -- R1-CLEAN item 3.)
 #[test]
 fn a_scene_s_step_momentum_parts_add_up_to_its_whole() {
-    for name in ["R5_PUMP", "R4_LIN_1"] {
+    for name in ["R4_LIN_1"] {
         let (mut steps, mut jumped) = (0, 0);
-        scene_clusters(name, &mut |_, _, cluster, run, starts| {
+        scene_clusters(name, &mut |_, cluster, run, starts| {
             for (i, start) in starts.iter().enumerate() {
                 let mut t = start.clone();
                 t.threshold = crate::random::Stream::new(53, crate::random::Purpose::Initial, i as u64, cluster as u32).open_uniform();
@@ -3995,8 +3981,8 @@ fn a_generator_without_a_decay_keeps_the_survival() {
 /// direction, as the step takes it from the decay laid at a node and a density's sum (`laid`, `accumulate`,
 /// `hazard`), is −2 Im⟨x̂|Ĥ|x̂⟩ to its rounding, and the jumps' rates on the state, Σ‖J x̂‖² (the photons' class rates,
 /// `Dynamics::emit`), to theirs -- never negative. On 300 random clusters (`Lindblad`) at 5 points and states each; and on
-/// R4_LIN_2's model as the solve closes it (`scene_clusters`), exactly (`Run::new`) and from its near tables, its
-/// clusters' atoms at their own states: the tables' rates against the decay within the tables' own error.
+/// R4_LIN_2's trajectory model as the solve makes it (`scene_clusters`), its atoms at their own states: the photons'
+/// rates against the decay to 10⁻⁹.
 #[test]
 fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
     use crate::linalg::LANES;
@@ -4036,31 +4022,29 @@ fn the_hazard_is_the_generator_s_decay_and_a_sum_of_squares() {
             worst[0] = crate::linalg::larger(worst[0], (hazard - jumps).abs() / rounding);
         }
     }
-    // A scene's clusters: the decay the step takes, exactly and from the tables, against the photons' rates.
-    scene_clusters("R4_LIN_2", &mut |model, _, cluster, run, starts| {
-        let exact = crate::model::Run::new(model, run.reference);
+    // A scene's trajectory model: the decay the step takes against the photons' rates (its decay is its photons',
+    // model/selected.rs # The generator by beats).
+    scene_clusters("R4_LIN_2", &mut |_, cluster, run, starts| {
         let n = starts[0].psi.len();
         for start in starts {
             let at = start.point();
-            for (dynamics, tables) in [(&exact, false), (run, true)] {
-                let middle = dynamics.middle(cluster, at.r, at.t);
-                let path = middle.path(at.kappa, [0.0; 3]);
-                let mut h = Mat::zeros(n, n);
-                middle.generator(&path, 0.0, &mut h);
-                let (hazard, form, scale) = rates(&h, &start.psi);
-                let mut jumps = 0.0;
-                let _ = dynamics.emit(cluster, &at, None, &start.psi, &mut |w| {
-                    jumps = w.iter().sum();
-                    None
-                });
-                let apart = (hazard - jumps).abs() / hazard;
-                worst[1] = crate::linalg::larger(worst[1], if tables { apart } else { 0.0 });
-                assert!(hazard > 0.0 && (hazard - form).abs() <= crate::units::rounding(4 * n + 10) * scale, "R4_LIN_2 cluster {cluster}: the hazard {hazard:e} against −2 Im⟨x|Ĥ|x⟩ {form:e}");
-                assert!(apart < if tables { 1e-3 } else { 1e-9 }, "R4_LIN_2 cluster {cluster} (tables {tables}): the hazard {hazard:e} against the photons' rates {jumps:e}");
-            }
+            let middle = run.middle(cluster, at.r, at.t);
+            let path = middle.path(at.kappa, [0.0; 3]);
+            let mut h = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut h);
+            let (hazard, form, scale) = rates(&h, &start.psi);
+            let mut jumps = 0.0;
+            let _ = run.emit(cluster, &at, None, &start.psi, &mut |w| {
+                jumps = w.iter().sum();
+                None
+            });
+            let apart = (hazard - jumps).abs() / hazard;
+            worst[1] = crate::linalg::larger(worst[1], apart);
+            assert!(hazard > 0.0 && (hazard - form).abs() <= crate::units::rounding(4 * n + 10) * scale, "R4_LIN_2 cluster {cluster}: the hazard {hazard:e} against −2 Im⟨x|Ĥ|x⟩ {form:e}");
+            assert!(apart < 1e-9, "R4_LIN_2 cluster {cluster}: the hazard {hazard:e} against the photons' rates {jumps:e}");
         }
     });
-    eprintln!("random clusters: the hazard within {:.3} of its rounding of the jumps' rates; R4_LIN_2 from its tables: within {:.2e} of them", worst[0], worst[1]);
+    eprintln!("random clusters: the hazard within {:.3} of its rounding of the jumps' rates; R4_LIN_2's trajectory model: within {:.2e} of them", worst[0], worst[1]);
 }
 
 /// The survival's hazard takes a decay's beats at their exact phase (step.rs, # Jumps; DESIGN §12.4): random clusters
@@ -4135,8 +4119,8 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
     eprintln!("{tones} beating decays as tones: the hazard within {worst:.3} of its rounding of the decay at its time; through the three nodes the decay's least eigenvalue down to {parabola:.3} of its largest");
 }
 
-/// R4_LIN_2's steps no longer raise the survival (step.rs, # Jumps): its model as the solve closes it (`scene_clusters`:
-/// lin⊥lin cooling, explicit excited states and folds), sixteen atoms a cluster in random states -- at the scene's
+/// R4_LIN_2's steps no longer raise the survival (step.rs, # Jumps): its trajectory model as the solve makes it
+/// (`scene_clusters`: lin⊥lin cooling, explicit excited states and folds), sixteen atoms in random states -- at the scene's
 /// temperature and at two and four times its speeds, the reach's hot atoms --, one step each at the engine's τ of the
 /// measured runs (0.36 and 0.4335 µs) and at the companion's 2τ, and from the same state steps of seven eighths of it
 /// down to one: the survival at each step's end never rises from the start's beyond the sums' rounding (the trajectory's
@@ -4147,8 +4131,8 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
 #[test]
 fn r4_lin_2_s_steps_never_raise_the_survival() {
     let (mut most, mut grown, mut widest, mut steps, mut refused) = (f64::NEG_INFINITY, 0, 0.0_f64, 0, 0);
-    for tau in [0.36, 0.4335, 0.867] {
-        scene_clusters("R4_LIN_2", &mut |_, _, cluster, run, starts| {
+    scene_clusters("R4_LIN_2", &mut |_, cluster, run, starts| {
+        for tau in [0.36, 0.4335, 0.867] {
             let mut scratch = step::Scratch::default();
             for faster in [1.0, 2.0, 4.0] {
                 let mut wide = 0.0_f64;
@@ -4177,8 +4161,8 @@ fn r4_lin_2_s_steps_never_raise_the_survival() {
                 widest = crate::linalg::larger(widest, wide);
                 eprintln!("R4_LIN_2 cluster {cluster}, τ {tau}, speeds × {faster}: the propagation's map at the most {wide:.6}");
             }
-        });
-    }
+        }
+    });
     // The propagation's own map, printed: it grew on some of these steps until the model changed (largest singular
     // value 0.958 of 576 at 80b9782e), and the witness that it does is `a_propagation_whose_map_grows_keeps_the_survival`
     // since 2026-11-20.
@@ -4676,3 +4660,4 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
 
 // R1-PROP: the propagation's regression and measurements on the six scenes (ignored, by name).
 mod r1prop;
+

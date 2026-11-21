@@ -22,7 +22,7 @@
 //! holds what is read inside it within the noise, and the interval stands. The analysis times are the ends of the
 //! intervals that stand.
 //!
-//! It is the tables' rule (model/tabulate.rs, # Refinement; `halving_on`): halve at the middles while the coarser
+//! It is the old model's tables' rule (their refinement, deleted with them): halve at the middles while the coarser
 //! grid's interpolant misses the new nodes beyond the share -- here the share is the read's own noise, below which no
 //! read of the run can resolve anything -- down to the grid's floor, the candidates' spacing. The tables' second clause
 //! (an axis whose read falls by a factor of 2 or less a halving on a grid that resolves its line's rate stops there: a

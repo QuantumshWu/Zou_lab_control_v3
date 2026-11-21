@@ -262,7 +262,7 @@
 //! T is continuous at t = 0, and what it does by the first output is the dynamics' alone. Its error there is its
 //! statistics' (no step taken, no model acted: `accounts`). What is shown at t = 0 is the request's state, exact:
 //! every trajectory starts in its component's state, and the readout's dressing by the lights -- the eliminated
-//! excited amplitudes following the ground state (model/readout.rs) -- has not happened at the instant they are
+//! excited amplitudes following the ground state (the lift, model/rs.rs `ModelAt::lift`) -- has not happened at the instant they are
 //! switched on. (T(0) was the ensemble's moment by quadrature (ensemble.rs, now the tests' reference for the draws),
 //! with the pilot's steps for its budget: another estimator, and a short run's budget leaves it unconverged -- the
 //! user's 200 µK tweezer of 7.5 k_BT, 0.1 µs: two levels of 2 and 4 nodes a coordinate 22.5 % apart, 179.5 µK against
@@ -833,7 +833,7 @@ struct Domain {
 struct Widest(f64);
 impl Widest {
     fn of(request: &Request) -> Widest {
-        let decay = crate::model::far::decay(request);
+        let decay = crate::scene::decay(&request.emission);
         Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., crate::linalg::larger))
     }
 }
@@ -2547,8 +2547,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// cannot advance (adapt.rs) fails from the first time it does not reach. One whose state scatters beyond every state
 /// of the atom (`Domain::runaway`: a fold far outside its validity) stops there: it is unresolved from then on, held at
 /// every later time as it stood (module documentation, # The unresolved atoms). One the run's fold does not exist for
-/// -- its start lands nowhere (its held forms no number: model/fold/run.rs `Dynamics::started`, step.rs
-/// `Trajectory::new`), or at a time read its readout is no number -- ends there with no outcome, said (`Counts::nowhere`; # Exits): at t = 0 it is
+/// -- its start lands nowhere (its forms at the start no number: step.rs `Trajectory::new`), or at a time read its readout is no number -- ends there with no outcome, said (`Counts::nowhere`; # Exits): at t = 0 it is
 /// the atom in its initial state, its own populations. Where its states are kept (`keep`), it is
 /// advanced from checkpoint to checkpoint (`Checkpoint`: at t = 0 and at the first step's end at or past every multiple
 /// of T's shortest window, module documentation, # The analysis times) -- the same trajectory to the bit (adapt.rs
@@ -5156,8 +5155,8 @@ mod tests {
     /// to 1000 times the thermal speed along each lab axis, run for 0.8 µs at 0.005 µs in the solve's domain. An atom whose
     /// state's hazard at its first step's middle is above the fastest excited state's decay, wholly excited, stops there,
     /// is counted and held from then on as it stood, unresolved (booked whole), its rows numbers; one whose hazard is
-    /// below half of it runs to the end untouched. The fold at the atom rises a node where its readings leave the share
-    /// (model/fold/run.rs # The nodes risen and fallen), so its rate stays a state's: how many stop is said, not asked.
+    /// below half of it runs to the end untouched. The model is made once (P chosen at the checkpoint, model/selected.rs),
+    /// so its rate is a state's: how many stop is said, not asked.
     #[test]
     fn a_fold_scattering_beyond_any_state_stops_its_atom_held_unresolved() {
         let (request, run, trap) = scene_run("R2_RECOIL", false, 7);
