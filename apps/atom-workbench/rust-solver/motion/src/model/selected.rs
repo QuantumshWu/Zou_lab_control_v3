@@ -21,10 +21,12 @@
 //! are in the frame: a channel's elements at their slow beats -- its common fast index (n_φ, n_tw) is a phase of the
 //! channel as a whole, its photon's frequency, no part of |L ψ|² --, each pair of its beats at their difference. So
 //! i(Ĥ − Ĥ†) = Σ L†L at every time by construction, the photons' operators the decay's. The integrator's candidate tones
-//! (`step::Middle::beats`) are the node's beats other than zero with their opposites, each pair one candidate at ν = |Ω|, its key a
-//! unit vector over the middle's candidates (no two candidates share a beat, so a sum of two keys is zero iff the
-//! members are a candidate's two: the one relation the propagation's second order reads), in the order of their exact
-//! vectors. The static group and which beats are tones are the propagation's choice (spectral.rs).
+//! (`step::Middle::beats`) are the node's beats other than zero with their opposites, each pair one candidate at ν = |Ω|, in
+//! the order of their exact vectors, its key the exact vector of its beat ν (its fast index n, and its slow remainder's
+//! ratios over the candidates' common denominator: integers), so that the keys' sums are the beats' sums exactly --
+//! equal sums the same beat, whichever candidates make them (4ν − 3ν is ν: one class of the propagation's second order,
+//! spectral.rs, # The second order by tones). The static group and which beats are tones are the propagation's choice
+//! (spectral.rs).
 //!
 //! # The nodes
 //! A middle makes the model where the step asks for it -- its middle and its two outer nodes, at the path's momentum
@@ -1427,13 +1429,33 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         });
     }
 
+    /// Each candidate's ν and its key (module documentation, # The generator by beats): the exact vector of the beat
+    /// e^{+iνt} -- the negation of its plus member's (which beats at Ω = −ν), or its minus member's --, its slow
+    /// remainder's ratios over the candidates' common denominator.
     fn beats(&self, path: &Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
         let candidates = self.candidates(path);
-        let count = candidates.len();
-        for (m, c) in candidates.iter().enumerate() {
-            beats.push(c.nu);
-            keys.push((0..count).map(|i| i64::from(i == m)).collect());
-        }
+        self.model.read(|b| {
+            let exact: Vec<Exact> = candidates
+                .iter()
+                .map(|c| match (c.plus, c.minus) {
+                    (Some(k), _) => (b.exact[k].0.map(|v| -v), negated(&b.exact[k].1)),
+                    (None, Some(k)) => b.exact[k].clone(),
+                    (None, None) => unreachable!("a candidate of no member"),
+                })
+                .collect();
+            let gcd = |a: i64, b: i64| {
+                let (mut a, mut b) = (a.abs(), b.abs());
+                while b != 0 {
+                    (a, b) = (b, a % b);
+                }
+                a
+            };
+            let common = exact.iter().flat_map(|e| e.1.iter().map(|r| r.den)).fold(1_i64, |l, d| l / gcd(l, d) * d);
+            for (c, (n, p)) in candidates.iter().zip(&exact) {
+                beats.push(c.nu);
+                keys.push(n.iter().copied().chain(p.iter().map(|r| r.num * (common / r.den))).collect());
+            }
+        });
     }
 
     /// Candidate m's members at s: G_plus(s) e^{iν t_m} and G_minus(s) e^{−iν t_m} (their parts of `generator`).
