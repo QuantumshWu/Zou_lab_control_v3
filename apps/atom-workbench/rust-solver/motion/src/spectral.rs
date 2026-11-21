@@ -309,8 +309,14 @@
 //!   where a state through it rounds no more than through the exponential of Ĥ₀ over the step
 //!   (`linalg::Chebyshev::rounding`);
 //! - an entry taken by no route of the decomposition, or the hops' series not converging on the whole hopped operator
-//!   (`Refusal::Radius`; # The split): a step far too long for the change it holds.
-//! The half step is the cure of the third alone; where the first two do not leave at any length of the step, the step
+//!   (`Refusal::Radius`; # The split): a step far too long for the change it holds;
+//! - the propagation's norm above the launch's at its stops past the launch -- the piece's middle and end -- beyond
+//!   the state's rounding (`Refusal::Growth`, `Picture::rounding`; read by the step, `Midway::stretch`): the flow of a
+//!   dissipative generator is a contraction, d‖x‖²/dt = −⟨x|Γ|x⟩ ≤ 0, and the propagation has left it. A backstop
+//!   beside the radii, not a route's rule: on the six scenes' walks at 0.474 and 0.948 µs no stop rose at all where the
+//!   radius took the step; where it rises, the following's truncation at r near one (1 + X far from the identity) or
+//!   a parabola whose decay dips between the nodes is what is left.
+//! The half step is the cure of the last two; where the first two do not leave at any length of the step, the step
 //! is refused down to the time's round-off and the trajectory ends with no outcome, which the solve counts (solve.rs
 //! `Counts`). Forced through the decomposition the scenes' steps at their converged step and twice it -- 2.3·10⁵ of
 //! them over R4, PGC3D, TET, GMD1C, S1, tilt0 and tilt2 -- met the first two on none, the third on R4 at 0.474 µs
@@ -339,6 +345,10 @@ pub enum Refusal {
     /// An entry taken by no route of the decomposition, or the hops' series not converging on the whole hopped operator
     /// (# The split).
     Radius,
+    /// The propagation's norm above the launch's beyond the state's rounding (`Picture::rounding`): a dissipative
+    /// generator's flow is a contraction, d‖x‖²/dt = −⟨x|Γ|x⟩ ≤ 0, so the propagation has left it (step.rs
+    /// `Midway::stretch` reads it at the propagation's stops).
+    Growth,
 }
 
 /// The reals of one vector of rows of one column laid for the lanes: its real parts and its imaginary parts.
@@ -2234,6 +2244,15 @@ impl Picture {
         }
         count += (evaluations * 3 * (8 * n * n + 20 * n)) as f64;
         (best, count)
+    }
+
+    /// The rounding of a state's norm relative to it (`Refusal::Growth`): a component of R(1 + X)d carries the launch's
+    /// product by R⁻¹, the following's by 1 + X and R's, 3n terms, and the exponential and the quintic's few, within
+    /// rounding(3n + 4) of the components' sizes, which the eigenbasis' condition bounds by the state's; the norm twice
+    /// that, and its own sum of n squares.
+    pub fn rounding(&self) -> f64 {
+        let n = self.n;
+        2.0 * crate::units::rounding(3 * n + 4) * self.basis.condition + crate::units::rounding(n)
     }
 
     /// The frame's state at the time u (from the middle; from the launch on) through the decomposition (module

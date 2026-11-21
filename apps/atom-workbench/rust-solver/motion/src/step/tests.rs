@@ -3865,7 +3865,9 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> Option<f6
 /// allows -- the negative part of the parabola of its decay through its three nodes (`negative_decay`), which a decay
 /// of plane waves that interfere away between the nodes can have -- and the sums' rounding: where that parabola is
 /// positive semidefinite, it never rises. The propagation's own map over the cases' whole steps (`map_growth`), which
-/// the survival does not take, grows on some of them.
+/// the survival does not take, is printed; where it grew past the propagation's own remainder the step is refused now
+/// (spectral.rs `Refusal::Growth`), so that no taken step need hold one: the growing map's case is
+/// `a_propagation_whose_map_grows_keeps_the_survival`, made to grow.
 #[test]
 fn the_survival_never_rises_whatever_the_generator_and_the_step() {
     let (mut most, mut grown, mut widest, mut negative) = (f64::NEG_INFINITY, 0, 0.0_f64, Vec::new());
@@ -3890,7 +3892,6 @@ fn the_survival_never_rises_whatever_the_generator_and_the_step() {
     negative.sort_by(|a, b| a.0.total_cmp(&b.0));
     eprintln!("the survival's largest rise over a step, ln: {most:e}; the steps whose decay's parabola goes negative (the turn between two nodes in π, its negative part over its size): {negative:.3?}");
     eprintln!("the propagation's own map: largest singular value {widest:.4}, above one on {grown} of 400 steps; {refused} of {tried} lengths refused by the decomposition");
-    assert!(grown > 0, "the random steps hold propagations whose map grows");
 }
 
 /// The survival does not rise where the propagation's own map grows (step.rs, # Jumps: the survival is the law's,

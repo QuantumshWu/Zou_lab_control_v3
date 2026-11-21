@@ -2289,6 +2289,23 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 }
             }
             let (target, first, before) = (march.state.threshold.ln(), norm_sqr(&march.state.psi).ln(), hazard(decay, sums, n));
+            // The norm does not rise (`Refusal::Growth`): the flow is a contraction, so at the propagation's stops past the
+            // launch -- the piece's middle and end, which its hops reach -- a norm above the launch's beyond what the
+            // propagation's own remainder E and the state's rounding allow, (1 + E)² − 1 (a state off by E of its norm),
+            // is the propagation's leaving it. E is made only where a stop rises past the rounding.
+            let (launch, rounded) = (norm_sqr(&launched[..n]), picture.rounding());
+            let mut rise = 0.0_f64;
+            for u in [0.5 * (from + h), h] {
+                picture.at(u, &mut x[..n]);
+                rise = linalg::larger(rise, norm_sqr(&x[..n]) / launch - 1.0);
+            }
+            if !(rise <= rounded) {
+                let (estimate, work) = picture.remainder();
+                picture.work += work;
+                if !(rise <= estimate * (2.0 + estimate) + rounded) {
+                    return Err(Refused::Propagation(Refusal::Growth));
+                }
+            }
             traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
