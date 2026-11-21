@@ -167,15 +167,18 @@
 //!   a first-order class's change, a product's (# The second order by tones) own second order --, the larger of its two
 //!   ways round. At r ≥ 1 1 + X is no near identity and D₂'s fast entries left out are not of a higher order;
 //! - a hop's first Magnus term is the first of a series that converges where ∫‖Ã(t)‖₂ dt < π over the hop (Moan &
-//!   Niesen 2008, Found. Comput. Math. 8, 291: the sufficient condition). A constant similarity S takes the series
-//!   to S(·)S⁻¹ term by term, so it converges where the condition holds for any S Ã S⁻¹: of the entry and its
-//!   partner alone, Ã = [[0, Ã_ab], [Ã_ba, 0]], S = diag(d, 1) at the d that balances the two ways at the hop's
-//!   middle, ‖SÃ(t)S⁻¹‖₂ = √(|Ã_ab||Ã_ba|) e^{|Im Ω| |t − t_m|} -- the pair's growth in the interaction picture
-//!   (below) only over half the hop's width --, within s = √(s_ab s_ba) e^{|Im Ω| |h|/2} over the hop, s_ab =
-//!   S_C + S_A/2 + S_B/3 of the entry's own envelope's sizes over a half step (a hop's widest, from the step's start to
-//!   its middle and on; Cauchy–Schwarz for the mean): s < π. An entry that does not turn holds a state with itself (or
-//!   a degenerate pair, of the same rule), and a state's own entry commutes with itself: its series is its first
-//!   term.
+//!   Niesen 2008, Found. Comput. Math. 8, 291: the sufficient condition), Ã the whole hopped operator. A constant
+//!   similarity S takes the series to S(·)S⁻¹ term by term, so it converges where the condition holds for one S
+//!   Ã S⁻¹ -- of every hopped entry together, a state's own entry too, which commutes with itself but not with the
+//!   others (`radius`, read on the hop's own envelope as the following leaves it, `Picture::hops_radius`). An entry's
+//!   own share, of the entry and its partner alone, Ã = [[0, Ã_ab], [Ã_ba, 0]] balanced by S = diag(d, 1) at the hop's
+//!   middle, ‖SÃ(t)S⁻¹‖₂ = √(|Ã_ab||Ã_ba|) e^{|Im Ω| |t − t_m|} within s = √(s_ab s_ba) e^{|Im Ω| |h|/2} over the hop
+//!   (s_ab = S_C + S_A/2 + S_B/3 of its envelope's sizes over a half step, a hop's widest), is the route's rule on the
+//!   entry below: s < π is the pair's series' radius, which the whole's holds only with every other entry beside it.
+//!   (Until 2026-11-21 the pair's radius was taken for the whole's and a state's own entry was let through as
+//!   commuting with itself: on R4 at 1.896 µs a hop's exponent of 2-norm 11 to 20, its diagonal's first-order shifts
+//!   of two ill-conditioned modes growing by e^{3.7} to e^{11}, took the propagation's norm from 1 to 10^66 inside a
+//!   piece -- each pair's s within π --, and the normalized state into that mode: tens of jumps a step.)
 //! Where both converge the route is the one that leaves less, by the leading remainders
 //!   F = (2/3)(S_A/x)³ + 2 S_C³ min(x, 1)/x³    (the following's third order),
 //!   L = (4/15) S_B²/x                            (the parabola's miss of the change's own light shift),
@@ -305,8 +308,8 @@
 //!   towards an exceptional point. The rule is the rounding's, not a tuned number: the decomposition takes the step
 //!   where a state through it rounds no more than through the exponential of Ĥ₀ over the step
 //!   (`linalg::Chebyshev::rounding`);
-//! - an entry taken by no route of the decomposition (`Refusal::Radius`; # The split): a step far too long for the
-//!   change it holds.
+//! - an entry taken by no route of the decomposition, or the hops' series not converging on the whole hopped operator
+//!   (`Refusal::Radius`; # The split): a step far too long for the change it holds.
 //! The half step is the cure of the third alone; where the first two do not leave at any length of the step, the step
 //! is refused down to the time's round-off and the trajectory ends with no outcome, which the solve counts (solve.rs
 //! `Counts`). Forced through the decomposition the scenes' steps at their converged step and twice it -- 2.3·10⁵ of
@@ -333,7 +336,8 @@ pub enum Refusal {
     /// A state through Ĥ₀'s eigenvectors rounds by more than through its exponential over the step: towards a
     /// defective generator.
     Rounding,
-    /// An entry taken by no route of the decomposition (# The split).
+    /// An entry taken by no route of the decomposition, or the hops' series not converging on the whole hopped operator
+    /// (# The split).
     Radius,
 }
 
@@ -536,6 +540,8 @@ pub struct Picture {
     /// max e^{|Im Ω| 2|h|} over the hopped entries: their growth in the interaction picture over the step (`followed`),
     /// a factor of a hop's exponent's bound (`moved`).
     grown: f64,
+    /// The hopped entries' moduli, the whole hopped operator's (`radius`): |C|, |A| and |B| at their growth, n² each.
+    moduli: Vec<f64>,
     /// The bounds of Ĥ₀ less its scalar part (`linalg::bounds`): what the decomposition's rounding is weighed against
     /// (`prepare`). And the Frobenius norms of D₂'s constants, slopes and curvatures as the
     /// hops take them, summed over the classes: what bounds a hop's exponent (`moved`).
@@ -606,6 +612,7 @@ impl Default for Picture {
             spacing: 0.0,
             spread: 0.0,
             grown: 1.0,
+            moduli: Vec::new(),
             bounds: [0.0; 2],
             slopes: [0.0; 3],
             reached: Vec::new(),
@@ -919,6 +926,62 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
     routed
 }
 
+/// The hops' radius on the whole hopped operator (module documentation, # The split): Moan & Niesen's condition
+/// ∫‖S Ã(t) S⁻¹‖₂ dt < π holds for one similarity S, of every hopped entry together -- a state's own entry too, which
+/// commutes with itself but not with the others. Of `moduli` the hopped entries' |C|, |A| and |B| (row-major, each n²),
+/// each times its largest modulus over a hop in the interaction picture, max(1, e^{−Im Ω 2h}) (`Picture::hops_radius`):
+/// |Ã(t)| ≤ M⁽⁰⁾ + |t| M⁽¹⁾ + t² M⁽²⁾ entrywise at |t| ≤ |h| from the step's start or its middle, so at S = diag(d)
+/// ∫‖SÃS⁻¹‖₂ ≤ Σ_k w_k ‖S M⁽ᵏ⁾ S⁻¹‖₂, w = (|h|, h²/2, |h|³/3) the moments' weights over a hop (the 2-norm is monotone
+/// on nonnegative matrices). Each 2-norm within Collatz–Wielandt's bound √(maxᵢ (MᵀMv)ᵢ/vᵢ) at any positive v, its
+/// power iterates from v = 1 while the bound falls by more than its rounding (it holds at every iterate). d by Osborne's
+/// balancing of the weighted sum (each d_a equalizing its off-diagonal row and column, LAPACK's gebal), sweep by sweep
+/// while the whole bound falls by more than its rounding: every d's bound holds, the least found is taken. Returns it
+/// and its count (n² a sweep, 2n² a power iterate).
+fn radius(moduli: &[f64], n: usize, h: f64) -> (f64, f64) {
+    let size = n * n;
+    let weights = [h.abs(), 0.5 * h * h, h.abs().powi(3) / 3.0];
+    let combined: Vec<f64> = (0..size).map(|k| (0..3).map(|j| weights[j] * moduli[j * size + k]).sum()).collect();
+    let mut count = 0.0;
+    // ‖D M D⁻¹‖₂ of the nonnegative M, within Collatz–Wielandt's bound on (DMD⁻¹)ᵀ(DMD⁻¹)'s Perron root.
+    let mut norm = |m: &[f64], d: &[f64]| -> f64 {
+        let entry = |a: usize, b: usize| d[a] / d[b] * m[a * n + b];
+        let mut v = vec![1.0_f64; n];
+        let mut best = f64::INFINITY;
+        loop {
+            let w: Vec<f64> = (0..n).map(|a| (0..n).map(|b| entry(a, b) * v[b]).sum()).collect();
+            let u: Vec<f64> = (0..n).map(|b| (0..n).map(|a| entry(a, b) * w[a]).sum()).collect();
+            count += (4 * size) as f64;
+            let bound = (0..n).fold(0.0_f64, |most, i| linalg::larger(most, if v[i] > 0.0 { u[i] / v[i] } else if u[i] > 0.0 { f64::INFINITY } else { 0.0 }));
+            let top = u.iter().fold(0.0_f64, |most, &x| linalg::larger(most, x));
+            if !(bound < best - crate::units::rounding(2 * n) * best) || !(top > 0.0) {
+                break linalg::smaller(best, bound).sqrt();
+            }
+            best = bound;
+            v = u.iter().map(|x| x / top).collect();
+        }
+    };
+    let mut bound = |d: &[f64]| -> f64 { (0..3).map(|j| weights[j] * norm(&moduli[j * size..(j + 1) * size], d)).sum() };
+    let mut d = vec![1.0; n];
+    let mut best = bound(&d);
+    loop {
+        for a in 0..n {
+            let row: f64 = (0..n).filter(|&b| b != a).map(|b| combined[a * n + b] / d[b]).sum();
+            let column: f64 = (0..n).filter(|&b| b != a).map(|b| combined[b * n + a] * d[b]).sum();
+            if row > 0.0 && column > 0.0 {
+                d[a] = (column / row).sqrt();
+            }
+        }
+        let next = bound(&d);
+        if !(next < best - crate::units::rounding(6 * size) * best) {
+            best = linalg::smaller(best, next);
+            break;
+        }
+        best = next;
+    }
+    count += (7 * size) as f64;
+    (best, count)
+}
+
 /// A hop's integral ∫₀ʷ e^{iΩt} E(u + t) dt of one entry over the width w from the time u (module documentation), the
 /// envelope's constant (none where it has none), slope and curvature on the entry's moments I₀, I₁, I₂:
 /// w [C I₀ + A (u I₀ + w I₁) + B (u² I₀ + 2uw I₁ + w² I₂)].
@@ -1179,6 +1242,12 @@ impl Picture {
             }
             self.work += ((4 + 12 * self.beats.len()) * n * n * n) as f64;
             self.follow()?;
+            // The hops' radius on the whole hopped operator (`hops_radius`), of the hop's own envelope as the following
+            // leaves it: every entry's own within π is no convergence of the whole series.
+            let reach = self.hops_radius();
+            if !(reach < std::f64::consts::PI) {
+                return Err(Refusal::Radius);
+            }
         }
         self.spanned();
         if self.moving {
@@ -1579,6 +1648,33 @@ impl Picture {
             *hopped = classes.iter().any(|class| class.hops && !class.fast[k]);
         }
         self.classes = classes;
+    }
+
+    /// The hops' radius on the whole hopped operator (`radius`): of each class that hops, each entry it does not follow
+    /// at its envelope's |C|, |A| and |B| -- the hop's own (`Class::hop`), the following's second order on it in --, each
+    /// at its largest modulus over a hop in the interaction picture, max(1, e^{−Im Ω 2h}) at its combined frequency
+    /// Ω = λ_a − λ_b + ν (module documentation, # The split). Counts its work.
+    fn hops_radius(&mut self) -> f64 {
+        let (n, h) = (self.n, self.half);
+        let (size, tones) = (n * n, !self.beats.is_empty());
+        let mut moduli = std::mem::take(&mut self.moduli);
+        moduli.clear();
+        moduli.resize(3 * size, 0.0);
+        for (c, class) in self.classes.iter().enumerate().filter(|(_, class)| class.hops) {
+            for k in (0..size).filter(|&k| !class.fast[k]) {
+                let between = self.lambda[k / n] - self.lambda[k % n];
+                let omega = if c == 0 { between } else { C64::new(between.re + class.beat, between.im) };
+                let growth = linalg::larger(1.0, (-omega.im * 2.0 * h).exp());
+                // The static group's constant is a tone's alone (`exponent`).
+                for j in usize::from(c == 0 && !tones)..3 {
+                    moduli[j * size + k] += growth * class.hop[j][k].abs();
+                }
+            }
+        }
+        let (reach, work) = radius(&moduli, n, h);
+        self.moduli = moduli;
+        self.work += work + (4 * size * self.classes.len()) as f64;
+        reach
     }
 
     /// The bound of a hop's exponent from the time u over the width w: ∫‖D₂‖ at the norms of its constants, slopes and
@@ -2685,6 +2781,25 @@ pub(crate) mod tests {
         }
         let hash = bits.iter().flat_map(|b| b.to_le_bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
         (hash, bits.len())
+    }
+
+    /// The hops' radius is the whole hopped operator's (# The split): a state coupled to two others by a slope of 500
+    /// rad/µs², the states 1 rad/µs apart, at h = 0.1 µs -- each pair turning by 0.1 and its following's size 50, so
+    /// hopped, its own radius s = 500 h²/2 = 2.5 < π --, the whole's 2-norm √2 times it, 3.54: refused (`Refusal::Radius`),
+    /// where the pairs' radii alone took it until 2026-11-21. At half the step (s 0.625, the whole 0.88) taken.
+    #[test]
+    fn a_hop_whose_pairs_converge_but_whose_whole_does_not_is_refused() {
+        let base = Mat::from_fn(3, 3, |i, j| if i == j { C64::real(i as f64) } else { C64::ZERO });
+        let slope = Mat::from_fn(3, 3, |i, j| if (i == 0) != (j == 0) { C64::real(500.0) } else { C64::ZERO });
+        let prepared = |half: f64| {
+            let mut picture = Picture::default();
+            picture.fit(3);
+            picture.base = base.clone();
+            picture.ends = [-half, half].map(|u| Mat::from_fn(3, 3, |i, j| base[(i, j)] + slope[(i, j)] * u));
+            picture.prepare(half, false, None)
+        };
+        assert_eq!(prepared(0.1), Err(Refusal::Radius));
+        assert_eq!(prepared(0.05), Ok(()));
     }
 
     /// The static group alone is propagated as it was before the exact tones (module documentation, # Tones: the
