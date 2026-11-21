@@ -524,7 +524,7 @@ pub trait Dynamics {
     /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (rad/µs).
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64;
 
-    /// The loss test at a point: outside the region and E_s above its far value.
+    /// The loss test at a point: E_s above its escape value, the far value (SPEC §1.7).
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool;
 
     /// The displayed rows of the cluster's state at a point.

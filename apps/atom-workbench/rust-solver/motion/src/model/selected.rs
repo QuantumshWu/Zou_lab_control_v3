@@ -1933,9 +1933,10 @@ impl crate::step::Dynamics for Selected {
         kinetic + self.prepared(&self.populations(psi)).at(at.r).value
     }
 
-    /// Outside the trap's region with the loss energy above its far value, zero.
+    /// The loss energy above the escape value E_cap = 0, the potential's far value, wherever the atom is: the first
+    /// passage out of the bound set H = {E ≤ 0} (SPEC §1.7). The trap's region is no part of it.
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
-        self.light.outside(at.r) && self.energy(cluster, at, psi) > 0.0
+        self.energy(cluster, at, psi) > 0.0
     }
 
     fn readout(&self, _cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {

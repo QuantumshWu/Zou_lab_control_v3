@@ -396,7 +396,7 @@ async function r6(id){
 // ---------------------------------------------------------------------------------------------------------------------
 // R9 (b): the push out of the trap.
 
-/** R9 (b). A σ+ beam along the tweezer's axis z pushes the atom out of the trap's region: the contract's 1D equation
+/** R9 (b). A σ+ beam along the tweezer's axis z pushes the atom out of the trap: the contract's 1D equation
  *   m z̈ = ħk R(δ − kż) − ∂_zU_g + ρ_ee ħ∂_zδ,
  * the radiation pressure at the two-level atom's steady rate R = Γρ_ee, ρ_ee = (s/2)/(1 + s + (2δ/Γ)²), the ground
  * state's trap force on the axis, U_g = −U₀g, g = 1/(1 + z²/z_R²), and the force the excited atom feels more (ħ∇δ P_e
@@ -405,15 +405,21 @@ async function r6(id){
  * Mandel's Q, σ emission): a Langevin equation, solved by a Monte Carlo from the prepared axial distribution
  * (Gaussian: T*_z and T(0)_z of the deep trap), N paths with a fixed seed.
  *
- * The region's edge is not at one z: the atom is outside where the tweezer's intensity g e^{−2ρ²g/w₀²} is below 1/20,
- * that is where ρ² > ρ_c²(z) = (w₀²/2g) ln(20g) -- on the axis at z = √19 z_R, earlier off it by kρ²/(2√19·…) ≈ 1 µm
- * per µm² --, and the emitted photons spread the atom across the axis as they push it along. So each path carries
- * the second moments of one radial axis (the two are alike), B = ⟨x²⟩, C = ⟨xv⟩, A = ⟨v²⟩:
+ * The atom is lost where its loss energy E = K + V first passes the far value, 0 (SPEC §1.7, since 2026-11-21: wherever
+ * it is), V = −U₀ g e^{−2ρ²g/w₀²} the ground state's well. E is the axial energy E_z = K_z − U₀g on the axis plus
+ * the radial energy X = K_ρ + U₀g(1 − e^{−s}) ≥ 0, s = 2ρ²g/w₀², so the radial motion brings the passage forward,
+ * and the emitted photons heat it as they push the atom along. So each path carries the second moments of one radial
+ * axis (the two are alike), B = ⟨x²⟩, C = ⟨xv⟩, A = ⟨v²⟩:
  *   dB/dt = 2C,  dC/dt = A − ω_ρ²g²(1 − κρ_ee)B,  dA/dt = −2ω_ρ²g²(1 − κρ_ee)C + (ħk/m)²(1 − ξ)R/2,
  * the radial spring of the beam at z (4U₀g²/w₀², less the excited atom's share) and the emission's recoil -- exact for
  * ρ ≪ w(z), adiabatic near the focus and ballistic once the spring has gone --, from the prepared radial ensemble. With
- * x, y Gaussian of variance B, ρ² is exponential of mean 2B: the path is outside with the probability e^{−ρ_c²/2B},
- * and L(t) is the paths' mean of its largest value up to t (the kinetic energy there is far above the trap: E_s > 0).
+ * (x, v) Gaussian of those moments on each radial axis, the radial energy to the same order, X = Σ (v² + Ω²x²)/2 (Ω² =
+ * ω_ρ²g² the ground well's own spring; over ħ/m, in rad/µs), is λ₁χ²₂ + λ₂χ²₂ -- λ the eigenvalues of
+ * diag(Ω², 1)Σ/2(ħ/m), Σ the moments' matrix --, so P(X > u) = (λ₁e^{−u/2λ₁} − λ₂e^{−u/2λ₂})/(λ₁ − λ₂). The path is
+ * lost by t with the probability P(X > −E_z) at its largest up to t (exact where X is conserved: the radial energy
+ * moves adiabatically, Ω being far above the axial rates, and its recoil heating is a few per cent of it), one once
+ * E_z > 0, and L(t) is the paths' mean of it. (Until 2026-11-21 the loss asked the atom to be outside the 1/20 region
+ * as well, at z = √19 z_R = 64 µm on the axis.)
  * The same B gives the cloud's average of what the axis' force leaves out: off the axis the trap's axial force is
  * (1 − sg)e^{−sg} of the axis' and the line's shift e^{−sg} of it, s = 2ρ²/w₀², ⟨sg⟩ = 4Bg/w₀²: the force
  * (1 − 2⟨sg⟩) and the shift (1 − ⟨sg⟩) of the axis', in the equation.
@@ -425,22 +431,25 @@ async function r6(id){
  * pressure is about five times the trap's largest axial force, (3√3/8)U₀/z_R at z_R/√3.
  *
  * u: the paths' standard error; the radial moments' next order -- they hold for ρ ≪ w(z), and the beam's radial
- * expansion goes on in sg, whose cloud average at the edge is ⟨sg⟩ = 4Bg/w₀²: 2⟨sg⟩ of what the moments move L by
+ * expansion goes on in sg, whose cloud average at the passage is ⟨sg⟩ = 4Bg/w₀²: 2⟨sg⟩ of what the moments move L by
  * (the run again without them) --; and the internal state's lag, the rate relaxing at Γ (the run again, common
- * random numbers). */
+ * random numbers). Checked against a three-dimensional Monte Carlo of the same equations with the exact well and the
+ * loss tested on each atom's own energy (refs/sanity/r9_push_3d.py). */
 async function r9(){
   const id='R9_PUSH',c=await cycle(id,['push']),{line,gamma,U0,dLS,kappa}=c,p=c.beams.push,m=line.model.motion,mass=m.massKg,T=m.temperatureUK,r=hbarOverMass(mass);
   const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),w2=tw.waistUm**2,prep=preparedTrap(line,'ground-2-2'),[radial,,axial]=prep.omegas,{T0}=initialTemperatures(prep,T);
-  const deltaFree=p.delta+dLS,Q=mandelQ(gamma,p.omega,p.delta),edge=Math.sqrt(19)*zR,times=grid(line),s=2*p.omega**2/gamma**2;
+  const deltaFree=p.delta+dLS,Q=mandelQ(gamma,p.omega,p.delta),times=grid(line),s=2*p.omega**2/gamma**2;
   const excited=delta=>s/2/(1+s+(2*delta/gamma)**2);
   const sz=Math.sqrt(r*KT_PER_UK*wignerTemperature(axial,T))/axial,sk=Math.sqrt(KT_PER_UK*T0[2]/r);
   // A seeded generator (mulberry32; each run restarts it: common random numbers between the runs) and normal deviates
   // (Box–Muller).
   let seed=0;const next=()=>{seed=(seed+0x6D2B79F5)>>>0;let t=seed;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};
   const normal=()=>{const u=1-next(),v=next();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
-  /** The paths: per path its probability of being outside at every output (the largest so far), and its exit on the
-   * axis (time, velocity µm/µs, photons, B there). `across` false leaves the radial moments out of the edge and of
-   * the force (the axis' equation alone); `lag` lets the rate relax at Γ. */
+  /** P(λ₁χ²₂ + λ₂χ²₂ > u), λ₁ ≥ λ₂ ≥ 0: the radial energy beyond u. */
+  const beyond=(u,l1,l2)=>{if(!(u>0))return 1;if(l1-l2<=1e-9*l1)return Math.exp(-u/(2*l1))*(1+u/(2*l1));return (l1*Math.exp(-u/(2*l1))-l2*Math.exp(-u/(2*l2)))/(l1-l2);};
+  /** The paths: per path its probability of having passed the far value by every output (the largest so far), and its
+   * axial energy's passage (time, z µm, velocity µm/µs, photons, B and g there). `across` false leaves the radial
+   * moments out of the energy and of the force (the axis' equation alone); `lag` lets the rate relax at Γ. */
   const run=({N,across=true,lag=false})=>{
     const outside=times.map(()=>0),square=times.map(()=>0),exits=[],dt=0.02,every=Math.round((times[1]-times[0])/dt);seed=0x9E3779B9;
     for(let n=0;n<N;n++){
@@ -455,8 +464,10 @@ async function r9(){
           const spring=radial*radial*g*g*(1-kappa*R/gamma),w=Math.sqrt(spring),co=Math.cos(w*dt),si=w*dt>1e-8?Math.sin(w*dt)/w:dt;
           [A,B,C]=[spring*spring*si*si*B-2*spring*si*co*C+co*co*A+dt*(r*p.k)**2*(1-XI_SIGMA)/2*R,co*co*B+2*co*si*C+si*si*A,-spring*si*co*B+(co*co-spring*si*si)*C+co*si*A];
           kap+=force*dt+Math.sqrt(p.k*p.k*(1+Q+XI_SIGMA)*R*dt)*normal();z+=r*kap*dt;photons+=R*dt;
-          if(z>edge)exit={t:times[i-1]+(j+1)*dt,v:r*kap,photons,B};
-          else if(across)most=Math.max(most,Math.exp(-w2/(2*g)*Math.log(20*g)/(2*B)));
+          const axial=r*kap*kap/2-U0*g;
+          if(axial>0)exit={t:times[i-1]+(j+1)*dt,z,v:r*kap,photons,B,g};
+          else if(across){const own=radial*radial*g*g,tr=(own*B+A)/(2*r),det=own*(B*A-C*C)/(4*r*r),root=Math.sqrt(Math.max(0,tr*tr-4*det));
+            most=Math.max(most,beyond(-axial,(tr+root)/2,Math.max(0,(tr-root)/2)));}
         }
         const P=exit?1:most;outside[i]+=P;square[i]+=P*P;
       }
@@ -464,24 +475,24 @@ async function r9(){
     }
     return {L:outside.map(x=>x/N),se:outside.map((x,i)=>Math.sqrt(Math.max(0,square[i]/N-(x/N)**2)/N)),exits};};
   const N=4000,full=run({N}),axis=run({N,across:false}),lagged=run({N,lag:true}),left=axis.exits.filter(x=>x),mean=f=>left.reduce((a,x)=>a+f(x),0)/left.length;
-  const next2=2*4*mean(x=>x.B)/(20*w2);
+  const next2=2*4*mean(x=>x.B*x.g)/w2;
   const series=[{quantity:'loss',indices:all(line),values:full.L,u:full.L.map((x,i)=>Math.hypot(full.se[i],next2*(x-axis.L[i]),lagged.L[i]-x)),target:POPULATION},
     {quantity:'population',state:'ground-2-2',indices:[0],values:[1],u:[0],target:POPULATION}];
   const crossing=(L,q)=>{const i=L.findIndex(x=>x>=q);return i<1?NaN:times[i-1]+(times[i]-times[i-1])*(q-L[i-1])/(L[i]-L[i-1]);},Erec=recoilUK(p.k,mass),photons=mean(x=>x.photons),spread=mean(x=>x.B);
-  write(id,expectation(id,'R9','R9 推出：离开 1/20 区域的时刻给出 L(t) 的台阶',line,{
-    derivation:'Langevin equation along the axis: radiation pressure at the two-level steady rate with the Doppler and position-dependent detuning, the ground trap force and the excited state’s extra force, momentum diffusion (ħk)²(1+Q+ξ)R; each path carries the second moments of the radial motion (the beam’s radial spring at z, the emission’s recoil), which place the 1/20 contour for the atom off the axis: outside with probability exp(−ρ_c²(z)/2⟨x²⟩), ρ_c² = (w₀²/2g)ln(20g). Monte Carlo from the prepared ensemble. The push is 40Γ off resonance and excites at most 5 %: the trap keeps its radial force, and the rate does not depend on where the atom sits.',
+  write(id,expectation(id,'R9','R9 推出：能量越过远处的值即丢失，L(t) 的台阶',line,{
+    derivation:'Langevin equation along the axis: radiation pressure at the two-level steady rate with the Doppler and position-dependent detuning, the ground trap force and the excited state’s extra force, momentum diffusion (ħk)²(1+Q+ξ)R; each path carries the second moments of the radial motion (the beam’s radial spring at z, the emission’s recoil), whose energy X = λ₁χ²₂ + λ₂χ²₂ adds to the axial energy E_z = K_z − U₀g: the path is lost by t with probability P(X > −E_z) at its largest so far, one once E_z > 0 (the loss energy above the far value, wherever the atom is: SPEC §1.7 since 2026-11-21; until then also outside the 1/20 region). Monte Carlo from the prepared ensemble. The push is 40Γ off resonance and excites at most 5 %: the trap keeps its radial force, and the rate does not depend on where the atom sits. Checked against a 3D Monte Carlo with the exact well (refs/sanity/r9_push_3d.py).',
     conditions:[{what:'s = 2Ω²/Γ²',value:s},{what:'δ at the bottom / Γ',value:p.delta/gamma},{what:'δ outside / Γ',value:deltaFree/gamma},
       {what:'ρ_ee at the bottom',value:excited(p.delta),limit:'≤ 0.05'},{what:'ρ_ee outside, at rest',value:excited(deltaFree),limit:'≤ 0.05'},
       {what:'radial trap force kept, 1 − κρ_ee, least',value:1-kappa*Math.max(excited(p.delta),excited(deltaFree)),limit:'≥ 0.89'},
       {what:'radiation pressure at the bottom over the trap’s largest axial force (3√3/8)U₀/z_R',value:p.k*gamma*excited(p.delta)/(3*Math.sqrt(3)/8*U0/zR),limit:'≈ 5'},
-      {what:'photons scattered until the axis’ edge (mean)',value:photons},{what:'velocity at the axis’ edge (m/s, mean)',value:mean(x=>x.v)},
+      {what:'photons scattered until the axial energy passes the far value (mean)',value:photons},{what:'z and velocity there (µm, m/s; means)',value:[mean(x=>x.z),mean(x=>x.v)]},
       {what:'Doppler shift there over Γ',value:p.k*mean(x=>x.v)/gamma},{what:'Doppler shift there over |δ| outside',value:p.k*mean(x=>x.v)/Math.abs(deltaFree),limit:'≪ 1'},
       {what:'time at which L = 0.05, 0.5, 0.95 (µs)',value:[0.05,0.5,0.95].map(q=>crossing(full.L,q))},{what:'the same for the axis’ equation alone (µs)',value:[0.05,0.5,0.95].map(q=>crossing(axis.L,q))},
-      {what:'radial rms per axis at the axis’ edge (µm), and ⟨sg⟩ = 2⟨ρ²⟩/w(z)² there',value:[Math.sqrt(spread),4*spread/(20*w2)],limit:'≪ 1'},
+      {what:'radial rms per axis at the passage (µm), and ⟨sg⟩ = 2⟨ρ²⟩/w(z)² there',value:[Math.sqrt(spread),4*mean(x=>x.B*x.g)/w2],limit:'≪ 1'},
       {what:'radial recoil heating over the push (µK per axis), of the depth',value:[(1-XI_SIGMA)/2*Erec*photons,KT_PER_UK*(1-XI_SIGMA)/2*Erec*photons/U0],limit:'≪ 1'},
-      {what:'line shift across the trap over |δ| at the bottom',value:dLS/Math.abs(p.delta),limit:'≪ 1'},{what:'atoms that do not reach the axis’ edge within the run',value:1-left.length/N},
-      {what:'region edge on the axis (µm)',value:edge}],
-    series,info:{mandelQ:Q,zR,edge,sz,sk,N,kappa,depthUK:U0/KT_PER_UK,T0,axisAloneLoss:axis.L}}));
+      {what:'line shift across the trap over |δ| at the bottom',value:dLS/Math.abs(p.delta),limit:'≪ 1'},{what:'atoms whose axial energy does not pass the far value within the run',value:1-left.length/N}],
+    series,info:{mandelQ:Q,zR,sz,sk,N,kappa,depthUK:U0/KT_PER_UK,T0,axisAloneLoss:axis.L,
+      model:{gamma,U0,dLS,deltaFree,omega:p.omega,k:p.k,hbarOverMass:r,radial,axial,w0:tw.waistUm,xiSigma:XI_SIGMA,B0:r*KT_PER_UK*wignerTemperature(radial,T)/(radial*radial),A0:r*KT_PER_UK*T0[0],dt:0.02}}}));
 }
 
 /** R9 (c). Heating-driven escape with no mean force: a red and a blue σ+ beam of one intensity counter-propagate along
@@ -497,19 +508,17 @@ async function r9(){
  * adiabatically invariant (ω_ρ/ω_z = πw₀√2/λ), so the truth lies between. ⟨·⟩_ε are microcanonical shell averages
  * over the exact beam (weight (ε − V)^{1/2}, kinetic (ε − V)^{3/2}; lib/phys.mjs' measure). The Fokker–Planck
  * equation ∂P/∂t = −∂(AP) + ½∂²(BP) on [0, U₀] (reflecting at the bottom, absorbing at the far level, where the atom
- * is unbound) from the prepared lowered isothermal P ∝ g(ε)(e^{−ε/k_BT} − e^{−U₀/k_BT}) gives the escape; an unbound
- * atom is counted lost when it leaves the 1/20 region: within µs across the beam, up to τ_max along it (the run from
- * the centre to √19 z_R at E = 0) -- L(t) is averaged over a delay uniform in [0, τ_max].
- * The expectation is the mean of the two closures. u: half their difference; half the delay's spread; the forces
- * that do not cancel -- off the centre the red beam is nearer the line and the blue farther by κV, so that the pair
- * pushes with ħkR·2κV/ħ|δ|, a tilt kRz_R·2κ/|δ| of the depth over a Rayleigh range: that fraction of t·dL/dt --; and
- * the boundary itself: an atom above the depth is lost only at the region's edge, up to τ_max later, and until then
- * its energy goes on spreading by √(Bτ_max/2), some of it back below the depth, which the absorbing boundary does not
- * allow: L is late by up to the time the drift takes over that layer, √(Bτ_max/2)/A.
+ * is unbound) from the prepared lowered isothermal P ∝ g(ε)(e^{−ε/k_BT} − e^{−U₀/k_BT}) gives the escape, and the
+ * escape is the loss: an atom is lost where its energy first passes the far value, wherever it is (SPEC §1.7, since
+ * 2026-11-21) -- the absorbing boundary itself. (Until then an unbound atom was counted lost only when it left the
+ * 1/20 region, up to τ_max = 0.35 ms later along the beam, and L was averaged over that delay, with its energy's
+ * return below the depth on the way: 0.1 to 0.2 of L where it rises, which no closure removed.)
+ * The expectation is the mean of the two closures. u: half their difference; and the forces that do not cancel --
+ * off the centre the red beam is nearer the line and the blue farther by κV, so that the pair pushes with
+ * ħkR·2κV/ħ|δ|, a tilt kRz_R·2κ/|δ| of the depth over a Rayleigh range: that fraction of t·dL/dt.
  *
- * Characterization, not a judge: that last term is a third to a half of a millisecond here, 0.1 to 0.2 of L where L
- * rises -- several times the loss's target --, and no closure of the energy equation removes it (the loss is a
- * passage in space, not in energy). The equation is kept so that the solver's loss stands beside an estimate. */
+ * Characterization, not a judge: the two closures bound the heating's spread, and their difference is what the
+ * energy equation leaves open. The equation is kept so that the solver's loss stands beside an estimate. */
 async function r9heat(){
   const id='R9_HEAT',c=await cycle(id,['red','blue']),{line,gamma,U0,kappa}=c,beams=Object.values(c.beams),m=line.model.motion,mass=m.massKg,T=m.temperatureUK;
   const tw=beamOf(line,'tweezer'),zR=rayleigh(tw.waveNumberPerUm,tw.waistUm),k=beams[0].k,Erec=recoilUK(k,mass),Q=beams.map(b=>mandelQ(gamma,b.omega,b.delta)),times=grid(line);
@@ -533,26 +542,22 @@ async function r9heat(){
         P=P.map((x,j)=>x-h*(J[j+1]-J[j])/de);t+=h;}
       L.push(1-P.reduce((a,b)=>a+b,0)*de);}
     return L;};
-  // The axial run from the centre to √19 z_R at E = 0: ∫dz/v, v = √(2U₀/(m(1 + z²/z_R²))) (µm/µs = m/s).
-  const r=hbarOverMass(mass),edge=Math.sqrt(19)*zR,tauMax=integrate(z=>1/Math.sqrt(2*U0*r/(1+z*z/(zR*zR))),0,edge,{panels:8,n:16});
   const at=(L,t)=>{if(t<=0)return 0;const x=t/(times[1]-times[0]),j=Math.floor(x);return j>=times.length-1?L.at(-1):L[j]+(L[j+1]-L[j])*(x-j);};
-  const delayed=L=>times.map(t=>{let s=0;const K=40;for(let q=0;q<K;q++)s+=at(L,t-tauMax*(q+0.5)/K);return s/K;});
-  const raw=Object.fromEntries(Object.entries(closures).map(([name,B])=>[name,escape(B)])),ergodic=delayed(raw.ergodic),axial=delayed(raw.axial),value=ergodic.map((x,i)=>(x+axial[i])/2);
-  const bottom=sum(0,()=>1),tilt=k*bottom*zR*2*kappa/Math.abs(beams[0].delta),mid=L=>times.map(t=>(at(L,t)-at(L,t-tauMax))/2);
-  const other=mid(raw.axial),spread=mid(raw.ergodic).map((x,i)=>(x+other[i])/2),pushed=times.map((t,i)=>Math.abs((at(value,t*(1+tilt))-at(value,t*(1-tilt)))/2));
-  const late=Math.sqrt(closures.ergodic.at(-1)*tauMax/2)/A.at(-1),returned=times.map(t=>at(value,t)-at(value,t-late));
-  const series=[{quantity:'loss',indices:all(line),values:value,u:value.map((x,i)=>Math.hypot((ergodic[i]-axial[i])/2,spread[i],pushed[i],returned[i])),target:POPULATION}];
+  const ergodic=escape(closures.ergodic),axial=escape(closures.axial),value=ergodic.map((x,i)=>(x+axial[i])/2);
+  const bottom=sum(0,()=>1),tilt=k*bottom*zR*2*kappa/Math.abs(beams[0].delta),pushed=times.map(t=>Math.abs((at(value,t*(1+tilt))-at(value,t*(1-tilt)))/2));
+  const series=[{quantity:'loss',indices:all(line),values:value,u:value.map((x,i)=>Math.hypot((ergodic[i]-axial[i])/2,pushed[i])),target:POPULATION}];
   const crossing=(L,q)=>{const i=L.findIndex(x=>x>=q);return i<1?NaN:times[i-1]+(times[i]-times[i-1])*(q-L[i-1])/(L[i]-L[i-1]);};
   write(id,{...expectation(id,'R9','R9 加热逃逸：红蓝对向光的动量扩散越过阱深（能量 Fokker–Planck，两种闭合；只作表征）',line,{
-    derivation:'A red and a blue σ+ beam of one intensity counter-propagating along the tweezer’s axis, ∓100Γ: radiation pressure, light shift and Doppler force cancel; uniform momentum diffusion remains. Energy Fokker–Planck with the exact drift A = E_rec(2+Q)R and the spread B between two closures (ergodic momenta, B = (4/3)⟨KE⟩A; all kinetic energy along the beams, B = 4⟨KE⟩(1+Q+ξ)E_rec R), microcanonical shells of the Gaussian beam, absorbing at the depth, from the lowered isothermal; L delayed by the run to the 1/20 region (0 to τ_max). Value: the closures’ mean; u: half their difference, half the delay’s spread, the uncancelled forces’ tilt, and the return below the depth before the edge is reached (a delay up to √(Bτ_max/2)/A): too wide to judge a loss to 0.05 -- reported, not judged.',
+    derivation:'A red and a blue σ+ beam of one intensity counter-propagating along the tweezer’s axis, ∓100Γ: radiation pressure, light shift and Doppler force cancel; uniform momentum diffusion remains. Energy Fokker–Planck with the exact drift A = E_rec(2+Q)R and the spread B between two closures (ergodic momenta, B = (4/3)⟨KE⟩A; all kinetic energy along the beams, B = 4⟨KE⟩(1+Q+ξ)E_rec R), microcanonical shells of the Gaussian beam, absorbing at the depth, from the lowered isothermal: the escape is the loss (the energy above the far value, wherever the atom is: SPEC §1.7 since 2026-11-21; until then L was delayed by the run to the 1/20 region). Value: the closures’ mean; u: half their difference and the uncancelled forces’ tilt -- reported, not judged.',
     conditions:[{what:'depth (µK)',value:U},{what:'initial depth over k_BT',value:U/T},{what:'δ of the two beams at the bottom / Γ',value:beams.map(b=>b.delta/gamma)},{what:'s of each beam',value:beams.map(b=>2*b.omega**2/gamma**2)},
       {what:'excited population (both beams)',value:bottom/gamma,limit:'≪ 1'},{what:'heating E_rec(2 + Q)R at the bottom (µK/µs)',value:A[0]},{what:'time for the drift to cross the depth, U/A (µs)',value:U/A[0]},
       {what:'rate imbalance of the two beams at the bottom, (R_red − R_blue)/R',value:(R(beams[0],0)-R(beams[1],0))/bottom,limit:'≪ 1'},
       {what:'tilt of the uncancelled push over a Rayleigh range, kRz_R·2κ/|δ| (of the depth)',value:tilt,limit:'≪ 1'},{what:'E_rec/U₀ (diffusion approximation)',value:Erec/U,limit:'≪ 1'},
-      {what:'axial run to the region edge at E = 0, τ_max (µs)',value:tauMax},{what:'time at which L = 0.05, 0.5, 0.95: ergodic closure (µs)',value:[0.05,0.5,0.95].map(q=>crossing(ergodic,q))},
+      {what:'time at which L = 0.05, 0.5, 0.95: ergodic closure (µs)',value:[0.05,0.5,0.95].map(q=>crossing(ergodic,q))},
       {what:'the same: axial closure (µs)',value:[0.05,0.5,0.95].map(q=>crossing(axial,q))},{what:'largest difference of the two closures in L',value:Math.max(...ergodic.map((x,i)=>Math.abs(x-axial[i])))},
-      {what:'energy spread during the run to the edge, √(Bτ_max/2) (µK), and the drift’s time over it (µs)',value:[Math.sqrt(closures.ergodic.at(-1)*tauMax/2),late]},{what:'largest u of L',value:Math.max(...series[0].u),limit:'≤ 0.05 to judge'}],
-    series,info:{zR,edge,tauMax,mandelQ:Q,kappa,closures:{ergodic,axial}}}),kind:'characterization'});
+      {what:'largest u of L',value:Math.max(...series[0].u),limit:'≤ 0.05 to judge'}],
+    series,info:{zR,mandelQ:Q,kappa,closures:{ergodic,axial},
+      model:{gamma,U0,hbarOverMass:hbarOverMass(mass),w0:tw.waistUm,temperatureUK:T,xiSigma:XI_SIGMA,beams:beams.map((b,i)=>({omega:b.omega,delta:b.delta,k:b.k,along:beamOf(line,['red','blue'][i]).direction[2]}))}}}),kind:'characterization'});
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

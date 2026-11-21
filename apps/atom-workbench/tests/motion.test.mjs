@@ -138,6 +138,22 @@ test('the motion block: 3D in the lab frame, the trap beam named, a waist exactl
   assert.deepEqual({h:plain.hReal,d:plain.drives,c:plain.collapse},{h:model.hReal,d:model.drives,c:model.collapse});
 });
 
+test('the optical reference is of the light other than the tweezer: beside that light the tweezer has a frequency axis of its own; alone it is the reference',()=>{
+  // The default scene's probe made weak and far (1e-6 mW/cm², 2 GHz off F=2 → F′=2): the 852 nm tweezer mixes most.
+  const scene=defaultScene(),probe=scene.lasers.find(l=>l.id==='probe');Object.assign(probe,{intensityMWcm2:1e-6});probe.frequency.offsetMHz=2000;resolveSceneFrequencies(scene);
+  assert.equal(buildFullMasterModel(scene,scene.dynamics).referenceLaserId,'tweezer','without motion no beam is a trap: the largest mixing, the tweezer');
+  const model=buildFullMasterModel(scene,scene.dynamics,request(scene)),f=model.frequencyCoordinates.frequenciesMHz,beams=model.motion.beams;
+  assert.equal(model.referenceLaserId,'probe');assert.equal(f.at(-1),laserFrequencyMHz(probe));
+  // The engine's test (scene.rs `tweezer_axis`): an axis before the carrier on which the tweezer's index is nonzero and every other beam's zero.
+  const tweezer=beams.find(b=>b.id==='tweezer'),own=f.slice(0,-1).findIndex((_,i)=>tweezer.frequencyIndex[i]!==0&&beams.every(b=>b===tweezer||b.frequencyIndex[i]===0));
+  assert.ok(own>=0,JSON.stringify(beams.map(b=>[b.id,b.frequencyIndex])));
+  // No light but the tweezer: it is the reference, its index zero, the carrier its own frequency.
+  probe.enabled=false;
+  const alone=buildFullMasterModel(scene,scene.dynamics,request(scene));
+  assert.equal(alone.referenceLaserId,'tweezer');assert.deepEqual(alone.motion.beams.map(b=>[b.id,b.frequencyIndex]),[['tweezer',[0]]]);
+  assert.deepEqual(alone.frequencyCoordinates.frequenciesMHz,[laserFrequencyMHz(tweezerOf(scene))]);
+});
+
 /** C ρ C† summed over operators. */
 function dissipated(operators,rho){
   const out={re:Array(N*N).fill(0),im:Array(N*N).fill(0)};
@@ -310,13 +326,11 @@ test('a motion trajectory is tested against its own target, 5 %, and every sente
 
 test('the notes and the chart titles say what the engine computes: the loss, the trap light, T\'s window, n̄, the initial ensemble, the statistics, the target on T',()=>{
   const notes=definitionNotes()+modelNotes(),solver=new URL('../rust-solver/motion/src/',import.meta.url),source=path=>readFileSync(new URL(path,solver),'utf8');
-  // The loss (model.rs `Model::lost`): first outside the trap light's region AND its loss energy above the far value; an
-  // atom outside the region but bound there is held. The region's words are the engine's (units.rs REGION_INTENSITY).
-  assert.match(source('model.rs'),/self\.light\.outside\(at\.r\)\s*&&\s*self\.energy_with\([^)]*\)\s*>\s*self\.asymptote\(/);
-  assert.match(source('units.rs'),/pub const REGION_INTENSITY: f64 = 1\.0 \/ 20\.0;/);
-  const region=/model-notes\.ts: "([^"]+)"/.exec(source('units.rs'))?.[1];
-  assert.ok(region&&region.includes('1/20')&&notes.includes(region),region);
-  assert.match(notes,/1\/20）[^。]*能量[^。]*高于远处的值[^。]*区域之外仍被束缚的原子不算丢失/);
+  // The loss (model/selected.rs `lost`, SPEC §1.7): the loss energy first above the far value, the escape value E_cap = 0,
+  // wherever the atom is -- the trap's region is no part of it (2026-11-21; before, the atom had also to be outside it).
+  assert.match(source('model/selected.rs'),/fn lost\([^)]*\) -> bool \{\s*self\.energy\([^)]*\)\s*>\s*0\.0\s*\}/);
+  assert.match(notes,/能量[^。]*第一次高于远处的值[^。]*就算丢失，不论它此时在哪里/);
+  assert.doesNotMatch(notes,/区域之外仍被束缚的原子不算丢失/);
   // The trap light is the whole field of the tweezer's frequency (field.rs `Light::outside`, SPEC §1.3).
   assert.match(source('field.rs'),/self\.frequencies\[self\.trap\]\.beams\.iter\(\)\.all/);
   assert.match(notes,/“设为光镊”的那一束光，连同与它同频的各束光/);
