@@ -1032,11 +1032,11 @@ fn kinetic_bound(run: &Selected) -> f64 {
     (0..GROUND).map(|g| -run.prepared(&alone(g)).at([0.; 3]).value).fold(0., crate::linalg::larger)
 }
 
-/// The growth rate Y (1/µs) of the trace distance by which the model's dropped terms may move the state, D(t) = t·Y
-/// (DESIGN2 §2.2; DROPRES §2): the model's own bound where it drops terms (the JUDGE line's, wired here when it is
-/// merged). None is dropped until then.
-fn dropped_rate(_run: &Selected) -> f64 {
-    0.
+/// The growth rate Y (1/µs) of the trace distance by which the model's dropped terms may move the state, D(t) ≤
+/// ½(e^{2Yt} − 1) (DESIGN2 §2.2; DROPRES §2; model/classify.rs `distance`): the model's own bound
+/// (`Selected::dropped`), zero where it drops nothing.
+fn dropped_rate(run: &Selected) -> f64 {
+    run.dropped()
 }
 
 /// The reads a step is judged by (module documentation, # The step): the mean squares over the run of the step's
@@ -3688,7 +3688,8 @@ fn run_groups(levels: &[Hand], shown: usize, messages: &mut Messages, progress: 
 /// What the pilot fixes for the run (module documentation, # Stopping), per time: the model's error on the held atoms
 /// (populations absolute, T relative; T's unbounded where no pilot atom reads it), none at t = 0, where no model has
 /// acted (`model_error`). And what the model's error holds beside it, by bounds (`bounded`): per time the trace distance
-/// D = t·Y its dropped terms may move the state by (`dropped_rate`), and the bound set's hold on a held atom (`Escape`,
+/// D(t) ≤ ½(e^{2Yt} − 1) its dropped terms may move the state by (`dropped_rate`; model/classify.rs `distance`), and the
+/// bound set's hold on a held atom (`Escape`,
 /// `kinetic_bound`), which bounds T where an atom's state is unknown.
 #[derive(Clone)]
 struct Fixed {
@@ -3700,7 +3701,7 @@ struct Fixed {
 impl Fixed {
     /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`.
     fn new(model: Vec<[f64; 2]>, times: &[f64], rate: f64, escape: Escape) -> Fixed {
-        Fixed { model, dropped: times.iter().map(|t| t * rate).collect(), rate, escape }
+        Fixed { model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), rate, escape }
     }
     /// The model's errors `model` at the times `times`, with this run's bounds.
     fn with(&self, model: Vec<[f64; 2]>, times: &[f64]) -> Fixed {
@@ -4230,7 +4231,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     let dropped: Vec<[f64; 2]> = reads.iter().zip(&c.fixed.dropped).map(|(e, &d)| bounded(e, d, &c.fixed.escape)).collect();
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
         let largest = (1..reads.len()).map(|k| if i == 0 { dropped[k][0] } else if reads[k].motion.is_some() { weighed(1. - reads[k].loss, dropped[k][1]) } else { 0. }).fold(0., crate::linalg::larger);
-        ledger.item(&format!("模型删去的项（{what}）"), largest, &format!("建模型时按严格界删去的项：它们让状态在迹距离上至多偏离 D(t) = t·Y（Y 是模型给出的增长率上界）；布居上计 D，温度上按束缚原子动能的上限（阱深 U₀ = {:.0} μK）严格计入", c.fixed.escape.kinetic_uk()));
+        ledger.item(&format!("模型删去的项（{what}）"), largest, &format!("建模型时按严格界删去的项：它们让状态在迹距离上至多偏离 D(t) = ½(e^{{2Yt}} − 1) ≈ t·Y（Y 是模型给出的增长率上界）；布居上计 D，温度上按束缚原子动能的上限（阱深 U₀ = {:.0} μK）严格计入", c.fixed.escape.kinetic_uk()));
     }
     ledger.close(times, &population, &temperature, &allowed);
     let mut s = Solution {
@@ -5465,9 +5466,10 @@ mod tests {
         assert!(account.model == 0.03 && (account.step - 0.02).abs() < 1e-17 && (account.statistics - CONFIDENCE * 0.075).abs() < 1e-14, "{account:?}");
     }
 
-    /// The model's dropped terms are booked by the trace distance they may move the state by, D = t·Y (`bounded`,
-    /// `Fixed::at`): at Y = 10⁻⁴/µs, D = 0.01 at 100 µs -- on what is shown the measured 1 % plus D; on T the measured
-    /// 3 % plus the bound at the share D/(1 − D) of the held atoms moved within the bound set (estimate.rs
+    /// The model's dropped terms are booked by the trace distance they may move the state by, D = ½(e^{2Yt} − 1)
+    /// (`bounded`, `Fixed::at`, model/classify.rs `distance`): at Y = 10⁻⁴/µs, D = 0.010067 at 100 µs -- on what is shown
+    /// the measured 1 % plus D; on T the measured 3 % plus the bound at the share D/(1 − D) of the held atoms moved
+    /// within the bound set (estimate.rs
     /// `Estimate::moved`, a 1 mK bound), weighed by the held share; in the result an item each, their largest. At Y = 0
     /// every account is the measurement's to the bit, and no item is made.
     #[test]
@@ -5479,9 +5481,11 @@ mod tests {
         let step = Bound::share();
         let dropped = Fixed::new(model.clone(), &[0., 100.], 1e-4, escape);
         let (population, temperature) = accounts(&run, &dropped, step);
-        let w = 0.01 / (1. - 0.01);
+        let d = crate::model::classify::distance(1e-4, 100.);
+        assert!((d - 0.5 * 0.02_f64.exp_m1()).abs() < 1e-17 && d > 0.01, "{d}");
+        let w = d / (1. - d);
         let expected = 0.03 + e.moved(w, &escape);
-        assert!((population[1].model - 0.02).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - expected).abs() < 1e-14 * expected), "{population:?} {temperature:?} against {expected}");
+        assert!((population[1].model - (0.01 + d)).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - expected).abs() < 1e-14 * expected), "{population:?} {temperature:?} against {expected}");
         assert!(e.moved(w, &escape) > 1., "a millikelvin's bound on 13.7 µK: {}", e.moved(w, &escape));
         let none = Fixed::new(model.clone(), &[0., 100.], 0., escape);
         assert_eq!(format!("{:?}", accounts(&run, &none, step)), format!("{:?}", accounts(&run, &fixed_of(model), step)));
@@ -5493,13 +5497,13 @@ mod tests {
         };
         let made = items(dropped);
         let item = |label: &str| made.iter().find(|i| i.label == label).map(|i| i.estimate);
-        assert!(item("模型删去的项（布居）") == Some(0.01) && item("模型删去的项（温度）").is_some_and(|x| (x - e.moved(w, &escape)).abs() < 1e-14 * x), "{made:?}");
+        assert!(item("模型删去的项（布居）") == Some(d) && item("模型删去的项（温度）").is_some_and(|x| (x - e.moved(w, &escape)).abs() < 1e-14 * x), "{made:?}");
         assert!(!items(none).iter().any(|i| i.label.starts_with("模型删去的项")));
     }
 
     /// The atoms whose state the run does not know are booked with the dropped terms by one bound (`bounded`): 800
-    /// atoms held at 13.7 µK, 1 % of them unresolved, 8 trajectories not counted, the model's dropped terms at D = 0.01
-    /// (a 1 mK bound). On what is shown the measured 1 % plus the share not counted, the unresolved share and D; on T the
+    /// atoms held at 13.7 µK, 1 % of them unresolved, 8 trajectories not counted, the model's dropped terms at Y = 10⁻⁴/µs
+    /// over 100 µs, D = ½(e^{0.02} − 1) (model/classify.rs `distance`; a 1 mK bound). On what is shown the measured 1 % plus the share not counted, the unresolved share and D; on T the
     /// measured 3 % plus the bound at (8 + 8)/808 + D/(1 − D), more than the two shares' bounds taken apart and added
     /// (the bound is convex in the share). Without the unknown atoms and the dropped terms, the measurement alone.
     #[test]
@@ -5510,8 +5514,9 @@ mod tests {
         let fixed = Fixed::new(vec![[0.; 2], [0.01, 0.03]], &[0., 100.], 1e-4, escape);
         let run = [e.clone(), e.clone()];
         let (population, temperature) = accounts(&run, &fixed, Bound::share());
-        let (unknown, dropped) = (16. / 808., 0.01 / 0.99);
-        let expected = [0.01 + (8. / 808. + 0.01 + 0.01), 0.03 + e.moved(unknown + dropped, &escape)];
+        let d = crate::model::classify::distance(1e-4, 100.);
+        let (unknown, dropped) = (16. / 808., d / (1. - d));
+        let expected = [0.01 + (8. / 808. + 0.01 + d), 0.03 + e.moved(unknown + dropped, &escape)];
         assert!((population[1].model - expected[0]).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - expected[1]).abs() < 1e-14 * expected[1]), "{population:?} {temperature:?} against {expected:?}");
         assert!(e.moved(unknown + dropped, &escape) > e.moved(unknown, &escape) + e.moved(dropped, &escape));
         let known = estimate([25., 6., 10.], 0.01, 800.);

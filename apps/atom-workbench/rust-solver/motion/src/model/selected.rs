@@ -562,7 +562,7 @@ impl Selected {
             let length = self.scene.request.times_us.last().copied().unwrap_or(0.0);
             let beats = dropped.iter().map(|v| format!("±{v:.4}")).collect::<Vec<_>>().join("、");
             out += &format!("  删去拍 {} 对：{beats} rad/µs；迹距离增长率上界 Y = {:.2e} /µs（{length} µs 内 D ≤ {:.2e}）
-", dropped.len(), self.judgment.dropped, 0.5 * (2.0 * self.judgment.dropped * length).exp_m1());
+", dropped.len(), self.judgment.dropped, crate::model::classify::distance(self.judgment.dropped, length));
         }
         let judged: Vec<bool> = self.report.reference.iter().map(Option::is_some).collect();
         for c in &self.report.candidates {
@@ -940,8 +940,9 @@ impl Selected {
     /// (rs/fold.rs `Out::bounds` on the lab's grouping) and the decay's share ½ Σ ‖ℓ_l‖‖ℓ_r‖ over its products, each
     /// spherical component's norm the Frobenius of its entries' bounds (the spherical fold's own, `spherical`); the
     /// reach's κ from the prepared well's depth U₀ (`Scene::trap_potential` at the focus: K ≤ s U₀ for a held atom),
-    /// the account's c_T = 2U₀/(30 (ħ/m) k²) at the emission's shortest wave number k (T_sc ≥ 30 k_BT_rec), its errors
-    /// the selection's on P (the gate's where it holds none).
+    /// the account's hold of the held atoms by the same U₀ and T's scale at the emission's shortest wave number k
+    /// (T_sc ≥ 30 k_BT_rec, estimate.rs `semiclassical`), its errors the selection's on P (the gate's where it holds
+    /// none).
     fn drop_sizes(&self, node: &Node, candidates: &[usize], spherical: (&Plan, &Grouping)) -> (Vec<(Vec<usize>, f64)>, Account, f64) {
         let n = self.rs.keep.len();
         let wells = self.scene.trap_potential([0.0; 3], &self.depth);
@@ -1017,11 +1018,13 @@ impl Selected {
             .map(|(i, j)| self.scene.jumps().wave_number[(i, j)].re.abs())
             .fold(f64::INFINITY, smaller);
         let error = self.error().map(|e| if e.is_nan() { crate::select::GATE } else { e });
+        let scales = crate::estimate::Scales { hbar_over_mass: self.hbar_over_mass, frequencies: [0.0; 3] };
         let account = Account {
             populations: error[0],
             temperature: error[1],
             duration: request.times_us.last().copied().unwrap_or(0.0),
-            temperature_per_distance: 2.0 * depth / (crate::units::SUB_DOPPLER_RECOILS * self.hbar_over_mass * shortest * shortest),
+            escape: crate::estimate::Escape::new(depth, self.hbar_over_mass),
+            floor: crate::estimate::semiclassical([1.0, shortest * shortest], &scales),
         };
         (pairs, account, nodes)
     }

@@ -67,7 +67,7 @@ fn select_a_point_without_light_is_not_judged() {
     let dark = decide_on(&candidates, [false; POINTS], 1.0, |_, _| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
     assert_eq!((dark.keep.clone(), dark.whole), (vec![0], 1));
     assert_eq!(dark.notes().len(), POINTS);
-    let refined = refine(dark, 1.0, &|_: usize, _: &[usize]| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }).unwrap();
+    let refined = refine(dark, 1.0, &|_: usize, _: &[usize]| -> Result<(Readouts, Route), String> { panic!("a dark point is solved") }, &|_| true).unwrap();
     assert_eq!(refined.keep, vec![0]);
 }
 
@@ -129,7 +129,7 @@ fn select_leave_one_out_by_hand() {
     })
     .unwrap();
     assert_eq!(first.keep, base);
-    let out = refine(first, 1.0, &solve).unwrap();
+    let out = refine(first, 1.0, &solve, &|_| true).unwrap();
     let e: Vec<f64> = out.left_out.iter().map(|l| l.e()).collect();
     assert_eq!(out.left_out.iter().map(|l| l.state).collect::<Vec<_>>(), (GROUND..GROUND + 4).collect::<Vec<_>>());
     assert!(e.iter().zip([0.002, 0.0025, 0.0035, 0.021]).all(|(a, b)| (a - b).abs() < 1e-15), "{e:?}");
@@ -143,12 +143,12 @@ fn select_leave_one_out_by_hand() {
     assert_eq!(passing, vec![false, false, true]);
     assert_eq!(out.candidates.last().unwrap().keep, out.keep);
     let reference = out.reference.clone();
-    let wide = descend(out.base(), &out.left_out, 0.05, &reference, 1.0, &solve).unwrap();
+    let wide = descend(out.base(), &out.left_out, 0.05, &reference, 1.0, &solve, &|_| true).unwrap();
     assert_eq!((wide.keep, wide.checks.len()), (ground.clone(), 1));
     assert!((wide.predicted - 0.03).abs() < 1e-15);
-    let narrow = descend(out.base(), &out.left_out, 0.0025, &reference, 1.0, &solve).unwrap();
+    let narrow = descend(out.base(), &out.left_out, 0.0025, &reference, 1.0, &solve, &|_| true).unwrap();
     assert_eq!((narrow.keep, narrow.removed.len(), narrow.checks.len()), (base.clone(), 0, 0));
-    assert!(descend(out.base(), &out.left_out, 0.0005, &reference, 1.0, &solve).is_err());
+    assert!(descend(out.base(), &out.left_out, 0.0005, &reference, 1.0, &solve, &|_| true).is_err());
 }
 
 /// A level's name in the prototype's readouts (td_s: "g1", "g2", "e<line><F′>"), of its first state's label
@@ -166,7 +166,7 @@ fn six() -> Vec<(&'static str, Scene)> {
 
 /// The six scenes' requests (the directory `V3D_REQ`: scratchpad reqprec/req; `PSTATE_SCENE` one of them), each with
 /// its name in the prototype's files.
-fn requests() -> Vec<(&'static str, crate::request::Request)> {
+pub(crate) fn requests() -> Vec<(&'static str, crate::request::Request)> {
     let dir = std::path::PathBuf::from(std::env::var("V3D_REQ").expect("V3D_REQ: the six scenes' requests (scratchpad reqprec/req)"));
     [("tilt0.json", "tilt0"), ("tilt2.json", "tilt2"), ("R4_LIN_4.json", "r4"), ("GMD1C_1ms.json", "gmd1c"), ("PGC3D_1ms.json", "pgc3d"), ("TET_1ms.json", "tet")]
         .into_iter()
@@ -275,7 +275,7 @@ fn two_point_choice(scene: &Scene) -> Result<Selection, String> {
         None => three.reference(p),
         Some(c) => three.model(p, &candidates[c]),
     })?;
-    refine(base, three.k, &|p: usize, keep: &[usize]| three.model(p, keep))
+    refine(base, three.k, &|p: usize, keep: &[usize]| three.model(p, keep), &|_| true)
 }
 
 /// The two points beside the three (the user's change of 2026-11-20), for a scene and its three-point selection: the
@@ -353,9 +353,9 @@ fn choose_s_p_passes_at_the_three_points() {
         let mut gates = Vec::new();
         for gate in [0.02, 0.05] {
             let whole = selection.candidates[..selection.whole].iter().find(|c| c.within(gate)).expect("the base passes a wider gate");
-            let own = if whole.keep == base.keep { selection.left_out.clone() } else { leave_one_out(whole, &selection.reference, two.k, &model).unwrap() };
-            let at = descend(whole, &own, gate, &selection.reference, two.k, &model).unwrap();
-            let from = descend(base, &selection.left_out, gate, &selection.reference, two.k, &model).unwrap();
+            let own = if whole.keep == base.keep { selection.left_out.clone() } else { leave_one_out(whole, &selection.reference, two.k, &model, &|_| true).unwrap() };
+            let at = descend(whole, &own, gate, &selection.reference, two.k, &model, &|_| true).unwrap();
+            let from = descend(base, &selection.left_out, gate, &selection.reference, two.k, &model, &|_| true).unwrap();
             // P's measured worst: its check's, or its base's where nothing was removed.
             let measured = |d: &Descent, from: &Candidate| d.checks.last().filter(|c| c.keep == d.keep).map_or(from.worst(), |c| c.worst());
             eprintln!(

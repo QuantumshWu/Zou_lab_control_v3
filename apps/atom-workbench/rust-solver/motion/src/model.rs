@@ -11,6 +11,7 @@
 //! the frame where the excited states rotate at ν_frame). The emission operators C_a (a = x, y, z, ground ← excited, 1/√µs).
 pub mod classify;
 pub mod potential;
+pub mod reach;
 pub(crate) mod optical;
 pub mod rs;
 pub mod selected;
