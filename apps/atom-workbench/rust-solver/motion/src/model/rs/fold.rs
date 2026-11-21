@@ -786,9 +786,8 @@ fn sized(m: &mut Mat, rows: usize, cols: usize) {
 }
 
 impl Local {
-    /// The fold's numbers at a point: `values` the source's there.
-    pub fn evaluate(&mut self, plan: &Plan, values: &Values) {
-        self.values.clone_from(values);
+    /// The fold's numbers at a point: its `values`, the source's there (put in by the caller, `Rs::evaluate`).
+    pub fn evaluate(&mut self, plan: &Plan) {
         let mut work = 0.0;
         let Local { values: v, spectra, g, dg, hats, energies, slopes, m: ms, dm: dms, gen, terms, z, zc, d, x, y, t, gs, series, .. } = self;
         let v = &*v;
@@ -1155,6 +1154,10 @@ pub struct Series {
     zc: Vec<C64>,
     wmax: Vec<f64>,
     omax: Vec<f64>,
+    /// Where the series does not converge: the block's decomposition and its products.
+    eigen: linalg::Eigen,
+    product: Mat,
+    result: Mat,
 }
 
 impl Series {
@@ -1233,15 +1236,15 @@ impl Series {
             }
             return work;
         }
-        let mut eigen = linalg::Eigen::default();
+        let Series { eigen, product: w, result, .. } = self;
         assert!(eigen.decompose(g), "a sideband part's G₀ has no eigendecomposition (defective)");
-        let mut w = eigen.inverse.product(y);
+        plain_product(&eigen.inverse, y, w);
         for k in 0..size {
             for (j, &zj) in z.iter().enumerate().take(count) {
                 w[(k, j)] = w[(k, j)] / (C64::real(zj) - eigen.values[k]);
             }
         }
-        let result = eigen.vectors.product(&w);
+        plain_product(&eigen.vectors, w, result);
         out.data.copy_from_slice(&result.data);
         work + eigen.work + 2.0 * (size * size * count) as f64
     }
@@ -1336,6 +1339,25 @@ fn zero(m: &mut Mat, rows: usize, cols: usize) {
     sized(m, rows, cols);
 }
 
+/// out ← a on out's own memory (`Mat`'s derived `clone_from` makes a new one).
+fn copied(out: &mut Mat, a: &Mat) {
+    (out.rows, out.cols) = (a.rows, a.cols);
+    out.data.clear();
+    out.data.extend_from_slice(&a.data);
+}
+
+/// out (r × c) = a b by `Mat::product`'s own operations (each row a's entries' multiples of b's rows in turn, the
+/// product rounded and then the sum), on out's memory.
+fn plain_product(a: &Mat, b: &Mat, out: &mut Mat) {
+    assert_eq!(a.cols, b.rows);
+    sized(out, a.rows, b.cols);
+    for (row, x) in out.data.chunks_exact_mut(b.cols.max(1)).zip(a.data.chunks_exact(a.cols.max(1))) {
+        for (x, b) in x.iter().zip(b.data.chunks_exact(b.cols.max(1))) {
+            linalg::mul_add(false, row, *x, b);
+        }
+    }
+}
+
 impl Out {
     /// The contraction of `local` by `grouping` (module documentation, # Contraction): each piece's sums with its weight
     /// (`weights`, one per piece, or one for all where None), what `making` asks for. The amplitudes' sums are taken to
@@ -1392,8 +1414,8 @@ impl Out {
                 product(vectors, &self.zd[b], &mut self.md[b]);
                 work += (size * size * 4 * width) as f64;
             } else {
-                self.mv[b].clone_from(&self.zv[b]);
-                self.md[b].clone_from(&self.zd[b]);
+                copied(&mut self.mv[b], &self.zv[b]);
+                copied(&mut self.md[b], &self.zd[b]);
             }
         }
         let v = &local.values;

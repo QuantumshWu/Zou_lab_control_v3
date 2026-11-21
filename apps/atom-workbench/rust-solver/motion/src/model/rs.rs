@@ -447,7 +447,8 @@ impl Folding {
     /// The fold at the values (`At`).
     pub fn at(&self, values: &Values) -> At<'_> {
         let mut local = fold::Local::default();
-        local.evaluate(&self.plan, values);
+        local.values.clone_from(values);
+        local.evaluate(&self.plan);
         At { rs: self, local }
     }
 }
@@ -1115,9 +1116,8 @@ impl Rs {
 
     /// The fold's numbers at a point into a buffer (`local`'s).
     pub fn evaluate(&self, scene: &Scene, point: &Point, local: &mut fold::Local) {
-        let mut values = std::mem::take(&mut local.values);
-        self.tweezer.values_into(scene, point, &mut values);
-        local.evaluate(&self.folding.plan, &values);
+        self.tweezer.values_into(scene, point, &mut local.values);
+        local.evaluate(&self.folding.plan);
     }
 
     /// The tweezer's fold made once (`Tweezer::still`).

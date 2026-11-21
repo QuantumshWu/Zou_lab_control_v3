@@ -6,7 +6,7 @@
 //! the largest difference in units of ε times the quantity's largest entry.
 
 use super::*;
-use crate::model::rs::ModelPart;
+use crate::model::rs::{ModelAt, ModelPart};
 use crate::request::Request;
 use serde_json::{json, Value};
 
@@ -421,10 +421,11 @@ fn allocations(f: &mut dyn FnMut()) -> Option<u64> {
     }
 }
 
-/// R2-NODE: a node's and a readout's cost on one thread (µs, the least of R2_REPEAT runs, 40) at the golden's moving
-/// point (r = R1, κ the speed 0.1 µm/µs along U) and at the centre at rest, the node's parts -- the fold's numbers
-/// (`Rs::evaluate` with the point), the contraction, the filling --, the counted complex multiply-adds and their floor at
-/// 5 G/s (PROF1's kernel speed), and the heap allocations of each (feature `prof`; one call after a warm-up).
+/// R2-NODE: a node's, a jump's photon's and a readout's cost on one thread (µs, the least of R2_REPEAT runs, 40) at the
+/// golden's moving point (r = R1, κ the speed 0.1 µm/µs along U) and at the centre at rest: a node as a step makes it (a
+/// middle's three, every reading of them, a third of the whole) and its parts -- the fold's numbers (`Rs::evaluate`
+/// with the point), the contraction, the filling --, the counted complex multiply-adds and their floor at 5 G/s
+/// (PROF1's kernel speed), and the heap allocations of each (feature `prof`; one call after a warm-up).
 #[test]
 #[ignore]
 fn r2_node_cost() {
@@ -462,16 +463,42 @@ fn r2_node_cost() {
             let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps, &mut work.product));
             let a_fill = allocations(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps, &mut work.product));
             let counted = work.local.work + work.out.work;
-            let mut whole = || {
-                std::hint::black_box(run.node(r, kappa, false));
+            // A middle's three nodes (the step's middle and outer nodes, h = 0.237 µs along the path) with every reading
+            // of them a step makes -- the generator at each, the forces, the tones, the gradient with its slope, the
+            // scattered light -- and the middle dropped (its nodes back to the pool): a node's share a third.
+            let velocity = kappa.map(|k| run.hbar_over_mass() * k);
+            let h = 0.237;
+            let mut h_mat = Mat::zeros(n, n);
+            let rho = {
+                let mut rho = vec![C64::ZERO; n * n];
+                crate::step::density(&psi, &mut rho);
+                rho
             };
-            let t_node = least(&mut whole);
-            let a_node = allocations(&mut whole);
-            let mut kicked = || {
-                std::hint::black_box(run.node(r, kappa, true));
+            let (mut g, mut slope): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
+            let mut nodes = || {
+                let middle = run.middle(0, r, 0.0);
+                let path = middle.path(kappa, velocity);
+                for s in [0.0, -h, h] {
+                    middle.generator(&path, s, &mut h_mat);
+                }
+                std::hint::black_box(middle.force(&path, h, &rho));
+                middle.tones(&path, &rho, &mut |nu, f| {
+                    std::hint::black_box((nu, f));
+                });
+                std::hint::black_box(middle.gradient(&path, 0.0, &mut g, Some((h, &mut slope))));
+                std::hint::black_box(middle.scattering(&path, &psi));
             };
-            let t_kicked = least(&mut kicked);
-            let a_kicked = allocations(&mut kicked);
+            let t_nodes = least(&mut nodes) / 3.0;
+            let a_nodes = allocations(&mut nodes);
+            // A jump's photon at a point of the step (its node with the photon forms).
+            let mut jump = || {
+                let middle = run.middle(0, r, 0.0);
+                let path = middle.path(kappa, velocity);
+                let at = crate::model::Point { r, kappa, t: 0.1 };
+                std::hint::black_box(run.emit(0, &at, Some((&middle, &path, 0.1)), &psi, &mut |rates: &[f64]| (0..rates.len()).max_by(|a, b| rates[*a].total_cmp(&rates[*b]))));
+            };
+            let t_jump = least(&mut jump);
+            let a_jump = allocations(&mut jump);
             let at = crate::model::Point { r, kappa, t: 0.37 };
             let mut read = || {
                 std::hint::black_box(run.rows(&at, &psi));
@@ -479,9 +506,9 @@ fn r2_node_cost() {
             let t_read = least(&mut read);
             let a_read = allocations(&mut read);
             eprintln!(
-                "R2COST {name} {point}: node {t_node:.1} µs (evaluate {evaluate:.1} contract {contract:.1} fill {fill:.1}), kicked {t_kicked:.1}, readout {t_read:.1} µs; counted {counted:.4e} CMA, floor {:.1} µs (×{:.2}); allocations node {a_node:?} (evaluate {a_evaluate:?} contract {a_contract:?} fill {a_fill:?}) kicked {a_kicked:?} readout {a_read:?}",
+                "R2COST {name} {point}: node {t_nodes:.1} µs (evaluate {evaluate:.1} contract {contract:.1} fill {fill:.1}), a jump's photon {t_jump:.1}, readout {t_read:.1} µs; counted {counted:.4e} CMA, floor {:.1} µs (×{:.2}); allocations a middle's three nodes and readings {a_nodes:?} (evaluate {a_evaluate:?} contract {a_contract:?} fill {a_fill:?}) a jump {a_jump:?} readout {a_read:?}",
                 counted / 5e3,
-                t_node / (counted / 5e3)
+                t_nodes / (counted / 5e3)
             );
         }
     }
@@ -572,7 +599,3 @@ fn r1_frame_with_recoil() {
         eprintln!("R1FRAME {name}: θ the same {}, sectors the same {}, values {:?} vs {:?}", a.theta == b.theta, a.sectors() == b.sectors(), &a.values, &b.values);
     }
 }
-
-
-
-
