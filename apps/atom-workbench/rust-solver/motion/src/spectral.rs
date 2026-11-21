@@ -1002,33 +1002,45 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
 /// power iterates from v = 1 while the bound falls by more than its rounding (it holds at every iterate). d by Osborne's
 /// balancing of the weighted sum (each d_a equalizing its off-diagonal row and column, LAPACK's gebal), sweep by sweep
 /// while the whole bound falls by more than its rounding: every d's bound holds, the least found is taken. Returns it
-/// and its count (n² a sweep, 2n² a power iterate).
+/// and its count (n² a sweep, 2n² a power iterate). Its vectors on the stack (until 2026-11-21 each iterate's on the
+/// heap, some twenty allocations a step).
 fn radius(moduli: &[f64], n: usize, h: f64) -> (f64, f64) {
+    const STATES: usize = crate::model::STATES;
     let size = n * n;
     let weights = [h.abs(), 0.5 * h * h, h.abs().powi(3) / 3.0];
-    let combined: Vec<f64> = (0..size).map(|k| (0..3).map(|j| weights[j] * moduli[j * size + k]).sum()).collect();
+    let mut combined = [0.0_f64; STATES * STATES];
+    for (k, c) in combined[..size].iter_mut().enumerate() {
+        *c = (0..3).map(|j| weights[j] * moduli[j * size + k]).sum();
+    }
     let mut count = 0.0;
     // ‖D M D⁻¹‖₂ of the nonnegative M, within Collatz–Wielandt's bound on (DMD⁻¹)ᵀ(DMD⁻¹)'s Perron root.
     let mut norm = |m: &[f64], d: &[f64]| -> f64 {
         let entry = |a: usize, b: usize| d[a] / d[b] * m[a * n + b];
-        let mut v = vec![1.0_f64; n];
+        let (mut v, mut w, mut u) = ([1.0_f64; STATES], [0.0_f64; STATES], [0.0_f64; STATES]);
         let mut best = f64::INFINITY;
         loop {
-            let w: Vec<f64> = (0..n).map(|a| (0..n).map(|b| entry(a, b) * v[b]).sum()).collect();
-            let u: Vec<f64> = (0..n).map(|b| (0..n).map(|a| entry(a, b) * w[a]).sum()).collect();
+            for (a, w) in w[..n].iter_mut().enumerate() {
+                *w = (0..n).map(|b| entry(a, b) * v[b]).sum();
+            }
+            for (b, u) in u[..n].iter_mut().enumerate() {
+                *u = (0..n).map(|a| entry(a, b) * w[a]).sum();
+            }
             count += (4 * size) as f64;
             let bound = (0..n).fold(0.0_f64, |most, i| linalg::larger(most, if v[i] > 0.0 { u[i] / v[i] } else if u[i] > 0.0 { f64::INFINITY } else { 0.0 }));
-            let top = u.iter().fold(0.0_f64, |most, &x| linalg::larger(most, x));
+            let top = u[..n].iter().fold(0.0_f64, |most, &x| linalg::larger(most, x));
             if !(bound < best - crate::units::rounding(2 * n) * best) || !(top > 0.0) {
                 break linalg::smaller(best, bound).sqrt();
             }
             best = bound;
-            v = u.iter().map(|x| x / top).collect();
+            for (v, u) in v[..n].iter_mut().zip(&u[..n]) {
+                *v = u / top;
+            }
         }
     };
     let mut bound = |d: &[f64]| -> f64 { (0..3).map(|j| weights[j] * norm(&moduli[j * size..(j + 1) * size], d)).sum() };
-    let mut d = vec![1.0; n];
-    let mut best = bound(&d);
+    let mut d = [1.0_f64; STATES];
+    let d = &mut d[..n];
+    let mut best = bound(d);
     loop {
         for a in 0..n {
             let row: f64 = (0..n).filter(|&b| b != a).map(|b| combined[a * n + b] / d[b]).sum();
@@ -1037,7 +1049,7 @@ fn radius(moduli: &[f64], n: usize, h: f64) -> (f64, f64) {
                 d[a] = (column / row).sqrt();
             }
         }
-        let next = bound(&d);
+        let next = bound(d);
         if !(next < best - crate::units::rounding(6 * size) * best) {
             best = linalg::smaller(best, next);
             break;
