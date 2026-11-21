@@ -28,6 +28,17 @@
 //! both ground levels took the frame of the stronger beam, the same vector, φ = 0 (2026-11-20, pstate.status.md 4.5).
 //! In the cooling scenes the resonant first-order couplings stay the strongest and the frame is the same.
 //!
+//! The lattice's split (# The lattice) reads an element's frame vector c − θ_b + θ_a as its frequency, which is its
+//! detuning f_c − (E_b − E_a) only where every state's diagonal in the frame, D_a = E_a − θ_a, is slow. A level set
+//! from a laser of another line is not: R5_PUMP's F = 1 set from its D2 repump and F = 2 from its D1 pump are φ =
+//! 4.48·10⁷ rad/µs apart (the D1–D2 axis), and F = 1's diagonal is 0.999 φ -- its static elements to F = 2 (the pump
+//! and repump's Raman pair) were slow in the frame and 7 THz off resonance, joining the two levels at that bandwidth
+//! (R9_HEAT the same at −4.63 φ). So each state's θ is then moved, exactly, to the lattice point nearest its energy
+//! along φ (`settle`): by the whole number k_a = round((D_a − D_r)/φ) of φ's vector, D_r the first ground state's
+//! diagonal (no energy zero is the request's to set: a common offset moves nothing). φ is the levels' as chosen. An
+//! element's fast part is then that of its detuning -- the split's own rounding of a frequency on the lattice, read
+//! of the frequency the frame does not choose. Where every diagonal is within half a φ of the reference's, nothing moves.
+//!
 //! # The lattice
 //! A vector's fast part n = (n_φ, n_tw, n_ν) is split off exactly (`Frame::split`): n_ν the carrier axis' coefficient,
 //! n_tw the tweezer's own axis', n_φ = round(f/φ), φ = β_g2 − β_g1 (the ground hyperfine in the frame). The slow
@@ -477,9 +488,28 @@ impl Frame {
                 frame.fast[0] = v.iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum();
                 assert!(frame.fast[0].is_finite() && frame.fast[0] != 0.0, "the ground levels' frames apart by a nonzero frequency");
                 frame.phi = Some(p);
+                frame.settle(request, &v);
             }
         }
         frame
+    }
+
+    /// Each state's θ moved to the lattice point nearest its energy along φ (module documentation, # The frame): by
+    /// k_a = round((D_a − D_r)/φ) times φ's vector `v`, D_a = E_a − θ_a its diagonal in the frame (E the request's static
+    /// energies), D_r the first ground state's. An exact change of variables; φ itself is not moved.
+    fn settle(&mut self, request: &crate::request::Request, v: &FrameKey) {
+        let value = |t: &FrameKey, values: &[f64]| t.iter().zip(values).map(|(&k, w)| k as f64 * w).sum::<f64>();
+        let diagonal: Vec<f64> = (0..STATES).map(|s| request.hamiltonian[(s, s)].re - value(&self.theta[s], &self.values)).collect();
+        let reference = diagonal[0];
+        for (theta, d) in self.theta.iter_mut().zip(&diagonal) {
+            let k = ((d - reference) / self.fast[0]).round_ties_even();
+            // A diagonal that is not a number moves no frame and reaches the model as it is (its energy no number).
+            if k.is_finite() && k != 0.0 {
+                for (t, x) in theta.iter_mut().zip(v) {
+                    *t += k as i64 * x;
+                }
+            }
+        }
     }
 
     /// A vector over B as a primitive vector (linear: what the frame reads of a vector, `split` and the lattice).

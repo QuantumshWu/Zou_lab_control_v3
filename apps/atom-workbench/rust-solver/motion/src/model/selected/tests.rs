@@ -563,8 +563,10 @@ fn reference(name: &str) -> Request {
 }
 
 /// The reference scenes the exact blocks are checked on beside the six: lin⊥lin with explicit excited states
-/// (R4_LIN_1, R4_LIN_2) and optical pumping on D1 with a D2 repump (R5_PUMP).
-const BLOCKED: [&str; 3] = ["R4_LIN_1", "R4_LIN_2", "R5_PUMP"];
+/// (R4_LIN_1, R4_LIN_2), optical pumping on D1 with a D2 repump (R5_PUMP) and recoil heating by a red and a blue beam
+/// (R9_HEAT) -- the last two the scenes whose levels' frames are settled to their energies (floquet/frame.rs # The
+/// frame).
+const BLOCKED: [&str; 4] = ["R4_LIN_1", "R4_LIN_2", "R5_PUMP", "R9_HEAT"];
 
 /// The exact blocks' scenes (V3E_SCENE one of them): the six scenes' own requests (`scenes`) and `BLOCKED`.
 fn blocked_scenes() -> Vec<(String, Request)> {
@@ -704,8 +706,9 @@ fn ends_apart(a: &[Trajectory], b: &[Trajectory]) -> ([f64; 3], bool) {
 /// without a jump on either, with one -- the most two ends of one step are apart (`ends_apart`'s units) and the steps'
 /// count, and the most the step on `whole` from the state turned by a phase e^{i}, its end turned back, is apart from
 /// the one from the state as it is (the step's own rounding of ψ: the same numbers in another order); the most a step's
-/// ψ apart is in units of τ‖Ĥ − tr Ĥ/n‖ (Frobenius, the generator at the step's start): an eigenvalue's rounding of
-/// ε‖Ĥ‖ is a phase of ετ‖Ĥ‖, the floor of any decomposition's propagation; each model's nodes and wall time over the
+/// ψ apart is in units of τ‖Ĥ‖, ‖Ĥ‖ = ‖Ĥ − tr Ĥ/n‖ + |tr Ĥ/n| (Frobenius, the generator at the step's start) the most
+/// an eigenvalue λ = λ₀ + tr Ĥ/n can be: its rounding of ε‖Ĥ‖ is a phase of ετ‖Ĥ‖, the floor of any decomposition's
+/// propagation (a common diagonal far from zero its own share, a global phase); each model's nodes and wall time over the
 /// steps from the same states (s, one thread); and both trajectories' ends.
 struct Side {
     step: [([f64; 3], usize); 2],
@@ -749,7 +752,7 @@ fn side_by_side(run: &Selected, whole: &Selected, starts: &[(V3, V3, Vec<C64>, f
             let mut h = Mat::zeros(n, n);
             middle.generator(&path, 0.0, &mut h);
             let mean = (0..n).map(|x| h[(x, x)]).sum::<C64>() / n as f64;
-            let size = (0..n * n).map(|i| (h.data[i] - if i / n == i % n { mean } else { C64::ZERO }).norm_sqr()).sum::<f64>().sqrt();
+            let size = (0..n * n).map(|i| (h.data[i] - if i / n == i % n { mean } else { C64::ZERO }).norm_sqr()).sum::<f64>().sqrt() + mean.abs();
             side.floor[kind] = crate::linalg::larger(side.floor[kind], d[0] / (tau * size));
             let mut turned = t.clone();
             turned.psi.iter_mut().for_each(|z| *z = *z * C64::cis(1.0));
@@ -767,8 +770,8 @@ fn side_by_side(run: &Selected, whole: &Selected, starts: &[(V3, V3, Vec<C64>, f
 }
 
 /// The blocks change no step beyond the rounding, and what they save (R1-CLEAN item 3's acceptance; a measurement too):
-/// R4, tilt0 and R5_PUMP (V3E_SCENE one of them), V3E_ATOMS atoms (4) from `starts`, V3E_STEPS steps (12) of τ =
-/// V3E_TAU µs (0.05) with one noise, each step from the same state on the run and on the same model one block
+/// R4, tilt0, R5_PUMP and R9_HEAT (V3E_SCENE one of them), V3E_ATOMS atoms (4) from `starts`, V3E_STEPS steps (12) of
+/// τ = V3E_TAU µs (0.05) with one noise, each step from the same state on the run and on the same model one block
 /// (`side_by_side`): the two ends of a step without a jump apart by the rounding -- said in units of ε, beside the step's
 /// own rounding of ψ (the phase-turned step's), and ψ at most n ετ‖Ĥ‖, the eigenvalues' rounding of an n-term sum each
 /// --, those of a step with one said beside them (a jump's time is the root of the survival, which moves it by the
@@ -778,7 +781,7 @@ fn side_by_side(run: &Selected, whole: &Selected, starts: &[(V3, V3, Vec<C64>, f
 #[ignore]
 fn the_blocks_change_a_step_by_rounding() {
     let (atoms, count, tau) = (env("V3E_ATOMS", 4.0) as u64, env("V3E_STEPS", 12.0) as usize, env("V3E_TAU", 0.05));
-    for (name, request) in blocked_scenes().into_iter().filter(|(n, _)| ["R4", "tilt0", "R5_PUMP"].contains(&n.as_str())) {
+    for (name, request) in blocked_scenes().into_iter().filter(|(n, _)| ["R4", "tilt0", "R5_PUMP", "R9_HEAT"].contains(&n.as_str())) {
         let (run, whole) = (made(&request, true), made(&request, false));
         let side = side_by_side(&run, &whole, &starts(&run, request.temperature_uk, atoms), tau, count);
         let (d, jumps) = ends_apart(&side.ends[0], &side.ends[1]);
