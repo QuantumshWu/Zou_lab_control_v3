@@ -151,7 +151,8 @@ function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
 const diagonalIn=(a:MasterMatrix,u:MasterMatrix,factor:number):number[]=>{const x=transformOperator(a,u);return Array.from({length:N},(_,k)=>factor*x.real[k*N+k]!);};
 const fieldAmplitude=(l:Laser)=>Math.sqrt(2*laserIntensityMWcm2(l)*10/(EPS*C));
 /** Largest Rabi/(|detuning| + linewidth) over a laser's allowed D-line
- * couplings. The optical reference is the laser with the largest value: the
+ * couplings. The optical reference is the laser with the largest value of
+ * the light other than a motion solve's tweezer (buildFullMasterModel): the
  * frame is an exact change of coordinates, so this only decides which
  * coupling is static (best conditioned), by magnitude. */
 function mixing(l:Laser,bare:BareFieldModel,pol:readonly ComplexAmplitude[]):number {
@@ -216,8 +217,16 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  const background=staticModelBackground(scene),a=background.analysis,states=background.levels;
  const bare=bareFieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
  const enabled=drivingLasers(scene);
- let referenceIndex=0,best=-1;enabled.forEach((l,i)=>{const value=mixing(l,bare,a.polarizations[l.id]!.amplitudes);if(value>best){best=value;referenceIndex=i;}});
- const reference=enabled[referenceIndex],lasers=reference?[reference,...enabled.filter((_,i)=>i!==referenceIndex)]:[];
+ // The optical reference -- the excited states' frame and the carrier axis -- is the beam of the largest mixing among
+ // the light other than the tweezer. With motion the tweezer is the beam the motion block names its trap (`trapBeamId`,
+ // the laser the operator designates, tweezer.ts): the motion engine's trap light is that one beam (rust-solver/motion
+ // request.rs). As the reference beside other light it would be the beats' root, its index zero on every axis, and the
+ // engine could not tell its beats with that light (scene.rs `tweezer_axis`: refused). A tweezer alone is its own
+ // reference, the carrier its frequency, with no beat to tell (R1_TWEEZER). Without motion no beam is a trap: every
+ // driving laser is a candidate.
+ const trap=motion?tweezerOf(scene):undefined,others=enabled.filter(l=>l!==trap),candidates=others.length?others:enabled;
+ let reference:Laser|undefined,best=-1;for(const l of candidates){const value=mixing(l,bare,a.polarizations[l.id]!.amplitudes);if(value>best){best=value;reference=l;}}
+ const lasers=reference?[reference,...enabled.filter(l=>l!==reference)]:[];
  // Frequency axes: the tree of laser beats, then the reference optical
  // carrier itself. In the frame rotating at nu_ref a laser's co-rotating
  // coupling has charge -(nu_l - nu_ref) and its counter-rotating coupling
