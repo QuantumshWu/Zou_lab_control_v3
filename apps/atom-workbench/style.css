@@ -163,6 +163,28 @@ input[aria-invalid=true], input.invalid { border-color: var(--red-dark); }
 .model-scope { flex: none; display: flex; flex-wrap: wrap; gap: 0 var(--row-gap); padding: 0 var(--window-pad); color: var(--orange-dark); white-space: normal; overflow-wrap: anywhere; }
 .model-scope[hidden] { display: none; }
 .model-scope > .scope-head { font-weight: 600; }
+/* ---------- a running motion solve's course (solve-progress.ts) ---------- */
+/* Its nodes -- a dot, its words and the line under them -- joined by links, done up to the node in progress; the gauge
+ * and its words beside them, on the next line where they do not fit. */
+.solve-progress { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--row-gap) calc(2 * var(--row-gap)); padding: 0 var(--window-pad); font-variant-numeric: tabular-nums; }
+.solve-progress[hidden], .solve-progress [hidden] { display: none; }
+.course { flex: 0 1 auto; display: flex; align-items: flex-start; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.course-node { flex: none; display: grid; grid-template-columns: var(--dot) auto; column-gap: var(--dot-gap); align-items: center; line-height: var(--font-line); white-space: nowrap; }
+.course-dot { grid-row: 1; grid-column: 1; box-sizing: border-box; width: var(--dot); height: var(--dot); border: calc(2 * var(--edge)) solid var(--neutral-fill); border-radius: 50%; background: var(--surface); }
+.course-node[data-state="done"] > .course-dot { border-color: var(--accent-strong); background: var(--accent-strong); }
+.course-node[data-state="current"] > .course-dot { border-color: var(--accent-strong); }
+.course-label { grid-row: 1; grid-column: 2; color: var(--text); }
+.course-node[data-state="current"] > .course-label { font-weight: 600; }
+.course-node[data-state="pending"] > .course-label { color: var(--muted-ink); }
+.course-detail { grid-row: 2; grid-column: 2; color: var(--muted-ink); }
+/* A link's width, not its basis: the course's own width (its max-content) counts widths, so a basis alone would leave
+ * every link at its least. */
+.course-link { flex: 0 1 auto; width: calc(1.5 * var(--control)); min-width: calc(2 * var(--row-gap)); height: calc(2 * var(--edge)); margin: calc(var(--font-line) / 2 - var(--edge)) var(--dot-gap) 0; background: var(--divider); }
+.course-link.done { background: var(--accent-strong); }
+.course-gauge { flex: none; width: calc(4 * var(--control)); height: calc(var(--dot) / 2); border-radius: calc(var(--dot) / 4); background: var(--divider); overflow: hidden; }
+.course-fill { display: block; height: 100%; background: var(--accent-strong); }
+.course-gauge-words { flex: none; white-space: nowrap; }
+.course-words { flex: none; color: var(--muted-ink); white-space: nowrap; }
 .shift-warning { flex: 0 1 auto; min-width: 0; padding-bottom: var(--cap-lift); color: var(--orange-dark); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chart-surface { position: relative; flex: none; min-width: 0; overflow-x: auto; overflow-y: hidden; }
 .chart-surface > svg.chart-svg { display: block; width: 100%; max-width: calc(36 * var(--control)); height: auto; margin: auto; }
