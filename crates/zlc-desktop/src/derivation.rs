@@ -66,8 +66,8 @@ impl Output {
                 data:part.data().clone(),origin:None,shot_time:source.anchor().shot_time()})
         }).collect::<Result<Vec<_>,String>>()?;
         // A history view has one current shot anchor, not N simultaneous roots.
-        zlc_core::record_fields::admit(&self.owner,&metadata)?;
-        let accepted=match self.runtime.commit(self.generation.as_ref().unwrap(),&Bundle {inputs,metadata,parents:vec![source.anchor().clone()]}) {
+        // What the derivation is, its run record says; an event adds nothing to it.
+        let accepted=match self.runtime.commit(self.generation.as_ref().unwrap(),&Bundle {inputs,metadata:json!({}),parents:vec![source.anchor().clone()]}) {
             Ok(value)=>value,Err(RuntimeError::SourceSuperseded)=>return Ok(false),Err(error)=>return Err(error.to_string()),
         };
         crate::trace::point("derived.accepted",||json!({"owner":self.owner,"source":crate::trace::key(source.key()),

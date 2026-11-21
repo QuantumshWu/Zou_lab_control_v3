@@ -506,25 +506,24 @@ class WaveformMeasurementNode:
 
         return self._free_running and self._trigger is None
 
-    def _as_events(self, records: list[WaveformRecord]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(samples ``(events, samples, columns)``, source times, host receipts) of these records.
+    def _as_events(self, records: list[WaveformRecord]) -> tuple[np.ndarray, np.ndarray]:
+        """(samples ``(events, samples, columns)``, source times) of these records.
 
         Triggered, an event is a trace, and these records may complete any number of them.
         """
 
         times = np.fromiter((record.time_seconds for record in records), np.float64, len(records))
-        received = np.fromiter((record.host_received_at_ns for record in records), np.int64, len(records))
         samples = np.stack([record.samples for record in records])
         if self._trigger is None:
-            return samples, times, received
+            return samples, times
         count = self._record_samples
         offsets = self.working_point.sample_interval_seconds * np.arange(count)
-        traces = self._traces.push(samples.reshape(-1, samples.shape[2]), (times[:, None] + offsets).ravel(), np.repeat(received, count))
+        traces = self._traces.push(samples.reshape(-1, samples.shape[2]), (times[:, None] + offsets).ravel())
         if traces.edges:
             self._triggered()
-        return traces.samples, traces.times, traces.received
+        return traces.samples, traces.times
 
-    def _commit(self, samples: np.ndarray, times: np.ndarray, received: np.ndarray, commit: Callable[..., object],
+    def _commit(self, samples: np.ndarray, times: np.ndarray, commit: Callable[..., object],
                 *, finite: bool = False) -> int:
         """Publish these events as one commit, the same events however they are cut."""
 
@@ -547,13 +546,9 @@ class WaveformMeasurementNode:
             valid = np.isfinite(values)
             (schema, complete) = schemas[declaration.name]
             outputs[declaration.name] = LiveEvents(declaration, schema, values, True if valid.all() else valid, complete if finite else None)
-        basis, instance = self.working_point.time_basis, self.instance_id
-        records = [{"record_timing": {instance: {str(ordinal): {
-            "record_time_seconds": shot, "source_time_seconds": source, "time_basis": basis, "host_received_at_ns": host}}}}
-            for ordinal, shot, source, host in zip(ordinals.tolist(), shot_times.tolist(), times.tolist(), received.tolist())]
-        commit(outputs, ordinals=ordinals, shot_times=None if finite else shot_times,
-               origins=np.stack((ordinals, np.zeros(count, dtype=np.uint64)), axis=1) if finite else None,
-               records=records)
+        # Each event's time is its shot time (from the run's first record; the time basis is the run record's).
+        commit(outputs, ordinals=ordinals, shot_times=shot_times,
+               origins=np.stack((ordinals, np.zeros(count, dtype=np.uint64)), axis=1) if finite else None)
         self.published += count
         return count
 
@@ -563,8 +558,8 @@ class WaveformMeasurementNode:
         if not records:
             return 0
         self._check_stream(records)
-        samples, times, received = self._as_events(records)
-        return self._commit(samples, times, received, commit)
+        samples, times = self._as_events(records)
+        return self._commit(samples, times, commit)
 
     def publish_finite(self, records: list[WaveformRecord], commit: Callable[..., object]) -> int:
         """Up to the run's rest of ``repeat`` events."""
@@ -572,9 +567,9 @@ class WaveformMeasurementNode:
         if not records:
             return 0
         self._check_stream(records)
-        samples, times, received = self._as_events(records)
+        samples, times = self._as_events(records)
         last = self.repeat - self.published
-        return self._commit(samples[:last], times[:last], received[:last], commit, finite=True)
+        return self._commit(samples[:last], times[:last], commit, finite=True)
 
     @property
     def silence_seconds(self) -> float:

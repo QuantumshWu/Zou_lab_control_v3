@@ -1962,14 +1962,11 @@ class SlmFeedbackTask:
         self,
         *,
         include_measurement: bool,
-        candidate: int,
     ) -> dict[str, object]:
         """The exact working points for the candidate being published."""
 
         if type(include_measurement) is not bool:
             raise TypeError("include_measurement must be bool")
-        if type(candidate) is not int or candidate < 1:
-            raise ValueError("feedback device snapshot candidate must be positive")
         snapshots: dict[str, object] = {}
         if include_measurement and self.model is not None:
             missing = {"camera", "sequencer"} - set(
@@ -1993,15 +1990,7 @@ class SlmFeedbackTask:
             "mapping_revision": int(self.slm.mapping_revision),
             "command_receipt": dict(self.slm.last_command_receipt),
         }
-        plain = plain_json(
-            {
-                "device_snapshots": snapshots,
-                "device_snapshot_context": {
-                    "candidate": candidate,
-                    "measurement_completed": include_measurement,
-                },
-            }
-        )
+        plain = plain_json({"device_snapshots": snapshots})
         if not isinstance(plain, dict):
             raise TypeError("feedback device event record must remain an object")
         return plain
@@ -3505,7 +3494,6 @@ class SlmFeedbackTask:
                     )
                 device_record = self._device_event_record(
                     include_measurement=False,
-                    candidate=candidate_number,
                 )
             self._publish_candidate(
                 context,
@@ -3676,7 +3664,7 @@ class SlmFeedbackTask:
                 check_cancelled(context)
                 applied = self._apply_exact(phase)
                 device_record = self._device_event_record(
-                    include_measurement=False, candidate=candidate,
+                    include_measurement=False,
                 )
                 # First fit establishes the selected parameter's unit. Start
                 # the atomic output bundle then, rather than declaring an
@@ -3716,7 +3704,7 @@ class SlmFeedbackTask:
                     plant_slope=None, plant_sign=self.observable.plant_sign,
                 )
                 device_record = {
-                    **self._device_event_record(include_measurement=True, candidate=candidate),
+                    **self._device_event_record(include_measurement=True),
                     "fit_source": measured["source"],
                 }
                 item = {
@@ -3935,7 +3923,6 @@ class SlmFeedbackTask:
                     history=history,
                     device_event_record=self._device_event_record(
                         include_measurement=False,
-                        candidate=candidate_number,
                     ),
                 )
                 (
@@ -4283,7 +4270,6 @@ class SlmFeedbackTask:
                         decisions[probe_sites] = "hold_for_probe"
                 measured_device_record = self._device_event_record(
                     include_measurement=True,
-                    candidate=candidate_number,
                 )
                 history.append({
                     "iteration": candidate_number,

@@ -442,13 +442,11 @@ fn apply_data(runtime: &Runtime, viewer: &mut Viewer, apply: manual::Apply) -> R
         .or_else(|| viewer.archive.as_ref().and_then(|archive| archive.items().iter().find(|item| *item.signal == **signal).and_then(|item| item.publication.clone()))))
         .into_iter().collect();
     let signal: Arc<str> = apply.signal.as_str().into();
-    let operation = apply.metadata["operation"].clone();
     let generation = runtime.begin(apply.owner.clone(), vec![Declaration { signal: signal.clone(), schema, storage: Storage::Snapshot }], apply.metadata)
         .map_err(|error| error.to_string())?;
-    let metadata = json!({"operation": operation});
-    zlc_core::record_fields::admit("manual data", &metadata)?;
+    // The edit is the run's record (`apply.metadata`); the event adds nothing to it.
     let published = runtime.commit(&generation, &Bundle { inputs: vec![Input::Dataset { signal: signal.clone(), ordinal: None, snapshot: apply.snapshot.clone() }],
-        metadata, parents }).map_err(|error| error.to_string())?;
+        metadata: json!({}), parents }).map_err(|error| error.to_string())?;
     runtime.seal(&generation, json!({"reason": "manual data"})).map_err(|error| error.to_string())?;
     if let Some(publication) = published.publications.iter().find(|publication| publication.key().signal == signal) {
         viewer.drafts.published.insert(apply.signal.clone(), publication.clone());

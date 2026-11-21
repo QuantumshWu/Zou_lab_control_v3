@@ -25,8 +25,6 @@ and the Figure Viewer froze on them.
     `docs/PLUGIN_PROTOCOL.md` §5.5).
   - `record_fields::tests` fails when a reader no longer reads its field. Remove the field, or
     its registration, when its last reader goes.
-  - Fields marked `unread` were written before the registry and are awaiting removal or a
-    reader. Never add a field that way.
 - **A journal event or status message** is written when something happens, not on every
   success. Name its reader before adding one.
 - **A commit that adds a persisted field, a saved section or a journal event type** says in its

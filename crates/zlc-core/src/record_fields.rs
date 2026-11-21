@@ -5,9 +5,6 @@
 //! - `metadata`: the event metadata's own keys (`records`, `shot_time_seconds`, ...);
 //! - `event_record`: the keys of one output's record, `metadata.records.<output>`.
 //!
-//! A field written before this registry that nothing reads is listed with `unread`, why, and no
-//! readers, until it is removed or given a reader; no new field is added that way.
-//!
 //! A field says something: no null, "", [] or {} value, and an output with nothing to say
 //! has no record. A fact that is the same for every event of a run belongs in the run record;
 //! an event records how it differs (docs/PLUGIN_PROTOCOL.md, "Event records").
@@ -23,9 +20,8 @@ use serde_json::Value;
 
 const REGISTRY: &str = include_str!("record_fields.json");
 
-/// One registered field: who writes it, what it says, which code reads it (repository paths), or
-/// why nothing does yet (`unread`).
-pub struct Field { pub owner: String, pub purpose: String, pub readers: Vec<String>, pub unread: Option<String> }
+/// One registered field: who writes it, what it says, which code reads it (repository paths).
+pub struct Field { pub owner: String, pub purpose: String, pub readers: Vec<String> }
 
 pub struct Registry { pub metadata: BTreeMap<String, Field>, pub event_record: BTreeMap<String, Field> }
 
@@ -44,9 +40,8 @@ fn parse(text: &str) -> Result<Registry, String> {
                 .map(str::to_owned).ok_or(format!("{name}.{key} has no {part}"));
             let readers: Vec<String> = entry.get("readers").and_then(Value::as_array).into_iter().flatten()
                 .filter_map(Value::as_str).map(str::to_owned).collect();
-            let unread = text("unread").ok();
-            if readers.is_empty() == unread.is_none() { return Err(format!("{name}.{key} names its readers or why it has none, not both")); }
-            Ok((key.clone(), Field { owner: text("owner")?, purpose: text("purpose")?, readers, unread }))
+            if readers.is_empty() { return Err(format!("{name}.{key} names no reader")); }
+            Ok((key.clone(), Field { owner: text("owner")?, purpose: text("purpose")?, readers }))
         }).collect()
     };
     Ok(Registry { metadata: section("metadata")?, event_record: section("event_record")? })

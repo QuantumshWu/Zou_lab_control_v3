@@ -3,99 +3,62 @@
     "records": {
       "owner": "zlc_plugin SDK (commit_live, commit_events); native scan (zlc-workbench scan/execution.rs)",
       "purpose": "each output's event record, by output name",
-      "readers": ["crates/zlc-desktop/src/record.rs", "science/src/zlc_plugin/context.py", "crates/zlc-workbench/src/scan/execution.rs"]
+      "readers": [
+        "crates/zlc-desktop/src/record.rs",
+        "science/src/zlc_plugin/context.py",
+        "crates/zlc-workbench/src/scan/execution.rs"
+      ]
     },
     "shot_time_seconds": {
-      "owner": "zlc_plugin SDK (commit_live, commit_events): waveform_measurement monitor",
+      "owner": "zlc_plugin SDK (commit_live, commit_events): waveform_measurement",
       "purpose": "when each output's shot was taken (s); the host stamps it on the publication (its shot time)",
-      "readers": ["crates/zlc-plugin-host/src/lib.rs"]
-    },
-    "operation": {
-      "owner": "desktop: plot ROI and fit (zlc-plot document), Figure import (archive.rs), manual data (main.rs)",
-      "purpose": "which desktop operation made the event",
-      "readers": [],
-      "unread": "no reader; the same value is the run's record (derivation.rs, archive.rs, main.rs begin the run with it). Awaiting the user's decision (2026-11-21)."
-    },
-    "subject": {
-      "owner": "desktop plot ROI (zlc-plot/src/document/effects.rs)",
-      "purpose": "the ROI's subject document",
-      "readers": [],
-      "unread": "no reader; equal to the run record. Awaiting the user's decision (2026-11-21)."
-    },
-    "selector": {
-      "owner": "desktop plot ROI (zlc-plot/src/document/effects.rs)",
-      "purpose": "the ROI's selector document",
-      "readers": [],
-      "unread": "no reader; equal to the run record. Awaiting the user's decision (2026-11-21)."
-    },
-    "fit": {
-      "owner": "desktop plot fit (zlc-plot/src/document/panel.rs)",
-      "purpose": "the fit's target",
-      "readers": [],
-      "unread": "no reader; equal to the run record. Awaiting the user's decision (2026-11-21)."
+      "readers": [
+        "crates/zlc-plugin-host/src/lib.rs"
+      ]
     }
   },
   "event_record": {
     "frames_missing": {
       "owner": "camera_measurement (science/src/zlc_atom/nodes/camera/measurement.py)",
       "purpose": "the slots of a shot whose frames never came, written only for such a shot: why its data is invalid",
-      "readers": ["crates/zlc-desktop/src/record.rs"]
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
     },
     "device_settings": {
       "owner": "camera_measurement and its subclasses (camera/measurement.py _camera_event_record); calibration capture preview (calibration/outputs.py)",
       "purpose": "the camera settings epoch the frames were taken in (device session, epoch ranges, mixed)",
-      "readers": ["crates/zlc-desktop/src/record.rs"]
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
     },
     "actual_devices": {
-      "owner": "native scan (zlc-workbench scan/execution.rs, read back by scan/seamless.py); calibration site review (calibration/outputs.py, the run record)",
+      "owner": "native scan (zlc-workbench scan/execution.rs, read back by scan/seamless.py)",
       "purpose": "the device readbacks at this scan point",
-      "readers": ["crates/zlc-desktop/src/record.rs"]
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
     },
     "device_snapshots": {
-      "owner": "slm_feedback candidate outputs (slm_feedback/task.py); slm_rearrangement (slm_rearrangement/task.py)",
+      "owner": "slm_feedback candidate outputs (slm_feedback/task.py); slm_rearrangement, each output as its capture stood (slm_rearrangement/task.py)",
       "purpose": "the devices as they stood for this event (the SLM's command and mapping revisions)",
-      "readers": ["crates/zlc-desktop/src/record.rs"]
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
     },
     "image_point_overlay_geometry": {
       "owner": "slm_feedback camera frames; slm_rearrangement; calibration site review",
       "purpose": "the sites drawn over the image (coordinates, ids, labels, status axis)",
-      "readers": ["crates/zlc-plot/src/projection/site_geometry.rs"]
+      "readers": [
+        "crates/zlc-plot/src/projection/site_geometry.rs"
+      ]
     },
     "rearrangement": {
       "owner": "rearrangement_measurement (rearrangement_measurement/measurement.py)",
-      "purpose": "one cycle's rearrangement evidence (indices, timing, gate misses, ratios)",
-      "readers": [],
-      "unread": "no reader. Awaiting the user's decision (2026-11-21)."
-    },
-    "capture_events": {
-      "owner": "slm_rearrangement (slm_rearrangement/task.py)",
-      "purpose": "each output's capture device snapshots and source ordinal",
-      "readers": [],
-      "unread": "no reader; the Devices tab does not see its nested snapshots. Awaiting the user's decision (2026-11-21)."
-    },
-    "device_snapshot_context": {
-      "owner": "slm_feedback (slm_feedback/task.py)",
-      "purpose": "which candidate the device snapshots belong to, and whether its measurement completed",
-      "readers": [],
-      "unread": "no reader. Awaiting the user's decision (2026-11-21)."
-    },
-    "record_timing": {
-      "owner": "waveform_measurement (waveform_measurement/measurement.py)",
-      "purpose": "each event's record and source times, time basis and arrival",
-      "readers": [],
-      "unread": "no reader; its record time repeats shot_time_seconds and its keys the publication's owner and ordinal. Awaiting the user's decision (2026-11-21)."
-    },
-    "request": {
-      "owner": "calibration site review (calibration/outputs.py, the run record)",
-      "purpose": "the calibration request",
-      "readers": [],
-      "unread": "no reader; the event record repeats the whole run record. Awaiting the user's decision (2026-11-21)."
-    },
-    "pulse": {
-      "owner": "calibration site review (calibration/outputs.py, the run record)",
-      "purpose": "the pulse the calibration played",
-      "readers": [],
-      "unread": "no reader of the event's copy (the Figure record reads the run record's); the event record repeats the whole run record. Awaiting the user's decision (2026-11-21)."
+      "purpose": "one cycle's rearrangement: source and target sites, frames planned and played, timings, whether its quality gates accepted it and which maps missed them, the worst intensity ratios",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
     }
   }
 }

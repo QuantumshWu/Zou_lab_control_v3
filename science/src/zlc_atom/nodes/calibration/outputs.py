@@ -295,7 +295,6 @@ def _cycle_settings_record(
             "camera": {
                 "device_session_id": sessions.pop(),
                 "epoch_ranges": ranges,
-                "mixed": len(epochs) > 1,
             }
         }
     }
@@ -381,7 +380,6 @@ def site_review_output(
     binning_yx: tuple[int, int],
     generation: object,
     revision: int,
-    run_record: Mapping[str, object],
     value_unit: str | None,
 ) -> tuple[Mapping[str, object], LiveDatasetOutput]:
     """Publish one detected candidate SiteMap over its reference average."""
@@ -416,11 +414,9 @@ def site_review_output(
         labels=labels,
         coordinates_are_indices=True,
     )
+    # The candidate's sites, drawn over its image; the run's facts are its run record's.
     return (
-        {
-            **dict(run_record),
-            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry,
-        },
+        {IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry},
         LiveDatasetOutput(SITE_REVIEW_DECLARATION, snapshot),
     )
 

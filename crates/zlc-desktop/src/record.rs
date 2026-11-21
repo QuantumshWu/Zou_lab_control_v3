@@ -184,6 +184,12 @@ fn lost_frames(event_record: &Value) -> bool {
     event_record.get("records").and_then(Value::as_object).into_iter().flatten().any(|(_, output)| output.get("frames_missing").is_some())
 }
 
+/// Whether an event's outputs say its rearrangement failed its quality gates (`rearrangement.quality_accepted`).
+fn rearrangement_refused(event_record: &Value) -> bool {
+    event_record.get("records").and_then(Value::as_object).into_iter().flatten()
+        .any(|(_, output)| output.get("rearrangement").is_some_and(|evidence| evidence["quality_accepted"] == false))
+}
+
 /// The operator-facing Logic identity: its name when the run was built, else its id, else the stream's producer.
 fn logic_name(node: &Node) -> String {
     let explicit = [text(&node.record, "node_name"), text(&node.record, "node")].into_iter().find(|name| !name.is_empty());
@@ -280,6 +286,8 @@ fn logic_rows(nodes: &[Node], source: &Value) -> Rows {
         let mut row = logic_row(outputs, &first.record, &Value::Null);
         let lost = group.iter().filter(|node| lost_frames(&node.event_record)).count();
         if lost > 0 { row["$fields"].as_array_mut().unwrap().push(json!(["events missing frames", format!("{lost} of {}", group.len())])); }
+        let refused = group.iter().filter(|node| rearrangement_refused(&node.event_record)).count();
+        if refused > 0 { row["$fields"].as_array_mut().unwrap().push(json!(["rearrangements refused by their quality gates", format!("{refused} of {}", group.len())])); }
         let events: Rows = group.into_iter().filter_map(|node| {
             let record = event_facts(&node.event_record);
             if record.as_object().is_none_or(|map| map.is_empty()) { return None; }
@@ -994,6 +1002,20 @@ mod tests {
         assert_eq!(events[0][1]["records"]["frames"], json!({"frames_missing": [1]}));
         assert_eq!(events[1][1]["records"]["frames"], json!({"frames_missing": [0, 2]}));
         assert!(!logic.to_string().contains("trigger_alignment"));
+    }
+
+    /// A rearrangement its quality gates refused is counted over its run; an accepted one is not.
+    #[test]
+    fn refused_rearrangements_are_counted_on_the_logic_tab() {
+        let run = json!({"node": "rearrangement_measurement"});
+        let evidence = |accepted: bool| json!({"records": {"frames": {"rearrangement": {"quality_accepted": accepted, "gate_misses": if accepted { json!([]) } else { json!([2]) }}}}});
+        let events: Vec<Value> = [true, false, true].iter().enumerate().map(|(cycle, accepted)| json!({"run": 0, "signal": "@logic/rearrangement_measurement/frames",
+            "revision": cycle + 1, "ordinal": cycle, "record": evidence(*accepted), "parents": []})).collect();
+        let info = json!({"members": {}, "sections": {"plot": {}, "source": {}, "lineage": {"root": "n", "device_settings": [], "nodes": [
+            {"id": "n", "parents": [], "signals": ["@logic/rearrangement_measurement/frames"], "event": {"stream": "r", "generation": "r-gen", "sequence": 3}, "record": run,
+             "event_record": {"acquisition": {"runs": [{"stream": "r", "generation": "r-gen", "record": run}], "events": events}}}]}}});
+        let logic = &describe(&info).tabs[1][1][0][1];
+        assert_eq!(field(logic, "rearrangements refused by their quality gates"), "1 of 3");
     }
 
     /// A scan's captures are found by identity and grouped by exact state in hashed sets: the result

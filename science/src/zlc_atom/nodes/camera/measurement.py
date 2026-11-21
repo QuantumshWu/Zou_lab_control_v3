@@ -1125,7 +1125,6 @@ class CameraMeasurementNode:
             "camera": {
                 "device_session_id": session_id,
                 "epoch_ranges": ranges,
-                "mixed": len(ordered) > 1,
             }
         }}
 
