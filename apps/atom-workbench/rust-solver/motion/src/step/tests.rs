@@ -3604,15 +3604,13 @@ fn a_step_s_momentum_parts_add_up_to_its_whole() {
 }
 
 /// The same decomposition on a reference scene's own trajectory model (`scene_clusters`, as the solve makes it):
-/// lin⊥lin Sisyphus cooling (R4_LIN_1: explicit excited states, the optical sector's noise), from thermal atoms off the
-/// trap's centre in random internal states with random thresholds: every step's parts add up to its whole, and the
-/// steps hold jumps. (R5_PUMP, optical pumping to a dark state on D1 with a D2 repump, is out until its P–P cross
-/// Raman element is folded: its exact blocks are by m, each with an F = 1 and an F = 2 state joined by that element
-/// while their frames are 4.5·10⁷ rad/µs apart on the diagonal, and a step takes tens of seconds -- R1-CLEAN, after
-/// item 3.)
+/// lin⊥lin Sisyphus cooling (R4_LIN_1: explicit excited states, the optical sector's noise) and optical pumping to a
+/// dark state on D1 with a D2 repump (R5_PUMP: its levels' frames from two lines, settled to their energies,
+/// floquet/frame.rs # The frame), from thermal atoms off the trap's centre in random internal states with random
+/// thresholds: every step's parts add up to its whole, and the steps hold jumps.
 #[test]
 fn a_scene_s_step_momentum_parts_add_up_to_its_whole() {
-    for name in ["R4_LIN_1"] {
+    for name in ["R4_LIN_1", "R5_PUMP"] {
         let (mut steps, mut jumped) = (0, 0);
         scene_clusters(name, &mut |_, cluster, run, starts| {
             for (i, start) in starts.iter().enumerate() {
