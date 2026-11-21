@@ -1035,6 +1035,9 @@ mod golden;
 #[path = "drops.rs"]
 mod drops;
 
+#[path = "steps.rs"]
+mod steps;
+
 /// The selection's report (`Selected::report`): P state by state, the states left out, and a point not judged said as
 /// such -- R10_NODE's edge, where no light reaches the atom (`Selection::notes`) --, never as zero errors.
 #[test]
