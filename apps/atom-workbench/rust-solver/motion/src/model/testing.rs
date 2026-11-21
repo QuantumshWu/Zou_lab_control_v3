@@ -48,7 +48,7 @@ pub(crate) fn converged(quotients: &[f64], order: i32) -> (f64, f64) {
     let n = quotients.len();
     let rounding = (quotients[n - 1] - quotients[n - 2]).abs() * hs[n - 1].powi(order);
     (2..n - 2)
-        .map(|k| (quotients[k], (k - 2..=k + 2).map(|j| (quotients[j] - quotients[k]).abs()).fold(rounding / hs[k].powi(order), f64::max)))
+        .map(|k| (quotients[k], (k - 2..=k + 2).map(|j| (quotients[j] - quotients[k]).abs()).fold(rounding / hs[k].powi(order), crate::linalg::larger)))
         .fold((quotients[0], f64::INFINITY), |best, x| if x.1 < best.1 { x } else { best })
 }
 
@@ -56,13 +56,13 @@ pub(crate) fn converged(quotients: &[f64], order: i32) -> (f64, f64) {
 /// four times the difference's error and 10⁻⁸ of that scale -- a gradient's part its own size, a Hessian's diagonal entry
 /// its own, an off-diagonal one the geometric mean of its two axes' (`own`).
 pub(crate) fn agrees(jet: f64, (estimate, error): (f64, f64), scale: f64) -> bool {
-    (jet - estimate).abs() <= 4.0 * error + 1e-8 * scale.max(estimate.abs()).max(jet.abs())
+    (jet - estimate).abs() <= 4.0 * error + 1e-8 * crate::linalg::largest(scale, [estimate.abs(), jet.abs()])
 }
 
 /// The own scale of a Hessian's entry (a, c) (`agrees`): its own size, and for a ≠ c the geometric mean of the two axes'
 /// curvatures -- the scale a symmetric form's off-diagonal entry is a part of.
 pub(crate) fn own(hessian: &dyn Fn(usize, usize) -> f64, a: usize, c: usize) -> f64 {
-    hessian(a, c).abs().max((hessian(a, a) * hessian(c, c)).abs().sqrt())
+    crate::linalg::larger(hessian(a, c).abs(), (hessian(a, a) * hessian(c, c)).abs().sqrt())
 }
 
 /// A standard normal deviate from two uniform ones (Box–Muller).

@@ -88,7 +88,7 @@ fn select_the_middle_point_leaves_a_node() {
     assert!((half(&node, r) - 0.5).abs() <= 8.0 * f64::EPSILON, "R10_NODE: the tweezer's intensity {}", half(&node, r));
     let zero = vec![0.0; node.request.beams.len()];
     let tw = node.tweezer();
-    let other = |point: &Components| reach(&node, &rs::reference(&node, point), point, &|l| l != tw).iter().fold(0.0, |m: f64, &a| m.max(a));
+    let other = |point: &Components| reach(&node, &rs::reference(&node, point), point, &|l| l != tw).iter().fold(0.0, |m: f64, &a| crate::linalg::larger(m, a));
     let at_middle = other(&node.components(r, &zero, 1.0));
     let on_axis = other(&node.components(d.map(|x| x * node.geometry[tw].rayleigh().unwrap()), &zero, 1.0));
     assert!(at_middle >= f64::EPSILON && on_axis < f64::EPSILON, "R10_NODE: the other light's reach {at_middle:e} at the middle, {on_axis:e} on the axis");
@@ -224,13 +224,13 @@ fn choose_is_pysel() {
             let theirs = &python["full"][point];
             let f: Vec<f64> = theirs["F"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
             let r = theirs["R"].as_f64().unwrap();
-            let scale = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt().max(selection_k(&scene) * r);
+            let scale = crate::linalg::larger((f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt(), selection_k(&scene) * r);
             let df = (0..3).map(|a| (ours.force[a] - f[a]).powi(2)).sum::<f64>().sqrt() / scale;
             let dr = (ours.rate - r).abs() / r;
-            let dp = groups.iter().zip(&ours.levels).map(|(g, x)| (x - theirs["pops"][name(&labels[g[0]])].as_f64().unwrap()).abs()).fold(0.0, f64::max);
+            let dp = groups.iter().zip(&ours.levels).map(|(g, x)| (x - theirs["pops"][name(&labels[g[0]])].as_f64().unwrap()).abs()).fold(0.0, crate::linalg::larger);
             eprintln!("  {point} reference ({route:?}): F⃗ {df:.1e} R {dr:.1e} populations {dp:.1e}");
-            worst[0] = worst[0].max(df.max(dr).max(dp));
-            assert!(df.max(dr).max(dp) <= 1e-6, "{scene_name} {point}: the reference's readouts");
+            worst[0] = crate::linalg::largest(worst[0], [df, dr, dp]);
+            assert!(crate::linalg::largest(df, [dr, dp]) <= 1e-6, "{scene_name} {point}: the reference's readouts");
         }
         // Each whole-level candidate's gate errors.
         for (c, step) in selection.candidates[..selection.whole].iter().zip(python["steps"].as_array().unwrap()) {
@@ -242,7 +242,7 @@ fn choose_is_pysel() {
                     "  P {:2} {point}: F⃗ {:.4e} ({:.4e}) R {:.4e} ({:.4e}) populations {:.4e} ({:.4e}) -- ours (prototype's); {:?}",
                     c.keep.len(), ours.force, f, ours.rate, r, ours.populations, pop, ours.route
                 );
-                worst[1] = worst[1].max(((ours.force - f).abs()).max((ours.rate - r).abs()).max((ours.populations - pop).abs()));
+                worst[1] = crate::linalg::largest(worst[1], [(ours.force - f).abs(), (ours.rate - r).abs(), (ours.populations - pop).abs()]);
             }
         }
     }
@@ -421,7 +421,7 @@ fn choose_cost() {
             }
         }
         let runs: Vec<Selection> = (0..5).map(|_| choose(&scene).unwrap()).collect();
-        let least = |f: &dyn Fn(&Selection) -> f64| runs.iter().map(f).fold(f64::INFINITY, f64::min);
+        let least = |f: &dyn Fn(&Selection) -> f64| runs.iter().map(f).fold(f64::INFINITY, crate::linalg::smaller);
         let s = &runs[0];
         eprintln!(
             "{file}: choose {:.3} s (the least of five; base {:.3}, leave-one-out {:.3}, checks {:.3}): base P {}, {} left out one at a time, P {}, {} checks",
@@ -481,7 +481,7 @@ fn off_the_two_points() {
         for ((place, ..), (b, p)) in places.iter().zip(&rows) {
             eprintln!("  {place:<20} {} | {}", e(b), e(p));
             for (m, x) in most.iter_mut().zip([b, p]) {
-                *m = [m[0].max(x.populations), m[1].max(x.rate), m[2].max(x.force)];
+                *m = [crate::linalg::larger(m[0], x.populations), crate::linalg::larger(m[1], x.rate), crate::linalg::larger(m[2], x.force)];
             }
         }
         eprintln!("  {:<20} {:.2e} {:.2e} {:.2e} | {:.2e} {:.2e} {:.2e}", "largest", most[0][0], most[0][1], most[0][2], most[1][0], most[1][1], most[1][2]);
@@ -500,7 +500,7 @@ struct Well<'a> {
 impl<'a> Well<'a> {
     fn new(run: &'a crate::model::selected::Selected, populations: [f64; GROUND]) -> Well<'a> {
         let (light, potential) = (run.light(), run.prepared(&populations));
-        let k = light.frequencies[light.trap].beams.iter().map(|&l| light.beams[l].wave_number).fold(0., f64::max);
+        let k = light.frequencies[light.trap].beams.iter().map(|&l| light.beams[l].wave_number).fold(0., crate::linalg::larger);
         let trap = crate::model::potential::descend(1. / k, crate::step::Dynamics::hbar_over_mass(run), &|r| light.outside(r), &|r| potential.rounded(r)).expect("the prepared trap");
         Well { light, potential, trap }
     }
@@ -636,7 +636,7 @@ fn the_first_checkpoint_in_pairs() {
         for (i, (b, p)) in ends[0].iter().zip(&ends[1]).enumerate() {
             eprintln!("  #{}: base {} | P {}", indices[i], said(b), said(p));
         }
-        let apart = ends[0].iter().zip(&ends[1]).map(|(b, p)| (0..3).map(|a| (b.start[a] - p.start[a]).abs()).fold(0., f64::max)).fold(0., f64::max);
+        let apart = ends[0].iter().zip(&ends[1]).map(|(b, p)| (0..3).map(|a| (b.start[a] - p.start[a]).abs()).fold(0., crate::linalg::larger)).fold(0., crate::linalg::larger);
         eprintln!("  the pairs' starts apart by at most {apart:.2e} µm");
         let times = &request.times_us;
         let parted: Vec<String> = ends[0]
@@ -769,7 +769,7 @@ fn why_no_candidate_passes() {
                 }
             }
             eprintln!("  {point}: the levels' sectors {by:?}");
-            let most = reach(&scene, &two.references[p], &two.points[p], &|_| true).iter().fold(0.0, |m: f64, &a| m.max(a));
+            let most = reach(&scene, &two.references[p], &two.points[p], &|_| true).iter().fold(0.0, |m: f64, &a| crate::linalg::larger(m, a));
             eprintln!("  {point}: light reaches the atom: {} (the largest first-order amplitude {most:.3e})", two.lit[p]);
             let (reference, route) = match two.reference(p) {
                 Ok(r) => r,
@@ -791,7 +791,7 @@ fn why_no_candidate_passes() {
                 let system = assemble(&liouville, &elements);
                 let solved = crate::krylov::solve(&system).expect("the reference's solve (its error said above)");
                 let finite = solved.rho.iter().filter(|z| z.re.is_finite() && z.im.is_finite()).count();
-                let largest = solved.rho.iter().map(|z| z.abs()).fold(0., f64::max);
+                let largest = solved.rho.iter().map(|z| z.abs()).fold(0., crate::linalg::larger);
                 eprintln!(
                     "  {point} reference's solve: {} elements, {:?}, certified {}, ρ finite {finite} of {}, max |ρ| {largest:.3e}",
                     elements.order.len(), solved.route, solved.certified, solved.rho.len()
@@ -808,6 +808,8 @@ fn why_no_candidate_passes() {
             for keep in &two.candidates {
                 let (model, route) = two.model(p, keep).unwrap();
                 let e = errors(&model, &reference, two.k, route);
+                // The bracket shows the worst as 80b9782e read it, by f64::max on purpose (its NaN dropped), beside the
+                // gate's own `worst`.
                 eprintln!(
                     "    P {:2}: populations {:.3e} R {:.3e} F⃗ {:.3e}{} (80b9782e's worst, NaN dropped by f64::max: {:.3e}) | levels {:?}; R {:.6e}; F⃗ {:?}",
                     keep.len(), e.populations, e.rate, e.force, if e.worst() <= GATE { "" } else { " (over)" }, e.populations.max(e.rate).max(e.force),

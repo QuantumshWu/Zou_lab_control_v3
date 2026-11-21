@@ -77,7 +77,7 @@ fn the_scene_s_gradients_are_its_values_derivatives() {
             let mut worst: f64 = 0.0;
             for e in 0..STATES * STATES {
                 let fd = (up.parts[k].value.data[e] - down.parts[k].value.data[e]) * (0.5 / h);
-                worst = worst.max((fd - c.gradient[i].data[e]).abs());
+                worst = crate::linalg::larger(worst, (fd - c.gradient[i].data[e]).abs());
             }
             assert!(worst <= 1e-7 * scale, "component {k} axis {i}: {worst:e} of {scale:e}");
         }
@@ -120,7 +120,7 @@ fn the_dark_edge_s_lattice_and_system_keep_the_trace() {
             }
         }
         for x in 0..l.cols {
-            assert!(sums[x].abs() <= 1e-13 * size[x].max(1.0), "{key:?} column {x}: {:e} of {:e}", sums[x].abs(), size[x]);
+            assert!(sums[x].abs() <= 1e-13 * crate::linalg::larger(size[x], 1.0), "{key:?} column {x}: {:e} of {:e}", sums[x].abs(), size[x]);
         }
     }
     let elements = select(&liouville);
@@ -142,7 +142,7 @@ fn the_dark_edge_s_lattice_and_system_keep_the_trace() {
         }
     }
     for j in 0..count {
-        assert!(sums[j].abs() <= 1e-13 * size[j].max(1.0), "column {j}: {:e}", sums[j].abs());
+        assert!(sums[j].abs() <= 1e-13 * crate::linalg::larger(size[j], 1.0), "column {j}: {:e}", sums[j].abs());
     }
     eprintln!("R4 dark edge: {} elements, M = {}, b = {:?}, nnz {}", count, liouville.lattice.slow.len(), liouville.lattice.slow, system.matrix.values.len());
 }

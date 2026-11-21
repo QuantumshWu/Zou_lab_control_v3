@@ -59,16 +59,17 @@ impl Rows {
     }
 
     /// (η, ζ): the row-equilibrated backward error max_i |r_i| / (a_i ‖x‖∞ + |b_i|), and the same over each row's
-    /// rounding level. A row with a_i ‖x‖∞ + |b_i| = 0 has r_i = 0 exactly and counts 0.
+    /// rounding level. A row with a_i ‖x‖∞ + |b_i| = 0 has r_i = 0 exactly and counts 0; an iterate or a residual that
+    /// is not a number makes both not a number (no row is skipped for it): no iterate (krylov/solve.rs, a run whose ζ is not finite).
     pub fn backward(&self, x: &[C64], b: &[C64], r: &[C64]) -> (f64, f64) {
         let size = x.iter().map(|v| v.abs()).fold(0.0, larger);
         let (mut eta, mut zeta) = (0.0f64, 0.0f64);
         for i in 0..b.len() {
             let scale = self.norm[i] * size + b[i].abs();
-            if scale > 0.0 {
+            if scale != 0.0 {
                 let e = r[i].abs() / scale;
-                eta = eta.max(e);
-                zeta = zeta.max(e / self.level[i]);
+                eta = larger(eta, e);
+                zeta = larger(zeta, e / self.level[i]);
             }
         }
         (eta, zeta)
@@ -219,7 +220,8 @@ pub fn gmres(a: &Sparse, b: &[C64], p: &Schur, rows: &Rows) -> Outcome {
             out.stop = Stop::Breakdown;
             break;
         }
-        if rn >= previous {
+        // Stagnation: the residual not known to decrease (a residual that is not a number stops here too).
+        if !(rn < previous) {
             out.stop = Stop::Stagnation;
             break;
         }

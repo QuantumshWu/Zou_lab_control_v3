@@ -82,7 +82,9 @@ pub fn analysis_times(times: &[f64], cuts: &[usize], window: f64, read: &mut dyn
         let middle = (a + b) / 2;
         // The nested middles to the depth that leaves a quarter of the window at most between them: the middle and the
         // quarters at two, for an interval no longer than the window.
-        let depth = 2 + ((times[b] - times[a]) / window).log2().ceil().max(0.) as u32;
+        // The times are the request's (finite, increasing) and the window positive or unbounded: the depth's
+        // logarithm is a number or −∞ (an unbounded window), never NaN -- the cast would read a NaN as 0.
+        let depth = 2 + larger(((times[b] - times[a]) / window).log2().ceil(), 0.) as u32;
         let mut points = vec![];
         middles(a, b, depth, &mut points);
         points.dedup();

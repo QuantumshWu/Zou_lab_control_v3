@@ -272,7 +272,7 @@ impl Frequency {
         let turn: [[f64; 3]; 3] = std::array::from_fn(|k| std::array::from_fn(|a| (e[k].conj() * de[k][a]).im));
         let over = |x: f64, y: f64| if y > 0.0 { x / y } else { 0.0 };
         let mut chart = Chart { value: [0.0; 5], gradient: [[0.0; 3]; 5] };
-        chart.value[0] = (size[..r].iter().sum::<f64>() / n).min(1.0);
+        chart.value[0] = smaller(size[..r].iter().sum::<f64>() / n, 1.0);
         chart.gradient[0] = std::array::from_fn(|a| (0..r).map(|k| 2.0 * dot[k][a]).sum::<f64>() / n);
         for i in 1..r {
             let (first, rest) = (size[o[i - 1]].sqrt(), o[i..].iter().map(|&j| size[j]).sum::<f64>().sqrt());

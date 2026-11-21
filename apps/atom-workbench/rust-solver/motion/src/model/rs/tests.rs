@@ -73,8 +73,8 @@ fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> 
 
 /// The largest entry difference of two matrices and the larger of their largest entries.
 fn apart(a: &Mat, b: &Mat) -> (f64, f64) {
-    let d = a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max);
-    (d, a.max_abs().max(b.max_abs()))
+    let d = a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, crate::linalg::larger);
+    (d, crate::linalg::larger(a.max_abs(), b.max_abs()))
 }
 
 /// The exports, each scene and point: (name, document).
@@ -139,7 +139,7 @@ fn the_fold_is_hilbert_rs_to_rounding() {
         let mut check = |slot: usize, rust: Option<&Mat>, python: &Mat| {
             let zero = Mat::zeros(python.rows, python.cols);
             let (d, size) = apart(rust.unwrap_or(&zero), python);
-            (differences[slot], sizes[slot]) = (differences[slot].max(d), sizes[slot].max(size));
+            (differences[slot], sizes[slot]) = (crate::linalg::larger(differences[slot], d), crate::linalg::larger(sizes[slot], size));
         };
         let keys_h: Vec<Key> = out["H"].as_array().unwrap().iter().map(|h| key(&h["key"])).collect();
         for h in out["H"].as_array().unwrap() {
@@ -163,9 +163,9 @@ fn the_fold_is_hilbert_rs_to_rounding() {
         for l in out["lift"].as_array().unwrap() {
             check(4, at.lift.iter().find(|p| p.key == key(&l["key"])).map(|p| &p.value), &matrix(&l["value"]));
         }
-        let errors: Vec<f64> = differences.iter().zip(&sizes).map(|(d, s)| d / s.max(f64::MIN_POSITIVE)).collect();
+        let errors: Vec<f64> = differences.iter().zip(&sizes).map(|(d, s)| d / crate::linalg::larger(*s, f64::MIN_POSITIVE)).collect();
         eprintln!("{name}: P {} H {:.1e} ∂H {:.1e} L {:.1e} K {:.1e} M {:.1e}", at.states.len(), errors[0], errors[1], errors[2], errors[3], errors[4]);
-        worst = errors.iter().fold(worst, |w, e| w.max(*e));
+        worst = errors.iter().fold(worst, |w, e| crate::linalg::larger(w, *e));
     }
     assert!(worst <= 1e-10, "{worst:e}");
 }
@@ -209,11 +209,11 @@ fn the_adjoint_force_is_the_finite_difference() {
         }
         // The differences' rounding: each entry of a fold rounds by u|H|, a trace with ρ sums n² of them within
         // n u max|H| (Σ|ρ_ab| ≤ n tr ρ), and Richardson's four differences weigh them by (4/3)/δ + (1/6)/δ.
-        let largest = at.effective.iter().map(|p| p.value.max_abs()).fold(0.0, f64::max);
+        let largest = at.effective.iter().map(|p| p.value.max_abs()).fold(0.0, crate::linalg::larger);
         let floor = 1.5 * n as f64 * crate::units::UNIT_ROUNDOFF * largest / delta;
         let error = (adjoint - difference).abs() / (1e-7 * adjoint.abs() + floor);
         eprintln!("{name}: force {adjoint:.10e}, finite difference {difference:.10e}, relative {:.1e} (rounding floor {floor:.1e})", (adjoint - difference).abs() / adjoint.abs());
-        worst = worst.max(error);
+        worst = crate::linalg::larger(worst, error);
     }
     assert!(worst <= 1.0, "{worst:e} of 1e-7 of the force and the rounding floor");
 }
@@ -431,8 +431,8 @@ fn differ(a: &ModelAt, b: &ModelAt) -> [f64; 4] {
     let mut take = |slot: usize, x: Option<&Mat>, y: Option<&Mat>| {
         let (x, y) = (x.cloned().unwrap_or_else(|| Mat::zeros(a.states.len(), a.states.len())), y.cloned().unwrap_or_else(|| Mat::zeros(a.states.len(), a.states.len())));
         let (e, s) = apart(&x, &y);
-        d[slot] = d[slot].max(e);
-        scale[slot] = scale[slot].max(s);
+        d[slot] = crate::linalg::larger(d[slot], e);
+        scale[slot] = crate::linalg::larger(scale[slot], s);
     };
     let keys: std::collections::BTreeSet<Key> = a.effective.iter().chain(&b.effective).map(|p| p.key.clone()).collect();
     for key in keys {
@@ -455,7 +455,7 @@ fn differ(a: &ModelAt, b: &ModelAt) -> [f64; 4] {
             }
         }
     }
-    std::array::from_fn(|i| d[i] / scale[i].max(f64::MIN_POSITIVE))
+    std::array::from_fn(|i| d[i] / crate::linalg::larger(scale[i], f64::MIN_POSITIVE))
 }
 
 /// The points of the check: the centre and the edge of the checkpoint (r = 0, the tweezer full and dark, no Doppler
@@ -488,7 +488,7 @@ fn rs_at_is_the_exact_fold_to_rounding() {
             let truth = exact(&reference, &rs.keep, &rs.sectors, MODEL);
             let errors = differ(&model, &truth);
             eprintln!("{name} {point}: P {} H {:.1e} ∇H {:.1e} L {:.1e} ∇L {:.1e} ({} parts, {} channels)", model.states.len(), errors[0], errors[1], errors[2], errors[3], model.effective.len(), model.jumps.len());
-            worst = errors.iter().fold(worst, |w, e| w.max(*e));
+            worst = errors.iter().fold(worst, |w, e| crate::linalg::larger(w, *e));
         }
     }
     assert!(worst <= 1e-10, "{worst:e}");
@@ -575,16 +575,16 @@ fn now_is_the_components_at_their_phases() {
                     (sum, bound)
                 };
                 let mut ratios = [0.0_f64; 5];
-                let mut compare = |slot: usize, x: &Mat, (y, bound): (Mat, f64), scale: f64| ratios[slot] = ratios[slot].max(apart(x, &y).0 / (bound + 1e-10 * scale).max(f64::MIN_POSITIVE));
+                let mut compare = |slot: usize, x: &Mat, (y, bound): (Mat, f64), scale: f64| ratios[slot] = crate::linalg::larger(ratios[slot], apart(x, &y).0 / crate::linalg::larger(bound + 1e-10 * scale, f64::MIN_POSITIVE));
                 compare(0, &now.hamiltonian, at(&model.effective, None, n, n), now.hamiltonian.max_abs());
-                let scale = now.gradient.iter().map(Mat::max_abs).fold(0.0, f64::max);
+                let scale = now.gradient.iter().map(Mat::max_abs).fold(0.0, crate::linalg::larger);
                 for i in 0..3 {
                     compare(1, &now.gradient[i], at(&model.effective, Some(i), n, n), scale);
                 }
                 let (lscale, dscale, kscale) = (
-                    now.jumps.iter().map(|c| c.value.max_abs()).fold(0.0, f64::max),
-                    now.jumps.iter().flat_map(|c| c.gradient.iter().map(Mat::max_abs)).fold(0.0, f64::max),
-                    kicks.iter().map(|c| c.value.max_abs()).fold(0.0, f64::max),
+                    now.jumps.iter().map(|c| c.value.max_abs()).fold(0.0, crate::linalg::larger),
+                    now.jumps.iter().flat_map(|c| c.gradient.iter().map(Mat::max_abs)).fold(0.0, crate::linalg::larger),
+                    kicks.iter().map(|c| c.value.max_abs()).fold(0.0, crate::linalg::larger),
                 );
                 let zero = Mat::zeros(n, n);
                 let channels: std::collections::BTreeSet<(usize, [i64; 2])> = model.jumps.iter().map(|c| (c.emission, c.fast)).chain(now.jumps.iter().map(|c| (c.emission, c.fast))).collect();
@@ -602,7 +602,7 @@ fn now_is_the_components_at_their_phases() {
                 }
                 compare(4, &now.lift, at(&model.lift, None, model.folded.len(), n), now.lift.max_abs());
                 eprintln!("{name} {point} t {t}: of the bound H {:.1e} ∇H {:.1e} L {:.1e} K {:.1e} M {:.1e} ({} channels)", ratios[0], ratios[1], ratios[2], ratios[3], ratios[4], now.jumps.len());
-                worst = ratios.iter().fold(worst, |w, e| w.max(*e));
+                worst = ratios.iter().fold(worst, |w, e| crate::linalg::larger(w, *e));
             }
         }
     }
@@ -698,7 +698,7 @@ fn the_reference_is_pysel_to_rounding() {
             let mut check = |slot: usize, rust: Option<&Mat>, python: &Mat| {
                 let zero = Mat::zeros(python.rows, python.cols);
                 let (d, size) = apart(rust.unwrap_or(&zero), python);
-                (differences[slot], sizes[slot]) = (differences[slot].max(d), sizes[slot].max(size));
+                (differences[slot], sizes[slot]) = (crate::linalg::larger(differences[slot], d), crate::linalg::larger(sizes[slot], size));
             };
             let keys: Vec<Vec<i64>> = doc["H"].as_array().unwrap().iter().map(|h| h["key"].as_array().unwrap().iter().map(|k| k.as_i64().unwrap()).collect()).collect();
             for (h, key) in doc["H"].as_array().unwrap().iter().zip(&keys) {
@@ -723,9 +723,9 @@ fn the_reference_is_pysel_to_rounding() {
                 }
             }
             assert_eq!(reference.jumps.len(), channels.len(), "{name} {point}: the channels");
-            let errors: Vec<f64> = differences.iter().zip(&sizes).map(|(d, s)| d / s.max(f64::MIN_POSITIVE)).collect();
+            let errors: Vec<f64> = differences.iter().zip(&sizes).map(|(d, s)| d / crate::linalg::larger(*s, f64::MIN_POSITIVE)).collect();
             eprintln!("{name} {point}: H {:.1e} ∇H {:.1e} L {:.1e} ∇L {:.1e} ({} channels)", errors[0], errors[1], errors[2], errors[3], channels.len());
-            worst = errors.iter().fold(worst, |w, e| w.max(*e));
+            worst = errors.iter().fold(worst, |w, e| crate::linalg::larger(w, *e));
         }
     }
     assert!(worst <= 1e-12, "{worst:e}");
@@ -765,7 +765,7 @@ fn the_tweezer_s_channels_are_its_photons() {
                 assert_eq!(i64::from(p.key[tw]), c.fast[1], "{name}: channel {} {:?}, part at {:?}", c.emission, c.fast, p.key);
                 assert!(finite(&p.value) && p.gradient.iter().all(finite), "{name}: channel {} {:?} finite", c.emission, c.fast);
                 let size: &mut f64 = lit.entry(c.fast[1]).or_insert(0.0);
-                *size = size.max(p.value.max_abs());
+                *size = crate::linalg::larger(*size, p.value.max_abs());
             }
             counts.insert(c.fast[1]);
         }
@@ -803,22 +803,22 @@ fn the_raman_scenes_frame_and_model() {
                 let liouville = Liouville::new(&frame, &model.hilbert());
                 let system = assemble(&liouville, &select(&liouville));
                 let solved = crate::krylov::solve(&system).expect("consistent");
-                let biggest = solved.rho.iter().map(|z| z.abs()).fold(0.0, f64::max);
+                let biggest = solved.rho.iter().map(|z| z.abs()).fold(0.0, crate::linalg::larger);
                 (readouts(&liouville, &system, &solved.rho), solved.route, solved.certified, biggest)
             };
             let (r, route, certified, biggest) = solve(&reference);
             let model = Rs::new(&scene, &all, frame.sectors()).at(&scene, point);
             let (m, mroute, mcertified, _) = solve(&model);
-            let pops = r.levels.iter().zip(&m.levels).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
-            let rate = (r.rate - m.rate).abs() / r.rate.abs().max(f64::MIN_POSITIVE);
-            let scale = r.force.iter().map(|x| x * x).sum::<f64>().sqrt().max(scene.generators.last().unwrap().frequency / crate::units::SPEED_OF_LIGHT * r.rate);
+            let pops = r.levels.iter().zip(&m.levels).map(|(a, b)| (a - b).abs()).fold(0.0, crate::linalg::larger);
+            let rate = (r.rate - m.rate).abs() / crate::linalg::larger(r.rate.abs(), f64::MIN_POSITIVE);
+            let scale = crate::linalg::larger(r.force.iter().map(|x| x * x).sum::<f64>().sqrt(), scene.generators.last().unwrap().frequency / crate::units::SPEED_OF_LIGHT * r.rate);
             let force = (0..3).map(|i| (r.force[i] - m.force[i]).powi(2)).sum::<f64>().sqrt() / scale;
             println!(
                 "{name} point {p}: grounds {grounds:?}, φ {:.4} rad/µs; reference {route:?} certified {certified} max|ρ| {biggest:.2e}, R {:.4e}; P 32 {mroute:?} {mcertified}: populations {pops:.2e}, R {rate:.2e}, F {force:.2e}",
                 frame.fast[0], r.rate
             );
             for (w, x) in worst.iter_mut().zip([pops, rate, force]) {
-                *w = w.max(x);
+                *w = crate::linalg::larger(*w, x);
             }
             assert!((frame.fast[0] - 42943.0).abs() < 1.0, "{name}: φ {}", frame.fast[0]);
             assert!(certified && mcertified && biggest <= 1.0 + 1e-9, "{name} point {p}: the solves");
