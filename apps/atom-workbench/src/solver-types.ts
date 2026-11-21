@@ -83,8 +83,8 @@ export interface ApproximationLedger {totals:{population:LedgerTotal;temperature
  * axis's trap frequency at the trap's bottom (`trapFrequencyKHz`, ω/2π, the one the engine used), m⟨v²⟩/ħω − ½ (⟨v²⟩
  * with the mean velocity in it), both over one trap period of the axis about the sample (motion-chart.ts
  * `TEMPERATURE_WINDOW`); the total temperature (T_x + T_y + T_z)/3 with its own standard error, both the engine's; the
- * probability that the atom has left the trap by then -- been outside the trap light's 1/20 region and unbound there
- * (model-notes.ts); whether the sample lies in the method's validated regime
+ * probability that the atom has left the trap by then -- its energy above the value far away, unbound, wherever it
+ * is (model-notes.ts); whether the sample lies in the method's validated regime
  * (`classical`: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis; outside it the result is a reference
  * only); per axis the momentum distributions (grid: velocities, m/s) and the position distributions
  * (grid: positions from the focus, μm). Everything but the loss describes the atom still held. Its

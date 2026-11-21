@@ -430,13 +430,13 @@
 //! shown at a time is every atom's fate there -- a held atom's rows, a lost one's loss --, so the model errs on it by the
 //! mean over the atoms of the error of each one's fate (`Measured::means`): the held atoms' at their states there, by
 //! the held share 1 − L, and the lost atoms' along their paths, by L. A lost atom's fate was decided along its path
-//! from t = 0 to where it passes the potential's far value -- past it the atom runs out of the trap's region whatever
-//! the rates there, and is found lost where it leaves it (adapt.rs, # The reads) --: a rate's relative error x along
-//! that path moves its loss's time by x of it to the first order, and its fate's error is the path's mean of x, read
-//! where the run reads every atom and at the path's end: at t = 0, at the analysis times it was held at, and at its
-//! last state the run keeps below the far value (`approached`: its last checkpoint not leaving, within one window of
-//! the passage; `leaving`: the reference state's prepared energy there) -- by the trapezoid on them (`Booking::path`).
-//! The state it was found lost in is read nowhere: its fate is sealed there. (Read there, as half of the path, the 1D
+//! from t = 0 to its loss, the first of its own states whose loss energy is above the escape value, the potential's far
+//! value (SPEC §1.7; adapt.rs, # The reads; step.rs `Dynamics::lost`): a rate's relative error x along that path moves
+//! its loss's time by x of it to the first order, and its fate's error is the path's mean of x, read where the run reads
+//! every atom and at the path's end: at t = 0, at the analysis times it was held at, and at its last checkpoint
+//! (`Record::trail`), within one window of its loss -- a state the loss test found held, as every checkpoint after
+//! t = 0 is (`run`: a trajectory is stopped at a checkpoint only while it holds its atom) -- by the trapezoid on them
+//! (`Booking::path`). The state it was found lost in is read nowhere: its fate is sealed there. (Read there, as half of the path, the 1D
 //! PGC tilted 3° over 10 ms -- three of four atoms lost by 4 ms, each found at the trap's rim, 2 µm off its axis, where
 //! its strong near light (3 to 5 Γ, 38 I_sat a beam) left the old model's fold wrong by 0.32–0.48 against 0.004–0.032
 //! at every held state -- booked half its error there.) An atom held near the rim is read there where an analysis time
@@ -942,13 +942,6 @@ impl crate::step::Domain for Domain {
     fn runaway(&self, hazard: f64) -> bool {
         self.widest.runaway(hazard)
     }
-}
-
-/// Whether an atom at r with the momentum κ is leaving (module documentation, # Where the atoms went): its prepared
-/// energy, (ħ/m)κ²/2 + V_ref(r) of the reference state (the splitting's reference, `Dynamics::reference`), at the
-/// potential's far value, nothing, or above -- past it the atom runs out of the trap's region whatever the rates there.
-fn leaving<D: Dynamics>(model: &D, r: V3, kappa: V3) -> bool {
-    0.5 * model.hbar_over_mass() * kappa.iter().map(|k| k * k).sum::<f64>() + model.reference(r).value >= 0.
 }
 
 /// The reads a step is judged by (module documentation, # The step): the mean squares over the run of the step's
@@ -1784,20 +1777,11 @@ impl Booking {
     }
 }
 
-/// The end of the path a lost atom's fate was decided along (module documentation, # Where the atoms went): of its
-/// checkpoints `trail` (at t = 0 and every window on, `run`) the last whose state is not leaving -- its prepared energy
-/// below the potential's far value (`leaving`) --, the first where every one is. Its last state that the dynamics still
-/// decide the fate of: past the far value the atom runs out of the trap's region whatever the rates there, and is found
-/// lost where it leaves it.
-fn approached(trail: &[Checkpoint], leaving: &dyn Fn(&Trajectory) -> bool) -> usize {
-    trail.iter().rposition(|c| !leaving(&c.trajectory)).unwrap_or(0)
-}
-
 /// The states a lost atom's path is read at (`sampled`, `Booking::path`), in their times' order, each with its place
 /// among the held states `samples` (per analysis time, the first t = 0's) where it is one of them: its state at t = 0,
 /// its held states at the analysis times before the time `first` it is first lost at and before its path's end, and
-/// the path's end `end` (`approached`) where it is later than all of them. None where the run holds no state of it at
-/// t = 0.
+/// the path's end `end` (its last checkpoint, `run`) where it is later than all of them. None where the run holds no
+/// state of it at t = 0.
 fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Option<Vec<(&'a State, Option<(usize, usize)>)>> {
     let start = samples.first()?.iter().find(|x| x.index == end.index)?;
     let mut along = vec![(start, None)];
@@ -1825,8 +1809,8 @@ fn booked_at(run: &Selected, _state: &State) -> Vec<Booking> {
 /// - every member that holds its atom there: the error of its rows, read at its state there;
 /// - and every member lost by then: the error of its fate, its readings along the path its fate was decided along, read
 ///   at the states the run holds of that path -- at t = 0, at the analysis times it was held at before the path's end,
-///   and at the path's end, its last state below the potential's far value (`approached`) -- by the trapezoid
-///   (`Booking::path`); never where it was found lost, beyond the trap's region past the far value.
+///   and at the path's end, its last checkpoint (`run`) -- by the trapezoid (`Booking::path`); never where it was
+///   found lost, past the far value.
 /// At t = 0 no model has acted (`model_error`): its states are read as a lost atom's path's start alone. A state is read
 /// once -- a held atom's for its time, and as a node of its path where it is lost later --, and a lost atom's path is
 /// made of its states' rows, no read of its own, for every time after its loss: the reads are the table's rows by
@@ -3024,7 +3008,7 @@ struct Checkpoint {
 /// where held; what became of it by every time the decisions read (`Plan::reads`); where its states are kept (`keep`:
 /// the pilot's run level, for the model's errors and prices; module documentation, # The model: where the atoms went),
 /// its checkpoints (`trail`, module documentation, # The analysis times) and, where it was lost, the first of those
-/// times it is lost at and the end of the path its fate was decided along (`approached`); its counts.
+/// times it is lost at and the end of the path its fate was decided along (its last checkpoint, `run`); its counts.
 struct Record {
     outputs: Vec<Fate>,
     listed: Vec<Option<(V3, V3)>>,
@@ -3299,9 +3283,10 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
         reached = sizes;
     }
-    // From the time it does not reach: failed, or lost -- a lost atom's last state held below the potential's far
-    // value kept where states are, the end of the path its fate was decided along (`approached`), its fate's to read
-    // (`sampled`).
+    // From the time it does not reach: failed, or lost -- a lost atom's last checkpoint where states are kept, a state
+    // the loss test found held (every checkpoint after t = 0 is one: the loop stops at a checkpoint only while the atom
+    // is held), the end of the path its fate was decided along (module documentation, # Where the atoms went), its
+    // fate's to read (`sampled`).
     let (failed, nowhere) = (failed || nowhere.get().is_some(), nowhere.get());
     let mut lost = None;
     let mut windows = windows.into_inner();
@@ -3309,7 +3294,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         w.fates[reached.min(size)..].fill(if refused { Fate::Refused } else if failed { Fate::Failed } else { Fate::Lost });
     }
     if reached[1] < sizes[1] && keep && !failed {
-        lost = Some((reached[1], State::of(&trail[approached(&trail, &|c| leaving(model, c.r, c.kappa))].trajectory)));
+        lost = trail.last().map(|c| (reached[1], State::of(&c.trajectory)));
     }
     let [outputs, reads] = windows.map(Windows::close);
     let stopped = |why: bool| if why { Stopped::at(t.time) } else { Stopped::default() };
@@ -3366,8 +3351,8 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
 /// What a group of trajectories leaves: its sums at the outputs and at the times the decisions read (estimate.rs
 /// `Group`), its held atoms' (r, κ) at the listed outputs; where its states are kept (the pilot's run level: every
 /// member's), its trajectories' checkpoints in its members' order (`Record::trail`) and, at the analysis times
-/// (`parts_at`), its states there; its lost atoms' paths' ends (`approached`) with the first of the times read each is
-/// lost at; its counts.
+/// (`parts_at`), its states there; its lost atoms' paths' ends (`Record::lost`) with the first of the times read each
+/// is lost at; its counts.
 #[derive(Clone)]
 struct Part {
     sums: Group,
@@ -3885,7 +3870,7 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
         for (member, first) in members.iter().enumerate() {
             let held: Vec<&State> = part.samples.iter().skip(1).filter_map(|at| at.iter().find(|state| state.index == first.index)).collect();
             let lost = part.lost.iter().find(|(_, state)| state.index == first.index).map(|(_, state)| state);
-            // Its states to pick from, and its last: where it was lost, its path's end (`approached`).
+            // Its states to pick from, and its last: where it was lost, its path's end (`Record::lost`).
             let states = if held.is_empty() { lost.map(|_| vec![first]).unwrap_or_default() } else { held };
             let Some(last) = lost.or(states.last().copied()) else { continue };
             let through = ((member * groups + group) as f64 + 0.5) / (members.len() * groups) as f64;
@@ -4232,6 +4217,8 @@ mod tests {
     use super::*;
     use crate::estimate::unseen;
     use crate::units::TEMPERATURE_TARGET;
+
+    mod escape;
 
     /// A step as written gives its count back (`step_reading`): the run over the reading, rounded, is the number of
     /// steps, for every rung -- the run over an even number, halved down to the steps' cap -- of runs short and long;
@@ -5455,29 +5442,31 @@ mod tests {
     }
 
     /// A lost atom's fate is read along the path it was decided along (module documentation, # Where the atoms went;
-    /// `approached`, `held_path`, `Booking::path`): analysis times 0, 10, 20, 30 and 40 µs, checkpoints every 6 µs.
-    /// - An atom that escapes: held at 0 and 10 µs, past the far value from 24 µs on (`leaving`), found lost at 27 µs
-    ///   (first lost at 30): its path ends at its last checkpoint below the far value, 18 µs, and is read at 0, 10 and
-    ///   18 µs -- not at 20 µs, a state the run holds of it after its path's end, nor where it was found lost. Its
-    ///   error is the trapezoid's mean on those three, whatever the errors past the far value (one there, a fold's
-    ///   whole, as at the trap's rim of the 1D PGC tilted 3°).
-    /// - An atom that goes near the rim and back, held there at 10 µs with a large error, and is lost later (first at
-    ///   40, past the far value from 36 µs): its rim is a node of its path, weighed as the trapezoid weighs it.
+    /// `run`, `held_path`, `Booking::path`): analysis times 0, 10, 20, 30 and 40 µs, checkpoints every 6 µs, each a
+    /// state the loss test found held (`run` stops at a checkpoint only while the atom is held).
+    /// - An atom that escapes: held at 0, 10 and 20 µs, found lost at 23 µs -- its loss energy past the far value --
+    ///   (first lost at 30): its path ends at its last checkpoint, 18 µs, and is read at 0, 10 and 18 µs -- not at
+    ///   20 µs, a state the run holds of it after its path's end, nor where it was found lost. Its error is the
+    ///   trapezoid's mean on those three, whatever the errors past the far value (one there, a fold's whole, as at the
+    ///   trap's rim of the 1D PGC tilted 3°).
+    /// - An atom that goes near the rim and back, held there at 10 µs with a large error, and is lost later (found at
+    ///   35 µs, first lost at 40): its rim is a node of its path, weighed as the trapezoid weighs it.
     /// - An atom held near the rim at 20 µs and never lost: that state is a held row like every other, its error in the
     ///   held atoms' mean there (`Measured::means`).
-    /// - An atom past the far value at every checkpoint (none below it) is read at t = 0 alone.
+    /// - An atom found lost before its first checkpoint after t = 0 (one drawn above the far value: SPEC §1.7, found at
+    ///   its first step's end) is read at t = 0 alone.
     #[test]
     fn a_lost_atom_s_fate_is_read_on_its_path_below_the_far_value_and_the_rim_where_held() {
         let state = |index: u64, t: f64| bare_state(index, t, 0);
         let trail = |index: u64, until: f64| -> Vec<Checkpoint> {
             (0..).map(|j| 6. * j as f64).take_while(|&t| t < until).map(|t| Checkpoint { trajectory: state(index, t).trajectory(), path: adapt::Path::new(SEED, index, 2., 2) }).collect()
         };
-        // The escaping atom (0), the one that goes to the rim and back (1), the one held at the rim (2).
-        let leaving = |from: f64| move |t: &Trajectory| t.time >= from;
-        let (first, second) = (trail(0, 27.), trail(1, 38.));
-        let ends = [&first[approached(&first, &leaving(24.))], &second[approached(&second, &leaving(36.))]];
-        assert_eq!((ends[0].trajectory.time, ends[1].trajectory.time), (18., 30.), "the paths' ends: the last checkpoints below the far value");
-        assert_eq!(approached(&trail(3, 27.), &leaving(0.)), 0, "past the far value throughout: its path is its start");
+        // The escaping atom (0), the one that goes to the rim and back (1), the one held at the rim (2): each path's end
+        // its trail's last checkpoint (`run`).
+        let (first, second) = (trail(0, 23.), trail(1, 35.));
+        let ends = [first.last().unwrap(), second.last().unwrap()];
+        assert_eq!((ends[0].trajectory.time, ends[1].trajectory.time), (18., 30.), "the paths' ends: the last checkpoints before the loss");
+        assert_eq!(trail(3, 5.).last().unwrap().trajectory.time, 0., "lost before its first checkpoint: its path is its start");
         let ends = [State::of(&ends[0].trajectory), State::of(&ends[1].trajectory)];
         let times = [0., 10., 20., 30., 40.];
         let held = |index: u64, last: usize| (0..=last).map(move |k| (k, state(index, times[k])));
@@ -5493,7 +5482,7 @@ mod tests {
         let error = |index: u64, t: f64| -> Booking {
             let x = match (index, t) {
                 (1, 10.) | (2, 20.) => 0.4,
-                (0, t) if t >= 24. => 1.,
+                (0, t) if t >= 23. => 1.,
                 (_, t) => 0.01 + 0.001 * t,
             };
             Booking { error: [x, x] }
@@ -6239,6 +6228,45 @@ mod tests {
         }
         eprintln!("R2_RECOIL on the run: {stopped} atoms beyond any state stopped, {ran} within ran");
         assert!(ran > 0, "{stopped} stopped, {ran} ran");
+    }
+
+    /// The loss is the first passage out of the bound set H = {E ≤ 0}, wherever the atom is (SPEC §1.7;
+    /// model/selected.rs `lost`): R1_TWEEZER's atoms of its initial state at the trap's centre, along each lab axis at
+    /// the speed whose kinetic energy is 1.01 and 0.9 times the depth there, run at 0.01 µs and read at 0, τ/2, τ and
+    /// 2τ. The one above is held at t = 0 -- as every atom is, one drawn above the far value too (SPEC §1.7) --, held
+    /// at τ/2 inside its first step, and lost at that step's end, its first test: a few nanometres from the focus, deep
+    /// inside the trap's region (the old test held it until it left the region, 1.2 waists out). The one below is held
+    /// through the run, to the last output's window.
+    #[test]
+    fn an_atom_above_the_escape_value_is_lost_at_its_first_test_wherever_it_is() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R1_TWEEZER.json");
+        let b = chief(&Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap());
+        let (request, run, trap) = scene_run("R1_TWEEZER", false, b);
+        let domain = Domain { widest: Widest::of(&request) };
+        let tau = 0.01;
+        let mut plan = Plan::new(&[0., 0.5 * tau, tau, 2. * tau], trap.lab);
+        plan.cell = 2. * tau;
+        let depth = -run.prepared(&alone(b)).at(trap.centre).value;
+        assert!(depth > 0., "the tweezer holds the state: {depth}");
+        for (share, above) in [(1.01, true), (0.9, false)] {
+            for a in 0..3 {
+                let kappa: V3 = std::array::from_fn(|x| if x == a { (2. * share * depth / run.hbar_over_mass()).sqrt() } else { 0. });
+                let record = run_trajectory(&run, &domain, Start { state: b, r: trap.centre, kappa }, a as u64, tau, &plan);
+                let held: Vec<bool> = record.outputs.iter().map(|f| matches!(f, Fate::Held(_))).collect();
+                let mut t = Trajectory::new(&run, b, trap.centre, kappa, SEED, a as u64);
+                let mut path = adapt::Path::new(SEED, a as u64, plan.cell, (plan.cell / tau).log2().round() as u32);
+                let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &[], &mut |_, _, _| {}, &mut |_, _| {});
+                assert!(advanced.is_ok(), "{share} of the depth along {a}: {advanced:?}");
+                if above {
+                    assert_eq!(held, [true, true, false, false], "{share} of the depth along {a}");
+                    assert_eq!((t.lost, record.counts.time), (Some(tau), tau), "lost at its first step's end along {a}");
+                    let off = t.r.iter().zip(&trap.centre).map(|(x, c)| (x - c) * (x - c)).sum::<f64>().sqrt();
+                    assert!(!run.light().outside(t.r) && off < 0.01, "{share} of the depth along {a}: lost {off} µm from the centre");
+                } else {
+                    assert!(held.iter().all(|&h| h) && t.lost.is_none() && record.counts.time == plan.end, "{share} of the depth along {a}: {held:?}, lost at {:?}", t.lost);
+                }
+            }
+        }
     }
 
     /// The decisions' reads are the outputs' onlookers (module documentation, # The analysis times; adapt.rs, # The

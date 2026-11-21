@@ -39,10 +39,10 @@
 //! # The region
 //! An atom is outside the trap's region where the trap light -- the tweezer, the one beam of its frequency
 //! (`Request::validate`: neither its reflection nor another beam of its laser is input) -- is below `REGION_INTENSITY` of
-//! its focus value, |a(r)|² < 1/20 (SPEC §1.3, the UI's region; a lost atom is first outside it with its loss energy above the far
-//! value, the trajectory model's loss test, model/selected.rs). Only the trap light makes the trap: a probe or a
-//! cooling beam given by its waist is focused too, on the millimetre scale, and an atom it pushes out of the tweezer
-//! moves along it for metres (√19 z_R) -- counted by its intensity, such an atom would never be lost.
+//! its focus value, |a(r)|² < 1/20 (SPEC §1.3): the descent to a trap's centre stays within it (model/potential.rs
+//! `descend`). It is no part of the loss (SPEC §1.7: the loss energy above its far value, wherever the atom is). Only
+//! the trap light makes the trap: a probe or a cooling beam given by its waist is focused too, on the millimetre scale,
+//! and a region by its intensity would reach metres along it (√19 z_R).
 
 use crate::linalg::smaller;
 use crate::linalg::{dot3, hermitian_eigen, Mat, C64, V3};

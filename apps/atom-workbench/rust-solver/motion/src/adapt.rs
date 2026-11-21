@@ -38,7 +38,8 @@
 //!   and after every jump, each on the trajectory's place there (`step::Segment`). A trajectory found lost at one of
 //!   them is lost at that time: that is its last state, and its step counts up to there. A read is none of them, and a
 //!   time read inside a step before the trajectory's loss reads it held. The passage is the first of the trajectory's
-//!   own states beyond the trap's region above the far value -- an atom there runs away --: late against the passage
+//!   own states whose loss energy is above the escape value, the potential's far value, wherever the atom is -- it
+//!   leaves the bound set H = {E ≤ 0} (SPEC §1.7; the trap's region is no part of it) --: late against the passage
 //!   along its path by less than a step, as on the companion at 2τ by less than its own step. That is an error of the
 //!   first order in τ of the size of the loss's rate times τ (a loss of one half over a millisecond at τ = 1 µs:
 //!   5·10⁻⁴, a hundredth of the loss's target), which the companion reads with the step's other errors (solve.rs,

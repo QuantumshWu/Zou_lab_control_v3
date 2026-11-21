@@ -326,13 +326,11 @@ test('a motion trajectory is tested against its own target, 5 %, and every sente
 
 test('the notes and the chart titles say what the engine computes: the loss, the trap light, T\'s window, n̄, the initial ensemble, the statistics, the target on T',()=>{
   const notes=definitionNotes()+modelNotes(),solver=new URL('../rust-solver/motion/src/',import.meta.url),source=path=>readFileSync(new URL(path,solver),'utf8');
-  // The loss (model.rs `Model::lost`): first outside the trap light's region AND its loss energy above the far value; an
-  // atom outside the region but bound there is held. The region's words are the engine's (units.rs REGION_INTENSITY).
-  assert.match(source('model.rs'),/self\.light\.outside\(at\.r\)\s*&&\s*self\.energy_with\([^)]*\)\s*>\s*self\.asymptote\(/);
-  assert.match(source('units.rs'),/pub const REGION_INTENSITY: f64 = 1\.0 \/ 20\.0;/);
-  const region=/model-notes\.ts: "([^"]+)"/.exec(source('units.rs'))?.[1];
-  assert.ok(region&&region.includes('1/20')&&notes.includes(region),region);
-  assert.match(notes,/1\/20）[^。]*能量[^。]*高于远处的值[^。]*区域之外仍被束缚的原子不算丢失/);
+  // The loss (model/selected.rs `lost`, SPEC §1.7): the loss energy first above the far value, the escape value E_cap = 0,
+  // wherever the atom is -- the trap's region is no part of it (2026-11-21; before, the atom had also to be outside it).
+  assert.match(source('model/selected.rs'),/fn lost\([^)]*\) -> bool \{\s*self\.energy\([^)]*\)\s*>\s*0\.0\s*\}/);
+  assert.match(notes,/能量[^。]*第一次高于远处的值[^。]*就算丢失，不论它此时在哪里/);
+  assert.doesNotMatch(notes,/区域之外仍被束缚的原子不算丢失/);
   // The trap light is the whole field of the tweezer's frequency (field.rs `Light::outside`, SPEC §1.3).
   assert.match(source('field.rs'),/self\.frequencies\[self\.trap\]\.beams\.iter\(\)\.all/);
   assert.match(notes,/“设为光镊”的那一束光，连同与它同频的各束光/);
