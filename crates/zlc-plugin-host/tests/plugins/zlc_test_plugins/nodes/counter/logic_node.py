@@ -39,7 +39,7 @@ class Counter:
                 break
             frame = self.echo.frame(self.size, index + 1)
             snapshot = owned_snapshot_from_arrays(value, frame.reshape(1, 1, self.size, self.size), index, cell_domain=cells)
-            context.commit_live({"frames": LiveDatasetOutput(FRAMES, snapshot, event_record={"index": index})})
+            context.commit_live({"frames": LiveDatasetOutput(FRAMES, snapshot, event_record={"frames_missing": [index]})})  # a registered field, as a camera writes it
             context.report_progress("frames", current=index + 1, total=self.count)
         answer = context.core("probe", value=self.count)
         return {"published": self.count, "device_total": self.echo.total(frame), "core": answer}

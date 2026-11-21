@@ -181,8 +181,9 @@ impl MountedArchive {
             // A saved dataset is one state, not a replay of fabricated shots.
             // Image and measured status become visible in the same atomic event;
             // the complete native snapshots also admit empty prefixes unchanged.
+            // The import is the run's record (`operation`); the event adds nothing to it.
             let delivery = mounted.runtime.commit(&generation, &Bundle {
-                inputs, metadata:json!({"operation":"figure-import"}), parents:vec![],
+                inputs, metadata:json!({}), parents:vec![],
             }).map_err(|error| error.to_string())?;
             let published = delivery.publications.iter().find(|publication| publication.key().signal == signal).cloned();
             if let Some(item) = mounted.items.last_mut() { item.publication = published; }

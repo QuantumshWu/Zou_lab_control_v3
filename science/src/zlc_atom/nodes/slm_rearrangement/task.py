@@ -223,22 +223,27 @@ class SlmRearrangementTask:
         """Commit these new results; an output not shown yet is committed
         with them, so every panel mounts its frozen geometry at the first
         publication (its invalid placeholder until the result exists)."""
-        event = {"capture_events": {
-            name: {**capture, "device_snapshots": {"slm": capture["device_snapshots"]["slm"]}}
-            for name, capture in self._capture_evidence.items()}, "device_snapshots": {**self._device_snapshots, "slm": {
+        now = {**self._device_snapshots, "slm": {
             "identity": str(self.slm.identity), "shape_yx": list(self.slm.shape_yx),
             "command_revision": int(self.slm.command_revision), "mapping_revision": int(self.slm.mapping_revision),
-            "command_receipt": dict(self.slm.last_command_receipt)}}}
+            "command_receipt": dict(self.slm.last_command_receipt)}}
         updates = {decl.name: value for decl,value in snapshots}
         self._available_outputs.update(updates)
         self._snapshots.update(updates)
-        if self._overlay_geometry is not None:
-            event[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = self._overlay_geometry
         committed = [decl for decl in self.dataset_output_declarations
                      if decl.name in updates or decl.name not in self._committed]
         if not committed:
             return  # results this frame policy keeps as artifacts only (rearrangement_outputs)
-        context.commit_live({decl.name: LiveDatasetOutput(decl, self._snapshots[decl.name], event_record=event)
+
+        def record(name):
+            # Each output with the devices as they stood when it was captured (the SLM before or
+            # after the move), else as they stand now.
+            capture = self._capture_evidence.get(name)
+            event = {"device_snapshots": now if capture is None else capture["device_snapshots"]}
+            if self._overlay_geometry is not None:
+                event[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = self._overlay_geometry
+            return event
+        context.commit_live({decl.name: LiveDatasetOutput(decl, self._snapshots[decl.name], event_record=record(decl.name))
                              for decl in committed})
         self._committed.update(decl.name for decl in committed)
 

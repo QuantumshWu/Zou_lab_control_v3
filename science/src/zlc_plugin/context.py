@@ -603,7 +603,8 @@ class RunContext:
                                      "data": {"values": values, "validity": mask, "sigma": sigma}}
             self._state_schema(entry, name, schema, finite)
             entries.append(entry)
-            if output.event_record is not None:
+            # An output with nothing to record has no record (crates/zlc-core/src/record_fields.rs).
+            if output.event_record:
                 records[name] = dict(output.event_record)
             if output.shot_time_seconds is not None:
                 times[name] = float(output.shot_time_seconds)

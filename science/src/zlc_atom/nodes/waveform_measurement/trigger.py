@@ -202,11 +202,10 @@ class TriggerDetector:
 
 class Traces(NamedTuple):
     """What one read completed: ``samples`` ``(traces, samples, columns)``, each trace's
-    crossing time and its crossing sample's host receipt, and how many edges it found."""
+    crossing time, and how many edges it found."""
 
     samples: np.ndarray
     times: np.ndarray
-    received: np.ndarray
     edges: int
 
 
@@ -227,7 +226,6 @@ class TraceAssembler:
         self._before = trigger.samples // 2
         self._held: np.ndarray | None = None
         self._held_times = np.empty(0)
-        self._held_received = np.empty(0, dtype=np.int64)
         #: The stream position of the first held sample.
         self._first = 0
         #: The stream positions of the edges still waiting for samples.
@@ -242,12 +240,11 @@ class TraceAssembler:
     def take_range(self) -> tuple[float, float] | None:
         return self._detector.take_range()
 
-    def push(self, samples: np.ndarray, times: np.ndarray, received: np.ndarray) -> Traces:
-        """``samples`` ``(samples, columns)``, each one's source time and host receipt."""
+    def push(self, samples: np.ndarray, times: np.ndarray) -> Traces:
+        """``samples`` ``(samples, columns)`` and each one's source time."""
 
         held = samples if self._held is None else np.concatenate((self._held, samples))
         held_times = np.concatenate((self._held_times, times))
-        held_received = np.concatenate((self._held_received, received))
         column = self._trigger.column
         edges = np.flatnonzero(self._detector.scan(samples[:, column])) + self._first + held.shape[0] - samples.shape[0]
         self._pending.extend(int(edge) for edge in edges)
@@ -255,7 +252,7 @@ class TraceAssembler:
         # Each point of a trace lies this fraction of the way between two samples, so a
         # trace reads one sample past its length.
         span = self._length + 1
-        traces, crossings, receipts = [], [], []
+        traces, crossings = [], []
         while self._pending and self._pending[0] - 1 - self._before + span <= total:
             edge = self._pending.popleft()
             start = edge - 1 - self._before
@@ -266,12 +263,11 @@ class TraceAssembler:
             fraction = (self._trigger.level - below) / (above - below)
             traces.append((1.0 - fraction) * held[part:part + self._length] + fraction * held[part + 1:part + span])
             crossings.append(held_times[at - 1] + fraction * self._interval)
-            receipts.append(held_received[at])
         # What is still pending starts inside the newest span.
-        self._held, self._held_times, self._held_received = held[-span:], held_times[-span:], held_received[-span:]
+        self._held, self._held_times = held[-span:], held_times[-span:]
         self._first = total - self._held.shape[0]
         return Traces(np.stack(traces) if traces else np.empty((0, self._length, samples.shape[1]), dtype=samples.dtype),
-                      np.array(crossings, dtype=np.float64), np.array(receipts, dtype=np.int64), edges.size)
+                      np.array(crossings, dtype=np.float64), edges.size)
 
 
 __all__ = ["EXTREMES_WINDOW_SECONDS", "MINIMUM_SAMPLES", "SLOPES", "TraceAssembler", "Traces", "TriggerDetector", "TriggerSettings", "WaveformTrigger",

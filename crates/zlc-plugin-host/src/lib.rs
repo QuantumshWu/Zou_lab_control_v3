@@ -1645,6 +1645,7 @@ impl Inner {
             (generation, inputs, parents)
         };
         let metadata = if params["metadata"].is_object() { params["metadata"].clone() } else { json!({}) };
+        zlc_core::record_fields::admit(&format!("run.commit of {}", generation.owner()), &metadata).map_err(invalid)?;
         let delivery = self.runtime.commit(&generation, &Bundle { inputs, metadata, parents })
             .map_err(|error| CallError::from(error.to_string()))?;
         let keys: serde_json::Map<String, Value> = delivery.publications.iter().map(|publication| {
@@ -1703,8 +1704,9 @@ impl Inner {
         let mut blocks: Vec<_> = outputs.iter().map(|(.., blocks)| blocks.iter()).collect();
         let bundles: Vec<Bundle> = (0..count).map(|index| {
             let mut metadata = serde_json::Map::new();
-            if let Some(records) = records {
-                metadata.insert("records".into(), Value::Object(outputs.iter().map(|(name, ..)| (name.clone(), records[index].clone())).collect()));
+            // An event with nothing to record has no record.
+            if let Some(record) = records.map(|records| &records[index]).filter(|record| record.as_object().is_some_and(|fields| !fields.is_empty())) {
+                metadata.insert("records".into(), Value::Object(outputs.iter().map(|(name, ..)| (name.clone(), record.clone())).collect()));
             }
             let time = times.as_ref().map(|times| times.as_slice()[index]);
             if let Some(time) = time {
@@ -1717,6 +1719,8 @@ impl Inner {
             }).collect();
             Bundle { inputs, metadata: Value::Object(metadata), parents: Vec::new() }
         }).collect();
+        let producer = format!("run.commit_events of {}", generation.owner());
+        for bundle in &bundles { zlc_core::record_fields::admit(&producer, &bundle.metadata).map_err(invalid)?; }
         self.runtime.commit_events(&generation, &bundles)
             .map_err(|error| CallError::from(error.to_string()))?;
         Ok(Value::Null)

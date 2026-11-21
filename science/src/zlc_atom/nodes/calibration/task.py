@@ -1549,7 +1549,6 @@ class CalibrationTask:
                 binning_yx=contract.binning_yx,
                 generation=context.generation,
                 revision=1,
-                run_record=run_record,
                 value_unit=None if value_unit is None else str(value_unit),
             )
             # The candidate overlay travels with its image; the run's record is

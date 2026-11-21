@@ -79,8 +79,10 @@ class RearrangementMeasurement(CameraMeasurementNode):
 
     def _camera_event_record(self, records):
         event = super()._camera_event_record(records)
-        if self._cycle_evidence.get("cycle") == records[0].source_ordinal // self.frames_per_cycle:
-            event["rearrangement"] = self._cycle_evidence
+        evidence = self._cycle_evidence
+        if evidence.get("cycle") == records[0].source_ordinal // self.frames_per_cycle:
+            # Which cycle, and its first frame, the event itself says (its ordinal).
+            event["rearrangement"] = {name: value for name, value in evidence.items() if name not in ("cycle", "initial_frame_ordinal")}
         return event
 
     def _stopped(self):

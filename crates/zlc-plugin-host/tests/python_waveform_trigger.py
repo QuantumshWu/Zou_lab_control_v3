@@ -61,7 +61,7 @@ class Commits:
     """What the context's commit_events was given, as the events it says."""
 
     def __init__(self):
-        self.ordinals, self.shot_times, self.records, self.values = [], [], [], {}
+        self.ordinals, self.shot_times, self.values = [], [], {}
         self.commits = 0
         self.origins = []
 
@@ -69,10 +69,9 @@ class Commits:
         self.commits += 1
         count = len(ordinals)
         assert all(output.values.shape[0] == count for output in outputs.values())
-        assert len(records) == count
+        assert records is None, 'an event has no record: its time is its shot time'
         self.ordinals += [int(item) for item in ordinals]
         self.shot_times += [] if shot_times is None else [float(item) for item in shot_times]
-        self.records += records
         self.origins += [] if origins is None else [tuple(int(cell) for cell in row) for row in origins]
         for name, output in outputs.items():
             self.values.setdefault(name, []).append(output.values)
@@ -165,8 +164,7 @@ def pushed(signal, *, rate=RATE_HZ, samples=100, level=0.0, slope='rising', seco
     assembler = TraceAssembler(WaveformTrigger(0, level, slope, 'x', 'V', samples), 1.0 / rate)
     times = np.arange(int(seconds * rate)) / rate
     values = signal(times)
-    received = np.arange(times.size, dtype=np.int64)
-    parts = [assembler.push(values[at:at + cut], times[at:at + cut], received[at:at + cut]) for at in range(0, times.size, cut)]
+    parts = [assembler.push(values[at:at + cut], times[at:at + cut]) for at in range(0, times.size, cut)]
     return assembler, np.concatenate([part.samples for part in parts]), np.concatenate([part.times for part in parts]), sum(part.edges for part in parts)
 
 
@@ -252,8 +250,6 @@ class Publication(unittest.TestCase):
                 np.testing.assert_allclose(commits.traces(outputs[0].name)[:, 20], 0.0, atol=1e-5)
                 self.assertTrue(np.all(np.diff(commits.shot_times) > 0))
                 self.assertLess(commits.commits, 40, 'one commit a read')
-                timing = commits.records[3]['record_timing']['wf']['3']
-                self.assertAlmostEqual(timing['record_time_seconds'], commits.shot_times[3])
 
     def test_the_time_axis_is_zero_at_the_crossing_in_a_continuous_and_a_finite_run(self):
         for repeat in (0, 5):
@@ -327,8 +323,8 @@ class FiniteRuns(unittest.TestCase):
             # The same wave at the same phase: one trace lies on the next.
             self.assertLess(np.abs(traces - traces[0]).max(), 1e-3)
             self.assertTrue(capture.terminal.source_stopped)
-            crossings = [commits.records[index]['record_timing']['wf'][str(index)]['source_time_seconds'] for index in range(5)]
-            np.testing.assert_allclose(np.diff(crossings), 0.2, atol=1e-3)
+            # Each trace's crossing is its shot time.
+            np.testing.assert_allclose(np.diff(commits.shot_times[:5]), 0.2, atol=1e-3)
 
     def test_stopped_before_any_edge_keeps_nothing(self):
         stop = threading.Event()

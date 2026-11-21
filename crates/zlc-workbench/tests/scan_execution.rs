@@ -32,7 +32,7 @@ impl Run {
     fn publish(&self, ordinal:u64)->Arc<Publication>{
         let data=DataBlock::new(self.schema.clone(),OwnedBuffer::from_vec(vec![ordinal as f64;2]).into(),Validity::Uniform(true),None).unwrap();
         self.runtime.commit(&self.source,&Bundle{inputs:vec![Input::Event{signal:"source".into(),ordinal,data,origin:None,shot_time:None}],
-            metadata:json!({"records":{"source":{"point":ordinal}}}),parents:vec![]}).unwrap().publications[0].clone()
+            metadata:json!({"records":{"source":{"frames_missing":[ordinal]}}}),parents:vec![]}).unwrap().publications[0].clone()
     }
 }
 

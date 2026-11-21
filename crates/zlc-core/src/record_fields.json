@@ -1,0 +1,64 @@
+{
+  "metadata": {
+    "records": {
+      "owner": "zlc_plugin SDK (commit_live, commit_events); native scan (zlc-workbench scan/execution.rs)",
+      "purpose": "each output's event record, by output name",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs",
+        "science/src/zlc_plugin/context.py",
+        "crates/zlc-workbench/src/scan/execution.rs"
+      ]
+    },
+    "shot_time_seconds": {
+      "owner": "zlc_plugin SDK (commit_live, commit_events): waveform_measurement",
+      "purpose": "when each output's shot was taken (s); the host stamps it on the publication (its shot time)",
+      "readers": [
+        "crates/zlc-plugin-host/src/lib.rs"
+      ]
+    }
+  },
+  "event_record": {
+    "frames_missing": {
+      "owner": "camera_measurement (science/src/zlc_atom/nodes/camera/measurement.py)",
+      "purpose": "the slots of a shot whose frames never came, written only for such a shot: why its data is invalid",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
+    },
+    "device_settings": {
+      "owner": "camera_measurement and its subclasses (camera/measurement.py _camera_event_record); calibration capture preview (calibration/outputs.py)",
+      "purpose": "the camera settings epoch the frames were taken in (device session, epoch ranges, mixed)",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
+    },
+    "actual_devices": {
+      "owner": "native scan (zlc-workbench scan/execution.rs, read back by scan/seamless.py)",
+      "purpose": "the device readbacks at this scan point",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
+    },
+    "device_snapshots": {
+      "owner": "slm_feedback candidate outputs (slm_feedback/task.py); slm_rearrangement, each output as its capture stood (slm_rearrangement/task.py)",
+      "purpose": "the devices as they stood for this event (the SLM's command and mapping revisions)",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
+    },
+    "image_point_overlay_geometry": {
+      "owner": "slm_feedback camera frames; slm_rearrangement; calibration site review",
+      "purpose": "the sites drawn over the image (coordinates, ids, labels, status axis)",
+      "readers": [
+        "crates/zlc-plot/src/projection/site_geometry.rs"
+      ]
+    },
+    "rearrangement": {
+      "owner": "rearrangement_measurement (rearrangement_measurement/measurement.py)",
+      "purpose": "one cycle's rearrangement: source and target sites, frames planned and played, timings, whether its quality gates accepted it and which maps missed them, the worst intensity ratios",
+      "readers": [
+        "crates/zlc-desktop/src/record.rs"
+      ]
+    }
+  }
+}

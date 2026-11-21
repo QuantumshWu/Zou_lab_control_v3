@@ -122,7 +122,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert!(signal.sealed);
     let latest = runtime.read_latest(&signal.generation, frames_signal).unwrap();
     assert_eq!(latest.key().ordinal, Some(2));
-    assert_eq!(latest.event().metadata, json!({"records": {"frames": {"index": 2}}}));
+    assert_eq!(latest.event().metadata, json!({"records": {"frames": {"frames_missing": [2]}}}));
     let data = latest.data().unwrap();
     let frame = std::sync::Arc::downgrade(data);
     assert_eq!(data.schema().physical_shape(), [1, 1, 128, 128]);
@@ -155,7 +155,7 @@ fn devices_lend_frames_nodes_publish_through_claims_and_share_one_process() {
     assert_eq!(derived.key().ordinal, Some(2));
     assert_eq!(derived.event().parents.iter().map(|parent| parent.key.clone()).collect::<Vec<_>>(), [latest.key().clone()]);
     assert_eq!(derived.run().metadata, json!({"source": frames_signal, "source_count": 3, "node": "doubler", "node_name": "doubler"}));
-    assert_eq!(derived.event().metadata, json!({"records": {"doubled": {"from": {"index": 2}}}}));
+    assert_eq!(derived.event().metadata, json!({"records": {"doubled": {"frames_missing": [2]}}}));
     let AnyBuffer::U32(values) = derived.data().unwrap().values() else { panic!("dtype") };
     assert!(values.as_slice().iter().all(|value| *value == 6));
 

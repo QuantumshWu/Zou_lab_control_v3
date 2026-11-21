@@ -796,10 +796,12 @@ class AlignedCapture:
         # A frame that never came is stood in for by one that did, and marked invalid.
         cycle = tuple(frame if frame is not None else taken[0] for frame in shot.frames)
         present = tuple(frame is not None for frame in shot.frames)
-        record = {"trigger_alignment": {"shot": shot.index, "missing": [slot for slot, here in enumerate(present) if not here]}}
-        if not shot.complete:
+        missing = [slot for slot, here in enumerate(present) if not here]
+        # Only a shot that lost frames says so in its record: which of its frames are stand-ins (why it is invalid).
+        record = {"frames_missing": missing} if missing else None
+        if missing:
             self.incomplete += 1
-            journal.note("camera", "shot_incomplete", key=self.node.request.camera_key, shot=shot.index, missing=record["trigger_alignment"]["missing"])
+            journal.note("camera", "shot_incomplete", key=self.node.request.camera_key, shot=shot.index, missing=missing)
             if self._say is not None:
                 self._say(f"shot {shot.index + 1} lacks {len(shot.frames) - len(taken)} of its {len(shot.frames)} frames: published invalid")
         output = (_finite_cycle_output(self.node, cycle, self.published, present=present, record=record) if self.node.repeat
@@ -1123,7 +1125,6 @@ class CameraMeasurementNode:
             "camera": {
                 "device_session_id": session_id,
                 "epoch_ranges": ranges,
-                "mixed": len(ordered) > 1,
             }
         }}
 

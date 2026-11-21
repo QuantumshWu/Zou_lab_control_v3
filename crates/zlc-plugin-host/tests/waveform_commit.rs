@@ -73,15 +73,15 @@ fn await_end(events: &mpsc::Receiver<HostEvent>, run: &str) -> (String, Value, O
 }
 
 /// Each event of `signal` a run published, in order, as a follower takes it:
-/// (ordinal, first value, shot time, the source time its record says).
-fn drain(subscription: &Subscription, into: &mut Vec<(u64, f32, f64, f64)>) {
+/// (ordinal, first value, shot time).
+fn drain(subscription: &Subscription, into: &mut Vec<(u64, f32, f64)>) {
     while let Ok(Some(delivery)) = subscription.next(Duration::ZERO) {
         for publication in delivery.publications.iter() {
             let ordinal = publication.key().ordinal.unwrap();
             let AnyBuffer::F32(values) = publication.data().unwrap().values() else { panic!("dtype") };
-            let timing = &publication.event().metadata["records"]["q0"]["record_timing"]["wave"][ordinal.to_string()];
-            assert!((publication.event().metadata["shot_time_seconds"]["q0"].as_f64().unwrap() - timing["record_time_seconds"].as_f64().unwrap()).abs() < 1e-12, "{ordinal}");
-            into.push((ordinal, values.as_slice()[0], publication.shot_time().unwrap(), timing["source_time_seconds"].as_f64().unwrap()));
+            assert_eq!(publication.event().metadata["shot_time_seconds"]["q0"].as_f64(), publication.shot_time(), "{ordinal}");
+            assert!(publication.event().metadata.get("records").is_none(), "an event's time is its shot time, not a record");
+            into.push((ordinal, values.as_slice()[0], publication.shot_time().unwrap()));
         }
     }
 }
@@ -123,8 +123,6 @@ fn a_triggered_run_publishes_one_centred_trace_for_each_edge() {
             assert_eq!(pair[1].0, pair[0].0 + 1, "every event in order");
             assert!(pair[1].2 > pair[0].2, "crossing times strictly increase");
         }
-        let origin = taken[0].3 - taken[0].2;
-        for (_, _, shot, source) in &taken { assert!((source - shot - origin).abs() < 1e-9); }
         let latest = runtime.read_latest(&description.generation, "@logic/wave/q0").unwrap();
         let schema = latest.data().unwrap().schema().clone();
         assert_eq!(schema.domain(zlc_core::schema::DomainRole::Cell).axes()[1].name(), "record time");
@@ -184,6 +182,7 @@ fn a_finite_triggered_run_keeps_one_trace_for_each_edge() {
     let dataset = latest.canonical().expect("finite dataset");
     assert_eq!((dataset.written_cells(), dataset.total_cells()), (5, 5));
     assert_eq!(latest.key().ordinal, Some(4));
+    assert!(latest.shot_time().is_some(), "a finite trace's crossing is its shot time");
     host.close("wave").unwrap();
     host.close("source").unwrap();
 
