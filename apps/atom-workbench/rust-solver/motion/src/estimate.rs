@@ -40,16 +40,21 @@
 //! The estimates are over the trajectories counted. What the others would show is unknown, and a probability errs by
 //! at most its share: with u the share of an output's trajectories not counted (`Estimate::uncounted`), a row as shown
 //! or the loss over the counted ones, P_c, and the whole ensemble's, P = (1 − u)P_c + u P_u with P_u ∈ [0, 1] unknown,
-//! differ by u|P_u − P_c| ≤ u -- booked whole on what is shown (solve.rs `accounts`). Of T nothing bounds the part the
-//! held atoms of unknown fate make: an atom's kinetic energy after its last state is bounded by nothing the run read,
-//! so T has no account where some trajectory is not counted. Where none is counted (u = 1) nothing is estimated: the
-//! loss stands at the output before it, what is shown is booked whole, and the result says so (solve.rs `assemble`).
+//! differ by u|P_u − P_c| ≤ u -- booked whole on what is shown (solve.rs `bounded`). Of T, a held atom's kinetic energy
+//! is bounded whatever its state (SPEC §1.7): the held atoms of unknown fate move the held atoms' distribution by at
+//! most their share of it, and T by at most the bound of that share (# A share of the held atoms moved). Where none is
+//! counted (u = 1) nothing is estimated: the loss stands at the output before it, what is shown is booked whole, and
+//! the result says so (solve.rs `assemble`).
 //!
 //! # A share of the held atoms moved
 //! A held atom is in the bound set H = {E ≤ 0} (SPEC §1.7): its kinetic energy is at most K_max, the prepared
 //! potential's deepest (`Escape`; solve.rs `kinetic_bound`), so along each lab axis its x = √m v lies in [−a, a],
-//! a = √(2K_max). Let the held atoms' distribution P be moved to Q within H by at most w in total variation -- by the
-//! model's dropped terms, the trace distance they may move the state by (solve.rs `bounded`). An axis's
+//! a = √(2K_max). Let the held atoms' distribution P be moved to Q within H by at most w in total variation (solve.rs
+//! `bounded`) -- by held atoms whose state the run does not know: the unresolved (solve.rs, # The unresolved atoms),
+//! and the trajectories not counted, each as one held (# What is counted), their share (U + F)/(H + F) of H held, U
+//! of them unresolved, and F not counted; and by the model's dropped terms, the trace distance D they may move the state
+//! by, D/(n − D) of the held share n. The shares add (the triangle inequality), and the bound is taken at their sum.
+//! An axis's
 //! k_BT = E[⟨(x − c)²⟩] − (E⟨x⟩ − c)² for every centre c (⟨·⟩ the window's mean, over states in H), and a function
 //! with values in [0, (a + |c|)²] moves by at most that range times w; with c the other distribution's mean x̄,
 //!   k_BT_Q ≤ E_Q⟨(x − x̄_P)²⟩ ≤ E_P⟨(x − x̄_P)²⟩ + (a + |x̄_P|)² w = k_BT_P + (a + |x̄_P|)² w,
@@ -59,7 +64,10 @@
 //! the loss test reads (adapt.rs, # The reads), and between them to the step's order. At rest (x̄ = 0) and to the
 //! first order in w it is 2K_max w: on T's allowance, which is no less than T_sc, at most c_T w with
 //! c_T = 2K_max/(k_B T_sc) (DESIGN2 §2.3: 191 to 275 on the six scenes). It reads nothing of the dynamics, and none
-//! tighter reads only the bound: a share w of the atoms moved from rest to K_max meets it.
+//! tighter reads only the bound: a share w of the atoms moved from rest to K_max meets it. (Until 2026-11-21 an
+//! unresolved atom's T was booked as its share of the held atoms' kinetic energy, which bounded its error only while
+//! its true energy was within twice the computed one, and T had no account where some trajectory was not counted: with
+//! the loss also asking for the trap's region, a held atom's energy had no bound.)
 //!
 //! # Errors
 //! The trajectories come in groups, a Latin hypercube inside each and the groups independent (ensemble.rs): an
@@ -317,7 +325,7 @@ pub enum Fate {
 
 /// One output's sums over a group's trajectories: the number counted and of the others (`Fate::Failed`), the atoms held, and over the held
 /// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; of the held atoms
-/// the unresolved ones (`Held`), their number and their Σ_a ⟨κ_a²⟩ over the three axes.
+/// the number unresolved (`Held`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -329,11 +337,11 @@ pub struct Sums {
     pub kappa: [f64; 3],
     pub kappa_squared: [f64; 3],
     pub kappa2: [f64; 3],
-    pub unresolved: [f64; 2],
+    pub unresolved: f64,
 }
 
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], unresolved: [0.; 2] };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], unresolved: 0. };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         if matches!(fate, Fate::Failed | Fate::Refused) {
@@ -353,8 +361,7 @@ impl Sums {
                 self.kappa2[a] += h.kappa2[a];
             }
             if h.unresolved {
-                self.unresolved[0] += 1.;
-                self.unresolved[1] += h.kappa2.iter().sum::<f64>();
+                self.unresolved += 1.;
             }
         }
     }
@@ -372,9 +379,7 @@ impl Sums {
             self.kappa_squared[a] += sign * o.kappa_squared[a];
             self.kappa2[a] += sign * o.kappa2[a];
         }
-        for i in 0..2 {
-            self.unresolved[i] += sign * o.unresolved[i];
-        }
+        self.unresolved += sign * o.unresolved;
     }
 }
 
@@ -483,9 +488,9 @@ pub struct Estimate {
     /// T's allowance at the output, relative to its total T (`allowance`; solve.rs, # T's allowance): the target the
     /// total T is held to there -- `TEMPERATURE_TARGET` where no T is read.
     pub temperature_target: f64,
-    /// Of the held atoms the unresolved ones (`Held`): their share of the atoms and their share of the atoms' kinetic
-    /// energy, Σ_a ⟨κ_a²⟩ of theirs over that of all -- what they carry of what is shown and of the total T.
-    pub unresolved: [f64; 2],
+    /// Of the held atoms the unresolved ones' share (`Held`): what they carry of what is shown, and of the held atoms
+    /// whose state is unknown on T (`Estimate::moved`; solve.rs `bounded`).
+    pub unresolved: f64,
 }
 /// The held atoms' motion at an output where at least two are held: T per lab axis (µK), T_total = (T_x + T_y + T_z)/3
 /// with its own jackknife (the axes' correlations in it), n̄ and the mean velocity (m/s).
@@ -670,10 +675,8 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
             let (all, full) = (&j.all[0], &j.full[0]);
             let n = all.held;
             let motion = motion(&j, scales);
-            let kinetic: f64 = all.kappa2.iter().sum();
-            let shares = |kind: &[f64; 2]| [if n != 0. { kind[0] / n } else { 0. }, if kinetic != 0. { kind[1] / kinetic } else { 0. }];
             let estimate = Estimate {
-                unresolved: shares(&all.unresolved),
+                unresolved: if n != 0. { all.unresolved / n } else { 0. },
                 trajectories: all.trajectories,
                 held: n,
                 loss: 0.,
@@ -1206,19 +1209,20 @@ mod tests {
         assert!(summarize(&[group(vec![Some(atom(0, 1., 3.)), None])], &scales)[0].motion.is_none());
     }
 
-    /// The unresolved atoms at an output (`Estimate::unresolved`): of three held atoms with Σ_a ⟨κ_a²⟩ = 9, 33 and 6,
-    /// the second and the third unresolved, they are two thirds of the atoms and hold 39/48 of the kinetic energy --
-    /// whatever the groups they come in, and a lost atom is none of them.
+    /// The unresolved atoms at an output (`Estimate::unresolved`): of three held atoms, the second and the third
+    /// unresolved, they are two thirds of the atoms -- whatever their energies and the groups they come in, and a lost
+    /// atom is none of them. (Their T is the bound's at their share, solve.rs `bounded`; the share of the kinetic energy
+    /// they held is read no more.)
     #[test]
-    fn the_unresolved_atoms_are_their_shares_of_the_held_atoms_and_of_their_kinetic_energy() {
+    fn the_unresolved_atoms_are_their_share_of_the_held_atoms() {
         let scales = Scales { hbar_over_mass: 2., frequencies: [4.; 3] };
         let apart = |y: f64| Some(Held { unresolved: true, ..atom(0, 1., y) });
         let one = summarize(&[group(vec![Some(atom(0, 1., 3.)), apart(11.), apart(2.), None])], &scales);
         let two = summarize(&[group(vec![Some(atom(0, 1., 3.)), None]), group(vec![apart(11.), apart(2.)])], &scales);
         for e in [&one[0], &two[0]] {
-            assert!((e.unresolved[0] - 2. / 3.).abs() < 1e-15 && (e.unresolved[1] - 39. / 48.).abs() < 1e-15, "{:?}", e.unresolved);
+            assert!((e.unresolved - 2. / 3.).abs() < 1e-15, "{:?}", e.unresolved);
         }
-        assert_eq!(summarize(&[group(vec![None, None])], &scales)[0].unresolved, [0.; 2]);
+        assert_eq!(summarize(&[group(vec![None, None])], &scales)[0].unresolved, 0.);
     }
 
     /// What is counted (module documentation, # What is counted). Four groups of two trajectories at t = 0 and three
@@ -1286,7 +1290,7 @@ mod tests {
     fn held_at(temperature: [f64; 3], mean: [f64; 3]) -> Estimate {
         let exact = Spread { error: 0., groups: f64::INFINITY };
         let motion = Motion { temperature, temperature_errors: [exact; 3], temperature_total: temperature.iter().sum::<f64>() / 3., temperature_total_error: exact, occupation: [0.; 3], mean_velocity: mean };
-        Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: [0.; 2] }
+        Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: 0. }
     }
 
     /// A share w of the held atoms moved anywhere in the bound set moves the total T by no more than `Estimate::moved`

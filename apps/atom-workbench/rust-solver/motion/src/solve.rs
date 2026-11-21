@@ -447,12 +447,15 @@
 //! # The unresolved atoms
 //! A step asks its domain one cheap thing (`Domain`; step.rs, # The domain): whether a state scatters beyond every state
 //! of the atom, its hazard above the fastest excited state's decay wholly excited (`Widest`). The trajectory stops there
-//! (`run`): unresolved from then on, its state as it stood. What an unresolved atom shows is booked whole (`apart`): its
-//! share of the held atoms on what is shown -- an atom's row is a probability, so its error is at most one, whatever its
-//! state, and the mean over the held atoms errs by at most the share --, its share of the held atoms' kinetic energy on
-//! T -- the part of T it makes, which bounds its error while its true kinetic energy is within twice the one computed (a
-//! hypothesis on T, not a bound). The loss of an atom lost after such a step is no held atom's: as every model error's,
-//! it is in what the held atoms' errors are weighed by (the held share, `accounts`), and not booked apart.
+//! (`run`): unresolved from then on, its state as it stood. What an unresolved atom shows is booked whole (`bounded`):
+//! its share of the held atoms on what is shown -- an atom's row is a probability, so its error is at most one, whatever
+//! its state, and the mean over the held atoms errs by at most the share --; on T the strict bound of that share of the
+//! held atoms moved anywhere in the bound set (estimate.rs `Estimate::moved`: a held atom's kinetic energy is at most
+//! K_max, SPEC §1.7), with the trajectories not counted, each as one held atom of unknown state (estimate.rs, # What is
+//! counted) -- one bound for every held atom whose state the run does not know. (Until 2026-11-21 its share of the held
+//! atoms' kinetic energy: a bound only while its true kinetic energy was within twice the computed one.) The loss of an
+//! atom lost after such a step is no held atom's: as every model error's, it is in what the held atoms' errors are
+//! weighed by (the held share, `accounts`), and not booked apart.
 //!
 //! # Exits
 //! Two exits, each said where it is met, none carried on as a number (unify2 §7):
@@ -477,8 +480,9 @@
 //! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
 //! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the three points' measurement booked at the pilot's states
 //! -- its held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the optical sector's booking, and c
-//! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what the run's
-//! unresolved atoms carry, read before each batch's looks (# The unresolved atoms) --; S the statistics' interval. The
+//! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what the atoms whose
+//! state the run does not know carry, read with every look (# The unresolved atoms; `bounded`) --; S the statistics'
+//! interval. The
 //! run stops where every one of them lies within its target: the test the ledger flags an output by, at the outputs
 //! (`Look::met`). The stop reads the run's standard errors, its unresolved atoms, and nothing else of its estimates. A
 //! look that no run's trajectories bring within its target -- its need beyond `MOST_TRAJECTORIES`, or A² + c² ≥ ε²
@@ -1751,14 +1755,6 @@ fn read_as_it_is(times: &[f64], window: f64, fine: &[&Part], coarse: &[&Part], s
     between(&there(&fine), &there(&coarse), scales, &at.iter().map(|&k| times[k]).collect::<Vec<_>>())
 }
 
-/// What the run's unresolved atoms add to the model's error at every time (SPEC §4; module documentation, # The
-/// unresolved atoms), whole: their share of the held atoms on what is shown (absolute: by the held share 1 − L, as
-/// `Measured::means` books the held atoms), their share of the kinetic energy on T (relative; estimate.rs
-/// `Estimate::unresolved`).
-fn apart(estimates: &[Estimate]) -> Vec<[f64; 2]> {
-    estimates.iter().map(|e| [(1. - e.loss) * e.unresolved[0], e.unresolved[1]]).collect()
-}
-
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
 /// `CLASSICAL` ħω (SPEC §0, §3): what the result reports as classical, per axis; reporting only.
 fn classical(temperature: f64, frequency: f64) -> bool {
@@ -1944,7 +1940,6 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     let mut context = Context {
         at: vec![0., end],
         fixed: Fixed::new(vec![[0.; 2]; 2], &[0., end], dropped_rate(run), Escape::new(kinetic_bound(run), hm)),
-        unresolved: vec![[0.; 2]; 2],
         step: Bound::share(),
         checked: None,
         tau: first_rung,
@@ -2059,7 +2054,6 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     context.plan.read_at(times.clone());
     let n = times.len();
     context.at = times;
-    context.unresolved = vec![[0.; 2]; n];
     context.fixed = context.fixed.with(read.model.clone(), &context.at);
     // The optical sector's noise (ledger.rs `optical`), its items; its booking on T is in the model's error the reads
     // made (`pilot_reads`).
@@ -2797,14 +2791,12 @@ fn batch(need: f64, have: u64) -> u64 {
 /// The product (module documentation, # Stopping): batches of whole groups at the run's step, on from the pilot's
 /// groups (their numbers `pilot`; the product's own follow in the list's order), to the number the looks predict
 /// (`batch`), until every look a run's trajectories can meet (`Look::fits`) is met, or the trajectories reach
-/// `MOST_TRAJECTORIES`. Before every batch's looks the unresolved atoms are booked (`apart`): what they add joins the
-/// model's error the pilot fixed, in the looks and in the results. Each batch's result is a checkpoint; returns the
+/// `MOST_TRAJECTORIES`; every look with what the atoms of unknown state carry (`bounded`). Each batch's result is a
+/// checkpoint; returns the
 /// estimates, the listed atoms and the counts at its end, and the estimates at the analysis times.
 #[allow(clippy::too_many_arguments)]
 fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, parts: &mut Vec<Part>, pilot: &[u64], messages: &mut Messages) -> (Vec<Estimate>, Vec<Vec<(V3, V3)>>, Counts, Vec<Estimate>) {
     let (started, from) = (Instant::now(), parts.len() as u64 * GROUP);
-    // The model's error as the pilot fixed it.
-    let booked = context.fixed.model.clone();
     // The group at the list's place g.
     let number = |g: u64| pilot.get(g as usize).copied().unwrap_or(g);
     // The wall time (ms) the trajectories from `done` to `want` take at the product's pace so far; none before its own
@@ -2815,8 +2807,6 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
         let n = all.len() as u64 * GROUP;
         // The estimates at the analysis times: what the looks and the decisions read (# The analysis times).
         let e = summarize(&reads_of(&all), &context.scales);
-        context.unresolved = apart(&e);
-        context.fixed.model = booked.iter().zip(&context.unresolved).map(|(model, more)| [probability_error(model[0] + more[0]), model[1] + more[1]]).collect();
         let chased: Vec<Look> = looks(&e, &context.fixed, context.step).into_iter().filter(Look::fits).collect();
         if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
             let (shown, l, c) = pooled(&all, &context.scales);
@@ -3212,7 +3202,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
     let (mut steps, mut counted) = (0, None);
     let mut record = |places: [Option<usize>; 2], t: &Trajectory, shown: Option<&[f64; STATES]>| {
         // The atom at the time's instant; from the first time on its κ and κ² are its window's means (`mean`).
-        // An unresolved one is booked whole (`apart`). Where the run's fold does not exist for it: no outcome from then
+        // An unresolved one is booked whole (`bounded`). Where the run's fold does not exist for it: no outcome from then
         // on, and at t = 0 its own state's populations.
         let _p = crate::prof::scope(crate::prof::SOLVE_RECORD);
         let mut rows = [0.; STATES];
@@ -3614,11 +3604,10 @@ fn run_groups(levels: &[Hand], shown: usize, messages: &mut Messages, progress: 
 }
 
 /// What the pilot fixes for the run (module documentation, # Stopping), per time: the model's error on the held atoms
-/// (populations absolute, T relative; T's unbounded where no pilot atom reads it) -- to which the product adds what
-/// its unresolved atoms carry (`Context::unresolved`) --; none at t = 0, where no model has acted (`model_error`). And
-/// what the model's error holds beside it, by bounds the model fixes (`bounded`): per time the trace distance D = t·Y
-/// its dropped terms may move the state by (`dropped_rate`), and the bound set's hold on a held atom (`Escape`,
-/// `kinetic_bound`).
+/// (populations absolute, T relative; T's unbounded where no pilot atom reads it), none at t = 0, where no model has
+/// acted (`model_error`). And what the model's error holds beside it, by bounds (`bounded`): per time the trace distance
+/// D = t·Y its dropped terms may move the state by (`dropped_rate`), and the bound set's hold on a held atom (`Escape`,
+/// `kinetic_bound`), which bounds T where an atom's state is unknown.
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
@@ -3642,19 +3631,24 @@ impl Fixed {
     }
 }
 
-/// What the model's error holds beside its measurement at a time (SPEC §4), each a strict bound: its dropped terms
-/// may move the state -- the held atoms with the lost ones, on which the propagator is a contraction -- by D in trace
-/// distance (`Fixed::dropped`; DROPRES §2). On what is shown D itself: a row as shown and the loss are observables
-/// between 0 and 1 (the held atoms' own populations p = P/n move by D/(n − D), DESIGN2 §2.2, n = 1 − L the held share);
-/// on T the bound where the held atoms' distribution moves by D/(n − D) in total variation within the bound set
-/// (estimate.rs `Estimate::moved`). Nothing where nothing is dropped.
+/// What the model's error holds beside its measurement at a time (SPEC §4), each a strict bound, on what is shown
+/// (absolute) and on T (relative):
+/// - the atoms whose state the run does not know: the trajectories not counted (`Estimate::uncounted`, estimate.rs
+///   # What is counted) and the unresolved held atoms (`Estimate::unresolved`, module documentation, # The unresolved
+///   atoms) -- on what is shown their share whole, the unresolved ones' by the held share n = 1 − L; on T their share of
+///   the held atoms (U + F)/(H + F), H held, U of them unresolved, F not counted (each as one held atom);
+/// - the model's dropped terms, which may move the state -- the held atoms with the lost ones, on which the propagator
+///   is a contraction -- by D in trace distance (`Fixed::dropped`; DROPRES §2): on what is shown D itself, a row as
+///   shown and the loss being observables between 0 and 1 (the held atoms' own populations p = P/n move by D/(n − D),
+///   DESIGN2 §2.2); on T a share D/(n − D) of the held atoms.
+/// On T one bound at the shares' sum (the triangle inequality of the total variation): the held atoms' distribution
+/// moved by it within the bound set (estimate.rs `Estimate::moved`). Nothing where every state is known and nothing
+/// dropped, to the bit.
 fn bounded(e: &Estimate, dropped: f64, escape: &Escape) -> [f64; 2] {
-    if dropped == 0. {
-        return [0.; 2];
-    }
     let held = 1. - e.loss;
-    let moved = if held > dropped { dropped / (held - dropped) } else { 1. };
-    [dropped, e.moved(moved, escape)]
+    let unknown = if e.held + e.failed > 0. { (e.unresolved * e.held + e.failed) / (e.held + e.failed) } else { 0. };
+    let moved = if dropped == 0. { 0. } else if held > dropped { dropped / (held - dropped) } else { 1. };
+    [e.uncounted + held * e.unresolved + dropped, e.moved(unknown + moved, escape)]
 }
 
 /// The step's share of the targets (SPEC §2.2, §4): on what is shown s·ε, and on T s itself -- of T's allowance at each
@@ -3762,8 +3756,8 @@ fn most_needed(looks: &[Look]) -> f64 {
 /// what is shown is the request's state, without error, and T the initial atoms' estimate (module documentation,
 /// # Times and windows): no step is taken and no model has acted there, so T's account is its statistics alone.
 /// The share of the time's trajectories not counted is booked whole on what is shown, in the model's part
-/// (estimate.rs, # What is counted: what no number of trajectories takes away), and leaves T no account
-/// (`temperature_model`). The model's error on what is shown is at most 1, a probability's. T has an account where its
+/// (estimate.rs, # What is counted: what no number of trajectories takes away), and on T by the bound (`bounded`). The
+/// model's error on what is shown is at most 1, a probability's. T has an account where its
 /// statistics, the model's error and its step error are all read. The times' accounts are made on the pool, each
 /// time's by itself.
 fn accounts(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> (Vec<Account>, Vec<Option<Account>>) {
@@ -3777,27 +3771,20 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> (Vec<Account>
                 return (Account::default(), temperature.statistics.is_finite().then_some(temperature));
             }
             let a = fixed.at(k, e);
-            let population = Account { model: probability_error(a[0] + e.uncounted), step: step.shown, statistics: e.shown_statistics() };
+            let population = Account { model: probability_error(a[0]), step: step.shown, statistics: e.shown_statistics() };
             let temperature = temperature_account(e, a[1], &step, e.temperature_interval());
             (population, (temperature.model.is_finite() && temperature.step.is_finite() && temperature.statistics.is_finite()).then_some(temperature))
         })
         .unzip()
 }
 
-/// T's account at a time (`accounts`) from its estimate, the model's error on T there `model`, the step's part `bound`
-/// (a share of T's allowance) and the statistics' relative interval `interval`: the model's part (`temperature_model`)
-/// and the statistics' weighed by the held share, the step's read so already (estimate.rs `between`), times the
-/// allowance.
+/// T's account at a time (`accounts`) from its estimate, the model's error on T there `model` (with its bounds,
+/// `Fixed::at`), the step's part `bound` (a share of T's allowance) and the statistics' relative interval `interval`:
+/// the model's part and the statistics' weighed by the held share, the step's read so already (estimate.rs
+/// `between`), times the allowance.
 fn temperature_account(e: &Estimate, model: f64, bound: &Bound, interval: f64) -> Account {
     let h = 1. - e.loss;
-    Account { model: weighed(h, temperature_model(e, model)), step: bound.temperature * e.temperature_target, statistics: weighed(h, interval) }
-}
-
-/// The model's part of T's account at a time whose model's error on T is `model` (relative): it where every
-/// trajectory is counted; unbounded where some is not -- the part of T the held atoms of unknown fate make is bounded by
-/// nothing the run read (estimate.rs, # What is counted).
-fn temperature_model(e: &Estimate, model: f64) -> f64 {
-    if e.uncounted != 0. { f64::INFINITY } else { model }
+    Account { model: weighed(h, model), step: bound.temperature * e.temperature_target, statistics: weighed(h, interval) }
 }
 
 /// An error of the held atoms weighed by their share h, as an account weighs it: unbounded stays so at any share -- h
@@ -3989,9 +3976,6 @@ struct Context {
     initial: [f64; STATES],
     at: Vec<f64>,
     fixed: Fixed,
-    /// What the unresolved atoms add to the model's error at each analysis time (`apart`), in `fixed` with the pilot's:
-    /// nothing until the product reads them.
-    unresolved: Vec<[f64; 2]>,
     step: Bound,
     checked: Option<Checked>,
     ledger: Ledger,
@@ -4054,7 +4038,7 @@ fn accounts_along(at: &[f64], population: &[Account], temperature: &[Option<Acco
 /// what is shown) -- else the cause alone, as the request's exit says it (`nothing_integrated`).
 fn ended(counts: &Counts, booked: bool) -> Vec<String> {
     let unmade = "在某一步上，光学扇区的噪声算子 K 做不出";
-    let [after, there] = if booked { ["：此后它们不计入估计，所占的比例全部计入布居与丢失的误差", "：它们在那里结束，此后不计入估计，所占的比例全部计入布居与丢失的误差"] } else { [""; 2] };
+    let [after, there] = if booked { ["：此后它们不计入估计，所占的比例全部计入布居与丢失的误差，温度上按束缚原子动能的上限计入", "：它们在那里结束，此后不计入估计，所占的比例全部计入布居与丢失的误差，温度上按束缚原子动能的上限计入"] } else { [""; 2] };
     let mut out = vec![];
     for (stopped, why) in [
         (&counts.refused, "的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了".to_string()),
@@ -4144,10 +4128,14 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         let relative = if check.resolution[1].is_finite() { format!("、在温度上低于其允许误差的 {} 时检查分辨不出", percent(check.resolution[1])) } else { " 时检查分辨不出，在温度上无法估计".into() };
         step = format!("（步长收敛检查：{paired}（同一初始原子、同一组随机数），相邻两级之差在各输出时刻上的方均根（已扣除统计噪声）按二阶换算成本步长的误差；{how}；步长误差的方均根在布居上低于 {}{relative}）", percent(check.resolution[0]));
     }
-    // What the unresolved atoms add (`apart`): its largest over the analysis times, weighed by the held share.
+    // What the unresolved atoms add (`bounded`, their part alone): its largest over the analysis times, weighed by the
+    // held share as the accounts weigh it -- on what is shown their share whole, on T the bound at their share of the
+    // held atoms, where T is read.
+    let kinetic = c.fixed.escape.kinetic_uk();
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
-        let largest = (1..reads.len()).map(|k| c.unresolved[k][i] * (1. - reads[k].loss)).fold(0., crate::linalg::larger);
-        ledger.item(&format!("计算中停下的原子（{what}）"), largest, "在每个输出时刻统计：因散射率超过原子任何状态的上限而停下的原子（从那一步起），按它们所占的比例全部计入（布居上是原子数的比例，温度上是动能的比例）");
+        let part = |e: &Estimate| if i == 0 { (1. - e.loss) * e.unresolved } else if e.motion.is_some() { weighed(1. - e.loss, e.moved(e.unresolved, &c.fixed.escape)) } else { 0. };
+        let largest = (1..reads.len()).map(|k| part(&reads[k])).fold(0., crate::linalg::larger);
+        ledger.item(&format!("计算中停下的原子（{what}）"), largest, &format!("在每个输出时刻统计：因散射率超过原子任何状态的上限而停下的原子（从那一步起），布居上按它们所占的比例全部计入；温度上按束缚原子动能的上限（阱深 U₀ = {kinetic:.0} μK）严格计入：份额 w 的原子在束缚集里任意移动时总温度至多变化 w·2U₀/k_B（另加平均速度与 w 的二阶项）"));
     }
     // What the model's dropped terms add (`bounded`): its largest over the analysis times, weighed by the held share as
     // the accounts weigh T -- an item only where it is more than the rounding (`Ledger::item`), so none where nothing is
@@ -4179,10 +4167,9 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         approximations: ledger,
     };
     // The first output where every trajectory counted is lost; the outputs no trajectory is counted at (estimate.rs,
-    // # What is counted), and those where T is read and some trajectory is not counted.
+    // # What is counted).
     let (mut empty, mut carried, mut unread) = (None, vec![], vec![]);
     let none: Vec<usize> = (1..outputs).filter(|&k| estimates[k].trajectories == 0.).collect();
-    let partly: Vec<usize> = (1..outputs).filter(|&k| estimates[k].uncounted > 0. && estimates[k].motion.is_some()).collect();
     for (k, e) in estimates.iter().enumerate() {
         // At t = 0 every trajectory holds its atom (`run`), and a result rests on two at least: nothing is carried there.
         let last = || k.checked_sub(1).expect("t = 0 holds every trajectory's atom, two at least in a result");
@@ -4242,10 +4229,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         s.approximations.flag(said);
     }
     if let Some(t) = counts.runaway.since {
-        s.approximations.flag(format!("{} 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 {}）：它们在那里停下，此后按停下时的状态计入，所占的比例全部计入误差", counts.runaway.count, when(t)));
-    }
-    if !partly.is_empty() {
-        s.approximations.flag(format!("{}：有轨迹不计入估计，温度的误差无法估计", span(&partly, times)));
+        s.approximations.flag(format!("{} 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 {}）：它们在那里停下，此后按停下时的状态计入，所占的比例全部计入误差（温度上按束缚原子动能的上限）", counts.runaway.count, when(t)));
     }
     if !none.is_empty() {
         s.approximations.flag(format!("{}：没有一条轨迹计入估计，丢失概率、布居与温度沿用此前的值，布居与丢失的误差至少 100%", span(&none, times)));
@@ -5153,7 +5137,7 @@ mod tests {
             }),
             failed: 0.,
             uncounted: 0.,
-            unresolved: [0.; 2],
+            unresolved: 0.,
             temperature_target: TEMPERATURE_TARGET,
         }
     }
@@ -5162,14 +5146,14 @@ mod tests {
     /// trajectories at t = 0 and three outputs, every atom held in state 0 until it ends with no outcome: the first of
     /// each group after the first output, the second after the second. The model's error booked at 1 % on the held
     /// atoms' populations and 2 % on T, the step at its share. At the first output the accounts are the model's and T
-    /// has one; at the second what is shown takes the uncounted half whole, 1 % + 50 %, and T has none; at the third,
+    /// has one; at the second what is shown takes the uncounted half whole, 1 % + 50 %, and T the bound of half its held
+    /// atoms moved anywhere in the bound set (1 mK, `bounded`), the atoms at rest (`Estimate::moved`); at the third,
     /// none counted, what is shown is booked whole, its model's part and its statistics' at one: those two outputs' looks
     /// on what is shown have no room. The result:
     /// every number finite (the app refuses one that is not), the loss and the populations at the third output the
     /// second's, its error at least the whole, and the flags say why -- the trajectories that ended by their reasons
-    /// (a step's optical sector that made no K by its own), counts and first times, the output where T has no account,
-    /// the outputs none is counted at -- and nothing of an atom lost; the reason a result is partial is the output none
-    /// is counted at.
+    /// (a step's optical sector that made no K by its own), counts and first times, the outputs none is counted at --
+    /// and nothing of an atom lost, nor of T unbooked; the reason a result is partial is the output none is counted at.
     #[test]
     fn the_share_not_counted_is_booked_whole_and_an_output_none_counts_at_says_so() {
         let groups: Vec<Group> = (0..4)
@@ -5186,7 +5170,9 @@ mod tests {
         let (fixed, step) = (fixed_of(vec![[0.01, 0.02]; 4]), Bound::share());
         let (population, temperature) = accounts(&estimates, &fixed, step);
         assert!((population[1].model - 0.01).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - 0.02).abs() < 1e-15), "{population:?} {temperature:?}");
-        assert!((population[2].model - 0.51).abs() < 1e-15 && temperature[2].is_none());
+        let bound = 0.02 + estimates[2].moved(0.5, &fixed.escape);
+        assert!((population[2].model - 0.51).abs() < 1e-15 && temperature[2].is_some_and(|t| (t.model - bound).abs() < 1e-14 * bound), "{temperature:?} against {bound}");
+        assert!((estimates[2].moved(0.5, &fixed.escape) - 0.5 * 2000. * 4. / estimates[2].motion.unwrap().temperature_total).abs() < 1e-12 * bound, "at rest, w = 1/2: w (2a)² m/k_B over T");
         assert!((population[3].model, population[3].statistics) == (1., 1.) && temperature[3].is_none());
         assert_eq!(looks(&estimates, &fixed, step).iter().map(|l| l.room() > 0.).collect::<Vec<_>>(), [true, true, false, false, false]);
         let plan = Plan::new(&[0., 10., 20., 30.], [1.; 3]);
@@ -5198,7 +5184,6 @@ mod tests {
             scales,
             initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
             fixed,
-            unresolved: vec![[0.; 2]; 4],
             step,
             checked: None,
             ledger: Ledger::default(),
@@ -5210,10 +5195,10 @@ mod tests {
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
         let flagged = s.approximations.flagged.expect("flagged");
-        for said in ["4 条轨迹的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "6 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 16 μs）：它们在那里结束", "20 μs：有轨迹不计入估计，温度的误差无法估计", "30 μs 起：没有一条轨迹计入估计"] {
+        for said in ["4 条轨迹的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "6 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 16 μs）：它们在那里结束", "30 μs 起：没有一条轨迹计入估计"] {
             assert!(flagged.contains(said), "{said} in {flagged}");
         }
-        assert!(!flagged.contains("已无原子留在光阱中"), "{flagged}");
+        assert!(!flagged.contains("已无原子留在光阱中") && !flagged.contains("温度的误差无法估计"), "{flagged}");
         assert!(s.reason.as_ref().is_some_and(|r| r.starts_with("t = 30 μs") && r.ends_with("：没有一条轨迹计入估计")), "{:?}", s.reason);
     }
 
@@ -5246,7 +5231,6 @@ mod tests {
             scales,
             initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
             fixed: fixed_of(vec![[0.01, 0.02]; 5]),
-            unresolved: vec![[0.; 2]; 5],
             step: Bound::share(),
             checked: None,
             ledger: Ledger::default(),
@@ -5319,7 +5303,7 @@ mod tests {
             let estimates = summarize(groups, &scales);
             for (k, e) in estimates.iter().enumerate() {
                 assert!(number(e.loss) && (0. ..=1.).contains(&e.loss) && (0. ..=1.).contains(&e.uncounted) && e.populations.iter().all(|p| number(*p)), "output {k}: {e:?}");
-                assert!(e.unresolved.iter().all(|x| number(*x)) && number_or_unbounded(e.temperature_interval()), "output {k}: {e:?}");
+                assert!(number(e.unresolved) && number_or_unbounded(e.temperature_interval()), "output {k}: {e:?}");
                 assert!(number(e.shown_statistics()) && e.shown_statistics() <= 1., "output {k}: {e:?}");
             }
             for booked in [[0.01, 0.02], [1., f64::INFINITY], [f64::NAN; 2]] {
@@ -5339,7 +5323,6 @@ mod tests {
                 scales,
                 initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))),
                 fixed: fixed_of(vec![[0.01, 0.02]; kinds + 1]),
-                unresolved: vec![[0.; 2]; kinds + 1],
                 step: Bound::share(),
                 checked: None,
                 ledger: Ledger::default(),
@@ -5347,7 +5330,7 @@ mod tests {
             }, &estimates, &estimates, &vec![vec![]; Plan::new(&(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>(), [1.; 3]).listed.len()], &Counts::default(), 20);
             assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| number(*x)), "{s:?}");
             let flagged = s.approximations.flagged.expect("flagged");
-            assert!(flagged.contains("30 μs") && flagged.contains("70 μs：没有一条轨迹计入估计") && flagged.contains("有轨迹不计入估计，温度的误差无法估计"), "{flagged}");
+            assert!(flagged.contains("30 μs") && flagged.contains("70 μs：没有一条轨迹计入估计") && !flagged.contains("温度的误差无法估计"), "{flagged}");
         }
         let read = between(&fine, &coarse, &scales, &(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>());
         let reads: Vec<&Read> = std::iter::once(&read.loss).chain(&read.shown).chain(read.temperature.iter()).collect();
@@ -5418,13 +5401,34 @@ mod tests {
         let items = |fixed: Fixed| {
             let plan = Plan::new(&[0., 100.], [1.; 3]);
             let listed = vec![vec![]; plan.listed.len()];
-            let context = Context { at: vec![0., 100.], plan, tau: 1., scales: Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] }, initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))), fixed, unresolved: vec![[0.; 2]; 2], step, checked: None, ledger: Ledger::default(), method: String::new() };
+            let context = Context { at: vec![0., 100.], plan, tau: 1., scales: Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] }, initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))), fixed, step, checked: None, ledger: Ledger::default(), method: String::new() };
             assemble(&context, &run, &run, &listed, &Counts::default(), 800).approximations.items
         };
         let made = items(dropped);
         let item = |label: &str| made.iter().find(|i| i.label == label).map(|i| i.estimate);
         assert!(item("模型删去的项（布居）") == Some(0.01) && item("模型删去的项（温度）").is_some_and(|x| (x - e.moved(w, &escape)).abs() < 1e-14 * x), "{made:?}");
         assert!(!items(none).iter().any(|i| i.label.starts_with("模型删去的项")));
+    }
+
+    /// The atoms whose state the run does not know are booked with the dropped terms by one bound (`bounded`): 800
+    /// atoms held at 13.7 µK, 1 % of them unresolved, 8 trajectories not counted, the model's dropped terms at D = 0.01
+    /// (a 1 mK bound). On what is shown the measured 1 % plus the share not counted, the unresolved share and D; on T the
+    /// measured 3 % plus the bound at (8 + 8)/808 + D/(1 − D), more than the two shares' bounds taken apart and added
+    /// (the bound is convex in the share). Without the unknown atoms and the dropped terms, the measurement alone.
+    #[test]
+    fn the_atoms_of_unknown_state_and_the_dropped_terms_share_one_bound() {
+        let escape = Escape::new(1000. * KT_PER_UK, KT_PER_UK);
+        let mut e = estimate([25., 6., 10.], 0.01, 800.);
+        (e.unresolved, e.failed, e.uncounted) = (0.01, 8., 8. / 808.);
+        let fixed = Fixed::new(vec![[0.; 2], [0.01, 0.03]], &[0., 100.], 1e-4, escape);
+        let run = [e.clone(), e.clone()];
+        let (population, temperature) = accounts(&run, &fixed, Bound::share());
+        let (unknown, dropped) = (16. / 808., 0.01 / 0.99);
+        let expected = [0.01 + (8. / 808. + 0.01 + 0.01), 0.03 + e.moved(unknown + dropped, &escape)];
+        assert!((population[1].model - expected[0]).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - expected[1]).abs() < 1e-14 * expected[1]), "{population:?} {temperature:?} against {expected:?}");
+        assert!(e.moved(unknown + dropped, &escape) > e.moved(unknown, &escape) + e.moved(dropped, &escape));
+        let known = estimate([25., 6., 10.], 0.01, 800.);
+        assert_eq!(bounded(&known, 0., &escape), [0.; 2]);
     }
 
     /// A T whose statistics no group reads is held as one whose statistics are the normal theory's prediction, in whether
@@ -5826,7 +5830,6 @@ mod tests {
             scales: Scales { hbar_over_mass: 1., frequencies: [1.; 3] },
             initial: [0.; STATES],
             fixed: fixed_of(vec![[0.; 2]; 2]),
-            unresolved: vec![[0.; 2]; 2],
             step: Bound::share(),
             checked: None,
             ledger: Ledger::default(),
@@ -5875,7 +5878,6 @@ mod tests {
             scales: Scales { hbar_over_mass: 1., frequencies: [1.; 3] },
             initial: [0.; STATES],
             fixed: fixed_of(vec![[0.; 2]; 2]),
-            unresolved: vec![[0.; 2]; 2],
             step: Bound::share(),
             checked: None,
             ledger: Ledger::default(),
@@ -6762,7 +6764,6 @@ mod tests {
                 scales,
                 initial: state(0),
                 fixed: fixed_of(vec![[0.; 2], [0.01, 0.02], [0.; 2]]),
-                unresolved: vec![[0.; 2]; 3],
                 step: Bound::share(),
                 checked: None,
                 ledger: Ledger::default(),
