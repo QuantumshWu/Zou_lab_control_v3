@@ -1562,7 +1562,8 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 /// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing of a
 /// step is carried to the next one, and a trajectory taken up again with a fresh scratch goes on as itself, to the bit.
 /// Beside, the count of the trajectory's steps the decomposition refused for an entry of no route (`unrouted`:
-/// spectral.rs, # The split), which the solve's probe reads (solve.rs, ## The ladder) and no step does.
+/// spectral.rs, # The split), which the solve's probe reads (solve.rs, ## The ladder) and no step does; and the counted
+/// work of the attempts refused on it (`refused`), which the solve's price reads and no step does.
 /// (Until 2026-11-20 the scratch carried its picture's counts of the decomposition's route, which the next step's
 /// route was priced against: the strides', spectral.rs, # Where the decomposition does not take the step.)
 #[derive(Default)]
@@ -1578,6 +1579,36 @@ pub struct Scratch {
     kept: Vec<f64>,
     /// The steps refused for an entry of no route (`Refused::Propagation(Refusal::Radius)`), at whatever length.
     unrouted: u64,
+    /// The counted work of the attempts refused on the scratch (`refused`), and how far the picture of the stretch being
+    /// taken has gone (`pictured`).
+    refused: f64,
+    stage: Stage,
+}
+
+/// How far a stretch's picture has gone (`pictured`), for the count of a stretch refused where it stood (`unfinished`):
+/// nothing yet; the model's generator at the step's nodes made (a refusal there comes after all of them); the tones
+/// separated (`spectral::Picture::separate`); the decay laid and the preparation begun -- the picture's own count
+/// (`spectral::Picture::work`) is the stretch's from there on.
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+enum Stage {
+    #[default]
+    None,
+    Made,
+    Separated,
+    Prepared,
+}
+
+/// What a stretch has done as far as it went, beside its picture (`Midway::stretch`): its states and whether its
+/// generator is still, the nodes gathered into the sums and the hazard's traces (`Price::nodes`, `Price::traces`), and
+/// where it passed the middle the scattered light's count (`Price::scattering`) -- what a refused stretch's count reads
+/// (`unfinished`).
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    states: usize,
+    still: bool,
+    counted: usize,
+    traces: usize,
+    scattering: f64,
 }
 
 struct Carved<'a> {
@@ -1600,6 +1631,16 @@ impl Scratch {
     /// length -- each taken at its halves by the advance (adapt.rs, # The step) -- since the scratch was made.
     pub fn unrouted(&self) -> u64 {
         self.unrouted
+    }
+
+    /// The counted work (real multiply-adds, `Step::work`'s) of every attempt on this scratch that was refused, since the
+    /// scratch was made (`Midway::attempt`): what each did before its refusal, by the counts its price would have had
+    /// (`Price::work`, `unfinished`) -- its stretches finished before the refused one, and of that one its middle's
+    /// making, its generator at the nodes, its tones' envelopes, the picture's own count as far as it went, the decay laid
+    /// with the hazard's traces taken, the nodes gathered, and the scattered light where it was made. None of a step's
+    /// results reads it.
+    pub fn refused(&self) -> f64 {
+        self.refused
     }
 
     /// The scratch for a cluster of n states and `slots` sums (`Sums`): the weights' sums of the three nodes kept, a
@@ -1651,8 +1692,14 @@ mod count {
     /// `forces`): per node and tone a density again and its six sums (`super::Sums`); their two matrices, each its three
     /// nodes' sums added, with the nodes' sums at their phases, and their forms.
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, centred: bool, tones: usize, forces: f64) -> f64 {
-        let (sums, forms) = if still { (1, model[1]) } else { (3, (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 }) };
-        COMPLEX * ((nodes * ((1 + sums) * n * (n + 1) / 2 + (1 + super::TONE) * tones * n * (n + 1) / 2)) as f64 + forms + (16 * tones * n * n) as f64 + forces)
+        let forms = if still { model[1] } else { (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 } };
+        gathered(n, nodes, still, tones) + COMPLEX * (forms + (16 * tones * n * n) as f64 + forces)
+    }
+    /// The kick's nodes alone (`impulse`'s first part): per node its density's upper triangle into the weighted sums,
+    /// and per node and tone a density again and its six sums.
+    pub fn gathered(n: usize, nodes: usize, still: bool, tones: usize) -> f64 {
+        let sums = if still { 1 } else { 3 };
+        COMPLEX * (nodes * ((1 + sums) * n * (n + 1) / 2 + (1 + super::TONE) * tones * n * (n + 1) / 2)) as f64
     }
     /// The end state's held forms (# The path's momentum): its density and one more node's forms with its tones'.
     pub fn end(n: usize, model: [f64; 3], tones: f64) -> f64 {
@@ -1685,6 +1732,7 @@ fn nodes(tau: f64, bandwidth: f64) -> usize {
 fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<&[C64]>) -> Result<f64, Refused> {
     let _p = crate::prof::scope(crate::prof::PICTURED);
     let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
+    scratch.stage = Stage::None;
     let picture = &mut scratch.picture;
     picture.fit(n);
     let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
@@ -1694,6 +1742,8 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
     drop(_g);
+    scratch.stage = Stage::Made;
+    let picture = &mut scratch.picture;
     let numbers = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
     if !(numbers(&picture.base) && (still || picture.ends.iter().all(numbers))) {
         return Err(Refused::Overflow);
@@ -1709,6 +1759,8 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         |m, s, plus, minus| along.middle.envelopes(&along.path, m, s, plus, minus),
     );
     drop(_s);
+    scratch.stage = Stage::Separated;
+    let picture = &mut scratch.picture;
     if !picture.beats.iter().flat_map(|tone| tone.members.iter().flatten()).all(numbers) {
         return Err(Refused::Overflow);
     }
@@ -1736,8 +1788,35 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     }
     let scale = sizes.into_iter().fold(0.0, linalg::larger);
     let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
-    picture.prepare(h, still, start).map_err(Refused::Propagation)?;
+    scratch.stage = Stage::Prepared;
+    scratch.picture.prepare(h, still, start).map_err(Refused::Propagation)?;
     Ok(scale)
+}
+
+/// The counted work of a stretch refused where it stood (`Scratch::refused`), by its price's counts as far as it went
+/// (`Price`, `count`): the middle's making (`Price::middle`); where its picture made the generator at the nodes, those
+/// (a refusal in the picture comes after all of them), the tones' envelopes where they were separated, the picture's own
+/// count where its preparation began (the decay laid with it, and the hazard's traces taken); the nodes gathered; the
+/// scattered light where the stretch passed the middle. Not the middle's forms, the end state's held forms nor the
+/// optical sector: each is made past the last place a stretch is refused before it.
+fn unfinished<M: Middle>(generator: &M, progress: &Progress, scratch: &Scratch) -> f64 {
+    let (n, still, picture) = (progress.states, progress.still, &scratch.picture);
+    let costs = generator.work();
+    let (tones, toned) = if scratch.stage >= Stage::Separated { (picture.beats.len(), toned(generator, picture, n)) } else { (0, [0.0; 2]) };
+    let made = if scratch.stage >= Stage::Made { count::propagation(costs, still, if scratch.stage == Stage::Prepared { picture.work } else { 0.0 }, toned[0]) } else { 0.0 };
+    let laid = if scratch.stage == Stage::Prepared { count::hazard(n, progress.traces, still, tones) } else { 0.0 };
+    generator.made() + made + laid + count::gathered(n, progress.counted, still, tones) + progress.scattering
+}
+
+/// A stretch's tones' counts (`Price::toned`): their envelopes at the three nodes, the candidates weighed and left in the
+/// static group at the middle alone, the weighing (`spectral::Picture::separate`) and the tones' sums; and their forms'.
+fn toned<M: Middle>(generator: &M, picture: &Picture, n: usize) -> [f64; 2] {
+    let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
+        let work = generator.tone_work(tone.candidate);
+        [sum[0] + work[0], sum[1] + work[1]]
+    });
+    let envelopes = envelopes + picture.weighed.iter().map(|&m| generator.tone_work(m)[0] / 3.0).sum::<f64>() + picture.weighing;
+    [envelopes + (6 * picture.beats.len() * n * n) as f64, forces]
 }
 
 /// A Hermitian matrix Γ (by its entries `gamma`) laid as the sum j of those `accumulate` holds: on each entry a ≤ b its
@@ -2100,6 +2179,8 @@ struct March {
     /// The end state's rows as shown on the middle of the stretch that reaches the step's end in its own cluster, where
     /// times are read at the end (`Middle::readout`).
     ended: Option<[f64; STATES]>,
+    /// The stretch being taken, as far as it went (`Progress`).
+    progress: Progress,
 }
 
 impl<'a, D: Dynamics> Midway<'a, D> {
@@ -2132,13 +2213,15 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n, SUMS);
         let kappa_m = predicted(&from.forms, kappa_h, tau, from.time + h);
-        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new(), ended: None };
+        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new(), ended: None, progress: Progress::default() };
         // The three nodes' weights' sums over the step, its stretches' together.
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
         loop {
-            let (done, next) = self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)?;
+            // A refused stretch: the attempt's count as far as it went, on the scratch (`Scratch::refused`).
+            let generator = landed.as_ref().unwrap_or(&self.generator);
+            let (done, next) = self.stretch(generator, kappa_m, from.time, reads, &mut march, scratch, domain).inspect_err(|_| scratch.refused += march.work + unfinished(generator, &march.progress, scratch))?;
             if done {
                 break;
             }
@@ -2196,6 +2279,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         let (r1, kappa1) = flow.advance(kicked, 0.5 * tau);
         if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && end.psi.iter().all(|z| z.is_finite())) {
+            scratch.refused += work;
             return Err(Refused::Overflow);
         }
         (end.r, end.kappa, end.time) = (r1, kappa1, from.time + tau);
@@ -2243,6 +2327,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let velocity = kappa_m.map(|k| hm * k);
         let along = Along::new(generator, kappa_m, velocity);
         let (n, still, cluster) = (along.n, generator.still(), march.state.cluster);
+        march.progress = Progress { states: n, still, ..Progress::default() };
         let launched = along.turned(&march.state.psi, march.u, true);
         // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
         // decay laid alike.
@@ -2255,7 +2340,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         weights[SUMS..].fill(0.0);
         let begun = march.u;
         let ahead = |u: f64| (u + h) / tau;
-        let (mut counted, mut traces, mut middle) = (0, 0, None);
+        let mut middle = None;
         let mut x = [C64::ZERO; STATES];
         // A state of the frame at a time u in the lab at the survival ln N: the direction at the norm √N.
         let at = |x: &[C64], u: f64, log: f64| -> Internal {
@@ -2283,7 +2368,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
             // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
             // the picture is moved or counted).
-            if traces == 0 {
+            if march.progress.traces == 0 {
                 part.fill(0.0);
                 Sums { still, h, tones: &picture.beats }.gather(from, 1.0, &launched[..n], None, part);
                 if domain.runaway(hazard(decay, part, n)) {
@@ -2308,7 +2393,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     return Err(Refused::Propagation(Refusal::Growth));
                 }
             }
-            traces += 1;
+            march.progress.traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
             // The panels: as many as leave the fewest nodes, on whether the survival ends in the piece (`count`).
@@ -2357,7 +2442,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         predicted = Some(last);
                     }
                     if let (Some(w), None) = (weight, predicted) {
-                        counted += 1;
+                        march.progress.counted += 1;
                         let _p = crate::prof::scope(crate::prof::GATHER);
                         Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), sums);
                     }
@@ -2380,16 +2465,16 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     Some(guess) => Some((None, guess)),
                     None => {
                         end = first - (hazard(decay, sums, n) - before);
-                        traces += 1;
+                        march.progress.traces += 1;
                         (end <= target).then_some((Some((b, log - end)), f64::NAN))
                     }
                 };
                 let root = search.and_then(|(past, guess)| {
-                    let floor = rounding(2 * counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
+                    let floor = rounding(2 * march.progress.counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
                     sums.copy_from_slice(saved);
                     weights.copy_from_slice(kept);
                     let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
-                    (counted, traces) = (counted + nodes, traces + spans);
+                    (march.progress.counted, march.progress.traces) = (march.progress.counted + nodes, march.progress.traces + spans);
                     match crossed {
                         Some(crossed) => picture.at(crossed, &mut x[..n]),
                         None => end = log - fell,
@@ -2562,34 +2647,27 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         if let Some(middle) = &middle {
             let _p = crate::prof::scope(crate::prof::MID_STEP_MIDDLE);
             let (scattered, made) = along.middle.scattering(&along.path, &middle[..n]);
-            (march.scattered, scattering) = (Some(scattered), made);
+            (march.scattered, scattering, march.progress.scattering) = (Some(scattered), made, made);
             if let Some((epsilon, ground, made)) = optical(&along, picture, still, noise)? {
                 let k = noise.sector.operators().expect("a sector made");
                 march.optical = Some((within(k, &noise.gradient, &middle[..n]), epsilon));
                 sector = Some((ground, made));
             }
         }
-        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once: the tones'
-        // envelopes at the three nodes, the candidates weighed and left in the static group at the middle alone, and the
-        // weighing (`spectral::Picture::separate`).
-        let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
-            let work = generator.tone_work(tone.candidate);
-            [sum[0] + work[0], sum[1] + work[1]]
-        });
-        let envelopes = envelopes + picture.weighed.iter().map(|&m| generator.tone_work(m)[0] / 3.0).sum::<f64>() + picture.weighing;
-        let count = picture.beats.len();
+        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once (its tones':
+        // `toned`).
         let price = Price {
             states: n,
             still,
             tau,
             bandwidth,
-            nodes: counted,
-            traces,
+            nodes: march.progress.counted,
+            traces: march.progress.traces,
             made: prepared,
             stops: picture.work - prepared,
             sector,
-            tones: count,
-            toned: [envelopes + (6 * count * n * n) as f64, forces],
+            tones: picture.beats.len(),
+            toned: toned(generator, picture, n),
             centred: middle.is_some(),
             ended,
             middle: generator.made(),

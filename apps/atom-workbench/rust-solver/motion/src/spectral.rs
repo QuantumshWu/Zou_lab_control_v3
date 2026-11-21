@@ -1212,6 +1212,9 @@ impl Picture {
         if !self.basis.decompose(&self.matrix) {
             return Err(Refusal::Decomposition);
         }
+        // Counted as made, before the rounding is weighed: a step refused here did the decomposition (step.rs
+        // `Scratch::refused`).
+        self.work += self.basis.work;
         let decay = |pick: fn(f64, f64) -> f64, from: f64| self.basis.values.iter().map(|l| l.im).fold(from, pick);
         if !(self.basis.condition * UNIT_ROUNDOFF * (1.0 + tau * (decay(linalg::larger, f64::NEG_INFINITY) - decay(linalg::smaller, f64::INFINITY))) <= exponential) {
             return Err(Refusal::Rounding);
@@ -1220,7 +1223,6 @@ impl Picture {
         for (l, value) in self.lambda.iter_mut().zip(&e.values) {
             *l = *value + scalar;
         }
-        self.work += e.work;
         // The eigenvectors' overlaps, what the norm rings by (`quotient`): R†R, n³.
         linalg::adjoint_product(&e.vectors.data, &e.vectors.data, (n, n, n), &mut self.product[..n * n]);
         for (o, z) in self.overlaps.iter_mut().zip(&self.product[..n * n]) {
