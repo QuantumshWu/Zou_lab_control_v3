@@ -52,9 +52,11 @@
 //!   bound). The products of a high beat are of a large component and a small one (tilt2's ±3ν: 10 × 10⁻¹³), so the
 //!   bound by the channels' components is tight where the scale S of the summed products is not (CLUSTER: 10⁹ too
 //!   large).
-//! - **The readouts** (DROPRES §2.1, its corrections): a row as shown and the loss move by at most D; T by at most
-//!   c_T D of its allowance, c_T = 2K_max/(k_B T_sc), K_max = U₀ the prepared well's depth (a held atom's kinetic
-//!   energy below its escape energy, E_cap = 0), T_sc at least 30 k_BT_rec of the emission's shortest wave number.
+//! - **The readouts** (DROPRES §2.1, its corrections): a row as shown and the loss move by at most D; T by the solve's
+//!   bound of a share D/(n − D) of the held atoms moved within the bound set (estimate.rs `Estimate::moved`; at rest and
+//!   at T_sc, about c_T D of its allowance, c_T = 2K_max/(k_B T_sc), K_max = U₀ the prepared well's depth, E_cap = 0),
+//!   T_sc at least 30 k_BT_rec of the emission's shortest wave number (estimate.rs `semiclassical`). The solve books
+//!   them (solve.rs `bounded`, D by `distance`).
 //! - **Which beats** (DESIGN2 §2.1, the marginal rule): the candidates in increasing Y, each prefix of them dropped or
 //!   none; the drop the one of least W = w · max_l (E_l² − A_l²)^{−(1 + 1/2p)}, E the user's targets (units.rs: the
 //!   populations absolute, T's allowance), A the selection's measured error with the drop's bound added (linearly: both
@@ -123,32 +125,64 @@ pub struct Judgment {
     pub pairs: Vec<(Vec<usize>, f64)>,
 }
 
+/// The trace distance by which dropped terms of the rate Y (1/µs) may move the state after a time t (µs), strict
+/// (# The drop tier): ½(e^{2Yt} − 1) = tY(1 + O(tY)). The one implementation: the solve books it (solve.rs `Fixed`),
+/// the drop tier weighs it (`Account`).
+pub fn distance(rate: f64, t: f64) -> f64 {
+    0.5 * (2.0 * rate * t).exp_m1()
+}
+
 /// A drop's readouts' errors and costs (# The drop tier): the selection's measured error -- on the populations
-/// (absolute) and on T (relative; `Selected::error`) --, the run's length (µs) and c_T (T's allowances per unit of trace
-/// distance).
+/// (absolute) and on T (relative; `Selected::error`) --, the run's length (µs), and what T's bound of a share of the
+/// held atoms moved reads (estimate.rs `Estimate::moved`, the solve's own bound): the held atoms' hold (`Escape`, the
+/// prepared well's depth) and T's semiclassical scale at its least (µK), where T's allowance is the scale itself.
 #[derive(Clone, Copy, Debug)]
 pub struct Account {
     pub populations: f64,
     pub temperature: f64,
     pub duration: f64,
-    pub temperature_per_distance: f64,
+    pub escape: crate::estimate::Escape,
+    pub floor: f64,
 }
 
 impl Account {
-    /// The trace distance after the run's length at the rate Y (# The drop tier): ½(e^{2YT} − 1).
+    /// The trace distance after the run's length at the rate Y (`distance`).
     pub fn distance(&self, rate: f64) -> f64 {
-        0.5 * (2.0 * rate * self.duration).exp_m1()
+        distance(rate, self.duration)
+    }
+
+    /// T's bound, relative to T, where the drop at the rate Y moves the held atoms by D (`distance`): the solve's
+    /// (estimate.rs `Estimate::moved`, the share D/(n − D) of the held atoms, here n = 1) at T at its scale T_sc,
+    /// the atoms at rest on average -- in units of T's allowance there, which is at least T_sc, at most that.
+    fn temperature_moved(&self, d: f64) -> f64 {
+        use crate::estimate::{Estimate, Motion, Spread};
+        let unread = Spread::UNREAD;
+        let motion = Motion { temperature: [self.floor; 3], temperature_errors: [unread; 3], temperature_total: self.floor, temperature_total_error: unread, occupation: [0.0; 3], mean_velocity: [0.0; 3] };
+        let at = Estimate {
+            trajectories: 0.0,
+            held: 1.0,
+            loss: 0.0,
+            loss_error: unread,
+            shown_errors: [unread; crate::request::STATES],
+            populations: [0.0; crate::request::STATES],
+            motion: Some(motion),
+            failed: 0.0,
+            uncounted: 0.0,
+            temperature_target: crate::units::TEMPERATURE_TARGET,
+            unresolved: 0.0,
+        };
+        at.moved(if d < 1.0 { d / (1.0 - d) } else { 1.0 }, &self.escape)
     }
 
     /// W's model-dependent factor max_l (E_l² − A_l²)^{−(1 + 1/2p)} with the drop at the rate Y (# The drop tier): on
     /// the populations E = `POPULATION_TARGET`, A the measured error plus D; on T, in units of its allowance (at least
-    /// `TEMPERATURE_TARGET` of T), E = 1, A the measured relative error over `TEMPERATURE_TARGET` plus c_T D. Unbounded
-    /// where an A reaches its E, or is not a number.
+    /// `TEMPERATURE_TARGET` of T and at least T_sc), E = 1, A the measured relative error over `TEMPERATURE_TARGET` plus
+    /// the drop's bound (`temperature_moved`). Unbounded where an A reaches its E, or is not a number.
     pub fn factor(&self, rate: f64) -> f64 {
         use crate::units::{ORDER, POPULATION_TARGET, TEMPERATURE_TARGET};
         let d = self.distance(rate);
         let power = 1.0 + 1.0 / (2.0 * ORDER as f64);
-        let room = [POPULATION_TARGET.powi(2) - (self.populations + d).powi(2), 1.0 - (self.temperature / TEMPERATURE_TARGET + self.temperature_per_distance * d).powi(2)];
+        let room = [POPULATION_TARGET.powi(2) - (self.populations + d).powi(2), 1.0 - (self.temperature / TEMPERATURE_TARGET + self.temperature_moved(d)).powi(2)];
         room.iter().map(|&r| if r > 0.0 { r.powf(-power) } else { f64::INFINITY }).fold(0.0, crate::linalg::larger)
     }
 }
