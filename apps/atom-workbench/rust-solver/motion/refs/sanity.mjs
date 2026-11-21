@@ -29,10 +29,11 @@
 // two-level steady-state rate at the local light-shifted, Doppler-shifted detuning with dipole-pattern kicks; F: the
 // Gordon–Ashkin Fokker–Planck coefficients from the optical Bloch equations, with the standing wave's interference).
 // The expectation is their mean; their difference and statistical errors are its uncertainty.
-// Physics' verdict on the scenes (model.json): S1 heats and loses the atom (half lost at 1.84 ms, 97 % at 5 ms); S2 as the
+// Physics' verdict on the scenes (model.json; the loss the engine's, SPEC §1.7: E > 0 anywhere): S1 heats and loses the
+// atom (half lost at 1.82 ms, 97 % at 5 ms); S2 as the
 // app builds it is a pure σ+ standing wave on a closed two-level cycle -- Doppler cooling along z only (the light-shifted
 // line puts the probe at −3.8Γ, T_D ≈ 410 µK, half the trap depth), x and y heated by spontaneous emission at twice
-// S1's photon rate, the repump idle -- so it loses the atom FASTER than S1 (half at 1.17 ms), not slower.
+// S1's photon rate, the repump idle -- so it loses the atom FASTER than S1 (half at 1.10 ms), not slower.
 // S2Q is judged against model.py's multilevel rate model (quantum jumps over the 8 ground sublevels, each beam's rate on
 // each |F',m'⟩ at its own light-shifted, Zeeman-shifted, Doppler-shifted detuning, dipole branching; no ground
 // coherences: the 3 G field dephases them -- Larmor 2.1 MHz per Δm against a ground light shift of ~0.4 MHz -- which
@@ -51,7 +52,7 @@
 //   heating  T_total at 0.25, 0.5, 1, 2 ms (while the model keeps ≥ 10 % of the atoms) within 10 % + 2σ;
 //   loss     L at 1, 2, 3, 4, 5 ms within 0.05 + 2σ;
 //   lost     L at the end ≥ 0.9 (both scenes: model 0.97 and 1.00);
-//   S2 vs S1 t½(S1)/t½(S2) in [1.25, 2.0] (model 1.57; each t½ is known to ~7 % from the loss tolerance);
+//   S2 vs S1 t½(S1)/t½(S2) in [1.25, 2.0] (model 1.65; each t½ is known to ~7 % from the loss tolerance);
 //   S2Q      loss at 0.25, 0.5, 1, 2, 3, 5 ms inside the band [z frozen − tol, z frictionless + tol] (tol 0.05 + 2σ; a loose
 //            criterion, as wide as the model's ignorance along z); T_total at 0.25, 0.5 ms inside [min − 10 %, max + 10 %]
 //            of the three variants; the held atom's |2,−2⟩ and |2,2⟩ shares at 0.25 and 0.5 ms within 0.05 + 2σ of the
@@ -369,7 +370,7 @@ for(const id of wanted){
 }
 if(results.S1&&results.S2&&!results.S1.error&&!results.S2.error){
   const a=half(results.S1.times,results.S1.loss),b=half(results.S2.times,results.S2.loss),ratio=a/b,pass=Number.isFinite(ratio)&&ratio>=1.25&&ratio<=2.0;
-  console.log(`\n${ok(pass)} S2 vs S1: t½(S1)/t½(S2) = ${Number.isFinite(ratio)?ratio.toFixed(2):'undefined'} (model 1.57, accepted 1.25–2.0: S2 as built loses the atom faster than S1)`);
+  console.log(`\n${ok(pass)} S2 vs S1: t½(S1)/t½(S2) = ${Number.isFinite(ratio)?ratio.toFixed(2):'undefined'} (model ${(modelHalf('S1')/modelHalf('S2')).toFixed(2)}, accepted 1.25–2.0: S2 as built loses the atom faster than S1)`);
   if(!pass)failures++;summary.ratio=ratio;
 }
 if(results.S1&&results.S2Q&&!results.S1.error&&!results.S2Q.error){

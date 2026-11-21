@@ -1,5 +1,7 @@
-"""(By the old loss of until 2026-11-21: outside the tweezer's 1/20 region with E > 0. The engine's loss is now E > 0
-wherever the atom is, SPEC §1.7; this reference is kept as it was.)
+"""(2026-11-21, ACCEPT3: the loss is the engine's own, SPEC §1.7 -- the atom is lost the first time its energy is above
+the escape value 0, wherever it is. Until then it was lost only once it was also outside the tweezer's 1/20 region; the
+two Monte Carlos (`run`, `run_multi`) test E > 0 alone now, at the same place in the step, and the per-output share of
+held-but-unbound atoms the old definition allowed (`unbound`, read by nothing) is gone. model.json regenerated with this.)
 
 Independent physics model of the two sanity scenes (refs/sanity.mjs): S1, the app's default tweezer + one σ+ probe;
 S2, the same + the probe's retro-reflection (the app's plain mirror) + a repump. It shares no code and no approximation
@@ -66,9 +68,9 @@ the dipole pattern at Γρ_ee. Valid for kv ≪ Γ (first order in v). F is the 
 for S1 it cross-checks K (they differ by Q, the light-shift force noise and K's exact Doppler nonlinearity).
 
 Initial state: Boltzmann positions in U_g at 30 µK (exact rejection), Maxwell velocities (the Wigner factor
-coth(ħω/2k_BT)·ħω/2k_BT − 1 < 2e-3 is left out). Loss: the app's definition (ui-design.md §6.20, engine SPEC §1.7):
-the atom is first outside the region where the tweezer's intensity exceeds 1/20 of its focus value, with energy above
-the value far away (E = mv²/2 + U_g > 0). T_a = m Var(v_a)/k_B over the atoms still held (the app's T); total = mean of
+coth(ħω/2k_BT)·ħω/2k_BT − 1 < 2e-3 is left out). Loss: the engine's definition (SPEC §1.7): the first time, after a
+step's kicks, that the atom's energy is above the value far away (E = mv²/2 + U_g > 0), wherever it is (t = 0 is
+held; an initial atom with E > 0 is lost at the end of its first step). T_a = m Var(v_a)/k_B over the atoms still held (the app's T); total = mean of
 the three axes. Velocity Verlet (dt below), stochastic kicks after each step. No gravity (2e-4 of the trap's force).
 
 # S2Q: the mirror with its λ/4 plate (σ+ and σ− about the field) -- part C, the multilevel rate model
@@ -90,7 +92,7 @@ the trap's edge. Half the atoms lost at 0.52 ms (z frictionless 0.45 ms; z froze
 z can make S2Q "much slower" than S1 (1.82 ms). What would: cooling on all three axes (the x, y spontaneous-emission
 heating is what loses the atom in every variant), with the light red of the light-shifted line throughout the trap,
 and at a field whose Larmor frequency is below the ground light shift if sub-Doppler cooling is wanted.
-S2 by the same model (S2R, independent beams) agrees with S2K within 0.04 in L, and gives S2's physical leaks out of
+S2 by the same model (S2R, independent beams) agrees with S2K within 0.045 in L, and gives S2's physical leaks out of
 the cycle (all from the repump, 6.5–6.8 GHz off its F=2 lines): 2.1/s to |2,1⟩, 1.2/s to |1,1⟩ at the centre.
 
 # What this gives (printed by --summary; the numbers are in model.json)
@@ -366,10 +368,10 @@ def fp_probe(Om, dOm_z, d, gz, gamma, vz):
     return f[2], D[2, 2], ee
 
 @nb.njit(parallel=True)
-def run(model, n_atoms, seed, T_uK, dt, n_steps, every, P, out_v, out_alive, out_unbound):
+def run(model, n_atoms, seed, T_uK, dt, n_steps, every, P, out_v, out_alive):
     """model: 0 = S1 kicks, 1 = S1 Fokker–Planck, 2 = S2 kicks (independent beams), 3 = S2 Fokker–Planck (standing wave).
     P = [gamma, kp, w0, zR, U0, dLS, dZ, hbar_m, s1, uK]. Writes, per output time and atom, the velocity and whether
-    the atom is still held (and whether it is unbound, E > 0)."""
+    the atom is still held (lost the first time E > 0)."""
     gamma, kp, w0, zR, U0, dLS, dZ, hbar_m, s1, uK = P[0], P[1], P[2], P[3], P[4], P[5], P[6], P[7], P[8], P[9]
     vr = hbar_m * kp
     kT = T_uK * uK                       # rad/µs
@@ -398,13 +400,13 @@ def run(model, n_atoms, seed, T_uK, dt, n_steps, every, P, out_v, out_alive, out
             logw = -U0 * (1 - g) / kT + 0.5 * ((x / sig[0]) ** 2 + (y / sig[1]) ** 2 + (z / sig[2]) ** 2)
             if math.log(max(rnd(st), 1e-300)) < logw: break   # logw ≤ 0 inside the region for these widths (checked)
         vx = vth * gauss(st); vy = vth * gauss(st); vz = vth * gauss(st)
-        alive = True; unbound = False
+        alive = True
         k_out = 0
         ax = 0.0; ay = 0.0; az = 0.0; ree = 0.0; Rp = 0.0; Rm = 0.0
         for step in range(n_steps + 1):
             if step % every == 0 and k_out < n_out:
                 out_v[k_out, a, 0] = vx; out_v[k_out, a, 1] = vy; out_v[k_out, a, 2] = vz
-                out_alive[k_out, a] = alive; out_unbound[k_out, a] = unbound
+                out_alive[k_out, a] = alive
                 k_out += 1
             if step == n_steps or not alive: continue
             for half in range(2):
@@ -459,8 +461,7 @@ def run(model, n_atoms, seed, T_uK, dt, n_steps, every, P, out_v, out_alive, out
                     ex, ey, ez = emission(st); vx += vr * ex; vy += vr * ey; vz += vr * ez
             g, _, _, _ = beam(x, y, z, w0, zR)
             E = 0.5 * (vx * vx + vy * vy + vz * vz) / hbar_m - U0 * g
-            if E > 0: unbound = True
-            if g < 0.05 and E > 0: alive = False
+            if E > 0: alive = False
     return 0
 
 MODELS = {'S1K': 0, 'S1F': 1, 'S2K': 2, 'S2F': 3}
@@ -469,9 +470,9 @@ DESCRIPTION = {'S1K': 'S1, kicks at the two-level rate (Poisson)', 'S1F': 'S1, G
 
 def simulate(name, p, atoms, end_us, every_us, dt, seed=12345):
     n_steps = int(round(end_us / dt)); every = int(round(every_us / dt)); n_out = n_steps // every + 1
-    out_v = np.zeros((n_out, atoms, 3)); out_alive = np.zeros((n_out, atoms), np.bool_); out_unbound = np.zeros((n_out, atoms), np.bool_)
+    out_v = np.zeros((n_out, atoms, 3)); out_alive = np.zeros((n_out, atoms), np.bool_)
     P = np.array([p['gamma'], p['kp'], p['w0'], p['zR'], p['U0'], p['dLS'], p['dZ'], p['hbar_m'], p['s1'], p['uK']])
-    t0 = time.time(); run(MODELS[name], atoms, seed, 30.0, dt, n_steps, every, P, out_v, out_alive, out_unbound)
+    t0 = time.time(); run(MODELS[name], atoms, seed, 30.0, dt, n_steps, every, P, out_v, out_alive)
     wall = time.time() - t0
     times = np.arange(n_out) * every * dt
     held = out_alive.sum(1); loss = 1 - held / atoms
@@ -485,7 +486,6 @@ def simulate(name, p, atoms, end_us, every_us, dt, seed=12345):
     Ttot = T.mean(1); setot = np.sqrt((se ** 2).sum(1)) / 3
     return dict(model=name, description=DESCRIPTION[name], atoms=atoms, dtUs=dt, wallS=wall, timesUs=times.tolist(),
                 loss=loss.tolist(), lossSE=np.sqrt(np.maximum(loss * (1 - loss), 1 / atoms) / atoms).tolist(),
-                unbound=out_unbound.mean(1).tolist(),
                 T=[[None if not np.isfinite(x) else round(float(x), 3) for x in T[:, a]] for a in range(3)],
                 TSE=[[None if not np.isfinite(x) else round(float(x), 3) for x in se[:, a]] for a in range(3)],
                 Ttotal=[None if not np.isfinite(x) else round(float(x), 3) for x in Ttot],
@@ -642,7 +642,7 @@ def run_multi(variant, n_atoms, seed, T_uK, dt, n_steps, every, P, beams, S, B, 
             if variant == 1: vz *= math.exp(-dt / 1.0)
             g, _, _, _ = beam(x, y, z, w0, zR)
             E = 0.5 * (vx * vx + vy * vy + vz * vz) / hbar_m - U0 * g
-            if g < 0.05 and E > 0: alive = False
+            if E > 0: alive = False
     return 0
 
 MULTI = {'S2QR': (0, 'S2Q, multilevel rate model (Doppler, optical pumping, Zeeman, light shifts; no ground coherences)'),
