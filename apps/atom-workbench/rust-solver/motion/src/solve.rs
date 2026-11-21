@@ -223,12 +223,17 @@
 //!   The rung below is taken where some rung below is expected to cost less than staying (`course`): a smaller step is
 //!   the more accurate one, and the rung below stands only on its own reads, as every rung does, so no error enters
 //!   the choice -- it is the work's alone. Its third level above is this rung's read, lowered (`carried`).
-//! - The third level above shows the order above a rung by its own pair (2τ, 4τ); a rung below shows it by this
-//!   rung's read, inherited. So the third level is worth no more than what the least rung below adds to staying, and
-//!   the rung buys it where its price P w(4τ) is no more than that, on the pilot's position (`buys`; on the scout the
-//!   pilot's purchase to come is priced into staying). Where it costs more, the rung stands on its own two levels: the
-//!   QuTiP-like path, as where a ladder's top has no third level. At the ladder's bottom, with no rung below, it buys
-//!   it wherever there is one.
+//! - Two paths from a rung its reads stand (`course`): verified there -- its companions and, where it has one to read,
+//!   its third level, each at its work for its read's precision (`read_cost`: the pairs its noise needs, lifted and
+//!   taken back as its pair is, at its levels' work with the refused attempts in it), and its run level to the product
+//!   --, or verified at the least rung below, whose third level is this rung's read, inherited and lowered, for
+//!   nothing. The rung takes the cheaper, on the scout before the pilot is bought and again after every stretch the check
+//!   runs, at what is held then (what is spent is no part of either path). A rung with no third level to be had (a
+//!   ladder's top with no level below to read) stands on its own two levels: the QuTiP-like path. At the ladder's bottom,
+//!   with no rung below, it reads the third wherever there is one. (Before, a third dearer than the rung below added
+//!   left the rung on its own two levels, and a third's price was its plain work: PGC3D's scout stayed at 0.948 µs for a
+//!   third at 3.79 µs priced 1.2e9 -- its read's precision there 3.7e9, out of the order's range, unable to see -- and went
+//!   down only after 190 s.)
 //! - Why priced. The ladder took every step at one price, w(h) ∝ 1/h: then the largest rung that stands is the
 //!   cheapest -- a rung below adds at least N w(τ) to staying, the steps doubled -- and the third level, a quarter of
 //!   the pilot's steps, P w(τ)/4, always less than that: the ladder as it was, to the bit, wherever a step's price is
@@ -1008,15 +1013,24 @@ fn raw_pairs(read: &Between, pairs: f64, carried: f64) -> f64 {
 /// The work a read of a pair costs for its precision (module documentation, ## A companion at τ/2; `against_half`,
 /// `third_of`): the pairs it needs within the share at the best (`raw_pairs` × its lift × its factor), or the pilot's
 /// `pilot` where those need fewer, at its level of the step `step` beyond the `held` there and at its other level
-/// `other` beyond the pilot's -- each at its work a µs as priced, its refused attempts in it (`Prices::work`); without
+/// `other` beyond the `beside` there (the pilot's, or the run level's trajectories where that is the other level: what
+/// the run holds there anyway) -- each at its work a µs as priced, its refused attempts in it (`Prices::work`); without
 /// bound where its factor is.
 #[allow(clippy::too_many_arguments)]
-fn read_cost(prices: &Prices, step: f64, held: f64, other: f64, pilot: f64, raw: f64, lift: f64, factor: f64) -> f64 {
+fn read_cost(prices: &Prices, step: f64, held: f64, other: f64, beside: f64, pilot: f64, raw: f64, lift: f64, factor: f64) -> f64 {
     if !(factor < f64::INFINITY) {
         return f64::INFINITY;
     }
     let pairs = crate::linalg::larger(pilot, raw * lift * factor);
-    crate::linalg::larger(pairs - held, 0.) * (prices.work)(step) + crate::linalg::larger(pairs - pilot, 0.) * (prices.work)(other)
+    crate::linalg::larger(pairs - held, 0.) * (prices.work)(step) + crate::linalg::larger(pairs - beside, 0.) * (prices.work)(other)
+}
+
+/// A rung's companion's work for its read's precision (`read_cost`): against 2τ of no lift, against τ/2 lifted 2^{2p};
+/// its factor `factor`, its level held by `held`, the run level beside it held to `run`.
+#[allow(clippy::too_many_arguments)]
+fn companion_cost(prices: &Prices, tau: f64, companion: Companion, held: f64, run: f64, pilot: f64, raw: f64, factor: f64) -> f64 {
+    let lift = if companion == Companion::Half { 2_f64.powi(2 * ORDER) } else { 1. };
+    read_cost(prices, companion.step(tau), held, tau, run, pilot, raw, lift, factor)
 }
 
 /// Whether a rung at the step `step` is read against half its step rather than twice it (module documentation, ## A
@@ -1027,8 +1041,7 @@ fn read_cost(prices: &Prices, step: f64, held: f64, other: f64, pilot: f64, raw:
 /// against 2h is without bound. The one rule the companion and the third level are chosen by (`third_of`).
 #[allow(clippy::too_many_arguments)]
 fn against_half(prices: &Prices, step: f64, double: f64, half: f64, raw: f64, pilot: f64, held: [f64; 2]) -> bool {
-    let lift = 2_f64.powi(2 * ORDER);
-    !(double < f64::INFINITY) || read_cost(prices, 0.5 * step, held[1], step, pilot, raw, lift, half) < read_cost(prices, 2. * step, held[0], step, pilot, raw, 1., double)
+    !(double < f64::INFINITY) || companion_cost(prices, step, Companion::Half, held[1], pilot, pilot, raw, half) < companion_cost(prices, step, Companion::Double, held[0], pilot, pilot, raw, double)
 }
 
 /// Whether a read's every look that reads (`read_looks`) is within the step's share as it reads (module documentation,
@@ -1276,6 +1289,7 @@ struct Holding {
     below: [f64; 2],
     amplified: [f64; 2],
     raw: f64,
+    factor: f64,
 }
 
 /// The run's expected work from here where it stays at the rung τ in hand (module documentation, ## The ladder): the
@@ -1283,8 +1297,9 @@ struct Holding {
 /// product's trajectories, the pilot's and the pairs in hand (the further pairs' run level is the product's), (P − P_m)
 /// w(c) + (max(N, P, n) − n) w(τ). The third level above is the course's to add where the rung buys it (`course`).
 fn staying(prices: &Prices, tau: f64, holding: Holding) -> f64 {
-    let Holding { pilot, members, pairs, companion, .. } = holding;
-    (pilot - members) * (prices.work)(companion.step(tau)) + (crate::linalg::larger(crate::linalg::larger(prices.product, pilot), pairs) - pairs) * (prices.work)(tau)
+    let Holding { pilot, members, pairs, companion, raw, factor, .. } = holding;
+    let run = crate::linalg::larger(crate::linalg::larger(prices.product, pilot), pairs);
+    companion_cost(prices, tau, companion, members, run, pilot, raw, factor) + (run - pairs) * (prices.work)(tau)
 }
 
 /// The run's expected work from here at the least of the rungs below the rung τ in hand (module documentation,
@@ -1322,9 +1337,9 @@ fn descending(prices: &Prices, tau: f64, end: f64, holding: Holding) -> f64 {
         let factor = |j: i32| if j < 2 { amplified[j as usize] } else { (prices.halving)(at(j)) };
         let above = if k == 1 { members } else { crate::linalg::larger(members, held(k - 1)) };
         let companion = if against_half(prices, at(k), factor(k - 1), factor(k), raw, pilot, [above, held(k + 1)]) {
-            more(pilot, held(k + 1)) * (prices.work)(at(k + 1))
+            companion_cost(prices, at(k), Companion::Half, held(k + 1), run, pilot, raw, factor(k))
         } else {
-            more(pilot, above) * (prices.work)(at(k - 1))
+            companion_cost(prices, at(k), Companion::Double, above, run, pilot, raw, factor(k - 1))
         };
         least = crate::linalg::smaller(least, floor - way + more(run, held(k)) * (prices.work)(at(k)) + companion);
     }
@@ -1353,7 +1368,7 @@ impl Third {
     /// Its work for its read's precision (`read_cost`): the pairs its read needs at the best, its lift and factor on the
     /// rung's own noise `raw`, on the pilot's at least, at its level and at the rung's level beside it.
     fn cost(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
-        read_cost(prices, self.step, self.held, self.beside, pilot, raw, self.lift, self.factor)
+        read_cost(prices, self.step, self.held, self.beside, pilot, pilot, raw, self.lift, self.factor)
     }
 }
 
@@ -1406,12 +1421,13 @@ enum Course {
 /// rung buys it (`buys`, at the pilot's position: on the scout the pilot's purchase to come, its work priced into
 /// staying -- the course there is the pilot's to take); else it stands on its own two levels.
 fn course(prices: &Prices, tau: f64, end: f64, holding: Holding, third: Option<Third>) -> Course {
-    let whole = Holding { members: holding.pilot, pairs: crate::linalg::larger(holding.pairs, holding.pilot), ..holding };
-    let bought = third.filter(|third| buys(prices, tau, end, whole, *third));
-    let stay = staying(prices, tau, holding) + bought.map_or(0., |third| third.work(prices, holding.pilot));
+    // The two paths from here: verified at τ -- its companions, its third level where it has one to read, each for its
+    // read's precision, and its run level to the product --, or at the least rung below (`descending`: its third level
+    // this rung's read, lowered).
+    let stay = staying(prices, tau, holding) + third.map_or(0., |third| third.cost(prices, holding.pilot, holding.raw));
     if descending(prices, tau, end, holding) < stay {
         Course::Below
-    } else if bought.is_some() {
+    } else if third.is_some() {
         Course::Third
     } else {
         Course::Stand
@@ -2383,6 +2399,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
             amplified: [amplified(&levels.fine), if halved_companion { amplified(&levels.coarse) } else { ran_at(below).map_or_else(|| prices.map_or(1., |prices| (prices.halving)(below)), |f| amplified(&f.first)) }],
             // The rung's own read's noise, its lift and factor undone: what every read's precision is priced by.
             raw: raw_pairs(&read, (groups * members + levels.further[0].len() as u64 * GROUP) as f64, if halved_companion { 2_f64.powi(2 * ORDER) * amplified(levels.paired().0.iter().copied()) } else { amplified(levels.paired().1.iter().copied()) }),
+            factor: amplified(if halved_companion { levels.paired().0 } else { levels.paired().1 }),
         };
         // The third level the rung would read on the pilot's pairs, where it has none yet: the side of the less cost for
         // its read's precision (`third_of`).
@@ -4280,7 +4297,7 @@ mod tests {
     /// What the run holds of a rung read against 2τ whose levels took every step at its length (`Holding`): the pilot's
     /// trajectories, the members run at both levels, the pairs in hand, the scout's pairs at τ/2.
     fn holding(pilot: f64, members: f64, pairs: f64, below: f64) -> Holding {
-        Holding { pilot, members, pairs, companion: Companion::Double, below: [below, 0.], amplified: [1.; 2], raw: 0. }
+        Holding { pilot, members, pairs, companion: Companion::Double, below: [below, 0.], amplified: [1.; 2], raw: 0., factor: 1. }
     }
 
     /// The rung below of a rung at τ read against 2τ whose rung below is read against τ, as `check` makes it
@@ -4497,15 +4514,15 @@ mod tests {
         }
     }
 
-    /// A third level whose price is more than what a rung below would add is not read: the rung stands on its own two
-    /// levels (`course`, `buys`; module documentation, ## The ladder). The pilot's 88 pairs at 0.95 µs of a 1 ms run, a
+    /// A rung verified where it stands -- its third level read with its two -- or at the rung below, whichever path costs
+    /// the run the less (`course`; module documentation, ## The ladder): the pilot's 88 pairs at 0.95 µs of a 1 ms run, a
     /// product of 287 trajectories, a flat price but the third level's steps dearer by a factor f: the rung below adds
-    /// (N + P)/τ to staying's (N − P)/τ, so the third level, 88 f/(4τ), is read up to f = 4(N + P)/P = 17.05 and not beyond --
-    /// one flip, and never the rung below, which is no cheaper. At the ladder's bottom (no rung below) it is read
-    /// whatever its price. On the scout's position the pilot's purchase to come is priced into staying: the rung below
-    /// adds 336.5/τ to the scout's staying (its companions at 2τ not yet run), so where the pilot would buy a third level
-    /// dearer than that -- from f = 336.5/22 = 15.3 to the pilot's 17.05 -- the scout goes down instead, and beyond it,
-    /// where the pilot would not buy it, the scout stands.
+    /// (N + P)/τ to staying's (N − P)/τ, so the third level, 88 f/(4τ), is read up to f = 4(N + P)/P = 17.05, and beyond
+    /// it the rung below is the cheaper path -- one flip. At the ladder's bottom (no rung below) it is read whatever its
+    /// price. On the scout's position the pilot's purchase to come is priced into staying: the rung below adds 336.5/τ to
+    /// the scout's staying (its companions at 2τ not yet run), so from f = 336.5/22 = 15.3 on the scout goes down. (Until
+    /// R2-LADDER a third dearer than that left the rung to stand on its own two levels; the path at the rung is now
+    /// verified with its third wherever one is to be had.)
     #[test]
     fn a_third_level_dearer_than_a_rung_below_is_not_read() {
         let (end, tau, product) = (1000., 0.95, 287.);
@@ -4518,11 +4535,11 @@ mod tests {
         let courses: Vec<Course> = factors.iter().map(|&f| priced(f, tau, pilot)).collect();
         let flips = courses.windows(2).filter(|w| w[0] != w[1]).count();
         let flip = 4. * (product + 88.) / 88.;
-        assert!(courses[0] == Course::Third && courses[400] == Course::Stand && flips == 1, "{courses:?}");
-        assert!(factors.iter().zip(&courses).all(|(&f, &c)| c == if f <= flip { Course::Third } else { Course::Stand }), "{flip}");
+        assert!(courses[0] == Course::Third && courses[400] == Course::Below && flips == 1, "{courses:?}");
+        assert!(factors.iter().zip(&courses).all(|(&f, &c)| c == if f <= flip { Course::Third } else { Course::Below }), "{flip}");
         let bottom = end / MOST_STEPS as f64 * 1.5;
         assert!(end / (0.5 * bottom) > MOST_STEPS as f64 && priced(1e6, bottom, pilot) == Course::Third);
-        assert_eq!([1., 15.2, 15.4, 17., 17.1, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Stand, Course::Stand]);
+        assert_eq!([1., 15.2, 15.4, 17., 17.1, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Below, Course::Below]);
     }
 
     /// A rung read against τ/2 reads e(τ) as one read against 2τ does (module documentation, ## A companion at τ/2;
@@ -4603,14 +4620,16 @@ mod tests {
                     };
                     let held = if k == 1 { holding.members } else { holding.members.max(have(k - 1)) };
                     let half = !(factor(k - 1) < f64::INFINITY) || precision(k + 1, have(k + 1), 16., factor(k)) < precision(k - 1, held, 1., factor(k - 1));
-                    let c = if half { k + 1 } else { k - 1 };
-                    need[c] = need[c].max(pilot);
-                    need.iter().enumerate().map(|(j, &n)| (n - have(j)).max(0.) * w(j)).sum::<f64>()
+                    // The companion's work for its read's precision, its run level beside it held to the run's.
+                    let (c, held, lift, a) = if half { (k + 1, have(k + 1), 16., factor(k)) } else { (k - 1, held, 1., factor(k - 1)) };
+                    let pairs = pilot.max(holding.raw * lift * a);
+                    let companion = (pairs - held).max(0.) * w(c) + (pairs - run).max(0.) * w(k);
+                    need.iter().enumerate().map(|(j, &n)| (n - have(j)).max(0.) * w(j)).sum::<f64>() + companion
                 })
                 .fold(f64::INFINITY, f64::min)
         };
-        let half = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Half, below, amplified, raw: 0. };
-        let double = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Double, below, amplified, raw: 0. };
+        let half = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Half, below, amplified, raw: 0., factor: 1. };
+        let double = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Double, below, amplified, raw: 0., factor: 1. };
         let holdings = [
             double(scout, [0., 0.], [1., 1.]),
             double(scout, [scout, 0.], [1.06, 1.]),
@@ -4631,7 +4650,10 @@ mod tests {
                     let (priced, count) = (descending(&prices, tau, end, holding), counted(work, product, holding));
                     assert!((priced - count).abs() <= 1e-12 * count, "{product} {holding:?}: {priced} against {count}");
                     let stay = staying(&prices, tau, holding);
-                    assert_eq!(stay, (pilot - holding.members) * work(holding.companion.step(tau)) + (product.max(pilot) - holding.members) * work(tau), "{holding:?}");
+                    let lift = if holding.companion == Companion::Half { 16. } else { 1. };
+                    let pairs = pilot.max(holding.raw * lift * holding.factor);
+                    let expected = (pairs - holding.members) * work(holding.companion.step(tau)) + (pairs - product.max(pilot)).max(0.) * work(tau) + (product.max(pilot) - holding.members) * work(tau);
+                    assert!((stay - expected).abs() <= 1e-12 * expected, "{holding:?}: {stay} against {expected}");
                 }
             }
         }
