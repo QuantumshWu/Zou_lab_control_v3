@@ -318,11 +318,14 @@ fn apart(a: &Mat, b: &Mat) -> f64 {
 /// The force at the frame's time zero is the model's (model/rs.rs `ModelAt::force`, the Lindbladian's force observable):
 /// −Re tr(Ĝρ) of the middle (`Middle::force`) with every class's absorbed momentum Σ_a Im⟨u_a|∇u_a⟩ -- what the jumps
 /// and the step's scattering carry between them -- at the centre and at a moving point, on a state of P with every
-/// amplitude set, to the rounding of the traces.
+/// amplitude set, to the rounding of the traces: the run's with nothing dropped (model/classify.rs, # The drop tier),
+/// and the run's as the solve makes it apart from that by its dropped beats' −Re tr(Ĝ_k ρ) alone (tilt2's ±3ν … ±6ν).
 #[test]
 fn the_selected_force_at_time_zero_is_the_model_s() {
     for (name, request, keep) in scenes() {
-        let run = run_of(&request, &keep);
+        let dropping = run_of(&request, &keep);
+        let run = made_with(&request, &Drops::Only(Vec::new()));
+        let dropped: Vec<usize> = dropping.judgment().tiers.iter().filter(|t| t.1 == crate::model::classify::Tier::Drop).map(|t| t.0).collect();
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         let n = keep.len();
@@ -341,6 +344,12 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let worst = (0..3).map(|i| (engine[i] - model[i]).abs()).fold(0.0, crate::linalg::larger);
             eprintln!("{name} κ {kappa:?}: engine {engine:?}, model {model:?}, difference {worst:.2e}");
             assert!(worst <= 1e-12 * crate::linalg::larger(size, f64::MIN_POSITIVE), "{name}: {worst:e} of {size:e}");
+            // The run as the solve makes it: apart by its dropped beats' Ehrenfest force alone.
+            let other = dropping.middle(0, r, 0.0);
+            let lost = SelectedMiddle::contract(&node, |beat| dropped.contains(&beat).then_some(C64::ONE), &rho).map(|z| z.re);
+            let apart = (0..3).map(|i| (other.force(&other.path(kappa, [0.0; 3]), 0.0, &rho)[i] + lost[i] - ehrenfest[i]).abs()).fold(0.0, crate::linalg::larger);
+            eprintln!("{name} κ {kappa:?}: the dropped beats' force {lost:?}, the run's apart from it by {apart:.2e}");
+            assert!(apart <= 1e-12 * crate::linalg::larger(size, f64::MIN_POSITIVE), "{name}: the run's force apart by {apart:e} of {size:e}");
         }
     }
 }
@@ -684,13 +693,21 @@ fn blocked_scenes() -> Vec<(String, Request)> {
     cases
 }
 
+/// A request's run as the solve makes it (`made`'s), the beats `drops` says dropped.
+fn made_with(request: &Request, drops: &Drops) -> Selected {
+    let reference = crate::solve::alone(crate::solve::chief(request));
+    let scene = crate::scene::Scene::new(request).unwrap();
+    let selection = crate::select::choose(&scene).unwrap();
+    Selected::made(scene, selection, reference, true, drops).unwrap()
+}
+
 /// A request's run as the solve makes it (`solve::run_of`, its reference state the chief's) in its exact blocks, and
 /// (`split` false) the same model with its states one block.
 fn made(request: &Request, split: bool) -> Selected {
     let reference = crate::solve::alone(crate::solve::chief(request));
     let scene = crate::scene::Scene::new(request).unwrap();
     let selection = crate::select::choose(&scene).unwrap();
-    Selected::made(scene, selection, reference, split).unwrap()
+    Selected::made(scene, selection, reference, split, &Drops::Judged).unwrap()
 }
 
 /// A run's blocks said: each its ground and other states and its states' labels.
@@ -708,8 +725,9 @@ fn said(request: &Request, run: &Selected) -> String {
 /// The structure's rounding scales are its entries' (model/selected.rs, # The structure's rounding): on the scenes'
 /// runs (`blocked_scenes`), every entry of the structure's node -- each beat of the generator off the static beat's
 /// diagonal (θ is put back there after), each beat of the gradient -- is within (1 + γ_K) of its scale S, the sum of
-/// its terms' moduli, and a nonzero entry has terms; the summation's rounding zeros (|x| ≤ γ_K S above ε·max) are said
-/// per scene with the largest of them.
+/// its terms' moduli, and a nonzero entry has terms; the entries other than zero that are the summation's rounding
+/// zeros (|x| ≤ γ_K S, model/classify.rs `zero`) are said per scene with the largest of them over ε times its matrix's
+/// largest.
 #[test]
 fn the_structure_s_scales_bound_its_entries() {
     for (name, request) in blocked_scenes() {
@@ -724,7 +742,7 @@ fn the_structure_s_scales_bound_its_entries() {
                 let bound = (1.0 + crate::units::rounding(terms[x])) * scale[x];
                 assert!(z <= bound, "{name} {what} ({}, {}): |x| {z:e} above its scale {:e} (K {})", x / n, x % n, scale[x], terms[x]);
                 assert!(z == 0.0 || terms[x] > 0, "{name} {what} ({}, {}): |x| {z:e} of no terms", x / n, x % n);
-                if z != 0.0 && !(z < f64::EPSILON * top) && rounding_zero(m.data[x], scale[x], terms[x], top) {
+                if z != 0.0 && crate::model::classify::zero(m.data[x], scale[x], terms[x]) {
                     zeros += 1;
                     largest = crate::linalg::larger(largest, z / (f64::EPSILON * top));
                 }
@@ -1012,6 +1030,9 @@ fn a_cross_block_element_joins_the_blocks() {
 
 #[path = "golden.rs"]
 mod golden;
+
+#[path = "drops.rs"]
+mod drops;
 
 /// The selection's report (`Selected::report`): P state by state, the states left out, and a point not judged said as
 /// such -- R10_NODE's edge, where no light reaches the atom (`Selection::notes`) --, never as zero errors.

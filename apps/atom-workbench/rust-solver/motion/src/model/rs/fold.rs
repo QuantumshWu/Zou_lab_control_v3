@@ -147,6 +147,9 @@ pub struct Plan {
     channels: Vec<(usize, [i64; 2])>,
     hamiltonian: usize,
     generator_terms: Vec<(usize, C64)>,
+    /// Per factor whether it can vary along a path (`Source::varying`): the generator's varying factors are the
+    /// intensities the reach's bound ranges over (`Plan::reach`).
+    varying: Vec<bool>,
     /// Per piece where its terms start in the flat list of every piece's terms.
     offsets: Vec<usize>,
     blocks: Vec<Block>,
@@ -362,7 +365,7 @@ impl Plan {
             batch.total += count;
             batch.wide += if r.single.is_some() { count } else { 4 * count };
         }
-        Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, offsets, blocks, diagonal, amplitudes, batches, place, legs, direct }
+        Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct }
     }
 
     /// The folded blocks' sizes and which are Q's.
@@ -1857,6 +1860,344 @@ impl Out {
     }
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The reach's bounds.
+
+/// The range a run's atom reaches, as the fold's numbers take it (model/classify.rs, # The drop tier): every beam's
+/// amplitude of modulus at most one (its focus value, field.rs), every intensity of the generator -- the tweezer's
+/// |a_tw|² = s, a Gaussian beam's |a_l|² -- in [0, 1], the momentum within κ_max(s) = κ √s (a held atom's kinetic
+/// energy below s U₀), and the tweezer's Doppler powers within their largest there.
+#[derive(Clone, Debug)]
+pub struct Reach {
+    /// The tweezer's intensity among the values' factors (`Factor::Power`).
+    pub power: Option<usize>,
+    /// κ (1/µm): the largest momentum at the focus, κ_max(s) = κ √s.
+    pub kappa: f64,
+    /// Per piece (`Plan::keys`' order) the change of its frequency per unit momentum, (ħ/m)|Σ_g c_g k_g| (rad/µs·µm).
+    pub doppler: Vec<f64>,
+    /// Per coefficient its largest modulus over the reach (coefficient 0 is one).
+    pub coefficients: Vec<f64>,
+}
+
+/// The most boxes of the intensities one column's bound takes (`Plan::reach`): beyond them the column is unbounded.
+const BOXES: usize = 1 << 12;
+
+/// x ← N x + b for N n × n (row by row, nonnegative) until no entry changes (`Plan::reach`'s Neumann sum).
+fn neumann_sum(n: &[f64], size: usize, b: &[f64], out: &mut Vec<f64>) {
+    out.clear();
+    out.extend_from_slice(b);
+    let mut term = b.to_vec();
+    let mut next = vec![0.0; size];
+    loop {
+        for i in 0..size {
+            next[i] = (0..size).map(|k| n[i * size + k] * term[k]).sum();
+        }
+        let mut moved = false;
+        for (o, t) in out.iter_mut().zip(&next) {
+            let before = *o;
+            *o += *t;
+            moved |= *o != before;
+        }
+        std::mem::swap(&mut term, &mut next);
+        if !moved {
+            return;
+        }
+    }
+}
+
+impl Plan {
+    /// Per folded block the entrywise bound over the reach (`Reach`) of its amplitudes M = (z − G₀)⁻¹X in the states'
+    /// basis, |B| × its batch's columns as `Local::m` lays them (model/classify.rs, # The drop tier): per column j, z =
+    /// E_a + f_c of its kept state a and its piece c, X its piece's entries' moduli at their largest coefficients (every
+    /// factor's modulus at most one). The generator and E_a are affine in the varying intensities σ (`varying`); on a
+    /// box of them about σ^c of half-widths h, A = A_c + Δ with A_c = z^c − G₀(σ^c) at the box's centre and
+    ///   |Δ| ≤ E = Σ_σ h_σ |e_aσ − G_σ| + δ_c(s_hi) + Σ_{k ≥ 1} c̄_k (|g_ak| + |G_k|),
+    /// G_σ, e_aσ the intensity's part of the block's generator and of E_a, δ_c(s) = (ħ/m)|K_c| κ √s the column's
+    /// Doppler change at the box's largest tweezer intensity, the coefficients' parts by their largest; where
+    /// N = E|R_c| has row sums below ½, |R| ≤ |R_c| Σ_k N^k (R_c = A_c⁻¹; the Neumann series of (1 + ΔR_c)⁻¹), and the
+    /// column's bound is |R_c| Σ_k N^k |X|. A box whose N is not so is halved along the intensity of the largest share;
+    /// the column's bound is the largest over the boxes (`BOXES` of them at most: beyond, the column is unbounded).
+    /// `values` are the structure point's (the frequencies at rest).
+    pub fn reach(&self, values: &Values, reach: &Reach) -> Vec<Vec<f64>> {
+        let coefficient = |c: u32| -> f64 { if c == 0 { 1.0 } else { reach.coefficients[c as usize] } };
+        let mut out = Vec::with_capacity(self.blocks.len());
+        for (block, batch) in self.blocks.iter().zip(&self.batches) {
+            let size = block.rows.len();
+            let total = batch.total;
+            let mut bound = vec![0.0_f64; size * total];
+            if batch.amplitudes.is_empty() {
+                out.push(bound);
+                continue;
+            }
+            // The block's generator: the fixed part (every factor at its value, the coefficient one), each varying
+            // intensity's part, the coefficients' moduli.
+            let mut fixed = Mat::zeros(size, size);
+            let mut parts: Vec<(usize, Mat)> = Vec::new();
+            let mut wobble = vec![0.0_f64; size * size];
+            for e in &block.generator {
+                let (f, scale) = self.generator_terms[e.term as usize];
+                let at = e.row as usize * size + e.col as usize;
+                if e.coefficient != 0 {
+                    wobble[at] += (scale * e.value).abs() * coefficient(e.coefficient);
+                } else if self.varying[f] {
+                    let i = parts.iter().position(|x| x.0 == f).unwrap_or_else(|| {
+                        parts.push((f, Mat::zeros(size, size)));
+                        parts.len() - 1
+                    });
+                    parts[i].1.data[at] += scale * e.value;
+                } else {
+                    fixed.data[at] += values.factors[f].0 * scale * e.value;
+                }
+            }
+            for (&i, &(off, _)) in batch.amplitudes.iter().zip(&batch.offsets) {
+                let r = &self.amplitudes[i];
+                for (j, &a) in r.cols.iter().enumerate() {
+                    // The column's X, E_a's parts, its frequency and its Doppler change.
+                    let mut x = vec![0.0_f64; size];
+                    for e in r.entries.iter().filter(|e| e.col as usize == j) {
+                        let (_, scale) = self.terms[r.piece][e.term as usize];
+                        x[e.row as usize] += (e.value * scale).abs() * coefficient(e.coefficient);
+                    }
+                    let (mut energy, mut slope, mut drift) = (0.0_f64, vec![0.0_f64; parts.len()], 0.0_f64);
+                    for e in self.diagonal.iter().filter(|e| e.row as usize == a) {
+                        let (f, scale) = self.generator_terms[e.term as usize];
+                        if e.coefficient != 0 {
+                            drift += (scale * e.value).abs() * coefficient(e.coefficient);
+                        } else if let Some(i) = parts.iter().position(|x| x.0 == f) {
+                            slope[i] += (scale * e.value).re;
+                        } else if self.varying[f] {
+                            // A varying intensity of the kept state alone: E_a moves within its range.
+                            drift += (scale * e.value).abs();
+                        } else {
+                            energy += (values.factors[f].0 * scale * e.value).re;
+                        }
+                    }
+                    let z = energy + values.frequencies[r.piece];
+                    let column = self.column(size, &fixed, &parts, &slope, &wobble, z, drift, reach.doppler[r.piece] * reach.kappa, reach.power, &x);
+                    for k in 0..size {
+                        bound[k * total + off + j] = column[k];
+                    }
+                }
+            }
+            out.push(bound);
+        }
+        out
+    }
+
+    /// One column's bound over the boxes of the intensities (`reach`): the fixed generator, the intensities' parts
+    /// and the kept state's slopes along them, the coefficients' moduli on the block and on E_a (`drift`, with a kept
+    /// state's own intensities), z at rest, the Doppler change at s = 1, the tweezer's intensity, |X|.
+    #[allow(clippy::too_many_arguments)]
+    fn column(&self, size: usize, fixed: &Mat, parts: &[(usize, Mat)], slope: &[f64], wobble: &[f64], z: f64, drift: f64, doppler: f64, power: Option<usize>, x: &[f64]) -> Vec<f64> {
+        let mut most = vec![0.0_f64; size];
+        let mut boxes: Vec<Vec<(f64, f64)>> = vec![vec![(0.0, 1.0); parts.len()]];
+        let mut made = 0usize;
+        let (mut a, mut inverse, mut pivots) = (vec![C64::ZERO; size * size], vec![C64::ZERO; size * size], vec![0usize; size]);
+        let mut n = vec![0.0_f64; size * size];
+        let mut y = Vec::new();
+        while let Some(bx) = boxes.pop() {
+            made += 1;
+            if made > BOXES {
+                return vec![f64::INFINITY; size];
+            }
+            // A_c = z^c − G₀(σ^c) and its inverse.
+            let mut centre = z;
+            for (i, s) in slope.iter().enumerate() {
+                centre += 0.5 * (bx[i].0 + bx[i].1) * s;
+            }
+            for r in 0..size {
+                for c in 0..size {
+                    let mut g = fixed.data[r * size + c];
+                    for (i, (_, part)) in parts.iter().enumerate() {
+                        g += part.data[r * size + c] * (0.5 * (bx[i].0 + bx[i].1));
+                    }
+                    a[r * size + c] = -g;
+                }
+                a[r * size + r] += C64::real(centre);
+            }
+            if !linalg::factor(&mut a, &mut pivots, size) {
+                return vec![f64::INFINITY; size];
+            }
+            inverse.fill(C64::ZERO);
+            for k in 0..size {
+                inverse[k * size + k] = C64::ONE;
+            }
+            linalg::solve(&a, &pivots, size, &mut inverse, size);
+            let r_abs: Vec<f64> = inverse.iter().map(|z| z.abs()).collect();
+            if r_abs.iter().any(|v| !v.is_finite()) {
+                return vec![f64::INFINITY; size];
+            }
+            // E and N = E|R_c|, each intensity's share apart.
+            let s_high = power.and_then(|p| parts.iter().position(|x| x.0 == p)).map_or(1.0, |i| bx[i].1);
+            let scalar = drift + doppler * s_high.sqrt();
+            let mut e = wobble.to_vec();
+            for k in 0..size {
+                e[k * size + k] += scalar;
+            }
+            let mut shares = vec![0.0_f64; parts.len()];
+            for (i, (_, part)) in parts.iter().enumerate() {
+                let h = 0.5 * (bx[i].1 - bx[i].0);
+                let mut d = vec![0.0_f64; size * size];
+                for r in 0..size {
+                    for c in 0..size {
+                        let mut v = part.data[r * size + c];
+                        if r == c {
+                            v -= C64::real(slope[i]);
+                        }
+                        d[r * size + c] = h * v.abs();
+                    }
+                }
+                // The share's row sums of d |R_c|.
+                let mut worst = 0.0_f64;
+                for r in 0..size {
+                    let mut row = 0.0;
+                    for c in 0..size {
+                        row += (0..size).map(|k| d[r * size + k] * r_abs[k * size + c]).sum::<f64>();
+                    }
+                    worst = linalg::larger(worst, row);
+                }
+                shares[i] = worst;
+                for (o, v) in e.iter_mut().zip(&d) {
+                    *o += v;
+                }
+            }
+            let mut q = 0.0_f64;
+            for r in 0..size {
+                let mut row = 0.0;
+                for c in 0..size {
+                    let v: f64 = (0..size).map(|k| e[r * size + k] * r_abs[k * size + c]).sum();
+                    n[r * size + c] = v;
+                    row += v;
+                }
+                q = linalg::larger(q, row);
+            }
+            if !(q < 0.5) {
+                let Some(widest) = (0..parts.len()).filter(|&i| shares[i] > 0.0).max_by(|&i, &j| shares[i].total_cmp(&shares[j])) else {
+                    return vec![f64::INFINITY; size];
+                };
+                let (lo, hi) = bx[widest];
+                let mid = 0.5 * (lo + hi);
+                if !(lo < mid && mid < hi) {
+                    return vec![f64::INFINITY; size];
+                }
+                let (mut low, mut high) = (bx.clone(), bx);
+                low[widest].1 = mid;
+                high[widest].0 = mid;
+                boxes.push(low);
+                boxes.push(high);
+                continue;
+            }
+            // |R_c| Σ_k N^k |X|.
+            neumann_sum(&n, size, x, &mut y);
+            for (k, m) in most.iter_mut().enumerate() {
+                let v: f64 = (0..size).map(|c| r_abs[k * size + c] * y[c]).sum();
+                *m = linalg::larger(*m, v);
+            }
+        }
+        most
+    }
+}
+
+impl Out {
+    /// Each output's elements' bounds over the reach (model/classify.rs, # The drop tier), the values alone: the sum of
+    /// the moduli of the terms each element is the sum of, every factor at most one and every coefficient at its
+    /// largest (`Reach`), the blocks' amplitudes at their bounds `moduli` (`Plan::reach`, the states' basis) -- a direct
+    /// entry |x c|; a pair ½ Σ_q |X_iq| M̄_qj (a jump's pair without the ½). The weights are one (the lab's grouping).
+    /// Per H output and per channel output (the photon forms' outputs left at zero), on their structural elements.
+    pub fn bounds(plan: &Plan, grouping: &Grouping, moduli: &[Vec<f64>], coefficients: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let coefficient = |c: u32| -> f64 { if c == 0 { 1.0 } else { coefficients[c as usize] } };
+        let mut h: Vec<Vec<f64>> = grouping.lists.iter().map(|l| vec![0.0; l.len()]).collect();
+        let mut channels: Vec<Vec<f64>> = grouping.channel_lists.iter().map(|l| vec![0.0; l.len()]).collect();
+        // The amplitude sums' bounds per block, side by side (`Grouping::layout`).
+        let mut sums: Vec<Vec<f64>> = Vec::with_capacity(grouping.layout.len());
+        for (b, (list, width)) in grouping.layout.iter().enumerate() {
+            let size = plan.blocks[b].rows.len();
+            let mut z = vec![0.0; size * width];
+            for &zi in list {
+                let (s, o) = (&grouping.zs[zi], grouping.z_offset[zi]);
+                for (member, map) in &s.members {
+                    let (mb, off) = plan.place[*member];
+                    let total = plan.batches[mb].total;
+                    for k in 0..size {
+                        for &(from, to) in map {
+                            z[k * width + o + to] += moduli[mb][k * total + off + from];
+                        }
+                    }
+                }
+            }
+            sums.push(z);
+        }
+        // The direct entries.
+        for p in 0..plan.keys.len() {
+            let terms = &plan.terms[p];
+            if p >= plan.hamiltonian && plan.jump[p].is_some_and(|(_, which)| which == 1) {
+                continue;
+            }
+            for (i, (e, _)) in plan.direct[p].iter().enumerate() {
+                let (_, sc) = terms[e.term as usize];
+                let c = (e.value * sc).abs() * coefficient(e.coefficient);
+                if p >= plan.hamiltonian {
+                    let (o, k) = grouping.j_direct[p - plan.hamiltonian][i];
+                    channels[o][k as usize] += c;
+                } else {
+                    h[grouping.h_direct[p]][grouping.h_direct_places[p][i] as usize] += c;
+                }
+            }
+        }
+        // The pairs: per leg sum its |X| once, then its products with the amplitude sums' bounds.
+        let count = grouping.h_pairs.len() + grouping.j_pairs.len();
+        let (mut made, mut xa) = (usize::MAX, Vec::new());
+        for k in 0..count {
+            let (wi, zi, is_jump) = if k < grouping.h_pairs.len() {
+                let p = &grouping.h_pairs[k];
+                (p.w, p.z, false)
+            } else {
+                let p = &grouping.j_pairs[k - grouping.h_pairs.len()];
+                (p.w, p.z, true)
+            };
+            let s = &grouping.ws[wi];
+            if s.jump.is_some_and(|(_, which)| which == 1) {
+                continue;
+            }
+            let (rows, size, width) = (s.index.len(), plan.blocks[s.block].rows.len(), grouping.layout[s.block].1);
+            if made != wi {
+                xa.clear();
+                xa.resize(rows * size, 0.0);
+                for (member, map) in &grouping.wmaps[s.at] {
+                    let r = &plan.legs[*member];
+                    let ts = &plan.terms[r.piece];
+                    for e in &r.entries {
+                        let to = map[e.row as usize];
+                        if to == u32::MAX {
+                            continue;
+                        }
+                        let (_, sc) = ts[e.term as usize];
+                        xa[to as usize * size + e.col as usize] += (e.value * sc).abs() * coefficient(e.coefficient);
+                    }
+                }
+                made = wi;
+            }
+            let half = if is_jump { 1.0 } else { 0.5 };
+            let (cols, at0) = (grouping.zs[zi].index.len(), grouping.z_offset[zi]);
+            let z = &sums[s.block];
+            for i in 0..rows {
+                for j in 0..cols {
+                    let v = half * (0..size).map(|q| xa[i * size + q] * z[q * width + at0 + j]).sum::<f64>();
+                    if is_jump {
+                        let p = &grouping.j_pairs[k - grouping.h_pairs.len()];
+                        channels[p.out][p.places[i * cols + j] as usize] += v;
+                    } else {
+                        let p = &grouping.h_pairs[k];
+                        h[p.out][p.places[i * cols + j] as usize] += v;
+                        h[p.conjugate][p.conjugate_places[i * cols + j] as usize] += v;
+                    }
+                }
+            }
+        }
+        (h, channels)
+    }
+}
 
 impl Grouping {
     /// The structure's sizes (a measurement's): Z sums, W sums, H pairs, jump pairs, and their products' summed

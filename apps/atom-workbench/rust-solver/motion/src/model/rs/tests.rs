@@ -651,7 +651,7 @@ fn rs_at_cost() {
 
 /// The full reference is the prototype's to rounding: PYEXP2's construction -- pyexp2/scene_p.py `build` (each
 /// scene's own request, reqprec/req; the tweezer's dissipative fold; scene_x's H0 convention) and pysel/ps.py
-/// `hilbert_full3` --, its input by the engine's rule since 3a (model/rs.rs `significant`: each coupling entry of the
+/// `hilbert_full3` --, its input by the engine's rule since 3a (model/classify.rs `input`: each coupling entry of the
 /// base, every beam's X_l, the tweezer's X_tw and R_tw and every outside-form product zero where its first-order
 /// amplitude is below ε at the term's frequency at rest; the emission by its own largest), as JSON in the directory
 /// `V3C_FULL` (made by motion3d_status/rewrite/r1clean_ref/export_rule.py, the files kept beside it). On the six
@@ -837,7 +837,7 @@ fn the_raman_scenes_frame_and_model() {
     }
 }
 
-/// The fold's input read by the first-order amplitude rule (`significant`), said per scene: the entries left out of
+/// The fold's input read by the first-order amplitude rule (model/classify.rs `input`), said per scene: the entries left out of
 /// each coupling of H's terms at rest, their largest amplitude a (below ε), and the largest of those kept below
 /// u·max|x| of their own matrix (what the matrix's own rounding would have left out, kept as amplitudes).
 #[test]
