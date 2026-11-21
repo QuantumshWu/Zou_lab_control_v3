@@ -360,7 +360,7 @@ fn engine_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, e
     let mut sums = vec![0.0; 2 * n * super::super::row(n) * super::super::SUMS];
     let mut nodes = 0;
     let panels = super::super::count(b - a, picture.quotient, super::super::FORMS, 2, || ends);
-    for (u, w) in super::super::panels(a, b, panels, picture.quotient, super::super::FORMS, 2).flat_map(|(_, nodes)| nodes) {
+    for (u, w) in super::super::panels(a, b, panels).flat_map(|(_, nodes)| nodes) {
         picture.at(u, &mut x[..n]);
         super::super::Sums { still: false, h, tones: &[] }.gather(u, w, &x[..n], None, &mut sums);
         nodes += 1;
@@ -370,7 +370,7 @@ fn engine_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, e
         super::super::whole(&sums, j, n, &mut m);
         m
     });
-    (engine, nodes, panels)
+    (engine, nodes, panels.0)
 }
 
 /// The brute force's sums of `piece_sums`.

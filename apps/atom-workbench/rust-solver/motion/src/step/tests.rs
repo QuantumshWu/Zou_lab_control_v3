@@ -4726,4 +4726,5 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
 
 // R1-PROP: the propagation's regression and measurements on the six scenes (ignored, by name).
 mod r1prop;
+mod r2prop2;
 

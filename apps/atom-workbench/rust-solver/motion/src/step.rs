@@ -1243,33 +1243,42 @@ fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
 ///   root takes again, a panel's.
 /// Which one a piece is, `ends` tells (the propagation's norm at the piece's end at the trajectory's threshold or below:
 /// the survival to the propagation's accuracy, a stop's cost), asked only where the root's n is not one. n is the first
-/// past which C does not fall (each part of C is monotone in n, but for the node counts' steps of one).
-fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> usize {
-    let m = |n: usize| fewest(bandwidth, width / n as f64, nodes, degree) as f64;
-    let least = |cost: &dyn Fn(usize) -> f64| {
-        let (mut n, mut best) = (1, cost(1));
+/// past which C does not fall (each part of C is monotone in n, but for the node counts' steps of one). Returns n and
+/// its panels' m, each m(n) made once (`fewest` is a recurrence of some κ terms; the two costs ask the same n again,
+/// and until 2026-11-21 the panels made their m once more: 2 to 3 % of a step, PGC3D, R4, tilt0).
+fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> (usize, usize) {
+    let mut known = [0usize; 256];
+    let mut m = |n: usize| -> usize {
+        if let Some(&m) = known.get(n).filter(|&&m| m != 0) {
+            return m;
+        }
+        let m = fewest(bandwidth, width / n as f64, nodes, degree);
+        if let Some(slot) = known.get_mut(n) {
+            *slot = m;
+        }
+        m
+    };
+    let least = |m: &mut dyn FnMut(usize) -> usize, cost: &dyn Fn(usize, &mut dyn FnMut(usize) -> usize) -> f64| {
+        let (mut n, mut best) = (1, cost(1, &mut *m));
         loop {
-            let next = cost(n + 1);
+            let next = cost(n + 1, &mut *m);
             if !(next < best) {
                 break n;
             }
             (n, best) = (n + 1, next);
         }
     };
-    let rooted = least(&|n| 0.5 * n as f64 * m(n) + m(2 * n));
-    if rooted > 1 && ends() {
-        rooted
-    } else {
-        least(&|n| n as f64 * m(n))
-    }
+    let rooted = least(&mut m, &|n, m| 0.5 * n as f64 * m(n) as f64 + m(2 * n) as f64);
+    let n = if rooted > 1 && ends() { rooted } else { least(&mut m, &|n, m| n as f64 * m(n) as f64) };
+    (n, m(n))
 }
 
-/// The `count` equal panels over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, each
-/// to the round-off (`fewest`, of `nodes` nodes and more), in their order from a to b: each panel's end (b itself for
-/// the last) and its nodes and weights in their order.
-fn panels(a: f64, b: f64, count: usize, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+/// The `count` equal panels over [a, b] of `nodes` nodes each (`count`: the fewest that integrate each to the
+/// round-off), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in their
+/// order.
+fn panels(a: f64, b: f64, (count, nodes): (usize, usize)) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
     let w = (b - a) / count as f64;
-    let rule = rule(fewest(bandwidth, w, nodes, degree));
+    let rule = rule(nodes);
     (0..count).map(move |p| {
         let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
         (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k])))
@@ -1279,7 +1288,7 @@ fn panels(a: f64, b: f64, count: usize, bandwidth: f64, nodes: usize, degree: us
 /// The nodes and weights over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the
 /// round-off, where no jump's root is sought (`count`).
 fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, count(b - a, bandwidth, nodes, degree, || false), bandwidth, nodes, degree).flat_map(|(_, nodes)| nodes)
+    panels(a, b, count(b - a, bandwidth, nodes, degree, || false)).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1570,9 +1579,9 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 /// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
 /// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing of a
 /// step is carried to the next one, and a trajectory taken up again with a fresh scratch goes on as itself, to the bit.
-/// Beside, the count of the trajectory's steps the decomposition refused for an entry of no route (`unrouted`:
-/// spectral.rs, # The split), which the solve's probe reads (solve.rs, ## The ladder) and no step does; and the counted
-/// work of the attempts refused on it (`refused`), which the solve's price reads and no step does.
+/// Beside, the counted work of the attempts refused on it (`refused`), which the solve's price reads and no step does.
+/// (Until 2026-11-21 also the count of its steps refused for an entry of no route, which the solve's probe read before
+/// the ladder's price took the refused attempts' work: read by nothing since, removed.)
 /// (Until 2026-11-20 the scratch carried its picture's counts of the decomposition's route, which the next step's
 /// route was priced against: the strides', spectral.rs, # Where the decomposition does not take the step.)
 #[derive(Default)]
@@ -1586,8 +1595,6 @@ pub struct Scratch {
     slots: usize,
     weights: Vec<f64>,
     kept: Vec<f64>,
-    /// The steps refused for an entry of no route (`Refused::Propagation(Refusal::Radius)`), at whatever length.
-    unrouted: u64,
     /// The counted work of the attempts refused on the scratch (`refused`), and how far the picture of the stretch being
     /// taken has gone (`pictured`).
     refused: f64,
@@ -1636,12 +1643,6 @@ struct Carved<'a> {
 }
 
 impl Scratch {
-    /// The steps refused for an entry the decomposition takes by no route (spectral.rs, # The split), at whatever
-    /// length -- each taken at its halves by the advance (adapt.rs, # The step) -- since the scratch was made.
-    pub fn unrouted(&self) -> u64 {
-        self.unrouted
-    }
-
     /// The counted work (real multiply-adds, `Step::work`'s) of every attempt on this scratch that was refused, since the
     /// scratch was made (`Midway::attempt`): what each did before its refusal, by the counts its price would have had
     /// (`Price::work`, `unfinished`) -- its stretches finished before the refused one, and of that one its middle's
@@ -2341,10 +2342,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let along = Along::new(generator, kappa_m, velocity);
         let (n, still, cluster) = (along.n, generator.still(), march.state.cluster);
         march.progress = Progress { states: n, still, ..Progress::default() };
-        let launched = along.turned(&march.state.psi, march.u, true);
+        let mut launched = Some(along.turned(&march.state.psi, march.u, true));
         // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
         // decay laid alike.
-        let scale = pictured(&along, scratch, tau, Some(&launched[..n])).inspect_err(|refused| scratch.unrouted += u64::from(*refused == Refused::Propagation(Refusal::Radius)))?;
+        let scale = pictured(&along, scratch, tau, launched.as_ref().map(|x| &x[..n]))?;
         let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
         // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
         let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
@@ -2365,7 +2366,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let done = loop {
             // A piece: from the state the march stands at, the sums and the weights as they are, the survival from ‖ψ‖².
             let from = march.u;
-            let launched = along.turned(&march.state.psi, from, true);
+            // The stretch's first piece is launched with the state its picture was prepared on, the next ones with a jump's.
+            let launched = launched.take().unwrap_or_else(|| along.turned(&march.state.psi, from, true));
             {
                 let _p = crate::prof::scope(crate::prof::LAUNCH);
                 picture.launch(from, &launched[..n]);
@@ -2414,7 +2416,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 picture.at(h, &mut x[..n]);
                 norm_sqr(&x[..n]) <= march.state.threshold
             });
-            for (b, nodes) in panels(from, h, laid, bandwidth, FORMS, 2) {
+            for (b, nodes) in panels(from, h, laid) {
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);
