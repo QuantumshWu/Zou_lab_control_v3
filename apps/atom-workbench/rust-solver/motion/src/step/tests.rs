@@ -492,6 +492,61 @@ fn a_generator_that_is_no_number_refuses_the_step_and_panics_nowhere() {
     }
 }
 
+/// A refused attempt's work is counted on its scratch, a taken step's is not (step.rs `Scratch::refused`): a generator
+/// that is no number, refused at its nodes, counts the middle's making and the generator at the nodes, to the bit; and
+/// on random clusters (`Lindblad`, as `random_steps` makes them) every step taken leaves the count as it was, and every
+/// length the decomposition refuses raises it by more than that (the picture's preparation and the decay laid besides).
+#[test]
+fn a_refused_attempt_s_work_is_counted_on_its_scratch() {
+    use crate::decide::COMPLEX;
+    let flat = Trap::Quadratic { hessian: [[0.0; 3]; 3], gradient: [0.0; 3] };
+    let model = Atom::new(7.3e-4, flat, vec![Beam { k: [0.0, 0.0, 8.0], rabi: 10.0, phase: 0.0 }], f64::NAN, 38.1);
+    let start = held(&model, [0.0; 3], [0.0; 3]);
+    let mut scratch = step::Scratch::default();
+    for tau in [0.5, 1e-3] {
+        let before = scratch.refused();
+        assert!(matches!(step_of(&model, &start, tau, &mut scratch), Err(step::Refused::Overflow)), "τ {tau}");
+        let middle = model.middle(0, start.r, start.time + 0.5 * tau);
+        let made = middle.made() + COMPLEX * if middle.still() { 1.0 } else { 3.0 } * middle.work()[0];
+        assert_eq!(scratch.refused() - before, made, "τ {tau}: the refused attempt's count");
+    }
+    let (mut taken, mut refused) = (0, 0);
+    let mut scratch = step::Scratch::default();
+    for case in 0..24 {
+        let mut s = crate::random::Stream::new(43, crate::random::Purpose::Initial, case, 0);
+        let n = 1 + (5.0 * s.uniform()) as usize;
+        let beats = (3.0 * s.uniform()) as usize;
+        let waves = 1 + (3.0 * s.uniform()) as usize;
+        let size = 0.3 * 100.0_f64.powf(s.uniform());
+        let model = Lindblad::new(&mut s, n, beats, waves, size);
+        let speed = 10.0_f64.powf(-3.0 + 3.0 * s.uniform());
+        let mut start = Trajectory::new(&model, 0, s.direction().map(|x| 0.5 * x), s.direction().map(|x| x * speed / RB), 7, case);
+        start.psi = random_state(&mut s, n);
+        start.threshold = 0.0;
+        for tau in [0.01, 0.1, 1.0, 10.0, 100.0].map(|t| t / size) {
+            let before = scratch.refused();
+            let middle = step::Midway::new(&model, &start, tau).map(|m| m.reached);
+            match step_of(&model, &start, tau, &mut scratch) {
+                Ok(_) => {
+                    taken += 1;
+                    assert_eq!(scratch.refused(), before, "case {case}, τ {tau}: a step taken counts nothing refused");
+                }
+                Err(step::Refused::Propagation(_)) => {
+                    refused += 1;
+                    let (r_h, _) = middle.expect("a refused propagation has its middle");
+                    let m = model.middle(0, r_h, start.time + 0.5 * tau);
+                    let least = m.made() + COMPLEX * if m.still() { 1.0 } else { 3.0 } * m.work()[0];
+                    let counted = scratch.refused() - before;
+                    assert!(counted > least && counted.is_finite(), "case {case}, τ {tau}: {counted} counted, at least {least}");
+                }
+                Err(e) => panic!("case {case}, τ {tau}: {e:?}"),
+            }
+        }
+    }
+    eprintln!("{taken} steps taken, {refused} refused");
+    assert!(taken > 0 && refused > 0, "{taken} taken, {refused} refused");
+}
+
 /// A trajectory at the ground state at (r, κ) whose threshold no step reaches (a jump-free propagation).
 fn held(model: &Atom, r: [f64; 3], kappa: [f64; 3]) -> Trajectory {
     let mut t = Trajectory::new(model, 0, r, kappa, 7, 0);
