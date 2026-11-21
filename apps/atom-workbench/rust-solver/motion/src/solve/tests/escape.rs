@@ -37,11 +37,24 @@ fn request_of(name: &str) -> Request {
     Request::from_native(&line).unwrap()
 }
 
-/// The run's model with its loss noted (time, inside the region): the same model to the bit, each call handed on --
-/// or, `old`, with the loss of until 2026-11-21, outside the trap's region as well.
+/// A loss as noted (`Watched`): its time, whether inside the trap's region, its loss energy, and where it is a jump's
+/// test (adapt.rs: after every jump) the loss energy at the jump's landing with the potential at the populations
+/// before the jump -- what the jump's kick alone made of it, without the potential's reweighting by ψ's populations.
+#[derive(Clone, Copy, Debug)]
+struct Loss {
+    time: f64,
+    inside: bool,
+    energy: f64,
+    unweighed: Option<f64>,
+}
+
+/// The run's model with its loss noted (`Loss`): the same model to the bit, each call handed on -- or, `old`, with the
+/// loss of until 2026-11-21, outside the trap's region as well. `pending` the last photon's time and the potential at
+/// its state before the jump.
 struct Watched<'a> {
     inner: &'a Selected,
-    loss: RefCell<Option<(f64, bool)>>,
+    loss: RefCell<Option<Loss>>,
+    pending: RefCell<Option<(f64, f64)>>,
     old: bool,
 }
 
@@ -67,6 +80,8 @@ impl crate::step::Dynamics for Watched<'_> {
         self.inner.middle(cluster, r, t)
     }
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
+        let before = self.inner.energy(cluster, &Point { r: at.r, kappa: [0.; 3], t: at.t }, psi);
+        *self.pending.borrow_mut() = Some((at.t, before));
         self.inner.emit(cluster, at, on, psi, draw)
     }
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64 {
@@ -74,8 +89,11 @@ impl crate::step::Dynamics for Watched<'_> {
     }
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool {
         let lost = self.inner.lost(cluster, at, psi) && !(self.old && !self.inner.light().outside(at.r));
+        let jump = self.pending.borrow_mut().take().filter(|&(t, _)| t == at.t);
         if lost && self.loss.borrow().is_none() {
-            *self.loss.borrow_mut() = Some((at.t, !self.inner.light().outside(at.r)));
+            let energy = self.inner.energy(cluster, at, psi);
+            let unweighed = jump.map(|(_, before)| energy - self.inner.energy(cluster, &Point { r: at.r, kappa: [0.; 3], t: at.t }, psi) + before);
+            *self.loss.borrow_mut() = Some(Loss { time: at.t, inside: !self.inner.light().outside(at.r), energy, unweighed });
         }
         lost
     }
@@ -119,11 +137,11 @@ fn losscap_the_escape_value_against_the_region() {
     let indices: Vec<u64> = groups.iter().flat_map(|&g| (0..GROUP).map(move |m| g * GROUP + m)).collect();
     let started = Instant::now();
     let one = |index: u64, old: bool| {
-        let watched = Watched { inner: &run, loss: RefCell::new(None), old };
+        let watched = Watched { inner: &run, loss: RefCell::new(None), pending: RefCell::new(None), old };
         let record = super::super::run(&watched, &domain, ensemble.draw(SEED, index), index, tau, &plan, false);
         (record, watched.loss.into_inner())
     };
-    let results: Vec<(u64, f64, Option<(f64, bool)>)> = indices
+    let results: Vec<(u64, f64, Option<Loss>)> = indices
         .par_iter()
         .map(|&index| {
             let start = ensemble.draw(SEED, index);
@@ -133,8 +151,11 @@ fn losscap_the_escape_value_against_the_region() {
         })
         .collect();
     let highest = results.iter().map(|r| r.1).fold(f64::NEG_INFINITY, crate::linalg::larger);
-    let lost: Vec<(u64, f64, bool)> = results.iter().filter_map(|r| r.2.map(|(t, inside)| (r.0, t, inside))).collect();
-    let inside: Vec<(u64, f64)> = lost.iter().filter(|l| l.2).map(|l| (l.0, l.1)).collect();
+    let lost: Vec<(u64, Loss)> = results.iter().filter_map(|r| r.2.map(|l| (r.0, l))).collect();
+    for (index, l) in &lost {
+        eprintln!("{name} trajectory {index}: lost at {} µs, {} the region, loss energy {:.4e} U₀{}", l.time, if l.inside { "inside" } else { "outside" }, l.energy / depth, l.unweighed.map_or(" (a step's end)".into(), |u| format!(" after a jump; with the populations before the jump {:.4e} U₀ ({})", u / depth, if u <= 0. { "the reweighting alone took it past 0" } else { "past 0 without the reweighting" })));
+    }
+    let inside: Vec<(u64, f64)> = lost.iter().filter(|l| l.1.inside).map(|l| (l.0, l.1.time)).collect();
     let before = inside.iter().filter(|l| l.1 <= last).count();
     eprintln!(
         "{name}: {} trajectories in {:.1} s; initial loss energy at most {highest:.4} U₀ ({} above 0); {} lost, {} of them inside the region (the old test held them then) at {:?} (trajectory, µs), {before} before the last output",
@@ -148,10 +169,11 @@ fn losscap_the_escape_value_against_the_region() {
     // Each one lost inside the region, again under the old test: its fate and window means at every output, both ways.
     for &(index, at) in &inside {
         let ((new, _), (old, then)) = (one(index, false), one(index, true));
+        eprintln!("{name} trajectory {index}: under the old test {}", then.map_or("held to the run's end".into(), |l| format!("lost at {} µs, {} the region", l.time, if l.inside { "inside" } else { "outside" })));
         for (k, (a, b)) in new.outputs.iter().zip(&old.outputs).enumerate() {
             if a != b {
                 let kinetic = |f: &Fate| if let Fate::Held(h) = f { format!("held, Σ_a ⟨κ_a²⟩ {:.6e} /µm², Σ_a ⟨κ_a⟩² {:.6e}", h.kappa2.iter().sum::<f64>(), h.kappa.iter().map(|x| x * x).sum::<f64>()) } else { format!("{f:?}") };
-                eprintln!("{name} trajectory {index} (lost at {at} µs; under the old test {then:?}): output {k} at {} µs -- {} against the old {}", request.times_us[k], kinetic(a), kinetic(b));
+                eprintln!("{name} trajectory {index} (lost at {at} µs): output {k} at {} µs -- {} against the old {}", request.times_us[k], kinetic(a), kinetic(b));
             }
         }
     }

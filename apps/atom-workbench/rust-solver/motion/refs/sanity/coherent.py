@@ -1,4 +1,7 @@
-"""S3, the user's experiment in the lab's geometry (refs/sanity.mjs), by an independent coherent model: quantum jumps of
+"""(By the old loss of until 2026-11-21: outside the tweezer's 1/20 region with E > 0. The engine's loss is now E > 0
+wherever the atom is, SPEC §1.7; this reference is kept as it was.)
+
+S3, the user's experiment in the lab's geometry (refs/sanity.mjs), by an independent coherent model: quantum jumps of
 the full internal state of F=2 and F'=3 along classical trajectories in the tweezer. It shares no code with the motion
 engine; it takes model.py's tables (light shifts by its own sum over states, Clebsch–Gordan, Zeeman, I_sat).
 

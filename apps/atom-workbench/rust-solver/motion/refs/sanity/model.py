@@ -1,4 +1,7 @@
-"""Independent physics model of the two sanity scenes (refs/sanity.mjs): S1, the app's default tweezer + one σ+ probe;
+"""(By the old loss of until 2026-11-21: outside the tweezer's 1/20 region with E > 0. The engine's loss is now E > 0
+wherever the atom is, SPEC §1.7; this reference is kept as it was.)
+
+Independent physics model of the two sanity scenes (refs/sanity.mjs): S1, the app's default tweezer + one σ+ probe;
 S2, the same + the probe's retro-reflection (the app's plain mirror) + a repump. It shares no code and no approximation
 with the motion engine: the light shifts come from a sum over states on the app's own atomic tables (read from
 src/physics.ts and src/spectroscopy-data.ts), the dynamics from a classical-atom Monte Carlo written here.
