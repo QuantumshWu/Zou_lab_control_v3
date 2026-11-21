@@ -108,9 +108,9 @@ use crate::field::Light;
 use crate::floquet::frame::{exact_sum, FrameKey, Ratio};
 use crate::floquet::{Frame, Hilbert};
 use crate::linalg::{inner, norm_sqr, C64, Mat, V3};
-use crate::model::rs::fold::{Grouping, Local, Out};
+use crate::model::rs::fold::{Grouping, Local, Out, Plan};
 use crate::model::rs::{Making, Rs};
-use crate::model::classify::{Judgment, Scales};
+use crate::model::classify::{Account, Judgment, Scales, Tier};
 use crate::model::{Beat, Cluster, Moments, Point, Quadratic, Scattering};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Key, Scene};
@@ -165,6 +165,15 @@ pub struct Selected {
     /// The lift's groups in the order of their keys, each with its elements' fast index (an index among the run's
     /// fast indices of the lift) and the value of its slow beat (`Selected::rows`).
     lifts: Vec<(usize, Vec<(usize, f64)>)>,
+}
+
+/// Which beats a model drops (`Selected::made`): those its judgment drops (model/classify.rs, # The drop tier), or (a
+/// check's) exactly the candidate pairs of the listed |Ω| (rad/µs, to 10⁻⁹ of it), none of an empty list.
+#[derive(Clone, Debug)]
+pub(crate) enum Drops {
+    Judged,
+    #[cfg(test)]
+    Only(Vec<f64>),
 }
 
 /// The runs' numbers (`Selected::id`).
@@ -406,11 +415,12 @@ impl Selected {
     /// populations `reference`. The frame is the checkpoint's centre's at rest (floquet/frame.rs), the fold's sectors
     /// its (`Rs::new`). Err where P does not hold every ground state (a jump lands on any of them).
     pub fn new(scene: Scene, report: Selection, reference: [f64; GROUND]) -> Result<Selected, String> {
-        Selected::made(scene, report, reference, true)
+        Selected::made(scene, report, reference, true, &Drops::Judged)
     }
 
-    /// The model, its states in their exact blocks or (`split` false: what the tests check the blocks against) one.
-    fn made(scene: Scene, report: Selection, reference: [f64; GROUND], split: bool) -> Result<Selected, String> {
+    /// The model, its states in their exact blocks or (`split` false: what the tests check the blocks against) one, the
+    /// beats `drops` says dropped.
+    fn made(scene: Scene, report: Selection, reference: [f64; GROUND], split: bool, drops: &Drops) -> Result<Selected, String> {
         // The frame at rest with the beams' recoil shifts (module documentation, # One cluster, one frame).
         let recoil = scene.doppler([0.0; 3]);
         let centre = scene.components([0.0; 3], &recoil, 1.0);
@@ -479,8 +489,8 @@ impl Selected {
         };
         let labels = label(rs.folding.keys());
         // The decay's structure: the same fold with its channels in the emission's spherical basis.
-        let spherical = rs.spherical();
-        let spherical = Grouping::new(&spherical, &label(spherical.keys()));
+        let spherical_plan = rs.spherical();
+        let spherical = Grouping::new(&spherical_plan, &label(spherical_plan.keys()));
         let lab = Grouping::new(rs.plan(), &labels);
         let n = rs.keep.len();
         let mut beats = Beats::default();
@@ -505,7 +515,7 @@ impl Selected {
             template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 },
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0 },
+            judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0, pairs: Vec::new() },
             blocks: vec![(0..n).collect()],
             block_of: vec![0; n],
             beats: RwLock::new(beats),
@@ -517,7 +527,7 @@ impl Selected {
             scene,
         };
         run.layout(&spherical);
-        run.judge(split);
+        run.judge(split, (&spherical_plan, &spherical), drops);
         run.tones();
         run.lift_tables();
         Ok(run)
@@ -546,6 +556,13 @@ impl Selected {
         for note in self.report.notes() {
             out += &format!("  注：{note}
 ");
+        }
+        let dropped: Vec<f64> = self.read(|b| self.judgment.tiers.iter().filter(|t| t.1 == Tier::Drop).map(|t| b.value[t.0]).filter(|v| *v > 0.0).collect());
+        if !dropped.is_empty() {
+            let length = self.scene.request.times_us.last().copied().unwrap_or(0.0);
+            let beats = dropped.iter().map(|v| format!("±{v:.4}")).collect::<Vec<_>>().join("、");
+            out += &format!("  删去拍 {} 对：{beats} rad/µs；迹距离增长率上界 Y = {:.2e} /µs（{length} µs 内 D ≤ {:.2e}）
+", dropped.len(), self.judgment.dropped, 0.5 * (2.0 * self.judgment.dropped * length).exp_m1());
         }
         let judged: Vec<bool> = self.report.reference.iter().map(Option::is_some).collect();
         for c in &self.report.candidates {
@@ -827,10 +844,28 @@ impl Selected {
     /// written there); with `split` (what the tests check the blocks against: one block) the judgment's blocks, every
     /// place between two of them left out of the layout as well and the decay's products between them not made, zero by
     /// construction.
-    fn judge(&mut self, split: bool) {
+    fn judge(&mut self, split: bool, spherical: (&Plan, &Grouping), drops: &Drops) {
         let n = self.rs.keep.len();
         let (node, scales) = self.structure();
-        let judgment = Judgment::new(&node, &scales);
+        let mut judgment = Judgment::new(&node, &scales);
+        let candidates = judgment.candidates();
+        if !candidates.is_empty() {
+            let (pairs, account, nodes) = self.drop_sizes(&node, &candidates, spherical);
+            let beats: Vec<usize> = node.generator.iter().map(|g| g.0).collect();
+            let work = |left: &[usize]| -> f64 {
+                let kept: Vec<usize> = candidates.iter().filter(|k| !left.contains(k)).map(|&k| beats[k]).collect();
+                self.counted(&kept, nodes)
+            };
+            match drops {
+                Drops::Judged => judgment.drop(&node, &scales, &pairs, &account, &work),
+                #[cfg(test)]
+                Drops::Only(listed) => {
+                    let values: Vec<f64> = self.read(|b| beats.iter().map(|&k| b.value[k]).collect());
+                    let chosen: Vec<usize> = (0..pairs.len()).filter(|&i| listed.iter().any(|v| (values[pairs[i].0[0]].abs() - v).abs() <= 1e-9 * v)).collect();
+                    judgment.dropping(&node, &scales, &pairs, &chosen);
+                }
+            }
+        }
         let keep: Vec<bool> = (0..judgment.tiers.len()).map(|k| judgment.kept(k)).collect();
         // The slots left, and every place of the layout renumbered (a place at a beat left out goes with it).
         let mut slot_of = vec![usize::MAX; keep.len()];
@@ -888,6 +923,144 @@ impl Selected {
     /// left out were taken from the layout, its beat and tier; the blocks; what the dropped beats cost.
     pub fn judgment(&self) -> &Judgment {
         &self.judgment
+    }
+
+    /// Y (1/µs): the bound of the rate at which the model's dropped terms move the run's state in trace distance
+    /// (model/classify.rs, # The drop tier) -- after a time t the distance is at most ½(e^{2Yt} − 1) = tY(1 + O(tY)), a row
+    /// as shown and the loss move by at most that, T by at most c_T times it of its allowance. Zero where nothing is
+    /// dropped. The run's error account takes it (the solve's).
+    pub fn dropped(&self) -> f64 {
+        self.judgment.dropped
+    }
+
+    /// The candidate pairs of the drop tier with their Y (model/classify.rs, # The drop tier), the drop's account, and
+    /// the three nodes' counted work of a step (complex multiply-adds): per candidate slot of the structure's node
+    /// (`candidates`, before the layout drops anything) its pair -- it and the slot of its opposite beat -- and the sum
+    /// of their sup norms' bounds over the reach, the H_eff part's √(‖S‖₁‖S‖_∞) of its entries' bounds S
+    /// (rs/fold.rs `Out::bounds` on the lab's grouping) and the decay's share ½ Σ ‖ℓ_l‖‖ℓ_r‖ over its products, each
+    /// spherical component's norm the Frobenius of its entries' bounds (the spherical fold's own, `spherical`); the
+    /// reach's κ from the prepared well's depth U₀ (`Scene::trap_potential` at the focus: K ≤ s U₀ for a held atom),
+    /// the account's c_T = 2U₀/(30 (ħ/m) k²) at the emission's shortest wave number k (T_sc ≥ 30 k_BT_rec), its errors
+    /// the selection's on P (the gate's where it holds none).
+    fn drop_sizes(&self, node: &Node, candidates: &[usize], spherical: (&Plan, &Grouping)) -> (Vec<(Vec<usize>, f64)>, Account, f64) {
+        let n = self.rs.keep.len();
+        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
+        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
+        let kappa = (2.0 * depth / self.hbar_over_mass).sqrt();
+        let reach = self.rs.reach(&self.scene, self.hbar_over_mass, kappa);
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
+        let nodes = 3.0 * (work.local.work + work.out.work);
+        let values = &work.local.values;
+        // The H_eff part per slot.
+        let (h, _) = Out::bounds(self.rs.plan(), &self.lab, &self.rs.plan().reach(values, &reach), &reach.coefficients);
+        let slots = node.generator.len();
+        let mut parts = vec![vec![0.0_f64; n * n]; slots];
+        for (list, b) in self.tables.h.iter().zip(&h) {
+            for (k, &(x, g, _)) in list.iter().enumerate() {
+                if g != u32::MAX {
+                    parts[g as usize][x as usize] += b[k];
+                }
+            }
+        }
+        let norm = |m: &[f64]| -> f64 {
+            let rows = (0..n).map(|a| (0..n).map(|b| m[a * n + b]).sum::<f64>()).fold(0.0, larger);
+            let cols = (0..n).map(|b| (0..n).map(|a| m[a * n + b]).sum::<f64>()).fold(0.0, larger);
+            (rows * cols).sqrt()
+        };
+        let mut size: Vec<f64> = parts.iter().map(|m| norm(m)).collect();
+        // The decay's share per slot: each spherical component's entries' bounds (the spherical fold's channel outputs
+        // at the component's class, axis and beat), its Frobenius norm, the products'.
+        let (plan, grouping) = spherical;
+        let (_, channels) = Out::bounds(plan, grouping, &plan.reach(values, &reach), &reach.coefficients);
+        let mut entries: HashMap<(usize, u32), f64> = HashMap::new();
+        for (co, (q, fast, which, key, _)) in grouping.channel_outputs.iter().enumerate() {
+            let Some(class) = self.template.classes.iter().position(|c| c.fast == *fast).filter(|_| *which == 0) else { continue };
+            let beats = self.elements(key, Of::Jump);
+            for (k, &x) in grouping.channel_lists[co].iter().enumerate() {
+                if let Some(j) = self.tables.jumps.iter().position(|j| j.class == class && j.q == *q && j.beat == beats[x as usize]) {
+                    *entries.entry((j, x)).or_insert(0.0) += channels[co][k];
+                }
+            }
+        }
+        let mut components = vec![0.0_f64; self.tables.jumps.len()];
+        for (&(j, _), v) in &entries {
+            components[j] += v * v;
+        }
+        for d in &self.tables.decay {
+            let v = 0.5 * components[d.left].sqrt() * components[d.right].sqrt();
+            size[d.forward] += v;
+            if d.left != d.right {
+                size[d.back] += v;
+            }
+        }
+        // The pairs: a slot and the slot of its opposite beat.
+        let exact: Vec<Exact> = self.read(|b| node.generator.iter().map(|g| b.exact[g.0].clone()).collect());
+        let mut pairs: Vec<(Vec<usize>, f64)> = Vec::new();
+        for &k in candidates {
+            if pairs.iter().any(|p| p.0.contains(&k)) {
+                continue;
+            }
+            let opposite = (exact[k].0.map(|v| -v), negated(&exact[k].1));
+            let mut slots = vec![k];
+            slots.extend(candidates.iter().copied().filter(|&j| j != k && exact[j] == opposite));
+            let y = slots.iter().map(|&j| size[j]).sum();
+            pairs.push((slots, y));
+        }
+        // The account.
+        let request = &self.scene.request;
+        let shortest = (0..STATES)
+            .flat_map(|i| (0..STATES).map(move |j| (i, j)))
+            .filter(|&(i, j)| request.emission.iter().any(|c| c[(i, j)] != C64::ZERO))
+            .map(|(i, j)| self.scene.jumps().wave_number[(i, j)].re.abs())
+            .fold(f64::INFINITY, smaller);
+        let error = self.error().map(|e| if e.is_nan() { crate::select::GATE } else { e });
+        let account = Account {
+            populations: error[0],
+            temperature: error[1],
+            duration: request.times_us.last().copied().unwrap_or(0.0),
+            temperature_per_distance: 2.0 * depth / (crate::units::SUB_DOPPLER_RECOILS * self.hbar_over_mass * shortest * shortest),
+        };
+        (pairs, account, nodes)
+    }
+
+    /// A step's counted work with the beats `kept` of the generator other than the static one (model/classify.rs, # The
+    /// drop tier; complex multiply-adds): the three nodes' (`nodes`), and the propagation's part the tones change
+    /// (spectral.rs, # The second order by tones) -- per tone member its envelope to the eigenbasis, 6n³; per product
+    /// of two first-order classes beyond the static group's with itself 2n³ at each of three nodes; per beating class
+    /// followed three products of n³; the middle's solve where there are tones, n³ + n³/3 + n³ --, the tones T the
+    /// kept beats with their opposites, the classes the distinct sums of two of their exact beats and the static one.
+    fn counted(&self, kept: &[usize], nodes: f64) -> f64 {
+        let exact: Vec<Exact> = self.read(|b| kept.iter().map(|&k| b.exact[k].clone()).collect());
+        let plus = |a: &Exact, b: &Exact| -> Exact {
+            (std::array::from_fn(|i| a.0[i] + b.0[i]), a.1.iter().zip(&b.1).map(|(x, y)| Ratio::new(x.num * y.den + y.num * x.den, x.den * y.den)).collect())
+        };
+        let width = exact.first().map_or(0, |e| e.1.len());
+        let zero: Exact = ([0; 3], vec![Ratio::ZERO; width]);
+        let mut members: Vec<Exact> = vec![zero];
+        for e in &exact {
+            for x in [e.clone(), (e.0.map(|v| -v), negated(&e.1))] {
+                if !members.contains(&x) {
+                    members.push(x);
+                }
+            }
+        }
+        let tones = (members.len() - 1) / 2;
+        let mut classes: Vec<Exact> = Vec::new();
+        for a in &members {
+            for b in &members {
+                let c = plus(a, b);
+                if !classes.contains(&c) {
+                    classes.push(c);
+                }
+            }
+        }
+        let cube = (self.rs.keep.len() as f64).powi(3);
+        let first = (1 + 2 * tones) as f64;
+        let solve = if tones > 0 { 7.0 / 3.0 } else { 0.0 };
+        nodes + cube * (12.0 * tones as f64 + 6.0 * (first * first - 1.0) + 3.0 * (classes.len() as f64 - 1.0) + solve)
     }
 
     /// The model at a point in the frame, by beats (`Node`; module documentation, # The generator by beats), with the

@@ -677,6 +677,8 @@ pub struct Tweezer {
     /// The spherical basis: per channel q its Cartesian axes' coefficients (ℓ_q = Σ_a U_qa L_a).
     pub basis: [[C64; 3]; 3],
     factors: Factors,
+    /// The tweezer's intensity |a_tw|² among the factors (`Factor::Power`).
+    power: usize,
     /// Per sign σ of the tweezer's absorbed photon (+: its keys e_tw, e_tw + 2e_ν; −: their negations) and power j the
     /// largest entry of its matrices (the series' rule), and the static part at δ = 0 (`still`).
     sizes: [[f64; ORDERS]; 2],
@@ -864,7 +866,7 @@ impl Tweezer {
         let spherical = Source { jumps: spherical_jumps, ..source.clone() };
         let all: Vec<usize> = (0..STATES).collect();
         let groups = levels(&scene.request.states, &all);
-        Tweezer { library, sectors, groups, source, spherical, basis, factors, sizes, still: unit.still }
+        Tweezer { library, sectors, groups, source, spherical, basis, factors, power: power_f, sizes, still: unit.still }
     }
 
     /// The source's numbers at a point (scene.rs `Point`): the factors at its amplitudes, the tweezer's Doppler powers
@@ -1110,6 +1112,34 @@ impl Rs {
     /// The tweezer's fold made once (`Tweezer::still`).
     pub fn tweezer(&self) -> &Tweezer {
         &self.tweezer
+    }
+
+    /// The reach of a run (rs/fold.rs `Reach`; model/classify.rs, # The drop tier) as the fold's numbers take it: κ
+    /// (1/µm) the largest momentum at the focus; per piece of the fold's plan (and of the spherical one: the same H
+    /// pieces first) its frequency's change per unit momentum (ħ/m)|Σ_g c_g k_g| over its key's beams; per coefficient
+    /// its largest: the tweezer's Doppler shift δ = (ħ/m)(k_tw·κ + |k_tw|²/2) (`Tweezer::values_into`) at most
+    /// (ħ/m)(|k_tw| κ + |k_tw|²/2), its power j at most that to the j.
+    pub fn reach(&self, scene: &Scene, hbar_over_mass: f64, kappa: f64) -> fold::Reach {
+        let wave = |g: usize| scene.generators[g].beam.map_or([0.0; 3], |l| scene.geometry[l].wave_vector());
+        let doppler = self
+            .plan()
+            .keys()
+            .iter()
+            .map(|key| {
+                let k: [f64; 3] = std::array::from_fn(|a| key.iter().enumerate().map(|(g, &c)| f64::from(c) * wave(g)[a]).sum());
+                hbar_over_mass * crate::linalg::norm3(k)
+            })
+            .collect();
+        let tw = scene.geometry[scene.tweezer()].wave_number;
+        let delta = hbar_over_mass * (tw * kappa + 0.5 * tw * tw);
+        let mut coefficients = vec![0.0; self.tweezer.source.coefficients];
+        coefficients[0] = 1.0;
+        for sign in 0..2 {
+            for j in 1..ORDERS {
+                coefficients[power(sign, j)] = delta.powi(j as i32);
+            }
+        }
+        fold::Reach { power: Some(self.tweezer.power), kappa, doppler, coefficients }
     }
 
     /// The fold's structure with its channels in the emission's spherical basis (`channel_basis`): the decay's

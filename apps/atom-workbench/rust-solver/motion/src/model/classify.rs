@@ -16,7 +16,8 @@
 //!   amplitude is one there, at its focus, its largest anywhere (field.rs), so S is the sum of the terms' moduli at
 //!   their largest. A beat is zero where every entry of its value and of its gradient is.
 //! - **Drop**: a whole beat pair ±Ω (the H_eff part with its share of the decay) left out of the model under a strict
-//!   bound of what leaving it out does to every readout, booked in the run's error (`Judgment::dropped`; item 2).
+//!   bound of what leaving it out does to every readout, booked in the run's error (`Judgment::dropped`; # The drop
+//!   tier).
 //! - **Fold**: what the RS fold takes to second order -- Q, the states the selection leaves out (select.rs, with the
 //!   strict fold condition before its points are judged), and P's fast elements (the frame's n ≠ 0, rs.rs # The fold).
 //!   Both are decided before the model's node exists: the node holds P's slow elements alone, which are of the other
@@ -28,6 +29,38 @@
 //! - the exact blocks: P's connected parts under the kept beats' entries that are not zero, of the value and of the
 //!   gradient along each lab axis, off the diagonal (an entry that is not a number joins);
 //! - the candidate tones: the kept beats other than the static one, with their opposites (model/selected.rs `tones`).
+//!
+//! # The drop tier
+//! The bound (DROPRES §2 with its corrections; DESIGN2 §2.1–2.3). The run's model M and M′, M less the dropped beats'
+//! slots of the generator Ĥ = H_eff − (i/2)ΣL†L, both on the internal states ⊗ the centre of mass (taken quantum), the
+//! loss a transfer into a lost sector the same in both: M's propagator Φ on held ⊕ lost is CPTP and contracts the trace
+//! norm. Leaving a beat's decay share without its channels' components makes M′ no Lindblad form (Φ′ need not
+//! contract), so with M's Φ and ρ′(t), Δ(T) = ρ′ − ρ = ∫ Φ(T, t)(𝓛′ − 𝓛)ρ′(t) dt and
+//! ‖(𝓛′ − 𝓛)ρ‖₁ = ‖i(δĤρ − ρδĤ†)‖₁ ≤ 2 sup‖δĤ‖ ‖ρ‖₁ (δĤ(r̂) a multiplication operator, its norm the sup over the reach
+//! of the matrix's), Grönwall: ‖Δ(T)‖₁ ≤ e^{2YT} − 1, the trace distance D(T) = ½‖Δ‖₁ ≤ ½(e^{2YT} − 1) = YT(1 + O(YT)),
+//! Y = Σ_dropped sup‖G_k‖ over their slots. No T² term: the dropped force is in [δĤ(r̂), ρ]; the exact propagation's
+//! contraction takes every later consequence.
+//! - **The H_eff part** of a slot: its entries' bounds over the reach (rs/fold.rs `Out::bounds`): the sums of their terms'
+//!   moduli with every beam's amplitude at most one (its focus value: per beam, strict; the joint extremum of their
+//!   interference is lower, DESIGN2 §5.3, and not needed), every coefficient at its largest, and the folded blocks'
+//!   amplitudes at their bound over the reach (`Plan::reach`: the resolvent over every intensity in [0, 1] and every
+//!   momentum below κ_max(s), by boxes and the Neumann series about each box's centre). ‖G‖ ≤ √(‖S‖₁‖S‖_∞) of the
+//!   nonnegative bound S ≥ |G| entrywise.
+//! - **The decay's share** of a slot: Σ over the decay's products ℓ_l†ℓ_r landing there of ½‖ℓ_l‖‖ℓ_r‖, each spherical
+//!   channel component's norm by its own entries' bounds over the reach (the spherical fold's, whose fixed matrices hold
+//!   the polarizations' combination exactly: the cancellation of the Cartesian axes is in the matrices, not in the
+//!   bound). The products of a high beat are of a large component and a small one (tilt2's ±3ν: 10 × 10⁻¹³), so the
+//!   bound by the channels' components is tight where the scale S of the summed products is not (CLUSTER: 10⁹ too
+//!   large).
+//! - **The readouts** (DROPRES §2.1, its corrections): a row as shown and the loss move by at most D; T by at most
+//!   c_T D of its allowance, c_T = 2K_max/(k_B T_sc), K_max = U₀ the prepared well's depth (a held atom's kinetic
+//!   energy below its escape energy, E_cap = 0), T_sc at least 30 k_BT_rec of the emission's shortest wave number.
+//! - **Which beats** (DESIGN2 §2.1, the marginal rule): the candidates in increasing Y, each prefix of them dropped or
+//!   none; the drop the one of least W = w · max_l (E_l² − A_l²)^{−(1 + 1/2p)}, E the user's targets (units.rs: the
+//!   populations absolute, T's allowance), A the selection's measured error with the drop's bound added (linearly: both
+//!   are biases), w the step's counted work the beats change (the propagation's tone classes, spectral.rs # The
+//!   second order by tones, beside the three nodes'). A gap of orders between the beats makes the choice "all below the
+//!   gap": the drop's share of A is a tiny fraction of the target and any saving pays for it.
 //!
 //! The zero tier is read at the trap's centre at rest, as the structure was before: an entry whose terms cancel there
 //! alone and not elsewhere would read as zero there; the tests read the blocks at points off it
@@ -85,6 +118,39 @@ pub struct Judgment {
     /// Y: the bound of the rate at which the dropped beats move the run's state in trace distance (1/µs); zero where
     /// nothing is dropped.
     pub dropped: f64,
+    /// The drop tier's candidate pairs: per pair its slots and Y, the bound of its slots' sup norms over the reach
+    /// (# The drop tier); none where the node holds no beat but the static one.
+    pub pairs: Vec<(Vec<usize>, f64)>,
+}
+
+/// A drop's readouts' errors and costs (# The drop tier): the selection's measured error -- on the populations
+/// (absolute) and on T (relative; `Selected::error`) --, the run's length (µs) and c_T (T's allowances per unit of trace
+/// distance).
+#[derive(Clone, Copy, Debug)]
+pub struct Account {
+    pub populations: f64,
+    pub temperature: f64,
+    pub duration: f64,
+    pub temperature_per_distance: f64,
+}
+
+impl Account {
+    /// The trace distance after the run's length at the rate Y (# The drop tier): ½(e^{2YT} − 1).
+    pub fn distance(&self, rate: f64) -> f64 {
+        0.5 * (2.0 * rate * self.duration).exp_m1()
+    }
+
+    /// W's model-dependent factor max_l (E_l² − A_l²)^{−(1 + 1/2p)} with the drop at the rate Y (# The drop tier): on
+    /// the populations E = `POPULATION_TARGET`, A the measured error plus D; on T, in units of its allowance (at least
+    /// `TEMPERATURE_TARGET` of T), E = 1, A the measured relative error over `TEMPERATURE_TARGET` plus c_T D. Unbounded
+    /// where an A reaches its E, or is not a number.
+    pub fn factor(&self, rate: f64) -> f64 {
+        use crate::units::{ORDER, POPULATION_TARGET, TEMPERATURE_TARGET};
+        let d = self.distance(rate);
+        let power = 1.0 + 1.0 / (2.0 * ORDER as f64);
+        let room = [POPULATION_TARGET.powi(2) - (self.populations + d).powi(2), 1.0 - (self.temperature / TEMPERATURE_TARGET + self.temperature_per_distance * d).powi(2)];
+        room.iter().map(|&r| if r > 0.0 { r.powf(-power) } else { f64::INFINITY }).fold(0.0, crate::linalg::larger)
+    }
 }
 
 impl Judgment {
@@ -105,9 +171,48 @@ impl Judgment {
                 (*beat, if k == 0 || held(m, &scales.generator[k]) || moving { Tier::Keep } else { Tier::Zero })
             })
             .collect();
-        let mut judgment = Judgment { tiers, blocks: Vec::new(), dropped: 0.0 };
+        let mut judgment = Judgment { tiers, blocks: Vec::new(), dropped: 0.0, pairs: Vec::new() };
         judgment.blocks = judgment.joined(node, scales);
         judgment
+    }
+
+    /// The drop tier (# The drop tier): of the candidate pairs -- per pair its slots and Y, the bound of its slots' sup
+    /// norms over the reach -- the prefix in increasing Y of least W, `work` the step's counted work with the slots left
+    /// out (a pair's slots by their places); those slots dropped, the blocks made again of the beats kept, `dropped` their
+    /// Y. A pair whose Y is not a number is never dropped.
+    pub(crate) fn drop(&mut self, node: &Node, scales: &Scales, pairs: &[(Vec<usize>, f64)], account: &Account, work: &dyn Fn(&[usize]) -> f64) {
+        let mut order: Vec<usize> = (0..pairs.len()).filter(|&i| pairs[i].1.is_finite()).collect();
+        order.sort_by(|&a, &b| pairs[a].1.total_cmp(&pairs[b].1));
+        let (mut best, mut least) = (0, work(&[]) * account.factor(0.0));
+        let (mut rate, mut slots) = (0.0, Vec::new());
+        for (m, &i) in order.iter().enumerate() {
+            rate += pairs[i].1;
+            slots.extend_from_slice(&pairs[i].0);
+            let w = work(&slots) * account.factor(rate);
+            if w < least {
+                (best, least) = (m + 1, w);
+            }
+        }
+        self.dropping(node, scales, pairs, &order[..best]);
+    }
+
+    /// The pairs `chosen` (indices into `pairs`) dropped: their slots' tiers, `dropped` their Y, the blocks of the beats
+    /// kept.
+    pub(crate) fn dropping(&mut self, node: &Node, scales: &Scales, pairs: &[(Vec<usize>, f64)], chosen: &[usize]) {
+        self.pairs = pairs.to_vec();
+        self.dropped = 0.0;
+        for &i in chosen {
+            self.dropped += pairs[i].1;
+            for &k in &pairs[i].0 {
+                self.tiers[k].1 = Tier::Drop;
+            }
+        }
+        self.blocks = self.joined(node, scales);
+    }
+
+    /// The candidates' slots for the drop tier: the slots kept other than the static one.
+    pub fn candidates(&self) -> Vec<usize> {
+        (1..self.tiers.len()).filter(|&k| self.kept(k)).collect()
     }
 
     /// Whether slot k is kept.
