@@ -829,3 +829,48 @@ fn the_raman_scenes_frame_and_model() {
         assert!(chosen.is_ok(), "{name}: {chosen:?}");
     }
 }
+
+/// The fold's input read by the first-order amplitude rule (`significant`), said per scene: the entries left out of
+/// each coupling of H's terms at rest, their largest amplitude a (below ε), and the largest of those kept below
+/// u·max|x| of their own matrix (what the matrix's own rounding would have left out, kept as amplitudes).
+#[test]
+#[ignore = "a measurement, not a check: run by name"]
+fn the_fold_s_input_by_its_amplitudes() {
+    let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ"));
+    for file in ["tilt0.json", "tilt2.json", "R4_LIN_4.json", "GMD1C_1ms.json", "PGC3D_1ms.json", "TET_1ms.json"] {
+        let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(file)).unwrap()).unwrap();
+        line["options"]["device"] = serde_json::json!("cpu");
+        for form in line["model"]["motion"]["outsideForms"].as_array_mut().unwrap() {
+            form.as_object_mut().unwrap().entry("transitions").or_insert(serde_json::json!([]));
+        }
+        let request = crate::request::Request::from_native(&line).unwrap();
+        let scene = Scene::new(&request).unwrap();
+        let (energy, width) = levels_of(&scene);
+        let mut frequency = vec![0.0; scene.matrices()];
+        for t in scene.terms(&scene.doppler([0.0; 3])) {
+            frequency[t.matrix] = t.frequency;
+        }
+        let (mut dropped, mut most_dropped, mut kept_small, mut most_kept_small) = (0, 0.0_f64, 0, 0.0_f64);
+        for i in 0..scene.matrices() {
+            let m = scene.matrix(i);
+            let top = m.max_abs();
+            for a in 0..STATES {
+                for b in 0..STATES {
+                    let z = m[(a, b)];
+                    if z == C64::ZERO {
+                        continue;
+                    }
+                    let amplitude = z.abs() / C64::new(energy[a] - energy[b] - frequency[i], 0.5 * (width[a] + width[b])).abs();
+                    if amplitude < f64::EPSILON {
+                        dropped += 1;
+                        most_dropped = crate::linalg::larger(most_dropped, amplitude);
+                    } else if z.abs() < UNIT_ROUNDOFF * top {
+                        kept_small += 1;
+                        most_kept_small = crate::linalg::larger(most_kept_small, amplitude);
+                    }
+                }
+            }
+        }
+        eprintln!("AMPLITUDES {file}: {dropped} entries left out (largest a {most_dropped:.2e}); {kept_small} kept below u·max of their matrix (largest a {most_kept_small:.2e})");
+    }
+}

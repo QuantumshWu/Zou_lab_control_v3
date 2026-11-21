@@ -324,6 +324,10 @@ fn r1_against_golden() {
                 d[4].ratio(),
                 lift[5].ratio()
             );
+            eprintln!(
+                "R1GOLDABS {name} node {point}: |Δ| (largest entry) generator {:.1e} ({:.1e}) ∇H {:.1e} ({:.1e}) L {:.1e} ({:.1e}) ∇L {:.1e} ({:.1e}) K {:.1e} ({:.1e}) lift {:.1e} ({:.1e})",
+                d[0].d, d[0].s, d[1].d, d[1].s, d[2].d, d[2].s, d[3].d, d[3].s, d[4].d, d[4].s, lift[5].d, lift[5].s
+            );
         }
     }
 }

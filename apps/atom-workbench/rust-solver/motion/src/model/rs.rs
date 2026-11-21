@@ -230,9 +230,30 @@ pub fn fixed(m: &Mat) -> Fixed {
     (0..m.rows).flat_map(|i| (0..m.cols).map(move |j| (i, j))).filter(|&(i, j)| m[(i, j)] != C64::ZERO).map(|(i, j)| (i, j, m[(i, j)])).collect()
 }
 
-/// A matrix the engine makes as a sum of products (the tweezer's unit fold), by the rounding rule: its entries below
-/// u·max|x| of the matrix itself are the rounding of a cancellation -- of the polarizations' axes, of the paths through
-/// the folded states --, not a coupling, and are zero.
+/// A coupling of the fold's input at the frequency f (a term of H ∝ e^{−ift}, `Scene::terms` at rest), by the rounding
+/// rule on its first-order amplitudes: an entry i ← j whose a = |M_ij| / |E_i − E_j − f + i(Γ_i + Γ_j)/2| is below the
+/// format's ε is no coupling and is zero -- on the fixed matrix and its own denominator (the bare levels E = diag H0,
+/// the decay Γ = Σ_a C_a†C_a's diagonal), not on its size against the matrix's largest entry: a small entry close to
+/// its resonance is an amplitude like any other, and a near-resonant denominator would carry it out of the rounding.
+/// A coupling at its resonance (no denominator) always counts.
+pub fn significant(m: &Mat, f: f64, energy: &[f64], width: &[f64]) -> Mat {
+    Mat::from_fn(m.rows, m.cols, |i, j| {
+        let z = m[(i, j)];
+        let detuning = C64::new(energy[i] - energy[j] - f, 0.5 * (width[i] + width[j]));
+        if z.abs() < f64::EPSILON * detuning.abs() { C64::ZERO } else { z }
+    })
+}
+
+/// The bare levels E_s = diag H0 and their decay Γ_s (`significant`'s denominators).
+fn levels_of(scene: &Scene) -> (Vec<f64>, Vec<f64>) {
+    let decay = scene.jumps().decay();
+    ((0..STATES).map(|s| scene.request.hamiltonian[(s, s)].re).collect(), (0..STATES).map(|s| decay[(s, s)].re).collect())
+}
+
+/// A matrix handed to the integrator (H_eff's components, the gradients, the jumps and their decay), or one the engine
+/// makes as a sum of products (the tweezer's unit fold), by the rounding rule: its entries below u·max|x| of the matrix
+/// itself are the rounding of a cancellation -- of the polarizations' axes, of the paths through the folded states --,
+/// not a coupling, and are zero.
 pub fn rounded(m: &Mat) -> Mat {
     let floor = UNIT_ROUNDOFF * m.max_abs();
     Mat { rows: m.rows, cols: m.cols, data: m.data.iter().map(|z| if z.abs() < floor { C64::ZERO } else { *z }).collect() }
@@ -739,12 +760,21 @@ impl Tweezer {
     /// |a|², its channels at a and a*, the emission's channels, the generator H's static part − (i/2)(Σ C†C + |a|² Σ Ĵ†Ĵ).
     pub fn new(scene: &Scene) -> Tweezer {
         let length = scene.generators.len();
-        let mut library: Vec<Fixed> = (0..scene.matrices()).map(|i| fixed(scene.matrix(i))).collect();
+        // The fold's input by the rounding rule, nothing of it by exact zeros: each coupling of H's terms by its
+        // first-order amplitudes at its frequency at rest (`significant`), the emission -- a jump, no coupling -- and its
+        // decay by their own largest entries (`rounded`).
+        let (energy, width) = levels_of(scene);
+        let mut frequency = vec![0.0; scene.matrices()];
+        for t in scene.terms(&scene.doppler([0.0; 3])) {
+            frequency[t.matrix] = t.frequency;
+        }
+        let mut library: Vec<Fixed> = (0..scene.matrices()).map(|i| fixed(&significant(scene.matrix(i), frequency[i], &energy, &width))).collect();
         let put = |library: &mut Vec<Fixed>, m: &Mat| {
             library.push(fixed(m));
             library.len() - 1
         };
         let (c, k, gamma) = emission(scene.jumps());
+        let (c, k, gamma) = (c.each_ref().map(rounded), k.each_ref().map(rounded), rounded(&gamma));
         let emission_m = c.each_ref().map(|m| put(&mut library, m));
         let kicks_m = k.each_ref().map(|m| put(&mut library, m));
         let rate = put(&mut library, &gamma);
@@ -917,9 +947,12 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
     let h0 = &scene.request.hamiltonian;
     let g = Mat::from_fn(STATES, STATES, |i, j| h0[(i, j)] - gamma[(i, j)] * C64::new(0.0, 0.5));
     let energy: Vec<f64> = (0..STATES).map(|a| g[(a, a)].re).collect();
+    // The resolvent's blocks: the couplings of H0 − (i/2)Γ, Γ by the rounding rule (`Tweezer::new`), H0 diagonal.
     let pattern: Vec<(usize, usize)> = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| i != j && g[(i, j)] != C64::ZERO).collect();
     let blocks = fold::connected_parts(STATES, &pattern);
     let [(co_key, f, x), (cr_key, fr, r)] = scene.tweezer_couplings();
+    let (energy, width) = levels_of(scene);
+    let (x, r) = (significant(x, f, &energy, &width), significant(r, fr, &energy, &width));
     let comps: [(Key, f64, Mat, i64, usize); 4] = [
         (co_key.clone(), f, x.clone(), 1, 0),
         (negated(&co_key), -f, x.adjoint(), -1, 1),
