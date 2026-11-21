@@ -630,18 +630,19 @@ dialog.dialog::backdrop { background: transparent; }
 .flow-card.opens { cursor: pointer; }
 .flow-empty { color: var(--muted-ink); padding: calc(18 * var(--fluent) * var(--qt)); }
 .info-tree {
-  flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start;
-  /* The viewport scrolls; rows keep their full content height, including
-   * embedded buttons, so their hover/selection bounds contain their cells. */
-  grid-auto-rows: max-content;
+  flex: 1; min-height: 0; overflow: auto;
   /* v2 _fit_name_column: the names as wide as the widest at its depth, up to six tenths of the view
    * (never below the declared label column); the values follow and the tree scrolls sideways. */
-  grid-template-columns: max(var(--info-label-w, var(--label-min)), var(--info-name-w, 0px)) minmax(max-content, 1fr);
+  --info-col: max(var(--info-label-w, var(--label-min)), var(--info-name-w, 0px));
   border: var(--edge) solid var(--divider); border-radius: var(--radius); background: var(--surface);
 }
 .info-tree.decorated { --root: 1; }
+/* The spacer: as tall as every shown row, as wide as the name column and the widest shown value
+ * (--info-value-w, each value measured by its font) or the view; only the rows in view are drawn,
+ * each at its offset. */
+.info-rows { position: relative; min-width: 100%; width: calc(var(--info-col) + var(--info-value-w, 0px) + var(--grid-gutter)); }
 .info-row {
-  position: relative; grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; align-items: center;
+  position: absolute; left: 0; right: 0; display: flex; align-items: center;
   min-height: calc(var(--font-line) + 2 * var(--info-pad) + var(--item-view-extra)); margin: 0 var(--grid-gutter); border-radius: var(--radius);
 }
 .info-row:hover { background: var(--accent-tint); }
@@ -649,10 +650,10 @@ dialog.dialog::backdrop { background: transparent; }
 .info-row.selected:hover { background: var(--selected-hover); }
 .info-name, .info-value { white-space: nowrap; padding: var(--info-pad) var(--info-pad) calc(var(--info-pad) + var(--cap-lift)); align-self: stretch; display: flex; align-items: center; }
 .info-name {
-  min-width: 0; overflow: hidden;
+  flex: none; width: calc(var(--info-col) - var(--grid-gutter)); min-width: 0; overflow: hidden;
   padding-left: calc((var(--depth) + var(--root, 0)) * var(--info-indent) + var(--field-text-inset) - var(--edge) - var(--grid-gutter));
 }
-.info-value { -webkit-user-select: text; user-select: text; }
+.info-value { flex: 1 0 auto; -webkit-user-select: text; user-select: text; }
 /* A branch's count ("4 fields") is a count of what follows, not a value: MUTED_INK. */
 .info-row.branch > .info-value { color: var(--muted-ink); }
 /* v2 embeds the zero-margin button holder inside the item's padded contents;

@@ -39,6 +39,8 @@ try {
  });
  check('a record arrives once: other messages cost nothing and the pane keeps it; a new one replaces it; none clears it',()=>{
   // As the page gets them: delta changes on the sections it holds (transport.ts), merged into latest (shell.ts).
+  // A tree draws only the rows in view: the rows read here are on the Logic tab, shown.
+  viewer.info.tabs.setCurrent('Logic');
   let sections={};
   const message=changes=>{const [next,touched]=applyChanges(sections,changes);sections=next;for(const key of touched)ctx.latest[key]=sections[key];viewer.update({type:'state',request:0,error:null})};
   const rows=()=>viewer.info.root.textContent;
@@ -69,7 +71,7 @@ try {
   message([[['record','info']],[['record','flow']]]);
   assert(!rows().includes('other file'),'cleared');
   equal([...viewer.info.tabs.strip.querySelectorAll('.tab-label')].map(label=>label.textContent),['Plot','Logic','Devices','Flow'],'its tabs stand');
-  viewer.info.setTabs=tabsOf;viewer.info.setGraph=graphOf;delete ctx.latest.record;ctx.latest.viewer={document:{path:''},panels:[],signals:[],plot_kinds:[]};accept('',0);
+  viewer.info.setTabs=tabsOf;viewer.info.setGraph=graphOf;viewer.info.tabs.setCurrent('Plot');delete ctx.latest.record;ctx.latest.viewer={document:{path:''},panels:[],signals:[],plot_kinds:[]};accept('',0);
  });
  check('Browse requests the native visual picker without guessing a path',()=>{
   assert(browse.title.includes('thumbnails')&&browse.title.includes('same-named'),'visual matching guidance missing');
