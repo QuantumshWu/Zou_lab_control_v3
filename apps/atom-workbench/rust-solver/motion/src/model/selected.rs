@@ -179,6 +179,20 @@ struct Tables {
     jumps: Vec<Spherical>,
     starts: Vec<usize>,
     decay: Vec<Decay>,
+    /// The decay's products by their structural terms (`Selected::decay_terms`): per entry of a product (ℓ_l†ℓ_r at
+    /// a place) where its terms end in `terms`, each term the places of its two factors in the components' buffer --
+    /// a ground row the two share, the rows in their order --, and the entry's places in the generator.
+    terms: Vec<(u32, u32)>,
+    entries: Vec<Entry>,
+}
+
+/// An entry of the decay's products (`Tables::entries`): where its terms end; the forward slot and place a·n + b of
+/// ℓ_l†ℓ_r, and where l ≠ r the back slot and place b·n + a of its adjoint (u32::MAX: none).
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    end: u32,
+    forward: (u32, u32),
+    back: (u32, u32),
 }
 
 /// A jump component in the emission's spherical basis (`Selected::layout`): its class, channel q and beat, its columns
@@ -211,9 +225,8 @@ struct Work {
     point: crate::scene::Point,
     local: Local,
     out: Out,
-    /// The jump components on the ground rows (`GROUND` × n each), and one product (n × n).
+    /// The jump components on the ground rows (`GROUND` × their columns each).
     jumps: Vec<C64>,
-    product: Vec<C64>,
     /// A readout's: the density (n × n), the lift by fast index (the fast indices in the order met, each's Q × P), a
     /// row of M ρ.
     rho: Vec<C64>,
@@ -821,6 +834,7 @@ impl Selected {
         }).collect();
         self.template = template;
         self.tables = tables;
+        self.decay_terms();
     }
 
     /// The node's beats by the rounding rule (coordinator 2026-11-20): a beat is the model's where its coefficients at
@@ -891,6 +905,7 @@ impl Selected {
             .filter(|d| slot_of[d.forward] != usize::MAX && slot_of[d.back] != usize::MAX)
             .map(|d| Decay { forward: slot_of[d.forward], back: slot_of[d.back], ..*d })
             .collect();
+        self.decay_terms();
         // The pooled nodes were made on the layout before.
         POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
     }
@@ -922,7 +937,7 @@ impl Selected {
             self.scene.point_into(at, kappa, &mut work.point);
             self.rs.evaluate(&self.scene, &work.point, &mut work.local);
             work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making { model: true, kicks: kicked, lift: false });
-            self.fill(node, &work.out, kicked, &mut work.jumps, &mut work.product);
+            self.fill(node, &work.out, kicked, &mut work.jumps);
             node.work = crate::decide::COMPLEX * (work.local.work + work.out.work);
         });
         node.kappa = kappa;
@@ -1036,7 +1051,7 @@ impl Selected {
         self.rs.evaluate(&self.scene, &work.point, &mut work.local);
         work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making { model: true, kicks: false, lift: false });
         work.out.scales(self.rs.plan(), &self.lab, &work.local, None);
-        self.fill(&mut node, &work.out, false, &mut work.jumps, &mut work.product);
+        self.fill(&mut node, &work.out, false, &mut work.jumps);
         for (a, t) in self.theta.iter().enumerate() {
             node.generator[0].1[(a, a)] += C64::real(*t);
         }
@@ -1162,6 +1177,7 @@ impl Selected {
                     *e = (e.0, u32::MAX, u32::MAX);
                 }
             }
+            self.decay_terms();
             // The pooled nodes were made on the layout before.
             POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
         }
@@ -1172,8 +1188,46 @@ impl Selected {
         &self.blocks
     }
 
+    /// The decay's products by their structural terms (`Tables::entries`), made with the layout and again where its
+    /// slots or its blocks change (`prune`, `split`): per product of the layout (`Tables::decay`, in its order) each
+    /// place (a, b) of its two components' columns within one block, in their order, whose components share a ground
+    /// row: the shared rows' terms in the rows' order, the forward and the back places. A place of no shared row is a
+    /// structural zero of the product, no entry.
+    fn decay_terms(&mut self) {
+        let n = self.rs.keep.len();
+        let t = &self.tables;
+        let (mut terms, mut entries) = (Vec::new(), Vec::new());
+        for d in &t.decay {
+            let (jl, jr) = (&t.jumps[d.left], &t.jumps[d.right]);
+            let (cl, cr) = (jl.cols.len(), jr.cols.len());
+            let (sl, sr) = (t.starts[d.left], t.starts[d.right]);
+            let held = |j: &Spherical, cols: usize| -> Vec<bool> {
+                let mut held = vec![false; GROUND * cols];
+                for (p, _) in &j.elements {
+                    held[*p] = true;
+                }
+                held
+            };
+            let (hl, hr) = (held(jl, cl), held(jr, cr));
+            for (i, &a) in jl.cols.iter().enumerate() {
+                for (j, &b) in jr.cols.iter().enumerate().filter(|(_, &b)| self.block_of[b] == self.block_of[a]) {
+                    let before = terms.len();
+                    for g in (0..GROUND).filter(|&g| hl[g * cl + i] && hr[g * cr + j]) {
+                        terms.push(((sl + g * cl + i) as u32, (sr + g * cr + j) as u32));
+                    }
+                    if terms.len() == before {
+                        continue;
+                    }
+                    let back = if d.left != d.right { (d.back as u32, (b * n + a) as u32) } else { (u32::MAX, u32::MAX) };
+                    entries.push(Entry { end: terms.len() as u32, forward: (d.forward as u32, (a * n + b) as u32), back });
+                }
+            }
+        }
+        (self.tables.terms, self.tables.entries) = (terms, entries);
+    }
+
     /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places).
-    fn fill(&self, node: &mut Node, out: &Out, kicked: bool, jumps: &mut Vec<C64>, product: &mut Vec<C64>) {
+    fn fill(&self, node: &mut Node, out: &Out, kicked: bool, jumps: &mut Vec<C64>) {
         let n = self.rs.keep.len();
         for (_, m) in node.generator.iter_mut() {
             m.data.fill(C64::ZERO);
@@ -1233,30 +1287,24 @@ impl Selected {
                 jumps[at + p] = sources.iter().map(|&(a, c, e, u)| u * axes[a][c].elements[e].value).sum();
             }
         }
+        // Each product's entries by their structural terms (`decay_terms`; between two exact blocks nothing, `split`):
+        // Σ_g conj(ℓ_l[g, i]) ℓ_r[g, j] over the rows the two share, each term two fused multiply-adds a part as the
+        // product kernel makes them (`linalg::adjoint_product`, whose other terms are the structural zeros'), then −i/2
+        // of it at its forward place and of its conjugate at its back place.
         let half = C64::new(0.0, -0.5);
-        for d in &self.tables.decay {
-            let (cl, cr) = (&self.tables.jumps[d.left].cols, &self.tables.jumps[d.right].cols);
-            let (sl, sr) = (self.tables.starts[d.left], self.tables.starts[d.right]);
-            product.clear();
-            product.resize(cl.len() * cr.len(), C64::ZERO);
-            crate::linalg::adjoint_product(&jumps[sl..sl + GROUND * cl.len()], &jumps[sr..sr + GROUND * cr.len()], (cl.len(), GROUND, cr.len()), product);
-            // Between two exact blocks nothing (`split`).
-            let block_of = &self.block_of;
-            {
-                let forward = &mut node.generator[d.forward].1.data;
-                for (i, &a) in cl.iter().enumerate() {
-                    for (j, &b) in cr.iter().enumerate().filter(|(_, &b)| block_of[b] == block_of[a]) {
-                        forward[a * n + b] += half * product[i * cr.len() + j];
-                    }
-                }
+        let mut from = 0;
+        for e in &self.tables.entries {
+            let (mut re, mut im) = (0.0_f64, 0.0_f64);
+            for &(l, r) in &self.tables.terms[from..e.end as usize] {
+                let (x, y) = (jumps[l as usize].conj(), jumps[r as usize]);
+                re = x.re.mul_add(y.re, (-x.im).mul_add(y.im, re));
+                im = x.re.mul_add(y.im, x.im.mul_add(y.re, im));
             }
-            if d.left != d.right {
-                let back = &mut node.generator[d.back].1.data;
-                for (i, &a) in cl.iter().enumerate() {
-                    for (j, &b) in cr.iter().enumerate().filter(|(_, &b)| block_of[b] == block_of[a]) {
-                        back[b * n + a] += half * product[i * cr.len() + j].conj();
-                    }
-                }
+            from = e.end as usize;
+            let p = C64::new(re, im);
+            node.generator[e.forward.0 as usize].1.data[e.forward.1 as usize] += half * p;
+            if e.back.0 != u32::MAX {
+                node.generator[e.back.0 as usize].1.data[e.back.1 as usize] += half * p.conj();
             }
         }
     }
