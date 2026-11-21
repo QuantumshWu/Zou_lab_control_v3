@@ -129,7 +129,9 @@
 //! of w⁶ times it, w the stops' spacing. So the state at any time u from the launch on is
 //! x(u) = R (1 + X(u)) e^{−iΛ(u − u₀)} m(u) -- n exponentials, the matrix R(1 + X(u)) from its three of each class
 //! followed (R(1 + Y₀), RY₁ and RY₂ of the static group's, RY₀, RY₁, RY₂ of a beating class's at its phase, made once a
-//! step) and its product of n² (`Picture::at`), no hop --, and at the three stops it is the hops' own.
+//! step) and its product of n² (`Picture::at`), no hop --, and at the three stops it is the hops' own. The n
+//! exponentials are four at a time (`linalg::times_exp`: within 4u of the library's, at a quarter of its time), where
+//! one by one they were most of a state's time at the scenes' n (8 to 20 states: 55 to 65 % of it, 9 to 13 ns each).
 //!
 //! The propagation is linear in the state, and nothing of the picture but m knows the state: a state that changes at
 //! a time of the step -- a quantum jump's (step.rs, # Jumps) -- is launched again at that time on the same picture,
@@ -268,6 +270,22 @@
 //! of two classes and node 2n³ (the products beyond the static group's with itself), per beating class at each node its
 //! part of X, the right side and D (6n²) and its hops' envelopes and moments; the middle's solve where there are tones
 //! (n³ + n³/3 + n³); and per beating class followed three products of n³ for a state at a time, 4n² more each.
+//!
+//! How far the classes merge. The harmonics of one beat ν -- tilt2's four tones at ν, 2ν, 3ν and 4ν (ν = 13.19 rad/µs,
+//! its tilt's Larmor beat) -- are one periodic envelope G(u) = Σ_k e^{ikνu} G_k(u), and its following is harmonic by
+//! harmonic: Ω_ab Y_ab − iẎ_ab + E_ab = 0 at each class's combined frequency Ω = ω_ab + kν (# The state at any time of
+//! the step), the polynomial of `following` -- X_k = −D_k/(ω + kν) at its leading order --, which nothing here changes.
+//! With exact labels the products fall into the classes of their harmonics' sums: tilt2's first order ±1…±4 ν and its
+//! products ±2…±8 ν, ±1…±3 ν and 0 make the classes 0, ±1…±8 ν -- 17, of which 16 beat and are followed. A state at a
+//! time is then R(1 + X(u)) d assembled once from those 16 (`at`: (2 + 4·16)n² multiply-adds and 4n, against
+//! (2 + 4·40)n² with the products of one beat apart); one class for the whole periodic envelope would not take less: each
+//! harmonic is three matrices of n², the same in a sum over k as in a sum over classes, and of the harmonics' phases
+//! z^k = e^{ikνu} only the exponentials would be shared, n a point against 16. Measured where the model labelled its
+//! candidates by unit vectors (until 2026-11-21: a sum of two keys zero only for a candidate's two members, so that
+//! 4ν − 3ν and ν were two classes of one beat): tilt2's 41 classes, 40 of them followed, at 17.2 ms a step (one thread,
+//! τ 0.326 µs); labelled by the exact vectors 17 and 16 at 10.1 ms, the steps from the same 64 states within 3.7·10⁻⁸
+//! (2.2–6·10⁻¹⁶ on the median; a few entries change their route with the merged envelope) (motion3d_status/rewrite/
+//! r2prop2.status.md).
 //!
 //! # What follows the generator's own frequencies, and what does not
 //! The propagation's own work -- the decomposition, the following, two hops -- is the same whatever Ĥ₀'s frequencies
@@ -984,33 +1002,45 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
 /// power iterates from v = 1 while the bound falls by more than its rounding (it holds at every iterate). d by Osborne's
 /// balancing of the weighted sum (each d_a equalizing its off-diagonal row and column, LAPACK's gebal), sweep by sweep
 /// while the whole bound falls by more than its rounding: every d's bound holds, the least found is taken. Returns it
-/// and its count (n² a sweep, 2n² a power iterate).
+/// and its count (n² a sweep, 2n² a power iterate). Its vectors on the stack (until 2026-11-21 each iterate's on the
+/// heap, some twenty allocations a step).
 fn radius(moduli: &[f64], n: usize, h: f64) -> (f64, f64) {
+    const STATES: usize = crate::model::STATES;
     let size = n * n;
     let weights = [h.abs(), 0.5 * h * h, h.abs().powi(3) / 3.0];
-    let combined: Vec<f64> = (0..size).map(|k| (0..3).map(|j| weights[j] * moduli[j * size + k]).sum()).collect();
+    let mut combined = [0.0_f64; STATES * STATES];
+    for (k, c) in combined[..size].iter_mut().enumerate() {
+        *c = (0..3).map(|j| weights[j] * moduli[j * size + k]).sum();
+    }
     let mut count = 0.0;
     // ‖D M D⁻¹‖₂ of the nonnegative M, within Collatz–Wielandt's bound on (DMD⁻¹)ᵀ(DMD⁻¹)'s Perron root.
     let mut norm = |m: &[f64], d: &[f64]| -> f64 {
         let entry = |a: usize, b: usize| d[a] / d[b] * m[a * n + b];
-        let mut v = vec![1.0_f64; n];
+        let (mut v, mut w, mut u) = ([1.0_f64; STATES], [0.0_f64; STATES], [0.0_f64; STATES]);
         let mut best = f64::INFINITY;
         loop {
-            let w: Vec<f64> = (0..n).map(|a| (0..n).map(|b| entry(a, b) * v[b]).sum()).collect();
-            let u: Vec<f64> = (0..n).map(|b| (0..n).map(|a| entry(a, b) * w[a]).sum()).collect();
+            for (a, w) in w[..n].iter_mut().enumerate() {
+                *w = (0..n).map(|b| entry(a, b) * v[b]).sum();
+            }
+            for (b, u) in u[..n].iter_mut().enumerate() {
+                *u = (0..n).map(|a| entry(a, b) * w[a]).sum();
+            }
             count += (4 * size) as f64;
             let bound = (0..n).fold(0.0_f64, |most, i| linalg::larger(most, if v[i] > 0.0 { u[i] / v[i] } else if u[i] > 0.0 { f64::INFINITY } else { 0.0 }));
-            let top = u.iter().fold(0.0_f64, |most, &x| linalg::larger(most, x));
+            let top = u[..n].iter().fold(0.0_f64, |most, &x| linalg::larger(most, x));
             if !(bound < best - crate::units::rounding(2 * n) * best) || !(top > 0.0) {
                 break linalg::smaller(best, bound).sqrt();
             }
             best = bound;
-            v = u.iter().map(|x| x / top).collect();
+            for (v, u) in v[..n].iter_mut().zip(&u[..n]) {
+                *v = u / top;
+            }
         }
     };
     let mut bound = |d: &[f64]| -> f64 { (0..3).map(|j| weights[j] * norm(&moduli[j * size..(j + 1) * size], d)).sum() };
-    let mut d = vec![1.0; n];
-    let mut best = bound(&d);
+    let mut d = [1.0_f64; STATES];
+    let d = &mut d[..n];
+    let mut best = bound(d);
     loop {
         for a in 0..n {
             let row: f64 = (0..n).filter(|&b| b != a).map(|b| combined[a * n + b] / d[b]).sum();
@@ -1019,7 +1049,7 @@ fn radius(moduli: &[f64], n: usize, h: f64) -> (f64, f64) {
                 d[a] = (column / row).sqrt();
             }
         }
-        let next = bound(&d);
+        let next = bound(d);
         if !(next < best - crate::units::rounding(6 * size) * best) {
             best = linalg::smaller(best, next);
             break;
@@ -2331,9 +2361,8 @@ impl Picture {
                 d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (first[a] * rates[0] + second[a] * rates[1] + last[a] * rates[2]) * self.spacing;
             }
         }
-        for (z, l) in d.iter_mut().zip(&self.lambda) {
-            *z *= (C64::new(0.0, -(u - self.origin)) * *l).exp();
-        }
+        // e^{−iΛ(u − u₀)}: the n exponentials four at a time (`linalg::times_exp`).
+        linalg::times_exp(d, C64::new(0.0, -(u - self.origin)), &self.lambda);
         // R(1 + X(u)) d: the matrix at the time from its three, R(1 + Y₀) + u RY₁ + u² RY₂ of the static group's and each
         // beating class's at its phase; R where nothing is followed.
         let (group, beating) = self.classes.split_first().expect("the static group");
@@ -2392,6 +2421,24 @@ pub(crate) mod tests {
     /// Whether some pair's change is followed: the split's choice on a step.
     pub(crate) fn follows(picture: &Picture) -> bool {
         picture.followed
+    }
+
+    /// A picture's eigenvalues, the time of its last launch and the step's half (a measurement of its turns).
+    pub(crate) fn turning(picture: &Picture) -> (Vec<C64>, f64, f64) {
+        (picture.lambda.clone(), picture.origin, picture.half)
+    }
+
+    /// A picture's classes as prepared (a measurement): the states, the tones' beats, the classes (first order and in
+    /// all), those followed and those hopped, and per class its beat, whether it is followed and hopped, and its
+    /// followed entries' count.
+    pub(crate) fn census(picture: &Picture) -> String {
+        let order = 1 + 2 * picture.beats.len();
+        let classes = &picture.classes;
+        let followed = classes.iter().filter(|c| c.followed).count();
+        let hopped = classes.iter().filter(|c| c.hops).count();
+        let beats: Vec<String> = picture.beats.iter().map(|t| format!("{:.4}", t.beat)).collect();
+        let each: Vec<String> = classes.iter().enumerate().map(|(i, c)| format!("{i}:{:.4}{}{}/{}", c.beat, if c.followed { "f" } else { "" }, if c.hops { "h" } else { "" }, c.fast.iter().filter(|&&f| f).count())).collect();
+        format!("n {} tones {} [{}] classes {} of order {} followed {followed} hopped {hopped} | {}", picture.n, picture.beats.len(), beats.join(" "), classes.len(), order, each.join(" "))
     }
 
     /// The largest row sum of |X| at the step's end: the size of the following there.
@@ -2836,28 +2883,71 @@ pub(crate) mod tests {
     }
 
     /// The outputs of a picture of the static group alone, bit by bit: its bandwidth and the states it gives
-    /// -- launched at the step's start and read at times of the step, launched again inside the step and read on --
-    /// folded into one number (FNV-1a over their bits), with their count.
-    fn static_outputs(picture: &mut Picture) -> (u64, usize) {
+    /// -- launched at the step's start and read at times of the step, launched again inside the step and read on, each by
+    /// `read` --, folded into one number (FNV-1a over their bits), with their count; and the states' components with each
+    /// one's scale Σ_k |R(1 + X)_ik| |d_k| (`at_one_by_one`).
+    fn static_outputs(picture: &mut Picture, read: fn(&mut Picture, f64, &mut [C64]) -> Vec<f64>) -> ((u64, usize), Vec<(C64, f64)>) {
         let (n, h) = (picture.n, picture.half);
         let mut bits: Vec<u64> = vec![picture.bandwidth.to_bits()];
         let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * (0.5 + 0.1 * i as f64)).collect();
         let mut x = vec![C64::ZERO; n];
-        let state = |x: &[C64], bits: &mut Vec<u64>| bits.extend(x.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
+        let mut states = Vec::new();
+        let mut state = |x: &[C64], scale: Vec<f64>, bits: &mut Vec<u64>| {
+            bits.extend(x.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
+            states.extend(x.iter().copied().zip(scale));
+        };
         picture.launch(-h, &start);
         for u in [-0.5 * h, 0.0, 0.3 * h, 0.1 * h, h] {
-            picture.at(u, &mut x);
-            state(&x, &mut bits);
+            let scale = read(picture, u, &mut x);
+            state(&x, scale, &mut bits);
         }
-        picture.at(0.2 * h, &mut x);
+        read(picture, 0.2 * h, &mut x);
         let inside = x.clone();
         picture.launch(0.2 * h, &inside);
         for u in [0.6 * h, h] {
-            picture.at(u, &mut x);
-            state(&x, &mut bits);
+            let scale = read(picture, u, &mut x);
+            state(&x, scale, &mut bits);
         }
         let hash = bits.iter().flat_map(|b| b.to_le_bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
-        (hash, bits.len())
+        ((hash, bits.len()), states)
+    }
+
+    /// `Picture::at` as it was before its exponentials went four at a time (until 2026-11-21, R2-PROP2): the n turns
+    /// one by one by the library's `C64::exp`, the rest as it is -- the reference the engine's state is read against --;
+    /// and each component's scale Σ_k |R(1 + X)_ik| |d_k|, d the turned coordinates.
+    fn at_one_by_one(picture: &mut Picture, u: f64, x: &mut [C64]) -> Vec<f64> {
+        let n = picture.n;
+        let path = &picture.path;
+        let node = |k: usize| &path[k * n..(k + 1) * n];
+        let mut d = vec![C64::ZERO; n];
+        if !picture.moving {
+            d.copy_from_slice(node(0));
+        } else {
+            let (values, rates) = quintic((u - picture.centre) / picture.spacing);
+            let (start, first, middle, second, end, last) = (node(0), node(1), node(2), node(3), node(4), node(5));
+            for a in 0..n {
+                d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (first[a] * rates[0] + second[a] * rates[1] + last[a] * rates[2]) * picture.spacing;
+            }
+        }
+        for (z, l) in d.iter_mut().zip(&picture.lambda) {
+            *z *= (C64::new(0.0, -(u - picture.origin)) * *l).exp();
+        }
+        let (group, beating) = picture.classes.split_first().expect("the static group");
+        let mut matrix = picture.right.clone();
+        if picture.followed {
+            let (first, rest) = group.nodes.split_at(picture.right.len());
+            let (second, third) = rest.split_at(picture.right.len());
+            for (((m, first), second), third) in matrix.iter_mut().zip(first).zip(second).zip(third) {
+                *m = (u * u).mul_add(*third, u.mul_add(*second, *first));
+            }
+            for class in beating.iter().filter(|class| class.followed) {
+                add_turned(class.turn(u), &class.nodes, u, &mut matrix);
+            }
+        }
+        let mut lanes = picture.lanes.clone();
+        combine(false, &d, n, &matrix, &mut lanes, 1, 0);
+        unlay(&lanes, 1, x);
+        (0..n).map(|i| (0..n).map(|k| entry(&matrix, laid(i, k, n)).abs() * d[k].abs()).sum()).collect()
     }
 
     /// The hops' radius is the whole hopped operator's (# The split): a state coupled to two others by a slope of 500
@@ -2887,7 +2977,10 @@ pub(crate) mod tests {
     /// picture has no other route and no price (module documentation, # Where the decomposition does not take the
     /// step): the outputs without them were read on 80b9782e, before the strides went, and are the same to the bit. And
     /// since the quotient's bandwidth (`quotient_from`) the picture's count holds its work too: read without the count,
-    /// on the code of R1-PROP's fourth item, whose states are 80b9782e's.
+    /// on the code of R1-PROP's fourth item, whose states are 80b9782e's. Since the exponentials of a state at a time go
+    /// four at a time (`linalg::times_exp`, 2026-11-21) the outputs to the bit are those of the state read as before
+    /// (`at_one_by_one`: the turns one by one by the library), and the engine's states are within 5u of each component's
+    /// scale of them.
     #[test]
     fn the_static_group_alone_is_propagated_as_before_to_the_bit() {
         let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
@@ -2915,7 +3008,19 @@ pub(crate) mod tests {
                 _ => [true, true, true],
             };
             assert_eq!(route, wanted, "{name}: the route (moving, followed, a pair hopped beside)");
-            found.push((name, static_outputs(&mut picture)));
+            // The states as the propagation gave them before (`at_one_by_one`), and the engine's, read again on the same
+            // picture: within 5u of each component's scale -- the turns' 4u, the rest the same operations.
+            let (before, reference) = static_outputs(&mut picture, at_one_by_one);
+            let (_, engine) = static_outputs(&mut picture, |picture, u, x| {
+                let scale = at_one_by_one(picture, u, &mut x.to_vec());
+                picture.at(u, x);
+                scale
+            });
+            assert_eq!(engine.len(), reference.len());
+            let worst = reference.iter().zip(&engine).map(|((r, scale), (e, _))| (*e - *r).abs() / (UNIT_ROUNDOFF * scale)).fold(0.0, linalg::larger);
+            eprintln!("{name}: the engine's states within {worst:.2} u of their scale of the ones before");
+            assert!(worst <= 5.0, "{name}: {worst} u");
+            found.push((name, before));
         }
         // Read without the route, the price and the count (80b9782e's states: with the count 0x9468_5b73_6c10_bebe,
         // 0xb016_cf29_078f_a7be, 0x1a10_0fbd_7124_71ef and 0x0034_f20d_4180_ef5f there).
