@@ -236,13 +236,96 @@ fn levels_of(scene: &Scene) -> (Vec<f64>, Vec<f64>) {
     ((0..STATES).map(|s| scene.request.hamiltonian[(s, s)].re).collect(), (0..STATES).map(|s| decay[(s, s)].re).collect())
 }
 
-/// A matrix handed to the integrator (H_eff's components, the gradients, the jumps and their decay), or one the engine
-/// makes as a sum of products (the tweezer's unit fold), by the rounding rule: its entries below u·max|x| of the matrix
-/// itself are the rounding of a cancellation -- of the polarizations' axes, of the paths through the folded states --,
-/// not a coupling, and are zero.
-pub fn rounded(m: &Mat) -> Mat {
-    let floor = UNIT_ROUNDOFF * m.max_abs();
-    Mat { rows: m.rows, cols: m.cols, data: m.data.iter().map(|z| if z.abs() < floor { C64::ZERO } else { *z }).collect() }
+/// A matrix the engine makes of the request's (the emission's photon forms and decay, its spherical channels, the
+/// tweezer's unit fold) with its computation's rounding scale beside it: per entry the sum of the moduli of the terms it
+/// is the sum of, and the longest chain of operations behind an entry (model/classify.rs, # The tiers: an entry within
+/// γ_K S of its terms is the rounding of a cancellation -- of the polarizations' axes, of the paths through the folded
+/// states -- and is zero; `zeroed`). The request's own matrices are no computation of the engine's: their scale is
+/// their moduli, none of their operations: the input side's rule is theirs (model/classify.rs `input`,
+/// `emission_input`).
+#[derive(Clone, Debug)]
+struct Scaled {
+    value: Mat,
+    scale: Vec<f64>,
+    terms: usize,
+}
+
+impl Scaled {
+    /// A request's matrix (no operation of the engine's).
+    fn input(m: &Mat) -> Scaled {
+        Scaled { value: m.clone(), scale: m.data.iter().map(|z| z.abs()).collect(), terms: 0 }
+    }
+
+    /// The product a b: the moduli's product, the chains' with the inner product's length.
+    fn product(&self, b: &Scaled) -> Scaled {
+        let (n, k, m) = (self.value.rows, self.value.cols, b.value.cols);
+        let mut scale = vec![0.0; n * m];
+        for i in 0..n {
+            for q in 0..k {
+                let x = self.scale[i * k + q];
+                if x != 0.0 {
+                    for j in 0..m {
+                        scale[i * m + j] += x * b.scale[q * m + j];
+                    }
+                }
+            }
+        }
+        Scaled { value: self.value.product(&b.value), scale, terms: self.terms + b.terms + k }
+    }
+
+    /// c times it.
+    fn times(&self, c: C64) -> Scaled {
+        Scaled { value: self.value.scaled(c), scale: self.scale.iter().map(|s| s * c.abs()).collect(), terms: self.terms + 1 }
+    }
+
+    /// Its adjoint.
+    fn adjoint(&self) -> Scaled {
+        let (n, m) = (self.value.rows, self.value.cols);
+        Scaled { value: self.value.adjoint(), scale: (0..m * n).map(|x| self.scale[(x % n) * m + x / n]).collect(), terms: self.terms }
+    }
+
+    /// It plus b.
+    fn add(&mut self, b: &Scaled) {
+        self.value.add_scaled(C64::ONE, &b.value);
+        self.scale.iter_mut().zip(&b.scale).for_each(|(s, t)| *s += t);
+        self.terms = self.terms.max(b.terms) + 1;
+    }
+
+    /// Zeros of the same size.
+    fn zeros(rows: usize, cols: usize) -> Scaled {
+        Scaled { value: Mat::zeros(rows, cols), scale: vec![0.0; rows * cols], terms: 0 }
+    }
+
+    /// The matrix with its rounding zeros zero (model/classify.rs `zero`: |x| ≤ γ_K S).
+    fn zeroed(&self) -> Mat {
+        let mut m = self.value.clone();
+        for (z, s) in m.data.iter_mut().zip(&self.scale) {
+            if crate::model::classify::zero(*z, *s, self.terms) {
+                *z = C64::ZERO;
+            }
+        }
+        m
+    }
+}
+
+/// Σ_a U_a M_a of three matrices with their scales.
+fn combined_scaled(row: &[C64; 3], m: [&Scaled; 3]) -> Scaled {
+    let mut out = Scaled::zeros(m[0].value.rows, m[0].value.cols);
+    for (x, mi) in row.iter().zip(m) {
+        if *x != C64::ZERO {
+            out.add(&mi.times(*x));
+        }
+    }
+    out
+}
+
+/// The decay Σ_a L_a†L_a of three matrices with its scale (`decay`'s, each axis's product summed).
+fn decay_scaled(c: &[Scaled; 3]) -> Scaled {
+    let mut out = Scaled::zeros(c[0].value.cols, c[0].value.cols);
+    for x in c {
+        out.add(&x.adjoint().product(x));
+    }
+    out
 }
 
 /// A fixed matrix's entries by where they fall in a fold of K and Q: K × K (positions in K) by the fast-part difference
@@ -684,12 +767,12 @@ pub struct Tweezer {
     still: Mat,
 }
 
-/// The emission's channels in the basis that holds the fewest entries (by the rounding rule, `rounded`) among the
+/// The emission's channels in the basis that holds the fewest entries (by the zero tier, `Scaled::zeroed`) among the
 /// Cartesian axes and the spherical bases about each of them, ℓ_± = ∓(L_b ± iL_c)/√2, ℓ_0 = L_a (a, b, c cyclic): the
 /// basis of the states' quantization axis, where each channel changes m by one number and the decay Σ_q ℓ_q†ℓ_q =
 /// Σ_a L_a†L_a holds no element of the axes' cancellations (Δm = 2 of the Cartesian x and y: diaga.status.md 4.3). Any
 /// unitary basis gives the same decay; this one gives it its structure.
-pub fn channel_basis(c: &[Mat; 3]) -> [[C64; 3]; 3] {
+fn channel_basis(c: &[Scaled; 3]) -> [[C64; 3]; 3] {
     let r = std::f64::consts::FRAC_1_SQRT_2;
     let cyclic = |a: usize| -> [[C64; 3]; 3] {
         let (b, cc) = ((a + 1) % 3, (a + 2) % 3);
@@ -702,19 +785,7 @@ pub fn channel_basis(c: &[Mat; 3]) -> [[C64; 3]; 3] {
         u
     };
     let identity = [[C64::ONE, C64::ZERO, C64::ZERO], [C64::ZERO, C64::ONE, C64::ZERO], [C64::ZERO, C64::ZERO, C64::ONE]];
-    let count = |u: &[[C64; 3]; 3]| -> usize {
-        u.iter()
-            .map(|row| {
-                let mut m = Mat::zeros(STATES, STATES);
-                for (a, &x) in row.iter().enumerate() {
-                    if x != C64::ZERO {
-                        m.add_scaled(x, &c[a]);
-                    }
-                }
-                rounded(&m).data.iter().filter(|z| **z != C64::ZERO).count()
-            })
-            .sum()
-    };
+    let count = |u: &[[C64; 3]; 3]| -> usize { u.iter().map(|row| combined_scaled(row, [&c[0], &c[1], &c[2]]).zeroed().data.iter().filter(|z| **z != C64::ZERO).count()).sum() };
     let mut best = (count(&identity), identity);
     for a in [2, 0, 1] {
         let u = cyclic(a);
@@ -724,17 +795,6 @@ pub fn channel_basis(c: &[Mat; 3]) -> [[C64; 3]; 3] {
         }
     }
     best.1
-}
-
-/// Σ_a U_qa M_a of three matrices.
-fn combined(row: &[C64; 3], m: [&Mat; 3]) -> Mat {
-    let mut out = Mat::zeros(m[0].rows, m[0].cols);
-    for (x, mi) in row.iter().zip(m) {
-        if *x != C64::ZERO {
-            out.add_scaled(*x, mi);
-        }
-    }
-    out
 }
 
 /// The coefficient index of the power j ≥ 1 of the sign σ (0: +, 1: −); coefficient 0 is one.
@@ -750,8 +810,9 @@ impl Tweezer {
     pub fn new(scene: &Scene) -> Tweezer {
         let length = scene.generators.len();
         // The fold's input by the rounding rule, nothing of it by exact zeros: each coupling of H's terms by its
-        // first-order amplitudes at its frequency at rest (the zero tier's input side, model/classify.rs `input`), the emission -- a jump, no coupling -- and its
-        // decay by their own largest entries (`rounded`).
+        // first-order amplitudes at its frequency at rest (the zero tier's input side, model/classify.rs `input`), the
+        // emission -- a jump, no coupling -- by its share of its state's decay amplitude (`emission_input`), and what the
+        // engine makes of them by its computation's rounding (`Scaled`).
         let (energy, width) = levels_of(scene);
         let mut frequency = vec![0.0; scene.matrices()];
         for t in scene.terms(&scene.doppler([0.0; 3])) {
@@ -762,12 +823,20 @@ impl Tweezer {
             library.push(fixed(m));
             library.len() - 1
         };
-        let (c, k, gamma) = emission(scene.jumps());
-        let (c, k, gamma) = (c.each_ref().map(rounded), k.each_ref().map(rounded), rounded(&gamma));
-        let emission_m = c.each_ref().map(|m| put(&mut library, m));
-        let kicks_m = k.each_ref().map(|m| put(&mut library, m));
-        let rate = put(&mut library, &gamma);
-        let unit = unit_fold(scene, &c, &k, &gamma);
+        // The emission, a request's matrix; its photon forms, each entry a product of two; its decay Σ_a C_a†C_a, each by
+        // its computation's rounding (`Scaled`).
+        let jumps = scene.jumps();
+        let c: [Scaled; 3] = crate::model::classify::emission_input(&jumps.emission).each_ref().map(Scaled::input);
+        let k: [Scaled; 3] = c.each_ref().map(|x| {
+            let value = Mat::from_fn(STATES, STATES, |i, j| x.value[(i, j)] * jumps.wave_number[(i, j)].re);
+            Scaled { scale: value.data.iter().map(|z| z.abs()).collect(), value, terms: 1 }
+        });
+        let gamma = decay_scaled(&c);
+        let gamma = Scaled { value: gamma.zeroed(), ..gamma };
+        let emission_m = c.each_ref().map(|m| put(&mut library, &m.value));
+        let kicks_m = k.each_ref().map(|m| put(&mut library, &m.zeroed()));
+        let rate = put(&mut library, &gamma.value);
+        let unit = unit_fold(scene, &c, &k, &gamma.value);
         let mut factors = Factors::default();
         let one = factors.of(Factor::Scene(scene::Factor::One));
         let power_f = factors.of(Factor::Power);
@@ -798,8 +867,8 @@ impl Tweezer {
         let mut sizes = [[0.0_f64; ORDERS]; 2];
         for (key, by) in &unit.shift {
             let matrices: Vec<(usize, usize)> = by.iter().map(|(sign, j, m)| {
-                sizes[*sign][*j] = crate::linalg::larger(sizes[*sign][*j], m.max_abs());
-                (put(&mut library, &rounded(m)), power(*sign, *j))
+                sizes[*sign][*j] = crate::linalg::larger(sizes[*sign][*j], m.value.max_abs());
+                (put(&mut library, &m.zeroed()), power(*sign, *j))
             }).collect();
             let term = Term { factor: power_f, adjoint: false, scale: C64::ONE, matrices };
             match hamiltonian.iter_mut().find(|p| &p.key == key) {
@@ -810,15 +879,15 @@ impl Tweezer {
         let mut jumps = emission_channels(length, one, emission_m, kicks_m);
         for ((emission, fast), (parts, kicks)) in &unit.channels {
             let factor = if fast[1] > 0 { a } else { a_conj };
-            let piece = |library: &mut Vec<Fixed>, sizes: &mut [[f64; ORDERS]; 2], (key, by): (&Key, &Vec<(usize, usize, Mat)>)| Piece {
+            let piece = |library: &mut Vec<Fixed>, sizes: &mut [[f64; ORDERS]; 2], (key, by): (&Key, &Vec<(usize, usize, Scaled)>)| Piece {
                 key: key.clone(),
                 terms: vec![Term {
                     factor,
                     adjoint: false,
                     scale: C64::ONE,
                     matrices: by.iter().map(|(sign, j, m)| {
-                        sizes[*sign][*j] = crate::linalg::larger(sizes[*sign][*j], m.max_abs());
-                        (put(library, &rounded(m)), power(*sign, *j))
+                        sizes[*sign][*j] = crate::linalg::larger(sizes[*sign][*j], m.value.max_abs());
+                        (put(library, &m.zeroed()), power(*sign, *j))
                     }).collect(),
                 }],
             };
@@ -830,7 +899,7 @@ impl Tweezer {
         let basis = channel_basis(&c);
         let mut spherical_jumps = Vec::new();
         for (q, row) in basis.iter().enumerate() {
-            let m = put(&mut library, &rounded(&combined(row, [&c[0], &c[1], &c[2]])));
+            let m = put(&mut library, &combined_scaled(row, [&c[0], &c[1], &c[2]]).zeroed());
             spherical_jumps.push(SourceChannel { emission: q, fast: [0; 2], parts: vec![Piece { key: vec![0; length], terms: vec![Term::one(one, m)] }], kicks: Vec::new() });
         }
         let fasts: Vec<[i64; 2]> = {
@@ -841,14 +910,14 @@ impl Tweezer {
         };
         for fast in fasts {
             let factor = if fast[1] > 0 { a } else { a_conj };
-            let axes: Vec<&BTreeMap<Key, Vec<(usize, usize, Mat)>>> = (0..3).map(|axis| &unit.channels[&(axis, fast)].0).collect();
+            let axes: Vec<&BTreeMap<Key, Vec<(usize, usize, Scaled)>>> = (0..3).map(|axis| &unit.channels[&(axis, fast)].0).collect();
             for (q, row) in basis.iter().enumerate() {
                 let mut parts = Vec::new();
                 for (key, by) in axes[0] {
                     let mut matrices = Vec::new();
                     for (sign, j, _) in by {
-                        let pick = |axis: usize| -> &Mat { &axes[axis][key].iter().find(|x| x.0 == *sign && x.1 == *j).expect("the axes' powers").2 };
-                        let m = rounded(&combined(row, [pick(0), pick(1), pick(2)]));
+                        let pick = |axis: usize| -> &Scaled { &axes[axis][key].iter().find(|x| x.0 == *sign && x.1 == *j).expect("the axes' powers").2 };
+                        let m = combined_scaled(row, [pick(0), pick(1), pick(2)]).zeroed();
                         matrices.push((put(&mut library, &m), power(*sign, *j)));
                     }
                     parts.push(Piece { key: key.clone(), terms: vec![Term { factor, adjoint: false, scale: C64::ONE, matrices }] });
@@ -858,7 +927,7 @@ impl Tweezer {
         }
         let mut generator = hamiltonian.iter().find(|p| p.key.iter().all(|k| *k == 0)).expect("H's static part").terms.clone();
         generator.push(Term { factor: one, adjoint: false, scale: C64::new(0.0, -0.5), matrices: vec![(rate, 0)] });
-        let scattering: Vec<(usize, usize)> = unit.scattering.iter().map(|(sign, j, m)| (put(&mut library, &rounded(m)), power(*sign, *j))).collect();
+        let scattering: Vec<(usize, usize)> = unit.scattering.iter().map(|(sign, j, m)| (put(&mut library, &m.zeroed()), power(*sign, *j))).collect();
         generator.push(Term { factor: power_f, adjoint: false, scale: C64::new(0.0, -0.5), matrices: scattering });
         let varying = factors.0.iter().map(|f| f.varying(Some(scene))).collect();
         let source = Source { hamiltonian, jumps, generator, varying, coefficients: 1 + 2 * (ORDERS - 1) };
@@ -921,9 +990,9 @@ impl Tweezer {
 /// index) with their parts and photon forms by key, the decay of its channels by (sign, power), and its static part at
 /// rest.
 struct Unit {
-    shift: BTreeMap<Key, Vec<(usize, usize, Mat)>>,
-    channels: BTreeMap<(usize, [i64; 2]), (BTreeMap<Key, Vec<(usize, usize, Mat)>>, BTreeMap<Key, Vec<(usize, usize, Mat)>>)>,
-    scattering: Vec<(usize, usize, Mat)>,
+    shift: BTreeMap<Key, Vec<(usize, usize, Scaled)>>,
+    channels: BTreeMap<(usize, [i64; 2]), (BTreeMap<Key, Vec<(usize, usize, Scaled)>>, BTreeMap<Key, Vec<(usize, usize, Scaled)>>)>,
+    scattering: Vec<(usize, usize, Scaled)>,
     still: Mat,
 }
 
@@ -932,10 +1001,10 @@ struct Unit {
 /// each column's resolvent at E_a + f_c by the Neumann series about the diagonal and its powers R^{j+1} H_c; the pairs
 /// whose n_tw is zero, ½(H_c′ R^{j+1} H_c + h.c.) at c + c′ and its negation; the channels C_a R^{j+1} H_c and
 /// (k∘C_a) R^{j+1} H_c at n_tw of c; the channels' decay Σ_a Σ_key Σ_{j + j′ = J} L_j†L_j′ by power J, each axis whole.
-fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
+fn unit_fold(scene: &Scene, c: &[Scaled; 3], k: &[Scaled; 3], gamma: &Mat) -> Unit {
     let h0 = &scene.request.hamiltonian;
     let g = Mat::from_fn(STATES, STATES, |i, j| h0[(i, j)] - gamma[(i, j)] * C64::new(0.0, 0.5));
-    // The resolvent's blocks: the couplings of H0 − (i/2)Γ, Γ by the rounding rule (`Tweezer::new`), H0 diagonal.
+    // The resolvent's blocks: the couplings of H0 − (i/2)Γ, Γ without its rounding zeros (`Tweezer::new`), H0 diagonal.
     let pattern: Vec<(usize, usize)> = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| i != j && g[(i, j)] != C64::ZERO).collect();
     let blocks = fold::connected_parts(STATES, &pattern);
     let [(co_key, f, x), (cr_key, fr, r)] = scene.tweezer_couplings();
@@ -951,7 +1020,7 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
     // H_c holds (the request's structure: the couplings excited ← ground, `Request::validate`; a power's the same):
     // elsewhere M_c is zero, the resolvent acting on nothing -- and there it may be singular, a ground state's own
     // block at E_a + f_c = E_a where the tweezer is the frame's carrier (f_c = 0: a lone tweezer, scene.rs `tweezer_axis`).
-    let resolved: Vec<Vec<Mat>> = comps
+    let resolved: Vec<Vec<Scaled>> = comps
         .iter()
         .map(|(_, freq, h, _, _)| {
             let z: Vec<f64> = energy.iter().map(|e| e + freq).collect();
@@ -961,20 +1030,24 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
                 .filter(|(_, cols)| !cols.is_empty())
                 .collect();
             let mut out = Vec::with_capacity(ORDERS);
-            let mut y = h.clone();
+            let mut y = Scaled::input(h);
             for _ in 0..ORDERS {
-                let mut m = Mat::zeros(STATES, STATES);
+                let mut m = Scaled::zeros(STATES, STATES);
                 for (rows, cols) in &held {
                     let sub = g.block(rows, rows);
-                    let yb = y.block(rows, cols);
+                    let yb = y.value.block(rows, cols);
+                    let ys: Vec<f64> = rows.iter().flat_map(|&r| cols.iter().map(move |&a| (r, a))).map(|(r, a)| y.scale[r * STATES + a]).collect();
                     let zb: Vec<f64> = cols.iter().map(|&a| z[a]).collect();
                     let mut mb = Mat::default();
                     fold::neumann_into(&sub, &zb, &yb, &mut mb);
+                    let (sb, terms) = fold::neumann_scale(&sub, &zb, &ys);
                     for (i, &row) in rows.iter().enumerate() {
                         for (k, &a) in cols.iter().enumerate() {
-                            m[(row, a)] = mb[(i, k)];
+                            m.value[(row, a)] = mb[(i, k)];
+                            m.scale[row * STATES + a] = sb[i * cols.len() + k];
                         }
                     }
+                    m.terms = m.terms.max(y.terms + terms);
                 }
                 y = m.clone();
                 out.push(m);
@@ -982,11 +1055,11 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
             out
         })
         .collect();
-    let mut shift: BTreeMap<Key, Vec<(usize, usize, Mat)>> = BTreeMap::new();
-    let add = |map: &mut BTreeMap<Key, Vec<(usize, usize, Mat)>>, key: Key, sign: usize, j: usize, m: &Mat| {
+    let mut shift: BTreeMap<Key, Vec<(usize, usize, Scaled)>> = BTreeMap::new();
+    let add = |map: &mut BTreeMap<Key, Vec<(usize, usize, Scaled)>>, key: Key, sign: usize, j: usize, m: &Scaled| {
         let list = map.entry(key).or_default();
         match list.iter_mut().find(|(s, p, _)| *s == sign && *p == j) {
-            Some((_, _, x)) => x.add_scaled(C64::ONE, m),
+            Some((_, _, x)) => x.add(m),
             None => list.push((sign, j, m.clone())),
         }
     };
@@ -998,18 +1071,18 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
             }
             let key = sum_keys(key_c, key_w);
             for (j, m) in resolved[ci].iter().enumerate() {
-                let a = h_w.product(m).scaled(C64::real(0.5));
+                let a = Scaled::input(h_w).product(m).times(C64::real(0.5));
                 let adj = a.adjoint();
                 if j == 0 && key.iter().all(|x| *x == 0) {
-                    still.add_scaled(C64::ONE, &a);
-                    still.add_scaled(C64::ONE, &adj);
+                    still.add_scaled(C64::ONE, &a.value);
+                    still.add_scaled(C64::ONE, &adj.value);
                 }
                 add(&mut shift, key.clone(), *sign, j, &a);
                 add(&mut shift, negated(&key), *sign, j, &adj);
             }
         }
     }
-    type ByKey = BTreeMap<Key, Vec<(usize, usize, Mat)>>;
+    type ByKey = BTreeMap<Key, Vec<(usize, usize, Scaled)>>;
     let mut channels: BTreeMap<(usize, [i64; 2]), (ByKey, ByKey)> = BTreeMap::new();
     for (ci, (key_c, _, _, class_c, sign)) in comps.iter().enumerate() {
         for axis in 0..3 {
@@ -1021,24 +1094,27 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
         }
     }
     // The decay of the channels by sign and power: each axis whole, then the axes.
-    let mut scattering: Vec<(usize, usize, Mat)> = Vec::new();
+    let mut scattering: Vec<(usize, usize, Scaled)> = Vec::new();
     for sign in 0..2 {
         for power in 0..ORDERS {
-            let mut total = Mat::zeros(STATES, STATES);
+            let mut total = Scaled::zeros(STATES, STATES);
             for axis in 0..3 {
-                let mut g = Mat::zeros(STATES, STATES);
+                let mut g = Scaled::zeros(STATES, STATES);
                 for (_, (parts, _)) in channels.iter().filter(|((e, _), _)| *e == axis) {
                     for list in parts.values() {
                         for (s1, j1, l1) in list.iter().filter(|x| x.0 == sign) {
                             for (_, _, l2) in list.iter().filter(|x| x.0 == *s1 && x.1 + j1 == power) {
-                                adjoint_product_onto(l1, l2, C64::ONE, &mut g);
+                                adjoint_product_onto(&l1.value, &l2.value, C64::ONE, &mut g.value);
+                                let s = l1.adjoint().product(l2);
+                                g.scale.iter_mut().zip(&s.scale).for_each(|(a, b)| *a += b);
+                                g.terms = g.terms.max(s.terms) + 1;
                             }
                         }
                     }
                 }
-                total.add_scaled(C64::ONE, &g);
+                total.add(&g);
             }
-            if nonzero(&total) {
+            if nonzero(&total.value) {
                 scattering.push((sign, power, total));
             }
         }

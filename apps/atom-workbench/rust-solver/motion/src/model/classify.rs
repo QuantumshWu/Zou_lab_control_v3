@@ -6,8 +6,11 @@
 //!
 //! # The tiers
 //! - **Zero**: what the computation itself cannot tell from nothing. On the input side the user's rule: a coupling
-//!   entry whose first-order amplitude a = |M_ij| / |E_i − E_j − f + i(Γ_i + Γ_j)/2| is below ε (`input`). On the output
-//!   side -- the model's node, P's slow elements -- the computation's own rounding and nothing else: an entry x that is
+//!   entry whose first-order amplitude a = |M_ij| / |E_i − E_j − f + i(Γ_i + Γ_j)/2| is below ε (`input`), a jump's
+//!   amplitude whose share of its state's decay amplitude is (`emission_input`). On the output side -- every matrix
+//!   the engine makes of those, the fixed matrices of the folds (rs.rs `Scaled`: the photon forms, the decay, the
+//!   spherical channels, the tweezer's unit fold) and the model's node, P's slow elements -- the computation's own
+//!   rounding and nothing else (until 2026-11-21 the fixed matrices' was u times their largest entry): an entry x that is
 //!   the sum of K terms whose moduli sum to S is a rounding zero where |x| ≤ γ_K S (Higham's γ_K = Ku/(1 − Ku), units.rs
 //!   `rounding`; `zero`). There is no second definition: an entry below ε times some matrix's largest is no zero by
 //!   that alone (until 2026-11-21 the beats read "ε times the largest of every beat's" and the blocks "ε times its
@@ -107,6 +110,17 @@ pub fn input(m: &Mat, f: f64, energy: &[f64], width: &[f64]) -> Mat {
         let detuning = C64::new(energy[i] - energy[j] - f, 0.5 * (width[i] + width[j]));
         if z.abs() < f64::EPSILON * detuning.abs() { C64::ZERO } else { z }
     })
+}
+
+/// The emission by the zero tier's input side (module documentation, # The tiers): a jump's amplitude C_a[g, e] whose
+/// share of its excited state's whole decay amplitude, |C_a[g, e]| / √Γ_e (Γ_e = Σ_a Σ_g |C_a[g, e]|², the state's
+/// decay rate), is below the format's ε is no jump and is zero -- the first-order rule of `input` for a jump, whose
+/// natural size is its state's decay, not a detuning. The request's matrix, given entry by entry: no computation of the
+/// engine's makes its entries, so this is its one rule.
+pub fn emission_input(c: &[Mat; 3]) -> [Mat; 3] {
+    let n = c[0].cols;
+    let decay: Vec<f64> = (0..n).map(|e| c.iter().map(|m| (0..m.rows).map(|g| m[(g, e)].norm_sqr()).sum::<f64>()).sum()).collect();
+    c.each_ref().map(|m| Mat::from_fn(m.rows, m.cols, |g, e| if m[(g, e)].abs() < f64::EPSILON * decay[e].sqrt() { C64::ZERO } else { m[(g, e)] }))
 }
 
 /// The run's judgment of its node's beats (module documentation): per slot of the node's generator its tier, P's exact

@@ -1270,6 +1270,76 @@ pub fn neumann_into(g: &Mat, z: &[f64], y: &Mat, out: &mut Mat) -> f64 {
     Series::default().resolve(g, z, y, out)
 }
 
+/// The rounding scale of `neumann_into`'s result (rs.rs `Scaled`; model/classify.rs, # The tiers): per entry the sum
+/// of the moduli of the terms it is the sum of, the same series on the moduli -- |w₀| = |D⁻¹| ∘ S_y, |w_{k+1}| =
+/// |D⁻¹| ∘ (|N| |w_k|), summed until a term no longer moves the sum, S_y the scale of y (|B| × columns, row by row) --
+/// or where the series does not converge the decomposition's, |V| ((|V⁻¹| S_y) ⊘ |z − λ|); and the operations' count
+/// behind an entry, the terms' chains (one row of N and its product a term).
+pub fn neumann_scale(g: &Mat, z: &[f64], y: &[f64]) -> (Vec<f64>, usize) {
+    let size = g.rows;
+    let count = if size == 0 { 0 } else { y.len() / size };
+    let mut off: Vec<(usize, usize, f64)> = Vec::new();
+    let mut spread = vec![0.0; size];
+    for i in 0..size {
+        for k in 0..size {
+            if i != k && g[(i, k)] != C64::ZERO {
+                spread[i] += g[(i, k)].abs();
+                off.push((i, k, g[(i, k)].abs()));
+            }
+        }
+    }
+    let inverse: Vec<f64> = (0..size).flat_map(|i| (0..count).map(move |j| (i, j))).map(|(i, j)| 1.0 / (C64::real(z[j]) - g[(i, i)]).abs()).collect();
+    let converges = (0..count).all(|j| (0..size).map(|i| spread[i] * inverse[i * count + j]).fold(0.0, linalg::larger) < 1.0);
+    let longest = (0..size).map(|i| off.iter().filter(|e| e.0 == i).count()).max().unwrap_or(0) + 2;
+    if converges {
+        let mut w: Vec<f64> = y.iter().zip(&inverse).map(|(a, b)| a * b).collect();
+        let mut out = w.clone();
+        let mut steps = 1;
+        loop {
+            let mut next = vec![0.0; size * count];
+            for &(i, k, v) in &off {
+                for j in 0..count {
+                    next[i * count + j] += v * w[k * count + j];
+                }
+            }
+            w = next.iter().zip(&inverse).map(|(a, b)| a * b).collect();
+            let mut moved = false;
+            for (o, a) in out.iter_mut().zip(&w) {
+                let before = *o;
+                *o += a;
+                moved |= *o != before;
+            }
+            steps += 1;
+            if !moved {
+                return (out, steps * longest);
+            }
+        }
+    }
+    let mut eigen = linalg::Eigen::default();
+    assert!(eigen.decompose(g), "a block's G₀ has no eigendecomposition (defective)");
+    let (v, vi): (Vec<f64>, Vec<f64>) = (eigen.vectors.data.iter().map(|z| z.abs()).collect(), eigen.inverse.data.iter().map(|z| z.abs()).collect());
+    let mut w = vec![0.0; size * count];
+    for k in 0..size {
+        for q in 0..size {
+            for j in 0..count {
+                w[k * count + j] += vi[k * size + q] * y[q * count + j];
+            }
+        }
+        for j in 0..count {
+            w[k * count + j] /= (C64::real(z[j]) - eigen.values[k]).abs();
+        }
+    }
+    let mut out = vec![0.0; size * count];
+    for i in 0..size {
+        for k in 0..size {
+            for j in 0..count {
+                out[i * count + j] += v[i * size + k] * w[k * count + j];
+            }
+        }
+    }
+    (out, 4 * size)
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The contraction.
 

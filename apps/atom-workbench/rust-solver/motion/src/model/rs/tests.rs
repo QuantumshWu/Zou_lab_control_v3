@@ -653,7 +653,8 @@ fn rs_at_cost() {
 /// scene's own request, reqprec/req; the tweezer's dissipative fold; scene_x's H0 convention) and pysel/ps.py
 /// `hilbert_full3` --, its input by the engine's rule since 3a (model/classify.rs `input`: each coupling entry of the
 /// base, every beam's X_l, the tweezer's X_tw and R_tw and every outside-form product zero where its first-order
-/// amplitude is below ε at the term's frequency at rest; the emission by its own largest), as JSON in the directory
+/// amplitude is below ε at the term's frequency at rest; the emission by its share of its state's decay, classify.rs
+/// `emission_input`), as JSON in the directory
 /// `V3C_FULL` (made by motion3d_status/rewrite/r1clean_ref/export_rule.py, the files kept beside it). On the six
 /// scenes at the checkpoint's centre (r = 0, the tweezer full) and edge (dark), no Doppler shift: H's components summed
 /// by the prototype's keys (its beams grouped by frequency, then the carrier and the frame's α) and their gradients
@@ -881,3 +882,6 @@ fn the_fold_s_input_by_its_amplitudes() {
         eprintln!("AMPLITUDES {file}: {dropped} entries left out (largest a {most_dropped:.2e}); {kept_small} kept below u·max of their matrix (largest a {most_kept_small:.2e})");
     }
 }
+
+#[path = "zeros.rs"]
+mod zeros;
