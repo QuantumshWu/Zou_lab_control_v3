@@ -943,6 +943,68 @@ impl Eigen {
         self.work = work as f64;
         self.condition.is_finite()
     }
+
+    /// The eigendecomposition of a block-diagonal A (its entries between two of `blocks` zero), block by block: each
+    /// block decomposed alone (`decompose`, each on its own place in `scratch`: none made after the first of a size), its eigencomponents in its own states' places -- R and
+    /// R⁻¹ block-diagonal, so that no eigenvector of one block is mixed with another's, not even where two blocks share an
+    /// eigenvalue --, `part` each component's block. The condition of the whole R (its columns' largest 1-norm times
+    /// ‖R⁻¹‖₁), the blocks' work summed. False where a block's decomposition is (`decompose`).
+    pub fn decompose_blocks(&mut self, a: &Mat, blocks: &[Vec<usize>], scratch: &mut Vec<(Mat, Eigen)>, part: &mut Vec<usize>) -> bool {
+        let n = a.rows;
+        assert_eq!(n, a.cols, "the eigendecomposition of a {}x{} matrix", a.rows, a.cols);
+        if self.values.len() != n {
+            self.values.resize(n, C64::ZERO);
+            for m in [&mut self.vectors, &mut self.inverse] {
+                (m.rows, m.cols) = (n, n);
+                m.data.resize(n * n, C64::ZERO);
+            }
+            self.columns[2].resize(n * n, C64::ZERO);
+        }
+        self.vectors.data.fill(C64::ZERO);
+        self.inverse.data.fill(C64::ZERO);
+        part.clear();
+        part.resize(n, usize::MAX);
+        let mut work = 0.0;
+        if scratch.len() != blocks.len() {
+            scratch.resize_with(blocks.len(), Default::default);
+        }
+        for (b, states) in blocks.iter().enumerate() {
+            let m = states.len();
+            let (block, scratch) = &mut scratch[b];
+            if block.rows != m {
+                *block = Mat::zeros(m, m);
+            }
+            for (i, &s) in states.iter().enumerate() {
+                for (j, &t) in states.iter().enumerate() {
+                    block.data[i * m + j] = a[(s, t)];
+                }
+            }
+            if !scratch.decompose(block) {
+                return false;
+            }
+            work += scratch.work;
+            for (j, &c) in states.iter().enumerate() {
+                self.values[c] = scratch.values[j];
+                part[c] = b;
+                for (i, &s) in states.iter().enumerate() {
+                    self.vectors.data[s * n + c] = scratch.vectors.data[i * m + j];
+                    self.inverse.data[c * n + s] = scratch.inverse.data[j * m + i];
+                }
+            }
+        }
+        assert!(part.iter().all(|&b| b != usize::MAX), "the blocks are a partition of the states");
+        let mut one = 0.0_f64;
+        for k in 0..n {
+            let column = &mut self.columns[2][k * n..(k + 1) * n];
+            for (i, z) in column.iter_mut().enumerate() {
+                *z = self.vectors.data[i * n + k];
+            }
+            one = larger(one, column.iter().map(|z| z.abs()).sum::<f64>());
+        }
+        self.condition = one * self.inverse.norm1();
+        self.work = work;
+        self.condition.is_finite()
+    }
 }
 
 /// The complex Schur form of the n × n matrix in `h` (row by row), in its place: Householder reduction to Hessenberg
@@ -1548,6 +1610,41 @@ pub(crate) mod tests {
             eigen(&h).unwrap().condition
         };
         assert!(at(g / 2.0 * (1.0 + 1e-8)) > 1e3 * at(2.0 * g), "{} {}", at(g / 2.0 * (1.0 + 1e-8)), at(2.0 * g));
+    }
+
+    /// The decomposition block by block (`Eigen::decompose_blocks`) of a block-diagonal generator of the same shape, its
+    /// blocks interleaved among the states (of 1 to 9 states, two of them sharing an eigenvalue): R Λ R⁻¹ = A to
+    /// γ κ(R) ‖A‖, R and R⁻¹ zero between two blocks -- every eigenvector of one block, even where two blocks share an
+    /// eigenvalue --, each component's block its states', a second call on the same scratch the same to the bit.
+    #[test]
+    fn the_block_eigendecomposition_gives_the_matrix_back() {
+        let blocks: Vec<Vec<usize>> = vec![vec![0, 3, 7, 12], vec![1, 2], vec![4], vec![5, 6, 8, 9, 10, 11, 13, 14, 15]];
+        let n = 16;
+        let block_of: Vec<usize> = (0..n).map(|s| blocks.iter().position(|b| b.contains(&s)).unwrap()).collect();
+        let mut s = Stream::new(5, Purpose::Latin, n as u64, 2);
+        let full = sample(n, n, 4242).hermitian_part().scaled(C64::real(50.0));
+        let mut h = Mat::from_fn(n, n, |i, j| if block_of[i] == block_of[j] { full[(i, j)] } else { C64::ZERO });
+        for i in 0..n {
+            h[(i, i)] += C64::new(400.0 * (s.uniform() - 0.5), -19.0 * (s.uniform() + 0.5));
+        }
+        // The lone state's eigenvalue is its diagonal: set to another block's first eigenvalue, the two blocks share it.
+        let other = Mat::from_fn(2, 2, |i, j| h[(blocks[1][i], blocks[1][j])]);
+        h[(4, 4)] = eigen(&other).unwrap().values[0];
+        let (mut e, mut scratch, mut part) = (Eigen::default(), Vec::new(), Vec::new());
+        assert!(e.decompose_blocks(&h, &blocks, &mut scratch, &mut part), "converges");
+        let back = e.vectors.product(&Mat::diagonal(&e.values)).product(&e.inverse);
+        let bound = rounding(4 * n * n) * e.condition * h.max_abs();
+        let error = difference(&back, &h);
+        assert!(error <= bound, "{error:e} > {bound:e}");
+        for a in 0..n {
+            assert_eq!(part[a], block_of[a], "component {a}'s block");
+            for c in (0..n).filter(|&c| block_of[c] != block_of[a]) {
+                assert!(e.vectors[(a, c)] == C64::ZERO && e.inverse[(c, a)] == C64::ZERO, "({a}, {c}) between two blocks");
+            }
+        }
+        let first = (e.values.clone(), e.vectors.clone(), e.inverse.clone(), e.condition);
+        assert!(e.decompose_blocks(&h, &blocks, &mut scratch, &mut part));
+        assert!(first == (e.values.clone(), e.vectors.clone(), e.inverse.clone(), e.condition), "a second call the same");
     }
 
     /// The vector's Chebyshev plan: nothing for a zero matrix; for a Hermitian one a single part, of degree 15 at σ = 1

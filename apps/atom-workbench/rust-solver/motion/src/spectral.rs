@@ -509,6 +509,13 @@ pub struct Picture {
     matrix: Mat,
     /// Ĥ₀'s decomposition of its traceless part.
     basis: linalg::Eigen,
+    /// The model's exact blocks, the caller's (step.rs from `Middle::blocks`; none: the states one block): every matrix
+    /// the step is given is block-diagonal on them (model/selected.rs, # Exact blocks). Ĥ₀ is decomposed block by
+    /// block (`linalg::Eigen::decompose_blocks`) and each eigencomponent is of one block (`part`): no pair of two blocks
+    /// is a frequency of any form, of any class, or of the quadrature's bandwidth -- the forms are block-diagonal too.
+    pub blocks: Vec<Vec<usize>>,
+    part: Vec<usize>,
+    scratch: Vec<(Mat, linalg::Eigen)>,
     /// Ĥ₀'s eigenvalues, the scalar part with them.
     lambda: Vec<C64>,
     /// The classes (module documentation, # Tones): the static group; each exact tone's two members, ⁺ and then ⁻; the
@@ -602,6 +609,9 @@ impl Default for Picture {
             slope: none(),
             matrix: none(),
             basis: linalg::Eigen::default(),
+            blocks: Vec::new(),
+            part: Vec::new(),
+            scratch: Vec::new(),
             lambda: Vec::new(),
             classes: vec![Class::default()],
             combined: vec![0],
@@ -700,10 +710,13 @@ fn hop_size([slope, curvature, constant]: [f64; 3]) -> f64 {
 
 /// The terms of ∫₀¹ t^p e^{zt} dt's series Σ_j z^j/(j!(j + p + 1)) at |z| ≤ x for an integral of the size `size` at
 /// most: the least T with x^T/T! times the size within the unit round-off, the size no more than one -- the terms from T
-/// on are within the round-off of the state the integral acts on, or of its own first term where that is more.
+/// on are within the round-off of the state the integral acts on, or of its own first term where that is more. A hopped
+/// entry's |z| is below the split (`followed`); one whose terms leave the numbers (|z| beyond some 700) has no sum here,
+/// and is refused at once rather than summed without end.
 fn series(x: f64, size: f64) -> usize {
     let (mut terms, mut next) = (1, x * linalg::smaller(size, 1.0));
     while next > UNIT_ROUNDOFF {
+        assert!(next.is_finite(), "a hop's series at |z| = {x} leaves the numbers");
         terms += 1;
         next *= x / terms as f64;
     }
@@ -885,6 +898,18 @@ fn take(class: &mut Class, k: usize, t: usize, omega: C64, fast: bool, size: usi
     }
 }
 
+/// A class's entry k (its transpose's place t) between two exact blocks (`Picture::blocks`): none of the class's, as
+/// every matrix the step is given is zero there -- taken as followed (`fast`) with nothing to follow, its inverse and its
+/// following none, so that no route reads its frequency (the hops' series, their radius, the turns) and nothing of a
+/// step before stays on it.
+fn apart(class: &mut Class, k: usize, t: usize, size: usize) {
+    class.fast[k] = true;
+    class.inverses[k] = C64::ZERO;
+    for j in 0..3 {
+        class.follow[j * size + t] = C64::ZERO;
+    }
+}
+
 /// The entries of the classes in `range` -- the first order's classes (`first`) or the products' -- that are hopped at
 /// all, each with its partner's -- the entry (a, b) at
 /// Ω = λ_a − λ_b + ν and its partner's (b, a) at −Ω (module documentation, # Tones) --, taken (`take`) by the split at
@@ -897,7 +922,7 @@ fn take(class: &mut Class, k: usize, t: usize, omega: C64, fast: bool, size: usi
 /// half the hop's growth; a state's own entry, which commutes with itself, has no radius). False where an entry is taken by no route of the decomposition
 /// (the rest is flagged as it would be, and not used).
 #[allow(clippy::too_many_arguments)]
-fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambda: &[C64], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], coupled: f64, h: f64, spread: &mut f64, grown: &mut f64) -> bool {
+fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambda: &[C64], part: &[usize], sizes: [f64; 3], envelope: &dyn Fn(&Class, usize) -> [C64; 3], coupled: f64, h: f64, spread: &mut f64, grown: &mut f64) -> bool {
     let size = |class: &Class, k: usize, omega: C64| {
         let [c, a, b] = envelope(class, k);
         let y = following(omega.recip(), c, a, b);
@@ -916,7 +941,14 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
             continue;
         }
         for row in 0..n {
-            for column in if partner == c { row } else { 0 }..n {
+            // A pair of two blocks holds nothing of any class (every matrix the step is given is block-diagonal): it is
+            // followed with nothing to follow (`apart`), so that no hop, no hop's series and no bound reads its frequency.
+            for column in (if partner == c { row } else { 0 }..n).filter(|&column| part[column] != part[row]) {
+                let (one, other) = both(classes, c, partner);
+                apart(one, row * n + column, column * n + row, n * n);
+                apart(other.unwrap_or(one), column * n + row, row * n + column, n * n);
+            }
+            for column in (if partner == c { row } else { 0 }..n).filter(|&column| part[column] == part[row]) {
                 let between = lambda[row] - lambda[column];
                 let omega = if c == 0 { between } else { C64::new(between.re + beat, between.im) };
                 let turn = omega.abs();
@@ -1024,6 +1056,7 @@ impl Picture {
             self.overlaps.resize(size, 0.0);
             self.reached.resize(n, false);
             self.held.resize(n, false);
+            self.part.resize(n, 0);
             self.pivots.resize(n, 0);
             for class in &mut self.classes {
                 class.fit(n);
@@ -1209,7 +1242,14 @@ impl Picture {
         let [rho, gamma] = self.bounds;
         let tau = 2.0 * half.abs();
         let exponential = linalg::Chebyshev::plan(rho * tau, gamma * tau).rounding(n);
-        if !self.basis.decompose(&self.matrix) {
+        let decomposed = if self.blocks.len() > 1 {
+            self.basis.decompose_blocks(&self.matrix, &self.blocks, &mut self.scratch, &mut self.part)
+        } else {
+            self.part.clear();
+            self.part.resize(n, 0);
+            self.basis.decompose(&self.matrix)
+        };
+        if !decomposed {
             return Err(Refusal::Decomposition);
         }
         // Counted as made, before the rounding is weighed: a step refused here did the decomposition (step.rs
@@ -1344,9 +1384,11 @@ impl Picture {
             });
             self.held[a] = on >= off;
         }
-        let (lambda, held) = (&self.lambda, &self.held);
-        // |λ_a* − λ_b + ν| is the pair's whichever way round.
-        let pairs = move |beat: f64| (0..n).filter(move |&a| held[a]).flat_map(move |a| (a..n).filter(move |&b| held[b]).map(move |b| (lambda[a].conj() - lambda[b] + C64::real(beat)).abs()));
+        let (lambda, held, part) = (&self.lambda, &self.held, &self.part);
+        // |λ_a* − λ_b + ν| is the pair's whichever way round; a pair of two blocks is no form's (`blocks`).
+        let pairs = move |beat: f64| {
+            (0..n).filter(move |&a| held[a]).flat_map(move |a| (a..n).filter(move |&b| held[b] && part[b] == part[a]).map(move |b| (lambda[a].conj() - lambda[b] + C64::real(beat)).abs()))
+        };
         let mut bandwidth = pairs(0.0).fold(0.0, linalg::larger);
         if self.moving {
             let (low, high) = self.classes.iter().filter(|class| class.followed).fold((0.0_f64, 0.0_f64), |(low, high), class| (linalg::smaller(low, class.beat), linalg::larger(high, class.beat)));
@@ -1405,7 +1447,7 @@ impl Picture {
         let size_of = |sum: f64| (0.5 * sum).sqrt();
         let sizes = [size_of(sums[1]) * (h * h), size_of(sums[2]) * (h * h * h).abs(), size_of(sums[0]) * h.abs()];
         let mut spread = self.spread;
-        if !flag(&mut classes, 0..order, true, &self.lambda, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), 0.0, h, &mut spread, &mut self.grown) {
+        if !flag(&mut classes, 0..order, true, &self.lambda, &self.part, sizes, &|class, k| [0, 1, 2].map(|j| class.change[j][k]), 0.0, h, &mut spread, &mut self.grown) {
             self.finish(classes, spread);
             return Err(Refusal::Radius);
         }
@@ -1505,7 +1547,7 @@ impl Picture {
             let middle = if tones > 0 { entry(&class.second, 2 * block + place) } else { C64::ZERO };
             [middle, (plus - minus) * first, (plus + minus - middle * 2.0) * second]
         };
-        if !flag(&mut classes, order..all, false, &self.lambda, sizes, &product, sizes.iter().sum(), h, &mut spread, &mut self.grown) {
+        if !flag(&mut classes, order..all, false, &self.lambda, &self.part, sizes, &product, sizes.iter().sum(), h, &mut spread, &mut self.grown) {
             self.finish(classes, spread);
             return Err(Refusal::Radius);
         }
@@ -1868,7 +1910,8 @@ impl Picture {
             for a in 0..n {
                 let mut row = 0.0;
                 for c in (0..n).filter(|&c| !group.fast[a * n + c]) {
-                    let q: C64 = (0..n).filter(|&k| group.fast[k * n + c]).map(|k| b[a * n + k] * b[k * n + c] / (self.lambda[k] - self.lambda[c])).sum();
+                    // Of c's own block alone: a pair of two blocks is no class's entry (`apart`), its B none.
+                    let q: C64 = (0..n).filter(|&k| group.fast[k * n + c] && self.part[k] == self.part[c]).map(|k| b[a * n + k] * b[k * n + c] / (self.lambda[k] - self.lambda[c])).sum();
                     row += q.abs() * m[c].abs();
                 }
                 total += row * row;
@@ -2026,7 +2069,7 @@ impl Picture {
         ringing.clear();
         // A weight that is not a number stays in: the quotient is not a number, and the stop it bounds is refused.
         for a in (0..n).filter(|&a| self.held[a] && !(m[a] <= 0.0)) {
-            for b in (a..n).filter(|&b| self.held[b] && !(m[b] <= 0.0)) {
+            for b in (a..n).filter(|&b| self.held[b] && !(m[b] <= 0.0) && self.part[b] == self.part[a]) {
                 let line = |s: f64, (d, slope): (f64, f64)| (m[a].ln() + m[b].ln() + (rates[a] + rates[b]) * s - d.ln(), rates[a] + rates[b] - slope / d);
                 let ((f0, s0), (f1, s1)) = (line(0.0, ends[0]), line(width, ends[1]));
                 let top = if s0 <= 0.0 {
@@ -2161,8 +2204,14 @@ impl Picture {
         if series.is_finite() && !pays(series / 3.0) {
             return (f64::INFINITY, 0.0);
         }
-        let (low, high) = (0..n).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| (linalg::smaller(lo, self.lambda[a].re), linalg::larger(hi, self.lambda[a].re)));
-        let centre = C64::real(0.5 * (low + high));
+        // Each block about its own centre: a state's row is of its block's components alone (R block-diagonal), so a
+        // pair's exponent is its own difference whatever the centre, and no block's offset from another's grows here.
+        let blocks = self.part.iter().copied().fold(0, usize::max) + 1;
+        let mut ends = vec![(f64::INFINITY, f64::NEG_INFINITY); blocks];
+        for (a, &b) in self.part.iter().enumerate().take(n) {
+            ends[b] = (linalg::smaller(ends[b].0, self.lambda[a].re), linalg::larger(ends[b].1, self.lambda[a].re));
+        }
+        let centre: Vec<C64> = self.part.iter().take(n).map(|&b| C64::real(0.5 * (ends[b].0 + ends[b].1))).collect();
         let r = &self.basis.vectors;
         let (lambda, path, held) = (&self.lambda, &self.path, &self.held);
         let points = [0.0, 0.5 * width, width].map(|s| {
@@ -2200,7 +2249,7 @@ impl Picture {
             for (d, diagonal, norm) in &points {
                 let (mut plus, mut minus) = ([C64::ZERO; crate::model::STATES], [C64::ZERO; crate::model::STATES]);
                 for a in 0..n {
-                    let e = ((lambda[a] - centre) * y).exp();
+                    let e = ((lambda[a] - centre[a]) * y).exp();
                     (plus[a], minus[a]) = (d[a] * e, d[a] / e);
                 }
                 let mut continued = C64::ZERO;
