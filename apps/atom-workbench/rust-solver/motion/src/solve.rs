@@ -104,9 +104,10 @@
 //! local control and a refinement checked by hand take it (the user's approximate convergence, QuTiP-like: delivered
 //! fast, the risk of two coarse levels that agree accepted there). The third level bought on the pilot lies above the
 //! rung's pair or below it -- (2τ, 4τ) above, (τ/2, τ) below; against τ/2, (τ, 2τ) and (τ/4, τ/2) --, three adjacent
-//! levels either way, at the side whose read costs the less for its precision (`third_of`): the pilot's work there times
-//! the factor its pair's read takes for that pair's coarser level's halved steps (## A companion at τ/2; foretold by the
-//! states in hand where that level is not run, measured where it is) -- the one rule the companion is chosen by. Above,
+//! levels either way, at the side whose read costs the less for its precision (`third_of`, `read_cost`): the pairs its
+//! read needs, its lift above or below and its factor on the rung's own noise, at its levels' work (## A companion at
+//! τ/2; the factor foretold by the states in hand where that level is not run, measured where it is) -- the one rule the
+//! companion is chosen by. Above,
 //! the triple holds the rung's own pair at its finest; a coarser level that took most of its steps at their halves is out
 //! of the order's range there, and its read can only not see (PGC3D, TET at 0.948 µs: 3.79 µs read 6 to 8 times the
 //! share's square, the rung's own read within). Below, its read is raised 2^{2p} times and is the noisier where the pairs
@@ -146,10 +147,16 @@
 //! raised 2^{2p} times is so much the noisier than the one against 2τ; where they stay together the noise falls with the
 //! error and the two are alike (## The ladder: the noise's ratio). Its estimate decides as every read's does (`verdict`),
 //! its noise priced as every read's is (`remedy`).
-//! Which of the two: the one whose read costs the less work for its precision (`against_half`) -- the read's noise
-//! squared is raised by the factor a its coarser level's halved steps take, so a read of the same precision against 2τ
-//! takes about a times the pairs: w(2τ) a(2τ) against w(τ/2) a(τ), at the work a µs as priced (`Prices::work`; with
-//! w(2τ) ≈ w(τ)/2 and w(τ/2) ≈ 2 w(τ), τ/2 from f ≈ ½ of 2τ's time on halved steps). It is decided on a priced pass of
+//! Which of the two: the one whose read costs the less work for its precision (`against_half`, `read_cost`): the pairs
+//! it needs to read within the share at the best, at its levels' work a µs as priced, its refused attempts in it
+//! (`Prices::work`). A read's noise is raised with its value -- by its factor a for its coarser level's halved steps, and
+//! by its lift (τ/h)^{2p} from its pair's finer step h to the rung's --, so where its pairs have parted, their difference
+//! the two ensembles' own noise at either step, it needs λ a times the pairs the rung's own read's noise asks with its
+//! lift and factor undone (`raw_pairs`): against 2τ λ = 1 and a = a(2τ), against τ/2 λ = 2^{2p} and a = a(τ) -- the
+//! τ/2 read costs 16 times the pairs before its factor where the read against 2τ costs a(2τ) times, on the pilot's pairs
+//! at least. Where the pairs stay together the noise falls with the error and the lift is no cost: the rule errs toward
+//! 2τ there. (Priced at w·a alone, the lift left out, it took the side below for GMD1C's and PGC3D's third levels, whose
+//! reads on parted pairs came out ±3.5 b against the ±0.03 b above.) It is decided on a priced pass of
 //! the check (`check`), before the read decides anything: where 2τ took any step at its half the check stops for its
 //! prices (`Settled::Pending`) whatever the read against 2τ says -- it may be of no comparison of the steps at all (R4
 //! at 0.474 µs, 0.948 µs's time 44 % on halved steps: a row at 7.1 ± 1.8 b against 2τ taken back, 2.2 ± 0.6 b as it is,
@@ -988,13 +995,40 @@ fn factor_of(shortfall: f64, time: f64) -> f64 {
     if short > 0. { ((order - 1.) / short).powi(2) } else { f64::INFINITY }
 }
 
+/// The pairs a read of no lift and no halved steps needs to read within the step's share at the best -- its noise
+/// alone: its far end t·SE at one look within the share's square b, the noise falling as 1/N (`asks`) --, as the rung's
+/// own read `read` on its `pairs` foretells it, its own lift and factor `carried` undone (module documentation, ## A
+/// companion at τ/2): the largest over the looks that read. A pair's read whose noise is the same pairs' -- the pairs
+/// parted, the difference of two ensembles' estimates at either step -- carried by the lift λ = (τ/h)^{2p} from its finer
+/// step h to the rung's and taken back by its factor a needs λ a times as many (`read_cost`).
+fn raw_pairs(read: &Between, pairs: f64, carried: f64) -> f64 {
+    judged(read).into_iter().map(|(read, bound)| read.spread.interval() / bound).filter(|x| x.is_finite()).fold(0., crate::linalg::larger) * pairs / carried
+}
+
+/// The work a read of a pair costs for its precision (module documentation, ## A companion at τ/2; `against_half`,
+/// `third_of`): the pairs it needs within the share at the best (`raw_pairs` × its lift × its factor), or the pilot's
+/// `pilot` where those need fewer, at its level of the step `step` beyond the `held` there and at its other level
+/// `other` beyond the pilot's -- each at its work a µs as priced, its refused attempts in it (`Prices::work`); without
+/// bound where its factor is.
+#[allow(clippy::too_many_arguments)]
+fn read_cost(prices: &Prices, step: f64, held: f64, other: f64, pilot: f64, raw: f64, lift: f64, factor: f64) -> f64 {
+    if !(factor < f64::INFINITY) {
+        return f64::INFINITY;
+    }
+    let pairs = crate::linalg::larger(pilot, raw * lift * factor);
+    crate::linalg::larger(pairs - held, 0.) * (prices.work)(step) + crate::linalg::larger(pairs - pilot, 0.) * (prices.work)(other)
+}
+
 /// Whether a rung at the step `step` is read against half its step rather than twice it (module documentation, ## A
-/// companion at τ/2): by the work its read's precision costs, the companion's work a µs times the factor the pair's read
-/// takes for its coarser level's halved steps (`amplified`: its noise's square is raised with its value) -- w(2h) a(2h)
-/// against w(h/2) a(h), `double` and `half` the two factors; τ/2 where that is the less, and wherever the factor against
-/// 2h is without bound. At the work as priced (`Prices::work`).
-fn against_half(work: &dyn Fn(f64) -> f64, step: f64, double: f64, half: f64) -> bool {
-    !(double < f64::INFINITY) || work(0.5 * step) * half < work(2. * step) * double
+/// companion at τ/2): where the read against τ/2 costs the less for its precision (`read_cost`) -- the read against 2h
+/// of no lift and the factor `double` of 2h's halved steps, its level held by `held[0]`; the read against h/2 lifted
+/// 2^{2p} and of the factor `half` of h's, its level held by `held[1]`; each its pairs for the share at the best, the
+/// rung's own noise `raw` foretelling theirs (`raw_pairs`), on the `pilot` pairs at least --, and wherever the factor
+/// against 2h is without bound. The one rule the companion and the third level are chosen by (`third_of`).
+#[allow(clippy::too_many_arguments)]
+fn against_half(prices: &Prices, step: f64, double: f64, half: f64, raw: f64, pilot: f64, held: [f64; 2]) -> bool {
+    let lift = 2_f64.powi(2 * ORDER);
+    !(double < f64::INFINITY) || read_cost(prices, 0.5 * step, held[1], step, pilot, raw, lift, half) < read_cost(prices, 2. * step, held[0], step, pilot, raw, 1., double)
 }
 
 /// Whether a read's every look that reads (`read_looks`) is within the step's share as it reads (module documentation,
@@ -1231,7 +1265,8 @@ fn refused_at(run: &Selected, from: &Trajectory, length: f64, widest: &Widest) -
 /// and at τ/4 beside the members at τ, `below` (the scout's pairs at τ/2 or τ/4, `foresee`; the members at τ/2 where
 /// that is the companion); and the factor a read takes for the levels at τ and at τ/2 as its coarser level, of their
 /// halved steps on what they hold (`amplified`; one at a level not run) -- what the rungs below are read against
-/// (`against_half`; ## A companion at τ/2).
+/// (`against_half`; ## A companion at τ/2); and the pairs a read of no lift and no halved steps needs within the share,
+/// as the rung's own read's noise foretells it (`raw_pairs`): what every read's precision is priced by.
 #[derive(Clone, Copy, Debug)]
 struct Holding {
     pilot: f64,
@@ -1240,6 +1275,7 @@ struct Holding {
     companion: Companion,
     below: [f64; 2],
     amplified: [f64; 2],
+    raw: f64,
 }
 
 /// The run's expected work from here where it stays at the rung τ in hand (module documentation, ## The ladder): the
@@ -1266,7 +1302,7 @@ fn staying(prices: &Prices, tau: f64, holding: Holding) -> f64 {
 /// to the bottom. Each rung's companion the rung above, it is the ladder as it was, P_m Σ_{j≤k} w(τ_j) + (P − P_m)
 /// w(τ_{k−1}) + (max(N, P) − P_m) w(τ_k) − r_1 w(τ_1).
 fn descending(prices: &Prices, tau: f64, end: f64, holding: Holding) -> f64 {
-    let Holding { pilot, members, below, amplified, .. } = holding;
+    let Holding { pilot, members, below, amplified, raw, .. } = holding;
     let run = crate::linalg::larger(prices.product, pilot);
     let at = |k: i32| tau * 0.5_f64.powi(k);
     // The trajectories held at τ_k beside the members at τ (k ≥ 1).
@@ -1284,10 +1320,11 @@ fn descending(prices: &Prices, tau: f64, end: f64, holding: Holding) -> f64 {
         // Rung k's companion: τ_{k−1} -- its members held there, on the way or at τ --, or τ_{k+1} where that reads it
         // at less work for its precision, the factors of τ's and τ/2's halved steps as held (`against_half`).
         let factor = |j: i32| if j < 2 { amplified[j as usize] } else { (prices.halving)(at(j)) };
-        let companion = if against_half(prices.work, at(k), factor(k - 1), factor(k)) {
+        let above = if k == 1 { members } else { crate::linalg::larger(members, held(k - 1)) };
+        let companion = if against_half(prices, at(k), factor(k - 1), factor(k), raw, pilot, [above, held(k + 1)]) {
             more(pilot, held(k + 1)) * (prices.work)(at(k + 1))
         } else {
-            more(pilot, if k == 1 { members } else { crate::linalg::larger(members, held(k - 1)) }) * (prices.work)(at(k - 1))
+            more(pilot, above) * (prices.work)(at(k - 1))
         };
         least = crate::linalg::smaller(least, floor - way + more(run, held(k)) * (prices.work)(at(k)) + companion);
     }
@@ -1304,6 +1341,8 @@ struct Third {
     step: f64,
     held: f64,
     factor: f64,
+    beside: f64,
+    lift: f64,
 }
 impl Third {
     /// Its work on the pilot's `pilot` trajectories: those still to run at its step.
@@ -1311,10 +1350,10 @@ impl Third {
         crate::linalg::larger(pilot - self.held, 0.) * (prices.work)(self.step)
     }
 
-    /// Its work for its read's precision: its work times the factor, the read's noise squared raised with it
-    /// (`against_half`); without bound where the factor is.
-    fn cost(&self, prices: &Prices, pilot: f64) -> f64 {
-        if self.factor < f64::INFINITY { self.work(prices, pilot) * self.factor } else { f64::INFINITY }
+    /// Its work for its read's precision (`read_cost`): the pairs its read needs at the best, its lift and factor on the
+    /// rung's own noise `raw`, on the pilot's at least, at its level and at the rung's level beside it.
+    fn cost(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
+        read_cost(prices, self.step, self.held, self.beside, pilot, raw, self.lift, self.factor)
     }
 }
 
@@ -1326,16 +1365,18 @@ impl Third {
 /// r2ladder.status.md) --; the one above where the two cost alike, as the ladder was; none where neither is to be had
 /// or both are without bound.
 fn third_of(prices: &Prices, tau: f64, holding: Holding, sides: [bool; 2]) -> Option<Third> {
-    let Holding { pilot, companion, below, amplified, .. } = holding;
+    let Holding { pilot, companion, below, amplified, raw, .. } = holding;
+    // The lift of a pair whose finer step is h, to τ: (τ/h)^{2p}.
+    let lift = |h: f64| (tau / h).powi(2 * ORDER);
     let (up, down) = match companion {
-        Companion::Double => (Third { step: 4. * tau, held: 0., factor: (prices.halving)(4. * tau) }, Third { step: 0.5 * tau, held: below[0], factor: amplified[0] }),
-        Companion::Half => (Third { step: 2. * tau, held: 0., factor: (prices.halving)(2. * tau) }, Third { step: 0.25 * tau, held: below[1], factor: amplified[1] }),
+        Companion::Double => (Third { step: 4. * tau, held: 0., factor: (prices.halving)(4. * tau), beside: 2. * tau, lift: lift(2. * tau) }, Third { step: 0.5 * tau, held: below[0], factor: amplified[0], beside: tau, lift: lift(0.5 * tau) }),
+        Companion::Half => (Third { step: 2. * tau, held: 0., factor: (prices.halving)(2. * tau), beside: tau, lift: 1. }, Third { step: 0.25 * tau, held: below[1], factor: amplified[1], beside: 0.5 * tau, lift: lift(0.25 * tau) }),
     };
     [(sides[0], up), (sides[1], down)]
         .into_iter()
-        .filter(|(side, third)| *side && third.cost(prices, pilot) < f64::INFINITY)
+        .filter(|(side, third)| *side && third.cost(prices, pilot, raw) < f64::INFINITY)
         .map(|(_, third)| third)
-        .reduce(|a, b| if b.cost(prices, pilot) < a.cost(prices, pilot) { b } else { a })
+        .reduce(|a, b| if b.cost(prices, pilot, raw) < a.cost(prices, pilot, raw) { b } else { a })
 }
 
 /// Whether a rung buys its third level, the pilot's trajectories at the third's step (module documentation, ## The
@@ -1344,7 +1385,7 @@ fn third_of(prices: &Prices, tau: f64, holding: Holding, sides: [bool; 2]) -> Op
 /// a rung below shows it by this rung's read (`carried`), and the third is worth no more than that. At the ladder's
 /// bottom a rung below adds without bound.
 fn buys(prices: &Prices, tau: f64, end: f64, holding: Holding, third: Third) -> bool {
-    third.cost(prices, holding.pilot) <= descending(prices, tau, end, holding) - staying(prices, tau, holding)
+    third.cost(prices, holding.pilot, holding.raw) <= descending(prices, tau, end, holding) - staying(prices, tau, holding)
 }
 
 /// A rung's course where its reads stand it (module documentation, ## The ladder; `course`, `check`).
@@ -2280,11 +2321,14 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // bound, whatever the price. None beyond the steps' cap, where the read against 2τ is the one there is.
         let mut undecided = false;
         if levels.companion == Companion::Double && !lowest {
-            let (double, half) = {
+            // The two reads' noise foretold by the read against 2τ's own, its factor undone (`raw_pairs`).
+            let (double, half, raw) = {
                 let (own, companion) = levels.paired();
-                (amplified(companion), amplified(own))
+                let double = amplified(companion.iter().copied());
+                (double, amplified(own.iter().copied()), raw_pairs(&levels.own(&context.plan.reads, context.plan.window, &context.scales), own.len() as f64 * GROUP as f64, double))
             };
-            if prices.map_or(!(double < f64::INFINITY), |prices| against_half(prices.work, context.tau, double, half)) {
+            let (pilot_pairs, held) = ((numbers.len() as u64 * GROUP) as f64, [(numbers.len() as u64 * members) as f64, levels.half.as_ref().filter(|f| f.step == below).map_or(0., |_| numbers.len() as f64)]);
+            if prices.map_or(!(double < f64::INFINITY), |prices| against_half(prices, context.tau, double, half, raw, pilot_pairs, held)) {
                 halve_companion(run, ensemble, domain, context, levels, numbers, members, messages);
             } else {
                 undecided = prices.is_none() && double > 1.;
@@ -2337,6 +2381,8 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
             companion: levels.companion,
             below: [if halved_companion { (groups * members) as f64 } else { ran_at(below).map_or(0., |_| groups as f64) }, ran_at(0.5 * below).map_or(0., |_| groups as f64)],
             amplified: [amplified(&levels.fine), if halved_companion { amplified(&levels.coarse) } else { ran_at(below).map_or_else(|| prices.map_or(1., |prices| (prices.halving)(below)), |f| amplified(&f.first)) }],
+            // The rung's own read's noise, its lift and factor undone: what every read's precision is priced by.
+            raw: raw_pairs(&read, (groups * members + levels.further[0].len() as u64 * GROUP) as f64, if halved_companion { 2_f64.powi(2 * ORDER) * amplified(levels.paired().0.iter().copied()) } else { amplified(levels.paired().1.iter().copied()) }),
         };
         // The third level the rung would read on the pilot's pairs, where it has none yet: the side of the less cost for
         // its read's precision (`third_of`).
@@ -2369,7 +2415,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
                 let own_within = within(&read);
                 // The rung below's companion: the level at τ, the pilot's; or τ/4 where that reads it at less work for its
                 // precision (`against_half`), the scout's pairs there where `foresee` ran them.
-                let quarter = against_half(prices.work, below, holding.amplified[0], holding.amplified[1]);
+                let quarter = against_half(prices, below, holding.amplified[0], holding.amplified[1], holding.raw, holding.pilot, [holding.pilot, holding.below[1]]);
                 let companion_below = |held: u64| if quarter { (0.5 * below, held) } else { (context.tau, groups * GROUP) };
                 let below = match levels.companion {
                     _ if lowest => None,
@@ -4234,7 +4280,7 @@ mod tests {
     /// What the run holds of a rung read against 2τ whose levels took every step at its length (`Holding`): the pilot's
     /// trajectories, the members run at both levels, the pairs in hand, the scout's pairs at τ/2.
     fn holding(pilot: f64, members: f64, pairs: f64, below: f64) -> Holding {
-        Holding { pilot, members, pairs, companion: Companion::Double, below: [below, 0.], amplified: [1.; 2] }
+        Holding { pilot, members, pairs, companion: Companion::Double, below: [below, 0.], amplified: [1.; 2], raw: 0. }
     }
 
     /// The rung below of a rung at τ read against 2τ whose rung below is read against τ, as `check` makes it
@@ -4245,30 +4291,33 @@ mod tests {
 
     /// The third level above a rung at τ read against 2τ, its steps whole (`Third`): the pilot's trajectories at 4τ.
     fn up(tau: f64) -> Option<Third> {
-        Some(Third { step: 4. * tau, held: 0., factor: 1. })
+        Some(Third { step: 4. * tau, held: 0., factor: 1., beside: 2. * tau, lift: 0.5_f64.powi(2 * ORDER) })
     }
 
     /// The side a rung reads its third level at (`third_of`; module documentation, ## Two levels, three levels): the one
-    /// whose read costs the less for its precision, the pilot's work there times the factor of its pair's coarser
-    /// level's halved steps. At a flat price c/h with every level whole, above (4τ: P c/4τ against 2 P c/τ below), as the
-    /// ladder was; where 4τ is foretold to take most of its steps at their halves -- a factor of 10 or more --, below
-    /// (τ/2), and the more so the dearer 4τ (as at PGC3D's 3.79 µs); a side not to be had, or whose factor is without
-    /// bound, is not taken; read against τ/2, above is 2τ and below τ/4 (its pair's coarser level τ/2, as held); none
-    /// where neither side is.
+    /// whose read costs the less for its precision (`read_cost`): the pairs it needs within the share at the best -- the
+    /// rung's own noise times its lift, 1/16 above and 16 below, and its factor --, on the pilot's at least, at its level
+    /// and beside. At a flat price 1/h, the pilot's 88 pairs, its own noise none: above (4τ: 88/4 against 88·2), as the
+    /// ladder was, whatever 4τ's factor short of none; its own read needing just the pilot's pairs (raw 88): above while
+    /// 4τ's factor leaves it the less (256: 1408 pairs, 1408/4 + 1320/2 = 1012 against 1408·2 + 1320 = 4136 below), below
+    /// where it does not (2000) or is without bound; a side not to be had, or whose factor is without bound, is not
+    /// taken; read against τ/2, above is 2τ (lift 1) and below τ/4 (lift 256); none where neither side is.
     #[test]
     fn a_rung_reads_its_third_level_at_the_side_of_the_less_cost_for_its_precision() {
         let (tau, flat) = (1., |h: f64| 1. / h);
         let at = |halving: &dyn Fn(f64) -> f64, holding: Holding, sides: [bool; 2]| third_of(&Prices { work: &flat, halving, product: 300. }, tau, holding, sides).map(|third| third.step);
         let whole = |_: f64| 1.;
-        let double = holding(88., 88., 88., 0.);
+        let quiet = holding(88., 88., 88., 0.);
+        assert_eq!((at(&whole, quiet, [true, true]), at(&|h| if h > 3. { 1e9 } else { 1. }, quiet, [true, true])), (Some(4.), Some(4.)));
+        let double = Holding { raw: 88., ..quiet };
         assert_eq!(at(&whole, double, [true, true]), Some(4.));
-        assert_eq!(at(&|h| if h > 3. { 8. } else { 1. }, double, [true, true]), Some(4.));
-        assert_eq!(at(&|h| if h > 3. { 10. } else { 1. }, double, [true, true]), Some(0.5));
+        assert_eq!(at(&|h| if h > 3. { 256. } else { 1. }, double, [true, true]), Some(4.));
+        assert_eq!(at(&|h| if h > 3. { 2000. } else { 1. }, double, [true, true]), Some(0.5));
         assert_eq!((at(&|h| if h > 3. { f64::INFINITY } else { 1. }, double, [true, true]), at(&whole, double, [false, true]), at(&whole, double, [false, false])), (Some(0.5), Some(0.5), None));
         let below = Holding { amplified: [f64::INFINITY, 1.], ..double };
         assert_eq!(at(&|h| if h > 3. { f64::INFINITY } else { 1. }, below, [true, true]), None);
         let half = Holding { companion: Companion::Half, below: [88., 0.], amplified: [3., 1.], ..double };
-        assert_eq!((at(&whole, half, [true, true]), at(&|h| if h > 1.5 { 10. } else { 1. }, half, [true, true])), (Some(2.), Some(0.25)));
+        assert_eq!((at(&whole, half, [true, true]), at(&|h| if h > 1.5 { 1e5 } else { 1. }, half, [true, true])), (Some(2.), Some(0.25)));
     }
 
     /// Where no rung below is (the ladder's bottom), or no pairs see (`remedy`), the rung asks as it did before the
@@ -4545,16 +4594,23 @@ mod tests {
                         *slot = holding.members;
                     }
                     need[k] = run;
-                    let half = !(factor(k - 1) < f64::INFINITY) || w(k + 1) * factor(k) < w(k - 1) * factor(k - 1);
+                    let have = |j: usize| if j == 0 { holding.members } else { holding.below.get(j - 1).copied().unwrap_or(0.) };
+                    // A read's work for its precision: the pairs its noise needs (lift times factor on the rung's own),
+                    // the pilot's at least, at its level beyond those held and at the rung's beyond the pilot's.
+                    let precision = |j: usize, held: f64, lift: f64, a: f64| {
+                        let pairs = pilot.max(holding.raw * lift * a);
+                        if a < f64::INFINITY { (pairs - held).max(0.) * w(j) + (pairs - pilot).max(0.) * w(k) } else { f64::INFINITY }
+                    };
+                    let held = if k == 1 { holding.members } else { holding.members.max(have(k - 1)) };
+                    let half = !(factor(k - 1) < f64::INFINITY) || precision(k + 1, have(k + 1), 16., factor(k)) < precision(k - 1, held, 1., factor(k - 1));
                     let c = if half { k + 1 } else { k - 1 };
                     need[c] = need[c].max(pilot);
-                    let have = |j: usize| if j == 0 { holding.members } else { holding.below.get(j - 1).copied().unwrap_or(0.) };
                     need.iter().enumerate().map(|(j, &n)| (n - have(j)).max(0.) * w(j)).sum::<f64>()
                 })
                 .fold(f64::INFINITY, f64::min)
         };
-        let half = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Half, below, amplified };
-        let double = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Double, below, amplified };
+        let half = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Half, below, amplified, raw: 0. };
+        let double = |members: f64, below: [f64; 2], amplified: [f64; 2]| Holding { pilot, members, pairs: members, companion: Companion::Double, below, amplified, raw: 0. };
         let holdings = [
             double(scout, [0., 0.], [1., 1.]),
             double(scout, [scout, 0.], [1.06, 1.]),
@@ -4564,6 +4620,8 @@ mod tests {
             half(scout, [scout, 0.], [f64::INFINITY, 1.]),
             half(pilot, [pilot, scout], [30., 1.2]),
             half(pilot, [pilot, 0.], [1., f64::INFINITY]),
+            Holding { raw: 88., ..double(scout, [scout, 0.], [3.2, 1.]) },
+            Holding { raw: 300., ..half(pilot, [pilot, scout], [1.2, 1.]) },
         ];
         let works: [&dyn Fn(f64) -> f64; 2] = [&steep, &flat];
         for work in works {
@@ -4587,13 +4645,17 @@ mod tests {
         }
     }
 
-    /// Which companion a rung is read against (`against_half`, `amplified`; module documentation, ## A companion at
-    /// τ/2): a coarser level whose steps were halved once over a share f of its time raises its read by 1/(1 − f)², and
-    /// the rung is read against τ/2 where w(τ/2) is less than w(2τ)/(1 − f)² -- at w(2τ) = w(τ)/2 and w(τ/2) = 2 w(τ) from
-    /// f = ½ on, at other prices (w(2τ) = 0.39 w(τ), w(τ/2) = 1.98 w(τ)) from f = 1 − √(0.39/1.98);
-    /// and wherever the read against 2τ is without bound, the coarser level no coarser (2^p r ≤ 1), whatever the price. A
-    /// level with no step halved takes no factor, to the bit; one whose steps were halved twice over (to a quarter) takes
-    /// the larger factor of its smaller error, r = 1 − f (1 − 4^{−p}).
+    /// Which companion a rung is read against (`against_half`, `amplified`, `read_cost`; module documentation, ## A
+    /// companion at τ/2): a coarser level whose steps were halved once over a share f of its time raises its read by
+    /// 1/(1 − f)²; each read costs the pairs it needs within the share at the best -- the rung's own noise times its lift
+    /// and its factor, on the pilot's at least -- at its levels. The pilot's 88 pairs, whose read against 2τ needs just
+    /// them (raw 88), at w(h) = 0.948/h: against τ/2 its read is lifted 16 times, 1408 pairs, 1408 w(τ/2) + 1320 w(τ);
+    /// against 2τ its raw/(1 − f)² pairs, beyond the 88 held, at w(2τ) + w(τ) -- τ/2 from (1 − f)² = raw/(88 + 4136/1.5)
+    /// on, f = 0.824; noise that needs ten times fewer pairs (raw 8.8: 141 pairs against τ/2, 334) from f = 0.832 on: never
+    /// while the read against 2τ needs no more than the pilot's. Wherever the read against 2τ is without bound, the coarser
+    /// level no coarser (2^p r ≤ 1), whatever the price. A level with no step halved takes no factor, to the bit; one
+    /// whose steps were halved twice over (to a quarter) takes the larger factor of its smaller error, r = 1 − f (1 −
+    /// 4^{−p}).
     #[test]
     fn a_rung_is_read_against_its_half_where_that_costs_the_less_for_its_precision() {
         let part = |halved: f64, quarter: f64| {
@@ -4616,12 +4678,20 @@ mod tests {
         }
         assert_eq!(amplified(&[part(0., 1.)]), f64::INFINITY);
         let rough = |h: f64| 0.948 / h;
-        let priced = |h: f64| if h > 1.5 { 0.39 } else if h < 0.7 { 1.98 } else { 1. };
-        let switch = |work: &dyn Fn(f64) -> f64, f: f64| against_half(work, 0.948, amplified(&[part(f, 0.)]), 1.);
-        let edge = 1. - (0.39_f64 / 1.98).sqrt();
-        assert!(!switch(&rough, 0.49) && switch(&rough, 0.51));
-        assert!(!switch(&priced, edge - 1e-6) && switch(&priced, edge + 1e-6), "{edge}");
-        assert!(switch(&priced, 1.) && !against_half(&priced, 0.948, 1., 1.));
+        let prices = Prices { work: &rough, halving: &|_: f64| 1., product: 0. };
+        let switch = |raw: f64, f: f64| against_half(&prices, 0.948, amplified(&[part(f, 0.)]), 1., raw, 88., [88., 0.]);
+        // Against 2τ: (88/(1 − f)² − 88)(0.5 + 1); against τ/2: 1408 · 2 + 1320 · 1 = 4136 -- the raw noise times 16.
+        let edge = |raw: f64| {
+            let half = 16. * raw;
+            let half = crate::linalg::larger(half, 88.);
+            let cost = half * 2. + crate::linalg::larger(half - 88., 0.);
+            1. - (raw / (88. + cost / 1.5)).sqrt()
+        };
+        for raw in [88., 8.8] {
+            let f = edge(raw);
+            assert!(!switch(raw, f - 1e-6) && switch(raw, f + 1e-6), "{raw}: {f}");
+        }
+        assert!(edge(8.8) > edge(88.) && !switch(0., 0.99) && switch(0., 1.) && !switch(88., 0.));
     }
 
     /// A read as a run logged it: its value and its far end at one look, each over the bound b of its look, on `groups`
