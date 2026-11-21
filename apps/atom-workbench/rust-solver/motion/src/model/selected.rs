@@ -325,9 +325,6 @@ pub struct SelectedMiddle<'a> {
     r: V3,
     t: f64,
     nodes: RefCell<Vec<Rc<Node>>>,
-    /// The step's half-width h, as the step gives it (`Middle::nodes`): its outer nodes' offset, the chord of
-    /// `gradient`'s slope. A jump's node at another offset does not change it.
-    half: Cell<Option<f64>>,
     made: Cell<f64>,
 }
 
@@ -1528,8 +1525,8 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     }
 
     /// Ĝ_a(s) as matrices, and where asked their slope along the path at the middle: the envelopes' chord through the
-    /// step's outer nodes and each beat's phase's derivative −iΩ.
-    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
+    /// outer nodes ±h of the step it is asked with and each beat's phase's derivative −iΩ.
+    fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64 {
         assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
         let n = self.states();
         let values = self.model.read(|b| b.value.clone());
@@ -1551,8 +1548,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         let node = self.node(path, s, false);
         at(&node, s, false, g);
         let mut counted = 3.0 * node.gradient.len() as f64 * (n * n) as f64;
-        if let Some(slope) = slope {
-            let h = self.half.get().expect("the step's outer nodes: its picture's ends");
+        if let Some((h, slope)) = slope {
             let (before, after) = (self.node(path, -h, false), self.node(path, h, false));
             let mut minus: [Vec<C64>; 3] = Default::default();
             // The envelopes' chord at the middle's phases, and the phases' turn on the middle's envelopes.
@@ -1573,9 +1569,8 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     /// P's explicit excited states' optical sector (step.rs, # The optical sector's noise): its ground states, γ_Q, and
     /// the light pattern's fastest beat along the path over the non-tweezer beams.
-    /// The step's three nodes' forms (`step::Middle::nodes`), the step's half-width h kept for `gradient`'s slope.
+    /// The step's three nodes' forms (`step::Middle::nodes`).
     fn nodes(&self, path: &Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Path)>) -> ([[f64; 3]; 3], Option<crate::step::Forms>) {
-        self.half.set(Some(h));
         let forms = std::array::from_fn(|j| match held {
             Some((held, weight)) if j == 1 => self.centre(path, held, weight, rho[j]),
             _ => self.force(path, [-h, 0.0, h][j], rho[j]),
@@ -1614,7 +1609,7 @@ impl crate::step::Dynamics for Selected {
     }
 
     fn middle(&self, _cluster: usize, r: [f64; 3], t: f64) -> SelectedMiddle<'_> {
-        SelectedMiddle { model: self, r, t, nodes: RefCell::new(Vec::new()), half: Cell::new(None), made: Cell::new(0.0) }
+        SelectedMiddle { model: self, r, t, nodes: RefCell::new(Vec::new()), made: Cell::new(0.0) }
     }
 
     /// A jump's photon: on the step's middle at the jump's time and place, or at a point on a middle made there.
