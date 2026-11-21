@@ -556,6 +556,54 @@ fn a_step_s_time_on_the_selected_model() {
     }
 }
 
+/// The candidate tones' keys are exact (`step::Middle::beats`; module documentation, # The generator by beats): on the six
+/// scenes at the centre at rest and at a moving point, among the static beat, the candidates' members (each key at +ν and
+/// its negation at −ν) and every sum of two members -- the propagation's second order --, two keys are equal where and
+/// only where their beats are: equal beats to rounding, different ones apart by more than 10⁻⁹ of the largest. Said per
+/// scene: the candidates, and the classes of the second order (the distinct keys among them).
+#[test]
+fn the_candidates_keys_sum_as_their_beats() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        for (r, kappa) in POINTS {
+            let middle = run.middle(0, r, 0.0);
+            let path = middle.path(kappa, kappa.map(|k| run.hbar_over_mass() * k));
+            let mut h = Mat::zeros(run.rs.keep.len(), run.rs.keep.len());
+            middle.generator(&path, 0.0, &mut h);
+            let (mut beats, mut keys) = (vec![], vec![]);
+            middle.beats(&path, &mut beats, &mut keys);
+            let width = keys.first().map_or(0, Vec::len);
+            assert!(keys.iter().all(|k| k.len() == width), "{name}: one length");
+            let mut members: Vec<(Vec<i64>, f64)> = vec![(vec![0; width], 0.0)];
+            for (k, &nu) in keys.iter().zip(&beats) {
+                members.push((k.clone(), nu));
+                members.push((k.iter().map(|x| -x).collect(), -nu));
+            }
+            let mut all = members.clone();
+            for (i, a) in members.iter().enumerate().skip(1) {
+                for b in &members[i..] {
+                    all.push((a.0.iter().zip(&b.0).map(|(x, y)| x + y).collect(), a.1 + b.1));
+                }
+            }
+            let top = all.iter().map(|x| x.1.abs()).fold(0.0, crate::linalg::larger);
+            for (i, a) in all.iter().enumerate() {
+                for b in &all[i + 1..] {
+                    let apart = (a.1 - b.1).abs();
+                    if a.0 == b.0 {
+                        assert!(apart <= 64.0 * f64::EPSILON * top, "{name}: one key, beats {} and {} apart", a.1, b.1);
+                    } else {
+                        assert!(apart > 1e-9 * top, "{name}: keys {:?} and {:?}, one beat {} ({})", a.0, b.0, a.1, b.1);
+                    }
+                }
+            }
+            let mut classes: Vec<&Vec<i64>> = all.iter().map(|x| &x.0).collect();
+            classes.sort();
+            classes.dedup();
+            eprintln!("{name} r {r:?}: {} candidates, {} classes of the second order", beats.len(), classes.len());
+        }
+    }
+}
+
 /// A reference scene's request (refs/scenes, as step/tests.rs reads them).
 fn reference(name: &str) -> Request {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
