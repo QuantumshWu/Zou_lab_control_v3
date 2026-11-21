@@ -30,6 +30,13 @@ type Rows = Vec<(String, Value)>;
 #[derive(Clone)]
 struct Node { id: String, event: Value, parents: Vec<String>, signals: Vec<String>, record: Arc<Value>, event_record: Value }
 
+/// Each run record once, in first-seen order: the captures of one run share it, so what is read off a
+/// run record is read once per run, not once per capture.
+fn distinct_runs(nodes: &[Node]) -> impl Iterator<Item = &Node> {
+    let mut seen = HashSet::new();
+    nodes.iter().filter(move |node| seen.insert(Arc::as_ptr(&node.record)))
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> &'a str { value.get(key).and_then(Value::as_str).map(str::trim).unwrap_or("") }
 
 /// `split_signal_key`: (producer, output) of `@logic/<producer>/<output>`.
@@ -127,13 +134,17 @@ fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Res
             if let Some(event) = range["event"].as_u64() { ranges.entry(event).or_default().push(json!({"origin": range["origin"], "extent": range["extent"]})); }
         }
         let runs: Vec<Arc<Value>> = acquisition["runs"].as_array().into_iter().flatten().map(|run| Arc::new(run["record"].clone())).collect();
+        // A run's (stream, generation) keys, written once for all its captures.
+        let run_keys: Vec<(String, String)> = acquisition["runs"].as_array().into_iter().flatten()
+            .map(|run| (equality_key(&run["stream"]), equality_key(&run["generation"]))).collect();
         for (index, capture) in acquisition["events"].as_array().into_iter().flatten().enumerate() {
             let Some(run_index) = capture["run"].as_u64().map(|index| index as usize).filter(|index| *index < runs.len()) else { continue };
             let run = &acquisition["runs"][run_index];
             let signal = text(capture, "signal");
             let mut event = json!({"stream": run["stream"], "generation": run["generation"], "sequence": capture["revision"], "ordinal": capture["ordinal"]});
             if let Some(ranges) = ranges.remove(&(index as u64)) { event["ranges"] = json!(ranges); }
-            let key = identity(signal, &event);
+            let (stream, generation) = &run_keys[run_index];
+            let key = (signal.to_owned(), stream.clone(), generation.clone(), equality_key(&event["sequence"]));
             if let Some(existing) = found.get(&key) {
                 records[*existing].event = event;
                 continue;
@@ -176,7 +187,7 @@ fn source_run_record(source: &Value, nodes: &[Node]) -> Option<(String, String, 
     let record = source.get("run_record").filter(|record| record.is_object())?;
     let task = [text(record, "node_name"), text(source, "task"), text(record, "node")].into_iter().find(|name| !name.is_empty())?.to_owned();
     let output = ["report", "artifact", "signal"].into_iter().map(|key| text(source, key)).find(|output| !output.is_empty())?.to_owned();
-    if nodes.iter().any(|node| *node.record == *record) { return None; }
+    if distinct_runs(nodes).any(|node| *node.record == *record) { return None; }
     Some((task, output, record.clone()))
 }
 
@@ -274,15 +285,15 @@ fn device_associations(record: &Value) -> Vec<(String, String)> {
 }
 
 /// (role, device, snapshot) of a record's device snapshots.
-fn record_devices(record: &Value, named: &[(String, String)]) -> Vec<(String, String, Value)> {
+fn record_devices<'a>(record: &'a Value, named: &[(String, String)]) -> Vec<(String, String, &'a Value)> {
     let mut named = named.to_vec();
     for pair in named_devices(record) { if !named.iter().any(|(role, _)| *role == pair.0) { named.push(pair); } }
-    let mut result: Vec<(String, String, Value)> = Vec::new();
+    let mut result: Vec<(String, String, &Value)> = Vec::new();
     for (role, snapshot) in record.get("device_snapshots").and_then(Value::as_object).into_iter().flatten() {
-        if let Some((_, key)) = named.iter().find(|(named_role, _)| named_role == role) { result.push((role.clone(), key.clone(), snapshot.clone())); }
+        if let Some((_, key)) = named.iter().find(|(named_role, _)| named_role == role) { result.push((role.clone(), key.clone(), snapshot)); }
     }
     for (key, snapshot) in record.get("actual_devices").and_then(Value::as_object).into_iter().flatten() {
-        if !result.iter().any(|(_, existing, _)| existing == key) { result.push((key.clone(), key.clone(), snapshot.clone())); }
+        if !result.iter().any(|(_, existing, _)| existing == key) { result.push((key.clone(), key.clone(), snapshot)); }
     }
     result
 }
@@ -293,12 +304,16 @@ fn record_devices(record: &Value, named: &[(String, String)]) -> Vec<(String, St
 fn device_names(nodes: &[Node], source: &Value) -> HashMap<String, String> {
     let mut names = HashMap::new();
     let saved = source_run_record(source, nodes).map(|(_, _, record)| record);
+    // A run record already read gives no new first name: each is read at its first capture only.
+    let mut runs = HashSet::new();
     let records = nodes.iter().flat_map(|node| {
         let outputs = node.event_record.get("records").and_then(Value::as_object).into_iter().flatten().map(|(_, record)| record);
-        [&*node.record, &node.event_record].into_iter().chain(outputs)
+        let run = runs.insert(Arc::as_ptr(&node.record)).then_some(&*node.record);
+        run.into_iter().chain([&node.event_record]).chain(outputs)
     }).chain(saved.as_ref());
     for record in records {
-        let entries = bench_devices(record).into_iter().chain(record_devices(record, &named_devices(record)).into_iter().map(|(_, key, entry)| (key, entry)));
+        let entries = bench_devices(record).map(|(key, entry)| (key.to_owned(), entry))
+            .chain(record_devices(record, &named_devices(record)).into_iter().map(|(_, key, entry)| (key, entry)));
         for (key, entry) in entries {
             if let Some(name) = entry.get("role").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()) {
                 names.entry(key).or_insert_with(|| name.to_owned());
@@ -341,9 +356,9 @@ fn readable_settings(entry: &mut Value) {
 }
 
 /// The bench a run record says its run started on (`apparatus`): (device, entry), its devices then its pulse board.
-fn bench_devices(record: &Value) -> Vec<(String, Value)> {
+fn bench_devices(record: &Value) -> impl Iterator<Item = (&str, &Value)> {
     ["devices", "sequencer"].into_iter().flat_map(|part| record.get("apparatus").and_then(|bench| bench.get(part)).and_then(Value::as_object).into_iter().flatten())
-        .map(|(device, entry)| (device.clone(), entry.clone())).collect()
+        .map(|(device, entry)| (device.as_str(), entry))
 }
 
 /// Whether the record's own device snapshots keep the program a board entry names (a scan's
@@ -369,11 +384,11 @@ fn played_pulses(nodes: &[Node], source: &Value) -> Vec<(PlayedPulse, String, Op
             found.push((PlayedPulse { key, name, tree: document.clone() }, device, sequence.clone(), "pulse"));
         }
         for (device, entry) in bench_devices(&record) {
-            let Some(document) = entry["snapshot"].get("pulse").filter(|document| document.is_object() && !recorded_program(&record, &device, &entry)) else { continue };
-            let name = document.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(&device).to_owned();
+            let Some(document) = entry["snapshot"].get("pulse").filter(|document| document.is_object() && !recorded_program(&record, device, entry)) else { continue };
+            let name = document.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(device).to_owned();
             let key = match &sequence { None => format!("saved-source:{logic}:bench:{device}"), Some(sequence) => format!("{logic}:{sequence}:{generation}:bench:{device}") };
             let phase = if record["apparatus"]["phase"] == "acquisition" { "pulse at acquisition" } else { "pulse at Start" };
-            found.push((PlayedPulse { key, name, tree: document.clone() }, device, sequence.clone(), phase));
+            found.push((PlayedPulse { key, name, tree: document.clone() }, device.to_owned(), sequence.clone(), phase));
         }
     }
     found
@@ -406,24 +421,27 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
     let mut seen = Seen::default();
     let mut records: Vec<(Value, Value, Vec<(String, String)>)> = Vec::new();
     let mut runs = Vec::new();
+    // A record with none of the device fields adds nothing below: most captures of a scan.
+    let carries = |record: &Value| DEVICE_RECORD_FIELDS.iter().any(|field| record.get(field).is_some());
     for node in nodes {
-        let mut named = named_devices(&node.record);
-        for pair in named_devices(&node.event_record) { if !named.iter().any(|(role, _)| *role == pair.0) { named.push(pair); } }
         for (scope, record) in [("run", &*node.record), ("event", &node.event_record)] {
+            let outputs: Vec<(&String, &Value)> = if scope == "event" {
+                node.signals.iter().filter_map(|signal| record["records"].get(signal_name(signal)).map(|output| (signal, output)))
+                    .filter(|(_, output)| carries(output)).collect()
+            } else { Vec::new() };
+            if scope == "event" && !carries(record) && outputs.is_empty() { continue; }
             let run = (node.event["stream"].clone(), node.event["generation"].clone());
             if scope == "run" {
                 if runs.contains(&run) { continue; }
                 runs.push(run);
             }
+            let mut named = named_devices(&node.record);
+            for pair in named_devices(&node.event_record) { if !named.iter().any(|(role, _)| *role == pair.0) { named.push(pair); } }
             let origin = json!({"logic": logic_name(node), "scope": scope, "node_id": node.id, "event": node.event});
             records.push((origin.clone(), record.clone(), named.clone()));
-            if scope == "event" {
-                for signal in &node.signals {
-                    if let Some(output) = record["records"].get(signal_name(signal)) {
-                        let mut origin = origin.clone(); origin["signal"] = json!(signal);
-                        records.push((origin, output.clone(), named.clone()));
-                    }
-                }
+            for (signal, output) in outputs {
+                let mut origin = origin.clone(); origin["signal"] = json!(signal);
+                records.push((origin, output.clone(), named.clone()));
             }
         }
     }
@@ -439,7 +457,8 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
             push_unique(&mut facts["roles"], json!(role));
             push_unique(&mut facts["used_by"], origin["logic"].clone());
         }
-        for (role, key, mut snapshot) in record_devices(record, named) {
+        for (role, key, snapshot) in record_devices(record, named) {
+            let mut snapshot = snapshot.clone();
             let facts = entry(&mut devices, &key);
             push_unique(&mut facts["roles"], json!(role));
             push_unique(&mut facts["used_by"], origin["logic"].clone());
@@ -462,14 +481,14 @@ fn device_rows(lineage: &Value, nodes: &[Node], source: &Value, played: &[(Playe
             for field in ["phase", "context", "taken_at", "completed_at"] {
                 if let Some(value) = record["apparatus"].get(field) { source[field] = value.clone(); }
             }
-            if let Some(transport) = record["apparatus"]["device_transports"].get(&key) { source["transport"] = transport.clone(); }
-            let mut state = stood;
+            if let Some(transport) = record["apparatus"]["device_transports"].get(key) { source["transport"] = transport.clone(); }
+            let mut state = stood.clone();
             if let Some(map) = state.as_object_mut() {
                 for field in ["type_id", "role", "driver"] {
                     if let Some(value) = map.remove(field) { source[field] = value; }
                 }
             }
-            add_snapshot(&mut devices, &mut seen, &key, "snapshots", state, source);
+            add_snapshot(&mut devices, &mut seen, key, "snapshots", state, source);
         }
     }
     for item in lineage.get("device_settings").and_then(Value::as_array).into_iter().flatten() {
