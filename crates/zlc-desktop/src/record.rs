@@ -159,8 +159,29 @@ fn acquisition_records(nodes: &[Node], acquisitions: &[(String, &Value)]) -> Res
         if !order.contains(&run) { order.push(run); }
     }
     records.sort_by_cached_key(|record| (order.iter().position(|run| run.0 == record.event["stream"] && run.1 == record.event["generation"]).unwrap(), record.event["sequence"].as_u64().unwrap_or(0)));
-    for record in &mut records { if let Some(map) = record.event_record.as_object_mut() { map.remove("acquisition"); } }
+    for record in &mut records {
+        if let Some(map) = record.event_record.as_object_mut() { map.remove("acquisition"); }
+        read_retired_fields(&mut record.event_record);
+    }
     Ok(records)
+}
+
+/// Figures saved before 2026-11-21 carry the camera's `trigger_alignment` (`{shot, missing}`) on
+/// every shot, mostly `missing: []`; a shot now records `frames_missing` only when it lost frames.
+/// The old field reads as the new one.
+fn read_retired_fields(event_record: &mut Value) {
+    let outputs = event_record.get_mut("records").and_then(Value::as_object_mut).into_iter().flat_map(|outputs| outputs.values_mut());
+    for output in outputs.filter_map(Value::as_object_mut) {
+        let Some(alignment) = output.remove("trigger_alignment") else { continue };
+        if let Some(missing) = alignment.get("missing").filter(|missing| missing.as_array().is_some_and(|slots| !slots.is_empty())) {
+            output.insert("frames_missing".to_owned(), missing.clone());
+        }
+    }
+}
+
+/// Whether an event's outputs say some of its frames never came (`frames_missing`, a shot published invalid).
+fn lost_frames(event_record: &Value) -> bool {
+    event_record.get("records").and_then(Value::as_object).into_iter().flatten().any(|(_, output)| output.get("frames_missing").is_some())
 }
 
 /// The operator-facing Logic identity: its name when the run was built, else its id, else the stream's producer.
@@ -257,6 +278,8 @@ fn logic_rows(nodes: &[Node], source: &Value) -> Rows {
         for node in &group { for signal in &node.signals { let name = signal_name(signal); if !outputs.contains(&name) { outputs.push(name); } } }
         if group.len() == 1 { rows.push((label, logic_row(outputs, &first.record, &first.event_record))); continue; }
         let mut row = logic_row(outputs, &first.record, &Value::Null);
+        let lost = group.iter().filter(|node| lost_frames(&node.event_record)).count();
+        if lost > 0 { row["$fields"].as_array_mut().unwrap().push(json!(["events missing frames", format!("{lost} of {}", group.len())])); }
         let events: Rows = group.into_iter().filter_map(|node| {
             let record = event_facts(&node.event_record);
             if record.as_object().is_none_or(|map| map.is_empty()) { return None; }
@@ -950,6 +973,27 @@ mod tests {
         assert_eq!(from_list.tabs, from_columns.tabs);
         assert_eq!(from_list.flow, from_columns.flow);
         assert!(!from_columns.tabs.to_string().contains("cannot read"));
+    }
+
+    /// A shot that lost frames reads as its event and in its run's count; a whole shot says nothing,
+    /// and a Figure's retired per-shot `trigger_alignment` reads the same way.
+    #[test]
+    fn only_shots_that_lost_frames_read_on_the_logic_tab() {
+        let run = json!({"node": "camera"});
+        let old = |missing: Value| json!({"records": {"frames": {"trigger_alignment": {"shot": 0, "missing": missing}}}});
+        let records = [old(json!([])), old(json!([1])), json!({"records": {"frames": {"frames_missing": [0, 2]}}}), json!({})];
+        let events: Vec<Value> = records.iter().enumerate().map(|(shot, record)| json!({"run": 0, "signal": "@logic/camera/frames",
+            "revision": shot + 1, "ordinal": shot, "record": record, "parents": []})).collect();
+        let info = json!({"members": {}, "sections": {"plot": {}, "source": {}, "lineage": {"root": "camera-node", "device_settings": [], "nodes": [
+            {"id": "camera-node", "parents": [], "signals": ["@logic/camera/frames"], "event": {"stream": "camera", "generation": "camera-gen", "sequence": 4}, "record": run,
+             "event_record": {"acquisition": {"runs": [{"stream": "camera", "generation": "camera-gen", "record": run}], "events": events}}}]}}});
+        let logic = &describe(&info).tabs[1][1][0][1];
+        assert_eq!(field(logic, "events missing frames"), "2 of 4");
+        let events = field(logic, "events")["$fields"].as_array().unwrap();
+        assert_eq!(events.iter().map(|event| event[0].as_str().unwrap()).collect::<Vec<_>>(), ["frames · sample 1", "frames · sample 2"]);
+        assert_eq!(events[0][1]["records"]["frames"], json!({"frames_missing": [1]}));
+        assert_eq!(events[1][1]["records"]["frames"], json!({"frames_missing": [0, 2]}));
+        assert!(!logic.to_string().contains("trigger_alignment"));
     }
 
     /// A scan's captures are found by identity and grouped by exact state in hashed sets: the result

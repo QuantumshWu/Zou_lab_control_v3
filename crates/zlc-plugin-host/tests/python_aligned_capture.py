@@ -60,7 +60,7 @@ class Bench:
         self.batches.append(tuple(frames))
         with mock.patch.object(measurement, "time_ns", return_value=now_us * 1000),              mock.patch.object(measurement, "validate_batch", side_effect=lambda ordinals, **options: {"next": 0, "group_ends": []}), \
              mock.patch.object(measurement, "_monitor_cycle_output",
-                               side_effect=lambda node, cycle, revision, present, record: (tuple(r.source_ordinal for r in cycle), present, record["trigger_alignment"])), \
+                               side_effect=lambda node, cycle, revision, present, record: (tuple(r.source_ordinal for r in cycle), present, record)), \
              mock.patch.object(measurement, "_finite_cycle_output",
                                side_effect=lambda node, cycle, index, present, record: (index, tuple(r.source_ordinal for r in cycle), present)):
             self.capture.poll()
@@ -77,7 +77,7 @@ class AlignedCapture(unittest.TestCase):
         bench.poll()
         bench.board = answer(2, "playing", command_id=7, sent_us=ARMED + 1_000_000)
         bench.poll(frame(1, 10 + RISING[0]), frame(2, 10 + RISING[1]), frame(3, 10 + 1.11), frame(4, 10 + RISING[2]))
-        self.assertEqual(bench.published, [((1, 2, 4), (True, True, True), {"shot": 0, "missing": []})])
+        self.assertEqual(bench.published, [((1, 2, 4), (True, True, True), None)])
         self.assertEqual((bench.capture.dropped, bench.node._aligned_frames), (2, 3))
         # Nothing told since: the same answer sorts the next frames as before.
         aligned = bench.capture._alignment
@@ -85,7 +85,7 @@ class AlignedCapture(unittest.TestCase):
         self.assertIs(bench.capture._alignment, aligned)
         # The second shot lacks its middle frame: published, with that frame marked invalid.
         bench.poll(frame(5, 10 + SHOT + RISING[0]), frame(6, 10 + SHOT + RISING[2]), frame(7, 10 + 2 * SHOT + RISING[0]))
-        self.assertEqual(bench.published[1], ((5, 5, 6), (True, False, True), {"shot": 1, "missing": [1]}))
+        self.assertEqual(bench.published[1], ((5, 5, 6), (True, False, True), {"frames_missing": [1]}))
         self.assertEqual(bench.capture.incomplete, 1)
         # Stop and FIRE again: the shot the old play stopped in is no shot; the new play starts at its own first trigger.
         bench.board = answer(4, "playing", command_id=8, sent_us=ARMED + 60_000_000)
@@ -93,7 +93,7 @@ class AlignedCapture(unittest.TestCase):
         bench.poll(frame(8, 10 + 2 * SHOT + RISING[1], host_us=ARMED + 59_000_000),
                    frame(9, 90 + RISING[0], host_us=late), frame(10, 90 + RISING[1], host_us=late), frame(11, 90 + RISING[2], host_us=late))
         self.assertEqual(len(bench.published), 3)
-        self.assertEqual(bench.published[2], ((9, 10, 11), (True, True, True), {"shot": 0, "missing": []}))
+        self.assertEqual(bench.published[2], ((9, 10, 11), (True, True, True), None))
 
     def test_the_frames_of_the_shot_a_camera_started_inside_are_journaled_as_dropped(self):
         bench = Bench()
@@ -117,7 +117,7 @@ class AlignedCapture(unittest.TestCase):
         bench.poll(now_us=received + round(SHOT * 0.9e6))
         self.assertEqual(bench.published, [], "still inside the shot")
         bench.poll(now_us=received + round(SHOT * 1.1e6))
-        self.assertEqual(bench.published, [((0, 0, 0), (True, False, False), {"shot": 0, "missing": [1, 2]})])
+        self.assertEqual(bench.published, [((0, 0, 0), (True, False, False), {"frames_missing": [1, 2]})])
 
     def test_a_pulse_with_another_cycle_size_is_refused(self):
         bench = Bench()
