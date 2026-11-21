@@ -82,6 +82,34 @@ test('two checkpoints, then 停止: the solve ends and the last checkpoint is wh
  for(const mean of horizonRecords({result:last,wallMs:1,horizon:1e6}))if(kept.horizons.includes(mean.horizon))means.set('mean inputs',epochs[1],mean.horizon,mean);
  assert.equal(trajectories.get('trajectory inputs','trajectory'),last);assert.deepEqual([1e5,1e6].map(T=>means.get('mean inputs',T)?.result.mean.horizonUs),[1e5,1e6]);
 });
+test('a motion solve\'s stages are read strictly and handed on in order beside its checkpoints; one of another request, or malformed, is refused',async t=>{
+ const scene=scenario(),stages=[];
+ const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stages'});t.after(()=>client.dispose());
+ const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{},onStage:stage=>stages.push(stage)});await waitCalls(mock,1);
+ const stream=streamReply(mock.calls[0]),request=mock.calls[0].body.request;
+ const sent=[{step:'select'},{step:'model'},{step:'scout',stepUs:3.3},{step:'pilot',stepUs:1.65},{step:'product',stepUs:1.65,batch:1,trajectories:88,want:176,worst:1.85},{step:'product',stepUs:1.65,batch:2,trajectories:176,want:192}];
+ for(const stage of sent)stream.send({type:'stage',data:{request,stage}});
+ stream.send({type:'checkpoint',data:checkpoint(scene,request,[0,.007,.001])});
+ const final=checkpoint(scene,request,[0,.002,.001]);delete final.progress;stream.send({type:'result',data:final});stream.close();
+ // A batch is read as one: its number, trajectories, want and worst together.
+ const read=sent.map(({batch,trajectories,want,worst,...rest})=>batch?{...rest,batch:{number:batch,trajectories,want,...(worst===undefined?{}:{worst})}}:rest);
+ await pending;assert.deepEqual(stages,read);
+ for(const [label,stage,other] of [
+   ['a stage of another request',{step:'select'},true],
+   ['an unknown step',{step:'warmup'}],
+   ['a rung before the scout',{step:'model',stepUs:1}],
+   ['a pilot without its rung',{step:'pilot'}],
+   ['a batch that brings no trajectory',{step:'product',stepUs:1,batch:1,trajectories:88,want:88}],
+   ['a batch numbered from 0',{step:'product',stepUs:1,batch:0,trajectories:88,want:176}],
+   ['a worst that is no number',{step:'product',stepUs:1,batch:1,trajectories:88,want:176,worst:null}],
+   ['a field no step has',{step:'scout',stepUs:1,trajectories:8}],
+ ]){
+   const mock=transport(),client=new DynamicsClient({fetch:mock.fetch,debounceMs:0,clientId:'stage-contract'});
+   const pending=client.solve(scene,scene.dynamics,{onProgress:()=>{},onStage:()=>{}});await waitCalls(mock,1);const stream=streamReply(mock.calls[0]);
+   const request=mock.calls[0].body.request;stream.send({type:'stage',data:{request:other?{...request,sequence:request.sequence+1}:request,stage}});stream.close();
+   await assert.rejects(pending,/求解进度/,label);client.dispose();
+ }
+});
 test('the stream speaks checkpoints and one final result only',async t=>{
  const scene=scenario();
  for(const [label,events] of [
