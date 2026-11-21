@@ -75,7 +75,7 @@ fn the_selected_model_is_slow_in_its_frame() {
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         for (r, kappa) in POINTS {
-            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false });
+            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true });
             let (mut elements, mut beyond) = (0, 0);
             for part in &model.effective {
                 let table = run.elements(&part.key, Of::Generator);
@@ -228,7 +228,7 @@ fn the_node_is_the_model_now_in_its_frame() {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
                 let rest = kappa == [0.0; 3];
-                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false });
+                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false, gradients: true });
                 if rest {
                     let now = local.now(t);
                     assert!(sum.effective.first().is_none_or(|p| (0..n * n).all(|x| (p.value.data[x] - now.hamiltonian.data[x]).abs() <= 1e-12 * now.hamiltonian.max_abs())), "{name}: at rest the sum is now(t)");
@@ -334,7 +334,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let path = middle.path(kappa, [0.0; 3]);
             let ehrenfest = middle.force(&path, 0.0, &rho);
             let node = middle.node(&path, 0.0, false);
-            let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi)).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.moments.mean[i]));
+            let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi, &mut Vec::new()).iter().map(|p| p.moments).collect::<Vec<_>>()).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
             let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
             let size = model.iter().chain(&ehrenfest).map(|x| x.abs()).fold(0.0, crate::linalg::larger);
@@ -521,7 +521,7 @@ fn a_step_s_time_on_the_selected_model() {
             std::hint::black_box(local.now(0.37));
         });
         let model = least(&mut || {
-            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false }));
+            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true }));
         });
         let node = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
@@ -601,6 +601,62 @@ fn the_candidates_keys_sum_as_their_beats() {
             classes.dedup();
             eprintln!("{name} r {r:?}: {} candidates, {} classes of the second order", beats.len(), classes.len());
         }
+    }
+}
+
+/// The readout is the lift (module documentation, # The rest of the model): `Selected::rows` on the thread's buffers,
+/// against the same populations from the model by components (`Selected::at` making the lift, each part's elements by
+/// fast index at their slow beats' phases, `rs::lifted`), on the six scenes at the centre at rest and at a moving point,
+/// a spread state, three times: the same numbers to the bit.
+#[test]
+fn the_readout_is_the_lift_by_fast_index() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let n = run.rs.keep.len();
+        let psi = spread(n);
+        for (r, kappa) in POINTS {
+            for t in [0.0, 0.37, -1.9] {
+                let model = run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true });
+                let mut rho = vec![C64::ZERO; n * n];
+                crate::step::density(&psi, &mut rho);
+                let mut expected = [0.0; STATES];
+                for (a, &s) in model.states.iter().enumerate() {
+                    expected[s] = rho[a * n + a].re;
+                }
+                let q = model.folded.len();
+                let mut by_fast: Vec<([i64; 3], Mat)> = Vec::new();
+                for part in &model.lift {
+                    let table = run.elements(&part.key, Of::Lift);
+                    let beats: Vec<([i64; 3], f64)> = run.read(|b| table.iter().map(|&i| (b.exact[i].0, b.value[i])).collect());
+                    for (x, &(fast, value)) in beats.iter().enumerate() {
+                        let z = part.value.data[x];
+                        if z == C64::ZERO {
+                            continue;
+                        }
+                        let slow = value - run.value(&(fast, vec![]));
+                        let i = match by_fast.iter().position(|f| f.0 == fast) {
+                            Some(i) => i,
+                            None => {
+                                by_fast.push((fast, Mat::zeros(q, n)));
+                                by_fast.len() - 1
+                            }
+                        };
+                        by_fast[i].1.data[x] += z * C64::cis(-slow * t);
+                    }
+                }
+                for (_, m) in by_fast {
+                    let lifted = crate::model::rs::lifted(&model.states, &model.folded, &m, &rho);
+                    for &s in &model.folded {
+                        expected[s] += lifted[s];
+                    }
+                }
+                let total: f64 = expected.iter().sum();
+                let expected = expected.map(|x| x / total);
+                let rows = run.rows(&crate::model::Point { r, kappa, t }, &psi);
+                assert!(rows.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "{name} r {r:?} t {t}: {rows:?} against {expected:?}");
+            }
+        }
+        eprintln!("{name}: the readout is the lift to the bit");
     }
 }
 
@@ -1007,6 +1063,40 @@ fn the_envelope_bounds_the_prepared_potential() {
                 })
                 .fold(0.0, crate::linalg::larger);
             assert!(-v <= bound * brightest * (1.0 + 1e-12) + 1e-12, "{name}: −V = {} above its bound {} at {r:?}", -v, bound * brightest);
+        }
+    }
+}
+
+/// R2-NODE (a measurement, run by name): a walk of R2_STEPS steps (24) at τ = R2_TAU (0.474 µs; halved where a step is
+/// refused) from the reference state at a moving point, with the trajectory's own jumps, every step's end said to the
+/// bit -- the time, r, κ, ψ, the jumps, the work: two builds' walks compared line by line.
+#[test]
+#[ignore]
+fn r2_walk_dump() {
+    let steps = env("R2_STEPS", 24.0) as usize;
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let chief = crate::solve::chief(&request);
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let mut t = Trajectory::new(&run, chief, [0.1, 0.2, 0.3], [speed, -0.5 * speed, 0.3 * speed], 11, 0);
+        let mut scratch = Scratch::default();
+        let mut tau = env("R2_TAU", 0.474);
+        let mut taken = 0;
+        while taken < steps && tau > 1e-3 {
+            let attempt = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere));
+            match attempt {
+                Ok(step) => {
+                    let jumps = step.made.iter().filter(|m| m.kick.is_some()).count();
+                    t = step.end;
+                    taken += 1;
+                    let psi: Vec<String> = t.psi.iter().map(|z| format!("{:?},{:?}", z.re, z.im)).collect();
+                    eprintln!("R2WALK {name} {taken} tau {tau:?} time {:?} r {:?} kappa {:?} jumps {jumps} work {:?} psi {}", t.time, t.r, t.kappa, step.work, psi.join(";"));
+                }
+                Err(e) => {
+                    eprintln!("R2WALK {name} refused at tau {tau:?}: {e:?}");
+                    tau *= 0.5;
+                }
+            }
         }
     }
 }

@@ -6,7 +6,7 @@
 //! the largest difference in units of ε times the quantity's largest entry.
 
 use super::*;
-use crate::model::rs::ModelPart;
+use crate::model::rs::{ModelAt, ModelPart};
 use crate::request::Request;
 use serde_json::{json, Value};
 
@@ -119,7 +119,7 @@ fn r1_golden_dump() {
             doc["node"][point] = node(&run, &made);
             doc["node"][point]["r"] = json!(r);
             doc["node"][point]["kappa"] = json!(kappa);
-            doc["lift"][point] = model(&run.at(r, kappa, Making { model: false, kicks: false, lift: true }));
+            doc["lift"][point] = model(&run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true }));
         }
         std::fs::write(dir.join(format!("{name}.json")), serde_json::to_string(&doc).unwrap()).unwrap();
         eprintln!("{name}: written");
@@ -314,7 +314,7 @@ fn r1_against_golden() {
         for (point, r, kappa) in nodes(&run) {
             let made = run.node(r, kappa, true);
             let (d, beats, golden_beats) = nodes_apart(&node(&run, &made), &golden["node"][point]);
-            let lift = models(&model(&run.at(r, kappa, Making { model: false, kicks: false, lift: true })), &golden["lift"][point]);
+            let lift = models(&model(&run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true })), &golden["lift"][point]);
             eprintln!(
                 "R1GOLD {name} node {point}: generator {:.1} ∇H {:.1} L {:.1} ∇L {:.1} K {:.1} lift {:.1} (ε·max); beats {beats} (golden {golden_beats})",
                 d[0].ratio(),
@@ -367,8 +367,8 @@ fn r1_node_parts() {
         let mut work = Work::default();
         let mut node = run.template.clone();
         run.scene.point_into(r, kappa, &mut work.point);
-        run.rs.evaluate(&run.scene, &work.point, &mut work.local);
-        work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false });
+        run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+        work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true });
         let point = least(&mut || {
             run.scene.point_into(r, kappa, &mut work.point);
         });
@@ -377,9 +377,9 @@ fn r1_node_parts() {
             run.rs.tweezer().values_into(&run.scene, &work.point, &mut v);
             work.local.values = v;
         });
-        let evaluate = least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local));
-        let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false }));
-        let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps, &mut work.product));
+        let evaluate = least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making::node(false)));
+        let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true }));
+        let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps));
         let whole = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
         });
@@ -395,6 +395,122 @@ fn r1_node_parts() {
             node.generator.len()
         );
         eprintln!("R1SIZES {name}: zs ws h_pairs j_pairs h_flops j_flops {:?}; amplitudes {}", run.lab.sizes(plan), plan.amplitudes.len());
+    }
+}
+
+/// The heap allocations `f` makes on this thread (the feature `prof`'s counting allocator, prof.rs: a free region, slot
+/// `ALLOCATIONS`, read off its report); None without the feature.
+fn allocations(f: &mut dyn FnMut()) -> Option<u64> {
+    #[cfg(feature = "prof")]
+    {
+        const ALLOCATIONS: usize = 95;
+        let read = || -> u64 {
+            crate::prof::report().lines().find(|l| l.starts_with(&format!("PROF {ALLOCATIONS:3} "))).and_then(|l| l.rsplit("more ").next()).map_or(0, |x| x.trim().parse().unwrap())
+        };
+        let before = read();
+        {
+            let _p = crate::prof::scope(ALLOCATIONS);
+            f();
+        }
+        Some(read() - before)
+    }
+    #[cfg(not(feature = "prof"))]
+    {
+        let _ = f;
+        None
+    }
+}
+
+/// R2-NODE: a node's, a jump's photon's and a readout's cost on one thread (µs, the least of R2_REPEAT runs, 40) at the
+/// golden's moving point (r = R1, κ the speed 0.1 µm/µs along U) and at the centre at rest: a node as a step makes it (a
+/// middle's three, every reading of them, a third of the whole) and its parts -- the fold's numbers (`Rs::evaluate`
+/// with the point), the contraction, the filling --, the counted complex multiply-adds and their floor at 5 G/s
+/// (PROF1's kernel speed), and the heap allocations of each (feature `prof`; one call after a warm-up).
+#[test]
+#[ignore]
+fn r2_node_cost() {
+    let repeat = super::env("R2_REPEAT", 40.0) as usize;
+    for (name, request, _) in runs() {
+        let run = run_of(&request, &[]);
+        let n = run.rs.keep.len();
+        let psi = super::spread(n);
+        for (point, r, kappa) in [("moving", R1, moving(&run)), ("centre", [0.0; 3], [0.0; 3])] {
+            let least = |f: &mut dyn FnMut()| {
+                f();
+                (0..repeat)
+                    .map(|_| {
+                        let clock = std::time::Instant::now();
+                        f();
+                        clock.elapsed().as_secs_f64() * 1e6
+                    })
+                    .fold(f64::INFINITY, crate::linalg::smaller)
+            };
+            let mut work = Work::default();
+            let mut node = run.template.clone();
+            run.scene.point_into(r, kappa, &mut work.point);
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true });
+            let evaluate = least(&mut || {
+                run.scene.point_into(r, kappa, &mut work.point);
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+            });
+            let a_evaluate = allocations(&mut || {
+                run.scene.point_into(r, kappa, &mut work.point);
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+            });
+            let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true }));
+            let a_contract = allocations(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true }));
+            let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps));
+            let a_fill = allocations(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps));
+            let counted = work.local.work + work.out.work;
+            // A middle's three nodes (the step's middle and outer nodes, h = 0.237 µs along the path) with every reading
+            // of them a step makes -- the generator at each, the forces, the tones, the gradient with its slope, the
+            // scattered light -- and the middle dropped (its nodes back to the pool): a node's share a third.
+            let velocity = kappa.map(|k| run.hbar_over_mass() * k);
+            let h = 0.237;
+            let mut h_mat = Mat::zeros(n, n);
+            let rho = {
+                let mut rho = vec![C64::ZERO; n * n];
+                crate::step::density(&psi, &mut rho);
+                rho
+            };
+            let (mut g, mut slope): ([Vec<C64>; 3], [Vec<C64>; 3]) = Default::default();
+            let mut nodes = || {
+                let middle = run.middle(0, r, 0.0);
+                let path = middle.path(kappa, velocity);
+                for s in [0.0, -h, h] {
+                    middle.generator(&path, s, &mut h_mat);
+                }
+                std::hint::black_box(middle.force(&path, h, &rho));
+                middle.tones(&path, &rho, &mut |nu, f| {
+                    std::hint::black_box((nu, f));
+                });
+                std::hint::black_box(middle.gradient(&path, 0.0, &mut g, Some((h, &mut slope))));
+                std::hint::black_box(middle.scattering(&path, &psi));
+            };
+            let t_nodes = least(&mut nodes) / 3.0;
+            let a_nodes = allocations(&mut nodes);
+            // A jump's photon at a point of the step (its node with the photon forms).
+            let mut jump = || {
+                let middle = run.middle(0, r, 0.0);
+                let path = middle.path(kappa, velocity);
+                let at = crate::model::Point { r, kappa, t: 0.1 };
+                std::hint::black_box(run.emit(0, &at, Some((&middle, &path, 0.1)), &psi, &mut |rates: &[f64]| (0..rates.len()).max_by(|a, b| rates[*a].total_cmp(&rates[*b]))));
+            };
+            let t_jump = least(&mut jump);
+            let a_jump = allocations(&mut jump);
+            let at = crate::model::Point { r, kappa, t: 0.37 };
+            let mut read = || {
+                std::hint::black_box(run.rows(&at, &psi));
+            };
+            let t_read = least(&mut read);
+            let a_read = allocations(&mut read);
+            eprintln!(
+                "R2COST {name} {point}: node {t_nodes:.1} µs (evaluate {evaluate:.1} contract {contract:.1} fill {fill:.1}), a jump's photon {t_jump:.1}, readout {t_read:.1} µs; counted {counted:.4e} CMA, floor {:.1} µs (×{:.2}); allocations a middle's three nodes and readings {a_nodes:?} (evaluate {a_evaluate:?} contract {a_contract:?} fill {a_fill:?}) a jump {a_jump:?} readout {a_read:?}",
+                counted / 5e3,
+                t_nodes / (counted / 5e3)
+            );
+        }
     }
 }
 
@@ -415,9 +531,9 @@ fn r1_tones() {
             let mut bare = run.template.clone();
             let mut work = Work::default();
             run.scene.point_into(r, kappa, &mut work.point);
-            run.rs.evaluate(&run.scene, &work.point, &mut work.local);
-            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false });
-            run.fill(&mut bare, &work.out, false, &mut work.jumps, &mut work.product);
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true });
+            run.fill(&mut bare, &work.out, false, &mut work.jumps);
             let (values, exact) = run.components();
             for (k, ((beat, g), (_, gb))) in full.generator.iter().zip(&bare.generator).enumerate() {
                 let total = g.max_abs();
@@ -483,5 +599,3 @@ fn r1_frame_with_recoil() {
         eprintln!("R1FRAME {name}: θ the same {}, sectors the same {}, values {:?} vs {:?}", a.theta == b.theta, a.sectors() == b.sectors(), &a.values, &b.values);
     }
 }
-
-
