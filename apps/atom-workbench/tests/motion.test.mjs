@@ -138,6 +138,22 @@ test('the motion block: 3D in the lab frame, the trap beam named, a waist exactl
   assert.deepEqual({h:plain.hReal,d:plain.drives,c:plain.collapse},{h:model.hReal,d:model.drives,c:model.collapse});
 });
 
+test('the optical reference is of the light other than the tweezer: beside that light the tweezer has a frequency axis of its own; alone it is the reference',()=>{
+  // The default scene's probe made weak and far (1e-6 mW/cm², 2 GHz off F=2 → F′=2): the 852 nm tweezer mixes most.
+  const scene=defaultScene(),probe=scene.lasers.find(l=>l.id==='probe');Object.assign(probe,{intensityMWcm2:1e-6});probe.frequency.offsetMHz=2000;resolveSceneFrequencies(scene);
+  assert.equal(buildFullMasterModel(scene,scene.dynamics).referenceLaserId,'tweezer','without motion no beam is a trap: the largest mixing, the tweezer');
+  const model=buildFullMasterModel(scene,scene.dynamics,request(scene)),f=model.frequencyCoordinates.frequenciesMHz,beams=model.motion.beams;
+  assert.equal(model.referenceLaserId,'probe');assert.equal(f.at(-1),laserFrequencyMHz(probe));
+  // The engine's test (scene.rs `tweezer_axis`): an axis before the carrier on which the tweezer's index is nonzero and every other beam's zero.
+  const tweezer=beams.find(b=>b.id==='tweezer'),own=f.slice(0,-1).findIndex((_,i)=>tweezer.frequencyIndex[i]!==0&&beams.every(b=>b===tweezer||b.frequencyIndex[i]===0));
+  assert.ok(own>=0,JSON.stringify(beams.map(b=>[b.id,b.frequencyIndex])));
+  // No light but the tweezer: it is the reference, its index zero, the carrier its own frequency.
+  probe.enabled=false;
+  const alone=buildFullMasterModel(scene,scene.dynamics,request(scene));
+  assert.equal(alone.referenceLaserId,'tweezer');assert.deepEqual(alone.motion.beams.map(b=>[b.id,b.frequencyIndex]),[['tweezer',[0]]]);
+  assert.deepEqual(alone.frequencyCoordinates.frequenciesMHz,[laserFrequencyMHz(tweezerOf(scene))]);
+});
+
 /** C ρ C† summed over operators. */
 function dissipated(operators,rho){
   const out={re:Array(N*N).fill(0),im:Array(N*N).fill(0)};
