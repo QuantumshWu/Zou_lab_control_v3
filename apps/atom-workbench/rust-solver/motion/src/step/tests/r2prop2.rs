@@ -266,6 +266,166 @@ fn r2prop2_time() {
     }
 }
 
+/// A state at a time on one thread (`Picture::at`; the caller pins the thread): from the moving point (trajectory
+/// R2PROP2_TRAJ, 3) R2PROP2_BURN steps (5) at each τ of R2PROP2_TAUS (0.474), then on the last stretch's picture as the
+/// step left it the states at 1000 times from its last launch to the step's end, R2PROP2_REPEAT times (20): the least
+/// time a state, and of it the n turns e^{−iλ(u − u₀)} alone (the same loop, its results kept).
+#[test]
+#[ignore]
+fn r2prop2_at() {
+    use crate::linalg::C64;
+    let taus = list("R2PROP2_TAUS", "0.474");
+    let (burn, repeats, traj) = (env("R2PROP2_BURN", 5.0) as usize, env("R2PROP2_REPEAT", 20.0) as usize, env("R2PROP2_TRAJ", 3.0) as u64);
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let mut t = start(&run, &request, chief, traj);
+            let mut scratch = Scratch::default();
+            for _ in 0..burn {
+                if let Ok(step) = stepped(&run, &t, tau, &mut scratch) {
+                    t = step.end;
+                }
+            }
+            let picture = &mut scratch.picture;
+            let n = picture.states();
+            let (lambda, origin, half) = crate::spectral::tests::turning(picture);
+            let times: Vec<f64> = (0..1000).map(|k| origin + (half - origin) * (k as f64 + 0.5) / 1000.0).collect();
+            let mut x = vec![C64::ZERO; n];
+            let (mut whole, mut turns, mut vector) = (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            let mut kept = vec![C64::ZERO; n];
+            for _ in 0..repeats {
+                let clock = std::time::Instant::now();
+                for &u in &times {
+                    picture.at(u, &mut x);
+                    std::hint::black_box(&x);
+                }
+                whole = crate::linalg::smaller(whole, clock.elapsed().as_secs_f64() * 1e9 / times.len() as f64);
+                let clock = std::time::Instant::now();
+                for &u in &times {
+                    for (z, l) in kept.iter_mut().zip(&lambda) {
+                        *z = (C64::new(0.0, -(u - origin)) * *l).exp();
+                    }
+                    std::hint::black_box(&kept);
+                }
+                turns = crate::linalg::smaller(turns, clock.elapsed().as_secs_f64() * 1e9 / times.len() as f64);
+                let clock = std::time::Instant::now();
+                for &u in &times {
+                    kept.fill(C64::ONE);
+                    crate::linalg::times_exp(&mut kept, C64::new(0.0, -(u - origin)), &lambda);
+                    std::hint::black_box(&kept);
+                }
+                vector = crate::linalg::smaller(vector, clock.elapsed().as_secs_f64() * 1e9 / times.len() as f64);
+            }
+            let (fastest, slowest) = lambda.iter().fold((0.0_f64, 0.0_f64), |(f, d), l| (crate::linalg::larger(f, l.re.abs()), crate::linalg::smaller(d, l.im)));
+            println!("R2-AT {name} tau {tau}: n {n}, followed {}: a state {whole:.1} ns; its n turns by the library {turns:.1} ns ({:.1} ns a turn), four at a time {vector:.1} ns ({:.1} ns a turn); the least of {repeats} x 1000; max |Re λ| {fastest:.3e}, min Im λ {slowest:.3e} rad/µs over {:.3} µs", crate::spectral::tests::follows(picture), turns / n as f64, vector / n as f64, half - origin);
+        }
+    }
+}
+
+/// The four lanes' exponentials' speed on one thread (`linalg::exps`, the caller pins it): 4096 lanes of a in
+/// [−40, 0] and b in [−3·10⁴, 3·10⁴], one call a vector, the least of R2PROP2_REPEAT (20) passes; against the library's
+/// `C64::exp` lane by lane.
+#[test]
+#[ignore]
+fn r2prop2_exps() {
+    use crate::linalg::{exps, C64, LANES};
+    let repeats = env("R2PROP2_REPEAT", 20.0) as usize;
+    let lanes: Vec<(f64, f64)> = (0..4096).map(|k| (-40.0 * ((k * 7919) % 4096) as f64 / 4096.0, 3e4 * (((k * 104_729) % 4096) as f64 / 2048.0 - 1.0))).collect();
+    let (a, b): (Vec<f64>, Vec<f64>) = lanes.iter().copied().unzip();
+    let mut out = vec![C64::ZERO; lanes.len()];
+    let time = |f: &mut dyn FnMut()| (0..repeats).map(|_| {
+        let clock = std::time::Instant::now();
+        f();
+        clock.elapsed().as_secs_f64() * 1e9 / 4096.0
+    }).fold(f64::INFINITY, crate::linalg::smaller);
+    let vector = time(&mut || {
+        for ((a, b), o) in a.chunks_exact(LANES).zip(b.chunks_exact(LANES)).zip(out.chunks_exact_mut(LANES)) {
+            o.copy_from_slice(&exps([a[0], a[1], a[2], a[3]], [b[0], b[1], b[2], b[3]]));
+        }
+        std::hint::black_box(&out);
+    });
+    let library = time(&mut || {
+        for ((a, b), o) in a.iter().zip(&b).zip(out.iter_mut()) {
+            *o = C64::new(*a, *b).exp();
+        }
+        std::hint::black_box(&out);
+    });
+    println!("R2-EXPS: four at a time {vector:.2} ns a lane, the library {library:.2} ns a lane (the least of {repeats} passes of 4096)");
+    // A state's turns as `Picture::at` makes them: n eigenvalues, 1024 times a pass.
+    for n in [8, 12, 20] {
+        let z: Vec<C64> = (0..n).map(|k| C64::new(3e4 * (k as f64 / n as f64 - 0.5), -19.0 * (k % 3) as f64)).collect();
+        let mut x = vec![C64::ONE; n];
+        let short = time(&mut || {
+            for k in 0..1024 {
+                crate::linalg::times_exp(&mut x, C64::new(0.0, -1e-3 * k as f64), &z);
+            }
+            std::hint::black_box(&x);
+        }) * 4096.0 / (1024.0 * n as f64);
+        let plain = time(&mut || {
+            for k in 0..1024 {
+                for (x, z) in x.iter_mut().zip(&z) {
+                    *x *= (C64::new(0.0, -1e-3 * k as f64) * *z).exp();
+                }
+            }
+            std::hint::black_box(&x);
+        }) * 4096.0 / (1024.0 * n as f64);
+        println!("R2-EXPS n {n}: times_exp {short:.2} ns a lane, the library's loop {plain:.2} ns a lane");
+    }
+}
+
+/// A step's middle on one thread (the caller pins it; step.rs `middle`, `Midway::new`): from the moving point
+/// (trajectory R2PROP2_TRAJ, 3) R2PROP2_BURN steps (5) at each τ of R2PROP2_TAUS (0.474), then at that state the least
+/// over R2PROP2_REPEAT (20) of 200 calls each of the middle's fixed point, of the whole `Midway::new`, of the model's
+/// reference at the point the fixed point reaches (`Dynamics::reference`, one a round) and of a round's own flow (its
+/// axes and its reach, `Flow::new`, `Flow::reach`).
+#[test]
+#[ignore]
+fn r2prop2_middle() {
+    use crate::step::Dynamics;
+    let taus = list("R2PROP2_TAUS", "0.474");
+    let (burn, repeats, traj) = (env("R2PROP2_BURN", 5.0) as usize, env("R2PROP2_REPEAT", 20.0) as usize, env("R2PROP2_TRAJ", 3.0) as u64);
+    for (name, request) in scenes() {
+        let (run, chief) = run_of(&request);
+        for &tau in &taus {
+            let mut t = start(&run, &request, chief, traj);
+            let mut scratch = Scratch::default();
+            for _ in 0..burn {
+                if let Ok(step) = stepped(&run, &t, tau, &mut scratch) {
+                    t = step.end;
+                }
+            }
+            let half = 0.5 * tau;
+            let (_, (p, _)) = super::super::middle(&run, t.r, t.kappa, half).unwrap();
+            let time = |f: &mut dyn FnMut()| -> f64 {
+                (0..repeats)
+                    .map(|_| {
+                        let clock = std::time::Instant::now();
+                        for _ in 0..200 {
+                            f();
+                        }
+                        clock.elapsed().as_secs_f64() * 1e9 / 200.0
+                    })
+                    .fold(f64::INFINITY, crate::linalg::smaller)
+            };
+            let fixed = time(&mut || {
+                std::hint::black_box(super::super::middle(&run, t.r, t.kappa, half).unwrap());
+            });
+            let whole = time(&mut || {
+                std::hint::black_box(Midway::new(&run, &t, tau).unwrap().tau);
+            });
+            let reference = time(&mut || {
+                std::hint::black_box(run.reference(p));
+            });
+            let q = run.reference(p);
+            let flow = time(&mut || {
+                let f = super::super::Flow::new(&q, p, run.hbar_over_mass());
+                std::hint::black_box(f.advance((t.r, t.kappa), half));
+            });
+            println!("R2-MIDDLE {name} tau {tau}: the fixed point {fixed:.0} ns, Midway::new {whole:.0} ns; a round's reference {reference:.0} ns and its flow {flow:.0} ns: {:.1} rounds' worth", fixed / (reference + flow));
+        }
+    }
+}
+
 /// A walk's pictures class by class: from the moving point (trajectory R2PROP2_TRAJ, 3), R2PROP2_STEPS steps (4) at each
 /// τ of R2PROP2_TAUS (0.326), the picture of each step's last stretch (`spectral::tests::census`).
 #[test]

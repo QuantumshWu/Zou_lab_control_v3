@@ -340,6 +340,153 @@ pub fn reciprocals(c: &[C64], w: f64, kappa: C64, out: &mut [C64]) {
     }
 }
 
+/// x_j ← x_j e^{w z_j} for every j, four at a time (`exp4`): each argument w z_j as `C64`'s product makes it and the
+/// product with x_j as `C64`'s -- a state's turns at a time (spectral.rs `Picture::at`). The numbers go to the vectors
+/// and back by shuffles, not through memory a lane at a time (a vector read of four numbers just written one by one waits
+/// for the writes, some twenty cycles a vector: the kernel's own work); the numbers past the whole vectors through a
+/// vector padded with zeros.
+pub fn times_exp(x: &mut [C64], w: C64, z: &[C64]) {
+    use std::arch::x86_64::{_mm256_movedup_pd, _mm256_permute2f128_pd, _mm256_permute4x64_pd, _mm256_unpackhi_pd, _mm256_unpacklo_pd};
+    let n = x.len();
+    assert!(z.len() >= n);
+    // SAFETY: whole vectors of four numbers within x and z (`whole`), the rest through padded copies; C64 is two f64
+    // (`repr(C)`); the build has AVX2 and FMA (above).
+    unsafe {
+        let (wr, wi) = (_mm256_set1_pd(w.re), _mm256_set1_pd(w.im));
+        let four = |x: *mut f64, z: *const f64| {
+            let (v0, v1) = (_mm256_loadu_pd(z), _mm256_loadu_pd(z.add(4)));
+            // [z0 z1 z2 z3]'s real parts and imaginary parts.
+            let zr = _mm256_permute4x64_pd::<0xD8>(_mm256_unpacklo_pd(v0, v1));
+            let zi = _mm256_permute4x64_pd::<0xD8>(_mm256_unpackhi_pd(v0, v1));
+            let a = _mm256_sub_pd(_mm256_mul_pd(wr, zr), _mm256_mul_pd(wi, zi));
+            let b = _mm256_add_pd(_mm256_mul_pd(wr, zi), _mm256_mul_pd(wi, zr));
+            let (mut er, mut ei, inside) = exp4(a, b);
+            if inside != 0b1111 {
+                let (mut ra, mut rb, mut re, mut im) = ([0.0; LANES], [0.0; LANES], [0.0; LANES], [0.0; LANES]);
+                for (v, to) in [(a, &mut ra), (b, &mut rb), (er, &mut re), (ei, &mut im)] {
+                    _mm256_storeu_pd(to.as_mut_ptr(), v);
+                }
+                for l in (0..LANES).filter(|&l| inside & (1 << l) == 0) {
+                    let e = C64::new(ra[l], rb[l]).exp();
+                    (re[l], im[l]) = (e.re, e.im);
+                }
+                (er, ei) = (_mm256_loadu_pd(re.as_ptr()), _mm256_loadu_pd(im.as_ptr()));
+            }
+            // Back to numbers side by side, [e0 e1] and [e2 e3], and x e as `C64`'s product.
+            let (low, high) = (_mm256_unpacklo_pd(er, ei), _mm256_unpackhi_pd(er, ei));
+            for (at, e) in [(0, _mm256_permute2f128_pd::<0x20>(low, high)), (4, _mm256_permute2f128_pd::<0x31>(low, high))] {
+                let y = _mm256_loadu_pd(x.add(at));
+                let product = _mm256_addsub_pd(_mm256_mul_pd(y, _mm256_movedup_pd(e)), _mm256_mul_pd(_mm256_permute_pd::<0b0101>(y), _mm256_permute_pd::<0b1111>(e)));
+                _mm256_storeu_pd(x.add(at), product);
+            }
+        };
+        let whole = n / LANES * LANES;
+        let (xp, zp) = (x.as_mut_ptr() as *mut f64, z.as_ptr() as *const f64);
+        for j in (0..whole).step_by(LANES) {
+            four(xp.add(2 * j), zp.add(2 * j));
+        }
+        if whole < n {
+            let (mut xs, mut zs) = ([C64::ZERO; LANES], [C64::ZERO; LANES]);
+            xs[..n - whole].copy_from_slice(&x[whole..]);
+            zs[..n - whole].copy_from_slice(&z[whole..n]);
+            four(xs.as_mut_ptr() as *mut f64, zs.as_ptr() as *const f64);
+            x[whole..].copy_from_slice(&xs[..n - whole]);
+        }
+    }
+}
+
+/// e^{a_l} (cos b_l + i sin b_l) of four lanes (`exp4`), a lane outside its range the library's own: the kernel lane by
+/// lane, for the tests.
+#[cfg(test)]
+pub(crate) fn exps(a: [f64; LANES], b: [f64; LANES]) -> [C64; LANES] {
+    let mut out = [C64::ZERO; LANES];
+    // SAFETY: four lanes in and out; the build has AVX2 and FMA (above).
+    let inside = unsafe {
+        let (re, im, inside) = exp4(_mm256_loadu_pd(a.as_ptr()), _mm256_loadu_pd(b.as_ptr()));
+        let (mut res, mut ims) = ([0.0; LANES], [0.0; LANES]);
+        _mm256_storeu_pd(res.as_mut_ptr(), re);
+        _mm256_storeu_pd(ims.as_mut_ptr(), im);
+        for l in 0..LANES {
+            out[l] = C64::new(res[l], ims[l]);
+        }
+        inside
+    };
+    for l in (0..LANES).filter(|&l| inside & (1 << l) == 0) {
+        out[l] = C64::new(a[l], b[l]).exp();
+    }
+    out
+}
+
+/// e^{a_l} (cos b_l + i sin b_l) of four lanes, a vector of the real parts and one of the imaginary parts, each within a
+/// few units of its round-off of the modulus e^{a_l} (tests, `four_exponentials_are_the_library_s_within_their_round_off`),
+/// and the lanes in range (a mask, lane l its bit l):
+/// - e^a: a = k ln 2 + r, k = round(a/ln 2), r by Cody & Waite's two parts of ln 2 (fdlibm's: the first's trailing bits
+///   zero, each product rounded once in its fused step), |r| ≤ ln 2/2; e^r = 1 + r + r²/2 + … to r¹³/13! (the next term
+///   r¹⁴/14! ≤ 4·10⁻¹⁸ of one), and 2^k from k's bits;
+/// - cos b, sin b: b = k π/2 + r, k = round(2b/π), r by three parts of π/2 of 33 bits each (fdlibm's `rem_pio2`): every
+///   k π/2's part exact for |k| < 2^20, the first difference exact by Sterbenz's lemma, so r is within an ulp of its own
+///   and k 10⁻³¹ besides; on |r| ≤ π/4 fdlibm's kernels (`__kernel_sin`, `__kernel_cos`: their minimax polynomials, each
+///   within an ulp), the quadrant by k's last two bits.
+/// A lane outside the range these hold on -- a outside [−708, 709] (e^a beyond the normal numbers' range or its 2^k),
+/// |b| beyond 2^19 π/2, a number that is not finite (a comparison with NaN is false) -- is out of range: its caller takes
+/// the library's (`C64::exp`), NaN in, NaN out. Inlined where it is called: each lane is a chain of some forty dependent
+/// fused steps, and a caller's successive vectors overlap.
+#[inline(always)]
+unsafe fn exp4(av: __m256d, bv: __m256d) -> (__m256d, __m256d, i32) {
+    use std::arch::x86_64::{_mm256_add_epi64, _mm256_and_pd, _mm256_and_si256, _mm256_andnot_pd, _mm256_blendv_pd, _mm256_castpd_si256, _mm256_castsi256_pd, _mm256_cmp_pd, _mm256_cmpeq_epi64, _mm256_movemask_pd, _mm256_round_pd, _mm256_set1_epi64x, _mm256_slli_epi64, _mm256_xor_pd, _CMP_GE_OQ, _CMP_LE_OQ, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT};
+    // fdlibm's constants (e_exp.c, e_rem_pio2.c, k_sin.c, k_cos.c).
+    const LN2_HI: f64 = 6.931_471_803_691_238_164_90e-1;
+    const LN2_LO: f64 = 1.908_214_929_270_587_700_02e-10;
+    const PIO2: [f64; 3] = [1.570_796_326_734_125_614_17, 6.077_100_506_303_965_976_60e-11, 2.022_266_248_711_166_455_80e-21];
+    const SIN: [f64; 6] = [-1.666_666_666_666_663_243_48e-1, 8.333_333_333_322_489_461_24e-3, -1.984_126_982_985_794_931_34e-4, 2.755_731_370_707_006_767_89e-6, -2.505_076_025_340_686_341_95e-8, 1.589_690_995_211_550_102_21e-10];
+    const COS: [f64; 6] = [4.166_666_666_666_660_190_37e-2, -1.388_888_888_887_410_957_49e-3, 2.480_158_728_947_672_941_78e-5, -2.755_731_435_139_066_330_35e-7, 2.087_572_321_298_174_827_90e-9, -1.135_964_755_778_819_482_65e-11];
+    // 2^52 + 2^51: a whole number of magnitude below 2^51 added to it lies in the sum's last bits.
+    const MAGIC: f64 = 6_755_399_441_055_744.0;
+    const NEAREST: i32 = _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC;
+    // SAFETY: the caller's (the build has AVX2 and FMA).
+    unsafe {
+        let fma = |x: __m256d, y: __m256d, z: __m256d| _mm256_fmadd_pd(x, y, z);
+        let set = _mm256_set1_pd;
+        // e^a.
+        let k = _mm256_round_pd::<NEAREST>(_mm256_mul_pd(av, set(std::f64::consts::LOG2_E)));
+        let minus = _mm256_sub_pd(_mm256_setzero_pd(), k);
+        let r = fma(minus, set(LN2_LO), fma(minus, set(LN2_HI), av));
+        let mut q = set(1.0 / 6_227_020_800.0);
+        for f in [479_001_600.0, 39_916_800.0, 3_628_800.0, 362_880.0, 40_320.0, 5_040.0, 720.0, 120.0, 24.0, 6.0, 2.0] {
+            q = fma(q, r, set(1.0 / f));
+        }
+        let p = _mm256_add_pd(set(1.0), fma(_mm256_mul_pd(r, r), q, r));
+        let power = _mm256_slli_epi64::<52>(_mm256_add_epi64(_mm256_castpd_si256(_mm256_add_pd(k, set(MAGIC))), _mm256_set1_epi64x(1023 - 0x4338_0000_0000_0000)));
+        let modulus = _mm256_mul_pd(p, _mm256_castsi256_pd(power));
+        // cos b, sin b.
+        let k = _mm256_round_pd::<NEAREST>(_mm256_mul_pd(bv, set(std::f64::consts::FRAC_2_PI)));
+        let minus = _mm256_sub_pd(_mm256_setzero_pd(), k);
+        let r = fma(minus, set(PIO2[2]), fma(minus, set(PIO2[1]), fma(minus, set(PIO2[0]), bv)));
+        let z = _mm256_mul_pd(r, r);
+        let mut s = set(SIN[5]);
+        for c in SIN[1..5].iter().rev() {
+            s = fma(s, z, set(*c));
+        }
+        let sine = fma(_mm256_mul_pd(z, r), fma(z, s, set(SIN[0])), r);
+        let mut c = set(COS[5]);
+        for x in COS[..5].iter().rev() {
+            c = fma(c, z, set(*x));
+        }
+        let (hz, zc) = (_mm256_mul_pd(set(0.5), z), _mm256_mul_pd(_mm256_mul_pd(z, z), c));
+        let w = _mm256_sub_pd(set(1.0), hz);
+        let cosine = _mm256_add_pd(w, _mm256_add_pd(_mm256_sub_pd(_mm256_sub_pd(set(1.0), w), hz), zc));
+        // The quadrant k mod 4 from k's last bits: odd swaps the two, k ≡ 1, 2 turns the cosine's sign, k ≡ 2, 3 the sine's.
+        let bits = _mm256_castpd_si256(_mm256_add_pd(k, set(MAGIC)));
+        let (one, two) = (_mm256_set1_epi64x(1), _mm256_set1_epi64x(2));
+        let swap = _mm256_castsi256_pd(_mm256_cmpeq_epi64(_mm256_and_si256(bits, one), one));
+        let (cos, sin) = (_mm256_blendv_pd(cosine, sine, swap), _mm256_blendv_pd(sine, cosine, swap));
+        let cos = _mm256_xor_pd(cos, _mm256_castsi256_pd(_mm256_slli_epi64::<62>(_mm256_and_si256(_mm256_add_epi64(bits, one), two))));
+        let sin = _mm256_xor_pd(sin, _mm256_castsi256_pd(_mm256_slli_epi64::<62>(_mm256_and_si256(bits, two))));
+        let inside = _mm256_and_pd(_mm256_and_pd(_mm256_cmp_pd::<_CMP_GE_OQ>(av, set(-708.0)), _mm256_cmp_pd::<_CMP_LE_OQ>(av, set(709.0))), _mm256_cmp_pd::<_CMP_LE_OQ>(_mm256_andnot_pd(set(-0.0), bv), set(823_549.6)));
+        (_mm256_mul_pd(cos, modulus), _mm256_mul_pd(sin, modulus), _mm256_movemask_pd(inside))
+    }
+}
+
 /// out (r × c) = a (r × k) b (k × c), all row by row: each entry from zero by k fused steps, b's rows in order,
 /// o.re ← x.re y.re + (−x.im y.im + o.re) and o.im ← x.re y.im + (x.im y.re + o.im) (x = a's entry, y = b's) -- two
 /// fused multiply-adds a real. Up to eight numbers of a row of out are held in registers through the k steps.
@@ -1314,6 +1461,75 @@ pub fn symmetric3_eigen(m: &M3) -> (V3, [V3; 3]) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The four lanes' exponentials (`exps`) against the library's, `C64::exp` -- e^a by the platform's `exp`, cos b and
+    /// sin b by its `sin_cos`, each within an ulp --: over 4·10⁵ lanes of a from −720 to 720 (and densely from −50 to 5,
+    /// the decays a step meets) and b of every size from 10⁻²⁰ to 2·10⁶ of either sign, beside multiples of π/2 up to
+    /// 5·10⁵ of them to within 10⁻¹² to 10⁻³, and the numbers no lane takes (±0, ±∞, NaN, a beyond the normal range, b
+    /// beyond 2^19 π/2): within 4u of the modulus |e^{a + ib}| where it is finite, and the library's own -- the same
+    /// infinities and NaNs -- where it is not. `times_exp` on lengths of every remainder against the scalar product with
+    /// the library's exponential: within 6u of |x| |e^{wz}|.
+    #[test]
+    fn four_exponentials_are_the_library_s_within_their_round_off() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut uniform = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut lanes: Vec<(f64, f64)> = Vec::new();
+        for k in 0..400_000 {
+            let a = if k % 2 == 0 { -720.0 + 1440.0 * uniform() } else { -50.0 + 55.0 * uniform() };
+            let size = 10f64.powf(-20.0 + 26.3 * uniform());
+            let b = match k % 3 {
+                0 => size,
+                1 => -size,
+                _ => {
+                    let quarter = (uniform() * 5e5).round();
+                    quarter * std::f64::consts::FRAC_PI_2 + if uniform() < 0.5 { 1.0 } else { -1.0 } * 10f64.powf(-12.0 + 9.0 * uniform())
+                }
+            };
+            lanes.push((a, b));
+        }
+        let (nan, inf) = (f64::NAN, f64::INFINITY);
+        for a in [0.0, -0.0, 708.0, -708.0, 709.0, 709.5, 710.0, -708.5, -745.0, -746.0, -1e3, inf, -inf, nan] {
+            for b in [0.0, -0.0, 1.0, std::f64::consts::FRAC_PI_2, 823_549.0, 823_550.0, 1e7, 1e300, inf, -inf, nan] {
+                lanes.push((a, b));
+            }
+        }
+        while lanes.len() % LANES != 0 {
+            lanes.push((0.0, 0.0));
+        }
+        let mut worst = 0.0_f64;
+        for four in lanes.chunks_exact(LANES) {
+            let found = exps(std::array::from_fn(|l| four[l].0), std::array::from_fn(|l| four[l].1));
+            for (&(a, b), found) in four.iter().zip(found) {
+                let library = C64::new(a, b).exp();
+                if library.re.is_finite() && library.im.is_finite() {
+                    let ratio = (found - library).abs() / (UNIT_ROUNDOFF * a.exp());
+                    assert!(ratio <= 4.0 || (found - library).abs() == 0.0, "e^({a} + i{b}): {found:?} against {library:?}, {ratio:.2} u of the modulus");
+                    worst = larger(worst, if ratio.is_finite() { ratio } else { 0.0 });
+                } else {
+                    let same = |x: f64, y: f64| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+                    assert!(same(found.re, library.re) && same(found.im, library.im), "e^({a} + i{b}): {found:?} against {library:?}");
+                }
+            }
+        }
+        eprintln!("{} lanes: within {worst:.2} u of the modulus", lanes.len());
+        for n in 1..=9 {
+            let x: Vec<C64> = (0..n).map(|_| C64::new(uniform() - 0.5, uniform() - 0.5)).collect();
+            // Eigenvalues: frequencies of either sign, decays (their imaginary parts negative).
+            let z: Vec<C64> = (0..n).map(|_| C64::new(2e4 * (uniform() - 0.5), -300.0 * uniform())).collect();
+            let w = C64::new(0.0, -0.37 * uniform());
+            let mut found = x.clone();
+            times_exp(&mut found, w, &z);
+            for ((found, x), z) in found.iter().zip(&x).zip(&z) {
+                let wanted = *x * (w * *z).exp();
+                assert!((*found - wanted).abs() <= 6.0 * UNIT_ROUNDOFF * x.abs() * (w * *z).re.exp(), "n {n}: {found:?} against {wanted:?}");
+            }
+        }
+    }
 
     /// The NaN-carrying maximum and minimum (`larger`, `smaller`, `largest`, `Mat::max_abs`): a NaN anywhere -- the start,
     /// the first, the middle, the last, beside ±∞ -- is the result; ±∞ are numbers like any other; no values leave the

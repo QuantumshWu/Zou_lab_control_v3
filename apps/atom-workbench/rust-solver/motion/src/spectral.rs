@@ -129,7 +129,9 @@
 //! of w⁶ times it, w the stops' spacing. So the state at any time u from the launch on is
 //! x(u) = R (1 + X(u)) e^{−iΛ(u − u₀)} m(u) -- n exponentials, the matrix R(1 + X(u)) from its three of each class
 //! followed (R(1 + Y₀), RY₁ and RY₂ of the static group's, RY₀, RY₁, RY₂ of a beating class's at its phase, made once a
-//! step) and its product of n² (`Picture::at`), no hop --, and at the three stops it is the hops' own.
+//! step) and its product of n² (`Picture::at`), no hop --, and at the three stops it is the hops' own. The n
+//! exponentials are four at a time (`linalg::times_exp`: within 4u of the library's, at a quarter of its time), where
+//! one by one they were most of a state's time at the scenes' n (8 to 20 states: 55 to 65 % of it, 9 to 13 ns each).
 //!
 //! The propagation is linear in the state, and nothing of the picture but m knows the state: a state that changes at
 //! a time of the step -- a quantum jump's (step.rs, # Jumps) -- is launched again at that time on the same picture,
@@ -2347,9 +2349,8 @@ impl Picture {
                 d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (first[a] * rates[0] + second[a] * rates[1] + last[a] * rates[2]) * self.spacing;
             }
         }
-        for (z, l) in d.iter_mut().zip(&self.lambda) {
-            *z *= (C64::new(0.0, -(u - self.origin)) * *l).exp();
-        }
+        // e^{−iΛ(u − u₀)}: the n exponentials four at a time (`linalg::times_exp`).
+        linalg::times_exp(d, C64::new(0.0, -(u - self.origin)), &self.lambda);
         // R(1 + X(u)) d: the matrix at the time from its three, R(1 + Y₀) + u RY₁ + u² RY₂ of the static group's and each
         // beating class's at its phase; R where nothing is followed.
         let (group, beating) = self.classes.split_first().expect("the static group");
@@ -2408,6 +2409,11 @@ pub(crate) mod tests {
     /// Whether some pair's change is followed: the split's choice on a step.
     pub(crate) fn follows(picture: &Picture) -> bool {
         picture.followed
+    }
+
+    /// A picture's eigenvalues, the time of its last launch and the step's half (a measurement of its turns).
+    pub(crate) fn turning(picture: &Picture) -> (Vec<C64>, f64, f64) {
+        (picture.lambda.clone(), picture.origin, picture.half)
     }
 
     /// A picture's classes as prepared (a measurement): the states, the tones' beats, the classes (first order and in
@@ -2865,28 +2871,71 @@ pub(crate) mod tests {
     }
 
     /// The outputs of a picture of the static group alone, bit by bit: its bandwidth and the states it gives
-    /// -- launched at the step's start and read at times of the step, launched again inside the step and read on --
-    /// folded into one number (FNV-1a over their bits), with their count.
-    fn static_outputs(picture: &mut Picture) -> (u64, usize) {
+    /// -- launched at the step's start and read at times of the step, launched again inside the step and read on, each by
+    /// `read` --, folded into one number (FNV-1a over their bits), with their count; and the states' components with each
+    /// one's scale Σ_k |R(1 + X)_ik| |d_k| (`at_one_by_one`).
+    fn static_outputs(picture: &mut Picture, read: fn(&mut Picture, f64, &mut [C64]) -> Vec<f64>) -> ((u64, usize), Vec<(C64, f64)>) {
         let (n, h) = (picture.n, picture.half);
         let mut bits: Vec<u64> = vec![picture.bandwidth.to_bits()];
         let start: Vec<C64> = (0..n).map(|i| C64::cis(0.9 * i as f64) * (0.5 + 0.1 * i as f64)).collect();
         let mut x = vec![C64::ZERO; n];
-        let state = |x: &[C64], bits: &mut Vec<u64>| bits.extend(x.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
+        let mut states = Vec::new();
+        let mut state = |x: &[C64], scale: Vec<f64>, bits: &mut Vec<u64>| {
+            bits.extend(x.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]));
+            states.extend(x.iter().copied().zip(scale));
+        };
         picture.launch(-h, &start);
         for u in [-0.5 * h, 0.0, 0.3 * h, 0.1 * h, h] {
-            picture.at(u, &mut x);
-            state(&x, &mut bits);
+            let scale = read(picture, u, &mut x);
+            state(&x, scale, &mut bits);
         }
-        picture.at(0.2 * h, &mut x);
+        read(picture, 0.2 * h, &mut x);
         let inside = x.clone();
         picture.launch(0.2 * h, &inside);
         for u in [0.6 * h, h] {
-            picture.at(u, &mut x);
-            state(&x, &mut bits);
+            let scale = read(picture, u, &mut x);
+            state(&x, scale, &mut bits);
         }
         let hash = bits.iter().flat_map(|b| b.to_le_bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
-        (hash, bits.len())
+        ((hash, bits.len()), states)
+    }
+
+    /// `Picture::at` as it was before its exponentials went four at a time (until 2026-11-21, R2-PROP2): the n turns
+    /// one by one by the library's `C64::exp`, the rest as it is -- the reference the engine's state is read against --;
+    /// and each component's scale Σ_k |R(1 + X)_ik| |d_k|, d the turned coordinates.
+    fn at_one_by_one(picture: &mut Picture, u: f64, x: &mut [C64]) -> Vec<f64> {
+        let n = picture.n;
+        let path = &picture.path;
+        let node = |k: usize| &path[k * n..(k + 1) * n];
+        let mut d = vec![C64::ZERO; n];
+        if !picture.moving {
+            d.copy_from_slice(node(0));
+        } else {
+            let (values, rates) = quintic((u - picture.centre) / picture.spacing);
+            let (start, first, middle, second, end, last) = (node(0), node(1), node(2), node(3), node(4), node(5));
+            for a in 0..n {
+                d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (first[a] * rates[0] + second[a] * rates[1] + last[a] * rates[2]) * picture.spacing;
+            }
+        }
+        for (z, l) in d.iter_mut().zip(&picture.lambda) {
+            *z *= (C64::new(0.0, -(u - picture.origin)) * *l).exp();
+        }
+        let (group, beating) = picture.classes.split_first().expect("the static group");
+        let mut matrix = picture.right.clone();
+        if picture.followed {
+            let (first, rest) = group.nodes.split_at(picture.right.len());
+            let (second, third) = rest.split_at(picture.right.len());
+            for (((m, first), second), third) in matrix.iter_mut().zip(first).zip(second).zip(third) {
+                *m = (u * u).mul_add(*third, u.mul_add(*second, *first));
+            }
+            for class in beating.iter().filter(|class| class.followed) {
+                add_turned(class.turn(u), &class.nodes, u, &mut matrix);
+            }
+        }
+        let mut lanes = picture.lanes.clone();
+        combine(false, &d, n, &matrix, &mut lanes, 1, 0);
+        unlay(&lanes, 1, x);
+        (0..n).map(|i| (0..n).map(|k| entry(&matrix, laid(i, k, n)).abs() * d[k].abs()).sum()).collect()
     }
 
     /// The hops' radius is the whole hopped operator's (# The split): a state coupled to two others by a slope of 500
@@ -2916,7 +2965,10 @@ pub(crate) mod tests {
     /// picture has no other route and no price (module documentation, # Where the decomposition does not take the
     /// step): the outputs without them were read on 80b9782e, before the strides went, and are the same to the bit. And
     /// since the quotient's bandwidth (`quotient_from`) the picture's count holds its work too: read without the count,
-    /// on the code of R1-PROP's fourth item, whose states are 80b9782e's.
+    /// on the code of R1-PROP's fourth item, whose states are 80b9782e's. Since the exponentials of a state at a time go
+    /// four at a time (`linalg::times_exp`, 2026-11-21) the outputs to the bit are those of the state read as before
+    /// (`at_one_by_one`: the turns one by one by the library), and the engine's states are within 5u of each component's
+    /// scale of them.
     #[test]
     fn the_static_group_alone_is_propagated_as_before_to_the_bit() {
         let entry = |seed: f64, i: usize, j: usize| C64::new((seed * (1.0 + i as f64) + 0.7 * j as f64).sin(), (seed * (2.0 + j as f64) - 0.3 * i as f64).cos());
@@ -2944,7 +2996,19 @@ pub(crate) mod tests {
                 _ => [true, true, true],
             };
             assert_eq!(route, wanted, "{name}: the route (moving, followed, a pair hopped beside)");
-            found.push((name, static_outputs(&mut picture)));
+            // The states as the propagation gave them before (`at_one_by_one`), and the engine's, read again on the same
+            // picture: within 5u of each component's scale -- the turns' 4u, the rest the same operations.
+            let (before, reference) = static_outputs(&mut picture, at_one_by_one);
+            let (_, engine) = static_outputs(&mut picture, |picture, u, x| {
+                let scale = at_one_by_one(picture, u, &mut x.to_vec());
+                picture.at(u, x);
+                scale
+            });
+            assert_eq!(engine.len(), reference.len());
+            let worst = reference.iter().zip(&engine).map(|((r, scale), (e, _))| (*e - *r).abs() / (UNIT_ROUNDOFF * scale)).fold(0.0, linalg::larger);
+            eprintln!("{name}: the engine's states within {worst:.2} u of their scale of the ones before");
+            assert!(worst <= 5.0, "{name}: {worst} u");
+            found.push((name, before));
         }
         // Read without the route, the price and the count (80b9782e's states: with the count 0x9468_5b73_6c10_bebe,
         // 0xb016_cf29_078f_a7be, 0x1a10_0fbd_7124_71ef and 0x0034_f20d_4180_ef5f there).
