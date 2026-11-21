@@ -175,7 +175,7 @@ impl Middle for Parts {
     }
     /// Ĝ_a(s) = the Hermitian part of Σ_p e^{iΩ_p s} G_p,a (what `force` contracts), Ω_p the part's beat on the path,
     /// and its slope, the same of iΩ_p e^{iΩ_p s} G_p,a.
-    fn gradient(&self, velocity: &[f64; 3], s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
+    fn gradient(&self, velocity: &[f64; 3], s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64 {
         let n = self.states();
         let sum = |turned: bool, a: usize| -> Vec<C64> {
             let mut m = vec![C64::ZERO; n * n];
@@ -191,7 +191,8 @@ impl Middle for Parts {
         for (a, m) in g.iter_mut().enumerate() {
             *m = sum(false, a);
         }
-        if let Some(slope) = slope {
+        // The slope at s itself (the parts' beats are exact): no chord, whatever the step.
+        if let Some((_, slope)) = slope {
             for (a, m) in slope.iter_mut().enumerate() {
                 *m = sum(true, a);
             }
@@ -2490,7 +2491,7 @@ impl<M: Middle> Middle for Probe<'_, M> {
     fn made(&self) -> f64 {
         self.middle.made()
     }
-    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64 {
+    fn gradient(&self, path: &M::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64 {
         self.middle.gradient(path, s, g, slope)
     }
     fn optical(&self, path: &M::Path) -> Option<step::Optical> {
@@ -2742,14 +2743,14 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
             &mut || {
                 // As a step asks them (`step::optical`): at the middle, with their slope along the path where it is not still.
                 pieces.iter().zip(&paths).for_each(|(p, path)| {
-                    p.through.generator.gradient(path, 0.0, &mut g, (!p.through.generator.still()).then_some(&mut slope));
+                    p.through.generator.gradient(path, 0.0, &mut g, (!p.through.generator.still()).then_some((half, &mut slope)));
                 });
                 g[0][0].re
             },
             &mut || {
                 let mut sum = 0.0;
                 for (p, (along, scratch)) in pieces.iter().zip(alongs.iter().zip(scratches.iter_mut())) {
-                    if let Some((epsilon, _, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), &mut scratch.noise).expect("a sector made") {
+                    if let Some((epsilon, _, _)) = super::optical(along, &scratch.picture, p.through.generator.still(), half, &mut scratch.noise).expect("a sector made") {
                         sum += epsilon + super::within(scratch.noise.sector.operators().unwrap(), &scratch.noise.gradient, &p.crossed.psi)[0][0];
                     }
                 }

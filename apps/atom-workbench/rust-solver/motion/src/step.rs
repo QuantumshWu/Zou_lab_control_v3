@@ -664,9 +664,10 @@ pub trait Middle {
     fn made(&self) -> f64;
 
     /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
-    /// `force` contracts; and where `slope` is asked, their derivative along the path at s, dĜ_a/ds. With the counted
-    /// complex multiply-adds that made them (`optical_work`: priced where they are made).
-    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>) -> f64;
+    /// `force` contracts; and where `slope` is asked -- with the half-width h of the step it is the slope of (a model
+    /// may take it as its chord through the step's ends, ±h) --, their derivative along the path at s, dĜ_a/ds. With
+    /// the counted complex multiply-adds that made them (`optical_work`: priced where they are made).
+    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64;
 
     /// The rows as shown (the model's readout, `Dynamics::readout`) of the cluster's state ψ at the time s from the middle
     /// along the path, on the step's own model there -- what the step propagates between its nodes --, read where the
@@ -723,16 +724,17 @@ struct Noise {
 }
 
 /// The optical sector's operators at a step's middle along its path (# The optical sector's noise), made in the
-/// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path (`Middle::gradient`);
+/// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path over the step of the
+/// half-width `h` (`Middle::gradient`);
 /// K of the picture's generator at the middle, to the first order along the path with the picture's slope through the
 /// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)², its ground states and its make's counted work with the
 /// gradient's as the model counted it (real multiply-adds; the stretch's `Price` with the forms: `optical_work`); None
 /// where the cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
-fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, usize, f64)>, Refused> {
+fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, h: f64, noise: &mut Noise) -> Result<Option<(f64, usize, f64)>, Refused> {
     let _p = crate::prof::scope(crate::prof::OPTICAL);
     let Some(shape) = along.middle.optical(&along.path) else { return Ok(None) };
     let Noise { sector, gradient, slope } = noise;
-    let matrices = along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
+    let matrices = along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some((h, &mut *slope)));
     sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope))).map_err(Refused::Optical)?;
     Ok(Some(((shape.beat / shape.decay).powi(2), shape.ground, sector.work + COMPLEX * matrices)))
 }
@@ -2659,7 +2661,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let _p = crate::prof::scope(crate::prof::MID_STEP_MIDDLE);
             let (scattered, made) = along.middle.scattering(&along.path, &middle[..n]);
             (march.scattered, scattering, march.progress.scattering) = (Some(scattered), made, made);
-            if let Some((epsilon, ground, made)) = optical(&along, picture, still, noise)? {
+            if let Some((epsilon, ground, made)) = optical(&along, picture, still, h, noise)? {
                 let k = noise.sector.operators().expect("a sector made");
                 march.optical = Some((within(k, &noise.gradient, &middle[..n]), epsilon));
                 sector = Some((ground, made));
