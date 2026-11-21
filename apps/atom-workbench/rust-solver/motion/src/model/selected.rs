@@ -56,6 +56,21 @@
 //! through M_c (`ModelAt::lift`), each fast index of the lift apart (its terms do not interfere over time), over their
 //! sum; a readout's contraction makes the lift alone.
 //!
+//! # Exact blocks
+//! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
+//! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis (`Selected::split`). They are
+//! read where `prune` reads the beats, the node at the trap's centre at rest, each by the rounding rule on its own matrix
+//! (the static beat with its frame's θ back on the diagonal): an element of at most ε times that matrix's largest entry
+//! is no element (a matrix of zeros has none), and two states are of one block where a chain of elements joins them.
+//! What two keys of one lab frequency cancel at the centre alone would read as no element there; the tests read the
+//! blocks at points off it as well (tests, `the_exact_blocks_hold_at_every_point`). The jumps are no part of it: a jump
+//! may land a state of one block in several,
+//! and the state is the direct sum of its blocks' parts -- the generator and every reading's operator (the force, the
+//! hazard, the norm) block-diagonal, the jump acting on the whole state as it is. Every element between two blocks is
+//! left out of the node (zero by construction), and the integrator decomposes Ĥ₀ block by block with no pair of two
+//! blocks a frequency of any form (spectral.rs `Picture::blocks`). An element of more than the rounding between two such
+//! states joins their blocks wherever the model holds it.
+//!
 //! # What is not here
 //! No landing transient, no decision, no representation per trajectory: the integrator's plain landing L_qψ/‖·‖ is the
 //! model's (D5), the trajectory holds nothing of the model.
@@ -119,6 +134,10 @@ pub struct Selected {
     id: usize,
     /// The beats the rounding rule kept and dropped (`prune`).
     kept: Vec<(usize, f64, f64, bool)>,
+    /// The exact blocks of P (module documentation, # Exact blocks): places in P, each sorted (its ground states first);
+    /// and each place's block.
+    blocks: Vec<Vec<usize>>,
+    block_of: Vec<usize>,
     beats: RwLock<Beats>,
 }
 
@@ -324,6 +343,11 @@ impl Selected {
     /// populations `reference`. The frame is the checkpoint's centre's at rest (floquet/frame.rs), the fold's sectors
     /// its (`Rs::new`). Err where P does not hold every ground state (a jump lands on any of them).
     pub fn new(scene: Scene, report: Selection, reference: [f64; GROUND]) -> Result<Selected, String> {
+        Selected::made(scene, report, reference, true)
+    }
+
+    /// The model, its states in their exact blocks or (`split` false: what the tests check the blocks against) one.
+    fn made(scene: Scene, report: Selection, reference: [f64; GROUND], split: bool) -> Result<Selected, String> {
         // The frame at rest with the beams' recoil shifts (module documentation, # One cluster, one frame).
         let recoil = scene.doppler([0.0; 3]);
         let centre = scene.components([0.0; 3], &recoil, 1.0);
@@ -419,6 +443,8 @@ impl Selected {
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             kept: Vec::new(),
+            blocks: vec![(0..n).collect()],
+            block_of: vec![0; n],
             beats: RwLock::new(beats),
             rs,
             report,
@@ -426,6 +452,9 @@ impl Selected {
         };
         run.layout(&spherical);
         run.prune();
+        if split {
+            run.split();
+        }
         Ok(run)
     }
 
@@ -826,6 +855,78 @@ impl Selected {
         node
     }
 
+    /// The exact blocks (module documentation, # Exact blocks): P's connected parts under the elements of the node's
+    /// every beat of the generator (the static one with θ back on its diagonal) and of its gradient along each lab
+    /// axis, at the trap's centre at rest (the node `prune` reads), each by the rounding rule on its own matrix -- an
+    /// element of at most ε times its matrix's largest entry is no element (a matrix of zeros has none); one that is not
+    /// a number joins. Where there are two blocks or more, every place between two of them is left out of the layout
+    /// (nothing is written there) and the decay's products between them are not made: zero by construction.
+    fn split(&mut self) {
+        let n = self.rs.keep.len();
+        let mut node = self.node([0.0; 3], [0.0; 3], false);
+        for (a, t) in self.theta.iter().enumerate() {
+            node.generator[0].1[(a, a)] += C64::real(*t);
+        }
+        let mut root: Vec<usize> = (0..n).collect();
+        fn find(root: &mut [usize], mut i: usize) -> usize {
+            while root[i] != i {
+                root[i] = root[root[i]];
+                i = root[i];
+            }
+            i
+        }
+        let join = |root: &mut Vec<usize>, a: usize, b: usize| {
+            let (x, y) = (find(root, a), find(root, b));
+            if x != y {
+                root[x.max(y)] = x.min(y);
+            }
+        };
+        let read = |root: &mut Vec<usize>, m: &Mat| {
+            let top = m.max_abs();
+            for a in 0..n {
+                for b in (0..n).filter(|&b| b != a) {
+                    if !(m[(a, b)].abs() <= f64::EPSILON * top) {
+                        join(root, a, b);
+                    }
+                }
+            }
+        };
+        for (_, m) in &node.generator {
+            read(&mut root, m);
+        }
+        for (_, g) in &node.gradient {
+            for m in g {
+                read(&mut root, m);
+            }
+        }
+        let mut parts: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for i in 0..n {
+            let r = find(&mut root, i);
+            parts.entry(r).or_default().push(i);
+        }
+        self.blocks = parts.into_values().collect();
+        for (b, states) in self.blocks.iter().enumerate() {
+            for &s in states {
+                self.block_of[s] = b;
+            }
+        }
+        if self.blocks.len() > 1 {
+            let block_of = &self.block_of;
+            for list in self.tables.h.iter_mut() {
+                for e in list.iter_mut().filter(|e| block_of[e.0 as usize / n] != block_of[e.0 as usize % n]) {
+                    *e = (e.0, u32::MAX, u32::MAX);
+                }
+            }
+            // The pooled nodes were made on the layout before.
+            POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
+        }
+    }
+
+    /// The exact blocks of P (module documentation, # Exact blocks): places in P.
+    pub fn blocks(&self) -> &[Vec<usize>] {
+        &self.blocks
+    }
+
     /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places).
     fn fill(&self, node: &mut Node, out: &Out, kicked: bool, jumps: &mut Vec<C64>, product: &mut Vec<C64>) {
         let n = self.rs.keep.len();
@@ -894,10 +995,12 @@ impl Selected {
             product.clear();
             product.resize(cl.len() * cr.len(), C64::ZERO);
             crate::linalg::adjoint_product(&jumps[sl..sl + GROUND * cl.len()], &jumps[sr..sr + GROUND * cr.len()], (cl.len(), GROUND, cr.len()), product);
+            // Between two exact blocks nothing (`split`).
+            let block_of = &self.block_of;
             {
                 let forward = &mut node.generator[d.forward].1.data;
                 for (i, &a) in cl.iter().enumerate() {
-                    for (j, &b) in cr.iter().enumerate() {
+                    for (j, &b) in cr.iter().enumerate().filter(|(_, &b)| block_of[b] == block_of[a]) {
                         forward[a * n + b] += half * product[i * cr.len() + j];
                     }
                 }
@@ -905,7 +1008,7 @@ impl Selected {
             if d.left != d.right {
                 let back = &mut node.generator[d.back].1.data;
                 for (i, &a) in cl.iter().enumerate() {
-                    for (j, &b) in cr.iter().enumerate() {
+                    for (j, &b) in cr.iter().enumerate().filter(|(_, &b)| block_of[b] == block_of[a]) {
                         back[b * n + a] += half * product[i * cr.len() + j].conj();
                     }
                 }
@@ -1184,6 +1287,10 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     fn still(&self) -> bool {
         false
+    }
+
+    fn blocks(&self) -> &[Vec<usize>] {
+        if self.model.blocks.len() > 1 { &self.model.blocks } else { &[] }
     }
 
     fn path(&self, kappa: [f64; 3], velocity: [f64; 3]) -> Path {

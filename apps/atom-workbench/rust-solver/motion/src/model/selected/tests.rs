@@ -556,6 +556,316 @@ fn a_step_s_time_on_the_selected_model() {
     }
 }
 
+/// A reference scene's request (refs/scenes, as step/tests.rs reads them).
+fn reference(name: &str) -> Request {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+    Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap()
+}
+
+/// The reference scenes the exact blocks are checked on beside the six: lin⊥lin with explicit excited states
+/// (R4_LIN_1, R4_LIN_2) and optical pumping on D1 with a D2 repump (R5_PUMP).
+const BLOCKED: [&str; 3] = ["R4_LIN_1", "R4_LIN_2", "R5_PUMP"];
+
+/// The exact blocks' scenes (V3E_SCENE one of them): the six scenes' own requests (`scenes`) and `BLOCKED`.
+fn blocked_scenes() -> Vec<(String, Request)> {
+    let only = std::env::var("V3E_SCENE").ok();
+    let mut cases: Vec<(String, Request)> = if only.as_deref().is_some_and(|o| BLOCKED.contains(&o)) {
+        Vec::new()
+    } else {
+        scenes().into_iter().map(|(name, request, _)| (name.to_string(), request)).collect()
+    };
+    cases.extend(BLOCKED.into_iter().filter(|n| only.as_deref().is_none_or(|o| o == *n)).map(|n| (n.to_string(), reference(n))));
+    cases
+}
+
+/// A request's run as the solve makes it (`solve::run_of`, its reference state the chief's) in its exact blocks, and
+/// (`split` false) the same model with its states one block.
+fn made(request: &Request, split: bool) -> Selected {
+    let reference = crate::solve::alone(crate::solve::chief(request));
+    let scene = crate::scene::Scene::new(request).unwrap();
+    let selection = crate::select::choose(&scene).unwrap();
+    Selected::made(scene, selection, reference, split).unwrap()
+}
+
+/// A run's blocks said: each its ground and other states and its states' labels.
+fn said(request: &Request, run: &Selected) -> String {
+    run.blocks()
+        .iter()
+        .map(|b| {
+            let ground = b.iter().filter(|&&a| run.rs.keep[a] < GROUND).count();
+            format!("{}+{} [{}]", ground, b.len() - ground, b.iter().map(|&a| request.states[run.rs.keep[a]].as_str()).collect::<Vec<_>>().join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The exact blocks hold at every point (model/selected.rs, # Exact blocks): the scenes' runs (`blocked_scenes`), their
+/// blocks read at the trap's centre at rest, against the same model with its states one block, at the centre at rest, at
+/// a moving point off it (`POINTS`) and at a point farther out at another speed: the model's node with the photon forms
+/// there, its every beat's H_eff and gradient, has between two blocks no element beyond the rounding of its matrix (said
+/// in units of ε times the matrix's largest entry), and the blocked node is the whole one's with those places zero, bit
+/// for bit. The blocks said per scene: R4 (R4_LIN_4) 9 + 11, tilt0 11 + 8 (the decision history's acceptance).
+#[test]
+fn the_exact_blocks_hold_at_every_point() {
+    let points = [POINTS[0], POINTS[1], ([1.3, -0.7, 2.1], [-9.0, 4.0, 6.0])];
+    for (name, request) in blocked_scenes() {
+        let (run, whole) = (made(&request, true), made(&request, false));
+        assert_eq!(run.rs.keep, whole.rs.keep, "{name}: one P");
+        let n = run.rs.keep.len();
+        eprintln!("{name}: P {n}, {} blocks: {}", run.blocks().len(), said(&request, &run));
+        let block_of = &run.block_of;
+        let mut worst = 0.0_f64;
+        for (r, kappa) in points {
+            let (a, b) = (run.node(r, kappa, true), whole.node(r, kappa, true));
+            let matrices = |node: &Node| node.generator.iter().map(|(_, m)| m.clone()).chain(node.gradient.iter().flat_map(|(_, g)| g.iter().cloned())).collect::<Vec<Mat>>();
+            let (ma, mb) = (matrices(&a), matrices(&b));
+            assert_eq!(ma.len(), mb.len(), "{name}: one layout of beats");
+            for (x, y) in ma.iter().zip(&mb) {
+                let top = y.max_abs();
+                for i in 0..n {
+                    for j in 0..n {
+                        if block_of[i] == block_of[j] {
+                            assert!(x[(i, j)] == y[(i, j)], "{name} at {r:?}, {kappa:?}: ({i}, {j}) in a block, {:?} against the whole's {:?}", x[(i, j)], y[(i, j)]);
+                        } else {
+                            assert!(x[(i, j)] == C64::ZERO, "{name}: ({i}, {j}) between two blocks written");
+                            if y[(i, j)] != C64::ZERO {
+                                worst = crate::linalg::larger(worst, y[(i, j)].abs() / (f64::EPSILON * top));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("{name}: the whole model's elements between two blocks at most {worst:.3e} ε of their matrix's largest");
+        assert!(worst <= 1.0, "{name}: an element between two blocks of {worst} ε of its matrix's largest");
+        if name == "R4" {
+            assert_eq!(run.blocks().iter().map(Vec::len).collect::<Vec<_>>(), [9, 11], "R4's blocks");
+        }
+        if name == "tilt0" {
+            assert_eq!(run.blocks().iter().map(Vec::len).collect::<Vec<_>>(), [11, 8], "tilt0's blocks");
+        }
+    }
+}
+
+/// Atoms through the same steps on a model (`through`'s): from the trap's centre region in a spread state (`spread`, a
+/// phase pattern per atom) at the thermal speed, a random threshold each.
+fn starts(run: &Selected, temperature_uk: f64, atoms: u64) -> Vec<(V3, V3, Vec<C64>, f64)> {
+    let speed = (crate::units::KT_PER_UK * temperature_uk / run.hbar_over_mass()).sqrt();
+    let n = run.cluster(0).states.len();
+    (0..atoms)
+        .map(|i| {
+            let mut stream = crate::random::Stream::new(97, crate::random::Purpose::Initial, i, 0);
+            let r: V3 = std::array::from_fn(|_| 0.2 * stream.normal());
+            let kappa: V3 = std::array::from_fn(|_| speed * stream.normal());
+            let psi: Vec<C64> = spread(n).iter().enumerate().map(|(a, z)| *z * C64::cis(0.3 * (i as f64) * a as f64)).collect();
+            (r, kappa, psi, stream.open_uniform())
+        })
+        .collect()
+}
+
+/// The atoms of `starts` on a model, `count` steps of τ each with one noise: each atom's end and the steps' wall time
+/// (s, one thread).
+fn through(run: &Selected, starts: &[(V3, V3, Vec<C64>, f64)], tau: f64, count: usize) -> (Vec<Trajectory>, f64) {
+    let clock = std::time::Instant::now();
+    let ends = starts
+        .iter()
+        .enumerate()
+        .map(|(i, (r, kappa, psi, threshold))| {
+            let mut t = Trajectory::new(run, run.cluster(0).states[0], *r, *kappa, 97, i as u64);
+            t.psi = psi.iter().copied().collect();
+            t.forms = run.forms(t.cluster, &t.point(), &t.psi);
+            t.threshold = *threshold;
+            let (mut scratch, mut noise) = (Scratch::default(), crate::random::Stream::brownian(97, i as u64, 0, 0));
+            for _ in 0..count {
+                let brownian = Brownian::over(tau, &[noise.normals(), noise.normals()]);
+                t = Midway::new(run, &t, tau).and_then(|m| m.attempt(&t, &brownian, &[], &mut scratch, &Anywhere)).expect("a step").end;
+            }
+            t
+        })
+        .collect();
+    (ends, clock.elapsed().as_secs_f64())
+}
+
+/// How far two sets of ends are apart (`through`'s): the largest |Δψ_a| (the states normalized), |Δr| over the largest |r| and |Δκ|
+/// over the largest |κ|, each in units of ε; and whether every atom's jumps are the same.
+fn ends_apart(a: &[Trajectory], b: &[Trajectory]) -> ([f64; 3], bool) {
+    let mut d = [0.0_f64; 3];
+    let (rs, ks) = a.iter().fold((0.0_f64, 0.0_f64), |(r, k), t| (crate::linalg::larger(r, crate::linalg::norm3(t.r)), crate::linalg::larger(k, crate::linalg::norm3(t.kappa))));
+    for (x, y) in a.iter().zip(b) {
+        d[0] = crate::linalg::larger(d[0], x.psi.iter().zip(y.psi.iter()).map(|(p, q)| (*p - *q).abs()).fold(0.0, crate::linalg::larger));
+        d[1] = crate::linalg::larger(d[1], (0..3).map(|i| (x.r[i] - y.r[i]).abs()).fold(0.0, crate::linalg::larger) / rs);
+        d[2] = crate::linalg::larger(d[2], (0..3).map(|i| (x.kappa[i] - y.kappa[i]).abs()).fold(0.0, crate::linalg::larger) / ks);
+    }
+    (d.map(|x| x / f64::EPSILON), a.iter().zip(b).all(|(x, y)| x.jumps == y.jumps))
+}
+
+/// The atoms of `starts` through `count` steps of τ each with one noise on the run, each step taken from the same state
+/// on `whole` (the same model one block) beside it, and the trajectories on `whole` throughout: per kind of step --
+/// without a jump on either, with one -- the most two ends of one step are apart (`ends_apart`'s units) and the steps'
+/// count, and the most the step on `whole` from the state turned by a phase e^{i}, its end turned back, is apart from
+/// the one from the state as it is (the step's own rounding of ψ: the same numbers in another order); the most a step's
+/// ψ apart is in units of τ‖Ĥ − tr Ĥ/n‖ (Frobenius, the generator at the step's start): an eigenvalue's rounding of
+/// ε‖Ĥ‖ is a phase of ετ‖Ĥ‖, the floor of any decomposition's propagation; each model's nodes and wall time over the
+/// steps from the same states (s, one thread); and both trajectories' ends.
+struct Side {
+    step: [([f64; 3], usize); 2],
+    phase: [[f64; 3]; 2],
+    floor: [f64; 2],
+    nodes: [usize; 2],
+    time: [f64; 2],
+    ends: [Vec<Trajectory>; 2],
+}
+
+fn side_by_side(run: &Selected, whole: &Selected, starts: &[(V3, V3, Vec<C64>, f64)], tau: f64, count: usize) -> Side {
+    let mut side = Side { step: [([0.0; 3], 0); 2], phase: [[0.0; 3]; 2], floor: [0.0; 2], nodes: [0; 2], time: [0.0; 2], ends: [Vec::new(), Vec::new()] };
+    for (i, (r, kappa, psi, threshold)) in starts.iter().enumerate() {
+        let start = |model: &Selected| {
+            let mut t = Trajectory::new(model, model.cluster(0).states[0], *r, *kappa, 97, i as u64);
+            t.psi = psi.iter().copied().collect();
+            t.forms = model.forms(t.cluster, &t.point(), &t.psi);
+            t.threshold = *threshold;
+            t
+        };
+        let (mut t, mut u) = (start(run), start(whole));
+        let mut scratch: [Scratch; 4] = Default::default();
+        let mut noise = crate::random::Stream::brownian(97, i as u64, 0, 0);
+        for _ in 0..count {
+            let brownian = Brownian::over(tau, &[noise.normals(), noise.normals()]);
+            let mut taken = Vec::new();
+            for (k, model) in [run, whole].into_iter().enumerate() {
+                let clock = std::time::Instant::now();
+                let step = Midway::new(model, &t, tau).and_then(|m| m.attempt(&t, &brownian, &[], &mut scratch[k], &Anywhere)).expect("a step");
+                side.time[k] += clock.elapsed().as_secs_f64();
+                side.nodes[k] += step.prices.iter().map(|(_, p)| p.nodes).sum::<usize>();
+                taken.push(step.end);
+            }
+            let (d, _) = ends_apart(&taken[..1], &taken[1..]);
+            let kind = usize::from(taken.iter().any(|e| e.jumps != t.jumps));
+            side.step[kind].0 = std::array::from_fn(|a| crate::linalg::larger(side.step[kind].0[a], d[a]));
+            side.step[kind].1 += 1;
+            let n = t.psi.len();
+            let middle = run.middle(t.cluster, t.r, t.time);
+            let path = middle.path(t.kappa, t.kappa.map(|k| run.hbar_over_mass() * k));
+            let mut h = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut h);
+            let mean = (0..n).map(|x| h[(x, x)]).sum::<C64>() / n as f64;
+            let size = (0..n * n).map(|i| (h.data[i] - if i / n == i % n { mean } else { C64::ZERO }).norm_sqr()).sum::<f64>().sqrt();
+            side.floor[kind] = crate::linalg::larger(side.floor[kind], d[0] / (tau * size));
+            let mut turned = t.clone();
+            turned.psi.iter_mut().for_each(|z| *z = *z * C64::cis(1.0));
+            let mut back = Midway::new(whole, &turned, tau).and_then(|m| m.attempt(&turned, &brownian, &[], &mut scratch[3], &Anywhere)).expect("a step").end;
+            back.psi.iter_mut().for_each(|z| *z = *z * C64::cis(-1.0));
+            let (p, _) = ends_apart(&taken[1..], std::slice::from_ref(&back));
+            side.phase[kind] = std::array::from_fn(|a| crate::linalg::larger(side.phase[kind][a], p[a]));
+            u = Midway::new(whole, &u, tau).and_then(|m| m.attempt(&u, &brownian, &[], &mut scratch[2], &Anywhere)).expect("a step").end;
+            t = taken.swap_remove(0);
+        }
+        side.ends[0].push(t);
+        side.ends[1].push(u);
+    }
+    side
+}
+
+/// The blocks change no step beyond the rounding, and what they save (R1-CLEAN item 3's acceptance; a measurement too):
+/// R4, tilt0 and R5_PUMP (V3E_SCENE one of them), V3E_ATOMS atoms (4) from `starts`, V3E_STEPS steps (12) of τ =
+/// V3E_TAU µs (0.05) with one noise, each step from the same state on the run and on the same model one block
+/// (`side_by_side`): the two ends of a step without a jump apart by the rounding -- said in units of ε, beside the step's
+/// own rounding of ψ (the phase-turned step's), and ψ at most n ετ‖Ĥ‖, the eigenvalues' rounding of an n-term sum each
+/// --, those of a step with one said beside them (a jump's time is the root of the survival, which moves it by the
+/// rounding over the hazard); the two trajectories' ends and jumps, each on its own model throughout; and a step's nodes
+/// and wall time on each (one thread).
+#[test]
+#[ignore]
+fn the_blocks_change_a_step_by_rounding() {
+    let (atoms, count, tau) = (env("V3E_ATOMS", 4.0) as u64, env("V3E_STEPS", 12.0) as usize, env("V3E_TAU", 0.05));
+    for (name, request) in blocked_scenes().into_iter().filter(|(n, _)| ["R4", "tilt0", "R5_PUMP"].contains(&n.as_str())) {
+        let (run, whole) = (made(&request, true), made(&request, false));
+        let side = side_by_side(&run, &whole, &starts(&run, request.temperature_uk, atoms), tau, count);
+        let (d, jumps) = ends_apart(&side.ends[0], &side.ends[1]);
+        let steps = (atoms as usize * count) as f64;
+        let [(free, nf), (jumped, nj)] = side.step;
+        let [own, own_jumped] = side.phase;
+        eprintln!(
+            "{name}: blocks {:?}; {atoms} atoms × {count} steps of τ {tau} µs; a step's two ends apart without a jump ({nf}) |Δψ| {:.1} ε = {:.3} ετ‖Ĥ‖, |Δr| {:.1} ε, |Δκ| {:.1} ε (the step's own rounding {:.1}, {:.1}, {:.1} ε), with one ({nj}) {:.1}, {:.1}, {:.1} ε (its own {:.1}, {:.1}, {:.1} ε); the trajectories' ends ({} and {} jumps) {:.1}, {:.1}, {:.1} ε; a step {:.0} nodes and {:.3} ms in blocks, {:.0} nodes and {:.3} ms one block ({:.2}×)",
+            run.blocks().iter().map(Vec::len).collect::<Vec<_>>(),
+            free[0],
+            side.floor[0],
+            free[1],
+            free[2],
+            own[0],
+            own[1],
+            own[2],
+            jumped[0],
+            jumped[1],
+            jumped[2],
+            own_jumped[0],
+            own_jumped[1],
+            own_jumped[2],
+            side.ends[0].iter().map(|t| t.jumps).sum::<u32>(),
+            side.ends[1].iter().map(|t| t.jumps).sum::<u32>(),
+            d[0],
+            d[1],
+            d[2],
+            side.nodes[0] as f64 / steps,
+            1e3 * side.time[0] / steps,
+            side.nodes[1] as f64 / steps,
+            1e3 * side.time[1] / steps,
+            side.time[1] / side.time[0]
+        );
+        assert!(jumps, "{name}: the trajectories' jumps differ");
+        let n = run.rs.keep.len() as f64;
+        assert!(side.floor[0] <= n, "{name}: a step's two ends apart by {} ετ‖Ĥ‖ ({free:?} ε)", side.floor[0]);
+    }
+}
+
+/// An element between two blocks of more than the rounding joins them, and the readings move with it, not at it
+/// (R1-CLEAN item 3): R4_LIN_1's request with its first beam's coupling between a ground state of F = 2 in one block and
+/// an explicit excited state of F′ = 3 in the other -- the cooling transition, near resonance -- set to δ (H0 is
+/// diagonal in the model's basis: a coupling is a beam's), δ of
+/// 10⁻², 10², 10⁴ and 10⁸ times ε times the coupling's largest entry -- the first below the rounding (of the element's
+/// beat in the node and of its first-order amplitude at the fold's input alike), the others above it: below the rounding
+/// the blocks stand, above it they are one; and `starts`' atoms through V3E_STEPS steps (12), held from any jump (the
+/// threshold the least number: a jump's time would move by the rounding over the hazard), apart from δ = 0's by the
+/// rounding below it, by an amount that grows with δ above it -- no step at the joining.
+#[test]
+#[ignore]
+fn a_cross_block_element_joins_the_blocks() {
+    let (atoms, count, tau) = (env("V3E_ATOMS", 4.0) as u64, env("V3E_STEPS", 12.0) as usize, env("V3E_TAU", 0.05));
+    let request = reference("R4_LIN_1");
+    let run = made(&request, true);
+    assert!(run.blocks().len() > 1, "R4_LIN_1 in blocks");
+    let keep = &run.rs.keep;
+    let (g, e) = run.blocks()[0]
+        .iter()
+        .flat_map(|&g| run.blocks()[1].iter().map(move |&e| (g, e)))
+        .find(|&(g, e)| request.states[keep[g]].starts_with("ground-2-") && request.states[keep[e]].starts_with("D2-3-"))
+        .expect("a ground state of F = 2 in one block and an excited state of F′ = 3 in the other");
+    let top = request.beams[0].coupling.max_abs();
+    eprintln!("R4_LIN_1: blocks {}; δ between {} and {} on {}; the coupling's largest {top:.4e}", said(&request, &run), request.states[keep[g]], request.states[keep[e]], request.beams[0].id);
+    let from: Vec<_> = starts(&run, request.temperature_uk, atoms).into_iter().map(|(r, kappa, psi, _)| (r, kappa, psi, f64::MIN_POSITIVE)).collect();
+    let (base, _) = through(&run, &from, tau, count);
+    let mut moved = Vec::new();
+    for factor in [1e-2, 1e2, 1e4, 1e8] {
+        let delta = factor * f64::EPSILON * top;
+        let mut perturbed = request.clone();
+        perturbed.beams[0].coupling[(keep[e], keep[g])] += C64::real(delta);
+        let other = made(&perturbed, true);
+        assert_eq!(&other.rs.keep, keep, "one P");
+        let (ends, _) = through(&other, &from, tau, count);
+        let (d, jumps) = ends_apart(&ends, &base);
+        eprintln!(
+            "δ {factor:e} ε·max ({delta:.3e}): blocks {:?}; apart from δ = 0 |Δψ| {:.3e} ε, |Δr| {:.3e} ε, |Δκ| {:.3e} ε, the same jumps {jumps}",
+            other.blocks().iter().map(Vec::len).collect::<Vec<_>>(),
+            d[0],
+            d[1],
+            d[2]
+        );
+        assert_eq!(other.blocks().len() > 1, factor < 1.0, "δ {factor} ε·max: the blocks");
+        moved.push(d[0]);
+    }
+    assert!(moved.windows(2).all(|w| w[1] >= w[0]), "the readings move with δ: {moved:?}");
+}
+
 #[path = "golden.rs"]
 mod golden;
 

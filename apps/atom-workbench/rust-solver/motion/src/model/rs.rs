@@ -946,7 +946,6 @@ struct Unit {
 fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
     let h0 = &scene.request.hamiltonian;
     let g = Mat::from_fn(STATES, STATES, |i, j| h0[(i, j)] - gamma[(i, j)] * C64::new(0.0, 0.5));
-    let energy: Vec<f64> = (0..STATES).map(|a| g[(a, a)].re).collect();
     // The resolvent's blocks: the couplings of H0 − (i/2)Γ, Γ by the rounding rule (`Tweezer::new`), H0 diagonal.
     let pattern: Vec<(usize, usize)> = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| i != j && g[(i, j)] != C64::ZERO).collect();
     let blocks = fold::connected_parts(STATES, &pattern);

@@ -603,6 +603,13 @@ pub trait Middle {
     /// path Ĥ is still along.
     fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>, _keys: &mut Vec<Vec<i64>>) {}
 
+    /// The model's exact blocks of the cluster's states (model/selected.rs, # Exact blocks): a partition on which every
+    /// matrix the middle gives -- the generator at every time, its gradient, every tone's envelopes -- is block-diagonal
+    /// (the jumps need not be). None: the states are one block.
+    fn blocks(&self) -> &[Vec<usize>] {
+        &[]
+    }
+
     /// The m-th candidate's members' envelopes (`beats`) at the time s from the middle along the path (the step's nodes:
     /// spectral.rs `Picture::separate`) into `plus` (G_m⁺, at e^{iν_m s}) and `minus` (G_m⁻, at e^{−iν_m s}; n × n each,
     /// rad/µs): its part of `generator`'s at the time s is e^{iν_m s} G_m⁺(s) + e^{−iν_m s} G_m⁻(s).
@@ -1735,6 +1742,10 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     scratch.stage = Stage::None;
     let picture = &mut scratch.picture;
     picture.fit(n);
+    if picture.blocks.as_slice() != along.middle.blocks() {
+        picture.blocks.clear();
+        picture.blocks.extend_from_slice(along.middle.blocks());
+    }
     let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
     along.middle.generator(&along.path, 0.0, &mut picture.base);
     if !still {
