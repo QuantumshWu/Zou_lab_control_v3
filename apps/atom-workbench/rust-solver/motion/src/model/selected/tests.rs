@@ -601,6 +601,43 @@ fn said(request: &Request, run: &Selected) -> String {
         .join("; ")
 }
 
+/// The structure's rounding scales are its entries' (model/selected.rs, # The structure's rounding): on the scenes'
+/// runs (`blocked_scenes`), every entry of the structure's node -- each beat of the generator off the static beat's
+/// diagonal (θ is put back there after), each beat of the gradient -- is within (1 + γ_K) of its scale S, the sum of
+/// its terms' moduli, and a nonzero entry has terms; the summation's rounding zeros (|x| ≤ γ_K S above ε·max) are said
+/// per scene with the largest of them.
+#[test]
+fn the_structure_s_scales_bound_its_entries() {
+    for (name, request) in blocked_scenes() {
+        let run = made(&request, true);
+        let n = run.rs.keep.len();
+        let (node, scales) = run.structure();
+        let (mut zeros, mut largest) = (0usize, 0.0_f64);
+        let mut check = |m: &Mat, (scale, terms): &(Vec<f64>, Vec<usize>), diagonal: bool, what: &str| {
+            let top = m.max_abs();
+            for x in (0..n * n).filter(|&x| !(diagonal && x / n == x % n)) {
+                let z = m.data[x].abs();
+                let bound = (1.0 + crate::units::rounding(terms[x])) * scale[x];
+                assert!(z <= bound, "{name} {what} ({}, {}): |x| {z:e} above its scale {:e} (K {})", x / n, x % n, scale[x], terms[x]);
+                assert!(z == 0.0 || terms[x] > 0, "{name} {what} ({}, {}): |x| {z:e} of no terms", x / n, x % n);
+                if z != 0.0 && !(z < f64::EPSILON * top) && rounding_zero(m.data[x], scale[x], terms[x], top) {
+                    zeros += 1;
+                    largest = crate::linalg::larger(largest, z / (f64::EPSILON * top));
+                }
+            }
+        };
+        for (k, ((beat, m), s)) in node.generator.iter().zip(&scales.generator).enumerate() {
+            check(m, s, k == 0, &format!("beat {beat}"));
+        }
+        for ((beat, g), s) in node.gradient.iter().zip(&scales.gradient) {
+            for (a, (m, s)) in g.iter().zip(s).enumerate() {
+                check(m, s, false, &format!("gradient beat {beat} axis {a}"));
+            }
+        }
+        eprintln!("{name}: {zeros} entries the summation's rounding alone reads as zeros, the largest {largest:.3e} ε·max");
+    }
+}
+
 /// The exact blocks hold at every point (model/selected.rs, # Exact blocks): the scenes' runs (`blocked_scenes`), their
 /// blocks read at the trap's centre at rest, against the same model with its states one block, at the centre at rest, at
 /// a moving point off it (`POINTS`) and at a point farther out at another speed: the model's node with the photon forms
