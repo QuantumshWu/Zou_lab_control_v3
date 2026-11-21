@@ -15,13 +15,21 @@
 //! gap between the two sides' diagonals is wider than both sides' spreads (their diagonals' range and twice their
 //! largest off-diagonal row sum) and than twice the coupling across: the iteration's ratio is then below one half. Which
 //! split is taken chooses only which exact transform is used.
+//!
+//! # Its basis from the leaves'
+//! With V_J, V_K the two sides' bases (their leaves' eigenvectors, each side decoupled in turn), the block's is
+//! V = T diag(V_J, V_K) and V⁻¹ = diag(V_J⁻¹, V_K⁻¹) T⁻¹, made by blocks without T:
+//!   V = [[V_J, Y V_K], [X V_J, V_K + X (Y V_K)]],  V⁻¹ = [[V_J⁻¹ + (V_J⁻¹Y) X, −V_J⁻¹Y], [−V_K⁻¹X, V_K⁻¹]],
+//! six products of 3|J||K|(|J| + |K|) multiply-adds in all; a leaf of one state is its own value, V = V⁻¹ = 1. Every
+//! product is the product kernel's (`linalg::fused_product`) on the spectrum's own buffers, kept by depth of the
+//! decoupling (each depth's made for the largest block it can hold where it is first reached): a decomposition
+//! allocates nothing once its depths and leaves have been met.
 
-use crate::linalg::larger;
-use crate::linalg::{self, C64, Mat};
+use crate::linalg::{self, larger, smaller, C64, Mat};
 use crate::units::UNIT_ROUNDOFF;
 
 /// The spectrum of a block (module documentation): V, V⁻¹, and per eigen index its leaf's centre c and μ′ (the
-/// eigenvalue c + μ′), the leaves' sizes, and the counted complex multiply-adds.
+/// eigenvalue c + μ′), the leaves' sizes, and the counted complex multiply-adds; its buffers kept for the next.
 #[derive(Clone, Debug, Default)]
 pub struct Spectrum {
     pub vectors: Mat,
@@ -30,241 +38,325 @@ pub struct Spectrum {
     pub values: Vec<C64>,
     pub leaves: Vec<usize>,
     pub work: f64,
-    /// The leaves' decompositions, kept (`Eigen` keeps its memory).
+    /// The leaves' decompositions, by leaf (`Eigen` keeps its memory), and the decoupling's buffers by depth.
     eigens: Vec<linalg::Eigen>,
+    levels: Vec<Level>,
+    /// `split`'s: the diagonal and its order.
+    diagonal: Vec<f64>,
+    order: Vec<usize>,
 }
 
-/// The widest gap of G's diagonal (real parts) at which a split pays (module documentation): the two sides, each sorted.
-pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
-    let n = g.rows;
-    if n < 2 {
-        return None;
+/// One depth of the decoupling (`decouple`): its split, the four blocks, X and Y and their iteration's, the two sides'
+/// generators B₁₁, B₂₂ and bases, the products', and a leaf's shifted block.
+#[derive(Clone, Debug, Default)]
+struct Level {
+    made: bool,
+    left: Vec<usize>,
+    right: Vec<usize>,
+    a11: Vec<C64>,
+    a12: Vec<C64>,
+    a21: Vec<C64>,
+    a22: Vec<C64>,
+    x: Vec<C64>,
+    y: Vec<C64>,
+    c: Vec<C64>,
+    rhs: Vec<C64>,
+    delta: Vec<C64>,
+    near: Vec<C64>,
+    far: Vec<C64>,
+    t: Vec<C64>,
+    b11: Vec<C64>,
+    b22: Vec<C64>,
+    vj: Vec<C64>,
+    vji: Vec<C64>,
+    vk: Vec<C64>,
+    vki: Vec<C64>,
+    u: Vec<C64>,
+    w: Vec<C64>,
+    shifted: Mat,
+}
+
+impl Level {
+    /// The depth's buffers for blocks up to m states, every one at its largest at once.
+    fn make(&mut self, m: usize) {
+        if self.made {
+            return;
+        }
+        self.made = true;
+        self.left.reserve(m);
+        self.right.reserve(m);
+        for v in [
+            &mut self.a11, &mut self.a12, &mut self.a21, &mut self.a22, &mut self.x, &mut self.y, &mut self.c, &mut self.rhs, &mut self.delta, &mut self.near, &mut self.far, &mut self.t,
+            &mut self.b11, &mut self.b22, &mut self.vj, &mut self.vji, &mut self.vk, &mut self.vki, &mut self.u, &mut self.w, &mut self.shifted.data,
+        ] {
+            v.reserve(m * m);
+        }
     }
-    let d: Vec<f64> = (0..n).map(|i| g[(i, i)].re).collect();
-    let mut order: Vec<usize> = (0..n).collect();
+}
+
+/// `v` as `len` zeros.
+fn zeroed(v: &mut Vec<C64>, len: usize) {
+    v.clear();
+    v.resize(len, C64::ZERO);
+}
+
+/// The widest gap of G's diagonal (real parts) at which a split pays (module documentation): the two sides, each sorted,
+/// into `left` and `right`; false where none pays. G is m × m, row-major; `d` and `order` its buffers.
+fn split_into(g: &[C64], m: usize, d: &mut Vec<f64>, order: &mut Vec<usize>, left: &mut Vec<usize>, right: &mut Vec<usize>) -> bool {
+    if m < 2 {
+        return false;
+    }
+    d.clear();
+    d.extend((0..m).map(|i| g[i * m + i].re));
+    order.clear();
+    order.extend(0..m);
     order.sort_by(|&a, &b| d[a].total_cmp(&d[b]));
-    let row_sum = |i: usize, side: &[usize]| -> f64 { side.iter().filter(|&&j| j != i).map(|&j| g[(i, j)].abs()).sum() };
+    let row_sum = |i: usize, side: &[usize]| -> f64 { side.iter().filter(|&&j| j != i).map(|&j| g[i * m + j].abs()).sum() };
     let spread = |side: &[usize]| -> f64 {
-        let (lo, hi) = side.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| (crate::linalg::smaller(lo, d[i]), larger(hi, d[i])));
+        let (lo, hi) = side.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| (smaller(lo, d[i]), larger(hi, d[i])));
         let off = if side.len() > 1 { side.iter().map(|&i| row_sum(i, side)).fold(0.0, larger) } else { 0.0 };
         hi - lo + 2.0 * off
     };
     let mut best: Option<(f64, usize)> = None;
-    for c in 1..n {
-        let (left, right) = order.split_at(c);
-        let gap = d[right[0]] - d[left[c - 1]];
+    for c in 1..m {
+        let (l, r) = order.split_at(c);
+        let gap = d[r[0]] - d[l[c - 1]];
         if best.is_some_and(|(b, _)| gap <= b) {
             continue;
         }
-        let cross = left.iter().flat_map(|&i| right.iter().map(move |&j| larger(g[(i, j)].abs(), g[(j, i)].abs()))).fold(0.0, larger);
-        if gap > 2.0 * cross && gap > spread(left) + spread(right) {
+        let cross = l.iter().flat_map(|&i| r.iter().map(move |&j| larger(g[i * m + j].abs(), g[j * m + i].abs()))).fold(0.0, larger);
+        if gap > 2.0 * cross && gap > spread(l) + spread(r) {
             best = Some((gap, c));
         }
     }
-    best.map(|(_, c)| {
-        let (mut left, mut right) = (order[..c].to_vec(), order[c..].to_vec());
-        left.sort_unstable();
-        right.sort_unstable();
-        (left, right)
-    })
+    let Some((_, c)) = best else { return false };
+    left.clear();
+    left.extend_from_slice(&order[..c]);
+    right.clear();
+    right.extend_from_slice(&order[c..]);
+    left.sort_unstable();
+    right.sort_unstable();
+    true
 }
 
-fn sub(a: &Mat, b: &Mat) -> Mat {
-    Mat { rows: a.rows, cols: a.cols, data: a.data.iter().zip(&b.data).map(|(x, y)| *x - *y).collect() }
+/// The widest gap of G's diagonal at which a split pays (`split_into`): the two sides, each sorted.
+pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (mut d, mut order, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    split_into(&g.data, g.rows, &mut d, &mut order, &mut left, &mut right).then_some((left, right))
 }
 
-fn off_diagonal(a: &Mat) -> Mat {
-    Mat::from_fn(a.rows, a.cols, |i, j| if i == j { C64::ZERO } else { a[(i, j)] })
+/// An iteration's buffers (`iterate`): the denominators, −N_L, N_R, the right-hand side, a product's.
+struct Sweep<'a> {
+    delta: &'a mut Vec<C64>,
+    near: &'a mut Vec<C64>,
+    far: &'a mut Vec<C64>,
+    rhs: &'a mut Vec<C64>,
+    t: &'a mut Vec<C64>,
 }
 
-/// The iteration about the diagonals (module documentation): X ← (c + f(X) − N_L X + X N_R) ⊘ (d_Lᵢ − d_Rⱼ), X (|L| × |R|)
-/// of the left block L and the right block R, `f` the equation's own nonlinear part (the Riccati's XA₁₂X, none for a
-/// Sylvester equation), until the sweep's change is within X's rounding or no longer shrinks. Returns X and the counted
-/// complex multiply-adds.
-fn iterate(left: &Mat, right: &Mat, c: &Mat, f: impl Fn(&Mat) -> Option<Mat>) -> (Mat, f64) {
-    let (m, k) = (left.rows, right.rows);
-    let (nl, nr) = (off_diagonal(left), off_diagonal(right));
-    let delta: Vec<C64> = (0..m).flat_map(|i| (0..k).map(move |j| (i, j))).map(|(i, j)| left[(i, i)] - right[(j, j)]).collect();
-    let mut x = Mat { rows: m, cols: k, data: c.data.iter().zip(&delta).map(|(a, b)| *a / *b).collect() };
+/// The iteration about the diagonals (module documentation): X ← (C + f(X) − N_L X + X N_R) ⊘ (d_Lᵢ − d_Rⱼ) of X
+/// (p × q, into `x`) of the left block L (p × p) and the right R (q × q), f(X) = X A X with `quadratic` A (q × p; the
+/// Riccati's A₁₂, none for a Sylvester equation), until the sweep's change is within X's rounding or no longer shrinks.
+/// Returns the counted complex multiply-adds.
+fn iterate(left: &[C64], right: &[C64], c: &[C64], (p, q): (usize, usize), quadratic: Option<&[C64]>, x: &mut Vec<C64>, sweep: Sweep) -> f64 {
+    let Sweep { delta, near, far, rhs, t } = sweep;
+    near.clear();
+    near.extend(left.iter().enumerate().map(|(at, z)| if at / p == at % p { C64::ZERO } else { -*z }));
+    far.clear();
+    far.extend(right.iter().enumerate().map(|(at, z)| if at / q == at % q { C64::ZERO } else { *z }));
+    delta.clear();
+    delta.extend((0..p * q).map(|at| left[(at / q) * (p + 1)] - right[(at % q) * (q + 1)]));
+    x.clear();
+    x.extend(c.iter().zip(delta.iter()).map(|(a, b)| *a / *b));
     let (mut last, mut work) = (f64::INFINITY, 0.0);
     loop {
-        let mut rhs = c.clone();
-        if let Some(extra) = f(&x) {
-            rhs.add_scaled(C64::ONE, &extra);
+        rhs.clear();
+        rhs.extend_from_slice(c);
+        if let Some(a) = quadratic {
+            zeroed(t, p * p);
+            linalg::fused_product(x, a, (p, q, p), t);
+            linalg::fused_product_onto(t, x, (p, p, q), rhs);
+            work += (2 * p * p * q) as f64;
         }
-        rhs = sub(&rhs, &nl.product(&x));
-        rhs.add_scaled(C64::ONE, &x.product(&nr));
-        work += (m * m * k + m * k * k) as f64;
-        let next = Mat { rows: m, cols: k, data: rhs.data.iter().zip(&delta).map(|(a, b)| *a / *b).collect() };
-        let change = sub(&next, &x).max_abs();
-        x = next;
+        linalg::fused_product_onto(near, x, (p, p, q), rhs);
+        linalg::fused_product_onto(x, far, (p, q, q), rhs);
+        work += (p * p * q + p * q * q) as f64;
+        // The next iterate in place, its change from this one, and its largest entry.
+        let (mut change, mut top) = (0.0_f64, 0.0_f64);
+        for ((x, r), d) in x.iter_mut().zip(rhs.iter()).zip(delta.iter()) {
+            let next = *r / *d;
+            change = larger(change, (next - *x).abs());
+            top = larger(top, next.abs());
+            *x = next;
+        }
         // Done at the rounding or where the change stops falling; a change that is not a number ends it too (the
         // iterate carries it out), where both comparisons would be false and the iteration would not end.
-        if !(change > 2.0 * UNIT_ROUNDOFF * x.max_abs()) || !(change < last) {
-            return (x, work);
+        if !(change > 2.0 * UNIT_ROUNDOFF * top) || !(change < last) {
+            return work;
         }
         last = change;
     }
 }
 
-/// G = T diag(leaves) T⁻¹ recursively (module documentation): the leaves (their indices into G, and their blocks), and T,
-/// T⁻¹ with columns (rows) in the leaves' concatenated order.
-fn decouple(g: &Mat, work: &mut f64) -> (Mat, Mat, Vec<(Vec<usize>, Mat)>) {
-    let n = g.rows;
-    let Some((j, k)) = split(g) else {
-        return (Mat::identity(n), Mat::identity(n), vec![((0..n).collect(), g.clone())]);
+/// What every depth of the decoupling shares: the leaves' decompositions, `split`'s buffers, the leaves' sizes, the
+/// count.
+struct Shared<'a> {
+    eigens: &'a mut Vec<linalg::Eigen>,
+    diagonal: &'a mut Vec<f64>,
+    order: &'a mut Vec<usize>,
+    leaves: &'a mut Vec<usize>,
+    work: f64,
+}
+
+/// G (m × m, row-major) = V diag(c + μ′) V⁻¹ on the decoupling's buffers from this depth on (`levels`, the first this
+/// depth's; module documentation): V into `v` (its rows G's indices, its columns the eigen indices in the leaves'
+/// order), V⁻¹ into `vi`, each eigen index's centre and μ′ into `centre` and `values`, the leaves' sizes onto the
+/// shared list. False where a leaf has no decomposition.
+#[allow(clippy::too_many_arguments)]
+fn decouple(g: &[C64], m: usize, levels: &mut [Level], shared: &mut Shared, v: &mut [C64], vi: &mut [C64], centre: &mut [f64], values: &mut [C64]) -> bool {
+    // The depth d's blocks hold at most n − d states, the depths from it on as many.
+    let most = levels.len();
+    let (here, below) = levels.split_first_mut().expect("a depth for every split (at most the block's size)");
+    here.make(most);
+    if !split_into(g, m, shared.diagonal, shared.order, &mut here.left, &mut here.right) {
+        // A leaf: about its own centre c, the mean of Re G_ii; a single state its own value, V = V⁻¹ = 1.
+        let c = (0..m).map(|i| g[i * m + i].re).sum::<f64>() / m.max(1) as f64;
+        centre.fill(c);
+        let leaf = shared.leaves.len();
+        shared.leaves.push(m);
+        if m == 1 {
+            values[0] = g[0] - C64::real(c);
+            (v[0], vi[0]) = (C64::ONE, C64::ONE);
+            return true;
+        }
+        if shared.eigens.len() <= leaf {
+            shared.eigens.resize_with(leaf + 1, linalg::Eigen::default);
+        }
+        let shifted = &mut here.shifted;
+        (shifted.rows, shifted.cols) = (m, m);
+        shifted.data.clear();
+        shifted.data.extend_from_slice(&g[..m * m]);
+        for i in 0..m {
+            shifted.data[i * m + i] -= C64::real(c);
+        }
+        let eigen = &mut shared.eigens[leaf];
+        if !eigen.decompose(shifted) {
+            return false;
+        }
+        shared.work += eigen.work;
+        values.copy_from_slice(&eigen.values[..m]);
+        v.copy_from_slice(&eigen.vectors.data);
+        vi.copy_from_slice(&eigen.inverse.data);
+        return true;
+    }
+    let (nj, nk) = (here.left.len(), here.right.len());
+    let Level { left, right, a11, a12, a21, a22, x, y, c, rhs, delta, near, far, t, b11, b22, vj, vji, vk, vki, u, w, .. } = here;
+    let block = |out: &mut Vec<C64>, rows: &[usize], cols: &[usize]| {
+        out.clear();
+        out.extend(rows.iter().flat_map(|&i| cols.iter().map(move |&j| g[i * m + j])));
     };
-    let (a11, a12, a21, a22) = (g.block(&j, &j), g.block(&j, &k), g.block(&k, &j), g.block(&k, &k));
-    let minus = |m: &Mat| m.scaled(C64::real(-1.0));
+    block(a11, left, left);
+    block(a12, left, right);
+    block(a21, right, left);
+    block(a22, right, right);
     // X (|K| × |J|): A₂₂X − XA₁₁ = −A₂₁ + XA₁₂X.
-    let (x, wx) = iterate(&a22, &a11, &minus(&a21), |x| Some(x.product(&a12).product(x)));
-    let b11 = {
-        let mut b = a11.clone();
-        b.add_scaled(C64::ONE, &a12.product(&x));
-        b
-    };
-    let b22 = sub(&a22, &x.product(&a12));
+    c.clear();
+    c.extend(a21.iter().map(|z| -*z));
+    shared.work += iterate(a22, a11, c, (nk, nj), Some(a12), x, Sweep { delta, near, far, rhs, t });
+    // B₁₁ = A₁₁ + A₁₂X, B₂₂ = A₂₂ − XA₁₂.
+    b11.clear();
+    b11.extend_from_slice(a11);
+    linalg::fused_product_onto(a12, x, (nj, nk, nj), b11);
+    zeroed(t, nk * nk);
+    linalg::fused_product(x, a12, (nk, nj, nk), t);
+    b22.clear();
+    b22.extend(a22.iter().zip(t.iter()).map(|(a, b)| *a - *b));
     // Y (|J| × |K|): B₁₁Y − YB₂₂ = −A₁₂.
-    let (y, wy) = iterate(&b11, &b22, &minus(&a12), |_| None);
-    *work += wx + wy + 3.0 * (j.len() * k.len() * (j.len() + k.len())) as f64;
-    let m = j.len();
-    // T and T⁻¹ in the order (J, K).
-    let mut t = Mat::identity(n);
-    let mut ti = Mat::identity(n);
-    let xy = x.product(&y);
-    let yx = y.product(&x);
-    for a in 0..n {
-        for b in 0..n {
-            match (a < m, b < m) {
-                (true, false) => {
-                    t[(a, b)] = y[(a, b - m)];
-                    ti[(a, b)] = -y[(a, b - m)];
-                }
-                (false, true) => {
-                    t[(a, b)] = x[(a - m, b)];
-                    ti[(a, b)] = -x[(a - m, b)];
-                }
-                (false, false) => t[(a, b)] += xy[(a - m, b - m)],
-                (true, true) => ti[(a, b)] += yx[(a, b)],
-            }
+    c.clear();
+    c.extend(a12.iter().map(|z| -*z));
+    shared.work += iterate(b11, b22, c, (nj, nk), None, y, Sweep { delta, near, far, rhs, t });
+    shared.work += (2 * nj * nk * (nj + nk)) as f64;
+    // Each side's basis, the right's on the depths below once the left's are done with them.
+    zeroed(vj, nj * nj);
+    zeroed(vji, nj * nj);
+    zeroed(vk, nk * nk);
+    zeroed(vki, nk * nk);
+    if !decouple(b11, nj, below, shared, vj, vji, &mut centre[..nj], &mut values[..nj]) {
+        return false;
+    }
+    if !decouple(b22, nk, below, shared, vk, vki, &mut centre[nj..], &mut values[nj..]) {
+        return false;
+    }
+    // V by blocks (module documentation, # Its basis from the leaves'), its rows put back at G's indices: row J_p is
+    // [V_J | Y V_K]_p, row K_q [X V_J | V_K + X (Y V_K)]_q.
+    zeroed(u, nj * nk);
+    linalg::fused_product(y, vk, (nj, nk, nk), u);
+    zeroed(w, nk * nk);
+    w.copy_from_slice(vk);
+    linalg::fused_product_onto(x, u, (nk, nj, nk), w);
+    for (p, &row) in left.iter().enumerate() {
+        v[row * m..row * m + nj].copy_from_slice(&vj[p * nj..(p + 1) * nj]);
+        v[row * m + nj..(row + 1) * m].copy_from_slice(&u[p * nk..(p + 1) * nk]);
+    }
+    for (q, &row) in right.iter().enumerate() {
+        v[row * m + nj..(row + 1) * m].copy_from_slice(&w[q * nk..(q + 1) * nk]);
+    }
+    zeroed(t, nk * nj);
+    linalg::fused_product(x, vj, (nk, nj, nj), t);
+    for (q, &row) in right.iter().enumerate() {
+        v[row * m..row * m + nj].copy_from_slice(&t[q * nj..(q + 1) * nj]);
+    }
+    // V⁻¹ by blocks, its columns put back at G's indices: rows 0..|J| are [V_J⁻¹ + (V_J⁻¹Y) X | −V_J⁻¹Y], the rest
+    // [−V_K⁻¹X | V_K⁻¹].
+    zeroed(u, nj * nk);
+    linalg::fused_product(vji, y, (nj, nj, nk), u);
+    zeroed(w, nj * nj);
+    w.copy_from_slice(vji);
+    linalg::fused_product_onto(u, x, (nj, nk, nj), w);
+    zeroed(t, nk * nj);
+    linalg::fused_product(vki, x, (nk, nk, nj), t);
+    for r in 0..nj {
+        for (p, &col) in left.iter().enumerate() {
+            vi[r * m + col] = w[r * nj + p];
+        }
+        for (q, &col) in right.iter().enumerate() {
+            vi[r * m + col] = -u[r * nk + q];
         }
     }
-    let (tl, til, left) = decouple(&b11, work);
-    let (tr, tir, right) = decouple(&b22, work);
-    // T · diag(T_L, T_R), diag(T⁻¹_L, T⁻¹_R) · T⁻¹, and back to G's order: rows of T (columns of T⁻¹) from (J, K) to G's.
-    let mut inner = Mat::zeros(n, n);
-    let mut inner_inverse = Mat::zeros(n, n);
-    for a in 0..m {
-        for b in 0..m {
-            inner[(a, b)] = tl[(a, b)];
-            inner_inverse[(a, b)] = til[(a, b)];
+    for r in 0..nk {
+        for (p, &col) in left.iter().enumerate() {
+            vi[(nj + r) * m + col] = -t[r * nj + p];
+        }
+        for (q, &col) in right.iter().enumerate() {
+            vi[(nj + r) * m + col] = vki[r * nk + q];
         }
     }
-    for a in m..n {
-        for b in m..n {
-            inner[(a, b)] = tr[(a - m, b - m)];
-            inner_inverse[(a, b)] = tir[(a - m, b - m)];
-        }
-    }
-    let (full, full_inverse) = (t.product(&inner), inner_inverse.product(&ti));
-    *work += 2.0 * (n * n * n) as f64;
-    let order: Vec<usize> = j.iter().chain(&k).copied().collect();
-    let mut tg = Mat::zeros(n, n);
-    let mut tig = Mat::zeros(n, n);
-    for (p, &row) in order.iter().enumerate() {
-        for c in 0..n {
-            tg[(row, c)] = full[(p, c)];
-            tig[(c, row)] = full_inverse[(c, p)];
-        }
-    }
-    let leaves = left.into_iter().map(|(ix, b)| (ix.iter().map(|&i| j[i]).collect(), b)).chain(right.into_iter().map(|(ix, b)| (ix.iter().map(|&i| k[i]).collect(), b))).collect();
-    (tg, tig, leaves)
+    shared.work += (3 * nj * nk * (nj + nk)) as f64;
+    true
 }
 
 impl Spectrum {
     /// G's spectrum (module documentation); false where a leaf has no eigendecomposition.
     pub fn decompose(&mut self, g: &Mat) -> bool {
         let n = g.rows;
-        let mut work = 0.0;
-        // One leaf (no gap that pays, every block of one state among them): the leaf about its own centre, on the
-        // buffers as they stand -- no change of basis to multiply in, nothing allocated where the sizes repeat.
-        if n < 2 || split(g).is_none() {
-            return self.leaf(g);
+        assert_eq!(n, g.cols, "the spectrum of a {}x{} block", g.rows, g.cols);
+        // A depth for every split: each takes a state at least off the block below it.
+        if self.levels.len() < n.max(1) {
+            self.levels.resize_with(n.max(1), Level::default);
         }
-        let (t, ti, leaves) = decouple(g, &mut work);
-        let (mut vb, mut vbi) = (Mat::zeros(n, n), Mat::zeros(n, n));
-        self.centre = vec![0.0; n];
-        self.values = vec![C64::ZERO; n];
-        self.leaves = leaves.iter().map(|l| l.0.len()).collect();
-        let mut at = 0;
-        if self.eigens.len() < leaves.len() {
-            self.eigens.resize_with(leaves.len(), linalg::Eigen::default);
+        for m in [&mut self.vectors, &mut self.inverse] {
+            (m.rows, m.cols) = (n, n);
+            zeroed(&mut m.data, n * n);
         }
-        for (leaf, (ix, b)) in leaves.iter().enumerate() {
-            let k = ix.len();
-            let c = (0..k).map(|i| b[(i, i)].re).sum::<f64>() / k as f64;
-            let shifted = Mat::from_fn(k, k, |i, j| if i == j { b[(i, j)] - C64::real(c) } else { b[(i, j)] });
-            let eigen = &mut self.eigens[leaf];
-            if !eigen.decompose(&shifted) {
-                return false;
-            }
-            work += eigen.work;
-            for i in 0..k {
-                self.centre[at + i] = c;
-                self.values[at + i] = eigen.values[i];
-                for j in 0..k {
-                    vb[(at + i, at + j)] = eigen.vectors[(i, j)];
-                    vbi[(at + i, at + j)] = eigen.inverse[(i, j)];
-                }
-            }
-            at += k;
-        }
-        self.vectors = t.product(&vb);
-        self.inverse = vbi.product(&ti);
-        work += 2.0 * (n * n * n) as f64;
-        self.work = work;
-        true
-    }
-
-    /// The spectrum of one leaf, the whole block (`decompose`): its centre c (the mean of Re G_ii), and G − c by the
-    /// eigensolver -- a single state its own value, V = V⁻¹ = 1.
-    fn leaf(&mut self, g: &Mat) -> bool {
-        let n = g.rows;
-        let c = (0..n).map(|i| g[(i, i)].re).sum::<f64>() / n.max(1) as f64;
         self.centre.clear();
-        self.centre.resize(n, c);
-        self.leaves.clear();
-        self.leaves.push(n);
+        self.centre.resize(n, 0.0);
         self.values.clear();
-        if n == 1 {
-            self.values.push(g[(0, 0)] - C64::real(c));
-            for m in [&mut self.vectors, &mut self.inverse] {
-                m.rows = 1;
-                m.cols = 1;
-                m.data.clear();
-                m.data.push(C64::ONE);
-            }
-            self.work = 0.0;
-            return true;
-        }
-        if self.eigens.is_empty() {
-            self.eigens.push(linalg::Eigen::default());
-        }
-        let mut shifted = std::mem::take(&mut self.vectors);
-        shifted.clone_from(g);
-        for i in 0..n {
-            shifted.data[i * n + i] -= C64::real(c);
-        }
-        let eigen = &mut self.eigens[0];
-        if !eigen.decompose(&shifted) {
-            return false;
-        }
-        self.values.extend_from_slice(&eigen.values[..n]);
-        shifted.clone_from(&eigen.vectors);
-        self.vectors = shifted;
-        self.inverse.clone_from(&eigen.inverse);
-        self.work = eigen.work;
-        true
+        self.values.resize(n, C64::ZERO);
+        self.leaves.clear();
+        let mut shared = Shared { eigens: &mut self.eigens, diagonal: &mut self.diagonal, order: &mut self.order, leaves: &mut self.leaves, work: 0.0 };
+        let made = decouple(&g.data, n, &mut self.levels[..n.max(1)], &mut shared, &mut self.vectors.data, &mut self.inverse.data, &mut self.centre, &mut self.values);
+        self.work = shared.work;
+        made
     }
 }
 

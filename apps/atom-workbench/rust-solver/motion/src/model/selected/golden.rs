@@ -398,6 +398,95 @@ fn r1_node_parts() {
     }
 }
 
+/// The heap allocations `f` makes on this thread (the feature `prof`'s counting allocator, prof.rs: a free region, slot
+/// `ALLOCATIONS`, read off its report); None without the feature.
+fn allocations(f: &mut dyn FnMut()) -> Option<u64> {
+    #[cfg(feature = "prof")]
+    {
+        const ALLOCATIONS: usize = 95;
+        let read = || -> u64 {
+            crate::prof::report().lines().find(|l| l.starts_with(&format!("PROF {ALLOCATIONS:3} "))).and_then(|l| l.rsplit("more ").next()).map_or(0, |x| x.trim().parse().unwrap())
+        };
+        let before = read();
+        {
+            let _p = crate::prof::scope(ALLOCATIONS);
+            f();
+        }
+        Some(read() - before)
+    }
+    #[cfg(not(feature = "prof"))]
+    {
+        let _ = f;
+        None
+    }
+}
+
+/// R2-NODE: a node's and a readout's cost on one thread (µs, the least of R2_REPEAT runs, 40) at the golden's moving
+/// point (r = R1, κ the speed 0.1 µm/µs along U) and at the centre at rest, the node's parts -- the fold's numbers
+/// (`Rs::evaluate` with the point), the contraction, the filling --, the counted complex multiply-adds and their floor at
+/// 5 G/s (PROF1's kernel speed), and the heap allocations of each (feature `prof`; one call after a warm-up).
+#[test]
+#[ignore]
+fn r2_node_cost() {
+    let repeat = super::env("R2_REPEAT", 40.0) as usize;
+    for (name, request, _) in runs() {
+        let run = run_of(&request, &[]);
+        let n = run.rs.keep.len();
+        let psi = super::spread(n);
+        for (point, r, kappa) in [("moving", R1, moving(&run)), ("centre", [0.0; 3], [0.0; 3])] {
+            let least = |f: &mut dyn FnMut()| {
+                f();
+                (0..repeat)
+                    .map(|_| {
+                        let clock = std::time::Instant::now();
+                        f();
+                        clock.elapsed().as_secs_f64() * 1e6
+                    })
+                    .fold(f64::INFINITY, crate::linalg::smaller)
+            };
+            let mut work = Work::default();
+            let mut node = run.template.clone();
+            run.scene.point_into(r, kappa, &mut work.point);
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local);
+            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false });
+            let evaluate = least(&mut || {
+                run.scene.point_into(r, kappa, &mut work.point);
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local);
+            });
+            let a_evaluate = allocations(&mut || {
+                run.scene.point_into(r, kappa, &mut work.point);
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local);
+            });
+            let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false }));
+            let a_contract = allocations(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false }));
+            let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps, &mut work.product));
+            let a_fill = allocations(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps, &mut work.product));
+            let counted = work.local.work + work.out.work;
+            let mut whole = || {
+                std::hint::black_box(run.node(r, kappa, false));
+            };
+            let t_node = least(&mut whole);
+            let a_node = allocations(&mut whole);
+            let mut kicked = || {
+                std::hint::black_box(run.node(r, kappa, true));
+            };
+            let t_kicked = least(&mut kicked);
+            let a_kicked = allocations(&mut kicked);
+            let at = crate::model::Point { r, kappa, t: 0.37 };
+            let mut read = || {
+                std::hint::black_box(run.rows(&at, &psi));
+            };
+            let t_read = least(&mut read);
+            let a_read = allocations(&mut read);
+            eprintln!(
+                "R2COST {name} {point}: node {t_node:.1} µs (evaluate {evaluate:.1} contract {contract:.1} fill {fill:.1}), kicked {t_kicked:.1}, readout {t_read:.1} µs; counted {counted:.4e} CMA, floor {:.1} µs (×{:.2}); allocations node {a_node:?} (evaluate {a_evaluate:?} contract {a_contract:?} fill {a_fill:?}) kicked {a_kicked:?} readout {a_read:?}",
+                counted / 5e3,
+                t_node / (counted / 5e3)
+            );
+        }
+    }
+}
+
 /// R1-MODEL item 2: every beat of the node's generator and of its gradient with its frequency, its exact vector and its
 /// largest element at the centre and at the moving point -- H_eff's part (θ and the decay left out) and the decay's apart
 /// --, and the step's candidate tones; per scene (V3E_SCENE one of them).
@@ -483,5 +572,7 @@ fn r1_frame_with_recoil() {
         eprintln!("R1FRAME {name}: θ the same {}, sectors the same {}, values {:?} vs {:?}", a.theta == b.theta, a.sectors() == b.sectors(), &a.values, &b.values);
     }
 }
+
+
 
 
