@@ -176,6 +176,10 @@ pub struct Scene {
     products: Vec<(usize, usize, Mat)>,
     /// ħ/m (µm²/µs).
     hbar_over_mass: f64,
+    /// The tweezer's own outside form's shift of each ground state at the tweezer's unit intensity, Re O_tw(E_tw)_gg
+    /// (`trap_potential`'s), made once: its form and field are the request's (none where the request holds no form at
+    /// the tweezer's frequency: `trap_potential` asks for it).
+    own: Option<[f64; GROUND]>,
 }
 
 /// B(E, E′) = Σ_pq E_p* E′_q A_pq of an outside form's nine matrices (A_qq = O_q, A_pq = (X − iY)/2, A_qp = (X + iY)/2
@@ -265,6 +269,13 @@ impl Scene {
             base,
             products,
             hbar_over_mass: hbar_over_mass(request.mass_kg),
+            own: {
+                let tw = request.trap_beam;
+                request.outside_forms.iter().find(|f| f.frequency_index == beams[tw].frequency_index).map(|form| {
+                    let own = bilinear(&form.matrices, &beams[tw].field, &beams[tw].field);
+                    std::array::from_fn(|g| own[(g, g)].re)
+                })
+            },
         })
     }
 
@@ -455,18 +466,14 @@ impl Scene {
     /// wells (only the trap light on) and the loss energy (the tweezer's conservative potential alone); the reported trap
     /// adds the other lights' smooth shifts to it (`running_potential`).
     pub fn trap_potential(&self, r: V3, depth: &[f64; GROUND]) -> [Quadratic; GROUND] {
-        let request = &self.request;
-        let tw = request.trap_beam;
-        let a = self.geometry[tw].amplitude(r);
-        let form = request.outside_forms.iter().find(|f| f.frequency_index == request.beams[tw].frequency_index).expect("validated: one form per frequency");
-        let field = &request.beams[tw].field;
-        let own = bilinear(&form.matrices, field, field);
+        let own = self.own.expect("validated: one form per frequency");
+        let a = self.geometry[self.request.trap_beam].amplitude(r);
         let intensity = a.value.norm_sqr();
         let slope: V3 = std::array::from_fn(|i| 2.0 * (a.value.conj() * a.gradient[i]).re);
         let curvature: [[f64; 3]; 3] =
             std::array::from_fn(|i| std::array::from_fn(|j| 2.0 * (a.gradient[i].conj() * a.gradient[j] + a.value.conj() * a.hessian[i][j]).re));
         std::array::from_fn(|g| {
-            let d = depth[g] + own[(g, g)].re;
+            let d = depth[g] + own[g];
             Quadratic { value: intensity * d, gradient: slope.map(|x| x * d), hessian: curvature.map(|row| row.map(|x| x * d)) }
         })
     }
