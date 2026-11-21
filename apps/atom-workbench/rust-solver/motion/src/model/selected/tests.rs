@@ -708,8 +708,9 @@ fn said(request: &Request, run: &Selected) -> String {
 /// The structure's rounding scales are its entries' (model/selected.rs, # The structure's rounding): on the scenes'
 /// runs (`blocked_scenes`), every entry of the structure's node -- each beat of the generator off the static beat's
 /// diagonal (θ is put back there after), each beat of the gradient -- is within (1 + γ_K) of its scale S, the sum of
-/// its terms' moduli, and a nonzero entry has terms; the summation's rounding zeros (|x| ≤ γ_K S above ε·max) are said
-/// per scene with the largest of them.
+/// its terms' moduli, and a nonzero entry has terms; the entries other than zero that are the summation's rounding
+/// zeros (|x| ≤ γ_K S, model/classify.rs `zero`) are said per scene with the largest of them over ε times its matrix's
+/// largest.
 #[test]
 fn the_structure_s_scales_bound_its_entries() {
     for (name, request) in blocked_scenes() {
@@ -724,7 +725,7 @@ fn the_structure_s_scales_bound_its_entries() {
                 let bound = (1.0 + crate::units::rounding(terms[x])) * scale[x];
                 assert!(z <= bound, "{name} {what} ({}, {}): |x| {z:e} above its scale {:e} (K {})", x / n, x % n, scale[x], terms[x]);
                 assert!(z == 0.0 || terms[x] > 0, "{name} {what} ({}, {}): |x| {z:e} of no terms", x / n, x % n);
-                if z != 0.0 && !(z < f64::EPSILON * top) && rounding_zero(m.data[x], scale[x], terms[x], top) {
+                if z != 0.0 && crate::model::classify::zero(m.data[x], scale[x], terms[x]) {
                     zeros += 1;
                     largest = crate::linalg::larger(largest, z / (f64::EPSILON * top));
                 }

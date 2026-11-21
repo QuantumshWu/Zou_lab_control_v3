@@ -1,5 +1,6 @@
 //! The model's shared types and its parts. The trajectory's model is the P the two-point check selected (select.rs) and
-//! its one Reiter–Sørensen fold (`rs`), put in the integrator's frame and terms (`selected`); the optical sector's
+//! its one Reiter–Sørensen fold (`rs`), put in the integrator's frame and terms (`selected`), its terms judged once (`classify`: zero, drop, fold,
+//! keep); the optical sector's
 //! momentum noise beside it (`optical`); the trap's descent on a potential's expansion (`potential`). The types here are
 //! what the integrator (step.rs) and the solve read of any model: a frequency exactly (`Beat`), a trajectory's point, a
 //! scalar's second-order expansion, the trap, a cluster and its frames, a class of photons and the one photon rule
@@ -8,6 +9,7 @@
 //! # Notation (SPEC §0 units)
 //! States s: the 32 of the model basis, the ground states first (`GROUND` of them), H0 diagonal in it (energies E_s, rad/µs, in
 //! the frame where the excited states rotate at ν_frame). The emission operators C_a (a = x, y, z, ground ← excited, 1/√µs).
+pub mod classify;
 pub mod potential;
 pub(crate) mod optical;
 pub mod rs;

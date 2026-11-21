@@ -60,10 +60,9 @@
 //!
 //! # Exact blocks
 //! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
-//! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis (`Selected::split`). They are
-//! read where `prune` reads the beats, the node at the trap's centre at rest, each by the rounding rule on its own matrix
-//! (the static beat with its frame's θ back on the diagonal): an element of at most ε times that matrix's largest entry
-//! is no element (a matrix of zeros has none), and two states are of one block where a chain of elements joins them.
+//! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis. They are the run's judgment's
+//! (model/classify.rs, `Selected::judge`): P's connected parts under the kept beats' entries that are no rounding zeros,
+//! read on the structure's node, the trap's centre at rest (the static beat with its frame's θ back on the diagonal).
 //! What two keys of one lab frequency cancel at the centre alone would read as no element there; the tests read the
 //! blocks at points off it as well (tests, `the_exact_blocks_hold_at_every_point`). The jumps are no part of it: a jump
 //! may land a state of one block in several,
@@ -74,19 +73,21 @@
 //! states joins their blocks wherever the model holds it.
 //!
 //! # The structure's rounding
-//! The structure -- which beats the node holds (`prune`), which states its blocks join (`split`), and with the beats
-//! the tones' candidates -- is read on computed numbers, the node at the trap's centre at rest. A computed entry's
-//! rounding is its own computation's bound, not the result's ε·max: an entry x that is the sum of K terms of moduli
-//! summing to S is a rounding zero where |x| ≤ γ_K S (Higham's γ_K = Ku/(1 − Ku), units.rs `rounding`), or where it is
-//! below ε times its matrix's largest (`rounding_zero`). S and K are the computation's (`Selected::structure`,
-//! rs/fold.rs `Out::scales`, `Local::shadows`), the same sums and products on the operands' moduli: a direct entry one
-//! term; a pair Σ_q |X_iq| |M_qj| over |B| + the leg sum's members, |X| the leg sum's members' moduli summed and |M| the
-//! amplitudes' own scale through their resolvent (a Q block's |V| Σ|w| |D| ∘ (|V⁻¹| |X|), where a decomposition that
-//! mixes nearly degenerate states would leave its rounding); the decay's products Σ_g |l_g||r_g| over the landing
-//! states. A cancellation of terms larger than its result -- the polarizations' axes, the emission's -- is its
-//! rounding, however far above ε times the result's largest it lies. (2026-11-20: on every scene of the gate and of
-//! refs/scenes the structure read so is the one ε·max read; 3 to 34 single entries per scene are zeros by the sum
-//! alone, each within a block and in a beat that holds others.)
+//! The structure -- which beats the node holds, which states its blocks join, and with the beats the tones'
+//! candidates -- is the run's one judgment (model/classify.rs), made once on computed numbers, the node at the trap's
+//! centre at rest at unit amplitude (`Selected::structure`). A computed entry's rounding is its own computation's bound,
+//! not the result's ε·max: an entry x that is the sum of K terms of moduli summing to S is a rounding zero where
+//! |x| ≤ γ_K S (Higham's γ_K = Ku/(1 − Ku), units.rs `rounding`; classify.rs `zero`), and nowhere else. S and K are the
+//! computation's (`Selected::structure`, rs/fold.rs `Out::scales`, `Local::shadows`), the same sums and products on the
+//! operands' moduli: a direct entry one term; a pair Σ_q |X_iq| |M_qj| over |B| + the leg sum's members, |X| the leg
+//! sum's members' moduli summed and |M| the amplitudes' own scale through their resolvent (a Q block's
+//! |V| Σ|w| |D| ∘ (|V⁻¹| |X|), where a decomposition that mixes nearly degenerate states would leave its rounding); the
+//! decay's products Σ_g |l_g||r_g| over the landing states. A cancellation of terms larger than its result -- the
+//! polarizations' axes, the emission's -- is its rounding, however far above ε times the result's largest it lies.
+//! (2026-11-20: on every scene of the gate and of refs/scenes the structure read so was the one ε·max read; 3 to 34
+//! single entries per scene are zeros by the sum alone, each within a block and in a beat that holds others. Until
+//! 2026-11-21 an entry below ε times its matrix's largest was a zero as well, the largest of every beat's for the beats
+//! and its own slot's for the blocks: one quantity of two definitions, now one.)
 //!
 //! # What is not here
 //! No landing transient, no decision, no representation per trajectory: the integrator's plain landing L_qψ/‖·‖ is the
@@ -109,6 +110,7 @@ use crate::floquet::{Frame, Hilbert};
 use crate::linalg::{inner, norm_sqr, C64, Mat, V3};
 use crate::model::rs::fold::{Grouping, Local, Out};
 use crate::model::rs::{Making, Rs};
+use crate::model::classify::{Judgment, Scales};
 use crate::model::{Beat, Cluster, Moments, Point, Quadratic, Scattering};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Key, Scene};
@@ -149,8 +151,8 @@ pub struct Selected {
     tables: Tables,
     /// The run's own number (the thread's buffers and pooled nodes are its).
     id: usize,
-    /// The beats the rounding rule kept and dropped (`prune`).
-    kept: Vec<(usize, f64, f64, bool)>,
+    /// The run's judgment of its node's beats and blocks (model/classify.rs, `judge`).
+    judgment: Judgment,
     /// The exact blocks of P (module documentation, # Exact blocks): places in P, each sorted (its ground states first);
     /// and each place's block.
     blocks: Vec<Vec<usize>>,
@@ -339,21 +341,6 @@ pub struct Node {
     pub work: f64,
 }
 
-/// The rounding scales of the structure's node (`Selected::structure`): per generator slot and per gradient slot and
-/// axis, per place (n × n, row by row) the sum of the moduli of the terms its value is the sum of, and their count.
-struct Scales {
-    generator: Vec<(Vec<f64>, Vec<usize>)>,
-    gradient: Vec<[(Vec<f64>, Vec<usize>); 3]>,
-}
-
-/// Whether a computed entry x is a rounding zero (module documentation, # The structure's rounding): within Higham's
-/// γ_K of its scale S, the sum of its K terms' moduli, or below ε times its matrix's largest entry `top`. One that is not
-/// a number is not.
-fn rounding_zero(x: C64, scale: f64, terms: usize, top: f64) -> bool {
-    let m = x.abs();
-    m <= crate::units::rounding(terms) * scale || m < f64::EPSILON * top
-}
-
 /// A candidate tone (`step::Middle::beats`): its beat ν > 0 and the beats of its members at e^{+iνu} and e^{−iνu}.
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
@@ -518,7 +505,7 @@ impl Selected {
             template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 },
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            kept: Vec::new(),
+            judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0 },
             blocks: vec![(0..n).collect()],
             block_of: vec![0; n],
             beats: RwLock::new(beats),
@@ -530,10 +517,7 @@ impl Selected {
             scene,
         };
         run.layout(&spherical);
-        run.prune();
-        if split {
-            run.split();
-        }
+        run.judge(split);
         run.tones();
         run.lift_tables();
         Ok(run)
@@ -837,42 +821,18 @@ impl Selected {
         self.decay_terms();
     }
 
-    /// The node's beats by the rounding rule (coordinator 2026-11-20): a beat is the model's where its coefficients at
-    /// unit amplitude -- the node at the trap's centre at rest, every beam's amplitude one, the tweezer's full -- reach
-    /// ε times the largest of all its components' (H_eff's with the decay, θ left out; and the same of the gradient):
-    /// below it, in value and in gradient, the beat is the rounding of the products and no part of the model (no
-    /// candidate tone). The beats left and their two ratios are kept for the report (`Selected::beats_kept`).
-    fn prune(&mut self) {
+    /// The node's beats and P's exact blocks by the run's judgment (model/classify.rs), read once on the structure's
+    /// node (`structure`): every beat neither zero nor dropped is kept, the layout's places at the others go with them
+    /// and the slots are renumbered (a place at a beat left out keeps its entry in the outputs' order, marked: nothing is
+    /// written there); with `split` (what the tests check the blocks against: one block) the judgment's blocks, every
+    /// place between two of them left out of the layout as well and the decay's products between them not made, zero by
+    /// construction.
+    fn judge(&mut self, split: bool) {
         let n = self.rs.keep.len();
-        // The structure's node: θ back on the static beat's diagonal, each place's rounding scale beside it.
         let (node, scales) = self.structure();
-        let mut largest = vec![0.0_f64; node.generator.len()];
-        for (k, (_, m)) in node.generator.iter().enumerate() {
-            for a in 0..n {
-                for b in 0..n {
-                    largest[k] = larger(largest[k], m[(a, b)].abs());
-                }
-            }
-        }
-        let gradients: Vec<(usize, f64)> = node.gradient.iter().map(|(beat, g)| (*beat, g.iter().map(Mat::max_abs).fold(0.0, larger))).collect();
-        let (top, gtop) = (largest.iter().copied().fold(0.0, larger), gradients.iter().map(|g| g.1).fold(0.0, larger));
-        // A NaN coefficient would read every ratio as NaN and drop every beat but the zero one (a comparison with NaN is
-        // false): the node at unit amplitude is numbers, or the run is refused here.
-        assert!(top.is_finite() && gtop.is_finite(), "the node's coefficients at unit amplitude are not finite");
-        // A beat is kept where an entry of its value or of its gradient is no rounding zero (module documentation,
-        // # The structure's rounding), against the largest over every beat's.
-        let mut keep = vec![true; node.generator.len()];
-        self.kept = Vec::new();
-        for (k, (beat, m)) in node.generator.iter().enumerate() {
-            let value = largest[k] / larger(top, f64::MIN_POSITIVE);
-            let slot = node.gradient.iter().position(|g| g.0 == *beat);
-            let slope = slot.map_or(0.0, |d| gradients[d].1 / larger(gtop, f64::MIN_POSITIVE));
-            let held = |m: &Mat, (scale, terms): &(Vec<f64>, Vec<usize>), top: f64| (0..n * n).any(|x| !rounding_zero(m.data[x], scale[x], terms[x], top));
-            let moving = slot.is_some_and(|d| (0..3).any(|a| held(&node.gradient[d].1[a], &scales.gradient[d][a], gtop)));
-            keep[k] = k == 0 || held(m, &scales.generator[k], top) || moving;
-            self.kept.push((*beat, value, slope, keep[k]));
-        }
-        // The slots left, and every place of the layout renumbered (a place at a beat dropped dropped with it).
+        let judgment = Judgment::new(&node, &scales);
+        let keep: Vec<bool> = (0..judgment.tiers.len()).map(|k| judgment.kept(k)).collect();
+        // The slots left, and every place of the layout renumbered (a place at a beat left out goes with it).
         let mut slot_of = vec![usize::MAX; keep.len()];
         let mut generator = Vec::new();
         for (k, g) in std::mem::take(&mut self.template.generator).into_iter().enumerate() {
@@ -893,7 +853,6 @@ impl Selected {
         }
         self.template.gradient = gradient;
         for list in self.tables.h.iter_mut() {
-            // A place at a beat dropped keeps its entry (the outputs' order), marked: nothing is written there.
             for e in list.iter_mut() {
                 *e = if slot_of[e.1 as usize] == usize::MAX { (e.0, u32::MAX, u32::MAX) } else { (e.0, slot_of[e.1 as usize] as u32, gslot_of[e.2 as usize] as u32) };
             }
@@ -905,15 +864,30 @@ impl Selected {
             .filter(|d| slot_of[d.forward] != usize::MAX && slot_of[d.back] != usize::MAX)
             .map(|d| Decay { forward: slot_of[d.forward], back: slot_of[d.back], ..*d })
             .collect();
+        if split && judgment.blocks.len() > 1 {
+            self.blocks.clone_from(&judgment.blocks);
+            for (b, states) in self.blocks.iter().enumerate() {
+                for &s in states {
+                    self.block_of[s] = b;
+                }
+            }
+            let block_of = &self.block_of;
+            for list in self.tables.h.iter_mut() {
+                for e in list.iter_mut().filter(|e| block_of[e.0 as usize / n] != block_of[e.0 as usize % n]) {
+                    *e = (e.0, u32::MAX, u32::MAX);
+                }
+            }
+        }
+        self.judgment = judgment;
         self.decay_terms();
         // The pooled nodes were made on the layout before.
         POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
     }
 
-    /// The node's beats with their coefficients' ratios at unit amplitude (`prune`): (beat, value's, gradient's,
-    /// kept).
-    pub fn beats_kept(&self) -> &[(usize, f64, f64, bool)] {
-        &self.kept
+    /// The run's judgment of its node's beats (model/classify.rs): per slot of the structure's node, before the beats
+    /// left out were taken from the layout, its beat and tier; the blocks; what the dropped beats cost.
+    pub fn judgment(&self) -> &Judgment {
+        &self.judgment
     }
 
     /// The model at a point in the frame, by beats (`Node`; module documentation, # The generator by beats), with the
@@ -1034,7 +1008,8 @@ impl Selected {
         self.lifts = lifts;
     }
 
-    /// The node the model's structure is read on (module documentation, # The structure's rounding): at the trap's
+    /// The node the model's structure is read on (module documentation, # The structure's rounding; model/classify.rs
+    /// judges on it): at the trap's
     /// centre at rest, the static beat with θ back on its diagonal, and per place of every beat of the generator and of
     /// its gradient along each lab axis the rounding scale of its value -- the sum of the moduli of the terms it is the
     /// sum of and their count (`Out::scales`: H_eff's outputs; the decay's products ½ Σ_g |l_g| |r_g| over their landing
@@ -1118,78 +1093,13 @@ impl Selected {
         (node, scales)
     }
 
-    /// The exact blocks (module documentation, # Exact blocks): P's connected parts under the elements of the node's
-    /// every beat of the generator (the static one with θ back on its diagonal) and of its gradient along each lab
-    /// axis, at the trap's centre at rest (the node `prune` reads), each by the rounding rule on its own matrix -- an
-    /// element of at most ε times its matrix's largest entry is no element (a matrix of zeros has none); one that is not
-    /// a number joins. Where there are two blocks or more, every place between two of them is left out of the layout
-    /// (nothing is written there) and the decay's products between them are not made: zero by construction.
-    fn split(&mut self) {
-        let n = self.rs.keep.len();
-        let (node, scales) = self.structure();
-        let mut root: Vec<usize> = (0..n).collect();
-        fn find(root: &mut [usize], mut i: usize) -> usize {
-            while root[i] != i {
-                root[i] = root[root[i]];
-                i = root[i];
-            }
-            i
-        }
-        let join = |root: &mut Vec<usize>, a: usize, b: usize| {
-            let (x, y) = (find(root, a), find(root, b));
-            if x != y {
-                root[x.max(y)] = x.min(y);
-            }
-        };
-        let read = |root: &mut Vec<usize>, m: &Mat, (scale, terms): &(Vec<f64>, Vec<usize>)| {
-            let top = m.max_abs();
-            for a in 0..n {
-                for b in (0..n).filter(|&b| b != a) {
-                    if !rounding_zero(m[(a, b)], scale[a * n + b], terms[a * n + b], top) {
-                        join(root, a, b);
-                    }
-                }
-            }
-        };
-        for ((_, m), s) in node.generator.iter().zip(&scales.generator) {
-            read(&mut root, m, s);
-        }
-        for ((_, g), s) in node.gradient.iter().zip(&scales.gradient) {
-            for (m, s) in g.iter().zip(s) {
-                read(&mut root, m, s);
-            }
-        }
-        let mut parts: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
-        for i in 0..n {
-            let r = find(&mut root, i);
-            parts.entry(r).or_default().push(i);
-        }
-        self.blocks = parts.into_values().collect();
-        for (b, states) in self.blocks.iter().enumerate() {
-            for &s in states {
-                self.block_of[s] = b;
-            }
-        }
-        if self.blocks.len() > 1 {
-            let block_of = &self.block_of;
-            for list in self.tables.h.iter_mut() {
-                for e in list.iter_mut().filter(|e| block_of[e.0 as usize / n] != block_of[e.0 as usize % n]) {
-                    *e = (e.0, u32::MAX, u32::MAX);
-                }
-            }
-            self.decay_terms();
-            // The pooled nodes were made on the layout before.
-            POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
-        }
-    }
-
     /// The exact blocks of P (module documentation, # Exact blocks): places in P.
     pub fn blocks(&self) -> &[Vec<usize>] {
         &self.blocks
     }
 
     /// The decay's products by their structural terms (`Tables::entries`), made with the layout and again where its
-    /// slots or its blocks change (`prune`, `split`): per product of the layout (`Tables::decay`, in its order) each
+    /// slots or its blocks change (`judge`): per product of the layout (`Tables::decay`, in its order) each
     /// place (a, b) of its two components' columns within one block, in their order, whose components share a ground
     /// row: the shared rows' terms in the rows' order, the forward and the back places. A place of no shared row is a
     /// structural zero of the product, no entry.
@@ -1287,7 +1197,7 @@ impl Selected {
                 jumps[at + p] = sources.iter().map(|&(a, c, e, u)| u * axes[a][c].elements[e].value).sum();
             }
         }
-        // Each product's entries by their structural terms (`decay_terms`; between two exact blocks nothing, `split`):
+        // Each product's entries by their structural terms (`decay_terms`; between two exact blocks nothing, `judge`):
         // Σ_g conj(ℓ_l[g, i]) ℓ_r[g, j] over the rows the two share, each term two fused multiply-adds a part as the
         // product kernel makes them (`linalg::adjoint_product`, whose other terms are the structural zeros'), then −i/2
         // of it at its forward place and of its conjugate at its back place.

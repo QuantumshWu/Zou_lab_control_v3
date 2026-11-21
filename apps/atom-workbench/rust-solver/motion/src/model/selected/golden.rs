@@ -557,9 +557,9 @@ fn r1_tones() {
             middle.beats(&path, &mut beats, &mut keys);
             eprintln!("R1TONE {name} {point}: {} candidate tones {:?} (n {n})", beats.len(), beats);
         }
-        for &(beat, value, slope, kept) in run.beats_kept() {
+        for &(beat, tier) in &run.judgment().tiers {
             let (values, _) = run.components();
-            eprintln!("R1KEPT {name}: beat {beat} Ω {:+.6e} rad/µs: coefficients over the largest, value {value:.3e} gradient {slope:.3e}: {}", values[beat], if kept { "kept" } else { "below the rounding" });
+            eprintln!("R1KEPT {name}: beat {beat} Ω {:+.6e} rad/µs: {tier:?}", values[beat]);
         }
     }
 }

@@ -82,6 +82,7 @@ pub mod fold;
 pub mod spectrum;
 
 use crate::floquet::{Hilbert, Lift, Part, Sectors};
+use crate::model::classify::input;
 use crate::linalg::{C64, Mat, V3};
 use crate::request::STATES;
 use crate::scene::{self, Components, Jumps, Key, Point, Scene};
@@ -230,21 +231,7 @@ pub fn fixed(m: &Mat) -> Fixed {
     (0..m.rows).flat_map(|i| (0..m.cols).map(move |j| (i, j))).filter(|&(i, j)| m[(i, j)] != C64::ZERO).map(|(i, j)| (i, j, m[(i, j)])).collect()
 }
 
-/// A coupling of the fold's input at the frequency f (a term of H ∝ e^{−ift}, `Scene::terms` at rest), by the rounding
-/// rule on its first-order amplitudes: an entry i ← j whose a = |M_ij| / |E_i − E_j − f + i(Γ_i + Γ_j)/2| is below the
-/// format's ε is no coupling and is zero -- on the fixed matrix and its own denominator (the bare levels E = diag H0,
-/// the decay Γ = Σ_a C_a†C_a's diagonal), not on its size against the matrix's largest entry: a small entry close to
-/// its resonance is an amplitude like any other, and a near-resonant denominator would carry it out of the rounding.
-/// A coupling at its resonance (no denominator) always counts.
-pub fn significant(m: &Mat, f: f64, energy: &[f64], width: &[f64]) -> Mat {
-    Mat::from_fn(m.rows, m.cols, |i, j| {
-        let z = m[(i, j)];
-        let detuning = C64::new(energy[i] - energy[j] - f, 0.5 * (width[i] + width[j]));
-        if z.abs() < f64::EPSILON * detuning.abs() { C64::ZERO } else { z }
-    })
-}
-
-/// The bare levels E_s = diag H0 and their decay Γ_s (`significant`'s denominators).
+/// The bare levels E_s = diag H0 and their decay Γ_s (the input's zero tier's denominators, model/classify.rs `input`).
 fn levels_of(scene: &Scene) -> (Vec<f64>, Vec<f64>) {
     let decay = scene.jumps().decay();
     ((0..STATES).map(|s| scene.request.hamiltonian[(s, s)].re).collect(), (0..STATES).map(|s| decay[(s, s)].re).collect())
@@ -762,14 +749,14 @@ impl Tweezer {
     pub fn new(scene: &Scene) -> Tweezer {
         let length = scene.generators.len();
         // The fold's input by the rounding rule, nothing of it by exact zeros: each coupling of H's terms by its
-        // first-order amplitudes at its frequency at rest (`significant`), the emission -- a jump, no coupling -- and its
+        // first-order amplitudes at its frequency at rest (the zero tier's input side, model/classify.rs `input`), the emission -- a jump, no coupling -- and its
         // decay by their own largest entries (`rounded`).
         let (energy, width) = levels_of(scene);
         let mut frequency = vec![0.0; scene.matrices()];
         for t in scene.terms(&scene.doppler([0.0; 3])) {
             frequency[t.matrix] = t.frequency;
         }
-        let mut library: Vec<Fixed> = (0..scene.matrices()).map(|i| fixed(&significant(scene.matrix(i), frequency[i], &energy, &width))).collect();
+        let mut library: Vec<Fixed> = (0..scene.matrices()).map(|i| fixed(&input(scene.matrix(i), frequency[i], &energy, &width))).collect();
         let put = |library: &mut Vec<Fixed>, m: &Mat| {
             library.push(fixed(m));
             library.len() - 1
@@ -952,7 +939,7 @@ fn unit_fold(scene: &Scene, c: &[Mat; 3], k: &[Mat; 3], gamma: &Mat) -> Unit {
     let blocks = fold::connected_parts(STATES, &pattern);
     let [(co_key, f, x), (cr_key, fr, r)] = scene.tweezer_couplings();
     let (energy, width) = levels_of(scene);
-    let (x, r) = (significant(x, f, &energy, &width), significant(r, fr, &energy, &width));
+    let (x, r) = (input(x, f, &energy, &width), input(r, fr, &energy, &width));
     let comps: [(Key, f64, Mat, i64, usize); 4] = [
         (co_key.clone(), f, x.clone(), 1, 0),
         (negated(&co_key), -f, x.adjoint(), -1, 1),
