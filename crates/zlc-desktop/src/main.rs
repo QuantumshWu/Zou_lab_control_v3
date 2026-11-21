@@ -445,8 +445,10 @@ fn apply_data(runtime: &Runtime, viewer: &mut Viewer, apply: manual::Apply) -> R
     let operation = apply.metadata["operation"].clone();
     let generation = runtime.begin(apply.owner.clone(), vec![Declaration { signal: signal.clone(), schema, storage: Storage::Snapshot }], apply.metadata)
         .map_err(|error| error.to_string())?;
+    let metadata = json!({"operation": operation});
+    zlc_core::record_fields::admit("manual data", &metadata)?;
     let published = runtime.commit(&generation, &Bundle { inputs: vec![Input::Dataset { signal: signal.clone(), ordinal: None, snapshot: apply.snapshot.clone() }],
-        metadata: json!({"operation": operation}), parents }).map_err(|error| error.to_string())?;
+        metadata, parents }).map_err(|error| error.to_string())?;
     runtime.seal(&generation, json!({"reason": "manual data"})).map_err(|error| error.to_string())?;
     if let Some(publication) = published.publications.iter().find(|publication| publication.key().signal == signal) {
         viewer.drafts.published.insert(apply.signal.clone(), publication.clone());

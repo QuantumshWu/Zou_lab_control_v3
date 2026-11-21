@@ -268,7 +268,9 @@ fn collect(params: &Value, plan: &Plan, work: &mut Work, context: &dyn Context) 
             record["actual_devices"] = Value::Object(devices);
         }
         let output = &work.configuration.as_ref().unwrap().output;
-        let metadata = if record.is_null() { json!({}) } else { json!({"records": {output: record}}) };
+        // A point with nothing to record has no record.
+        let metadata = if record.as_object().is_none_or(|fields| fields.is_empty()) { json!({}) } else { json!({"records": {output: record}}) };
+        zlc_core::record_fields::admit("native scan", &metadata).map_err(invalid)?;
         // Same immutable DataBlock and real parent: no array encoding, copy,
         // materialization, or re-read of a live Runtime history.
         context.commit(&publication.generation, &Bundle {

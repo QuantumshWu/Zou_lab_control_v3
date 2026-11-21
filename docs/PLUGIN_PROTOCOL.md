@@ -747,6 +747,32 @@ use the headless desktop mode for their local files. Offline service state is
 keyed by scope and can be released with `scope.release`; it also ends with the
 process. Native engine code and the Python SDK are shipped together.
 
+### 5.5 Event records
+
+An event's metadata (`run.commit`'s `metadata`, `run.commit_events`'s `shot_times` and
+`records`) is kept with every publication and saved in every Figure's lineage, so a field
+written on each event costs every event, every save and every reader; a Figure Viewer once
+listed 19388 rows for a 3210-shot scan, 3209 of them saying no frame was missing. So:
+
+- **Each fact has one home.** Whether a value can be used is the data's validity; what
+  happened during a run is the journal (`journal.note`); how a run was configured is its run
+  record. An event record says how *this* event differs: a fact that is the same for every
+  event of a run belongs in the run record, and a default or empty value is not recorded.
+- **A field says something.** No null, `""`, `[]` or `{}`; an output with nothing to record has
+  no record (the SDK sends none).
+- **Every field is registered** in `crates/zlc-core/src/record_fields.json`: the metadata's own
+  keys under `metadata`, the keys of one output's record (`records.<output>`) under
+  `event_record`, each with its `owner`, `purpose` and `readers` (repository paths of the code
+  that reads it by name, not tests). A test (`record_fields::tests`) fails when a reader does not
+  read its field. A new field is registered in the same change that writes it, and the change
+  says what reads it.
+
+The plugin host checks each commit as it arrives, and native producers check theirs where they
+write them (`zlc_core::record_fields::admit`); a saved record committed again (a Figure import,
+a derivation) is not checked. A debug build refuses the commit (`invalid`, naming the field);
+a release build keeps the event and notes the field once in the journal
+(`runtime unregistered_record_field`), so a missed registration never stops a run in the lab.
+
 ## 6. Data plane
 
 **Blocks.** Bulk values live in shared-memory blocks: named, paging-file-backed

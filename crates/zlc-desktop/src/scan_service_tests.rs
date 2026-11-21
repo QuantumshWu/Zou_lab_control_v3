@@ -59,7 +59,7 @@ fn publish(runtime: &Runtime, source: &Generation, schema: Arc<DatasetSchema>, o
         Validity::Uniform(ordinal % 2 == 0), Some(OwnedBuffer::from_vec(vec![0.25; count]))).unwrap();
     runtime.commit(source, &Bundle {
         inputs: vec![Input::Event { signal: SOURCE.into(), ordinal, data, origin, shot_time: Some(ordinal as f64 * 0.01) }],
-        metadata: json!({"records": {"frames": {"shot": ordinal, "actual_devices": {"camera": {"exposure": 0.01}}}}}),
+        metadata: json!({"records": {"frames": {"frames_missing": [ordinal], "actual_devices": {"camera": {"exposure": 0.01}}}}}),
         parents: vec![],
     }).unwrap().publications[0].clone()
 }
@@ -140,7 +140,7 @@ fn native_scan_places_repeats_and_retains_original_data_and_lineage_without_pyth
         }
         assert_eq!(latest.key().ordinal, Some(51));
         assert_eq!(latest.event().parents[0].key, *parents[11].key());
-        assert_eq!(latest.event().metadata["records"]["scan"]["shot"], 51);
+        assert_eq!(latest.event().metadata["records"]["scan"]["frames_missing"], json!([51]));
         assert_eq!(latest.event().metadata["records"]["scan"]["actual_devices"]["rf"]["values"]["frequency"], 80.25);
         assert_eq!(latest.event().metadata["records"]["scan"]["actual_devices"]["camera"]["exposure"], 0.01);
         assert_eq!(latest.run().metadata["fixture"], "native-scan");
@@ -154,8 +154,8 @@ fn native_scan_places_repeats_and_retains_original_data_and_lineage_without_pyth
         for (index, range) in ranges.iter().enumerate() {
             let event = &events[range["event"].as_u64().unwrap() as usize];
             let parent = &events[event["parents"][0].as_u64().unwrap() as usize];
-            assert_eq!(event["record"]["records"]["scan"]["shot"], json!(index + 40));
-            assert_eq!(parent["record"]["records"]["frames"]["shot"], json!(index + 40));
+            assert_eq!(event["record"]["records"]["scan"]["frames_missing"], json!([index + 40]));
+            assert_eq!(parent["record"]["records"]["frames"]["frames_missing"], json!([index + 40]));
         }
     }
 }

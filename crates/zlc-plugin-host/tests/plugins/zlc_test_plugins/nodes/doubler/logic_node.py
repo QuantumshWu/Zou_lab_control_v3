@@ -21,7 +21,7 @@ class Doubler:
                                               repeat_domain=frames.schema.repeat_domain,
                                               point_domain=frames.schema.point_domain,
                                               cell_domain=frames.schema.cell_domain)
-        return {"doubled": LiveDatasetOutput(DOUBLED, snapshot, event_record={"from": value.event_record})}
+        return {"doubled": LiveDatasetOutput(DOUBLED, snapshot, event_record=value.event_record)}  # the source event's record, as a derivation keeps it
 
 
 LOGIC_NODE = NodeType("doubler", NodeKind.PROCESSOR, AuthoringSchema(()), description="Doubles the frames it follows.",
