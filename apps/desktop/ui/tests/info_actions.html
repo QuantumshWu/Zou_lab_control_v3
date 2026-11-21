@@ -107,7 +107,7 @@ try {
    }
   }
  });
- // Only the rows in view are drawn (QTreeView): a long tree costs its view, not its length.
+ // Only the rows in view are drawn (QTreeView), with a view's height past each edge: a long tree costs its view, not its length.
  const groups=200,fields=25,big=Array.from({length:groups},(_,g)=>[`group_${g}`,{$fields:Array.from({length:fields},(_,k)=>[`field_${g}_${k}`,`value ${g}.${k}`])}]);
  const drawn=()=>[...tree.root.querySelectorAll('.info-row')];
  const named=text=>drawn().find(row=>row.querySelector('.info-name').textContent===text);
@@ -116,8 +116,8 @@ try {
  const menu=(row,label)=>{row.querySelector('.info-name').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:40,clientY:40}));[...document.querySelectorAll('.menu-item')].find(item=>item.textContent===label).click()};
  tree.root.style.cssText='width:360px;height:280px';document.documentElement.style.setProperty('--fluent','1');
  tree.setRows(big);await settle();
- const rowH=drawn()[0].getBoundingClientRect().height,total=groups*(fields+1),bound=()=>Math.ceil(tree.root.clientHeight/rowH)+1+2*8;
- await check('a long tree draws only the rows in view and a few past it',()=>{
+ const rowH=drawn()[0].getBoundingClientRect().height,total=groups*(fields+1),bound=()=>Math.ceil(3*tree.root.clientHeight/rowH)+2;
+ await check('a long tree draws only the rows in view and a view past each edge',()=>{
   near(tree.root.scrollHeight,total*rowH,'the tree is as tall as every row');
   const count=drawn().length;
   assert(count>=Math.ceil(tree.root.clientHeight/rowH)&&count<=bound(),`${count} rows drawn`);

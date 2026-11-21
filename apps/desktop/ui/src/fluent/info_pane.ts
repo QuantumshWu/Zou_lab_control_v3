@@ -75,9 +75,6 @@ type Metrics = {
   valuePad: number; buttonFont: string; chrome: number; q: number; widest: number;
 };
 
-/** Rows drawn past each edge of the view. */
-const OVERSCAN = 8;
-
 /** InfoTree: names and values as a tree, every field on its own row, open
  * from the start; guides down every level a row sits under and a chevron on
  * a row that opens; a filter finds a name or value anywhere and tints what
@@ -341,12 +338,12 @@ export class InfoTree {
     return low;
   }
 
-  /** Draw the rows in view and a few past it, in order; drop the rest. */
+  /** Draw the rows in view and one view's height of rows past each edge, in order; drop the rest. */
   private paint(): void {
     const metrics = this.metrics;
     if (!metrics || this.stale.flat || !this.flat.length) return;
     const top = this.root.scrollTop;
-    const first = Math.max(0, this.at(top) - OVERSCAN), last = Math.min(this.flat.length, this.at(top + this.root.clientHeight) + 1 + OVERSCAN);
+    const view = this.root.clientHeight, first = this.at(top - view), last = this.at(top + 2 * view) + 1;
     const wanted = new Set(this.flat.slice(first, last));
     for (const [node, row] of this.drawn) if (!wanted.has(node)) { row.remove(); this.drawn.delete(node); }
     let next: ChildNode | null = this.rows.firstChild;
