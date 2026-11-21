@@ -75,7 +75,7 @@ fn the_selected_model_is_slow_in_its_frame() {
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         for (r, kappa) in POINTS {
-            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false });
+            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true });
             let (mut elements, mut beyond) = (0, 0);
             for part in &model.effective {
                 let table = run.elements(&part.key, Of::Generator);
@@ -228,7 +228,7 @@ fn the_node_is_the_model_now_in_its_frame() {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
                 let rest = kappa == [0.0; 3];
-                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false });
+                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false, gradients: true });
                 if rest {
                     let now = local.now(t);
                     assert!(sum.effective.first().is_none_or(|p| (0..n * n).all(|x| (p.value.data[x] - now.hamiltonian.data[x]).abs() <= 1e-12 * now.hamiltonian.max_abs())), "{name}: at rest the sum is now(t)");
@@ -521,7 +521,7 @@ fn a_step_s_time_on_the_selected_model() {
             std::hint::black_box(local.now(0.37));
         });
         let model = least(&mut || {
-            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false }));
+            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true }));
         });
         let node = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
@@ -616,7 +616,7 @@ fn the_readout_is_the_lift_by_fast_index() {
         let psi = spread(n);
         for (r, kappa) in POINTS {
             for t in [0.0, 0.37, -1.9] {
-                let model = run.at(r, kappa, Making { model: false, kicks: false, lift: true });
+                let model = run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true });
                 let mut rho = vec![C64::ZERO; n * n];
                 crate::step::density(&psi, &mut rho);
                 let mut expected = [0.0; STATES];

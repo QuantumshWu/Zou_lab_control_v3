@@ -448,7 +448,7 @@ impl Folding {
     pub fn at(&self, values: &Values) -> At<'_> {
         let mut local = fold::Local::default();
         local.values.clone_from(values);
-        local.evaluate(&self.plan);
+        local.evaluate(&self.plan, Making::ALL);
         At { rs: self, local }
     }
 }
@@ -497,12 +497,12 @@ impl At<'_> {
     /// The model's value at the time t (the trajectory's): one group, each component at its phase e^{−if_c t}: H_eff(t)
     /// with its gradient, each channel's L(t) with its gradient, and the lift M(t) on Q (|Q| × n).
     pub fn now(&self, t: f64) -> Now {
-        Now::of(self.at_time(t, Making { model: true, kicks: false, lift: true }))
+        Now::of(self.at_time(t, Making { model: true, kicks: false, lift: true, gradients: true }))
     }
 
     /// The channels' photons' forms at the time t (`now`'s channels' kicks: k∘L per element, folded alike).
     pub fn kicks(&self, t: f64) -> Vec<Moment> {
-        moments(&self.at_time(t, Making { model: true, kicks: true, lift: false }), true)
+        moments(&self.at_time(t, Making { model: true, kicks: true, lift: false, gradients: true }), true)
     }
 }
 
@@ -1110,14 +1110,14 @@ impl Rs {
     /// a time) and `At::components`.
     pub fn local(&self, scene: &Scene, point: &Point) -> At<'_> {
         let mut local = fold::Local::default();
-        self.evaluate(scene, point, &mut local);
+        self.evaluate(scene, point, &mut local, Making::ALL);
         At { rs: &self.folding, local }
     }
 
-    /// The fold's numbers at a point into a buffer (`local`'s).
-    pub fn evaluate(&self, scene: &Scene, point: &Point, local: &mut fold::Local) {
+    /// The fold's numbers at a point into a buffer (`local`'s), what `making` asks for (`Local::evaluate`).
+    pub fn evaluate(&self, scene: &Scene, point: &Point, local: &mut fold::Local, making: Making) {
         self.tweezer.values_into(scene, point, &mut local.values);
-        local.evaluate(&self.folding.plan);
+        local.evaluate(&self.folding.plan, making);
     }
 
     /// The tweezer's fold made once (`Tweezer::still`).

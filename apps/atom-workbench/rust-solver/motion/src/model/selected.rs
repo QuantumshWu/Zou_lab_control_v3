@@ -679,7 +679,7 @@ impl Selected {
     fn at(&self, r: V3, kappa: V3, making: Making) -> crate::model::rs::ModelAt {
         let point = self.scene.point_at(r, kappa);
         let mut local = Local::default();
-        self.rs.evaluate(&self.scene, &point, &mut local);
+        self.rs.evaluate(&self.scene, &point, &mut local, Making { gradients: true, ..making });
         let mut out = Out::default();
         out.contract(self.rs.plan(), &self.lab, &local, None, making);
         crate::model::rs::model_of(self.rs.plan(), &self.lab, &out, &local.values.frequencies, making)
@@ -935,8 +935,8 @@ impl Selected {
             }
             let work = &mut w.as_mut().expect("the thread's buffers").1;
             self.scene.point_into(at, kappa, &mut work.point);
-            self.rs.evaluate(&self.scene, &work.point, &mut work.local);
-            work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making { model: true, kicks: kicked, lift: false });
+            self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(kicked));
+            work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(kicked));
             self.fill(node, &work.out, kicked, &mut work.jumps);
             node.work = crate::decide::COMPLEX * (work.local.work + work.out.work);
         });
@@ -1048,8 +1048,8 @@ impl Selected {
         };
         let mut work = Work::default();
         self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
-        self.rs.evaluate(&self.scene, &work.point, &mut work.local);
-        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making { model: true, kicks: false, lift: false });
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
         work.out.scales(self.rs.plan(), &self.lab, &work.local, None);
         self.fill(&mut node, &work.out, false, &mut work.jumps);
         for (a, t) in self.theta.iter().enumerate() {
@@ -1334,8 +1334,8 @@ impl Selected {
             }
             let Work { point, local, out, rho, fasts, lifts, row, .. } = &mut w.as_mut().expect("the thread's buffers").1;
             self.scene.point_into(at.r, at.kappa, point);
-            self.rs.evaluate(&self.scene, point, local);
-            out.contract(self.rs.plan(), &self.lab, local, None, Making { model: false, kicks: false, lift: true });
+            self.rs.evaluate(&self.scene, point, local, Making::READOUT);
+            out.contract(self.rs.plan(), &self.lab, local, None, Making::READOUT);
             let (n, q) = (self.rs.keep.len(), self.rs.folded.len());
             rho.clear();
             rho.resize(n * n, C64::ZERO);

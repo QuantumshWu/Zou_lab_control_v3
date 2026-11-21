@@ -786,8 +786,10 @@ fn sized(m: &mut Mat, rows: usize, cols: usize) {
 }
 
 impl Local {
-    /// The fold's numbers at a point: its `values`, the source's there (put in by the caller, `Rs::evaluate`).
-    pub fn evaluate(&mut self, plan: &Plan) {
+    /// The fold's numbers at a point: its `values`, the source's there (put in by the caller, `Rs::evaluate`), what
+    /// `making` asks for: K's sideband parts where it makes the model, the gradients where it makes them.
+    pub fn evaluate(&mut self, plan: &Plan, making: Making) {
+        assert!(making.gradients || !making.model, "a model is made with its gradients");
         let mut work = 0.0;
         let Local { values: v, spectra, g, dg, hats, energies, slopes, m: ms, dm: dms, gen, terms, z, zc, d, x, y, t, gs, series, .. } = self;
         let v = &*v;
@@ -807,18 +809,25 @@ impl Local {
         hats.resize_with(nb, Vec::new);
         // G₀ and ∂G₀ on each block; Q's spectra and T̂_σ.
         for (b, block) in plan.blocks.iter().enumerate() {
+            if block.sideband.is_some() && !making.model {
+                continue;
+            }
             let size = block.rows.len();
             sized(&mut g[b], size, size);
-            for x in dg[b].iter_mut() {
-                sized(x, size, size);
+            if making.gradients {
+                for x in dg[b].iter_mut() {
+                    sized(x, size, size);
+                }
             }
             for e in &block.generator {
                 let (s, ds) = gen[e.term as usize];
                 let c = e.value * v.coefficients[e.coefficient as usize];
                 let at = e.row as usize * size + e.col as usize;
                 g[b].data[at] += s * c;
-                for (x, dd) in dg[b].iter_mut().zip(ds) {
-                    x.data[at] += dd * c;
+                if making.gradients {
+                    for (x, dd) in dg[b].iter_mut().zip(ds) {
+                        x.data[at] += dd * c;
+                    }
                 }
             }
             if block.sideband.is_some() {
@@ -827,6 +836,9 @@ impl Local {
             let s = &mut spectra[b];
             assert!(s.decompose(&g[b]), "a folded block's G₀ has no eigendecomposition (defective)");
             work += s.work;
+            if !making.gradients {
+                continue;
+            }
             let mut used = 0;
             for (f, entries) in &block.varying {
                 if v.factors[*f].1.iter().all(|d| *d == C64::ZERO) {
@@ -869,11 +881,16 @@ impl Local {
         dms.resize_with(nb, Mat::default);
         for (b, batch) in plan.batches.iter().enumerate() {
             let block = &plan.blocks[b];
+            if block.sideband.is_some() && !making.model {
+                continue;
+            }
             let size = block.rows.len();
             let (total, wide) = (batch.total, batch.wide);
             let (m, dm) = (&mut ms[b], &mut dms[b]);
             sized(m, size, total);
-            sized(dm, size, 3 * total);
+            if making.gradients {
+                sized(dm, size, 3 * total);
+            }
             if batch.amplitudes.is_empty() {
                 continue;
             }
@@ -901,8 +918,10 @@ impl Local {
                     } else {
                         let (s, ds) = ts[e.term as usize];
                         x.data[at] += s * c;
-                        for (k, dd) in ds.iter().enumerate() {
-                            x.data[at + (k + 1) * count] += *dd * c;
+                        if making.gradients {
+                            for (k, dd) in ds.iter().enumerate() {
+                                x.data[at + (k + 1) * count] += *dd * c;
+                            }
                         }
                     }
                 }
@@ -932,11 +951,16 @@ impl Local {
                             };
                             let mv = d[k * total + off + j] * xv;
                             m.data[k * total + off + j] = mv;
-                            for a in 0..3 {
-                                dm.data[k * 3 * total + a * total + off + j] = dx[a] - mv * slopes[a][r.cols[j]];
+                            if making.gradients {
+                                for a in 0..3 {
+                                    dm.data[k * 3 * total + a * total + off + j] = dx[a] - mv * slopes[a][r.cols[j]];
+                                }
                             }
                         }
                     }
+                }
+                if !making.gradients {
+                    continue;
                 }
                 // Σ_σ ∂σ T̂_σ M̂: one product per varying factor for the whole batch, each axis's share onto that axis's
                 // row of ∂M̂ at once; then D ∘.
@@ -1258,16 +1282,25 @@ pub fn neumann_into(g: &Mat, z: &[f64], y: &Mat, out: &mut Mat) -> f64 {
 // ---------------------------------------------------------------------------------------------------------------------
 // The contraction.
 
-/// What a contraction makes (rs.rs, # Contractions).
+/// What an evaluation and its contraction make (rs.rs, # Contractions): the model (H_eff and the channels, and with it
+/// K's sideband parts), the channels' photon forms, the lift, and their gradients along r. A model is made with its
+/// gradients; a readout makes the lift's values alone (`READOUT`: Q's blocks, no gradient).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Making {
     pub model: bool,
     pub kicks: bool,
     pub lift: bool,
+    pub gradients: bool,
 }
 
 impl Making {
-    pub const ALL: Making = Making { model: true, kicks: true, lift: true };
+    pub const ALL: Making = Making { model: true, kicks: true, lift: true, gradients: true };
+    /// A node's: the model with its gradients, the photon forms where `kicks`.
+    pub const fn node(kicks: bool) -> Making {
+        Making { model: true, kicks, lift: false, gradients: true }
+    }
+    /// A readout's: the lift's values (model/selected.rs `Selected::rows`).
+    pub const READOUT: Making = Making { model: false, kicks: false, lift: true, gradients: false };
 }
 
 /// An output's numbers on its structural elements (`Grouping::lists`' order): values and the three gradients; and where
@@ -1382,10 +1415,15 @@ impl Out {
             list.resize_with(nb, Default::default);
         }
         for (b, (list, width)) in grouping.layout.iter().enumerate() {
+            if plan.blocks[b].sideband.is_some() && !making.model {
+                continue;
+            }
             let (size, width) = (plan.blocks[b].rows.len(), *width);
             let (zv, zd) = (&mut self.zv[b], &mut self.zd[b]);
             zero(zv, size, width);
-            zero(zd, size, 3 * width);
+            if making.gradients {
+                zero(zd, size, 3 * width);
+            }
             if list.is_empty() {
                 continue;
             }
@@ -1397,12 +1435,16 @@ impl Out {
                     let total = a.cols;
                     let w = weight(plan.amplitudes[*member].piece);
                     for k in 0..size {
-                        let (row, drow) = (&mut zv.data[k * width..(k + 1) * width], &mut zd.data[k * 3 * width..(k + 1) * 3 * width]);
-                        let (av, dv) = (&a.data[k * total + off..], &da.data[k * 3 * total + off..]);
+                        let (row, av) = (&mut zv.data[k * width..(k + 1) * width], &a.data[k * total + off..]);
                         for &(from, to) in map {
                             row[o + to] += w * av[from];
-                            for d in 0..3 {
-                                drow[d * width + o + to] += w * dv[d * total + from];
+                        }
+                        if making.gradients {
+                            let (drow, dv) = (&mut zd.data[k * 3 * width..(k + 1) * 3 * width], &da.data[k * 3 * total + off..]);
+                            for &(from, to) in map {
+                                for d in 0..3 {
+                                    drow[d * width + o + to] += w * dv[d * total + from];
+                                }
                             }
                         }
                     }
@@ -1411,8 +1453,11 @@ impl Out {
             if plan.blocks[b].sideband.is_none() {
                 let vectors = &local.spectra[b].vectors;
                 product(vectors, &self.zv[b], &mut self.mv[b]);
-                product(vectors, &self.zd[b], &mut self.md[b]);
-                work += (size * size * 4 * width) as f64;
+                work += (size * size * width) as f64;
+                if making.gradients {
+                    product(vectors, &self.zd[b], &mut self.md[b]);
+                    work += (size * size * 3 * width) as f64;
+                }
             } else {
                 copied(&mut self.mv[b], &self.zv[b]);
                 copied(&mut self.md[b], &self.zd[b]);
@@ -1517,7 +1562,7 @@ impl Out {
             for (l, g) in self.lift.iter_mut() {
                 zero(l, plan.nq, n);
                 for d in g.iter_mut() {
-                    zero(d, plan.nq, n);
+                    zero(d, if making.gradients { plan.nq } else { 0 }, n);
                 }
             }
             for (b, group, mine) in &grouping.lift {
@@ -1528,8 +1573,10 @@ impl Out {
                     for (k, &row) in plan.blocks[*b].rows.iter().enumerate() {
                         for (j, &a) in s.index.iter().enumerate() {
                             lv.data[row * n + a] += mv.data[k * width + o + j];
-                            for d in 0..3 {
-                                lg[d].data[row * n + a] += md.data[k * 3 * width + d * width + o + j];
+                            if making.gradients {
+                                for d in 0..3 {
+                                    lg[d].data[row * n + a] += md.data[k * 3 * width + d * width + o + j];
+                                }
                             }
                         }
                     }
