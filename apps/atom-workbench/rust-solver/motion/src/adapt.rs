@@ -120,12 +120,45 @@ pub struct Cursor {
     rest: Brownian,
 }
 
+/// The steps a trajectory took at a half of their length or less on its way, where the scheme refused them at their
+/// length (`halving`; `Path::halved`): how many, the time they span (µs), and that time's shortfall in the order, Σ ℓ (1 −
+/// (ℓ/τ)^p) over them, ℓ a step's length taken, τ the level's step and p the scheme's order (units.rs `ORDER`). To the
+/// leading order a run's error is the time mean of its steps' C ℓ^p (their local errors add up along it), so a level of
+/// the step τ whose steps were halved errs by C τ^p r, r = 1 − shortfall/time run: what a comparison of two levels takes
+/// its coarser level's error for (solve.rs, ## A companion at τ/2). Steps halved once: r = 1 − f (1 − 2^{−p}), f their
+/// share of the time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Halved {
+    pub steps: u64,
+    pub time: f64,
+    pub shortfall: f64,
+}
+
+impl Halved {
+    /// A step of the length `taken` where the advance asked `length` at the level's step `tau`: one halved step more
+    /// where it is shorter.
+    fn take(&mut self, taken: f64, length: f64, tau: f64) {
+        if taken < length {
+            self.steps += 1;
+            self.time += taken;
+            self.shortfall += taken * (1.0 - (taken / tau).powi(crate::units::ORDER));
+        }
+    }
+
+    /// Another trajectory's, added.
+    pub fn add(&mut self, other: &Halved) {
+        self.steps += other.steps;
+        self.time += other.time;
+        self.shortfall += other.shortfall;
+    }
+}
+
 /// A trajectory's Brownian path (module documentation, # The Brownian path) as a trajectory at one step goes along it:
 /// the run's seed and the trajectory's number, the cells' width (µs), the depth of the trajectory's grid in a cell's
 /// tree (2^depth bins a cell), where the trajectory stands, and the branch of the tree last read -- its cell, the bin's
 /// place in it, and the parts of the nodes from the cell down to the bin: a bin's branch is read on from where it
 /// leaves the last one's (the next bin's shares all but two nodes with it on average), no part made twice. And the
-/// steps the trajectory took at a half of their length on the way, where the scheme refused them (`halved`).
+/// steps the trajectory took at a half of their length on the way, where the scheme refused them (`Halved`).
 #[derive(Clone, Debug)]
 pub struct Path {
     seed: u64,
@@ -134,23 +167,23 @@ pub struct Path {
     depth: u32,
     cursor: Cursor,
     branch: (u32, u64, Vec<Brownian>),
-    halved: u64,
+    halved: Halved,
 }
 
 impl Path {
     /// The path of trajectory `index` of the run `seed` from t = 0, in cells of the width `cell`, for a trajectory whose
     /// grid has 2^depth bins a cell.
     pub fn new(seed: u64, index: u64, cell: f64, depth: u32) -> Path {
-        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, Vec::with_capacity(depth as usize + 1)), halved: 0 };
+        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, Vec::with_capacity(depth as usize + 1)), halved: Halved::default() };
         path.cursor.rest = path.whole(0);
         path
     }
 
-    /// The steps the trajectory took along the path so far at a half of their length, or less (`halving`): each step
-    /// the scheme refused at its length once, however many times it was halved. A level none of whose steps was halved
-    /// took every step at its own length (solve.rs, # The step: a companion's steps are its step's, or the comparison is
-    /// not of the two steps).
-    pub fn halved(&self) -> u64 {
+    /// The steps the trajectory took along the path so far at a half of their length, or less (`halving`; `Halved`):
+    /// each step the scheme refused at its length once, however many times it was halved, with the time it spans and
+    /// its shortfall in the order. A level none of whose steps was halved took every step at its own length; one some of
+    /// whose steps were is a comparison's coarser level at an error of its own (solve.rs, ## A companion at τ/2).
+    pub fn halved(&self) -> Halved {
         self.halved
     }
 
@@ -298,7 +331,7 @@ pub fn advance<D: Dynamics>(
             count(if tried.is_ok() { STEPS } else { REFUSED }, 1);
             tried.map(|step| (step, end, beyond))
         })?;
-        path.halved += u64::from(taken < length);
+        path.halved.take(taken, length, tau);
         // The states made inside the step in the order of their times, each on the step's path (module documentation,
         // # The reads): after a jump the trajectory's, on the path that goes on from it, with its loss test; at a time
         // read a reading on the path it lies on, which the trajectory does not take up -- held at its time where the
