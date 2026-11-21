@@ -69,8 +69,9 @@ try {
  });
  await check('the filter searches the visible pulse name, not an opaque action identifier',()=>{
   tree.applyFilter('blow_away_rabi');
+  // Only the shown rows are drawn: the two pulse entries and nothing else.
   const rows=[...tree.root.querySelectorAll('.info-row')];
-  assert(!rows[0].hidden&&!rows[1].hidden&&rows[2].hidden&&rows[3].hidden,'pulse name did not match both entries');
+  assert(rows.length===2&&rows.every(row=>row.querySelector('button')?.textContent===name),'pulse name did not match both entries');
   assert(rows[0].querySelector('.info-value').classList.contains('match'),'matching button value was not highlighted');
   tree.applyFilter('');
  });
@@ -81,26 +82,91 @@ try {
    ['remote_sequencer pulse at Start 403',{text:name,action:'pulse:start'}],
    ['remote_sequencer pulse 403',{text:name,action:'pulse:scan'}],
   ]);
+  // The rows drawn at each height, each against itself in the roomy view (a short view draws only
+  // those in it), known by where it stands among all of them.
   const geometry=()=>[...tree.root.querySelectorAll('.info-row')].map(row=>{
    const name=row.querySelector('.info-name'),range=document.createRange();range.selectNodeContents(name);
-   return {row:row.getBoundingClientRect(),name:name.getBoundingClientRect(),value:row.querySelector('.info-value').getBoundingClientRect(),text:range.getBoundingClientRect(),button:row.querySelector('button')?.getBoundingClientRect()};
+   return {key:Math.round(row.getBoundingClientRect().top-row.parentElement.getBoundingClientRect().top),row:row.getBoundingClientRect(),name:name.getBoundingClientRect(),value:row.querySelector('.info-value').getBoundingClientRect(),text:range.getBoundingClientRect(),button:row.querySelector('button')?.getBoundingClientRect()};
   });
   for(const scale of [1,1.25]) {
    document.documentElement.style.setProperty('--fluent',String(scale));tree.root.style.height='2400px';await settle();
-   const roomy=geometry();
+   const roomy=new Map(geometry().map(g=>[g.key,g]));
+   assert(roomy.size===42,'the roomy view draws every row once');
    for(const height of [140,220]) {
     tree.root.style.height=`${height}px`;await settle();tree.root.scrollTop=tree.root.scrollHeight;
     assert(tree.root.scrollHeight>tree.root.clientHeight,'crowded tree does not scroll');
-    geometry().forEach((g,i)=>{
-     near(g.row.height,roomy[i].row.height,`row ${i} height is independent of viewport height`);
+    geometry().forEach(g=>{
+     const i=g.key,r=roomy.get(i);
+     near(g.row.height,r.row.height,`row ${i} height is independent of viewport height`);
      for(const cell of [g.name,g.value]) {near(cell.top,g.row.top,`row ${i} cell top`);near(cell.bottom,g.row.bottom,`row ${i} cell bottom`)}
-     near((g.text.top+g.text.bottom)/2-g.row.top,(roomy[i].text.top+roomy[i].text.bottom)/2-roomy[i].row.top,`row ${i} text vertical alignment`);
+     near((g.text.top+g.text.bottom)/2-g.row.top,(r.text.top+r.text.bottom)/2-r.row.top,`row ${i} text vertical alignment`);
      if(g.button) near((g.button.top+g.button.bottom)/2,(g.row.top+g.row.bottom)/2,`row ${i} button centered inside hover`);
     });
     const last=geometry().at(-1),view=tree.root.getBoundingClientRect();
     assert(last.row.bottom<=view.top+tree.root.clientTop+tree.root.clientHeight+1,'last action is clipped at scroll end');
    }
   }
+ });
+ // Only the rows in view are drawn (QTreeView), with a view's height past each edge: a long tree costs its view, not its length.
+ const groups=200,fields=25,big=Array.from({length:groups},(_,g)=>[`group_${g}`,{$fields:Array.from({length:fields},(_,k)=>[`field_${g}_${k}`,`value ${g}.${k}`])}]);
+ const drawn=()=>[...tree.root.querySelectorAll('.info-row')];
+ const named=text=>drawn().find(row=>row.querySelector('.info-name').textContent===text);
+ const viewTop=()=>tree.root.getBoundingClientRect().top+tree.root.clientTop;
+ const inView=row=>{const b=row.getBoundingClientRect();return b.bottom>viewTop()&&b.top<viewTop()+tree.root.clientHeight};
+ const menu=(row,label)=>{row.querySelector('.info-name').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:40,clientY:40}));[...document.querySelectorAll('.menu-item')].find(item=>item.textContent===label).click()};
+ tree.root.style.cssText='width:360px;height:280px';document.documentElement.style.setProperty('--fluent','1');
+ tree.setRows(big);await settle();
+ const rowH=drawn()[0].getBoundingClientRect().height,total=groups*(fields+1),bound=()=>Math.ceil(3*tree.root.clientHeight/rowH)+2;
+ await check('a long tree draws only the rows in view and a view past each edge',()=>{
+  near(tree.root.scrollHeight,total*rowH,'the tree is as tall as every row');
+  const count=drawn().length;
+  assert(count>=Math.ceil(tree.root.clientHeight/rowH)&&count<=bound(),`${count} rows drawn`);
+ });
+ await check('scrolling draws the later rows at their offsets, in order',async()=>{
+  tree.root.scrollTop=3000*rowH;await settle();
+  const row=named('field_115_9');assert(row&&inView(row),'row 3000 not drawn in view');
+  near(row.getBoundingClientRect().top,viewTop(),'row 3000 at the view top');
+  const tops=drawn().map(row=>row.getBoundingClientRect().top);
+  assert(tops.every((top,i)=>!i||Math.abs(top-tops[i-1]-rowH)<1),'drawn rows not consecutive');
+  assert(drawn().length<=bound(),'scrolling piled up rows');
+ });
+ await check('the selection belongs to its row, through scrolling away and back',async()=>{
+  named('field_115_10').querySelector('.info-name').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0}));
+  tree.root.scrollTop=0;await settle();
+  assert(!named('field_115_10')&&!drawn().some(row=>row.classList.contains('selected')),'selection drawn away from its row');
+  tree.root.scrollTop=3000*rowH;await settle();
+  const selected=drawn().filter(row=>row.classList.contains('selected'));
+  assert(selected.length===1&&selected[0]===named('field_115_10'),'selection lost on scrolling');
+ });
+ await check('the filter keeps the found rows and their branches, tinted, the rest not drawn',async()=>{
+  tree.applyFilter('field_150_7');await settle();
+  assert(JSON.stringify(drawn().map(row=>row.querySelector('.info-name').textContent))==='["group_150","field_150_7"]','filtered rows');
+  near(tree.root.scrollHeight,tree.root.clientHeight,'the filtered tree is as tall as its view');
+  assert(named('field_150_7').querySelector('.info-name').classList.contains('match')&&!named('group_150').querySelector('.info-name').classList.contains('match'),'name tint');
+  tree.applyFilter('value 7.2');await settle();
+  assert(named('field_7_2').querySelector('.info-value').classList.contains('match'),'value tint');
+  tree.applyFilter('');await settle();
+  near(tree.root.scrollHeight,total*rowH,'a cleared filter shows every row');
+ });
+ await check('a chevron, a double-click, Collapse all and Expand all open and shut branches',async()=>{
+  tree.root.scrollTop=0;await settle();
+  named('group_0').querySelector('.info-chevron').click();await settle();
+  assert(!named('field_0_0')&&!named('group_0').classList.contains('open'),'chevron did not close');
+  near(tree.root.scrollHeight,(total-fields)*rowH,'a closed branch still takes room');
+  named('group_0').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));await settle();
+  assert(named('field_0_0')&&named('group_0').classList.contains('open'),'double-click did not open');
+  menu(named('field_0_3'),'Collapse all');await settle();
+  near(tree.root.scrollHeight,groups*rowH,'Collapse all');
+  assert(drawn().every(row=>!row.classList.contains('open'))&&!named('field_0_0'),'collapsed rows drawn');
+  menu(named('group_3'),'Expand all');await settle();
+  near(tree.root.scrollHeight,total*rowH,'Expand all');
+ });
+ await check('showRow selects a top-level row and scrolls it into view',async()=>{
+  tree.root.scrollTop=0;await settle();
+  assert(tree.showRow('group_180'),'showRow');await settle();
+  const row=named('group_180');assert(row&&inView(row)&&row.classList.contains('selected'),'row not shown and selected');
+  near(row.getBoundingClientRect().bottom,viewTop()+tree.root.clientHeight,'scrolled to the nearest edge');
+  assert(!tree.showRow('no such row'),'a missing row');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:checks.length,checks});
 }catch(error){document.getElementById('result').textContent=JSON.stringify({passed:false,error:error.stack})}

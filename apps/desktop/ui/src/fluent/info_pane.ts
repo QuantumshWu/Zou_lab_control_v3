@@ -57,7 +57,23 @@ export function copyText(value: InfoValue, indent = ""): string {
   return valueText(value);
 }
 
-type Node = { row: HTMLDivElement; label: HTMLSpanElement; name: string; path: string; value: InfoValue; depth: number; children: Node[]; open: boolean };
+/** A field of the tree: its words and value, where it sits, and what the filter found in it. */
+type Node = {
+  name: string; path: string; value: InfoValue; text: string; depth: number; children: Node[];
+  branch: boolean; action: boolean; open: boolean;
+  /** Its value cell's width, by the font of the last measure. */
+  width: number;
+  nameHit: boolean; valueHit: boolean; found: boolean;
+};
+
+/** What a probe row of each kind reads: the kinds' heights; the name cell's
+ * gutter, declared label column, end padding, indent at every depth and font;
+ * the value cell's paddings; a FluentButton's font, chrome and Qt px.  And the
+ * widest name's cell, by that font. */
+type Metrics = {
+  plain: number; action: number; gutter: number; label: number; end: number; indents: number[]; font: string;
+  valuePad: number; buttonFont: string; chrome: number; q: number; widest: number;
+};
 
 /** InfoTree: names and values as a tree, every field on its own row, open
  * from the start; guides down every level a row sits under and a chevron on
@@ -65,139 +81,101 @@ type Node = { row: HTMLDivElement; label: HTMLSpanElement; name: string; path: s
  * it found (ORANGE_TINT); one rounded wash per row under the pointer
  * (ACCENT_TINT) or selected (SELECTED); Copy value, Copy name, Expand all and
  * Collapse all on any row.  A value is never wrapped or cut: the tree scrolls
- * sideways; a name wider than its column shows its two ends (Qt ElideMiddle). */
+ * sideways; a name wider than its column shows its two ends (Qt ElideMiddle).
+ * As QTreeView, only the rows in view are drawn: the fields are a model, the
+ * shown rows its depth-first list, each drawn at its offset in a spacer as
+ * tall as all of them. */
 export class InfoTree {
   readonly root = element("div", "info-tree");
+  private readonly rows = element("div", "info-rows");
   private nodes: Node[] = [];
+  private all: Node[] = [];
+  /** The shown rows in order, and where each starts (one more: where the last ends). */
+  private flat: Node[] = [];
+  private offsets = new Float64Array(1);
+  private drawn = new Map<Node, HTMLDivElement>();
+  private owner = new WeakMap<Element, Node>();
   private selected: Node | null = null;
+  private reveal: Node | null = null;
+  private needle = "";
+  /** While a needle is set: the branches closed since (the filter opens every other). */
+  private shut: Set<Node> | null = null;
+  private metrics: Metrics | null = null;
+  private measureName: (text: string) => number = () => 0;
+  private stale = { metrics: true, flat: true };
+  /** The view width the names were fitted to, and the name cell it gave. */
+  private fitted = 0;
+  private column = 0;
   actionRequested: (action: string) => void = () => {};
 
-  constructor() { new ResizeObserver(() => this.fitNames()).observe(this.root); }
-
-  /** v2 _fit_name_column: the name column as wide as its widest name at its depth (every name,
-   * open or not), up to six tenths of the view (the values must start on screen), never below the
-   * declared label column; a name past it shows its two ends. Measured by the font, not the layout. */
-  private fitNames(): void {
-    const first = this.nodes[0]?.label;
-    if (!this.root.clientWidth || !first) return;
-    const style = getComputedStyle(first);
-    const measure = measurer(fontOf(style));
-    // A name's cell: its words after its depth's indent, and the end padding.
-    const inset = new Map<number, number>();
-    const all: Node[] = [];
-    const walk = (node: Node): void => { all.push(node); node.children.forEach(walk); };
-    this.nodes.forEach(walk);
-    const end = parseFloat(style.paddingRight);
-    const indent = (node: Node): number => {
-      let left = inset.get(node.depth);
-      if (left === undefined) { left = parseFloat(getComputedStyle(node.label).paddingLeft); inset.set(node.depth, left); }
-      return left + end;
+  constructor() {
+    this.root.append(this.rows);
+    new ResizeObserver(() => this.update()).observe(this.root);
+    // The scale (scale.js and --fluent on the root) or a font changed: measure the kinds again.
+    const restyled = (): void => { this.stale.metrics = true; this.update(); };
+    new MutationObserver(restyled).observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
+    document.fonts.addEventListener("loadingdone", restyled);
+    this.root.addEventListener("scroll", () => this.paint(), { passive: true });
+    const nodeAt = (event: Event): Node | undefined => {
+      const row = (event.target as Element).closest(".info-row");
+      return row ? this.owner.get(row) : undefined;
     };
-    // A row stands a gutter in from the tree's edge: its name column is that much narrower.
-    const gutter = parseFloat(getComputedStyle(this.nodes[0]!.row).marginLeft);
-    const widest = Math.ceil(gutter + all.reduce((most, node) => Math.max(most, measure(node.name) + indent(node)), 0));
-    const width = `${Math.min(widest, Math.floor(this.root.clientWidth * 0.6))}px`;
-    if (this.root.style.getPropertyValue("--info-name-w") !== width) this.root.style.setProperty("--info-name-w", width);
-    // The column: the wider of the declared label column and the names', read off a shown row.
-    const shown = all.find(node => !node.row.hidden)?.label;
-    if (!shown) return;
-    const column = shown.getBoundingClientRect().width;
-    for (const node of all) setText(node.label, elideMiddle(node.name, column - indent(node), measure));
+    this.root.addEventListener("mousedown", event => { const node = nodeAt(event); if (node) this.select(node); });
+    this.root.addEventListener("click", event => {
+      const node = nodeAt(event);
+      if (node?.branch && (event.target as Element).closest(".info-chevron")) this.setOpen(node, !this.isOpen(node));
+    });
+    this.root.addEventListener("dblclick", event => { const node = nodeAt(event); if (node?.branch) this.setOpen(node, !this.isOpen(node)); });
+    this.root.addEventListener("contextmenu", event => {
+      const node = nodeAt(event);
+      if (!node) return;
+      event.preventDefault();
+      this.select(node);
+      // v2 InfoTree's menu: the value, the name from the top (devices.camera.exposure_seconds), the tree open or shut.
+      new Menu([
+        { label: "Copy value", action: () => void navigator.clipboard?.writeText(isAction(node.value) ? node.value.text : copyText(node.value)) },
+        { label: "Copy name", action: () => void navigator.clipboard?.writeText(node.path) },
+        "separator",
+        { label: "Expand all", action: () => this.setAll(true) },
+        { label: "Collapse all", action: () => this.setAll(false) },
+      ]).openAt(event.clientX, event.clientY);
+    });
   }
 
   setRows(rows: readonly InfoRow[]): void {
-    this.selected = null;
+    const all: Node[] = [];
     const build = (name: string, value: InfoValue, depth: number, above: string): Node => {
-      const row = element("div", "info-row");
-      row.style.setProperty("--depth", String(depth));
-      for (let level = 0; level < depth; level++) {
-        const guide = element("span", "info-guide");
-        guide.style.setProperty("--level", String(level));
-        row.append(guide);
-      }
-      const chevron = element("span", "info-chevron");
-      const label = element("span", "info-name", name);
-      const shown = element("span", "info-value");
-      if (isAction(value)) {
-        // v2's embedded FluentButton consumes its left press; opening the
-        // action preserves the tree's selection and its separate hover wash.
-        shown.classList.add("info-action");
-        const action = command(value.text, () => this.actionRequested(value.action));
-        action.root.addEventListener("mousedown", event => { if (event.button === 0) event.stopPropagation(); });
-        shown.append(action.root);
-      } else shown.textContent = valueText(value);
-      row.append(chevron, label, shown);
       const path = above ? `${above}.${name}` : name;
-      const node: Node = { row, label, name, path, value, depth, children: [], open: true };
-      if (isComposite(value)) {
-        row.classList.add("branch", "open");
-        node.children = entriesOf(value).map(([child, item]) => build(child, item, depth + 1, path));
-        chevron.addEventListener("click", event => { event.stopPropagation(); this.setOpen(node, !node.open); });
-        row.addEventListener("dblclick", () => this.setOpen(node, !node.open));
-      }
-      row.addEventListener("mousedown", () => this.select(node));
-      row.addEventListener("contextmenu", event => {
-        event.preventDefault();
-        this.select(node);
-        // v2 InfoTree's menu: the value, the name from the top (devices.camera.exposure_seconds), the tree open or shut.
-        new Menu([
-          { label: "Copy value", action: () => void navigator.clipboard?.writeText(isAction(node.value) ? node.value.text : copyText(node.value)) },
-          { label: "Copy name", action: () => void navigator.clipboard?.writeText(node.path) },
-          "separator",
-          { label: "Expand all", action: () => this.setAll(true) },
-          { label: "Collapse all", action: () => this.setAll(false) },
-        ]).openAt(event.clientX, event.clientY);
-      });
+      const node: Node = {
+        name, path, value, text: valueText(value), depth, children: [], branch: isComposite(value), action: isAction(value), open: true,
+        width: 0, nameHit: false, valueHit: false, found: false,
+      };
+      all.push(node);
+      if (node.branch) node.children = entriesOf(value).map(([child, item]) => build(child, item, depth + 1, path));
       return node;
     };
     this.nodes = rows.map(([name, value]) => build(name, value, 0, ""));
+    this.all = all;
     // The top level keeps a chevron column only when some top-level row opens.
     this.root.classList.toggle("decorated", this.nodes.some(node => node.children.length > 0));
-    const flat: HTMLElement[] = [];
-    const walk = (node: Node): void => { flat.push(node.row); node.children.forEach(walk); };
-    this.nodes.forEach(walk);
-    this.root.replaceChildren(...flat);
-    for (const node of this.nodes) this.setOpen(node, true);
-    requestAnimationFrame(() => this.fitNames());
-  }
-
-  private setAll(open: boolean): void {
-    const walk = (node: Node): void => { if (node.children.length) { node.children.forEach(walk); this.setOpen(node, open); } };
-    this.nodes.forEach(walk);
-  }
-
-  private setOpen(node: Node, open: boolean): void {
-    node.open = open;
-    node.row.classList.toggle("open", open);
-    const show = (child: Node, visible: boolean): void => {
-      child.row.hidden = !visible;
-      for (const grand of child.children) show(grand, visible && child.open);
-    };
-    for (const child of node.children) show(child, open && !node.row.hidden);
-  }
-
-  private select(node: Node): void {
-    this.selected?.row.classList.remove("selected");
-    this.selected = node;
-    node.row.classList.add("selected");
+    this.selected = null;
+    this.reveal = null;
+    this.metrics = null;
+    this.mark();
+    this.clear();
+    this.stale = { metrics: true, flat: true };
+    this.update();
   }
 
   /** Keep the rows whose name or value holds `text`, with the rows above them;
    * the cells that matched are tinted. */
   applyFilter(text: string): void {
     const needle = text.trim().toLowerCase();
-    const visit = (node: Node, parentOpen: boolean): boolean => {
-      const nameHit = Boolean(needle) && node.name.toLowerCase().includes(needle);
-      const valueHit = Boolean(needle) && !isComposite(node.value) && valueText(node.value).toLowerCase().includes(needle);
-      node.row.querySelector(".info-name")!.classList.toggle("match", nameHit);
-      node.row.querySelector(".info-value")!.classList.toggle("match", valueHit);
-      let below = false;
-      for (const child of node.children) below = visit(child, parentOpen && node.open || Boolean(needle)) || below;
-      const keep = !needle || nameHit || valueHit || below;
-      node.row.hidden = !keep || (!needle && !parentOpen);
-      return nameHit || valueHit || below;
-    };
-    for (const node of this.nodes) visit(node, true);
+    if (needle === this.needle) return;
+    this.needle = needle;
+    this.mark();
+    this.stale.flat = true;
+    this.update();
   }
 
   /** Open on the top-level row `label`; false when there is none. */
@@ -205,8 +183,226 @@ export class InfoTree {
     const node = this.nodes.find(node => node.name === label);
     if (!node) return false;
     this.select(node);
-    node.row.scrollIntoView({ block: "nearest" });
+    this.reveal = node;
+    this.update();
     return true;
+  }
+
+  /** What the needle finds: each node's hits, and whether it or a row below it holds one. */
+  private mark(): void {
+    const needle = this.needle;
+    this.shut = needle ? new Set() : null;
+    const visit = (node: Node): boolean => {
+      node.nameHit = Boolean(needle) && node.name.toLowerCase().includes(needle);
+      node.valueHit = Boolean(needle) && !node.branch && node.text.toLowerCase().includes(needle);
+      let below = false;
+      for (const child of node.children) below = visit(child) || below;
+      return node.found = node.nameHit || node.valueHit || below;
+    };
+    this.nodes.forEach(visit);
+  }
+
+  private isOpen(node: Node): boolean { return this.shut ? !this.shut.has(node) : node.open; }
+
+  private setOpen(node: Node, open: boolean): void {
+    if (!this.shut) node.open = open;
+    else if (open) this.shut.delete(node);
+    else this.shut.add(node);
+    this.stale.flat = true;
+    this.update();
+  }
+
+  private setAll(open: boolean): void {
+    const branches = this.all.filter(node => node.children.length);
+    for (const node of branches) node.open = open;
+    if (this.shut) this.shut = new Set(open ? [] : branches);
+    this.stale.flat = true;
+    this.update();
+  }
+
+  private select(node: Node): void {
+    if (this.selected) this.drawn.get(this.selected)?.classList.remove("selected");
+    this.selected = node;
+    this.drawn.get(node)?.classList.add("selected");
+  }
+
+  /** Measure, list, fit and draw what changed; a hidden tree waits until it is shown. */
+  private update(): void {
+    const width = this.root.clientWidth;
+    if (!width) return;
+    if (!this.all.length) { this.clear(); this.flat = []; this.rows.style.height = "0px"; return; }
+    let redraw = false;
+    if (this.stale.metrics) {
+      this.stale.metrics = false;
+      if (this.measure()) this.stale.flat = true;
+    }
+    if (this.stale.flat) { this.stale.flat = false; this.layout(); redraw = true; }
+    if (width !== this.fitted) { this.fitNames(width); redraw = true; }
+    if (redraw) for (const [node, row] of this.drawn) this.refresh(node, row);
+    if (this.reveal) {
+      // scrollIntoView({ block: "nearest" }) at the row's offset.
+      const at = this.flat.indexOf(this.reveal);
+      this.reveal = null;
+      if (at >= 0) {
+        const top = this.offsets[at]!, bottom = this.offsets[at + 1]!;
+        if (top < this.root.scrollTop) this.root.scrollTop = top;
+        else if (bottom > this.root.scrollTop + this.root.clientHeight) this.root.scrollTop = bottom - this.root.clientHeight;
+      }
+    }
+    this.paint();
+  }
+
+  /** A probe row of each kind, read in one layout (Metrics); when it reads
+   * anything new, every name and value measured by the font.  True then. */
+  private measure(): boolean {
+    const plain = this.all.find(node => !node.action), action = this.all.find(node => node.action);
+    const probes = [plain, action].map(node => node && this.draw(node));
+    for (const probe of probes) if (probe) { probe.style.visibility = "hidden"; this.rows.append(probe); }
+    // The declared label column: the name cell with no name fitted.
+    this.root.style.removeProperty("--info-name-w");
+    this.fitted = 0;
+    const probe = (probes[0] ?? probes[1])!, name = probe.querySelector<HTMLElement>(".info-name")!;
+    const style = getComputedStyle(name);
+    const [plainHeight, actionHeight] = probes.map(row => row ? row.getBoundingClientRect().height : 0);
+    const label = name.getBoundingClientRect().width, gutter = parseFloat(getComputedStyle(probe).marginLeft);
+    const font = fontOf(style), end = parseFloat(style.paddingRight);
+    const indents: number[] = [];
+    const deepest = this.all.reduce((most, node) => Math.max(most, node.depth), 0);
+    for (let depth = 0; depth <= deepest; depth++) {
+      probe.style.setProperty("--depth", String(depth));
+      indents.push(parseFloat(getComputedStyle(name).paddingLeft));
+    }
+    const padding = (cell: Element): number => { const box = getComputedStyle(cell); return parseFloat(box.paddingLeft) + parseFloat(box.paddingRight); };
+    const valuePad = probes[0] ? padding(probes[0].querySelector(".info-value")!) : 0;
+    // A FluentButton: its words (fitWords' Qt advance, or the font's where wider) and its chrome.
+    let buttonFont = "", chrome = 0, q = 0;
+    const words = (text: string): number => Math.max(wordsWidth(text) * q, measurer(buttonFont)(text));
+    if (probes[1]) {
+      const holder = probes[1].querySelector(".info-action")!, face = holder.querySelector("button")!;
+      buttonFont = fontOf(getComputedStyle(face));
+      q = token("--q");
+      chrome = padding(holder) + face.getBoundingClientRect().width - words(action!.text);
+    }
+    for (const probe of probes) probe?.remove();
+    const read = { plain: plainHeight!, action: actionHeight!, gutter, label, end, indents, font, valuePad, buttonFont, chrome, q, widest: 0 };
+    if (this.metrics && JSON.stringify({ ...this.metrics, widest: 0 }) === JSON.stringify(read)) return false;
+    // A name's cell: its words after its depth's indent and the end padding, a gutter in from the tree's edge.
+    const measure = this.measureName = measurer(font);
+    let widest = 0;
+    for (const node of this.all) {
+      widest = Math.max(widest, measure(node.name) + indents[node.depth]!);
+      node.width = node.action ? chrome + words(node.text) : valuePad + measure(node.text);
+    }
+    this.metrics = { ...read, widest: Math.ceil(gutter + widest + end) };
+    return true;
+  }
+
+  /** The shown rows: depth first through open branches (while a needle is
+   * set, the found rows only); their offsets; the widest value among them. */
+  private layout(): void {
+    const metrics = this.metrics!, flat: Node[] = [];
+    const visit = (node: Node): void => {
+      if (this.shut && !node.found) return;
+      flat.push(node);
+      if (this.isOpen(node)) node.children.forEach(visit);
+    };
+    this.nodes.forEach(visit);
+    this.flat = flat;
+    this.offsets = new Float64Array(flat.length + 1);
+    let widest = 0;
+    flat.forEach((node, at) => {
+      this.offsets[at + 1] = this.offsets[at]! + (node.action ? metrics.action : metrics.plain);
+      widest = Math.max(widest, node.width);
+    });
+    this.rows.style.height = `${this.offsets[flat.length]}px`;
+    this.root.style.setProperty("--info-value-w", `${widest}px`);
+  }
+
+  /** v2 _fit_name_column: the name column as wide as its widest name at its depth (every name,
+   * open or not), up to six tenths of the view (the values must start on screen), never below the
+   * declared label column; a name past it shows its two ends. Measured by the font, not the layout. */
+  private fitNames(width: number): void {
+    const metrics = this.metrics!, names = Math.min(metrics.widest, Math.floor(width * 0.6));
+    if (this.root.style.getPropertyValue("--info-name-w") !== `${names}px`) this.root.style.setProperty("--info-name-w", `${names}px`);
+    this.column = Math.max(metrics.label, names - metrics.gutter);
+    this.fitted = width;
+  }
+
+  /** The shown row at `y` down the spacer. */
+  private at(y: number): number {
+    let low = 0, high = this.flat.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (this.offsets[middle]! <= y) low = middle; else high = middle - 1;
+    }
+    return low;
+  }
+
+  /** Draw the rows in view and one view's height of rows past each edge, in order; drop the rest. */
+  private paint(): void {
+    const metrics = this.metrics;
+    if (!metrics || this.stale.flat || !this.flat.length) return;
+    const top = this.root.scrollTop;
+    const view = this.root.clientHeight, first = this.at(top - view), last = this.at(top + 2 * view) + 1;
+    const wanted = new Set(this.flat.slice(first, last));
+    for (const [node, row] of this.drawn) if (!wanted.has(node)) { row.remove(); this.drawn.delete(node); }
+    let next: ChildNode | null = this.rows.firstChild;
+    for (let at = first; at < last; at++) {
+      const node = this.flat[at]!;
+      let row = this.drawn.get(node);
+      if (!row) {
+        row = this.draw(node);
+        this.refresh(node, row);
+        this.drawn.set(node, row);
+      }
+      const offset = `${this.offsets[at]}px`;
+      if (row.style.top !== offset) row.style.top = offset;
+      if (row === next) next = next.nextSibling; else this.rows.insertBefore(row, next);
+    }
+  }
+
+  private clear(): void {
+    for (const row of this.drawn.values()) row.remove();
+    this.drawn.clear();
+  }
+
+  /** One row: a guide per level it sits under, the chevron, the name and the value. */
+  private draw(node: Node): HTMLDivElement {
+    const row = element("div", "info-row");
+    row.style.setProperty("--depth", String(node.depth));
+    for (let level = 0; level < node.depth; level++) {
+      const guide = element("span", "info-guide");
+      guide.style.setProperty("--level", String(level));
+      row.append(guide);
+    }
+    const label = element("span", "info-name", node.name);
+    const shown = element("span", "info-value");
+    if (isAction(node.value)) {
+      // v2's embedded FluentButton consumes its left press; opening the
+      // action preserves the tree's selection and its separate hover wash.
+      shown.classList.add("info-action");
+      const action = node.value.action;
+      const face = command(node.value.text, () => this.actionRequested(action));
+      face.root.addEventListener("mousedown", event => { if (event.button === 0) event.stopPropagation(); });
+      shown.append(face.root);
+    } else shown.textContent = node.text;
+    row.append(element("span", "info-chevron"), label, shown);
+    if (node.branch) row.classList.add("branch");
+    this.owner.set(row, node);
+    return row;
+  }
+
+  /** A drawn row's state: its kind's height (a text in a taller fallback font keeps
+   * the row's slot), its name in the column, the filter's tint, open, selected. */
+  private refresh(node: Node, row: HTMLDivElement): void {
+    const metrics = this.metrics!, label = row.querySelector(".info-name")!;
+    const height = `${node.action ? metrics.action : metrics.plain}px`;
+    if (row.style.height !== height) row.style.height = height;
+    setText(label, elideMiddle(node.name, this.column - metrics.indents[node.depth]! - metrics.end, this.measureName));
+    label.classList.toggle("match", node.nameHit);
+    row.querySelector(".info-value")!.classList.toggle("match", node.valueHit);
+    row.classList.toggle("open", node.branch && this.isOpen(node));
+    row.classList.toggle("selected", node === this.selected);
   }
 }
 
