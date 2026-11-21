@@ -56,9 +56,8 @@
 //! K × Q, Q × Q (`Split`) --, their entries by the rounding rule (`fixed`), and with them the fold's whole structure:
 //! the blocks, the routes, the sums, the pairs, the outputs (rs/fold.rs `Plan`, `Grouping`). A point (`Rs::local`) puts in
 //! the factors and the frequencies and makes the one thing the formula itself asks there: the folded blocks' resolvents
-//! at the local generator, Q's through their spectrum (rs/spectrum.rs: decoupled at the gaps that pay, each leaf about its
-//! own centre), K's sideband parts through the Neumann series about their diagonal (their denominators are a hyperfine
-//! φ ≈ 4·10⁴ rad/µs or the tweezer's 10⁸ off couplings ≲ 10²; ρ ≈ 2·10⁻³, summed to each column's rounding).
+//! at the local generator through their spectrum, Q's and K's sideband parts alike (rs/spectrum.rs: decoupled at the
+//! gaps that pay, each leaf about its own centre).
 //!
 //! # Contractions (`At::contract`)
 //! One contraction of the fold at a point, by groups of its components: each component c enters its group g(c) with a
