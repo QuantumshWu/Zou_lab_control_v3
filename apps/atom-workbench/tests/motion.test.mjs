@@ -335,12 +335,14 @@ test('the notes and the chart titles say what the engine computes: the loss, the
   assert.match(source('field.rs'),/self\.frequencies\[self\.trap\]\.beams\.iter\(\)\.all/);
   assert.match(notes,/“设为光镊”的那一束光，连同与它同频的各束光/);
   // T and n̄ over one trap period about t, cut at t = 0 and kept centred (estimate.rs `half_window`): from 0 to 2t at first.
-  assert.match(source('estimate.rs'),/pub fn half_window\(frequency: f64, t: f64\) -> f64 \{\s*\(0\.5 \* TAU \/ frequency\)\.min\(t\)/);
+  // The smaller of half a period and t, NaN where either is (linalg.rs `smaller`, d440c45b: the same rule, NaN kept).
+  assert.match(source('estimate.rs'),/pub fn half_window\(frequency: f64, t: f64\) -> f64 \{\s*crate::linalg::smaller\(0\.5 \* TAU \/ frequency, t\)/);
   const [temperature,occupation]=motionSeries(readMotion().motion);
   assert.ok(temperature.title.includes(TEMPERATURE_WINDOW)&&TEMPERATURE_WINDOW.includes('一个阱周期')&&TEMPERATURE_WINDOW.includes('0 到 2t'),temperature.title);
   assert.match(notes,/一个阱周期内的平均（t 不到半个周期时窗口截到 t = 0、仍以 t 为中心，即 0 到 2t/);
   // n̄ of the held atoms' mean κ², the mean velocity in it (estimate.rs `summarize`): k_BT/ħω − ½ only for atoms at rest as a whole.
-  assert.match(source('estimate.rs'),/occupation: std::array::from_fn\(\|a\| occupation\(hm \* all\.kappa2\[a\], n, scales\.frequencies\[a\]\)\)/);
+  // Over the held atoms' number, `all.held` (the local `n` it was until 0ce72e75).
+  assert.match(source('estimate.rs'),/occupation: std::array::from_fn\(\|a\| occupation\(hm \* all\.kappa2\[a\], all\.held, scales\.frequencies\[a\]\)\)/);
   assert.match(occupation.title,/n̄ = m⟨v²⟩\/ħω − ½/);assert.match(notes,/⟨v²⟩ 含原子整体的平均速度：没有平均速度时它就是 k<sub>B<\/sub>T\/ħω − ½/);
   // The initial ensemble: the lowered isothermal of the bound atoms (ensemble.rs), not a Boltzmann factor cut at the escape.
   assert.match(source('ensemble.rs'),/f\(r, κ\) ∝ e\^\{−E\/k_BT\} − 1 for E < 0/);
@@ -349,8 +351,10 @@ test('the notes and the chart titles say what the engine computes: the loss, the
   // errors over few groups.
   assert.match(source('estimate.rs'),/quantile\(tail_among\(looks\), freedom\) \* self\.error/);
   assert.match(notes,/区间按组数取 Student t，组少时比两倍标准误差宽/);
-  // The total T's target: its three parts weighed by the held share (solve.rs `accounts`; SPEC §0).
-  assert.match(source('solve.rs'),/Account \{ model: h \* model, step: h \* bound, statistics: h \* relative \}/);
+  // The total T's target: its three parts weighed by the held share (solve.rs `temperature_account`, moved out of
+  // `accounts` in b2dac752; SPEC §0): the model's and the statistics' here, the step's read so already (estimate.rs `between`).
+  assert.match(source('solve.rs'),/let h = 1\. - e\.loss;\s*Account \{ model: weighed\(h, model\), step: bound\.temperature \* e\.temperature_target, statistics: weighed\(h, interval\) \}/);
+  assert.match(source('estimate.rs'),/T relative to the finer level's and weighed by the\s*\/\/! finer level's held share 1 − L/);
   assert.match(notes,/按仍在光阱中的份额 1 − L 计权后与 10% 比较/);
   // A motion trajectory's sample errors are its total estimates against its own target.
   assert.match(notes,/按运动自己的目标 5% 判断与标出/);

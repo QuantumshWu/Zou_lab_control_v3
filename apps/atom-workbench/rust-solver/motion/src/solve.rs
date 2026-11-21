@@ -545,8 +545,17 @@
 //! is set by a message, not by a look) and goes out with the first group that makes a result pass. Between the
 //! product's batches each total is a message: in a solve shorter than `CHECKPOINT` the first message is the product's
 //! first total, after the pilot (SPEC §9). A message is made by loops that run on the trajectories' own pool, between
-//! two trajectories of a thread (`run_groups`). What runs no trajectories sends nothing and looks at no clock: the
+//! two trajectories of a thread (`run_groups`). What runs no trajectories sends no result and looks at no clock: the
 //! run's construction, the model's error at the states, the prices.
+//!
+//! # Steps
+//! Beside the results, the solve says where its pipeline stands (`Stage`, `Messages::stage`) -- what no result can say
+//! where no trajectory runs: the selection, the model, and which of the scout, the pilot and the product's batches the
+//! trajectories are of. A stage is sent as a step begins (`run_of`: the selection and the model; `attempt`: the scout
+//! and the pilot; `product`: every batch, with its trajectories, the number it brings the run to and how far its looks
+//! stand from their targets) and as the step's check moves to another rung (`check`) -- when it changes, never
+//! otherwise. It decides nothing, is no part of the result and is kept nowhere: its one reader is the app's course of a
+//! running solve (src/solve-progress.ts).
 use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
@@ -638,8 +647,9 @@ pub struct Solution {
     pub approximations: Ledger,
 }
 
-/// The solve of a request (module documentation): every checkpoint handed to `checkpoint` with the estimated wall time
-/// left (ms) where the run's pace gives one, the final solution returned; partial results are never withheld.
+/// The solve of a request (module documentation): every message handed to `send` -- each checkpoint with the estimated
+/// wall time left (ms) where the run's pace gives one, and each step the pipeline enters (# Steps) --, the final
+/// solution returned; partial results are never withheld.
 ///
 /// The run is one object, made once for the request and the same at every step of the solve (model/selected.rs
 /// `Selected`: the scene, the three-point check's P and its fold): what the solve takes of it beside the steps -- the
@@ -647,17 +657,25 @@ pub struct Solution {
 /// (`Setting`) -- is made from it here, and the pipeline runs once (`attempt`). A request it refuses (the scene, the
 /// selection, a trap that does not hold the atom, no step below the edge) is refused with its reason, before a
 /// trajectory runs.
-pub fn solve(request: &Request, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
+pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
     request.validate()?;
-    let run = run_of(request, alone(chief(request)))?;
-    solve_on(request, &run, checkpoint)
+    let run = run_entered(request, alone(chief(request)), &mut |step| send(Message::Stage(&Stage { step, tau: None, batch: None })))?;
+    solve_on(request, &run, send)
 }
 
 /// The run of a request at the reference populations `reference` (`solve`): its scene, the three-point check's P
-/// (`select::choose`) and its fold.
+/// (`select::choose`) and its fold (`run_entered`, its steps said to no one): the tests' run.
+#[cfg(test)]
 pub(crate) fn run_of(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
+    run_entered(request, reference, &mut |_| {})
+}
+
+/// The run of a request (`run_of`), each of its steps handed to `entered` as it begins (# Steps).
+fn run_entered(request: &Request, reference: [f64; GROUND], entered: &mut dyn FnMut(Step)) -> Result<Selected, String> {
+    entered(Step::Select);
     let scene = crate::scene::Scene::new(request)?;
     let selection = crate::select::choose(&scene)?;
+    entered(Step::Model);
     Selected::new(scene, selection, reference)
 }
 
@@ -669,7 +687,7 @@ pub(crate) fn chief(request: &Request) -> usize {
 }
 
 /// The solve of a request on its run (`solve`): the selection's report to stderr, the run's setting, the pipeline.
-pub(crate) fn solve_on(request: &Request, run: &Selected, checkpoint: &mut dyn FnMut(&Solution, Option<f64>)) -> Result<Solution, String> {
+pub(crate) fn solve_on(request: &Request, run: &Selected, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request);
     let chief = initial.iter().position(|&(s, _)| s == chief(request)).expect("the reference state is a component");
@@ -680,7 +698,7 @@ pub(crate) fn solve_on(request: &Request, run: &Selected, checkpoint: &mut dyn F
     let trap = &wells[chief].trap;
     let reported = reported(run, &reference).ok();
     let setting = Setting { run, trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported, kick: kick_curvature(run, trap) };
-    let mut messages = Messages { send: checkpoint, clock: Instant::now(), last: None, least: 0 };
+    let mut messages = Messages { send, clock: Instant::now(), last: None, least: 0, stage: None };
     let solved = attempt(request, &setting, &mut messages);
     // The run's counts (adapt.rs `tally`), to stderr.
     eprintln!("{}", crate::adapt::counted(true));
@@ -708,15 +726,71 @@ struct Setting<'a> {
 
 /// The solve's messages to the app (module documentation, # Checkpoints).
 struct Messages<'a> {
-    send: &'a mut dyn FnMut(&Solution, Option<f64>),
-    /// The last message's time.
+    send: &'a mut dyn FnMut(Message),
+    /// The last result's time: the clock times results alone, never a stage.
     clock: Instant,
     /// The last result sent.
     last: Option<Solution>,
     /// The trajectories a result must rest on to be sent.
     least: u64,
+    /// The last stage sent (# Steps).
+    stage: Option<Stage>,
 }
+
+/// A message of the solve to the app: a checkpoint -- a complete result so far, with the wall time left (ms) where the
+/// run's pace gives one (# Checkpoints) -- or the step the pipeline stands at (# Steps).
+pub enum Message<'a> {
+    Checkpoint(&'a Solution, Option<f64>),
+    Stage(&'a Stage),
+}
+
+/// The steps of the pipeline a stage names (module documentation, # The pipeline): the three-point selection of P,
+/// the model (its fold, the prepared wells and the initial ensemble), the scout, the pilot and the product.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Select,
+    Model,
+    Scout,
+    Pilot,
+    Product,
+}
+
+/// Where the pipeline stands (# Steps): its step, the rung τ (µs) the scout, the pilot or the product runs at, and the
+/// product's batch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stage {
+    pub step: Step,
+    pub tau: Option<f64>,
+    pub batch: Option<Batch>,
+}
+
+/// A batch of the product (`product`): its number from 1, the trajectories in hand and the number it brings the run to
+/// (`batch`), and its looks' largest total over its target -- every look within its target at 1 or below, which stops
+/// the run (`Look::met`) --, none where that is no number.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Batch {
+    pub number: u64,
+    pub trajectories: u64,
+    pub want: u64,
+    pub worst: Option<f64>,
+}
+
 impl Messages<'_> {
+    /// The pipeline at `stage` (# Steps): sent where it is not the last stage sent -- a step begun, or its numbers
+    /// changed --, never again otherwise.
+    fn stage(&mut self, stage: Stage) {
+        if self.stage.as_ref() != Some(&stage) {
+            (self.send)(Message::Stage(&stage));
+            self.stage = Some(stage);
+        }
+    }
+    /// The step's check moves to the rung `tau` (`check`): the step in hand, at that rung.
+    fn rung(&mut self, tau: f64) {
+        if let Some(stage) = &self.stage {
+            let moved = Stage { tau: Some(tau), ..stage.clone() };
+            self.stage(moved);
+        }
+    }
     /// A result of the solve so far, of `groups` groups and `trajectories` trajectories, with the wall time left (ms)
     /// where the run's pace gives one: made (`made`) and sent where it rests on two groups at least -- the jackknife's
     /// least for a spread, whatever the members a group has so far (the scout's groups have one) --, shows something
@@ -729,7 +803,7 @@ impl Messages<'_> {
             self.least = trajectories;
             // The run's counts so far with each result (adapt.rs `counted`), to stderr; their tally at the solve's end.
             eprintln!("{}", crate::adapt::counted(false));
-            (self.send)(&s, remaining);
+            (self.send)(Message::Checkpoint(&s, remaining));
             self.last = Some(s);
             self.clock = Instant::now();
         } else {
@@ -740,7 +814,7 @@ impl Messages<'_> {
     /// stays due, and goes out with the first result that passes (`run_groups`).
     fn again(&mut self) {
         if let Some(s) = &self.last {
-            (self.send)(s, None);
+            (self.send)(Message::Checkpoint(s, None));
             self.clock = Instant::now();
         }
     }
@@ -1963,6 +2037,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // Where its rung stands on its reads, its course by the run's work from here, priced at its states at its analysis
     // times -- the rung, or one below where that is expected to cost the run less: the product's trajectories its looks
     // ask beside the model's error at those states (`Prices`).
+    messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
     let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, messages);
     if matches!(scouting, Settled::Pending) {
         let (here, at) = {
@@ -1984,6 +2059,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // # The step) -- first as far as its own two levels: at the first rung whose own read is in and not clearly beyond,
     // its states are read, and the check goes on from there priced at them. Whether it saw: a step that stands
     // uncertified -- at the steps' cap, or unable to see -- is flagged.
+    messages.stage(Stage { step: Step::Pilot, tau: Some(context.tau), batch: None });
     let mut settled = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, messages);
     // Nothing integrated (# Exits): the pilot's every trajectory ended with no outcome before the first output after
     // t = 0 -- no step, no rung and no further trajectory is checked or priced on what shows nothing --, the request's
@@ -2589,6 +2665,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         let halved_companion = levels.companion == Companion::Half;
         let inherits = (!halved_companion).then(|| carried(&read, 0.5));
         context.tau = below;
+        messages.rung(below);
         // The level at the step is the companion from here on: its states are read no more; its own companion (where
         // it is 2τ) and the further pairs are no level of the rung below's -- all freed before its level runs, which
         // holds as much again.
@@ -2802,6 +2879,7 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
     // The wall time (ms) the trajectories from `done` to `want` take at the product's pace so far; none before its own
     // first trajectories are in.
     let left = |done: u64, want: u64| (done > from).then(|| started.elapsed().as_secs_f64() * 1e3 / (done - from) as f64 * (want - done) as f64);
+    let mut batches = 0;
     loop {
         let all: Vec<&Part> = parts.iter().collect();
         let n = all.len() as u64 * GROUP;
@@ -2813,6 +2891,10 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
             return (shown, l, c, e);
         }
         let want = batch(most_needed(&chased), n);
+        // The batch begun (# Steps): its trajectories, and how far its looks stand from their targets.
+        batches += 1;
+        let worst = chased.iter().map(Look::over).fold(0., crate::linalg::larger);
+        messages.stage(Stage { step: Step::Product, tau: Some(context.tau), batch: Some(Batch { number: batches, trajectories: n, want, worst: worst.is_finite().then_some(worst) }) });
         messages.result(all.len(), n, integrated(&all), left(n, want), || {
             let (shown, l, c) = pooled(&all, &context.scales);
             assemble(context, &shown, &e, &l, &c, n)
@@ -3690,6 +3772,11 @@ impl Look {
     /// Whether its total lies within its target: the ledger's own test of a time (ledger.rs `Ledger::close`).
     fn met(&self) -> bool {
         self.account.total() <= self.target
+    }
+    /// Its total over its target, 1 or below where it is met: how far it stands from its target, for the product's
+    /// stage alone (# Steps; `met` decides).
+    fn over(&self) -> f64 {
+        self.account.total() / self.target
     }
     /// The room its statistics may take (`room`).
     fn room(&self) -> f64 {
@@ -5848,8 +5935,8 @@ mod tests {
         let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
         let scout: Vec<Part> = (0..3).map(|i| folded(&shape, std::iter::once(record(i)))).collect();
         let mut sent = vec![];
-        let mut send = |s: &Solution, _: Option<f64>| sent.push(s.trajectories);
-        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        let mut send = |m: Message| if let Message::Checkpoint(s, _) = m { sent.push(s.trajectories) };
+        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
         // No group, one group: nothing, and the message stays due. Three groups of one member: a result, and the clock is
         // set. Two of them: fewer trajectories, the last again. Two whole groups, in hand or coming in: results.
         so_far(&context, &[], &[], &mut messages);
@@ -5862,6 +5949,57 @@ mod tests {
         so_far(&context, &whole[..1], &[&whole[1]], &mut messages);
         messages.result(1, 4 * GROUP, true, None, || unreachable!("no result is made of one group"));
         assert_eq!(sent, [3, 3, 2 * GROUP, 2 * GROUP, 2 * GROUP]);
+    }
+
+    /// The stages (module documentation, # Steps): one as a step begins and as the check moves to another rung, none
+    /// where nothing changed -- the same stage again, a rung the step stands at, a rung before any step --; a stage
+    /// sets no result's clock.
+    #[test]
+    fn a_stage_goes_out_when_it_changes_and_never_again() {
+        let mut sent = vec![];
+        let mut send = |m: Message| if let Message::Stage(s) = m { sent.push(s.clone()) };
+        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
+        let at = |step, tau| Stage { step, tau: Some(tau), batch: None };
+        let batch = |number, trajectories, want| Stage { step: Step::Product, tau: Some(0.5), batch: Some(Batch { number, trajectories, want, worst: Some(1.5) }) };
+        messages.rung(1.);
+        messages.stage(at(Step::Scout, 1.));
+        messages.stage(at(Step::Scout, 1.));
+        messages.rung(0.5);
+        messages.rung(0.5);
+        messages.stage(at(Step::Pilot, 0.5));
+        messages.stage(batch(1, 88, 176));
+        messages.stage(batch(2, 176, 352));
+        assert!(messages.due().is_zero(), "a stage sets no clock: the result stays due");
+        assert_eq!(sent, [at(Step::Scout, 1.), at(Step::Scout, 0.5), at(Step::Pilot, 0.5), batch(1, 88, 176), batch(2, 176, 352)]);
+    }
+
+    /// A solve's stages in order (module documentation, # Steps), on R1_TWEEZER's own request over 20 µs: the selection
+    /// and the model with no rung, then the scout, the pilot and the product's batches at their rungs, never a step back,
+    /// each stage another than the one before; no checkpoint before the scout. A batch brings the run beyond the
+    /// trajectories in hand, its numbers count from 1, and its looks stand beyond their targets (else no batch).
+    #[test]
+    fn a_solve_says_its_steps_in_order() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R1_TWEEZER.json");
+        let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        (line["options"]["durationUs"], line["options"]["samples"]) = (serde_json::json!(20.), serde_json::json!(21));
+        let request = Request::from_native(&line).unwrap();
+        // Each message as it came: a stage, or a checkpoint (None).
+        let mut came: Vec<Option<Stage>> = vec![];
+        let solved = solve(&request, &mut |m| came.push(match m {
+            Message::Stage(s) => Some(s.clone()),
+            Message::Checkpoint(..) => None,
+        }));
+        solved.unwrap();
+        let stages: Vec<&Stage> = came.iter().flatten().collect();
+        eprintln!("{} messages; stages {stages:?}", came.len());
+        assert_eq!(stages.iter().take(3).map(|s| s.step).collect::<Vec<_>>(), [Step::Select, Step::Model, Step::Scout]);
+        assert!(stages[..2].iter().all(|s| s.tau.is_none() && s.batch.is_none()) && stages[2..].iter().all(|s| s.tau.is_some_and(|t| t > 0.)));
+        assert!(stages.iter().any(|s| s.step == Step::Pilot));
+        assert!(stages.windows(2).all(|w| w[0] != w[1] && w[0].step as u8 <= w[1].step as u8), "a step back or a stage again");
+        let scout = came.iter().position(|m| m.as_ref().is_some_and(|s| s.step == Step::Scout)).unwrap();
+        assert!(came[..scout].iter().all(Option::is_some), "no checkpoint before the scout");
+        let batches: Vec<&Batch> = stages.iter().filter_map(|s| s.batch.as_ref()).collect();
+        assert!(batches.iter().enumerate().all(|(i, b)| b.number == i as u64 + 1 && b.want > b.trajectories && b.worst.is_none_or(|w| w > 1.)), "{batches:?}");
     }
 
     /// A run that integrates nothing hands out nothing (module documentation, # Exits; tilt2 at 24d346ce: every start
@@ -5903,8 +6041,8 @@ mod tests {
         let all: Vec<&Part> = none.iter().collect();
         assert!(!integrated(&all));
         let mut sent = vec![];
-        let mut send = |s: &Solution, _: Option<f64>| sent.push(s.trajectories);
-        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        let mut send = |m: Message| if let Message::Checkpoint(s, _) = m { sent.push(s.trajectories) };
+        let mut messages = Messages { send: &mut send, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
         so_far(&context, &none, &[], &mut messages);
         assert!(messages.due().is_zero(), "no result of what shows nothing beyond t = 0");
         let reason = nothing_integrated(&counts_of(&all), 2 * GROUP, context.plan.times[1]);
@@ -5943,8 +6081,8 @@ mod tests {
             over.fetch_add(1, Ordering::Relaxed);
             Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
         };
-        let mut silent = |_: &Solution, _: Option<f64>| {};
-        let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0 };
+        let mut silent = |_: Message| {};
+        let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
         let numbers: Vec<u64> = (0..rayon::current_num_threads() as u64).collect();
         let mut seen = vec![];
         let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], 0, &mut messages, &mut |_, messages| {
@@ -6066,8 +6204,10 @@ mod tests {
             let request = Request::from_native(&line).unwrap();
             let clock = Instant::now();
             println!("R2-SOLVE {name} begins; threads {}", rayon::current_num_threads());
-            let solved = solve(&request, &mut |s, remaining| {
-                println!("R2-SOLVE {name} {:.1} s: {} trajectories, tau {} us, remaining {remaining:?}", clock.elapsed().as_secs_f64(), s.trajectories, s.time_step_us);
+            let solved = solve(&request, &mut |m| {
+                if let Message::Checkpoint(s, remaining) = m {
+                    println!("R2-SOLVE {name} {:.1} s: {} trajectories, tau {} us, remaining {remaining:?}", clock.elapsed().as_secs_f64(), s.trajectories, s.time_step_us);
+                }
             });
             match solved {
                 Ok(s) => println!("R2-SOLVE {name} solved at {:.1} s: tau {} us, {} trajectories; {}", clock.elapsed().as_secs_f64(), s.time_step_us, s.trajectories, s.method),
@@ -6125,8 +6265,8 @@ mod tests {
             plan.read_at(candidates.clone());
             let first = MOST_TRAJECTORIES / GROUP;
             let numbers: Vec<u64> = (first..first + pilot_size() / GROUP).collect();
-            let mut silent = |_: &Solution, _: Option<f64>| {};
-            let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
+            let mut silent = |_: Message| {};
+            let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
             let tau = first_rung * rung;
             let [half, own, double] = [0.5 * tau, tau, 2. * tau].map(|step| level(&run, &ensemble, &domain, &plan, step, &numbers, 0..members, false, &mut messages, &mut |_, _| {}));
             let [half, own, double] = [&half, &own, &double].map(|level| level.iter().collect::<Vec<&Part>>());
@@ -6209,8 +6349,8 @@ mod tests {
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
             Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2] }
         };
-        let mut silent = |_: &Solution, _: Option<f64>| {};
-        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
+        let mut silent = |_: Message| {};
+        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
         let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
         let members = [0..GROUP, 1..3];
         let hands = members.clone().map(|members| Hand { groups: &numbers, members, shape, record: &record });
@@ -6242,8 +6382,8 @@ mod tests {
             std::thread::sleep(each);
             Record { reads: vec![Fate::Lost; 2], outputs: vec![Fate::Lost; 2], listed: vec![None], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
         };
-        let mut silent = |_: &Solution, _: Option<f64>| {};
-        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0 };
+        let mut silent = |_: Message| {};
+        let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
         let started = Instant::now();
         let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }];
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_groups(&hands, 0, &mut messages, &mut |_, _| {})));

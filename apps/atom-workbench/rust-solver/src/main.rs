@@ -191,7 +191,8 @@ fn write_line(message: &Value) -> bool {
 /// One protocol response to a request and its line. `capabilities` and `warmup` (the
 /// worker start-up LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
 /// which with `progress` first streams every checkpoint's result as `checkpoint`
-/// progress (the same contract, marked `progress`).
+/// progress (the same contract, marked `progress`), and a motion solve's stages as
+/// `stage` progress (motion_adapter.rs `stage`).
 fn respond(request: Request, line: &Value) -> Value {
     let id = request.id;
     match request.op.as_deref() {
@@ -215,9 +216,15 @@ fn respond(request: Request, line: &Value) -> Value {
             write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"checkpoint","result":stamp(checkpoint.clone())}));
         }
     };
+    // A motion solve's stages (motion_adapter.rs `stage`), with `progress` only, as `stage` progress: no result.
+    let mut staged = |stage: &Value| {
+        if request.progress {
+            write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"stage","stage":stage}));
+        }
+    };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
         (Some(FULL_MODEL_SCHEMA), Some(model)) => match &model.motion {
-            Some(_) => motion_adapter::solve(model, line, &request.options, &mut publish),
+            Some(_) => motion_adapter::solve(model, line, &request.options, &mut publish, &mut staged),
             None => lattice_core_adapter::solve(model, &request.options, &mut publish),
         },
         (Some(FULL_MODEL_SCHEMA), None) => Err("A solve request requires a model".into()),
