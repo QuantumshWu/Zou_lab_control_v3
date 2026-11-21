@@ -4052,7 +4052,7 @@ fn ended(counts: &Counts, booked: bool) -> Vec<String> {
         }
     }
     if let Some(t) = counts.nowhere.since {
-        out.push(format!("{} 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 {}）{there}", counts.nowhere.count, when(t)));
+        out.push(format!("{} 条轨迹所在处的折叠不存在（起点处算出的数不是有限数，或某个读出时刻的读数不是有限数，最早在 {}）{there}", counts.nowhere.count, when(t)));
     }
     out
 }
@@ -5195,7 +5195,7 @@ mod tests {
         assert!(s.estimated_errors.iter().chain(&s.loss_probability).chain(s.populations.iter().flatten()).all(|x| x.is_finite()), "{s:?}");
         assert!(s.loss_probability[3] == s.loss_probability[2] && s.populations[3] == s.populations[2] && s.estimated_errors[3] >= 1., "{s:?}");
         let flagged = s.approximations.flagged.expect("flagged");
-        for said in ["4 条轨迹的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "6 条轨迹所在处的折叠不存在（起点落不到任何簇上、读出不是有限数、或在光阱区域外丢失能量不是有限数，最早在 16 μs）：它们在那里结束", "30 μs 起：没有一条轨迹计入估计"] {
+        for said in ["4 条轨迹的一步在所取步长下推进不了（算出的数不是有限数，或内态的本征分解不可用），在时间的舍入以内减半步长也推进不了（最早在 11 μs）：此后它们不计入估计", "3 条轨迹的跳跃给不出光子（模型在该状态上失败，缩短步长无济于事）（最早在 12.5 μs）：此后它们不计入估计", "2 条轨迹在某一步上，光学扇区的噪声算子 K 做不出（ℳ 奇异", "5 条轨迹的散射率超过了原子任何状态可能的上限（某个绝热消去远离它的适用范围，最早在 15 μs）：它们在那里停下", "6 条轨迹所在处的折叠不存在（起点处算出的数不是有限数，或某个读出时刻的读数不是有限数，最早在 16 μs）：它们在那里结束", "30 μs 起：没有一条轨迹计入估计"] {
             assert!(flagged.contains(said), "{said} in {flagged}");
         }
         assert!(!flagged.contains("已无原子留在光阱中") && !flagged.contains("温度的误差无法估计"), "{flagged}");
