@@ -649,17 +649,24 @@ fn rs_at_cost() {
     }
 }
 
-/// The full reference is the prototype's (scene_p.build with the tweezer's dissipative fold, scene_x's H0 convention,
-/// each scene's own request: PYEXP2's exports pysel\export2\*_full_rs.npz as JSON by scratchpad v3c2\tojson.py in the
-/// directory `V3C_FULL`) to rounding, on the six scenes at the checkpoint's centre (r = 0, the tweezer full) and edge
-/// (dark), no Doppler shift: H's components summed by the prototype's keys (its beams grouped by frequency, then the
-/// carrier and the frame's α) and their gradients along x, y, z; the emission's channels e₁, e₂, u (= x, y, z) and the
-/// tweezer's six (co- and counter-rotating, n_tw = ±1), their gradients; each relative to its quantity's largest entry
-/// over every key: to 10⁻¹². (PYSEL's first exports made both tilt scenes of the tilt2 request, scene_x
-/// `angle_request`, which drops the probe's |Δm| ≥ 2 elements: another scene's numbers, not these requests' (REQPREC).)
+/// The full reference is the prototype's to rounding: PYEXP2's construction -- pyexp2/scene_p.py `build` (each
+/// scene's own request, reqprec/req; the tweezer's dissipative fold; scene_x's H0 convention) and pysel/ps.py
+/// `hilbert_full3` --, its input by the engine's rule since 3a (model/rs.rs `significant`: each coupling entry of the
+/// base, every beam's X_l, the tweezer's X_tw and R_tw and every outside-form product zero where its first-order
+/// amplitude is below ε at the term's frequency at rest; the emission by its own largest), as JSON in the directory
+/// `V3C_FULL` (made by motion3d_status/rewrite/r1clean_ref/export_rule.py, the files kept beside it). On the six
+/// scenes at the checkpoint's centre (r = 0, the tweezer full) and edge (dark), no Doppler shift: H's components summed
+/// by the prototype's keys (its beams grouped by frequency, then the carrier and the frame's α) and their gradients
+/// along x, y, z; the emission's channels e₁, e₂, u (= x, y, z) and the tweezer's six (co- and counter-rotating,
+/// n_tw = ±1), their gradients; each relative to its quantity's largest entry over every key: to 10⁻¹². (Until
+/// 2026-11-20 the JSON was v3c2/full, converted from PYSEL's pysel/export -- other requests: the tilt scenes from
+/// tilt2's by scene_x `angle_request`, PGC3D in another geometry, its couplings' signs and the emission's axes apart, ∇H
+/// and L 1.6 off --; PYEXP2's own-request export2 without the input rule leaves ∇H up to 5.8·10⁻¹⁰ (GMD1C): the
+/// request's residues the rule takes, such as cool-plus-x's −9.9·10⁻⁹ coupling to D2-3-0 at a 7 THz detuning, and the
+/// outside-form products' entries below it, which in the exact sum cancel the y-gradient of ground-1-1 ← ground-2-0.)
 #[test]
 fn the_reference_is_pysel_to_rounding() {
-    let dir = std::path::PathBuf::from(std::env::var("V3C_FULL").expect("V3C_FULL: PYSEL's full references as JSON (scratchpad v3c2/full)"));
+    let dir = std::path::PathBuf::from(std::env::var("V3C_FULL").expect("V3C_FULL: the prototype's full references as JSON (motion3d_status/rewrite/r1clean_ref)"));
     let mut worst = 0.0_f64;
     for (name, scene, _) in scenes() {
         let beams = &scene.request.beams;
