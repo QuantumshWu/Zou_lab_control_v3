@@ -98,7 +98,9 @@ fn iterate(left: &Mat, right: &Mat, c: &Mat, f: impl Fn(&Mat) -> Option<Mat>) ->
         let next = Mat { rows: m, cols: k, data: rhs.data.iter().zip(&delta).map(|(a, b)| *a / *b).collect() };
         let change = sub(&next, &x).max_abs();
         x = next;
-        if change <= 2.0 * UNIT_ROUNDOFF * x.max_abs() || change >= last {
+        // Done at the rounding or where the change stops falling; a change that is not a number ends it too (the
+        // iterate carries it out), where both comparisons would be false and the iteration would not end.
+        if !(change > 2.0 * UNIT_ROUNDOFF * x.max_abs()) || !(change < last) {
             return (x, work);
         }
         last = change;

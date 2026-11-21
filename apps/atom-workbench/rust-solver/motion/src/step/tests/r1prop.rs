@@ -354,7 +354,7 @@ fn piece_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, sp
 
 /// The engine's sums of `piece_sums`, its nodes and its panels.
 fn engine_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, ends: bool) -> ([Vec<crate::linalg::C64>; 3], usize, usize) {
-    use crate::linalg::{norm_sqr, C64};
+    use crate::linalg::C64;
     let n = picture.states();
     let mut x = [C64::ZERO; super::super::STATES];
     let mut sums = vec![0.0; 2 * n * super::super::row(n) * super::super::SUMS];

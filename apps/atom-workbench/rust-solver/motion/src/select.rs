@@ -487,7 +487,8 @@ pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn
 /// Whether light reaches the atom at a point (module documentation, # Points without light): some first-order
 /// amplitude of every beam's light there (`reach`, the tweezer's included) at or above the rounding, ε.
 pub fn lit(scene: &Scene, reference: &ModelAt, point: &Components) -> bool {
-    reach(scene, reference, point, &|_| true).iter().any(|&a| a >= f64::EPSILON)
+    // An amplitude that is not a number counts as light: the point is judged, and its errors are not numbers.
+    reach(scene, reference, point, &|_| true).iter().any(|&a| !(a < f64::EPSILON))
 }
 
 /// The candidate levels in the order of their largest first-order amplitude at the points (scene2.ranking): per

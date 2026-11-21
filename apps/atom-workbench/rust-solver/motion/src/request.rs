@@ -24,9 +24,9 @@
 //!
 //! with a_l(r) the beam's amplitude relative to its focus value (field.rs), X_l and R_l its co- and counter-rotating
 //! couplings at the focus, linear in its field E_l and E_l*, x_{ω,i} the coherence coordinates of the frequency's summed
-//! field (`coordinates`) and O_{ω,i} its outside form: the shift through the states outside the model and the Rb⁺ core,
+//! field (`OutsideForm`) and O_{ω,i} its outside form: the shift through the states outside the model and the Rb⁺ core,
 //! of which H0 already holds the focus value -- the second order of those states, whose own error, per transition to
-//! each of their levels, comes with the form (`Transition`; the model books it, model/elim.rs `errors`). Δ_l = 2π Σ_k frequency_index_l[k] frequencies_mhz[k] is the beam's
+//! each of their levels, comes with the form (`Transition`; parsed, and read by no model since the old one went). Δ_l = 2π Σ_k frequency_index_l[k] frequencies_mhz[k] is the beam's
 //! detuning from the excited states' frame. Spontaneous emission is Σ_a D[C_a] over the lowering dipole's lab-axis
 //! components (`emission`).
 
@@ -126,7 +126,7 @@ pub struct Beam {
 
 /// The outside shift of the beams of one frequency as a form in their summed field E (rad/µs/(V/m)²; src/spectroscopy.ts
 /// `outsideFieldForm`): O(E) = Σ_i x_i(E) O_i with x = (|E_q|² for q = −1, 0, +1, then per pair p < q in the order
-/// (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)) -- `coordinates`. Each O_i is Hermitian. And its transitions to
+/// (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)). Each O_i is Hermitian. And its transitions to
 /// the levels outside the model the shift is made through (`Transition`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutsideForm {
@@ -140,35 +140,12 @@ pub struct OutsideForm {
 /// term, its own small parameter (coupling/detuning)² -- the population a model state holds in the level, Σ_v |V_vs/Δ_vs|²
 /// over the level's sublevels and both rotations --, and the term itself, its part of the outside form's diagonal, each
 /// as a form in the same field: m_s(E) = Σ_i x_i(E) mixing[i][s] (1/(V/m)²) and o_s(E) = Σ_i x_i(E) shift[i][s]
-/// (rad/µs/(V/m)², `coordinates`), per model state s.
+/// (rad/µs/(V/m)², x_i the coordinates of `OutsideForm`), per model state s.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Transition {
     pub name: String,
     pub mixing: [Vec<f64>; 9],
     pub shift: [Vec<f64>; 9],
-}
-
-/// What H0 holds of an outside form's value O at the focus (`Request::hamiltonian`: H0 is diagonal in the model basis):
-/// its diagonal. The light's Hamiltonian at r is H0 − held(O(0)) + O(r) -- the bare levels plus the whole form there --,
-/// so that taking the focus's form out of H0 takes out what H0 holds and no more (dragchk.status.md section 4 (b): with
-/// the whole O(0) taken out, tilt0's tweezer form lost its off-diagonal at the focus -- up to 11 rad/µs between D2
-/// hyperfine levels of one m -- and had it with the wrong sign away from it).
-pub(crate) fn held(o: &Mat) -> Mat {
-    Mat::from_fn(o.rows, o.cols, |i, j| if i == j { o[(i, i)] } else { C64::ZERO })
-}
-
-/// The coordinates x_i(E) of a field's outside forms (`OutsideForm`): |E_q|² for q = −1, 0, +1, then per pair p < q in
-/// the order (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q) and Im(E_p* E_q).
-pub(crate) fn coordinates(e: &[C64; 3]) -> [f64; 9] {
-    let mut x = [0.0; 9];
-    for q in 0..3 {
-        x[q] = e[q].norm_sqr();
-    }
-    for (i, (p, q)) in [(0, 1), (0, 2), (1, 2)].into_iter().enumerate() {
-        let z = e[p].conj() * e[q];
-        (x[3 + 2 * i], x[4 + 2 * i]) = (z.re, z.im);
-    }
-    x
 }
 
 /// A motion solve: the model, the initial state and the output times.

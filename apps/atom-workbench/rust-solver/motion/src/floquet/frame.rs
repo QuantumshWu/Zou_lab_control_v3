@@ -438,6 +438,8 @@ impl Frame {
             let bet = betas(*alpha);
             let at = |l: Lev| bet.iter().find(|b| b.0 == l).map_or(0.0, |b| b.1);
             let residual: Vec<(f64, f64)> = terms.iter().map(|&(amp, f, dm, lg, le, _)| (amp, f - alpha * dm as f64 - (at(le) - at(lg)))).collect();
+            // A term that is not a number would be left out of the score and the band, and the frame chosen without it.
+            assert!(residual.iter().all(|r| !r.0.is_nan() && !r.1.is_nan()), "the frame's terms are not numbers");
             let score = residual.iter().filter(|r| r.1.abs() > STATIC).map(|r| r.0).fold(0.0, larger);
             let band = residual.iter().filter(|r| r.0 > BAND * strongest).map(|r| r.1.abs()).fold(0.0, larger);
             let better = match &best {
@@ -551,7 +553,7 @@ pub struct Sectors {
 
 /// One coordinate of the frame vector of the element b ← a (row b, column a) of a component at the vector c: c − θ_b +
 /// θ_a. In the frame ψ_a = e^{−iθ_a t} ψ̃_a, so H_ba e^{−ict} ψ_a enters i dψ̃_b/dt as H_ba e^{−i(c − θ_b + θ_a)t} ψ̃_a.
-/// The one definition: the assembly's on whole vectors (assemble.rs `to_frame`), the fold's on their fast parts
+/// The one definition: the assembly's on whole vectors (floquet/assemble.rs `to_frame`), the fold's on their fast parts
 /// (`Sectors::element`).
 pub fn element(c: i64, row: i64, col: i64) -> i64 {
     c - row + col

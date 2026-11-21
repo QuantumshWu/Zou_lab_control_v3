@@ -873,7 +873,7 @@ impl Tweezer {
             }
             for j in 1..ORDERS {
                 let term = d.powi(j as i32);
-                if term.abs() * sizes[j] >= UNIT_ROUNDOFF * sizes[0] {
+                if !(term.abs() * sizes[j] < UNIT_ROUNDOFF * sizes[0]) {
                     assert!(j + 1 < ORDERS, "the tweezer's Doppler series needs more than {ORDERS} powers at δ = {d} rad/µs");
                     v.coefficients[power(sign, j)] = term;
                 } else {

@@ -330,8 +330,14 @@
 //! its converged step, the error growing with the span (stepcost.status.md).)
 
 use crate::linalg::{self, combine, C64, Mat, LANES};
-use crate::model::assemble::laid;
 use crate::units::UNIT_ROUNDOFF;
+
+/// Where row `row` of column `column` lies among `count` columns laid for the lanes -- each column's rows in blocks of
+/// `LANES`, a block's real parts and then its imaginary parts --, from their start: its real part, its imaginary part
+/// `LANES` after it.
+pub(crate) fn laid(row: usize, column: usize, count: usize) -> usize {
+    ((row / LANES) * count + column) * 2 * LANES + row % LANES
+}
 
 /// Why the decomposition does not take a step (module documentation, # Where the decomposition does not take the
 /// step): the step is refused (step.rs `Refused::Propagation`), and the advance takes it at its half.
@@ -915,7 +921,7 @@ fn flag(classes: &mut [Class], range: std::ops::Range<usize>, first: bool, lambd
                 let omega = if c == 0 { between } else { C64::new(between.re + beat, between.im) };
                 let turn = omega.abs();
                 let (k, t) = (row * n + column, column * n + row);
-                let r = if turn > 0.0 { linalg::larger(size(&classes[c], k, omega), size(&classes[partner], t, -omega)) } else { 0.0 };
+                let r = if turn != 0.0 { linalg::larger(size(&classes[c], k, omega), size(&classes[partner], t, -omega)) } else { 0.0 };
                 let decay = omega.im.abs() * h.abs();
                 // The pair's hop exponent at its balancing similarity, its two ways' geometric mean with half the hop's
                 // growth; a state's own entry commutes with itself: its hops' series is its first term.
@@ -2016,8 +2022,9 @@ impl Picture {
         let (mut numerator, mut ringing) = (std::mem::take(&mut self.numerator), std::mem::take(&mut self.ringing));
         numerator.clear();
         ringing.clear();
-        for a in (0..n).filter(|&a| self.held[a] && m[a] > 0.0) {
-            for b in (a..n).filter(|&b| self.held[b] && m[b] > 0.0) {
+        // A weight that is not a number stays in: the quotient is not a number, and the stop it bounds is refused.
+        for a in (0..n).filter(|&a| self.held[a] && !(m[a] <= 0.0)) {
+            for b in (a..n).filter(|&b| self.held[b] && !(m[b] <= 0.0)) {
                 let line = |s: f64, (d, slope): (f64, f64)| (m[a].ln() + m[b].ln() + (rates[a] + rates[b]) * s - d.ln(), rates[a] + rates[b] - slope / d);
                 let ((f0, s0), (f1, s1)) = (line(0.0, ends[0]), line(width, ends[1]));
                 let top = if s0 <= 0.0 {
@@ -2033,7 +2040,7 @@ impl Picture {
                 numerator.push((twice * weight, nu));
                 if a != b {
                     let o = self.overlaps[a * n + b];
-                    if o > 0.0 {
+                    if !(o <= 0.0) {
                         ringing.push((twice * o * weight, nu));
                     }
                 }

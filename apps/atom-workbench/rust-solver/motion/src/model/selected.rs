@@ -43,8 +43,8 @@
 //! axes the polarization's amplitudes u_a = L_(a,n)(t) ψ. A jump of the class carries its conditional mean b =
 //! Σ_a Im⟨u_a|∇u_a⟩/W of the absorbed momentum as far as one absorbed photon's goes, s b with s = min(1, k_c/|b|), k_c
 //! the largest wave number of the beams its channels' keys hold; the step carries the rest, Σ_c (1 − s_c) Σ_a
-//! Im⟨u_a|∇u_a⟩ and 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ − s_c² W_c b_c b_cᵀ] (model/photon.rs, # The absorbed light's
-//! momentum: the one rule). The photon's wave number is the class's rate-weighted mean of the elements' k_eg, read on the
+//! Im⟨u_a|∇u_a⟩ and 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ − s_c² W_c b_c b_cᵀ] (model.rs `Moments` and
+//! `Scattering::of_moments`: the one rule). The photon's wave number is the class's rate-weighted mean of the elements' k_eg, read on the
 //! channels' photon forms (`Channel::kicks`, made at a jump's node alone): Σ_a Re⟨u_a|K_aψ⟩/W.
 //!
 //! # The rest of the model
@@ -1160,7 +1160,7 @@ fn photons(node: &Node, values: &[f64], t: f64, psi: &[C64]) -> Vec<Photons> {
             }
             let moments = Moments::of(&u, &du, class.absorbed);
             let weight = moments.weight;
-            let wave_number = node.kicked.then(|| if weight > 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
+            let wave_number = node.kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
             Photons { u, moments: moments.over(norm), wave_number }
         })
         .collect()
@@ -1364,7 +1364,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     fn optical(&self, path: &Path) -> Option<Optical> {
         let decay = self.model.optical?;
         let (most, least) = self.model.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (larger(most, x), smaller(least, x)));
-        Some(Optical { ground: GROUND, decay, beat: if most >= least { most - least } else { 0.0 } })
+        Some(Optical { ground: GROUND, decay, beat: if most < least { 0.0 } else { most - least } })
     }
 }
 

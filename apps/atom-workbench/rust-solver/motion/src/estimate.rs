@@ -121,7 +121,7 @@ use std::f64::consts::{PI, TAU};
 /// (n + z²/2 + z √(n(N − n)/N + z²/4))/(N + z²): the largest share the draws leave plausible (module documentation).
 pub fn wilson(count: f64, draws: f64) -> f64 {
     let z = CONFIDENCE;
-    let spread = if draws > 0. { count * (draws - count) / draws } else { 0. };
+    let spread = if draws != 0. { count * (draws - count) / draws } else { 0. };
     (count + 0.5 * z * z + z * (spread + 0.25 * z * z).sqrt()) / (draws + z * z)
 }
 
@@ -409,7 +409,7 @@ pub struct Scales {
 /// (`Group::scattered`): max(`SUB_DOPPLER_RECOILS` T_rec, ħω̄/2k_B) -- k_BT_rec = (ħk)²/m at the photons' own mean k²,
 /// the mean over the lab axes of the reported trap's zero point ħω_a/2k_B. No photon, no recoil part.
 pub fn semiclassical(scattered: [f64; 2], scales: &Scales) -> f64 {
-    let recoil = if scattered[0] > 0. { scales.hbar_over_mass * scattered[1] / scattered[0] / KT_PER_UK } else { 0. };
+    let recoil = if scattered[0] != 0. { scales.hbar_over_mass * scattered[1] / scattered[0] / KT_PER_UK } else { 0. };
     let zero_point = scales.frequencies.iter().sum::<f64>() / (6. * KT_PER_UK);
     crate::linalg::larger(SUB_DOPPLER_RECOILS * recoil, zero_point)
 }
@@ -417,7 +417,7 @@ pub fn semiclassical(scattered: [f64; 2], scales: &Scales) -> f64 {
 /// T's allowance at a total T (µK) of the semiclassical scale `scale` (µK), relative to T (solve.rs, # T's allowance):
 /// δT/T = √(ε_T² + (T_sc/T)²); unbounded where T is none.
 pub fn allowance(temperature: f64, scale: f64) -> f64 {
-    if temperature > 0. { TEMPERATURE_TARGET.hypot(scale / temperature) } else { f64::INFINITY }
+    if !(temperature <= 0.) { TEMPERATURE_TARGET.hypot(scale / temperature) } else { f64::INFINITY }
 }
 
 /// The groups' photons together (`Group::scattered`).
@@ -478,7 +478,7 @@ impl Estimate {
     /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
     /// is not read, or is none (atoms that do not move: no error is relative to it).
     pub fn temperature_interval(&self) -> f64 {
-        self.motion.as_ref().filter(|m| m.temperature_total > 0.).map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
+        self.motion.as_ref().filter(|m| !(m.temperature_total <= 0.)).map_or(f64::INFINITY, |m| m.temperature_total_error.interval() / m.temperature_total)
     }
 }
 
@@ -500,7 +500,7 @@ fn temperature(s: &Sums, hbar_over_mass: f64) -> Option<[f64; 3]> {
 }
 fn moments(s: &Sums, hbar_over_mass: f64) -> Moments {
     let n = s.trajectories;
-    Moments { shown: (n > 0.).then(|| (1. - s.held / n, s.rows.map(|r| r / n))), temperature: temperature(s, hbar_over_mass) }
+    Moments { shown: (n != 0.).then(|| (1. - s.held / n, s.rows.map(|r| r / n))), temperature: temperature(s, hbar_over_mass) }
 }
 /// The jackknife's standard error of the values with each group left out (module documentation, # Errors), read on
 /// `groups`.
@@ -533,7 +533,7 @@ fn jackknife<G: Borrow<Group>>(levels: &[&[G]], k: usize, hm: f64) -> Jackknife 
         })
         .collect();
     let count = levels[0].len();
-    let holding = (0..count).filter(|&i| levels.iter().any(|l| l[i].borrow().sums[k].held > 0.)).count() as f64;
+    let holding = (0..count).filter(|&i| levels.iter().any(|l| l[i].borrow().sums[k].held != 0.)).count() as f64;
     let leave = if count >= 2 {
         (0..count)
             .map(|i| {
@@ -613,7 +613,7 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
             let n = all.held;
             let motion = motion(&j, scales);
             let kinetic: f64 = all.kappa2.iter().sum();
-            let shares = |kind: &[f64; 2]| [if n > 0. { kind[0] / n } else { 0. }, if kinetic > 0. { kind[1] / kinetic } else { 0. }];
+            let shares = |kind: &[f64; 2]| [if n != 0. { kind[0] / n } else { 0. }, if kinetic != 0. { kind[1] / kinetic } else { 0. }];
             let estimate = Estimate {
                 unresolved: shares(&all.unresolved),
                 trajectories: all.trajectories,
@@ -621,10 +621,10 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 loss: 0.,
                 loss_error: j.every(|m| loss(&m[0])),
                 shown_errors: std::array::from_fn(|s| j.every(|m| shown(&m[0], s))),
-                populations: if n > 0. { all.rows.map(|r| r / n) } else { [0.; STATES] },
+                populations: if n != 0. { all.rows.map(|r| r / n) } else { [0.; STATES] },
                 motion,
                 failed: all.failed,
-                uncounted: if all.trajectories > 0. { all.failed / (all.trajectories + all.failed) } else { 1. },
+                uncounted: if all.trajectories != 0. { all.failed / (all.trajectories + all.failed) } else { 1. },
                 temperature_target: motion.map_or(TEMPERATURE_TARGET, |m| allowance(m.temperature_total, scale)),
             };
             (full.shown.map(|(loss, _)| loss), estimate)
@@ -674,7 +674,7 @@ fn step_error(m: &[Moments], q: usize) -> f64 {
 /// Whether a time's moments read a quantity of `step_error` at every level: the loss and the rows where every level
 /// counts a trajectory, T where every level's total T is a positive number besides.
 fn stepped(m: &[Moments], q: usize) -> bool {
-    counted(m) && (q <= STATES || m.iter().all(|x| x.temperature.is_some_and(|t| t.iter().sum::<f64>() > 0.)))
+    counted(m) && (q <= STATES || m.iter().all(|x| x.temperature.is_some_and(|t| !(t.iter().sum::<f64>() <= 0.))))
 }
 
 /// Each time's share of the run in a mean over the times `times` (increasing, from t = 0): half the interval to each

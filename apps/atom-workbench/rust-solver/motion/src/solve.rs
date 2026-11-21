@@ -262,7 +262,7 @@
 //! T is continuous at t = 0, and what it does by the first output is the dynamics' alone. Its error there is its
 //! statistics' (no step taken, no model acted: `accounts`). What is shown at t = 0 is the request's state, exact:
 //! every trajectory starts in its component's state, and the readout's dressing by the lights -- the eliminated
-//! excited amplitudes following the ground state (model/readout.rs) -- has not happened at the instant they are
+//! excited amplitudes following the ground state (the lift, model/rs.rs `ModelAt::lift`) -- has not happened at the instant they are
 //! switched on. (T(0) was the ensemble's moment by quadrature (ensemble.rs, now the tests' reference for the draws),
 //! with the pilot's steps for its budget: another estimator, and a short run's budget leaves it unconverged -- the
 //! user's 200 µK tweezer of 7.5 k_BT, 0.1 µs: two levels of 2 and 4 nodes a coordinate 22.5 % apart, 179.5 µK against
@@ -833,7 +833,7 @@ struct Domain {
 struct Widest(f64);
 impl Widest {
     fn of(request: &Request) -> Widest {
-        let decay = crate::model::far::decay(request);
+        let decay = crate::scene::decay(&request.emission);
         Widest((0..decay.rows).map(|x| decay[(x, x)].re).fold(0., crate::linalg::larger))
     }
 }
@@ -1742,7 +1742,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         let held: Vec<f64> = read.estimates.iter().map(|e| 1. - e.loss).collect();
         let means = read.sampled.measured().means(n, &read.estimates);
         for (i, label) in READINGS.iter().enumerate() {
-            let most = (1..n).filter(|&k| held[k] > 0.).map(|k| crate::linalg::larger(means[k][i][0], held[k] * means[k][i][1])).fold(0., crate::linalg::larger);
+            let most = (1..n).filter(|&k| held[k] != 0.).map(|k| crate::linalg::larger(means[k][i][0], held[k] * means[k][i][1])).fold(0., crate::linalg::larger);
             context.ledger.item(label, most, MODEL_MEASURED);
         }
     }
@@ -2515,7 +2515,7 @@ impl<'a> Windows<'a> {
 fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3]) {
     if let Fate::Held(h) = fate {
         let w: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|i| ends[a][1][i] - ends[a][0][i]));
-        for a in (0..3).filter(|&a| w[a][0] > 0.) {
+        for a in (0..3).filter(|&a| w[a][0] != 0.) {
             (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
         }
     }
@@ -2547,8 +2547,7 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 /// cannot advance (adapt.rs) fails from the first time it does not reach. One whose state scatters beyond every state
 /// of the atom (`Domain::runaway`: a fold far outside its validity) stops there: it is unresolved from then on, held at
 /// every later time as it stood (module documentation, # The unresolved atoms). One the run's fold does not exist for
-/// -- its start lands nowhere (its held forms no number: model/fold/run.rs `Dynamics::started`, step.rs
-/// `Trajectory::new`), or at a time read its readout is no number -- ends there with no outcome, said (`Counts::nowhere`; # Exits): at t = 0 it is
+/// -- its start lands nowhere (its forms at the start no number: step.rs `Trajectory::new`), or at a time read its readout is no number -- ends there with no outcome, said (`Counts::nowhere`; # Exits): at t = 0 it is
 /// the atom in its initial state, its own populations. Where its states are kept (`keep`), it is
 /// advanced from checkpoint to checkpoint (`Checkpoint`: at t = 0 and at the first step's end at or past every multiple
 /// of T's shortest window, module documentation, # The analysis times) -- the same trajectory to the bit (adapt.rs
@@ -2995,7 +2994,7 @@ fn step_bound() -> [f64; 2] {
 /// documentation, # Stopping); none where the two fill the target, or where either is no number -- it bounds nothing.
 fn room(target: f64, model: f64, step: f64) -> f64 {
     let rest = target * target - model * model - step * step;
-    if rest > 0. { rest.sqrt() } else { 0. }
+    if !(rest <= 0.) { rest.sqrt() } else { 0. }
 }
 
 /// An error on a probability as it is booked (SPEC §4): at most one, the probability's whole range; one that is no
@@ -3066,7 +3065,7 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
         .flat_map_iter(|(k, e)| {
             let (h, n) = (1. - e.loss, e.trajectories);
             let shown = Look { target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true };
-            let held = (e.held > 0.).then(|| {
+            let held = (e.held != 0.).then(|| {
                 let read = Some(e.temperature_interval()).filter(|i| i.is_finite());
                 let account = temperature[k].unwrap_or_else(|| temperature_account(e, fixed.model[k][1], &step, read.unwrap_or(CONFIDENCE * (2. / (n * h)).sqrt())));
                 Look { target: e.temperature_target, account, interval: account.statistics, trajectories: n, shown: false }
@@ -3122,7 +3121,7 @@ fn temperature_account(e: &Estimate, model: f64, bound: &Bound, interval: f64) -
 /// trajectory is counted; unbounded where some is not -- the part of T the held atoms of unknown fate make is bounded by
 /// nothing the run read (estimate.rs, # What is counted).
 fn temperature_model(e: &Estimate, model: f64) -> f64 {
-    if e.uncounted > 0. { f64::INFINITY } else { model }
+    if e.uncounted != 0. { f64::INFINITY } else { model }
 }
 
 /// An error of the held atoms weighed by their share h, as an account weighs it: unbounded stays so at any share -- h
@@ -3197,7 +3196,7 @@ impl Measured<'_> {
                     return vec![[1., f64::INFINITY]; n];
                 }
                 let h = 1. - estimates[k].loss;
-                let mean = |sum: f64, count: f64| if count > 0. { sum / count } else { 0. };
+                let mean = |sum: f64, count: f64| if count != 0. { sum / count } else { 0. };
                 held.iter().zip(&lost).map(|(held, lost)| [h * mean(held[0], holding) + (1. - h) * mean(*lost, losing), mean(held[1], holding)]).collect()
             })
             .collect()
@@ -3266,7 +3265,7 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
 /// groups but `left`; zero where no state is read -- nothing is held to err or to work on.
 fn over_the_run(picks: &[Pick], values: impl Iterator<Item = f64>, left: Option<usize>) -> f64 {
     let (sum, weight) = picks.iter().zip(values).filter(|(pick, _)| Some(pick.group) != left).fold((0., 0.), |a, (pick, value)| (a.0 + pick.weight * value, a.1 + pick.weight));
-    if weight > 0. { sum / weight } else { 0. }
+    if weight != 0. { sum / weight } else { 0. }
 }
 
 /// Histograms of one coordinate of the held atoms at the listed outputs on one grid symmetric about 0 that holds them all
@@ -3485,7 +3484,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     for (k, e) in estimates.iter().enumerate() {
         // At t = 0 every trajectory holds its atom (`run`), and a result rests on two at least: nothing is carried there.
         let last = || k.checked_sub(1).expect("t = 0 holds every trajectory's atom, two at least in a result");
-        s.populations.push(if k == 0 { c.initial } else if e.held > 0. { e.populations } else { s.populations[last()] });
+        s.populations.push(if k == 0 { c.initial } else if e.held != 0. { e.populations } else { s.populations[last()] });
         if e.held == 0. && e.trajectories > 0. && empty.is_none() {
             empty = Some(k);
         }
@@ -3499,7 +3498,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
                 s.mean_velocity_mps.push(m.mean_velocity);
                 s.mean_occupation.push(m.occupation);
                 s.classical.push(classical(&m.temperature));
-                if m.temperature_errors.iter().any(|x| !x.read()) && e.held > 0. {
+                if m.temperature_errors.iter().any(|x| !x.read()) && e.held != 0. {
                     unread.push(k);
                 }
             }
@@ -3513,7 +3512,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
                 s.mean_velocity_mps.push(v);
                 s.mean_occupation.push(n);
                 s.classical.push(s.classical[last]);
-                if e.held > 0. {
+                if e.held != 0. {
                     carried.push(k);
                 }
             }
@@ -5156,8 +5155,8 @@ mod tests {
     /// to 1000 times the thermal speed along each lab axis, run for 0.8 µs at 0.005 µs in the solve's domain. An atom whose
     /// state's hazard at its first step's middle is above the fastest excited state's decay, wholly excited, stops there,
     /// is counted and held from then on as it stood, unresolved (booked whole), its rows numbers; one whose hazard is
-    /// below half of it runs to the end untouched. The fold at the atom rises a node where its readings leave the share
-    /// (model/fold/run.rs # The nodes risen and fallen), so its rate stays a state's: how many stop is said, not asked.
+    /// below half of it runs to the end untouched. The model is made once (P chosen at the checkpoint, model/selected.rs),
+    /// so its rate is a state's: how many stop is said, not asked.
     #[test]
     fn a_fold_scattering_beyond_any_state_stops_its_atom_held_unresolved() {
         let (request, run, trap) = scene_run("R2_RECOIL", false, 7);
