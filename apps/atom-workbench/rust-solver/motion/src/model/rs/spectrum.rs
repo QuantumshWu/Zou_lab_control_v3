@@ -41,9 +41,10 @@ pub struct Spectrum {
     /// The leaves' decompositions, by leaf (`Eigen` keeps its memory), and the decoupling's buffers by depth.
     eigens: Vec<linalg::Eigen>,
     levels: Vec<Level>,
-    /// `split`'s: the diagonal and its order.
+    /// `split`'s: the diagonal, its order, the gaps.
     diagonal: Vec<f64>,
     order: Vec<usize>,
+    gaps: Vec<(f64, usize)>,
 }
 
 /// One depth of the decoupling (`decouple`): its split, the four blocks, X and Y and their iteration's, the two sides'
@@ -102,7 +103,7 @@ fn zeroed(v: &mut Vec<C64>, len: usize) {
 
 /// The widest gap of G's diagonal (real parts) at which a split pays (module documentation): the two sides, each sorted,
 /// into `left` and `right`; false where none pays. G is m × m, row-major; `d` and `order` its buffers.
-fn split_into(g: &[C64], m: usize, d: &mut Vec<f64>, order: &mut Vec<usize>, left: &mut Vec<usize>, right: &mut Vec<usize>) -> bool {
+fn split_into(g: &[C64], m: usize, (d, order, gaps): (&mut Vec<f64>, &mut Vec<usize>, &mut Vec<(f64, usize)>), left: &mut Vec<usize>, right: &mut Vec<usize>) -> bool {
     if m < 2 {
         return false;
     }
@@ -117,19 +118,17 @@ fn split_into(g: &[C64], m: usize, d: &mut Vec<f64>, order: &mut Vec<usize>, lef
         let off = if side.len() > 1 { side.iter().map(|&i| row_sum(i, side)).fold(0.0, larger) } else { 0.0 };
         hi - lo + 2.0 * off
     };
-    let mut best: Option<(f64, usize)> = None;
-    for c in 1..m {
+    // The widest gap that pays, the first of equal ones: the gaps tried widest first, the first that pays taken (a gap
+    // that is not a number pays nowhere).
+    gaps.clear();
+    gaps.extend((1..m).map(|c| (d[order[c]] - d[order[c - 1]], c)));
+    gaps.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let pays = |&(gap, c): &(f64, usize)| {
         let (l, r) = order.split_at(c);
-        let gap = d[r[0]] - d[l[c - 1]];
-        if best.is_some_and(|(b, _)| gap <= b) {
-            continue;
-        }
         let cross = l.iter().flat_map(|&i| r.iter().map(move |&j| larger(g[i * m + j].abs(), g[j * m + i].abs()))).fold(0.0, larger);
-        if gap > 2.0 * cross && gap > spread(l) + spread(r) {
-            best = Some((gap, c));
-        }
-    }
-    let Some((_, c)) = best else { return false };
+        gap > 2.0 * cross && gap > spread(l) + spread(r)
+    };
+    let Some(&(_, c)) = gaps.iter().find(|x| pays(x)) else { return false };
     left.clear();
     left.extend_from_slice(&order[..c]);
     right.clear();
@@ -141,8 +140,8 @@ fn split_into(g: &[C64], m: usize, d: &mut Vec<f64>, order: &mut Vec<usize>, lef
 
 /// The widest gap of G's diagonal at which a split pays (`split_into`): the two sides, each sorted.
 pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
-    let (mut d, mut order, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    split_into(&g.data, g.rows, &mut d, &mut order, &mut left, &mut right).then_some((left, right))
+    let (mut d, mut order, mut gaps, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    split_into(&g.data, g.rows, (&mut d, &mut order, &mut gaps), &mut left, &mut right).then_some((left, right))
 }
 
 /// An iteration's buffers (`iterate`): the denominators, −N_L, N_R, the right-hand side, a product's.
@@ -204,6 +203,7 @@ struct Shared<'a> {
     eigens: &'a mut Vec<linalg::Eigen>,
     diagonal: &'a mut Vec<f64>,
     order: &'a mut Vec<usize>,
+    gaps: &'a mut Vec<(f64, usize)>,
     leaves: &'a mut Vec<usize>,
     work: f64,
 }
@@ -218,7 +218,7 @@ fn decouple(g: &[C64], m: usize, levels: &mut [Level], shared: &mut Shared, v: &
     let most = levels.len();
     let (here, below) = levels.split_first_mut().expect("a depth for every split (at most the block's size)");
     here.make(most);
-    if !split_into(g, m, shared.diagonal, shared.order, &mut here.left, &mut here.right) {
+    if !split_into(g, m, (&mut *shared.diagonal, &mut *shared.order, &mut *shared.gaps), &mut here.left, &mut here.right) {
         // A leaf: about its own centre c, the mean of Re G_ii; a single state its own value, V = V⁻¹ = 1.
         let c = (0..m).map(|i| g[i * m + i].re).sum::<f64>() / m.max(1) as f64;
         centre.fill(c);
@@ -353,7 +353,7 @@ impl Spectrum {
         self.values.clear();
         self.values.resize(n, C64::ZERO);
         self.leaves.clear();
-        let mut shared = Shared { eigens: &mut self.eigens, diagonal: &mut self.diagonal, order: &mut self.order, leaves: &mut self.leaves, work: 0.0 };
+        let mut shared = Shared { eigens: &mut self.eigens, diagonal: &mut self.diagonal, order: &mut self.order, gaps: &mut self.gaps, leaves: &mut self.leaves, work: 0.0 };
         let made = decouple(&g.data, n, &mut self.levels[..n.max(1)], &mut shared, &mut self.vectors.data, &mut self.inverse.data, &mut self.centre, &mut self.values);
         self.work = shared.work;
         made

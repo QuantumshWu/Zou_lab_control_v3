@@ -1497,12 +1497,14 @@ impl Out {
                     work += self.product(grouping, pair.w);
                     self.made = pair.w;
                 }
+                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
                 let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
                 for i in 0..rows {
-                    for j in 0..cols {
-                        let (x, dx) = self.element(grouping, pair.w, pair.z, i, j);
+                    let (places, conjugates) = (&pair.places[i * cols..(i + 1) * cols], &pair.conjugate_places[i * cols..(i + 1) * cols]);
+                    for (j, (&k, &kc)) in places.iter().zip(conjugates).enumerate() {
+                        let (x, dx) = products.element(i, j);
                         let (x, dx) = (x * 0.5, dx.map(|d| d * 0.5));
-                        let (k, kc) = (pair.places[i * cols + j] as usize, pair.conjugate_places[i * cols + j] as usize);
+                        let (k, kc) = (k as usize, kc as usize);
                         let out = &mut self.h[pair.out];
                         out.value[k] += x;
                         for a in 0..3 {
@@ -1544,11 +1546,13 @@ impl Out {
                     work += self.product(grouping, pair.w);
                     self.made = pair.w;
                 }
+                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
                 let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
+                let out = &mut self.channels[pair.out];
                 for i in 0..rows {
-                    for j in 0..cols {
-                        let (x, dx) = self.element(grouping, pair.w, pair.z, i, j);
-                        let (out, k) = (&mut self.channels[pair.out], pair.places[i * cols + j] as usize);
+                    for (j, &k) in pair.places[i * cols..(i + 1) * cols].iter().enumerate() {
+                        let (x, dx) = products.element(i, j);
+                        let k = k as usize;
                         out.value[k] += x;
                         for a in 0..3 {
                             out.gradient[a][k] += dx[a];
@@ -1633,16 +1637,35 @@ impl Out {
         ((stacked + 3 * rows) * size * width) as f64
     }
 
-    /// The element (i, j) of the pair of the leg sum wi (its products made) and the amplitude sum zi: X M and its three
-    /// gradients ∂X M + X ∂M.
-    fn element(&self, grouping: &Grouping, wi: usize, zi: usize, i: usize, j: usize) -> (C64, [C64; 3]) {
+}
+
+/// A pair's slices of its leg sum's products (`Out::product`): [X; ∂X] M and X ∂M, the sum's rows, the block's width,
+/// the amplitude sum's first column, whether the leg sum moves.
+struct Products<'a> {
+    p: &'a [C64],
+    pd: &'a [C64],
+    rows: usize,
+    width: usize,
+    at: usize,
+    moving: bool,
+}
+
+impl Products<'_> {
+    /// The pair of the leg sum wi (its products `p`, `pd` made, `Out::product`; `moving` its) and the amplitude sum zi.
+    fn of<'a>(p: &'a Mat, pd: &'a Mat, moving: bool, grouping: &Grouping, wi: usize, zi: usize) -> Products<'a> {
         let (rows, width) = (grouping.ws[wi].index.len(), grouping.layout[grouping.ws[wi].block].1);
-        let at = grouping.z_offset[zi] + j;
-        let value = self.p.data[i * width + at];
+        Products { p: &p.data, pd: &pd.data, rows, width, at: grouping.z_offset[zi], moving }
+    }
+
+    /// The pair's element (i, j): X M and its three gradients ∂X M + X ∂M.
+    #[inline]
+    fn element(&self, i: usize, j: usize) -> (C64, [C64; 3]) {
+        let (width, at) = (self.width, self.at + j);
+        let value = self.p[i * width + at];
         let gradient = std::array::from_fn(|a| {
-            let held = self.pd.data[i * 3 * width + a * width + at];
+            let held = self.pd[i * 3 * width + a * width + at];
             if self.moving {
-                held + self.p.data[((a + 1) * rows + i) * width + at]
+                held + self.p[((a + 1) * self.rows + i) * width + at]
             } else {
                 held
             }

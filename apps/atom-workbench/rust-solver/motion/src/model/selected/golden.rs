@@ -422,7 +422,8 @@ fn allocations(f: &mut dyn FnMut()) -> Option<u64> {
 }
 
 /// R2-NODE: a node's, a jump's photon's and a readout's cost on one thread (µs, the least of R2_REPEAT runs, 40) at the
-/// golden's moving point (r = R1, κ the speed 0.1 µm/µs along U) and at the centre at rest: a node as a step makes it (a
+/// golden's moving point (r = R1, κ the speed 0.1 µm/µs along U) and at the centre at rest, on the six scenes and the
+/// app's default scene (R2_DEFAULT: its request, S1; V3E_SCENE one scene): a node as a step makes it (a
 /// middle's three, every reading of them, a third of the whole) and its parts -- the fold's numbers (`Rs::evaluate`
 /// with the point), the contraction, the filling --, the counted complex multiply-adds and their floor at 5 G/s
 /// (PROF1's kernel speed), and the heap allocations of each (feature `prof`; one call after a warm-up).
@@ -430,7 +431,15 @@ fn allocations(f: &mut dyn FnMut()) -> Option<u64> {
 #[ignore]
 fn r2_node_cost() {
     let repeat = super::env("R2_REPEAT", 40.0) as usize;
-    for (name, request, _) in runs() {
+    // The six scenes, and the app's default scene where R2_DEFAULT names its request (S1; PROF1's).
+    let mut scenes: Vec<(&str, Request, Vec<usize>)> = runs();
+    let only = std::env::var("V3E_SCENE").ok();
+    if let (Ok(path), true) = (std::env::var("R2_DEFAULT"), only.as_deref().is_none_or(|o| o == "S1")) {
+        let mut line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        line["options"]["device"] = json!("cpu");
+        scenes.push(("S1", Request::from_native(&line).unwrap(), Vec::new()));
+    }
+    for (name, request, _) in scenes {
         let run = run_of(&request, &[]);
         let n = run.rs.keep.len();
         let psi = super::spread(n);
