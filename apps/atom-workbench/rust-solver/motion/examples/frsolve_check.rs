@@ -93,8 +93,8 @@ fn vector(path: &str) -> Vec<C64> {
 
 /// max |a − b| / max |b|.
 fn relative(a: &[C64], b: &[C64]) -> f64 {
-    let scale = b.iter().map(|v| v.abs()).fold(0.0, f64::max);
-    let d = a.iter().zip(b).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max);
+    let scale = b.iter().map(|v| v.abs()).fold(0.0, atom_motion::linalg::larger);
+    let d = a.iter().zip(b).map(|(p, q)| (*p - *q).abs()).fold(0.0, atom_motion::linalg::larger);
     if scale == 0.0 {
         d
     } else {
@@ -276,16 +276,16 @@ fn main() {
         let (f0, r0) = (r["F"].as_f64().unwrap(), r["R"].as_f64().unwrap());
         let raw: Vec<f64> = pops.iter().map(|(_, row)| row.read(&rho)).collect();
         let total: f64 = raw.iter().sum();
-        let d_f = (force[2].read(&rho) - f0).abs() / f0.abs().max(kph * r0);
+        let d_f = (force[2].read(&rho) - f0).abs() / atom_motion::linalg::larger(f0.abs(), kph * r0);
         let d_r = (rate.read(&rho) - r0).abs() / r0.abs();
         let d_p = pops
             .iter()
             .zip(&raw)
             .map(|((g, _), v)| (v / total - r["pops"][g].as_f64().unwrap()).abs())
-            .fold(0.0, f64::max);
+            .fold(0.0, atom_motion::linalg::larger);
         let d_x = relative(&rho, &rho_py);
         for (w, d) in worst.iter_mut().zip([d_f, d_r, d_p, d_x]) {
-            *w = w.max(d);
+            *w = atom_motion::linalg::larger(*w, d);
         }
         let pr = &py["rho"];
         println!(

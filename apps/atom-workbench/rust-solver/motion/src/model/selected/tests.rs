@@ -95,7 +95,7 @@ fn the_selected_model_is_slow_in_its_frame() {
                 }
             }
             let (values, _) = run.components();
-            let most = values.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let most = values.iter().map(|v| v.abs()).fold(0.0, crate::linalg::larger);
             eprintln!("{name} at r {r:?} κ {kappa:?}: P {}, {elements} elements, {beyond} fast; beats {}, largest |Ω| {most:.4e} rad/µs", keep.len(), values.len());
             if beyond > 0 {
                 fast.push(format!("{name} {kappa:?}: {beyond} of {elements}"));
@@ -137,7 +137,7 @@ fn the_selected_decay_is_its_photons() {
         }
         let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
         let size = gamma.max_abs();
-        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, f64::max);
+        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, crate::linalg::larger);
         eprintln!("{name}: |i(H − H†) − Σ L†L| {worst:.3e} of {size:.3e}");
         assert!(worst <= n as f64 * crate::units::UNIT_ROUNDOFF * size * 16.0, "{name}: {worst:e} of {size:e}");
     }
@@ -178,7 +178,7 @@ fn a_lone_tweezer_s_node_is_its_two_photon_classes() {
         let h = &node.generator[0].1;
         let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
         let (size, whole) = (gamma.max_abs(), h.max_abs());
-        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, f64::max);
+        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, crate::linalg::larger);
         eprintln!("{name}: P {n}, beats {:?}, classes {fasts:?}; |i(H − H†) − Σ L†L| {worst:.3e} of |Γ| {size:.3e}, |H| {whole:.3e}", node.generator.iter().map(|g| g.0).collect::<Vec<_>>());
         assert_eq!(node.generator.len(), 1, "{name}: the zero beat alone");
         assert!(fasts.contains(&[0, 1]) && fasts.contains(&[0, -1]) && fasts.len() == 2, "{name}: {fasts:?}");
@@ -223,7 +223,7 @@ fn the_node_is_the_model_now_in_its_frame() {
             for t in [0.0, 0.37, -1.9] {
                 let phase = |beat: usize| if beat == 0 { C64::ONE } else { C64::cis(-values[beat] * t) };
                 let turn = |x: &Mat| Mat::from_fn(n, n, |a, b| C64::cis(run.theta[a] * t) * x[(a, b)] * C64::cis(-run.theta[b] * t));
-                let theta = run.theta.iter().map(|x| (x * t).abs()).fold(0.0, f64::max);
+                let theta = run.theta.iter().map(|x| (x * t).abs()).fold(0.0, crate::linalg::larger);
                 let bound = |parts: &mut dyn Iterator<Item = (&ModelPart, &Mat)>, scale: f64| -> f64 {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
@@ -247,7 +247,7 @@ fn the_node_is_the_model_now_in_its_frame() {
                 let h = Mat::from_fn(n, n, |a, b| (g[(a, b)] + g[(b, a)].conj()) * 0.5 + if a == b { C64::real(run.theta[a]) } else { C64::ZERO });
                 let want = turn(sum.effective.first().map_or(&zero, |p| &p.value));
                 let scale = want.max_abs();
-                ratios[0] = apart(&h, &want) / bound(&mut components.effective.iter().map(|p| (p, &p.value)), scale).max(f64::MIN_POSITIVE);
+                ratios[0] = apart(&h, &want) / crate::linalg::larger(bound(&mut components.effective.iter().map(|p| (p, &p.value)), scale), f64::MIN_POSITIVE);
                 for i in 0..3 {
                     let mut d = Mat::zeros(n, n);
                     for (beat, m) in &node.gradient {
@@ -255,7 +255,7 @@ fn the_node_is_the_model_now_in_its_frame() {
                     }
                     let want = turn(sum.effective.first().map_or(&zero, |p| &p.gradient[i]));
                     let scale = want.max_abs();
-                    ratios[1] = ratios[1].max(apart(&d, &want) / bound(&mut components.effective.iter().map(|p| (p, &p.gradient[i])), scale).max(f64::MIN_POSITIVE));
+                    ratios[1] = crate::linalg::larger(ratios[1], apart(&d, &want) / crate::linalg::larger(bound(&mut components.effective.iter().map(|p| (p, &p.gradient[i])), scale), f64::MIN_POSITIVE));
                 }
                 // The channels: L, ∇L and K of each class's axis against the channel (emission, fast index).
                 let mut seen = 0;
@@ -289,21 +289,21 @@ fn the_node_is_the_model_now_in_its_frame() {
                     };
                     let scale = want.max_abs();
                     let unit = (common.abs() - 1.0).abs() * scale;
-                    ratios[2] = ratios[2].max((apart(&l, &turned(&value.value)) + unit) / bound(&mut part.parts.iter().map(|p| (p, &p.value)), scale).max(f64::MIN_POSITIVE));
+                    ratios[2] = crate::linalg::larger(ratios[2], (apart(&l, &turned(&value.value)) + unit) / crate::linalg::larger(bound(&mut part.parts.iter().map(|p| (p, &p.value)), scale), f64::MIN_POSITIVE));
                     for i in 0..3 {
                         let d = summed(&|e| e.gradient[i]);
                         let want = turned(&value.gradient[i]);
                         let scale = want.max_abs();
-                        ratios[2] = ratios[2].max(apart(&d, &want) / bound(&mut part.parts.iter().map(|p| (p, &p.gradient[i])), scale).max(f64::MIN_POSITIVE));
+                        ratios[2] = crate::linalg::larger(ratios[2], apart(&d, &want) / crate::linalg::larger(bound(&mut part.parts.iter().map(|p| (p, &p.gradient[i])), scale), f64::MIN_POSITIVE));
                     }
                     let k = summed(&|e| e.kick);
                     let want = turned(kick.map_or(&zero, |k| &k.value));
                     let scale = want.max_abs();
-                    ratios[3] = ratios[3].max(apart(&k, &want) / bound(&mut part.kicks.iter().map(|p| (p, &p.value)), scale).max(f64::MIN_POSITIVE));
+                    ratios[3] = crate::linalg::larger(ratios[3], apart(&k, &want) / crate::linalg::larger(bound(&mut part.kicks.iter().map(|p| (p, &p.value)), scale), f64::MIN_POSITIVE));
                 }
                 assert_eq!(seen, sum.jumps.len(), "{name}: the node's channels are the sum's");
                 eprintln!("{name} r {r:?} κ {kappa:?} t {t}: of the bound H {:.1e} ∇H {:.1e} L, ∇L {:.1e} K {:.1e} ({seen} channels)", ratios[0], ratios[1], ratios[2], ratios[3]);
-                worst = ratios.iter().fold(worst, |w, e| w.max(*e));
+                worst = ratios.iter().fold(worst, |w, e| crate::linalg::larger(w, *e));
             }
         }
     }
@@ -312,7 +312,7 @@ fn the_node_is_the_model_now_in_its_frame() {
 
 /// The largest entry of |a − b|.
 fn apart(a: &Mat, b: &Mat) -> f64 {
-    a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max)
+    a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, crate::linalg::larger)
 }
 
 /// The force at the frame's time zero is the model's (model/rs.rs `ModelAt::force`, the Lindbladian's force observable):
@@ -337,10 +337,10 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi)).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.moments.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
             let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
-            let size = model.iter().chain(&ehrenfest).map(|x| x.abs()).fold(0.0, f64::max);
-            let worst = (0..3).map(|i| (engine[i] - model[i]).abs()).fold(0.0, f64::max);
+            let size = model.iter().chain(&ehrenfest).map(|x| x.abs()).fold(0.0, crate::linalg::larger);
+            let worst = (0..3).map(|i| (engine[i] - model[i]).abs()).fold(0.0, crate::linalg::larger);
             eprintln!("{name} κ {kappa:?}: engine {engine:?}, model {model:?}, difference {worst:.2e}");
-            assert!(worst <= 1e-12 * size.max(f64::MIN_POSITIVE), "{name}: {worst:e} of {size:e}");
+            assert!(worst <= 1e-12 * crate::linalg::larger(size, f64::MIN_POSITIVE), "{name}: {worst:e} of {size:e}");
         }
     }
 }
@@ -511,7 +511,7 @@ fn a_step_s_time_on_the_selected_model() {
             let clock = std::time::Instant::now();
             f();
             clock.elapsed().as_secs_f64() * 1e6
-        }).fold(f64::INFINITY, f64::min);
+        }).fold(f64::INFINITY, crate::linalg::smaller);
         let point = run.scene.point_at(r, kappa);
         let local = run.rs.local(&run.scene, &point);
         let fold = least(&mut || {
@@ -547,11 +547,11 @@ fn a_step_s_time_on_the_selected_model() {
             "{name}: P {}; fold {fold:.0}, now's contraction {:.0}, the node's {:.0}, node {node:.0}, a jump's node {jump:.0} µs; step {step:.0} µs, of it three nodes {:.0} and the rest {:.0}; {} candidate tones, the largest {:.4e} rad/µs",
             keep.len(),
             now,
-            model - fold.min(model),
+            model - crate::linalg::smaller(fold, model),
             3.0 * node,
             step - 3.0 * node,
             beats.len(),
-            beats.iter().copied().fold(0.0, f64::max)
+            beats.iter().copied().fold(0.0, crate::linalg::larger)
         );
     }
 }

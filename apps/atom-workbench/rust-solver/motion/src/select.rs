@@ -90,9 +90,9 @@ pub const GATE: f64 = 0.01;
 /// The points: the centre (0), the edge (1), the middle (2) (module documentation).
 pub const POINTS: usize = 3;
 
-/// The largest of some errors; not a number where one of them is not (# The gate).
+/// The largest of some errors; not a number where one of them is not (# The gate; `linalg::largest`).
 fn largest(errors: &[f64]) -> f64 {
-    errors.iter().fold(0.0, |m: f64, &x| if m.is_nan() || x.is_nan() { f64::NAN } else { m.max(x) })
+    crate::linalg::largest(0.0, errors.iter().copied())
 }
 
 /// One point's comparison of a candidate P's model with the full reference.
@@ -220,11 +220,11 @@ pub type References = [Option<(Readouts, Route)>; POINTS];
 /// The model's errors against the reference at one point; `k` the photon wave number of the force's scale kR.
 pub fn errors(model: &Readouts, reference: &Readouts, k: f64, route: Route) -> PointError {
     let populations =
-        model.levels.iter().zip(&reference.levels).map(|(m, r)| (m - r).abs()).fold(0.0, f64::max);
+        model.levels.iter().zip(&reference.levels).map(|(m, r)| (m - r).abs()).fold(0.0, crate::linalg::larger);
     let rate = (model.rate - reference.rate).abs() / reference.rate;
     let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     let delta = [0, 1, 2].map(|i| model.force[i] - reference.force[i]);
-    let force = norm(delta) / norm(reference.force).max(k * reference.rate);
+    let force = norm(delta) / crate::linalg::larger(norm(reference.force), k * reference.rate);
     PointError { populations, rate, force, route: Some(route) }
 }
 
@@ -475,7 +475,7 @@ pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn
                 for g in 0..GROUND {
                     if x[(e, g)] != C64::ZERO {
                         let away = C64::new(still[(g, g)].re + f - still[(e, e)].re, 0.5 * gamma[(e, e)].re);
-                        score[e] = score[e].max(x[(e, g)].abs() / away.abs());
+                        score[e] = crate::linalg::larger(score[e], x[(e, g)].abs() / away.abs());
                     }
                 }
             }
@@ -500,14 +500,14 @@ pub fn ranking(scene: &Scene, references: &[ModelAt], points: &[Components]) -> 
     let mut score = [0.0_f64; STATES];
     for (reference, point) in references.iter().zip(points) {
         for (s, a) in score.iter_mut().zip(reach(scene, reference, point, &|l| l != tw)) {
-            *s = s.max(a);
+            *s = crate::linalg::larger(*s, a);
         }
     }
     let all: Vec<usize> = (0..STATES).collect();
     let mut found: Vec<(f64, Vec<usize>)> = levels(&request.states, &all)
         .into_iter()
         .filter(|level| level[0] >= GROUND)
-        .map(|level| (level.iter().map(|&e| score[e]).fold(0.0, f64::max), level))
+        .map(|level| (level.iter().map(|&e| score[e]).fold(0.0, crate::linalg::larger), level))
         .collect();
     found.sort_by(|a, b| b.0.total_cmp(&a.0));
     found.into_iter().map(|(_, level)| level).collect()

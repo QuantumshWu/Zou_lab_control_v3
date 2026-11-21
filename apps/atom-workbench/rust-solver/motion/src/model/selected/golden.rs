@@ -138,12 +138,12 @@ impl Apart {
         let size = a.or(b).map(|m| (m.rows, m.cols)).unwrap_or((0, 0));
         let zero = Mat::zeros(size.0, size.1);
         let (a, b) = (a.unwrap_or(&zero), b.unwrap_or(&zero));
-        self.d = self.d.max(a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, f64::max));
-        self.s = self.s.max(b.max_abs());
+        self.d = crate::linalg::larger(self.d, a.data.iter().zip(&b.data).map(|(x, y)| (*x - *y).abs()).fold(0.0, crate::linalg::larger));
+        self.s = crate::linalg::larger(self.s, b.max_abs());
     }
 
     fn ratio(&self) -> f64 {
-        self.d / (crate::units::UNIT_ROUNDOFF * 2.0 * self.s.max(f64::MIN_POSITIVE))
+        self.d / (crate::units::UNIT_ROUNDOFF * 2.0 * crate::linalg::larger(self.s, f64::MIN_POSITIVE))
     }
 }
 
@@ -228,8 +228,8 @@ fn models(a: &Value, b: &Value) -> [Apart; 6] {
         by_key(&reduced(parts(x.map_or(&none, |c| &c.1))), &reduced(parts(y.map_or(&none, |c| &c.1))), &mut l, &mut dl);
         (out[2], out[3]) = (l, dl);
         by_key(&reduced(parts(x.map_or(&none, |c| &c.2))), &reduced(parts(y.map_or(&none, |c| &c.2))), &mut kd, &mut kg);
-        out[4].d = out[4].d.max(kd.d);
-        out[4].s = out[4].s.max(kd.s);
+        out[4].d = crate::linalg::larger(out[4].d, kd.d);
+        out[4].s = crate::linalg::larger(out[4].s, kd.s);
     }
     let mut g = Apart::default();
     by_key(&reduced(parts(&a["lift"])), &reduced(parts(&b["lift"])), &mut out[5], &mut g);
@@ -283,14 +283,14 @@ fn nodes_apart(a: &Value, b: &Value) -> ([Apart; 5], usize, usize) {
     let zero = (C64::ZERO, [C64::ZERO; 3], C64::ZERO);
     for l in labels {
         let (p, q) = (x.get(l).unwrap_or(&zero), y.get(l).unwrap_or(&zero));
-        out[2].d = out[2].d.max((p.0 - q.0).abs());
-        out[2].s = out[2].s.max(q.0.abs());
+        out[2].d = crate::linalg::larger(out[2].d, (p.0 - q.0).abs());
+        out[2].s = crate::linalg::larger(out[2].s, q.0.abs());
         for i in 0..3 {
-            out[3].d = out[3].d.max((p.1[i] - q.1[i]).abs());
-            out[3].s = out[3].s.max(q.1[i].abs());
+            out[3].d = crate::linalg::larger(out[3].d, (p.1[i] - q.1[i]).abs());
+            out[3].s = crate::linalg::larger(out[3].s, q.1[i].abs());
         }
-        out[4].d = out[4].d.max((p.2 - q.2).abs());
-        out[4].s = out[4].s.max(q.2.abs());
+        out[4].d = crate::linalg::larger(out[4].d, (p.2 - q.2).abs());
+        out[4].s = crate::linalg::larger(out[4].s, q.2.abs());
     }
     (out, a["generator"].as_array().unwrap().len(), b["generator"].as_array().unwrap().len())
 }
@@ -359,7 +359,7 @@ fn r1_node_parts() {
             let clock = std::time::Instant::now();
             f();
             clock.elapsed().as_secs_f64() * 1e6
-        }).fold(f64::INFINITY, f64::min);
+        }).fold(f64::INFINITY, crate::linalg::smaller);
         let mut work = Work::default();
         let mut node = run.template.clone();
         run.scene.point_into(r, kappa, &mut work.point);
@@ -418,7 +418,7 @@ fn r1_tones() {
             for (k, ((beat, g), (_, gb))) in full.generator.iter().zip(&bare.generator).enumerate() {
                 let total = g.max_abs();
                 let _ = gb;
-                let grad = full.gradient.iter().find(|x| x.0 == *beat).map_or(0.0, |x| x.1.iter().map(Mat::max_abs).fold(0.0, f64::max));
+                let grad = full.gradient.iter().find(|x| x.0 == *beat).map_or(0.0, |x| x.1.iter().map(Mat::max_abs).fold(0.0, crate::linalg::larger));
                 eprintln!("R1TONE {name} {point}: slot {k} beat {beat} Ω {:+.6e} rad/µs exact {:?}: generator max {total:.3e}, gradient max {grad:.3e}", values[*beat], exact[*beat]);
             }
             let middle = run.middle(0, r, 0.0);

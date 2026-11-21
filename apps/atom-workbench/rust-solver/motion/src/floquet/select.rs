@@ -66,7 +66,7 @@ pub fn select(parts: &Liouville) -> Elements {
             let m: Vec<i64> = x.m.iter().zip(dm).map(|(a, b)| a + b).collect();
             let nn: [i64; 3] = std::array::from_fn(|i| x.n[i] + dn[i]);
             let lambda = (C64::new(0.0, parts.lattice.frequency(&m, &nn)) + parts.diagonal[r]).abs();
-            let ay = ax * c / lambda.max(c);
+            let ay = ax * c / crate::linalg::larger(lambda, c);
             if ay * ay < rule {
                 continue;
             }

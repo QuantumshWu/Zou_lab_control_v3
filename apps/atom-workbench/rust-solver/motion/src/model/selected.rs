@@ -751,8 +751,8 @@ impl Selected {
         let mut keep = vec![true; node.generator.len()];
         self.kept = Vec::new();
         for (k, &(beat, _)) in node.generator.iter().enumerate() {
-            let value = largest[k] / top.max(f64::MIN_POSITIVE);
-            let slope = gradients.iter().find(|g| g.0 == beat).map_or(0.0, |g| g.1 / gtop.max(f64::MIN_POSITIVE));
+            let value = largest[k] / larger(top, f64::MIN_POSITIVE);
+            let slope = gradients.iter().find(|g| g.0 == beat).map_or(0.0, |g| g.1 / larger(gtop, f64::MIN_POSITIVE));
             keep[k] = k == 0 || value >= epsilon || slope >= epsilon;
             self.kept.push((beat, value, slope, keep[k]));
         }
@@ -1363,7 +1363,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     fn optical(&self, path: &Path) -> Option<Optical> {
         let decay = self.model.optical?;
-        let (most, least) = self.model.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (most.max(x), least.min(x)));
+        let (most, least) = self.model.waves.iter().map(|k| (0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>()).fold((f64::NEG_INFINITY, f64::INFINITY), |(most, least), x| (larger(most, x), smaller(least, x)));
         Some(Optical { ground: GROUND, decay, beat: if most >= least { most - least } else { 0.0 } })
     }
 }

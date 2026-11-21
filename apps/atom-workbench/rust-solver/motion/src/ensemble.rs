@@ -230,7 +230,7 @@ impl Mode {
 
 /// The unit vector of cos θ = μ and azimuth φ.
 fn direction(mu: f64, phi: f64) -> V3 {
-    let (s, (sp, cp)) = ((1. - mu * mu).max(0.).sqrt(), phi.sin_cos());
+    let (s, (sp, cp)) = (crate::linalg::larger(1. - mu * mu, 0.).sqrt(), phi.sin_cos());
     [s * cp, s * sp, mu]
 }
 
@@ -255,7 +255,7 @@ struct Component<'a> {
 impl Component<'_> {
     /// u_c, where the beams' bound meets the ceiling: 2(1 − c/a), at most 1.
     fn flat(&self) -> f64 {
-        (2. * (1. - self.ceiling / self.top)).min(1.)
+        crate::linalg::smaller(2. * (1. - self.ceiling / self.top), 1.)
     }
     /// The masses of a beam's four pieces over e^c and its volume (module documentation, # Its draw): the flat ball, the
     /// chord's exponential and its gamma law, the tail.
@@ -266,7 +266,7 @@ impl Component<'_> {
             2. * TAU / 3. * flat.powf(1.5),
             TAU * flat.sqrt() * (2. / a) * -(-span).exp_m1(),
             TAU * (2. / a).powf(1.5) * gamma(1.5) * if span > 0. { regularized(1.5, span) } else { 0. },
-            TAU * ((0.5 * a).min(self.ceiling) - self.ceiling).exp() * a.powf(2.5) / gamma(3.5),
+            TAU * (crate::linalg::smaller(0.5 * a, self.ceiling) - self.ceiling).exp() * a.powf(2.5) / gamma(3.5),
         ]
     }
     /// Σ_l E(u_l(r)) e^{−c} (module documentation, # Its draw).
@@ -281,7 +281,7 @@ impl Component<'_> {
                 } else if u <= 1. {
                     (-0.5 * a * (u - flat)).exp() * (flat.sqrt() + (u - flat).sqrt()) / u.sqrt()
                 } else {
-                    ((0.5 * a).min(self.ceiling) - self.ceiling).exp() * a.powf(2.5) * u.powf(-2.5) / gamma(3.5)
+                    (crate::linalg::smaller(0.5 * a, self.ceiling) - self.ceiling).exp() * a.powf(2.5) * u.powf(-2.5) / gamma(3.5)
                 }
             })
             .sum()
@@ -386,7 +386,7 @@ impl<'a> Ensemble<'a> {
                 let modes: Vec<Mode> = beams.iter().map(Mode::new).collect();
                 let a = bound / kt;
                 let (centre, axes, frequencies) = well.trap();
-                let ceiling = (-well.potential(centre).0 / kt).min(a);
+                let ceiling = crate::linalg::smaller(-well.potential(centre).0 / kt, a);
                 if !(ceiling > 0.) {
                     return Err(NO_WELL.to_string());
                 }
@@ -530,11 +530,11 @@ impl<'a> Ensemble<'a> {
                 })
                 .collect();
             self.summed(c, n, &|r, y, gradient| {
-                let held = (room(c.wigner(r, gradient, [0.; 3]).0) / self.kt).max(0.);
+                let held = crate::linalg::larger(room(c.wigner(r, gradient, [0.; 3]).0) / self.kt, 0.);
                 let (number, energy) = (kept(1.5, y, y, c.ceiling), kept(2.5, y, y, c.ceiling));
                 let mut out = [number, energy, 0., 0.];
                 for &(q, weight) in &octant {
-                    let k = (held / q).min(y);
+                    let k = crate::linalg::smaller(held / q, y);
                     out[2] += weight * (number - kept(1.5, y, k, c.ceiling));
                     out[3] += weight * q * (energy - kept(2.5, y, k, c.ceiling));
                 }
@@ -632,7 +632,7 @@ mod tests {
                     }
                     let exact = sum / gamma(s);
                     let value = kept(s, y, k, 0.);
-                    assert!((value - exact).abs() <= 1e-11 * exact.abs().max(1e-300), "s {s} y {y} k {k}: {value:e} against {exact:e}");
+                    assert!((value - exact).abs() <= 1e-11 * crate::linalg::larger(exact.abs(), 1e-300), "s {s} y {y} k {k}: {value:e} against {exact:e}");
                 }
             }
         }
@@ -719,7 +719,7 @@ mod tests {
                 let exact = if quantum {
                     let (a, b) = (squares[0], squares[2]);
                     // ∫_L^∞ P(X > x) dx by Simpson to 60 of the larger scale beyond L.
-                    let (panels, top) = (20000, 60. * a.max(b));
+                    let (panels, top) = (20000, 60. * crate::linalg::larger(a, b));
                     let integral: f64 = (0..=2 * panels).map(|i| (if i == 0 || i == 2 * panels { 1. } else if i % 2 == 1 { 4. } else { 2. }) * tail(a, b, level + top * i as f64 / (2 * panels) as f64)).sum::<f64>() * top / (6 * panels) as f64;
                     [tail(a, b, level), (level * tail(a, b, level) + integral) / (2. * a + b)]
                 } else {

@@ -354,7 +354,7 @@ fn the_two_level_identity() {
                     dense.reference(0, &xbar, 2)
                 };
                 // Q is everything here: Tr[K X̄] is D_x itself, and E[within] = D_x − D_E.
-                assert!((within - (d_x - d_e)).abs() <= 2e-4 * d_x.abs().max(1e-3), "running {running}, δ {delta}, Ω₀ {om}: E[within] {within:.6} against D_x − D_E = {d_x:.6} − {d_e:.6}");
+                assert!((within - (d_x - d_e)).abs() <= 2e-4 * crate::linalg::larger(d_x.abs(), 1e-3), "running {running}, δ {delta}, Ω₀ {om}: E[within] {within:.6} against D_x − D_E = {d_x:.6} − {d_e:.6}");
             }
         }
     }
