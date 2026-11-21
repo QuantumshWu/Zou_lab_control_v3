@@ -65,6 +65,13 @@
 //!    largest e_i (the first of equal ones) is put back and the set checked again. P is the first set passing; every
 //!    state put back, the base (which passed). The ground states are never removed.
 //!
+//! **The fold condition** (model/reach.rs, BRIEF_JUDGE item 3) comes before every judgment as a strict precondition: a
+//! set whose left-out states of some excited level are not foldable over the reach -- the RS series of those states,
+//! summed over them, not certified to converge at every place and momentum a held atom reaches -- is never judged at
+//! the points and never chosen. A whole-level candidate so is left out of the ranked chain, a state whose leave-one-out
+//! set so is never removed, a descent's set so is a failed check without a solve (its largest e_i put back). The sets
+//! left out and why are the report's (`Selection::notes`). The gate and its points are as before.
+//!
 //! The prediction adds the e_i as if the removals' errors added up; each e_i holds the base's own error once more, so
 //! the sum counts the base's error once per removed state above the once it starts with. Whatever it predicts, P is a
 //! set measured within the gate at the three points: the errors over removals are not monotone (a mirror pair with one side
@@ -199,6 +206,8 @@ pub struct Selection {
     /// descent's checks.
     pub seconds: f64,
     pub stages: [f64; 3],
+    /// The sets the fold condition left out (module documentation, # The decision) and why.
+    pub excluded: Vec<(Vec<usize>, String)>,
 }
 
 impl Selection {
@@ -207,9 +216,12 @@ impl Selection {
         &self.candidates[self.whole - 1]
     }
 
-    /// What the report says beside the numbers (Chinese): each point not judged (# Points without light).
+    /// What the report says beside the numbers (Chinese): each point not judged (# Points without light), each set the
+    /// fold condition left out (# The decision).
     pub fn notes(&self) -> Vec<String> {
-        ["中心", "边缘", "中间"].iter().zip(&self.reference).filter(|(_, r)| r.is_none()).map(|(name, _)| format!("{name}点无光、无唯一稳态，不判")).collect()
+        let mut notes: Vec<String> = ["中心", "边缘", "中间"].iter().zip(&self.reference).filter(|(_, r)| r.is_none()).map(|(name, _)| format!("{name}点无光、无唯一稳态，不判")).collect();
+        notes.extend(self.excluded.iter().map(|(keep, why)| format!("候选 {} 态不判：{why}", keep.len())));
+        notes
     }
 }
 
@@ -293,6 +305,7 @@ where
                 reference,
                 seconds,
                 stages: [seconds, 0.0, 0.0],
+                excluded: Vec::new(),
             });
         }
     }
@@ -300,15 +313,15 @@ where
     Err(format!("no candidate P passes the {GATE} gate at the points judged (the largest has {largest} states)"))
 }
 
-/// Stage 2's measurements (module documentation, # The decision, 2): the base less each of its explicit excited states,
-/// every set at the judged points at once (rayon); `solve(point, keep)` a model's readouts and route at a point. In
-/// the base's order.
-pub fn leave_one_out<F>(base: &Candidate, reference: &References, k: f64, solve: &F) -> Result<Vec<LeftOut>, String>
+/// Stage 2's measurements (module documentation, # The decision, 2): the base less each of its explicit excited states
+/// whose set is `foldable` (# The decision: the fold condition), every set at the judged points at once (rayon);
+/// `solve(point, keep)` a model's readouts and route at a point. In the base's order.
+pub fn leave_one_out<F>(base: &Candidate, reference: &References, k: f64, solve: &F, foldable: &(dyn Fn(&[usize]) -> bool + Sync)) -> Result<Vec<LeftOut>, String>
 where
     F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
 {
     let lit = judged_points(reference);
-    let states: Vec<usize> = base.keep.iter().copied().filter(|&s| s >= GROUND).collect();
+    let states: Vec<usize> = base.keep.iter().copied().filter(|&s| s >= GROUND && foldable(&base.keep.iter().copied().filter(|&x| x != s).collect::<Vec<_>>())).collect();
     let sets: Vec<Vec<usize>> = states.iter().map(|&i| base.keep.iter().copied().filter(|&s| s != i).collect()).collect();
     let models: Vec<Option<(Readouts, Route)>> = (0..sets.len() * POINTS)
         .into_par_iter()
@@ -324,8 +337,9 @@ where
 
 /// Stage 2's decision (module documentation, # The decision, 2) at `gate` from the base, which passes it, and its
 /// leave-one-out: the removal the prediction allows, then the checks, each at the judged points at once, with the
-/// put-backs. P the first set passing or, every state put back, the base. Err where the base does not pass the gate.
-pub fn descend<F>(base: &Candidate, left_out: &[LeftOut], gate: f64, reference: &References, k: f64, solve: &F) -> Result<Descent, String>
+/// put-backs -- a set not `foldable` (the fold condition) a failed check without a solve. P the first set passing or,
+/// every state put back, the base. Err where the base does not pass the gate.
+pub fn descend<F>(base: &Candidate, left_out: &[LeftOut], gate: f64, reference: &References, k: f64, solve: &F, foldable: &(dyn Fn(&[usize]) -> bool + Sync)) -> Result<Descent, String>
 where
     F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
 {
@@ -345,31 +359,33 @@ where
     let mut checks: Vec<Candidate> = Vec::new();
     while !removed.is_empty() {
         let keep: Vec<usize> = base.keep.iter().copied().filter(|s| removed.iter().all(|r| r.state != *s)).collect();
-        let candidate = judged(&keep, &pair(&keep, judged_points(reference), solve)?, reference, k);
-        let passes = candidate.within(gate);
-        checks.push(candidate);
-        if passes {
-            break;
+        if foldable(&keep) {
+            let candidate = judged(&keep, &pair(&keep, judged_points(reference), solve)?, reference, k);
+            let passes = candidate.within(gate);
+            checks.push(candidate);
+            if passes {
+                break;
+            }
         }
         let back = (0..removed.len()).fold(0, |b, j| if removed[j].e() > removed[b].e() { j } else { b });
         removed.remove(back);
     }
-    let keep = if removed.is_empty() { base.keep.clone() } else { checks.last().expect("a removal is checked").keep.clone() };
+    let keep = if removed.is_empty() { base.keep.clone() } else { checks.last().expect("a removal passing is checked").keep.clone() };
     Ok(Descent { keep, removed: removed.iter().map(|r| r.state).collect(), predicted, checks })
 }
 
-/// Stage 2 on the base's selection (`decide`) at the gate (`GATE`): its leave-one-out and its descent, the report's P
-/// the descent's, its checks after the whole levels -- and the base's measurement once more where every removed state
-/// was put back, so that the last is P's.
-pub fn refine<F>(mut selection: Selection, k: f64, solve: &F) -> Result<Selection, String>
+/// Stage 2 on the base's selection (`decide`) at the gate (`GATE`): its leave-one-out and its descent on the sets
+/// `foldable` (the fold condition), the report's P the descent's, its checks after the whole levels -- and the base's
+/// measurement once more where every removed state was put back, so that the last is P's.
+pub fn refine<F>(mut selection: Selection, k: f64, solve: &F, foldable: &(dyn Fn(&[usize]) -> bool + Sync)) -> Result<Selection, String>
 where
     F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
 {
     let clock = Instant::now();
     let base = selection.base().clone();
-    let left_out = leave_one_out(&base, &selection.reference, k, solve)?;
+    let left_out = leave_one_out(&base, &selection.reference, k, solve, foldable)?;
     let looked = clock.elapsed().as_secs_f64();
-    let descent = descend(&base, &left_out, GATE, &selection.reference, k, solve)?;
+    let descent = descend(&base, &left_out, GATE, &selection.reference, k, solve, foldable)?;
     let checked = clock.elapsed().as_secs_f64() - looked;
     selection.candidates.extend(descent.checks);
     if selection.candidates.last().map(|c| &c.keep) != Some(&descent.keep) {
@@ -577,16 +593,34 @@ impl<'a> ThreePoints<'a> {
 }
 
 /// Chooses P for a scene (module documentation, # The decision): on the three points (`ThreePoints`), those light reaches
-/// judged (# Points without light), the base over the whole-level candidates (`decide_on`), then its leave-one-out
-/// and descent (`refine`); every solve the same (`solved`).
+/// judged (# Points without light), the base over the whole-level candidates the fold condition leaves (`decide_on`;
+/// model/reach.rs `Foldability`), then its leave-one-out and descent on foldable sets (`refine`); every solve the same
+/// (`solved`). The sets the condition left out and why are the selection's (`Selection::excluded`).
 pub fn choose(scene: &Scene) -> Result<Selection, String> {
     let three = ThreePoints::new(scene);
-    let base = decide_on(&three.candidates, three.lit, three.k, |p, c| match c {
+    let fold = crate::model::reach::Foldability::new(scene);
+    let excluded: std::sync::Mutex<Vec<(Vec<usize>, String)>> = std::sync::Mutex::new(Vec::new());
+    let foldable = |keep: &[usize]| -> bool {
+        match fold.check(keep) {
+            Ok(()) => true,
+            Err(why) => {
+                let mut list = excluded.lock().unwrap_or_else(|e| e.into_inner());
+                if !list.iter().any(|x| x.0 == keep) {
+                    list.push((keep.to_vec(), why));
+                }
+                false
+            }
+        }
+    };
+    let candidates: Vec<Vec<usize>> = three.candidates.iter().filter(|keep| foldable(keep)).cloned().collect();
+    let base = decide_on(&candidates, three.lit, three.k, |p, c| match c {
         None => three.reference(p),
-        Some(c) => three.model(p, &three.candidates[c]),
+        Some(c) => three.model(p, &candidates[c]),
     })?;
-    refine(base, three.k, &|p: usize, keep: &[usize]| three.model(p, keep))
+    let mut selection = refine(base, three.k, &|p: usize, keep: &[usize]| three.model(p, keep), &foldable)?;
+    selection.excluded = excluded.into_inner().unwrap_or_else(|e| e.into_inner());
+    Ok(selection)
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
