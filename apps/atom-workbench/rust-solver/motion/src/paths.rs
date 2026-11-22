@@ -109,9 +109,13 @@
 //! Unresolved, the scheme stands on a plateau there, where doubling the substeps changes nothing and the Richardson
 //! reading reads "converged": R4 at its start, the reference against the converged scheme 5.2e-3 at 16.9 to 135
 //! substeps a µs, 1.0e-3 at 270, 3.8e-4 at 540 and 1080 (the rest the run's).
-//! - So over the opening the substeps are counted in turns of the fastest coherence of the piece's Λ, W = max |Im μ|:
-//!   `turns` substeps a turn, one at the least -- d·W ≤ 2π, the stages' half-substep sampling at its Nyquist rate --,
-//!   off the plateau, where doubling them reads their error.
+//! - So over the opening the substeps are counted in turns of the fastest coherence the opening resolves, W: `turns`
+//!   substeps a turn, one at the least -- d·W ≤ 2π, the stages' half-substep sampling at its Nyquist rate --, off the
+//!   plateau, where doubling them reads their error. W is the largest |Im μ| at the stretch's start over the modes the
+//!   start holds above the rounding and the opening outlasts (`Form::opening`): a coherence the start does not hold
+//!   needs no turn (S1's 32 states hold levels 4.5e7 rad/µs off the light's frame, which its start holds nothing of: W
+//!   140 rad/µs; taken over the whole sector, 0.5 µs of S1 took 148 s), and a mode the opening does not outlast is the
+//!   run's (R5_PUMP's ground hyperfine coherences, 4.4e4 rad/µs, held at 2e-5 and decaying at the pumping rate).
 //! - The opening lasts while the start's optical coherences have not decayed to the double's unit rounding u: a
 //!   coherence between a ground and an excited state decays at half the excited state's rate (for a dressed pair the
 //!   two halves' sum, the trace of their decay), so t_open = 2 ln(1/u)/Γ, Γ the slowest decay of P's excited states in
@@ -969,15 +973,15 @@ impl<'a> Form<'a> {
                 let first = std::sync::Arc::new(self.amps_with(&node, false));
                 drop(node);
                 // The opening (# The start), and the fastest coherence's rate at the stretch's start.
-                let opening = self.opening(&first, from);
+                let (opening, fastest) = self.opening(&first, from, &v)?;
                 counts.opening = opening;
                 // The knot intervals, each with whether a reading is made at its end.
                 let intervals: Vec<(f64, f64, bool)> = knots.windows(2).enumerate().map(|(i, w)| (w[0], w[1], (i + 1) % read == 0 || i + 2 == knots.len())).collect();
-                // A piece's substeps (# The start), of its start, length and fastest coherence's rate: `turns` a turn of it
-                // in the opening, `rate` a µs after; a product's rounding up never adds one (a rate of whole substeps a
-                // piece).
-                let substeps = |p0: f64, part: f64, w: f64| -> usize {
-                    let n = if p0 < from + opening { part * w * turns / std::f64::consts::TAU } else { part * rate };
+                // A piece's substeps (# The start), of its start and length: `turns` a turn of the fastest coherence the
+                // opening resolves, in the opening, `rate` a µs after; a product's rounding up never adds one (a rate of
+                // whole substeps a piece).
+                let substeps = |p0: f64, part: f64| -> usize {
+                    let n = if p0 < from + opening { part * fastest * turns / std::f64::consts::TAU } else { part * rate };
                     (n * (1.0 - 4.0 * f64::EPSILON)).ceil().max(1.0) as usize
                 };
                 // A chunk of intervals frozen on the pool while the one before is propagated; its readings on the pool
@@ -1487,14 +1491,18 @@ impl Form<'_> {
         mus
     }
 
-    /// A stretch's opening (µs; module documentation, # The start) from the time `t`, the amplitudes there `amps`: the
-    /// time the start's optical coherences take to decay to the double's unit rounding u, 2 ln(1/u)/Γ, Γ the slowest
-    /// decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited states are all folded holds
-    /// no such coherence).
-    fn opening(&self, amps: &Amps, t: f64) -> f64 {
+    /// A stretch's opening (module documentation, # The start) from the state `v` at the time `t`, the amplitudes there
+    /// `amps`: its length (µs), the time the start's optical coherences take to decay to the double's unit rounding u,
+    /// 2 ln(1/u)/Γ, Γ the slowest decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited
+    /// states are all folded holds no such coherence); and the fastest coherence it resolves, max |Im μ_j| of H(t)'s Λ
+    /// over the modes the start holds, |σ₀ⱼ| above u of the largest, that the opening outlasts, |σ₀ⱼ| e^{Re μ_j t_open}
+    /// at most that (a mode it does not outlast goes on into the run, which takes it as it takes every mode then; none
+    /// held, no turn to resolve). Err where an eigendecomposition fails.
+    fn opening(&self, amps: &Amps, t: f64, v: &[C64]) -> Result<(f64, f64), String> {
         let mut h = vec![C64::ZERO; self.h_slot];
         self.h_at(&[(amps, 1.0)], t, &mut h);
         let mut decay = f64::INFINITY;
+        let (mut values, mut vinv, mut vinvadj) = (Vec::new(), Vec::new(), Vec::new());
         for (x, blk) in self.blocks.iter().enumerate() {
             let (w, o) = (blk.len(), self.h_block[x]);
             for (i, &p) in blk.iter().enumerate() {
@@ -1502,15 +1510,38 @@ impl Form<'_> {
                     decay = decay.min(-2.0 * h[o + i * w + i].im);
                 }
             }
+            let mut eig = Eigen::default();
+            if !eig.decompose(&Mat { rows: w, cols: w, data: h[o..o + w * w].to_vec() }) {
+                return Err(format!("H's block {x} at {t} µs has no eigendecomposition"));
+            }
+            let (mut a, mut b) = (vec![C64::ZERO; w * w], vec![C64::ZERO; w * w]);
+            for i in 0..w {
+                for k in 0..w {
+                    a[i * w + k] = eig.inverse[(i, k)];
+                    b[k * w + i] = eig.inverse[(i, k)].conj();
+                }
+            }
+            values.push(eig.values.clone());
+            vinv.push(a);
+            vinvadj.push(b);
         }
-        if decay.is_finite() && decay > 0.0 { 2.0 * (2.0 / f64::EPSILON).ln() / decay } else { 0.0 }
+        if !(decay.is_finite() && decay > 0.0) {
+            return Ok((0.0, 0.0));
+        }
+        let length = 2.0 * (2.0 / f64::EPSILON).ln() / decay;
+        let mus = self.rates_of(&values);
+        let (mut sigma, mut tmp) = (vec![C64::ZERO; self.dim], vec![C64::ZERO; self.dim]);
+        self.sandwich(&vinv, &vinvadj, v, &mut sigma, &mut tmp);
+        let floor = 0.5 * f64::EPSILON * sigma.iter().map(|z| z.abs()).fold(0.0, larger);
+        let fastest = mus.iter().zip(&sigma).filter(|(m, z)| z.abs() > floor && z.abs() * (m.re * length).exp() <= floor).map(|(m, _)| m.im.abs()).fold(0.0, larger);
+        Ok((length, fastest))
     }
 
     /// A chunk of knot intervals frozen (module documentation, # The nodes, # The substeps): each interval's nodes at its
     /// pieces' ends, one job each on the pool -- the node before the chunk's first `before` --, then its pieces, one job
     /// each (`freeze`), the reading's node an interval's last's where it is read at its end; the pieces in order, the
     /// chunk's last node, and the work.
-    fn freeze_chunk(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, pieces: usize, substeps: &(dyn Fn(f64, f64, f64) -> usize + Sync)) -> Result<(Vec<Frozen>, std::sync::Arc<Amps>, Counts), String> {
+    fn freeze_chunk(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, pieces: usize, substeps: &(dyn Fn(f64, f64) -> usize + Sync)) -> Result<(Vec<Frozen>, std::sync::Arc<Amps>, Counts), String> {
         let jobs: Vec<(usize, usize)> = (0..intervals.len()).flat_map(|i| (1..=pieces).map(move |j| (i, j))).collect();
         let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64)> = jobs
             .par_iter()
@@ -1548,9 +1579,8 @@ impl Form<'_> {
 
     /// A piece frozen (`Frozen`): the `j`-th of the knot interval [a, b] cut in as many pieces as its nodes `grid` at the
     /// pieces' ends (`lagrange`) less one: H(t_m) at its middle and its eigendecomposition per block (σ = V⁻¹ρV⁻†, Λ
-    /// diagonal there), its substeps (`substeps`: their count of the piece's start, length and Λ's largest |Im μ|) and
-    /// their weights. Err where an eigendecomposition fails.
-    fn freeze(&self, grid: Vec<std::sync::Arc<Amps>>, a: f64, b: f64, j: usize, substeps: &(dyn Fn(f64, f64, f64) -> usize + Sync)) -> Result<Frozen, String> {
+    /// diagonal there), its substeps (`substeps`: their count of the piece's start and length) and their weights. Err where an eigendecomposition fails.
+    fn freeze(&self, grid: Vec<std::sync::Arc<Amps>>, a: f64, b: f64, j: usize, substeps: &(dyn Fn(f64, f64) -> usize + Sync)) -> Result<Frozen, String> {
         let clock = std::time::Instant::now();
         let pieces = grid.len() - 1;
         let part = (b - a) / pieces as f64;
@@ -1589,10 +1619,9 @@ impl Form<'_> {
         traced(2, clock);
         #[cfg(test)]
         let part_clock = std::time::Instant::now();
-        // μ per sector entry; the substeps by the fastest |Im μ|, and their weights.
+        // μ per sector entry, the substeps, and their weights.
         let mus = self.rates_of(&values);
-        let widest = mus.iter().map(|m| m.im.abs()).fold(0.0, larger);
-        f.n = substeps(p0, part, widest);
+        f.n = substeps(p0, part);
         f.d = part / f.n as f64;
         f.weights = vec![vec![C64::ZERO; self.dim]; ETD_WEIGHTS];
         for (at, &mu) in mus.iter().enumerate() {
