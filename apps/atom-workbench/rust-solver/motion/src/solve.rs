@@ -2687,10 +2687,13 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let met = met(&own);
         let need = most_needed(&own);
         debug_assert!(!exact || met == [true; 2], "the reference itself meets every look the run's own does");
+        // Its fate in words: complete where every look the run's own meets (no model error, `base`) is still met at its
+        // model error -- the room that error leaves the statistics filled within the trajectories' cap (`Look::fits`) --,
+        // else the first kind of look it leaves unmet, what is shown (the populations and the loss) before T.
         let (work, fate) = match met {
-            [true, true] => (Some(need * price * span + again(place, price)), "上界够用".to_string()),
-            [true, false] => (None, "温度上界不够，不选".to_string()),
-            _ => (None, "布居或丢失的上界不够，不选".to_string()),
+            [true, true] => (Some(need * price * span + again(place, price)), "模型误差留给统计的余量够用".to_string()),
+            [true, false] => (None, "温度：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
+            _ => (None, "显示量（布居、丢失）：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
         };
         noted(report, format!("候选 P{}：每 µs 代价 {:.3e}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
         Ok(Weighed { place, judged, price, model: model_error, need, work, fate })
