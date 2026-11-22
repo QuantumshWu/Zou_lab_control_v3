@@ -343,6 +343,13 @@ pub struct Form<'a> {
     elements: usize,
     beats_r: Vec<f64>,
     terms: Vec<(u32, u32, u32, u32)>,
+    /// R's places some term takes (`terms`; the places of R^T, column-major over rows), group by group, each group's
+    /// increasing; the groups' bounds among them (`r_groups`: group g's are r_groups[g]..r_groups[g + 1]); each term's
+    /// place among them (`r_slot`). A node's R is held at them alone (`Amps::r`): tilt2's 21 groups hold 64 306 of their
+    /// 21 × 36 864 places, TET's one group 32 574 of its 36 864.
+    r_places: Vec<u32>,
+    r_groups: Vec<usize>,
+    r_slot: Vec<u32>,
     /// R (# The generator) as R^T: its columns' and rows' sector places, column-major over rows.
     cols: Vec<usize>,
     rows: Vec<usize>,
@@ -355,9 +362,10 @@ pub struct Form<'a> {
     hbar_over_mass: f64,
 }
 
-/// A node's amplitudes on the sector (# The nodes): H's slots' blocks, the recycling's R per group of its beats (each
-/// cols × rows, R^T), and the blocks' spectral width (rad/µs) at the node -- the interpolated quantities: H and R are
-/// linear in the Liouvillian, each beat's amplitude a smooth function of the time along the path.
+/// A node's amplitudes on the sector (# The nodes): H's slots' blocks, the recycling's R per group of its beats (R^T, at
+/// the places its terms take, `Form::r_places`: the others are zero at every node), and the blocks' spectral width
+/// (rad/µs) at the node -- the interpolated quantities: H and R are linear in the Liouvillian, each beat's amplitude a
+/// smooth function of the time along the path.
 #[derive(Clone, Debug)]
 struct Amps {
     h: Vec<C64>,
@@ -524,6 +532,20 @@ impl<'a> Form<'a> {
         let nr = rows.len();
         let mut terms: Vec<(u32, u32, u32, u32)> = raw.iter().map(|&(bp, gg, ss, e1, e2)| (bp as u32, (col_of[ss] as usize * nr + row_of[gg] as usize) as u32, e1 as u32, e2 as u32)).collect();
         terms.sort_unstable();
+        // R's places the terms take, by group (`Form::r_places`).
+        let (mut r_places, mut r_groups, mut r_slot) = (Vec::new(), vec![0usize; beats_r.len() + 1], Vec::with_capacity(terms.len()));
+        let mut last = None;
+        for &(bp, place, ..) in &terms {
+            if last != Some((bp, place)) {
+                r_places.push(place);
+                last = Some((bp, place));
+                r_groups[bp as usize + 1] = r_places.len();
+            }
+            r_slot.push(r_places.len() as u32 - 1);
+        }
+        for g in 1..r_groups.len() {
+            r_groups[g] = r_groups[g].max(r_groups[g - 1]);
+        }
         let mut h_block = Vec::with_capacity(nb);
         let mut h_slot = 0;
         for b in &blocks {
@@ -544,6 +566,9 @@ impl<'a> Form<'a> {
             elements,
             beats_r,
             terms,
+            r_places,
+            r_groups,
+            r_slot,
             cols,
             rows,
             values,
@@ -639,10 +664,9 @@ impl<'a> Form<'a> {
                 }
             }
         }
-        let size = self.cols.len() * self.rows.len();
-        let mut r = vec![C64::ZERO; self.beats_r.len() * size];
-        for &(bp, place, e1, e2) in &self.terms {
-            r[bp as usize * size + place as usize] += j[e1 as usize] * j[e2 as usize].conj();
+        let mut r = vec![C64::ZERO; self.r_places.len()];
+        for (&(_, _, e1, e2), &slot) in self.terms.iter().zip(&self.r_slot) {
+            r[slot as usize] += j[e1 as usize] * j[e2 as usize].conj();
         }
         if !width {
             return Amps { h, r, columns: Vec::new(), width: f64::NAN };
@@ -668,9 +692,28 @@ impl<'a> Form<'a> {
             })
             .collect();
         let width = self.pairs.iter().map(|&(x, y)| larger(ends[x].1 - ends[y].0, ends[y].1 - ends[x].0)).fold(0.0, larger);
-        let nr = self.rows.len();
-        let columns = r.chunks(nr.max(1)).map(|c| c.iter().map(|z| z.abs()).sum::<f64>()).collect();
+        let columns = self.columns_of(&r);
         Amps { h, r, columns, width }
+    }
+
+    /// R's columns' moduli summed over its rows, per group and column (`Amps::columns`), of R at its places `r`.
+    fn columns_of(&self, r: &[C64]) -> Vec<f64> {
+        let (nr, nc) = (self.rows.len().max(1), self.cols.len());
+        let mut out = vec![0.0; self.beats_r.len() * nc];
+        for g in 0..self.beats_r.len() {
+            for k in self.r_groups[g]..self.r_groups[g + 1] {
+                out[g * nc + self.r_places[k] as usize / nr] += r[k].abs();
+            }
+        }
+        out
+    }
+
+    /// z ← z + c R_g of a node's R at its places `r` (`Amps::r`), its group g's, into R^T's places `z`.
+    fn r_onto(&self, z: &mut [C64], c: C64, r: &[C64], g: usize) {
+        let (from, to) = (self.r_groups[g], self.r_groups[g + 1]);
+        for (&place, &x) in self.r_places[from..to].iter().zip(&r[from..to]) {
+            z[place as usize] += c * x;
+        }
     }
 
     /// The operator h·L′ of one exponential into `op` (`Op`): its generator Σ (weight × the amplitudes at their phases
@@ -737,14 +780,13 @@ impl<'a> Form<'a> {
             }
         }
         // R and its columns' bound: Σ_j Σ_g |h w_jg| Σ_rows |R_jg| ≥ Σ_rows |R's combination|.
-        let size = op.rt.len();
         let ncols = self.cols.len();
         op.rt.fill(C64::ZERO);
         op.colsum.fill(0.0);
         for (i, a) in nodes.iter().enumerate() {
             for g in 0..groups {
                 let c = op.wr[i * groups + g] * h;
-                mul_add(false, &mut op.rt, c, &a.r[g * size..(g + 1) * size]);
+                self.r_onto(&mut op.rt, c, &a.r, g);
                 let m = c.abs();
                 for (ci, &place) in self.cols.iter().enumerate() {
                     op.colsum[place] += m * a.columns[g * ncols + ci];
@@ -1405,12 +1447,11 @@ impl Form<'_> {
 
     /// R(t)^T of the amplitudes Σ_j w_j a_j, its groups at their phases at t, into `out`.
     fn r_at(&self, of: &[(&Amps, f64)], t: f64, out: &mut [C64]) {
-        let size = out.len();
         out.fill(C64::ZERO);
         for (g, &delta) in self.beats_r.iter().enumerate() {
             let f = if delta == 0.0 { C64::ONE } else { C64::cis(-delta * t) };
             for &(a, w) in of {
-                mul_add(false, out, f * w, &a.r[g * size..(g + 1) * size]);
+                self.r_onto(out, f * w, &a.r, g);
             }
         }
     }
@@ -1546,7 +1587,7 @@ impl Form<'_> {
         // The generator at the start, to take L x of the recycled part (its shift's scalar back: L = L′ + 2 Im(c)).
         let mut op = Op::default();
         let nr = self.rows.len();
-        let whole = Amps { columns: amps.r.chunks(nr.max(1)).map(|c| c.iter().map(|z| z.abs()).sum::<f64>()).collect(), ..amps.clone() };
+        let whole = Amps { columns: self.columns_of(&amps.r), ..amps.clone() };
         self.op_into(&[(&whole, 1.0, t)], 1.0, &mut op);
         let mut work = Work::new(self);
         let (bound_l, shift) = (op.norm, op.eta.ln());
@@ -1685,9 +1726,8 @@ impl Form<'_> {
         let mut condition = vec![0.0_f64; m];
         // A chunk of intervals frozen on the pool while the one before is propagated; its readings on the pool after it.
         // The chunk: what `FROZEN_BYTES` holds of an interval's nodes and the members' pieces, at most four per thread.
-        let ncr = self.cols.len() * self.rows.len();
         let pieces: usize = knobs.iter().map(|k| k.2).sum();
-        let bytes = 16 * (finest * (self.h_beats.len() * self.h_slot + self.beats_r.len() * ncr) + pieces * (5 * self.h_slot + ETD_WEIGHTS * self.dim));
+        let bytes = 16 * (finest * (self.h_beats.len() * self.h_slot + self.r_places.len()) + pieces * (5 * self.h_slot + ETD_WEIGHTS * self.dim));
         let chunk = (FROZEN_BYTES / (bytes + 1)).clamp(1, 4 * rayon::current_num_threads());
         let freeze = |range: std::ops::Range<usize>, before: std::sync::Arc<Amps>| self.freeze_family(walk, &intervals[range], before, &knobs, finest, &substeps);
         let freeze = &freeze;
