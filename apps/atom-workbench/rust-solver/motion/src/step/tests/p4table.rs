@@ -378,3 +378,106 @@ fn p4table_fill_time() {
         }
     }
 }
+
+/// A step off the tables against a step decomposing every block (model/rs/fold_table.rs `MODE` 0 and 1), in one
+/// process, interleaved: per model, on P4T_STEPS (12) states of a walk from the moving point (`r1prop::start`, its
+/// trajectory 3) at the scene's τ (`tau_of`), each step the least of P4T_REPEAT_STEP (5) in P4T_ROUNDS (4) rounds
+/// alternating the two (a fresh scratch each, its first call not timed), and its counted work.
+#[test]
+#[ignore]
+fn p4table_ab_step() {
+    let (steps, repeat, rounds) = (env("P4T_STEPS", 12.0) as usize, env("P4T_REPEAT_STEP", 5.0) as usize, env("P4T_ROUNDS", 4.0) as usize);
+    let mode = &crate::model::rs::fold::table::MODE;
+    for (name, request) in scenes() {
+        let tau = tau_of(&name);
+        let chief = crate::solve::chief(&request);
+        for (label, run) in models(&name, &request) {
+            let mut t = start(&run, &request, chief, 3);
+            let (mut time, mut counted, mut taken) = ([0.0f64; 2], [0.0f64; 2], 0usize);
+            for _ in 0..steps {
+                let mut best = [f64::INFINITY; 2];
+                let mut next = None;
+                for _ in 0..rounds {
+                    for m in 0..2 {
+                        mode.with(|x| x.set(m as u8));
+                        for _ in 0..repeat {
+                            let mut s = Scratch::default();
+                            let _ = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere));
+                            let clock = std::time::Instant::now();
+                            let step = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere));
+                            best[m] = best[m].min(clock.elapsed().as_secs_f64() * 1e6);
+                            if let Ok(step) = step {
+                                if next.is_none() && m == 0 {
+                                    next = Some(step.end.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                for m in 0..2 {
+                    mode.with(|x| x.set(m as u8));
+                    let mut s = Scratch::default();
+                    if let Ok(step) = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere)) {
+                        counted[m] += step.work;
+                    }
+                }
+                mode.with(|x| x.set(0));
+                match next {
+                    Some(end) => {
+                        for m in 0..2 {
+                            time[m] += best[m];
+                        }
+                        taken += 1;
+                        t = end;
+                    }
+                    None => break,
+                }
+            }
+            let k = taken.max(1) as f64;
+            eprintln!("P4T-ABSTEP {name} {label} tau {tau}: a step off the tables {:.1} µs (counted {:.4e}), decomposed {:.1} µs (counted {:.4e}), ratio {:.3} (mean over {taken} states, each the least of {rounds}×{repeat})", time[0] / k, counted[0] / k, time[1] / k, counted[1] / k, time[0] / time[1]);
+        }
+    }
+}
+
+/// V⁻¹X off a table, priced (BRIEF_P4_TABLE item 1's V⁻¹X): the product the node makes, V⁻¹ (n × n) times X (n × w),
+/// against reading a table of W̃X -- `rows` coefficient rows of n × w, each a real multiple onto the sum (the tables'
+/// kernel, fold_table.rs `onto`) -- and U⁻¹ by clusters of `clusters` states (Σm² × w); each the least of P4T_REPEAT
+/// (200), the table read cold (one table of P4T_TABLES (8) in turn) and warm. P4T_N (24), P4T_W (56), P4T_ROWS (21: degree
+/// 8 and two small parts of degree 5), P4T_CLUSTERS ("3,5,1,3,5,7").
+#[test]
+#[ignore]
+fn p4table_vx_price() {
+    let (n, w, rows, repeat, tables) = (env("P4T_N", 24.0) as usize, env("P4T_W", 56.0) as usize, env("P4T_ROWS", 21.0) as usize, env("P4T_REPEAT", 200.0) as usize, env("P4T_TABLES", 8.0) as usize);
+    let clusters: Vec<usize> = std::env::var("P4T_CLUSTERS").unwrap_or_else(|_| "3,5,1,3,5,7".into()).split(',').map(|x| x.parse().unwrap()).collect();
+    let fill = |k: usize| -> Vec<C64> { (0..k).map(|i| C64::new((i as f64 * 0.37).sin(), (i as f64 * 0.11).cos())).collect() };
+    let (a, x) = (fill(n * n), fill(n * w));
+    let mut out = vec![C64::ZERO; n * w];
+    let product = least(&mut || crate::linalg::fused_product(&a, &x, (n, n, w), &mut out), repeat);
+    let coefficients: Vec<Vec<C64>> = (0..tables).map(|t| fill(rows * n * w + t)).collect();
+    let f: Vec<f64> = (0..rows).map(|j| 1.0 / (1.0 + j as f64)).collect();
+    let mut sum = vec![C64::ZERO; n * w];
+    let onto = |c: &[C64], sum: &mut [C64]| {
+        for (j, t) in f.iter().enumerate() {
+            for (o, v) in sum.iter_mut().zip(&c[j * n * w..(j + 1) * n * w]) {
+                o.re += t * v.re;
+                o.im += t * v.im;
+            }
+        }
+    };
+    let warm = least(&mut || onto(&coefficients[0], &mut sum), repeat);
+    let mut which = 0;
+    let cold = least(&mut || {
+        which = (which + 1) % tables;
+        onto(&coefficients[which], &mut sum)
+    }, repeat);
+    let u: Vec<Vec<C64>> = clusters.iter().map(|&m| fill(m * m)).collect();
+    let mut y = vec![C64::ZERO; n * w];
+    let blocks = least(&mut || {
+        let mut at = 0;
+        for (m, uc) in clusters.iter().zip(&u) {
+            crate::linalg::fused_product(uc, &sum[at * w..(at + m) * w], (*m, *m, w), &mut y[at * w..(at + m) * w]);
+            at += m;
+        }
+    }, repeat);
+    eprintln!("P4T-VX n {n} w {w}: V⁻¹X by the product {product:.2} µs; off a table of {rows} rows ({:.0} KB): its sums warm {warm:.2} µs, cold {cold:.2} µs, U⁻¹ by clusters {blocks:.2} µs", (rows * n * w * 16) as f64 / 1e3);
+}
