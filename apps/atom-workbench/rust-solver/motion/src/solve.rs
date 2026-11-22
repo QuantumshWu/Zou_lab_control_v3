@@ -2115,6 +2115,9 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         _ => true,
     };
     let tau = context.tau;
+    // The pilot's paths at the run's step, handed out where a test asks for them (`walks`; PIPELINE_V3_FINAL §二 B.7).
+    #[cfg(test)]
+    crate::paths::hand_out(&|count, until| walks(run, &domain, tau, context.plan.end, &levels.fine.iter().collect::<Vec<_>>(), count, until));
     // The step's check (module documentation, # The step): what the reads the rung stands by do not exclude into the
     // accounts, their resolution into the result's words (`Levels::told`, `checked`).
     let (own, third, step_of_third, pairs) = levels.told(&candidates, window, &scales);
@@ -3437,6 +3440,35 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
         }
     }
     states
+}
+
+/// The atom paths of a level whose states are kept (PIPELINE_V3_FINAL §二 B.7; paths.rs `Walk`): the first `count`
+/// trajectories of its groups `parts` in their members' order, each made again from its first checkpoint at the step τ
+/// toward the run's end `end` (`replay`'s way: the same trajectory to the bit), one step at a time -- advanced to the
+/// first step's end past its time (adapt.rs `advance`: a stop is no step's end) --, its (t, r, κ) at every step's end as
+/// far as the first at or past `until`, its loss or its failure; and its state at t = 0 by the request's states. Reads
+/// and changes nothing of the run.
+#[cfg_attr(not(test), allow(dead_code))]
+fn walks(run: &Selected, domain: &Domain, tau: f64, end: f64, parts: &[&Part], count: usize, until: f64) -> Vec<crate::paths::Walk> {
+    let trails: Vec<&Checkpoint> = parts.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).take(count).collect();
+    trails
+        .par_iter()
+        .map(|first| {
+            let (mut t, mut path, mut scratch) = (first.trajectory.clone(), first.path.clone(), Scratch::default());
+            let states = &run.cluster(t.cluster).states;
+            let norm = crate::linalg::norm_sqr(&t.psi).sqrt();
+            let start = t.psi.iter().zip(states).filter(|(z, _)| z.norm_sqr() > 0.).map(|(z, &s)| (s, *z * (1. / norm))).collect();
+            let mut ends = vec![[t.time, t.r[0], t.r[1], t.r[2], t.kappa[0], t.kappa[1], t.kappa[2]]];
+            while t.time < until && t.time < end && t.lost.is_none() {
+                let stop = t.time.next_up();
+                if adapt::advance(run, domain, tau, &mut t, &mut scratch, &mut path, end, stop, &[], &mut |_, _, _| {}, &mut |_, _| {}).is_err() {
+                    break;
+                }
+                ends.push([t.time, t.r[0], t.r[1], t.r[2], t.kappa[0], t.kappa[1], t.kappa[2]]);
+            }
+            crate::paths::Walk { index: t.index, start, ends }
+        })
+        .collect()
 }
 
 /// What a group of trajectories leaves: its sums at the outputs and at the times the decisions read (estimate.rs
