@@ -1,423 +1,198 @@
-//! The state selection at three points (RUSTPLAN §1.1, its corrections at the end of RUSTPLAN.md; PSTATE; the third
-//! point the user's of 2026-11-20, "变成三点判断吧，加一个中间位置的点"): P judged at three points against the full
-//! reference, the rest of the 32 folded by RS (`model::rs`). The only place P is decided. The points, the atom at rest:
-//! - the centre (0): the tweezer's focus, its light full (s = 1);
-//! - the edge (1): the focus' place with the tweezer off (s = 0), the other light as at the centre (its lattice phase);
-//! - the middle (2): from the focus along n̂, the direction the light other than the tweezer's changes fastest in
-//!   there, to where the tweezer's intensity is half its peak (s = 1/2) -- every light there as it is at that place
-//!   (its own lattice phase, no longer the centre's): between the two others in the tweezer's light, and the other
-//!   light's pattern where it really is (`middle`).
+//! The selection of P (PIPELINE_V3_FINAL §二 A.3, A.5–A.6, B.7–B.11, C.13–C.15): the candidates by structure, each
+//! judged by what it does to the run's readings -- along the atoms' own paths against the 32-state model (paths.rs), its
+//! feedback through the motion bounded by the identity below, the temperature measured in pairs where that bound does
+//! not reach --, and the candidate of least total work chosen among those whose model error A leaves the targets room.
+//! The trajectories' parts (the pilot the paths come from, the model-only scaling response, the pairs, the work) are the
+//! solve's (solve.rs, # The selection); what is here is the model's side and the accounts.
 //!
-//! # The middle point's direction and distance
-//! Near the focus each frequency's field (its beams' fields summed coherently, `field::Light`) is E(r) = E(0) +
-//! (r·∇)E + O(r²), so along a unit n̂ its change is |E(t n̂) − E(0)|² = t² n̂ᵀ M_w n̂ + O(t³) with the real symmetric,
-//! positive semidefinite M_w = Re(∇E ∇E†), (M_w)_ij = Re Σ_q ∂_iE_q (∂_jE_q)*. The frequencies do not interfere in
-//! the time average, so their changes add: M = Σ_w M_w over the light other than the tweezer's. n̂ is the eigenvector
-//! of M's largest eigenvalue -- the maximum of the Rayleigh quotient n̂ᵀMn̂ over unit n̂ (Rayleigh–Ritz; Horn &
-//! Johnson, Matrix Analysis, Thm 4.2.2) --, its sign the one that makes its largest component positive. At a node
-//! E(0) = 0 the intensity itself grows as t² n̂ᵀMn̂, so n̂ is the way out of the node fastest -- where the tweezer's
-//! axis lies in the node's plane (R10's node scenes: the standing wave's nodal plane holds the axis), along the axis
-//! the light stays dark and along n̂ it does not. With no light but the tweezer's, M = 0 and n̂ is the tweezer's axis.
-//! The distance: the tweezer's paraxial Gaussian intensity |a(t n̂)|² = exp(−2ρ²/w(ζ)²)/(1 + ζ²/z_R²) (ζ = t n̂·d along
-//! its direction d, ρ = t|n̂ − (n̂·d)d|, w(ζ) = w₀√(1 + ζ²/z_R²)) falls strictly along every ray from the focus, both
-//! factors decreasing in t, so |a|² = 1/2 has one root t > 0, found by bisection to the rounding of t; along the axis
-//! it is the Rayleigh range z_R = k w₀²/2.
+//! # The candidates
+//! Every excited state e has a structural amplitude a_e: the largest first-order amplitude |V_eg|/|E_g + f − E_e +
+//! iΓ_e/2| the light other than the tweezer's gives it, over the ground states, the light's frequencies and the three
+//! structural points -- the tweezer's focus with its light full (s = 1), the focus with it off (s = 0), and the place of
+//! half its intensity along the direction the other light changes fastest (`middle`) -- (`reach`, `amplitudes`). No
+//! equation is solved for it: it is the coupling over the detuning. The chain (`chain`) starts at the model in which every
+//! level is whole -- the 32 states, nothing folded -- and folds the excited states one at a time in increasing a_e, the
+//! states of equal a_e to the rounding together (a mirror pair is folded as a pair: one side kept would lose the pair's
+//! cancellation), down to the full-ground model G, every excited state folded. The chain is nested and made by the
+//! structure alone: no candidate is judged at a point, no gate is read (the three-point check, its 1 % gate, the
+//! leave-one-out and its stopping at the gate, and the fold condition s < ½ of model/reach.rs are gone: the user's of
+//! 2026-11-21, PIPELINE_V3_FINAL §二 A.6). What stays is the runaway's check of the steps (step.rs, # The domain): a fold
+//! that diverges where an atom goes scatters beyond every state of the atom there and is booked whole.
 //!
-//! # The gate
-//! At each point, the model's readouts against the reference's (td_s.cmp with the force as a vector):
-//! - populations by level, absolute: max_g |δp_g|;
-//! - the scattering rate, relative: |δR| / R (every jump channel, the tweezer's folded ones included, in both);
-//! - the force vector: |δF⃗| / max(|F⃗|, kR) -- the scale kR is the force a photon's momentum per scattering would give,
-//!   so a vanishing F⃗ (a balanced point) is judged against the scattering it could produce, not against zero.
+//! # The paths
+//! The candidates are judged along `WALKS` of the pilot's trajectories (solve.rs `walks`; P1-PATHS): each is advanced
+//! by the candidate and by the 32-state model in the ground-holding exact blocks' density matrices along the same path
+//! (paths.rs `Form::along`), by Lawson's scheme in H's eigenbasis (`LAWSON`: P1-PATHS R2), and their readings compared
+//! in windows of the memory time (paths.rs `windows`, `compare`). A path is read at its start for L = min(T, 5 τ_mem),
+//! τ_mem the slowest decay of the full-ground model's generator, the longest over the paths' starts (`memory`; P1 §5: it
+//! differs with the place by up to 2.4 times) -- the start's transient and the internal state's forgetting of it --, and,
+//! where the run is longer than 2L, again over its last L from the walk's own start state (`Paths::late_from`): its last
+//! window reads the model where the atoms are late in the run, which the start's windows cannot (the motion's own
+//! memory, Λ_T, is the longer: R4's start windows' drive is the transient's, its late one the heated atoms'). The scheme's own error on the fold's error is read once per candidate against the
+//! converged `Scheme::sparse` on the first path's first `CALIBRATION` µs (`Calibration`) and booked: Lawson's force
+//! errs high by 1.2–5 times on the scenes measured (P1 R2.1), so its drive bounds the converged one's from above, and
+//! the difference is booked beside it.
 //!
-//! Each ≤ `GATE` at the three points passes; a measure that is not a number passes no gate. The diffusion is not judged (the
-//! user: out of the model's gate), so only ρ is solved. Every solve the gate reads is certified (krylov.rs: its
-//! backward error at the rounding floor); one that is not is an error of the selection, never a number read.
+//! The reference is the 32-state model itself (B.8), not a whole-level base: under Lawson its path costs 10–20 % more
+//! than the base's (P1 R2.3), and with it nothing remains of a base's own error to check request by request.
 //!
-//! # Points without light
-//! A point no light reaches -- every first-order amplitude of every beam there, the tweezer's too, each frequency's
-//! beams summed (`reach`), below the rounding, a < ε (the rounding rule's, `f64::EPSILON`) -- is not judged (`lit`):
-//! - the reference has no unique steady state there: nothing pumps, so every mixture of the ground states is
-//!   stationary (its system is singular, and `krylov::solve` refuses it);
-//! - every P is exact there: the fold's corrections are products of the couplings, every one of them zero to rounding,
-//!   so every model is the bare atom the reference is.
+//! # The direct part
+//! Per output time t, its window's (`paths::window_of`) error of each displayed row, |mean| + z·se over the paths
+//! (`paths::Mean`; z the run's `CONFIDENCE`), the largest over the rows, and the scheme's calibration beside it; past L
+//! the larger of the start's last window's and the late segment's last window's, and past the late segment's start the
+//! latter's.
 //!
-//! There is nothing to compare: such a point's errors read zero (`PointError::unlit`), its reference none
-//! (`Selection::reference`), and the report says so (`Selection::notes`). A scene whose points are all dark has the
-//! ground states -- the first whole-level candidate -- for its P. (R10's node scenes, the trap at a node of the
-//! standing wave, and R3's, the trap at a node of its two beams: their edge, the tweezer off, is dark; their middle is
-//! not.)
+//! # The feedback bound
+//! The model's error moves the atoms, and where they go moves every reading. For any reading O -- a displayed row, the
+//! loss, k_BT -- the Duhamel identity on the motion's Markov projection (FOLDTEMP §R2.2) gives
+//!   δO(t) = ∫₀ᵗ μ^R_s[δF̄·∇_κh_O + Σ_c δλ̄_c E_c(h_O(κ + Δκ) − h_O(κ))] ds,
+//! h_O(s, r, κ) the model's backward function of O at t. The scaling response reads h_O's gradient: the momenta of the
+//! model's own atoms scaled by 1 ± η at a time, the same random numbers, the reading's change R_O(τ) = dO/dη a time τ
+//! later is Σ_a⟨κ_a ∂_a h_O⟩ (`Response`). Taking ∂_a h_O = c_O(τ) κ_a (the measurement's ansatz: the user's approval of
+//! 2026-11-22, "Λ 用只跑模型的动量缩放响应读出"), c_O = R_O/⟨κ²⟩ with ⟨κ²⟩ = Σ_a⟨κ_a²⟩ at the kick; the jumps' first
+//! moment, the scattered light's mean momentum, is the force's own part (the readout's absorbed momentum, paths.rs
+//! # The readings), so the jump term keeps its second moment, ½ c_O Σ_a⟨Δκ_a²⟩ ≤ c_O k², k the light's largest wave
+//! number (an absorbed and an emitted photon). So
+//!   |δO(t)| ≤ ∫₀ᵗ D(s) |R_O(t − s)| ds / ⟨κ²⟩,   D = Σ_a⟨|δF_a||κ_a|⟩ + k² Σ_c |δλ_c|,
+//! the drive D the path's (`Window::power` = ⅓Σ_a⟨|δF_a||v_a|⟩, the rates' differences by photon class, both over tr ρ_P
+//! as the trajectories take them), window by window in s, exactly for a drive constant in each (`feedback`): the
+//! start's windows to L, then the mean of the start's last and the late segment's last to the late segment's start,
+//! then the late segment's last (where there is no late segment, the start's last). For O = k_BT, R(0) = ⅔(ħ/m)⟨κ²⟩ and the bound is
+//! PATHGAP's 2 A_F Λ with Λ = ∫ R_T/R_T(0), its recoil term ⅔(ħ/m) k² Σ|δλ_c| Λ (PATHGAP wrote twice this). The rows and
+//! the loss take the same identity with their own responses: one bound for every reading (BRIEF_P3_SELECT item 4).
+//! What is not strict: the ansatz (a mean weight, not the supremum, FOLDTEMP), the drive taken on the histories the paths
+//! saw (not the histories the error itself made), and the response's noise, which |R̄| takes up.
 //!
-//! # The decision
-//! One procedure in two stages:
-//! 1. **The base** (`decide`): from the ground states, one whole level more at a time in the order of its largest
-//!    first-order amplitude at the three points (`ranking`, scene2.ranking); the base is the first candidate passing.
-//!    The references at the three points, then the candidates in turn, each at the three points at once (rayon). A candidate
-//!    beyond the base is never solved: its model is larger than every one below it (a level more), and the largest
-//!    (every level kept, the reference's size) would cost the most time and memory of all (GMD1C: the base 8 passes,
-//!    its candidates run to 32). No candidate passing is an error, never an empty P.
-//! 2. **Leave one out** (`leave_one_out`, `descend`; PFINE's, its prototype pfine/predict.py): each explicit excited
-//!    state i of the base folded alone -- the base less i judged at the three points, all of them at once (rayon) --,
-//!    its e_i that model's worst error (the largest of the three measures over the three points, against the full reference:
-//!    the error of the base less i, not an increment over the base's). Then from the base the states are removed in
-//!    increasing e_i (ties in the base's order) while the predicted error -- the base's worst plus the removed states'
-//!    e_i -- stays within the gate; that set is checked at the three points, and while it fails, the removed state of the
-//!    largest e_i (the first of equal ones) is put back and the set checked again. P is the first set passing; every
-//!    state put back, the base (which passed). The ground states are never removed.
+//! # The temperature measured in pairs
+//! Where only T's bound leaves no room, the candidate is run in pairs with an anchor (`Fallback`): the cheapest judged
+//! candidate whose own bound leaves T room, both on the same trajectory numbers at the same step for L_T = min(T,
+//! 5 Λ_T), Λ_T = ∫|R_T|/R_T(0), and T's and the loss's differences read with the pairs' jackknife; their error is the
+//! difference's |mean| + z·se plus the anchor's own bound. The populations are never measured so (the pairs save them
+//! almost nothing, PAIR): a candidate whose rows' bound leaves no room is not chosen.
 //!
-//! **The fold condition** (model/reach.rs, BRIEF_JUDGE item 3) comes before every judgment as a strict precondition: a
-//! set whose left-out states of some excited level are not foldable over the reach -- the RS series of those states,
-//! summed over them, not certified to converge at every place and momentum a held atom reaches -- is never judged at
-//! the points and never chosen. A whole-level candidate so is left out of the ranked chain, a state whose leave-one-out
-//! set so is never removed, a descent's set so is a failed check without a solve (its largest e_i put back). The sets
-//! left out and why are the report's (`Selection::notes`). The gate and its points are as before.
-//!
-//! The prediction adds the e_i as if the removals' errors added up; each e_i holds the base's own error once more, so
-//! the sum counts the base's error once per removed state above the once it starts with. Whatever it predicts, P is a
-//! set measured within the gate at the three points: the errors over removals are not monotone (a mirror pair with one side
-//! kept loses its cancellation; a folded state of amplitude a ≳ 0.25–0.3 is outside RS), so a removal the prediction
-//! allows may fail its check -- a check more and a state put back, never the gate (PSTATE's decision history: the gate
-//! is judged at its points alone, the user's rules of 11-19 and 11-20). The descent ends: each failed check puts a state back,
-//! so there are at most as many checks as removed states, and a set of one removed state is its leave-one-out model,
-//! measured at e_i ≤ the gate less the base's worst (its prediction).
-
-use crate::floquet::{assemble, readouts, select, Frame, Liouville, Readouts};
-use crate::krylov::{Route, Unsolved};
-use crate::linalg::{symmetric3_eigen, C64, Mat, V3};
-use crate::model::rs::{self, decay, levels, ModelAt, Rs};
+//! # The region left out
+//! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
+//! pilot's thermal speed against the reference (`scan`, `SCANNING`), each scan to the turning point of the pilot's most
+//! energetic held atom on the reference state's prepared potential, or to the trap region's edge (`REGION_INTENSITY` of
+//! the tweezer's peak), whichever is nearer -- the reach the pilot's atoms show (solve.rs `choose_on_the_pilot`): where
+//! the paths did not go -- the tweezer's intensity s below the least the paths reached --, the readings where a row errs
+//! by a quarter of its target or more mark the region {s ≤ s*}, s* the most intense of them, its error e the largest
+//! row's error there; below the least intensity the scans reached nothing is read, and an atom there is unknown, its
+//! error whole (`Region`). The run books every atom in either (solve.rs `booked_at`): a share f of them errs by at most e
+//! (one) on what is shown and moves T by the bound set's `Estimate::moved(f)`. (Only the chosen one: a scan of the
+//! 32-state reference to the trap's region's edge took R4 50 s at its pilot's step, the candidates' own a minute more.)
+use crate::field::Light;
+use crate::linalg::{larger, symmetric3_eigen, C64, Mat, V3};
+use crate::model::rs::{self, decay, ModelAt};
+use crate::model::selected::Selected;
+use crate::paths::{self, Form, Mean, Scheme, Series, Walk, Window};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Components, Scene};
-use crate::units::SPEED_OF_LIGHT;
+use crate::step::Dynamics;
+use crate::units::{CONFIDENCE, POPULATION_TARGET};
 use rayon::prelude::*;
 use std::time::Instant;
 
-/// The gate on every readout's error: 1 % (the user's two-point threshold, RUSTPLAN §1.1).
-pub const GATE: f64 = 0.01;
-
-/// The points: the centre (0), the edge (1), the middle (2) (module documentation).
+/// The points the structural amplitudes are read at: the centre (0), the edge (1), the middle (2) (module
+/// documentation, # The candidates).
 pub const POINTS: usize = 3;
 
-/// The largest of some errors; not a number where one of them is not (# The gate; `linalg::largest`).
-fn largest(errors: &[f64]) -> f64 {
-    crate::linalg::largest(0.0, errors.iter().copied())
-}
+/// The pilot's paths a candidate is judged on (BRIEF_P3_SELECT item 2: P1-PATHS's path-to-path spread is at most 2e-3,
+/// one or two paths reach a quarter of the target, four cover the start's draws).
+pub const WALKS: usize = 4;
 
-/// One point's comparison of a candidate P's model with the full reference.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PointError {
-    /// The largest absolute population error over the levels, R's relative error, F⃗'s error |δF⃗| / max(|F⃗|, kR).
-    pub populations: f64,
-    pub rate: f64,
-    pub force: f64,
-    /// The model's solve's route; none at a point not judged.
-    pub route: Option<Route>,
-}
+/// The path scheme (P1-PATHS R2): each step of the path in two pieces, H exact in its eigenbasis there, the recycling
+/// and the beats by RK4 in 128 substeps a µs (set by the decay, about 3.4 a lifetime of the D lines; P1's 64 erred by
+/// 3e-3, 128 by 2.4e-4 on R4). Its error on the fold's error is read and booked (`Calibration`).
+pub const LAWSON: Scheme = Scheme::Lawson { per_us: 128.0, pieces: 2, read: 1 };
 
-impl PointError {
-    /// The largest of the three (`largest`).
-    pub fn worst(&self) -> f64 {
-        largest(&[self.populations, self.rate, self.force])
-    }
+/// The calibration's piece (µs): the first path's start, where the readings change fastest (P1-PATHS: one path, 10 µs).
+pub const CALIBRATION: f64 = 10.0;
 
-    /// A point not judged (module documentation, # Points without light): every model exact there, so every error
-    /// zero -- derived, not measured --, no solve.
-    pub fn unlit() -> PointError {
-        PointError { populations: 0.0, rate: 0.0, force: 0.0, route: None }
-    }
-}
+/// The momenta's relative kick of the scaling response (PATHGAP's, measured on PGC3D, TET, R4 and tilt0): its symmetric
+/// difference errs by O(η²).
+pub const KICK: f64 = 0.25;
 
-/// One candidate P: its states and its errors at the centre, the edge and the middle.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Candidate {
-    pub keep: Vec<usize>,
-    pub centre: PointError,
-    pub edge: PointError,
-    pub middle: PointError,
-}
-
-impl Candidate {
-    /// Its points' errors in their order (`POINTS`).
-    pub fn points(&self) -> [&PointError; POINTS] {
-        [&self.centre, &self.edge, &self.middle]
-    }
-
-    /// The largest of the points' worst errors (`largest`).
-    pub fn worst(&self) -> f64 {
-        largest(&self.points().map(PointError::worst))
-    }
-
-    /// Every error at the three points within `gate`.
-    pub fn within(&self, gate: f64) -> bool {
-        self.worst() <= gate
-    }
-
-    /// Within the gate (`GATE`) at the three points.
-    pub fn passes(&self) -> bool {
-        self.within(GATE)
-    }
-}
-
-/// One explicit excited state of the base folded alone (module documentation, # The decision, 2): the state and the
-/// base less it, judged at the three points.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LeftOut {
-    pub state: usize,
-    pub candidate: Candidate,
-}
-
-impl LeftOut {
-    /// Its e_i: the base less the state, its worst error at the three points.
-    pub fn e(&self) -> f64 {
-        self.candidate.worst()
-    }
-}
-
-/// The descent from the base at a gate (`descend`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Descent {
-    /// P: the base less `removed`.
-    pub keep: Vec<usize>,
-    /// The states P leaves out of the base, in increasing e_i.
-    pub removed: Vec<usize>,
-    /// The first removal's predicted error: the base's worst plus its states' e_i.
-    pub predicted: f64,
-    /// The sets checked at the three points in turn; none where nothing could be removed.
-    pub checks: Vec<Candidate>,
-}
-
-/// The selection's report: the chosen P; the sets judged at the three points on the way, with their errors; the full
-/// reference's readouts and routes; the time.
-#[derive(Clone, Debug, PartialEq)]
+/// A run's states: P, the structural chain it is one of (module documentation, # The candidates), the states'
+/// structural amplitudes, the chain's time, and what the choice made of the chain where it was made (`Choice`: after the
+/// pilot, solve.rs # The selection).
+#[derive(Clone, Debug)]
 pub struct Selection {
-    /// P.
+    /// P (indices into the 32).
     pub keep: Vec<usize>,
-    /// Every set judged at the three points in turn but the leave-one-out ones: the whole-level candidates up to the base
-    /// (the first `whole` of them, the base the last), then the descent's checks. The last is P's.
-    pub candidates: Vec<Candidate>,
-    pub whole: usize,
-    /// The base's explicit excited states each folded alone, in the base's order (`leave_one_out`).
-    pub left_out: Vec<LeftOut>,
-    /// The states P leaves out of the base and the first removal's predicted error (`Descent`).
-    pub removed: Vec<usize>,
-    pub predicted: f64,
-    /// The full reference's readouts and route at each point; none at a point not judged (# Points without light).
-    pub reference: References,
-    /// The time (s): the whole and its stages -- the base (the references and the whole levels), the leave-one-out, the
-    /// descent's checks.
+    /// The chain from the full-ground model G (first) up to the 32 states (last), each sorted.
+    pub chain: Vec<Vec<usize>>,
+    /// Per state its structural amplitude (zero on the ground states).
+    pub amplitudes: [f64; STATES],
     pub seconds: f64,
-    pub stages: [f64; 3],
-    /// The sets the fold condition left out (module documentation, # The decision) and why.
-    pub excluded: Vec<(Vec<usize>, String)>,
+    pub choice: Option<std::sync::Arc<Choice>>,
 }
 
 impl Selection {
-    /// The base: the first whole-level candidate passing (# The decision, 1).
-    pub fn base(&self) -> &Candidate {
-        &self.candidates[self.whole - 1]
+    /// The full-ground model's states: the chain's first, the model the scout and the pilot run.
+    pub fn ground(&self) -> &[usize] {
+        &self.chain[0]
     }
 
-    /// What the report says beside the numbers (Chinese): each point not judged (# Points without light), each set the
-    /// fold condition left out (# The decision).
+    /// What the report says beside the numbers (Chinese): the chain, and the choice where it was made.
     pub fn notes(&self) -> Vec<String> {
-        let mut notes: Vec<String> = ["中心", "边缘", "中间"].iter().zip(&self.reference).filter(|(_, r)| r.is_none()).map(|(name, _)| format!("{name}点无光、无唯一稳态，不判")).collect();
-        notes.extend(self.excluded.iter().map(|(keep, why)| format!("候选 {} 态不判：{why}", keep.len())));
+        let mut notes = vec![format!("结构链 {} 档：{}", self.chain.len(), self.chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" → "))];
+        if let Some(choice) = &self.choice {
+            notes.extend(choice.report.iter().cloned());
+        }
         notes
     }
 }
 
-/// The full reference's readouts and route at each point, none at a point not judged: a point is judged where its
-/// reference is.
-pub type References = [Option<(Readouts, Route)>; POINTS];
-
-/// The model's errors against the reference at one point; `k` the photon wave number of the force's scale kR.
-pub fn errors(model: &Readouts, reference: &Readouts, k: f64, route: Route) -> PointError {
-    let populations =
-        model.levels.iter().zip(&reference.levels).map(|(m, r)| (m - r).abs()).fold(0.0, crate::linalg::larger);
-    let rate = (model.rate - reference.rate).abs() / reference.rate;
-    let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    let delta = [0, 1, 2].map(|i| model.force[i] - reference.force[i]);
-    let force = norm(delta) / crate::linalg::larger(norm(reference.force), k * reference.rate);
-    PointError { populations, rate, force, route: Some(route) }
-}
-
-/// A set judged: its models' readouts and routes at the points against the references' -- a point without its
-/// reference not judged (`PointError::unlit`).
-fn judged(keep: &[usize], models: &[Option<(Readouts, Route)>], reference: &References, k: f64) -> Candidate {
-    let point = |p: usize| match (&models[p], &reference[p]) {
-        (Some(m), Some(r)) => errors(&m.0, &r.0, k, m.1),
-        _ => PointError::unlit(),
-    };
-    Candidate { keep: keep.to_vec(), centre: point(0), edge: point(1), middle: point(2) }
-}
-
-/// The points judged: those with a reference.
-fn judged_points(reference: &References) -> [bool; POINTS] {
-    reference.each_ref().map(|r| r.is_some())
-}
-
-/// A set's models at the judged points, both at once; none at a point not judged.
-fn pair<F>(keep: &[usize], points: [bool; POINTS], solve: &F) -> Result<Vec<Option<(Readouts, Route)>>, String>
-where
-    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
-{
-    (0..POINTS).into_par_iter().map(|p| if points[p] { solve(p, keep).map(Some) } else { Ok(None) }).collect()
-}
-
-/// The base (module documentation, # The decision, 1) over ranked candidates (each `keep` a superset of the one
-/// before), every point judged (`decide_on`).
-pub fn decide<F>(candidates: &[Vec<usize>], k: f64, solve: F) -> Result<Selection, String>
-where
-    F: Fn(usize, Option<usize>) -> Result<(Readouts, Route), String> + Sync,
-{
-    decide_on(candidates, [true; POINTS], k, solve)
-}
-
-/// The base over ranked candidates, the points `lit` judged (# Points without light): `solve(point, None)` is the
-/// full reference at a point, `solve(point, Some(c))` candidate c's model there, each giving the readouts and the
-/// route, never asked at a point not judged. The references, then the candidates in turn, each at the judged points
-/// at once; the base is the first candidate passing there. The report's P is the base, nothing left out yet (`refine`
-/// takes it on).
-pub fn decide_on<F>(candidates: &[Vec<usize>], lit: [bool; POINTS], k: f64, solve: F) -> Result<Selection, String>
-where
-    F: Fn(usize, Option<usize>) -> Result<(Readouts, Route), String> + Sync,
-{
+/// The selection's chain for a scene (module documentation, # The candidates): its states' structural amplitudes and the
+/// chain; P the full-ground model, until the choice (solve.rs, # The selection) takes another.
+pub fn choose(scene: &Scene) -> Result<Selection, String> {
     let clock = Instant::now();
-    let both = |c: Option<usize>| -> Result<Vec<Option<(Readouts, Route)>>, String> {
-        (0..POINTS).into_par_iter().map(|p| if lit[p] { solve(p, c).map(Some) } else { Ok(None) }).collect()
-    };
-    let reference = both(None)?;
-    let reference: References = std::array::from_fn(|p| reference[p].clone());
-    let mut tried: Vec<Candidate> = Vec::new();
-    for (c, keep) in candidates.iter().enumerate() {
-        let candidate = judged(keep, &both(Some(c))?, &reference, k);
-        let passes = candidate.passes();
-        tried.push(candidate);
-        if passes {
-            let seconds = clock.elapsed().as_secs_f64();
-            let predicted = tried[c].worst();
-            return Ok(Selection {
-                keep: keep.clone(),
-                whole: tried.len(),
-                candidates: tried,
-                left_out: Vec::new(),
-                removed: Vec::new(),
-                predicted,
-                reference,
-                seconds,
-                stages: [seconds, 0.0, 0.0],
-                excluded: Vec::new(),
-            });
+    let amplitudes = amplitudes(scene);
+    let chain = chain(&amplitudes);
+    Ok(Selection { keep: chain[0].clone(), chain, amplitudes, seconds: clock.elapsed().as_secs_f64(), choice: None })
+}
+
+/// The chain (module documentation, # The candidates) by the states' structural amplitudes: from the ground states up,
+/// the excited states added in decreasing amplitude, those equal to the rounding at once, to all 32.
+pub fn chain(amplitudes: &[f64; STATES]) -> Vec<Vec<usize>> {
+    let mut excited: Vec<usize> = (GROUND..STATES).collect();
+    excited.sort_by(|&x, &y| amplitudes[y].total_cmp(&amplitudes[x]).then(x.cmp(&y)));
+    let mut keep: Vec<usize> = (0..GROUND).collect();
+    let mut chain = vec![keep.clone()];
+    let tie = crate::units::rounding(STATES);
+    let mut i = 0;
+    while i < excited.len() {
+        let top = amplitudes[excited[i]];
+        let mut j = i + 1;
+        while j < excited.len() && (top - amplitudes[excited[j]]).abs() <= tie * larger(top.abs(), amplitudes[excited[j]].abs()) {
+            j += 1;
         }
+        keep.extend(&excited[i..j]);
+        keep.sort_unstable();
+        chain.push(keep.clone());
+        i = j;
     }
-    let largest = candidates.last().map_or(0, |k| k.len());
-    Err(format!("no candidate P passes the {GATE} gate at the points judged (the largest has {largest} states)"))
+    chain
 }
 
-/// Stage 2's measurements (module documentation, # The decision, 2): the base less each of its explicit excited states
-/// whose set is `foldable` (# The decision: the fold condition), every set at the judged points at once (rayon);
-/// `solve(point, keep)` a model's readouts and route at a point. In the base's order.
-pub fn leave_one_out<F>(base: &Candidate, reference: &References, k: f64, solve: &F, foldable: &(dyn Fn(&[usize]) -> bool + Sync)) -> Result<Vec<LeftOut>, String>
-where
-    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
-{
-    let lit = judged_points(reference);
-    let states: Vec<usize> = base.keep.iter().copied().filter(|&s| s >= GROUND && foldable(&base.keep.iter().copied().filter(|&x| x != s).collect::<Vec<_>>())).collect();
-    let sets: Vec<Vec<usize>> = states.iter().map(|&i| base.keep.iter().copied().filter(|&s| s != i).collect()).collect();
-    let models: Vec<Option<(Readouts, Route)>> = (0..sets.len() * POINTS)
-        .into_par_iter()
-        .map(|j| if lit[j % POINTS] { solve(j % POINTS, &sets[j / POINTS]).map(Some) } else { Ok(None) })
-        .collect::<Result<_, _>>()?;
-    Ok(states
-        .iter()
-        .zip(&sets)
-        .zip(models.chunks(POINTS))
-        .map(|((&state, keep), models)| LeftOut { state, candidate: judged(keep, models, reference, k) })
-        .collect())
-}
-
-/// Stage 2's decision (module documentation, # The decision, 2) at `gate` from the base, which passes it, and its
-/// leave-one-out: the removal the prediction allows, then the checks, each at the judged points at once, with the
-/// put-backs -- a set not `foldable` (the fold condition) a failed check without a solve. P the first set passing or,
-/// every state put back, the base. Err where the base does not pass the gate.
-pub fn descend<F>(base: &Candidate, left_out: &[LeftOut], gate: f64, reference: &References, k: f64, solve: &F, foldable: &(dyn Fn(&[usize]) -> bool + Sync)) -> Result<Descent, String>
-where
-    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
-{
-    if !base.within(gate) {
-        return Err(format!("the base ({} states) does not pass the {gate} gate", base.keep.len()));
-    }
-    let mut order: Vec<&LeftOut> = left_out.iter().collect();
-    order.sort_by(|a, b| a.e().total_cmp(&b.e()));
-    let mut predicted = base.worst();
-    let mut removed: Vec<&LeftOut> = Vec::new();
-    for state in order {
-        if predicted + state.e() <= gate {
-            predicted += state.e();
-            removed.push(state);
-        }
-    }
-    let mut checks: Vec<Candidate> = Vec::new();
-    while !removed.is_empty() {
-        let keep: Vec<usize> = base.keep.iter().copied().filter(|s| removed.iter().all(|r| r.state != *s)).collect();
-        if foldable(&keep) {
-            let candidate = judged(&keep, &pair(&keep, judged_points(reference), solve)?, reference, k);
-            let passes = candidate.within(gate);
-            checks.push(candidate);
-            if passes {
-                break;
-            }
-        }
-        let back = (0..removed.len()).fold(0, |b, j| if removed[j].e() > removed[b].e() { j } else { b });
-        removed.remove(back);
-    }
-    let keep = if removed.is_empty() { base.keep.clone() } else { checks.last().expect("a removal passing is checked").keep.clone() };
-    Ok(Descent { keep, removed: removed.iter().map(|r| r.state).collect(), predicted, checks })
-}
-
-/// Stage 2 on the base's selection (`decide`) at the gate (`GATE`): its leave-one-out and its descent on the sets
-/// `foldable` (the fold condition), the report's P the descent's, its checks after the whole levels -- and the base's
-/// measurement once more where every removed state was put back, so that the last is P's.
-pub fn refine<F>(mut selection: Selection, k: f64, solve: &F, foldable: &(dyn Fn(&[usize]) -> bool + Sync)) -> Result<Selection, String>
-where
-    F: Fn(usize, &[usize]) -> Result<(Readouts, Route), String> + Sync,
-{
-    let clock = Instant::now();
-    let base = selection.base().clone();
-    let left_out = leave_one_out(&base, &selection.reference, k, solve, foldable)?;
-    let looked = clock.elapsed().as_secs_f64();
-    let descent = descend(&base, &left_out, GATE, &selection.reference, k, solve, foldable)?;
-    let checked = clock.elapsed().as_secs_f64() - looked;
-    selection.candidates.extend(descent.checks);
-    if selection.candidates.last().map(|c| &c.keep) != Some(&descent.keep) {
-        selection.candidates.push(base);
-    }
-    selection.keep = descent.keep;
-    selection.left_out = left_out;
-    selection.removed = descent.removed;
-    selection.predicted = descent.predicted;
-    selection.stages[1] = looked;
-    selection.stages[2] = checked;
-    selection.seconds += looked + checked;
-    Ok(selection)
-}
-
-/// The points' components (module documentation), the atom at rest (no Doppler shift): the centre, the tweezer full,
-/// and the edge, dark, both at the focus' place; the middle at `middle`, every light there as it is (the tweezer at
-/// its half intensity).
+/// The structural points' components (module documentation, # The candidates), the atom at rest (no Doppler shift): the
+/// centre, the tweezer full, and the edge, dark, both at the focus' place; the middle at `middle`, every light there as
+/// it is (the tweezer at its half intensity).
 pub fn points(scene: &Scene) -> [Components; POINTS] {
     let zero = vec![0.0; scene.request.beams.len()];
     [scene.components([0.0; 3], &zero, 1.0), scene.components([0.0; 3], &zero, 0.0), scene.components(middle(scene), &zero, 1.0)]
 }
 
-/// The middle point's place (µm from the focus; module documentation, # The middle point's direction and distance):
-/// n̂ the top eigenvector of M = Σ_w Re(∇E_w ∇E_w†) at the focus over the light other than the tweezer's (the
-/// tweezer's axis where M = 0), and along it the tweezer's half-intensity distance by bisection. The tweezer is a
-/// Gaussian beam (`Request::validate`).
+/// The middle point's place (µm from the focus): n̂ the top eigenvector of M = Σ_w Re(∇E_w ∇E_w†) at the focus over the
+/// light other than the tweezer's -- the direction its pattern changes fastest (Rayleigh–Ritz; Horn & Johnson, Thm
+/// 4.2.2), the tweezer's axis where M = 0 --, its sign the one that makes its largest component positive; along it the
+/// distance where the tweezer's paraxial Gaussian intensity is half its peak, its one root found by bisection to the
+/// rounding (the intensity falls strictly along every ray from the focus).
 pub fn middle(scene: &Scene) -> V3 {
-    let light = crate::field::Light::new(&scene.request);
+    let light = Light::new(&scene.request);
     let mut m = [[0.0_f64; 3]; 3];
     for frequency in light.frequencies.iter().enumerate().filter(|&(w, _)| w != light.trap).map(|(_, f)| f) {
-        // ∂_i E_q at the focus, the frequency's beams' fields summed.
         let mut g = [[C64::ZERO; 3]; 3];
         for (&l, field) in frequency.beams.iter().zip(&frequency.fields) {
             let a = light.beams[l].amplitude_to([0.0; 3], 1).gradient;
@@ -462,11 +237,11 @@ pub fn middle(scene: &Scene) -> V3 {
     n.map(|x| t * x)
 }
 
-/// The light's reach at a point (scene2.ranking): per excited state e the largest first-order amplitude
-/// |V_eg| / |E_g + f − E_e + iΓ_e/2| over the ground states g and the beams `beams` takes -- V the coupling of a
-/// frequency's beams together (its field: the beams of one frequency index summed, so that beams cancelling at the point
-/// cancel), at f and its conjugate at −f; E the reference's static energies at the point (the tweezer's shift in), Γ its
-/// decay. A beam with no component at the point couples nothing there.
+/// The light's reach at a point: per excited state e the largest first-order amplitude |V_eg| / |E_g + f − E_e +
+/// iΓ_e/2| over the ground states g and the beams `beams` takes -- V the coupling of a frequency's beams together (its
+/// field: the beams of one frequency index summed, so that beams cancelling at the point cancel), at f and its conjugate
+/// at −f; E the reference's static energies at the point (the tweezer's shift in), Γ its decay. A beam with no component
+/// at the point couples nothing there.
 pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn Fn(usize) -> bool) -> [f64; STATES] {
     let request = &scene.request;
     let still = &reference.still().value;
@@ -491,7 +266,7 @@ pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn
                 for g in 0..GROUND {
                     if x[(e, g)] != C64::ZERO {
                         let away = C64::new(still[(g, g)].re + f - still[(e, e)].re, 0.5 * gamma[(e, e)].re);
-                        score[e] = crate::linalg::larger(score[e], x[(e, g)].abs() / away.abs());
+                        score[e] = larger(score[e], x[(e, g)].abs() / away.abs());
                     }
                 }
             }
@@ -500,126 +275,562 @@ pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn
     score
 }
 
-/// Whether light reaches the atom at a point (module documentation, # Points without light): some first-order
-/// amplitude of every beam's light there (`reach`, the tweezer's included) at or above the rounding, ε.
-pub fn lit(scene: &Scene, reference: &ModelAt, point: &Components) -> bool {
-    // An amplitude that is not a number counts as light: the point is judged, and its errors are not numbers.
-    reach(scene, reference, point, &|_| true).iter().any(|&a| !(a < f64::EPSILON))
-}
-
-/// The candidate levels in the order of their largest first-order amplitude at the points (scene2.ranking): per
-/// excited state the largest over the points of the reach of the light other than the tweezer (`reach`); a level's
-/// the largest of its states'. Each level its states (indices into the 32), the best first (a tie in the levels'
-/// order).
-pub fn ranking(scene: &Scene, references: &[ModelAt], points: &[Components]) -> Vec<Vec<usize>> {
-    let request = &scene.request;
-    let tw = request.trap_beam;
+/// Per state its structural amplitude (module documentation, # The candidates): the largest over the structural points
+/// of the reach of the light other than the tweezer's (`reach`); zero on the ground states.
+pub fn amplitudes(scene: &Scene) -> [f64; STATES] {
+    let tw = scene.request.trap_beam;
     let mut score = [0.0_f64; STATES];
-    for (reference, point) in references.iter().zip(points) {
-        for (s, a) in score.iter_mut().zip(reach(scene, reference, point, &|l| l != tw)) {
-            *s = crate::linalg::larger(*s, a);
+    for point in points(scene) {
+        let reference = rs::reference(scene, &point);
+        for (s, a) in score.iter_mut().zip(reach(scene, &reference, &point, &|l| l != tw)) {
+            *s = larger(*s, a);
         }
     }
-    let all: Vec<usize> = (0..STATES).collect();
-    let mut found: Vec<(f64, Vec<usize>)> = levels(&request.states, &all)
-        .into_iter()
-        .filter(|level| level[0] >= GROUND)
-        .map(|level| (level.iter().map(|&e| score[e]).fold(0.0, crate::linalg::larger), level))
-        .collect();
-    found.sort_by(|a, b| b.0.total_cmp(&a.0));
-    found.into_iter().map(|(_, level)| level).collect()
+    score
 }
 
-/// One point's solve (the reference's or a model's): the Hilbert model through the one Liouville assembly, the rounding
-/// rule's elements and the solve (floquet, krylov), its readouts and route. A system with no solution, or a solve that
-/// is not certified, is an error (module documentation, # The gate): no number is read off it.
-fn solved(frame: &Frame, model: &ModelAt) -> Result<(Readouts, Route), String> {
-    let liouville = Liouville::new(frame, &model.hilbert());
-    let system = assemble(&liouville, &select(&liouville));
-    let solved = crate::krylov::solve(&system).map_err(|e| match e {
-        Unsolved::Inconsistent(i) => format!("the checkpoint's system is inconsistent at {} rows", i.rows.len()),
-        Unsolved::NoIterate { attempts } => format!(
-            "the checkpoint's system has no solution: no route gave a finite iterate ({})",
-            attempts.iter().map(|a| format!("{:?}{}", a.route, a.unfactorised.as_ref().map_or(String::new(), |u| format!(": {u}")))).collect::<Vec<_>>().join("; ")
-        ),
-    })?;
-    if !solved.certified {
-        return Err(format!("the checkpoint's solve is not certified (route {:?}, ζ {:.3e})", solved.route, solved.certificate));
-    }
-    Ok((readouts(&liouville, &system, &solved.rho), solved.route))
+/// The structural amplitudes `base` (the structural points', `amplitudes`) widened by the light's reach at the places
+/// `places` an atom was seen at (the pilot's states: an atom at rest there, the tweezer's light as it is), each state's
+/// the largest -- the couplings where the atoms go, a lattice's polarization where the structural points do not see it
+/// (R4: the F′ = 3 stretched states, dark to the π light at the three points, coupled by the σ light between them).
+pub fn amplitudes_over(scene: &Scene, places: &[V3], base: &[f64; STATES]) -> [f64; STATES] {
+    let tw = scene.request.trap_beam;
+    let zero = vec![0.0; scene.request.beams.len()];
+    places
+        .par_iter()
+        .map(|&r| {
+            let point = scene.components(r, &zero, 1.0);
+            reach(scene, &rs::reference(scene, &point), &point, &|l| l != tw)
+        })
+        .reduce(|| *base, |a, b| std::array::from_fn(|s| larger(a[s], b[s])))
 }
 
-/// What every solve of a scene's selection reads: the three points (`points`), the full reference at each
-/// (`rs::reference`) and its frame (`Frame::new`: the reference there, no Doppler shift), and whether light reaches
-/// the atom there (`lit`: the points judged); the whole-level candidates -- the ground states, then one level more at
-/// a time in `ranking`'s order --; the force's scale k, the carrier's wave number (ν/c, td_s's kref).
-pub struct ThreePoints<'a> {
-    scene: &'a Scene,
-    points: [Components; POINTS],
-    references: Vec<ModelAt>,
-    frames: Vec<Frame>,
-    pub lit: [bool; POINTS],
-    pub candidates: Vec<Vec<usize>>,
-    pub k: f64,
+// ---------------------------------------------------------------------------------------------------------------------
+// The paths and the candidates' judgment.
+
+/// The tweezer's intensity at a place, relative to its peak (s = |a_tw(r)|²).
+pub fn intensity(light: &Light, r: V3) -> f64 {
+    light.beams[light.frequencies[light.trap].beams[0]].amplitude_to(r, 0).value.norm_sqr()
 }
 
-impl<'a> ThreePoints<'a> {
-    pub fn new(scene: &'a Scene) -> ThreePoints<'a> {
-        let points = points(scene);
-        let references: Vec<ModelAt> = points.iter().map(|p| rs::reference(scene, p)).collect();
-        let zero = vec![0.0; scene.request.beams.len()];
-        let frames: Vec<Frame> = references.iter().map(|r| Frame::new(scene, &r.hilbert(), &zero)).collect();
-        let mut keep: Vec<usize> = (0..GROUND).collect();
-        let mut candidates = vec![keep.clone()];
-        for level in ranking(scene, &references, &points) {
-            keep.extend(level);
-            keep.sort_unstable();
-            candidates.push(keep.clone());
-        }
-        let k = scene.generators.last().expect("the carrier").frequency / SPEED_OF_LIGHT;
-        let lit = std::array::from_fn(|p| lit(scene, &references[p], &points[p]));
-        ThreePoints { scene, points, references, frames, lit, candidates, k }
-    }
-
-    /// The full reference's readouts and route at point p.
-    pub fn reference(&self, p: usize) -> Result<(Readouts, Route), String> {
-        solved(&self.frames[p], &self.references[p])
-    }
-
-    /// The RS model on `keep` (indices into the 32) at point p, on that point's frame's sectors (`Rs::new`, `Rs::at`).
-    pub fn model(&self, p: usize, keep: &[usize]) -> Result<(Readouts, Route), String> {
-        solved(&self.frames[p], &Rs::new(self.scene, keep, self.frames[p].sectors()).at(self.scene, &self.points[p]))
-    }
+//// What every candidate is judged against (module documentation, # The paths): the walks cut at L, their windows, the
+/// reference's form and its series along them by `LAWSON` and on the calibration's piece by `Scheme::sparse`, the least
+/// tweezer intensity the walks reached, the memory time, and the work it took.
+pub struct Paths<'a> {
+    pub walks: Vec<Walk>,
+    pub length: f64,
+    pub memory: f64,
+    pub windows: Vec<(f64, f64)>,
+    pub reference: Form<'a>,
+    series: Vec<Series>,
+    calibration: (f64, Series),
+    /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
+    /// none where the run is no longer than twice L.
+    late: Option<(f64, Vec<(f64, f64)>, Vec<Series>)>,
+    pub least: f64,
+    pub seconds: f64,
+    pub products: u64,
 }
 
-/// Chooses P for a scene (module documentation, # The decision): on the three points (`ThreePoints`), those light reaches
-/// judged (# Points without light), the base over the whole-level candidates the fold condition leaves (`decide_on`;
-/// model/reach.rs `Foldability`), then its leave-one-out and descent on foldable sets (`refine`); every solve the same
-/// (`solved`). The sets the condition left out and why are the selection's (`Selection::excluded`).
-pub fn choose(scene: &Scene) -> Result<Selection, String> {
-    let three = ThreePoints::new(scene);
-    let fold = crate::model::reach::Foldability::new(scene);
-    let excluded: std::sync::Mutex<Vec<(Vec<usize>, String)>> = std::sync::Mutex::new(Vec::new());
-    let foldable = |keep: &[usize]| -> bool {
-        match fold.check(keep) {
-            Ok(()) => true,
-            Err(why) => {
-                let mut list = excluded.lock().unwrap_or_else(|e| e.into_inner());
-                if !list.iter().any(|x| x.0 == keep) {
-                    list.push((keep.to_vec(), why));
+/// The scans' scheme (module documentation, # The region left out): `LAWSON` in one piece a step (P1-PATHS R2.1: on R4
+/// one piece and two err alike on the populations, 2.4e-4 and 2.5e-4, a fiftieth of a quarter of the target the scans
+/// mark at), read at every fourth step's end.
+pub const SCANNING: Scheme = Scheme::Lawson { per_us: 128.0, pieces: 1, read: 4 };
+
+/// The scans' walks (module documentation, # The region left out): per principal axis of the trap and each way along
+/// it, from the trap's centre at the speed `speed` (µm/µs) to where `beyond` first holds -- the pilot's most energetic
+/// held atom's turning point, or the trap region's edge --, its knots `step` apart (µs), the atom's state at its start
+/// `start`.
+pub fn scan_walks(beyond: &dyn Fn(V3) -> bool, centre: V3, axes: &[V3; 3], speed: f64, step: f64, hbar_over_mass: f64, start: &[(usize, C64)]) -> Vec<Walk> {
+    let mut walks = Vec::new();
+    for (i, axis) in axes.iter().enumerate() {
+        for sign in [1.0, -1.0] {
+            let e = axis.map(|x| sign * x);
+            let at = |d: f64| -> V3 { std::array::from_fn(|k| centre[k] + d * e[k]) };
+            // The edge: the first distance where `beyond` holds, by doubling then bisection.
+            let (mut lo, mut hi) = (0.0, step * speed);
+            while !beyond(at(hi)) && hi < 1e6 {
+                (lo, hi) = (hi, 2.0 * hi);
+            }
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if beyond(at(mid)) {
+                    hi = mid;
+                } else {
+                    lo = mid;
                 }
-                false
+            }
+            let time = hi / speed;
+            let count = (time / step).ceil().max(1.0) as usize;
+            let kappa = e.map(|x| x * speed / hbar_over_mass);
+            let ends = (0..=count)
+                .map(|k| {
+                    let t = time * k as f64 / count as f64;
+                    let r = at(speed * t);
+                    [t, r[0], r[1], r[2], kappa[0], kappa[1], kappa[2]]
+                })
+                .collect();
+            walks.push(Walk { index: (2 * i + usize::from(sign < 0.0)) as u64, start: start.to_vec(), ends });
+        }
+    }
+    walks
+}
+
+impl<'a> Paths<'a> {
+    /// The reference's part (`Paths`): the walks `walks` (the pilot's, from their own starts, through the run) at their
+    /// start, [0, L], L = min(`run`, 5 τ_mem) -- `memory` the memory time (`paths::memory`, the longest over the walks'
+    /// starts) --, and at the run's end, [run − L, run], each from the walk's own start state (the late segment: its
+    /// last window has forgotten that start), where the run is longer than twice L; the windows of their step `step`;
+    /// the reference along them and on the calibration's piece.
+    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light) -> Result<Paths<'a>, String> {
+        let clock = Instant::now();
+        let form = Form::new(reference, at);
+        let length = run.min(5.0 * memory);
+        let windows = paths::windows(length, memory, step);
+        let piece = CALIBRATION.min(length);
+        let late_from = (run > 2.0 * length).then_some(run - length);
+        // One job the calibration, a walk's start and its end; on the pool.
+        let n = walks.len();
+        let jobs: Vec<usize> = (0..1 + n * (1 + usize::from(late_from.is_some()))).collect();
+        let done: Vec<Result<Series, String>> = jobs
+            .par_iter()
+            .map(|&j| {
+                if j == 0 {
+                    form.along(&walks[0], &walks[0].start, 0.0, piece.min(walks[0].end()), Scheme::sparse(4))
+                } else if j <= n {
+                    let w = &walks[j - 1];
+                    form.along(w, &w.start, 0.0, length.min(w.end()), LAWSON)
+                } else {
+                    let (w, from) = (&walks[j - 1 - n], late_from.expect("a late segment"));
+                    form.along(w, &w.start, from.min(w.end()), run.min(w.end()), LAWSON)
+                }
+            })
+            .collect();
+        let mut done = done.into_iter();
+        let calibration = (piece, done.next().expect("the calibration")?);
+        let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
+        let late_series: Vec<Series> = done.collect::<Result<_, _>>()?;
+        let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
+        let least = walks.iter().flat_map(|w| w.ends.iter().map(|e| intensity(light, [e[1], e[2], e[3]]))).fold(f64::INFINITY, crate::linalg::smaller);
+        let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).chain(std::iter::once(&calibration.1)).map(|s| s.counts.products).sum();
+        Ok(Paths { walks, length, memory, windows, reference: form, series, calibration, late, least, seconds: clock.elapsed().as_secs_f64(), products })
+    }
+
+    /// Where the late segment starts (µs), where there is one.
+    pub fn late_from(&self) -> Option<f64> {
+        self.late.as_ref().map(|l| l.0)
+    }
+
+    /// The reference judged against itself (`Judged`): every error none -- the 32 states are the reference.
+    pub fn itself(&self, keep: Vec<usize>) -> Judged {
+        let labels = &self.reference.model.scene.request.states;
+        let hm = self.reference.model.hbar_over_mass();
+        let windows = paths::compare(&self.series, &self.series, &self.windows, labels, hm);
+        let late = self.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(s, s, w, labels, hm));
+        Judged { keep, windows, late, calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 }
+    }
+}
+
+/// The scheme's error on the fold's error (module documentation, # The paths): on the calibration's piece the largest
+/// change, between `LAWSON` and the converged `Scheme::sparse`, of a row's difference to the reference and of the total
+/// rate's relative difference -- booked beside the direct part --, and the converged scheme's drive (⅓Σ_a|δF_a||v_a|, its
+/// mean) over Lawson's, at least one: the factor Lawson's drive is taken at (Lawson's force errs high where the pieces
+/// freeze H, P1-PATHS R2.1, so mostly one).
+#[derive(Clone, Copy, Debug)]
+pub struct Calibration {
+    pub rows: f64,
+    pub rate: f64,
+    pub power: f64,
+}
+
+impl Default for Calibration {
+    /// No scheme error: the rows' and the rate's none, the drive's factor one.
+    fn default() -> Calibration {
+        Calibration { rows: 0.0, rate: 0.0, power: 1.0 }
+    }
+}
+
+/// The region left out (module documentation, # The region left out): {s ≤ `intensity`} where a scan found a row's
+/// error of a quarter of its target or more beyond the paths' least intensity, `error` the largest there (at most one);
+/// none flagged, the intensity −∞. Below the least intensity the scans reached, `edge`, nothing was read: a state there
+/// is unknown, its error whole (one). `largest` the largest row's error the scans read beyond the paths' reach, flagged
+/// or not.
+#[derive(Clone, Copy, Debug)]
+pub struct Region {
+    pub intensity: f64,
+    pub error: f64,
+    pub edge: f64,
+    pub largest: f64,
+}
+
+impl Region {
+    /// No region: nothing flagged, nothing unread.
+    pub const NONE: Region = Region { intensity: f64::NEG_INFINITY, error: 0.0, edge: f64::NEG_INFINITY, largest: 0.0 };
+
+    /// The error of a place of the tweezer's intensity `s` on what is shown: one below the scans' edge, the region's in
+    /// it, none outside (where it is some, the place's share moves T).
+    pub fn error_at(&self, s: f64) -> Option<f64> {
+        if s < self.edge {
+            Some(1.0)
+        } else if s <= self.intensity {
+            Some(self.error)
+        } else {
+            None
+        }
+    }
+}
+
+/// One candidate judged along the paths (`judge`): its states, its windows' errors, its calibration, its region (the
+/// scans', `scan`; none until scanned), and the work and time its judgment took.
+#[derive(Clone, Debug)]
+pub struct Judged {
+    pub keep: Vec<usize>,
+    pub windows: Vec<Window>,
+    /// The late segment's windows (their times the run's), none where it has none.
+    pub late: Vec<Window>,
+    pub calibration: Calibration,
+    pub region: Region,
+    pub seconds: f64,
+    pub products: u64,
+}
+
+/// A candidate model judged against the reference along the paths (`Judged`): its series along the walks by `LAWSON`
+/// and on the calibration's piece by `Scheme::sparse`, every job on the pool.
+pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> {
+    let clock = Instant::now();
+    let form = Form::new(model, at);
+    let (piece, ref calibrated) = paths.calibration;
+    let w0 = &paths.walks[0];
+    let n = paths.walks.len();
+    let run = paths.late.as_ref().map_or(0.0, |(from, ..)| from + paths.length);
+    let jobs: Vec<usize> = (0..1 + n * (1 + usize::from(paths.late.is_some()))).collect();
+    let done: Vec<Result<Series, String>> = jobs
+        .par_iter()
+        .map(|&j| match j {
+            0 => form.along(w0, &w0.start, 0.0, piece.min(w0.end()), Scheme::sparse(4)),
+            j if j <= n => {
+                let w = &paths.walks[j - 1];
+                form.along(w, &w.start, 0.0, paths.length.min(w.end()), LAWSON)
+            }
+            j => {
+                let (w, from) = (&paths.walks[j - 1 - n], paths.late.as_ref().expect("a late segment").0);
+                form.along(w, &w.start, from.min(w.end()), run.min(w.end()), LAWSON)
+            }
+        })
+        .collect();
+    let mut done = done.into_iter();
+    let sparse = done.next().expect("the calibration")?;
+    let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
+    let late_series: Vec<Series> = done.collect::<Result<_, _>>()?;
+    let labels = &model.scene.request.states;
+    let hm = model.hbar_over_mass();
+    let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm));
+    // The calibration: the converged scheme's difference to the reference against Lawson's, on the same piece -- the
+    // first walk's own Lawson series there (the same scheme from the same start), the candidate's and the reference's.
+    let cut = |s: &Series| Series { readings: s.readings.iter().filter(|r| r.t <= piece).cloned().collect(), ..Series::default() };
+    let calibration = calibrate(&cut(&series[0]), &cut(&paths.series[0]), &sparse, calibrated, hm);
+    let products = series.iter().chain(&late_series).chain([&sparse]).map(|s| s.counts.products).sum();
+    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
+}
+
+/// The region left out of a candidate (module documentation, # The region left out; `Region`): the candidate and the
+/// reference along the scans `scans` by `SCANNING`, every job on the pool; beyond the paths' least intensity `least`,
+/// each reading's largest row error, a quarter of the target or more marking. With the time it took.
+pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], least: f64, light: &Light) -> Result<(Region, f64), String> {
+    let clock = Instant::now();
+    let forms = [Form::new(reference, at), Form::new(model, at)];
+    let jobs: Vec<(usize, usize)> = (0..2).flat_map(|m| (0..scans.len()).map(move |w| (m, w))).collect();
+    let done: Vec<Result<Series, String>> = jobs.par_iter().map(|&(m, w)| forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), SCANNING)).collect();
+    let done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
+    let (reference, candidate) = done.split_at(scans.len());
+    let quarter = 0.25 * POPULATION_TARGET;
+    let mut region = Region::NONE;
+    region.edge = scans.iter().filter_map(|w| w.ends.last()).map(|e| intensity(light, [e[1], e[2], e[3]])).fold(f64::INFINITY, crate::linalg::smaller);
+    for (r, c) in reference.iter().zip(candidate) {
+        for (c, r) in c.readings.iter().zip(&r.readings) {
+            let s = intensity(light, c.r);
+            if s >= least {
+                continue;
+            }
+            let e = (0..STATES).map(|k| (c.rows[k] - r.rows[k]).abs()).fold(0.0, larger);
+            region.largest = larger(region.largest, e);
+            if e >= quarter {
+                region.intensity = larger(region.intensity, s);
+                region.error = larger(region.error, e.min(1.0));
             }
         }
+    }
+    Ok((region, clock.elapsed().as_secs_f64()))
+}
+
+/// The calibration (`Calibration`) of a candidate's Lawson series `lawson` and the reference's `reference` against their
+/// converged series `sparse` and `converged` on the same piece, read at the times both read (the knots).
+fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &Series, hm: f64) -> Calibration {
+    let mut c = Calibration::default();
+    let at = |s: &Series, t: f64| s.readings.iter().find(|r| r.t == t).cloned();
+    let (mut power_l, mut power_s, mut count) = (0.0, 0.0, 0.0);
+    for x in &lawson.readings {
+        let (Some(y), Some(u), Some(v)) = (at(reference, x.t), at(sparse, x.t), at(converged, x.t)) else { continue };
+        let (y, u, v) = (&y, &u, &v);
+        for k in 0..STATES {
+            c.rows = larger(c.rows, ((x.rows[k] - y.rows[k]) - (u.rows[k] - v.rows[k])).abs());
+        }
+        let total = |r: &paths::Reading| r.rates.iter().sum::<f64>();
+        c.rate = larger(c.rate, ((total(x) / total(y) - 1.0) - (total(u) / total(v) - 1.0)).abs());
+        for a in 0..3 {
+            power_l += (x.force[a] - y.force[a]).abs() * (hm * y.kappa[a]).abs() / 3.0;
+            power_s += (u.force[a] - v.force[a]).abs() * (hm * v.kappa[a]).abs() / 3.0;
+        }
+        count += 1.0;
+    }
+    if count > 0.0 && power_l > 0.0 {
+        c.power = larger(1.0, power_s / power_l);
+    }
+    c
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The accounts.
+
+/// The model-only scaling response (module documentation, # The feedback bound): at the times `times` (µs, from t = 0)
+/// per reading its R_O = (O₊ − O₋)/2η of the model's own atoms with their initial momenta scaled by 1 ± η -- the loss,
+/// each row as shown, the total T (µK) --, the group mean; ⟨κ²⟩ = Σ_a⟨κ_a²⟩ at the kick; and T's response's own
+/// statistical interval at the last time (whether it is still read there: the memory not shorter than the run).
+#[derive(Clone, Debug)]
+pub struct Response {
+    pub times: Vec<f64>,
+    pub loss: Vec<f64>,
+    pub rows: Vec<[f64; STATES]>,
+    pub temperature: Vec<f64>,
+    /// Each one's standard error (the groups' jackknife), at the same times.
+    pub errors: Vec<[f64; STATES + 2]>,
+    pub kappa2: f64,
+    pub last_interval: f64,
+}
+
+impl Response {
+    /// The size |R| of the reading q (0 the loss, 1 + s the row s, 1 + `STATES` T) at the k-th time, its noise taken out:
+    /// √max(R̄² − se², 0), R̄² being R² + se² on average -- a response the noise hides reads none, where |R̄| would read
+    /// the noise (88 atoms: a row's ±η difference has a noise of about 0.09 a unit η, PGC3D's rows' |R̄| integrated to
+    /// 71 µs over 1 ms of it).
+    fn size(&self, q: usize, k: usize) -> f64 {
+        let r = if q == 0 { self.loss[k] } else if q <= STATES { self.rows[k][q - 1] } else { self.temperature[k] };
+        let e = self.errors[k][q];
+        let d = r * r - if e.is_finite() { e * e } else { 0.0 };
+        if d > 0.0 { d.sqrt() } else { 0.0 }
+    }
+
+    /// ∫₀ᵗ |R(τ)| dτ of one reading's response size `r` (`size`) at the response's times (the trapezoid; beyond its last
+    /// time R held at its last value).
+    fn integral(&self, r: &dyn Fn(usize) -> f64, t: f64) -> f64 {
+        let mut sum = 0.0;
+        for k in 1..self.times.len() {
+            let (a, b) = (self.times[k - 1], self.times[k]);
+            if a >= t {
+                return sum;
+            }
+            let (ra, rb) = (r(k - 1).abs(), r(k).abs());
+            if b <= t {
+                sum += 0.5 * (b - a) * (ra + rb);
+            } else {
+                let rt = ra + (rb - ra) * (t - a) / (b - a);
+                return sum + 0.5 * (t - a) * (ra + rt);
+            }
+        }
+        let last = self.times.len() - 1;
+        sum + (t - self.times[last]).max(0.0) * r(last).abs()
+    }
+
+    /// Λ_T = ∫₀ᵗ|R_T| / R_T(0): T's memory time (µs) to the time t.
+    pub fn memory(&self, t: f64) -> f64 {
+        self.integral(&|k| self.size(1 + STATES, k), t) / self.temperature[0].abs()
+    }
+
+    /// The rows' and the loss's ∫₀ᵗ|R| (µs per unit η): the largest row's and the loss's -- the feedback bound's
+    /// weights on what is shown, for the report.
+    pub fn shown_weights(&self, t: f64) -> [f64; 2] {
+        [(0..STATES).map(|s| self.integral(&|k| self.size(1 + s, k), t)).fold(0.0, larger), self.integral(&|k| self.size(0, k), t)]
+    }
+
+    /// Whether T's response is still read at its last time, beyond its interval: no memory shorter than the run (the
+    /// flag "Λ 塌掉", FOLDTEMP §R2.3).
+    pub fn collapsed(&self) -> bool {
+        self.temperature.last().is_some_and(|r| r.abs() > self.last_interval)
+    }
+}
+
+/// The temperature and the loss measured in pairs with an anchor (module documentation, # The temperature measured in
+/// pairs): at the times `times` (µs, up to L_T) the differences' |mean| + z·se, T's in µK; the pairs; the anchor's place
+/// among the judged candidates; L_T.
+#[derive(Clone, Debug)]
+pub struct Fallback {
+    pub times: Vec<f64>,
+    pub temperature: Vec<f64>,
+    pub loss: Vec<f64>,
+    pub pairs: u64,
+    pub anchor: Vec<usize>,
+    pub length: f64,
+}
+
+impl Fallback {
+    /// Its value at the time t of the series `v`: linear between its times, the last beyond them (the pairs have
+    /// forgotten their start past L_T), none at or before the first.
+    fn at(&self, v: &[f64], t: f64) -> f64 {
+        let k = self.times.partition_point(|&x| x <= t);
+        if k == 0 {
+            return 0.0;
+        }
+        if k >= self.times.len() {
+            return v[self.times.len() - 1];
+        }
+        let (a, b) = (self.times[k - 1], self.times[k]);
+        v[k - 1] + (v[k] - v[k - 1]) * (t - a) / (b - a)
+    }
+}
+
+/// A candidate's model error at a time, by parts (module documentation): on what is shown the direct part (the rows'
+/// worst, with the scheme's calibration) and the feedback bound (the rows' with their direct part, the loss's), on T
+/// (µK) the feedback bound and, where measured, the pairs' error with the anchor's bound; and the region's error.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Parts {
+    pub direct: f64,
+    pub feedback: f64,
+    pub shown: f64,
+    pub temperature_bound: f64,
+    pub temperature: f64,
+    pub measured: bool,
+}
+
+/// The feedback bound at the time t of the windows' drives `drives` (1/µm²/µs, one a window of `windows`, the last's past
+/// its end) and one reading's response `r` (module documentation, # The feedback bound): ∫₀ᵗ D(s)|R(t − s)| ds/⟨κ²⟩,
+/// window by window exactly, D constant there: D_w [Λ(t − a) − Λ(t − b)] over (a, b] ∩ (0, t], Λ(x) = ∫₀ˣ|R|
+/// (`Response::integral`).
+fn feedback(response: &Response, windows: &[(f64, f64)], drives: &[f64], r: &dyn Fn(usize) -> f64, t: f64) -> f64 {
+    let lambda = |x: f64| response.integral(r, x);
+    let last = windows.len() - 1;
+    let mut sum = 0.0;
+    for (w, &(a, b)) in windows.iter().enumerate() {
+        if a >= t {
+            break;
+        }
+        let b = if w == last { t } else { b.min(t) };
+        sum += drives[w] * (lambda(t - a) - lambda(t - b));
+    }
+    sum / response.kappa2
+}
+
+/// The drive D (1/µm²/µs) of a window (module documentation, # The feedback bound): Σ_a⟨|δF_a||κ_a|⟩ = 3·power/(ħ/m)
+/// and k² Σ_c |δλ_c|, each at its mean + z·se over the paths, with the calibration's drive beside it.
+pub fn drive(w: &Window, calibration: &Calibration, hbar_over_mass: f64, k2: f64) -> f64 {
+    let up = |m: &Mean| m.value.abs() + CONFIDENCE * m.error.abs();
+    let force = 3.0 * up(&w.power) * calibration.power / hbar_over_mass;
+    let rates: f64 = w.rates.iter().map(|(_, m, _)| up(m)).sum();
+    force + k2 * rates
+}
+
+/// The direct part of a window: per row |mean| + z·se, the largest.
+fn direct(w: &Window) -> Vec<f64> {
+    w.rows.iter().map(|m| m.value.abs() + CONFIDENCE * m.error.abs()).collect()
+}
+
+/// A candidate's error at the time t (`Parts`; module documentation): its windows (the time's, `paths::window_of`), the
+/// response, k² (1/µm², the light's largest wave number's square), and its pairs where measured with the anchor's own
+/// bound at the time on T and the loss.
+pub fn parts(judged: &Judged, windows: &[(f64, f64)], response: &Response, k2: f64, hbar_over_mass: f64, fallback: Option<(&Fallback, [f64; 2])>, t: f64) -> Parts {
+    if t <= 0.0 || judged.windows.is_empty() {
+        return Parts::default();
+    }
+    // The drive in s (module documentation, # The paths): the start's windows to L; past it, where the late segment
+    // stands, the mean of the start's last window's and the late segment's last window's to the late segment's start,
+    // the late's last from there; else the start's last.
+    let drive_of = |w: &Window| drive(w, &judged.calibration, hbar_over_mass, k2);
+    let mut bounds = windows.to_vec();
+    let mut drives: Vec<f64> = judged.windows.iter().map(drive_of).collect();
+    let length = windows.last().map_or(0.0, |w| w.1);
+    let late = judged.late.last().map(|w| (w.from - (w.to - w.from).max(0.0), w));
+    let late_from = judged.late.first().map(|w| w.from);
+    if let (Some(from), Some(last), Some((_, late_last))) = (late_from, judged.windows.last(), late) {
+        let (early, end) = (drive_of(last), drive_of(late_last));
+        if from > length {
+            bounds.push((length, from));
+            drives.push(0.5 * (early + end));
+        }
+        bounds.push((larger(from, length), f64::INFINITY));
+        drives.push(end);
+    }
+    let own = match (late_from, judged.windows.last(), late) {
+        (Some(from), Some(last), Some((_, late_last))) if t > length => {
+            let (a, b) = (direct(last), direct(late_last));
+            if t > from { b } else { a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect() }
+        }
+        _ => direct(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
     };
-    let candidates: Vec<Vec<usize>> = three.candidates.iter().filter(|keep| foldable(keep)).cloned().collect();
-    let base = decide_on(&candidates, three.lit, three.k, |p, c| match c {
-        None => three.reference(p),
-        Some(c) => three.model(p, &candidates[c]),
-    })?;
-    let mut selection = refine(base, three.k, &|p: usize, keep: &[usize]| three.model(p, keep), &foldable)?;
-    selection.excluded = excluded.into_inner().unwrap_or_else(|e| e.into_inner());
-    Ok(selection)
+    let worst = own.iter().copied().fold(0.0, larger) + judged.calibration.rows;
+    let rows = (0..STATES).map(|s| own[s] + feedback(response, &bounds, &drives, &|k| response.size(1 + s, k), t)).fold(0.0, larger) + judged.calibration.rows;
+    let loss_bound = feedback(response, &bounds, &drives, &|k| response.size(0, k), t);
+    let temperature_bound = feedback(response, &bounds, &drives, &|k| response.size(1 + STATES, k), t);
+    let (loss, temperature, measured) = match fallback {
+        Some((f, anchor)) => (crate::linalg::smaller(loss_bound, f.at(&f.loss, t) + anchor[0]), crate::linalg::smaller(temperature_bound, f.at(&f.temperature, t) + anchor[1]), true),
+        None => (loss_bound, temperature_bound, false),
+    };
+    Parts { direct: worst, feedback: larger(rows - worst, loss), shown: larger(rows, loss), temperature_bound, temperature, measured }
+}
+
+/// What the choice made of the chain (solve.rs, # The selection): P, its judgment and its pairs (with the anchor's
+/// judgment), the response, the paths' windows and k², and the report's lines -- every candidate judged with its
+/// parts, its cost and why it was or was not chosen, the stages' times.
+#[derive(Clone, Debug)]
+pub struct Choice {
+    pub keep: Vec<usize>,
+    /// The chain the choice was made on: the structural amplitudes widened by the pilot's places (`amplitudes_over`).
+    pub chain: Vec<Vec<usize>>,
+    pub judged: Judged,
+    pub fallback: Option<(Fallback, Judged)>,
+    pub response: Response,
+    pub windows: Vec<(f64, f64)>,
+    pub k2: f64,
+    pub hbar_over_mass: f64,
+    pub memory: f64,
+    pub length: f64,
+    pub report: Vec<String>,
+}
+
+impl Choice {
+    /// P's error at the time t (`parts`), the anchor's bound at t taken into its pairs.
+    pub fn at(&self, t: f64) -> Parts {
+        let fallback = self.fallback.as_ref().map(|(f, anchor)| {
+            let a = parts(anchor, &self.windows, &self.response, self.k2, self.hbar_over_mass, None, t);
+            (f, [a.shown, a.temperature])
+        });
+        parts(&self.judged, &self.windows, &self.response, self.k2, self.hbar_over_mass, fallback, t)
+    }
+}
+
+/// The key the choice is kept under (BRIEF_P3_SELECT item 6: the scene's physics): the request without its times --
+/// its length, its outputs and the samples they make. The worker is one process for every request (main.rs), so a scene
+/// solved again with other times takes its choice from here (`CHOICES`).
+pub fn key(request: &crate::request::Request) -> String {
+    let mut r = request.clone();
+    r.times_us = Vec::new();
+    format!("{r:?}")
+}
+
+/// The choices made (`key`), in the order they were made.
+static CHOICES: std::sync::Mutex<Vec<(String, std::sync::Arc<Choice>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The choice kept for a request (`key`), where one was made.
+pub fn kept(request: &crate::request::Request) -> Option<std::sync::Arc<Choice>> {
+    let key = key(request);
+    CHOICES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| *k == key).map(|(_, c)| c.clone())
+}
+
+/// A choice kept for its request (`key`).
+pub fn keep(request: &crate::request::Request, choice: std::sync::Arc<Choice>) {
+    let key = key(request);
+    let mut list = CHOICES.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|(k, _)| *k != key);
+    list.push((key, choice));
 }
 
 #[cfg(test)]

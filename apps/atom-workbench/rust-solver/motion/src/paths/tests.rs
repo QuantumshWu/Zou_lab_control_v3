@@ -37,29 +37,32 @@ fn request_of(name: &str) -> Request {
     Request::from_native(&line).unwrap()
 }
 
-/// The base's explicit excited states in increasing e_i (PAIR's `chain_order`).
-fn chain_order(selection: &Selection) -> Vec<usize> {
-    let mut order: Vec<&crate::select::LeftOut> = selection.left_out.iter().collect();
-    order.sort_by(|a, b| a.e().total_cmp(&b.e()));
-    order.iter().map(|l| l.state).collect()
-}
-
-/// A model's states by its name (PAIR's and ENGFOLD's `keep_of`): P, base, full, c<n> (the chain from the base), w<n>.
-fn keep_of(spec: &str, selection: &Selection, three: &crate::select::ThreePoints) -> Vec<usize> {
-    let base = selection.base().keep.clone();
+/// A model's states by its name: G (the full-ground model, the chain's first; P its old name), full (the 32 states),
+/// c<n> (the selection's chain's candidate of n states), w<n> (the ground states and the whole levels of the largest
+/// structural amplitudes, n states).
+fn keep_of(spec: &str, selection: &Selection, labels: &[String]) -> Vec<usize> {
     match spec {
-        "P" => selection.keep.clone(),
-        "base" => base,
+        "G" | "P" => selection.chain[0].clone(),
         "full" => (0..STATES).collect(),
-        s if s.starts_with('w') => {
-            let n: usize = s[1..].parse().unwrap();
-            three.candidates.iter().find(|c| c.len() == n).unwrap_or_else(|| panic!("no whole-level candidate of {n}")).clone()
-        }
         s if s.starts_with('c') => {
             let n: usize = s[1..].parse().unwrap();
-            let order = chain_order(selection);
-            let gone = &order[..base.len() - n];
-            base.iter().copied().filter(|s| !gone.contains(s)).collect()
+            selection.chain.iter().find(|c| c.len() == n).unwrap_or_else(|| panic!("no candidate of {n} on the chain")).clone()
+        }
+        s if s.starts_with('w') => {
+            let n: usize = s[1..].parse().unwrap();
+            let mut levels = crate::model::rs::levels(labels, &(GROUND..STATES).collect::<Vec<_>>());
+            let top = |l: &Vec<usize>| l.iter().map(|&e| selection.amplitudes[e]).fold(0.0, larger);
+            levels.sort_by(|a, b| top(b).total_cmp(&top(a)));
+            let mut keep: Vec<usize> = (0..GROUND).collect();
+            for level in levels {
+                if keep.len() >= n {
+                    break;
+                }
+                keep.extend(level);
+            }
+            keep.sort_unstable();
+            assert_eq!(keep.len(), n, "no whole-level model of {n} states");
+            keep
         }
         other => panic!("unknown model {other}"),
     }
@@ -70,12 +73,11 @@ fn keep_of(spec: &str, selection: &Selection, three: &crate::select::ThreePoints
 fn models(request: &Request, specs: &[String]) -> Vec<Selected> {
     let scene = Scene::new(request).unwrap();
     let selection = crate::select::choose(&scene).unwrap();
-    let three = crate::select::ThreePoints::new(&scene);
     let reference = crate::solve::alone(crate::solve::chief(request));
     specs
         .iter()
         .map(|s| {
-            let keep = keep_of(s, &selection, &three);
+            let keep = keep_of(s, &selection, &request.states);
             Selected::new(Scene::new(request).unwrap(), Selection { keep, ..selection.clone() }, reference).unwrap()
         })
         .collect()

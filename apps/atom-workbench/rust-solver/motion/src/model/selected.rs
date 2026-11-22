@@ -1,5 +1,5 @@
-//! The trajectory's model (RUSTPLAN §3.2 and its corrections of 2026-11-19, "模型只定一次", "一个折叠公式"): the P the
-//! two-point check selected (select.rs) and its RS fold (model/rs.rs `Rs`) as the onefold integrator's
+//! The trajectory's model (RUSTPLAN §3.2 and its corrections of 2026-11-19, "模型只定一次", "一个折叠公式"): a P of the
+//! selection's chain (select.rs) and its RS fold (model/rs.rs `Rs`) as the onefold integrator's
 //! `step::Dynamics` / `step::Middle`. Nothing here decides or folds: P, the fold's formula and its coefficients are the
 //! checkpoint's, `Rs::at` gives the model at a point, and this module puts it in the integrator's frame and terms.
 //!
@@ -98,7 +98,7 @@
 //! exact beat with their values (`Selected::components`), H_eff's gradient's, and the photon classes. A propagation that
 //! takes the model once a step (STEPBENCH L2) asks for the middle's alone; the onefold integrator asks for three.
 
-use crate::linalg::{larger, largest, smaller};
+use crate::linalg::{larger, smaller};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -533,9 +533,8 @@ impl Selected {
         Ok(run)
     }
 
-    /// The selection's report (stderr): P by levels and state by state, the states left out, the selection's notes (a
-    /// point not judged and why: `Selection::notes`), each candidate's errors at the gate's three points (centre, edge,
-    /// middle: `Candidate::points`) -- "不判" at a point not judged, never its zero --, the time.
+    /// The selection's report (stderr): P by levels and state by state, the states folded, the selection's notes (its
+    /// chain, and the choice's lines where it was made: select.rs `Selection::notes`), the dropped beats.
     pub fn report(&self) -> String {
         let labels = &self.scene.request.states;
         let mut levels: Vec<String> = Vec::new();
@@ -547,48 +546,19 @@ impl Selected {
             }
         }
         let names = |states: &[usize]| states.iter().map(|&s| labels[s].as_str()).collect::<Vec<_>>().join(", ");
-        let mut out = format!("三点选态：P = {} 态 {:?}，用时 {:.2} s
-", self.rs.keep.len(), levels, self.report.seconds);
-        out += &format!("  P 的态：{}
-", names(&self.rs.keep));
-        out += &format!("  删去 {} 态：{}
-", self.rs.folded.len(), if self.rs.folded.is_empty() { "无".to_string() } else { names(&self.rs.folded) });
+        let mut out = format!("选态：P = {} 态 {:?}（结构链用时 {:.2} s）\n", self.rs.keep.len(), levels, self.report.seconds);
+        out += &format!("  P 的态：{}\n", names(&self.rs.keep));
+        out += &format!("  折叠 {} 态：{}\n", self.rs.folded.len(), if self.rs.folded.is_empty() { "无".to_string() } else { names(&self.rs.folded) });
         for note in self.report.notes() {
-            out += &format!("  注：{note}
-");
+            out += &format!("  注：{note}\n");
         }
         let dropped: Vec<f64> = self.read(|b| self.judgment.tiers.iter().filter(|t| t.1 == Tier::Drop).map(|t| b.value[t.0]).filter(|v| *v > 0.0).collect());
         if !dropped.is_empty() {
             let length = self.scene.request.times_us.last().copied().unwrap_or(0.0);
             let beats = dropped.iter().map(|v| format!("±{v:.4}")).collect::<Vec<_>>().join("、");
-            out += &format!("  删去拍 {} 对：{beats} rad/µs；迹距离增长率上界 Y = {:.2e} /µs（{length} µs 内 D ≤ {:.2e}）
-", dropped.len(), self.judgment.dropped, crate::model::classify::distance(self.judgment.dropped, length));
-        }
-        let judged: Vec<bool> = self.report.reference.iter().map(Option::is_some).collect();
-        for c in &self.report.candidates {
-            let e = |p: &crate::select::PointError, at: usize| {
-                if judged[at] {
-                    format!("布居 {:.2e} R {:.2e} F {:.2e}", p.populations, p.rate, p.force)
-                } else {
-                    "不判".to_string()
-                }
-            };
-            let [centre, edge, middle] = c.points();
-            out += &format!("  候选 {} 态：中心 {}；边缘 {}；中间 {}{}
-", c.keep.len(), e(centre, 0), e(edge, 1), e(middle, 2), if c.passes() { "（过）" } else { "" });
+            out += &format!("  删去拍 {} 对：{beats} rad/µs；迹距离增长率上界 Y = {:.2e} /µs（{length} µs 内 D ≤ {:.2e}）\n", dropped.len(), self.judgment.dropped, crate::model::classify::distance(self.judgment.dropped, length));
         }
         out
-    }
-
-    /// The model's error as the run books it (solve.rs `Booking`), measured at the gate's points on the chosen P
-    /// (`Candidate::points`: the centre, the edge, the middle): on the populations the largest of its population errors
-    /// (absolute), on T the largest of its rates' and forces' (relative) -- a rate or a force wrong by x moves T by x. A
-    /// point not judged reads zero there (`Selection::notes`). No number where the selection holds no measurement of P.
-    pub fn error(&self) -> [f64; 2] {
-        self.report.candidates.last().filter(|c| c.keep == self.rs.keep).map_or([f64::NAN; 2], |c| {
-            let points = c.points();
-            [largest(0.0, points.iter().map(|p| p.populations)), largest(0.0, points.iter().flat_map(|p| [p.rate, p.force]))]
-        })
     }
 
     /// The run's light (the region, the beams' geometries).
@@ -941,8 +911,8 @@ impl Selected {
     /// spherical component's norm the Frobenius of its entries' bounds (the spherical fold's own, `spherical`); the
     /// reach's κ from the prepared well's depth U₀ (`Scene::trap_potential` at the focus: K ≤ s U₀ for a held atom),
     /// the account's hold of the held atoms by the same U₀ and T's scale at the emission's shortest wave number k
-    /// (T_sc ≥ 30 k_BT_rec, estimate.rs `semiclassical`), its errors the selection's on P (the gate's where it holds
-    /// none).
+    /// (T_sc ≥ 30 k_BT_rec, estimate.rs `semiclassical`), its measured errors none (the model's own error is measured
+    /// after the pilot, on the run's paths: select.rs).
     fn drop_sizes(&self, node: &Node, candidates: &[usize], spherical: (&Plan, &Grouping)) -> (Vec<(Vec<usize>, f64)>, Account, f64) {
         let n = self.rs.keep.len();
         let wells = self.scene.trap_potential([0.0; 3], &self.depth);
@@ -1017,7 +987,9 @@ impl Selected {
             .filter(|&(i, j)| request.emission.iter().any(|c| c[(i, j)] != C64::ZERO))
             .map(|(i, j)| self.scene.jumps().wave_number[(i, j)].re.abs())
             .fold(f64::INFINITY, smaller);
-        let error = self.error().map(|e| if e.is_nan() { crate::select::GATE } else { e });
+        // The model's own error is measured after the pilot, on the run's paths (select.rs): at the model's making it is
+        // not known, and the drop is weighed at none of it -- the drop's D is booked on top of whatever it is.
+        let error = [0.0_f64; 2];
         let scales = crate::estimate::Scales { hbar_over_mass: self.hbar_over_mass, frequencies: [0.0; 3] };
         let account = Account {
             populations: error[0],
