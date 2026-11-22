@@ -113,12 +113,19 @@
 //! of them unresolved, and F not counted; and by the model's dropped terms, the trace distance D they may move the state
 //! by, D/(n − D) of the held share n. The shares add (the triangle inequality), and the bound is taken at their sum.
 //! An axis's
-//! k_BT = E[⟨(x − c)²⟩] − (E⟨x⟩ − c)² for every centre c (⟨·⟩ the window's mean, over states in H), and a function
-//! with values in [0, (a + |c|)²] moves by at most that range times w; with c the other distribution's mean x̄,
-//!   k_BT_Q ≤ E_Q⟨(x − x̄_P)²⟩ ≤ E_P⟨(x − x̄_P)²⟩ + (a + |x̄_P|)² w = k_BT_P + (a + |x̄_P|)² w,
-//! and the same the other way round, with |x̄_Q| ≤ min(a, |x̄_P| + 2a w):
-//!   k_B|T_Q − T_P| ≤ w (a + max(|x̄_P|, min(a, |x̄_P| + 2a w)))²   (`Estimate::moved`),
-//! per axis; the total T's is the axes' mean, relative to the total T read. The computed atoms are in H at every state
+//! k_BT = E⟨x²⟩ − ‖x̄‖² = E⟨(x − g)²⟩ − ‖x̄ − g‖² for every path g on the window's polynomials (# The cloud's own
+//! motion: x̄ the cloud's path on them, Σ_{ℓ ≤ p} (2ℓ + 1) c̄_ℓ P_ℓ, what the cloud's mean leaves off them orthogonal to
+//! g; ⟨·⟩ the window's mean over states in H, ‖g‖² = ⟨g²⟩ the window's mean square), and a function with values in
+//! [0, ⟨(a + |g|)²⟩] ⊂ [0, (a + ‖g‖)²] (⟨|g|⟩ ≤ ‖g‖) moves by at most that range times w; with g the other
+//! distribution's path x̄,
+//!   k_BT_Q ≤ E_Q⟨(x − x̄_P)²⟩ ≤ E_P⟨(x − x̄_P)²⟩ + (a + ‖x̄_P‖)² w = k_BT_P + (a + ‖x̄_P‖)² w,
+//! and the same the other way round, with ‖x̄_Q‖ ≤ min(a, ‖x̄_P‖ + 2a w) (the means differ by at most 2aw at every
+//! time, and the projection on the polynomials lengthens no path):
+//!   k_B|T_Q − T_P| ≤ w (a + max(‖x̄_P‖, min(a, ‖x̄_P‖ + 2a w)))²   (`Estimate::moved`),
+//! per axis, ‖x̄_P‖ = √(Σ_ℓ (2ℓ + 1) c̄_ℓ²) the window's rms of the held atoms' mean velocity (`Motion::mean_speed`): no
+//! less than the window's mean of it, |c̄₀|, and more where the cloud moves within the window (until 2026-11-22 the
+//! bound read |c̄₀|, as T's reading of before asked: a cloud sloshing about rest read a cloud at rest's bound); the total
+//! T's is the axes' mean, relative to the total T read. The computed atoms are in H at every state
 //! the loss test reads (adapt.rs, # The reads), and between them to the step's order. At rest (x̄ = 0) and to the
 //! first order in w it is 2K_max w: on T's allowance, which is no less than T_sc, at most c_T w with
 //! c_T = 2K_max/(k_B T_sc) (DESIGN2 §2.3: 191 to 275 on the six scenes). It reads nothing of the dynamics, and none
@@ -750,7 +757,9 @@ pub struct Estimate {
     pub unresolved: f64,
 }
 /// The held atoms' motion at an output where at least two are held: T per lab axis (µK), T_total = (T_x + T_y + T_z)/3
-/// with its own jackknife (the axes' correlations in it), n̄ and the mean velocity (m/s).
+/// with its own jackknife (the axes' correlations in it), n̄ and the mean velocity (m/s); and the window's rms of the
+/// mean velocity on the window's polynomials, √(Σ_ℓ (2ℓ + 1) c̄_ℓ²) ħ/m (m/s; module documentation, # A share of the held
+/// atoms moved): what bounds the cloud's path, which T is read about, where the mean bounds it no more.
 #[derive(Clone, Copy, Debug)]
 pub struct Motion {
     pub temperature: [f64; 3],
@@ -759,6 +768,7 @@ pub struct Motion {
     pub temperature_total_error: Spread,
     pub occupation: [f64; 3],
     pub mean_velocity: [f64; 3],
+    pub mean_speed: [f64; 3],
 }
 impl Estimate {
     /// The jackknife interval of what is shown of the atom at the confidence z (module documentation): the largest of the
@@ -781,9 +791,9 @@ impl Estimate {
     }
     /// The bound on the total T's error, relative to it, where the held atoms' distribution may be moved by `w` in total
     /// variation within the bound set (module documentation, # A share of the held atoms moved): per lab axis
-    /// w (a + max(|v̄|, min(a, |v̄| + 2a w)))² m/k_B, a the bound's speed and v̄ the held atoms' mean velocity, the axes'
-    /// mean over the total T; w beyond one is one. None at w = 0, whatever T; unbounded where w is more and T is not
-    /// read, or is none.
+    /// w (a + max(‖v̄‖, min(a, ‖v̄‖ + 2a w)))² m/k_B, a the bound's speed and ‖v̄‖ the window's rms of the held atoms'
+    /// mean velocity (`Motion::mean_speed`: the cloud's path T is read about), the axes' mean over the total T; w beyond
+    /// one is one. None at w = 0, whatever T; unbounded where w is more and T is not read, or is none.
     pub fn moved(&self, w: f64, escape: &Escape) -> f64 {
         if w == 0. {
             return 0.;
@@ -791,7 +801,7 @@ impl Estimate {
         let Some(m) = self.motion.as_ref().filter(|m| !(m.temperature_total <= 0.)) else { return f64::INFINITY };
         let (a, w) = (escape.speed, crate::linalg::smaller(w, 1.));
         let axes: f64 = m
-            .mean_velocity
+            .mean_speed
             .iter()
             .map(|v| {
                 let far = crate::linalg::larger(v.abs(), crate::linalg::smaller(a, v.abs() + 2. * a * w));
@@ -925,6 +935,10 @@ fn motion(j: &Jackknife, scales: &Scales) -> Option<Motion> {
         temperature_total_error: j.held(|x| x[0].iter().sum::<f64>() / 3.),
         occupation: std::array::from_fn(|a| occupation(hm * all.kappa2[a], all.held, scales.frequencies[a])),
         mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / all.held),
+        mean_speed: std::array::from_fn(|a| {
+            let mean = all.kappa[a] / all.held;
+            hm * (mean * mean + weighed(&all.shape[a].map(|c| c / all.held))).sqrt()
+        }),
     })
 }
 
@@ -1566,7 +1580,7 @@ mod tests {
     /// spreads exact.
     fn held_at(temperature: [f64; 3], mean: [f64; 3]) -> Estimate {
         let exact = Spread { error: 0., groups: f64::INFINITY };
-        let motion = Motion { temperature, temperature_errors: [exact; 3], temperature_total: temperature.iter().sum::<f64>() / 3., temperature_total_error: exact, occupation: [0.; 3], mean_velocity: mean };
+        let motion = Motion { temperature, temperature_errors: [exact; 3], temperature_total: temperature.iter().sum::<f64>() / 3., temperature_total_error: exact, occupation: [0.; 3], mean_velocity: mean, mean_speed: mean.map(f64::abs) };
         Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: 0. }
     }
 
@@ -1623,6 +1637,99 @@ mod tests {
         assert!((total(after) - total(before) - 0.01 * escape.mass * a * a * (1. - 1e-6)).abs() < 1e-9 * total(after) && change <= bound && change * 1.02 * 1.02 >= bound * (1. - 1e-5), "at rest: T moves by {change}, the bound {bound}");
         assert_eq!(held_at([0.; 3], [0.; 3]).moved(0., &escape), 0.);
         assert_eq!(held_at([0.; 3], [0.; 3]).moved(0.01, &escape), f64::INFINITY);
+        eprintln!("the largest change over its bound in 3000 trials: {closest}");
+    }
+
+    /// The bound of a share moved holds where the cloud moves within the window (module documentation, # A share of the
+    /// held atoms moved): T is read about the cloud's path on the window's polynomials, and the bound reads that path's
+    /// rms (`Motion::mean_speed`). Rb87's ħ/m and a 1 mK bound (speed a); the window [−1, 1] by 64 Gauss–Legendre
+    /// nodes, on which the Legendre polynomials to `SHAPE` are orthogonal. 200 atoms on a path every one shares -- a
+    /// constant and a sinusoid of up to a whole window's phase π -- and each its own oscillation within a random spread,
+    /// every path within [−a, a]; a random number k ≤ 100 of them moved -- to a random constant, to +a, or to −a on the
+    /// cloud's far side at every time --, 3000 trials: T of the moved atoms (the window's mean of the variance over them
+    /// about their path on the polynomials, m/k_B ⟨Var v⟩) within the bound of the first's T and path, both ways round.
+    /// A cloud sloshing about rest at 0.8 a with its atoms on it to 10⁻³ a, two of them (w = 1 %) moved to its far side:
+    /// T moves by w ⟨(a + |g|)²⟩ m/k_B, within the bound; the bound of the window's mean velocity (zero), what T's
+    /// reading of before asked, is exceeded twice over.
+    #[test]
+    fn a_share_moved_within_the_bound_set_moves_t_within_its_bound_where_the_cloud_moves() {
+        let escape = Escape::new(1000. * KT_PER_UK, 7.307e-4);
+        let a = escape.speed;
+        let rule = crate::special::gauss_legendre(64);
+        // The Legendre polynomials to `SHAPE` at the nodes.
+        let legendre: Vec<[f64; SHAPE + 1]> = rule
+            .iter()
+            .map(|&(x, _)| {
+                let mut p = [1.; SHAPE + 1];
+                p[1] = x;
+                for l in 1..SHAPE {
+                    p[l + 1] = ((2 * l + 1) as f64 * x * p[l] - l as f64 * p[l - 1]) / (l + 1) as f64;
+                }
+                p
+            })
+            .collect();
+        // T (m/k_B ⟨Var v⟩ about the path on the polynomials, per axis: all three alike), the window's mean velocity and
+        // the rms of the path, of atoms' velocities at the nodes.
+        let read = |v: &[Vec<f64>]| -> (f64, f64, f64) {
+            let n = v.len() as f64;
+            let square: f64 = v.iter().map(|u| u.iter().zip(&rule).map(|(x, r)| 0.5 * r.1 * x * x).sum::<f64>()).sum::<f64>() / n;
+            let c: [f64; SHAPE + 1] = std::array::from_fn(|l| v.iter().map(|u| u.iter().zip(&rule).zip(&legendre).map(|((x, r), p)| 0.5 * r.1 * x * p[l]).sum::<f64>()).sum::<f64>() / n);
+            let path: f64 = c.iter().enumerate().map(|(l, c)| (2 * l + 1) as f64 * c * c).sum();
+            (escape.mass * (square - path), c[0], path.sqrt())
+        };
+        let estimate = |(t, mean, rms): (f64, f64, f64)| Estimate { motion: held_at([t; 3], [mean; 3]).motion.map(|m| Motion { mean_speed: [rms; 3], ..m }), ..held_at([t; 3], [mean; 3]) };
+        let mut s = crate::random::Stream::new(7, crate::random::Purpose::Initial, 0, 0);
+        let mut closest: f64 = 0.;
+        for trial in 0..3000 {
+            let spread = s.uniform();
+            let amplitude = (1. - spread) * a * s.uniform();
+            let centre = ((1. - spread) * a - amplitude) * (2. * s.uniform() - 1.);
+            let (nu, phi) = (PI * s.uniform(), TAU * s.uniform());
+            let cloud: Vec<f64> = rule.iter().map(|&(x, _)| centre + amplitude * (nu * x + phi).sin()).collect();
+            let mut v: Vec<Vec<f64>> = (0..200)
+                .map(|_| {
+                    let (r, mu, psi) = (spread * a * s.uniform(), 2. * PI * s.uniform(), TAU * s.uniform());
+                    rule.iter().zip(&cloud).map(|(&(x, _), g)| g + r * (mu * x + psi).cos()).collect()
+                })
+                .collect();
+            let before = read(&v);
+            let k = 1 + (s.uniform() * 100.) as usize;
+            let mode = trial % 3;
+            for u in v.iter_mut().take(k) {
+                let to = (2. * s.uniform() - 1.) * a;
+                for (x, g) in u.iter_mut().zip(&cloud) {
+                    *x = match mode {
+                        0 => to,
+                        1 => a,
+                        _ => -a * g.signum(),
+                    };
+                }
+            }
+            let after = read(&v);
+            let w = k as f64 / 200.;
+            for (from, to) in [(before, after), (after, before)] {
+                let change = (to.0 - from.0).abs() / from.0;
+                let bound = estimate(from).moved(w, &escape);
+                assert!(change <= bound * (1. + 1e-12), "trial {trial}: T {} -> {} by {change}, bound {bound} at w {w}", from.0, to.0);
+                closest = closest.max(change / bound);
+            }
+        }
+        let sloshing: Vec<f64> = rule.iter().map(|&(x, _)| 0.8 * a * (PI * x).sin()).collect();
+        let mut still: Vec<Vec<f64>> = (0..200).map(|i| sloshing.iter().map(|g| g + 1e-3 * a * if i % 2 == 0 { 1. } else { -1. }).collect()).collect();
+        let before = read(&still);
+        for u in still.iter_mut().take(2) {
+            for (x, g) in u.iter_mut().zip(&sloshing) {
+                *x = -a * g.signum();
+            }
+        }
+        let after = read(&still);
+        let change = (after.0 - before.0) / before.0;
+        let far: f64 = rule.iter().zip(&sloshing).map(|(r, g)| 0.5 * r.1 * (a + g.abs()).powi(2)).sum();
+        let (bound, mean_only) = (estimate(before).moved(0.01, &escape), estimate((before.0, before.1, before.1.abs())).moved(0.01, &escape));
+        // T after: the variance about the pointwise mean, w(1 − w)⟨(a + |g|)²⟩, and the mean's part off the polynomials
+        // (its far side's steps, w²a² of their mean square at the most).
+        assert!(before.1.abs() < 1e-12 * a && (after.0 - before.0 - 0.01 * 0.99 * escape.mass * far).abs() < 1e-4 * escape.mass * a * a, "the sloshing: T {} -> {}", before.0, after.0);
+        assert!(change <= bound && change > 2. * mean_only, "the sloshing: T moves by {change}, the bound {bound}, the mean's {mean_only}");
         eprintln!("the largest change over its bound in 3000 trials: {closest}");
     }
 }

@@ -6064,6 +6064,7 @@ mod tests {
                 temperature_total_error: Spread { error, groups: f64::INFINITY },
                 occupation: [0.; 3],
                 mean_velocity: [0.; 3],
+                mean_speed: [0.; 3],
             }),
             failed: 0.,
             uncounted: 0.,
