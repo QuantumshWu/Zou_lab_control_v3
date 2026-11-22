@@ -107,23 +107,24 @@
 //! and at half the step it falls seventyfold and fiftyfold, where the difference falls fourteenfold and eightfold. The
 //! pilot's companion at twice the step reads all of it (solve.rs, # The step).
 //!
-//! The impulse is exact in its decomposition about the state at the step's middle, held in the frame, x_m = x(t_m)
-//! (= ψ(t_m), U(t_m) = 1):
-//! - the shear: the conservative force at the fixed r_h on x_m, −∫⟨x_m|G(r_h, t)|x_m⟩dt/‖x_m‖². At a fixed point the
+//! The impulse is exact in its decomposition about the step's mean state, held in the frame: its density's mean over the
+//! step, ρ̄ = (1/τ)∫ρ dt (over its stretch's part where a jump leaves its cluster; `Midway::stretch`) -- of a state that
+//! does not change, the state itself, x_m = x(t_m) at the middle (= ψ(t_m), U(t_m) = 1), as of the step taken back:
+//! - the shear: the conservative force at the fixed r_h on ρ̄, −∫tr(G(r_h, t)ρ̄)dt. At a fixed point the
 //!   gradient beats in time alone, G(r_h, t) = Σ_m G_m e^{iΩ_m(t − t_m)} over its tones (`Middle::tones`), each
 //!   τ sinc(Ω_mτ/2) (`Midway::stretch`'s weights). Of a state that does not change it depends on r_h alone: the
 //!   conservative kick is a shear and the step symplectic (propagation.md §2.3);
-//! - what the state's change along the path adds: the evolved state's force along the path less x_m's held in the frame,
-//!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − ⟨x_m|Ĝ(t)|x_m⟩/‖x_m‖²)dt, Ĝ(t) the gradient on the path, one quadrature of the
+//! - what the state's change along the path adds: the evolved state's force along the path less ρ̄'s held in the frame,
+//!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − tr(Ĝ(t)ρ̄))dt, Ĝ(t) the gradient on the path, one quadrature of the
 //!   difference on the propagation's nodes: it vanishes at every node where the state does not
 //!   change -- a lone ground state in a standing wave's far light takes no error of the path's nodes, however long its
 //!   step. The lag that friction and the Sisyphus effect live in;
 //! - less the reference's force: + τ∇V_ref(r_h), since V_ref's force is the A flow's.
 //!
 //! The first two are read together (`propagate`): a mean ⟨x|G|x⟩/‖x‖² is tr(Gρ) of the state's density ρ, which the
-//! model contracts without forming G (`Middle::force`). With ρ_m the middle state's, (s_k, w_k, ρ_k) the quadrature's
+//! model contracts without forming G (`Middle::force`). With ρ̄ the step's mean state, (s_k, w_k, ρ_k) the quadrature's
 //! times from the middle, weights and densities, and ℓ_j the Lagrange polynomials of the step's three nodes s_j, they are
-//! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
+//! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ̄) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ̄): the atom's own frequencies
 //! are in the Q_j, integrated to the round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
 //! of the size Γ/Δ times the excited share -- puts parts of the quotient at twice the forms' bandwidth and beyond (# The
@@ -230,12 +231,24 @@
 //! (sinc(k·vτ/2)), counting the steady force twice -- a running wave's pressure came out doubled. Shear and path then differ
 //! only by the path's beats, the light pattern's spatial modulation the atom crosses, which is what the shear holds at r_h.
 //!
-//! The middle state, not the start's: the step's reverse propagates back through the same x_m, so the decomposition is the
-//! same both ways and the step its own inverse with the internal state changing too. About the start state the reverse
+//! The step's own state, not the start's: the step's reverse propagates back through the same states -- the same x_m,
+//! the same mean ρ̄ = Σ_k w_k ρ_k/τ over them --, so the decomposition is the same both ways and the step its own inverse
+//! with the internal state changing too. About the start state the reverse
 //! took its own start, x(t₀ + τ), and Q(x) = ∫[F(r_h, x) − F(path, x)]dt, the midpoint rule's O(τ³(v·∇)²F) on that state,
 //! differed between the two: a two-level atom in a far-detuned standing wave missed its start by two hundred times the
 //! step's own error (tests). A one-dimensional PGC read the same T on the middle state as on the start state
-//! (propagation.md §2.3).
+//! (propagation.md §2.3). The mean, not the middle state itself (until 2026-11-22 x_m): the two are one where the state
+//! changes smoothly, but where a jump falls in the step's first half the middle state is the bare state the jump left,
+//! its excited amplitudes still rising and ringing at their Rabi frequency within 1/Γ of it, whose force is no mean of
+//! the step's: the shear on it over the whole step, less it along the path, left the dropped part of its force's
+//! change along the path -- the shear's own, of the second order on the step's states -- without bound on that state.
+//! Measured on R9_PUSH's atoms with D2-3-3 explicit (a σ⁺ push 40 Γ off, s = 711), one step from a state of a trajectory
+//! with its jump moved across the step: the kick at 1.41 µs −239 to +256 per µm where the jump fell 0.006 to 0.09 µs
+//! before the middle, against 24 to 25 elsewhere and 20.3 by the plain three nodes; at 0.705 µs 5.4 to 17.4 against
+//! 10.7; at 0.352 µs within 0.09. On the mean state the kick is 24.3 to 25.5 and 10.66 ± 0.01 wherever the jump falls,
+//! as it was after the middle. The loss of those steps' atoms did not fall as the step's order on halving -- the same
+//! at 1.41, 2.82 and 5.64 µs --, so the companion did not read it: the 32-state model stood at 1.41 µs and lost 23 % of
+//! R9_PUSH's atoms by 10 µs against the reference's 0.13 % (motion3d_status/rewrite/selcost.status.md, 十四).
 //!
 //! # The path's momentum
 //! v_m = (ħ/m)κ_m, κ_m the momentum at the step's middle time: the mean of the momenta before and after the kick,
@@ -2540,7 +2553,7 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
-/// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
+/// its following, the state's path), one array carved (`Scratch::carve`) into the step's mean state's density and a
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
 /// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
@@ -2670,14 +2683,15 @@ mod count {
     }
     /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
     /// sums (one on a step of one node, three on one of three); then the model's one form of the sum, or on three nodes
-    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms -- where the stretch
-    /// holds the step's middle (`centred`), the middle's with the fixed point's tones on the middle state
+    /// the reference state's density laid with the middle node's sum, and the three nodes' forms -- where the stretch
+    /// holds the step's middle (`centred`), the mean state's from its three sums and the middle's form with the fixed
+    /// point's tones on it
     /// (`Middle::centre`: a form and a `tones`). Of the exact tones (`tones` of them, their forms' counted work
     /// `forces`): on three nodes per node and tone a density again and its six sums (`super::Sums`), their two
     /// matrices, each its three nodes' sums added, with the nodes' sums at their phases, and their forms; on one node
     /// its two sums into the density's pass and their two matrices less the static sum, and their forms.
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, centred: bool, tones: usize, forces: f64) -> f64 {
-        let forms = if still { model[1] } else { (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 } };
+        let forms = if still { model[1] } else { (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] + (2 * n * n) as f64 } else { 0.0 } };
         let toned = if still { 3 } else { 16 };
         gathered(n, nodes, still, tones) + COMPLEX * (forms + (toned * tones * n * n) as f64 + forces)
     }
@@ -3406,8 +3420,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// The stretch's part of the kick is exact in its decomposition (module documentation, # The kick): the force
     /// along the path, −∫Re tr(Ĝ(u)ρ(u))du over the stretch, Ĝ through the step's three nodes u_j = −h, 0, h and their
     /// Lagrange polynomials ℓ_j -- Σ_j Re tr(Ĝ(u_j) S_j), S_j = Σ_k w_k ℓ_j(u_k) ρ_k over the stretch's nodes, three
-    /// forms of the model --; and in the stretch the step's middle lies in, about the middle state held in the frame
-    /// over the whole step: its shear at r_h, each tone at its beat alone (τ sinc(Ωτ/2)), and S_j less W_j ρ_m, W_j = ∫ℓ_j
+    /// forms of the model --; and in the stretch the step's middle lies in, about the stretch's mean state ρ̄ held in the
+    /// frame over the whole step (Σ_j S_j/Σ_j W_j over what the stretch took, # The kick): its shear at r_h, each tone at
+    /// its beat alone (τ sinc(Ωτ/2)), and S_j less W_j ρ̄, W_j = ∫ℓ_j
     /// over the step -- the weights' sum over every piece of the step, and of what is left of it past this stretch.
     /// Of a state that does not change that difference is its rounding, and nothing where there is one state. Where
     /// Ĥ is still along every path Ĝ is one matrix, and the stretch's part its one form with ∫ρ(u)du. The middle's
@@ -3697,7 +3712,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             march.state.forms = forms;
         }
         let t_m = start + h;
-        // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light and the
+        // The stretch's part of the kick; in the middle's stretch about its mean state, with the scattered light and the
         // optical sector's rate there.
         let forming = crate::prof::scope(91);
         let part = if still {
@@ -3728,7 +3743,19 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         } else {
             let mut out = [0.0; 3];
             let size = n * n;
-            if let Some(middle) = &middle {
+            if middle.is_some() {
+                // The state the kick is decomposed about (module documentation, # The kick): the stretch's mean density,
+                // ∫ρ du over what of the step it took by its length -- its three nodes' sums and weights added, Σ_j ℓ_j =
+                // 1 --, before what is left of the step past it is weighed in. Of a state that does not change it is the
+                // state itself.
+                let covered: f64 = weights[..SUMS].iter().sum();
+                held[..size].fill(C64::ZERO);
+                for j in 0..SUMS {
+                    whole(sums, j, n, &mut sum[..size]);
+                    for (r, q) in held[..size].iter_mut().zip(&sum[..size]) {
+                        *r += *q * (1.0 / covered);
+                    }
+                }
                 if !done {
                     for (u, w) in quadrature(march.u, h, 0.0, FORMS, 2) {
                         let s = u / h;
@@ -3737,10 +3764,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                     }
                 }
-                density(&middle[..n], held);
             }
-            // A tone's sums at its beat at each of the three nodes (`Sums`), less the middle state's at their weights: its
-            // σ_j = Σ_k w_k ℓ_j(u_k) e^{iνu_k}(ρ_k − ρ_m) -- the weights' sums with what of the step lies outside this
+            // A tone's sums at its beat at each of the three nodes (`Sums`), less the mean state's at their weights: its
+            // σ_j = Σ_k w_k ℓ_j(u_k) e^{iνu_k}(ρ_k − ρ̄) -- the weights' sums with what of the step lies outside this
             // stretch, ∫ℓ_j(u)e^{iνu}du over [−h, its start] and past its end by the kick's rule at the tone's beat.
             for ((m, node_sums), tone) in tones.chunks_exact_mut(TONE * size).enumerate().zip(&picture.beats) {
                 let mut outside = [0.0; TONE];
@@ -3765,7 +3791,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     }
                 }
             }
-            // The middle node's form and the shear of the middle state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
+            // The middle node's form and the shear of the mean state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
             // one pass of the model's forms (`Middle::centre`); the nodes' forms hold the exact tones' at the nodes, and
             // each tone's sums at its beat take them out node by node (`Middle::tone_force`).
             let shear = |omega: f64| tau * sinc(0.5 * omega * tau);
