@@ -574,11 +574,16 @@
 //! # Steps
 //! Beside the results, the solve says where its pipeline stands (`Stage`, `Messages::stage`) -- what no result can say
 //! where no trajectory runs: the selection, the model, and which of the scout, the pilot and the product's batches the
-//! trajectories are of. A stage is sent as a step begins (`run_of`: the selection and the model; `attempt`: the scout
-//! and the pilot; `product`: every batch, with its trajectories, the number it brings the run to and how far its looks
-//! stand from their targets) and as the step's check moves to another rung (`check`) -- when it changes, never
-//! otherwise. It decides nothing, is no part of the result and is kept nowhere: its one reader is the app's course of a
-//! running solve (src/solve-progress.ts).
+//! trajectories are of. A stage is sent as a step begins (`solve`: the model, and the selection where it is the kept
+//! one; `attempt`: the scout and the pilot; `choose_on_the_pilot`: the selection; `product`: every batch, with its
+//! trajectories, the number it brings the run to and how far its looks stand from their targets) and as the step's
+//! check moves to another rung (`check`) -- when it changes, never otherwise. The order (the app's, src/solve-progress.ts):
+//! - a new selection: Model (the structural chain and G's model are the model's making) → Scout (G's) → Pilot →
+//!   Select (along the pilot's paths; a candidate's short scout is part of it and says no Scout of its own, at most
+//!   Select at its rung) → where the choice is not G, Model → Scout → Pilot → Product; where it is G, Product;
+//! - the choice kept for the scene: Select (at once) → Model → Scout → Pilot → Product.
+//! It decides nothing, is no part of the result and is kept nowhere: its one reader is the app's course of a running
+//! solve (src/solve-progress.ts).
 use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
@@ -689,16 +694,20 @@ pub struct Solution {
 pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
     request.validate()?;
     let mut messages = Messages { send, clock: Instant::now(), last: None, least: 0, stage: None };
-    messages.stage(Stage { step: Step::Select, tau: None, batch: None });
     let reference = alone(chief(request));
-    let scene = crate::scene::Scene::new(request)?;
-    let selection = crate::select::choose(&scene)?;
+    // The choice kept for the scene (# Steps: Select at once, then the model).
     if let Some(choice) = crate::select::kept(request) {
+        messages.stage(Stage { step: Step::Select, tau: None, batch: None });
         messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+        let scene = crate::scene::Scene::new(request)?;
+        let selection = crate::select::choose(&scene)?;
         let run = Selected::new(scene, Selection { keep: choice.keep.clone(), choice: Some(choice.clone()), ..selection }, reference)?;
         return solved(solve_with(request, &run, Choosing::Made(Some(choice)), &mut messages));
     }
+    // A new selection (# Steps: the structural chain and G's model are the model's making).
     messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+    let scene = crate::scene::Scene::new(request)?;
+    let selection = crate::select::choose(&scene)?;
     let run = Selected::new(scene, selection.clone(), reference)?;
     match solve_with(request, &run, Choosing::Make, &mut messages)? {
         Attempted::Solved(s) => Ok(s),
@@ -2166,7 +2175,10 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     // Where its rung stands on its reads, its course by the run's work from here, priced at its states at its analysis
     // times -- the rung, or one below where that is expected to cost the run less: the product's trajectories its looks
     // ask beside the model's error at those states (`Prices`).
-    messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
+    // A candidate's short scout is the selection's, and says no Scout of its own (# Steps).
+    if !matches!(choosing, Choosing::Scout) {
+        messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
+    }
     let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, messages);
     // A candidate's short scout (`Choosing::Scout`): the rung its own two levels stand on (`settle`: down the ladder
     // to the first rung whose own read is in and not clearly beyond), the check's priced course not taken -- a scout
@@ -6584,33 +6596,45 @@ mod tests {
         assert_eq!(sent, [at(Step::Scout, 1.), at(Step::Scout, 0.5), at(Step::Pilot, 0.5), batch(1, 88, 176), batch(2, 176, 352)]);
     }
 
-    /// A solve's stages in order (module documentation, # Steps), on R1_TWEEZER's own request over 20 µs: the selection
-    /// and the model with no rung, then the scout, the pilot and the product's batches at their rungs, never a step back,
-    /// each stage another than the one before; no checkpoint before the scout. A batch brings the run beyond the
-    /// trajectories in hand, its numbers count from 1, and its looks stand beyond their targets (else no batch).
+    /// A solve's stages in order (module documentation, # Steps), on R1_TWEEZER's own request over 20 µs, solved twice:
+    /// the first a new selection -- Model with no rung, then G's Scout and Pilot, Select, and either Product (G chosen) or
+    /// Model, Scout, Pilot and Product again --, the second on the choice kept -- Select and Model with no rung, then
+    /// Scout, Pilot, Product --; each stage another than the one before, the steps (consecutive stages of one step taken
+    /// once) in that order, every stage but Model and the kept choice's Select at a rung; no checkpoint before the first
+    /// Scout. A batch brings the run beyond the trajectories in hand, its numbers count from 1, and its looks stand beyond
+    /// their targets (else no batch).
     #[test]
     fn a_solve_says_its_steps_in_order() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R1_TWEEZER.json");
         let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         (line["options"]["durationUs"], line["options"]["samples"]) = (serde_json::json!(20.), serde_json::json!(21));
         let request = Request::from_native(&line).unwrap();
-        // Each message as it came: a stage, or a checkpoint (None).
-        let mut came: Vec<Option<Stage>> = vec![];
-        let solved = solve(&request, &mut |m| came.push(match m {
-            Message::Stage(s) => Some(s.clone()),
-            Message::Checkpoint(..) => None,
-        }));
-        solved.unwrap();
-        let stages: Vec<&Stage> = came.iter().flatten().collect();
-        eprintln!("{} messages; stages {stages:?}", came.len());
-        assert_eq!(stages.iter().take(3).map(|s| s.step).collect::<Vec<_>>(), [Step::Select, Step::Model, Step::Scout]);
-        assert!(stages[..2].iter().all(|s| s.tau.is_none() && s.batch.is_none()) && stages[2..].iter().all(|s| s.tau.is_some_and(|t| t > 0.)));
-        assert!(stages.iter().any(|s| s.step == Step::Pilot));
-        assert!(stages.windows(2).all(|w| w[0] != w[1] && w[0].step as u8 <= w[1].step as u8), "a step back or a stage again");
-        let scout = came.iter().position(|m| m.as_ref().is_some_and(|s| s.step == Step::Scout)).unwrap();
-        assert!(came[..scout].iter().all(Option::is_some), "no checkpoint before the scout");
-        let batches: Vec<&Batch> = stages.iter().filter_map(|s| s.batch.as_ref()).collect();
-        assert!(batches.iter().enumerate().all(|(i, b)| b.number == i as u64 + 1 && b.want > b.trajectories && b.worst.is_none_or(|w| w > 1.)), "{batches:?}");
+        let fresh = crate::select::kept(&request).is_none();
+        for new in [fresh, false] {
+            // Each message as it came: a stage, or a checkpoint (None).
+            let mut came: Vec<Option<Stage>> = vec![];
+            let solved = solve(&request, &mut |m| came.push(match m {
+                Message::Stage(s) => Some(s.clone()),
+                Message::Checkpoint(..) => None,
+            }));
+            solved.unwrap();
+            let stages: Vec<&Stage> = came.iter().flatten().collect();
+            eprintln!("{} messages; stages {stages:?}", came.len());
+            assert!(stages.windows(2).all(|w| w[0] != w[1]), "a stage again");
+            let mut steps: Vec<Step> = stages.iter().map(|s| s.step).collect();
+            steps.dedup();
+            use Step::*;
+            if new {
+                assert!(steps == [Model, Scout, Pilot, Select, Product] || steps == [Model, Scout, Pilot, Select, Model, Scout, Pilot, Product], "{steps:?}");
+            } else {
+                assert_eq!(steps, [Select, Model, Scout, Pilot, Product]);
+            }
+            assert!(stages.iter().all(|s| (s.step == Model || (!new && s.step == Select && s.tau.is_none())) == s.tau.is_none()), "a rung where none is, or none where one is");
+            let scout = came.iter().position(|m| m.as_ref().is_some_and(|s| s.step == Scout)).unwrap();
+            assert!(came[..scout].iter().all(Option::is_some), "no checkpoint before the scout");
+            let batches: Vec<&Batch> = stages.iter().filter_map(|s| s.batch.as_ref()).collect();
+            assert!(batches.iter().enumerate().all(|(i, b)| b.number == i as u64 + 1 && b.want > b.trajectories && b.worst.is_none_or(|w| w > 1.)), "{batches:?}");
+        }
     }
 
     /// A run that integrates nothing hands out nothing (module documentation, # Exits; tilt2 at 24d346ce: every start
