@@ -81,7 +81,7 @@ fn select_the_feedback_bound_by_hand() {
     let judged = Judged { keep: vec![], windows: vec![window(0.0, 1000.0, power, rate, 1e-3)], late: vec![], calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 };
     let windows = vec![(0.0, 1000.0)];
     for t in [10.0, 100.0, 900.0] {
-        let p = parts(&judged, &windows, &response, k2, hm, None, t);
+        let p = parts(&judged, &windows, &response, k2, hm, t);
         let d = 3.0 * power / hm + k2 * rate;
         let expected = d * r0 * lambda * (1.0 - (-t / lambda).exp()) / kappa2;
         assert!((p.temperature - expected).abs() <= 1e-4 * expected, "t {t}: {} against {expected}", p.temperature);
@@ -90,23 +90,6 @@ fn select_the_feedback_bound_by_hand() {
         assert!((p.direct - 1e-3).abs() <= 1e-15 && p.shown > p.direct, "t {t}: the direct part {} under the shown {}", p.direct, p.shown);
     }
     assert!(response.collapsed(), "R at the end above its interval: read");
-}
-
-/// The pairs' account by hand (`Parts`, `Fallback`): the measured T and loss errors with the anchor's bound take the
-/// place of a larger bound, never of a smaller one; before the pairs' first time nothing, past their last the last.
-#[test]
-fn select_the_pairs_take_the_place_of_the_bound() {
-    let response = Response { times: vec![0.0, 1000.0], loss: vec![0.0, 0.0], rows: vec![[0.0; STATES]; 2], temperature: vec![1.0, 1.0], errors: vec![[0.0; STATES + 2]; 2], kappa2: 1.0, last_interval: 0.0 };
-    let judged = Judged { keep: vec![], windows: vec![window(0.0, 1000.0, 1.0, 0.0, 0.0)], late: vec![], calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 };
-    let windows = vec![(0.0, 1000.0)];
-    let fallback = Fallback { times: vec![0.0, 100.0, 200.0], temperature: vec![0.0, 0.5, 0.7], loss: vec![0.0, 0.01, 0.02], pairs: 24, anchor: vec![], length: 200.0 };
-    let bound = parts(&judged, &windows, &response, 0.0, 1.0, None, 500.0);
-    let measured = parts(&judged, &windows, &response, 0.0, 1.0, Some((&fallback, [0.001, 0.1])), 500.0);
-    assert!(measured.measured && (measured.temperature - 0.8).abs() <= 1e-12 && bound.temperature > 0.8, "{measured:?} {bound:?}");
-    let tight = Fallback { temperature: vec![0.0, 1e9, 1e9], ..fallback.clone() };
-    let kept = parts(&judged, &windows, &response, 0.0, 1.0, Some((&tight, [0.0, 0.0])), 500.0);
-    assert_eq!(kept.temperature, bound.temperature, "the bound where it is the smaller");
-    assert!((fallback.at(&fallback.temperature, 150.0) - 0.6).abs() <= 1e-12);
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -250,7 +233,7 @@ fn select_on_the_scenes() {
                 .iter()
                 .map(|&t| {
                     let p = choice.at(t);
-                    serde_json::json!({"t": t, "direct": p.direct, "feedback": p.feedback, "shown": p.shown, "temperature_bound_uk": p.temperature_bound, "temperature_uk": p.temperature, "measured": p.measured})
+                    serde_json::json!({"t": t, "direct": p.direct, "feedback": p.feedback, "shown": p.shown, "temperature_uk": p.temperature})
                 })
                 .collect();
             let doc = serde_json::json!({
@@ -258,7 +241,6 @@ fn select_on_the_scenes() {
                 "memory": choice.memory, "length": choice.length, "lambda_t": choice.response.memory(*request.times_us.last().unwrap()),
                 "collapsed": choice.response.collapsed(), "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
                 "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate, choice.judged.calibration.power],
-                "pairs": choice.fallback.as_ref().map(|(f, a)| serde_json::json!({"pairs": f.pairs, "length": f.length, "anchor": a.keep.len(), "times": f.times, "temperature": f.temperature, "loss": f.loss})),
                 "response": {"times": choice.response.times, "temperature": choice.response.temperature, "loss": choice.response.loss, "kappa2": choice.response.kappa2,
                     "rows": choice.response.rows.iter().map(|r| r.to_vec()).collect::<Vec<_>>(), "errors": choice.response.errors.iter().map(|r| r.to_vec()).collect::<Vec<_>>()},
                 "parts": parts, "report": choice.report,

@@ -1,8 +1,8 @@
 //! The selection of P (PIPELINE_V3_FINAL §二 A.3, A.5–A.6, B.7–B.11, C.13–C.15): the candidates by structure, each
 //! judged by what it does to the run's readings -- along the atoms' own paths against the 32-state model (paths.rs), its
-//! feedback through the motion bounded by the identity below, the temperature measured in pairs where that bound does
-//! not reach --, and the candidate of least total work chosen among those whose model error A leaves the targets room.
-//! The trajectories' parts (the pilot the paths come from, the model-only scaling response, the pairs, the work) are the
+//! feedback through the motion bounded by the identity below --, and the candidate of least total work chosen among
+//! those whose model error A leaves the targets room.
+//! The trajectories' parts (the pilot the paths come from, the model-only scaling response, the work) are the
 //! solve's (solve.rs, # The selection); what is here is the model's side and the accounts.
 //!
 //! # The candidates
@@ -67,13 +67,6 @@
 //! the loss take the same identity with their own responses: one bound for every reading (BRIEF_P3_SELECT item 4).
 //! What is not strict: the ansatz (a mean weight, not the supremum, FOLDTEMP), the drive taken on the histories the paths
 //! saw (not the histories the error itself made), and the response's noise, which |R̄| takes up.
-//!
-//! # The temperature measured in pairs
-//! Where only T's bound leaves no room, the candidate is run in pairs with an anchor (`Fallback`): the cheapest judged
-//! candidate whose own bound leaves T room, both on the same trajectory numbers at the same step for L_T = min(T,
-//! 5 Λ_T), Λ_T = ∫|R_T|/R_T(0), and T's and the loss's differences read with the pairs' jackknife; their error is the
-//! difference's |mean| + z·se plus the anchor's own bound. The populations are never measured so (the pairs save them
-//! almost nothing, PAIR): a candidate whose rows' bound leaves no room is not chosen.
 //!
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
@@ -673,46 +666,15 @@ impl Response {
     }
 }
 
-/// The temperature and the loss measured in pairs with an anchor (module documentation, # The temperature measured in
-/// pairs): at the times `times` (µs, up to L_T) the differences' |mean| + z·se, T's in µK; the pairs; the anchor's place
-/// among the judged candidates; L_T.
-#[derive(Clone, Debug)]
-pub struct Fallback {
-    pub times: Vec<f64>,
-    pub temperature: Vec<f64>,
-    pub loss: Vec<f64>,
-    pub pairs: u64,
-    pub anchor: Vec<usize>,
-    pub length: f64,
-}
-
-impl Fallback {
-    /// Its value at the time t of the series `v`: linear between its times, the last beyond them (the pairs have
-    /// forgotten their start past L_T), none at or before the first.
-    fn at(&self, v: &[f64], t: f64) -> f64 {
-        let k = self.times.partition_point(|&x| x <= t);
-        if k == 0 {
-            return 0.0;
-        }
-        if k >= self.times.len() {
-            return v[self.times.len() - 1];
-        }
-        let (a, b) = (self.times[k - 1], self.times[k]);
-        v[k - 1] + (v[k] - v[k - 1]) * (t - a) / (b - a)
-    }
-}
-
 /// A candidate's model error at a time, by parts (module documentation): on what is shown the direct part (the rows'
 /// worst, with the scheme's calibration) and the feedback bound (the rows' with their direct part, the loss's), on T
-/// (µK) the feedback bound and, where measured, the pairs' error with the anchor's bound; and the region's error.
+/// (µK) the feedback bound.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Parts {
     pub direct: f64,
     pub feedback: f64,
     pub shown: f64,
-    pub temperature_bound: f64,
     pub temperature: f64,
-    pub measured: bool,
 }
 
 /// The feedback bound at the time t of the windows' drives `drives` (1/µm²/µs, one a window of `windows`, the last's past
@@ -748,9 +710,8 @@ fn direct(w: &Window) -> Vec<f64> {
 }
 
 /// A candidate's error at the time t (`Parts`; module documentation): its windows (the time's, `paths::window_of`), the
-/// response, k² (1/µm², the light's largest wave number's square), and its pairs where measured with the anchor's own
-/// bound at the time on T and the loss.
-pub fn parts(judged: &Judged, windows: &[(f64, f64)], response: &Response, k2: f64, hbar_over_mass: f64, fallback: Option<(&Fallback, [f64; 2])>, t: f64) -> Parts {
+/// response, and k² (1/µm², the light's largest wave number's square).
+pub fn parts(judged: &Judged, windows: &[(f64, f64)], response: &Response, k2: f64, hbar_over_mass: f64, t: f64) -> Parts {
     if t <= 0.0 || judged.windows.is_empty() {
         return Parts::default();
     }
@@ -783,15 +744,11 @@ pub fn parts(judged: &Judged, windows: &[(f64, f64)], response: &Response, k2: f
     let rows = (0..STATES).map(|s| own[s] + feedback(response, &bounds, &drives, &|k| response.size(1 + s, k), t)).fold(0.0, larger) + judged.calibration.rows;
     let loss_bound = feedback(response, &bounds, &drives, &|k| response.size(0, k), t);
     let temperature_bound = feedback(response, &bounds, &drives, &|k| response.size(1 + STATES, k), t);
-    let (loss, temperature, measured) = match fallback {
-        Some((f, anchor)) => (crate::linalg::smaller(loss_bound, f.at(&f.loss, t) + anchor[0]), crate::linalg::smaller(temperature_bound, f.at(&f.temperature, t) + anchor[1]), true),
-        None => (loss_bound, temperature_bound, false),
-    };
-    Parts { direct: worst, feedback: larger(rows - worst, loss), shown: larger(rows, loss), temperature_bound, temperature, measured }
+    Parts { direct: worst, feedback: larger(rows - worst, loss_bound), shown: larger(rows, loss_bound), temperature: temperature_bound }
 }
 
-/// What the choice made of the chain (solve.rs, # The selection): P, its judgment and its pairs (with the anchor's
-/// judgment), the response, the paths' windows and k², and the report's lines -- every candidate judged with its
+/// What the choice made of the chain (solve.rs, # The selection): P, its judgment, the response, the paths' windows
+/// and k², and the report's lines -- every candidate judged with its
 /// parts, its cost and why it was or was not chosen, the stages' times.
 #[derive(Clone, Debug)]
 pub struct Choice {
@@ -799,7 +756,6 @@ pub struct Choice {
     /// The chain the choice was made on: by the importance at the pilot's states (`importance`).
     pub chain: Vec<Vec<usize>>,
     pub judged: Judged,
-    pub fallback: Option<(Fallback, Judged)>,
     pub response: Response,
     pub windows: Vec<(f64, f64)>,
     pub k2: f64,
@@ -810,13 +766,9 @@ pub struct Choice {
 }
 
 impl Choice {
-    /// P's error at the time t (`parts`), the anchor's bound at t taken into its pairs.
+    /// P's error at the time t (`parts`).
     pub fn at(&self, t: f64) -> Parts {
-        let fallback = self.fallback.as_ref().map(|(f, anchor)| {
-            let a = parts(anchor, &self.windows, &self.response, self.k2, self.hbar_over_mass, None, t);
-            (f, [a.shown, a.temperature])
-        });
-        parts(&self.judged, &self.windows, &self.response, self.k2, self.hbar_over_mass, fallback, t)
+        parts(&self.judged, &self.windows, &self.response, self.k2, self.hbar_over_mass, t)
     }
 }
 
