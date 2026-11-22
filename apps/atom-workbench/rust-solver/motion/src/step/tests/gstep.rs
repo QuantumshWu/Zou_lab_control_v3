@@ -650,36 +650,62 @@ fn a_piece_s_sums_by_groups_are_its_integral_to_the_round_off() {
     assert!(apart(&grouped, &exact) < 1e-13 * tau && apart(&plain, &exact) < 1e-13 * tau);
 }
 
-/// A cluster of ground states alone whose model gives no candidate tone takes its generator at the middle alone
-/// (step.rs, # One node a step): five ground states in a tweezer beating along the path by nine pairs of plane waves'
-/// parts (`Synthetic`), their candidates hidden (`Counted::quiet`), as the selected model gives its pattern by its
-/// points: one generator a step, where the same model with its candidates takes three; and its step of the second
-/// order -- against three nodes' at τ/16, two steps of τ/2 err four times less than one of τ, as three nodes' do (τ =
-/// 0.1 µs: one node's fall 3.9 to 6.2, three nodes' 3.8 to 7.5; its error two to ten times theirs).
+/// A cluster of ground states alone takes its generator at the middle alone, whatever its candidate tones (step.rs,
+/// # One node a step): five ground states in a tweezer beating along the path by nine pairs of plane waves' parts
+/// (`Synthetic`), one generator a step with its candidates hidden (`Counted::quiet`, as the selected model gives its
+/// pattern by its points) and with them, where the same model with an explicit state (`Three`) takes three. Its step of
+/// the second order -- with the candidates hidden, against three nodes' at τ/16, two steps of τ/2 err four times less
+/// than one of τ, as three nodes' do (τ = 0.1 µs: one node's fall 3.9 to 6.2, three nodes' 3.8 to 7.5; its error two to
+/// ten times theirs). And its tones and the candidates it leaves in the static group at their exact phases from the
+/// middle's envelopes alone (`spectral::Picture::separate`, `held`; the kick's forms at the outer nodes by each
+/// candidate's change of phase): `Synthetic`'s parts beat at q·v and their envelopes do not change, so that its
+/// generator held at the middle is its generator, and one node's step is three nodes' to their rounding (measured: the
+/// momentum within 9.6·10⁻¹⁶ of its size, the state within 1.0·10⁻¹⁴, on the nine pairs and on one standing wave's).
 #[test]
-fn a_ground_cluster_beating_in_no_time_takes_one_node_of_the_second_order() {
+fn a_ground_cluster_takes_one_node_whatever_its_tones() {
     use super::{atoms, step_of, Counted, Synthetic, K};
     let six = [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0], [1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 0.0, 1.0], [1.0, 0.0, -1.0], [0.0, 1.0, 1.0], [0.0, 1.0, -1.0]].map(|q| q.map(|x| x * K));
     let model = Synthetic::new(5, 1000.0, [0.0; 3], &six[..]);
     let starts: Vec<Trajectory> = atoms(&model, 4).into_iter().map(|t| Trajectory { threshold: f64::MIN_POSITIVE, ..t }).collect();
     let tau = 0.1;
-    for (quiet, nodes) in [(false, 3), (true, 1)] {
+    for quiet in [false, true] {
         let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet };
+        let explicit = Three::new(&counted);
         for s in &starts {
-            step_of(&counted, s, tau, &mut Scratch::default()).unwrap();
+            let _ = step_of(&counted, s, tau, &mut Scratch::default());
         }
-        assert_eq!(counted.calls.get()[2], nodes * starts.len() as u64, "the generator's calls, quiet {quiet}");
+        assert_eq!(counted.calls.get()[2], starts.len() as u64, "the generator's calls on ground states alone, quiet {quiet}");
+        counted.calls.set([0; 5]);
+        for s in &starts {
+            step_of(&explicit, s, tau, &mut Scratch::default()).unwrap();
+        }
+        assert_eq!(counted.calls.get()[2], 3 * starts.len() as u64, "the generator's calls with an explicit state, quiet {quiet}");
     }
-    let (three, one) = (Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false }, Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: true });
     let walk = |model: &dyn Fn(&Trajectory, f64) -> Trajectory, t: &Trajectory, tau: f64, count: usize| (0..count).fold(t.clone(), |t, _| model(&t, tau));
-    let three_step = |t: &Trajectory, tau: f64| step_of(&three, t, tau, &mut Scratch::default()).unwrap().end;
-    let one_step = |t: &Trajectory, tau: f64| step_of(&one, t, tau, &mut Scratch::default()).unwrap().end;
     let off = |a: &Trajectory, b: &Trajectory| (0..3).map(|i| (a.kappa[i] - b.kappa[i]).powi(2)).sum::<f64>().sqrt();
-    for t in &starts {
-        let reference = walk(&three_step, t, tau / 16.0, 16);
-        let errors = [walk(&one_step, t, tau, 1), walk(&one_step, t, 0.5 * tau, 2), walk(&three_step, t, tau, 1), walk(&three_step, t, 0.5 * tau, 2)].map(|e| off(&e, &reference));
-        eprintln!("momentum off the reference: one node {:.2e} / {:.2e} ({:.1}), three {:.2e} / {:.2e} ({:.1})", errors[0], errors[1], errors[0] / errors[1], errors[2], errors[3], errors[2] / errors[3]);
-        assert!(errors[0] / errors[1] > 3.0, "one node's step of the second order: {errors:?}");
+    {
+        let (visible, one) = (Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false }, Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: true });
+        let three = Three::new(&visible);
+        let three_step = |t: &Trajectory, tau: f64| step_of(&three, t, tau, &mut Scratch::default()).unwrap().end;
+        let one_step = |t: &Trajectory, tau: f64| step_of(&one, t, tau, &mut Scratch::default()).unwrap().end;
+        for t in &starts {
+            let reference = walk(&three_step, t, tau / 16.0, 16);
+            let errors = [walk(&one_step, t, tau, 1), walk(&one_step, t, 0.5 * tau, 2), walk(&three_step, t, tau, 1), walk(&three_step, t, 0.5 * tau, 2)].map(|e| off(&e, &reference));
+            eprintln!("momentum off the reference: one node {:.2e} / {:.2e} ({:.1}), three {:.2e} / {:.2e} ({:.1})", errors[0], errors[1], errors[0] / errors[1], errors[2], errors[3], errors[2] / errors[3]);
+            assert!(errors[0] / errors[1] > 3.0, "one node's step of the second order: {errors:?}");
+        }
+    }
+    for model in [Synthetic::new(5, 1000.0, [0.0; 3], &six[..]), Synthetic::new(5, 1000.0, [0.0; 3], &six[2..3])] {
+        let visible = Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false };
+        let three = Three::new(&visible);
+        let (mut momentum, mut state) = (0.0f64, 0.0f64);
+        for t in atoms(&model, 4).into_iter().map(|t| Trajectory { threshold: f64::MIN_POSITIVE, ..t }) {
+            let (a, b) = (step_of(&visible, &t, tau, &mut Scratch::default()).unwrap().end, step_of(&three, &t, tau, &mut Scratch::default()).unwrap().end);
+            momentum = momentum.max(off(&a, &b) / crate::linalg::norm3(b.kappa));
+            state = state.max(a.psi.iter().zip(b.psi.iter()).map(|(x, y)| (*x - *y).abs()).fold(0.0, crate::linalg::larger));
+        }
+        eprintln!("{} pairs: one node against three, the momentum {momentum:.1e} of its size, the state {state:.1e}", model.beats.len());
+        assert!(momentum < 1e-13 && state < 1e-13, "one node against three on a generator its middle holds: {momentum:e}, {state:e}");
     }
 }
 

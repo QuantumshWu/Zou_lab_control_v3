@@ -414,6 +414,17 @@ fn add_turned(p: C64, from: &[f64], u: f64, to: &mut [f64]) {
     }
 }
 
+/// to += p from, of laid matrices (`add_turned` of a matrix that does not change).
+fn add_phased(p: C64, from: &[f64], to: &mut [f64]) {
+    for (chunk, from) in to.chunks_exact_mut(PAIR).zip(from.chunks_exact(PAIR)) {
+        for l in 0..LANES {
+            let (re, im) = (from[l], from[LANES + l]);
+            chunk[l] += p.re * re - p.im * im;
+            chunk[LANES + l] += p.re * im + p.im * re;
+        }
+    }
+}
+
 /// An entry of a laid matrix.
 fn entry(matrix: &[f64], place: usize) -> C64 {
     C64::new(matrix[place], matrix[place + LANES])
@@ -558,9 +569,12 @@ pub struct Picture {
     left: Vec<f64>,
     spare: [Vec<f64>; 5],
     lanes: Vec<f64>,
-    /// Whether D is anything at all, and the step's half h.
+    /// Whether D is anything at all, and the step's half h; and whether every envelope is its constant over the step
+    /// (`separate`'s `held` with every candidate a tone): the slopes and curvatures of every class, and so the
+    /// following's Y₁ and Y₂, are zero, and nothing is made of them.
     moving: bool,
     half: f64,
+    constant: bool,
     /// Whether any entry of any class is followed, and 1 + X factored (LU with partial pivoting, n² and its pivots) at
     /// the time `factored`: a launched state's way into g -- the following leaves the step's start's, a launch elsewhere
     /// makes its own.
@@ -652,6 +666,7 @@ impl Default for Picture {
             lanes: Vec::new(),
             moving: false,
             half: 0.0,
+            constant: false,
             followed: false,
             factors: Vec::new(),
             pivots: Vec::new(),
@@ -1125,7 +1140,15 @@ impl Picture {
     /// changes along the path (the light's profile at the path's points) goes through the nodes as the static group does.
     /// The routes are weighed on the generator's diagonal at the middle as given, before any candidate is taken out: a
     /// candidate's route does not depend on the others' order.
-    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
+    ///
+    /// `held`: the step takes its generator at the middle alone (step.rs, # One node a step) -- the static group and
+    /// every envelope held at their middle's values, each beat at its exact phase: Ĥ(u) = G₀(0) + Σ_m (e^{iν_m u} G_m⁺(0)
+    /// + e^{−iν_m u} G_m⁻(0)), known at every time from the middle's generator and envelopes alone (`ends` are not read
+    /// before, the envelopes asked at the middle alone). The routes are weighed as on three nodes; a tone's members at
+    /// the outer nodes are its middle's, and the static group at the outer nodes is the middle's with each candidate left
+    /// in it at its exact phase there: the parabola the propagation takes of such a candidate is its beat's through the
+    /// three nodes, as on three nodes, and of everything else its constant.
+    pub fn separate(&mut self, half: f64, held: bool, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
         self.keys.clear();
@@ -1138,6 +1161,12 @@ impl Picture {
         }
         let mut count = 0;
         let Picture { beats, base, ends, beating, keys, reciprocals, weighed, weighing, .. } = self;
+        if held {
+            // The static group's change at the outer nodes: each candidate left in it, its phase there less its middle's.
+            for end in ends.iter_mut() {
+                end.data.fill(C64::ZERO);
+            }
+        }
         for (candidate, &beat) in beating.iter().enumerate() {
             if beats.len() == count {
                 beats.push(Beat { beat: 0.0, key: vec![], candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
@@ -1153,10 +1182,30 @@ impl Picture {
             *weighing += work;
             if !taken {
                 weighed.push(candidate);
+                if held {
+                    for (end, u) in ends.iter_mut().zip([-half, half]) {
+                        let (p, q) = (C64::cis(beat * u) - C64::ONE, C64::cis(-beat * u) - C64::ONE);
+                        for ((z, g), h) in end.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                            *z += p * *g + q * *h;
+                        }
+                    }
+                }
                 continue;
             }
             (tone.beat, tone.candidate) = (beat, candidate);
             tone.key.clone_from(&keys[candidate]);
+            if held {
+                for member in [&mut *plus, &mut *minus] {
+                    let [before, middle, after] = member;
+                    before.data.copy_from_slice(&middle.data);
+                    after.data.copy_from_slice(&middle.data);
+                }
+                for ((z, g), h) in base.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                    *z -= *g + *h;
+                }
+                count += 1;
+                continue;
+            }
             for (j, u) in [(0, -half), (2, half)] {
                 envelopes(candidate, u, &mut plus[j], &mut minus[j]);
             }
@@ -1170,6 +1219,19 @@ impl Picture {
             count += 1;
         }
         beats.truncate(count);
+        if held {
+            for end in ends.iter_mut() {
+                for (z, b) in end.data.iter_mut().zip(&base.data) {
+                    *z += *b;
+                }
+            }
+        }
+        self.constant = held && self.weighed.is_empty();
+    }
+
+    /// The beat of the caller's candidate `m` as `separate` was given it (rad/µs).
+    pub fn candidate_beat(&self, m: usize) -> f64 {
+        self.beating[m]
     }
 
     /// The states.
@@ -1246,7 +1308,9 @@ impl Picture {
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
         (self.half, self.followed, self.spread, self.factored, self.grown, self.slopes) = (half, false, 0.0, f64::NAN, 1.0, [0.0; 3]);
+        let classified = crate::prof::scope(84);
         self.classify();
+        drop(classified);
         if !still {
             let [minus, plus] = &mut self.ends;
             let (first, second) = (0.5 / half, 0.5 / (half * half));
@@ -1279,6 +1343,7 @@ impl Picture {
         self.reach(start);
         // The decomposition where it converges and a state through it rounds no more than through Ĥ₀'s exponential over
         // the step (module documentation, # Where the decomposition does not take the step).
+        let decomposing = crate::prof::scope(85);
         self.bounded();
         let [rho, gamma] = self.bounds;
         let tau = 2.0 * half.abs();
@@ -1312,7 +1377,9 @@ impl Picture {
         self.work += (n * n * n) as f64;
         lay(&e.vectors.data, n, &mut self.right);
         lay(&e.inverse.data, n, &mut self.left);
+        drop(decomposing);
         if self.moving {
+            let changing = crate::prof::scope(86);
             // Each change M ← (R⁻¹M)R: two products of n³, a product's right factor column by column -- the static
             // group's A and B, each member's C, A and B.
             let block = self.right.len();
@@ -1327,20 +1394,39 @@ impl Picture {
                 combine(false, e.columns(), n, product, laid, n, 0);
                 unlay(laid, n, change);
             };
+            // A constant picture's slopes and curvatures are zero: laid as zero, not changed.
+            let constant = self.constant;
+            let mut changed = 0;
             let group = &mut self.classes[0];
             for (j, given) in self.ends.iter().enumerate() {
-                basis(given, &mut group.laid[(1 + j) * block..(2 + j) * block], &mut group.change[1 + j]);
+                if constant {
+                    group.laid[(1 + j) * block..(2 + j) * block].fill(0.0);
+                    group.change[1 + j].fill(C64::ZERO);
+                } else {
+                    basis(given, &mut group.laid[(1 + j) * block..(2 + j) * block], &mut group.change[1 + j]);
+                    changed += 1;
+                }
             }
             for (m, tone) in self.beats.iter().enumerate() {
                 for (sign, member) in tone.members.iter().enumerate() {
                     let class = &mut self.classes[1 + 2 * m + sign];
                     for (j, given) in member.iter().enumerate() {
-                        basis(given, &mut class.laid[j * block..(j + 1) * block], &mut class.change[j]);
+                        if constant && j > 0 {
+                            class.laid[j * block..(j + 1) * block].fill(0.0);
+                            class.change[j].fill(C64::ZERO);
+                        } else {
+                            basis(given, &mut class.laid[j * block..(j + 1) * block], &mut class.change[j]);
+                            changed += 1;
+                        }
                     }
                 }
             }
-            self.work += ((4 + 12 * self.beats.len()) * n * n * n) as f64;
+            self.work += (2 * changed * n * n * n) as f64;
+            drop(changing);
+            let following = crate::prof::scope(87);
             self.follow()?;
+            drop(following);
+            let _hopping = crate::prof::scope(88);
             // The hops' radius on the whole hopped operator (`hops_radius`), of the hop's own envelope as the following
             // leaves it: every entry's own within π is no convergence of the whole series.
             let reach = self.hops_radius();
@@ -1506,8 +1592,10 @@ impl Picture {
             return Ok(());
         }
         let (first, second) = (0.5 / h, 0.5 / (h * h));
-        // The nodes −h, h and, where tones put a constant into D, 0.
+        // The nodes −h, h and, where tones put a constant into D, 0. Where every envelope is constant the products are
+        // the same at every node: made at the middle alone and laid at the others.
         let (count, times) = (if tones > 0 { 3 } else { 2 }, [-h, h, 0.0]);
+        let constant = self.constant;
         let block = self.right.len();
         for class in classes.iter_mut() {
             class.second[..count * block].fill(0.0);
@@ -1522,6 +1610,12 @@ impl Picture {
         // The products beyond the static group's with itself.
         let mut made = 0;
         for (j, &u) in times[..count].iter().enumerate() {
+            if constant && j < 2 {
+                // The static group's change none at the outer nodes too: its D and −D_s zero there, for D₂ below.
+                changes[j].fill(0.0);
+                slows[j * size..(j + 1) * size].fill(C64::ZERO);
+                continue;
+            }
             // Each followed first-order class's Y at u, column by column and laid.
             for class in classes[..order].iter_mut().filter(|class| class.followed) {
                 polynomial(&class.follow, size, u, &mut class.now);
@@ -1549,8 +1643,9 @@ impl Picture {
                 d.fill(0.0);
                 slow.fill(C64::ZERO);
             }
-            // The products D_t Y_t′ − Y_t′ D_t^s, each into the class of its beats' sum.
-            for t in (0..order).filter(|&t| t > 0 || j < 2) {
+            // The products D_t Y_t′ − Y_t′ D_t^s, each into the class of its beats' sum (of the static group's change
+            // none at the middle, and none at all where every envelope is constant).
+            for t in (0..order).filter(|&t| t > 0 || (j < 2 && !constant)) {
                 if t > 0 {
                     let class = &classes[t];
                     for (i, z) in change.iter_mut().enumerate() {
@@ -1576,6 +1671,13 @@ impl Picture {
                     (classes[into].second, classes[into].hops) = (out, true);
                     made += usize::from(t > 0 || following > 0);
                 }
+            }
+        }
+        if constant {
+            for class in classes.iter_mut() {
+                let (outer, middle) = class.second.split_at_mut(2 * block);
+                outer[..block].copy_from_slice(&middle[..block]);
+                outer[block..].copy_from_slice(&middle[..block]);
             }
         }
         // F, each class's fast part of its second order through the three nodes, followed -- a product's entries taken
@@ -2300,7 +2402,7 @@ impl Picture {
     pub(crate) fn state_work(&self) -> (f64, bool, usize) {
         let n = self.n;
         let followers = self.classes[1..].iter().filter(|class| class.followed).count();
-        (((if self.followed { 2 + 4 * followers } else { 1 }) * n * n + 4 * n) as f64, self.followed, followers)
+        (((1 + self.assembly(followers)) * n * n + 4 * n) as f64, self.followed, self.assembly(followers))
     }
 
     /// Whether the generator moves along the path (D is anything at all: `prepare`).
@@ -2468,7 +2570,18 @@ impl Picture {
         let matrix = if self.followed { &self.spare[0] } else { &self.right };
         combine(false, &self.coordinates, n, matrix, &mut self.lanes, 1, 0);
         unlay(&self.lanes, 1, x);
-        self.work += ((if self.followed { 2 + 4 * followers } else { 1 }) * size + 4 * n) as f64;
+        self.work += ((1 + self.assembly(followers)) * size + 4 * n) as f64;
+    }
+
+    /// The state's matrix at a time made of the followed classes' (`matrix_at`), complex multiply-adds an entry:
+    /// R(1 + Y₀) + uRY₁ + u²RY₂ and each class's three at its phase, or where every envelope is constant R(1 + Y₀) and
+    /// each class's RY₀; none where nothing is followed.
+    fn assembly(&self, followers: usize) -> usize {
+        match (self.followed, self.constant) {
+            (false, _) => 0,
+            (true, false) => 1 + 4 * followers,
+            (true, true) => followers,
+        }
     }
 
     /// The frame's state at the time u by groups of its eigencomponents (step.rs, # The quadrature by groups): out[g] =
@@ -2504,7 +2617,7 @@ impl Picture {
                 }
             }
         }
-        self.work += ((if self.followed { 1 + 4 * followers } else { 0 }) * size + products + 4 * n) as f64;
+        self.work += (self.assembly(followers) * size + products + 4 * n) as f64;
     }
 
     /// The exact blocks' states (`blocks`, none: one block) and each eigencomponent's block (`part`).
@@ -2538,7 +2651,14 @@ impl Picture {
     fn matrix_at(&mut self, u: f64) -> usize {
         let (group, beating) = self.classes.split_first().expect("the static group");
         let followers = beating.iter().filter(|class| class.followed).count();
-        if self.followed {
+        if self.followed && self.constant {
+            // Y₁ = Y₂ = 0: R(1 + Y₀) and each class's R Y₀ at its phase.
+            let matrix = self.right.len();
+            self.spare[0].copy_from_slice(&group.nodes[..matrix]);
+            for class in beating.iter().filter(|class| class.followed) {
+                add_phased(class.turn(u), &class.nodes[..matrix], &mut self.spare[0]);
+            }
+        } else if self.followed {
             let (first, rest) = group.nodes.split_at(self.right.len());
             let (second, third) = rest.split_at(self.right.len());
             for (((m, first), second), third) in self.spare[0].iter_mut().zip(first).zip(second).zip(third) {
@@ -3227,6 +3347,7 @@ pub(crate) mod tests {
         picture.ends = [-half, half].map(|u| toned(group, tones, u));
         picture.separate(
             half,
+            false,
             |beats, keys| {
                 beats.extend(tones.iter().map(|t| t.beat));
                 keys.extend((0..tones.len()).map(|m| (0..tones.len()).map(|j| i64::from(j == m)).collect()));
@@ -3400,6 +3521,7 @@ pub(crate) mod tests {
                 picture.ends = [-half, half].map(generator);
                 picture.separate(
                     half,
+                    false,
                     |beats, keys| {
                         beats.push(beat);
                         keys.push(vec![1]);
@@ -3602,7 +3724,7 @@ pub(crate) mod tests {
                             beats.push(tones[0].beat);
                             keys.push(vec![1]);
                         };
-                        rule.separate(half, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
+                        rule.separate(half, false, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
                         let taken = rule.beats.len() == 1;
                         let (mut tone, mut nodes) = (as_tones(&group, &tones, half), without_tones(&group, &tones, half));
                         let times = [-0.3 * half, 0.4 * half, half];

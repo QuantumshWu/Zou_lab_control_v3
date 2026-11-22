@@ -66,7 +66,7 @@ fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> 
     generator.push(Term { factor: 0, adjoint: false, scale: C64::new(0.0, -0.5), matrices: vec![(decay, 0)] });
     let jumps = emission_channels(length, 0, parts, kicks);
     frequencies.extend(std::iter::repeat_n(0.0, 6));
-    let source = Source { hamiltonian, jumps, generator, varying: vec![false, true], coefficients: 1, intensity: Vec::new() };
+    let source = Source { hamiltonian, jumps, generator, varying: vec![false, true], coefficients: 1, intensity: Vec::new(), own: Vec::new() };
     let values = Values { factors: vec![(C64::ONE, [C64::ZERO; 3]), (C64::ZERO, [C64::ZERO, C64::ZERO, C64::ONE])], coefficients: vec![1.0], frequencies };
     (library, source, values)
 }
