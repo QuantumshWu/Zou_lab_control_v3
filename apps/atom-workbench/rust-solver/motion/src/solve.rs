@@ -434,7 +434,11 @@
 //!
 //! # The selection (PIPELINE_V3_FINAL §二 B.7–B.11; select.rs)
 //! Where no choice is kept for the scene (select.rs `kept`: the request without its times), the attempt on G chooses P
-//! once its pilot stands (`choose_on_the_pilot`):
+//! once its pilot stands (`choose_on_the_pilot`). Where G's fold scatters beyond every state of the atom at every one of
+//! its pilot's paths' starts (step.rs, # The domain: the runaway, which no step's length helps; SAT_3's resonant
+//! D2-3-3, its first-order excitation 1.5), no path goes past its start and nothing can be chosen on them: the attempt
+//! is made on the structural chain's next model, and so on up (`piloted`; the top folds nothing), and the choice is made
+//! on that pilot among the chain's models above it (G and the others below it ran away where the atoms start).
 //! 1. The paths: `select::WALKS` of the pilot's trajectories at the run's step (`walks`), cut at L = min(T, 5 τ_mem),
 //!    τ_mem the full-ground model's memory time, the longest over their starts; the 32-state reference along them, at
 //!    the setting read along the longest of them, and along the scans of the trap's axes (select.rs `Paths`).
@@ -696,8 +700,9 @@ pub struct Solution {
 /// An attempt's run is one object, the same at every step of the attempt (model/selected.rs `Selected`: the scene, P
 /// and its fold): what the solve takes of it beside the steps -- the prepared potentials and their traps, the initial
 /// ensemble drawn in them, the reported trap, the kick's curvature (`Setting`) -- is made from it (`solve_with`), and
-/// the pipeline runs on it (`attempt`). The first is the choice kept for the scene, or else G, whose pilot makes the
-/// choice (# The selection): G chosen, its attempt is the solve; another, the attempt is made again on it. A request
+/// the pipeline runs on it (`attempt`). The first is the choice kept for the scene, or else G (where G's fold runs away
+/// at every start of its pilot, the chain's first model that does not, `piloted`), whose pilot makes the choice (# The
+/// selection): it chosen, its attempt is the solve; another, the attempt is made again on it. A request
 /// it refuses (the scene, a trap that does not hold the atom, no step below the edge) is refused with its reason,
 /// before a trajectory runs.
 pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
@@ -715,14 +720,12 @@ pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solutio
     }
     // A new selection (# Steps: the structural chain and G's model are the model's making).
     messages.stage(Stage { step: Step::Model, tau: None, batch: None });
-    let scene = crate::scene::Scene::new(request)?;
-    let selection = crate::select::choose(&scene)?;
-    let run = Selected::new(scene, selection.clone(), reference)?;
-    match solve_with(request, &run, Choosing::Make, &mut messages)? {
+    let (attempted, selection) = piloted(request, reference, Choosing::Make, &mut messages)?;
+    match attempted {
         Attempted::Solved(s) => Ok(s),
         Attempted::Scouted(_) => unreachable!("an attempt that makes the choice is no scout"),
+        Attempted::RanAway => unreachable!("`piloted` goes up the chain past a model that ran away"),
         Attempted::Chose(choice) => {
-            drop(run);
             messages.stage(Stage { step: Step::Model, tau: None, batch: None });
             let run = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: choice.keep.clone(), choice: Some(choice.clone()), ..selection }, reference)?;
             solved(solve_with(request, &run, Choosing::Made(Some(choice)), &mut messages))
@@ -734,8 +737,35 @@ pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solutio
 fn solved(attempted: Result<Attempted, String>) -> Result<Solution, String> {
     match attempted? {
         Attempted::Solved(s) => Ok(s),
-        Attempted::Chose(_) | Attempted::Scouted(_) => unreachable!("an attempt on a choice made solves"),
+        Attempted::Chose(_) | Attempted::Scouted(_) | Attempted::RanAway => unreachable!("an attempt on a choice made solves"),
     }
+}
+
+/// The attempt that makes the choice (`Choosing::Make`; the tests' `Choose`) on the cheapest model of the structural
+/// chain whose pilot goes past its start (# The selection; PIPELINE_V3_FINAL §二 B.7: the scout and the pilot on the
+/// cheapest candidate): G, and where every one of G's paths stopped at its start, its fold scattering beyond every state
+/// of the atom there (`Attempted::RanAway`; step.rs, # The domain: no length of a step makes the fold hold), the chain's
+/// next model, and so on up -- the chain's top folds nothing, and no state of it scatters beyond the atom's. Each model
+/// made again is the pipeline's Model step again. With it the selection it was taken from (the structural chain).
+fn piloted(request: &Request, reference: [f64; GROUND], choosing: Choosing, messages: &mut Messages) -> Result<(Attempted, Selection), String> {
+    let selection = crate::select::choose(&crate::scene::Scene::new(request)?)?;
+    let top = selection.chain.len() - 1;
+    for place in 0..=top {
+        if place > 0 {
+            messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+        }
+        let run = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: selection.chain[place].clone(), ..selection.clone() }, reference)?;
+        match solve_with(request, &run, choosing.clone(), messages)? {
+            Attempted::RanAway if place < top => eprintln!(
+                "  注：P{} 的折叠在先导每条路径的起点就超过原子任何状态的散射率（失控，任何步长都一样），没有一条路径走过起点：先导改在链上的下一档 P{} 上重做",
+                selection.chain[place].len(),
+                selection.chain[place + 1].len()
+            ),
+            Attempted::RanAway => return Err("the chain's top ran away at its pilot's every start (it folds nothing: no state of it can)".into()),
+            attempted => return Ok((attempted, selection)),
+        }
+    }
+    unreachable!("the chain's top ends the climb")
 }
 
 /// What an attempt does with the choice of P (module documentation, # The selection): takes the one made, or none
@@ -752,12 +782,15 @@ enum Choosing {
     Choose,
 }
 
-/// How an attempt ended: its solution, the choice of another model (or, `Choosing::Choose`, of any), or (`Scout`) the
-/// rung its scout stands at (µs).
+/// How an attempt ended: its solution, the choice of another model (or, `Choosing::Choose`, of any), (`Scout`) the
+/// rung its scout stands at (µs), or -- where it was to make the choice -- its model's fold beyond every state of the
+/// atom at every one of its pilot's paths' starts, so that no path went past its start and nothing is chosen on them
+/// (`choose_on_the_pilot`; `piloted` takes the chain's next model).
 enum Attempted {
     Solved(Solution),
     Chose(std::sync::Arc<Choice>),
     Scouted(f64),
+    RanAway,
 }
 
 /// The run of a request at the reference populations `reference`: its scene and the selection's cheapest candidate,
@@ -771,7 +804,8 @@ pub(crate) fn run_of(request: &Request, reference: [f64; GROUND]) -> Result<Sele
 }
 
 /// The run of a request on the P its selection chooses (# The selection), at the reference populations `reference`:
-/// the choice kept for the scene, or made on G's pilot (its attempt stopped there) and kept. The tests' chosen run.
+/// the choice kept for the scene, or made on the pilot (`piloted`: G's, or the chain's first model that does not run
+/// away; its attempt stopped there) and kept. The tests' chosen run.
 #[cfg(test)]
 pub(crate) fn chosen(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
     let scene = crate::scene::Scene::new(request)?;
@@ -779,12 +813,11 @@ pub(crate) fn chosen(request: &Request, reference: [f64; GROUND]) -> Result<Sele
     let choice = match crate::select::kept(request) {
         Some(choice) => choice,
         None => {
-            let run = Selected::new(crate::scene::Scene::new(request)?, selection.clone(), alone(chief(request)))?;
             let mut send = |_: Message| {};
             let mut messages = Messages { send: &mut send, clock: Instant::now(), last: None, least: 0, stage: None };
-            match solve_with(request, &run, Choosing::Choose, &mut messages)? {
+            match piloted(request, alone(chief(request)), Choosing::Choose, &mut messages)?.0 {
                 Attempted::Chose(choice) => choice,
-                Attempted::Solved(_) | Attempted::Scouted(_) => unreachable!("an attempt that chooses stops at its choice"),
+                Attempted::Solved(_) | Attempted::Scouted(_) | Attempted::RanAway => unreachable!("an attempt that chooses stops at its choice"),
             }
         }
     };
@@ -2319,7 +2352,10 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let mut read = read;
     if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
         let pilot_refs: Vec<&Part> = pilot.iter().collect();
-        let made = std::sync::Arc::new(choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)?);
+        let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
+            return Ok(Attempted::RanAway);
+        };
+        let made = std::sync::Arc::new(made);
         crate::select::keep(request, made.clone());
         let stop = {
             #[cfg(test)]
@@ -2561,14 +2597,16 @@ struct Weighed {
     fate: String,
 }
 
-/// The choice of P on the pilot of G (module documentation, # The selection): the paths; G judged
-/// first, then -- where G is not complete -- the least complete candidate of the chain found by bisection (the chain
-/// nested, each candidate's error no less than the next's: a candidate complete, every one above it taken complete),
-/// then the chain above it while a candidate's least W stands below the least found, every candidate judged on the way
-/// weighed; the complete ones scouted at their own step while their least W stands below the least found; P the
-/// complete candidate of least W, its region scanned.
+/// The choice of P on the pilot of the attempt's model -- G, or the chain's first whose pilot went past its start
+/// (`piloted`) -- (module documentation, # The selection): the paths; the pilot's model judged first, then -- where it
+/// is not complete -- the least complete candidate of the chain above it found by bisection (the chain nested, each
+/// candidate's error no less than the next's: a candidate complete, every one above it taken complete), then the chain
+/// above that while a candidate's least W stands below the least found, every candidate judged on the way weighed; the
+/// complete ones scouted at their own step while their least W stands below the least found; P the complete candidate
+/// of least W, its region scanned. None where no path went past its start because the model's fold scattered beyond
+/// every state of the atom there (a pilot's trajectory ran away at t = 0, step.rs # The domain): nothing to choose on.
 #[allow(clippy::too_many_arguments)]
-fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Choice, String> {
+fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
     use crate::select::{direct_at, judge, Paths, WALKS};
     let clock = Instant::now();
     let run = setting.run;
@@ -2583,7 +2621,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let length = request.times_us.last().copied().unwrap_or(0.);
     let mut report: Vec<String> = vec![];
     // The chain on the first-order excitation where the pilot's atoms went, from the ground states they were in
-    // (select.rs `importance`): G's states are the ground states, a state's populations its own (P = G).
+    // (select.rs `importance`; a model's cluster holds its ground states first, model.rs `Cluster`), from the pilot's own
+    // model up: every model of it holds the pilot's states, the pilot's first (place 0, the attempt's run).
     let started = Instant::now();
     let places: Vec<(V3, [f64; GROUND])> = pilot
         .iter()
@@ -2594,15 +2633,20 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         })
         .collect();
     let amplitudes = crate::select::importance(&run.scene, &places);
-    let chain = &crate::select::chain(&amplitudes);
+    let own = &run.rs.keep;
+    let mut chain: Vec<Vec<usize>> = crate::select::chain(&amplitudes).into_iter().filter(|c| own.iter().all(|s| c.contains(s))).collect();
+    if chain.first() != Some(own) {
+        chain.insert(0, own.clone());
+    }
+    let chain = &chain;
     let labels = &request.states;
     let order: Vec<String> = chain.windows(2).map(|w| w[1].iter().filter(|s| !w[0].contains(s)).map(|&s| format!("{} {:.2e}", labels[s], amplitudes[s])).collect::<Vec<_>>().join(" + ")).collect();
     noted(&mut report, format!("链上依次加入的激发态（先导位置上的最大一阶激发布居）：{}", order.join("；")));
     noted(
         &mut report,
         format!(
-            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；G = P{}；链按先导的 {} 个状态上的一阶激发，{} 档（{}），{:.1} s",
-            times.len(), run.rs.keep.len(), places.len(), chain.len(), chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" "), started.elapsed().as_secs_f64()
+            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；先导的模型 P{}{}；链按先导的 {} 个状态上的一阶激发，从先导的模型往上 {} 档（{}），{:.1} s",
+            times.len(), run.rs.keep.len(), if run.rs.keep.len() == GROUND { "（G）" } else { "（G 的折叠在先导起点失控，链上第一个走得动的）" }, places.len(), chain.len(), chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" "), started.elapsed().as_secs_f64()
         ),
     );
     // 1. The paths: the pilot's first trajectories' starts, the memory time there (the longest), the walks to L.
@@ -2613,6 +2657,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let memory = if memory > 0. { memory } else { length };
     drop(form);
     let walks = walks(run, &domain, tau, context.plan.end, &fine_refs, WALKS, length);
+    // No path past its start, the model's fold beyond every state of the atom where a pilot's atom started: the chain's
+    // next model is the pilot's (`piloted`). (No path past its start otherwise -- every atom lost at its first step --
+    // is said by `Paths::new`.)
+    if walks.iter().all(|w| !(w.end() > 0.)) && read.counts.runaway.since == Some(0.) {
+        return Ok(None);
+    }
     let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
     let paths = Paths::new(&full, centre, walks, memory, length, tau, light)?;
     let settled = &paths.settled;
@@ -2857,7 +2907,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     }
     noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
     let w = weighed.swap_remove(chosen);
-    Ok(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report })
+    Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }))
 }
 
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The
