@@ -2168,6 +2168,12 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     // ask beside the model's error at those states (`Prices`).
     messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
     let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, messages);
+    // A candidate's short scout (`Choosing::Scout`): the rung its own two levels stand on (`settle`: down the ladder
+    // to the first rung whose own read is in and not clearly beyond), the check's priced course not taken -- a scout
+    // with it took PGC3D's P20 34-68 s, R4's P26 87 s.
+    if matches!(choosing, Choosing::Scout) {
+        return Ok(Attempted::Scouted(context.tau));
+    }
     if matches!(scouting, Settled::Pending) {
         let (here, at) = {
             let scout: Vec<&Part> = levels.fine.iter().collect();
@@ -2183,10 +2189,6 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         let priced = work_at(run, domain.widest, &rated);
         let (work, halving) = (|t: f64| priced(t)[0], |t: f64| priced(t)[1]);
         check(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1, &above, Some(&Prices { work: &work, halving: &halving, product: need }), messages);
-    }
-    // A candidate's scout alone (`Choosing::Scout`): the rung it stands at.
-    if matches!(choosing, Choosing::Scout) {
-        return Ok(Attempted::Scouted(context.tau));
     }
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
     // # The step) -- first as far as its own two levels: at the first rung whose own read is in and not clearly beyond,
@@ -2761,8 +2763,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     }
     // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
     // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
-    // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, the
-    // check's course on them, as the attempt's own scout), its work a µs at the rung the scout stands at, and its W again
+    // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, down
+    // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), its work a µs at the rung the scout stands at, and its W again
     // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
     // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
     // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
