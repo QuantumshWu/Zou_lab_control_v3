@@ -183,12 +183,14 @@ pub struct Reading {
     pub trace: f64,
 }
 
-/// A model's readings along one path, its photon classes' fast indices, and the work they took.
+/// A model's readings along one path, its photon classes' fast indices, the work they took, and its state at the end
+/// (the sector vector: the path goes on from there, `Form::along_from`).
 #[derive(Clone, Debug, Default)]
 pub struct Series {
     pub classes: Vec<[i64; 2]>,
     pub readings: Vec<Reading>,
     pub counts: Counts,
+    pub state: Vec<C64>,
 }
 
 /// A model on its sector (module documentation, # The sector, # The generator): the structure every node shares, made
@@ -780,7 +782,16 @@ impl<'a> Form<'a> {
     /// The model's readings along a path from `from` to `to` from the state `start` (module documentation): its
     /// series, and Err where the state is not the model's.
     pub fn along(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
-        let mut v = self.initial(start)?;
+        self.along_from(walk, self.initial(start)?, from, to, scheme)
+    }
+
+    /// `along` from a sector state at `from` (a series' end state: the same path gone on, its knots and nodes the
+    /// same as in one stretch where `from` is a knot).
+    pub fn along_from(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
+        let mut v = state;
+        if v.len() != self.dim {
+            return Err(format!("a state of {} numbers for a sector of {}", v.len(), self.dim));
+        }
         if !(to > from) {
             return Err(format!("an empty stretch of the path: [{from}, {to}]"));
         }
@@ -861,7 +872,7 @@ impl<'a> Form<'a> {
             }
         }
         counts.time = to - from;
-        Ok(Series { classes: self.classes.clone(), readings, counts })
+        Ok(Series { classes: self.classes.clone(), readings, counts, state: v })
     }
 
     /// The sector's Liouvillian at the point and time, dense (d × d), column by column through the operator.
@@ -1099,8 +1110,37 @@ pub struct Window {
     pub power: Mean,
 }
 
+/// The windows of a path of the length `length` (µs): (0, e₁], (e₁, 2e₁], … doubling up to the length, e₁ the
+/// memory time halved down to the first below four times the path's `step` -- the start's transient resolved where it
+/// changes fastest, the error's approach to its stationary value (the memory's scale) in octaves; the last window ends
+/// at the length.
+pub fn windows(length: f64, memory: f64, step: f64) -> Vec<(f64, f64)> {
+    let mut e = memory;
+    while e > 4.0 * step {
+        e *= 0.5;
+    }
+    let mut edges = vec![0.0];
+    while e < length {
+        edges.push(e);
+        e *= 2.0;
+    }
+    edges.push(length);
+    edges.windows(2).map(|x| (x[0], x[1])).collect()
+}
+
+/// The window an output time takes its error from (PIPELINE_V3_FINAL B.8: "the time window it falls in"): the window
+/// (from, to] holding t; past the last window's end the last window -- a path of L = 5τ_mem has forgotten its start
+/// there, the error stationary --; None at or before the first window's start (every model starts in the same state).
+pub fn window_of(windows: &[(f64, f64)], t: f64) -> Option<usize> {
+    if windows.is_empty() || t <= windows[0].0 {
+        return None;
+    }
+    Some(windows.iter().position(|w| t <= w.1).unwrap_or(windows.len() - 1))
+}
+
 /// The candidate's direct errors against the reference on the same paths (`Window` per window `(from, to]`):
-/// `candidate[p]` and `reference[p]` read along path p at the same times; `labels` the request's states.
+/// `candidate[p]` and `reference[p]` read along path p at the same times; `labels` the request's states. A window's
+/// statistics are over the paths read in it.
 pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)], labels: &[String], hbar_over_mass: f64) -> Vec<Window> {
     let mut levels: Vec<(String, Vec<usize>)> = Vec::new();
     for (s, l) in labels.iter().enumerate() {
@@ -1123,10 +1163,12 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             let mut force = vec![[0.0; 3]; p];
             let mut force_rms = vec![0.0; p];
             let mut power = vec![0.0; p];
+            let mut read = vec![false; p];
             for (k, (c, r)) in candidate.iter().zip(reference).enumerate() {
                 let pairs: Vec<(&Reading, &Reading)> = c.readings.iter().zip(&r.readings).filter(|(x, _)| x.t > from && x.t <= to).collect();
                 assert!(pairs.iter().all(|(x, y)| x.t == y.t), "the two series read at the same times");
                 let q = pairs.len() as f64;
+                read[k] = !pairs.is_empty();
                 let (mut df2, mut f2, mut total_m, mut total_r) = (0.0, 0.0, 0.0, 0.0);
                 for (x, y) in &pairs {
                     for s in 0..STATES {
@@ -1153,22 +1195,25 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 rate[k] = total_m / total_r - 1.0;
                 force_rms[k] = (df2 / f2).sqrt();
             }
-            let row_means: Vec<Mean> = rows.iter().map(|x| Mean::of(x)).collect();
+            // The paths read in the window (a lost atom's path ends early).
+            let held: Vec<usize> = (0..p).filter(|&k| read[k]).collect();
+            let of = |x: &[f64]| Mean::of(&held.iter().map(|&k| x[k]).collect::<Vec<_>>());
+            let row_means: Vec<Mean> = rows.iter().map(|x| of(x)).collect();
             let worst_row = (0..STATES).max_by(|&a, &b| row_means[a].value.abs().total_cmp(&row_means[b].value.abs())).unwrap();
-            let worst_per_path = (0..p).map(|k| rows.iter().map(|x| x[k].abs()).fold(0.0, larger)).collect();
+            let worst_per_path = held.iter().map(|&k| rows.iter().map(|x| x[k].abs()).fold(0.0, larger)).collect();
             Window {
                 from,
                 to,
-                paths: p,
+                paths: held.len(),
                 worst: (worst_row, row_means[worst_row]),
                 rows: row_means,
-                levels: levels.iter().zip(&lv).map(|((name, _), x)| (name.clone(), Mean::of(x))).collect(),
+                levels: levels.iter().zip(&lv).map(|((name, _), x)| (name.clone(), of(x))).collect(),
                 worst_per_path,
-                rates: classes.iter().zip(&rates).zip(&rate_ref).map(|((f, x), r)| (*f, Mean::of(x), *r)).collect(),
-                rate: Mean::of(&rate),
-                force: std::array::from_fn(|a| Mean::of(&force.iter().map(|f| f[a]).collect::<Vec<_>>())),
-                force_rms: Mean::of(&force_rms),
-                power: Mean::of(&power),
+                rates: classes.iter().zip(&rates).zip(&rate_ref).map(|((f, x), r)| (*f, of(x), *r * p as f64 / held.len() as f64)).collect(),
+                rate: of(&rate),
+                force: std::array::from_fn(|a| of(&force.iter().map(|f| f[a]).collect::<Vec<_>>())),
+                force_rms: of(&force_rms),
+                power: of(&power),
             }
         })
         .collect()

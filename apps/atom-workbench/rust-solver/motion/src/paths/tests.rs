@@ -6,7 +6,8 @@
 //!   windows) by a scheme, to a JSON file for the comparison with the prototypes;
 //! - `paths_memory`: τ_mem and L of the models at the trap's centre at rest;
 //! - `paths_pilot`: the pilot's paths handed out by the solve (solve.rs `walks`), and the path errors along them;
-//! - `paths_cost`: the work of a model a path's µs, one thread, the least of five.
+//! - `paths_cost`: the work of a model a path's µs, one thread, the least of five;
+//! - `paths_check`: the scheme's check against its halves on a path piece (`check`).
 use super::*;
 use crate::request::Request;
 use crate::scene::Scene;
@@ -166,6 +167,7 @@ fn paths_replay() {
     let specs: Vec<String> = var("PATHS_MODELS").split(',').map(String::from).collect();
     let state: usize = std::env::var("PATHS_STATE").map_or(7, |s| s.parse().unwrap());
     let walks = walks_of(&var("PATHS_FILE"), state);
+    // The windows [path, t0, t1, h, read]; a window's start state the state PATHS_STATE, or its earlier run's (PATHS_RESUME).
     let windows: Vec<(usize, f64, f64, f64, usize)> = serde_json::from_str(&std::fs::read_to_string(var("PATHS_WINDOWS")).unwrap()).unwrap();
     let scheme_text = var("PATHS_SCHEME");
     let clock = std::time::Instant::now();
@@ -176,12 +178,26 @@ fn paths_replay() {
     let made = clock.elapsed().as_secs_f64();
     let mut jobs: Vec<(usize, usize)> = (0..forms.len()).flat_map(|m| (0..windows.len()).map(move |w| (m, w))).collect();
     jobs.sort_by(|a, b| forms[b.0].dim.cmp(&forms[a.0].dim));
+    // PATHS_RESUME: an earlier run's output; a window goes on from its window of the same model and path that ends at
+    // this one's start (that one's end state), the chain's origin carried.
+    let resume: Option<serde_json::Value> = std::env::var("PATHS_RESUME").ok().map(|f| serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap());
+    let earlier = |spec: &str, p: usize, t0: f64| -> Option<(Vec<C64>, f64)> {
+        let r = resume.as_ref()?;
+        let w = r[spec]["windows"].as_array()?.iter().find(|w| w["path"].as_u64() == Some(p as u64) && w["t1"].as_f64() == Some(t0))?;
+        let state = w["state"].as_array()?.iter().map(|z| C64::new(z[0].as_f64().unwrap(), z[1].as_f64().unwrap())).collect();
+        Some((state, w["origin"].as_f64().unwrap()))
+    };
+    let origins: Vec<Vec<f64>> = specs.iter().map(|spec| windows.iter().map(|w| earlier(spec, w.0, w.1).map_or(w.1, |e| e.1)).collect()).collect();
     let done: Vec<((usize, usize), Series)> = jobs
         .par_iter()
         .map(|&(m, w)| {
             let (p, t0, t1, h, read) = windows[w];
             let scheme = if scheme_text == "engfold" { Scheme::Exact { h, read } } else { scheme_of(&scheme_text) };
-            ((m, w), forms[m].along(&walks[p], &[(state, C64::ONE)], t0, t1, scheme).unwrap())
+            let s = match earlier(&specs[m], p, t0) {
+                Some((state, _)) => forms[m].along_from(&walks[p], state, t0, t1, scheme),
+                None => forms[m].along(&walks[p], &[(state, C64::ONE)], t0, t1, scheme),
+            };
+            ((m, w), s.unwrap())
         })
         .collect();
     let mut out = serde_json::Map::new();
@@ -193,7 +209,8 @@ fn paths_replay() {
                 continue;
             }
             total.add(&s.counts);
-            per.push(serde_json::json!({"window": w, "path": windows[*w].0, "t0": windows[*w].1, "readings": s.readings.iter().map(reading_json).collect::<Vec<_>>()}));
+            per.push(serde_json::json!({"window": w, "path": windows[*w].0, "t0": windows[*w].1, "t1": windows[*w].2, "origin": origins[m][*w],
+                "readings": s.readings.iter().map(reading_json).collect::<Vec<_>>(), "state": s.state.iter().map(|z| [z.re, z.im]).collect::<Vec<_>>()}));
         }
         let (blocks, pairs) = forms[m].blocks();
         eprintln!(
@@ -206,7 +223,7 @@ fn paths_replay() {
     }
     // The pairs' direct errors (`compare`): PATHS_PAIRS "a-b,..." (candidate − reference), per start time of the
     // windows over the paths starting there, the windows PATHS_EDGES (µs from the start, increasing).
-    if let Ok(pairs) = std::env::var("PATHS_PAIRS") {
+    if let Some(pairs) = std::env::var("PATHS_PAIRS").ok().filter(|p| p.contains('-') && p.len() > 1) {
         let edges: Vec<f64> = var("PATHS_EDGES").split(',').map(|x| x.parse().unwrap()).collect();
         let mut starts: Vec<f64> = windows.iter().map(|w| w.1).collect();
         starts.sort_by(f64::total_cmp);
@@ -314,18 +331,11 @@ fn paths_pilot() {
     let mem = memory(forms.iter().min_by_key(|f| f.dim).unwrap(), at, [0.0; 3], 0.0).unwrap();
     let length = mem.length(end);
     let step = walks[0].ends[1][0] - walks[0].ends[0][0];
-    let mut edges = vec![0.0];
-    let mut e = mem.time;
-    while e > 4.0 * step {
-        e *= 0.5;
-    }
-    while e < length {
-        edges.push(e);
-        e *= 2.0;
-    }
-    edges.push(length);
-    let windows: Vec<(f64, f64)> = edges.windows(2).map(|x| (x[0], x[1])).collect();
-    eprintln!("{scene}: solved in {solved:.1} s; τ_mem {:.3} µs (the smallest model's), L {length:.1} µs; windows {windows:?}", mem.time);
+    let windows = super::windows(length, mem.time, step);
+    assert!(windows[0].0 == 0.0 && windows.last().unwrap().1 == length && windows.windows(2).all(|w| w[0].1 == w[1].0), "the windows tile [0, L]");
+    let taken: Vec<Option<usize>> = request.times_us.iter().map(|&t| window_of(&windows, t)).collect();
+    assert!(request.times_us.iter().zip(&taken).all(|(&t, w)| w.is_some() == (t > 0.0)), "every output after t = 0 takes a window");
+    eprintln!("{scene}: solved in {solved:.1} s; τ_mem {:.3} µs (the smallest model's), L {length:.1} µs; windows {windows:?}; the outputs' windows {taken:?}", mem.time);
     let candidates: Vec<&Form> = forms[1..].iter().collect();
     let clock = std::time::Instant::now();
     let errors = path_errors(&forms[0], &candidates, &walks, &|w: &Walk| w.start.clone(), 0.0, length, &windows, Scheme::sparse(nodes)).unwrap();
@@ -382,4 +392,27 @@ fn paths_cost() {
             form.n, form.dim, c.seconds() / us, c.node_seconds / us, c.propagation_seconds / us, c.readout_seconds / us, c.nodes as f64 / us, c.segments as f64 / us, c.exponentials as f64 / us, c.products as f64 / us, c.readouts as f64 / us, c.readout_calls as f64 / us, 1e6 * c.propagation_seconds / c.products as f64
         );
     }
+}
+
+/// The scheme's check (`check`; module documentation, # The segments): PATHS_MODELS "candidate,reference" on path
+/// PATHS_PATH of PATHS_FILE over [PATHS_FROM, PATHS_TO] at `Scheme::sparse(PATHS_NODES)` against its halves; the
+/// largest change of the difference's row, rate and force; and that a turn past 2π is refused.
+#[test]
+#[ignore]
+fn paths_check() {
+    let scene = var("PATHS_SCENE");
+    let specs: Vec<String> = var("PATHS_MODELS").split(',').map(String::from).collect();
+    let walks = walks_of(&var("PATHS_FILE"), 7);
+    let path: usize = var("PATHS_PATH").parse().unwrap();
+    let (from, to): (f64, f64) = (var("PATHS_FROM").parse().unwrap(), var("PATHS_TO").parse().unwrap());
+    let nodes: usize = var("PATHS_NODES").parse().unwrap();
+    let request = request_of(&scene);
+    let runs = models(&request, &specs);
+    let at = centre(&runs[0], &request);
+    let (c, r) = (Form::new(&runs[0], at), Form::new(&runs[1], at));
+    let start = [(7, C64::ONE)];
+    assert!(check(&c, &r, &walks[path], &start, from, to, Scheme::Sparse { nodes, turn: 4.0 * std::f64::consts::PI, read: 1 }).is_none(), "a turn past 2π is refused");
+    let clock = std::time::Instant::now();
+    let [row, rate, force] = check(&c, &r, &walks[path], &start, from, to, Scheme::sparse(nodes)).unwrap().unwrap();
+    eprintln!("{scene} {} − {}, path {path} on [{from}, {to}] µs, {nodes} nodes a step against {} and half the turn: the difference changes by row {row:.2e}, rate {rate:.2e} (of the rate), force {force:.2e} (of the rms force); {:.1} s", specs[0], specs[1], 2 * nodes, clock.elapsed().as_secs_f64());
 }
