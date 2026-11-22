@@ -508,7 +508,7 @@
 //!   - for the Brownian part the path's mean given the two moments the step takes of it: in free flight
 //!     E[W(s) | ΔW, ΔZ] = sΔW/τ − 6s(τ − s)ΔZ/τ³ is that flow exactly. What the two moments do not tell is the
 //!     bridge's rest, of the variance τσ(1 − 3σ), σ = (s/τ)(1 − s/τ), through Λ: none at the ends, τ/12 at the most.
-//!     A state read at a time takes it by a draw (`Segment::place`), a window's ∫κ² in the mean (`Segment::moments`).
+//!     A state read at a time takes it by a draw (`Segment::place`), a window's ∫κ² in the mean (`Segment::stretch`).
 //! One path for every time of the step; no other is kept. A read's error is the scheme's accumulated one at the
 //! step's start and this one term of its own step, which is not accumulated: second order.
 //!
@@ -544,6 +544,7 @@
 //! (step/tests.rs: an atom past its standing wave's resolution).
 
 use crate::decide::COMPLEX;
+use crate::estimate::{Local, SHAPE};
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
@@ -2261,7 +2262,7 @@ impl Groups {
 // ---------------------------------------------------------------------------------------------------------------------
 // The step's path and its moments.
 
-/// The fewest nodes of a path's moments (`Segment::moments`): in free flight under a force linear in the time κ is a
+/// The fewest nodes of a path's integrals (`Stretch`): in free flight under a force linear in the time κ is a
 /// quadratic and κ² a quartic of the time, which the rule of three nodes integrates exactly (to the degree 5).
 const MOMENTS: usize = 3;
 
@@ -2269,7 +2270,7 @@ const MOMENTS: usize = 3;
 /// step's kick spread over the step -- the force linear in the time that ends the step where the kick at the middle
 /// ends it --, from the step's start, or from one of the step's jumps with the momentum the jump leaves (`after`).
 /// Second order in τ at every time of the step, the step's own start and end at its two ends. T's window means are
-/// its integrals of κ (`Segment::moments`, SPEC §1.7), an output inside the step its value (`Segment::at`,
+/// its integrals of κ (`Segment::stretch`, SPEC §1.7), an output inside the step its value (`Segment::at`,
 /// `Segment::place`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment {
@@ -2336,36 +2337,172 @@ impl Segment {
         let sigma = linalg::larger(theta * (1.0 - theta), 0.0);
         sigma * (1.0 - 3.0 * sigma)
     }
-    /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the path's part of the step:
-    /// Gauss–Legendre to round-off on the path, κ² of bandwidth twice the flow's rate (`quadrature`). κ² in the mean
-    /// over the Brownian path: the path is the mean given the step's two moments, and the square of what they do not
-    /// tell is added, (Λ Λᵀ)_aa |τ| ∫σ(1 − 3σ)dt (`untold`; ∫₀^θ σ(1 − 3σ)dθ = θ²/2 − 4θ³/3 + 3θ⁴/2 − 3θ⁵/5, 1/15 over the
-    /// step) -- so that a cut of a step has the diffusion's input up to it, as the whole step has. (The residual is the
-    /// free flight's; the reference's rotation changes it by its (ωτ)² share, the third order.)
-    pub fn moments(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
-        let (lo, hi) = (linalg::smaller(from, to), linalg::larger(from, to));
-        let sign = if to >= from { 1.0 } else { -1.0 };
-        let (mut one, mut two) = ([0.0; 3], [0.0; 3]);
-        if !(hi > lo) {
-            return (one, two);
-        }
-        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, 0) {
-            let k = self.at(t).1;
-            for x in 0..3 {
-                one[x] += sign * w * k[x];
-                two[x] += sign * w * k[x] * k[x];
-            }
-        }
+    /// What the path's piece [from, to] (within its part of the step, from ≤ to) gives T's windows: its integrals over
+    /// every part [from, at] of it (`Stretch`), the flow evaluated once per node of the piece.
+    pub fn stretch(&self, from: f64, to: f64) -> Stretch<'_> {
+        Stretch::new(self, from, to)
+    }
+    /// What the step's two moments do not tell of the Brownian path, integrated over [from, to] within the step (from ≤
+    /// to), over |τ| (`untold`; ∫₀^θ σ(1 − 3σ)dθ = θ²/2 − 4θ³/3 + 3θ⁴/2 − 3θ⁵/5, 1/15 over the step).
+    fn untold_over(&self, from: f64, to: f64) -> f64 {
         let (start, tau) = self.step;
         let integral = |time: f64| {
             let theta = (time - start) / tau;
             theta * theta * (0.5 + theta * (-4.0 / 3.0 + theta * (1.5 - 0.6 * theta)))
         };
-        let untold = sign * tau * tau * (integral(hi) - integral(lo)).abs();
-        for x in 0..3 {
-            two[x] += self.spread[x].iter().map(|l| l * l).sum::<f64>() * untold;
+        tau * tau * (integral(to) - integral(from)).abs()
+    }
+}
+
+/// The integrals of a stretch of the path (`Stretch::to`): per lab axis ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs), κ² in
+/// the mean over the Brownian path -- the path is the mean given the step's two moments, and the square of what they do
+/// not tell is added, (Λ Λᵀ)_aa |τ| ∫σ(1 − 3σ)dt (`Segment::untold`), so that a cut of a step has the diffusion's input up
+/// to it, as the whole step has (the residual is the free flight's; the reference's rotation changes it by its (ωτ)²
+/// share, the third order) --; and the moments for the windows' shapes (estimate.rs `Local`), of κ alone: the path's
+/// mean, what the step's moments do not tell of the Brownian path has no mean.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Integrals {
+    pub one: [f64; 3],
+    pub two: [f64; 3],
+    pub local: Local,
+}
+impl Integrals {
+    /// Nothing integrated, the shapes' moments about the time `centre`.
+    pub fn none(centre: f64) -> Integrals {
+        Integrals { one: [0.0; 3], two: [0.0; 3], local: Local { centre, ..Local::NONE } }
+    }
+    /// The sums over nodes (t, w, κ) -- each its time, its weight and κ there --, the shapes' moments about `centre`.
+    pub fn of(centre: f64, nodes: impl IntoIterator<Item = (f64, f64, [f64; 3])>) -> Integrals {
+        let mut sums = Integrals::none(centre);
+        for (t, w, kappa) in nodes {
+            sums.add(t, w, kappa);
         }
-        (one, two)
+        sums
+    }
+    fn add(&mut self, t: f64, w: f64, kappa: [f64; 3]) {
+        let d = t - self.local.centre;
+        for x in 0..3 {
+            let mut power = w * kappa[x];
+            self.one[x] += power;
+            self.two[x] += power * kappa[x];
+            for m in self.local.moments[x].iter_mut() {
+                *m += power;
+                power *= d;
+            }
+        }
+    }
+    fn plus(&self, o: &Integrals) -> Integrals {
+        let mut sum = *self;
+        for x in 0..3 {
+            sum.one[x] += o.one[x];
+            sum.two[x] += o.two[x];
+            for (m, n) in sum.local.moments[x].iter_mut().zip(&o.local.moments[x]) {
+                *m += n;
+            }
+        }
+        sum
+    }
+}
+
+/// The nodes of one of a stretch's panels of the width w (`Stretch`), κ of the flow's bandwidth ν: the most of three
+/// rules, each to the round-off (`fewest`, `resolved`) -- κ² (the bandwidth 2ν), κ times a polynomial of the degree
+/// `SHAPE` (the shapes' moments; at least `MOMENTS` + ⌈SHAPE/2⌉ nodes, the degree of a quadratic κ times the power
+/// whatever the bandwidth), and the interpolant through κ at the nodes, which is κ to the round-off (a panel's part).
+fn stretched(nu: f64, width: f64) -> usize {
+    let shapes = fewest(nu, width, MOMENTS + SHAPE.div_ceil(2), SHAPE);
+    fewest(2.0 * nu, width, MOMENTS, 0).max(shapes).max(resolved(nu, width, MOMENTS, 0, true))
+}
+
+/// A piece [from, to] of a step's path as T's windows read it (solve.rs `Windows`): its integrals over every part
+/// [from, at] (`to`), the flow evaluated once per node of the piece, whatever the windows' ends inside it. Its panels
+/// are the fewest nodes in all (`arranged`) of rules that each integrate to the round-off κ², κ times every power of the
+/// time to the degree `SHAPE`, and whose polynomial through κ at the nodes is κ to the round-off (`stretched`). A part
+/// ends inside a panel: the panels before it are their sums, the panel's part the same rule over it on that polynomial
+/// (barycentric on the Gauss–Legendre nodes, its weights (−1)^j √((1 − x_j²) w_j); exact to round-off: it is κ's degree
+/// the rule integrates, not the interpolant's). The shapes' moments are about the piece's middle.
+pub struct Stretch<'a> {
+    segment: &'a Segment,
+    from: f64,
+    width: f64,
+    rule: std::rc::Rc<Rule>,
+    barycentric: Vec<f64>,
+    kappa: Vec<[f64; 3]>,
+    /// The integrals over the first p panels, p = 0…panels.
+    sums: Vec<Integrals>,
+}
+impl<'a> Stretch<'a> {
+    /// The piece on the fewest nodes in all (`arranged`), none where it has no length.
+    fn new(segment: &'a Segment, from: f64, to: f64) -> Stretch<'a> {
+        let (length, nu) = (to - from, segment.flow.rate());
+        let panels = if length > 0.0 { arranged(length, |w| stretched(nu, w), |m| m as f64, || false).0 } else { 0 };
+        Stretch::on(segment, from, to, panels)
+    }
+    /// The piece on `panels` equal panels, each of the nodes its width asks (`stretched`).
+    fn on(segment: &'a Segment, from: f64, to: f64, panels: usize) -> Stretch<'a> {
+        let (centre, length) = (0.5 * (from + to), to - from);
+        let n = if panels > 0 { stretched(segment.flow.rate(), length / panels as f64) } else { MOMENTS };
+        let rule = rule(n);
+        let barycentric = rule.nodes.iter().zip(&rule.weights).enumerate().map(|(j, (x, w))| if j % 2 == 0 { 1.0 } else { -1.0 } * ((1.0 - x * x) * w).sqrt()).collect();
+        let width = if panels > 0 { length / panels as f64 } else { 0.0 };
+        let mut kappa = Vec::with_capacity(panels * n);
+        let mut sums = Vec::with_capacity(panels + 1);
+        sums.push(Integrals::none(centre));
+        for p in 0..panels {
+            let middle = from + (p as f64 + 0.5) * width;
+            let mut panel = Integrals::none(centre);
+            for (x, weight) in rule.nodes.iter().zip(&rule.weights) {
+                let t = middle + 0.5 * width * x;
+                let k = segment.at(t).1;
+                kappa.push(k);
+                panel.add(t, 0.5 * width * weight, k);
+            }
+            sums.push(sums[p].plus(&panel));
+        }
+        Stretch { segment, from, width, rule, barycentric, kappa, sums }
+    }
+    /// The integrals over [from, at] (`Integrals`), `at` within the piece.
+    pub fn to(&self, at: f64) -> Integrals {
+        let panels = self.sums.len() - 1;
+        let mut sums = if panels == 0 || !(at > self.from) {
+            self.sums[0]
+        } else {
+            let p = (((at - self.from) / self.width).floor() as usize).min(panels);
+            let start = self.from + p as f64 * self.width;
+            if p == panels || !(at > start) {
+                self.sums[p]
+            } else {
+                // The panel's part [start, at] by the rule over it, κ there the panel's polynomial.
+                let n = self.rule.nodes.len();
+                let values = &self.kappa[p * n..(p + 1) * n];
+                let (middle, half) = (start + 0.5 * self.width, 0.5 * self.width);
+                let mut part = Integrals::none(self.sums[0].local.centre);
+                for (x, weight) in self.rule.nodes.iter().zip(&self.rule.weights) {
+                    let t = 0.5 * (start + at) + 0.5 * (at - start) * x;
+                    part.add(t, 0.5 * (at - start) * weight, self.interpolate(values, (t - middle) / half));
+                }
+                self.sums[p].plus(&part)
+            }
+        };
+        let untold = self.segment.untold_over(self.from, linalg::larger(at, self.from));
+        for x in 0..3 {
+            sums.two[x] += self.segment.spread[x].iter().map(|l| l * l).sum::<f64>() * untold;
+        }
+        sums
+    }
+    /// The polynomial through `values` at the rule's nodes at x (barycentric, the second form; a node's own value at it).
+    fn interpolate(&self, values: &[[f64; 3]], x: f64) -> [f64; 3] {
+        let (mut top, mut bottom) = ([0.0; 3], 0.0);
+        for ((node, lambda), value) in self.rule.nodes.iter().zip(&self.barycentric).zip(values) {
+            if x == *node {
+                return *value;
+            }
+            let c = lambda / (x - node);
+            bottom += c;
+            for a in 0..3 {
+                top[a] += c * value[a];
+            }
+        }
+        top.map(|t| t / bottom)
     }
 }
 

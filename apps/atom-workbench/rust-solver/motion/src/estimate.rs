@@ -7,10 +7,13 @@
 //! - the loss L_k = E[1 − A_k], never decreasing since A_k is not;
 //! - each row as shown P_{s,k} = E[A_k ρ_s(t_k)] (ρ the readout; the app shows p(1 − L) = P), and the held atoms'
 //!   populations p_{s,k} = P_{s,k}/(1 − L_k) (the contract's `populations`);
-//! - per lab axis a the temperature T_a = (ħ²/m k_B) Var(κ_a), the variance over the held atoms and over the times of the
-//!   window about t_k (`half_window`): E[A ⟨κ_a²⟩]/E[A] − (E[A ⟨κ_a⟩]/E[A])², ⟨·⟩ the atom's mean over the window (over
-//!   its held part when it is lost within it). Over a whole period of a harmonic axis the window takes the oscillation's
-//!   phase out of ⟨κ_a²⟩, so the spread between atoms is that of their energies. Over less it does not, whatever the
+//! - per lab axis a the temperature T_a = (ħ²/m k_B) ⟨Var κ_a⟩, the held atoms' spread about the cloud's own motion:
+//!   at each time t′ of the window about t_k (`half_window`) the variance of κ_a over the held atoms about their mean
+//!   at t′, ⟨·⟩ its mean over the window (an atom's over its held part when it is lost within it) -- E[A⟨κ_a²⟩]/E[A]
+//!   less the window's mean of the cloud's mean κ_a squared (# The cloud's own motion). The cloud's motion -- a push, a
+//!   sloshing, a fall -- is no temperature: the spread about it is. Over a whole period of a harmonic axis the window
+//!   takes each atom's oscillation's phase out of ⟨κ_a²⟩, so the spread between atoms is that of their energies about
+//!   the cloud's. Over less it does not, whatever the
 //!   outputs' spacing asks: an atom's κ_a² is E_a(1 + cos 2θ)/(ħ²/m) at its phase θ, the window's mean of it
 //!   E_a(1 + sinc(ωW) cos 2θ̄)/(ħ²/m) over a width W, and N atoms' phases do not cancel -- the estimate breathes at 2ω
 //!   about its mean by its statistics, an rms of |sinc ωW|/√N of T for a thermal axis (E_a exponential), while its
@@ -18,14 +21,69 @@
 //!   for the same error at W → 0 (measured, R1's tweezer at 1 µs outputs, four seeds: 7.9–8.7 % rms at 2ω on 200
 //!   atoms, 1.9–2.4 % on 3200, 0.3 % over whole periods; no part of it common to the seeds);
 //! - n̄_a = (ħ/m ω_a) E[A ⟨κ_a²⟩]/E[A] − ½ (over a period of a harmonic axis the kinetic energy is half the axis's energy,
-//!   E_a/ħω_a = n̄_a + ½) and the mean velocity (ħ/m) E[A ⟨κ_a⟩]/E[A].
+//!   E_a/ħω_a = n̄_a + ½) and the mean velocity (ħ/m) E[A ⟨κ_a⟩]/E[A]: means, not spreads -- the cloud's own motion is
+//!   in both (a coherent sloshing is an occupation: a coherent state's n̄ is |α|²).
+//!
+//! # The cloud's own motion
+//! Of the window's mean square the cloud's motion is a part: with κ̄(t′) = E[A κ(t′)]/E[A] the held atoms' mean at t′,
+//!   E[A⟨κ²⟩]/E[A] − (E[A⟨κ⟩]/E[A])² = ⟨E[A κ²]/E[A] − κ̄²⟩ + [⟨κ̄²⟩ − ⟨κ̄⟩²]
+//! (expectations and window means are both linear, and commute): the spread about the cloud's motion and the window's
+//! variance of that motion. The second is no spread: a cloud pushed at a = ħkΓρ_ee/m over the window [0, 2t] has it
+//! (m/k_B)a²t²/3 whatever its spread, and over a whole period a cloud sloshing at an amplitude v has (m/k_B)v²/2
+//! (SAT_03, a resonant σ⁺ beam along a heavy atom's tweezer: read until 2026-11-22 as T_z 1.0 → 16.0 µK in 20 µs, where
+//! the window's ramp of the push is 15 µK; satheat.status.md for the engine before, 8.7 of 10.0 µK). T is the first part
+//! alone. κ̄ is common to every atom, its window's variance a square of a sum over the atoms -- no atom's own sum, and the
+//! trajectories' times are cut by their own jumps, so no common time grid sums them -- so it is taken component by
+//! component on the window's Legendre polynomials, each component's square as the mean's square is (# Estimators):
+//! with x = (t′ − t)/h over a window [t − h, t + h] and an atom's c_ℓ = ⟨κ P_ℓ(x)⟩ (c₀ = ⟨κ⟩), the window's mean square of
+//! any path f is Σ_ℓ (2ℓ + 1)⟨f P_ℓ⟩² (Parseval on [−1, 1], ⟨P_ℓ²⟩ = 1/(2ℓ + 1)), so ⟨κ̄²⟩ = Σ_ℓ (2ℓ + 1) c̄_ℓ²,
+//! c̄_ℓ = E[A c_ℓ]/E[A], and
+//!   T ∝ E[A⟨κ²⟩]/E[A] − Σ_{ℓ ≤ p} (2ℓ + 1) c̄_ℓ²,
+//! the ℓ = 0 term the mean's square of before; per atom and axis 13 numbers more, summed over the atoms as κ is.
+//!
+//! Its bias is the cloud's motion beyond the degree p, Σ_{ℓ > p} (2ℓ + 1) c̄_ℓ² ≥ 0, which holds no atom's spread. p is
+//! derived, not chosen: along a lab axis the cloud moves as the trap moves it along that axis and as the light drives
+//! it, smoothly over the window -- a push, a fall and a drift are polynomials of a low degree, the trap's own sloshing a
+//! sinusoid of the frequency ω = π/G at the most, G the axis's longest half window (ω the axis's own frequency where the
+//! run spans its half period, more where it is shorter). Over a window of half width h such a sinusoid is e^{iνx} at
+//! ν = ωh, its Legendre coefficients (2ℓ + 1) i^ℓ j_ℓ(ν), and p is the least degree at which it leaves no more than the
+//! unit round-off of its mean square, Σ_{ℓ > p} (2ℓ + 1) j_ℓ(ν)² ≤ u (`shape_degree`, through |j_ℓ(ν)| ≤ ν^ℓ/(2ℓ + 1)!!):
+//! 13 over a whole window (ν = π; the exact tail gives 13 too), fewer as the window narrows -- cut at t = 0, or at the
+//! run's end for the analysis times --: ν = π/2 asks 10. The inputs are two: the machine's round-off and the axis's own
+//! frequency, which defines T's window itself. It is not taken from the data: each degree's U-statistic is unbiased for
+//! its (E c_ℓ)², so a degree more takes out bias and adds little variance, where a cut chosen on the data would bias.
+//! The narrower windows' fewer degrees are needed as well: the conversion from the origin's powers to the window's
+//! polynomials (below) amplifies the moments' rounding with the degree and as the window narrows against its origin's
+//! span, and a degree the window does not need would only spend it.
+//!
+//! What it leaves (its known limit): a motion faster than ω is taken out all but its tail -- at 2ω and 3ω over a whole
+//! window all but 4.8·10⁻⁹ and 8.1·10⁻⁵ of its mean square (an anharmonic sloshing's harmonics); and where the trap's
+//! principal axes are not the lab axes, a faster mode's projection on the axis, e_ia² of its sloshing's mean square, is
+//! left in part -- at most 0.19 % of that mean square for PGC3D's 100 and 19 kHz at any tilt (0.11 % at 3°), at most
+//! 2.1 % for any ratio of the frequencies (near a 10° tilt); the reading of before left all of it. To take all of it
+//! out asks p ≈ 35, where the origins' powers convert with a rounding too large to use: a better conditioned basis of
+//! the moments, which nothing has asked for.
+//!
+//! An atom's c_ℓ come from its running moments against powers of the time about a grid of origins (`Shapes`, read at
+//! the window's ends as its κ and κ² are; solve.rs `Windows`) and Bonnet's recurrence (`shape`): the moments' rounding
+//! times the conversion's Σ_j |T_ℓj| (solve.rs tests: the shapes within a tenth of that bound, and T with a shared path
+//! against T without it within 10⁻¹¹ of the paths' scale, the atoms' spread and the path's mean square). An atom whose
+//! window its trajectory's end cuts (lost, failed or stopped inside it) is read on its held part's own polynomials: its
+//! components lie on another basis than the other atoms', so the cloud's motion is taken out of it in part only -- a
+//! bias of at most its share of the held atoms times that motion's variance.
 //!
 //! # Estimators
 //! Every trajectory runs to the last output and through its window, so an output's estimate is a sample mean over all
 //! the trajectories: unbiased, for a given number of them, for the loss and the rows as shown, and, given the number n
 //! of atoms held, for the held atoms' means. T's plug-in variance ȳ − x̄² (y = ⟨κ²⟩, x = ⟨κ⟩ over the held atoms) is low
 //! by Var(x)/n, since E[x̄²] = μ_x² + Var(x)/n; with x̄² taken as its U-statistic ((Σx)² − Σx²)/(n(n − 1)) = x̄² − s²_x/n
-//! the estimate is unbiased for n ≥ 2, and no less than the held atoms' mean of ⟨κ²⟩ − ⟨κ⟩² ≥ 0.
+//! the estimate is unbiased for n ≥ 2. Each of the cloud's Legendre components is taken out as its own U-statistic the
+//! same way, ((Σc_ℓ)² − Σc_ℓ²)/(n(n − 1)), unbiased for c̄_ℓ² (# The cloud's own motion):
+//!   T ∝ (1/n)Σ⟨κ²⟩ − Σ_{ℓ ≤ p} (2ℓ + 1) ((Σc_ℓ)² − Σc_ℓ²)/(n(n − 1))
+//!     = (1/(n − 1)) Σ_{ℓ ≤ p} (2ℓ + 1) Σ_i (c_ℓ,i − c̄_ℓ)² + (1/n) Σ_i [⟨κ_i²⟩ − Σ_{ℓ ≤ p} (2ℓ + 1) c_ℓ,i²]
+//! (c̄_ℓ here the atoms' mean): the atoms' spread about the cloud on the window's polynomials, and each atom's own
+//! motion beyond them -- both no less than zero (Bessel), so T ≥ 0. With no shape (a window of no length: t = 0) it is
+//! the estimate of before to the bit (the correction is a zero subtracted).
 //!
 //! # What is counted
 //! A trajectory counts at an output where it has an outcome there under the run's model: its atom is held, or was lost
@@ -136,9 +194,10 @@ use crate::analysis::Reading;
 use crate::decide::{richardson, Read};
 use crate::request::STATES;
 use crate::special::upper;
-use crate::units::{CONFIDENCE, KT_PER_UK, ORDER, SUB_DOPPLER_RECOILS, TEMPERATURE_TARGET};
+use crate::units::{CONFIDENCE, KT_PER_UK, ORDER, SUB_DOPPLER_RECOILS, TEMPERATURE_TARGET, UNIT_ROUNDOFF};
 use rayon::prelude::*;
 use std::borrow::Borrow;
+use std::collections::VecDeque;
 use std::f64::consts::{PI, TAU};
 
 /// The far end of Wilson's score interval at confidence z for a count n in N independent draws,
@@ -188,6 +247,173 @@ pub fn tail_among(looks: f64) -> f64 {
 /// (solve.rs `Plan`).
 pub fn half_window(frequency: f64, t: f64) -> f64 {
     crate::linalg::smaller(0.5 * TAU / frequency, t)
+}
+
+/// The highest degree of a window's shape (module documentation, # The cloud's own motion): `shape_degree` at the
+/// phase π -- a whole period of the window's highest frequency over its longest window (tested).
+pub const SHAPE: usize = 13;
+
+/// A held atom's shape where it has none: an instant (a window of no length).
+pub const NO_SHAPE: [[f64; SHAPE]; 3] = [[0.; SHAPE]; 3];
+
+/// The degree of a window's shape at the phase ν = ωh, ω the highest frequency the window resolves and h its half
+/// width (module documentation, # The cloud's own motion): the least p ≥ 1 at which the Legendre series of e^{iνx} on
+/// [−1, 1], Σ_ℓ (2ℓ + 1) i^ℓ j_ℓ(ν) P_ℓ(x), leaves no more than the unit round-off of its mean square,
+/// Σ_{ℓ > p} (2ℓ + 1) j_ℓ(ν)² ≤ u -- through |j_ℓ(ν)| ≤ ν^ℓ/(2ℓ + 1)!! (Poisson's integral of j_ℓ with |cos| ≤ 1),
+/// whose terms past ℓ > ν fall faster than geometrically; at most `SHAPE`.
+pub fn shape_degree(phase: f64) -> usize {
+    let (mut bound, mut terms) = (1., [0.; SHAPE + 16]);
+    for (l, term) in terms.iter_mut().enumerate() {
+        if l > 0 {
+            bound *= phase / (2 * l + 1) as f64;
+        }
+        *term = (2 * l + 1) as f64 * bound * bound;
+    }
+    // The tails Σ_{ℓ > p}, from the far end; the least p whose tail is within the round-off.
+    let (mut tail, mut degree) = (terms[SHAPE + 1..].iter().rev().sum::<f64>(), SHAPE);
+    for p in (1..SHAPE).rev() {
+        tail += terms[p + 1];
+        if tail > UNIT_ROUNDOFF {
+            break;
+        }
+        degree = p;
+    }
+    degree
+}
+
+/// The binomial coefficients C(j, k), j, k ≤ `SHAPE` (`Shapes::shift`).
+const BINOMIAL: [[f64; SHAPE + 1]; SHAPE + 1] = {
+    let mut c = [[0.; SHAPE + 1]; SHAPE + 1];
+    let mut j = 0;
+    while j <= SHAPE {
+        c[j][0] = 1.;
+        let mut k = 1;
+        while k <= j {
+            c[j][k] = c[j - 1][k - 1] + c[j - 1][k];
+            k += 1;
+        }
+        j += 1;
+    }
+    c
+};
+
+/// A stretch of a trajectory's path as the windows' shapes take it (`Shapes`; step.rs `Integrals`): per lab axis
+/// μ_k = ∫κ_a (t − c)^k dt, k ≤ `SHAPE`, about a time c of it (1/µm·µs^{k+1}).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Local {
+    pub centre: f64,
+    pub moments: [[f64; SHAPE + 1]; 3],
+}
+impl Local {
+    /// No stretch.
+    pub const NONE: Local = Local { centre: 0., moments: [[0.; SHAPE + 1]; 3] };
+}
+
+/// One trajectory's running moments on one lab axis for its windows' shapes (module documentation, # The cloud's own
+/// motion): on the grid of origins o_q = qG, G the axis's longest half window, each origin's R_j = ∫κ_a y^j dt from
+/// where the trajectory met it, y = (t − o_q)/(3G/2) − 1, j ≤ `SHAPE`. A window whose lower end lies in [o_q, o_q + G)
+/// ends before o_q + 3G (its half width is G at the most), so its moments are its origin's difference between its two
+/// ends -- read there as its κ and κ² are (solve.rs `Windows`) --, and an origin is dropped at o_q + 3G: three at a
+/// time, whatever the windows' overlap, and every y within [−1, 1] but for the piece an origin is met in.
+#[derive(Clone, Debug)]
+pub struct Shapes {
+    axis: usize,
+    spacing: f64,
+    origins: VecDeque<(i64, [f64; SHAPE + 1])>,
+}
+impl Shapes {
+    /// The moments of the lab axis `axis`, its longest half window `spacing` (µs, positive).
+    pub fn new(axis: usize, spacing: f64) -> Shapes {
+        Shapes { axis, spacing, origins: VecDeque::new() }
+    }
+    /// The grid's spacing G (µs).
+    pub fn spacing(&self) -> f64 {
+        self.spacing
+    }
+    /// The origin of a window whose lower end is at `lower`.
+    pub fn origin(&self, lower: f64) -> i64 {
+        crate::linalg::larger((lower / self.spacing).floor(), 0.) as i64
+    }
+    /// The origins over the path's piece [from, to]: those no window ends past dropped, those whose cells it reaches
+    /// met at `from`.
+    pub fn reach(&mut self, from: f64, to: f64) {
+        while self.origins.front().is_some_and(|o| (o.0 + 3) as f64 * self.spacing <= from) {
+            self.origins.pop_front();
+        }
+        let first = self.origins.back().map_or_else(|| self.origin(from), |o| o.0 + 1);
+        for q in first..=self.origin(to) {
+            self.origins.push_back((q, [0.; SHAPE + 1]));
+        }
+    }
+    /// Origin q's moments at the end of a stretch that starts where the moments are (step.rs `Stretch::to` from a
+    /// piece's start; `Local::NONE` where it is the moments as they stand); none where the origin is not met.
+    pub fn at(&self, q: i64, stretch: &Local) -> Option<[f64; SHAPE + 1]> {
+        self.origins.iter().find(|o| o.0 == q).map(|(q, moments)| {
+            let mut m = *moments;
+            self.shift(*q, stretch.centre, &self.scaled(stretch), &mut m);
+            m
+        })
+    }
+    /// The path's piece added to every origin met (its whole stretch).
+    pub fn add(&mut self, stretch: &Local) {
+        let z = self.scaled(stretch);
+        let mut origins = std::mem::take(&mut self.origins);
+        for (q, moments) in origins.iter_mut() {
+            self.shift(*q, stretch.centre, &z, moments);
+        }
+        self.origins = origins;
+    }
+    /// A stretch's moments on the axis in the origins' unit of time s = 3G/2: μ_k/s^k.
+    fn scaled(&self, stretch: &Local) -> [f64; SHAPE + 1] {
+        let (inverse, mut over) = (1. / (1.5 * self.spacing), 1.);
+        std::array::from_fn(|k| {
+            let z = stretch.moments[self.axis][k] * over;
+            over *= inverse;
+            z
+        })
+    }
+    /// A stretch's moments about c (`scaled`: z_k = μ_k/s^k) added to origin q's, in its powers: with
+    /// y = (t − o_q)/s − 1 = b + (t − c)/s, b = (c − o_q)/s − 1, ∫κ y^j dt = Σ_{k ≤ j} C(j, k) b^{j−k} z_k (the binomial
+    /// theorem; its terms no larger in all than (|b| + |t − c|/s)^j ∫|κ| dt, as the powers summed node by node would be)
+    /// -- one stretch's moments for every origin and axis, of one power of the time per node.
+    fn shift(&self, q: i64, centre: f64, z: &[f64; SHAPE + 1], moments: &mut [f64; SHAPE + 1]) {
+        let b = (centre - q as f64 * self.spacing) / (1.5 * self.spacing) - 1.;
+        let mut powers = [1.; SHAPE + 1];
+        for k in 1..=SHAPE {
+            powers[k] = powers[k - 1] * b;
+        }
+        for (j, m) in moments.iter_mut().enumerate() {
+            *m += (0..=j).map(|k| BINOMIAL[j][k] * powers[j - k] * z[k]).sum::<f64>();
+        }
+    }
+}
+
+/// A window's shape (module documentation, # The cloud's own motion): its means of κ P_ℓ(x), x = (t − c)/h about its
+/// centre c and half width h of [lower, upper], ℓ = 1…p (p = `shape_degree` at πh/G), from its origin q's moments at
+/// its two ends (`Shapes`) -- P_ℓ(αy + β) = Σ_j T_ℓj y^j with α = 3G/2h, β = (o_q + 3G/2 − c)/h by Bonnet's recurrence
+/// on the coefficients, c_ℓ = Σ_j T_ℓj ΔR_j/2h --; zero past p, all zero for a window of no length.
+pub fn shape(spacing: f64, q: i64, lower: f64, upper: f64, low: &[f64; SHAPE + 1], high: &[f64; SHAPE + 1]) -> [f64; SHAPE] {
+    let mut c = [0.; SHAPE];
+    let h = 0.5 * (upper - lower);
+    if !(h > 0.) {
+        return c;
+    }
+    let s = 1.5 * spacing;
+    let (alpha, beta) = (s / h, (q as f64 * spacing + s - (lower + h)) / h);
+    let delta: [f64; SHAPE + 1] = std::array::from_fn(|j| high[j] - low[j]);
+    let (mut before, mut now) = ([0.; SHAPE + 2], [0.; SHAPE + 2]);
+    (before[0], now[0], now[1]) = (1., beta, alpha);
+    for l in 1..=shape_degree(PI * h / spacing) {
+        c[l - 1] = (0..=l).map(|j| now[j] * delta[j]).sum::<f64>() / (2. * h);
+        // P_{ℓ+1} = ((2ℓ + 1)(αy + β)P_ℓ − ℓP_{ℓ−1})/(ℓ + 1).
+        let mut next = [0.; SHAPE + 2];
+        for j in 0..=l + 1 {
+            let times = beta * now[j] + if j > 0 { alpha * now[j - 1] } else { 0. };
+            next[j] = ((2 * l + 1) as f64 * times - l as f64 * before[j]) / (l + 1) as f64;
+        }
+        (before, now) = (now, next);
+    }
+    c
 }
 
 /// n̄ of a lab axis of frequency ω > 0 (rad/µs; module documentation): (ħ/m)Σ⟨κ²⟩ (rad/µs) summed over `atoms` atoms, over
@@ -294,15 +520,17 @@ fn student_tail(q: f64, nu: u64) -> f64 {
     1. - a
 }
 
-/// An atom held at an output: its readout's populations (SPEC §1.7) and per lab axis its means of κ and κ² over the
-/// output's window (1/µm, 1/µm²); and whether it is `unresolved` -- a step of its trajectory, at the output or before
-/// it, scattered beyond every state of the atom, and it stopped there (step.rs `Trajectory::unresolved`; solve.rs,
-/// # The unresolved atoms).
+/// An atom held at an output: its readout's populations (SPEC §1.7), per lab axis its means of κ and κ² over the
+/// output's window (1/µm, 1/µm²) and its window's shape, its means of κ P_ℓ, ℓ = 1…`SHAPE` (`shape`, module
+/// documentation, # The cloud's own motion; 1/µm); and whether it is `unresolved` -- a step of its trajectory, at the
+/// output or before it, scattered beyond every state of the atom, and it stopped there (step.rs
+/// `Trajectory::unresolved`; solve.rs, # The unresolved atoms).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
     pub kappa: [f64; 3],
     pub kappa2: [f64; 3],
+    pub shape: [[f64; SHAPE]; 3],
     pub unresolved: bool,
 }
 
@@ -324,8 +552,8 @@ pub enum Fate {
 }
 
 /// One output's sums over a group's trajectories: the number counted and of the others (`Fate::Failed`), the atoms held, and over the held
-/// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis; of the held atoms
-/// the number unresolved (`Held`).
+/// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis, and of the windows'
+/// shapes Σc_ℓ and Σ_ℓ (2ℓ + 1)Σc_ℓ² (# The cloud's own motion); of the held atoms the number unresolved (`Held`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -337,11 +565,13 @@ pub struct Sums {
     pub kappa: [f64; 3],
     pub kappa_squared: [f64; 3],
     pub kappa2: [f64; 3],
+    pub shape: [[f64; SHAPE]; 3],
+    pub shape_squared: [f64; 3],
     pub unresolved: f64,
 }
 
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], unresolved: 0. };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, shape_squared: [0.; 3], unresolved: 0. };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         self.add_weighted(fate, 1.);
@@ -364,6 +594,10 @@ impl Sums {
                 self.kappa[a] += w * h.kappa[a];
                 self.kappa_squared[a] += w * h.kappa[a] * h.kappa[a];
                 self.kappa2[a] += w * h.kappa2[a];
+                for (s, c) in self.shape[a].iter_mut().zip(&h.shape[a]) {
+                    *s += w * c;
+                }
+                self.shape_squared[a] += w * weighed(&h.shape[a]);
             }
             if h.unresolved {
                 self.unresolved += w;
@@ -383,6 +617,10 @@ impl Sums {
             self.kappa[a] += sign * o.kappa[a];
             self.kappa_squared[a] += sign * o.kappa_squared[a];
             self.kappa2[a] += sign * o.kappa2[a];
+            for (s, c) in self.shape[a].iter_mut().zip(&o.shape[a]) {
+                *s += sign * c;
+            }
+            self.shape_squared[a] += sign * o.shape_squared[a];
         }
         self.unresolved += sign * o.unresolved;
     }
@@ -570,15 +808,24 @@ struct Moments {
     shown: Option<(f64, [f64; STATES])>,
     temperature: Option<[f64; 3]>,
 }
-/// T per lab axis (µK) of held-atom sums (module documentation, # Estimators); none below two atoms.
+/// T per lab axis (µK) of held-atom sums (module documentation, # Estimators): the held atoms' mean of ⟨κ²⟩ less the
+/// cloud's own path over the window, its mean and its shape, each component's square as its U-statistic -- the shape's
+/// at once, (Σ_ℓ (2ℓ + 1)(Σc_ℓ)² − Σ_ℓ (2ℓ + 1)Σc_ℓ²)/(n(n − 1)) (# The cloud's own motion); none below two atoms.
 fn temperature(s: &Sums, hbar_over_mass: f64) -> Option<[f64; 3]> {
     let n = s.held;
     (n >= 2.).then(|| {
         std::array::from_fn(|a| {
             let square = (s.kappa[a] * s.kappa[a] - s.kappa_squared[a]) / (n * (n - 1.));
-            (s.kappa2[a] / n - square) * hbar_over_mass / KT_PER_UK
+            let path = (weighed(&s.shape[a]) - s.shape_squared[a]) / (n * (n - 1.));
+            (s.kappa2[a] / n - square - path) * hbar_over_mass / KT_PER_UK
         })
     })
+}
+
+/// Σ_ℓ (2ℓ + 1)c_ℓ² over a shape's components, ℓ = 1…`SHAPE` (`Held::shape`): the window's mean square of its path on
+/// them (module documentation, # The cloud's own motion).
+fn weighed(shape: &[f64; SHAPE]) -> f64 {
+    shape.iter().enumerate().map(|(i, &c)| (2 * i + 3) as f64 * c * c).sum()
 }
 fn moments(s: &Sums, hbar_over_mass: f64) -> Moments {
     let n = s.trajectories;
@@ -1110,11 +1357,22 @@ mod tests {
         assert_eq!(half_window(w, 0.), 0.);
     }
 
+    /// The shapes' highest degree is a whole period's (`shape_degree` at π, # The cloud's own motion), a window of no
+    /// phase needs the first degree alone, half a period's phase asks 10, and the degree never falls as the phase grows.
+    #[test]
+    fn the_shape_s_highest_degree_is_a_whole_period_s() {
+        assert_eq!(shape_degree(PI), SHAPE);
+        assert_eq!(shape_degree(1e-9), 1);
+        assert_eq!(shape_degree(0.5 * PI), 10);
+        let degrees: Vec<usize> = (0..=100).map(|i| shape_degree(PI * i as f64 / 100.)).collect();
+        assert!(degrees.windows(2).all(|d| d[0] <= d[1]), "{degrees:?}");
+    }
+
     /// A held atom in `state` with ⟨κ⟩ = x, ⟨κ²⟩ = y on every axis.
     fn atom(state: usize, x: f64, y: f64) -> Held {
         let mut rows = [0.; STATES];
         rows[state] = 1.;
-        Held { rows, kappa: [x; 3], kappa2: [y; 3], unresolved: false }
+        Held { rows, kappa: [x; 3], kappa2: [y; 3], shape: NO_SHAPE, unresolved: false }
     }
     fn group(atoms: Vec<Option<Held>>) -> Group {
         let mut g = Group::new(1);

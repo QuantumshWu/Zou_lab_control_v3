@@ -1788,10 +1788,14 @@ fn sizes(errors: &[f64]) -> String {
 /// A step's path (`Segment`; step.rs, # The path between a step's ends) in a tilted quadratic trap with a stiff axis
 /// (ω τ = 1.26), a hyperbolic and a flat one, under a kick with every part: the force two unequal counter-propagating
 /// waves leave to the step, and their diffusion's part of a Brownian path, its increment and its first moment. The path
-/// begins at the step's start and ends at the step's end, to the rounding of the flow's sums. Its moments
-/// (`Segment::moments`) over cuts of the step -- before the middle, across it, after it, the whole -- are the dense
-/// trapezoids of its own κ and κ² (`Segment::at`) with, on κ², the diffusion's rate times the integral of what the
-/// step's two moments do not tell of the Brownian path (|τ|σ(1 − 3σ), τ²/15 over the step).
+/// begins at the step's start and ends at the step's end, to the rounding of the flow's sums. Its stretches
+/// (`Segment::stretch`) over pieces of the step -- before the middle, across it, after it, the whole --, read from the
+/// piece's start to a time inside a panel, to a panel's end and to the piece's end (`Stretch::to`), on the panels it
+/// takes and on three, are the dense trapezoids of the path's own κ and κ² (`Segment::at`) with, on κ², the
+/// diffusion's rate times the integral of what the step's two moments do not tell of the Brownian path
+/// (|τ|σ(1 − 3σ), τ²/15 over the step), and of κ times every power (t − c)^j, j ≤ `SHAPE`, about the piece's middle c.
+/// Two halves' integrals add up to the whole's. And the panel's polynomial (`Stretch::interpolate`) is the one through
+/// its nodes: a polynomial of the rule's degree less one, at points between them, to the rounding.
 #[test]
 fn a_step_s_path_goes_from_its_start_to_its_end_and_its_moments_are_its_integrals() {
     let (c, s) = (0.6_f64, 0.8_f64);
@@ -1815,27 +1819,55 @@ fn a_step_s_path_goes_from_its_start_to_its_end_and_its_moments_are_its_integral
     // The same step without the kick ends elsewhere: the path's end is the kicked step's.
     let unkicked = seg.flow.advance(seg.from, tau);
     assert!(relative(&unkicked.1, &step.end.kappa) > 1e-4, "the kick moves the end: {unkicked:?}");
-    for (from, to) in [(0.2, 0.9), (0.7, 1.6), (1.3, 1.95), (0.0, 2.0), (1.6, 0.7)] {
-        let (one, two) = seg.moments(from, to);
-        let n = 200_000;
-        let h = (to - from) / n as f64;
-        let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
-        for i in 0..=n {
-            let w = if i == 0 || i == n { 0.5 * h } else { h };
-            let time = from + i as f64 * h;
-            let kappa = seg.at(time).1;
-            let sigma = time / tau * (1.0 - time / tau);
-            for x in 0..3 {
-                a[x] += w * kappa[x];
-                b[x] += w * (kappa[x] * kappa[x] + scatter[x] * tau * sigma * (1.0 - 3.0 * sigma));
+    for (from, to) in [(0.2, 0.9), (0.7, 1.6), (1.3, 1.95), (0.0, 2.0)] {
+        let centre = 0.5 * (from + to);
+        let own = seg.stretch(from, to).sums.len() - 1;
+        for panels in [own, 3] {
+            let stretch = step::Stretch::on(seg, from, to, panels);
+            assert!(stretch.sums.len() == panels + 1 && panels >= 1, "[{from}, {to}] on {panels} panels");
+            let ends = [from + 0.37 * (to - from), from + (to - from) / panels as f64, to];
+            for at in ends {
+                let got = stretch.to(at);
+                let n = 200_000;
+                let h = (at - from) / n as f64;
+                let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
+                let mut powers = [[0.0; 3]; crate::estimate::SHAPE + 1];
+                for i in 0..=n {
+                    let w = if i == 0 || i == n { 0.5 * h } else { h };
+                    let time = from + i as f64 * h;
+                    let kappa = seg.at(time).1;
+                    let sigma = time / tau * (1.0 - time / tau);
+                    for x in 0..3 {
+                        a[x] += w * kappa[x];
+                        b[x] += w * (kappa[x] * kappa[x] + scatter[x] * tau * sigma * (1.0 - 3.0 * sigma));
+                    }
+                    for (j, p) in powers.iter_mut().enumerate() {
+                        for x in 0..3 {
+                            p[x] += w * kappa[x] * (time - centre).powi(j as i32);
+                        }
+                    }
+                }
+                assert!(relative(&got.one, &a) < 1e-8 && relative(&got.two, &b) < 1e-8, "[{from}, {at}] of [{from}, {to}] on {panels} panels: {:?} vs {a:?}, {:?} vs {b:?}", got.one, got.two);
+                for (j, p) in powers.iter().enumerate() {
+                    let sum: [f64; 3] = std::array::from_fn(|x| got.local.moments[x][j]);
+                    assert!(relative(&sum, p) < 1e-8, "[{from}, {at}] of [{from}, {to}] on {panels} panels, power {j}: {sum:?} vs {p:?}");
+                }
             }
         }
-        assert!(relative(&one, &a) < 1e-8 && relative(&two, &b) < 1e-8, "[{from}, {to}]: {one:?} vs {a:?}, {two:?} vs {b:?}");
     }
-    // The cuts' moments add up to the whole's.
-    let (lo, hi, whole) = (seg.moments(0.0, 0.5 * tau), seg.moments(0.5 * tau, tau), seg.moments(0.0, tau));
+    // Two halves' integrals add up to the whole's.
+    let (lo, hi, whole) = (seg.stretch(0.0, 0.5 * tau).to(0.5 * tau), seg.stretch(0.5 * tau, tau).to(tau), seg.stretch(0.0, tau).to(tau));
     for x in 0..3 {
-        assert!((lo.0[x] + hi.0[x] - whole.0[x]).abs() <= 1e-12 * whole.0[x].abs() && (lo.1[x] + hi.1[x] - whole.1[x]).abs() <= 1e-12 * whole.1[x], "axis {x}: {lo:?} and {hi:?} against {whole:?}");
+        assert!((lo.one[x] + hi.one[x] - whole.one[x]).abs() <= 1e-12 * whole.one[x].abs() && (lo.two[x] + hi.two[x] - whole.two[x]).abs() <= 1e-12 * whole.two[x], "axis {x}: {lo:?} and {hi:?} against {whole:?}");
+    }
+    // The panel's polynomial: through a polynomial of the degree n − 1 at the rule's nodes, read between them.
+    let stretch = seg.stretch(0.0, tau);
+    let n = stretch.rule.nodes.len();
+    let poly = |x: f64| -> [f64; 3] { std::array::from_fn(|a| (0..n).map(|j| ((j + a) as f64 * 0.37).sin() * x.powi(j as i32)).sum()) };
+    let values: Vec<[f64; 3]> = stretch.rule.nodes.iter().map(|&x| poly(x)).collect();
+    for x in [-0.999, -0.61, -0.05, 0.0, 0.33, 0.87, 1.0] {
+        let (got, want) = (stretch.interpolate(&values, x), poly(x));
+        assert!(relative(&got, &want) < 1e-12, "{n} nodes at {x}: {got:?} vs {want:?}");
     }
 }
 
