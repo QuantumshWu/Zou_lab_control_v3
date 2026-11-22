@@ -6779,6 +6779,119 @@ mod tests {
         now
     }
 
+    /// The cloud's own motion is no temperature (estimate.rs, # The cloud's own motion), whatever it is: 64 atoms in eight
+    /// groups on the windows of the test above (periods 0.7, 2.3 and 23 µs, outputs 1 µs apart, windows cut at t = 0
+    /// and whole), each its own oscillation κ_a = A cos(ω_a t + φ) with a kick of its own at every jump, and on top of
+    /// them a path every atom shares -- none, a push (a ramp of 0.6/µm per µs, a fall alike) and a sloshing at 0.86 ω_a
+    /// of amplitude 5/µm, the cloud's motion's window variance up to 70 times the atoms' spread. T and its jackknife
+    /// per axis and output read with the shared path are those without it within 1e-9 of the paths' scale (the atoms'
+    /// spread and the shared path's mean square over the window): the shapes take the path out but for the rounding of
+    /// their conversion (bounded in the test above). So is what the atoms whose state the run does not know carry of T:
+    /// every seventh atom unresolved, their share of the held atoms (estimate.rs `Estimate::unresolved`, booked on T as
+    /// the bound of that share moved: `Estimate::moved`) is the same with the shared path and without it. Read with no
+    /// shapes (the estimate of before) T moves with the path by its window variance and twice its window covariance with
+    /// the atoms' own mean path, Var_W(g) + 2Cov_W(g, ū) (the U-statistic's algebra), by a dense rule on the pieces within
+    /// 1e-9 of the scale -- what the shapes take out.
+    #[test]
+    fn the_cloud_s_own_motion_is_no_temperature() {
+        let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
+        let times: Vec<f64> = (0..31).map(|k| k as f64).collect();
+        let plan = Plan::new(&times, w);
+        let tau = 0.37;
+        let mut cuts = vec![0.];
+        for i in 0.. {
+            let (start, step_end) = (i as f64 * tau, crate::linalg::smaller((i + 1) as f64 * tau, plan.end));
+            if i % 3 == 2 && start + 0.43 * tau < step_end {
+                cuts.push(start + 0.43 * tau);
+            }
+            cuts.push(step_end);
+            if step_end >= plan.end {
+                break;
+            }
+        }
+        // Each atom's own numbers, a fixed sequence: amplitudes, phases and kick sizes.
+        let draw = |i: usize, j: usize| -> f64 { ((i * 7919 + j * 104_729 + 13) as f64 * 0.618_033_988_749_895).fract() };
+        let atoms = 64;
+        let own = |i: usize, a: usize, t: f64| -> f64 {
+            let kicks = (cuts.partition_point(|&c| c <= t) - 1) as f64;
+            (0.5 + draw(i, a)) * (w[a] * t + TAU * draw(i, a + 3)).cos() + 0.05 * (draw(i, a + 6) - 0.5) * kicks
+        };
+        let shared: [&dyn Fn(usize, f64) -> f64; 3] = [&|_, _| 0., &|_, t| 0.6 * t, &|a, t| 5. * (0.86 * w[a] * t + 0.4).sin()];
+        let rule = crate::special::gauss_legendre(60);
+        let read = |path: &dyn Fn(usize, f64) -> f64, shapes: bool| -> Vec<Estimate> {
+            let mut groups: Vec<Group> = (0..8).map(|_| Group::new(times.len())).collect();
+            for i in 0..atoms {
+                let kappa = |t: f64| -> V3 { std::array::from_fn(|a| own(i, a, t) + path(a, t)) };
+                // The path is continuous within a piece (a kick lands at a piece's start): a piece's rule from just
+                // inside it.
+                let nodes = |from: f64, to: f64| -> Vec<(f64, f64, V3)> {
+                    rule.iter().map(|&(x, weight)| { let t = 0.5 * (from + to) + 0.5 * (to - from) * x; (t, 0.5 * (to - from) * weight, kappa(t)) }).collect()
+                };
+                let along = |from: f64, at: f64| Integrals::of(from, nodes(from, at));
+                let mut windows = Windows::new(&plan.times, &plan.halves);
+                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, unresolved: i % 7 == 3 });
+                windows.record(0, at(0.));
+                let mut next = 1;
+                for piece in cuts.windows(2) {
+                    windows.add(piece[0], piece[1], &|at| along(piece[0], at));
+                    while next < times.len() && times[next] <= piece[1] {
+                        windows.record(next, at(times[next]));
+                        next += 1;
+                    }
+                }
+                let mut fates = windows.close();
+                if !shapes {
+                    for f in fates.iter_mut() {
+                        if let Fate::Held(h) = f {
+                            h.shape = NO_SHAPE;
+                        }
+                    }
+                }
+                groups[i % 8].add(&fates);
+            }
+            summarize(&groups, &Scales { hbar_over_mass: KT_PER_UK, frequencies: w })
+        };
+        let (alone, alone_before) = (read(shared[0], true), read(shared[0], false));
+        let mut worst = 0_f64;
+        for (case, path) in shared.iter().enumerate().skip(1) {
+            let (with, before) = (read(*path, true), read(*path, false));
+            for k in 1..times.len() {
+                let (m, a0, b, b0) = (with[k].motion.unwrap(), alone[k].motion.unwrap(), before[k].motion.unwrap(), alone_before[k].motion.unwrap());
+                for a in 0..3 {
+                    let h = plan.halves[k][a];
+                    let (lo, hi) = (times[k] - h, times[k] + h);
+                    // The shared path g and the atoms' own mean ū over the window by a dense rule on its pieces.
+                    let mut ends = vec![lo];
+                    ends.extend(cuts.iter().copied().filter(|&c| c > lo && c < hi));
+                    ends.push(hi);
+                    let (mut g1, mut g2, mut u1, mut gu) = (0., 0., 0., 0.);
+                    for piece in ends.windows(2) {
+                        for &(x, wt) in rule.iter() {
+                            let (t, wt) = (0.5 * (piece[0] + piece[1]) + 0.5 * (piece[1] - piece[0]) * x, 0.5 * (piece[1] - piece[0]) * wt / (hi - lo));
+                            let (g, u) = (path(a, t), (0..atoms).map(|i| own(i, a, t)).sum::<f64>() / atoms as f64);
+                            (g1, g2, u1, gu) = (g1 + wt * g, g2 + wt * g * g, u1 + wt * u, gu + wt * g * u);
+                        }
+                    }
+                    let (variance, covariance) = (g2 - g1 * g1, gu - g1 * u1);
+                    // The paths' scale: the atoms' spread and the shared path's mean square over the window.
+                    let scale = a0.temperature[a] + g2;
+                    worst = worst.max((m.temperature[a] - a0.temperature[a]).abs() / scale);
+                    assert!((m.temperature[a] - a0.temperature[a]).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: T {} with the shared path against {} without (its variance {variance})", m.temperature[a], a0.temperature[a]);
+                    assert!((m.temperature_errors[a].error - a0.temperature_errors[a].error).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: its error {} against {}", m.temperature_errors[a].error, a0.temperature_errors[a].error);
+                    let moved = b.temperature[a] - b0.temperature[a];
+                    assert!((moved - variance - 2. * covariance).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: with no shapes T moved by {moved} against {variance} + 2 × {covariance}");
+                }
+                // The unresolved atoms: the same share of the held atoms, what T's bound is booked at.
+                assert!(with[k].unresolved == alone[k].unresolved && alone[k].unresolved > 0., "case {case}, output {k}: the unresolved share {} with the shared path against {} without", with[k].unresolved, alone[k].unresolved);
+            }
+        }
+        println!("T with a shared path against T without it: at most {worst:.2e} of the paths' scale");
+        // The shared paths are large against the spread: the largest window variance over the atoms' T.
+        let sloshing = read(shared[2], false);
+        let most = (1..times.len()).map(|k| sloshing[k].motion.unwrap().temperature[2] / alone[k].motion.unwrap().temperature[2]).fold(0., f64::max);
+        assert!(most > 10., "the sloshing's reading with no shapes is {most} times the spread at the most");
+    }
+
     /// The histograms hold every atom, sum to one, put 0 at a bin's centre, and carry a listed output with no atom.
     #[test]
     fn the_histograms_hold_the_atoms() {
