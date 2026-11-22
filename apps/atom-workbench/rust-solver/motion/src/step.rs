@@ -201,7 +201,8 @@
 //! less their centres, its tones' beats in: `Picture::envelope`). One group is the plain rule: its only label is 0, its
 //! moments the rule's weights, its nodes the quadrature's (`count`). Two groups' cross terms are left out only where
 //! they integrate within the round-off of the width, by parts: |∫c e^{iΩu}du| ≤ (|c(a)| + |c(b)| + ∫|ċ|)/Ω ≤ π sup|c|/(Ω
-//! − β) of an envelope of the band β; else every cross term is integrated, the norm's ringing to the round-off. No level
+//! − β) of an envelope of the band β (model/classify.rs `by_parts`, the lemma's one implementation); else every cross
+//! term is integrated, the norm's ringing to the round-off. No level
 //! is named: which cut is taken is the cost's alone (`Groups::choose`), on every step alike, and every cut is to the
 //! round-off -- where a node's series does not hold after all (a moving generator's following may ring between the
 //! groups beyond what the piece's start, middle and end said), the node says so and the piece's rest is taken by the
@@ -1643,7 +1644,8 @@ impl Groups {
     /// the state cannot hold goes to the nearest centre in its block, or to its block's own group. A group's parts, norms
     /// and density are its block's rows alone (R is block-diagonal: `Picture::parts`), so that many small groups cost what
     /// one product of n² does. Two groups of a block ring together unless their cross terms integrate within the
-    /// round-off of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's constant), sup|c|
+    /// round-off of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's
+    /// constant; model/classify.rs `by_parts`), sup|c|
     /// the numerator's weights between them over 1 − r (`Picture::weighed_by`), Ω their least gap, β the shifted pairs'
     /// band; a pair not taken is neither in the density nor in the norm's ringing. A cut's cost: its panels' nodes
     /// (`resolved`, interpolated, at the envelopes' bandwidth) each its parts, norms, series, weights and densities
@@ -1816,8 +1818,10 @@ impl Groups {
             for g in 0..groups {
                 linked[g] |= 1 << g;
                 for q in (0..groups).filter(|&q| q != g && block_of[q] == block_of[g]) {
+                    // The lemma's bound: the ends π sup|c| (sup|c| the numerator's weights over 1 − r) at the rate Ω − β.
                     let omega = gap[g * groups + q] - spanned;
-                    let small = ratio_all < 1.0 && omega > 0.0 && std::f64::consts::PI * self.numerator[g * groups + q] / ((1.0 - ratio_all) * omega) <= UNIT_ROUNDOFF * width.abs();
+                    let ends = std::f64::consts::PI * self.numerator[g * groups + q] / (1.0 - ratio_all);
+                    let small = ratio_all < 1.0 && omega > 0.0 && crate::model::classify::by_parts(ends, 0.0, C64::real(omega)) <= UNIT_ROUNDOFF * width.abs();
                     if !small {
                         linked[g] |= 1 << q;
                     }

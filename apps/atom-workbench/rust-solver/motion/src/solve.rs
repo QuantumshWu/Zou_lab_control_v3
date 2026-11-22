@@ -92,7 +92,11 @@
 //! to τ by the order (`carried`) -- lowered 2^{2p} times in the mean square, noise and all. The triple is (4τ, 2τ, τ), τ
 //! its finest step. The third level is the rung left above where the check came down from it (a level the ladder ran,
 //! left on its reads or for its price), else the pilot's trajectories at 4τ where the rung buys them (`above`: the
-//! ladder has the rung above; `buys`: their price no more than what a rung below would add, ## The ladder). Where
+//! ladder has the rung above; `buys`: their price no more than what a rung below would add, ## The ladder) -- as
+//! many of the pilot's groups as its read asks at the best, three at the least (`Third::pairs`; on more of them where
+//! it cannot see, as further pairs are taken for an own read): its pairs are its read's precision's, not the pilot's
+//! number (tilt2's third level on all 88 of its trajectories was a third of its pilot's work, each trajectory's jumps
+//! as dear at 4τ as at τ). Where
 //! the order holds across the triple both reads are of one mean square, e(τ)'s. A rung stands (`verdict`) where both
 //! estimates are within the share, M̂ ≤ b on every look (`within`) -- the larger of the two, as multilevel Monte Carlo
 //! takes the larger of its finest difference and the next one lowered by the order, so that two levels that agree by
@@ -212,7 +216,8 @@
 //!   τ/2: ## A companion at τ/2) and r_j the trajectories run at τ/2^j beside the members at τ (the scout's pairs at
 //!   τ/2 or τ/4, `foresee`; the members at τ/2 where that is the companion):
 //!   - staying: the pilot's companions still to run and the run level to the most of N, P and n, (P − P_m) w(c) +
-//!     (max(N, P, n) − n) w(τ) (`staying`), and the third level P w(4τ) where the rung buys it;
+//!     (max(N, P, n) − n) w(τ) (`staying`), and the third level N₃ w(4τ) where the rung buys it, N₃ the pairs its read
+//!     asks in whole groups (`Third::pairs`);
 //!   - the k-th rung below, τ_k = τ/2^k, reached a rung at a time (each rung's own level its next one's companion, or
 //!     the next one's own level its companion): the members in hand at every rung on the way, the pilot's run level at
 //!     τ_k and its companions at τ_{k−1} -- or at τ_{k+1}, where that reads it at less work for its precision: τ's halved steps as its members
@@ -431,8 +436,8 @@
 //! Where no choice is kept for the scene (select.rs `kept`: the request without its times), the attempt on G chooses P
 //! once its pilot stands (`choose_on_the_pilot`):
 //! 1. The paths: `select::WALKS` of the pilot's trajectories at the run's step (`walks`), cut at L = min(T, 5 τ_mem),
-//!    τ_mem the full-ground model's memory time, the longest over their starts; the 32-state reference along them, on
-//!    the calibration's piece and along the scans of the trap's axes (select.rs `Paths`).
+//!    τ_mem the full-ground model's memory time, the longest over their starts; the 32-state reference along them, at
+//!    the setting read along the longest of them, and along the scans of the trap's axes (select.rs `Paths`).
 //! 2. T's memory is not read here: the flag of its being no shorter than the run is the product's, on the run's own
 //!    trajectories at its end (`memory_at_the_end`; select.rs, # The feedback through the motion: zero).
 //! 3. The candidates of the chain: each one's model made, its step's work a µs at the pilot's states and step
@@ -1607,19 +1612,40 @@ struct Third {
     measured: Option<f64>,
 }
 impl Third {
-    /// Its work on the pilot's `pilot` trajectories: those still to run at its step.
-    fn work(&self, prices: &Prices, pilot: f64) -> f64 {
-        crate::linalg::larger(pilot - self.held, 0.) * (prices.work)(self.step)
+    /// The pairs its read is run on (module documentation, ## Two levels, three levels; `third_on_the_pilot`): those it
+    /// asks at the best -- measured on the scout's pairs (`measured`), or the rung's own noise `raw` lifted and taken back
+    /// by its factor --, above the rung in whole groups of the pilot's `pilot`, `THIRD_GROUPS` at the least, and beyond
+    /// the pilot's, further pairs; below it the pilot's at the least, its level the rung below's own or its companion's,
+    /// every member of it.
+    fn pairs(&self, pilot: f64, raw: f64) -> f64 {
+        let asks = self.measured.unwrap_or(raw * self.lift * self.factor);
+        let groups = crate::linalg::larger((asks / GROUP as f64).ceil(), THIRD_GROUPS as f64) * GROUP as f64;
+        if self.step > self.beside && groups <= pilot { groups } else { crate::linalg::larger(asks, pilot) }
     }
 
-    /// Its work for its read's precision (`read_cost`): the pairs its read needs at the best, its lift and factor on the
-    /// rung's own noise `raw`, on the pilot's at least, at its level and at the rung's level beside it.
-    fn cost(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
-        match self.measured {
-            Some(pairs) => read_cost(prices, self.step, self.held, self.beside, pilot, pilot, pairs, 1., 1.),
-            None => read_cost(prices, self.step, self.held, self.beside, pilot, pilot, raw, self.lift, self.factor),
-        }
+    /// Its work on the pilot's `pilot` trajectories: those of its pairs still to run at its step (`pairs`).
+    fn work(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
+        crate::linalg::larger(self.pairs(pilot, raw).min(pilot) - self.held, 0.) * (prices.work)(self.step)
     }
+
+    /// Its work for its read's precision (`read_cost`): its pairs (`pairs`) at its level, and those beyond the pilot's
+    /// `pilot` at the rung's level beside it; without bound where its factor is.
+    fn cost(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
+        if self.measured.is_none() && !(self.factor < f64::INFINITY) {
+            return f64::INFINITY;
+        }
+        let pairs = self.pairs(pilot, raw);
+        crate::linalg::larger(pairs - self.held, 0.) * (prices.work)(self.step) + crate::linalg::larger(pairs - pilot, 0.) * (prices.work)(self.beside)
+    }
+}
+
+/// The least of the pilot's groups a third level above the rung is read on (`Third::pairs`): a read's spread is over
+/// its groups, and there is none on fewer than three (estimate.rs `between`).
+const THIRD_GROUPS: u64 = 3;
+
+/// The pilot's groups the pairs `pairs` fill, of the `groups` it has: the whole groups, all of them at the most.
+fn groups_for(pairs: f64, groups: usize) -> usize {
+    if pairs.is_finite() { ((pairs / GROUP as f64).ceil() as usize).clamp(1, groups) } else { groups }
 }
 
 /// The third level a rung reads where it reads one (module documentation, ## Two levels, three levels): of the sides
@@ -1742,17 +1768,19 @@ fn remedy(own: &Between, upper: Option<Upper>, holding: Holding, below: Option<B
     // The own read's pairs where its estimate is beyond (`seeing`: none it can see on, the rung below); none asked
     // where it is within.
     let own_at = if within(own) { None } else { Some(seeing(own, have)?) };
-    // The third level's pairs: those its read asks, at its levels -- the pilot's at 4τ first where it holds none.
-    let (upper_at, buy, coarser) = match upper {
+    // The third level's pairs: those its read asks, at its levels -- the pilot's at 4τ first where it holds none, as
+    // many of its groups as the read asks (`THIRD_GROUPS` at the least).
+    let (upper_at, buy, coarser, bought) = match upper {
         Some(upper) if !within(upper.read) => {
             let need = seeing(upper.read, upper.pairs)?;
             if !upper.held && !upper.buys {
                 return None;
             }
-            let base = if upper.held { upper.pairs as f64 } else { pilot };
-            (Some(n + crate::linalg::larger(need - base, 0.)), !upper.held, true)
+            let bought = (groups_for(need, (pilot / GROUP as f64) as usize).max(THIRD_GROUPS as usize) as f64 * GROUP as f64).min(pilot);
+            let base = if upper.held { upper.pairs as f64 } else { bought };
+            (Some(n + crate::linalg::larger(need - base, 0.)), !upper.held, true, bought)
         }
-        upper => (None, false, upper.is_some_and(|upper| upper.held)),
+        upper => (None, false, upper.is_some_and(|upper| upper.held), 0.),
     };
     // Nothing that cannot see asks nothing; pairs beyond a run's trajectories are none to be had.
     let at = match (own_at, upper_at) {
@@ -1770,8 +1798,8 @@ fn remedy(own: &Between, upper: Option<Upper>, holding: Holding, below: Option<B
     let extra = upper.map_or(0., |upper| upper.step);
     let stay = (at - n) * work(holding.companion.step(tau))
         + (crate::linalg::larger(at, product) - n) * work(tau)
-        + third.map_or(0., |third| third.work(prices, pilot))
-        + if buy { (pilot - upper.map_or(0., |upper| upper.ran as f64)) * work(extra) } else { 0. }
+        + third.map_or(0., |third| third.work(prices, pilot, holding.raw))
+        + if buy { crate::linalg::larger(bought - upper.map_or(0., |upper| upper.ran as f64), 0.) * work(extra) } else { 0. }
         + if coarser { (at - n) * work(extra) } else { 0. };
     // The rung below's run level at τ/2 and its companion's, each beyond what it holds.
     let (step, held) = below.companion;
@@ -2184,27 +2212,30 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     if !matches!(choosing, Choosing::Scout) {
         messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
     }
-    let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, messages);
+    let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, None, messages);
     // A candidate's short scout (`Choosing::Scout`): the rung its own two levels stand on (`settle`: down the ladder
     // to the first rung whose own read is in and not clearly beyond), the check's priced course not taken -- a scout
     // with it took PGC3D's P20 34-68 s, R4's P26 87 s.
     if matches!(choosing, Choosing::Scout) {
         return Ok(Attempted::Scouted(context.tau));
     }
-    if matches!(scouting, Settled::Pending) {
-        let (here, at) = {
-            let scout: Vec<&Part> = levels.fine.iter().collect();
-            let at = analysed_alone(&scout);
-            (parts_at(run, &domain, context.tau, &context.plan, &scout, &at), at)
-        };
-        let refs: Vec<&Part> = here.iter().collect();
+    // The scout's states where its check is priced (`Settled::Pending`): its prices, and the pilot's levels' hand-out's
+    // order after them (`foretold`).
+    let here = matches!(scouting, Settled::Pending).then(|| {
+        let scout: Vec<&Part> = levels.fine.iter().collect();
+        let at = analysed_alone(&scout);
+        (parts_at(run, &domain, context.tau, &context.plan, &scout, &at), at)
+    });
+    let refs: Vec<&Part> = here.iter().flat_map(|(here, _)| here.iter()).collect();
+    let rated = one_each(&refs);
+    let priced = work_at(run, domain.widest, &rated);
+    let work = |t: f64| priced(t)[0];
+    if let Some((_, at)) = &here {
         let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
         let read = pilot_reads(run, &refs, &scales, choice.as_deref(), &times, &context.fixed.escape);
         let fixed = context.fixed.with(read.model, &times);
         let need = most_needed(&looks(&read.estimates, &fixed, Bound::share()));
-        let rated = one_each(&refs);
-        let priced = work_at(run, domain.widest, &rated);
-        let (work, halving) = (|t: f64| priced(t)[0], |t: f64| priced(t)[1]);
+        let halving = |t: f64| priced(t)[1];
         check(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1, &above, Some(&Prices { work: &work, halving: &halving, product: need }), messages);
     }
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
@@ -2212,7 +2243,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     // its states are read, and the check goes on from there priced at them. Whether it saw: a step that stands
     // uncertified -- at the steps' cap, or unable to see -- is flagged.
     messages.stage(Stage { step: Step::Pilot, tau: Some(context.tau), batch: None });
-    let mut settled = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, messages);
+    let mut settled = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, here.as_ref().map(|_| &work as &dyn Fn(f64) -> f64), messages);
     // Nothing integrated (# Exits): the pilot's every trajectory ended with no outcome before the first output after
     // t = 0 -- no step, no rung and no further trajectory is checked or priced on what shows nothing --, the request's
     // exit with its reason.
@@ -2582,9 +2613,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     noted(
         &mut report,
         format!(
-            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快相干每转 {} 个子步、其后每 µs {:.1} 个，每步 {} 段（按误差定：校准段上参照的误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
+            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快相干每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每步 {} 段（按误差定：最长一条路径全长 {:.1} µs 上参照的误差（先在前 {} µs 上爬梯） 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
             paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
-            settled.opening, settled.setting.turns, settled.setting.rate, settled.setting.pieces, settled.errors[0], settled.errors[1], settled.errors[2], crate::select::TOLERANCE,
+            settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, paths.calibrated_over(), crate::select::CALIBRATION, settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], crate::select::TOLERANCE,
             settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
         ),
     );
@@ -2879,6 +2910,10 @@ struct Levels {
     third_none: [bool; 2],
     half: Option<Foreseen>,
     scouted: Option<Scouted>,
+    /// The scout's trajectories at the third level's step of the pilot's groups the extra level does not hold yet
+    /// (`third_on_the_pilot`: their first members, `extra_members` of each), kept for the groups it goes on to.
+    extra_first: Vec<Part>,
+    extra_members: u64,
 }
 
 /// The rung's third level above as the scout read it on its own pairs (module documentation, ## The ladder; `check`,
@@ -2930,10 +2965,11 @@ impl Levels {
     fn third_at(&self, tau: f64, step: f64, extra: &[&Part], further: usize, members: u64, times: &[f64], window: f64, scales: &Scales) -> (Between, [f64; 2], u64) {
         let other = self.companion.step(tau);
         let (lower, upper) = if other > tau { ((tau, 0), (other, 1)) } else { ((other, 1), (tau, 0)) };
-        // The rung's level beside the extra one: its pilot's groups and its further pairs that hold the extra level too.
+        // The rung's level beside the extra one: the pilot's groups the extra level holds (`third_on_the_pilot`: all of
+        // them, or as many as its read asked) and its further pairs that hold the extra level too.
         let (next, k) = if step > upper.0 { upper } else { lower };
         let start = self.further[k].len() - further;
-        let beside: Vec<&Part> = [&self.fine, &self.coarse][k].iter().chain(&self.further[k][start..]).collect();
+        let beside: Vec<&Part> = [&self.fine, &self.coarse][k].iter().take(extra.len() - further).chain(&self.further[k][start..]).collect();
         let (finer, coarser, steps) = if step > next { (beside, extra.to_vec(), [next, step]) } else { (extra.to_vec(), beside, [step, next]) };
         let pairs = finer.len() as u64 * members;
         (carried(&read_step(times, window, &finer, &coarser, scales), tau / steps[0]), steps, pairs)
@@ -2968,32 +3004,28 @@ impl Levels {
 /// (a companion's level takes `Domain::companion`): a hand-out of its own (`run_groups`).
 #[allow(clippy::too_many_arguments)]
 fn level(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
-    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
+    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i), work: 1. };
     run_groups(&[hand], 0, messages, progress).pop().expect("the hand-out's one level")
 }
 
-/// Some levels of the groups `numbers`, the members `members`, one hand-out (`run_groups`): the steps `steps` in their
-/// order, each with whether its states are kept; the finest level first, whose trajectories take the most steps, so
-/// that the threads that wait for the list's last trajectories wait for its shortest. `progress` takes the first
-/// level's groups of `steps` (the run level's); returned in the order of `steps`.
+/// Some levels of the groups `numbers`, the members `members`, one hand-out (`run_groups`): the steps `steps`, each with
+/// whether its states are kept, the dearest trajectories first as foretold at `prices` (`foretold`; with none, the
+/// finest level, whose trajectories take the most steps). `progress` takes the first level's groups of `steps` (the run
+/// level's); returned in the order of `steps`.
 #[allow(clippy::too_many_arguments)]
-fn levels_of(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, steps: &[(f64, bool)], numbers: &[u64], members: std::ops::Range<u64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
+fn levels_of(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, steps: &[(f64, bool)], numbers: &[u64], members: std::ops::Range<u64>, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
     let records: Vec<_> = steps.iter().map(|&(step, keep)| move |i| trajectory(run, ensemble, domain, step, plan, keep, i)).collect();
-    let mut order: Vec<usize> = (0..steps.len()).collect();
-    order.sort_by(|&a, &b| steps[a].0.total_cmp(&steps[b].0));
-    let hands: Vec<Hand> = order.iter().map(|&k| Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, steps[k].1), record: &records[k] }).collect();
-    let shown = order.iter().position(|&k| k == 0).expect("the run level among the steps");
-    let mut made: Vec<Option<Vec<Part>>> = run_groups(&hands, shown, messages, progress).into_iter().map(Some).collect();
-    (0..steps.len()).map(|k| made[order.iter().position(|&o| o == k).expect("every step handed out")].take().expect("one level a step")).collect()
+    let hands: Vec<Hand> = steps.iter().zip(&records).map(|(&(step, keep), record)| Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record, work: foretold(prices, step) }).collect();
+    run_groups(&hands, 0, messages, progress)
 }
 
 /// The members `members` of the groups `numbers` at the step `tau` (their states kept) and at its companion's step
 /// (2τ, or τ/2: its states kept too, the rung below's own level), the two levels of a check (module documentation,
-/// # The step): one hand-out (`levels_of`) -- a check runs both whatever either shows --, the finer level first.
-/// `progress` takes the level at τ's groups.
+/// # The step): one hand-out (`levels_of`) -- a check runs both whatever either shows --, the dearer level first as
+/// foretold at `prices` (`foretold`). `progress` takes the level at τ's groups.
 #[allow(clippy::too_many_arguments)]
-fn pair(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, companion: Companion, numbers: &[u64], members: std::ops::Range<u64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
-    let mut levels = levels_of(run, ensemble, domain, plan, &[(tau, true), (companion.step(tau), companion == Companion::Half)], numbers, members, messages, progress).into_iter();
+fn pair(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, companion: Companion, numbers: &[u64], members: std::ops::Range<u64>, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
+    let mut levels = levels_of(run, ensemble, domain, plan, &[(tau, true), (companion.step(tau), companion == Companion::Half)], numbers, members, prices, messages, progress).into_iter();
     std::array::from_fn(|_| levels.next().expect("the hand-out's two levels"))
 }
 
@@ -3063,8 +3095,8 @@ enum Settled {
 /// On the scout and on the pilot alike the check stops where the rung's own read is in and not clearly beyond
 /// (`Settled::Pending`: `check` takes it up again, priced, once the states it is priced at are read).
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
-    let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, levels.companion, numbers, members.clone(), messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+fn settle(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages) -> Settled {
+    let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, levels.companion, numbers, members.clone(), prices, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
     check(run, ensemble, domain, context, levels, numbers, members.end, above, None, messages)
@@ -3188,7 +3220,8 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
             });
             match course(prices, context.tau, context.plan.end, holding, third) {
                 Course::Third if pilot => {
-                    third_on_the_pilot(run, ensemble, domain, context, levels, numbers, third.expect("a third bought").step, messages);
+                    let third = third.expect("a third bought");
+                    third_on_the_pilot(run, ensemble, domain, context, levels, numbers, third.step, groups_for(third.pairs(holding.pilot, holding.raw), numbers.len()), messages);
                     continue;
                 }
                 // On the scout the third level is the pilot's to read.
@@ -3204,6 +3237,17 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // the rung below is weighed where both are to be had. Where the rung below is cheaper, or pairs cannot see, the
         // rung is left, as an adaptive integrator leaves a step whose error estimate is beyond its tolerance.
         let have = holding.pairs as u64;
+        // A third level above the rung held on some of the pilot's groups whose read cannot see: on more of them first,
+        // as many as it asks and twice as many at the least (every group at the most), as further pairs are taken for an
+        // own read -- the extra level alone runs.
+        if let (Verdict::Unseeing, Some(above)) = (verdict, levels.above.as_ref().filter(|above| !within(above) && levels.above_pilot)) {
+            if levels.extra_step > tau && !levels.extra.is_empty() && levels.extra.len() < numbers.len() {
+                let asks = seeing(above, levels.above_pairs).unwrap_or(f64::INFINITY);
+                let groups = groups_for(asks, numbers.len()).max(2 * levels.extra.len()).min(numbers.len());
+                third_on_the_pilot(run, ensemble, domain, context, levels, numbers, levels.extra_step, groups, messages);
+                continue;
+            }
+        }
         let remedied = match (verdict, prices) {
             (Verdict::Unseeing, Some(prices)) => {
                 let own_within = within(&read);
@@ -3221,7 +3265,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
                         // against 2τ; τ/4, τ/2 and τ against τ/2, where the rung below is read against τ/4.
                         let lower = if companion == Companion::Half { below } else { context.tau };
                         if !own_within && seeing(&read, have).is_some() && levels.half.is_none() {
-                            levels.half = Some(foresee(run, ensemble, domain, context, levels, numbers, lower, messages));
+                            levels.half = Some(foresee(run, ensemble, domain, context, levels, numbers, lower, prices.work, messages));
                         }
                         let ran = if companion == Companion::Half { groups * members } else { 0 };
                         match &levels.half {
@@ -3242,8 +3286,10 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         };
         match remedied {
             Some(Remedy::Upper) => {
-                let step = third_of(prices.expect("a remedy is priced"), tau, holding, sides, scouted_up).expect("a third to read").step;
-                third_on_the_pilot(run, ensemble, domain, context, levels, numbers, step, messages);
+                let third = third_of(prices.expect("a remedy is priced"), tau, holding, sides, scouted_up).expect("a third to read");
+                let asks = levels.above.as_ref().and_then(|above| seeing(above, levels.above_pairs)).unwrap_or(f64::INFINITY);
+                let groups = groups_for(crate::linalg::larger(asks, (THIRD_GROUPS * GROUP) as f64), numbers.len());
+                third_on_the_pilot(run, ensemble, domain, context, levels, numbers, third.step, if third.step > tau { groups } else { numbers.len() }, messages);
                 continue;
             }
             Some(Remedy::Pairs(pairs)) => {
@@ -3251,11 +3297,16 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
                 // holds that level.
                 let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
                 let upper = !levels.extra.is_empty();
+                // The third level held on some of the pilot's groups: on all of them first (further pairs follow the
+                // pilot's at every level).
+                if upper && levels.extra.len() < numbers.len() {
+                    third_on_the_pilot(run, ensemble, domain, context, levels, numbers, levels.extra_step, numbers.len(), messages);
+                }
                 let mut steps = vec![(tau, false), (levels.companion.step(tau), false)];
                 if upper {
                     steps.push((levels.extra_step, false));
                 }
-                let more = levels_of(run, ensemble, domain, &context.plan, &steps, &next, 0..GROUP, messages, &mut |prefix, messages| {
+                let more = levels_of(run, ensemble, domain, &context.plan, &steps, &next, 0..GROUP, prices.map(|p| p.work), messages, &mut |prefix, messages| {
                     so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
                 });
                 levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
@@ -3287,7 +3338,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // A third level held below the rung -- the pilot's trajectories at τ/2, or at τ/4 against τ/2 -- is the rung
         // below's own level or its companion's, its states kept: kept for it, run no more.
         let extra = (levels.extra_step < tau).then(|| std::mem::take(&mut levels.extra)).filter(|extra| !extra.is_empty());
-        (levels.extra, levels.further, levels.scouted) = Default::default();
+        (levels.extra, levels.further, levels.scouted, levels.extra_first) = Default::default();
         if halved_companion {
             // The companion at τ/2 is the rung below's own level, its states kept. A foresight at τ/4 is its companion's
             // first members, where it is read against τ/4 (`halve_companion`), and a third held at τ/4 its whole.
@@ -3375,27 +3426,41 @@ fn halve_companion(run: &Selected, ensemble: &Ensemble, domain: &Domain, context
 }
 
 /// The third level on the pilot's trajectories (`check`: bought, `Course::Third`, or where the third level the rung has
-/// could not see, `Remedy::Upper`): the pilot's groups `numbers` at the third's step `step` (`third_of`: above the
-/// rung's pair or below it), held (`Levels::extra`; their states kept below the rung: a rung below's own level, or its
-/// companion), read against the rung's level beside it (`Levels::third`) -- the first members those the scout ran
-/// there, where it read the level on its own pairs (`Scouted`). Where its read excludes nothing on some look
-/// (`readable`: no output counts a trajectory at both levels), that side is unread.
+/// could not see, `Remedy::Upper`): the first `groups` of the pilot's groups `numbers` at the third's step `step`
+/// (`third_of`: above the rung's pair or below it; below it every group, its level a rung below's own or its
+/// companion's), held (`Levels::extra`; their states kept below the rung), read against the rung's level beside it on
+/// the same groups (`Levels::third`) -- the first members those the scout ran there, where it read the level on its
+/// own pairs (`Scouted`); a level held on fewer groups goes on to the more. Where its read excludes nothing on some
+/// look (`readable`: no output counts a trajectory at both levels), that side is unread.
 #[allow(clippy::too_many_arguments)]
-fn third_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], step: f64, messages: &mut Messages) {
+fn third_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], step: f64, groups: usize, messages: &mut Messages) {
     let tau = context.tau;
+    let groups = if step < tau { numbers.len() } else { groups.clamp(1, numbers.len()) };
     if !(levels.extra_step == step && !levels.extra.is_empty()) {
         let first = levels.scouted.as_mut().filter(|scouted| scouted.tau == tau && scouted.step == step && !scouted.level.is_empty()).map(|scouted| (std::mem::take(&mut scouted.level), scouted.members));
         levels.extra = match first {
             Some((mut first, members)) => {
-                let rest = level(run, ensemble, domain, &context.plan, step, numbers, members..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
+                // The scout's members of the groups beyond kept for them (`Levels::extra_first`).
+                (levels.extra_first, levels.extra_members) = (first.split_off(groups.min(first.len())), members);
+                let rest = level(run, ensemble, domain, &context.plan, step, &numbers[..groups], members..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
                 absorb(&mut first, rest);
                 first
             }
-            None => level(run, ensemble, domain, &context.plan, step, numbers, 0..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)),
+            None => {
+                levels.extra_first.clear();
+                level(run, ensemble, domain, &context.plan, step, &numbers[..groups], 0..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages))
+            }
         };
         (levels.extra_step, levels.further[2]) = (step, vec![]);
+    } else {
+        further_groups(run, ensemble, domain, context, levels, numbers, step, groups, messages);
     }
-    let (read, steps, pairs) = levels.third(tau, &context.plan.reads, context.plan.window, &context.scales);
+    let (mut read, mut steps, mut pairs) = levels.third(tau, &context.plan.reads, context.plan.window, &context.scales);
+    // A read on some of the pilot's groups that excludes nothing on some look: on all of them before the side is unread.
+    if !readable(&read) && levels.extra.len() < numbers.len() {
+        further_groups(run, ensemble, domain, context, levels, numbers, step, numbers.len(), messages);
+        (read, steps, pairs) = levels.third(tau, &context.plan.reads, context.plan.window, &context.scales);
+    }
     crate::prof::note(|| {
         let (halved, time) = levels.extra.iter().fold((0., 0.), |(h, t), p| (h + p.counts.halved.time, t + p.counts.time));
         let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
@@ -3406,6 +3471,29 @@ fn third_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, cont
     } else {
         levels.third_none[usize::from(step < tau)] = true;
     }
+}
+
+/// The extra level held on the pilot's first groups (`third_on_the_pilot`) on to its first `groups`: the scout's
+/// trajectories there (`Levels::extra_first`) with their groups' other members, then whole groups, one hand-out.
+#[allow(clippy::too_many_arguments)]
+fn further_groups(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], step: f64, groups: usize, messages: &mut Messages) {
+    let held = levels.extra.len();
+    if !(held < groups) {
+        return;
+    }
+    let tau = context.tau;
+    let took = (groups - held).min(levels.extra_first.len());
+    let mut first: Vec<Part> = levels.extra_first.drain(..took).collect();
+    let records = [|i| trajectory(run, ensemble, domain, step, &context.plan, step < tau, i)];
+    let hands = [
+        Hand { groups: &numbers[held..held + took], members: levels.extra_members..GROUP, shape: Shape::of(&context.plan, step < tau), record: &records[0], work: 1. },
+        Hand { groups: &numbers[held + took..groups], members: 0..GROUP, shape: Shape::of(&context.plan, step < tau), record: &records[0], work: 1. },
+    ];
+    let mut made = run_groups(&hands, 0, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)).into_iter();
+    let (rest, whole) = (made.next().expect("the scout's groups' other members"), made.next().expect("the whole groups"));
+    absorb(&mut first, rest);
+    levels.extra.extend(first);
+    levels.extra.extend(whole);
 }
 
 /// The rung's third level above on the scout's own pairs (`check`; module documentation, ## The ladder): the members
@@ -3442,15 +3530,16 @@ fn third_on_the_scout(run: &Selected, ensemble: &Ensemble, domain: &Domain, cont
 /// pair's and the pair's own, whose noise's ratio foresees the rung below (`foreseen`). Their cost is the scout's pairs
 /// at three steps, a few dozen of the rung's trajectories against the hundreds of pairs it weighs.
 #[allow(clippy::too_many_arguments)]
-fn foresee(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &Levels, numbers: &[u64], lower: f64, messages: &mut Messages) -> Foreseen {
+fn foresee(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &Levels, numbers: &[u64], lower: f64, prices: &dyn Fn(f64) -> f64, messages: &mut Messages) -> Foreseen {
     let plan = &context.plan;
     let half = |i| trajectory(run, ensemble, domain, 0.5 * lower, plan, true, i);
     let own = |i| trajectory(run, ensemble, domain, lower, plan, false, i);
     let double = |i| trajectory(run, ensemble, domain, 2. * lower, plan, false, i);
+    let work = |step: f64| foretold(Some(prices), step);
     let hands = [
-        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, true), record: &half },
-        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &own },
-        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &double },
+        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, true), record: &half, work: work(0.5 * lower) },
+        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &own, work: work(lower) },
+        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &double, work: work(2. * lower) },
     ];
     let further: Vec<&Part> = levels.further[0].iter().collect();
     let mut made = run_groups(&hands, 0, messages, &mut |_, messages| so_far(context, &levels.fine, &further, messages)).into_iter();
@@ -4216,12 +4305,21 @@ fn trajectory(model: &Selected, ensemble: &Ensemble, domain: &Domain, tau: f64, 
 }
 
 /// A level of a hand-out (`run_groups`): the members `members` of the groups of the numbers `groups` (all of them:
-/// 0..GROUP), each trajectory made by `record` from its number, a group's records folded as `shape` says.
+/// 0..GROUP), each trajectory made by `record` from its number, a group's records folded as `shape` says, and a
+/// trajectory's work as foretold (`work`: what the hand-out orders its levels by; `foretold`).
 struct Hand<'a> {
     groups: &'a [u64],
     members: std::ops::Range<u64>,
     shape: Shape,
     record: &'a (dyn Fn(u64) -> Record + Sync),
+    work: f64,
+}
+
+/// A trajectory's work at the step `step` as foretold where a hand-out orders its levels (`run_groups`): its work a µs as
+/// priced at the states in hand (`Prices::work`, the scout's or the pilot's), where there are prices; before them its
+/// steps, 1/h a µs.
+fn foretold(prices: Option<&dyn Fn(f64) -> f64>, step: f64) -> f64 {
+    prices.map_or(1. / step, |work| work(step))
 }
 impl Hand<'_> {
     /// The members run of a group.
@@ -4243,8 +4341,10 @@ impl Hand<'_> {
 /// the trajectories, every core unless the process is told otherwise). Each thread takes the list's next trajectory as it ends
 /// one, so a faster core takes more of them, the groups finish nearly in order and the first after about one
 /// trajectory's time. The threads have no trajectory left only at the list's end: what is known to be run together is
-/// handed out together (`pair`, `levels_of`), the level of the longer trajectories first, so that the threads that wait for the
-/// list's last trajectories wait for its shortest. Each group's records are added in its members' order on this thread
+/// handed out together (`pair`, `levels_of`, `foresee`), the level of the dearer trajectories first as foretold
+/// (`Hand::work`, `foretold`: largest first, as a list scheduler takes it), so that the threads that wait for the list's
+/// last trajectories wait for its cheapest. (Ordered by their steps alone -- the finer first --, a level whose steps
+/// cost the more for its tones came last: GMD1C's at 2τ, its pictures 23 times τ's a step.) Each group's records are added in its members' order on this thread
 /// as soon as those before it are in -- a record waits only for its group's members before it, never for the whole
 /// group (a record holds its trajectory's fates at every time read) -- (`Shape::add`, nothing depends on the threads),
 /// each level's groups returned in their order; whenever the solve's
@@ -4257,13 +4357,16 @@ impl Hand<'_> {
 /// once the threads' trajectories in hand end it unwinds to the caller (the worker answers the request with it, main.rs
 /// # Defects).
 fn run_groups(levels: &[Hand], shown: usize, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
-    // Where each level's trajectories begin in the list, and the list's length.
-    let starts: Vec<u64> = levels.iter().scan(0, |next, level| Some(std::mem::replace(next, *next + level.count()))).collect();
+    // The levels in the list's order, the dearest trajectories first (as given where they are foretold alike), where
+    // each level's trajectories begin in the list, and the list's length.
+    let mut order: Vec<usize> = (0..levels.len()).collect();
+    order.sort_by(|&a, &b| levels[b].work.total_cmp(&levels[a].work));
+    let starts: Vec<u64> = order.iter().scan(0, |next, &level| Some(std::mem::replace(next, *next + levels[level].count()))).collect();
     let stop: u64 = levels.iter().map(Hand::count).sum();
     // The list's k-th trajectory: its level and its place there.
     let place = |k: u64| {
-        let level = starts.partition_point(|&start| start <= k) - 1;
-        (level, k - starts[level])
+        let at = starts.partition_point(|&start| start <= k) - 1;
+        (order[at], k - starts[at])
     };
     let next = AtomicU64::new(0);
     let threads = rayon::current_num_threads().min(stop as usize);
@@ -5225,8 +5328,9 @@ mod tests {
     /// errs three times C (4τ)², d₂/d₁ = 44/3 and its read is (11/3)² = 13.4 times the own one's: apart beyond either's
     /// error at one look, on the scout's eleven pairs as on the pilot's 88 -- out of the order's range. Priced (a flat
     /// price, the pilot's 88 pairs), the side above as read costs the pairs it asks beyond the eleven held at 4τ and the
-    /// pilot's at 2τ, the pilot's at least; out of the range no pairs make it the rung's: the side below, as foretold,
-    /// where it is to be had, and else the path at the rung is without bound -- the rung below.
+    /// pilot's at 2τ, in whole groups of the pilot's, three at the least (`Third::pairs`); out of the range no pairs make
+    /// it the rung's: the side below, as foretold, where it is to be had, and else the path at the rung is without bound
+    /// -- the rung below.
     #[test]
     fn the_scout_s_third_level_prices_the_path_at_its_rung_by_what_it_reads() {
         let (tau, times, scales) = (0.95, [0., 1., 2., 3., 4.], Scales { hbar_over_mass: 1., frequencies: [1.; 3] });
@@ -5259,7 +5363,9 @@ mod tests {
         let scouted = |pairs: f64| Third { step: 4. * tau, held: 11., factor: 1., beside: 2. * tau, lift: 1., measured: Some(pairs) };
         let read = scouted(200.);
         assert!(close(read.cost(&prices, 88., 1.), 189. / (4. * tau) + 112. / (2. * tau)));
-        assert!(close(scouted(40.).cost(&prices, 88., 1.), 77. / (4. * tau)));
+        assert!(close(scouted(40.).cost(&prices, 88., 1.), 29. / (4. * tau)));
+        assert!(close(scouted(10.).cost(&prices, 88., 1.), 13. / (4. * tau)));
+        assert!(close(scouted(60.).work(&prices, 88., 1.), 53. / (4. * tau)));
         assert_eq!(third_of(&prices, tau, pilot, [true, false], Some(read)), Some(read));
         let out = scouted(f64::INFINITY);
         assert_eq!(third_of(&prices, tau, pilot, [true, false], Some(out)), None);
@@ -5473,12 +5579,14 @@ mod tests {
     /// A rung verified where it stands -- its third level read with its two -- or at the rung below, whichever path costs
     /// the run the less (`course`; module documentation, ## The ladder): the pilot's 88 pairs at 0.95 µs of a 1 ms run, a
     /// product of 287 trajectories, a flat price but the third level's steps dearer by a factor f: the rung below adds
-    /// (N + P)/τ to staying's (N − P)/τ, so the third level, 88 f/(4τ), is read up to f = 4(N + P)/P = 17.05, and beyond
-    /// it the rung below is the cheaper path -- one flip. At the ladder's bottom (no rung below) it is read whatever its
-    /// price. On the scout's position the pilot's purchase to come is priced into staying: the rung below adds 336.5/τ to
-    /// the scout's staying (its companions at 2τ not yet run), so from f = 336.5/22 = 15.3 on the scout goes down. (Until
-    /// R2-LADDER a third dearer than that left the rung to stand on its own two levels; the path at the rung is now
-    /// verified with its third wherever one is to be had.)
+    /// (N + P)/τ to staying's (N − P)/τ, so the third level -- the pairs its read asks, here none beyond its least three
+    /// groups, 24 f/(4τ) (`Third::pairs`) -- is read up to f = 4(N + P)/24 = 62.5, and beyond it the rung below is the
+    /// cheaper path -- one flip. At the ladder's bottom (no rung below) it is read whatever its price. On the scout's
+    /// position the pilot's purchase to come is priced into staying: the rung below adds 336.5/τ to the scout's staying
+    /// (its companions at 2τ not yet run), so from f = 336.5/6 = 56.1 on the scout goes down. (Until R2-LADDER a third
+    /// dearer than that left the rung to stand on its own two levels; the path at the rung is now verified with its third
+    /// wherever one is to be had. Until SELCOST the third was the pilot's 88 trajectories whatever its read asked: the
+    /// flips at 17.05 and 15.3.)
     #[test]
     fn a_third_level_dearer_than_a_rung_below_is_not_read() {
         let (end, tau, product) = (1000., 0.95, 287.);
@@ -5487,15 +5595,16 @@ mod tests {
             let work = move |h: f64| if h == 4. * tau { f / h } else { 1. / h };
             course(&Prices { halving: &|_: f64| 1., work: &work, product }, tau, end, holding, up(tau))
         };
-        let factors: Vec<f64> = (0..=400).map(|k| 1. + 0.1 * k as f64).collect();
+        let factors: Vec<f64> = (0..=1000).map(|k| 1. + 0.1 * k as f64).collect();
         let courses: Vec<Course> = factors.iter().map(|&f| priced(f, tau, pilot)).collect();
         let flips = courses.windows(2).filter(|w| w[0] != w[1]).count();
-        let flip = 4. * (product + 88.) / 88.;
-        assert!(courses[0] == Course::Third && courses[400] == Course::Below && flips == 1, "{courses:?}");
-        assert!(factors.iter().zip(&courses).all(|(&f, &c)| c == if f <= flip { Course::Third } else { Course::Below }), "{flip}");
+        let flip = 4. * (product + 88.) / (THIRD_GROUPS * GROUP) as f64;
+        assert!(courses[0] == Course::Third && courses[1000] == Course::Below && flips == 1, "{courses:?}");
+        // The flip on the grid itself (62.5) goes either way to the rounding.
+        assert!(factors.iter().zip(&courses).all(|(&f, &c)| (f - flip).abs() < 1e-9 || c == if f <= flip { Course::Third } else { Course::Below }), "{flip}");
         let bottom = end / MOST_STEPS as f64 * 1.5;
         assert!(end / (0.5 * bottom) > MOST_STEPS as f64 && priced(1e6, bottom, pilot) == Course::Third);
-        assert_eq!([1., 15.2, 15.4, 17., 17.1, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Below, Course::Below]);
+        assert_eq!([1., 56., 56.2, 62.4, 62.6, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Below, Course::Below]);
     }
 
     /// A rung read against τ/2 reads e(τ) as one read against 2τ does (module documentation, ## A companion at τ/2;
@@ -6752,7 +6861,7 @@ mod tests {
         let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
         let numbers: Vec<u64> = (0..rayon::current_num_threads() as u64).collect();
         let mut seen = vec![];
-        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], 0, &mut messages, &mut |_, messages| {
+        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record, work: 1. }], 0, &mut messages, &mut |_, messages| {
             seen.push((0..2).into_par_iter().map(|_| over.load(Ordering::Relaxed)).max().expect("the loop's two items"));
             messages.again();
         });
@@ -7005,7 +7114,8 @@ mod tests {
 
     /// The groups come back in their order whatever the threads do: 37 groups' records (five of a pilot's numbers, then a
     /// product's) -- each trajectory's own, its rows marking its number -- folded by `run_groups` equal the same records
-    /// folded one after another; so do the levels of one hand-out, each with its own members of the groups.
+    /// folded one after another; so do the levels of one hand-out, each with its own members of the groups, the one
+    /// foretold the dearer handed out first (`Hand::work`) and returned in its place.
     #[test]
     fn the_groups_come_back_in_order() {
         let shape = Shape { outputs: 2, reads: 2, listed: 1, keep: false };
@@ -7020,7 +7130,8 @@ mod tests {
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
         let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
         let members = [0..GROUP, 1..3];
-        let hands = members.clone().map(|members| Hand { groups: &numbers, members, shape, record: &record });
+        // The second level foretold the dearer: handed out first, returned in its place.
+        let hands = members.clone().map(|members| Hand { groups: &numbers, work: 1. + members.start as f64, members, shape, record: &record });
         let levels = run_groups(&hands, 0, &mut messages, &mut |_, _| {});
         assert_eq!(levels.len(), 2);
         for (parts, members) in levels.iter().zip(members) {
@@ -7052,14 +7163,14 @@ mod tests {
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
         let started = Instant::now();
-        let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }];
+        let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &record, work: 1. }];
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_groups(&hands, 0, &mut messages, &mut |_, _| {})));
         let took = started.elapsed();
         let message = outcome.err().and_then(|payload| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
         eprintln!("the hand-out ended after {took:?}: {message}");
         let whole = each * (numbers.len() as u32 * GROUP as u32).div_ceil(rayon::current_num_threads() as u32);
         assert!(message.contains("a trajectory's defect at 16387") && took < whole / 2, "{took:?} against {whole:?}: {message}");
-        let again = run_groups(&[Hand { groups: &numbers[1..2], members: 0..GROUP, shape, record: &record }], 0, &mut messages, &mut |_, _| {});
+        let again = run_groups(&[Hand { groups: &numbers[1..2], members: 0..GROUP, shape, record: &record, work: 1. }], 0, &mut messages, &mut |_, _| {});
         assert_eq!(again[0].len(), 1);
     }
 

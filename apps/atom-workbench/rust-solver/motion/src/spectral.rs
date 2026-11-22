@@ -154,7 +154,8 @@
 //!   between them, the quartic u⁴|B|²/Ω: ∫(u⁴ − h²u²)du |B|²/Ω = (4/15) s_B²/x, and nothing else; and the third order
 //!   of the following, D₂ on the entry itself, −X D X: for a slope −(|A|²A/Ω²) u (u + i/Ω)², s_A³ |I(x)|/x² with
 //!   I(x) = ∫₋₁¹ e^{ixt} t (t + i/x)² dt = i(2/(3x) + x/15 + …), that is (2/3)(s_A/x)³ to the leading order; for a
-//!   constant −(|C|²C/Ω²) at the entry's turn, (s_C/x)³ |∫₋₁¹ e^{ixt} dt| = 2 s_C³ |sin x|/x³ ≤ 2 s_C³ min(x, 1)/x³.
+//!   constant −(|C|²C/Ω²) at the entry's turn, (s_C/x)³ |∫₋₁¹ e^{ixt} dt| = 2 s_C³ |sin x|/x³ ≤ 2 s_C³ min(x, 1)/x³
+//!   (2|sin x| = |∫₋₁¹ x e^{ixt} dt|: within its length's 2x and the lemma's 2x/x, model/classify.rs `by_parts`).
 //!   They fall with the detuning, the slope's and the curvature's with the step. (A hop through an unresolved pair left
 //!   the light shift of the change, (k·v τ)²/24 of the light shift's turn over the step at any detuning.)
 //! (step/tests.rs, `a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator`.)
@@ -731,7 +732,9 @@ fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, 
         return (hops_converge.then_some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * linalg::smaller(x, 1.0) + 2.0 * coupled * r * x.powi(3);
+    // 2|sin x| = |∫₋₁¹ x e^{ixt} dt| within its length's 2x and the lemma's (module documentation, # The state at any time).
+    let turned = linalg::smaller(2.0 * x, crate::model::classify::by_parts(2.0 * x, 0.0, C64::real(x)));
+    let leading = 2.0 / 3.0 * first * slope + zeroth * constant * turned + 2.0 * coupled * r * x.powi(3);
     let hops = x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0) * (2.0 * decay).exp();
     let (light, cube) = (4.0 / 15.0 * second * (x * x), x.powi(3));
     match (r < 1.0, hops_converge) {
@@ -2005,7 +2008,8 @@ impl Picture {
     /// stood: E is no part of the propagation.
     /// - E_f, the following's third order, D₂'s fast entries left out (# The state at any time of the step): made whole
     ///   at the nodes by the factors of 1 + X (`follow`), each entry of the static group's at its largest node value
-    ///   times what its turning integral reaches over what is left of the step, min(h − u₀, 2/|Ω|), on |m|;
+    ///   times what its turning integral reaches over what is left of the step, min(h − u₀, 2/|Ω|) (the lemma's,
+    ///   model/classify.rs `by_parts`), on |m|;
     /// - E_h, the hops' second Magnus term, −½∫∫[D̃₂(t₁), D̃₂(t₂)]: of each of the launch's two hops by its two halves'
     ///   exponents J_a, J_b, ½‖[J_b, J_a] m‖ -- the term of a linear envelope at three quarters of its size --, summed;
     /// - E_L, what the three nodes' parabola of D₂ misses of the change's own light shift between them on the hopped
@@ -2041,7 +2045,8 @@ impl Picture {
                     let k = a * n + b;
                     if group.fast[k] {
                         let omega = (self.lambda[a] - self.lambda[b]).abs();
-                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * linalg::smaller(width, 2.0 / omega) * m[b].abs();
+                        let turned = linalg::smaller(width, crate::model::classify::by_parts(2.0, 0.0, C64::real(omega)));
+                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * turned * m[b].abs();
                     }
                 }
                 total += row * row;

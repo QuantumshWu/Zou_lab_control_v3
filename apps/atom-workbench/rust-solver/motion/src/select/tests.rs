@@ -93,8 +93,8 @@ fn select_the_memory_flag_by_hand() {
 #[test]
 fn select_the_ladder_top_by_hand() {
     let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, seconds: 0.0 };
-    assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE]).unmet(), None);
-    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0]).unmet(), Some(1.5 * TOLERANCE));
+    assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE, 0.0]).unmet(), None);
+    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0, 0.0]).unmet(), Some(1.5 * TOLERANCE));
 }
 
 /// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 substeps a µs a piece a step): off the
@@ -104,13 +104,13 @@ fn select_the_ladder_top_by_hand() {
 #[test]
 fn select_the_refinements_by_hand() {
     let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / 0.5), ..s };
-    let at = |o: f64, r: f64, p: usize| Setting { turns: o, rate: r, pieces: p };
+    let at = |o: f64, r: f64, p: usize| Setting { turns: o, rate: r, pieces: p, cutoff: 50.0 };
     let (runs, pairs) = refinements(at(32.0, 16.0, 2), &own);
-    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3)]));
+    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3), (0, 0)]));
     let (runs, pairs) = refinements(at(32.0, 8.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3)]));
+    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3), (0, 0)]));
     let (runs, pairs) = refinements(at(1.0, 10.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 4), at(2.0, 10.0, 4), at(1.0, 20.0, 4), at(1.0, 16.0, 8), at(1.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3)]));
+    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 4), at(2.0, 10.0, 4), at(1.0, 20.0, 4), at(1.0, 16.0, 8), at(1.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3), (0, 0)]));
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -361,7 +361,7 @@ fn select_paths_cost() {
                     let p: Vec<&str> = g.split('/').collect();
                     let pieces: usize = p[2].parse().unwrap();
                     let rate = match p[1].strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => p[1].parse().unwrap() };
-                    Setting { turns: p[0].parse().unwrap(), rate, pieces }
+                    Setting { turns: p[0].parse().unwrap(), rate, pieces, cutoff: p.get(3).map_or(f64::INFINITY, |x| x.parse().unwrap()) }
                 })
                 .collect()
         });
