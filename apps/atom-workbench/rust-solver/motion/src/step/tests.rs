@@ -4736,3 +4736,5 @@ mod r2prop2;
 // P2-GSTEP: one node a step and the quadrature by groups (ignored, by name).
 mod gstep;
 
+// P4-TABLE: the folded blocks tabled in the tweezer's intensity, against the node before it and its cost (ignored, by name).
+mod p4table;

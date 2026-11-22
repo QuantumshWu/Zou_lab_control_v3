@@ -930,7 +930,9 @@ impl Tweezer {
         let scattering: Vec<(usize, usize)> = unit.scattering.iter().map(|(sign, j, m)| (put(&mut library, &m.zeroed()), power(*sign, *j))).collect();
         generator.push(Term { factor: power_f, adjoint: false, scale: C64::new(0.0, -0.5), matrices: scattering });
         let varying = factors.0.iter().map(|f| f.varying(Some(scene))).collect();
-        let source = Source { hamiltonian, jumps, generator, varying, coefficients: 1 + 2 * (ORDERS - 1) };
+        // The tweezer's intensity: its unit fold's factor, and its own outside form's |a_tw|² where it has one.
+        let intensity = std::iter::once(power_f).chain(factors.0.iter().position(|f| *f == Factor::Scene(scene::Factor::Product(tw, tw)))).collect();
+        let source = Source { hamiltonian, jumps, generator, varying, coefficients: 1 + 2 * (ORDERS - 1), intensity };
         let spherical = Source { jumps: spherical_jumps, ..source.clone() };
         let all: Vec<usize> = (0..STATES).collect();
         let groups = levels(&scene.request.states, &all);
