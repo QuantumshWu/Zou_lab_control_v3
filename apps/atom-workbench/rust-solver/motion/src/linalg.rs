@@ -190,7 +190,7 @@ impl Sum for C64 {
     }
 }
 
-// The kernels below (`axpy`, `dot`, `combine`; table.rs `blend`) are written once, for 256-bit vectors of reals with fused
+// The kernels below (`axpy`, `dot`, `combine`) are written once, for 256-bit vectors of reals with fused
 // multiply-add, and the whole build takes those instructions (apps/atom-workbench/.cargo/config.toml; a build that sets
 // RUSTFLAGS itself names them there): no second, scalar form and no choice at run time. Without the features a fused
 // multiply-add is a library call per number -- so such a build is refused here instead of running many times slower.
@@ -310,21 +310,232 @@ pub fn mul_add(subtract: bool, z: &mut [C64], f: C64, y: &[C64]) {
     }
 }
 
+/// out_j = 1/((c_j − w) − κ) for every j, each as the scalar form makes it -- the two differences, |z|² = re² + im², one
+/// division, the conjugate scaled -- but four numbers' squared moduli to a vector and one vector division for the four.
+pub fn reciprocals(c: &[C64], w: f64, kappa: C64, out: &mut [C64]) {
+    let n = c.len();
+    assert!(out.len() >= n);
+    // SAFETY: n numbers of each (above); C64 is two f64 (`repr(C)`); the build has AVX2 (above).
+    unsafe {
+        use std::arch::x86_64::{_mm256_div_pd, _mm256_hadd_pd, _mm256_unpackhi_pd, _mm256_unpacklo_pd};
+        let (cp, op) = (c.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        let (wv, kv) = (_mm256_setr_pd(w, 0.0, w, 0.0), _mm256_setr_pd(kappa.re, kappa.im, kappa.re, kappa.im));
+        let (sign, one) = (_mm256_setr_pd(1.0, -1.0, 1.0, -1.0), _mm256_set1_pd(1.0));
+        let mut j = 0;
+        while j + 4 <= n {
+            let a = _mm256_sub_pd(_mm256_sub_pd(_mm256_loadu_pd(cp.add(2 * j)), wv), kv);
+            let b = _mm256_sub_pd(_mm256_sub_pd(_mm256_loadu_pd(cp.add(2 * j + 4)), wv), kv);
+            // [|z0|², |z2|², |z1|², |z3|²], their reciprocals, laid back by pairs.
+            let r = _mm256_div_pd(one, _mm256_hadd_pd(_mm256_mul_pd(a, a), _mm256_mul_pd(b, b)));
+            _mm256_storeu_pd(op.add(2 * j), _mm256_mul_pd(_mm256_mul_pd(a, sign), _mm256_unpacklo_pd(r, r)));
+            _mm256_storeu_pd(op.add(2 * j + 4), _mm256_mul_pd(_mm256_mul_pd(b, sign), _mm256_unpackhi_pd(r, r)));
+            j += 4;
+        }
+        while j < n {
+            let z = C64 { re: c[j].re - w, im: c[j].im - 0.0 } - kappa;
+            let d = 1.0 / z.norm_sqr();
+            out[j] = C64 { re: z.re * d, im: -z.im * d };
+            j += 1;
+        }
+    }
+}
+
+/// x_j ← x_j e^{w z_j} for every j, four at a time (`exp4`): each argument w z_j as `C64`'s product makes it and the
+/// product with x_j as `C64`'s -- a state's turns at a time (spectral.rs `Picture::at`). The numbers go to the vectors
+/// and back by shuffles, not through memory a lane at a time (a vector read of four numbers just written one by one waits
+/// for the writes, some twenty cycles a vector: the kernel's own work); the numbers past the whole vectors through a
+/// vector padded with zeros.
+pub fn times_exp(x: &mut [C64], w: C64, z: &[C64]) {
+    use std::arch::x86_64::{_mm256_movedup_pd, _mm256_permute2f128_pd, _mm256_permute4x64_pd, _mm256_unpackhi_pd, _mm256_unpacklo_pd};
+    let n = x.len();
+    assert!(z.len() >= n);
+    // SAFETY: whole vectors of four numbers within x and z (`whole`), the rest through padded copies; C64 is two f64
+    // (`repr(C)`); the build has AVX2 and FMA (above).
+    unsafe {
+        let (wr, wi) = (_mm256_set1_pd(w.re), _mm256_set1_pd(w.im));
+        let four = |x: *mut f64, z: *const f64| {
+            let (v0, v1) = (_mm256_loadu_pd(z), _mm256_loadu_pd(z.add(4)));
+            // [z0 z1 z2 z3]'s real parts and imaginary parts.
+            let zr = _mm256_permute4x64_pd::<0xD8>(_mm256_unpacklo_pd(v0, v1));
+            let zi = _mm256_permute4x64_pd::<0xD8>(_mm256_unpackhi_pd(v0, v1));
+            let a = _mm256_sub_pd(_mm256_mul_pd(wr, zr), _mm256_mul_pd(wi, zi));
+            let b = _mm256_add_pd(_mm256_mul_pd(wr, zi), _mm256_mul_pd(wi, zr));
+            let (mut er, mut ei, inside) = exp4(a, b);
+            if inside != 0b1111 {
+                let (mut ra, mut rb, mut re, mut im) = ([0.0; LANES], [0.0; LANES], [0.0; LANES], [0.0; LANES]);
+                for (v, to) in [(a, &mut ra), (b, &mut rb), (er, &mut re), (ei, &mut im)] {
+                    _mm256_storeu_pd(to.as_mut_ptr(), v);
+                }
+                for l in (0..LANES).filter(|&l| inside & (1 << l) == 0) {
+                    let e = C64::new(ra[l], rb[l]).exp();
+                    (re[l], im[l]) = (e.re, e.im);
+                }
+                (er, ei) = (_mm256_loadu_pd(re.as_ptr()), _mm256_loadu_pd(im.as_ptr()));
+            }
+            // Back to numbers side by side, [e0 e1] and [e2 e3], and x e as `C64`'s product.
+            let (low, high) = (_mm256_unpacklo_pd(er, ei), _mm256_unpackhi_pd(er, ei));
+            for (at, e) in [(0, _mm256_permute2f128_pd::<0x20>(low, high)), (4, _mm256_permute2f128_pd::<0x31>(low, high))] {
+                let y = _mm256_loadu_pd(x.add(at));
+                let product = _mm256_addsub_pd(_mm256_mul_pd(y, _mm256_movedup_pd(e)), _mm256_mul_pd(_mm256_permute_pd::<0b0101>(y), _mm256_permute_pd::<0b1111>(e)));
+                _mm256_storeu_pd(x.add(at), product);
+            }
+        };
+        let whole = n / LANES * LANES;
+        let (xp, zp) = (x.as_mut_ptr() as *mut f64, z.as_ptr() as *const f64);
+        for j in (0..whole).step_by(LANES) {
+            four(xp.add(2 * j), zp.add(2 * j));
+        }
+        if whole < n {
+            let (mut xs, mut zs) = ([C64::ZERO; LANES], [C64::ZERO; LANES]);
+            xs[..n - whole].copy_from_slice(&x[whole..]);
+            zs[..n - whole].copy_from_slice(&z[whole..n]);
+            four(xs.as_mut_ptr() as *mut f64, zs.as_ptr() as *const f64);
+            x[whole..].copy_from_slice(&xs[..n - whole]);
+        }
+    }
+}
+
+/// e^{a_l} (cos b_l + i sin b_l) of four lanes (`exp4`), a lane outside its range the library's own: the kernel lane by
+/// lane, for the tests.
+#[cfg(test)]
+pub(crate) fn exps(a: [f64; LANES], b: [f64; LANES]) -> [C64; LANES] {
+    let mut out = [C64::ZERO; LANES];
+    // SAFETY: four lanes in and out; the build has AVX2 and FMA (above).
+    let inside = unsafe {
+        let (re, im, inside) = exp4(_mm256_loadu_pd(a.as_ptr()), _mm256_loadu_pd(b.as_ptr()));
+        let (mut res, mut ims) = ([0.0; LANES], [0.0; LANES]);
+        _mm256_storeu_pd(res.as_mut_ptr(), re);
+        _mm256_storeu_pd(ims.as_mut_ptr(), im);
+        for l in 0..LANES {
+            out[l] = C64::new(res[l], ims[l]);
+        }
+        inside
+    };
+    for l in (0..LANES).filter(|&l| inside & (1 << l) == 0) {
+        out[l] = C64::new(a[l], b[l]).exp();
+    }
+    out
+}
+
+/// e^{a_l} (cos b_l + i sin b_l) of four lanes, a vector of the real parts and one of the imaginary parts, each within a
+/// few units of its round-off of the modulus e^{a_l} (tests, `four_exponentials_are_the_library_s_within_their_round_off`),
+/// and the lanes in range (a mask, lane l its bit l):
+/// - e^a: a = k ln 2 + r, k = round(a/ln 2), r by Cody & Waite's two parts of ln 2 (fdlibm's: the first's trailing bits
+///   zero, each product rounded once in its fused step), |r| ≤ ln 2/2; e^r = 1 + r + r²/2 + … to r¹³/13! (the next term
+///   r¹⁴/14! ≤ 4·10⁻¹⁸ of one), and 2^k from k's bits;
+/// - cos b, sin b: b = k π/2 + r, k = round(2b/π), r by three parts of π/2 of 33 bits each (fdlibm's `rem_pio2`): every
+///   k π/2's part exact for |k| < 2^20, the first difference exact by Sterbenz's lemma, so r is within an ulp of its own
+///   and k 10⁻³¹ besides; on |r| ≤ π/4 fdlibm's kernels (`__kernel_sin`, `__kernel_cos`: their minimax polynomials, each
+///   within an ulp), the quadrant by k's last two bits.
+/// A lane outside the range these hold on -- a outside [−708, 709] (e^a beyond the normal numbers' range or its 2^k),
+/// |b| beyond 2^19 π/2, a number that is not finite (a comparison with NaN is false) -- is out of range: its caller takes
+/// the library's (`C64::exp`), NaN in, NaN out. Inlined where it is called: each lane is a chain of some forty dependent
+/// fused steps, and a caller's successive vectors overlap.
+#[inline(always)]
+unsafe fn exp4(av: __m256d, bv: __m256d) -> (__m256d, __m256d, i32) {
+    use std::arch::x86_64::{_mm256_add_epi64, _mm256_and_pd, _mm256_and_si256, _mm256_andnot_pd, _mm256_blendv_pd, _mm256_castpd_si256, _mm256_castsi256_pd, _mm256_cmp_pd, _mm256_cmpeq_epi64, _mm256_movemask_pd, _mm256_round_pd, _mm256_set1_epi64x, _mm256_slli_epi64, _mm256_xor_pd, _CMP_GE_OQ, _CMP_LE_OQ, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT};
+    // fdlibm's constants (e_exp.c, e_rem_pio2.c, k_sin.c, k_cos.c).
+    const LN2_HI: f64 = 6.931_471_803_691_238_164_90e-1;
+    const LN2_LO: f64 = 1.908_214_929_270_587_700_02e-10;
+    const PIO2: [f64; 3] = [1.570_796_326_734_125_614_17, 6.077_100_506_303_965_976_60e-11, 2.022_266_248_711_166_455_80e-21];
+    const SIN: [f64; 6] = [-1.666_666_666_666_663_243_48e-1, 8.333_333_333_322_489_461_24e-3, -1.984_126_982_985_794_931_34e-4, 2.755_731_370_707_006_767_89e-6, -2.505_076_025_340_686_341_95e-8, 1.589_690_995_211_550_102_21e-10];
+    const COS: [f64; 6] = [4.166_666_666_666_660_190_37e-2, -1.388_888_888_887_410_957_49e-3, 2.480_158_728_947_672_941_78e-5, -2.755_731_435_139_066_330_35e-7, 2.087_572_321_298_174_827_90e-9, -1.135_964_755_778_819_482_65e-11];
+    // 2^52 + 2^51: a whole number of magnitude below 2^51 added to it lies in the sum's last bits.
+    const MAGIC: f64 = 6_755_399_441_055_744.0;
+    const NEAREST: i32 = _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC;
+    // SAFETY: the caller's (the build has AVX2 and FMA).
+    unsafe {
+        let fma = |x: __m256d, y: __m256d, z: __m256d| _mm256_fmadd_pd(x, y, z);
+        let set = _mm256_set1_pd;
+        // e^a.
+        let k = _mm256_round_pd::<NEAREST>(_mm256_mul_pd(av, set(std::f64::consts::LOG2_E)));
+        let minus = _mm256_sub_pd(_mm256_setzero_pd(), k);
+        let r = fma(minus, set(LN2_LO), fma(minus, set(LN2_HI), av));
+        let mut q = set(1.0 / 6_227_020_800.0);
+        for f in [479_001_600.0, 39_916_800.0, 3_628_800.0, 362_880.0, 40_320.0, 5_040.0, 720.0, 120.0, 24.0, 6.0, 2.0] {
+            q = fma(q, r, set(1.0 / f));
+        }
+        let p = _mm256_add_pd(set(1.0), fma(_mm256_mul_pd(r, r), q, r));
+        let power = _mm256_slli_epi64::<52>(_mm256_add_epi64(_mm256_castpd_si256(_mm256_add_pd(k, set(MAGIC))), _mm256_set1_epi64x(1023 - 0x4338_0000_0000_0000)));
+        let modulus = _mm256_mul_pd(p, _mm256_castsi256_pd(power));
+        // cos b, sin b.
+        let k = _mm256_round_pd::<NEAREST>(_mm256_mul_pd(bv, set(std::f64::consts::FRAC_2_PI)));
+        let minus = _mm256_sub_pd(_mm256_setzero_pd(), k);
+        let r = fma(minus, set(PIO2[2]), fma(minus, set(PIO2[1]), fma(minus, set(PIO2[0]), bv)));
+        let z = _mm256_mul_pd(r, r);
+        let mut s = set(SIN[5]);
+        for c in SIN[1..5].iter().rev() {
+            s = fma(s, z, set(*c));
+        }
+        let sine = fma(_mm256_mul_pd(z, r), fma(z, s, set(SIN[0])), r);
+        let mut c = set(COS[5]);
+        for x in COS[..5].iter().rev() {
+            c = fma(c, z, set(*x));
+        }
+        let (hz, zc) = (_mm256_mul_pd(set(0.5), z), _mm256_mul_pd(_mm256_mul_pd(z, z), c));
+        let w = _mm256_sub_pd(set(1.0), hz);
+        let cosine = _mm256_add_pd(w, _mm256_add_pd(_mm256_sub_pd(_mm256_sub_pd(set(1.0), w), hz), zc));
+        // The quadrant k mod 4 from k's last bits: odd swaps the two, k ≡ 1, 2 turns the cosine's sign, k ≡ 2, 3 the sine's.
+        let bits = _mm256_castpd_si256(_mm256_add_pd(k, set(MAGIC)));
+        let (one, two) = (_mm256_set1_epi64x(1), _mm256_set1_epi64x(2));
+        let swap = _mm256_castsi256_pd(_mm256_cmpeq_epi64(_mm256_and_si256(bits, one), one));
+        let (cos, sin) = (_mm256_blendv_pd(cosine, sine, swap), _mm256_blendv_pd(sine, cosine, swap));
+        let cos = _mm256_xor_pd(cos, _mm256_castsi256_pd(_mm256_slli_epi64::<62>(_mm256_and_si256(_mm256_add_epi64(bits, one), two))));
+        let sin = _mm256_xor_pd(sin, _mm256_castsi256_pd(_mm256_slli_epi64::<62>(_mm256_and_si256(bits, two))));
+        let inside = _mm256_and_pd(_mm256_and_pd(_mm256_cmp_pd::<_CMP_GE_OQ>(av, set(-708.0)), _mm256_cmp_pd::<_CMP_LE_OQ>(av, set(709.0))), _mm256_cmp_pd::<_CMP_LE_OQ>(_mm256_andnot_pd(set(-0.0), bv), set(823_549.6)));
+        (_mm256_mul_pd(cos, modulus), _mm256_mul_pd(sin, modulus), _mm256_movemask_pd(inside))
+    }
+}
+
 /// out (r × c) = a (r × k) b (k × c), all row by row: each entry from zero by k fused steps, b's rows in order,
 /// o.re ← x.re y.re + (−x.im y.im + o.re) and o.im ← x.re y.im + (x.im y.re + o.im) (x = a's entry, y = b's) -- two
 /// fused multiply-adds a real. Up to eight numbers of a row of out are held in registers through the k steps.
-pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out: &mut [C64]) {
+pub fn fused_product(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<false, false>(a, b, dims, out);
+}
+
+/// out (r × c) += a (r × k) b (k × c): `fused_product` with each entry's chain from out's own value.
+pub fn fused_product_onto(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<false, true>(a, b, dims, out);
+}
+
+/// out (r × c) = a† b, a (k × r): `fused_product` on a's columns, each entry conjugated (no adjoint made).
+pub fn adjoint_product(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<true, false>(a, b, dims, out);
+}
+
+/// out (r × c) += a† b, a (k × r).
+pub fn adjoint_product_onto(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
+    product::<true, true>(a, b, dims, out);
+}
+
+/// The products' one kernel: out (r × c) = op(a) b, op(a) = a (r × k) or with `ADJOINT` a† of a (k × r); with `ONTO` each
+/// entry's chain starts at out's value instead of zero.
+#[inline(always)]
+fn product<const ADJOINT: bool, const ONTO: bool>(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out: &mut [C64]) {
     assert!(a.len() >= r * k && b.len() >= k * c && out.len() >= r * c);
     // SAFETY: the lengths above; C64 is two f64 (`repr(C)`); the build has AVX2 and FMA (above).
     unsafe {
-        let (bp, op) = (b.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
-        for (i, row) in a[..r * k].chunks_exact(k.max(1)).enumerate().take(r) {
+        let (ap, bp, op) = (a.as_ptr(), b.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        for i in 0..r {
             let mut j = 0;
             while j < c {
                 let w = (c - j).min(8);
                 let pairs = w / 2;
+                let to = op.add(2 * (i * c + j));
                 let (mut held, mut tail) = ([_mm256_setzero_pd(); 4], _mm_setzero_pd());
-                for (l, x) in row.iter().enumerate() {
+                if ONTO {
+                    for (v, sum) in held.iter_mut().enumerate() {
+                        if v < pairs {
+                            *sum = _mm256_loadu_pd(to.add(4 * v));
+                        }
+                    }
+                    if w % 2 == 1 {
+                        tail = _mm_loadu_pd(to.add(4 * pairs));
+                    }
+                }
+                for l in 0..k {
+                    let x = if ADJOINT { (*ap.add(l * r + i)).conj() } else { *ap.add(i * k + l) };
                     let at = bp.add(2 * (l * c + j));
                     let (re, im) = (_mm256_set1_pd(x.re), _mm256_setr_pd(-x.im, x.im, -x.im, x.im));
                     for (v, sum) in held.iter_mut().enumerate() {
@@ -338,7 +549,6 @@ pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out
                         tail = _mm_fmadd_pd(_mm256_castpd256_pd128(re), y, _mm_fmadd_pd(_mm256_castpd256_pd128(im), _mm_permute_pd::<0b01>(y), tail));
                     }
                 }
-                let to = op.add(2 * (i * c + j));
                 for (v, sum) in held.iter().enumerate() {
                     if v < pairs {
                         _mm256_storeu_pd(to.add(4 * v), *sum);
@@ -350,9 +560,6 @@ pub fn fused_product(a: &[C64], b: &[C64], (r, k, c): (usize, usize, usize), out
                 j += w;
             }
         }
-        if k == 0 {
-            out[..r * c].fill(C64::ZERO);
-        }
     }
 }
 
@@ -363,6 +570,32 @@ pub fn inner(a: &[C64], b: &[C64]) -> C64 {
 /// ‖v‖² = Σ_i |v_i|².
 pub fn norm_sqr(v: &[C64]) -> f64 {
     v.iter().map(|z| z.norm_sqr()).sum()
+}
+
+/// The larger of a and b, and NaN where either is NaN. `f64::max` returns the other number where one is NaN, so that a
+/// maximum folded with it reads a NaN as nothing -- a block of NaN as the fold's start, 0 where it starts at 0 -- and
+/// the NaN never reaches what would refuse it; this one carries it to whatever reads the maximum. ±∞ are numbers like
+/// any other. Where neither is NaN it is `f64::max` itself, to the bit.
+pub fn larger(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// The smaller of a and b, and NaN where either is NaN (`larger`); where neither is, `f64::min` itself.
+pub fn smaller(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
+}
+
+/// The largest of `from` and the values, NaN where any of them is NaN (`larger`); `from` where there are none.
+pub fn largest(from: f64, values: impl IntoIterator<Item = f64>) -> f64 {
+    values.into_iter().fold(from, larger)
 }
 
 /// √(a² + b²) without overflow or underflow of the squares. Where neither square leaves the normal range -- both parts
@@ -468,15 +701,15 @@ impl Mat {
     }
     /// ‖A‖₁: the largest column sum of the entries' moduli.
     pub fn norm1(&self) -> f64 {
-        (0..self.cols).map(|j| (0..self.rows).map(|i| self[(i, j)].abs()).sum::<f64>()).fold(0.0, f64::max)
+        (0..self.cols).map(|j| (0..self.rows).map(|i| self[(i, j)].abs()).sum::<f64>()).fold(0.0, larger)
     }
     /// The Frobenius norm √Σ|a_ij|².
     pub fn frobenius(&self) -> f64 {
         norm_sqr(&self.data).sqrt()
     }
-    /// The largest entry's modulus.
+    /// The largest entry's modulus; NaN where an entry is (`largest`), 0 of no entries.
     pub fn max_abs(&self) -> f64 {
-        self.data.iter().fold(0.0, |a, z| a.max(z.abs()))
+        largest(0.0, self.data.iter().map(|z| z.abs()))
     }
     /// (A + A†)/2.
     pub fn hermitian_part(&self) -> Mat {
@@ -839,7 +1072,7 @@ impl Eigen {
             for z in r.iter_mut() {
                 *z = *z / norm;
             }
-            one = one.max(r.iter().map(|z| z.abs()).sum::<f64>());
+            one = larger(one, r.iter().map(|z| z.abs()).sum::<f64>());
             for (i, z) in r.iter().enumerate() {
                 self.vectors.data[i * n + k] = *z;
             }
@@ -855,6 +1088,68 @@ impl Eigen {
         solve(&self.factors, &self.pivots, n, &mut self.inverse.data, n);
         self.condition = one * self.inverse.norm1();
         self.work = work as f64;
+        self.condition.is_finite()
+    }
+
+    /// The eigendecomposition of a block-diagonal A (its entries between two of `blocks` zero), block by block: each
+    /// block decomposed alone (`decompose`, each on its own place in `scratch`: none made after the first of a size), its eigencomponents in its own states' places -- R and
+    /// R⁻¹ block-diagonal, so that no eigenvector of one block is mixed with another's, not even where two blocks share an
+    /// eigenvalue --, `part` each component's block. The condition of the whole R (its columns' largest 1-norm times
+    /// ‖R⁻¹‖₁), the blocks' work summed. False where a block's decomposition is (`decompose`).
+    pub fn decompose_blocks(&mut self, a: &Mat, blocks: &[Vec<usize>], scratch: &mut Vec<(Mat, Eigen)>, part: &mut Vec<usize>) -> bool {
+        let n = a.rows;
+        assert_eq!(n, a.cols, "the eigendecomposition of a {}x{} matrix", a.rows, a.cols);
+        if self.values.len() != n {
+            self.values.resize(n, C64::ZERO);
+            for m in [&mut self.vectors, &mut self.inverse] {
+                (m.rows, m.cols) = (n, n);
+                m.data.resize(n * n, C64::ZERO);
+            }
+            self.columns[2].resize(n * n, C64::ZERO);
+        }
+        self.vectors.data.fill(C64::ZERO);
+        self.inverse.data.fill(C64::ZERO);
+        part.clear();
+        part.resize(n, usize::MAX);
+        let mut work = 0.0;
+        if scratch.len() != blocks.len() {
+            scratch.resize_with(blocks.len(), Default::default);
+        }
+        for (b, states) in blocks.iter().enumerate() {
+            let m = states.len();
+            let (block, scratch) = &mut scratch[b];
+            if block.rows != m {
+                *block = Mat::zeros(m, m);
+            }
+            for (i, &s) in states.iter().enumerate() {
+                for (j, &t) in states.iter().enumerate() {
+                    block.data[i * m + j] = a[(s, t)];
+                }
+            }
+            if !scratch.decompose(block) {
+                return false;
+            }
+            work += scratch.work;
+            for (j, &c) in states.iter().enumerate() {
+                self.values[c] = scratch.values[j];
+                part[c] = b;
+                for (i, &s) in states.iter().enumerate() {
+                    self.vectors.data[s * n + c] = scratch.vectors.data[i * m + j];
+                    self.inverse.data[c * n + s] = scratch.inverse.data[j * m + i];
+                }
+            }
+        }
+        assert!(part.iter().all(|&b| b != usize::MAX), "the blocks are a partition of the states");
+        let mut one = 0.0_f64;
+        for k in 0..n {
+            let column = &mut self.columns[2][k * n..(k + 1) * n];
+            for (i, z) in column.iter_mut().enumerate() {
+                *z = self.vectors.data[i * n + k];
+            }
+            one = larger(one, column.iter().map(|z| z.abs()).sum::<f64>());
+        }
+        self.condition = one * self.inverse.norm1();
+        self.work = work;
         self.condition.is_finite()
     }
 }
@@ -919,7 +1214,7 @@ pub(crate) fn schur(h: &mut [C64], q: &mut [C64], v: &mut [C64], sums: &mut [C64
         }
     }
     // The QR iteration on the active block [lo, hi), the rotations accumulated into Q.
-    let scale = h.iter().map(|z| z.abs1()).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
+    let scale = larger(h.iter().map(|z| z.abs1()).fold(0.0, larger), f64::MIN_POSITIVE);
     let most = 30 * n.max(10);
     let (mut hi, mut iterations) = (n, 0);
     while hi > 1 {
@@ -994,14 +1289,14 @@ impl Chebyshev {
     /// part's y = σr/2q within ln(f64::MAX)); the least degree K with 2(1 + √2) Σ_{k>K} y^k/k! ≤ u, the sum within its
     /// first term over 1 − y/(K + 2). Nothing to sum where X is zero.
     pub fn plan(rho: f64, gamma: f64) -> Chebyshev {
-        let sigma = rho.max(gamma);
+        let sigma = larger(rho, gamma);
         assert!(sigma.is_finite() && rho >= 0.0 && gamma >= 0.0, "the exponential of a matrix of bounds {rho}, {gamma}");
         if sigma == 0.0 {
             return Chebyshev { parts: 1, terms: 0 };
         }
         let corner = C64::new(rho / sigma, gamma / sigma);
         let r = (corner + (corner * corner - C64::ONE).sqrt()).abs();
-        let parts = ((sigma * gamma).sqrt().max(0.5 * sigma * r / f64::MAX.ln()).ceil() as usize).max(1);
+        let parts = (larger((sigma * gamma).sqrt(), 0.5 * sigma * r / f64::MAX.ln()).ceil() as usize).max(1);
         let y = 0.5 * sigma * r / parts as f64;
         let (mut terms, mut next) = (0, y);
         while !((terms + 2) as f64 > y && 2.0 * (1.0 + std::f64::consts::SQRT_2) * next / (1.0 - y / (terms + 2) as f64) <= UNIT_ROUNDOFF) {
@@ -1053,8 +1348,8 @@ pub fn bounds(x: &Mat, sums: &mut [C64]) -> Bounds {
     let (mut lo, mut hi, mut spread) = (C64::new(f64::INFINITY, f64::INFINITY), C64::new(f64::NEG_INFINITY, f64::NEG_INFINITY), C64::ZERO);
     for i in 0..n {
         let (d, r) = (x[(i, i)], sums[i]);
-        lo = C64::new(lo.re.min(d.re - r.re), lo.im.min(d.im - r.im));
-        hi = C64::new(hi.re.max(d.re + r.re), hi.im.max(d.im + r.im));
+        lo = C64::new(smaller(lo.re, d.re - r.re), smaller(lo.im, d.im - r.im));
+        hi = C64::new(larger(hi.re, d.re + r.re), larger(hi.im, d.im + r.im));
         spread += C64::new((d.re - mean.re).powi(2), (d.im - mean.im).powi(2));
     }
     let least = |lo: f64, hi: f64, squares: f64, mean: f64| {
@@ -1081,7 +1376,7 @@ pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebys
     }
     let plan = Chebyshev::plan(rho, gamma);
     if plan.terms > 0 {
-        let sigma = rho.max(gamma);
+        let sigma = larger(rho, gamma);
         let z = sigma / plan.parts as f64;
         for x in &mut a.data {
             *x *= 2.0 / sigma;
@@ -1121,119 +1416,6 @@ pub fn exp_apply(a: &mut Mat, t: C64, v: &mut [C64], work: &mut [C64]) -> Chebys
         *x *= phase;
     }
     plan
-}
-
-/// The plan of e^X v by Taylor's series within a tolerance (`taylor_bound`, `taylor_series`): X taken in `parts` equal
-/// parts, each part's series summed through its term `terms`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Taylor {
-    pub parts: usize,
-    pub terms: usize,
-}
-
-impl Taylor {
-    /// The plan for X of the bound ‖X‖ ≤ x and the logarithmic norm μ(X) ≤ μ on n states, within `tolerance` relative
-    /// to ‖v‖: of the plans of q parts (y = x/q a part) the one of the fewest products q·m whose every part is within
-    /// its share tolerance/q over what the parts after it can grow it by, e^{μ⁺(q − 1)/q} (‖e^{X/q}‖ ≤ e^{μ/q}, μ⁺ its
-    /// positive part): its series' remainder past the term m, Σ_{k>m} y^k/k! ≤ y^{m+1}/(m+1)! (1 − y/(m + 2))⁻¹ for
-    /// y < m + 2, with the sum's rounding, γ((n + 2)(m + 1)) e^y -- a term is a product of n and two sums, and the terms
-    /// are at most e^y. A part too large for its rounding to be within its share takes no plan, unless it is of y ≤ 1
-    /// (its rounding then that of a few products: a tolerance below it is met as far as the arithmetic allows); the
-    /// parts are tried from one up while they are fewer than the best plan's products (a plan of q parts takes at
-    /// least q), and from x parts on every part is of y ≤ 1. Nothing to sum where x is within the unit round-off.
-    pub fn plan(x: f64, mu: f64, tolerance: f64, n: usize) -> Taylor {
-        // A series whose first term is within the unit round-off of the vector it acts on is the vector itself.
-        if x <= UNIT_ROUNDOFF {
-            return Taylor { parts: 1, terms: 0 };
-        }
-        assert!(x.is_finite() && tolerance > 0.0, "a Taylor plan of a bound {x} within {tolerance}");
-        let terms_of = |parts: usize| -> Option<usize> {
-            let y = x / parts as f64;
-            let share = tolerance / parts as f64 * (-mu.max(0.0) * (parts - 1) as f64 / parts as f64).exp();
-            // m and the bound y^{m+1}/(m+1)! of the first term past it, as long as the rounding leaves room.
-            let (mut m, mut next, largest) = (0usize, y, y.exp());
-            loop {
-                // Where the rounding alone is beyond the share, a part of y ≤ 1 still is no worse than the rounding of a
-                // product (γ e): there the truncation takes the share, elsewhere what the rounding leaves of it.
-                let rounded = rounding((n + 2) * (m + 1)) * largest;
-                let beyond = rounded >= share;
-                if beyond && y > 1.0 {
-                    return None;
-                }
-                let room = if beyond { share } else { share - rounded };
-                if y < (m + 2) as f64 && next / (1.0 - y / (m + 2) as f64) <= room {
-                    return Some(m);
-                }
-                m += 1;
-                next *= y / (m + 1) as f64;
-            }
-        };
-        let mut best: Option<Taylor> = None;
-        let mut parts = 1;
-        while best.is_none_or(|b| parts < b.parts * b.terms) {
-            if let Some(terms) = terms_of(parts) {
-                if best.is_none_or(|b| parts * terms < b.parts * b.terms) {
-                    best = Some(Taylor { parts, terms });
-                }
-            }
-            parts += 1;
-        }
-        best.expect("a plan")
-    }
-    /// Its complex multiply-adds on n states: a product of n² a term.
-    pub fn work(&self, n: usize) -> f64 {
-        (self.parts * self.terms * n * n) as f64
-    }
-}
-
-/// The bounds of X = t(A − z), z = tr A/n the scalar part of an n × n matrix (row by row): its norm, max(‖X‖₁, ‖X‖∞) ≥
-/// ‖X‖₂ -- its columns' and rows' sums of |re| + |im| --, and its logarithmic norm μ(X) = λ_max((X + X†)/2), bounded
-/// by Gershgorin's discs of that Hermitian part (‖e^{sX}‖ ≤ e^{sμ}); and z. What `taylor_series` takes out and is
-/// planned at (`Taylor::plan`).
-pub fn taylor_bound(a: &[C64], n: usize, t: C64) -> (C64, [f64; 2]) {
-    const MOST: usize = crate::request::STATES;
-    assert!(a.len() == n * n && n <= MOST, "the exponential of {} numbers on {n} states", a.len());
-    let scalar = (0..n).map(|i| a[i * n + i]).sum::<C64>() / n as f64;
-    let (mut rows, mut columns, mut discs) = ([0.0_f64; MOST], [0.0_f64; MOST], [0.0_f64; MOST]);
-    let entry = |i: usize, j: usize| (a[i * n + j] - if i == j { scalar } else { C64::ZERO }) * t;
-    for i in 0..n {
-        for j in 0..n {
-            let x = entry(i, j);
-            let size = x.re.abs() + x.im.abs();
-            rows[i] += size;
-            columns[j] += size;
-            discs[i] += if i == j { x.re } else { 0.5 * (x + entry(j, i).conj()).abs() };
-        }
-    }
-    let norm = rows[..n].iter().chain(&columns[..n]).fold(0.0_f64, |m, x| m.max(*x));
-    (scalar, [norm, discs[..n].iter().fold(f64::NEG_INFINITY, |m, x| m.max(*x))])
-}
-
-/// v ← T(t(A − z)) v, the plan's Taylor polynomials of e^{t(A − z)/q} applied q times (`Taylor`), z the scalar part
-/// `taylor_bound` took out -- its factor e^{tz} is the caller's: the strides of a step take the two of a stride's
-/// exponentials at once.
-pub fn taylor_series(a: &[C64], n: usize, scalar: C64, t: C64, v: &mut [C64], plan: Taylor) {
-    const MOST: usize = crate::request::STATES;
-    assert!(a.len() == n * n && v.len() == n && n <= MOST, "a series of {} numbers on {n} states", a.len());
-    let step = t / plan.parts as f64;
-    let (mut term, mut next) = ([C64::ZERO; MOST], [C64::ZERO; MOST]);
-    for _ in 0..plan.parts {
-        term[..n].copy_from_slice(v);
-        for k in 1..=plan.terms {
-            let scale = step / k as f64;
-            for i in 0..n {
-                let mut product = -scalar * term[i];
-                for (m, x) in a[i * n..(i + 1) * n].iter().zip(&term[..n]) {
-                    product += *m * *x;
-                }
-                next[i] = product * scale;
-            }
-            for i in 0..n {
-                term[i] = next[i];
-                v[i] += next[i];
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1279,6 +1461,115 @@ pub fn symmetric3_eigen(m: &M3) -> (V3, [V3; 3]) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The four lanes' exponentials (`exps`) against the library's, `C64::exp` -- e^a by the platform's `exp`, cos b and
+    /// sin b by its `sin_cos`, each within an ulp --: over 4·10⁵ lanes of a from −720 to 720 (and densely from −50 to 5,
+    /// the decays a step meets) and b of every size from 10⁻²⁰ to 2·10⁶ of either sign, beside multiples of π/2 up to
+    /// 5·10⁵ of them to within 10⁻¹² to 10⁻³, and the numbers no lane takes (±0, ±∞, NaN, a beyond the normal range, b
+    /// beyond 2^19 π/2): within 4u of the modulus |e^{a + ib}| where it is finite, and the library's own -- the same
+    /// infinities and NaNs -- where it is not. `times_exp` on lengths of every remainder against the scalar product with
+    /// the library's exponential: within 6u of |x| |e^{wz}|.
+    #[test]
+    fn four_exponentials_are_the_library_s_within_their_round_off() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut uniform = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut lanes: Vec<(f64, f64)> = Vec::new();
+        for k in 0..400_000 {
+            let a = if k % 2 == 0 { -720.0 + 1440.0 * uniform() } else { -50.0 + 55.0 * uniform() };
+            let size = 10f64.powf(-20.0 + 26.3 * uniform());
+            let b = match k % 3 {
+                0 => size,
+                1 => -size,
+                _ => {
+                    let quarter = (uniform() * 5e5).round();
+                    quarter * std::f64::consts::FRAC_PI_2 + if uniform() < 0.5 { 1.0 } else { -1.0 } * 10f64.powf(-12.0 + 9.0 * uniform())
+                }
+            };
+            lanes.push((a, b));
+        }
+        let (nan, inf) = (f64::NAN, f64::INFINITY);
+        for a in [0.0, -0.0, 708.0, -708.0, 709.0, 709.5, 710.0, -708.5, -745.0, -746.0, -1e3, inf, -inf, nan] {
+            for b in [0.0, -0.0, 1.0, std::f64::consts::FRAC_PI_2, 823_549.0, 823_550.0, 1e7, 1e300, inf, -inf, nan] {
+                lanes.push((a, b));
+            }
+        }
+        while lanes.len() % LANES != 0 {
+            lanes.push((0.0, 0.0));
+        }
+        let mut worst = 0.0_f64;
+        for four in lanes.chunks_exact(LANES) {
+            let found = exps(std::array::from_fn(|l| four[l].0), std::array::from_fn(|l| four[l].1));
+            for (&(a, b), found) in four.iter().zip(found) {
+                let library = C64::new(a, b).exp();
+                if library.re.is_finite() && library.im.is_finite() {
+                    let ratio = (found - library).abs() / (UNIT_ROUNDOFF * a.exp());
+                    assert!(ratio <= 4.0 || (found - library).abs() == 0.0, "e^({a} + i{b}): {found:?} against {library:?}, {ratio:.2} u of the modulus");
+                    worst = larger(worst, if ratio.is_finite() { ratio } else { 0.0 });
+                } else {
+                    let same = |x: f64, y: f64| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+                    assert!(same(found.re, library.re) && same(found.im, library.im), "e^({a} + i{b}): {found:?} against {library:?}");
+                }
+            }
+        }
+        eprintln!("{} lanes: within {worst:.2} u of the modulus", lanes.len());
+        for n in 1..=9 {
+            let x: Vec<C64> = (0..n).map(|_| C64::new(uniform() - 0.5, uniform() - 0.5)).collect();
+            // Eigenvalues: frequencies of either sign, decays (their imaginary parts negative).
+            let z: Vec<C64> = (0..n).map(|_| C64::new(2e4 * (uniform() - 0.5), -300.0 * uniform())).collect();
+            let w = C64::new(0.0, -0.37 * uniform());
+            let mut found = x.clone();
+            times_exp(&mut found, w, &z);
+            for ((found, x), z) in found.iter().zip(&x).zip(&z) {
+                let wanted = *x * (w * *z).exp();
+                assert!((*found - wanted).abs() <= 6.0 * UNIT_ROUNDOFF * x.abs() * (w * *z).re.exp(), "n {n}: {found:?} against {wanted:?}");
+            }
+        }
+    }
+
+    /// The NaN-carrying maximum and minimum (`larger`, `smaller`, `largest`, `Mat::max_abs`): a NaN anywhere -- the start,
+    /// the first, the middle, the last, beside ±∞ -- is the result; ±∞ are numbers like any other; no values leave the
+    /// start; and where no NaN is, the result is `f64::max`'s and `f64::min`'s to the bit, signed zeros included.
+    #[test]
+    fn the_largest_carries_a_nan_and_is_f64_max_elsewhere() {
+        let (nan, inf) = (f64::NAN, f64::INFINITY);
+        assert_eq!(largest(0.0, []), 0.0);
+        assert_eq!(largest(-inf, []), -inf);
+        assert!(largest(nan, []).is_nan());
+        assert_eq!(largest(0.0, [1.0, -3.0, 2.5]), 2.5);
+        assert_eq!(largest(0.0, [-1.0, -3.0]), 0.0);
+        assert_eq!(largest(-inf, [-1.0, -3.0]), -1.0);
+        assert_eq!(largest(0.0, [1.0, inf, 2.0]), inf);
+        assert_eq!(largest(0.0, [-inf]), 0.0);
+        for values in [[nan, 1.0, 2.0], [1.0, nan, 2.0], [1.0, 2.0, nan], [inf, nan, -inf], [nan, nan, nan]] {
+            assert!(largest(0.0, values).is_nan() && largest(-inf, values).is_nan(), "{values:?}");
+            assert!(values.into_iter().fold(inf, smaller).is_nan(), "{values:?}");
+        }
+        assert!(largest(nan, [1.0, 2.0]).is_nan() && larger(nan, -inf).is_nan() && smaller(inf, nan).is_nan());
+        assert_eq!((smaller(-inf, 3.0), smaller(2.0, 3.0), [4.0, -inf, 1.0].into_iter().fold(inf, smaller)), (-inf, 2.0, -inf));
+        let numbers = [0.0, -0.0, 1.5, -2.25, 1e-310, -1e300, inf, -inf, f64::MIN_POSITIVE];
+        for a in numbers {
+            for b in numbers {
+                assert_eq!((larger(a, b).to_bits(), smaller(a, b).to_bits()), (a.max(b).to_bits(), a.min(b).to_bits()), "{a:e}, {b:e}");
+            }
+        }
+        let mut m = Mat::from_fn(3, 3, |i, j| C64::new(i as f64 - 1.0, j as f64));
+        assert_eq!(m.max_abs(), m.data.iter().map(|z| z.abs()).fold(0.0, f64::max));
+        m.data[4] = C64::new(nan, 0.0);
+        assert!(m.max_abs().is_nan());
+        m.data.iter_mut().for_each(|z| *z = C64::new(nan, nan));
+        assert!(m.max_abs().is_nan(), "a block of NaN is NaN, not 0");
+        m.data[7] = C64::new(-inf, 0.0);
+        assert!(m.max_abs().is_nan());
+        m.data.iter_mut().for_each(|z| *z = C64::ZERO);
+        m.data[2] = C64::new(0.0, -inf);
+        assert_eq!(m.max_abs(), inf);
+        assert_eq!(Mat::from_fn(0, 0, |_, _| C64::ONE).max_abs(), 0.0);
+    }
     use crate::random::{Purpose, Stream};
     use crate::units::rounding;
 
@@ -1432,7 +1723,7 @@ pub(crate) mod tests {
         solve_columns(&Lu::new(&plus).unwrap(), &minus)
     }
     fn difference(a: &Mat, b: &Mat) -> f64 {
-        a.data.iter().zip(&b.data).fold(0.0, |m, (x, y)| m.max((*x - *y).abs()))
+        a.data.iter().zip(&b.data).fold(0.0, |m, (x, y)| larger(m, (*x - *y).abs()))
     }
 
     /// The tests' dense reference of an exponential: e^{tA} by the Taylor polynomial of tA/2^s, of norm ≤ 1 and degree 18
@@ -1481,7 +1772,7 @@ pub(crate) mod tests {
             let e = hermitian_eigen(&a);
             d.sort_by(f64::total_cmp);
             let scale = a.frobenius();
-            let worst = e.values.iter().zip(&d).fold(0.0_f64, |m, (x, y)| m.max((x - y).abs()));
+            let worst = e.values.iter().zip(&d).fold(0.0_f64, |m, (x, y)| larger(m, (x - y).abs()));
             assert!(worst <= rounding(8 * n) * scale, "n {n}: eigenvalues off by {worst:e} of {scale:e}");
             let gram = e.vectors.adjoint_product(&e.vectors);
             let off = difference(&gram, &Mat::identity(n));
@@ -1523,7 +1814,7 @@ pub(crate) mod tests {
         let e = eigen(&a).unwrap();
         let mut found = e.values.clone();
         found.sort_by(|x, y| x.re.total_cmp(&y.re));
-        let worst = found.iter().zip(&lambda).fold(0.0_f64, |m, (x, y)| m.max((*x - *y).abs()));
+        let worst = found.iter().zip(&lambda).fold(0.0_f64, |m, (x, y)| larger(m, (*x - *y).abs()));
         assert!(worst <= rounding(4 * n * n) * e.condition * a.max_abs(), "{worst:e}");
         let g = 38.0;
         let at = |omega: f64| {
@@ -1535,6 +1826,41 @@ pub(crate) mod tests {
             eigen(&h).unwrap().condition
         };
         assert!(at(g / 2.0 * (1.0 + 1e-8)) > 1e3 * at(2.0 * g), "{} {}", at(g / 2.0 * (1.0 + 1e-8)), at(2.0 * g));
+    }
+
+    /// The decomposition block by block (`Eigen::decompose_blocks`) of a block-diagonal generator of the same shape, its
+    /// blocks interleaved among the states (of 1 to 9 states, two of them sharing an eigenvalue): R Λ R⁻¹ = A to
+    /// γ κ(R) ‖A‖, R and R⁻¹ zero between two blocks -- every eigenvector of one block, even where two blocks share an
+    /// eigenvalue --, each component's block its states', a second call on the same scratch the same to the bit.
+    #[test]
+    fn the_block_eigendecomposition_gives_the_matrix_back() {
+        let blocks: Vec<Vec<usize>> = vec![vec![0, 3, 7, 12], vec![1, 2], vec![4], vec![5, 6, 8, 9, 10, 11, 13, 14, 15]];
+        let n = 16;
+        let block_of: Vec<usize> = (0..n).map(|s| blocks.iter().position(|b| b.contains(&s)).unwrap()).collect();
+        let mut s = Stream::new(5, Purpose::Latin, n as u64, 2);
+        let full = sample(n, n, 4242).hermitian_part().scaled(C64::real(50.0));
+        let mut h = Mat::from_fn(n, n, |i, j| if block_of[i] == block_of[j] { full[(i, j)] } else { C64::ZERO });
+        for i in 0..n {
+            h[(i, i)] += C64::new(400.0 * (s.uniform() - 0.5), -19.0 * (s.uniform() + 0.5));
+        }
+        // The lone state's eigenvalue is its diagonal: set to another block's first eigenvalue, the two blocks share it.
+        let other = Mat::from_fn(2, 2, |i, j| h[(blocks[1][i], blocks[1][j])]);
+        h[(4, 4)] = eigen(&other).unwrap().values[0];
+        let (mut e, mut scratch, mut part) = (Eigen::default(), Vec::new(), Vec::new());
+        assert!(e.decompose_blocks(&h, &blocks, &mut scratch, &mut part), "converges");
+        let back = e.vectors.product(&Mat::diagonal(&e.values)).product(&e.inverse);
+        let bound = rounding(4 * n * n) * e.condition * h.max_abs();
+        let error = difference(&back, &h);
+        assert!(error <= bound, "{error:e} > {bound:e}");
+        for a in 0..n {
+            assert_eq!(part[a], block_of[a], "component {a}'s block");
+            for c in (0..n).filter(|&c| block_of[c] != block_of[a]) {
+                assert!(e.vectors[(a, c)] == C64::ZERO && e.inverse[(c, a)] == C64::ZERO, "({a}, {c}) between two blocks");
+            }
+        }
+        let first = (e.values.clone(), e.vectors.clone(), e.inverse.clone(), e.condition);
+        assert!(e.decompose_blocks(&h, &blocks, &mut scratch, &mut part));
+        assert!(first == (e.values.clone(), e.vectors.clone(), e.inverse.clone(), e.condition), "a second call the same");
     }
 
     /// The vector's Chebyshev plan: nothing for a zero matrix; for a Hermitian one a single part, of degree 15 at σ = 1
@@ -1565,7 +1891,7 @@ pub(crate) mod tests {
         let found = bounds(&x, &mut vec![C64::ZERO; n]);
         let (h, k) = (x.hermitian_part(), Mat::from_fn(n, n, |i, j| (x[(i, j)] - x[(j, i)].conj()) * C64::new(0.0, -0.5)));
         for (part, bound, scalar) in [(&h, found.rho, found.scalar.re), (&k, found.gamma, found.scalar.im)] {
-            let most = hermitian_eigen(part).values.iter().map(|l| (l - scalar).abs()).fold(0.0, f64::max);
+            let most = hermitian_eigen(part).values.iter().map(|l| (l - scalar).abs()).fold(0.0, larger);
             assert!(most <= bound && bound <= part.norm1() + scalar.abs(), "{most} against the bound {bound}");
         }
         let (delta, coupling, level) = (165.0, 3.0, 4000.0);
@@ -1601,7 +1927,7 @@ pub(crate) mod tests {
             let mut w = v.clone();
             exp_apply(&mut h.clone(), C64::new(0.0, -tau), &mut w, &mut vec![C64::ZERO; 2 * n]);
             let want = exact.apply(&v);
-            let error = w.iter().zip(&want).fold(0.0_f64, |m, (x, y)| m.max((*x - *y).abs()));
+            let error = w.iter().zip(&want).fold(0.0_f64, |m, (x, y)| larger(m, (*x - *y).abs()));
             assert!(error <= bound, "τ {tau}: vector {error:e} > {bound:e}");
         }
         for theta in [0.1, 2.0, 50.0] {
@@ -1629,39 +1955,8 @@ pub(crate) mod tests {
             let want = m.apply(&v);
             let bound = rounding(4 * n * n) * e.condition * (1.0 + k.norm1() * tau);
             for (route, x) in [("vector", &a), ("eigen", &b)] {
-                let error = x.iter().zip(&want).fold(0.0_f64, |m, (p, q)| m.max((*p - *q).abs()));
+                let error = x.iter().zip(&want).fold(0.0_f64, |m, (p, q)| larger(m, (*p - *q).abs()));
                 assert!(error <= bound, "τ {tau} {route}: {error:e} > {bound:e}");
-            }
-        }
-    }
-
-    /// e^{tA} v by Taylor's series within a tolerance (`taylor_bound`, `taylor_series`, `Taylor::plan`): on the same
-    /// Hermitian H with a known spectrum, shifted by a large scalar (a trap's light shift: the series sums the rest) and with
-    /// a decay added, from ‖X‖ = 0.03 to 30, at tolerances from 10⁻³ to 10⁻¹², the error against the matrix exponential
-    /// (exact to round-off, `the_exponential_is_exact_to_round_off`) is within the tolerance (printed with the plans).
-    #[test]
-    fn a_taylor_series_is_within_its_tolerance() {
-        let n = 8;
-        let u = unitary(n, 5);
-        let d: Vec<f64> = (0..n).map(|k| 10.0 * k as f64 - 33.0).collect();
-        let mut h = u.product(&Mat::diagonal(&d.iter().map(|&x| C64::real(x)).collect::<Vec<_>>())).product(&u.adjoint());
-        for i in 0..n {
-            h[(i, i)] += C64::new(500.0, -0.5 * (i + 1) as f64);
-        }
-        let v: Vec<C64> = sample(n, 1, 9).data;
-        let size = v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-        for tau in [0.03 / 40.0, 0.3 / 40.0, 3.0 / 40.0, 30.0 / 40.0] {
-            let t = C64::new(0.0, -tau);
-            let want = exp(&h, t).apply(&v);
-            for tolerance in [1e-3, 1e-6, 1e-12] {
-                let (scalar, [bound, mu]) = taylor_bound(&h.data, n, t);
-                let plan = Taylor::plan(bound, mu, tolerance, n);
-                let mut w = v.clone();
-                taylor_series(&h.data, n, scalar, t, &mut w, plan);
-                let phase = (t * scalar).exp();
-                let error = w.iter().zip(&want).map(|(x, y)| (*x * phase - *y).norm_sqr()).sum::<f64>().sqrt() / size;
-                eprintln!("τ {tau:.4} bound {bound:.3} within {tolerance:e}: {} parts of {} terms, error {error:.2e}", plan.parts, plan.terms);
-                assert!(error <= tolerance + rounding(4 * n * n) * (1.0 + bound), "τ {tau}, {tolerance:e}: {error:e}");
             }
         }
     }

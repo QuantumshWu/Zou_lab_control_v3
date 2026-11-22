@@ -101,9 +101,9 @@ two standard errors, wider than two of them over few groups) -- meets the
 targets: 5% absolute in the populations and the loss, 10% relative in the total
 temperature (T_x + T_y + T_z)/3, its error weighed by the share still held,
 1 - L (SPEC §0: the temperature describes the held atoms). An output
-that cannot meet them is returned and flagged. An atom is lost when it first
-leaves the trap's region (every beam of the tweezer's frequency below 1/20 of its
-focal intensity at the atom; a probe or cooling beam given by its waist is not the trap) with an energy above the value far away (SPEC §1.7).
+that cannot meet them is returned and flagged. An atom is lost when its energy
+(kinetic plus the tweezer's potential) first rises above the value far away,
+wherever it is (SPEC §1.7).
 The example 光镊 · 3D PGC cools the atom with sigma+sigma- pairs along x, y and z.
 
 Known limits (SPEC §8). The centre of mass is a point that moves under the mean

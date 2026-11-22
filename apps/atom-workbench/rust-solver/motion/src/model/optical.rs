@@ -12,7 +12,7 @@
 //! trajectories is Re Tr[𝓕 𝓡_Q E[X_ψ]] by linearity, whatever the state's own fast dynamics. The rest passes through the
 //! ground manifold's own state, which the trajectory keeps (the Ehrenfest error of the ground manifold's superpositions, a
 //! model limitation the ledger names). A folded cluster has no Q direction a state of it enters: its fold holds that part
-//! as its photons' local second moment (photon.rs).
+//! as its photons' local second moment (model.rs `Moments`, the one photon rule).
 //!
 //! # The ground trace: the state's own cluster's
 //! Q takes a state's ground trace as the identity on the ground states of the cluster it lies in, over their number, d =

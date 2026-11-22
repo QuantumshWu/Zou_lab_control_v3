@@ -83,8 +83,8 @@ export interface ApproximationLedger {totals:{population:LedgerTotal;temperature
  * axis's trap frequency at the trap's bottom (`trapFrequencyKHz`, ω/2π, the one the engine used), m⟨v²⟩/ħω − ½ (⟨v²⟩
  * with the mean velocity in it), both over one trap period of the axis about the sample (motion-chart.ts
  * `TEMPERATURE_WINDOW`); the total temperature (T_x + T_y + T_z)/3 with its own standard error, both the engine's; the
- * probability that the atom has left the trap by then -- been outside the trap light's 1/20 region and unbound there
- * (model-notes.ts); whether the sample lies in the method's validated regime
+ * probability that the atom has left the trap by then -- its energy above the value far away, unbound, wherever it
+ * is (model-notes.ts); whether the sample lies in the method's validated regime
  * (`classical`: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis; outside it the result is a reference
  * only); per axis the momentum distributions (grid: velocities, m/s) and the position distributions
  * (grid: positions from the focus, μm). Everything but the loss describes the atom still held. Its
@@ -144,6 +144,33 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
     momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),
     trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number,device,...(note===undefined?{}:{deviceNote:note}),
     approximations:{totals:{population:total(totals.population),temperature:total(totals.temperature)},items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
+}
+/** The steps of a motion solve's pipeline, in their order (rust-solver/motion/src/solve.rs # Steps): the three-point
+ * selection of the states kept, the model, the scout, the pilot and the product. */
+export const SOLVE_STEPS=['select','model','scout','pilot','product'] as const;
+export type SolveStep=typeof SOLVE_STEPS[number];
+/** Where a running motion solve's pipeline stands (rust-solver/src/motion_adapter.rs `stage`), sent as a step begins
+ * and as its numbers change: its step; the rung τ (μs) the scout, the pilot or the product runs at (`stepUs`); and a
+ * product batch's number from 1, the trajectories in hand, the number it brings the run to and its looks' largest
+ * total over its target (`worst`: 1 or below at every look stops the run; absent where it is no number). Read for the
+ * course of a running solve alone (solve-progress.ts); no part of a result. */
+export interface SolveStage {step:SolveStep;stepUs?:number;batch?:{number:number;trajectories:number;want:number;worst?:number}}
+/** A stage read strictly: the fields its step has, and no other. */
+export function readStage(value:unknown):SolveStage {
+  const invalid=():never=>{throw new Error('Invalid solve stage');};
+  if(!value||typeof value!=='object'||Array.isArray(value))invalid();
+  const s=value as Record<string,unknown>,step=s.step as SolveStep;
+  if(!SOLVE_STEPS.includes(step))invalid();
+  const ruled=step!=='select'&&step!=='model',product=step==='product';
+  const keys=['step',...(ruled?['stepUs']:[]),...(product?['batch','trajectories','want']:[])];
+  if(!keys.every(key=>Object.hasOwn(s,key))||!Object.keys(s).every(key=>keys.includes(key)||(product&&key==='worst')))invalid();
+  if(!ruled)return {step};
+  const tau=s.stepUs;if(typeof tau!=='number'||!Number.isFinite(tau)||!(tau>0))invalid();
+  if(!product)return {step,stepUs:tau as number};
+  const count=(v:unknown,least:number):number=>Number.isSafeInteger(v)&&(v as number)>=least?v as number:invalid();
+  const number=count(s.batch,1),trajectories=count(s.trajectories,1),want=count(s.want,trajectories+1),worst=s.worst;
+  if(worst!==undefined&&(typeof worst!=='number'||!Number.isFinite(worst)||worst<0))invalid();
+  return {step,stepUs:tau as number,batch:{number,trajectories,want,...(worst===undefined?{}:{worst:worst as number})}};
 }
 export interface DynamicsResult {
   states:Level[];timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];

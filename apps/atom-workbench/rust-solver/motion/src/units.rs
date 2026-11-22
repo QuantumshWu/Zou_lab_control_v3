@@ -31,12 +31,14 @@ pub const CONFIDENCE: f64 = 2.0;
 /// given accuracy gives the step b/E = √(1/(1 + 2p)) of the target.
 pub const STEP_SHARE: f64 = square_root(1.0 / (1.0 + 2.0 * ORDER as f64));
 
-/// The kick's quadrature share (SPEC §2.2; step.rs, # The kick), the old engine's `QUADRATURE`: a step's quadrature errs
-/// on each component of its integrand by at most this share of the component's size times the step.
+/// The numerical share inside a step (SPEC §2.2), the old engine's `QUADRATURE`. No truncation inside a step is made at
+/// it (step.rs, # The quadrature's tolerance: until 2026-11-17 the kick's quadrature was laid at it; until 2026-11-20 a
+/// step took the strides where their Magnus part was within it, spectral.rs, # Where the decomposition does not take
+/// the step): the tests hold what a step leaves of their analytic references to it.
 ///
 /// Derivation: the numerical tolerances inside a step take the square of the step's share of the square, (1/(1 + 2p))²
 /// = s⁴, of their target -- their work grows with the logarithm of the tolerance (a Gauss rule's nodes) or as a small
-/// root of it (a fourth-order stride), so their least work beside the step's lies at a few per cent of it -- and the
+/// root of it (a fourth-order method's sub-steps), so their least work beside the step's lies at a few per cent of it -- and the
 /// impulse's target is T's, relative: s⁴ × `TEMPERATURE_TARGET`, 4·10⁻³ at p = 2.
 pub const QUADRATURE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * TEMPERATURE_TARGET;
 
@@ -65,15 +67,15 @@ pub const SUB_DOPPLER_RECOILS: f64 = 30.0;
 /// `classical`: every axis's; the UI's grey band, src/model-notes.ts `SEMICLASSICAL_REGIME`). Reported per output and
 /// axis (solve.rs `classical`); it decides nothing in the solve. An empirical boundary, not a derived one.
 pub const CLASSICAL: f64 = 4.0;
-/// The trap's region (SPEC §1.3, §1.7): an atom is outside it where every beam of the trap light (the tweezer's
-/// frequency) is at the atom below this share of its value at the focus -- the contract's region, the UI's text word for
-/// word (src/model-notes.ts: "与光镊同频的各束光在原子处的强度都低于各自焦点处的 1/20"). A lost atom is one first outside it
-/// with its loss energy above the far value (model.rs `Model::lost`), as the same sentence of the UI goes on.
+/// The trap's region (SPEC §1.3): outside it every beam of the trap light (the tweezer's frequency) is at the atom
+/// below this share of its value at the focus. The descent to a trap's centre stays within it (model/potential.rs
+/// `descend`: one that leaves it finds no minimum that holds the atom). It is no part of the loss, which is the loss
+/// energy above the escape value wherever the atom is (SPEC §1.7, `step::Dynamics::lost`; until 2026-11-21 the loss was
+/// also outside it, the UI's region).
 pub const REGION_INTENSITY: f64 = 1.0 / 20.0;
 /// The most trajectories a solve runs (SPEC §3; contract §2.3, whose reason text names 16384): reached, the solve
 /// returns as usual, partial. A cap of the contract, not derived; beside the work it sets the least statistics a
-/// solve books, z²/(N + z²) (estimate.rs `unseen`), and through it the reach's share and the tables' shares
-/// (model/tabulate.rs `shares`).
+/// solve books, z²/(N + z²) (estimate.rs `unseen`).
 pub const MOST_TRAJECTORIES: u64 = 1 << 14;
 /// The most steps of the run's constant step a trajectory's run may hold (SPEC §2.2; contract §2.3): the step's ladder
 /// goes no further down than the run's length over it; where its error still lies clearly beyond what it may take

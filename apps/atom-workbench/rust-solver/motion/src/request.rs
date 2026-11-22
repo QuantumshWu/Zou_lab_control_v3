@@ -24,8 +24,9 @@
 //!
 //! with a_l(r) the beam's amplitude relative to its focus value (field.rs), X_l and R_l its co- and counter-rotating
 //! couplings at the focus, linear in its field E_l and E_l*, x_{ω,i} the coherence coordinates of the frequency's summed
-//! field (field.rs) and O_{ω,i} its outside form: the shift through the states outside the model and the Rb⁺ core, of
-//! which H0 already holds the focus value. Δ_l = 2π Σ_k frequency_index_l[k] frequencies_mhz[k] is the beam's
+//! field (`OutsideForm`) and O_{ω,i} its outside form: the shift through the states outside the model and the Rb⁺ core,
+//! of which H0 already holds the focus value -- the second order of those states, whose own error, per transition to
+//! each of their levels, comes with the form (`Transition`; parsed, and read by no model since the old one went). Δ_l = 2π Σ_k frequency_index_l[k] frequencies_mhz[k] is the beam's
 //! detuning from the excited states' frame. Spontaneous emission is Σ_a D[C_a] over the lowering dipole's lab-axis
 //! components (`emission`).
 
@@ -37,6 +38,11 @@ use serde_json::{Map, Value};
 pub const STATES: usize = 32;
 /// The ground manifold's states (5S₁/₂, F = 1 and 2).
 pub const GROUND: usize = 8;
+
+/// The wavelengths (µm) light other than the tweezer may have: the band of the D1 (795 nm) and D2 (780 nm) lines, 765–810
+/// nm -- the legal input range the user set on 2026-11-19 for the allowed approximation that non-tweezer light couples
+/// the 32 states on D1/D2 alone (scene.rs). An input range, not a model tolerance.
+pub const D_LINES_UM: (f64, f64) = (0.765, 0.810);
 
 /// Why a motion block along an axis or in a plane is refused (contract §2.4; shown in the app).
 pub const ONLY_3D: &str = "运动只按三维计算（半经典）：不计算沿单个轴或在平面内的运动";
@@ -120,11 +126,26 @@ pub struct Beam {
 
 /// The outside shift of the beams of one frequency as a form in their summed field E (rad/µs/(V/m)²; src/spectroscopy.ts
 /// `outsideFieldForm`): O(E) = Σ_i x_i(E) O_i with x = (|E_q|² for q = −1, 0, +1, then per pair p < q in the order
-/// (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)) -- field.rs `Coherence`. Each O_i is Hermitian.
+/// (−1, 0), (−1, +1), (0, +1) Re(E_p* E_q), Im(E_p* E_q)). Each O_i is Hermitian. And its transitions to
+/// the levels outside the model the shift is made through (`Transition`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutsideForm {
     pub frequency_index: Vec<i32>,
     pub matrices: [Mat; 9],
+    pub transitions: Vec<Transition>,
+}
+
+/// One transition of a 32-state manifold to a level outside the model (its `name`, e.g. 5P3/2→5D5/2) of an outside
+/// form's frequency (src/spectroscopy.ts `outsideFieldForm`, src/full-master-model.ts): the error of its second-order
+/// term, its own small parameter (coupling/detuning)² -- the population a model state holds in the level, Σ_v |V_vs/Δ_vs|²
+/// over the level's sublevels and both rotations --, and the term itself, its part of the outside form's diagonal, each
+/// as a form in the same field: m_s(E) = Σ_i x_i(E) mixing[i][s] (1/(V/m)²) and o_s(E) = Σ_i x_i(E) shift[i][s]
+/// (rad/µs/(V/m)², x_i the coordinates of `OutsideForm`), per model state s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transition {
+    pub name: String,
+    pub mixing: [Vec<f64>; 9],
+    pub shift: [Vec<f64>; 9],
 }
 
 /// A motion solve: the model, the initial state and the output times.
@@ -142,7 +163,8 @@ pub struct Request {
     pub beams: Vec<Beam>,
     /// One outside form per distinct frequency of the beams.
     pub outside_forms: Vec<OutsideForm>,
-    /// The trap beam (an index into `beams`): the tweezer, a Gaussian beam whose focus is the origin.
+    /// The trap beam (an index into `beams`): the tweezer, a Gaussian beam whose focus is the origin, and the one beam of
+    /// its frequency (`validate`).
     pub trap_beam: usize,
     /// The lowering dipole's components on the lab axes x, y, z (1/√µs, 32 × 32, ground ← excited): Σ_a D[C_a] is
     /// the model's spontaneous emission.
@@ -176,7 +198,8 @@ const BEAM_FIELDS: [&str; 11] = [
     "outsideShift",
     "electricField",
 ];
-const FORM_FIELDS: [&str; 2] = ["frequencyIndex", "matrices"];
+const FORM_FIELDS: [&str; 3] = ["frequencyIndex", "matrices", "transitions"];
+const TRANSITION_FIELDS: [&str; 3] = ["name", "mixing", "shift"];
 const AMPLITUDE_FIELDS: [&str; 2] = ["re", "im"];
 
 fn invalid(why: impl std::fmt::Display) -> String {
@@ -337,7 +360,19 @@ impl Request {
                     .iter()
                     .map(|m| operator(m, "An outside form's matrix"))
                     .collect::<Result<Vec<Mat>, String>>()?;
-                Ok(OutsideForm { frequency_index, matrices: matrices.try_into().map_err(|_| "An outside form has nine matrices".to_string())? })
+                let transitions = array(get(o, "transitions", "an outside form")?, "an outside form's transitions")?
+                    .iter()
+                    .map(|t| {
+                        let t = object(t, "an outside transition", Some(&TRANSITION_FIELDS))?;
+                        let form = |key: &str| -> Result<[Vec<f64>; 9], String> {
+                            let what = format!("an outside transition's {key}");
+                            let rows = array(get(t, key, "an outside transition")?, &what)?.iter().map(|m| numbers(m, &what)).collect::<Result<Vec<Vec<f64>>, String>>()?;
+                            rows.try_into().map_err(|_| format!("An outside transition's {key} has nine coordinates"))
+                        };
+                        Ok(Transition { name: text(get(t, "name", "an outside transition")?, "an outside transition's name")?.to_string(), mixing: form("mixing")?, shift: form("shift")? })
+                    })
+                    .collect::<Result<Vec<Transition>, String>>()?;
+                Ok(OutsideForm { frequency_index, matrices: matrices.try_into().map_err(|_| "An outside form has nine matrices".to_string())?, transitions })
             })
             .collect::<Result<Vec<OutsideForm>, String>>()?;
         let trap_id = text(field("trapBeamId")?, "motion.trapBeamId")?;
@@ -429,6 +464,9 @@ impl Request {
             for m in &f.matrices {
                 square(m, "An outside form's matrix")?;
             }
+            if f.transitions.iter().any(|t| t.mixing.iter().chain(&t.shift).any(|m| m.len() != STATES || m.iter().any(|x| !x.is_finite()))) {
+                return Err(format!("An outside transition's mixing and shift have {STATES} finite numbers a coordinate, one per state"));
+            }
             if !self.beams.iter().any(|b| b.frequency_index == f.frequency_index) {
                 return Err("An outside form's frequency has no beam".into());
             }
@@ -444,6 +482,32 @@ impl Request {
         }
         if self.beams[self.trap_beam].waist.is_none() {
             return Err(NO_WAIST.into());
+        }
+        // The tweezer's light is the one beam the user names: a beam of its frequency beside it -- its reflection or
+        // another beam of the same laser -- is neither tweezer light nor other light (the user's rule, 2026-11-20).
+        let tweezer = &self.beams[self.trap_beam];
+        if let Some(b) = self.beams.iter().enumerate().find(|&(l, b)| l != self.trap_beam && b.frequency_index == tweezer.frequency_index).map(|(_, b)| b) {
+            return Err(format!(
+                "光束 {}（{}）与光镊 {}（{}）同频：光镊的光只有指定的那一束，光镊不能有反射光或同一激光的其他光束",
+                b.name,
+                b.id,
+                tweezer.name,
+                tweezer.id
+            ));
+        }
+        // Light other than the tweezer couples the 32 states on D1 and D2 alone (an allowed approximation, scene.rs).
+        for (_, b) in self.beams.iter().enumerate().filter(|&(l, _)| l != self.trap_beam) {
+            let wavelength = std::f64::consts::TAU / b.wave_number;
+            if !(D_LINES_UM.0..=D_LINES_UM.1).contains(&wavelength) {
+                return Err(format!(
+                    "光束 {}（{}）的波长 {:.1} nm 不在 D1/D2 的 {:.0}–{:.0} nm 内：光镊以外的光只按 D1/D2 线计算",
+                    b.name,
+                    b.id,
+                    wavelength * 1e3,
+                    D_LINES_UM.0 * 1e3,
+                    D_LINES_UM.1 * 1e3
+                ));
+            }
         }
         for m in &self.emission {
             square(m, "An emission operator")?;
@@ -507,9 +571,9 @@ pub(crate) mod tests {
     use serde_json::json;
 
     /// A valid request of the contract's shape: the 32 states ground-F-m, D1-F-m, D2-F-m in the app's order; a
-    /// diagonal H0; one tweezer (Gaussian, π-polarized) and a plane wave of another frequency; their forms; emission
-    /// ground ← excited; the initial state ground-2-0; 101 times over 10 µs. Its numbers are placeholders of the right
-    /// shape, not physics: the request's checks read shapes and structure.
+    /// diagonal H0; one tweezer (Gaussian, π-polarized, 852 nm) and a plane wave of another frequency on D2; their forms;
+    /// emission ground ← excited; the initial state ground-2-0; 101 times over 10 µs. Its numbers are placeholders of the
+    /// right shape, not physics: the request's checks read shapes and structure.
     pub(crate) fn sample() -> Request {
         let mut states = vec![];
         for (manifold, fs) in [("ground", [1, 2]), ("D1", [1, 2])] {
@@ -527,18 +591,18 @@ pub(crate) mod tests {
         let ground: Vec<bool> = states.iter().map(|s| s.starts_with("ground")).collect();
         let zero = || Mat::zeros(STATES, STATES);
         let coupling = |scale: f64| Mat::from_fn(STATES, STATES, |i, j| if !ground[i] && ground[j] { C64::real(scale * (1 + i + j) as f64) } else { C64::ZERO });
-        let beam = |id: &str, name: &str, waist: Option<f64>, index: i32, field: [C64; 3]| Beam {
+        let beam = |id: &str, name: &str, waist: Option<f64>, index: i32, wave_number: f64, field: [C64; 3]| Beam {
             id: id.into(),
             name: name.into(),
             direction: [0.0, 0.0, 1.0],
-            wave_number: 7.37,
+            wave_number,
             waist,
             frequency_index: vec![index],
             coupling: coupling(0.01),
             counter_coupling: coupling(0.001),
             field,
         };
-        let form = |index: i32| OutsideForm { frequency_index: vec![index], matrices: std::array::from_fn(|_| zero()) };
+        let form = |index: i32| OutsideForm { frequency_index: vec![index], matrices: std::array::from_fn(|_| zero()), transitions: vec![] };
         let mut density = zero();
         let start = states.iter().position(|s| s == "ground-2-0").unwrap();
         density[(start, start)] = C64::ONE;
@@ -547,8 +611,8 @@ pub(crate) mod tests {
             frame_frequencies_mhz: ground.iter().map(|&g| if g { 0.0 } else { 3.8e8 }).collect(),
             frequencies_mhz: vec![1.0],
             beams: vec![
-                beam("tweezer", "光镊", Some(0.8), -4, [C64::ZERO, C64::real(1e5), C64::ZERO]),
-                beam("probe", "探测光", None, 0, [C64::real(10.0), C64::ZERO, C64::ZERO]),
+                beam("tweezer", "光镊", Some(0.8), -4, 7.37, [C64::ZERO, C64::real(1e5), C64::ZERO]),
+                beam("probe", "探测光", None, 0, 8.05, [C64::real(10.0), C64::ZERO, C64::ZERO]),
             ],
             outside_forms: vec![form(-4), form(0)],
             trap_beam: 0,
@@ -576,7 +640,8 @@ pub(crate) mod tests {
             })
             .collect();
         let forms: Vec<Value> =
-            r.outside_forms.iter().map(|f| json!({"frequencyIndex": f.frequency_index, "matrices": f.matrices.iter().map(operator).collect::<Vec<_>>()})).collect();
+            r.outside_forms.iter().map(|f| json!({"frequencyIndex": f.frequency_index, "matrices": f.matrices.iter().map(operator).collect::<Vec<_>>(),
+                "transitions": f.transitions.iter().map(|t| json!({"name": t.name, "mixing": t.mixing, "shift": t.shift})).collect::<Vec<_>>()})).collect();
         let samples = r.times_us.len();
         json!({"id": 7, "modelSchema": "rb87-full/2", "progress": true,
             "options": {"durationUs": r.times_us[samples - 1], "samples": samples, "populationTolerance": 0.01, "includeMean": false,
@@ -657,6 +722,24 @@ pub(crate) mod tests {
         refused(&|r| r.emission[1][(20, 0)] = C64::real(1.0), "ground ← excited");
         refused(&|r| r.mass_kg = 0.0, ATOM);
         refused(&|r| r.beams[1].wave_number = -1.0, "Beam probe needs a finite direction");
+    }
+
+    /// The tweezer's light is the one beam named (the user's rule, 2026-11-20): its reflection -- a beam of its frequency
+    /// beside it -- is refused with both beams named, even where the tweezer is at 808 nm, inside D1/D2, so that the
+    /// wavelength does not refuse it; a reflection of other light, on D1/D2, is taken.
+    #[test]
+    fn a_reflection_of_the_tweezer_is_refused_and_one_of_other_light_is_taken() {
+        let mut r = sample();
+        r.beams[0].wave_number = std::f64::consts::TAU / 0.808;
+        assert_eq!(r.validate(), Ok(()));
+        let reflection = |b: &Beam, id: &str, name: &str| Beam { id: id.into(), name: name.into(), direction: b.direction.map(|x| -x), ..b.clone() };
+        let mut tweezer = r.clone();
+        tweezer.beams.push(reflection(&r.beams[0], "tweezer-reflection", "光镊（反射）"));
+        let e = tweezer.validate().expect_err("the tweezer's reflection");
+        assert!(e.contains("光束 光镊（反射）（tweezer-reflection）与光镊 光镊（tweezer）同频") && e.contains("光镊不能有反射光"), "{e}");
+        let mut probe = r.clone();
+        probe.beams.push(reflection(&r.beams[1], "probe-reflection", "探测光（反射）"));
+        assert_eq!(probe.validate(), Ok(()));
     }
 
     /// The native line maps onto the request it was written from, every field (the times linspace(0, durationUs,

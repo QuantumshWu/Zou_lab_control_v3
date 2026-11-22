@@ -22,7 +22,7 @@
 //! holds what is read inside it within the noise, and the interval stands. The analysis times are the ends of the
 //! intervals that stand.
 //!
-//! It is the tables' rule (model/tabulate.rs, # Refinement; `halving_on`): halve at the middles while the coarser
+//! It is the old model's tables' rule (their refinement, deleted with them): halve at the middles while the coarser
 //! grid's interpolant misses the new nodes beyond the share -- here the share is the read's own noise, below which no
 //! read of the run can resolve anything -- down to the grid's floor, the candidates' spacing. The tables' second clause
 //! (an axis whose read falls by a factor of 2 or less a halving on a grid that resolves its line's rate stops there: a
@@ -53,6 +53,7 @@
 //! that holds it again, as a feature would be followed -- what makes a feature found stay found: a chance split costs
 //! as many more as the halvings down to the candidates at the most, log₂ of their number.
 
+use crate::linalg::larger;
 use crate::estimate::{spread, Spread};
 use crate::units::rounding;
 
@@ -81,7 +82,9 @@ pub fn analysis_times(times: &[f64], cuts: &[usize], window: f64, read: &mut dyn
         let middle = (a + b) / 2;
         // The nested middles to the depth that leaves a quarter of the window at most between them: the middle and the
         // quarters at two, for an interval no longer than the window.
-        let depth = 2 + ((times[b] - times[a]) / window).log2().ceil().max(0.) as u32;
+        // The times are the request's (finite, increasing) and the window positive or unbounded: the depth's
+        // logarithm is a number or −∞ (an unbounded window), never NaN -- the cast would read a NaN as 0.
+        let depth = 2 + larger(((times[b] - times[a]) / window).log2().ceil(), 0.) as u32;
         let mut points = vec![];
         middles(a, b, depth, &mut points);
         points.dedup();
@@ -175,7 +178,7 @@ mod tests {
                 let s = (times[k] - times[a]) / (times[b] - times[a]);
                 (f(times[k]) - ((1.0 - s) * f(times[a]) + s * f(times[b]))).abs()
             })
-            .fold(0.0, f64::max)
+            .fold(0.0, larger)
     }
 
     /// A transient after a light's switch and an edge inside the run (module documentation, # The rule): a population
@@ -267,7 +270,7 @@ mod tests {
         let deviation = (splits.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
         let p = crate::estimate::tail_among(1.0);
         let expected = 1.0 / (1.0 - 2.0 * p) - 1.0;
-        let most = splits.iter().copied().fold(0.0, f64::max);
+        let most = splits.iter().copied().fold(0.0, larger);
         eprintln!("flat noise: {mean:.3} ± {deviation:.3} splits a case (at most {expected:.3} expected), {most} at the most; {:.2} candidates read a case", reads as f64 / n);
         assert!(mean <= expected + crate::units::CONFIDENCE * deviation && most <= 4.0, "{mean} ± {deviation} splits a case against {expected}; {most} at the most");
     }

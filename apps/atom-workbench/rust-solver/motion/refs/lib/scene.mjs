@@ -38,14 +38,3 @@ export async function beam(scene,{id,name=id,line,Fg,Fe,offsetMHz=0,intensityMWc
   if(waistUm){l.waistUm=waistUm;l.powerMW=intensityMWcm2*Math.PI*waistUm*waistUm/2e8;}
   scene.lasers.push(l);return l;
 }
-
-/** The retro-reflection of `of` (reflection.ts): a mirror far away sending it straight back, reflectivity R, the
- * reflected beam's phase at the atom relative to the source's, with or without a double pass through a quarter-wave
- * plate. Every physical field is derived from the source when the scene is resolved. */
-export async function reflection(scene,of,{reflectivity=1,phaseDeg=0,quarterWave=false}={}){
-  const {reflection:r}=await app();
-  const source=scene.lasers.find(l=>l.id===of);
-  const back=r.addReflection(scene,source);
-  back.reflection={of,reflectivity,phaseDeg,quarterWave};
-  return back;
-}

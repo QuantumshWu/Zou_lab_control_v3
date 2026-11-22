@@ -3,7 +3,7 @@
 //! # The step
 //! Every trajectory of a run advances by steps of one τ (`step::Midway::attempt`), whatever the times it is read at (# The reads)
 //! and whatever jumps it makes (# The jumps): a step ends at no output and at no jump. The last step of the run is its
-//! rest; a step the scheme refuses (`step::Refused`) is taken at its half, and one refused down to the time's
+//! rest; a step the scheme refuses (`step::Refused`) is taken at its half (`halving`), and one refused down to the time's
 //! round-off ends the advance with its refusal -- a numerical failure the solve counts and flags, never a loss. A step
 //! that ends at a bin's end of the trajectory's grid (# The Brownian path) ends at that time, so that a trajectory
 //! stays on its grid, the sum of its steps' lengths rounding or not. A step takes its generator's change along the path
@@ -38,7 +38,8 @@
 //!   and after every jump, each on the trajectory's place there (`step::Segment`). A trajectory found lost at one of
 //!   them is lost at that time: that is its last state, and its step counts up to there. A read is none of them, and a
 //!   time read inside a step before the trajectory's loss reads it held. The passage is the first of the trajectory's
-//!   own states beyond the trap's region above the far value -- an atom there runs away --: late against the passage
+//!   own states whose loss energy is above the escape value, the potential's far value, wherever the atom is -- it
+//!   leaves the bound set H = {E ≤ 0} (SPEC §1.7; the trap's region is no part of it) --: late against the passage
 //!   along its path by less than a step, as on the companion at 2τ by less than its own step. That is an error of the
 //!   first order in τ of the size of the loss's rate times τ (a loss of one half over a millisecond at τ = 1 µs:
 //!   5·10⁻⁴, a hundredth of the loss's target), which the companion reads with the step's other errors (solve.rs,
@@ -92,6 +93,25 @@ use crate::random::Stream;
 use crate::step::{test_loss, Brownian, Domain, Dynamics, Midway, Refused, Scratch, Segment, Trajectory};
 use crate::units::rounding;
 
+/// The run's counts, said with each result and at the solve's end (`counted`): the steps taken and refused, and the
+/// time in steps (ns).
+static COUNTS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+pub(crate) const STEPS: usize = 0;
+pub(crate) const REFUSED: usize = 1;
+pub(crate) const STEPPING: usize = 2;
+
+/// Adds x to count i (`COUNTS`).
+pub(crate) fn count(i: usize, x: u64) {
+    COUNTS[i].fetch_add(x, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The counts since the last tally as one line, set to zero where `tally` (the solve's end; a solve at a time in a
+/// process), else read as they stand (a result's).
+pub(crate) fn counted(tally: bool) -> String {
+    let g: Vec<u64> = COUNTS.iter().map(|c| if tally { c.swap(0, std::sync::atomic::Ordering::Relaxed) } else { c.load(std::sync::atomic::Ordering::Relaxed) }).collect();
+    format!("运行计数：步 {}（拒 {}），每步 {:.1} µs", g[STEPS], g[REFUSED], 1e-3 * g[STEPPING] as f64 / g[STEPS].max(1) as f64) + &crate::prof::report()
+}
+
 /// Where a trajectory stands on its Brownian path (`Path`): the time, the bin of its grid that time lies in, and the
 /// path's part from that time to the bin's end.
 #[derive(Clone, Copy, Debug)]
@@ -101,11 +121,45 @@ pub struct Cursor {
     rest: Brownian,
 }
 
+/// The steps a trajectory took at a half of their length or less on its way, where the scheme refused them at their
+/// length (`halving`; `Path::halved`): how many, the time they span (µs), and that time's shortfall in the order, Σ ℓ (1 −
+/// (ℓ/τ)^p) over them, ℓ a step's length taken, τ the level's step and p the scheme's order (units.rs `ORDER`). To the
+/// leading order a run's error is the time mean of its steps' C ℓ^p (their local errors add up along it), so a level of
+/// the step τ whose steps were halved errs by C τ^p r, r = 1 − shortfall/time run: what a comparison of two levels takes
+/// its coarser level's error for (solve.rs, ## A companion at τ/2). Steps halved once: r = 1 − f (1 − 2^{−p}), f their
+/// share of the time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Halved {
+    pub steps: u64,
+    pub time: f64,
+    pub shortfall: f64,
+}
+
+impl Halved {
+    /// A step of the length `taken` where the advance asked `length` at the level's step `tau`: one halved step more
+    /// where it is shorter.
+    fn take(&mut self, taken: f64, length: f64, tau: f64) {
+        if taken < length {
+            self.steps += 1;
+            self.time += taken;
+            self.shortfall += taken * (1.0 - (taken / tau).powi(crate::units::ORDER));
+        }
+    }
+
+    /// Another trajectory's, added.
+    pub fn add(&mut self, other: &Halved) {
+        self.steps += other.steps;
+        self.time += other.time;
+        self.shortfall += other.shortfall;
+    }
+}
+
 /// A trajectory's Brownian path (module documentation, # The Brownian path) as a trajectory at one step goes along it:
 /// the run's seed and the trajectory's number, the cells' width (µs), the depth of the trajectory's grid in a cell's
 /// tree (2^depth bins a cell), where the trajectory stands, and the branch of the tree last read -- its cell, the bin's
 /// place in it, and the parts of the nodes from the cell down to the bin: a bin's branch is read on from where it
-/// leaves the last one's (the next bin's shares all but two nodes with it on average), no part made twice.
+/// leaves the last one's (the next bin's shares all but two nodes with it on average), no part made twice. And the
+/// steps the trajectory took at a half of their length on the way, where the scheme refused them (`Halved`).
 #[derive(Clone, Debug)]
 pub struct Path {
     seed: u64,
@@ -114,15 +168,24 @@ pub struct Path {
     depth: u32,
     cursor: Cursor,
     branch: (u32, u64, Vec<Brownian>),
+    halved: Halved,
 }
 
 impl Path {
     /// The path of trajectory `index` of the run `seed` from t = 0, in cells of the width `cell`, for a trajectory whose
     /// grid has 2^depth bins a cell.
     pub fn new(seed: u64, index: u64, cell: f64, depth: u32) -> Path {
-        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, Vec::with_capacity(depth as usize + 1)) };
+        let mut path = Path { seed, index, cell, depth, cursor: Cursor { at: 0.0, bin: 0, rest: Brownian::STILL }, branch: (0, 0, Vec::with_capacity(depth as usize + 1)), halved: Halved::default() };
         path.cursor.rest = path.whole(0);
         path
+    }
+
+    /// The steps the trajectory took along the path so far at a half of their length, or less (`halving`; `Halved`):
+    /// each step the scheme refused at its length once, however many times it was halved, with the time it spans and
+    /// its shortfall in the order. A level none of whose steps was halved took every step at its own length; one some of
+    /// whose steps were is a comparison's coarser level at an error of its own (solve.rs, ## A companion at τ/2).
+    pub fn halved(&self) -> Halved {
+        self.halved
     }
 
     /// The end of a bin of the grid.
@@ -189,12 +252,45 @@ impl Path {
     }
 }
 
-/// Advances a held trajectory to the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
+/// Whether the advance takes a step the scheme refused so at its half (module documentation, # The step): every
+/// refusal but those no shorter step answers -- a jump that gives no photon (`Refused::Emission`), a state that scatters
+/// beyond every state of the atom (`Refused::Runaway`), a middle whose optical sector makes no K (`Refused::Optical`),
+/// each of which ends the advance.
+pub(crate) fn halves(refusal: &Refused) -> bool {
+    !matches!(refusal, Refused::Emission | Refused::Runaway | Refused::Optical(_))
+}
+
+/// A step of the length `length` from the time `time` as the advance takes it (module documentation, # The step):
+/// `attempt` at that length, and where the scheme refuses it (`halves`), at its half, and so on as far as the time's
+/// round-off -- where a half is no time after `time`, the last refusal is the answer, as it is at once for one that no
+/// shorter step answers. The step taken and its length. One rule for the run's steps (`advance`) and for those its
+/// steps are priced by (solve.rs `work_at`): a step refused at its length costs what the length it is taken at does.
+pub(crate) fn halving<T>(time: f64, mut length: f64, mut attempt: impl FnMut(f64) -> Result<T, Refused>) -> Result<(T, f64), Refused> {
+    loop {
+        match attempt(length) {
+            Ok(step) => return Ok((step, length)),
+            Err(refusal) if !halves(&refusal) => return Err(refusal),
+            Err(refusal) => {
+                length *= 0.5;
+                if !(time + length > time) {
+                    return Err(refusal);
+                }
+            }
+        }
+    }
+}
+
+/// Advances a held trajectory toward the time `to` (the run's end) by steps of τ, with its jumps and its loss test (module
 /// documentation, # The step, # The jumps; the loss is tested at every step's end and after every jump, SPEC §1.7),
-/// and reads it at the times `at` (increasing) that lie after its time and no later than `to`, each inside the step it
-/// falls in and the trajectory the same whatever is read (# The reads): `read` takes a time's place in `at` and the
-/// reading there. `each` takes every piece of every step's path -- from the step's start or a jump of the step -- with
-/// the time the trajectory is on it to: the next jump or the step's end. A trajectory lost on the way stops at its
+/// as far as the first step's end at or past `stop` (`to` for the whole run), and reads it at the times `at`
+/// (increasing) that lie after its time and no later than where it stops, each inside the step it falls in and the
+/// trajectory the same whatever is read (# The reads): `read` takes a time's place in `at` and the reading there. A
+/// stop is no step's end of its own: the steps are those of the run to `to`, and the trajectory with its path and
+/// scratch where it stopped is advanced on by the next call -- its time tells the reads that are done, its path where it
+/// stands --, to the bit as without the stop; so is a copy of the trajectory and its path advanced on with a fresh
+/// scratch (step.rs `Scratch`: nothing of a step is carried to the next). `each` takes every piece of
+/// every step's path -- from the step's start or a jump of the step -- with the time the trajectory is on it to: the
+/// next jump or the step's end. A trajectory lost on the way stops at its
 /// loss time. Where the scheme refuses a step at every length down to the time's round-off, the advance ends
 /// there with the refusal; so it does where the model gives a jump no photon (`step::jump`), where a state scatters
 /// beyond every state of the atom (step.rs, # The domain: a shorter step is no answer to that), and where the middle's optical
@@ -210,18 +306,19 @@ pub fn advance<D: Dynamics>(
     scratch: &mut Scratch,
     path: &mut Path,
     to: f64,
+    stop: f64,
     at: &[f64],
-    read: &mut dyn FnMut(usize, &Trajectory),
+    read: &mut dyn FnMut(usize, &Trajectory, Option<&[f64; crate::request::STATES]>),
     each: &mut dyn FnMut(&Segment, f64),
 ) -> Result<(), Refused> {
     let mut next = at.partition_point(|&time| time <= trajectory.time);
-    while trajectory.lost.is_none() && trajectory.time < to {
+    while trajectory.lost.is_none() && trajectory.time < to && trajectory.time < stop {
         let rest = to - trajectory.time;
         // The step taken from here: τ or the run's rest -- the rest too where a step of τ would end within the grid's
         // rounding of the run's end, which is then no step of its own --; half the length where the scheme refuses a
-        // step, as far as the time's round-off.
-        let mut length = if path.ends(to, trajectory.time + tau) { rest } else { tau.min(rest) };
-        let (step, end, beyond) = loop {
+        // step, as far as the time's round-off (`halving`).
+        let length = if path.ends(to, trajectory.time + tau) { rest } else { crate::linalg::smaller(tau, rest) };
+        let ((step, end, beyond), taken) = halving(trajectory.time, length, |length| {
             // The step's part of the Brownian path, and where the trajectory stands on it at the step's end: on the
             // trajectory's clock the run's end where the step spans its rest -- not an ulp short of it (the sum of the
             // steps' lengths rounds), which would leave a rest of the time's round-off to be stepped --, else where the
@@ -229,17 +326,13 @@ pub fn advance<D: Dynamics>(
             let (brownian, beyond) = path.reach(trajectory.time + length);
             let end = if length == rest { to } else { beyond.at };
             let reads = &at[next..next + at[next..].partition_point(|&time| time <= end)];
-            match Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain)) {
-                Ok(step) => break (step, end, beyond),
-                Err(refusal @ (Refused::Emission | Refused::Runaway | Refused::Optical(_))) => return Err(refusal),
-                Err(refusal) => {
-                    length *= 0.5;
-                    if !(trajectory.time + length > trajectory.time) {
-                        return Err(refusal);
-                    }
-                }
-            }
-        };
+            let clock = std::time::Instant::now();
+            let tried = Midway::new(model, trajectory, length).and_then(|through| through.attempt(trajectory, &brownian, reads, scratch, domain));
+            count(STEPPING, clock.elapsed().as_nanos() as u64);
+            count(if tried.is_ok() { STEPS } else { REFUSED }, 1);
+            tried.map(|step| (step, end, beyond))
+        })?;
+        path.halved.take(taken, length, tau);
         // The states made inside the step in the order of their times, each on the step's path (module documentation,
         // # The reads): after a jump the trajectory's, on the path that goes on from it, with its loss test; at a time
         // read a reading on the path it lies on, which the trajectory does not take up -- held at its time where the
@@ -263,10 +356,10 @@ pub fn advance<D: Dynamics>(
                 None => {
                     piece.place(&mut made.state);
                     if time < end {
-                        read(next, &made.state);
+                        read(next, &made.state, made.rows.as_ref());
                         next += 1;
                     } else {
-                        ending.push(made.state);
+                        ending.push((made.state, made.rows));
                     }
                 }
             }
@@ -278,8 +371,8 @@ pub fn advance<D: Dynamics>(
         trajectory.time = end;
         test_loss(model, trajectory);
         if trajectory.lost.is_none() {
-            for state in &ending {
-                read(next, state);
+            for (state, rows) in &ending {
+                read(next, state, rows.as_ref());
                 next += 1;
             }
         }

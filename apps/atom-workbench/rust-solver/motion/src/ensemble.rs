@@ -73,7 +73,7 @@
 //!
 //! # What a level leaves out
 //! A set of phase space given by the kinetic energy it holds at each place, {(r, κ) : (ħ/m)κ²/2 ≤ A(r)} (the model's
-//! reach: A = V_min + L − V(r), reach.rs), leaves out a share of the ensemble as it is drawn -- the classical draw
+//! reach of a level L above the bottom, A = V_min + L − V(r)), leaves out a share of the ensemble as it is drawn -- the classical draw
 //! (r, κ) mapped by the Wigner factor to (r′, Sκ), r′ = r + Σ_i (s_i − 1)(e_i·K⁻¹∇V(r)) e_i, S = Σ_i s_i e_i e_iᵀ. At r the
 //! classical momenta are isotropic with the kinetic energy K (in k_BT) of density ∝ (e^{y−K} − 1) K^{1/2} on [0, y]; a
 //! momentum along n (its components on the well's axes) has the mapped kinetic energy q(n) K, q = Σ_i s_i² n_i², and
@@ -91,7 +91,7 @@
 //! over n on one octant of the sphere (q is even in every n_i) by Gauss–Legendre in cos θ on (0, 1) and the midpoint
 //! rule in the azimuth on (0, π/2), with the level's node count; every count is doubled as `kinetic`'s are, and the
 //! last two levels' difference is the share's own error (`Share`). In a classical harmonic well (s_i = 1, V quadratic)
-//! the two are Q(3, L) and Q(4, L) (reach.rs, # The reach's level).
+//! the two are Q(3, L) and Q(4, L), the regularized upper incomplete gamma functions.
 //!
 //! # Latin hypercube
 //! A group's members draw each of the `DEVIATES` uniform deviates of a first proposal and a momentum -- the component, the
@@ -121,9 +121,6 @@ const _: () = assert!(crate::units::MOST_TRAJECTORIES % GROUP == 0);
 /// The uniform deviates a member draws in its group's strata (module documentation, # Latin hypercube).
 const DEVIATES: usize = 8;
 
-/// Why a trap light with a plane wave in it is refused (SPEC §9; shown in the app): a plane wave's potential does not
-/// fall off, so the well has no far level to bind atoms below and no envelope of Gaussian beams.
-pub const PLANE_WAVE: &str = "与光镊同频的光束都需要束腰：平面波的势在远处不降为零，被俘获原子的初始系综无从定义";
 /// Why an initial component whose well's envelope is not positive is refused (SPEC §9; shown in the app): the trap light
 /// does not attract that state anywhere.
 pub const NO_WELL: &str = "光镊不约束原子：阱光对初态的势没有吸引的部分";
@@ -148,7 +145,8 @@ pub trait Well: Sync {
 /// e^k P(s, k) = k^s/Γ(s + 1) (1 + Σ_{n≥1} k^n/((s + 1)…(s + n))), the lowering is subtracted from the series' first term
 /// exactly; elsewhere P is one less the upper function.
 pub fn kept(s: f64, y: f64, k: f64, shift: f64) -> f64 {
-    if !(k > 0.) {
+    // A k that is not a number goes on through the formulas: the kept share is not a number either.
+    if k <= 0. {
         return 0.;
     }
     let g = gamma(s + 1.);
@@ -174,6 +172,8 @@ fn root(f: impl Fn(f64) -> (f64, f64), target: f64, mut lo: f64, mut hi: f64) ->
     loop {
         let (value, slope) = f(v);
         let g = value - target;
+        // A value that is not a number would read as above the target, and bisection would end on a number.
+        assert!(!g.is_nan(), "the ensemble's inversion meets a value that is not a number at {v}");
         if g == 0. {
             return v;
         }
@@ -208,13 +208,12 @@ struct Mode {
     rayleigh: f64,
 }
 impl Mode {
-    fn new(g: &Geometry) -> Result<Mode, String> {
-        let (Some(waist), Some(rayleigh)) = (g.waist, g.rayleigh()) else {
-            return Err(PLANE_WAVE.into());
-        };
+    /// The mode of an envelope's beam: the trap light's, the tweezer alone, a Gaussian beam (`Request::validate`).
+    fn new(g: &Geometry) -> Mode {
+        let (waist, rayleigh) = g.waist.zip(g.rayleigh()).expect("the trap light is the tweezer, a Gaussian beam (Request::validate)");
         let n = g.direction;
         let (e1, e2) = perpendicular(n);
-        Ok(Mode { frame: [e1, e2, n], waist, rayleigh })
+        Mode { frame: [e1, e2, n], waist, rayleigh }
     }
     /// u = 2ρ²/w₀² + ζ²/z_R² at r.
     fn coordinate(&self, r: V3) -> f64 {
@@ -234,7 +233,7 @@ impl Mode {
 
 /// The unit vector of cos θ = μ and azimuth φ.
 fn direction(mu: f64, phi: f64) -> V3 {
-    let (s, (sp, cp)) = ((1. - mu * mu).max(0.).sqrt(), phi.sin_cos());
+    let (s, (sp, cp)) = (crate::linalg::larger(1. - mu * mu, 0.).sqrt(), phi.sin_cos());
     [s * cp, s * sp, mu]
 }
 
@@ -259,7 +258,7 @@ struct Component<'a> {
 impl Component<'_> {
     /// u_c, where the beams' bound meets the ceiling: 2(1 − c/a), at most 1.
     fn flat(&self) -> f64 {
-        (2. * (1. - self.ceiling / self.top)).min(1.)
+        crate::linalg::smaller(2. * (1. - self.ceiling / self.top), 1.)
     }
     /// The masses of a beam's four pieces over e^c and its volume (module documentation, # Its draw): the flat ball, the
     /// chord's exponential and its gamma law, the tail.
@@ -270,7 +269,7 @@ impl Component<'_> {
             2. * TAU / 3. * flat.powf(1.5),
             TAU * flat.sqrt() * (2. / a) * -(-span).exp_m1(),
             TAU * (2. / a).powf(1.5) * gamma(1.5) * if span > 0. { regularized(1.5, span) } else { 0. },
-            TAU * ((0.5 * a).min(self.ceiling) - self.ceiling).exp() * a.powf(2.5) / gamma(3.5),
+            TAU * (crate::linalg::smaller(0.5 * a, self.ceiling) - self.ceiling).exp() * a.powf(2.5) / gamma(3.5),
         ]
     }
     /// Σ_l E(u_l(r)) e^{−c} (module documentation, # Its draw).
@@ -285,7 +284,7 @@ impl Component<'_> {
                 } else if u <= 1. {
                     (-0.5 * a * (u - flat)).exp() * (flat.sqrt() + (u - flat).sqrt()) / u.sqrt()
                 } else {
-                    ((0.5 * a).min(self.ceiling) - self.ceiling).exp() * a.powf(2.5) * u.powf(-2.5) / gamma(3.5)
+                    (crate::linalg::smaller(0.5 * a, self.ceiling) - self.ceiling).exp() * a.powf(2.5) * u.powf(-2.5) / gamma(3.5)
                 }
             })
             .sum()
@@ -376,7 +375,7 @@ pub struct Evaluations {
 impl<'a> Ensemble<'a> {
     /// The ensemble of the initial components (basis state, population, its well) at the temperature T (µK), with ħ/m
     /// (µm²/µs); the populations normalized over them. Refused where a well holds no atom (its envelope's B is not
-    /// positive, `NO_WELL`) or its envelope is not one of Gaussian beams (`PLANE_WAVE`).
+    /// positive, `NO_WELL`).
     pub fn new(initial: &[(usize, f64, &'a dyn Well)], temperature_uk: f64, hbar_over_mass: f64) -> Result<Ensemble<'a>, String> {
         let kt = KT_PER_UK * temperature_uk;
         let total: f64 = initial.iter().map(|c| c.1).sum();
@@ -387,10 +386,10 @@ impl<'a> Ensemble<'a> {
                 if !(bound > 0.) || beams.is_empty() {
                     return Err(NO_WELL.to_string());
                 }
-                let modes = beams.iter().map(Mode::new).collect::<Result<Vec<_>, _>>()?;
+                let modes: Vec<Mode> = beams.iter().map(Mode::new).collect();
                 let a = bound / kt;
                 let (centre, axes, frequencies) = well.trap();
-                let ceiling = (-well.potential(centre).0 / kt).min(a);
+                let ceiling = crate::linalg::smaller(-well.potential(centre).0 / kt, a);
                 if !(ceiling > 0.) {
                     return Err(NO_WELL.to_string());
                 }
@@ -434,6 +433,8 @@ impl<'a> Ensemble<'a> {
             self.proposed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
+            // A potential that is not a number would be rejected at every proposal, and the draw would never end.
+            assert!(!y.is_nan() && gradient.iter().all(|g| !g.is_nan()), "the prepared potential is not a number at {r:?}: the well's model is broken");
             if y > c.ceiling + rounding(self.components.len()) * c.top {
                 self.over.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -498,6 +499,8 @@ impl<'a> Ensemble<'a> {
                         let r: V3 = std::array::from_fn(|a| c.centre[a] + rho * (0..3).map(|i| widths[i] * unit[i] * c.axes[i][a]).sum::<f64>());
                         let (v, gradient) = c.well.potential(r);
                         let y = -v / self.kt;
+                        // A potential that is not a number would be left out of the integral as a place unbound.
+                        assert!(!y.is_nan(), "the prepared potential is not a number at {r:?}: the well's model is broken");
                         if y > 0. {
                             let weight = volume * w_mu * (TAU / n as f64) * 0.5 * w_z * rho * rho / ((1. - tau) * (1. - tau));
                             for (sum, value) in sums.iter_mut().zip(of(r, y, gradient)) {
@@ -534,11 +537,11 @@ impl<'a> Ensemble<'a> {
                 })
                 .collect();
             self.summed(c, n, &|r, y, gradient| {
-                let held = (room(c.wigner(r, gradient, [0.; 3]).0) / self.kt).max(0.);
+                let held = crate::linalg::larger(room(c.wigner(r, gradient, [0.; 3]).0) / self.kt, 0.);
                 let (number, energy) = (kept(1.5, y, y, c.ceiling), kept(2.5, y, y, c.ceiling));
                 let mut out = [number, energy, 0., 0.];
                 for &(q, weight) in &octant {
-                    let k = (held / q).min(y);
+                    let k = crate::linalg::smaller(held / q, y);
                     out[2] += weight * (number - kept(1.5, y, k, c.ceiling));
                     out[3] += weight * q * (energy - kept(2.5, y, k, c.ceiling));
                 }
@@ -636,7 +639,7 @@ mod tests {
                     }
                     let exact = sum / gamma(s);
                     let value = kept(s, y, k, 0.);
-                    assert!((value - exact).abs() <= 1e-11 * exact.abs().max(1e-300), "s {s} y {y} k {k}: {value:e} against {exact:e}");
+                    assert!((value - exact).abs() <= 1e-11 * crate::linalg::larger(exact.abs(), 1e-300), "s {s} y {y} k {k}: {value:e} against {exact:e}");
                 }
             }
         }
@@ -685,6 +688,29 @@ mod tests {
         }
     }
 
+    /// A well whose potential is not a number off its bottom (the harmonic well's at its centre, NaN elsewhere): the
+    /// draw stops at its first proposal with the potential's error, where a rejection would go on for ever.
+    #[test]
+    #[should_panic(expected = "the prepared potential is not a number")]
+    fn a_draw_on_a_potential_that_is_not_a_number_stops_with_its_error() {
+        struct Broken(Harmonic);
+        impl Well for Broken {
+            fn potential(&self, r: V3) -> (f64, V3) {
+                if r == [0.; 3] { self.0.potential(r) } else { (f64::NAN, [0.; 3]) }
+            }
+            fn trap(&self) -> (V3, [V3; 3], V3) {
+                self.0.trap()
+            }
+            fn envelope(&self) -> (Vec<Geometry>, f64) {
+                self.0.envelope()
+            }
+        }
+        let kt = KT_PER_UK * 1.;
+        let well = Broken(Harmonic { depth: 30. * kt, waist: 1.0, rayleigh: 3.0, hbar_over_mass: 1e-12 });
+        let ensemble = Ensemble::new(&[(0, 1., &well as &dyn Well)], 1., 1e-12).unwrap();
+        ensemble.draw(3, 0);
+    }
+
     /// What a level leaves out of the ensemble (`Ensemble::beyond`) against the harmonic well's closed forms. A well
     /// quadratic to its escape (`Harmonic`), 30 k_BT deep (a millikelvin tweezer at 30 µK; the lowering is e^{−(30−L)} of
     /// the Boltzmann factor at the level) and 30000 k_BT deep (the same well at 0.03 µK: the cloud a thousandth of the
@@ -723,7 +749,7 @@ mod tests {
                 let exact = if quantum {
                     let (a, b) = (squares[0], squares[2]);
                     // ∫_L^∞ P(X > x) dx by Simpson to 60 of the larger scale beyond L.
-                    let (panels, top) = (20000, 60. * a.max(b));
+                    let (panels, top) = (20000, 60. * crate::linalg::larger(a, b));
                     let integral: f64 = (0..=2 * panels).map(|i| (if i == 0 || i == 2 * panels { 1. } else if i % 2 == 1 { 4. } else { 2. }) * tail(a, b, level + top * i as f64 / (2 * panels) as f64)).sum::<f64>() * top / (6 * panels) as f64;
                     [tail(a, b, level), (level * tail(a, b, level) + integral) / (2. * a + b)]
                 } else {

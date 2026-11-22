@@ -50,7 +50,12 @@ interface MasterDrive {omega:number;cos:MasterMatrix;sin:MasterMatrix;laserIds:s
  *   of the quantization axis, polarization and initial phase in it: the field X and R are of.
  * - `outsideForms`, per frequency (`frequencyIndex`) the outside shift as a form in the summed field
  *   E of its beams (spectroscopy.ts `outsideFieldForm`, rad/us/(V/m)²): beams of one frequency
- *   interfere there too, which their `outsideShift`s leave out.
+ *   interfere there too, which their `outsideShift`s leave out; and its `transitions`, per transition
+ *   of a 32-state manifold to a level outside the model (`name`, e.g. 5P3/2→5D5/2) the error of that
+ *   second-order term, (coupling/detuning)², as a form in the same field and coordinates
+ *   (1/(V/m)²): `mixing`, nine arrays of one number per model state, each state's population in the
+ *   level (the diagonal of the form's matrix in the model basis); and `shift`, the term itself
+ *   (rad/us/(V/m)², the diagonal of its own part of the outside form), the shift that error is of.
  * - `emission`: the lowering dipole operator's Cartesian components (1/sqrt(us)) on the motion
  *   frame's axes: Σ_a D[C_a] is the model's spontaneous emission, and the photon of C_a has the
  *   angular pattern of a dipole along a, so its recoil follows from that pattern.
@@ -64,7 +69,8 @@ export interface MotionModelBeam {
   id:string;name:string;direction:Vec3;waveNumberPerUm:number;waistUm?:number;intensityMWcm2:number;frequencyIndex:number[];coupling:MasterMatrix;counterCoupling:MasterMatrix;
   outsideShift:MasterMatrix;electricField:[ComplexAmplitude,ComplexAmplitude,ComplexAmplitude];
 }
-export interface MotionOutsideForm {frequencyIndex:number[];matrices:MasterMatrix[]}
+export interface MotionOutsideForm {frequencyIndex:number[];matrices:MasterMatrix[];transitions:MotionOutsideTransition[]}
+export interface MotionOutsideTransition {name:string;mixing:number[][];shift:number[][]}
 const N=32,TAU=2*Math.PI,HBAR=1.0545718176461565e-34,H_PLANCK=6.62607015e-34,EPS=8.8541878128e-12,C=299792458,zeros=()=>Array(N*N).fill(0),matrix=():MasterMatrix=>({real:zeros(),imag:zeros()});
 /** h * 1 MHz / k_B, in kelvin. */
 const MHZ_KELVIN=6.62607015e-34*1e6/1.380649e-23;
@@ -141,9 +147,12 @@ function transformOperator(a:MasterMatrix,u:MasterMatrix):MasterMatrix {
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=a.real[i*N+k]!,ai=a.imag[i*N+k]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=u.real[k*N+j]!,bi=u.imag[k*N+j]!;tmp.real[i*N+j]+=ar*br-ai*bi;tmp.imag[i*N+j]+=ar*bi+ai*br;}}
  for(let i=0;i<N;i++)for(let k=0;k<N;k++){const ar=u.real[k*N+i]!,ai=-u.imag[k*N+i]!;if(ar===0&&ai===0)continue;for(let j=0;j<N;j++){const br=tmp.real[k*N+j]!,bi=tmp.imag[k*N+j]!;out.real[i*N+j]+=ar*br-ai*bi;out.imag[i*N+j]+=ar*bi+ai*br;}}return out;
 }
+/** The diagonal of U† A U times `factor` (a Hermitian A: real). */
+const diagonalIn=(a:MasterMatrix,u:MasterMatrix,factor:number):number[]=>{const x=transformOperator(a,u);return Array.from({length:N},(_,k)=>factor*x.real[k*N+k]!);};
 const fieldAmplitude=(l:Laser)=>Math.sqrt(2*laserIntensityMWcm2(l)*10/(EPS*C));
 /** Largest Rabi/(|detuning| + linewidth) over a laser's allowed D-line
- * couplings. The optical reference is the laser with the largest value: the
+ * couplings. The optical reference is the laser with the largest value of
+ * the light other than a motion solve's tweezer (buildFullMasterModel): the
  * frame is an exact change of coordinates, so this only decides which
  * coupling is static (best conditioned), by magnitude. */
 function mixing(l:Laser,bare:BareFieldModel,pol:readonly ComplexAmplitude[]):number {
@@ -208,8 +217,16 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
  const background=staticModelBackground(scene),a=background.analysis,states=background.levels;
  const bare=bareFieldModel(a.fieldMagnitudeG),u=matrix();states.forEach((s,j)=>{for(let i=0;i<N;i++){u.real[i*N+j]=s.backgroundState?.real[i]??(i===j?1:0);u.imag[i*N+j]=s.backgroundState?.imag[i]??0;}});
  const enabled=drivingLasers(scene);
- let referenceIndex=0,best=-1;enabled.forEach((l,i)=>{const value=mixing(l,bare,a.polarizations[l.id]!.amplitudes);if(value>best){best=value;referenceIndex=i;}});
- const reference=enabled[referenceIndex],lasers=reference?[reference,...enabled.filter((_,i)=>i!==referenceIndex)]:[];
+ // The optical reference -- the excited states' frame and the carrier axis -- is the beam of the largest mixing among
+ // the light other than the tweezer. With motion the tweezer is the beam the motion block names its trap (`trapBeamId`,
+ // the laser the operator designates, tweezer.ts): the motion engine's trap light is that one beam (rust-solver/motion
+ // request.rs). As the reference beside other light it would be the beats' root, its index zero on every axis, and the
+ // engine could not tell its beats with that light (scene.rs `tweezer_axis`: refused). A tweezer alone is its own
+ // reference, the carrier its frequency, with no beat to tell (R1_TWEEZER). Without motion no beam is a trap: every
+ // driving laser is a candidate.
+ const trap=motion?tweezerOf(scene):undefined,others=enabled.filter(l=>l!==trap),candidates=others.length?others:enabled;
+ let reference:Laser|undefined,best=-1;for(const l of candidates){const value=mixing(l,bare,a.polarizations[l.id]!.amplitudes);if(value>best){best=value;reference=l;}}
+ const lasers=reference?[reference,...enabled.filter(l=>l!==reference)]:[];
  // Frequency axes: the tree of laser beats, then the reference optical
  // carrier itself. In the frame rotating at nu_ref a laser's co-rotating
  // coupling has charge -(nu_l - nu_ref) and its counter-rotating coupling
@@ -283,7 +300,8 @@ export function buildFullMasterModel(scene:Scene,settings?:Partial<DynamicsSetti
    direction:MOTION_FRAME.map(n=>n[0]*k[0]+n[1]*k[1]+n[2]*k[2]) as Vec3,waveNumberPerUm:TAU*laserFrequencyMHz(laser)/C,
    ...(laser.intensityMode==='intensity'?{}:{waistUm:laserWaistUm(laser)}),intensityMWcm2:laserIntensityMWcm2(laser),frequencyIndex:beat,coupling:A,counterCoupling:R,
    outsideShift:scaled(transformOperator(laserModelCorrection(scene,laser),u),TAU),electricField:field};}),
-  outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>({frequencyIndex:beat,matrices:outsideFieldForm(a,laser).map(m=>scaled(transformOperator(m,u),TAU))})),
+  outsideForms:couplings.filter((c,i)=>couplings.findIndex(x=>x.beat.join()===c.beat.join())===i).map(({laser,beat})=>{const form=outsideFieldForm(a,laser);return {frequencyIndex:beat,matrices:form.matrices.map(m=>scaled(transformOperator(m,u),TAU)),
+   transitions:form.transitions.map(t=>({name:t.name,mixing:t.matrices.map(m=>diagonalIn(m,u,1)),shift:t.shift.map(m=>diagonalIn(m,u,TAU))}))};}),
   emission:MOTION_FRAME.map(n=>cartesianEmission(n,composeMagneticField(scene.fields).frame,spherical)) as MotionModel['emission']} satisfies MotionModel}:{}),
  // A motion solve is not the 32-state master equation: what is said of that equation's drives and returned populations is
  // said of the motion's own in motionText.

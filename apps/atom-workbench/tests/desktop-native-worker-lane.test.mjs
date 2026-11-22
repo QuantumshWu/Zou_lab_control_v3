@@ -48,11 +48,14 @@ test('An idle worker stays for the next job, whatever device its jobs name: its 
   const closing=lane.close();assert.deepEqual(commands.at(-1),{op:'close',lane:'trajectory',generation:1});lane.receive({kind:'closed',generation:1});await closing;
 });
 
-test('IPC lane fails the worker on any progress but a checkpoint: the deleted 2D engine\'s running report is no message',async()=>{
-  const commands=[],finished=[];const owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};
+test('IPC lane fails the worker on any progress but a checkpoint or a stage: the deleted 2D engine\'s running report is no message',async()=>{
+  const commands=[],finished=[],stages=[];const owner={binarySha256:'binary',build:{sha256:'build'},startupTimeoutMs:1000,sendNative:c=>commands.push(c),finish:(job,error,value)=>{job.settled=true;finished.push({job,error,value});}};
   const lane=new IpcNativeLane(owner,'trajectory');
-  const job={nativeId:5,payload:{},settled:false,onProgress:()=>{}};lane.enqueue(job);await tick();
+  const job={nativeId:5,payload:{},settled:false,onProgress:()=>{},onStage:stage=>stages.push(stage)};lane.enqueue(job);await tick();
   lane.receive({kind:'opened',generation:1,binarySha256:'binary',pid:123});lane.receive({kind:'message',generation:1,message:capabilities});lane.receive({kind:'message',generation:1,message:warm});await tick();
+  // A motion solve's stage passes on as it came (motion_adapter.rs `stage`); the worker serves on.
+  lane.receive({kind:'message',generation:1,message:{id:5,protocol:NATIVE_PROTOCOL,progress:'stage',stage:{step:'scout',stepUs:1.5}}});
+  assert.deepEqual(stages,[{step:'scout',stepUs:1.5}]);assert.equal(finished.length,0);
   lane.receive({kind:'message',generation:1,message:{id:5,protocol:NATIVE_PROTOCOL,progress:'running',running:{simulatedUs:250,durationUs:1000,trajectories:16,estimatedRemainingMs:4200}}});
   assert.equal(finished[0].error.code,'invalid-native-response');assert.equal(commands.at(-1).op,'close');
   lane.receive({kind:'closed',generation:1});await lane.close();

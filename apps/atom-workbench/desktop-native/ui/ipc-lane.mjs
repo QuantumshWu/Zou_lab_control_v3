@@ -1,4 +1,4 @@
-import {nativeCapabilities,validateAtomicResult} from '../../scripts/native-protocol.mjs';
+import {isStage,nativeCapabilities,validateAtomicResult} from '../../scripts/native-protocol.mjs';
 import {HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../../dist/js/atom-workbench/src/solver-protocol.js';
 
 const failure=(message,status=503,code='solver-unavailable')=>Object.assign(new Error(message),{status,code});
@@ -55,6 +55,8 @@ export class IpcNativeLane {
     if(message.progress!==undefined){
       try{
         if(message.progress==='checkpoint'&&job.onProgress)job.onProgress(convert());
+        // A motion solve's stage (motion_adapter.rs `stage`): passed on as it came, read by the client.
+        else if(message.progress==='stage'&&job.onStage&&isStage(message.stage))job.onStage(message.stage);
         else throw Error('Unexpected native progress message.');
       }catch(error){this.failWorker(w,failure(error.message,502,'invalid-native-response'));}return;
     }

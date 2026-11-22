@@ -26,25 +26,35 @@
 //! time; per momentum the beams' Doppler weights and path rates (`Middle::path`); and at a time s from the middle Ĥ(s)
 //! itself, each beam's plane wave turned by e^{ik_l·v s} (`Middle::generator`).
 //!
-//! One propagation, whatever the generator (`propagate`; spectral.rs). Ĥ(s) = Ĥ₀ + D(s): Ĥ₀ = Ĥ(0), the generator at
-//! the step's middle, holds the atom's own frequencies -- detunings, light shifts, decay rates --, which may turn any
-//! number of times over the step (an explicit excited state twenty linewidths off its light turns 48 rad in 0.0625 µs,
-//! and rings at that for 2/Γ after every jump); D(s) is what the motion along the path and the lights' beats change,
-//! slow by the step's own choice. The two are integrated apart:
+//! One propagation, whatever the generator (`propagate`; spectral.rs). Ĥ(s) = Ĥ₀ + D(s): Ĥ₀ = G₀(0), the static group
+//! of the generator at the step's middle (`Middle::generator`), holds the atom's own frequencies -- detunings, light
+//! shifts, decay rates --, which may turn any number of times over the step (an explicit excited state twenty
+//! linewidths off its light turns 48 rad in 0.0625 µs, and rings at that for 2/Γ after every jump); D(s) is what the
+//! motion along the path and the lights' beats change: the static group's change, slow by the step's own choice, and the
+//! model's exact tones (`Middle::beats`), each at its beat. The two are integrated apart:
 //! - Ĥ₀ exactly: in its eigenbasis its phases and decays are factors over any width (the interaction picture,
 //!   `spectral::Picture`), so the state is known at any time of the step for n exponentials and two products of n²;
 //! - D through the step's three nodes alone, its middle and its two ends (two more generators of the model; none where
-//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): D(s) = sA + s²B. A pair
-//!   of Ĥ₀'s states that turns far between two nodes for what changes -- where its following leaves no more than its
-//!   hops would (`spectral::followed`; spectral.rs, # The split) -- follows the change (a polynomial in the time, to
-//!   the second order: the generator's own eigenvectors along the path); the slower pairs, with the change's own light
-//!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the pair's
+//!   Ĥ is the same at every time, `Middle::still`: every pair of states holds one wave vector): the static group's
+//!   change sA + s²B, a tone's envelope C + sA + s²B at its exact phase e^{iνs}. An entry of Ĥ₀'s states that turns far
+//!   between two nodes at its combined frequency ω_ab + ν for what changes -- where its following leaves no more than
+//!   its hops would (`spectral::followed`; spectral.rs, # The split) -- follows the change (a polynomial in the time, to
+//!   the second order: the generator's own eigenvectors along the path); the slower entries, with the change's own light
+//!   shift, are two hops of the interaction picture a step, the first Magnus term with its integral over the entry's
 //!   turn exact, and a quintic between the nodes (spectral.rs). The propagation's work is the same whatever Ĥ₀'s
-//!   frequencies times the step are. The gradient's slow change is taken through the same three nodes (`propagate`).
+//!   frequencies or the tones' beats times the step are. Which of the model's beats are tones is the propagation's
+//!   choice (spectral.rs, # Which beats are tones: by what each route leaves), the rest of the generator its static group. The
+//!   gradient's slow change is taken through the same three nodes (`propagate`), and so are the static group's decay
+//!   (the survival's) and its gradient (the kick's); a tone is its candidate whole, its Hermitian part and its decay's
+//!   beat (spectral.rs `Picture::separate`), and its forms -- its gradient's (the kick's) and its decay's (the
+//!   survival's) -- are taken at its beat, as its part of the state is: on the quadrature's densities summed at
+//!   e^{iνu} -- six Hermitian sums a tone, of the three nodes' Lagrange weights times cos νu and sin νu (`Sums`) -- so
+//!   that what the step integrates of a tone resolves its combined frequencies, not its beat (the forms' bandwidth with
+//!   the tones', spectral.rs).
 //! The step's time integral -- the kick -- is read on that state at the nodes of a
-//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: within the
-//! kick's share `QUADRATURE` of each component's size times the step, the old engine's rule -- no credit taken for a
-//! fast component's cancelling over the step, as the nodes follow the state), piece by piece between the step's jumps
+//! Gauss–Legendre quadrature at the bandwidth of the forms ⟨x|·|x⟩ on a state Ĥ₀ propagates (`quadrature`: to the
+//! round-off of each component's size times the step -- no credit taken for a fast component's cancelling over the
+//! step, as the nodes follow the state; why not to a share, # The quadrature's tolerance), piece by piece between the step's jumps
 //! (# Jumps), and the survival's with it. These nodes meet
 //! no model and no hop. Their number still follows the
 //! bandwidth: the kick is a quotient by the norm, whose sum of exponentials under the forms' has no closed form (below).
@@ -70,8 +80,8 @@
 //! (= ψ(t_m), U(t_m) = 1):
 //! - the shear: the conservative force at the fixed r_h on x_m, −∫⟨x_m|G(r_h, t)|x_m⟩dt/‖x_m‖². At a fixed point the
 //!   gradient beats in time alone, G(r_h, t) = Σ_m G_m e^{iΩ_m(t − t_m)} over its tones (`Middle::tones`), each
-//!   τ sinc(Ω_mτ/2) (`shear`). Of a state that does not change it depends on r_h alone: the conservative kick is a shear
-//!   and the step symplectic (propagation.md §2.3);
+//!   τ sinc(Ω_mτ/2) (`Midway::stretch`'s weights). Of a state that does not change it depends on r_h alone: the
+//!   conservative kick is a shear and the step symplectic (propagation.md §2.3);
 //! - what the state's change along the path adds: the evolved state's force along the path less x_m's held in the frame,
 //!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − ⟨x_m|Ĝ(t)|x_m⟩/‖x_m‖²)dt, Ĝ(t) the gradient on the path, one quadrature of the
 //!   difference on the propagation's nodes: it vanishes at every node where the state does not
@@ -83,14 +93,43 @@
 //! model contracts without forming G (`Middle::force`). With ρ_m the middle state's, (s_k, w_k, ρ_k) the quadrature's
 //! times from the middle, weights and densities, and ℓ_j the Lagrange polynomials of the step's three nodes s_j, they are
 //! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
-//! are in the Q_j, integrated within the kick's share, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
+//! are in the Q_j, integrated to the round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
-//! of the size Γ/Δ times the excited share -- puts a part of the quotient at twice the forms' bandwidth, which the
-//! quadrature does not resolve: the kick errs by a part of that ringing, measured 2·10⁻⁷ of the dipole kick at twenty
-//! linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200 (tests). So does the survival's hazard, the same quotient (# Jumps): at
-//! rest from the bare ground state 2.5·10⁻⁸, 3.4·10⁻⁸ and 3.5·10⁻⁷ of ln N over a step at Δτ = 10, 50, 200, moving
-//! 1.6·10⁻⁵ of the hazard's integral at 200 -- a share that does not fall with the step, so that the doubling does not
-//! read it (tests). Without a decay nothing does.)
+//! of the size Γ/Δ times the excited share -- puts parts of the quotient at twice the forms' bandwidth and beyond (# The
+//! quadrature's tolerance). Taken to a share, the kick erred by a part of that ringing, measured 2·10⁻⁷ of the dipole
+//! kick at twenty linewidths and Δτ = 50, 10⁻⁵ at Δτ = 200, and so did the survival's hazard, the same quotient
+//! (# Jumps): at rest from the bare ground state 2.5·10⁻⁸, 3.4·10⁻⁸ and 3.5·10⁻⁷ of ln N over a step at Δτ = 10, 50, 200,
+//! moving 1.6·10⁻⁵ of the hazard's integral at 200 -- a share that did not fall with the step, so that the doubling did
+//! not read it (tests). Without a decay nothing does.)
+//!
+//! # The quadrature's tolerance
+//! The nodes are laid to the round-off of each component, as the propagation takes Ĥ₀ (spectral.rs), not to a share of
+//! the target. Until 2026-11-17 they were laid at the kick's share `QUADRATURE` (the old engine's rule): an error per unit
+//! time that does not fall with the step and that the step's companion does not read -- a resonant two-level atom's
+//! survival over 4 µs without a jump (two states, the forms' bandwidth its Rabi frequency) erred by 7.9·10⁻², 2.4·10⁻² and
+//! 2.7·10⁻² of ln N = −76.6 at τ = 0.2, 0.1 and 0.05 µs, not falling, and by 1.2·10⁻⁵ at 0.025 µs, where the rule fell
+//! to its least; to the round-off by 1.9·10⁻⁴, 9.6·10⁻⁷, 2.4·10⁻⁸ and 2.2·10⁻⁹. Nor is a tolerance at what the
+//! propagation itself leaves enough: the kick's and the hazard's integrands are quotients by the norm, and a quotient of
+//! two sums of the forms' bandwidth B holds the norm's ringing at 2B, 3B, … -- its parts at the multiples of B fall with
+//! the ringing's relative size, not with the tolerance --, so that the Gauss rule's bound, which is of a component of
+//! bandwidth B, does not hold for it: laid at the propagation's remainder (10⁻⁷ a step on that atom at τ = 0.2 µs), the
+//! survival erred by 1.9·10⁻², the quotient's unresolved ringing; at 2B by 1.5·10⁻³; to the round-off by 1.9·10⁻⁴,
+//! falling with the step as above -- the rule's margin there takes the multiples of B (its error grows as (νw)^{2m}).
+//! So the rule is laid at the quotient's own bandwidth ν_Q (spectral.rs `Picture::quotient`): the forms' with the
+//! norm's ringing and its harmonics to the round-off -- the quotient's terms, a numerator pair's times k ringing pairs'
+//! of the eigenvectors' overlaps, their weights the launched state's and their frequencies added, cut by Chernoff's
+//! bound on the series where what lies beyond weighs within the round-off --, over each piece of the step as many equal
+//! Gauss–Legendre panels as leave the fewest nodes to take (`count`: one where no jump's root lies in the piece, more
+//! where one does and the root's panel is taken again), each of the fewest nodes to the round-off (`fewest`), every
+//! rule made in O(m) to the round-off once for the process (`special::gauss_legendre`, `rule`). Measured against brute
+//! force on the six scenes' plain pieces, the pieces after a jump and the bare starts at τ = 0.3256 and 0.948 µs
+//! (step/tests/r1prop.rs `r1prop_quadrature`; tilt2 at 0.3256): the sums, the hazard, the kick and the hazard to a time
+//! inside the piece (a root's span) within 3·10⁻¹⁴, laid as one panel and as a root's piece's three to eight, where the
+//! panels at the forms' bandwidth before left the norm's harmonics at 2B and 3B, up to 10⁻⁹ (motion3d_status/rewrite/
+//! carrier.status.md); ν_Q 2.0 to 3.2 times the forms' bandwidth on the explicit clusters, 5.6 to 6.4 on GMD1C's ground
+//! states, the nodes 1.3 to 2.0 times the panels' before (2.1 to 2.5 on GMD1C, of 9 to 27 nodes). The integration's
+//! time -- the stretch less its picture's making, along a walk on one thread (`r1prop_integration_time`) -- 1.1 to 2.1
+//! times the strides' before on PGC3D, TET, R4, GMD1C and tilt2, a fifth to nine tenths of it on tilt0.
 //!
 //! Why a quadrature and not a closed form. On the unnormalized state every form is a sum over the pairs of states of
 //! a slow factor times e^{−i(λ_b − λ_a*)s}, whose integral over the step is a closed form pair by pair (the moments
@@ -124,20 +163,41 @@
 //!
 //! # The path's momentum
 //! v_m = (ħ/m)κ_m, κ_m the momentum at the step's middle time: the mean of the momenta before and after the kick,
-//! κ_h + Δκ/2 (propagation.md §2.3). It depends on the kick the step makes, so it is predicted: κ_m = κ_h + K(ψ₀)/2, K(ψ)
-//! the kick of a state that does not change -- its shear at κ_h and the reference's τ∇V_ref(r_h) -- on the step's start
-//! state (`predicted`). The generator and the path are both taken at κ_m: one middle, one propagation a step.
-//! - The prediction errs by half of what the state's change adds to the kick, τ ΔF/2 (ΔF the force's change over the
-//!   step through the state): O(τ²) where the step resolves the internal state. The kick's sensitivity to v_m,
-//!   (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick errs by O(τ³), the scheme's own local order; the pilot's companion at twice
-//!   the step reads it with the rest of the step's error (solve.rs, # The step: each level predicts from its own
-//!   steps' starts).
-//! - The reverse step predicts from its own start, the step's end: its path's momentum is κ_h + Δκ − K(ψ₁)/2 against the
-//!   step's κ_h + K(ψ₀)/2. They differ by (K(ψ₀) + K(ψ₁))/2 − Δκ, the held kick's trapezoid against the kick: O(τ³), so a
-//!   step and its reverse miss the start by O(τ⁴), beyond the scheme's order (tests), and by nothing where the kick
-//!   does not depend on the path (one internal state: a conservative trap's step is its own inverse to round-off).
-//! - Where the step does not resolve the internal state (a jump's bare state relaxing in 1/Γ ≪ τ) ΔF is O(1) and the
-//!   path's velocity errs in first order over that step; the companion reads that too.
+//! κ_h + Δκ/2 (propagation.md §2.3). It depends on the kick the step makes, so it is predicted -- with no model
+//! evaluated for it (r11.status.md, its recommendation E): the generator and the path are both taken at κ_m, one middle
+//! and one evaluation of the model a step. κ_m = κ_h + K/2, K the kick of the start state held where the model last
+//! evaluated it -- its held forms (`Forms`), the trajectory's: the static form over τ and each tone's at its phase over
+//! the step, τ sinc(ντ/2) e^{iν(t_m − t₁)} (`predicted`, a function of what the trajectory carries). A form is what the
+//! kick integrates, the model's force less the reference's gradient, P = Re tr(Ĝρ) − ∇V_ref (# The reference: the
+//! reference's own flow is exact, the kick takes the rest), read at a middle point, where the model's generator and the
+//! reference's expansion are at one point by construction -- whatever a model holds of its potential along a path (a
+//! model may hold a trap the reference takes exactly as it is at the middle over the whole step: the kick integrates it
+//! to the same τ∇V_ref(r_h) either way). The forms are those of the end state ψ₁ at the last step's middle r_h, its
+//! density contracted with the step's own kick (`Middle::nodes`: one more density, its static form and each tone's
+//! complex amplitude), less the step's τ∇V_ref(r_h); at the trajectory's start the model's at its own point
+//! (`Dynamics::started`, the same contraction there); after a jump at a step's end into
+//! another cluster, that cluster's at the jump's point (`Dynamics::forms`).
+//! - The forms against the force the next step needs, its own average over its path about r_h′ = r_h + v_m τ + O(τ²):
+//!   the state is the trajectory's own at t₁, the position O(τ) from r_h′, and the generator is taken at κ_m of the last
+//!   step, O(τ) from the state's momentum: P_E = P(z₁) − τv·∇P − (τ/2)κ̇·∂_κP + O(τ²) against P(z₁) + (τ′/2)Ṗ + O(τ²).
+//!   κ_m errs by O(τ²), the kick's sensitivity to it, (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick and the state err by O(τ³),
+//!   the scheme's own local order (r11.status.md §2(a); the pilot's companion at twice the step reads it with the rest of
+//!   the step's error: each level carries its own forms). A tone is carried by its amplitude, so the next step weighs
+//!   it by its own beat over its own width: the force at one time alone would put κ_m off by (τ/2)|F_tone| at ντ ≳ 1.
+//!   What is read at one point against a reference at another holds the reference's own force between them, K·δr: a
+//!   model's force at the end node against the next middle's reference put κ_m off by (τ/2)K·v_mτ, (ωτ)²/2 of κ in a
+//!   trap of ω, which no step resolves (wire.status.md, wire4 item 1).
+//! - The reverse step takes the forms the forward step left, at its own middle (a step and its reverse share r_h): its
+//!   path's momentum is κ_h + Δκ − (τ/2)P_E(z₁) against the step's κ_h + (τ/2)P_E(z₀). They differ by the forms'
+//!   trapezoid against the kick and by the start's forms' position, O(τ²), and by (τ²/2)κ̇∂_κP, the force's dependence
+//!   on the velocity; the kick takes v_m by its path's odd moments: a step and its reverse miss the start beyond the
+//!   scheme's order (tests: from a dressed state 2.6e-6, 3.0e-7, 2.1e-8 at τ = 0.2, 0.1, 0.05 µs), and by nothing where
+//!   the kick does not depend on the path (one internal state: a conservative trap's step is its own inverse to
+//!   round-off).
+//! - Where the step does not resolve the internal state (a jump's bare state relaxing in 1/Γ ≪ τ) the force changes by
+//!   O(1) over the step and the path's velocity errs in first order over that step; the companion reads that too. A
+//!   jump inside a step: the step's κ_m was predicted from the state before it, as it was from the start state; the next
+//!   step's forms are the jumped state's at the end.
 //!
 //! # Jumps (SPEC §1.6)
 //! Between jumps ‖ψ‖² is the probability N that no jump happened, and the exact flow only lowers it, at the rate of the
@@ -148,12 +208,17 @@
 //! random long steps, 10²⁰⁰ compounded over a two-level atom's steps at 10 Γ (motion3d_status/rewrite/norm.status.md,
 //! int.status.md) --, which made an atom wait too long for its next jump and a root taken as monotone miss the first
 //! crossing. So the step takes the survival from the law, not from the propagation's norm: ln N(u) = ln N(u₀) − ∫h, h on
-//! the propagation's direction, Γ(u) the parabola of the generator's decay through the step's three nodes -- the
-//! generator the propagation takes, its one matrix where Ĥ is still --, and the trajectory's state is √N times the
-//! direction.
+//! the propagation's direction, Γ(u) the decay of the generator the propagation takes -- the static group's through the
+//! step's three nodes, its parabola Σ_j ℓ_j(u)Γ_j, and each tone's at its exact phase, its envelope's parabola times
+//! e^{±iνu}; its one matrix where Ĥ is still --, and the trajectory's state is √N times the direction.
 //! - The integral is the kick's quadrature's: each node's density is in the three nodes' Lagrange sums S_j already
-//!   (`accumulate`), and ∫h over what they hold is Σ_j tr(Γ_j S_j) (`hazard`) -- no work a node; a trace of the laid
-//!   decay at each panel's end (`panels`).
+//!   (`accumulate`) and in each tone's at its phase, C_j and S′_j of the weights ℓ_j(u) cos νu and ℓ_j(u) sin νu
+//!   (`Sums`), and ∫h over what they hold is Σ_j tr(Γ_j S_j) + Σ_tones Σ_j [tr(Γ_j^c C_j) + tr(Γ_j^s S′_j)] (`hazard`),
+//!   Γ_j^c and Γ_j^s the tone's decay at the phases 0 and π/2 at the node j -- the decays of G⁺ + G⁻ and of i(G⁺ − G⁻):
+//!   e^{iθ}G⁺ + e^{−iθ}G⁻ is cos θ times the first and sin θ times the second -- no work a node; a trace of the laid
+//!   decay at each panel's end (`panels`). At the quadrature's nodes this is x̂†Γ(u_k)x̂ of the generator's own decay
+//!   where the envelopes are constant along the path, Σ L(u_k)†L(u_k), whatever the tones' beats: the decay's beats are
+//!   neither aliased nor averaged by the three nodes (DESIGN §12.4).
 //! - N does not rise where the decay is positive semidefinite at the quadrature's nodes: the weights are positive and
 //!   each node's h a form of it. The model's decay is the jumps' product exactly, from its near tables to their error;
 //!   along the measured scenes' steps -- PGC3D, GMD1C, S3, S3c, R4_LIN_2, S1, R3_DOPPLER, TET and a two-level atom at
@@ -164,7 +229,7 @@
 //!   below zero between the nodes by its own third-order error; no scene's does.)
 //! - N reaches the trajectory's threshold θ first in the first panel whose end is at θ or below (N is monotone); a jump
 //!   is made there, at the root u* of ln N(u) = ln θ to ln N's rounding, ln N inside the panel its start less ∫h over
-//!   spans of it by their own quadratures on the propagation's states (`Picture::between`), stepped from below at the
+//!   spans of it by their own quadratures on the propagation's states (`Picture::at`), stepped from below at the
 //!   hazard's rate (`root`): the spans below the root are the kick's part of the panel as far as the root, so that the
 //!   root costs the panel's nodes before it and a few more, as laying them again did. The states kept inside that
 //!   panel -- the middle, a time read -- stand where they lie before the root; the others are met again after the
@@ -201,7 +266,8 @@
 //!   the step as the kick δκ cos ωu and the displacement −(ħ/m) δκ sin(ωu)/ω at the middle do, per principal axis (the
 //!   identity of `spreading` and of `Segment`);
 //! - a jump that lands in another cluster goes on in that cluster's generator at the same middle (`Dynamics::middle`),
-//!   on the same path: its picture is made there, its part of the kick is its own forms'.
+//!   on the same path -- the middle the jump's landing was made on (`Places`) --: its picture is made there, its part
+//!   of the kick is its own forms'.
 //! What a jump inside a step leaves, each once a jump (the jumps' number is the physics', so each is an error of the
 //! run of its own order in τ; h = τ/2, a the acceleration, f the force beside the reference's):
 //! - the photons' Doppler weights are the path's, κ_m for κ_m + a u*: first order and odd in u*, so of zero mean over
@@ -236,7 +302,7 @@
 //! # The absorbed light's momentum (SPEC §1.6)
 //! Per unit time the light an atom scatters gives its momentum a mean and a second moment that are smooth in the
 //! position and finite where the light interferes away -- the local Kramers–Moyal coefficients Σ Im⟨u|∇u⟩ and
-//! Σ Re⟨∇u|⊗|∇u⟩ of the jumps' amplitudes u = Jψ, neither divided by the jumps' rate (model/photon.rs). They are
+//! Σ Re⟨∇u|⊗|∇u⟩ of the jumps' amplitudes u = Jψ, neither divided by the jumps' rate (model.rs `Moments`). They are
 //! delivered so that no increment of the momentum is a quotient by a rate:
 //! - a jump carries the emitted photon's recoil −k_φ n and its class's conditional mean as far as one absorbed photon's
 //!   momentum goes (`Emitted::kick`: at most k_φ + k_c in all);
@@ -327,7 +393,7 @@
 //! propagation made (`Picture::slope`); the gradient's matrices and, where the cluster beats, their slope along the path
 //! in one pass of the model's forms (`Middle::gradient`); the blocks' Schur forms, ℳ made at once and factored, and the
 //! sides' solves (model/optical.rs, # The solve; S3: 36 reals where the whole sector is 96); and twelve forms
-//! (`Sector::forms`) -- which `Price` prices, making the same. It is made anew at every middle: a factorization
+//! (`Sector::forms`) -- which the stretch's `Price` counts as made. It is made anew at every middle: a factorization
 //! reused along the path as an iterative refinement's preconditioner contracts the error by the light pattern's change
 //! over a step -- S3's standing wave turns 0.26 rad a step at 30 µK -- for an iteration that applies the operator and
 //! solves, a third of the whole sector's factorization (measured on its 96 reals): more than the factorization to its
@@ -343,8 +409,8 @@
 //! - The internal state at any time: its propagation has x(u), u the time from the middle, on the straight path through
 //!   the middle (spectral.rs), and ψ_s = e^{iK_s·v_m u} x_s. A time read is no stop of the propagation: the step's
 //!   stops and nodes, its jumps' roots and its count are what the step resolves alone, and a read takes the state
-//!   from the propagation as it passes -- from the latest stop at or before the time (`Picture::between`), after the
-//!   jumps before it and before those after it (`looked`) --, its norm the propagation's there: a reading is read as
+//!   from the propagation as it passes -- the state there (`Picture::at`), after the jumps before it and before those
+//!   after it (`looked`) --, its norm the propagation's there: a reading is read as
 //!   ρ/tr ρ alone, and nothing of the survival is integrated for it. So a trajectory is the same to the bit whatever
 //!   times it is read at, and a read is the same whatever else is read (adapt.rs, # The reads). That path lies ½au² + ½a_B h²
 //!   from the atom's (a its
@@ -388,34 +454,28 @@
 //!
 //! # The domain (SPEC §1.8)
 //! Whether the model's folds hold where the atoms go is measured, not proven: the units' errors are read at the
-//! pilot's states (solve.rs, # The model). A step asks its domain two cheap things (`Domain`), from what it has anyway.
+//! pilot's states (solve.rs, # The model). A step asks its domain one cheap thing (`Domain`), from what it has anyway.
 //! - The runaway (`Domain::runaway`): a fold far outside its validity is wrong without bound -- a drive folded at the
 //!   atom whose Doppler series diverges scatters as (kv/Δ)², the released runaway's 10⁵ jumps/µs against Γ/2. Every
 //!   stretch reads the hazard of its first state, x̂†Γx̂ at the decay laid for the step (`hazard`): the rate at which the
 //!   state scatters, explicit excited states and folds alike. No state of the atom scatters faster than its fastest
 //!   excited state does wholly excited, so a hazard above that is a fold beyond any state of the atom: the step is
 //!   refused (`Refused::Runaway`), the trajectory stops there and is booked whole from then on (solve.rs `run`).
-//! - Whether the step resolves the generator's turn along its path at its speed -- each
-//! entry's (|Ω| + |K| v) τ/2 below π, its three nodes no alias -- is its accuracy: beyond it the nodes read an alias,
-//! and the step takes the parabola through three samples of the entry, at most 5/4 of the entry anywhere (the three
-//! points' Lebesgue constant), Hermitian where the entry is: the state goes on under a wrong generator as bounded as the
-//! true one; the impulse is the exact tones' on the middle state and that parabola's on the rest, at most (1 + 5/2) τ
-//! times the force's bound, a step after a step, and the hazard no more than the decay's -- the survival falls by the
-//! decay the step takes, never rises (# Jumps), and its rate is the alias's, as is the state's below the edge over a
-//! step long against the light's change, which the check reads (step/tests.rs: an atom past its standing wave's
-//! resolution). So such a step is taken,
-//! and the trajectory is unresolved from it on (`Trajectory::unresolved`): what it shows is booked whole (solve.rs,
-//! # The reach's atoms).
+//! The step asks no edge of the light: the propagation integrates every beat of the generator at its combined
+//! frequencies (spectral.rs, # Tones), so no step aliases one; a step long against the light's change is inaccurate,
+//! not unstable -- the state goes on under the envelopes' parabolas, as bounded as the true generator, the survival
+//! falls by the decay the step takes and never rises (# Jumps) --, and how inaccurate is the check's to read
+//! (step/tests.rs: an atom past its standing wave's resolution).
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
 use crate::random::Stream;
-use crate::spectral::Picture;
-use crate::units::{rounding, QUADRATURE, UNIT_ROUNDOFF};
+use crate::spectral::{Beat, Picture, Refusal};
+use crate::units::{rounding, UNIT_ROUNDOFF};
 
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
 /// `Model` with the run's lights and the reference state. Each method is one model function; the integrator defines
@@ -429,51 +489,83 @@ pub trait Dynamics {
     /// ħ/m (µm²/µs): the velocity of κ is (ħ/m)κ, its kinetic energy (ħ/m)κ²/2 (rad/µs).
     fn hbar_over_mass(&self) -> f64;
 
-    /// The reference potential's second-order expansion at r (SPEC §2.1): the fixed reference state's trap potential,
-    /// `Model::expansion(r, p_ref, &model.prepared())`. The splitting is exact for any reference; this one moves the trap's
-    /// harmonic part, and its gradient and curvature at the step's middle, exactly.
+    /// The reference potential's second-order expansion at r (SPEC §2.1): the fixed reference state's trap potential --
+    /// the trajectory model's prepared potential of the reference state (model/selected.rs, # The rest of the model). The
+    /// splitting is exact for any reference; this one moves the trap's harmonic part, and its
+    /// gradient and curvature at the step's middle, exactly.
     fn reference(&self, r: [f64; 3]) -> Quadratic;
 
-    /// A cluster: its states and its Doppler frame K_s (`Model::clusters()[c]`).
+    /// A cluster: its states and its Doppler frame K_s (model.rs `Cluster`).
     fn cluster(&self, cluster: usize) -> &Cluster;
 
-    /// The cluster a ground state belongs to (`Model::cluster_of`).
+    /// The cluster a ground state belongs to.
     fn cluster_of(&self, ground: usize) -> usize;
 
     /// The cluster's generator at the position r and the time t with every light on, for every momentum and along every
     /// straight path through the point (`Middle`): made once a step, at its middle.
     fn middle(&self, cluster: usize, r: [f64; 3], t: f64) -> Self::Middle<'_>;
 
-    /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/photon.rs
-    /// `Model::emission_of`): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
+    /// A jump's photon of the cluster's state ψ (unnormalized) at a point (SPEC §1.6; model/selected.rs, # The
+    /// photons): the model makes the rate W = Σ_a‖u_a‖² of every class the state emits there, in the
     /// classes' order; `draw` picks one of them by its place among those rates, or none; and the model makes the photon
     /// of the class drawn (`Emitted`) -- the one class whose amplitudes and kick a jump reads. None where `draw` picks
-    /// none.
-    fn emit(&self, cluster: usize, at: &Point, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
-    /// Where a jump's bare state `f` lands in a cluster at a point: the state the trajectory goes on in, with the norm
-    /// it goes on with (a fold's bare state is its slow state and a part that is gone within the excited state's
-    /// lifetime; the slow state's norm is the bare state's survival extrapolated back to the jump, below ‖f‖ or above
-    /// it; model.rs `Model::landed`). The state itself where the model folds nothing of that.
-    fn landed(&self, _cluster: usize, _at: &Point, f: &[C64]) -> Internal {
-        f.iter().copied().collect()
+    /// none. Inside a step the point is on the step's path: `on` is the cluster's middle there with the path and the
+    /// point's time s from the middle (`Places`), what the step made of the model for the jump to read (DESIGN §13.2);
+    /// at a trajectory's start there is none.
+    fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted>;
+    /// Where a jump's bare state `f` lands in a cluster at a point, against the trajectory's threshold θ for its next jump
+    /// (`Landing`, `Landed`): the state the trajectory goes on in and its threshold -- the state itself and θ for a model
+    /// whose jumps land on its own states (the plain landing L_qψ/‖·‖, RUSTPLAN §2.2 D5) --; or nowhere where the landing
+    /// does not exist in that cluster there. Inside a step `on` is the landing cluster's middle with the path (`emit`).
+    fn landed<'m>(&'m self, _cluster: usize, _at: &Point, _on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as Middle>::Path)>, f: &[C64], threshold: f64) -> Landing {
+        Landing::On(Landed::plain(f.iter().copied().collect(), threshold))
     }
 
-    /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (`Model::energy`, rad/µs).
+    /// The loss energy E_s = (ħ/m)κ²/2 + V_run(r; p(ψ)) of the cluster's state at a point (rad/µs).
     fn energy(&self, cluster: usize, at: &Point, psi: &[C64]) -> f64;
 
-    /// The loss test at a point (`Model::lost`): outside the region and E_s above its far value.
+    /// The loss test at a point: E_s above its escape value, the far value (SPEC §1.7).
     fn lost(&self, cluster: usize, at: &Point, psi: &[C64]) -> bool;
 
-    /// The displayed rows of the cluster's state at a point (`Model::readout`).
+    /// The displayed rows of the cluster's state at a point.
     fn readout(&self, cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES];
 
-    /// The counted work of one middle (`decide::Work`, real multiply-adds), made once per run: the price of a step's
-    /// middle beside its own work and its nodes' (`Price`).
-    fn assembly_work(&self) -> f64;
+    /// A cluster's state's held forms at a point (module documentation, # The path's momentum: `Forms`, at the point's
+    /// time): the model at the point (`middle`, deciding nothing), the state on its path at the point's momentum, at the
+    /// middle (`forms_at`), less the reference's gradient there. Where a jump at a step's end lands in another cluster,
+    /// and after a trajectory's first jump.
+    fn forms(&self, cluster: usize, at: &Point, psi: &[C64]) -> Forms
+    where
+        Self: Sized,
+    {
+        let middle = self.middle(cluster, at.r, at.t);
+        let path = middle.path(at.kappa, [0.0; 3]);
+        let mut rho = vec![C64::ZERO; psi.len() * psi.len()];
+        density(psi, &mut rho);
+        Forms { time: at.t, ..forms_at(&middle, &path, &rho) }.less(self.reference(at.r).gradient)
+    }
+
+    /// Where a trajectory starts (`Trajectory::new`): the bare state f on `cluster` at the point -- the cluster it lands
+    /// in there, its landing against the threshold θ (`land`) and its held forms there (`forms`); no number where it
+    /// lands nowhere.
+    fn started(&self, cluster: usize, at: &Point, f: &[C64], threshold: f64) -> (usize, Landed, Forms)
+    where
+        Self: Sized,
+    {
+        let Some((cluster, _, landed)) = land(self, cluster, at, None, f, threshold) else {
+            return (cluster, Landed::plain(f.iter().map(|_| C64::new(f64::NAN, f64::NAN)).collect(), threshold), Forms { time: at.t, held: [f64::NAN; 3], tones: vec![] });
+        };
+        let forms = self.forms(cluster, at, &landed.psi);
+        (cluster, landed, forms)
+    }
 
     /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
-    /// trajectory's work.
-    fn photon_work(&self) -> f64;
+    /// trajectory's work. The one count of a step's run that is not counted where it is made (`Price`): the model makes
+    /// the photon (`Dynamics::emit`) and does not hand its count on; so it is priced at the dearest class's of every
+    /// cluster at the focus, once a run.
+    fn photon_work(&self) -> f64 {
+        0.0
+    }
 }
 
 /// A cluster's generator at a point (r_h, t_m) (module documentation, # The kick): what of it depends on neither the
@@ -502,6 +594,41 @@ pub trait Middle {
     /// Ĥ(s) at the time s from the middle along the path, into `h` (n × n; rad/µs), the frames' diag(K_s·v) with it.
     fn generator(&self, path: &Self::Path, s: f64, h: &mut Mat);
 
+    /// The candidate tones of Ĥ along the path (spectral.rs, # Which beats are tones): Ĥ(s) holds
+    /// Σ_m (e^{iν_m s} G_m⁺ + e^{−iν_m s} G_m⁻) of terms whose beats ν_m are exact and whose envelopes G_m^± are constant
+    /// along the path (`envelopes`); into `beats` each ν_m (rad/µs), and into `keys` each one's exact label: integers,
+    /// one length for all, whose sums are the beats' sums exactly -- equal sums the same beat, the propagation's
+    /// products of members of equal key sums one class (spectral.rs, # The second order by tones). The propagation
+    /// takes as tones those it resolves better so and the rest with the generator's static group. None here; none on a
+    /// path Ĥ is still along.
+    fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>, _keys: &mut Vec<Vec<i64>>) {}
+
+    /// The model's exact blocks of the cluster's states (model/selected.rs, # Exact blocks): a partition on which every
+    /// matrix the middle gives -- the generator at every time, its gradient, every tone's envelopes -- is block-diagonal
+    /// (the jumps need not be). None: the states are one block.
+    fn blocks(&self) -> &[Vec<usize>] {
+        &[]
+    }
+
+    /// The m-th candidate's members' envelopes (`beats`) at the time s from the middle along the path (the step's nodes:
+    /// spectral.rs `Picture::separate`) into `plus` (G_m⁺, at e^{iν_m s}) and `minus` (G_m⁻, at e^{−iν_m s}; n × n each,
+    /// rad/µs): its part of `generator`'s at the time s is e^{iν_m s} G_m⁺(s) + e^{−iν_m s} G_m⁻(s).
+    fn envelopes(&self, _path: &Self::Path, _m: usize, _s: f64, _plus: &mut Mat, _minus: &mut Mat) {}
+
+    /// The m-th candidate's part of `force`'s forms at its beat, per lab axis: Σ_k w_k Re tr(Ĝ_m(s_k) ρ_k) of the
+    /// tone's Hermitian part's gradient Ĝ_m(s) = e^{iν_m s} Ĝ_m⁺(s) + e^{−iν_m s} Ĝ_m⁻(s), its envelopes through the step's
+    /// nodes as the propagation takes them (`envelopes`): Σ_j Re tr(Ĝ_m⁺(s_j) σ_j + Ĝ_m⁻(s_j) σ_j†), given per node s_j
+    /// its sums σ_j = Σ_k w_k ℓ_j(s_k) e^{iν_m s_k} ρ_k = `re` + i `im` (n × n row by row each, Hermitian) as
+    /// (s_j, re, im) -- the step's three nodes, or the middle alone (a fixed point's: `forms_at`).
+    fn tone_force(&self, _path: &Self::Path, _m: usize, _sums: &[(f64, &[C64], &[C64])]) -> [f64; 3] {
+        [0.0; 3]
+    }
+
+    /// The counted complex multiply-adds of the m-th candidate's `envelopes` and of its `tone_force`.
+    fn tone_work(&self, _m: usize) -> [f64; 2] {
+        [0.0; 2]
+    }
+
     /// Re tr(Ĝ_a(s) ρ) per lab axis a (rad/µs/µm): the gradient of Ĥ's Hermitian part at the time s from the middle along
     /// the path, contracted with a Hermitian ρ on the states (n × n, row by row).
     fn force(&self, path: &Self::Path, s: f64, rho: &[C64]) -> [f64; 3];
@@ -524,23 +651,56 @@ pub trait Middle {
     }
 
     /// What the light a state scatters at the point gives the momentum per unit time beside the Ehrenfest force and the
-    /// jumps' kicks (`Model::scattering_on`): the force and the second moment's rate the jumps do not carry, of the
-    /// state ψ at the middle's time and the path's momentum. Asked of the middle, which holds the point: the model makes
-    /// nothing there a second time.
-    fn scattering(&self, path: &Self::Path, psi: &[C64]) -> Scattering;
+    /// jumps' kicks (model.rs `Scattering::of_moments`): the force and the second moment's rate the jumps do not carry, of the
+    /// state ψ at the middle's time and the path's momentum; and the counted real multiply-adds that made it. Asked of
+    /// the middle, which holds the point: the model makes nothing there a second time.
+    fn scattering(&self, path: &Self::Path, psi: &[C64]) -> (Scattering, f64);
 
     /// The counted complex multiply-adds of one `generator`, one `force` and one `tones`.
     fn work(&self) -> [f64; 3];
 
+    /// The counted real multiply-adds that made the middle (`Dynamics::middle`): what of the generator the point holds,
+    /// whatever a step asks of it.
+    fn made(&self) -> f64;
+
     /// Ĝ_a(s) as matrices at the time s from the middle along the path (n × n each, row by row, Hermitian): what
-    /// `force` contracts; and where `slope` is asked, their derivative along the path at s, dĜ_a/ds.
-    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<&mut [Vec<C64>; 3]>);
+    /// `force` contracts; and where `slope` is asked -- with the half-width h of the step it is the slope of (a model
+    /// may take it as its chord through the step's ends, ±h) --, their derivative along the path at s, dĜ_a/ds. With
+    /// the counted complex multiply-adds that made them (`optical_work`: priced where they are made).
+    fn gradient(&self, path: &Self::Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64;
+
+    /// The rows as shown (the model's readout, `Dynamics::readout`) of the cluster's state ψ at the time s from the middle
+    /// along the path, on the step's own model there -- what the step propagates between its nodes --, read where the
+    /// step stands (adapt.rs, # The reads); none where the model reads it at the point instead (`Dynamics::readout`).
+    fn readout(&self, _path: &Self::Path, _s: f64, _psi: &[C64]) -> Option<[f64; STATES]> {
+        None
+    }
 
     /// The cluster's optical sector on the path (# The optical sector's noise; model/optical.rs): None where the
     /// cluster has no explicit excited state.
     fn optical(&self, _path: &Self::Path) -> Option<Optical> {
         None
     }
+
+    /// The step's three nodes' forms at once (`Midway::stretch`): Re tr(Ĝ(s_j) ρ_j) per lab axis at s = −h, 0, h (`force` at
+    /// each), the middle's with the fixed point's tones on a held state at their weights where one is held (`centre`); what
+    /// the step takes is their sum, node by node. And where `end` is given -- the end state's density, and the path at
+    /// rest through the middle (its fixed point's tones) -- its forms at the middle (`Forms`, its time the middle's, 0;
+    /// the model's, the integrator takes the reference's gradient from them; module documentation, # The path's
+    /// momentum). One call, so that a model whose forms are one derivative of its step contracts them at once (and gives
+    /// their sum as the first node's, the end's in the same contraction); here the end's by the middle's forms
+    /// (`forms_at`).
+    fn nodes(&self, path: &Self::Path, h: f64, rho: [&[C64]; 3], held: Option<(&[C64], &dyn Fn(f64) -> f64)>, end: Option<(&[C64], &Self::Path)>) -> ([[f64; 3]; 3], Option<Forms>)
+    where
+        Self: Sized,
+    {
+        let forms = std::array::from_fn(|j| match held {
+            Some((held, weight)) if j == 1 => self.centre(path, held, weight, rho[j]),
+            _ => self.force(path, [-h, 0.0, h][j], rho[j]),
+        });
+        (forms, end.map(|(rho, fixed)| forms_at(self, fixed, rho)))
+    }
+
 }
 
 /// The optical sector of a cluster on a path (# The optical sector's noise; model/optical.rs): its ground states (the
@@ -564,22 +724,25 @@ struct Noise {
 }
 
 /// The optical sector's operators at a step's middle along its path (# The optical sector's noise), made in the
-/// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path (`Middle::gradient`);
+/// workspace `noise`: the gradient there and, where the cluster beats, its slope along the path over the step of the
+/// half-width `h` (`Middle::gradient`);
 /// K of the picture's generator at the middle, to the first order along the path with the picture's slope through the
-/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)² and the counted work (`optical_work`); None where the
-/// cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
-fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, noise: &mut Noise) -> Result<Option<(f64, f64)>, Refused> {
+/// step's ends (`Picture::slope`). Its locality ε_Q = (ν/γ_Q)², its ground states and its make's counted work with the
+/// gradient's as the model counted it (real multiply-adds; the stretch's `Price` with the forms: `optical_work`); None
+/// where the cluster has no optical sector; the step refused where its sector made no K (`Refused::Optical`).
+fn optical<M: Middle>(along: &Along<M>, picture: &Picture, still: bool, h: f64, noise: &mut Noise) -> Result<Option<(f64, usize, f64)>, Refused> {
+    let _p = crate::prof::scope(crate::prof::OPTICAL);
     let Some(shape) = along.middle.optical(&along.path) else { return Ok(None) };
     let Noise { sector, gradient, slope } = noise;
-    along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some(&mut *slope));
+    let matrices = along.middle.gradient(&along.path, 0.0, gradient, (!still).then_some((h, &mut *slope)));
     sector.make(&picture.base, gradient, shape.ground, (!still).then_some((&picture.slope, &*slope))).map_err(Refused::Optical)?;
-    Ok(Some(((shape.beat / shape.decay).powi(2), optical_work(along.n, along.middle.work()[1], still, sector.work))))
+    Ok(Some(((shape.beat / shape.decay).powi(2), shape.ground, sector.work + COMPLEX * matrices)))
 }
 
-/// The counted work of the optical sector at a middle (`optical`) beside its sector's make (`Sector::cost`, `work`): the
-/// gradient's three matrices, each of the force's form's count, twice with their slope; and one `within`'s forms.
-fn optical_work(n: usize, force: f64, still: bool, work: f64) -> f64 {
-    COMPLEX * (if still { 3.0 } else { 6.0 } * force + Sector::forms(n)) + work
+/// The counted work of the optical sector at a middle (`optical`): its make with the gradient's matrices as they were
+/// counted (`work`: `Sector::cost`, `Middle::gradient`), and one `within`'s forms.
+fn optical_work(n: usize, work: f64) -> f64 {
+    COMPLEX * Sector::forms(n) + work
 }
 
 /// The optical sector's rate of a state x (unnormalized; model/optical.rs, # K_Q) from K_a and Ĝ_b on it (F = −Ĝ):
@@ -653,6 +816,47 @@ pub struct Emitted {
     pub wave_number: f64,
     pub amplitudes: [Internal; 3],
     pub kick: [f64; 3],
+    /// The counted real multiply-adds that made it where the model counts them there (its place and drawn photons; a
+    /// model that prices a jump once a run says none: `Dynamics::photon_work`).
+    pub work: f64,
+}
+
+/// Where a jump's bare state lands in a cluster (`Dynamics::landed`): the state the trajectory goes on in and its
+/// threshold (`On`); or none, where the landing does not exist in that cluster at the point -- a number that is not
+/// finite none (`Nowhere`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Landing {
+    On(Landed),
+    Nowhere,
+}
+
+/// A landing (`Dynamics::landed`): the state the trajectory goes on in, the threshold its next jump is at, the kick the
+/// landing books (1/µm) and its counted work (real multiply-adds), the jump's own as its photon's is (`jump`): no part of a
+/// step's. Where its norm is at or below its threshold already, the jump is at once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Landed {
+    pub psi: Internal,
+    pub threshold: f64,
+    pub kick: [f64; 3],
+    pub work: f64,
+}
+
+impl Landed {
+    /// The plain landing: the state, the trajectory's own threshold, no kick, no count.
+    pub fn plain(psi: Internal, threshold: f64) -> Landed {
+        Landed { psi, threshold, kick: [0.0; 3], work: 0.0 }
+    }
+}
+
+/// Where a jump's bare state f of the cluster `cluster` lands at a point against the threshold θ (`Dynamics::landed`): on
+/// the middles `places` holds there (`Places::of`), or at the point. The cluster, f on its states and its landing; none
+/// where it lands nowhere.
+fn land<'m, D: Dynamics>(model: &'m D, cluster: usize, at: &Point, places: Option<&mut Places<'_, 'm, D>>, f: &[C64], threshold: f64) -> Option<(usize, Internal, Landed)> {
+    let on = places.map(|p| p.of(cluster));
+    match model.landed(cluster, at, on, f, threshold) {
+        Landing::On(landed) => Some((cluster, f.iter().copied().collect(), landed)),
+        Landing::Nowhere => None,
+    }
 }
 
 /// A trajectory's state (SPEC §1.6, §1.7, §2.2).
@@ -669,7 +873,8 @@ pub struct Trajectory {
     pub cluster: usize,
     /// Time (µs).
     pub time: f64,
-    /// The waiting time's threshold θ ∈ (0, 1]: the next jump is where ‖ψ‖² reaches it.
+    /// The waiting time's threshold: the next jump is where ‖ψ‖² reaches it -- θ ∈ (0, 1] drawn at the last jump, or its
+    /// landing's (`Landed`).
     pub threshold: f64,
     /// The jumps made: the next one draws from `Stream::jump(seed, index, jumps + 1)`.
     pub jumps: u32,
@@ -687,9 +892,12 @@ pub struct Trajectory {
     pub index: u64,
     /// The work counted (`decide::Work`, real multiply-adds) of the integrator's own algorithms over the trajectory --
     /// the generator's decomposition, its following and hops, the states at the kick's nodes and their sums, with the
-    /// model's generators and forces at the step's nodes (`adapt` adds each step's) --, and its jumps' photons
-    /// (`Dynamics::photon_work`).
+    /// model's generators and forces at the step's nodes (`adapt` adds each step's) --, and its jumps' (`jumped`).
     pub work: f64,
+    /// Of `work`, its jumps' own: their photons (`Emitted::work`, `Dynamics::photon_work`) and their landings
+    /// (`Landed::work`) as they were made -- a jump's work is the jump's at whatever step it falls in, and the run prices
+    /// it so, at the trajectory's own rate (solve.rs `work_at`).
+    pub jumped: f64,
     /// The optical sector's pending covariance (1/µm², symmetric, negative semidefinite after every step: # The optical
     /// sector's noise): what of the noise's covariance its draws have not taken -- its negative excursions --, carried
     /// across steps and jumps.
@@ -697,25 +905,35 @@ pub struct Trajectory {
     /// The optical sector's booking over the trajectory (# The optical sector's noise; the ledger's): Σ ε_Q tr C of its
     /// steps' covariances C, Σ tr C, and the scattered light's Σ tr(2D)|τ| (1/µm²).
     pub booked: [f64; 3],
+    /// Its state's held forms where the model last evaluated it (module documentation, # The path's momentum): its next
+    /// step's path momentum.
+    pub forms: Forms,
 }
 
 impl Trajectory {
-    /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0: ψ the unit vector of that
-    /// state on its cluster, the first threshold from jump 0's stream (SPEC §2.4).
+    /// A trajectory at a basis state (a ground state of the model basis) at (r, κ) and time 0, the light switched on there
+    /// (SPEC §2.4; ELIMINATION v3 4): the bare state -- the unit vector of that state on its cluster -- is a jump's
+    /// landing, the same map (`Landed`), against the first threshold from jump 0's stream, with its held forms there
+    /// (`Dynamics::started`); at its threshold already, the jump at once, as after a jump (`jump`), and the held forms of
+    /// the state it lands in.
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
-        let cluster = model.cluster_of(state);
-        let states = &model.cluster(cluster).states;
-        let at = states.iter().position(|&s| s == state).expect("a ground state lies on its cluster");
-        let mut psi = Internal::zeros(states.len());
-        psi[at] = C64::ONE;
+        let bare = |cluster: usize| -> Internal {
+            let states = &model.cluster(cluster).states;
+            let at = states.iter().position(|&s| s == state).expect("a ground state lies on its cluster");
+            let mut psi = Internal::zeros(states.len());
+            psi[at] = C64::ONE;
+            psi
+        };
         let threshold = Stream::jump(seed, index, 0).open_uniform();
-        Trajectory {
+        let (cluster, landed, forms) = model.started(model.cluster_of(state), &Point { r, kappa, t: 0.0 }, &bare(model.cluster_of(state)), threshold);
+        let on = norm_sqr(&landed.psi) > landed.threshold;
+        let mut trajectory = Trajectory {
             r,
-            kappa,
-            psi,
+            kappa: std::array::from_fn(|a| kappa[a] + landed.kick[a]),
+            psi: landed.psi,
             cluster,
             time: 0.0,
-            threshold,
+            threshold: landed.threshold,
             jumps: 0,
             scattered: [0.0; 2],
             lost: None,
@@ -723,9 +941,23 @@ impl Trajectory {
             seed,
             index,
             work: 0.0,
+            jumped: 0.0,
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
+            forms,
+        };
+        if !on {
+            // Its jump at once; where the model has no photon to give, or its landing does not exist, the start is nowhere
+            // as a start that lands nowhere is: no held forms (solve.rs `run` says it, # Exits).
+            trajectory.forms = match jump(model, &mut trajectory, None) {
+                Ok(()) => {
+                    let t = &trajectory;
+                    model.forms(t.cluster, &t.point(), &t.psi)
+                }
+                Err(_) => Forms { time: 0.0, held: [f64::NAN; 3], tones: vec![] },
+            };
         }
+        trajectory
     }
     /// The trajectory's point.
     pub fn point(&self) -> Point {
@@ -796,8 +1028,8 @@ impl Flow {
             c += self.gradient[i] * y + 0.5 * self.curvatures[i] * y * y;
         }
         let h = half.abs();
-        let ends = (c + b * h + 0.5 * a * h * h).max(c - b * h + 0.5 * a * h * h);
-        if a < 0.0 && b.abs() <= -a * h { ends.max(c - 0.5 * b * b / a) } else { ends }
+        let ends = linalg::larger(c + b * h + 0.5 * a * h * h, c - b * h + 0.5 * a * h * h);
+        if a < 0.0 && b.abs() <= -a * h { linalg::larger(ends, c - 0.5 * b * b / a) } else { ends }
     }
     /// (r, κ) after the time t (either sign) from (r, κ) (module documentation, # The reference).
     pub fn advance(&self, from: ([f64; 3], [f64; 3]), t: f64) -> ([f64; 3], [f64; 3]) {
@@ -816,7 +1048,7 @@ impl Flow {
         let hm = self.hbar_over_mass;
         let d = [r[0] - self.centre[0], r[1] - self.centre[1], r[2] - self.centre[2]];
         let (mut r1, mut k1) = (self.centre, [0.0; 3]);
-        let mut sizes = [self.centre.iter().fold(0.0, |m: f64, x| m.max(x.abs())), 0.0];
+        let mut sizes = [self.centre.iter().fold(0.0, |m: f64, x| linalg::larger(m, x.abs())), 0.0];
         for i in 0..3 {
             let e = self.axes[i];
             let (y, k, lambda) = (linalg::dot3(e, d), linalg::dot3(e, kappa), self.curvatures[i]);
@@ -855,7 +1087,7 @@ impl Flow {
     }
     /// The largest rate of the flow, max_i √((ħ/m)|λ_i|) (rad/µs): κ's frequency along its axes (a hyperbolic axis' rate).
     fn rate(&self) -> f64 {
-        self.curvatures.iter().map(|l| (self.hbar_over_mass * l.abs()).sqrt()).fold(0.0, f64::max)
+        self.curvatures.iter().map(|l| (self.hbar_over_mass * l.abs()).sqrt()).fold(0.0, linalg::larger)
     }
 }
 
@@ -885,7 +1117,7 @@ const REACH: usize = 28;
 /// contraction too slow for a stable step.
 fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Result<(Flow, ([f64; 3], [f64; 3])), Refused> {
     let hm = model.hbar_over_mass();
-    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, f64::max);
+    let apart = |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0, linalg::larger);
     let mut p: [f64; 3] = std::array::from_fn(|a| r[a] + hm * kappa[a] * half);
     // The last move of the reach's position, the momentum it reached then, and the largest contraction measured (the
     // first round measures none: its move over no move before it is zero).
@@ -897,7 +1129,7 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
         if !moved.is_finite() || !reached.1.iter().all(|k| k.is_finite()) {
             return Err(Refused::Overflow);
         }
-        contraction = contraction.max(moved / last);
+        contraction = linalg::larger(contraction, moved / last);
         let within = sizes.map(|size| rounding(REACH) * size);
         let next = [contraction * moved, contraction * apart(reached.1, before)];
         if moved <= within[0] || (last.is_finite() && next[0] <= within[0] && next[1] <= within[1]) {
@@ -914,84 +1146,149 @@ fn middle<D: Dynamics>(model: &D, r: [f64; 3], kappa: [f64; 3], half: f64) -> Re
 // ---------------------------------------------------------------------------------------------------------------------
 // Quadrature within a tolerance.
 
-/// What a quadrature integrates its bandwidth to: the round-off (the path's moments, `Segment::moments`), or the kick's
-/// share (`QUADRATURE`: the kick's and the survival's quadratures on the propagation's states).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Within {
-    RoundOff,
-    Share,
-}
-
-/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes, weights) and its panel phases x_m: the largest ν w at which its
-/// error on a component e^{iνs} over a panel of width w, w (νw)^{2m} (m!)⁴/((2m + 1)((2m)!)³) (Davis & Rabinowitz
-/// 2.7.12), is within the tolerance times w -- the unit round-off, or the kick's share (`Within`): the panel a rule
-/// integrates an entire function of that bandwidth on to that tolerance of its size times the width.
+/// A Gauss–Legendre rule of m nodes on [−1, 1] (nodes from the largest down, weights).
 struct Rule {
     nodes: Vec<f64>,
     weights: Vec<f64>,
-    phases: [f64; 2],
 }
 
-impl Rule {
-    fn new(m: usize) -> Rule {
-        let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
-        let ln_factorial = |n: usize| (1..=n).map(|k| (k as f64).ln()).sum::<f64>();
-        let ln = ((2 * m + 1) as f64).ln() + 3.0 * ln_factorial(2 * m) - 4.0 * ln_factorial(m);
-        let phases = [UNIT_ROUNDOFF, QUADRATURE].map(|tolerance| ((tolerance.ln() + ln) / (2 * m) as f64).exp());
-        Rule { nodes, weights, phases }
+/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is first asked and
+/// kept for the process -- the same rule whichever thread makes it.
+fn rule(m: usize) -> &'static Rule {
+    static RULES: RwLock<Vec<Option<&'static Rule>>> = RwLock::new(Vec::new());
+    if let Some(&Some(rule)) = RULES.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(m) {
+        return rule;
     }
-
-    fn phase(&self, within: Within) -> f64 {
-        self.phases[within as usize]
+    let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
+    let made = Rule { nodes, weights };
+    let mut rules = RULES.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if rules.len() <= m {
+        rules.resize(m + 1, None);
     }
+    *rules[m].get_or_insert_with(|| Box::leak(Box::new(made)))
 }
 
-/// The rules of 2 to 64 nodes. The least is the smallest rule there is (`FORMS`, `MOMENTS` ask for no fewer). The
-/// largest is not derived: a rule's panel phase over its nodes, x_m/m, rises with m towards 8/e (Stirling on the
-/// error's factorials), so no rule is the last that pays; 64 is at three quarters of that limit at the round-off
-/// (u^{1/128}). The largest sets the nodes of a stiff step's quadrature, its cost alone.
-fn rules() -> &'static [Rule] {
-    static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
-    RULES.get_or_init(|| (2..=64).map(Rule::new).collect())
+thread_local! {
+    /// The spherical Bessel functions' scratch (`fewest`).
+    static BESSELS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The rule and the panels over a width of an entire integrand of bandwidth ν within a tolerance (`Within`): the fewest
-/// nodes (the smaller rule of two that take as many), each panel of width w within its rule's phase, νw ≤ x_m, of the
-/// rules of `nodes` nodes and more -- a rule of m nodes is exact for the polynomials of degree 2m − 1, which is what is
-/// asked of it where the bandwidth vanishes. Its node count is the propagation's states and the kick's sums
-/// (`propagate`, `count::impulse`). The rules are looked at from the smallest up as far as the first that takes one
-/// panel: every larger rule has more nodes than that one.
-fn plan(width: f64, bandwidth: f64, nodes: usize, within: Within) -> (&'static Rule, usize) {
-    let mut least: Option<(&'static Rule, usize)> = None;
-    for rule in rules().iter().filter(|rule| rule.nodes.len() >= nodes) {
-        let panels = ((bandwidth * width / rule.phase(within)).ceil() as usize).max(1);
-        if least.map_or(true, |(best, most)| rule.nodes.len() * panels < best.nodes.len() * most) {
-            least = Some((rule, panels));
+/// The index past `from` where the three-term recurrence's growing solution (p_{from−1} = 0, p_from = 1, upward) has
+/// grown by the round-off's inverse: there j_l has fallen below the round-off of j_from, and Miller's recurrence started
+/// there has j_from to the round-off (Gautschi 1967).
+fn grown(x: f64, from: usize) -> usize {
+    let (mut p0, mut p1, mut l) = (0.0f64, 1.0f64, from);
+    while p1.abs() < 1.0 / UNIT_ROUNDOFF {
+        let p2 = (2 * l + 1) as f64 / x * p1 - p0;
+        (p0, p1, l) = (p1, p2, l + 1);
+    }
+    l
+}
+
+/// The fewest nodes of one Gauss–Legendre panel over the width w on an integrand that is entire at the bandwidth ν,
+/// times a polynomial of `degree`, to the round-off of its size times the width -- every component of it, as the
+/// propagation takes Ĥ₀ (# The quadrature's tolerance): on [−1, 1] a component is e^{iκt} p(t), κ = ν w/2, whose
+/// Legendre series has the coefficients (2l + 1) i^l j_l(κ) (j_l the spherical Bessel functions), moved by p at most
+/// `degree` places; the rule of m nodes integrates P_l exactly up to l = 2m − 1 and errs on a P_l beyond by no more
+/// than 2 (|P_l| ≤ 1, its weights' sum 2), so within Σ_{l ≥ 2m − degree} (2l + 1)|j_l(κ)| over the integral's scale 2:
+/// the least m that holds that within the unit round-off -- the phase over four and the Bessel functions' tail past
+/// l ≈ κ, which falls faster than any power --, not fewer than `least`. Measured tight (CARRIER: at κ = 20, 150, 600
+/// the rule of 27, 106, 349 nodes errs by 10⁻¹⁶–10⁻¹⁵, a tenth fewer nodes by 3·10⁻¹⁴, 6·10⁻¹⁰, 5·10⁻⁴). j_l by
+/// Miller's backward recurrence from where it has fallen below the round-off (`grown`), normalized by
+/// Σ(2l + 1)j_l² = 1.
+fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
+    let kappa = 0.5 * nu * width.abs();
+    // A beat that is not a number would size the rule by a recurrence that stops at once: no rule is sized for it.
+    assert!(!kappa.is_nan(), "a tone's frequency is not a number");
+    if kappa <= 0.0 {
+        return least;
+    }
+    // No finite bandwidth -- ∞ or NaN, never read as none -- has a rule: its caller refuses it first (`Midway::stretch`).
+    if !kappa.is_finite() {
+        return usize::MAX;
+    }
+    BESSELS.with(|f| {
+        let f = &mut *f.borrow_mut();
+        let top = grown(kappa, grown(kappa, kappa.ceil() as usize + 1).max(2 * least));
+        f.clear();
+        f.resize(top + 2, 0.0);
+        f[top] = 1.0;
+        for l in (1..=top).rev() {
+            f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
+            if f[l - 1].abs() > 1e100 {
+                f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+            }
         }
-        if panels == 1 {
-            break;
-        }
-    }
-    least.expect("a rule")
-}
-
-/// The panels over [a, b] of an entire integrand of bandwidth ν within a tolerance (`plan`, of the rules of `nodes`
-/// nodes and more), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in
-/// their order (the rule's nodes are held from the largest down), panel by panel as they are read: a stiff generator's
-/// millions of nodes are never held at once.
-fn panels(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
-    let (rule, panels) = plan((b - a).abs(), bandwidth, nodes, within);
-    let w = (b - a) / panels as f64;
-    (0..panels).map(move |p| {
-        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == panels { b } else { a + (p + 1) as f64 * w });
-        (end, rule.nodes.iter().zip(&rule.weights).rev().map(move |(x, weight)| (centre + 0.5 * w * x, 0.5 * w * weight)))
+        let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+        let mut tail = 0.0;
+        let start = (0..=top).rev().find(|&l| {
+            tail += (2 * l + 1) as f64 * f[l].abs() / norm;
+            tail > UNIT_ROUNDOFF
+        });
+        start.map_or(least, |l| (l + 1 + degree).div_ceil(2).max(least))
     })
 }
 
-/// The nodes and weights over [a, b] of an entire integrand of bandwidth ν within a tolerance, panel after panel
-/// (`panels`).
-fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, within: Within) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, bandwidth, nodes, within).flat_map(|(_, nodes)| nodes)
+/// The panels' count over a piece of the width w at the bandwidth ν (`panels`; `fewest` of `nodes` nodes and more, on
+/// an integrand times a polynomial of `degree`): the n that leaves the fewest nodes to take, each node a state and its
+/// sums (`Midway::stretch`). The rules are made once for the process (`rule`): their making is no part of a piece's
+/// cost. On n equal panels of m = m(νw/n) nodes each (m(κ) ≈ κ/2 and the Bessel tail's few, the tail each panel's own):
+/// - a piece the survival does not end in takes them all: C(n) = n m;
+/// - a piece a jump's root lies in takes the panels before the root's, the root's panel's nodes as far as the norm's
+///   crossing -- which the root takes again, by its span from the panel's start (`root`, `fallen`) -- and that span,
+///   and no node past the root. Over the root's place -- uniform in the piece on the trajectories' thresholds, which are
+///   uniform in the survival, the survival taken linear between the piece's ends --, (n − 1)/2 panels before it, half
+///   the root's panel's nodes (a rule's nodes lie symmetric in its panel: the share before a uniform point is ½ on the
+///   mean) and the span at its mean, half the panel: C(n) = (n/2) m + m(νw/(2n)) -- the tail n times against what the
+///   root takes again, a panel's.
+/// Which one a piece is, `ends` tells (the propagation's norm at the piece's end at the trajectory's threshold or below:
+/// the survival to the propagation's accuracy, a stop's cost), asked only where the root's n is not one. n is the first
+/// past which C does not fall (each part of C is monotone in n, but for the node counts' steps of one). Returns n and
+/// its panels' m, each m(n) made once (`fewest` is a recurrence of some κ terms; the two costs ask the same n again,
+/// and until 2026-11-21 the panels made their m once more: 2 to 3 % of a step, PGC3D, R4, tilt0).
+fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> (usize, usize) {
+    let mut known = [0usize; 256];
+    let mut m = |n: usize| -> usize {
+        if let Some(&m) = known.get(n).filter(|&&m| m != 0) {
+            return m;
+        }
+        let m = fewest(bandwidth, width / n as f64, nodes, degree);
+        if let Some(slot) = known.get_mut(n) {
+            *slot = m;
+        }
+        m
+    };
+    let least = |m: &mut dyn FnMut(usize) -> usize, cost: &dyn Fn(usize, &mut dyn FnMut(usize) -> usize) -> f64| {
+        let (mut n, mut best) = (1, cost(1, &mut *m));
+        loop {
+            let next = cost(n + 1, &mut *m);
+            if !(next < best) {
+                break n;
+            }
+            (n, best) = (n + 1, next);
+        }
+    };
+    let rooted = least(&mut m, &|n, m| 0.5 * n as f64 * m(n) as f64 + m(2 * n) as f64);
+    let n = if rooted > 1 && ends() { rooted } else { least(&mut m, &|n, m| n as f64 * m(n) as f64) };
+    (n, m(n))
+}
+
+/// The `count` equal panels over [a, b] of `nodes` nodes each (`count`: the fewest that integrate each to the
+/// round-off), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in their
+/// order.
+fn panels(a: f64, b: f64, (count, nodes): (usize, usize)) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+    let w = (b - a) / count as f64;
+    let rule = rule(nodes);
+    (0..count).map(move |p| {
+        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
+        (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k])))
+    })
+}
+
+/// The nodes and weights over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the
+/// round-off, where no jump's root is sought (`count`).
+fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, f64)> {
+    panels(a, b, count(b - a, bandwidth, nodes, degree, || false)).flat_map(|(_, nodes)| nodes)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1069,7 +1366,7 @@ impl Segment {
     /// the bridge, Var B = τσ; ΔZ = −∫B, Cov(B(s), ∫B) = τ²σ/2, Var ∫B = τ³/12). Zero at the step's ends, 1/12 at the
     /// most; a time within the rounding of an end is the end.
     fn untold(theta: f64) -> f64 {
-        let sigma = (theta * (1.0 - theta)).max(0.0);
+        let sigma = linalg::larger(theta * (1.0 - theta), 0.0);
         sigma * (1.0 - 3.0 * sigma)
     }
     /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the path's part of the step:
@@ -1079,13 +1376,13 @@ impl Segment {
     /// step) -- so that a cut of a step has the diffusion's input up to it, as the whole step has. (The residual is the
     /// free flight's; the reference's rotation changes it by its (ωτ)² share, the third order.)
     pub fn moments(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
-        let (lo, hi) = (from.min(to), from.max(to));
+        let (lo, hi) = (linalg::smaller(from, to), linalg::larger(from, to));
         let sign = if to >= from { 1.0 } else { -1.0 };
         let (mut one, mut two) = ([0.0; 3], [0.0; 3]);
         if !(hi > lo) {
             return (one, two);
         }
-        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, Within::RoundOff) {
+        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, 0) {
             let k = self.at(t).1;
             for x in 0..3 {
                 one[x] += sign * w * k[x];
@@ -1139,6 +1436,9 @@ impl<'a, M: Middle> Along<'a, M> {
 
 /// The most sums `accumulate` takes at once: a beating path's three nodes'.
 const SUMS: usize = 3;
+
+/// An exact tone's sums (`Sums`): its density at each of the step's three nodes' Lagrange weights, times cos νu and sin νu.
+const TONE: usize = 2 * SUMS;
 
 /// The fewest nodes of the kick's quadrature (`propagate`): the smallest rule's -- the forms on a state the generator
 /// propagates are entire in the time at their bandwidth, and nothing more is asked of the rule where it vanishes.
@@ -1200,9 +1500,68 @@ fn whole(sums: &[f64], j: usize, n: usize, sum: &mut [C64]) {
     }
 }
 
+/// A state's held forms (module documentation, # The path's momentum): where the model last evaluated it, at a middle
+/// point and the time `time` (µs), the kick's integrand there -- the static form of the conservative force less the
+/// reference's gradient, Re tr(Ĝρ) − ∇V_ref per lab axis (rad/µs/µm) -- and per tone its beat ν (rad/µs) and complex
+/// amplitude a per lab axis, the tone's form at the time t being Re[a e^{iν(t − time)}]. What a trajectory carries to
+/// predict its next step's path momentum (`predicted`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Forms {
+    pub time: f64,
+    pub held: [f64; 3],
+    pub tones: Vec<(f64, [C64; 3])>,
+}
+
+impl Forms {
+    /// The model's forms less the reference's gradient at the point they were read at: the kick's integrand.
+    pub fn less(mut self, gradient: [f64; 3]) -> Forms {
+        for (f, g) in self.held.iter_mut().zip(gradient) {
+            *f -= g;
+        }
+        self
+    }
+}
+
+/// A state's forms at a middle on the path at rest through it, `fixed` (`Forms`, its time the middle's: 0; the model's,
+/// the reference's gradient not taken), by the middle's forms, for a model that gives them no other way
+/// (`Middle::nodes`, `Dynamics::forms`): the fixed point's tones -- its candidates, the light's beats in time alone, not
+/// the pattern's turns along a path -- each by its complex amplitude c = F(ρ) − iF(iρ) of its forms on σ = ρ and σ = iρ
+/// (`Middle::tone_force`), the static form the whole one at the middle (`Middle::force`) less the tones' there.
+pub fn forms_at<M: Middle>(middle: &M, fixed: &M::Path, rho: &[C64]) -> Forms {
+    let mut held = middle.force(fixed, 0.0, rho);
+    let (mut beats, mut keys) = (vec![], vec![]);
+    middle.beats(fixed, &mut beats, &mut keys);
+    let none = vec![C64::ZERO; rho.len()];
+    let tones = beats
+        .iter()
+        .enumerate()
+        .map(|(m, &nu)| {
+            let (re, im) = (middle.tone_force(fixed, m, &[(0.0, rho, &none)]), middle.tone_force(fixed, m, &[(0.0, &none, rho)]));
+            let c: [C64; 3] = std::array::from_fn(|a| C64::new(re[a], -im[a]));
+            for a in 0..3 {
+                held[a] -= c[a].re;
+            }
+            (nu, c)
+        })
+        .collect();
+    Forms { time: 0.0, held, tones }
+}
+
+/// The nodes' sums of a tone summed, Σ_j re_j and Σ_j im_j (`Middle::tone_force`): the whole σ, for a model whose
+/// envelopes are the same at every time of the path.
+pub fn summed(sums: &[(f64, &[C64], &[C64])]) -> (Vec<C64>, Vec<C64>) {
+    let size = sums.first().map_or(0, |x| x.1.len());
+    let (mut re, mut im) = (vec![C64::ZERO; size], vec![C64::ZERO; size]);
+    for (_, r, i) in sums {
+        re.iter_mut().zip(r.iter()).for_each(|(a, b)| *a += *b);
+        im.iter_mut().zip(i.iter()).for_each(|(a, b)| *a += *b);
+    }
+    (re, im)
+}
+
 /// A state's density matrix ρ = |x⟩⟨x|/⟨x|x⟩, ρ_ab = x_a x_b*/‖x‖², row by row: a mean ⟨x|G|x⟩/⟨x|x⟩ is tr(Gρ), which the
 /// model contracts (`Middle::force`, `Middle::tones`).
-fn density(x: &[C64], rho: &mut [C64]) {
+pub fn density(x: &[C64], rho: &mut [C64]) {
     let (n, scale) = (x.len(), 1.0 / norm_sqr(x));
     for (a, left) in x.iter().enumerate() {
         let left = *left * scale;
@@ -1212,28 +1571,19 @@ fn density(x: &[C64], rho: &mut [C64]) {
     }
 }
 
-/// The shear (module documentation, # The kick): −∫⟨ψ|G(r_h, t)|ψ⟩dt/‖ψ‖² over the step of a state held, at the fixed r_h
-/// each tone at its beat Ω_m alone, ∫e^{iΩ_m(t − t_m)}dt = τ sinc(Ω_mτ/2). `rho` takes the state's density.
-fn shear<M: Middle>(along: &Along<M>, rho: &mut [C64], psi: &[C64], tau: f64) -> [f64; 3] {
-    density(psi, rho);
-    let mut f = [0.0; 3];
-    along.middle.tones(&along.path, rho, &mut |omega, form| {
-        let w = tau * sinc(0.5 * omega * tau);
-        for a in 0..3 {
-            f[a] -= w * form[a];
-        }
-    });
-    f
-}
-
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
 /// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
-/// panel (`fallen`), and the generator's decay at the step's nodes (`laid_decay`); and the states a panel keeps -- its
-/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing a
-/// step left in it is read by another.
+/// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
+/// stops and its readings -- until its root is known (`Midway::stretch`). Every use writes what it reads: nothing of a
+/// step is carried to the next one, and a trajectory taken up again with a fresh scratch goes on as itself, to the bit.
+/// Beside, the counted work of the attempts refused on it (`refused`), which the solve's price reads and no step does.
+/// (Until 2026-11-21 also the count of its steps refused for an entry of no route, which the solve's probe read before
+/// the ladder's price took the refused attempts' work: read by nothing since, removed.)
+/// (Until 2026-11-20 the scratch carried its picture's counts of the decomposition's route, which the next step's
+/// route was priced against: the strides', spectral.rs, # Where the decomposition does not take the step.)
 #[derive(Default)]
 pub struct Scratch {
     picture: Picture,
@@ -1241,6 +1591,40 @@ pub struct Scratch {
     sums: Vec<f64>,
     met: Vec<(Stop, f64, [C64; STATES])>,
     noise: Noise,
+    /// The sums' count (`Sums`), and the weights' sums of the step and as they stood at a panel's start.
+    slots: usize,
+    weights: Vec<f64>,
+    kept: Vec<f64>,
+    /// The counted work of the attempts refused on the scratch (`refused`), and how far the picture of the stretch being
+    /// taken has gone (`pictured`).
+    refused: f64,
+    stage: Stage,
+}
+
+/// How far a stretch's picture has gone (`pictured`), for the count of a stretch refused where it stood (`unfinished`):
+/// nothing yet; the model's generator at the step's nodes made (a refusal there comes after all of them); the tones
+/// separated (`spectral::Picture::separate`); the decay laid and the preparation begun -- the picture's own count
+/// (`spectral::Picture::work`) is the stretch's from there on.
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+enum Stage {
+    #[default]
+    None,
+    Made,
+    Separated,
+    Prepared,
+}
+
+/// What a stretch has done as far as it went, beside its picture (`Midway::stretch`): its states and whether its
+/// generator is still, the nodes gathered into the sums and the hazard's traces (`Price::nodes`, `Price::traces`), and
+/// where it passed the middle the scattered light's count (`Price::scattering`) -- what a refused stretch's count reads
+/// (`unfinished`).
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    states: usize,
+    still: bool,
+    counted: usize,
+    traces: usize,
+    scattering: f64,
 }
 
 struct Carved<'a> {
@@ -1248,29 +1632,51 @@ struct Carved<'a> {
     noise: &'a mut Noise,
     held: &'a mut [C64],
     sum: &'a mut [C64],
+    tones: &'a mut [C64],
     sums: &'a mut [f64],
     saved: &'a mut [f64],
     part: &'a mut [f64],
     decay: &'a mut [f64],
     met: &'a mut Vec<(Stop, f64, [C64; STATES])>,
+    weights: &'a mut [f64],
+    kept: &'a mut [f64],
 }
 
 impl Scratch {
-    /// The scratch for a cluster of n states.
-    fn fit(&mut self, n: usize) {
+    /// The counted work (real multiply-adds, `Step::work`'s) of every attempt on this scratch that was refused, since the
+    /// scratch was made (`Midway::attempt`): what each did before its refusal, by the counts its price would have had
+    /// (`Price::work`, `unfinished`) -- its stretches finished before the refused one, and of that one its middle's
+    /// making, its generator at the nodes, its tones' envelopes, the picture's own count as far as it went, the decay laid
+    /// with the hazard's traces taken, the nodes gathered, and the scattered light where it was made. None of a step's
+    /// results reads it.
+    pub fn refused(&self) -> f64 {
+        self.refused
+    }
+
+    /// The scratch for a cluster of n states and `slots` sums (`Sums`): the weights' sums of the three nodes kept, a
+    /// step's earlier stretches' (`Midway::stretch`).
+    fn fit(&mut self, n: usize, slots: usize) {
         self.picture.fit(n);
-        self.rest.resize(2 * n * n, C64::ZERO);
-        self.sums.resize(4 * SUMS * 2 * n * row(n), 0.0);
+        self.slots = slots;
+        self.rest.resize((4 + TONE * (slots.saturating_sub(SUMS) / TONE)) * n * n, C64::ZERO);
+        self.sums.resize(4 * slots * 2 * n * row(n), 0.0);
+        self.weights.resize(slots.max(SUMS), 0.0);
+        self.kept.resize(slots.max(SUMS), 0.0);
     }
     /// The scratch's parts.
     fn carve(&mut self) -> Carved<'_> {
         let n = self.picture.states();
-        let (held, sum) = self.rest.split_at_mut(n * n);
-        let size = SUMS * 2 * n * row(n);
+        let (held, rest) = self.rest.split_at_mut(n * n);
+        let (sum, tones) = rest.split_at_mut(3 * n * n);
+        let size = self.slots * 2 * n * row(n);
         let (sums, rest) = self.sums.split_at_mut(size);
         let (saved, rest) = rest.split_at_mut(size);
-        let (part, decay) = rest.split_at_mut(size);
-        Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, sums, saved, part, decay, met: &mut self.met }
+        let (part, rest) = rest.split_at_mut(size);
+        // The decay on every sum: the nodes' and the tones' (`pictured`).
+        let decay = &mut rest[..size];
+        let width = self.slots.max(SUMS);
+        let (weights, kept) = (&mut self.weights[..width], &mut self.kept[..width]);
+        Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, tones, sums, saved, part, decay, met: &mut self.met, weights, kept }
     }
 }
 
@@ -1279,85 +1685,163 @@ impl Scratch {
 
 /// The counted work (`decide::Work`, real multiply-adds) of the integrator's operations on n states, one formula each,
 /// the model's own counts of its generator, its force and its tones at a node with them (`Middle::work`): what a
-/// step adds up and what `Price::work` prices a step by.
+/// stretch adds up (`Price::work`): its count and its price at once.
 mod count {
     use super::COMPLEX;
     /// The propagation: the model's generator at the step's nodes -- three, or the one of a path it is still along --
     /// and the picture's own count of its complex multiply-adds (`spectral::Picture::work`: the decomposition, the
     /// slopes, the following, the hops, the states at the nodes).
-    pub fn propagation(model: [f64; 3], still: bool, picture: f64) -> f64 {
-        COMPLEX * (if still { 1.0 } else { 3.0 } * model[0] + picture)
+    pub fn propagation(model: [f64; 3], still: bool, picture: f64, tones: f64) -> f64 {
+        COMPLEX * (if still { 1.0 } else { 3.0 } * model[0] + picture + tones)
     }
     /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
     /// sums (one on a still path, three on a beating one); then the model's one form of the sum, or on a beating path
-    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms (the middle's with the
-    /// tones on it, `Middle::centre`).
-    pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool) -> f64 {
-        let (sums, forms) = if still { (1, model[1]) } else { (3, (2 * n * n) as f64 + 3.0 * model[1]) };
-        COMPLEX * ((nodes * (1 + sums) * n * (n + 1) / 2) as f64 + forms)
+    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms -- where the stretch
+    /// holds the step's middle (`centred`), the middle's with the fixed point's tones on the middle state
+    /// (`Middle::centre`: a form and a `tones`). Of the exact tones (`tones` of them, their forms' counted work
+    /// `forces`): per node and tone a density again and its six sums (`super::Sums`); their two matrices, each its three
+    /// nodes' sums added, with the nodes' sums at their phases, and their forms.
+    pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, centred: bool, tones: usize, forces: f64) -> f64 {
+        let forms = if still { model[1] } else { (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 } };
+        gathered(n, nodes, still, tones) + COMPLEX * (forms + (16 * tones * n * n) as f64 + forces)
     }
-    /// The shear of the start state, the prediction of the path's momentum: its density and its tones.
-    pub fn shear(n: usize, model: [f64; 3]) -> f64 {
-        COMPLEX * ((n * n) as f64 + model[2])
-    }
-    /// The survival's hazard (# Jumps): the generator's decay laid at the step's nodes -- one, or three on a beating
-    /// path -- once, and `traces` of it on the sums, each over the same upper triangles.
-    pub fn hazard(n: usize, traces: usize, still: bool) -> f64 {
+    /// The kick's nodes alone (`impulse`'s first part): per node its density's upper triangle into the weighted sums,
+    /// and per node and tone a density again and its six sums.
+    pub fn gathered(n: usize, nodes: usize, still: bool, tones: usize) -> f64 {
         let sums = if still { 1 } else { 3 };
+        COMPLEX * (nodes * ((1 + sums) * n * (n + 1) / 2 + (1 + super::TONE) * tones * n * (n + 1) / 2)) as f64
+    }
+    /// The end state's held forms (# The path's momentum): its density and one more node's forms with its tones'.
+    pub fn end(n: usize, model: [f64; 3], tones: f64) -> f64 {
+        COMPLEX * ((n * n) as f64 + model[1] + tones)
+    }
+    /// The survival's hazard (# Jumps): the generator's decay laid on the sums -- at the step's nodes, one or three on a
+    /// beating path, and each of the `tones` exact tones' six (`super::Sums`) -- once, and `traces` of it on the sums,
+    /// each over the same upper triangles.
+    pub fn hazard(n: usize, traces: usize, still: bool, tones: usize) -> f64 {
+        let sums = if still { 1 } else { super::SUMS + super::TONE * tones };
         COMPLEX * ((1 + traces) * sums * n * (n + 1) / 2) as f64
     }
 }
 
-/// The node count of a quadrature over τ at a bandwidth (`plan`).
+/// The node count of a quadrature over τ at a bandwidth (`fewest`, with the three nodes' Lagrange weights).
+#[cfg(test)]
 fn nodes(tau: f64, bandwidth: f64) -> usize {
-    let (rule, panels) = plan(tau.abs(), bandwidth, FORMS, Within::Share);
-    rule.nodes.len() * panels
+    fewest(bandwidth, tau, FORMS, 2)
 }
 
-/// The states a jump's root reads (`root`), as its rounds go: Newton's from below double the bits of ln N that are right
-/// each round, so that from the first to the mantissa's `ROUNDS` takes log₂ ROUNDS of them, each the hazard at the
-/// latest time below and a span of the fewest nodes (`FORMS`).
-fn root_states() -> f64 {
-    (1 + FORMS) as f64 * (ROUNDS as f64).log2()
-}
-
-/// The picture of the generator along a step's path (`spectral::Picture`), prepared -- each route priced at its
-/// quadrature's nodes, the middle and the end (`nodes`), and at the states a jump's root reads (`root_states`) times the
-/// chance of a jump in what is left of the step, 1 − e^{−h₀|h − u|} at the hazard h₀ of `start`, the frame's state at
-/// the time u it is launched from (none: no root priced); the strides' share at what that state forgets, h₀
-/// (`Picture::prepare`) --: the model's generator at the step's middle and, unless it
-/// is still along every path, at the step's two ends. Their decay is laid into `decay` first, node by node in the order
-/// of the kick's sums (`laid_decay`; −h, 0, h, or the middle alone where Ĥ is still): the survival's hazard (# Jumps);
-/// `part` is a sum's scratch. Returns the largest sum of the decay's entries' moduli over the nodes.
-fn pictured<M: Middle>(along: &Along<M>, picture: &mut Picture, tau: f64, (decay, part): (&mut [f64], &mut [f64]), start: Option<(&[C64], f64)>) -> f64 {
-    let (h, still) = (0.5 * tau, along.middle.still());
+/// The picture of the generator along a step's path (`spectral::Picture`), prepared on `start`, the frame's state the
+/// step is launched with (none: any; `Picture::prepare`'s reached states): the model's generator at the step's middle
+/// and, unless it is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes
+/// at the three nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums
+/// (`Sums`): the static group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each
+/// node at the phases 0 and π/2 -- the survival's hazard (# Jumps). Returns the largest sum over the nodes of the moduli
+/// the decay's entries can reach (the static group's and each tone's two at once); a generator at a node that is no
+/// number refuses the step (`Refused::Overflow`: nothing of it can be propagated), and so does a step the decomposition
+/// does not take (`Refused::Propagation`).
+fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<&[C64]>) -> Result<f64, Refused> {
+    let _p = crate::prof::scope(crate::prof::PICTURED);
+    let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
+    scratch.stage = Stage::None;
+    let picture = &mut scratch.picture;
+    picture.fit(n);
+    if picture.blocks.as_slice() != along.middle.blocks() {
+        picture.blocks.clear();
+        picture.blocks.extend_from_slice(along.middle.blocks());
+    }
+    let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
     along.middle.generator(&along.path, 0.0, &mut picture.base);
     if !still {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
+    drop(_g);
+    scratch.stage = Stage::Made;
+    let picture = &mut scratch.picture;
+    let numbers = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
+    if !(numbers(&picture.base) && (still || picture.ends.iter().all(numbers))) {
+        return Err(Refused::Overflow);
+    }
+    let _s = crate::prof::scope(crate::prof::PIC_SEPARATE);
+    picture.separate(
+        h,
+        |beats, keys| {
+            if !still {
+                along.middle.beats(&along.path, beats, keys);
+            }
+        },
+        |m, s, plus, minus| along.middle.envelopes(&along.path, m, s, plus, minus),
+    );
+    drop(_s);
+    scratch.stage = Stage::Separated;
+    let picture = &mut scratch.picture;
+    if !picture.beats.iter().flat_map(|tone| tone.members.iter().flatten()).all(numbers) {
+        return Err(Refused::Overflow);
+    }
+    let slots = Sums { still, h, tones: &picture.beats }.count();
+    scratch.fit(n, slots);
+    let Carved { picture, decay, .. } = scratch.carve();
     decay.fill(0.0);
     let generators = if still { [Some(&picture.base), None, None] } else { [Some(&picture.ends[0]), Some(&picture.base), Some(&picture.ends[1])] };
-    let scale = generators.into_iter().flatten().enumerate().map(|(j, generator)| laid_decay(generator, j, decay)).fold(0.0, f64::max);
-    let rate = start.map_or(0.0, |(x, u)| {
-        part.fill(0.0);
-        gather(still, h, u, 1.0, x, &mut [0.0; 3], part);
-        hazard(decay, part, x.len()).max(0.0)
-    });
-    let roots = -(-rate * (h - start.map_or(h, |(_, u)| u)).abs()).exp_m1() * root_states();
-    picture.prepare(h, still, |bandwidth| nodes(tau, bandwidth) + 2, roots, rate);
-    scale
+    // The decay i(X − X†) of an n × n matrix X given entry by entry (row by row).
+    fn of(x: impl Fn(usize) -> C64, n: usize) -> impl Fn(usize, usize) -> C64 {
+        move |a, b| C64::I * (x(a * n + b) - x(b * n + a).conj())
+    }
+    // The static group's laid on the nodes' sums, and each tone's at each node on its two sums there: its decay at the
+    // phases 0 and π/2, of G⁺ + G⁻ and of i(G⁺ − G⁻) (`Sums`). Per node the sum of the moduli its decay can reach.
+    let mut sizes = [0.0; SUMS];
+    for ((j, g), size) in generators.into_iter().flatten().enumerate().zip(&mut sizes) {
+        *size = laid(of(|k| g.data[k], n), n, j, decay);
+    }
+    for (m, tone) in picture.beats.iter().enumerate() {
+        for (j, size) in sizes.iter_mut().enumerate() {
+            let [plus, minus] = [&tone.members[0][j].data, &tone.members[1][j].data];
+            let at = SUMS + TONE * m + 2 * j;
+            *size += laid(of(|k| plus[k] + minus[k], n), n, at, decay) + laid(of(|k| C64::I * (plus[k] - minus[k]), n), n, at + 1, decay);
+        }
+    }
+    let scale = sizes.into_iter().fold(0.0, linalg::larger);
+    let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
+    scratch.stage = Stage::Prepared;
+    scratch.picture.prepare(h, still, start).map_err(Refused::Propagation)?;
+    Ok(scale)
 }
 
-/// A generator's decay Γ = i(Ĥ − Ĥ†) (Hermitian; Γ_aa = −2 Im Ĥ_aa) laid as the sum j of those `accumulate` holds: on each
-/// entry a ≤ b its real and imaginary parts, twice off the diagonal, so that `hazard` -- the sum of the two laid arrays'
-/// products -- is tr(Γ S) = Σ_a Γ_aa S_aa + 2 Re Σ_{a<b} Γ_ab S_ab* of a Hermitian S held there. Returns Σ_ab |Γ_ab|.
-fn laid_decay(generator: &Mat, j: usize, decay: &mut [f64]) -> f64 {
-    let (n, mut size) = (generator.rows, 0.0);
-    let width = row(n);
+/// The counted work of a stretch refused where it stood (`Scratch::refused`), by its price's counts as far as it went
+/// (`Price`, `count`): the middle's making (`Price::middle`); where its picture made the generator at the nodes, those
+/// (a refusal in the picture comes after all of them), the tones' envelopes where they were separated, the picture's own
+/// count where its preparation began (the decay laid with it, and the hazard's traces taken); the nodes gathered; the
+/// scattered light where the stretch passed the middle. Not the middle's forms, the end state's held forms nor the
+/// optical sector: each is made past the last place a stretch is refused before it.
+fn unfinished<M: Middle>(generator: &M, progress: &Progress, scratch: &Scratch) -> f64 {
+    let (n, still, picture) = (progress.states, progress.still, &scratch.picture);
+    let costs = generator.work();
+    let (tones, toned) = if scratch.stage >= Stage::Separated { (picture.beats.len(), toned(generator, picture, n)) } else { (0, [0.0; 2]) };
+    let made = if scratch.stage >= Stage::Made { count::propagation(costs, still, if scratch.stage == Stage::Prepared { picture.work } else { 0.0 }, toned[0]) } else { 0.0 };
+    let laid = if scratch.stage == Stage::Prepared { count::hazard(n, progress.traces, still, tones) } else { 0.0 };
+    generator.made() + made + laid + count::gathered(n, progress.counted, still, tones) + progress.scattering
+}
+
+/// A stretch's tones' counts (`Price::toned`): their envelopes at the three nodes, the candidates weighed and left in the
+/// static group at the middle alone, the weighing (`spectral::Picture::separate`) and the tones' sums; and their forms'.
+fn toned<M: Middle>(generator: &M, picture: &Picture, n: usize) -> [f64; 2] {
+    let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
+        let work = generator.tone_work(tone.candidate);
+        [sum[0] + work[0], sum[1] + work[1]]
+    });
+    let envelopes = envelopes + picture.weighed.iter().map(|&m| generator.tone_work(m)[0] / 3.0).sum::<f64>() + picture.weighing;
+    [envelopes + (6 * picture.beats.len() * n * n) as f64, forces]
+}
+
+/// A Hermitian matrix Γ (by its entries `gamma`) laid as the sum j of those `accumulate` holds: on each entry a ≤ b its
+/// real and imaginary parts, twice off the diagonal, so that `hazard` -- the sum of the two laid arrays' products -- is
+/// tr(Γ S) = Σ_a Γ_aa S_aa + 2 Re Σ_{a<b} Γ_ab S_ab* of a Hermitian S held there. A generator's decay is
+/// Γ = i(Ĥ − Ĥ†) (Γ_aa = −2 Im Ĥ_aa). Returns Σ_ab |Γ_ab|.
+fn laid(gamma: impl Fn(usize, usize) -> C64, n: usize, j: usize, decay: &mut [f64]) -> f64 {
+    let (width, mut size) = (row(n), 0.0);
     for a in 0..n {
         for b in a..n {
-            let (gamma, twice) = (C64::I * (generator.data[a * n + b] - generator.data[b * n + a].conj()), if a == b { 1.0 } else { 2.0 });
+            let (gamma, twice) = (gamma(a, b), if a == b { 1.0 } else { 2.0 });
             let at = 2 * (j * n + a) * width + b;
             (decay[at], decay[at + width]) = (twice * gamma.re, twice * gamma.im);
             size += twice * gamma.abs();
@@ -1366,10 +1850,11 @@ fn laid_decay(generator: &Mat, j: usize, decay: &mut [f64]) -> f64 {
     size
 }
 
-/// ∫h du over the nodes a laid sum holds (# Jumps): Σ_j tr(Γ_j S_j), Γ_j the generator's decay at the step's node j
-/// (`laid_decay`) and S_j = Σ_k w_k ℓ_j(u_k) x̂_k x̂_k† the sum `accumulate` made -- Σ_k w_k x̂_k†Γ(u_k)x̂_k, Γ(u) = Σ_j ℓ_j(u)Γ_j
-/// the parabola through the step's three nodes the propagation takes (its one matrix where Ĥ is still). On n states,
-/// row by row from the vector of the row's own column on (the laid decay is zero below the diagonal), lane by lane.
+/// ∫h du over the nodes a laid sum holds (# Jumps): Σ_j tr(Γ_j S_j) over the laid decays and the sums `accumulate` made
+/// (`pictured`, `Sums`) -- of the static group Γ_j its decay at the step's node j and S_j = Σ_k w_k ℓ_j(u_k) x̂_k x̂_k†, of
+/// a tone its decay at the phases 0 and π/2 at the node j on its sums of ℓ_j(u_k) cos νu_k and ℓ_j(u_k) sin νu_k --:
+/// Σ_k w_k x̂_k†Γ(u_k)x̂_k, Γ(u) the decay of the generator the propagation takes (its one matrix where Ĥ is still). On n
+/// states, row by row from the vector of the row's own column on (the laid decay is zero below the diagonal), lane by lane.
 fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
     let width = row(n);
     let mut lanes = [0.0; LANES];
@@ -1385,23 +1870,24 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 }
 
 /// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
-/// bandwidth within the kick's share (`Picture::between`: any time after the launch), their densities summed into
+/// bandwidth to the round-off (`Picture::at`: any time after the launch), their densities summed into
 /// `part` as the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a
 /// jump's root lies -- and, a span before the root, the kick's part of it. Returns it and the nodes taken.
-fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64; 3]) -> (f64, usize) {
+fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
+    let _p = crate::prof::scope(crate::prof::FALLEN);
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
-    for (u, w) in quadrature(from, to, bandwidth, FORMS, Within::Share) {
-        picture.between(u, &mut x[..n]);
-        gather(still, h, u, w, &x[..n], weights, part);
+    for (u, w) in quadrature(from, to, bandwidth, FORMS, 2) {
+        picture.at(u, &mut x[..n]);
+        Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), part);
         nodes += 1;
     }
     (hazard(decay, part, n), nodes)
 }
 
 /// A span's sums (`fallen`) into the kick's: the densities' and the weights'.
-fn taken(part: &[f64], spanned: [f64; 3], sums: &mut [f64], weights: &mut [f64; 3]) {
+fn taken(part: &[f64], spanned: &[f64], sums: &mut [f64], weights: &mut [f64]) {
     for (sum, p) in sums.iter_mut().zip(part) {
         *sum += p;
     }
@@ -1410,46 +1896,80 @@ fn taken(part: &[f64], spanned: [f64; 3], sums: &mut [f64], weights: &mut [f64; 
     }
 }
 
-/// A node's state into the kick's sums (`accumulate`): with its weight where Ĥ is still along the path, with its
-/// weight times the Lagrange polynomials of the step's three nodes on a beating one, whose sums `weights` takes.
-fn gather(still: bool, h: f64, u: f64, weight: f64, x: &[C64], weights: &mut [f64; 3], sums: &mut [f64]) {
-    if still {
-        accumulate(x, &[weight], sums);
-    } else {
-        let s = u / h;
+/// What the kick's and the survival's sums hold (`accumulate`): one where Ĥ is still along the path, the three nodes'
+/// on a beating one (each node's weight times the nodes' Lagrange polynomials), and six of each exact tone of the step
+/// (`spectral::Picture::separate`) -- per node j its weight times ℓ_j(u) cos νu and ℓ_j(u) sin νu, the density's sum at
+/// e^{iνu} with the node's weight = the first + i the second (their sum over j the tone's whole, Σ_j ℓ_j = 1) --, in that
+/// order: the tone's forms at its exact phase, its envelope through the nodes as the propagation takes it.
+#[derive(Clone, Copy)]
+struct Sums<'a> {
+    still: bool,
+    h: f64,
+    tones: &'a [Beat],
+}
+
+impl Sums<'_> {
+    /// The sums' count.
+    fn count(&self) -> usize {
+        if self.still { 1 } else { SUMS + TONE * self.tones.len() }
+    }
+
+    /// A node's state at the time u with its weight into the sums, the weights' sums into `weights` where asked.
+    fn gather(&self, u: f64, weight: f64, x: &[C64], weights: Option<&mut [f64]>, sums: &mut [f64]) {
+        if self.still {
+            accumulate(x, &[weight], sums);
+            return;
+        }
+        let s = u / self.h;
         let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)].map(|l| weight * l);
-        for (sum, l) in weights.iter_mut().zip(lagrange) {
-            *sum += l;
+        let mut weights = weights;
+        if let Some(weights) = weights.as_deref_mut() {
+            for (sum, l) in weights.iter_mut().zip(lagrange) {
+                *sum += l;
+            }
         }
         accumulate(x, &lagrange, sums);
+        let size = 2 * x.len() * row(x.len());
+        for (m, tone) in self.tones.iter().enumerate() {
+            let (sin, cos) = (tone.beat * u).sin_cos();
+            let parts: [f64; TONE] = std::array::from_fn(|k| lagrange[k / 2] * if k % 2 == 0 { cos } else { sin });
+            accumulate(x, &parts, &mut sums[(SUMS + TONE * m) * size..]);
+            if let Some(weights) = weights.as_deref_mut() {
+                for (sum, part) in weights[SUMS + TONE * m..].iter_mut().zip(parts) {
+                    *sum += part;
+                }
+            }
+        }
     }
 }
 
-/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::between`), its
-/// density through `part` (`gather` at the weight one, `hazard`).
+/// The hazard at a time u of the step (# Jumps): x̂†Γ(u)x̂ of the propagation's state there (`Picture::at`), its
+/// density through `part` (`Sums::gather` at the weight one, `hazard`).
 fn hazard_at(picture: &mut Picture, still: bool, h: f64, u: f64, decay: &[f64], part: &mut [f64]) -> f64 {
+    let _p = crate::prof::scope(crate::prof::HAZARD_AT);
     let n = picture.states();
     part.fill(0.0);
     let mut x = [C64::ZERO; STATES];
-    picture.between(u, &mut x[..n]);
-    gather(still, h, u, 1.0, &x[..n], &mut [0.0; 3], part);
+    picture.at(u, &mut x[..n]);
+    Sums { still, h, tones: &picture.beats }.gather(u, 1.0, &x[..n], None, part);
     hazard(decay, part, n)
 }
 
 /// The times read of `reads` (lab times; from the `read`-th on) that the propagation has passed at the time u (from the
 /// middle of the step of 2h that starts at `start`), before the step's end -- a time read at the end is the end's own
-/// (`Midway::attempt`) --, each the frame's state there (`Picture::between`: from the latest stop the propagation made at
-/// or before it), kept in `met` with its time until the panel's root is known (`Midway::stretch`). A read is no stop
+/// (`Midway::attempt`) --, each the frame's state there (`Picture::at`), kept in `met` with its time until the panel's
+/// root is known (`Midway::stretch`). A read is no stop
 /// of the propagation and nothing of it is taken up by the step (# The path between a step's ends): the stops and the
 /// nodes are the step's alone, and so is the picture's count of its work, which the reads leave as they found it.
 /// Returns the next time to read.
 fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f64, f64), u: f64, met: &mut Vec<(Stop, f64, [C64; STATES])>) -> usize {
+    let _p = crate::prof::scope(crate::prof::LOOKED);
     let n = picture.states();
     let ahead = |v: f64| (v + h) / (2.0 * h);
     let work = picture.work;
     while let Some(t) = reads.get(read).map(|&time| (time - start) - h).filter(|&t| ahead(t) <= ahead(u) && ahead(t) < 1.0) {
         let mut x = [C64::ZERO; STATES];
-        picture.between(t, &mut x[..n]);
+        picture.at(t, &mut x[..n]);
         met.push((Stop::Read, t, x));
         read += 1;
     }
@@ -1475,7 +1995,8 @@ fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f6
 /// below, the sliver past it within the rounding. Without a far end the spans may reach the panel's end below ln θ: the
 /// panel holds no root, and its sums are the spans'. Returns the root (none in the panel), ∫h from the panel's start to
 /// the latest time below, the nodes taken and the hazard's traces.
-fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64; 3]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
+fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
+    let _p = crate::prof::scope(crate::prof::ROOT);
     let after = |u: f64, v: f64| (v - u) * (b - a) > 0.0;
     // (time, ∫h from the panel's start) at the latest time below the root.
     let (mut below, mut nodes, mut traces) = ((a, 0.0), 0, 0);
@@ -1488,7 +2009,7 @@ fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, 
             guess
         } else if round < ROUNDS {
             let mean = past.map_or(0.0, |(time, fell)| (fell - below.1) / (time - below.0));
-            let rate = hazard_at(picture, still, h, below.0, decay, part).max(mean);
+            let rate = linalg::larger(hazard_at(picture, still, h, below.0, decay, part), mean);
             (nodes, traces) = (nodes + 1, traces + 1);
             below.0 + left / rate
         } else {
@@ -1503,14 +2024,14 @@ fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, 
         if !(after(below.0, u) && past.is_none_or(|(far, _)| after(u, far))) {
             break;
         }
-        let mut spanned = [0.0; 3];
+        let mut spanned = vec![0.0; weights.len()];
         let (fell, taken_nodes) = fallen(picture, still, h, (below.0, u), bandwidth, decay, part, &mut spanned);
         (nodes, traces) = (nodes + taken_nodes, traces + 1);
         // A span that ends within ln N's rounding past the root ends at it: a step aimed at the root lands there within
         // that rounding either way, and is taken.
         if log - (below.1 + fell) > target - floor {
             below = (u, below.1 + fell);
-            taken(part, spanned, sums, weights);
+            taken(part, &spanned, sums, weights);
             if u == b && past.is_none() && log - below.1 - target > floor {
                 return (None, below.1, nodes, traces);
             }
@@ -1535,9 +2056,12 @@ pub struct Step {
     /// The states made inside the step, in the order of their times: the trajectory's after each of its jumps, and the
     /// readings at the times read, which are no part of it (adapt.rs, # The reads).
     pub made: Vec<Made>,
-    /// The step's counted work (real multiply-adds: its own and its nodes' generators and forces; its jumps' photons
-    /// are counted on the states). The middles it went through are counted where they are made (`Midway`).
+    /// The step's counted work (real multiply-adds), its stretches' prices added up: its own, its nodes' generators,
+    /// forces and tones, its middles' making and the scattered light at the middle (`Price`); its jumps' photons are
+    /// counted on the states (`jump`).
     pub work: f64,
+    /// Its stretches' prices, each with its cluster, in their order: what the step did, item by item (`Price`).
+    pub prices: Vec<(usize, Price)>,
     /// The momenta the step makes in turn (1/µm, lab axes; module documentation, # The step's momentum): its start κ₀,
     /// the middle the first half flow reaches κ_h, the middle kicked without its jumps κ_k and with them κ_j, its end κ₁.
     momenta: [[f64; 3]; 5],
@@ -1575,20 +2099,24 @@ impl Step {
 }
 
 /// A state made inside a step: the trajectory's after a jump -- with the jump's kick (1/µm) --, or a reading at a time
-/// read. The internal state, the cluster, the time and the trajectory's counters are the propagation's there; the
-/// position and the momentum are the caller's to set on the step's path (`Segment::after`, `Segment::place`).
+/// read with its rows as shown, read on the step's middle where its model reads them there (`Middle::readout`). The
+/// internal state, the cluster, the time and the trajectory's counters are the propagation's there; the position and the
+/// momentum are the caller's to set on the step's path (`Segment::after`, `Segment::place`).
 #[derive(Clone, Debug)]
 pub struct Made {
     pub kick: Option<[f64; 3]>,
     pub state: Trajectory,
+    pub rows: Option<[f64; STATES]>,
 }
 
 /// Why a step or a jump could not be made: the reference's fixed point is not a contraction at this step (`middle`); the
-/// state left the floating-point range; the norm reached its threshold with no photon to emit (`jump`: the model's
-/// decay and its photons contradict each other); a state scatters faster than any state of the atom can
-/// (`Domain::runaway`: a fold far outside its validity); or the middle state's cluster made no K of its optical sector
-/// (`Unmade`: # The optical sector's noise). The advance takes the step at its half at the first two (adapt.rs, # The
-/// step), and ends at the others.
+/// state left the floating-point range, or a piece's quotient has no finite bandwidth (`Midway::stretch`); the norm
+/// reached its threshold with no photon to emit (`jump`: the model's decay and its photons contradict each other); a
+/// state scatters faster than any state of the atom can (`Domain::runaway`: a fold far outside its validity); the
+/// middle state's cluster made no K of its optical sector (`Unmade`: # The optical sector's noise); or the
+/// decomposition of the generator does not take the step (spectral.rs `Refusal`, # Where the decomposition does not
+/// take the step). The advance takes the step at its half at
+/// the first two and the last (adapt.rs, # The step), and ends at the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refused {
     Reference,
@@ -1596,25 +2124,28 @@ pub enum Refused {
     Emission,
     Runaway,
     Optical(Unmade),
+    Propagation(Refusal),
 }
 
 /// What the integrator asks of the model's domain at every step (SPEC §1.8; module documentation, # The domain).
 pub trait Domain {
-    /// Whether the step of half-length `half` (µs) through its middle -- the reference's flow there (`Flow`) and the
-    /// middle point and path momentum (r_h, κ_m) -- resolves what it samples along its path at its speed (true: its
-    /// accuracy is the run's; false: the trajectory is the model's no longer to the step's accuracy,
-    /// `Trajectory::unresolved`).
-    fn resolves(&self, flow: &Flow, middle: ([f64; 3], [f64; 3]), half: f64) -> bool;
     /// Whether a state scattering at the rate `hazard` (1/µs: x̂†Γx̂, explicit excited states and folds alike) is beyond
     /// every state of the atom -- a fold far outside its validity (module documentation, # The domain).
     fn runaway(&self, hazard: f64) -> bool;
 }
 
-/// The path's momentum of the step of τ through a middle from a state (module documentation, # The path's momentum),
-/// predicted: κ_h and half the kick of the start state held there -- its shear at κ_h and the reference's τ∇V_ref(r_h).
-fn predicted<M: Middle>(scratch: &mut Scratch, middle: &M, psi: &[C64], kappa_h: [f64; 3], reference: [f64; 3], tau: f64) -> [f64; 3] {
-    let held = shear(&Along::new(middle, kappa_h, [0.0; 3]), scratch.carve().held, psi, tau);
-    std::array::from_fn(|a| kappa_h[a] + 0.5 * (held[a] + tau * reference[a]))
+/// The path's momentum of the step of τ about its middle time t_m (module documentation, # The path's momentum),
+/// predicted from the start state's held forms: κ_h and half the kick they give over the step -- the static form (the
+/// reference's gradient taken) over τ, each tone's over the step at its phase there, τ sinc(ντ/2) Re[a e^{iν(t_m − t₁)}].
+pub fn predicted(forms: &Forms, kappa_h: [f64; 3], tau: f64, t_m: f64) -> [f64; 3] {
+    let mut held = forms.held.map(|f| tau * f);
+    for (nu, a) in &forms.tones {
+        let (w, turn) = (tau * sinc(0.5 * nu * tau), C64::cis(nu * (t_m - forms.time)));
+        for c in 0..3 {
+            held[c] += w * (a[c] * turn).re;
+        }
+    }
+    std::array::from_fn(|c| kappa_h[c] - 0.5 * held[c])
 }
 
 /// A step's middle (module documentation, # The reference, # The kick): the reference's flow of a step of τ and the
@@ -1646,56 +2177,74 @@ enum Stop {
 /// path's at its last jump --; the next of the times to read; whether the middle is behind; the sums of the quadrature's
 /// weights times the three nodes' Lagrange polynomials over what is behind; the kick's part of the state so far; the
 /// scattered light at the middle, once it is passed, and the optical sector's rate of the middle state with its
-/// locality ε_Q where its cluster has one (# The optical sector's noise); the counted work; and the states made.
+/// locality ε_Q where its cluster has one (# The optical sector's noise); the counted work and its stretches' prices,
+/// each with its cluster (`Price`); and the states made.
 struct March {
     u: f64,
     state: Trajectory,
     read: usize,
     passed: bool,
-    weights: [f64; 3],
     impulse: [f64; 3],
     scattered: Option<Scattering>,
     optical: Option<([[f64; 3]; 3], f64)>,
     work: f64,
+    prices: Vec<(usize, Price)>,
     made: Vec<Made>,
+    /// The end state's rows as shown on the middle of the stretch that reaches the step's end in its own cluster, where
+    /// times are read at the end (`Middle::readout`).
+    ended: Option<[f64; STATES]>,
+    /// The stretch being taken, as far as it went (`Progress`).
+    progress: Progress,
 }
 
 impl<'a, D: Dynamics> Midway<'a, D> {
     /// The middle of the step of τ (negative: the reverse step) from a trajectory's position, momentum, cluster and
     /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there.
     pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
+        let _p = crate::prof::scope(crate::prof::STEP_NEW);
         let half = 0.5 * tau;
         let (flow, reached) = middle(model, from.r, from.kappa, half)?;
+        let hm = model.hbar_over_mass();
+        let reference = flow.gradient_at(reached.0);
         let generator = model.middle(from.cluster, reached.0, from.time + half);
-        Ok(Midway { model, tau, hbar_over_mass: model.hbar_over_mass(), flow, reached, reference: flow.gradient_at(reached.0), generator })
+        Ok(Midway { model, tau, hbar_over_mass: hm, flow, reached, reference, generator })
     }
 
     /// The step through this middle of a state at its start -- the middle's own position, momentum, cluster and time,
     /// any internal state of the cluster --, with its jumps (module documentation, # Jumps) and the readings at the
     /// times `reads` (increasing, after the step's start and no later than its end; no part of the step, `looked`):
-    /// the path's momentum predicted from the state (`predicted`); the propagation at it and on its path, cluster by
+    /// the path's momentum predicted from the state's held forms (`predicted`); the propagation at it and on its path,
+    /// the end state's held forms with its kick (# The path's momentum), cluster by
     /// cluster as the jumps land (`stretch`); the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), the
     /// scattered light's force and its diffusion's part of the Brownian path `brownian` (module documentation, # The
     /// absorbed light's momentum), and each jump's own where it is made -- and the second half flow. `scratch` is the
     /// trajectory's. A jump the model gives no photon is refused (`jump`); so is a stretch whose first state scatters
     /// beyond every state of the atom (`Domain::runaway`; module documentation, # The domain).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
+        let _p = crate::prof::scope(crate::prof::ATTEMPT);
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
-        scratch.fit(n);
-        let kappa_m = predicted(scratch, &self.generator, &from.psi, kappa_h, reference, tau);
-        let resolves = domain.resolves(&flow, (r_h, kappa_m), h);
-        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, weights: [0.0; 3], impulse: [0.0; 3], scattered: None, optical: None, work: count::shear(n, self.generator.work()), made: Vec::new() };
-        // A step that does not resolve its path at its speed is taken, and the trajectory is unresolved from it on: its
-        // states inside the step and after it.
-        march.state.unresolved |= !resolves;
+        scratch.fit(n, SUMS);
+        let kappa_m = predicted(&from.forms, kappa_h, tau, from.time + h);
+        let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new(), ended: None, progress: Progress::default() };
+        // The three nodes' weights' sums over the step, its stretches' together.
+        scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
-        while !self.stretch(landed.as_ref().unwrap_or(&self.generator), kappa_m, from.time, reads, &mut march, scratch, domain)? {
-            landed = Some(self.model.middle(march.state.cluster, r_h, from.time + h));
+        loop {
+            // A refused stretch: the attempt's count as far as it went, on the scratch (`Scratch::refused`).
+            let generator = landed.as_ref().unwrap_or(&self.generator);
+            let (done, next) = self.stretch(generator, kappa_m, from.time, reads, &mut march, scratch, domain).inspect_err(|_| scratch.refused += march.work + unfinished(generator, &march.progress, scratch))?;
+            if done {
+                break;
+            }
+            landed = Some(next.unwrap_or_else(|| {
+                let _p = crate::prof::scope(crate::prof::STEP_OTHER_MIDDLE);
+                self.model.middle(march.state.cluster, r_h, from.time + h)
+            }));
         }
-        let March { state: mut end, read, impulse, scattered, optical, work, mut made, .. } = march;
+        let March { state: mut end, read, impulse, scattered, optical, work, prices, mut made, ended, .. } = march;
         // The scattered light at the middle, on the state there: its force over the step; and its diffusion with the
         // optical sector's drawn covariance -- the middle state's rate over the step with what was pending (# The
         // optical sector's noise) --, their factor on the Brownian path's increment (the momentum) and on its first
@@ -1713,7 +2262,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     rate[a][b] += drawn[a][b] / step;
                 }
             }
-            size += (0..3).map(|a| drawn[a][a]).fold(0.0, f64::max) / step;
+            size += (0..3).map(|a| drawn[a][a]).fold(0.0, linalg::larger) / step;
             end.pending = pending;
         }
         if let Some((_, epsilon)) = optical {
@@ -1744,13 +2293,14 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         }
         let (r1, kappa1) = flow.advance(kicked, 0.5 * tau);
         if !(r1.iter().chain(&kappa1).all(|x| x.is_finite()) && end.psi.iter().all(|z| z.is_finite())) {
+            scratch.refused += work;
             return Err(Refused::Overflow);
         }
         (end.r, end.kappa, end.time) = (r1, kappa1, from.time + tau);
         // A time read at the step's end is the end itself.
-        made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() } }));
+        made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() }, rows: ended }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
-        Ok(Step { end, segment, made, work, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
+        Ok(Step { end, segment, made, work, prices, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
     }
 
     /// The propagation of B on the step's path from where the march stands, in the cluster its state is in, as far as
@@ -1761,7 +2311,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     ///   any time from there on);
     /// - the frame's state read at the stops in the path's order, panel by panel: the nodes of a quadrature that
     ///   resolves the generator's own frequencies -- Gauss–Legendre from the piece's start to the step's end at the
-    ///   bandwidth of the forms on a state it propagates, within the kick's share (`panels`) --, each with its weight; the
+    ///   bandwidth of the forms on a state it propagates, to the round-off (`panels`) --, each with its weight; the
     ///   step's middle and its end, where the state is kept -- a node within the time's round-off of one of them is
     ///   it --, standing once the panel's survival is known. The times read are no stops: each is the state there from
     ///   the latest stop at or before it (`looked`), kept beside the stops and standing with them -- so the step is
@@ -1778,59 +2328,99 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// along the path, −∫Re tr(Ĝ(u)ρ(u))du over the stretch, Ĝ through the step's three nodes u_j = −h, 0, h and their
     /// Lagrange polynomials ℓ_j -- Σ_j Re tr(Ĝ(u_j) S_j), S_j = Σ_k w_k ℓ_j(u_k) ρ_k over the stretch's nodes, three
     /// forms of the model --; and in the stretch the step's middle lies in, about the middle state held in the frame
-    /// over the whole step: its shear at r_h, each tone at its beat alone (`shear`), and S_j less W_j ρ_m, W_j = ∫ℓ_j
+    /// over the whole step: its shear at r_h, each tone at its beat alone (τ sinc(Ωτ/2)), and S_j less W_j ρ_m, W_j = ∫ℓ_j
     /// over the step -- the weights' sum over every piece of the step, and of what is left of it past this stretch.
     /// Of a state that does not change that difference is its rounding, and nothing where there is one state. Where
     /// Ĥ is still along every path Ĝ is one matrix, and the stretch's part its one form with ∫ρ(u)du. The middle's
     /// stretch reads the scattered light there and the optical sector's rate, on the middle state.
     #[allow(clippy::too_many_arguments)]
-    fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch, domain: &dyn Domain) -> Result<bool, Refused> {
+    fn stretch(&self, generator: &D::Middle<'a>, kappa_m: [f64; 3], start: f64, reads: &[f64], march: &mut March, scratch: &mut Scratch, domain: &dyn Domain) -> Result<(bool, Option<D::Middle<'a>>), Refused> {
+        let _p = crate::prof::scope(crate::prof::STRETCH);
         let (tau, hm) = (self.tau, self.hbar_over_mass);
         let h = 0.5 * tau;
         let velocity = kappa_m.map(|k| hm * k);
         let along = Along::new(generator, kappa_m, velocity);
-        let (n, still, costs, cluster) = (along.n, generator.still(), generator.work(), march.state.cluster);
-        scratch.fit(n);
-        let Carved { picture, noise, held, sum, sums, saved, part, decay, met } = scratch.carve();
-        // The nodes' sums: one where Ĥ is still, the three nodes' on a beating path; the decay laid alike.
-        let size = (if still { 1 } else { SUMS }) * 2 * n * row(n);
-        let (sums, saved, part, decay) = (&mut sums[..size], &mut saved[..size], &mut part[..size], &mut decay[..size]);
-        let launched = along.turned(&march.state.psi, march.u, true);
-        let scale = pictured(&along, picture, tau, (&mut *decay, &mut *part), Some((&launched[..n], march.u)));
-        let bandwidth = picture.bandwidth;
+        let (n, still, cluster) = (along.n, generator.still(), march.state.cluster);
+        march.progress = Progress { states: n, still, ..Progress::default() };
+        let mut launched = Some(along.turned(&march.state.psi, march.u, true));
+        // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
+        // decay laid alike.
+        let scale = pictured(&along, scratch, tau, launched.as_ref().map(|x| &x[..n]))?;
+        let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
+        // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
+        let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
         sums.fill(0.0);
+        // The tones' weights' sums, this stretch's; and where it begins.
+        weights[SUMS..].fill(0.0);
+        let begun = march.u;
         let ahead = |u: f64| (u + h) / tau;
-        let (mut counted, mut traces, mut middle) = (0, 0, None);
+        let mut middle = None;
         let mut x = [C64::ZERO; STATES];
         // A state of the frame at a time u in the lab at the survival ln N: the direction at the norm √N.
         let at = |x: &[C64], u: f64, log: f64| -> Internal {
             let scale = (0.5 * (log - norm_sqr(x).ln())).exp();
             along.turned(x, u, false)[..n].iter().map(|z| *z * scale).collect()
         };
+        // The middle of the cluster the last jump landed the trajectory in, where it is another (`Places`).
+        let mut next: Option<D::Middle<'a>> = None;
         let done = loop {
             // A piece: from the state the march stands at, the sums and the weights as they are, the survival from ‖ψ‖².
             let from = march.u;
-            let launched = along.turned(&march.state.psi, from, true);
-            picture.launch(from, &launched[..n]);
+            // The stretch's first piece is launched with the state its picture was prepared on, the next ones with a jump's.
+            let launched = launched.take().unwrap_or_else(|| along.turned(&march.state.psi, from, true));
+            {
+                let _p = crate::prof::scope(crate::prof::LAUNCH);
+                picture.launch(from, &launched[..n]);
+            }
+            // The quotients' bandwidth over this piece, on the states its state can hold (`spectral::Picture::launch`,
+            // `quotient`): the forms' with the norm's ringing.
+            let bandwidth = picture.quotient;
+            // A quotient of no finite bandwidth lays no rule (`fewest`): the step is refused, as a state that left the
+            // numbers is (`Refused::Overflow`).
+            if !bandwidth.is_finite() {
+                return Err(Refused::Overflow);
+            }
             // The runaway's guard (module documentation, # The domain): the stretch's first state's hazard, x̂†Γx̂ of the
             // launched state's direction at the decay laid for the step (`hazard_at`'s, on the state itself: nothing of
             // the picture is moved or counted).
-            if traces == 0 {
+            if march.progress.traces == 0 {
                 part.fill(0.0);
-                gather(still, h, from, 1.0, &launched[..n], &mut [0.0; 3], part);
+                Sums { still, h, tones: &picture.beats }.gather(from, 1.0, &launched[..n], None, part);
                 if domain.runaway(hazard(decay, part, n)) {
                     return Err(Refused::Runaway);
                 }
             }
             let (target, first, before) = (march.state.threshold.ln(), norm_sqr(&march.state.psi).ln(), hazard(decay, sums, n));
-            traces += 1;
+            // The norm does not rise (`Refusal::Growth`): the flow is a contraction, so at the propagation's stops past the
+            // launch -- the piece's middle and end, which its hops reach -- a norm above the launch's beyond what the
+            // propagation's own remainder E and the state's rounding allow, (1 + E)² − 1 (a state off by E of its norm),
+            // is the propagation's leaving it. E is made only where a stop rises past the rounding.
+            let (launch, rounded) = (norm_sqr(&launched[..n]), picture.rounding());
+            let mut rise = 0.0_f64;
+            for u in [0.5 * (from + h), h] {
+                picture.at(u, &mut x[..n]);
+                rise = linalg::larger(rise, norm_sqr(&x[..n]) / launch - 1.0);
+            }
+            if !(rise <= rounded) {
+                let (estimate, work) = picture.remainder();
+                picture.work += work;
+                if !(rise <= estimate * (2.0 + estimate) + rounded) {
+                    return Err(Refused::Propagation(Refusal::Growth));
+                }
+            }
+            march.progress.traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
-            for (b, nodes) in panels(from, h, bandwidth, FORMS, Within::Share) {
+            // The panels: as many as leave the fewest nodes, on whether the survival ends in the piece (`count`).
+            let laid = count(h - from, bandwidth, FORMS, 2, || {
+                picture.at(h, &mut x[..n]);
+                norm_sqr(&x[..n]) <= march.state.threshold
+            });
+            for (b, nodes) in panels(from, h, laid) {
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);
-                let weights = march.weights;
+                kept.copy_from_slice(weights);
                 // The latest time taken and, once the propagation's norm is at the threshold, that time: the crossing
                 // the norm predicts lies past it (the norm is the survival to the propagation's accuracy, and costs n a
                 // stop). From then on the panel's nodes are not taken -- its kick's part is the root's spans --, its kept
@@ -1858,14 +2448,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                         (None, None) => break,
                     };
-                    picture.advance(u, &mut x[..n]);
+                    {
+                        let _p = crate::prof::scope(crate::prof::AT_NODES);
+                        picture.at(u, &mut x[..n]);
+                    }
                     read = looked(picture, reads, read, (start, h), u, met);
                     if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
                         predicted = Some(last);
                     }
                     if let (Some(w), None) = (weight, predicted) {
-                        counted += 1;
-                        gather(still, h, u, w, &x[..n], &mut march.weights, sums);
+                        march.progress.counted += 1;
+                        let _p = crate::prof::scope(crate::prof::GATHER);
+                        Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), sums);
                     }
                     last = u;
                     if let Some(kind) = keep {
@@ -1886,25 +2480,25 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     Some(guess) => Some((None, guess)),
                     None => {
                         end = first - (hazard(decay, sums, n) - before);
-                        traces += 1;
+                        march.progress.traces += 1;
                         (end <= target).then_some((Some((b, log - end)), f64::NAN))
                     }
                 };
                 let root = search.and_then(|(past, guess)| {
-                    let floor = rounding(2 * counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
+                    let floor = rounding(2 * march.progress.counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
                     sums.copy_from_slice(saved);
-                    march.weights = weights;
-                    let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut march.weights), (a, b), log, past, guess, target, floor);
-                    (counted, traces) = (counted + nodes, traces + spans);
+                    weights.copy_from_slice(kept);
+                    let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
+                    (march.progress.counted, march.progress.traces) = (march.progress.counted + nodes, march.progress.traces + spans);
                     match crossed {
-                        Some(crossed) => picture.between(crossed, &mut x[..n]),
+                        Some(crossed) => picture.at(crossed, &mut x[..n]),
                         None => end = log - fell,
                     }
                     crossed
                 });
                 // The states kept stand as far as the root: the middle state; a time read, its state as the propagation
                 // passed it (`looked`), in the lab. A reading is read as ρ/tr ρ alone -- its rows, its place, a sample of
-                // the units' errors (model.rs `Model::readout`, units.rs `Model::state_populations`) --, so its norm is
+                // the model's error (`Dynamics::readout`) --, so its norm is
                 // the propagation's there and nothing of the survival is integrated for it: the loss and the jumps are
                 // the trajectory's own states' (adapt.rs, # The reads).
                 for &(kind, u, state) in met.iter().filter(|m| root.is_none_or(|r| ahead(m.1) < ahead(r))) {
@@ -1912,7 +2506,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         Stop::Middle => (middle, march.passed) = (Some(state), true),
                         Stop::Read => {
                             let state = Trajectory { psi: along.turned(&state[..n], u, false)[..n].iter().copied().collect(), time: reads[march.read], ..march.state.clone() };
-                            march.made.push(Made { kick: None, state });
+                            let rows = along.middle.readout(&along.path, u, &state.psi);
+                            march.made.push(Made { kick: None, state, rows });
                             march.read += 1;
                         }
                         Stop::End => {}
@@ -1929,13 +2524,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 march.u = h;
                 break true;
             };
-            // The jump, on the path's own point, from the state at the threshold.
+            // The jump, on the path's own point, from the state at the threshold, on the middles the step made there.
             let state = &mut march.state;
             state.psi = at(&x[..n], crossed, target);
             (state.r, state.kappa, state.time) = (std::array::from_fn(|a| self.reached.0[a] + velocity[a] * crossed), kappa_m, start + (crossed + h));
-            jump(self.model, state)?;
+            let mut places = Places { model: self.model, point: (self.reached.0, start + h), path: (kappa_m, velocity), s: crossed, own: (cluster, generator, &along.path), other: None };
+            {
+                let _p = crate::prof::scope(crate::prof::JUMP);
+                jump(self.model, state, Some(&mut places))?;
+            }
+            next = places.other.filter(|other| other.0 == state.cluster).map(|other| other.1);
             let kick = std::array::from_fn(|a| state.kappa[a] - kappa_m[a]);
-            march.made.push(Made { kick: Some(kick), state: state.clone() });
+            march.made.push(Made { kick: Some(kick), state: state.clone(), rows: None });
             march.u = crossed;
             if !(ahead(crossed) < 1.0) {
                 break true;
@@ -1944,35 +2544,111 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 break false;
             }
         };
+        // The end state's held forms (module documentation, # The path's momentum): where the stretch reaches the step's end
+        // in its own cluster, its density at the middle (the frame's there is the lab's), with the kick's forms, less the
+        // step's reference gradient; where a jump at the end left it in another, that cluster's at the jump's point.
+        let ended = done && march.state.cluster == cluster;
+        if ended && march.read < reads.len() {
+            march.ended = along.middle.readout(&along.path, h, &march.state.psi);
+        }
+        let end: Option<Vec<C64>> = ended.then(|| {
+            let mut rho = vec![C64::ZERO; n * n];
+            density(&march.state.psi, &mut rho);
+            rho
+        });
+        if done && !ended {
+            let state = &march.state;
+            let forms = self.model.forms(state.cluster, &state.point(), &state.psi);
+            march.state.forms = forms;
+        }
+        let t_m = start + h;
         // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light and the
         // optical sector's rate there.
         let part = if still {
+            let sum = &mut sum[..n * n];
             whole(sums, 0, n, sum);
+            if let Some(rho) = &end {
+                let fixed = along.middle.path(kappa_m, [0.0; 3]);
+                march.state.forms = Forms { time: t_m, ..forms_at(along.middle, &fixed, rho) }.less(self.reference);
+            }
             along.middle.force(&along.path, 0.0, sum).map(|f| -f)
         } else {
             let mut out = [0.0; 3];
+            let size = n * n;
             if let Some(middle) = &middle {
                 if !done {
-                    for (u, w) in quadrature(march.u, h, 0.0, FORMS, Within::Share) {
+                    for (u, w) in quadrature(march.u, h, 0.0, FORMS, 2) {
                         let s = u / h;
-                        for (sum, l) in march.weights.iter_mut().zip([0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)]) {
+                        for (sum, l) in weights.iter_mut().zip([0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)]) {
                             *sum += w * l;
                         }
                     }
                 }
                 density(&middle[..n], held);
             }
+            // A tone's sums at its beat at each of the three nodes (`Sums`), less the middle state's at their weights: its
+            // σ_j = Σ_k w_k ℓ_j(u_k) e^{iνu_k}(ρ_k − ρ_m) -- the weights' sums with what of the step lies outside this
+            // stretch, ∫ℓ_j(u)e^{iνu}du over [−h, its start] and past its end by the kick's rule at the tone's beat.
+            for ((m, node_sums), tone) in tones.chunks_exact_mut(TONE * size).enumerate().zip(&picture.beats) {
+                let mut outside = [0.0; TONE];
+                if middle.is_some() {
+                    for (a, b) in [(-h, begun)].into_iter().chain((!done).then_some((march.u, h))) {
+                        for (u, w) in quadrature(a, b, tone.beat.abs(), FORMS, 2) {
+                            let (s, (sin, cos)) = (u / h, (tone.beat * u).sin_cos());
+                            let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
+                            for (k, part) in outside.iter_mut().enumerate() {
+                                *part += w * lagrange[k / 2] * if k % 2 == 0 { cos } else { sin };
+                            }
+                        }
+                    }
+                }
+                for (k, node_sum) in node_sums.chunks_exact_mut(size).enumerate() {
+                    let slot = SUMS + TONE * m + k;
+                    whole(sums, slot, n, node_sum);
+                    if middle.is_some() {
+                        for (q, rho) in node_sum.iter_mut().zip(held.iter()) {
+                            *q -= *rho * (weights[slot] + outside[k]);
+                        }
+                    }
+                }
+            }
             // The middle node's form and the shear of the middle state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
-            // one pass of the model's forms (`Middle::centre`).
+            // one pass of the model's forms (`Middle::centre`); the nodes' forms hold the exact tones' at the nodes, and
+            // each tone's sums at its beat take them out node by node (`Middle::tone_force`).
             let shear = |omega: f64| tau * sinc(0.5 * omega * tau);
-            for (j, at) in [-h, 0.0, h].into_iter().enumerate() {
+            for (j, (at, sum)) in [-h, 0.0, h].into_iter().zip(sum.chunks_exact_mut(size)).enumerate() {
                 whole(sums, j, n, sum);
                 if middle.is_some() {
                     for (q, rho) in sum.iter_mut().zip(held.iter()) {
-                        *q -= *rho * march.weights[j];
+                        *q -= *rho * weights[j];
                     }
                 }
-                let form = if j == 1 && middle.is_some() { along.middle.centre(&along.path, held, &shear, sum) } else { along.middle.force(&along.path, at, sum) };
+                for (node_sums, tone) in tones.chunks_exact_mut(TONE * size).zip(&picture.beats) {
+                    let (sin, cos) = (tone.beat * at).sin_cos();
+                    let (re, im) = node_sums[2 * j * size..2 * (j + 1) * size].split_at_mut(size);
+                    for ((re, im), q) in re.iter_mut().zip(im.iter_mut()).zip(sum.iter()) {
+                        *re -= *q * cos;
+                        *im -= *q * sin;
+                    }
+                }
+            }
+            let (s0, rest) = sum.split_at(size);
+            let (s1, s2) = rest.split_at(size);
+            let fixed = end.as_ref().map(|_| along.middle.path(kappa_m, [0.0; 3]));
+            let _pn = crate::prof::scope(crate::prof::NODES_CALL);
+            let (forms, forms_end) = along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64)), end.as_deref().zip(fixed.as_ref()));
+            for form in forms {
+                for a in 0..3 {
+                    out[a] -= form[a];
+                }
+            }
+            if let Some(forms) = forms_end {
+                march.state.forms = Forms { time: t_m, ..forms }.less(self.reference);
+            }
+            drop(_pn);
+            for (node_sums, tone) in tones.chunks_exact(TONE * size).zip(&picture.beats) {
+                let at: Vec<(f64, &[C64], &[C64])> = node_sums.chunks_exact(2 * size).zip([-h, 0.0, h]).map(|(pair, s)| (s, &pair[..size], &pair[size..])).collect();
+                let form = along.middle.tone_force(&along.path, tone.candidate, &at);
                 for a in 0..3 {
                     out[a] -= form[a];
                 }
@@ -1982,16 +2658,40 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         for a in 0..3 {
             march.impulse[a] += part[a];
         }
+        let (mut scattering, mut sector) = (0.0, None);
         if let Some(middle) = &middle {
-            march.scattered = Some(along.middle.scattering(&along.path, &middle[..n]));
-            if let Some((epsilon, work)) = optical(&along, picture, still, noise)? {
+            let _p = crate::prof::scope(crate::prof::MID_STEP_MIDDLE);
+            let (scattered, made) = along.middle.scattering(&along.path, &middle[..n]);
+            (march.scattered, scattering, march.progress.scattering) = (Some(scattered), made, made);
+            if let Some((epsilon, ground, made)) = optical(&along, picture, still, h, noise)? {
                 let k = noise.sector.operators().expect("a sector made");
                 march.optical = Some((within(k, &noise.gradient, &middle[..n]), epsilon));
-                march.work += work;
+                sector = Some((ground, made));
             }
         }
-        march.work += count::propagation(costs, still, picture.work) + count::impulse(n, costs, counted, still) + count::hazard(n, traces, still);
-        Ok(done)
+        // The stretch's count, item by item as it was done (`Price`), the step's own and its price at once (its tones':
+        // `toned`).
+        let price = Price {
+            states: n,
+            still,
+            tau,
+            bandwidth,
+            nodes: march.progress.counted,
+            traces: march.progress.traces,
+            made: prepared,
+            stops: picture.work - prepared,
+            sector,
+            tones: picture.beats.len(),
+            toned: toned(generator, picture, n),
+            centred: middle.is_some(),
+            ended,
+            middle: generator.made(),
+            scattering,
+            costs: generator.work(),
+        };
+        march.work += price.work(price.costs);
+        march.prices.push((cluster, price));
+        Ok((done, next.filter(|_| !done)))
     }
 }
 
@@ -1999,8 +2699,12 @@ impl<'a, D: Dynamics> Midway<'a, D> {
 /// quotient cancels where x is small, and the series' terms fall from the first while |x| is below its second term's
 /// 20 (a step's x = ω²τ² is below π² on a trapping axis, SPEC §2.2; on a hyperbolic one every term is positive).
 fn stumpff3(x: f64) -> f64 {
-    let (mut term, mut sum, mut j) = (1.0 / 6.0, 0.0, 0.0);
+    let (mut term, mut sum, mut j): (f64, f64, f64) = (1.0 / 6.0, 0.0, 0.0);
     while sum + term != sum {
+        // A term that is not a number is the sum's (the caller's step is refused, its end no number), not a loop's end.
+        if term.is_nan() {
+            return term;
+        }
         sum += term;
         j += 1.0;
         term *= -x / ((2.0 * j + 2.0) * (2.0 * j + 3.0));
@@ -2084,15 +2788,30 @@ impl Brownian {
     }
 }
 
-/// The counted work of one step of τ on the path through a middle at a momentum and a velocity, priced without taking
-/// the step -- the solve's price of a model it has not run, at its pilot's states and steps (solve.rs `Pricing`) --,
-/// apart from the model's counts at a node (`Middle::work`), which `Price::work` takes: what `Step::work` counts of the
-/// generator's picture along the path -- its decomposition, its slopes and its following as the step makes them
-/// (`pictured`), its bandwidth and the quadrature's nodes there, the launch with a state at each node, at the middle
-/// and at the end (`spectral::Picture::price`), the survival's hazard at the piece's start and at each panel's end --
-/// and of the optical sector its shape and its blocks' Schur forms (`Sector::cost`; none where the cluster has no
-/// explicit excited state, or where a Schur form is not made: the step there is refused before its noise). The middle
-/// itself is the model's (`Dynamics::assembly_work`, one a step).
+/// The counted work of a stretch of a step (`Midway::stretch`; real multiply-adds) item by item as the stretch did it --
+/// the one count a step adds up (`Step::work`, `Step::prices`) and the one a model's step is priced by (`priced`; solve.rs
+/// `Formula`): a step's price is the work its run does, counted where it is done, not a model of it. Apart from the
+/// model's counts at a node (`Middle::work`), which `work` takes -- a kept model's are its own --: the generator's
+/// picture along the path, its preparation (`made`: its decomposition, its slopes, its tones and their products, its
+/// following, as `pictured` made them) and the states it made after (`stops`: the launches -- the stretch's first and
+/// one after each of its jumps --, the states at the kick's nodes, at the middle and at the end, and those its jumps'
+/// roots read: `spectral::Picture::launch`, `at`); the kick's nodes and the tones their states were
+/// summed with (`nodes`, `tones`); the survival's traces (`traces`); where the stretch holds the step's middle
+/// (`centred`) the middle's form there and the optical sector's make (`sector`: its ground states and the make's count);
+/// the end state's held forms on the stretch that reaches the step's end (`ended`); and the model's own: the middle's
+/// making (`Middle::made`) and the light scattered at the middle
+/// (`Middle::scattering`). A stretch after a jump to another cluster is that cluster's (`Step::prices`). (Priced without
+/// taking the step instead -- the picture prepared on the middle at the trap's centre, its stops at the quadrature's
+/// nodes, no jump --, PGC3D's steps of 0.95, 1.9 and 3.8 µs were priced at 0.81, 1.52 and 0.38 times what its run's
+/// steps counted, and the middle with its scattering at a constant five to nine times their cost at 0.95 µs: the
+/// rungs' steps were weighed against one another wrong by a factor of four.)
+///
+/// A count is the operations done, deterministic -- a request's decisions the same on any machine and under any load,
+/// and a run compared with another to the bit --, not their time: it holds no cache's effect. Where a long step's picture
+/// leaves the model's numbers out of the caches the step takes longer than its count says (PGC3D at 3.8 µs: a jump's
+/// photon and the middle 30 and 15 times their time at 0.95 µs, their counts the same), and a choice made by the counts
+/// leans there toward the longer step. Timed instead, the rung a request takes would change with the machine and its
+/// load.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Price {
     pub states: usize,
@@ -2100,68 +2819,74 @@ pub struct Price {
     pub tau: f64,
     pub bandwidth: f64,
     pub nodes: usize,
-    /// The quadrature's panels: the survival's hazard is read at each one's end (`count::hazard`).
-    pub panels: usize,
-    /// The picture's preparation, and its states at the nodes, the middle and the end (complex multiply-adds).
+    pub traces: usize,
+    /// The picture's preparation, and its states after it (complex multiply-adds).
     pub made: f64,
     pub stops: f64,
-    /// The same of the decomposition's route (`spectral::Picture::prepare`), and its nodes: what a grown cluster is
-    /// priced from (`grown`), whichever route this one takes.
-    pub decomposition: [f64; 3],
-    /// The optical sector's ground states and its Schur forms' count.
     pub sector: Option<(usize, f64)>,
+    /// The exact tones (spectral.rs, # Which beats are tones), and their envelopes' and forms' counted work with their
+    /// separation from the generator at the nodes (`Middle::tone_work`).
+    pub tones: usize,
+    pub toned: [f64; 2],
+    /// Whether the stretch holds the step's middle (its form and its scattering there), and whether it reaches the step's
+    /// end in its cluster (the end state's held forms).
+    pub centred: bool,
+    pub ended: bool,
+    /// The middle's making and the scattered light's (real multiply-adds); the model's counts at a node it was counted with
+    /// (`Middle::work`).
+    pub middle: f64,
+    pub scattering: f64,
+    pub costs: [f64; 3],
 }
 
 impl Price {
-    /// The price on the path through a middle at a momentum and a velocity: its own -- the caller's middle is a state's,
-    /// or one of the cluster made once: the nodes' counts are the cluster's whatever the point (`Middle::work`), and the
-    /// point gives the generator's picture alone. On the route a trajectory's steps take once the decomposition's is
-    /// counted (`spectral::Picture::prepare`): the picture is prepared twice, the first time on that route.
-    pub fn of<M: Middle>(middle: &M, kappa: [f64; 3], velocity: [f64; 3], tau: f64) -> Price {
-        let (n, still) = (middle.states(), middle.still());
-        let along = Along::new(middle, kappa, velocity);
-        let mut scratch = Scratch::default();
-        scratch.fit(n);
-        let Carved { picture, noise, decay, part, .. } = scratch.carve();
-        pictured(&along, picture, tau, (&mut *decay, &mut *part), None);
-        let first = nodes(tau, picture.bandwidth);
-        let decomposition = [picture.work, picture.price(first + 2), first as f64];
-        pictured(&along, picture, tau, (&mut *decay, &mut *part), None);
-        let (nodes, panels) = (nodes(tau, picture.bandwidth), plan(tau.abs(), picture.bandwidth, FORMS, Within::Share).1);
-        let sector = middle.optical(&along.path).and_then(|shape| noise.sector.schur(&picture.base, shape.ground).map(|schur| (shape.ground, schur)));
-        Price { states: n, still, tau, bandwidth: picture.bandwidth, nodes, panels, made: picture.work, stops: picture.price(nodes + 2), decomposition, sector }
-    }
-
-    /// The step's counted work with a model's counts at a node `costs` (`Middle::work`): what `Step::work` adds up --
-    /// the propagation, the kick's sums and forms, the survival's hazard, the shear, and the optical sector (`optical`:
-    /// its shape's formula with the Schur forms' count, the gradient's matrices and one `within`'s forms).
+    /// The stretch's counted work with a model's counts at a node `costs` (`Middle::work`): what the stretch adds to
+    /// `Step::work`, its integrator's part (`stepped`) and the model's own there (`modelled`).
     pub fn work(&self, costs: [f64; 3]) -> f64 {
-        let (n, still) = (self.states, self.still);
-        let optical = self.sector.map_or(0.0, |(ground, schur)| optical_work(n, costs[1], still, Sector::cost(n - ground, ground, !still, schur)));
-        count::propagation(costs, still, self.made + self.stops) + count::impulse(n, costs, self.nodes, still) + count::hazard(n, 1 + self.panels, still) + count::shear(n, costs) + optical
+        self.stepped(costs) + self.modelled()
     }
 
-    /// The price on the cluster this one's grows into -- `states` states, `ground` of them ground, its generator's
-    /// bandwidth `bandwidth` -- where a keep makes a drive explicit or joins two clusters: each part at its leading
-    /// order in the states, from what this cluster's picture made -- the decomposition's QR sweeps and the following's
-    /// products as n³ (the Schur forms' sweeps on the blocks with them, e³ + g³), a state at a node as n² --, the
-    /// nodes and panels those of the quadrature at the bandwidth; from the decomposition's route (`decomposition`).
-    pub fn grown(&self, states: usize, ground: usize, bandwidth: f64) -> Price {
-        let ratio = states as f64 / self.states as f64;
-        let (nodes, panels) = (nodes(self.tau, bandwidth), plan(self.tau.abs(), bandwidth, FORMS, Within::Share).1);
-        let excited = states - ground;
-        let cube = (excited.pow(3) + ground.pow(3)) as f64;
-        let sector = (excited > 0).then(|| {
-            let schur = match self.sector {
-                Some((g, schur)) => schur * cube / ((self.states - g).pow(3) + g.pow(3)) as f64,
-                None => self.decomposition[0] * cube / self.states.pow(3) as f64,
-            };
-            (ground, schur)
-        });
-        let [made, stops, before] = self.decomposition;
-        let (made, stops) = (made * ratio.powi(3), stops * ratio * ratio * (nodes + 2) as f64 / (before + 2.0));
-        Price { states, still: self.still, tau: self.tau, bandwidth, nodes, panels, made, stops, decomposition: [made, stops, nodes as f64], sector }
+    /// The integrator's part with the model's calls at the nodes: the propagation, the kick's sums and forms, the
+    /// survival's hazard, the optical sector (`optical_work`: its make, the gradient's matrices and one `within`'s
+    /// forms), and on the stretch that reaches the step's end the end state's held forms.
+    pub fn stepped(&self, costs: [f64; 3]) -> f64 {
+        let (n, still) = (self.states, self.still);
+        let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, make));
+        let end = if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 };
+        count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still, self.tones) + optical + end
     }
+
+    /// The model's own there: the middle's making and the light scattered at the middle.
+    pub fn modelled(&self) -> f64 {
+        self.middle + self.scattering
+    }
+
+    /// `work`'s parts (a measurement): the propagation, the kick, the survival's hazard, the optical sector, the end
+    /// state's held forms, the model's own.
+    #[cfg(test)]
+    pub fn parts(&self, costs: [f64; 3]) -> [f64; 6] {
+        let (n, still) = (self.states, self.still);
+        [
+            count::propagation(costs, still, self.made + self.stops, self.toned[0]),
+            count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]),
+            count::hazard(n, self.traces, still, self.tones),
+            self.sector.map_or(0.0, |(_, make)| optical_work(n, make)),
+            if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 },
+            self.modelled(),
+        ]
+    }
+}
+
+/// The step of τ from a trajectory's state as its run takes it, for its count: its stretches' prices, each with its
+/// cluster (`Step::prices`) -- a model's step priced where its run's states are (solve.rs `Formula::prices`). On the
+/// route a trajectory's steps take once the decomposition's is counted (`spectral::Picture::prepare`: a step's route is
+/// chosen against the counts its scratch carries): the step is taken twice on one scratch, the second counted. Its
+/// jumps are the state's own -- its threshold, its streams --, the Brownian path none (no work is of it), no time
+/// read. Refused as the run's step would be (`Midway::attempt`).
+pub fn priced<D: Dynamics>(model: &D, from: &Trajectory, tau: f64, domain: &dyn Domain) -> Result<Vec<(usize, Price)>, Refused> {
+    let (through, mut scratch) = (Midway::new(model, from, tau)?, Scratch::default());
+    through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?;
+    Ok(through.attempt(from, &Brownian::STILL, &[], &mut scratch, domain)?.prices)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2174,7 +2899,8 @@ fn split(c: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
     let (values, vectors) = linalg::symmetric3_eigen(c);
     let (mut drawn, mut pending) = ([[0.0; 3]; 3], [[0.0; 3]; 3]);
     for (lambda, v) in values.iter().zip(&vectors) {
-        let part = if *lambda > 0.0 { &mut drawn } else { &mut pending };
+        // An eigenvalue that is not a number is drawn (the step's factor carries it to the momentum), not kept pending.
+        let part = if !(*lambda <= 0.0) { &mut drawn } else { &mut pending };
         for a in 0..3 {
             for b in 0..3 {
                 part[a][b] += lambda * v[a] * v[b];
@@ -2185,7 +2911,7 @@ fn split(c: &[[f64; 3]; 3]) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
 }
 
 /// A factor Λ of a diffusion's second-moment rate C = 2D, Λ Λᵀ = C (positive semidefinite: the second moment's rate less
-/// what the jumps carry of it, Cauchy–Schwarz; model/photon.rs): its Cholesky factor's columns, so that Λ on a Brownian
+/// what the jumps carry of it, Cauchy–Schwarz; model.rs `Scattering::of_moments`): its Cholesky factor's columns, so that Λ on a Brownian
 /// increment of unit rate has the covariance C τ.
 ///
 /// In a null direction of C -- a plane wave's absorption leaves nothing beside its jumps' k -- a pivot is the rounding
@@ -2204,6 +2930,10 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
         order.swap(r, largest);
         let p = order[r];
         let moved = 3.0 * rounding(links) * scale * (1.0 + ((3 - r) * (4_usize.pow(r as u32) - 1)) as f64 / 3.0);
+        // A pivot or a scale that is not a number is no direction to drop: the factor is not a number, and so is the kick.
+        if c[p][p].is_nan() || moved.is_nan() {
+            return [[f64::NAN; 3]; 3];
+        }
         if !(c[p][p] > moved) {
             break;
         }
@@ -2221,6 +2951,35 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
     l
 }
 
+/// The middles a jump inside a step is made on (`jump`; module documentation, # Jumps): the step's middle point and
+/// time, the path's momentum and velocity and the jump's time s from the middle; the emitting cluster's middle with its
+/// path, and the middle of a cluster a jump lands in where that is another, made there -- the one the step goes on in
+/// after the jump (`Midway::stretch`).
+pub struct Places<'p, 'm, D: Dynamics + 'm> {
+    model: &'m D,
+    point: ([f64; 3], f64),
+    path: ([f64; 3], [f64; 3]),
+    s: f64,
+    own: (usize, &'p D::Middle<'m>, &'p <D::Middle<'m> as Middle>::Path),
+    other: Option<(usize, D::Middle<'m>, <D::Middle<'m> as Middle>::Path)>,
+}
+
+impl<'m, D: Dynamics + 'm> Places<'_, 'm, D> {
+    /// A cluster's middle with its path: the emitting cluster's, or another's, made where it is first asked for.
+    fn of(&mut self, cluster: usize) -> (&D::Middle<'m>, &<D::Middle<'m> as Middle>::Path) {
+        if cluster == self.own.0 {
+            return (self.own.1, self.own.2);
+        }
+        if self.other.as_ref().is_none_or(|other| other.0 != cluster) {
+            let middle = self.model.middle(cluster, self.point.0, self.point.1);
+            let path = middle.path(self.path.0, self.path.1);
+            self.other = Some((cluster, middle, path));
+        }
+        let (_, middle, path) = self.other.as_ref().expect("made");
+        (middle, path)
+    }
+}
+
 /// The jump of a trajectory at its state (SPEC §1.6): from `Stream::jump(seed, index, jumps + 1)` the next threshold, the
 /// class ∝ Σ_a‖u_a‖² among the rates the model makes of the state's classes, whose photon alone the model then makes
 /// (`Dynamics::emit`), the polarization across the direction by ‖Σ_a ε_a u_a‖², and the direction from the dipole pattern
@@ -2228,24 +2987,23 @@ fn factor(rate: &[[f64; 3]; 3], scale: f64, links: usize) -> [[f64; 3]; 3] {
 /// cluster and κ += −k_φ n + s b, the emitted photon's recoil and the class's conditional mean of the absorbed momentum
 /// as far as one photon's goes (`Emitted::kick`; module documentation, # The absorbed light's momentum) -- at most
 /// k_φ + k_c, whatever the light does at the point. The point is the trajectory's as it is given: a step makes its
-/// jumps on its path's points (module documentation, # Jumps), and the loss after a jump is its caller's to test, on
-/// the trajectory's own place (adapt.rs). A norm that reached its threshold with no photon to emit -- every class's
-/// weight zero, or not a number -- is refused (`Refused::Emission`) with the trajectory as it was: the model's decay
-/// and its photons contradict each other, and no jump is made of that.
+/// jumps on its path's points (module documentation, # Jumps), on the middles it made there (`Places`; at a
+/// trajectory's start, none: the model at the point), and the loss after a jump is its caller's to test, on the
+/// trajectory's own place (adapt.rs). A norm that reached its threshold with no photon to emit -- every class's
+/// weight zero, or not a number, or its amplitudes no finite numbers -- is refused (`Refused::Emission`) with the
+/// trajectory as it was: the model's decay and its photons contradict each other, and no jump is made of that. So is a
+/// landing that does not exist.
 ///
-/// The landing (`Dynamics::landed`): the trajectory goes on in the state the bare state f/‖f‖ lands in, with that state's
-/// norm, against the threshold as every state is -- one rule, whatever the norm. A norm above the threshold waits: from
-/// one, ‖f‖'s own, as before; from below one, as long as the rest of the threshold's law says; from above one, longer,
-/// by the time its decay takes down to one. A norm at or below the threshold already (only a norm below one meets it
-/// but for the one threshold in 2⁵³ that is one itself) is one more photon at once: the bare state emits it as any
-/// state does -- its class, polarization and direction drawn anew, its recoil and its bounded kick with them --, the
-/// next threshold is drawn anew, and it lands again. So the waiting time after a jump is P(T > t) = min(1, n e^{−γt})
-/// for the landing's norm n and the state's rate γ (model.rs `Model::landed`: the fourth order's statistics for either
-/// sign of 1 − n), and a state that lands as it is draws nothing more.
-pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), Refused> {
+/// The landing (`Dynamics::landed`, `land`): the trajectory goes on in the state the bare state f/‖f‖ lands in, with that
+/// state's norm, against the threshold its landing hands it (`Landed`; the plain landing, RUSTPLAN §2.2 D5: the state
+/// itself and the threshold θ drawn here), with the kick the landing books. A landed norm at or below its threshold
+/// already is that jump at once -- its class, polarization and direction drawn anew --, the next threshold drawn anew,
+/// and it lands again. The waiting time after a plain landing is P(T > t) = min(1, n e^{−γt}) for the landing's norm n
+/// and the state's rate γ.
+pub fn jump<'m, D: Dynamics>(model: &'m D, trajectory: &mut Trajectory, mut places: Option<&mut Places<'_, 'm, D>>) -> Result<(), Refused> {
     let j = trajectory.jumps + 1;
     let mut stream = Stream::jump(trajectory.seed, trajectory.index, j);
-    let threshold = stream.open_uniform();
+    let mut threshold = stream.open_uniform();
     let (mut class, mut polarization) = (stream.uniform(), stream.uniform());
     let mut first = true;
     loop {
@@ -2267,8 +3025,17 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
             }
             Some(pick)
         };
-        let Some(photon) = model.emit(trajectory.cluster, &at, &trajectory.psi, &mut draw) else {
-            // A norm at its threshold with no photon to emit is refused; a bare state with none goes on as it is.
+        let on = places.as_deref_mut().map(|p| {
+            let s = p.s;
+            let (middle, path) = p.of(trajectory.cluster);
+            (middle, path, s)
+        });
+        let gram = |u: &[Internal; 3]| -> [[f64; 3]; 3] { std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re)) };
+        // A photon whose amplitudes are no finite numbers is none, as a class's rate that is none (the one exit: the
+        // direction's rejection would accept no direction of it).
+        let emitted = model.emit(trajectory.cluster, &at, on, &trajectory.psi, &mut draw).map(|photon| (gram(&photon.amplitudes), photon));
+        let Some((gram, photon)) = emitted.filter(|(g, _)| (g[0][0] + g[1][1] + g[2][2]).is_finite() && g[0][0] + g[1][1] + g[2][2] > 0.0) else {
+            // A norm at its threshold with no photon to emit is refused; a landed state with none at once goes on as it is.
             if first {
                 return Err(Refused::Emission);
             }
@@ -2276,11 +3043,11 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         };
         if first {
             trajectory.jumps = j;
-            trajectory.threshold = threshold;
         }
-        trajectory.work += model.photon_work();
+        let emitted = model.photon_work() + photon.work;
+        trajectory.work += emitted;
+        trajectory.jumped += emitted;
         let u = &photon.amplitudes;
-        let gram: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|b| inner(&u[a], &u[b]).re));
         let trace = gram[0][0] + gram[1][1] + gram[2][2];
         let direction = loop {
             let n = stream.direction();
@@ -2302,15 +3069,21 @@ pub fn jump<D: Dynamics>(model: &D, trajectory: &mut Trajectory) -> Result<(), R
         trajectory.psi = f.iter().map(|z| *z * scale).collect();
         trajectory.cluster = photon.landing;
         first = false;
-        // The landing: the state the trajectory goes on in, its norm against the threshold; at the threshold already,
-        // one more photon from the bare state and the next threshold.
+        // The landing on the step's middles (`land`); none where it does not exist (refused, as a photon that is none);
+        // against the next threshold.
         let at = trajectory.point();
-        let landed = model.landed(trajectory.cluster, &at, &trajectory.psi);
-        if norm_sqr(&landed) > trajectory.threshold {
-            trajectory.psi = landed;
+        let Some((cluster, _, landed)) = land(model, trajectory.cluster, &at, places.as_deref_mut(), &trajectory.psi, threshold) else { return Err(Refused::Emission) };
+        let at_once = norm_sqr(&landed.psi) <= landed.threshold;
+        for a in 0..3 {
+            trajectory.kappa[a] += landed.kick[a];
+        }
+        trajectory.work += landed.work;
+        trajectory.jumped += landed.work;
+        (trajectory.cluster, trajectory.psi, trajectory.threshold) = (cluster, landed.psi, landed.threshold);
+        if !at_once {
             break;
         }
-        trajectory.threshold = stream.open_uniform();
+        threshold = stream.open_uniform();
         (class, polarization) = (stream.uniform(), stream.uniform());
     }
     Ok(())

@@ -27,14 +27,15 @@ import {DEFAULT_NUMERICAL_APERTURE,INTENSITY_UNITS,POWER_UNITS,WAIST_UNITS,inten
 import {meanInputsKey,trajectoryInputsKey} from './dynamics-cache-key.js';
 import {CurrentResults} from './current-results.js';
 import {covers,delivers,horizonRecords,keptCheckpoint,plannedSolve,solveOptions,type SolveInputs,type SolveKind} from './solve-plan.js';
+import {CourseStrip,addMark,clockChangesInMs,courseMark,courseView,currentStep,type Course} from './solve-progress.js';
 import {STATIC_MIXING_LIMIT,displayMixing,modelScope,spectroscopyAnalysis,spectroscopyCoupling,projectSpectroscopyPopulations} from './spectroscopy.js';
 import type {ScopeNote} from './spectroscopy.js';
 import {newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal} from './solver-types.js';
+import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal,SolveStage} from './solver-types.js';
 import {SEMICLASSICAL_REGIME} from './solver-types.js';
-import {MOTION_AXES,motionRefusal,motionTemperatureReading,setMotionTemperature} from './motion.js';
+import {MOTION_AXES,motionRefusal,motionRequest,motionTemperatureReading,setMotionTemperature} from './motion.js';
 import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
 import {keepTweezer,setTweezer,tweezerOf,tweezerRefusal} from './tweezer.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
@@ -102,7 +103,10 @@ type Submitted={kind:SolveKind;inputs:SolveInputs;epochs:{trajectory:number;mean
 /** The running solve's latest checkpoint and when it arrived (the status line counts its estimate of
  * the time left down from then): never drawn; on 停止 (or a failure) it becomes the result. */
 let lastCheckpoint:(Submitted&{record:SolvedRecord;arrived:number})|undefined;
-/** The status line's next re-render while it counts a running solve's remaining time down. */
+/** The running motion solve's course: its stages and its checkpoints' numbers, shown under the status strip while it
+ * runs (solve-progress.ts); none for any other solve. */
+let course:Course|undefined;
+/** The status line's next re-render while it counts a running solve's remaining time down, or the course its clock. */
 let countdownTimer=0;
 const $=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T;
 const message=(error:unknown)=>error instanceof Error?error.message:String(error);
@@ -147,7 +151,9 @@ const detailsCommand=command('详情',()=>showView('details'),{role:'quiet'});de
 strip.trailing.prepend(detailsCommand.root);
 // 超出模型范围: under the status line on every page, while a laser's effect is outside the model.
 const scopeLine=element('div','model-scope');scopeLine.id='model-scope';scopeLine.setAttribute('role','note');scopeLine.hidden=true;
-workbench.prepend(header,strip.root,scopeLine);
+// Under the status line while a motion solve runs: its course, step by step (solve-progress.ts).
+const courseStrip=new CourseStrip();courseStrip.root.id='solve-progress';
+workbench.prepend(header,strip.root,courseStrip.root,scopeLine);
 
 // The three analysis pages and 详情 (v3 FluentTabWidget); each page's own controls on its title
 // row. The analysis pages hold data only; what it means is on 详情.
@@ -268,7 +274,8 @@ function solverStatus():[string,StatusWord,string?,string?]{
   // While a solve runs nothing new is drawn; the status says how far its checkpoints have come and,
   // last, the time its latest estimate leaves, counted down.
   if(currentSolverBusy()){
-    const last=lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.mean.converged?last.mean.estimatedError:null);
+    // A motion solve's errors are on its course, under the line (solve-progress.ts).
+    const last=shownCourse()?undefined:lastCheckpoint?.record.result,reached=last?.populationAccuracy?.estimatedMaximumError??(last?.mean.converged?last.mean.estimatedError:null);
     const words=reached!=null?`${subject}计算中… · 当前估计误差最大 ${errorPercent(reached)}`:meanReady?'长期布居已就绪 · 时间演化计算中…':solverQueued?`${subject}待计算`:`${subject}计算中…`,left=remainingTime()?.words;
     return [left?`${words} · ${left}`:words,'task'];
   }
@@ -336,6 +343,8 @@ function remainingTime():ReturnType<typeof remainingWords>|undefined{
   const last=lastCheckpoint,metrics=last?.record.result.metrics,estimate=metrics?.estimatedRemainingMs;
   return last&&estimate!==undefined?remainingWords(estimate,performance.now()-last.arrived):undefined;
 }
+/** The course shown: the running motion solve's, while it brings what the page shows. */
+function shownCourse():Course|undefined{return currentSolverBusy()?course:undefined;}
 function refreshStatus():void{
   if(notice&&performance.now()>notice.until)notice=undefined;
   let [text,word,elapsed,full]=solverStatus();
@@ -346,9 +355,10 @@ function refreshStatus():void{
   const busy=currentSolverBusy();
   strip.show(text+tail,word);if(full)setTitle(strip.root,full+tail);strip.setActionVisible(busy);
   detailsCommand.hidden=!currentSolverError();
-  // The countdown says its next value when it changes, at least once a second.
-  clearTimeout(countdownTimer);const next=busy?remainingTime()?.changesInMs:undefined;
-  if(next!==undefined)countdownTimer=window.setTimeout(refreshStatus,Math.min(1000,next));
+  const shown=shownCourse(),now=performance.now();courseStrip.show(shown&&courseView(shown,now));
+  // The countdown says its next value when it changes, at least once a second; the course's clock at its next second.
+  clearTimeout(countdownTimer);const changes=[busy?remainingTime()?.changesInMs:undefined,shown&&clockChangesInMs(now-shown.startedAt,currentStep(shown).sinceMs)].filter((ms):ms is number=>ms!==undefined);
+  if(changes.length)countdownTimer=window.setTimeout(refreshStatus,Math.min(1000,...changes));
 }
 
 // ---------------------------------------------------------------- selection
@@ -1039,18 +1049,25 @@ function requestSolve():void{
   const stillCurrent=()=>revision===solverRevision;
   // A checkpoint is kept, not drawn: the page shows the final result, rendered once.
   lastCheckpoint=undefined;
-  const submittedOptions={...solveOptions(kind),onProgress:(result:DynamicsResult)=>{
+  // A motion solve -- the client sends the motion with a trajectory alone (solver-client.ts motionOf) -- keeps its course.
+  const options=solveOptions(kind),started:Course|undefined=!options.includeMean&&motionRequest(submittedSettings)?{startedAt:submittedAt,stages:[],marks:[]}:undefined;course=started;
+  const submittedOptions={...options,onProgress:(result:DynamicsResult)=>{
     if(!stillCurrent())return;
-    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon},arrived:performance.now()};refreshStatus();
+    lastCheckpoint={...submitted,record:{result,wallMs:performance.now()-submittedAt,horizon},arrived:performance.now()};
+    const mark=started&&courseMark(result,performance.now()-started.startedAt);if(mark)addMark(started!,mark);
+    refreshStatus();
+  },onStage:(stage:SolveStage)=>{
+    if(!stillCurrent()||!started)return;
+    started.stages.push({atMs:performance.now()-started.startedAt,stage});refreshStatus();
   }};
   solverTimer=window.setTimeout(async()=>{
     if(!stillCurrent())return;solverQueued=false;refreshPopulationOnly();
     try{
       const begin=performance.now(),result=await solver.solve(submittedScene,submittedSettings,submittedOptions);if(!stillCurrent())return;
-      solverWallMs=performance.now()-begin;lastCheckpoint=undefined;
+      solverWallMs=performance.now()-begin;lastCheckpoint=undefined;course=undefined;
       storeResult({result,wallMs:solverWallMs,horizon},submitted);
       solverBusy=false;running=undefined;refreshPopulationOnly();
-    }catch(e){if(!stillCurrent())return;keepLastCheckpoint('failed');solverBusy=false;running=undefined;solverError=message(e);refreshPopulationOnly();}
+    }catch(e){if(!stillCurrent())return;keepLastCheckpoint('failed');course=undefined;solverBusy=false;running=undefined;solverError=message(e);refreshPopulationOnly();}
   },16);
   refreshPopulationOnly();
 }
@@ -1059,7 +1076,7 @@ function storeResult(record:SolvedRecord,{kind,inputs,epochs}:Submitted):void{
   if(kind!=='mean')trajectories.set(inputs.trajectoryKey,epochs.trajectory,'trajectory',record);
   if(kind!=='trajectory')for(const mean of horizonRecords(record))means.set(inputs.meanKey,epochs.mean,mean.horizon,mean);
 }
-function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedKind=undefined;running=undefined;solverBusy=false;solverQueued=false;solverError='';}
+function cancelObsoleteSolve():void{solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;course=undefined;requestedKey='';requestedKind=undefined;running=undefined;solverBusy=false;solverQueued=false;solverError='';}
 /** The running solve's last checkpoint becomes the result, rendered once and marked: its
  * trajectory, and its mean at every T where no final mean is here. */
 function keepLastCheckpoint(cause:'stopped'|'failed'):void{
@@ -1477,7 +1494,7 @@ function renderResults(allowSolve=true):void{
 
 // ---------------------------------------------------------------- the scene as a document
 function replaceScene(next:Scene,text:string):void{
-  unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;requestedKey='';requestedKind=undefined;running=undefined;stoppedKey='';solverError='';solverBusy=false;solverQueued=false;controlsKey='';trajectories.clear();means.clear();
+  unitDrafts.clear();fieldProblems.clear();solver.cancel();solverRevision++;clearTimeout(solverTimer);lastCheckpoint=undefined;course=undefined;requestedKey='';requestedKind=undefined;running=undefined;stoppedKey='';solverError='';solverBusy=false;solverQueued=false;controlsKey='';trajectories.clear();means.clear();
   disposeTrees($('levels-details'));$('levels-details').replaceChildren();$('selection-readout').dataset.selectionKey='';
   normalizeScene(next);scene=next;stateLabels=keepLabels(stateLabels,id=>!id.startsWith('reference-')||!!scene.references.some(r=>r.id===id));populationTimeIndex=-1;
   selection=firstObject(scene);

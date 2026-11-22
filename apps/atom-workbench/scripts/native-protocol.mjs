@@ -45,3 +45,6 @@ export function validateAtomicResult(result,request){
   if(request.modelSchema!==FULL_MODEL_SCHEMA||request.model?.dimension!==32||!Array.isArray(request.model?.collapse))throw new Error('Atomic request is missing required physical model metadata.');
   if(result?.modelSchema!==request.modelSchema||result.protocol!==NATIVE_PROTOCOL)throw new Error('Native atomic response has missing or incompatible model identity.');
 }
+/** A worker's `stage` progress carries one object (rust-solver/src/motion_adapter.rs `stage`), passed on as it came; the
+ * client reads it strictly (src/solver-types.ts `readStage`). */
+export function isStage(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}

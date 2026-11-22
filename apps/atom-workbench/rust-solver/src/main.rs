@@ -4,9 +4,20 @@
 //! the semiclassical solver through `motion_adapter`. Matrices in the public
 //! protocol are row-major, frequencies are rad/us, collapse amplitudes are
 //! sqrt(1/us).
+//!
+//! # Defects
+//! A panic anywhere in a request's solve -- on this thread or on a thread of a
+//! solver's pool, whose join hands it on to the caller -- is a defect of the
+//! engine, never a result: the request is answered with an error that names
+//! where it was raised and its message (`answered`), and the worker serves the
+//! next request. The panic hook records the place and the message on the thread
+//! that raises it, before the unwinding reaches the request (`DEFECT`); nothing
+//! of a solve is changed by it.
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::{Mutex, Once};
 
 mod harmonics;
 mod lattice_core_adapter;
@@ -139,6 +150,39 @@ struct Request {
     progress: bool,
 }
 
+/// The first panic since a request began, as the panic hook recorded it: where it was raised and its message (# Defects).
+static DEFECT: Mutex<Option<String>> = Mutex::new(None);
+
+/// A panic's message: its payload's text, a `&str` or a `String` (`panic!`'s two).
+fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "（无文字信息）".into())
+}
+
+/// The work of a request answered whatever it does (# Defects): its value, or where a panic unwound out of it, the
+/// request `id`'s error with the panic's place and message. The hook that records them keeps the default one's report
+/// on stderr; it is installed once, for every thread.
+fn answered(id: &Value, work: impl FnOnce() -> Value) -> Value {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let default = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let place = info.location().map_or_else(|| "位置不明".into(), |at| format!("{}:{}:{}", at.file(), at.line(), at.column()));
+            let mut defect = DEFECT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            defect.get_or_insert_with(|| format!("{place}：{}", payload_text(info.payload())));
+            drop(defect);
+            default(info);
+        }));
+    });
+    DEFECT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    match panic::catch_unwind(AssertUnwindSafe(work)) {
+        Ok(value) => value,
+        Err(payload) => {
+            let defect = DEFECT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take().unwrap_or_else(|| payload_text(&*payload));
+            json!({"id":id,"protocol":NATIVE_PROTOCOL,"error":format!("求解中断：引擎内部出错（{defect}）。这是引擎缺陷，请把请求文件发给开发者。")})
+        }
+    }
+}
+
 fn write_line(message: &Value) -> bool {
     let mut out = io::BufWriter::new(io::stdout().lock());
     serde_json::to_writer(&mut out, message).is_ok() && writeln!(out).is_ok() && out.flush().is_ok()
@@ -147,7 +191,8 @@ fn write_line(message: &Value) -> bool {
 /// One protocol response to a request and its line. `capabilities` and `warmup` (the
 /// worker start-up LAPACK self-check) are operations; anything else is an rb87-full/2 solve,
 /// which with `progress` first streams every checkpoint's result as `checkpoint`
-/// progress (the same contract, marked `progress`).
+/// progress (the same contract, marked `progress`), and a motion solve's stages as
+/// `stage` progress (motion_adapter.rs `stage`).
 fn respond(request: Request, line: &Value) -> Value {
     let id = request.id;
     match request.op.as_deref() {
@@ -171,9 +216,15 @@ fn respond(request: Request, line: &Value) -> Value {
             write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"checkpoint","result":stamp(checkpoint.clone())}));
         }
     };
+    // A motion solve's stages (motion_adapter.rs `stage`), with `progress` only, as `stage` progress: no result.
+    let mut staged = |stage: &Value| {
+        if request.progress {
+            write_line(&json!({"id":id,"protocol":NATIVE_PROTOCOL,"progress":"stage","stage":stage}));
+        }
+    };
     let result = match (request.model_schema.as_deref(), request.model.as_ref()) {
         (Some(FULL_MODEL_SCHEMA), Some(model)) => match &model.motion {
-            Some(_) => motion_adapter::solve(model, line, &request.options, &mut publish),
+            Some(_) => motion_adapter::solve(model, line, &request.options, &mut publish, &mut staged),
             None => lattice_core_adapter::solve(model, &request.options, &mut publish),
         },
         (Some(FULL_MODEL_SCHEMA), None) => Err("A solve request requires a model".into()),
@@ -203,7 +254,7 @@ pub fn main() {
             continue;
         }
         let output = match serde_json::from_str::<Value>(&line).and_then(|value| Request::deserialize(&value).map(|request| (request, value))) {
-            Ok((request, value)) => respond(request, &value),
+            Ok((request, value)) => answered(&request.id.clone(), || respond(request, &value)),
             Err(error) => json!({"id":null,"protocol":NATIVE_PROTOCOL,"error":format!("Invalid request: {error}")}),
         };
         if !write_line(&output) {
@@ -217,6 +268,25 @@ mod tests {
     use super::*;
     fn request(line: Value) -> Value {
         respond(Request::deserialize(&line).unwrap(), &line)
+    }
+    /// A defect is an error, at once, and the worker serves on (# Defects): a request whose work panics on a thread of a
+    /// pool -- the solver's pool's way, a join handing the panic on -- is answered within seconds with the error that
+    /// names the panic's place (this file) and its message and says it is the engine's defect; the next request is
+    /// answered as ever.
+    #[test]
+    fn a_panic_in_a_solve_is_an_error_and_the_worker_serves_on() {
+        use rayon::prelude::*;
+        let started = std::time::Instant::now();
+        let out = answered(&json!(11), || {
+            (0..64_u32).into_par_iter().for_each(|i| assert!(i != 37, "a defect at {i}"));
+            json!({"id":11})
+        });
+        let error = out["error"].as_str().unwrap_or("").to_owned();
+        eprintln!("{:?}: {error}", started.elapsed());
+        assert!(out["id"] == json!(11) && error.contains("main.rs") && error.contains("a defect at 37") && error.contains("这是引擎缺陷"), "{out}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(request(json!({"id":12,"op":"capabilities"}))["capabilities"], json!([FULL_MODEL_SCHEMA]));
+        assert_eq!(answered(&json!(13), || json!({"id":13,"result":1})), json!({"id":13,"result":1}));
     }
     #[test]
     fn operations_report_the_single_schema_and_a_numerical_self_check() {

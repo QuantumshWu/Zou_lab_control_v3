@@ -74,19 +74,24 @@ test('timeout cancels only its channel and ignores the late terminal response',a
  }finally{await f.adapter.dispose();}
 });
 
-test('the checkpoints of a motion solve stream on and restart its deadline; a stream may not end on one',async()=>{
+test('the checkpoints and stages of a motion solve stream on and restart its deadline; a stream may not end on one',async()=>{
  const f=fixture({timeoutMs:60});try{
   const body={...input(1,true),options:{...input().options,motion:{axis:'3d',temperatureUK:30},device:'cpu'}};
   const pending=solve(f.adapter,body),message=await posted(f.worker);
-  const beat=()=>f.worker.emit({kind:'stream',channel:message.channel,event:{type:'checkpoint',data:{request:input().request,progress:true,populations:[[1,0]]}}});
+  const beat=(type='checkpoint')=>f.worker.emit({kind:'stream',channel:message.channel,event:{type,data:type==='stage'?{request:input().request,stage:{step:'pilot',stepUs:.5}}:{request:input().request,progress:true,populations:[[1,0]]}}});
   beat();const response=await pending,reader=response.body.getReader();assert.equal(line((await reader.read()).value).type,'checkpoint');
-  // Checkpoints 40 ms apart keep a 60 ms deadline from expiring for 160 ms.
-  for(let k=0;k<4;k++){await new Promise(resolve=>setTimeout(resolve,40));beat();assert.equal(line((await reader.read()).value).type,'checkpoint');}
+  // Checkpoints and stages 40 ms apart keep a 60 ms deadline from expiring for 160 ms; a stage passes on as it came.
+  for(let k=0;k<4;k++){
+    await new Promise(resolve=>setTimeout(resolve,40));const type=k%2?'stage':'checkpoint';beat(type);
+    const event=line((await reader.read()).value);assert.equal(event.type,type);if(type==='stage')assert.deepEqual(event.data.stage,{step:'pilot',stepUs:.5});
+  }
   f.worker.emit({kind:'stream',channel:message.channel,event:{type:'result',data:{request:input().request,populations:[[1,0]]}},done:true});
   assert.equal(line((await reader.read()).value).type,'result');assert.equal((await reader.read()).done,true);
-  const ended=solve(f.adapter,input(2,true)),next=await posted(f.worker);
-  f.worker.emit({kind:'stream',channel:next.channel,event:{type:'checkpoint',data:{request:input(2).request,progress:true,populations:[[1,0]]}},done:true});
-  await assert.rejects(ended);
+  for(const type of ['checkpoint','stage']){
+    const ended=solve(f.adapter,input(2,true)),next=await posted(f.worker);
+    f.worker.emit({kind:'stream',channel:next.channel,event:{type,data:{request:input(2).request,progress:true,populations:[[1,0]]}},done:true});
+    await assert.rejects(ended,undefined,`a stream ended on a ${type}`);
+  }
   // The running report of the deleted 2D engine is no event any more.
   const stale=solve(f.adapter,input(3,true)),last=await posted(f.worker);
   f.worker.emit({kind:'stream',channel:last.channel,event:{type:'running',data:{request:input(3).request,running:{simulatedUs:1,durationUs:2,trajectories:0}}}});

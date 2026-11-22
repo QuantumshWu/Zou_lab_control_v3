@@ -138,6 +138,22 @@ test('the motion block: 3D in the lab frame, the trap beam named, a waist exactl
   assert.deepEqual({h:plain.hReal,d:plain.drives,c:plain.collapse},{h:model.hReal,d:model.drives,c:model.collapse});
 });
 
+test('the optical reference is of the light other than the tweezer: beside that light the tweezer has a frequency axis of its own; alone it is the reference',()=>{
+  // The default scene's probe made weak and far (1e-6 mW/cm², 2 GHz off F=2 → F′=2): the 852 nm tweezer mixes most.
+  const scene=defaultScene(),probe=scene.lasers.find(l=>l.id==='probe');Object.assign(probe,{intensityMWcm2:1e-6});probe.frequency.offsetMHz=2000;resolveSceneFrequencies(scene);
+  assert.equal(buildFullMasterModel(scene,scene.dynamics).referenceLaserId,'tweezer','without motion no beam is a trap: the largest mixing, the tweezer');
+  const model=buildFullMasterModel(scene,scene.dynamics,request(scene)),f=model.frequencyCoordinates.frequenciesMHz,beams=model.motion.beams;
+  assert.equal(model.referenceLaserId,'probe');assert.equal(f.at(-1),laserFrequencyMHz(probe));
+  // The engine's test (scene.rs `tweezer_axis`): an axis before the carrier on which the tweezer's index is nonzero and every other beam's zero.
+  const tweezer=beams.find(b=>b.id==='tweezer'),own=f.slice(0,-1).findIndex((_,i)=>tweezer.frequencyIndex[i]!==0&&beams.every(b=>b===tweezer||b.frequencyIndex[i]===0));
+  assert.ok(own>=0,JSON.stringify(beams.map(b=>[b.id,b.frequencyIndex])));
+  // No light but the tweezer: it is the reference, its index zero, the carrier its own frequency.
+  probe.enabled=false;
+  const alone=buildFullMasterModel(scene,scene.dynamics,request(scene));
+  assert.equal(alone.referenceLaserId,'tweezer');assert.deepEqual(alone.motion.beams.map(b=>[b.id,b.frequencyIndex]),[['tweezer',[0]]]);
+  assert.deepEqual(alone.frequencyCoordinates.frequenciesMHz,[laserFrequencyMHz(tweezerOf(scene))]);
+});
+
 /** C ρ C† summed over operators. */
 function dissipated(operators,rho){
   const out={re:Array(N*N).fill(0),im:Array(N*N).fill(0)};
@@ -310,23 +326,23 @@ test('a motion trajectory is tested against its own target, 5 %, and every sente
 
 test('the notes and the chart titles say what the engine computes: the loss, the trap light, T\'s window, n̄, the initial ensemble, the statistics, the target on T',()=>{
   const notes=definitionNotes()+modelNotes(),solver=new URL('../rust-solver/motion/src/',import.meta.url),source=path=>readFileSync(new URL(path,solver),'utf8');
-  // The loss (model.rs `Model::lost`): first outside the trap light's region AND its loss energy above the far value; an
-  // atom outside the region but bound there is held. The region's words are the engine's (units.rs REGION_INTENSITY).
-  assert.match(source('model.rs'),/self\.light\.outside\(at\.r\)\s*&&\s*self\.energy_with\([^)]*\)\s*>\s*self\.asymptote\(/);
-  assert.match(source('units.rs'),/pub const REGION_INTENSITY: f64 = 1\.0 \/ 20\.0;/);
-  const region=/model-notes\.ts: "([^"]+)"/.exec(source('units.rs'))?.[1];
-  assert.ok(region&&region.includes('1/20')&&notes.includes(region),region);
-  assert.match(notes,/1\/20）[^。]*能量[^。]*高于远处的值[^。]*区域之外仍被束缚的原子不算丢失/);
+  // The loss (model/selected.rs `lost`, SPEC §1.7): the loss energy first above the far value, the escape value E_cap = 0,
+  // wherever the atom is -- the trap's region is no part of it (2026-11-21; before, the atom had also to be outside it).
+  assert.match(source('model/selected.rs'),/fn lost\([^)]*\) -> bool \{\s*self\.energy\([^)]*\)\s*>\s*0\.0\s*\}/);
+  assert.match(notes,/能量[^。]*第一次高于远处的值[^。]*就算丢失，不论它此时在哪里/);
+  assert.doesNotMatch(notes,/区域之外仍被束缚的原子不算丢失/);
   // The trap light is the whole field of the tweezer's frequency (field.rs `Light::outside`, SPEC §1.3).
   assert.match(source('field.rs'),/self\.frequencies\[self\.trap\]\.beams\.iter\(\)\.all/);
   assert.match(notes,/“设为光镊”的那一束光，连同与它同频的各束光/);
   // T and n̄ over one trap period about t, cut at t = 0 and kept centred (estimate.rs `half_window`): from 0 to 2t at first.
-  assert.match(source('estimate.rs'),/pub fn half_window\(frequency: f64, t: f64\) -> f64 \{\s*\(0\.5 \* TAU \/ frequency\)\.min\(t\)/);
+  // The smaller of half a period and t, NaN where either is (linalg.rs `smaller`, d440c45b: the same rule, NaN kept).
+  assert.match(source('estimate.rs'),/pub fn half_window\(frequency: f64, t: f64\) -> f64 \{\s*crate::linalg::smaller\(0\.5 \* TAU \/ frequency, t\)/);
   const [temperature,occupation]=motionSeries(readMotion().motion);
   assert.ok(temperature.title.includes(TEMPERATURE_WINDOW)&&TEMPERATURE_WINDOW.includes('一个阱周期')&&TEMPERATURE_WINDOW.includes('0 到 2t'),temperature.title);
   assert.match(notes,/一个阱周期内的平均（t 不到半个周期时窗口截到 t = 0、仍以 t 为中心，即 0 到 2t/);
   // n̄ of the held atoms' mean κ², the mean velocity in it (estimate.rs `summarize`): k_BT/ħω − ½ only for atoms at rest as a whole.
-  assert.match(source('estimate.rs'),/occupation: std::array::from_fn\(\|a\| occupation\(hm \* all\.kappa2\[a\], n, scales\.frequencies\[a\]\)\)/);
+  // Over the held atoms' number, `all.held` (the local `n` it was until 0ce72e75).
+  assert.match(source('estimate.rs'),/occupation: std::array::from_fn\(\|a\| occupation\(hm \* all\.kappa2\[a\], all\.held, scales\.frequencies\[a\]\)\)/);
   assert.match(occupation.title,/n̄ = m⟨v²⟩\/ħω − ½/);assert.match(notes,/⟨v²⟩ 含原子整体的平均速度：没有平均速度时它就是 k<sub>B<\/sub>T\/ħω − ½/);
   // The initial ensemble: the lowered isothermal of the bound atoms (ensemble.rs), not a Boltzmann factor cut at the escape.
   assert.match(source('ensemble.rs'),/f\(r, κ\) ∝ e\^\{−E\/k_BT\} − 1 for E < 0/);
@@ -335,8 +351,10 @@ test('the notes and the chart titles say what the engine computes: the loss, the
   // errors over few groups.
   assert.match(source('estimate.rs'),/quantile\(tail_among\(looks\), freedom\) \* self\.error/);
   assert.match(notes,/区间按组数取 Student t，组少时比两倍标准误差宽/);
-  // The total T's target: its three parts weighed by the held share (solve.rs `accounts`; SPEC §0).
-  assert.match(source('solve.rs'),/Account \{ model: h \* model, step: h \* bound, statistics: h \* relative \}/);
+  // The total T's target: its three parts weighed by the held share (solve.rs `temperature_account`, moved out of
+  // `accounts` in b2dac752; SPEC §0): the model's and the statistics' here, the step's read so already (estimate.rs `between`).
+  assert.match(source('solve.rs'),/let h = 1\. - e\.loss;\s*Account \{ model: weighed\(h, model\), step: bound\.temperature \* e\.temperature_target, statistics: weighed\(h, interval\) \}/);
+  assert.match(source('estimate.rs'),/T relative to the finer level's and weighed by the\s*\/\/! finer level's held share 1 − L/);
   assert.match(notes,/按仍在光阱中的份额 1 − L 计权后与 10% 比较/);
   // A motion trajectory's sample errors are its total estimates against its own target.
   assert.match(notes,/按运动自己的目标 5% 判断与标出/);
