@@ -2384,11 +2384,13 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     if choice.is_some() {
         let allowance = reads.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
         let (r, se, decided) = memory_at_the_end(&parts.iter().collect::<Vec<_>>(), &context.scales, allowance);
-        eprintln!(
-            "  注：运行末 T 的记忆（运行自己的 {} 条轨迹，初态动能倾斜的似然比）：m = {r:.2} ± {se:.2} µK，允许量 {allowance:.2} µK：{}",
-            parts.len() as u64 * GROUP,
-            match decided { Some(true) => "塌掉（运行末仍可读出）", Some(false) => "没塌掉（运行末的上端在允许量以内）", None => "定不下来，不出旗标" }
-        );
+        // At the run's end no atom held: no T there, its memory unread (no flag).
+        let said = if allowance.is_finite() && r.is_finite() && se.is_finite() {
+            format!("m = {r:.2} ± {se:.2} µK，允许量 {allowance:.2} µK：{}", match decided { Some(true) => "塌掉（运行末仍可读出）", Some(false) => "没塌掉（运行末的上端在允许量以内）", None => "定不下来，不出旗标" })
+        } else {
+            "运行末没有被抱住的原子，T 无读数，不出旗标".to_string()
+        };
+        eprintln!("  注：运行末 T 的记忆（运行自己的 {} 条轨迹，初态动能倾斜的似然比）：{said}", parts.len() as u64 * GROUP);
         if decided == Some(true) {
             context.ledger.flag("温度的记忆时间不短于运行（运行自己轨迹上的动量缩放响应在运行末仍可读出：Λ 塌掉）".to_string());
         }

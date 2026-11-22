@@ -688,12 +688,16 @@ impl<'a> Paths<'a> {
         let length = run.min(5.0 * memory);
         let windows = paths::windows(length, memory, step);
         let late_from = (run > 2.0 * length).then_some(run - length);
-        // The stretches the setting takes: every walk from its start, and from the late segment's where there is one.
-        let starts: Vec<(&Walk, f64)> = walks.iter().map(|w| (w, 0.0)).chain(late_from.iter().flat_map(|&f| walks.iter().filter(move |w| f < w.end()).map(move |w| (w, f)))).collect();
+        // The stretches the setting takes: every walk that took a step from its start, and from the late segment's where
+        // there is one.
+        let starts: Vec<(&Walk, f64)> = walks.iter().filter(|w| w.end() > 0.0).map(|w| (w, 0.0)).chain(late_from.iter().flat_map(|&f| walks.iter().filter(move |w| f < w.end()).map(move |w| (w, f)))).collect();
         // The calibration's walk: the longest (the first of them), along its whole [0, L].
         let reach = |w: &Walk| length.min(w.end());
         let longest = (0..walks.len()).fold(0, |best, k| if reach(&walks[k]) > reach(&walks[best]) { k } else { best });
         let stretch = reach(&walks[longest]);
+        if !(stretch > 0.0) {
+            return Err("no path of the pilot's goes past its start (every one's atom lost or its trajectory ended at its first step)".into());
+        }
         #[cfg(test)]
         if traced() {
             eprintln!("    [trace] reference form: {}; beats H {:?}, R {:?}", form.shape(), form.beat_values().0, form.beat_values().1);
@@ -714,7 +718,8 @@ impl<'a> Paths<'a> {
                     let clock = Instant::now();
                     let out = if j < n {
                         let w = &walks[j];
-                        form.along(w, &w.start, 0.0, reach(w), scheme)
+                        // A walk that took no step (its trajectory ended at its first) reads nothing.
+                        if reach(w) > 0.0 { form.along(w, &w.start, 0.0, reach(w), scheme) } else { Ok(Series::default()) }
                     } else {
                         // A walk that ended before the late segment (its atom lost) reads nothing there.
                         let (w, from) = (&walks[j - n], late_from.expect("a late segment"));
@@ -856,7 +861,8 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
                 }
                 j if j < n => {
                     let w = &paths.walks[j];
-                    form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme).map(|s| vec![s])
+                    let reach = paths.length.min(w.end());
+                    (if reach > 0.0 { form.along(w, &w.start, 0.0, reach, scheme) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
