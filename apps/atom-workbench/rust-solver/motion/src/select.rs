@@ -154,6 +154,24 @@ fn lawson((per_us, pieces): (f64, usize), read: usize) -> Scheme {
 /// The calibration's piece (µs): the first path's start, where the readings change fastest (P1-PATHS: one path, 10 µs).
 pub const CALIBRATION: f64 = 10.0;
 
+/// The measurements' trace (SELCOST): `SELCOST_TRACE` set, each job's work said.
+#[cfg(test)]
+pub(crate) fn traced() -> bool {
+    std::env::var_os("SELCOST_TRACE").is_some()
+}
+
+/// One job's work in the trace (`traced`): its wall seconds and its series' counts.
+#[cfg(test)]
+pub(crate) fn trace_job(what: &str, s: &Series, wall: f64) {
+    if traced() {
+        let c = &s.counts;
+        eprintln!(
+            "    [trace] {what}: {:.1} µs, wall {wall:.2} s; thread s {:.2} (freeze {:.2} + propagation {:.2} + readouts {:.2}); {} nodes, {} substeps, {} products, {} readouts",
+            c.time, c.seconds(), c.node_seconds, c.propagation_seconds, c.readout_seconds, c.nodes, c.segments, c.products, c.readouts
+        );
+    }
+}
+
 /// A run's states: P, the structural chain it is one of (module documentation, # The candidates), the states'
 /// structural amplitudes, the chain's time, and what the choice made of the chain where it was made (`Choice`: after the
 /// pilot, solve.rs # The selection).
@@ -424,6 +442,10 @@ fn settle(form: &Form, walk: &Walk, piece: f64, step: f64) -> Result<(Settled, [
         products += made.iter().map(|s| s.counts.products).sum::<u64>();
         let [a, b]: [Series; 2] = made.try_into().expect("two refinements");
         let errors = [RICHARDSON * change(&at, &a), RICHARDSON * change(&at, &b)];
+        #[cfg(test)]
+        if traced() {
+            eprintln!("    [trace] settle {setting:?}: refinements {:?} {:?}, parts {:.2e} {:.2e}, seconds {:.2} {:.2} {:.2}", finer[0], finer[1], errors[0], errors[1], at.counts.seconds(), a.counts.seconds(), b.counts.seconds());
+        }
         let open = [setting.0 < FINEST.0, setting.1 < FINEST.1];
         if errors[0] + errors[1] <= TOLERANCE || !(open[0] || open[1]) {
             return Ok((Settled { setting, errors, tried, products, seconds: clock.elapsed().as_secs_f64() }, [at, a, b]));
@@ -501,22 +523,42 @@ impl<'a> Paths<'a> {
         let late_from = (run > 2.0 * length).then_some(run - length);
         let (settled, calibrated) = settle(&form, &walks[0], piece, step)?;
         let scheme = lawson(settled.setting, 1);
+        #[cfg(test)]
+        if traced() {
+            eprintln!("    [trace] reference form: {}; beats H {:?}, R {:?}", form.shape(), form.beat_values().0, form.beat_values().1);
+            eprintln!("    [trace] walks: {:?} ends, step {step}, ends at {:?}", walks.iter().map(|w| w.ends.len()).collect::<Vec<_>>(), walks.iter().map(|w| w.end()).collect::<Vec<_>>());
+        }
+        #[cfg(test)]
+        let pool = Instant::now();
+        #[cfg(test)]
+        let _ = crate::paths::freeze_parts();
         // One job a walk's start and its end; on the pool.
         let n = walks.len();
         let jobs: Vec<usize> = (0..n * (1 + usize::from(late_from.is_some()))).collect();
         let done: Vec<Result<Series, String>> = jobs
             .par_iter()
             .map(|&j| {
-                if j < n {
+                #[cfg(test)]
+                let clock = Instant::now();
+                let out = if j < n {
                     let w = &walks[j];
                     form.along(w, &w.start, 0.0, length.min(w.end()), scheme)
                 } else {
                     // A walk that ended before the late segment (its atom lost) reads nothing there.
                     let (w, from) = (&walks[j - n], late_from.expect("a late segment"));
                     if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
+                };
+                #[cfg(test)]
+                if let Ok(s) = &out {
+                    trace_job(&format!("reference walk {} {}", j % n, if j < n { "start" } else { "late" }), s, clock.elapsed().as_secs_f64());
                 }
+                out
             })
             .collect();
+        #[cfg(test)]
+        if traced() {
+            eprintln!("    [trace] reference jobs: {:.2} s wall on {} threads; freezes' parts (node, amplitudes, eigen, exponentials and R, reading's node) {:.2?} s", pool.elapsed().as_secs_f64(), rayon::current_num_threads(), crate::paths::freeze_parts());
+        }
         let mut done = done.into_iter();
         let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
         let late_series: Vec<Series> = done.collect::<Result<_, _>>()?;
@@ -611,16 +653,25 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let jobs: Vec<usize> = (0..2 + n * (1 + usize::from(paths.late.is_some()))).collect();
     let done: Vec<Result<Series, String>> = jobs
         .par_iter()
-        .map(|&j| match j {
-            0 | 1 => form.along(w0, &w0.start, 0.0, piece, refined[j]),
-            j if j < 2 + n => {
-                let w = &paths.walks[j - 2];
-                form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme)
+        .map(|&j| {
+            #[cfg(test)]
+            let clock = Instant::now();
+            let out = match j {
+                0 | 1 => form.along(w0, &w0.start, 0.0, piece, refined[j]),
+                j if j < 2 + n => {
+                    let w = &paths.walks[j - 2];
+                    form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme)
+                }
+                j => {
+                    let (w, from) = (&paths.walks[j - 2 - n], paths.late.as_ref().expect("a late segment").0);
+                    if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
+                }
+            };
+            #[cfg(test)]
+            if let Ok(s) = &out {
+                trace_job(&format!("P{} job {j}", model.rs.keep.len()), s, clock.elapsed().as_secs_f64());
             }
-            j => {
-                let (w, from) = (&paths.walks[j - 2 - n], paths.late.as_ref().expect("a late segment").0);
-                if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
-            }
+            out
         })
         .collect();
     let mut done = done.into_iter();
@@ -648,7 +699,33 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
     let clock = Instant::now();
     let forms = [Form::new(reference, at), Form::new(model, at)];
     let jobs: Vec<(usize, usize)> = (0..2).flat_map(|m| (0..scans.len()).map(move |w| (m, w))).collect();
-    let done: Vec<Result<Series, String>> = jobs.par_iter().map(|&(m, w)| forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), lawson(setting, 4))).collect();
+    #[cfg(test)]
+    let _ = crate::paths::freeze_parts();
+    #[cfg(test)]
+    if traced() {
+        for (k, w) in scans.iter().enumerate() {
+            let e = w.ends.last().unwrap();
+            eprintln!("    [trace] scan {k}: {:.2} µs, {} knots, end r {:?}, s {:.3e}", w.end(), w.ends.len(), [e[1], e[2], e[3]], intensity(light, [e[1], e[2], e[3]]));
+        }
+        eprintln!("    [trace] candidate form: {}; beats H {:?}, R {:?}", forms[1].shape(), forms[1].beat_values().0, forms[1].beat_values().1);
+    }
+    let done: Vec<Result<Series, String>> = jobs
+        .par_iter()
+        .map(|&(m, w)| {
+            #[cfg(test)]
+            let clock = Instant::now();
+            let out = forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), lawson(setting, 4));
+            #[cfg(test)]
+            if let Ok(s) = &out {
+                trace_job(&format!("scan {w} {}", if m == 0 { "reference" } else { "candidate" }), s, clock.elapsed().as_secs_f64());
+            }
+            out
+        })
+        .collect();
+    #[cfg(test)]
+    if traced() {
+        eprintln!("    [trace] scans: freezes' parts (node, amplitudes, eigen, exponentials and R, reading's node) {:.2?} s", crate::paths::freeze_parts());
+    }
     let done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
     let (reference, candidate) = done.split_at(scans.len());
     let quarter = 0.25 * POPULATION_TARGET;

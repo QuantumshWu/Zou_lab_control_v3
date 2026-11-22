@@ -481,6 +481,12 @@ impl<'a> Form<'a> {
         )
     }
 
+    /// The beats' values (rad/µs): H's nonzero ones, and R's groups' (the measurements' line).
+    #[cfg(test)]
+    pub(crate) fn beat_values(&self) -> (Vec<f64>, Vec<f64>) {
+        (self.h_beats.iter().map(|&b| self.values[b]).filter(|&v| v != 0.0).collect(), self.beats_r.clone())
+    }
+
     /// The sector vector's length (module documentation, # The sector).
     pub fn dim(&self) -> usize {
         self.dim
@@ -1370,8 +1376,16 @@ impl Form<'_> {
     fn freeze(&self, walk: &Walk, p: &Piece) -> Result<Frozen, String> {
         let clock = std::time::Instant::now();
         let node = self.node_at(walk, p.tm);
+        #[cfg(test)]
+        traced(0, clock);
+        #[cfg(test)]
+        let part = std::time::Instant::now();
         let mut amps = self.amps_with(&node, false);
         drop(node);
+        #[cfg(test)]
+        traced(1, part);
+        #[cfg(test)]
+        let part = std::time::Instant::now();
         let mut hm = vec![C64::ZERO; self.h_slot];
         self.h_at(&[(&amps, 1.0)], p.tm, &mut hm);
         let nb = self.blocks.len();
@@ -1402,6 +1416,10 @@ impl Form<'_> {
             vinvadj.push(aia);
             values.push(eig.values.clone());
         }
+        #[cfg(test)]
+        traced(2, part);
+        #[cfg(test)]
+        let part = std::time::Instant::now();
         // μ = −i(λ_a − conj λ_b) per sector entry, and the substep's exponentials.
         let (mut half, mut full) = (vec![C64::ZERO; self.dim], vec![C64::ZERO; self.dim]);
         for (k, &(px, py)) in self.pairs.iter().enumerate() {
@@ -1426,7 +1444,13 @@ impl Form<'_> {
             })
             .collect();
         amps.r = Vec::new();
+        #[cfg(test)]
+        traced(3, part);
+        #[cfg(test)]
+        let part = std::time::Instant::now();
         let read = p.read.map(|t| (t, self.node_at(walk, t)));
+        #[cfg(test)]
+        traced(4, part);
         Ok(Frozen { a: p.a, d: p.d, n: p.n, amps, hm, v, vinv, vadj, vinvadj, half, full, rs, read, condition, seconds: clock.elapsed().as_secs_f64() })
     }
 
@@ -1741,6 +1765,23 @@ pub fn check(candidate: &Form, reference: &Form, walk: &Walk, start: &[(usize, C
         }
         Ok(most)
     })())
+}
+
+/// The freezes' parts' nanoseconds over every thread (the measurements' trace, select.rs `traced`): the node, its
+/// amplitudes, the eigendecompositions, the exponentials and R, the reading's node.
+#[cfg(test)]
+pub(crate) static FREEZE: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// A freeze's part `k` (`FREEZE`) since `from`.
+#[cfg(test)]
+fn traced(k: usize, from: std::time::Instant) {
+    FREEZE[k].fetch_add(from.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The freezes' parts (`FREEZE`) in seconds, and zeroed.
+#[cfg(test)]
+pub(crate) fn freeze_parts() -> [f64; 5] {
+    std::array::from_fn(|k| FREEZE[k].swap(0, std::sync::atomic::Ordering::Relaxed) as f64 * 1e-9)
 }
 
 #[cfg(test)]
