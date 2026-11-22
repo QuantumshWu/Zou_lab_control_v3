@@ -387,15 +387,14 @@ fn p4table_fill_time() {
 #[ignore]
 fn p4table_ab_step() {
     let (steps, repeat, rounds) = (env("P4T_STEPS", 12.0) as usize, env("P4T_REPEAT_STEP", 5.0) as usize, env("P4T_ROUNDS", 4.0) as usize);
-    // P4T_SWITCH: "table" (model/rs/fold_table.rs `MODE` 0 against 1) or "count" (step.rs `count` by the tail's bound
-    // against the tail summed, `SUMMED`).
-    let by_count = std::env::var("P4T_SWITCH").is_ok_and(|x| x == "count");
-    let set = |m: usize| {
-        if by_count {
-            super::super::SUMMED.with(|x| x.set(m == 1));
-        } else {
-            crate::model::rs::fold::table::MODE.with(|x| x.set(m as u8));
-        }
+    // P4T_SWITCH: "table" (model/rs/fold_table.rs `MODE` 0 against 1), "count" (step.rs `count` by the tail's bound
+    // against the tail summed, `SUMMED`) or "rule" (special.rs `gauss_legendre`'s Newton against the step until it stops
+    // shrinking, `STALLED`).
+    let switch = std::env::var("P4T_SWITCH").unwrap_or_else(|_| "table".into());
+    let set = |m: usize| match switch.as_str() {
+        "count" => super::super::SUMMED.with(|x| x.set(m == 1)),
+        "rule" => crate::special::STALLED.with(|x| x.set(m == 1)),
+        _ => crate::model::rs::fold::table::MODE.with(|x| x.set(m as u8)),
     };
     for (name, request) in scenes() {
         let tau = tau_of(&name);
@@ -403,6 +402,8 @@ fn p4table_ab_step() {
         for (label, run) in models(&name, &request) {
             let mut t = start(&run, &request, chief, 3);
             let (mut time, mut counted, mut taken) = ([0.0f64; 2], [0.0f64; 2], 0usize);
+            // The two ways' ends of each step from the same state, by golden's measure: r, κ, ψ (ε of each one's largest).
+            let mut apart = [0.0f64; 3];
             for _ in 0..steps {
                 let mut best = [f64::INFINITY; 2];
                 let mut next = None;
@@ -423,11 +424,20 @@ fn p4table_ab_step() {
                         }
                     }
                 }
+                let mut ends = Vec::new();
                 for m in 0..2 {
                     set(m);
                     let mut s = Scratch::default();
                     if let Ok(step) = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere)) {
                         counted[m] += step.work;
+                        ends.push(step.end);
+                    }
+                }
+                if let [a, b] = &ends[..] {
+                    let measure = |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(p, q)| (p - q).abs()).fold(0.0, crate::linalg::larger) / (f64::EPSILON * y.iter().map(|q| q.abs()).fold(f64::MIN_POSITIVE, crate::linalg::larger));
+                    let flat = |p: &crate::step::Internal| p.iter().flat_map(|z| [z.re, z.im]).collect::<Vec<f64>>();
+                    for (w, v) in apart.iter_mut().zip([measure(&a.r, &b.r), measure(&a.kappa, &b.kappa), measure(&flat(&a.psi), &flat(&b.psi))]) {
+                        *w = crate::linalg::larger(*w, v);
                     }
                 }
                 set(0);
@@ -443,8 +453,12 @@ fn p4table_ab_step() {
                 }
             }
             let k = taken.max(1) as f64;
-            let (new, old) = if by_count { ("the count by the bound", "by the tail summed") } else { ("off the tables", "decomposed") };
-            eprintln!("P4T-ABSTEP {name} {label} tau {tau}: a step {new} {:.1} µs (counted {:.4e}), {old} {:.1} µs (counted {:.4e}), ratio {:.3} (mean over {taken} states, each the least of {rounds}×{repeat})", time[0] / k, counted[0] / k, time[1] / k, counted[1] / k, time[0] / time[1]);
+            let (new, old) = match switch.as_str() {
+                "count" => ("the count by the bound", "by the tail summed"),
+                "rule" => ("the rule by Newton's own stop", "until the step stops shrinking"),
+                _ => ("off the tables", "decomposed"),
+            };
+            eprintln!("P4T-ABSTEP {name} {label} tau {tau}: a step {new} {:.1} µs (counted {:.4e}), {old} {:.1} µs (counted {:.4e}), ratio {:.3} (mean over {taken} states, each the least of {rounds}×{repeat}); a step's ends apart r {:.1} κ {:.1} ψ {:.1} ε of the largest", time[0] / k, counted[0] / k, time[1] / k, counted[1] / k, time[0] / time[1], apart[0], apart[1], apart[2]);
         }
     }
 }
