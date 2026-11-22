@@ -523,8 +523,6 @@
 //! falls by the decay the step takes and never rises (# Jumps) --, and how inaccurate is the check's to read
 //! (step/tests.rs: an atom past its standing wave's resolution).
 
-use std::sync::RwLock;
-
 use crate::decide::COMPLEX;
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::optical::{Sector, Unmade};
@@ -1208,20 +1206,11 @@ struct Rule {
     weights: Vec<f64>,
 }
 
-/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is first asked and
-/// kept for the process -- the same rule whichever thread makes it.
-fn rule(m: usize) -> &'static Rule {
-    static RULES: RwLock<Vec<Option<&'static Rule>>> = RwLock::new(Vec::new());
-    if let Some(&Some(rule)) = RULES.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(m) {
-        return rule;
-    }
+/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is asked and held by
+/// the panels that take it (`panels`) while they run: nothing of it outlives its quadrature.
+fn rule(m: usize) -> std::rc::Rc<Rule> {
     let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
-    let made = Rule { nodes, weights };
-    let mut rules = RULES.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if rules.len() <= m {
-        rules.resize(m + 1, None);
-    }
-    *rules[m].get_or_insert_with(|| Box::leak(Box::new(made)))
+    std::rc::Rc::new(Rule { nodes, weights })
 }
 
 thread_local! {
@@ -1355,7 +1344,7 @@ fn panels(a: f64, b: f64, (count, nodes): (usize, usize)) -> impl Iterator<Item 
     let w = (b - a) / count as f64;
     let rule = rule(nodes);
     (0..count).map(move |p| {
-        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
+        let (centre, end, rule) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w }, rule.clone());
         (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k], k)))
     })
 }
