@@ -97,6 +97,22 @@ fn select_the_ladder_top_by_hand() {
     assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0]).unmet(), Some(1.5 * TOLERANCE));
 }
 
+/// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 substeps a µs a piece a step): off the
+/// floor the pieces' part is read against the setting itself; where twice the pieces raise the run's rate to its floor
+/// at twice the setting's, against the twice-substepped run; where they raise both rates, against the setting's pieces
+/// at the raised rates, one run more.
+#[test]
+fn select_the_refinements_by_hand() {
+    let own = |s: Setting| Setting { rates: s.rates.map(|r| larger(r, s.pieces as f64 / 0.5)), pieces: s.pieces };
+    let at = |o: f64, r: f64, p: usize| Setting { rates: [o, r], pieces: p };
+    let (runs, pairs) = refinements(at(32.0, 16.0, 2), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3)]));
+    let (runs, pairs) = refinements(at(32.0, 8.0, 4), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3)]));
+    let (runs, pairs) = refinements(at(8.0, 8.0, 4), &own);
+    assert_eq!((runs, pairs), (vec![at(8.0, 8.0, 4), at(16.0, 8.0, 4), at(8.0, 16.0, 4), at(16.0, 16.0, 8), at(16.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3)]));
+}
+
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
 /// but its *.scene.json app scenes and the manifest, read as the model's tests read them, model/testing.rs `scene`) and
 /// the six scenes' own requests (`V3D_REQ`): on every one the chain is G first and the 32 states last, nested, every

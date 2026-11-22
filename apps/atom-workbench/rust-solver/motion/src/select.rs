@@ -37,8 +37,10 @@
 //! The scheme's setting (`Setting`) -- the substeps a µs over a stretch's opening (the paths' first window: the
 //! start's transient, paths.rs # The start) and after it, and the pieces a step -- is settled by its own error, not fixed
 //! (`settle`): on the first path's first `CALIBRATION` µs the reference is advanced at the setting and at each knob
-//! doubled, each refinement's largest change of a displayed row read as that knob's part of the setting's error
-//! (Richardson's 2^p/(2^p − 1), p = 2: H frozen at a piece's middle; a rate no lower than one substep a piece); from
+//! doubled, each knob's part of the setting's error the largest change of a displayed row from doubling it alone
+//! (Richardson's 2^p/(2^p − 1), p = 2: H frozen at a piece's middle; a rate no lower than one substep a piece, so
+//! that where twice the pieces raise a rate to that floor the pieces' part is read at the raised rates,
+//! `refinements`); from
 //! the coarsest (`COARSEST`), the knob of the largest part is doubled while the parts' sum is beyond `TOLERANCE` -- s⁴
 //! of the population target, the share the numerical tolerances inside a step take of theirs (units.rs `QUADRATURE`)
 //! --, to `FINEST` at the most (a bound on the work, not on the accuracy: stopped there short of the tolerance, the
@@ -463,11 +465,21 @@ impl Settled {
     }
 }
 
-/// A setting's refinements (module documentation, # The paths): its runs -- the setting, and each knob doubled --,
-/// each raised to one substep a piece (`own`), and per knob the two runs its part is read between.
+/// A setting's refinements (module documentation, # The paths): its runs -- the setting, and each knob doubled, raised
+/// to one substep a piece (`own`) --, and per knob the two runs its part is read between: a rate's doubled at the
+/// setting's pieces; the pieces' doubled at one pair of rates, the doubled pieces' own -- where twice the pieces raise
+/// a rate to that floor, against the setting's pieces at the raised rates, one run more where that is none of the
+/// others. (Read against the setting itself, the pieces' part held the substeps' wherever the floor doubled them too:
+/// TET's ladder doubled the pieces to 16 while its substeps erred, the pieces' own part at 4 a step 1.24e-3, SELCOST.)
 fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setting>, [(usize, usize); KNOBS]) {
-    let runs: Vec<Setting> = std::iter::once(setting).chain((0..KNOBS).map(|k| own(setting.doubled(k)))).collect();
-    (runs, std::array::from_fn(|k| (0, k + 1)))
+    let mut runs: Vec<Setting> = std::iter::once(setting).chain((0..KNOBS).map(|k| own(setting.doubled(k)))).collect();
+    let pieces = KNOBS;
+    let partner = Setting { rates: runs[pieces].rates, pieces: setting.pieces };
+    let at = runs.iter().position(|&s| s == partner).unwrap_or_else(|| {
+        runs.push(partner);
+        runs.len() - 1
+    });
+    (runs, std::array::from_fn(|k| if k + 1 == pieces { (at, pieces) } else { (0, k + 1) }))
 }
 
 /// The paths' scheme's setting by its error on the reference (module documentation, # The paths): from `COARSEST`, on
