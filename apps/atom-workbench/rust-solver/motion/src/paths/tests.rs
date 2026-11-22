@@ -7,7 +7,8 @@
 //! - `paths_memory`: τ_mem and L of the models at the trap's centre at rest;
 //! - `paths_pilot`: the pilot's paths handed out by the solve (solve.rs `walks`), and the path errors along them;
 //! - `paths_cost`: the work of a model a path's µs, one thread, the least of five;
-//! - `paths_check`: the scheme's check against its halves on a path piece (`check`).
+//! - `paths_check`: the scheme's check against its halves on a path piece (`check`);
+//! - `paths_go_on_after_the_opening`: a run gone on from another's opening is the run from the start (`Opened`).
 use super::*;
 use crate::request::Request;
 use crate::scene::Scene;
@@ -434,4 +435,41 @@ fn paths_check() {
     let scheme = std::env::var("PATHS_SCHEME").map_or(Scheme::sparse(nodes), |x| scheme_of(&x));
     let [row, rate, force] = check(&c, &r, &walks[path], &start, from, to, scheme).unwrap().unwrap();
     eprintln!("{scene} {} − {}, path {path} on [{from}, {to}] µs, {nodes} nodes a step against {} and half the turn: the difference changes by row {row:.2e}, rate {rate:.2e} (of the rate), force {force:.2e} (of the rms force); {:.1} s", specs[0], specs[1], 2 * nodes, clock.elapsed().as_secs_f64());
+}
+
+/// A run that differs from another only in `rate`, gone on from where the other's opening ends, is the run from the
+/// start (module documentation, # The start, once): on TET's and R4's 32 states along a slow line through the trap's
+/// centre, every reading and the end state the same bit for bit, at one and at two pieces a step; its work the part
+/// after the opening's end.
+#[test]
+#[ignore]
+fn paths_go_on_after_the_opening() {
+    for scene in ["TET", "R4"] {
+        let request = request_of(scene);
+        let model = models(&request, &["full".to_string()]).remove(0);
+        let c = centre(&model, &request);
+        let form = Form::new(&model, c);
+        let (speed, step, hm) = (0.03, 0.5, model.hbar_over_mass());
+        let ends = (0..=24).map(|k| {
+            let t = k as f64 * step;
+            [t, c[0] + speed * t, c[1], c[2], speed / hm, 0.0, 0.0]
+        });
+        let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect() };
+        for pieces in [1, 2] {
+            let at = |rate: f64| Scheme::Exponential { turns: 1.0, rate, pieces, cutoff: f64::INFINITY, read: 1 };
+            let (base, opened) = form.along_opened(&walk, &walk.start, 0.0, walk.end(), at(8.0)).unwrap();
+            let opened = opened.expect("a piece after the opening");
+            let whole = form.along(&walk, &walk.start, 0.0, walk.end(), at(16.0)).unwrap();
+            let after = form.along_after(&walk, &opened, walk.end(), at(16.0)).unwrap();
+            let same = |a: &Series, b: &Series| a.readings.len() == b.readings.len() && a.readings.iter().zip(&b.readings).all(|(x, y)| x.t == y.t && x.rows == y.rows && x.rates == y.rates) && a.state == b.state;
+            eprintln!(
+                "{scene} P{} pieces {pieces}: opening {:.2} µs, ends at piece {} of knot interval {} ({:?}); 16 a µs from the start {} products, after the opening {}; 8 a µs {}",
+                form.n, opened.opening, opened.piece, opened.interval, opened.ends, whole.counts.products, after.counts.products, base.counts.products
+            );
+            assert!(same(&whole, &after), "{scene} pieces {pieces}: gone on from the opening differs from the run from the start");
+            assert!(!same(&whole, &base), "{scene} pieces {pieces}: the rate changes nothing");
+            assert!(after.counts.products < whole.counts.products);
+            assert!(form.along_after(&walk, &opened, walk.end(), Scheme::Exponential { turns: 2.0, rate: 16.0, pieces, cutoff: f64::INFINITY, read: 1 }).is_err(), "another opening refused");
+        }
+    }
 }

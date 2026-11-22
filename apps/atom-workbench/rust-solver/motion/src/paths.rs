@@ -140,6 +140,10 @@
 //!   moving by at most the trace norm (bounded by the entries' moduli). ‖ΔH‖ is H's change over half a piece of the
 //!   first knot interval with every beat's amplitude twice, ‖Ḣ‖ the change over that interval and each beat's amplitude
 //!   twice times its rate, ‖L‖ the generator's 1-norm bound, L R m_j taken at the start (`Form::opening`).
+//! - **Once**: up to the first piece that starts after it, a stretch is the same at every `rate` -- the opening's
+//!   substeps are its turns', its cutoff and pieces its own --, so a run that differs from another only in `rate` goes
+//!   on from the other's state there (`Opened`, `Form::along_after`), the same series bit for bit as from the start
+//!   (paths/tests.rs `paths_go_on_after_the_opening`); select.rs `settle` makes its refinements so.
 //!
 //! What an exponential piece needs before its substeps reads no state -- the nodes, H at its middle and the blocks'
 //! eigendecompositions, the substep's weights, the node a reading takes at its end (`Frozen`) --, so it is made on the
@@ -307,6 +311,25 @@ pub struct Series {
     pub readings: Vec<Reading>,
     pub counts: Counts,
     pub state: Vec<C64>,
+}
+
+/// Where a stretch's opening ends (module documentation, # The start, once): the first piece that starts after it (its
+/// knot interval's place in the stretch and ends, its place there), the state at its start and the readings up to it,
+/// the opening's length, fastest coherence and bound, and the knobs that made them (turns, pieces, cutoff, read) -- what
+/// a run of the stretch that differs only in `rate` goes on from (`Form::along_after`).
+#[derive(Clone, Debug)]
+pub struct Opened {
+    from: f64,
+    knobs: (f64, usize, f64, usize),
+    opening: f64,
+    fastest: f64,
+    booked: f64,
+    condition: f64,
+    interval: usize,
+    piece: usize,
+    ends: (f64, f64),
+    state: Vec<C64>,
+    readings: Vec<Reading>,
 }
 
 /// A model on its sector (module documentation, # The sector, # The generator): the structure every node shares, made
@@ -939,9 +962,26 @@ impl<'a> Form<'a> {
         self.along_from(walk, self.initial(start)?, from, to, scheme)
     }
 
+    /// `along`, with where the stretch's opening ends (`Opened`; none where the stretch ends before a piece starts after
+    /// it, or the scheme has no opening).
+    pub fn along_opened(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Result<(Series, Option<Opened>), String> {
+        self.stretch(walk, self.initial(start)?, from, to, scheme, None)
+    }
+
+    /// `along` at a scheme that differs from the one of `opened`'s run only in `rate`, gone on from where its opening
+    /// ends (# The start, once): the same series as from the start, the work after the opening's end alone counted.
+    pub fn along_after(&self, walk: &Walk, opened: &Opened, to: f64, scheme: Scheme) -> Result<Series, String> {
+        Ok(self.stretch(walk, opened.state.clone(), opened.from, to, scheme, Some(opened))?.0)
+    }
+
     /// `along` from a sector state at `from` (a series' end state: the same path gone on, its knots and nodes the
     /// same as in one stretch where `from` is a knot).
     pub fn along_from(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
+        Ok(self.stretch(walk, state, from, to, scheme, None)?.0)
+    }
+
+    /// `along_from`, gone on from another run's opening (`after`: `along_after`), with where the opening ends.
+    fn stretch(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, scheme: Scheme, after: Option<&Opened>) -> Result<(Series, Option<Opened>), String> {
         let mut v = state;
         if v.len() != self.dim {
             return Err(format!("a state of {} numbers for a sector of {}", v.len(), self.dim));
@@ -949,6 +989,10 @@ impl<'a> Form<'a> {
         if !(to > from) {
             return Err(format!("an empty stretch of the path: [{from}, {to}]"));
         }
+        if after.is_some() && !matches!(scheme, Scheme::Exponential { .. }) {
+            return Err("only an exponential scheme has an opening to go on from".into());
+        }
+        let mut opened = None;
         let mut counts = Counts::default();
         let mut work = Work::new(self);
         let mut readings = Vec::new();
@@ -996,19 +1040,36 @@ impl<'a> Form<'a> {
             Scheme::Exponential { turns, rate, pieces, cutoff, read } => {
                 assert!(pieces >= 1, "a step in one piece at least");
                 let knots = walk.knots(from, to);
-                let node = made(from, &mut counts);
-                readings.push(self.read(&node, walk, from, &v, &mut counts));
-                let first = std::sync::Arc::new(self.amps_with(&node, false));
-                drop(node);
-                // The opening (# The start): its length, the fastest coherence it resolves, and the bound it books; H's
-                // change along a piece from the path's first knot interval.
-                let next = self.amps_with(&made(knots[1], &mut counts), false);
-                let (opening, fastest, booked, kept) = self.opening(&first, &next, from, knots[1], pieces, &v, cutoff)?;
-                (counts.opening, counts.booked) = (opening, booked);
-                // The booked modes' start dropped (their part of the state's start: the reading at the start is made).
-                v = kept;
                 // The knot intervals, each with whether a reading is made at its end.
                 let intervals: Vec<(f64, f64, bool)> = knots.windows(2).enumerate().map(|(i, w)| (w[0], w[1], (i + 1) % read == 0 || i + 2 == knots.len())).collect();
+                let knobs = (turns, pieces, cutoff, read);
+                // The opening (# The start): its length, the fastest coherence it resolves, and the bound it books -- made
+                // here, or another run's gone on from (`after`: the same knobs, the same knot interval at its end) --, and
+                // the piece the propagation starts at (its knot interval, its place there) and the node before it.
+                let (opening, fastest, at, skip, first) = match after {
+                    Some(o) => {
+                        if o.from != from || o.knobs != knobs || intervals.get(o.interval).map(|x| (x.0, x.1)) != Some(o.ends) {
+                            return Err("a run going on from another's opening differs from it before the opening's end".into());
+                        }
+                        readings = o.readings.clone();
+                        (counts.opening, counts.booked, counts.condition) = (o.opening, o.booked, o.condition);
+                        let first = std::sync::Arc::new(self.amps_with(&made(o.ends.0, &mut counts), false));
+                        (o.opening, o.fastest, o.interval, o.piece, first)
+                    }
+                    None => {
+                        let node = made(from, &mut counts);
+                        readings.push(self.read(&node, walk, from, &v, &mut counts));
+                        let first = std::sync::Arc::new(self.amps_with(&node, false));
+                        drop(node);
+                        // H's change along a piece from the path's first knot interval.
+                        let next = self.amps_with(&made(knots[1], &mut counts), false);
+                        let (opening, fastest, booked, kept) = self.opening(&first, &next, from, knots[1], pieces, &v, cutoff)?;
+                        (counts.opening, counts.booked) = (opening, booked);
+                        // The booked modes' start dropped (their part of the state's start: the reading at the start is made).
+                        v = kept;
+                        (opening, fastest, 0, 0, first)
+                    }
+                };
                 // A piece's substeps (# The start), of its start and length: `turns` a turn of the fastest coherence the
                 // opening resolves, in the opening, `rate` a µs after; a product's rounding up never adds one (a rate of
                 // whole substeps a piece).
@@ -1022,22 +1083,29 @@ impl<'a> Form<'a> {
                 let ncr = self.cols.len() * self.rows.len();
                 let bytes = 16 * pieces * (self.h_beats.len() * self.h_slot + self.beats_r.len() * ncr + 5 * self.h_slot + ETD_WEIGHTS * self.dim);
                 let chunk = (FROZEN_BYTES / (bytes + 1)).clamp(1, 4 * rayon::current_num_threads());
-                let freeze = |range: std::ops::Range<usize>, before: std::sync::Arc<Amps>| self.freeze_chunk(walk, &intervals[range], before, pieces, &substeps);
+                let freeze = |range: std::ops::Range<usize>, before: std::sync::Arc<Amps>, skip: usize| self.freeze_chunk(walk, &intervals[range], before, pieces, skip, &substeps);
                 let freeze = &freeze;
                 let mut lw = Stages::new(self);
-                let mut ahead = Some(freeze(0..chunk.min(intervals.len()), first));
-                let mut start = 0;
+                let mut ahead = Some(freeze(at..(at + chunk).min(intervals.len()), first, skip));
+                let (mut start, mut skipped) = (at, skip);
+                // The first piece that starts after the opening (its place in the stretch, its start) and the state there
+                // (a run that makes its opening).
+                let mut after_opening: Option<(usize, f64, Vec<C64>)> = None;
                 while let Some(frozen) = ahead.take() {
                     let (current, last, made) = frozen?;
                     counts.add(&made);
                     let end = (start + chunk).min(intervals.len());
                     let following = (end < intervals.len()).then(|| end..(end + chunk).min(intervals.len()));
+                    let (place, seek) = (start * pieces + skipped, after.is_none());
                     let (next, done) = rayon::join(
-                        move || following.map(|range| freeze(range, last)),
+                        move || following.map(|range| freeze(range, last, 0)),
                         || {
                             let clock = std::time::Instant::now();
                             let mut done: Vec<(f64, &Node, Vec<C64>)> = Vec::new();
-                            for f in &current {
+                            for (k, f) in current.iter().enumerate() {
+                                if seek && after_opening.is_none() && f.p0 >= from + opening {
+                                    after_opening = Some((place + k, f.p0, v.clone()));
+                                }
                                 self.piece_run(f, &mut v, &mut lw, &mut counts);
                                 if let Some((t, node)) = &f.read {
                                     done.push((*t, node, v.clone()));
@@ -1059,8 +1127,14 @@ impl<'a> Form<'a> {
                         readings.push(r);
                         counts.add(&Counts { time: 0.0, ..c });
                     }
-                    (ahead, start) = (next, end);
+                    (ahead, start, skipped) = (next, end, 0);
                 }
+                opened = after_opening.map(|(place, t, state)| {
+                    let (interval, piece) = (place / pieces, place % pieces);
+                    let ends = (intervals[interval].0, intervals[interval].1);
+                    let readings = readings.iter().filter(|r| r.t <= t).cloned().collect();
+                    Opened { from, knobs, opening, fastest, booked: counts.booked, condition: counts.condition, interval, piece, ends, state, readings }
+                });
             }
             Scheme::Exact { h, read } => {
                 let segments = ((to - from) / h).round() as usize;
@@ -1128,7 +1202,7 @@ impl<'a> Form<'a> {
             }
         }
         counts.time = to - from;
-        Ok(Series { classes: self.classes.clone(), readings, counts, state: v })
+        Ok((Series { classes: self.classes.clone(), readings, counts, state: v }, opened))
     }
 
     /// The sector's Liouvillian at the point and time, dense (d × d), column by column through the operator.
@@ -1663,9 +1737,10 @@ impl Form<'_> {
 
     /// A chunk of knot intervals frozen (module documentation, # The nodes, # The substeps): each interval's nodes at its
     /// pieces' ends, one job each on the pool -- the node before the chunk's first `before` --, then its pieces, one job
-    /// each (`freeze`), the reading's node an interval's last's where it is read at its end; the pieces in order, the
-    /// chunk's last node, and the work.
-    fn freeze_chunk(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, pieces: usize, substeps: &(dyn Fn(f64, f64) -> usize + Sync)) -> Result<(Vec<Frozen>, std::sync::Arc<Amps>, Counts), String> {
+    /// each (`freeze`) but the first interval's first `skip` (a run gone on from another's opening: `Opened`), the
+    /// reading's node an interval's last's where it is read at its end; the pieces in order, the chunk's last node, and
+    /// the work.
+    fn freeze_chunk(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, pieces: usize, skip: usize, substeps: &(dyn Fn(f64, f64) -> usize + Sync)) -> Result<(Vec<Frozen>, std::sync::Arc<Amps>, Counts), String> {
         let jobs: Vec<(usize, usize)> = (0..intervals.len()).flat_map(|i| (1..=pieces).map(move |j| (i, j))).collect();
         let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64)> = jobs
             .par_iter()
@@ -1686,11 +1761,11 @@ impl Form<'_> {
             .collect();
         let mut counts = Counts { nodes: nodes.len() as u64, node_seconds: nodes.iter().map(|x| x.2).sum(), ..Counts::default() };
         let grid = |i: usize| -> Vec<std::sync::Arc<Amps>> { std::iter::once(if i == 0 { before.clone() } else { nodes[i * pieces - 1].0.clone() }).chain(nodes[i * pieces..(i + 1) * pieces].iter().map(|x| x.0.clone())).collect() };
-        let mut frozen: Vec<Frozen> = jobs.par_iter().map(|&(i, j)| self.freeze(grid(i), intervals[i].0, intervals[i].1, j - 1, substeps)).collect::<Result<_, _>>()?;
+        let mut frozen: Vec<Frozen> = jobs[skip..].par_iter().map(|&(i, j)| self.freeze(grid(i), intervals[i].0, intervals[i].1, j - 1, substeps)).collect::<Result<_, _>>()?;
         for (i, iv) in intervals.iter().enumerate() {
             let last = (i + 1) * pieces - 1;
             if let Some(node) = nodes[last].1.take() {
-                frozen[last].read = Some((iv.1, node));
+                frozen[last - skip].read = Some((iv.1, node));
             }
         }
         for f in &frozen {

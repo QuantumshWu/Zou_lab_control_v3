@@ -521,11 +521,29 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 /// difference of the candidate to the reference, a scan's), read as its error (`RICHARDSON`); while the parts' sum is
 /// beyond `TOLERANCE`, the knob of the largest part doubled (of those below `FINEST`), all at the finest the last. A
 /// setting's rate is the substeps' own: no less than a piece of the path's step `step` takes (`Form::along` never takes
-/// fewer than one substep a piece; below that a doubled rate would change nothing, and read as no error). The setting
-/// with its parts and runs, and the first model's series at its runs (the calibration's).
+/// fewer than one substep a piece; below that a doubled rate would change nothing, and read as no error). A run that
+/// differs from the setting's only in the rate goes on from where the setting's opening ends (paths.rs, # The start,
+/// once). The setting with its parts and runs, and the first model's series at its runs (the calibration's).
 fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk, f64)]) -> Result<(Settled, Vec<Series>), String> {
     let clock = Instant::now();
-    let run = |s: Setting| -> Result<Vec<Series>, String> { forms.iter().map(|f| f.along(walk, &walk.start, 0.0, piece, scheme(s, 1))).collect() };
+    // A setting's runs, the models' each with where its opening ends: gone on from there where the setting differs
+    // from the one of the runs `base` only in the rate after the opening (paths.rs, # The start, once), else from the
+    // start.
+    type Opens = Vec<Option<std::sync::Arc<paths::Opened>>>;
+    let run = |s: Setting, base: Option<(Setting, &Opens)>| -> Result<(Vec<Series>, Opens), String> {
+        let made: Vec<(Series, Option<std::sync::Arc<paths::Opened>>)> = match base {
+            Some((b, opens)) if Setting { rate: b.rate, ..s } == b && opens.iter().all(Option::is_some) => forms
+                .iter()
+                .zip(opens)
+                .map(|(f, o)| {
+                    let o = o.clone().expect("an opening");
+                    Ok((f.along_after(walk, &o, piece, scheme(s, 1))?, Some(o)))
+                })
+                .collect::<Result<_, String>>()?,
+            _ => forms.iter().map(|f| f.along_opened(walk, &walk.start, 0.0, piece, scheme(s, 1)).map(|(x, o)| (x, o.map(std::sync::Arc::new)))).collect::<Result<_, String>>()?,
+        };
+        Ok(made.into_iter().unzip())
+    };
     let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
     // The cutoff's part: the largest over the stretches the setting takes (`starts`: each from its walk's own start) of
     // what their openings book, the models' together.
@@ -534,15 +552,17 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk,
         Ok(each.into_iter().fold(0.0, larger))
     };
     let mut setting = own(COARSEST);
-    let mut at = run(setting)?;
+    let (mut at, mut opens) = run(setting, None)?;
     let work = |x: &[Series]| x.iter().map(|s| s.counts.products).sum::<u64>();
     let (mut tried, mut products) = (1, work(&at));
     loop {
         let (runs, pairs) = refinements(setting, &own);
-        let made: Vec<Vec<Series>> = runs[1..].par_iter().map(|&s| run(s)).collect::<Result<_, _>>()?;
+        let made: Vec<(Vec<Series>, Opens)> = runs[1..].par_iter().map(|&s| run(s, Some((setting, &opens)))).collect::<Result<_, _>>()?;
         tried += made.len();
-        products += made.iter().map(|s| work(s)).sum::<u64>();
+        products += made.iter().map(|s| work(&s.0)).sum::<u64>();
+        let (made, made_opens): (Vec<Vec<Series>>, Vec<Opens>) = made.into_iter().unzip();
         let series: Vec<Vec<Series>> = std::iter::once(at).chain(made).collect();
+        let mut opened: Vec<Opens> = std::iter::once(opens).chain(made_opens).collect();
         let mut errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
         // The cutoff's part: what the setting's openings book (a scan's two models' both).
         errors[RUN_KNOBS] = booked(setting)?;
@@ -560,6 +580,7 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk,
         if k < RUN_KNOBS {
             setting = runs[1 + k];
             at = series.into_iter().nth(1 + k).expect("the refinement");
+            opens = opened.swap_remove(1 + k);
         } else {
             // The cutoff's part is the setting's own bound: raised while it stays the largest, and the setting run once.
             let others = errors[..RUN_KNOBS].iter().copied().fold(0.0, larger);
@@ -569,7 +590,7 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk,
                     break;
                 }
             }
-            at = run(setting)?;
+            (at, opens) = run(setting, None)?;
             tried += 1;
             products += work(&at);
         }
