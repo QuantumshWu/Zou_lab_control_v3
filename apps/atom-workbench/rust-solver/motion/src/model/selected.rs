@@ -264,9 +264,6 @@ struct Reads {
 thread_local! {
     /// The nodes the middles made, without and with the photon forms (a check's count).
     pub(crate) static MADE: RefCell<[usize; 2]> = const { RefCell::new([0; 2]) };
-    /// A check's switch (the tests', the thread's): a held step's jump takes its photon at the path's point there and the
-    /// middle keeps no numbers, as before 2026-11-22 (`SelectedMiddle::emitted`, `node`).
-    pub(crate) static PATH_PHOTON: Cell<bool> = const { Cell::new(false) };
 }
 
 thread_local! {
@@ -275,9 +272,6 @@ thread_local! {
     /// Nodes no middle holds any more, by their run's number: a middle's node is made in one of them
     /// (`Selected::pooled`).
     static POOL: RefCell<Vec<(usize, Rc<Node>)>> = const { RefCell::new(Vec::new()) };
-    /// A held middle's node's numbers (`SelectedMiddle::hold`), kept with the middle for its jumps' photon forms, by
-    /// their run's number: the thread's buffers trade them with `WORK`'s.
-    static KEPT: RefCell<Vec<(usize, Box<(Local, Out)>)>> = const { RefCell::new(Vec::new()) };
     /// The middles' lists of their nodes, empty, for the next middles.
     static LISTS: RefCell<Vec<Vec<Rc<Node>>>> = const { RefCell::new(Vec::new()) };
     /// The middles' readings' buffers.
@@ -377,10 +371,6 @@ pub struct SelectedMiddle<'a> {
     t: f64,
     nodes: RefCell<Vec<Rc<Node>>>,
     made: Cell<f64>,
-    /// Whether the step holds its generator at the middle (`step::Middle::hold`), and the middle's node's numbers there
-    /// (`Local`, `Out`), kept for its jumps' photon forms.
-    held: Cell<bool>,
-    kept: RefCell<Option<Box<(Local, Out)>>>,
 }
 
 fn zeros(n: usize, m: usize) -> [Mat; 3] {
@@ -1357,7 +1347,22 @@ impl Selected {
                 }
             }
         }
-        self.channels_into(node, out, if kicked { 0..2 } else { 0..1 });
+        for ((list, c), (_, _, which, _, _)) in self.tables.channels.iter().zip(&out.channels).zip(&self.lab.channel_outputs) {
+            if *which == 1 && !kicked {
+                continue;
+            }
+            for (k, &(_, class, axis, jump, element)) in list.iter().enumerate() {
+                let e = &mut node.classes[class as usize].axes[axis as usize][jump as usize].elements[element as usize];
+                if *which == 0 {
+                    e.value += c.value[k];
+                    for (g, d) in e.gradient.iter_mut().zip(&c.gradient) {
+                        *g += d[k];
+                    }
+                } else {
+                    e.kick += c.value[k];
+                }
+            }
+        }
         // The decay: the spherical components on the ground rows and their columns, then each pair's product.
         jumps.clear();
         for j in &self.tables.jumps {
@@ -1388,37 +1393,6 @@ impl Selected {
                 node.generator[e.back.0 as usize].1.data[e.back.1 as usize] += half * p.conj();
             }
         }
-    }
-
-    /// The channels' outputs of `which` in `whiches` into a node's elements (`fill`): the jumps' L and ∇L (0), the photon
-    /// forms K (1).
-    fn channels_into(&self, node: &mut Node, out: &Out, whiches: std::ops::Range<usize>) {
-        for ((list, c), (_, _, which, _, _)) in self.tables.channels.iter().zip(&out.channels).zip(&self.lab.channel_outputs) {
-            if !whiches.contains(which) {
-                continue;
-            }
-            for (k, &(_, class, axis, jump, element)) in list.iter().enumerate() {
-                let e = &mut node.classes[class as usize].axes[axis as usize][jump as usize].elements[element as usize];
-                if *which == 0 {
-                    e.value += c.value[k];
-                    for (g, d) in e.gradient.iter_mut().zip(&c.gradient) {
-                        *g += d[k];
-                    }
-                } else {
-                    e.kick += c.value[k];
-                }
-            }
-        }
-    }
-
-    /// A node made without its photon forms given them (`SelectedMiddle::kicked_middle`): its elements' K from a
-    /// contraction's photon forms (`Out::kicks`), as `fill` puts them where it makes them.
-    fn fill_kicks(&self, node: &mut Node, out: &Out) {
-        for e in node.classes.iter_mut().flat_map(|c| c.axes.iter_mut()).flatten().flat_map(|j| j.elements.iter_mut()) {
-            e.kick = C64::ZERO;
-        }
-        self.channels_into(node, out, 1..2);
-        node.kicked = true;
     }
 
     /// The ground populations of a state of P (an explicit excited state's by its decay's branching), over its norm.
@@ -1553,18 +1527,6 @@ impl Drop for SelectedMiddle<'_> {
             self.model.release(node);
         }
         LISTS.with(|l| l.borrow_mut().push(nodes));
-        // The kept numbers back into the thread's buffers, which the next middle's node is made in, warm; the ones the
-        // step's other evaluations took to the pool.
-        if let Some(mut kept) = self.kept.borrow_mut().take() {
-            let key = self.model.id;
-            WORK.with(|w| {
-                if let Some((_, work)) = w.borrow_mut().as_mut().filter(|x| x.0 == key) {
-                    std::mem::swap(&mut work.local, &mut kept.0);
-                    std::mem::swap(&mut work.out, &mut kept.1);
-                }
-            });
-            KEPT.with(|k| k.borrow_mut().push((key, kept)));
-        }
     }
 }
 
@@ -1590,52 +1552,8 @@ impl SelectedMiddle<'_> {
         self.made.set(self.made.get() + node.work);
         #[cfg(test)]
         MADE.with(|m| m.borrow_mut()[usize::from(kicked)] += 1);
-        #[cfg(test)]
-        let keep = self.held.get() && !PATH_PHOTON.with(|x| x.get());
-        #[cfg(not(test))]
-        let keep = self.held.get();
-        if keep && s == 0.0 && !kicked {
-            // The held middle's numbers, kept: the thread's buffers take the kept ones' place (none yet: the pool's).
-            let key = self.model.id;
-            let mut kept = self.kept.borrow_mut().take().or_else(|| KEPT.with(|k| {
-                let mut k = k.borrow_mut();
-                k.iter().position(|x| x.0 == key).map(|i| k.swap_remove(i).1)
-            })).unwrap_or_default();
-            WORK.with(|w| {
-                if let Some((_, work)) = w.borrow_mut().as_mut().filter(|x| x.0 == key) {
-                    std::mem::swap(&mut work.local, &mut kept.0);
-                    std::mem::swap(&mut work.out, &mut kept.1);
-                }
-            });
-            *self.kept.borrow_mut() = Some(kept);
-        }
         self.nodes.borrow_mut().push(node.clone());
         node
-    }
-
-    /// The held middle's node with its photon forms (`hold`): the fold's kicks alone on the middle's own numbers
-    /// (`Out::kicks`), into the node in its place, their work counted with the middle's; the node made again with them
-    /// where the middle kept no numbers.
-    fn kicked_middle(&self, path: &Path) -> Rc<Node> {
-        let node = self.node(path, 0.0, false);
-        if node.kicked {
-            return node;
-        }
-        let mut kept = self.kept.borrow_mut();
-        let Some(kept) = kept.as_mut() else {
-            drop(node);
-            return self.node(path, 0.0, true);
-        };
-        drop(node);
-        let (local, out) = &mut **kept;
-        out.kicks(self.model.rs.plan(), &self.model.lab, local, None);
-        let mut nodes = self.nodes.borrow_mut();
-        let at = self.r;
-        let i = nodes.iter().position(|x| x.kappa == path.kappa && x.at == at).expect("the middle's node");
-        let node = Rc::make_mut(&mut nodes[i]);
-        self.model.fill_kicks(node, out);
-        self.made.set(self.made.get() + crate::decide::COMPLEX * out.work);
-        nodes[i].clone()
     }
 
     /// e^{−iΩ (t_m + s)} of a beat.
@@ -1669,12 +1587,7 @@ impl SelectedMiddle<'_> {
     /// A jump's photon of the state ψ at the time s from the middle, at the jump's place (module documentation,
     /// # The photons): the classes' rates, the class `draw` picks and its photon.
     fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        // Held (`hold`): the step's own generator -- the middle's envelopes --, each beat at the jump's phase below.
-        #[cfg(test)]
-        let held = self.held.get() && !PATH_PHOTON.with(|x| x.get());
-        #[cfg(not(test))]
-        let held = self.held.get();
-        let node = if held { self.kicked_middle(path) } else { self.node(path, s, true) };
+        let node = self.node(path, s, true);
         READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { photons: list, rates, .. } = &mut *r;
@@ -1772,10 +1685,6 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     fn still(&self) -> bool {
         false
-    }
-
-    fn hold(&self) {
-        self.held.set(true);
     }
 
     fn blocks(&self) -> &[Vec<usize>] {
@@ -2010,7 +1919,7 @@ impl crate::step::Dynamics for Selected {
 
     fn middle(&self, _cluster: usize, r: [f64; 3], t: f64) -> SelectedMiddle<'_> {
         let nodes = LISTS.with(|l| l.borrow_mut().pop()).unwrap_or_default();
-        SelectedMiddle { model: self, r, t, nodes: RefCell::new(nodes), made: Cell::new(0.0), held: Cell::new(false), kept: RefCell::new(None) }
+        SelectedMiddle { model: self, r, t, nodes: RefCell::new(nodes), made: Cell::new(0.0) }
     }
 
     /// A jump's photon: on the step's middle at the jump's time and place, or at a point on a middle made there.

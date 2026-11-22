@@ -1516,16 +1516,6 @@ fn zero(m: &mut Mat, rows: usize, cols: usize) {
     sized(m, rows, cols);
 }
 
-/// A piece's terms' factors with their scales and the piece's weight w, once a piece (`Out::contract`).
-fn piece_factors(tf: &mut Vec<(C64, [C64; 3], bool)>, plan: &Plan, v: &Values, w: C64, p: usize) {
-    tf.clear();
-    tf.extend(plan.terms[p].iter().map(|&(f, s)| {
-        let (x, g) = v.factors[f];
-        let c = s * w;
-        (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
-    }));
-}
-
 /// out (r × c) = a b by `Mat::product`'s own operations (each row a's entries' multiples of b's rows in turn, the
 /// product rounded and then the sum), on out's memory.
 fn plain_product(a: &Mat, b: &Mat, out: &mut Mat) {
@@ -1606,7 +1596,16 @@ impl Out {
             }
         }
         let v = &local.values;
-        let factors = |tf: &mut Vec<(C64, [C64; 3], bool)>, p: usize| piece_factors(tf, plan, v, weight(p), p);
+        // A piece's terms' factors with their scales and the piece's weight, once a piece.
+        let factors = |tf: &mut Vec<(C64, [C64; 3], bool)>, p: usize| {
+            let w = weight(p);
+            tf.clear();
+            tf.extend(plan.terms[p].iter().map(|&(f, s)| {
+                let (x, g) = v.factors[f];
+                let c = s * w;
+                (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
+            }));
+        };
         if making.model {
             // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
             for p in 0..plan.hamiltonian {
@@ -1651,7 +1650,48 @@ impl Out {
                     }
                 }
             }
-            work += self.jumps(plan, grouping, local, weights, making.kicks, false);
+            // The jumps: direct entries, then the pairs, each whole in its channel.
+            for p in plan.hamiltonian..plan.keys.len() {
+                let (_, which) = plan.jump[p].unwrap();
+                if which == 1 && !making.kicks {
+                    continue;
+                }
+                factors(&mut self.tf, p);
+                for ((e, _), &(o, k)) in plan.direct[p].iter().zip(&grouping.j_direct[p - plan.hamiltonian]) {
+                    let (x, dx, moving) = self.tf[e.term as usize];
+                    let c = e.value * v.coefficients[e.coefficient as usize];
+                    let (o, k) = (&mut self.channels[o], k as usize);
+                    o.value[k] += x * c;
+                    if moving {
+                        for (g, d) in o.gradient.iter_mut().zip(dx) {
+                            g[k] += d * c;
+                        }
+                    }
+                }
+            }
+            for pair in &grouping.j_pairs {
+                if grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks {
+                    continue;
+                }
+                if self.made != pair.w {
+                    self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.product(grouping, pair.w);
+                    self.made = pair.w;
+                }
+                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
+                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
+                let out = &mut self.channels[pair.out];
+                for i in 0..rows {
+                    for (j, &k) in pair.places[i * cols..(i + 1) * cols].iter().enumerate() {
+                        let (x, dx) = products.element(i, j);
+                        let k = k as usize;
+                        out.value[k] += x;
+                        for a in 0..3 {
+                            out.gradient[a][k] += dx[a];
+                        }
+                    }
+                }
+            }
         }
         // The lift: M on Q's blocks, by group.
         if making.lift {
@@ -1680,72 +1720,6 @@ impl Out {
             }
         }
         self.work = work;
-    }
-
-    /// The jumps' outputs of a contraction (`contract`): the direct entries, then the pairs, each whole in its channel --
-    /// the photon forms' (a jump piece of `which` one, `Making::kicks`) where `kicks`, and those alone where `only`. The
-    /// amplitudes M are the contraction's, made before. Returns the counted complex multiply-adds.
-    #[allow(clippy::too_many_arguments)]
-    fn jumps(&mut self, plan: &Plan, grouping: &Grouping, local: &Local, weights: Option<&[C64]>, kicks: bool, only: bool) -> f64 {
-        let v = &local.values;
-        let weight = |p: usize| weights.map_or(C64::ONE, |w| w[p]);
-        let taken = |which: usize| if which == 1 { kicks } else { !only };
-        let mut work = 0.0;
-        for p in plan.hamiltonian..plan.keys.len() {
-            let (_, which) = plan.jump[p].unwrap();
-            if !taken(which) {
-                continue;
-            }
-            piece_factors(&mut self.tf, plan, v, weight(p), p);
-            for ((e, _), &(o, k)) in plan.direct[p].iter().zip(&grouping.j_direct[p - plan.hamiltonian]) {
-                let (x, dx, moving) = self.tf[e.term as usize];
-                let c = e.value * v.coefficients[e.coefficient as usize];
-                let (o, k) = (&mut self.channels[o], k as usize);
-                o.value[k] += x * c;
-                if moving {
-                    for (g, d) in o.gradient.iter_mut().zip(dx) {
-                        g[k] += d * c;
-                    }
-                }
-            }
-        }
-        for pair in &grouping.j_pairs {
-            if !taken(grouping.ws[pair.w].jump.map_or(0, |(_, which)| which)) {
-                continue;
-            }
-            if self.made != pair.w {
-                self.legs(plan, grouping, v, &weight, pair.w);
-                work += self.product(grouping, pair.w);
-                self.made = pair.w;
-            }
-            let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
-            let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
-            let out = &mut self.channels[pair.out];
-            for i in 0..rows {
-                for (j, &k) in pair.places[i * cols..(i + 1) * cols].iter().enumerate() {
-                    let (x, dx) = products.element(i, j);
-                    let k = k as usize;
-                    out.value[k] += x;
-                    for a in 0..3 {
-                        out.gradient[a][k] += dx[a];
-                    }
-                }
-            }
-        }
-        work
-    }
-
-    /// The photon forms of a contraction made without them (`contract` at `Making::node(false)`), on the same point's
-    /// numbers `local` and the amplitudes it made: the channels' outputs of the photon forms (a jump piece of `which`
-    /// one), each zeroed and made as `contract` makes them where `Making::kicks` -- the same numbers. Its count in `work`.
-    pub fn kicks(&mut self, plan: &Plan, grouping: &Grouping, local: &Local, weights: Option<&[C64]>) {
-        for ((c, list), output) in self.channels.iter_mut().zip(&grouping.channel_lists).zip(&grouping.channel_outputs) {
-            if output.2 == 1 {
-                c.zeroed(list.len());
-            }
-        }
-        self.made = usize::MAX;
-        self.work = self.jumps(plan, grouping, local, weights, true, true);
     }
 
     /// The leg sum wi at the point, dense: X and ∂X (`x`), its members' fixed entries at their factors, weights and
