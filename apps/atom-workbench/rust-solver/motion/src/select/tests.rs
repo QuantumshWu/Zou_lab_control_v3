@@ -72,7 +72,7 @@ fn select_the_direct_part_by_hand() {
         products: 0,
     };
     let windows = vec![(0.0, 10.0), (10.0, 100.0)];
-    let at = |t: f64| direct_at(&judged, &windows, t);
+    let at = |t: f64| direct_at(&judged, &windows, t).expect("every window read");
     assert_eq!(at(0.0), 0.0);
     assert!((at(5.0) - 4.01e-3).abs() < 1e-15 && (at(50.0) - 1.01e-3).abs() < 1e-15, "{} {}", at(5.0), at(50.0));
     assert!((at(500.0) - 2.01e-3).abs() < 1e-15 && (at(950.0) - 2.01e-3).abs() < 1e-15, "{} {}", at(500.0), at(950.0));

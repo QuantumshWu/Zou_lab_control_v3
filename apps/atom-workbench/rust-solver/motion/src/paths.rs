@@ -2061,16 +2061,23 @@ pub struct Mean {
 }
 
 impl Mean {
+    /// The mean of the paths' values `x` and its standard error, the paths' spread over √P: none to read on one path
+    /// (without bound). Of no path nothing is read: its window is unread (`Window::paths`, `select::direct_at`).
     fn of(x: &[f64]) -> Mean {
         let p = x.len() as f64;
         let value = x.iter().sum::<f64>() / p;
+        if x.len() < 2 {
+            return Mean { value, error: f64::INFINITY };
+        }
         let var = x.iter().map(|y| (y - value) * (y - value)).sum::<f64>() / (p - 1.0);
         Mean { value, error: (var / p).sqrt() }
     }
 }
 
 /// A candidate's direct error over one time window (module documentation): per quantity its window mean's difference
-/// to the reference on each path, and those over the paths (`Mean`).
+/// to the reference on each path, and those over the paths (`Mean`) -- over the `paths` that read in it, a lost atom's
+/// path ending early: a window no path reads (every path's atom lost before it) reads nothing, and its means are no
+/// numbers no reader takes.
 #[derive(Clone, Debug, Default)]
 pub struct Window {
     pub from: f64,

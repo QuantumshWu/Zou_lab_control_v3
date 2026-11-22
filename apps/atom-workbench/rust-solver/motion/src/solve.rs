@@ -2363,7 +2363,8 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
             context.ledger.item(label, most, MODEL_REGION);
         }
         if let Some(c) = &choice {
-            let direct = (1..n).filter(|&k| held[k] != 0.).map(|k| c.at(context.at[k])).fold(0., crate::linalg::larger);
+            // Where the paths read no direct part, the held atoms' bound (`model_of`).
+            let direct = (1..n).filter(|&k| held[k] != 0.).map(|k| c.at(context.at[k]).unwrap_or(held[k])).fold(0., crate::linalg::larger);
             context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
             for flag in model_flags(c, &read, request) {
                 context.ledger.flag(flag);
@@ -2450,15 +2451,17 @@ fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales, choice: Option<
     let region = choice.map_or(Region::NONE, |c| c.judged.region);
     let sampled = sampled(run, pilot, &region);
     let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
-    let model = model_of(&|t| choice.map_or(0., |c| c.at(t)), &sampled, &estimates, times, optical, escape);
+    let model = model_of(&|t| choice.map_or(Some(0.), |c| c.at(t)), &sampled, &estimates, times, optical, escape);
     PilotRead { estimates, counts, sampled, model }
 }
 
 /// The model's error per time (`pilot_reads`) of its direct part `direct(t)`, the region's at the states `sampled`,
 /// the optical sector's booking `optical` on T: on what is shown the direct part and the region's, at most one; on T
 /// the region's share moved and the optical booking -- T has no model error of its own (select.rs, # The feedback
-/// through the motion: zero) --; none at t = 0, the request's state.
-fn model_of(direct: &dyn Fn(f64) -> f64, sampled: &Sampled, estimates: &[Estimate], times: &[f64], optical: f64, escape: &Escape) -> Vec<[f64; 2]> {
+/// through the motion: zero) --; none at t = 0, the request's state. Where the paths read no direct part (no path's
+/// atom held there, `select::direct_at`) the held atoms' rows are unread: their bound, the share of the atoms held
+/// there (1 − L: none where every atom is lost, nothing held to err on).
+fn model_of(direct: &dyn Fn(f64) -> Option<f64>, sampled: &Sampled, estimates: &[Estimate], times: &[f64], optical: f64, escape: &Escape) -> Vec<[f64; 2]> {
     let region = sampled.measured().means(estimates.len(), estimates);
     estimates
         .iter()
@@ -2467,7 +2470,7 @@ fn model_of(direct: &dyn Fn(f64) -> f64, sampled: &Sampled, estimates: &[Estimat
             if k == 0 {
                 return [0.; 2];
             }
-            [probability_error(direct(times[k]) + region[k][0][0]), e.moved(region[k][0][1], escape) + optical]
+            [probability_error(direct(times[k]).unwrap_or(1. - e.loss) + region[k][0][0]), e.moved(region[k][0][1], escape) + optical]
         })
         .collect()
 }
@@ -2625,8 +2628,18 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
         let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
         let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
-        let drift = if let [.., (a, ea), (b, eb)] = held[..] { format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }) } else { "末段无 T".to_string() };
-        noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：运行末 m = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}；{drift}", pilot.len() as u64 * GROUP, match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" }));
+        let drift = match held[..] {
+            [.., (a, ea), (b, eb)] if ea.hypot(eb).is_finite() => format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }),
+            [.., (a, _), (b, _)] => format!("末两个分析时刻 T 差 {:.2} µK、误差棒无读数：定不下来", b - a),
+            _ => "末段无 T".to_string(),
+        };
+        // At the run's end no atom held: no T there, its memory unread.
+        let memory = if end.is_finite() && r.is_finite() && se.is_finite() {
+            format!("运行末 m = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}", match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" })
+        } else {
+            "运行末没有被抱住的原子，T 无读数".to_string()
+        };
+        noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：{memory}；{drift}", pilot.len() as u64 * GROUP));
     }
     // 3. The candidates.
     let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
@@ -2806,8 +2819,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     }
     // The report: every candidate weighed with its parts at their largest over the times.
     for w in &weighed {
-        let direct = times.iter().map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
-        let region = (1..times.len()).map(|k| w.model[k][0] - direct_at(&w.judged, &paths.windows, times[k])).fold(0., crate::linalg::larger);
+        // The direct part where the paths read it; the rest of the shown error, its region's (and where the paths read
+        // no direct part, the held atoms' bound there: `model_of`).
+        let direct = times.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
+        let region = (1..times.len()).map(|k| w.model[k][0] - direct_at(&w.judged, &paths.windows, times[k]).unwrap_or(0.)).fold(0., crate::linalg::larger);
         noted(
             &mut report,
             format!(
@@ -4748,7 +4763,9 @@ struct Pick<'a> {
 /// and reads the run's own change in time as no spread --, and all of them together read it at n evenly spaced
 /// points. A function of the trajectory's number alone: its group's place and its own place in the group. A
 /// trajectory that ends with no outcome before the first time (estimate.rs, # What is counted) has no state to give,
-/// and weighs nothing.
+/// and weighs nothing; so does one whose last state as taken here is at t = 0 -- lost before its first checkpoint after
+/// the start, its path's end (`Part::lost`) the start itself --: it holds its atom for no time read, and has no rate a
+/// µs to give (its jumps' work over no time; R9_PUSH's pushed atoms, 85 of 88).
 fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
     let groups = parts.len();
     let mut picks = vec![];
@@ -4760,7 +4777,7 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
             let lost = part.lost.iter().find(|(_, state)| state.index == first.index).map(|(_, state)| state);
             // Its states to pick from, and its last: where it was lost, its path's end (`Record::lost`).
             let states = if held.is_empty() { lost.map(|_| vec![first]).unwrap_or_default() } else { held };
-            let Some(last) = lost.or(states.last().copied()) else { continue };
+            let Some(last) = lost.or(states.last().copied()).filter(|last| last.sample.at.t > 0.) else { continue };
             let through = ((member * groups + group) as f64 + 0.5) / (members.len() * groups) as f64;
             let state = states[((through * states.len() as f64) as usize).min(states.len() - 1)];
             picks.push(Pick { state, group, weight: last.sample.at.t, jumping: last.jumped / last.sample.at.t });

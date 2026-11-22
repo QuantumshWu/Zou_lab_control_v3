@@ -1037,20 +1037,29 @@ fn direct(w: &Window) -> Vec<f64> {
 /// A candidate's direct error at the time t (module documentation, # The direct part): the largest row's |mean| + z·se
 /// of the time's window (`paths::window_of` on the start's windows `windows`), past L the larger of the start's last
 /// window's and the late segment's last window's, past the late segment's start the latter's; the scheme's calibration
-/// beside it. None at t = 0, where every model starts in the same state.
-pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> f64 {
+/// beside it. Zero at t = 0, where every model starts in the same state; none where the window it takes no path reads
+/// (`paths::Window::paths`: every path's atom lost before it) -- nothing held there on the paths to err on, no number.
+pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> Option<f64> {
     if t <= 0.0 || judged.windows.is_empty() {
-        return 0.0;
+        return Some(0.0);
     }
+    let read = |w: &Window| (w.paths > 0).then(|| direct(w));
     let length = windows.last().map_or(0.0, |w| w.1);
     let own = match (judged.late.first().map(|w| w.from), judged.windows.last(), judged.late.last()) {
         (Some(from), Some(last), Some(late_last)) if t > length => {
-            let (a, b) = (direct(last), direct(late_last));
-            if t > from { b } else { a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect() }
+            let (a, b) = (read(last), read(late_last));
+            if t > from {
+                b
+            } else {
+                match (a, b) {
+                    (Some(a), Some(b)) => Some(a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect()),
+                    (a, b) => a.or(b),
+                }
+            }
         }
-        _ => direct(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
+        _ => read(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
     };
-    own.iter().copied().fold(0.0, larger) + judged.calibration.rows
+    own.map(|own| own.iter().copied().fold(0.0, larger) + judged.calibration.rows)
 }
 
 /// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the paths' windows, the
@@ -1070,8 +1079,8 @@ pub struct Choice {
 
 impl Choice {
     /// P's direct error at the time t (`direct_at`): what is shown; T and the loss have none (module documentation, # The
-    /// feedback through the motion: zero).
-    pub fn at(&self, t: f64) -> f64 {
+    /// feedback through the motion: zero); none where its window reads no path.
+    pub fn at(&self, t: f64) -> Option<f64> {
         direct_at(&self.judged, &self.windows, t)
     }
 }
