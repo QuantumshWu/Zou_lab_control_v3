@@ -307,33 +307,29 @@ fn t2step_parts() {
                     let mut st = made_still;
                     std::hint::black_box(pictured(&along, &mut s, tau, Some(&x), ground, &mut st).is_ok());
                 }, repeat);
-                // The preparation alone: `pictured` hands a prepared picture; the ends and the envelopes it was prepared
-                // from are laid again by `pictured` before each timed `prepare`.
+                // The preparation alone: the generator at the nodes and the tones taken out as `pictured` takes them
+                // (the middle keeps its nodes), untimed, before each timed `prepare`.
                 let mut prepare = f64::INFINITY;
                 for _ in 0..=repeat {
-                    let mut st = made_still;
-                    let _ = pictured(&along, &mut s, tau, Some(&x), ground, &mut st);
-                    // Undo the preparation's parabola on the ends and the envelopes: the generator at the nodes again.
                     let picture = &mut s.picture;
+                    along.middle.generator(&along.path, 0.0, &mut picture.base);
                     if !still {
                         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
                         along.middle.generator(&along.path, h, &mut picture.ends[1]);
-                        along.middle.generator(&along.path, 0.0, &mut picture.base);
-                        let beats: Vec<(usize, f64)> = picture.beats.iter().map(|b| (b.candidate, b.beat)).collect();
-                        for (m, (candidate, beat)) in beats.into_iter().enumerate() {
-                            for (j, u) in [-h, 0.0, h].into_iter().enumerate() {
-                                let [plus, minus] = &mut picture.beats[m].members;
-                                along.middle.envelopes(&along.path, candidate, u, &mut plus[j], &mut minus[j]);
-                                let (p, q) = (C64::cis(beat * u), C64::cis(-beat * u));
-                                let node = if j == 0 { &mut picture.ends[0] } else if j == 1 { &mut picture.base } else { &mut picture.ends[1] };
-                                for ((z, g), hh) in node.data.iter_mut().zip(&plus[j].data).zip(&minus[j].data) {
-                                    *z -= p * *g + q * *hh;
-                                }
-                            }
-                        }
                     }
+                    picture.separate(
+                        h,
+                        still,
+                        |beats, keys| {
+                            if !made_still {
+                                along.middle.beats(&along.path, beats, keys);
+                            }
+                        },
+                        |m, u, plus, minus| along.middle.envelopes(&along.path, m, u, plus, minus),
+                    );
+                    let static_path = still && picture.beats.is_empty();
                     let clock = std::time::Instant::now();
-                    std::hint::black_box(picture.prepare(h, still, Some(&x)).is_ok());
+                    std::hint::black_box(picture.prepare(h, static_path, Some(&x)).is_ok());
                     prepare = prepare.min(clock.elapsed().as_secs_f64() * 1e6);
                 }
                 let mut st = made_still;
@@ -407,6 +403,42 @@ fn t2step_parts() {
                 jumps as f64 / k,
                 (total[0] - parts) / k
             );
+        }
+    }
+}
+
+/// A walk's every step said to the bit (R2-NODE's `r2_walk_dump` format, read by p2gstep's `walkdiff.py`): per model a
+/// walk of T2S_WALK (24) steps at the scene's τ (halved where a step is refused) from the trajectory 3 of `r1prop::start`
+/// -- its internal state the T2S_STATE_<SCENE>-th basis state where one is given --, with its own jumps.
+#[test]
+#[ignore]
+fn t2step_walk() {
+    let steps = env("T2S_WALK", 24.0) as usize;
+    for (name, request) in scenes() {
+        let chief = crate::solve::chief(&request);
+        for (label, run) in models(&name, &request) {
+            let mut t = start(&run, &request, chief, 3);
+            if let Some(s) = std::env::var(format!("T2S_STATE_{name}")).ok().and_then(|x| x.parse::<usize>().ok()) {
+                let mut psi = crate::step::Internal::zeros(t.psi.len());
+                psi[s] = crate::linalg::C64::ONE;
+                t.psi = psi;
+            }
+            let (mut scratch, mut tau, mut taken) = (Scratch::default(), tau_of(&name), 0);
+            while taken < steps && tau > 1e-3 {
+                match Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Everywhere)) {
+                    Ok(step) => {
+                        let jumps = step.made.iter().filter(|m| m.kick.is_some()).count();
+                        t = step.end;
+                        taken += 1;
+                        let psi: Vec<String> = t.psi.iter().map(|z| format!("{:?},{:?}", z.re, z.im)).collect();
+                        eprintln!("R2WALK {name}-{label} {taken} tau {tau:?} time {:?} r {:?} kappa {:?} jumps {jumps} work {:?} psi {}", t.time, t.r, t.kappa, step.work, psi.join(";"));
+                    }
+                    Err(e) => {
+                        eprintln!("R2WALK {name}-{label} refused at tau {tau:?}: {e:?}");
+                        tau *= 0.5;
+                    }
+                }
+            }
         }
     }
 }

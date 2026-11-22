@@ -4456,6 +4456,12 @@ impl Grouped {
         let cluster = Cluster { states: (0..4).collect(), ground: 4, frames: vec![crate::model::Beat::whole(vec![0]); 4], waves: vec![[0.0; 3]; 4], waves_exact: vec![crate::model::Beat::whole(vec![]); 4] };
         Grouped { theta, cluster }
     }
+    /// The model with its cluster said to hold an explicit excited state (its ground states three): its steps take
+    /// three nodes (step.rs, # One node a step).
+    fn explicit(mut self) -> Grouped {
+        self.cluster.ground = 3;
+        self
+    }
 }
 
 impl Dynamics for Grouped {
@@ -4597,37 +4603,43 @@ impl Dynamics for Emitting {
 /// fall of the norm -- one jump inside the step, the picture launched again from there, on one cluster: one stretch -- a
 /// step between two decisions (a decision's forward at the step's end is the decision's count, `Midway::decided`). The
 /// step's count is its stretch's price; the price's calls of the model are the calls the step made, counted by a probe
-/// (`Counted`) -- the generator at the three nodes, the kick's three forms and the fixed point's tones twice, at the
-/// middle's form and in the start state's shear --, read off the price's count at unit counts of each; it holds the two
-/// tones and their envelopes; the trajectory's photons are the one constant, one a jump; and the price a step taken from
-/// the state reads (`priced`) is this step's own on the scratch its first step primed.
+/// (`Counted`) -- on three nodes (the cluster said to hold an explicit state) the generator at the three nodes, the
+/// kick's three forms and the fixed point's tones twice, at the middle's form and in the start state's shear; on one
+/// (the cluster's states ground states alone, # One node a step) the generator at the middle, the middle's form and the
+/// end state's --, read off the price's count at unit counts of each; it holds the two tones and their envelopes; the
+/// trajectory's photons are the one constant, one a jump; and the price a step taken from the state reads (`priced`) is
+/// this step's own on the scratch its first step primed.
 #[test]
 fn a_step_s_price_is_its_count_item_by_item() {
     use crate::decide::COMPLEX;
-    let (model, tau) = (Emitting(Grouped::new(0.0)), 0.2);
-    let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
-    let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
-    from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
-    from.threshold = 0.0;
-    let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
-    from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
-    let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false };
-    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
-    through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
-    counted.calls.set([0; 5]);
-    let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
-    let calls = counted.calls.get();
-    let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
-    assert_eq!((jumps, taken.prices.len()), (1, 1), "one jump inside the step, one stretch");
-    let (_, price) = taken.prices[0];
-    let costs = model.middle(0, [0.0; 3], 0.0).work();
-    assert_eq!(taken.work, price.work(costs), "the step's count is its stretch's price");
-    let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
-    eprintln!("calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
-    assert_eq!([unit(0), unit(1), unit(2)], [calls[2] as f64, calls[3] as f64, calls[4] as f64], "the price's calls of the model are the step's");
-    assert!(price.tones == 2 && price.toned[0] > (6 * 2 * 4 * 4) as f64 && price.centred && price.ended, "{price:?}");
-    assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "a jump's photons");
-    assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "a step taken from the state");
+    for (model, nodes, calls_of) in [(Emitting(Grouped::new(0.0).explicit()), 3, [3, 4, 1]), (Emitting(Grouped::new(0.0)), 1, [1, 2, 0])] {
+        let tau = 0.2;
+        let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+        let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
+        from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
+        from.threshold = 0.0;
+        let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+        from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
+        let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false };
+        let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
+        through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        counted.calls.set([0; 5]);
+        let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let calls = counted.calls.get();
+        let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
+        assert_eq!((jumps, taken.prices.len()), (1, 1), "{nodes} nodes: one jump inside the step, one stretch");
+        let (_, price) = taken.prices[0];
+        let costs = model.middle(0, [0.0; 3], 0.0).work();
+        assert_eq!(taken.work, price.work(costs), "{nodes} nodes: the step's count is its stretch's price");
+        let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
+        eprintln!("{nodes} nodes: calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
+        assert_eq!([unit(0), unit(1), unit(2)], [calls[2] as f64, calls[3] as f64, calls[4] as f64], "{nodes} nodes: the price's calls of the model are the step's");
+        assert_eq!([calls[2], calls[3], calls[4]], calls_of, "{nodes} nodes: the model's calls");
+        assert_eq!(price.still, nodes == 1, "{nodes} nodes");
+        assert!(price.tones == 2 && price.toned[0] > (2 * nodes * 2 * 4 * 4) as f64 && price.centred && price.ended, "{price:?}");
+        assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "{nodes} nodes: a jump's photons");
+        assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "{nodes} nodes: a step taken from the state");
+    }
 }
 
 /// The fast-tone check (RUSTPLAN 3.2): can the picture take a hyperfine-sized beat of the model as an exact tone? Three
@@ -4725,6 +4737,7 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
             if toned {
                 picture.separate(
                     h,
+                    false,
                     |beats, keys| {
                         beats.push(nu);
                         keys.push(vec![1]);

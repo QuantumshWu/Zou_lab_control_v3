@@ -1125,7 +1125,15 @@ impl Picture {
     /// changes along the path (the light's profile at the path's points) goes through the nodes as the static group does.
     /// The routes are weighed on the generator's diagonal at the middle as given, before any candidate is taken out: a
     /// candidate's route does not depend on the others' order.
-    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
+    ///
+    /// `held`: the step takes its generator at the middle alone (step.rs, # One node a step) -- the static group and
+    /// every envelope held at their middle's values, each beat at its exact phase: Ĥ(u) = G₀(0) + Σ_m (e^{iν_m u} G_m⁺(0)
+    /// + e^{−iν_m u} G_m⁻(0)), known at every time from the middle's generator and envelopes alone (`ends` are not read
+    /// before, the envelopes asked at the middle alone). The routes are weighed as on three nodes; a tone's members at
+    /// the outer nodes are its middle's, and the static group at the outer nodes is the middle's with each candidate left
+    /// in it at its exact phase there: the parabola the propagation takes of such a candidate is its beat's through the
+    /// three nodes, as on three nodes, and of everything else its constant.
+    pub fn separate(&mut self, half: f64, held: bool, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
         self.keys.clear();
@@ -1138,6 +1146,12 @@ impl Picture {
         }
         let mut count = 0;
         let Picture { beats, base, ends, beating, keys, reciprocals, weighed, weighing, .. } = self;
+        if held {
+            // The static group's change at the outer nodes: each candidate left in it, its phase there less its middle's.
+            for end in ends.iter_mut() {
+                end.data.fill(C64::ZERO);
+            }
+        }
         for (candidate, &beat) in beating.iter().enumerate() {
             if beats.len() == count {
                 beats.push(Beat { beat: 0.0, key: vec![], candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
@@ -1153,10 +1167,30 @@ impl Picture {
             *weighing += work;
             if !taken {
                 weighed.push(candidate);
+                if held {
+                    for (end, u) in ends.iter_mut().zip([-half, half]) {
+                        let (p, q) = (C64::cis(beat * u) - C64::ONE, C64::cis(-beat * u) - C64::ONE);
+                        for ((z, g), h) in end.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                            *z += p * *g + q * *h;
+                        }
+                    }
+                }
                 continue;
             }
             (tone.beat, tone.candidate) = (beat, candidate);
             tone.key.clone_from(&keys[candidate]);
+            if held {
+                for member in [&mut *plus, &mut *minus] {
+                    let [before, middle, after] = member;
+                    before.data.copy_from_slice(&middle.data);
+                    after.data.copy_from_slice(&middle.data);
+                }
+                for ((z, g), h) in base.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                    *z -= *g + *h;
+                }
+                count += 1;
+                continue;
+            }
             for (j, u) in [(0, -half), (2, half)] {
                 envelopes(candidate, u, &mut plus[j], &mut minus[j]);
             }
@@ -1170,6 +1204,18 @@ impl Picture {
             count += 1;
         }
         beats.truncate(count);
+        if held {
+            for end in ends.iter_mut() {
+                for (z, b) in end.data.iter_mut().zip(&base.data) {
+                    *z += *b;
+                }
+            }
+        }
+    }
+
+    /// The beat of the caller's candidate `m` as `separate` was given it (rad/µs).
+    pub fn candidate_beat(&self, m: usize) -> f64 {
+        self.beating[m]
     }
 
     /// The states.
@@ -3236,6 +3282,7 @@ pub(crate) mod tests {
         picture.ends = [-half, half].map(|u| toned(group, tones, u));
         picture.separate(
             half,
+            false,
             |beats, keys| {
                 beats.extend(tones.iter().map(|t| t.beat));
                 keys.extend((0..tones.len()).map(|m| (0..tones.len()).map(|j| i64::from(j == m)).collect()));
@@ -3409,6 +3456,7 @@ pub(crate) mod tests {
                 picture.ends = [-half, half].map(generator);
                 picture.separate(
                     half,
+                    false,
                     |beats, keys| {
                         beats.push(beat);
                         keys.push(vec![1]);
@@ -3611,7 +3659,7 @@ pub(crate) mod tests {
                             beats.push(tones[0].beat);
                             keys.push(vec![1]);
                         };
-                        rule.separate(half, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
+                        rule.separate(half, false, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
                         let taken = rule.beats.len() == 1;
                         let (mut tone, mut nodes) = (as_tones(&group, &tones, half), without_tones(&group, &tones, half));
                         let times = [-0.3 * half, 0.4 * half, half];
