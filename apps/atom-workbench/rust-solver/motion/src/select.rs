@@ -82,7 +82,7 @@
 //! the tweezer's peak), whichever is nearer -- the reach the pilot's atoms show (solve.rs `choose_on_the_pilot`): where
 //! the paths did not go -- the tweezer's intensity s below the least the paths reached --, the readings where a row errs
 //! by a quarter of its target or more mark the region {s ≤ s*}, s* the most intense of them, its error e the largest
-//! row's error there; below the least intensity the scans reached nothing is read, and an atom there is unknown, its
+//! row's error there; below the least intensity the scans and the paths reached nothing is read, and an atom there is unknown, its
 //! error whole (`Region`). The run books every atom in either (solve.rs `booked_at`): a share f of them errs by at most e
 //! (one) on what is shown and moves T by the bound set's `Estimate::moved(f)`. (Only the chosen one: a scan of the
 //! 32-state reference to the trap's region's edge took R4 50 s at its pilot's step, the candidates' own a minute more.)
@@ -464,7 +464,7 @@ impl Default for Calibration {
 
 /// The region left out (module documentation, # The region left out): {s ≤ `intensity`} where a scan found a row's
 /// error of a quarter of its target or more beyond the paths' least intensity, `error` the largest there (at most one);
-/// none flagged, the intensity −∞. Below the least intensity the scans reached, `edge`, nothing was read: a state there
+/// none flagged, the intensity −∞. Below the least intensity the scans and the paths reached, `edge`, nothing was read: a state there
 /// is unknown, its error whole (one). `largest` the largest row's error the scans read beyond the paths' reach, flagged
 /// or not.
 #[derive(Clone, Copy, Debug)]
@@ -558,7 +558,8 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
     let (reference, candidate) = done.split_at(scans.len());
     let quarter = 0.25 * POPULATION_TARGET;
     let mut region = Region::NONE;
-    region.edge = scans.iter().filter_map(|w| w.ends.last()).map(|e| intensity(light, [e[1], e[2], e[3]])).fold(f64::INFINITY, crate::linalg::smaller);
+    // Unread: below the least intensity both the scans and the paths reached (the paths read where they went).
+    region.edge = scans.iter().filter_map(|w| w.ends.last()).map(|e| intensity(light, [e[1], e[2], e[3]])).fold(least, crate::linalg::smaller);
     for (r, c) in reference.iter().zip(candidate) {
         for (c, r) in c.readings.iter().zip(&r.readings) {
             let s = intensity(light, c.r);

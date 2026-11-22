@@ -702,6 +702,7 @@ pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solutio
     let run = Selected::new(scene, selection.clone(), reference)?;
     match solve_with(request, &run, Choosing::Make, &mut messages)? {
         Attempted::Solved(s) => Ok(s),
+        Attempted::Scouted(_) => unreachable!("an attempt that makes the choice is no scout"),
         Attempted::Chose(choice) => {
             drop(run);
             messages.stage(Stage { step: Step::Model, tau: None, batch: None });
@@ -715,25 +716,30 @@ pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solutio
 fn solved(attempted: Result<Attempted, String>) -> Result<Solution, String> {
     match attempted? {
         Attempted::Solved(s) => Ok(s),
-        Attempted::Chose(_) => unreachable!("an attempt on a choice made solves"),
+        Attempted::Chose(_) | Attempted::Scouted(_) => unreachable!("an attempt on a choice made solves"),
     }
 }
 
 /// What an attempt does with the choice of P (module documentation, # The selection): takes the one made, or none
 /// (`Made`: its model's error booked from it, or not measured); makes it on its pilot and goes on to the product where
-/// it chose the attempt's own model (`Make`), or stops there whatever it chose (`Choose`: the tests' `chosen`).
+/// it chose the attempt's own model (`Make`), or stops there whatever it chose (`Choose`: the tests' `chosen`); or a
+/// candidate's own scout alone, its rung read and nothing chosen (`Scout`: the choice's pricing of a candidate at its
+/// own step, `choose_on_the_pilot`).
 #[derive(Clone)]
 enum Choosing {
     Made(Option<std::sync::Arc<Choice>>),
     Make,
+    Scout,
     #[cfg(test)]
     Choose,
 }
 
-/// How an attempt ended: its solution, or the choice of another model (or, `Choosing::Choose`, of any).
+/// How an attempt ended: its solution, the choice of another model (or, `Choosing::Choose`, of any), or (`Scout`) the
+/// rung its scout stands at (µs).
 enum Attempted {
     Solved(Solution),
     Chose(std::sync::Arc<Choice>),
+    Scouted(f64),
 }
 
 /// The run of a request at the reference populations `reference`: its scene and the selection's cheapest candidate,
@@ -760,7 +766,7 @@ pub(crate) fn chosen(request: &Request, reference: [f64; GROUND]) -> Result<Sele
             let mut messages = Messages { send: &mut send, clock: Instant::now(), last: None, least: 0, stage: None };
             match solve_with(request, &run, Choosing::Choose, &mut messages)? {
                 Attempted::Chose(choice) => choice,
-                Attempted::Solved(_) => unreachable!("an attempt that chooses stops at its choice"),
+                Attempted::Solved(_) | Attempted::Scouted(_) => unreachable!("an attempt that chooses stops at its choice"),
             }
         }
     };
@@ -2178,6 +2184,10 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         let (work, halving) = (|t: f64| priced(t)[0], |t: f64| priced(t)[1]);
         check(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1, &above, Some(&Prices { work: &work, halving: &halving, product: need }), messages);
     }
+    // A candidate's scout alone (`Choosing::Scout`): the rung it stands at.
+    if matches!(choosing, Choosing::Scout) {
+        return Ok(Attempted::Scouted(context.tau));
+    }
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
     // # The step) -- first as far as its own two levels: at the first rung whose own read is in and not clearly beyond,
     // its states are read, and the check goes on from there priced at them. Whether it saw: a step that stands
@@ -2530,6 +2540,8 @@ struct Weighed {
     need: f64,
     met: [bool; 2],
     fallback: Option<(crate::select::Fallback, usize)>,
+    /// The pairs' work, where they were run (part of `work`).
+    pairs: f64,
     work: Option<f64>,
     fate: String,
 }
@@ -2653,7 +2665,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             _ => (None, "布居或丢失的上界不够，不选".to_string()),
         };
         noted(report, format!("候选 P{}：每 µs 代价 {:.3e}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
-        Ok(Weighed { place, judged, price, model: model_error, need, met, fallback: None, work, fate })
+        Ok(Weighed { place, judged, price, model: model_error, need, met, fallback: None, pairs: 0., work, fate })
     };
     weighed.push(weigh(0, &mut models, &mut report)?);
     messages.alive();
@@ -2736,7 +2748,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let w = need * weighed[d].price * span + again(weighed[d].place, weighed[d].price) + pairs_work;
         let (seconds, anchor_size) = (pair_clock.elapsed().as_secs_f64(), weighed[anchor].judged.keep.len());
         let entry = &mut weighed[d];
-        (entry.model, entry.need, entry.met) = (model_error, need, met);
+        (entry.model, entry.need, entry.met, entry.pairs) = (model_error, need, met, pairs_work);
         entry.fallback = Some((fallback, anchor));
         entry.fate = if met == [true, true] {
             entry.work = Some(w);
@@ -2744,6 +2756,31 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         } else {
             format!("温度上界不够，成对实测（{} 对 × {lt:.0} µs，对 P{anchor_size}，{seconds:.1} s）后仍不够，不选", groups as u64 * GROUP)
         };
+        noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
+        messages.alive();
+    }
+    // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
+    // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
+    // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, the
+    // check's course on them, as the attempt's own scout), its work a µs at the rung the scout stands at, and its W again
+    // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
+    for i in 0..weighed.len() {
+        if weighed[i].work.is_none() || weighed[i].place == 0 || weighed[i].place == usize::MAX {
+            continue;
+        }
+        let clock = Instant::now();
+        let model = models[weighed[i].place].as_ref().expect("a candidate's model");
+        let rung = match solve_with(request, model, Choosing::Scout, messages)? {
+            Attempted::Scouted(t) => t,
+            _ => unreachable!("a scout's attempt stops at its rung"),
+        };
+        messages.stage(Stage { step: Step::Select, tau: Some(tau), batch: None });
+        let price = priced(model, domain.widest, &rated, rung, false);
+        let scout = 1.5 * numbers.len() as f64 * price * span;
+        let entry = &mut weighed[i];
+        let w = entry.need * price * span + again(entry.place, price) + entry.pairs + scout;
+        entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
+        (entry.price, entry.work) = (price, Some(w));
         noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
         messages.alive();
     }
@@ -2776,7 +2813,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let model_error = account(&judged, None);
         let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
         let (met, need) = (met(&own), most_needed(&own));
-        weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, met, fallback: None, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }) });
+        weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, met, fallback: None, pairs: 0., work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }) });
     }
     // The report: every candidate weighed with its parts at their largest over the times.
     for w in &weighed {
