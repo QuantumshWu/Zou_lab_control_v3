@@ -3444,7 +3444,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 norm_sqr(&y[..n]) <= threshold
             };
             let tones = picture.beats.len();
+            let choosing = crate::prof::scope(89);
             let mut laid = groups.choose(picture, from, h, (still, tones), &mut ends);
+            drop(choosing);
             let mut layout = panels(from, h, laid);
             while let Some((b, nodes)) = layout.next() {
                 let grouped = groups.groups > 1;
@@ -3634,6 +3636,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let t_m = start + h;
         // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light and the
         // optical sector's rate there.
+        let forming = crate::prof::scope(91);
         let part = if still {
             let sum = &mut sum[..n * n];
             whole(sums, 0, n, sum);
@@ -3716,6 +3719,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 march.state.forms = Forms { time: t_m, ..forms }.less(self.reference);
             }
             drop(_pn);
+            let _toning = crate::prof::scope(90);
             for (node_sums, tone) in tones.chunks_exact(TONE * size).zip(&picture.beats) {
                 let at: Vec<(f64, &[C64], &[C64])> = node_sums.chunks_exact(2 * size).zip([-h, 0.0, h]).map(|(pair, s)| (s, &pair[..size], &pair[size..])).collect();
                 let form = along.middle.tone_force(&along.path, tone.candidate, &at);
@@ -3725,6 +3729,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             out
         };
+        drop(forming);
         for a in 0..3 {
             march.impulse[a] += part[a];
         }

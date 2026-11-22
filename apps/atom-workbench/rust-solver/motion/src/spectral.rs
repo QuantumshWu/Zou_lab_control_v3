@@ -1246,7 +1246,9 @@ impl Picture {
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
         (self.half, self.followed, self.spread, self.factored, self.grown, self.slopes) = (half, false, 0.0, f64::NAN, 1.0, [0.0; 3]);
+        let classified = crate::prof::scope(84);
         self.classify();
+        drop(classified);
         if !still {
             let [minus, plus] = &mut self.ends;
             let (first, second) = (0.5 / half, 0.5 / (half * half));
@@ -1279,6 +1281,7 @@ impl Picture {
         self.reach(start);
         // The decomposition where it converges and a state through it rounds no more than through Ĥ₀'s exponential over
         // the step (module documentation, # Where the decomposition does not take the step).
+        let decomposing = crate::prof::scope(85);
         self.bounded();
         let [rho, gamma] = self.bounds;
         let tau = 2.0 * half.abs();
@@ -1312,7 +1315,9 @@ impl Picture {
         self.work += (n * n * n) as f64;
         lay(&e.vectors.data, n, &mut self.right);
         lay(&e.inverse.data, n, &mut self.left);
+        drop(decomposing);
         if self.moving {
+            let changing = crate::prof::scope(86);
             // Each change M ← (R⁻¹M)R: two products of n³, a product's right factor column by column -- the static
             // group's A and B, each member's C, A and B.
             let block = self.right.len();
@@ -1340,7 +1345,11 @@ impl Picture {
                 }
             }
             self.work += ((4 + 12 * self.beats.len()) * n * n * n) as f64;
+            drop(changing);
+            let following = crate::prof::scope(87);
             self.follow()?;
+            drop(following);
+            let _hopping = crate::prof::scope(88);
             // The hops' radius on the whole hopped operator (`hops_radius`), of the hop's own envelope as the following
             // leaves it: every entry's own within π is no convergence of the whole series.
             let reach = self.hops_radius();
