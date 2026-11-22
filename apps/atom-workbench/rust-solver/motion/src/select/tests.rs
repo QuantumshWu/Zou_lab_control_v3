@@ -1,5 +1,6 @@
 //! The selection's checks: the chain by hand and on every reference scene, the middle point, the accounts' bounds by
-//! hand; and, run by name, the whole selection on the scenes' requests (`select_on_the_scenes`).
+//! hand; and, run by name, the whole selection on the scenes' requests (`select_on_the_scenes`) and where every atom is
+//! lost (`select_where_every_atom_is_lost`, R9_PUSH).
 use super::*;
 use crate::paths::Mean;
 
@@ -176,6 +177,27 @@ fn choose_on_every_reference_scene() {
     }
     eprintln!("{} scenes in {:.1} s; {} failed", all.len(), clock.elapsed().as_secs_f64(), failed.len());
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The whole selection where every atom is lost (refs/scenes R9_PUSH: the pushing beam has pushed every atom out by
+/// 45 µs, the paths' four walks by 28 µs): it ends with a choice, complete -- its W a number --, and no line of its
+/// report says a number that is none. (On dca75e10 every candidate's price and the 32 states' own account read no
+/// number there, and the choice panicked: "the anchor is complete".) A few seconds; a gate's.
+#[test]
+#[ignore]
+fn select_where_every_atom_is_lost() {
+    let request = crate::model::testing::scene("R9_PUSH");
+    let clock = Instant::now();
+    let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).expect("R9_PUSH's choice");
+    let choice = run.report.choice.clone().expect("the chosen run holds its choice");
+    for line in &choice.report {
+        eprintln!("  {line}");
+    }
+    eprintln!("R9_PUSH: P{} chosen in {:.1} s", run.rs.keep.len(), clock.elapsed().as_secs_f64());
+    let chosen = choice.report.iter().find(|l| l.contains("（选中）")).expect("the chosen candidate's line");
+    assert!(chosen.contains("W ") && !chosen.contains("W —") && !chosen.contains("inf"), "{chosen}");
+    assert!(choice.report.iter().all(|l| !l.contains("NaN")), "{:#?}", choice.report);
+    assert_eq!(choice.keep, run.rs.keep);
 }
 
 /// The six scenes' requests (the directory `V3D_REQ`: scratchpad reqprec/req; `PSTATE_SCENE` one of them), each with
