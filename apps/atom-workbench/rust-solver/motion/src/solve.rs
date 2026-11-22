@@ -2353,7 +2353,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         let allowance = reads.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
         let (r, se, decided) = memory_at_the_end(&parts.iter().collect::<Vec<_>>(), &context.scales, allowance);
         eprintln!(
-            "  注：运行末 T 的记忆（运行自己的 {} 条轨迹，似然比）：R_T = {r:.2} ± {se:.2} µK，允许量 {allowance:.2} µK：{}",
+            "  注：运行末 T 的记忆（运行自己的 {} 条轨迹，初态动能倾斜的似然比）：m = {r:.2} ± {se:.2} µK，允许量 {allowance:.2} µK：{}",
             parts.len() as u64 * GROUP,
             match decided { Some(true) => "塌掉（运行末仍可读出）", Some(false) => "没塌掉（运行末的上端在允许量以内）", None => "定不下来，不出旗标" }
         );
@@ -2472,24 +2472,32 @@ fn priced(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: bool)
     over_the_run(rated, taken.into_iter(), None)
 }
 
-/// T's memory at the run's end, read on the run's own trajectories at no trajectory more (select.rs, # The feedback
-/// through the motion: zero): R_T = dT/dε of every initial momentum scaled by 1 + ε at t = 0, by the likelihood ratio
-/// the run's T estimate with its reads reweighed by 1 + εs (`Group::tilted`; s each trajectory's score,
-/// ensemble.rs `Ensemble::draw_scored`) -- the difference at ±h over 2h, exact for the reweighing's linear part --, at
-/// the last time read, its standard error the groups' jackknife; and the flag's question there against T's allowance
-/// `allowance` (µK; select.rs `decide`). The response's value and error (µK a unit ε), and the answer.
+/// T's memory at the run's end, read on the run's own trajectories at no trajectory more (select.rs, # T's memory, read
+/// on the run's own trajectories): R_T(t) = dT(t)/dε of the initial tilt e^{−εK}, by the likelihood ratio the run's T
+/// estimate with its reads reweighed by 1 + ε(K̄ − K) (`Group::tilted`; K each trajectory's classical kinetic energy,
+/// ensemble.rs `Ensemble::draw_kinetic`, K̄ the run's own mean) -- the difference at ±h over 2h --; T's memory at the
+/// end the response there over its start's, R_T(end)/R_T(0), and on the momenta's-scaling scale the question asks it on
+/// (`select::decide`: a unit scaling moves T(0) by 2T(0)) m = 2T(0)·R_T(end)/R_T(0) (µK), its standard error the groups'
+/// jackknife of that ratio; the flag's question against T's allowance at the end `allowance` (µK). The memory m and its
+/// error, and the answer.
 fn memory_at_the_end(parts: &[&Part], scales: &Scales, allowance: f64) -> (f64, f64, Option<bool>) {
     let h = MEMORY_TILT;
-    let tilted = |sign: f64| -> Vec<Group> { parts.iter().map(|p| p.reads.tilted(&p.scored, sign * h)).collect() };
+    // K̄: every trajectory's K over their number, at t = 0 (every trajectory counted there, failed or not).
+    let total = |g: &Group| g.sums.first().map_or(0., |s| s.trajectories + s.failed);
+    let mean = parts.iter().map(|p| total(&p.kinetic)).sum::<f64>() / parts.iter().map(|p| total(&p.reads)).sum::<f64>();
+    let tilted = |sign: f64| -> Vec<Group> { parts.iter().map(|p| p.reads.tilted(&p.reads, sign * h * mean).tilted(&p.kinetic, -sign * h)).collect() };
     let (plus, minus) = (tilted(1.), tilted(-1.));
     let (a, b): (Vec<&Group>, Vec<&Group>) = (plus.iter().collect(), minus.iter().collect());
+    let plain: Vec<&Group> = parts.iter().map(|p| &p.reads).collect();
     let none: [&Group; 0] = [];
-    let k = parts.first().map_or(0, |p| p.reads.sums.len()).saturating_sub(1);
-    let (x, y) = (readings(&a, &none, k, scales), readings(&b, &none, k, scales));
+    let last = parts.first().map_or(0, |p| p.reads.sums.len()).saturating_sub(1);
     let t = |r: &[crate::analysis::Reading], g: Option<usize>| (0..3).map(|q| g.map_or(r[1 + STATES + q].whole, |g| r[1 + STATES + q].leave[g])).sum::<f64>() / 3.;
-    let d = |g: Option<usize>| (t(&x, g) - t(&y, g)) / (2. * h);
+    let at = |k: usize| (readings(&a, &none, k, scales), readings(&b, &none, k, scales));
+    let ((x0, y0), (x1, y1)) = (at(0), at(last));
+    let start = readings(&plain, &none, 0, scales);
+    let m = |g: Option<usize>| 2. * t(&start, g) * (t(&x1, g) - t(&y1, g)) / (t(&x0, g) - t(&y0, g));
     let groups = parts.len();
-    let (r, se) = (d(None), crate::estimate::spread((0..groups).map(|g| d(Some(g))).collect::<Vec<_>>().into_iter(), groups as f64).error);
+    let (r, se) = (m(None), crate::estimate::spread((0..groups).map(|g| m(Some(g))).collect::<Vec<_>>().into_iter(), groups as f64).error);
     (r, se, crate::select::decide(r, se, allowance))
 }
 
@@ -2585,7 +2593,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     {
         let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
         let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
-        noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（似然比，只作对照；旗标在正式运行末读）：运行末 R_T = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}", pilot.len() as u64 * GROUP, match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" }));
+        let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
+        let drift = if let [.., (a, ea), (b, eb)] = held[..] { format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }) } else { "末段无 T".to_string() };
+        noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：运行末 m = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}；{drift}", pilot.len() as u64 * GROUP, match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" }));
     }
     // 3. The candidates.
     let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
@@ -3707,8 +3717,9 @@ struct Record {
     counts: Counts,
     /// Its photons and their Σ k_φ² (step.rs `Trajectory::scattered`).
     scattered: [f64; 2],
-    /// Its initial momenta's score (ensemble.rs `Ensemble::draw_scored`; none where the run does not draw it).
-    score: f64,
+    /// Its classical draw's kinetic energy K in k_BT (ensemble.rs `Ensemble::draw_kinetic`; none where the run does not
+    /// draw it): the statistic of the initial tilt T's memory is read by (`memory_at_the_end`).
+    kinetic: f64,
 }
 
 /// One trajectory's T windows (module documentation, # Outputs and windows) about some times, and what became of it by
@@ -4001,7 +4012,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         halved: path.halved(),
         time: t.time,
     };
-    Record { outputs, listed, reads, trail, lost, counts, scattered: t.scattered, score: 0. }
+    Record { outputs, listed, reads, trail, lost, counts, scattered: t.scattered, kinetic: 0. }
 }
 
 /// A kept trajectory's states at the times `times` (increasing, from t = 0; µs) made again from its checkpoints `trail`
@@ -4076,7 +4087,7 @@ fn walks(run: &Selected, domain: &Domain, tau: f64, end: f64, parts: &[&Part], c
 struct Part {
     sums: Group,
     reads: Group,
-    scored: Group,
+    kinetic: Group,
     listed: Vec<Vec<(V3, V3)>>,
     samples: Vec<Vec<State>>,
     trails: Vec<Vec<Checkpoint>>,
@@ -4088,7 +4099,7 @@ impl Part {
     fn absorb(&mut self, other: Part) {
         self.sums.absorb(other.sums);
         self.reads.absorb(other.reads);
-        self.scored.absorb(other.scored);
+        self.kinetic.absorb(other.kinetic);
         for (l, x) in self.listed.iter_mut().zip(other.listed) {
             l.extend(x);
         }
@@ -4107,7 +4118,7 @@ impl Part {
         Part {
             sums: self.sums.clone(),
             reads: self.reads.at(at),
-            scored: self.scored.at(at),
+            kinetic: self.kinetic.at(at),
             listed: self.listed.clone(),
             samples: vec![vec![]; at.len()],
             trails: vec![],
@@ -4163,7 +4174,7 @@ impl Shape {
         Part {
             sums: Group::new(self.outputs),
             reads: Group::new(self.reads),
-            scored: Group::new(self.reads),
+            kinetic: Group::new(self.reads),
             listed: vec![vec![]; self.listed],
             samples: vec![],
             trails: vec![],
@@ -4177,8 +4188,8 @@ impl Shape {
         part.sums.scatter(r.scattered);
         part.reads.add(&r.reads);
         part.reads.scatter(r.scattered);
-        part.scored.add_weighted(&r.reads, r.score);
-        part.scored.scatter(r.scattered.map(|x| x * r.score));
+        part.kinetic.add_weighted(&r.reads, r.kinetic);
+        part.kinetic.scatter(r.scattered.map(|x| x * r.kinetic));
         for (l, x) in part.listed.iter_mut().zip(r.listed) {
             l.extend(x);
         }
@@ -4194,8 +4205,8 @@ impl Shape {
 /// through the plan (`run`). A function of the index and the step: the same index at another step is the same atom on
 /// the same streams (module documentation, # The step).
 fn trajectory(model: &Selected, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
-    let (start, score) = ensemble.draw_scored(SEED, index);
-    Record { score, ..run(model, domain, start, index, tau, plan, keep) }
+    let (start, kinetic) = ensemble.draw_kinetic(SEED, index);
+    Record { kinetic, ..run(model, domain, start, index, tau, plan, keep) }
 }
 
 /// A level of a hand-out (`run_groups`): the members `members` of the groups of the numbers `groups` (all of them:
@@ -5219,7 +5230,7 @@ mod tests {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * if h > 3. * tau { out } else { 1. };
             let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
-            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2], score: 0. }
+            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2], kinetic: 0. }
         };
         for members in [1, GROUP] {
             let level = |h: f64, out: f64| -> Vec<Part> { (0..11).map(|g| folded(&shape, (0..members).map(|m| record(h, out, g * GROUP + m)))).collect() };
@@ -5498,7 +5509,7 @@ mod tests {
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * (1. - f * (1. - 0.5_f64.powi(ORDER)));
             let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
             let halved = adapt::Halved { steps: 1, time: 4. * f, shortfall: 4. * f * (1. - 0.5_f64.powi(ORDER)) };
-            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2], score: 0. }
+            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2], kinetic: 0. }
         };
         let halved = |h: f64, f: f64| -> Vec<Part> { (0..11).map(|g| folded(&shape, (0..GROUP).map(|m| record(h, f, g * GROUP + m)))).collect() };
         let level = |h: f64| halved(h, 0.);
@@ -6350,7 +6361,7 @@ mod tests {
                 // Three jumps a unit of time.
                 let state = |m: usize, k: usize| bare_state(MOST_TRAJECTORIES + (g as u64) * GROUP + m as u64, k as f64, 3 * k as u32);
                 let samples = (0..=outputs).map(|k| (0..members).filter(|&m| k <= held(g, m)).map(|m| state(m, k)).collect()).collect();
-                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), scored: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], counts: Counts::default() }
+                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), kinetic: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], counts: Counts::default() }
             })
             .collect()
     }
@@ -6567,7 +6578,7 @@ mod tests {
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
             let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false };
-            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], score: 0. }
+            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0. }
         };
         let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
         let scout: Vec<Part> = (0..3).map(|i| folded(&shape, std::iter::once(record(i)))).collect();
@@ -6685,7 +6696,7 @@ mod tests {
             lost: None,
             counts: Counts { nowhere: Stopped::at(0.), ..Counts::default() },
             scattered: [0.; 2],
-            score: 0.,
+            kinetic: 0.,
         };
         let none = [folded(&shape, (0..GROUP).map(nowhere)), folded(&shape, (GROUP..2 * GROUP).map(nowhere))];
         let all: Vec<&Part> = none.iter().collect();
@@ -6729,7 +6740,7 @@ mod tests {
         let record = |_: u64| {
             std::thread::sleep(Duration::from_millis(3));
             over.fetch_add(1, Ordering::Relaxed);
-            Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], score: 0. }
+            Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0. }
         };
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
@@ -6997,7 +7008,7 @@ mod tests {
             rows[(i % STATES as u64) as usize] = 1.;
             let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
-            Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2], score: 0. }
+            Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2], kinetic: 0. }
         };
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
@@ -7030,7 +7041,7 @@ mod tests {
         let record = |i: u64| {
             assert!(i != 2048 * GROUP + 3, "a trajectory's defect at {i}");
             std::thread::sleep(each);
-            Record { reads: vec![Fate::Lost; 2], outputs: vec![Fate::Lost; 2], listed: vec![None], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], score: 0. }
+            Record { reads: vec![Fate::Lost; 2], outputs: vec![Fate::Lost; 2], listed: vec![None], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0. }
         };
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
@@ -7081,12 +7092,13 @@ mod tests {
         }
     }
 
-    /// The draws' score (ensemble.rs `Ensemble::draw_scored`; select.rs, # T's memory, read on the run's own
+    /// The draws' tilt statistic (ensemble.rs `Ensemble::draw_kinetic`; select.rs, # T's memory, read on the run's own
     /// trajectories) on the conservative reference traps (as `the_reference_traps_draw_their_exact_moments`), 2¹² draws
-    /// each: its mean is none (E[s] = 0), and it reads the momenta's scaling -- κ → (1 + ε)κ moves ⟨κ_a²⟩ by 2ε⟨κ_a²⟩, so
-    /// κ_a² s − 2κ_a² has none either --, each within its interval over the groups at the confidence z, eight looks.
+    /// each: K within the draw's depth (0 ≤ K ≤ y, so the score ⟨K⟩ − K bounded); with ⟨K⟩ = 3η/2 the classical
+    /// ensemble's own (`Ensemble::kinetic`), the score s = ⟨K⟩ − K has none for its mean and E[K s] = −Var K, each within
+    /// its interval over the groups at the confidence z (and the quadrature's error), four looks.
     #[test]
-    fn the_draws_score_reads_the_momenta_s_scaling() {
+    fn the_draws_tilt_scores_their_kinetic_energy() {
         let names = ["R1_TWEEZER", "R1_SIGMA_P"];
         for name in names {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
@@ -7097,21 +7109,24 @@ mod tests {
             let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&run, alone(s)).unwrap()).collect();
             let hm = hbar_over_mass(request.mass_kg);
             let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
-            let draws: Vec<(V3, f64)> = (0..1 << 12).map(|i| ensemble.draw_scored(SEED, i)).map(|(d, s)| (d.kappa.map(|k| hm * k * k), s)).collect();
-            let looks: [(&str, Box<dyn Fn(&(V3, f64)) -> f64>); 4] = [
-                ("s", Box::new(|d| d.1)),
-                ("κ_x² s − 2κ_x²", Box::new(|d| d.0[0] * (d.1 - 2.))),
-                ("κ_y² s − 2κ_y²", Box::new(|d| d.0[1] * (d.1 - 2.))),
-                ("κ_z² s − 2κ_z²", Box::new(|d| d.0[2] * (d.1 - 2.))),
-            ];
-            for (what, x) in &looks {
-                let groups: Vec<f64> = draws.chunks(GROUP as usize).map(|members| members.iter().map(x).sum::<f64>() / GROUP as f64).collect();
+            let kinetic = ensemble.kinetic(1 << 16);
+            // ⟨K⟩ over the components by their weights (K's mean is 3η/2 in each), and the quadrature's error alike.
+            let weight: f64 = initial.iter().map(|c| c.1).sum();
+            let expected = initial.iter().zip(&kinetic).map(|(c, k)| c.1 * 1.5 * k.eta).sum::<f64>() / weight;
+            let quadrature = initial.iter().zip(&kinetic).map(|(c, k)| c.1 * 1.5 * k.difference).sum::<f64>() / weight;
+            let k: Vec<f64> = (0..1 << 12).map(|i| ensemble.draw_kinetic(SEED, i).1).collect();
+            assert!(k.iter().all(|&k| k >= 0. && k.is_finite()), "{name}: a kinetic energy out of its range");
+            let mean = k.iter().sum::<f64>() / k.len() as f64;
+            let variance = k.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (k.len() - 1) as f64;
+            let looks: [(&str, f64, Box<dyn Fn(f64) -> f64>); 2] = [("s", 0., Box::new(|k| expected - k)), ("K s + Var K", quadrature * mean, Box::new(|k| k * (expected - k) + variance))];
+            for (what, slack, x) in &looks {
+                let groups: Vec<f64> = k.chunks(GROUP as usize).map(|members| members.iter().map(|&k| x(k)).sum::<f64>() / GROUP as f64).collect();
                 let g = groups.len() as f64;
-                let mean = groups.iter().sum::<f64>() / g;
-                let error = (groups.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
-                let within = Spread { error, groups: g }.interval_over((looks.len() * names.len()) as f64);
-                eprintln!("{name} {what}: {mean:.4e} ± {within:.2e}");
-                assert!(mean.abs() <= within, "{name} {what}: {mean} beyond ± {within}");
+                let m = groups.iter().sum::<f64>() / g;
+                let error = (groups.iter().map(|y| (y - m).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
+                let within = Spread { error, groups: g }.interval_over((looks.len() * names.len()) as f64) + quadrature + slack;
+                eprintln!("{name} {what}: {m:.4e} ± {within:.2e} (⟨K⟩ {expected:.4}, mean {mean:.4}, Var {variance:.4})");
+                assert!(m.abs() <= within, "{name} {what}: {m} beyond ± {within}");
             }
         }
     }
@@ -7513,7 +7528,7 @@ mod tests {
                 let mut samples = vec![vec![]; outputs + 1];
                 samples[0] = (0..members).map(|m| state(m, 0., 0)).collect();
                 let lost = (0..members).map(|m| (1, state(m, loss(m), 6))).collect();
-                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), scored: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost, counts: Counts::default() }
+                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), kinetic: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost, counts: Counts::default() }
             })
             .collect();
         let all: Vec<&Part> = parts.iter().collect();

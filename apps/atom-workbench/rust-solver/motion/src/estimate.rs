@@ -347,7 +347,7 @@ impl Sums {
         self.add_weighted(fate, 1.);
     }
     /// One trajectory at the output, its every count and sum weighed by `w` (`add` at w = 1; solve.rs: a run's reads
-    /// weighed by its trajectories' scores, `Group::tilted`).
+    /// weighed by its trajectories' initial kinetic energies, `Group::tilted`).
     pub fn add_weighted(&mut self, fate: &Fate, w: f64) {
         if matches!(fate, Fate::Failed | Fate::Refused) {
             self.failed += w;
@@ -425,8 +425,8 @@ impl Group {
             s.add_weighted(o, w);
         }
     }
-    /// The group's sums with another's of the same trajectories weighed by `h` added in: the group reweighed by 1 + h s
-    /// where `weighed` holds its trajectories weighed by their scores s (solve.rs `memory_at_the_end`).
+    /// The group's sums with another's of the same trajectories weighed by `h` added in: the group reweighed by 1 + h x
+    /// where `weighed` holds its trajectories weighed by a statistic x of theirs (solve.rs `memory_at_the_end`).
     pub fn tilted(&self, weighed: &Group, h: f64) -> Group {
         let mut g = self.clone();
         for (s, o) in g.sums.iter_mut().zip(&weighed.sums) {

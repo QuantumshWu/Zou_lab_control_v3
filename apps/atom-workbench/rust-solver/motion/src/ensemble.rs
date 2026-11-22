@@ -412,17 +412,13 @@ impl<'a> Ensemble<'a> {
     /// The initial state of trajectory `index` of the run `seed`: its group the `GROUP` trajectories from index − index mod
     /// GROUP, its strata from that group's Latin stream, the rest from its own (module documentation, # Latin hypercube).
     pub fn draw(&self, seed: u64, index: u64) -> Start {
-        self.draw_scored(seed, index).0
+        self.draw_kinetic(seed, index).0
     }
 
-    /// `draw`, with the draw's score for the momenta's scaling: s = ∂_ε log p_ε at ε = 0, p_ε the density of the draws
-    /// with every momentum scaled by 1 + ε (select.rs, # The feedback through the motion: zero -- T's memory read on the
-    /// run's own trajectories). At the classical draw's depth y and kinetic energy K (in k_BT; # Its draw) the density is
-    /// ∝ (e^{y−K} − 1)₊ with K ∝ κ², so s = 2K e^{y−K}/(e^{y−K} − 1) − 3 = 2K/(1 − e^{K−y}) − 3 (the 3 the scaling's
-    /// Jacobian); the Wigner map scales the momenta linearly and moves the place by the place alone (# The Wigner factor),
-    /// so the mapped draw's score is the classical one's. A draw at the escape energy itself, K = y (of no density), is
-    /// taken a rounding of y below it.
-    pub fn draw_scored(&self, seed: u64, index: u64) -> (Start, f64) {
+    /// `draw`, with the classical draw's kinetic energy K (in k_BT; # Its draw): the statistic of the initial state's
+    /// tilt e^{−εK} whose score ⟨K⟩ − K T's memory is read by (select.rs, # T's memory, read on the run's own
+    /// trajectories). Bounded: 0 ≤ K ≤ y, the depth of the draw's place, at most the well's.
+    pub fn draw_kinetic(&self, seed: u64, index: u64) -> (Start, f64) {
         let (first, member) = (index - index % GROUP, (index % GROUP) as usize);
         let mut shared = Stream::new(seed, Purpose::Latin, first, 0);
         let mut own = Stream::new(seed, Purpose::Initial, index, 0);
@@ -455,11 +451,10 @@ impl<'a> Ensemble<'a> {
             proposal = std::array::from_fn(|_| own.interior());
         };
         let k = invert(y, deviates[5]);
-        let score = 2. * k / -(k - y).min(-f64::EPSILON * y).exp_m1() - 3.;
         let size = (2. * k * self.kt / self.hbar_over_mass).sqrt();
         let kappa = direction(2. * deviates[6] - 1., TAU * deviates[7]).map(|x| x * size);
         let (r, kappa) = c.wigner(r, gradient, kappa);
-        (Start { state: c.state, r, kappa }, score)
+        (Start { state: c.state, r, kappa }, k)
     }
 
     /// Each component's quadrature of η (module documentation, # The exact moments: the draws' reference): every

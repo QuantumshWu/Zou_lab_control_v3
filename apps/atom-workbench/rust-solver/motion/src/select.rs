@@ -70,26 +70,31 @@
 //!
 //! ## T's memory, read on the run's own trajectories
 //! One flag is left of the momentum-scaling response: T's memory not shorter than the run (FOLDTEMP §R2.3, "缩放响应在
-//! 运行末仍可读出"). It is read on the product's own trajectories, no trajectory more (solve.rs `memory_at_the_end`;
-//! until the coordinator's item 7 of 2026-11-22 two more runs of the pilot's atoms at 1 ± η did it, 4–52 % of the
-//! chosen W):
-//! - The response R_O(t) = d⟨O(t)⟩/dε, every initial momentum scaled by 1 + ε at t = 0, is by the likelihood-ratio
-//!   (score-function) identity R_O(t) = d/dε ∫ O(t; x₀) p_ε(x₀) dx₀ = E[O(t) s(x₀)], s = ∂_ε log p_ε at ε = 0 the
-//!   draw's score, p_ε the density of the scaled draws, the dynamics after t = 0 unchanged. E[s] = 0, so R_O =
-//!   Cov(O(t), s); for an estimate that is a smooth function of the run's sums -- T, a U-statistic of the held atoms'
-//!   κ and κ² over their number -- R is its derivative with every trajectory reweighed by 1 + εs.
-//! - The engine's draw (ensemble.rs, # The lowered isothermal, # Its draw, # The Wigner factor) is no Maxwell
-//!   distribution independent of the place: the classical density is f(r, κ) ∝ (e^{y−K} − 1)₊, y = −V(r)/k_BT the
-//!   depth in the component's prepared well, K = (ħ/m)κ²/2k_BT; the Wigner map then scales κ by S (linear, along the
-//!   well's axes) and moves r by a function of r alone. Scaling the mapped momenta by 1 + ε scales κ alike, K by
-//!   (1 + ε)², the density's Jacobian by (1 + ε)⁻³, so s = 2K e^{y−K}/(e^{y−K} − 1) − 3 at the classical draw's K
-//!   and y (`Ensemble::draw_scored`; a mixture's component is the trajectory's internal state, its own density).
-//!   Deep in the well, y − K ≫ 1, it is Σ_a κ_a²/σ_a² − 3, the Maxwell distribution's.
-//! - Near the escape energy, K → y, s grows as 2y/(y − K): the density vanishes linearly there, and s's second moment
-//!   diverges as the logarithm of the nearest draw's distance to escape. Its weight is that of the atoms within a few
-//!   k_BT of escape, of order e^{−D/k_BT} in a well D deep; the run's groups' jackknife reads the spread it has.
-//! - The flag at the run's end against T's allowance there (`decide`): read there (|R| > z·se), flagged; within the
-//!   allowance at its upper end, or not told, no flag.
+//! 运行末仍可读出"): whether the run's end still remembers its initial state. It is read on the product's own
+//! trajectories, no trajectory more (solve.rs `memory_at_the_end`; until the coordinator's item 7 of 2026-11-22 two more
+//! runs of the pilot's atoms at 1 ± η did it, 4–52 % of the chosen W):
+//! - Any perturbation of the initial state not orthogonal to the slow modes asks it. A perturbation p_ε of the draws'
+//!   density moves a reading by R_O(t) = d/dε ∫ O(t; x₀) p_ε(x₀) dx₀ = E[O(t) s(x₀)] (the likelihood-ratio identity), s =
+//!   ∂_ε log p_ε at ε = 0 the draw's score, the dynamics after t = 0 unchanged; E[s] = 0, so R_O = Cov(O(t), s), and
+//!   for an estimate that is a smooth function of the run's sums -- T, a U-statistic of the held atoms' κ and κ² over
+//!   their number -- R is its derivative with every trajectory reweighed by 1 + εs.
+//! - The perturbation is the initial kinetic energy's exponential tilt, p_ε ∝ p e^{−εK} normalized, K the classical
+//!   draw's kinetic energy in k_BT (ensemble.rs, # Its draw; `Ensemble::draw_kinetic`): s = ⟨K⟩ − K. Like the momenta's
+//!   scaling it changes the initial state's temperature, and overlaps the slow modes as much; unlike it, its score is
+//!   bounded -- the draw's density (e^{y−K} − 1)₊ holds 0 ≤ K ≤ y, y the depth of the place, at most the well's -- and its
+//!   variance finite. (The momenta's scaling, by the same identity, had s = 2K e^{y−K}/(e^{y−K} − 1) − 3: it grows as
+//!   2y/(y − K) at the escape energy, where the density vanishes linearly, and its second moment diverges as the
+//!   logarithm; the groups' jackknife of such a heavy tail reads too small an error. The coordinator's item 8.) The
+//!   Wigner map (# The Wigner factor) is a fixed map of the classical draw, so the mapped draws are tilted by the same
+//!   factor, and a mixture's component is the trajectory's internal state: the tilt is of each component's own density.
+//! - ⟨K⟩ is the run's own mean K̄ over its trajectories (failed or not, at t = 0), so Σ s = 0 over the run: its sums'
+//!   counts are not reweighed to the first order. A ratio of reweighed sums is unmoved by a constant added to s, so K̄'s
+//!   own sampling error enters only through the U-statistic's (n − 1) -- a relative 1/n of the response --, and the
+//!   sample covariance's bias is the same 1/n against the jackknife's 1/√n: both negligible.
+//! - The question's scale (`decide`): the momenta's scaling by a unit moved T(0) by 2T(0), and the flag asked whether
+//!   that much at t = 0 still moves the end's T by more than its allowance. The tilt's response is put on that scale by
+//!   its own start: the end's memory m = 2T(0) R_T(end)/R_T(0), T(0) the run's, its error the groups' jackknife of the
+//!   ratio itself. Read there (|m| > z·se), flagged; within the allowance at its upper end, or not told, no flag.
 //!
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
@@ -693,10 +698,11 @@ fn calibrate(candidate: [&Series; 3], reference: &[Series; 3]) -> Calibration {
 // ---------------------------------------------------------------------------------------------------------------------
 // The accounts.
 
-/// Whether T's memory is not shorter than the run, of its response at the run's end `r` (µK a unit ε) and its standard
-/// error `se`, T's allowance there `allowance` (µK): yes where the response is read there, |r| > z·se (FOLDTEMP §R2.3:
-/// "缩放响应在运行末仍可读出"); no where even its upper end |r| + z·se is within the allowance -- a unit kick of the
-/// initial momenta moves the end's T by less than its target; none otherwise (no flag: the run's groups do not tell).
+/// Whether T's memory is not shorter than the run, of its memory at the run's end `r` (µK, on the momenta's-scaling
+/// scale: T(0) moved by 2T(0); module documentation, # T's memory, read on the run's own trajectories) and its standard
+/// error `se`, T's allowance there `allowance` (µK): yes where it is read there, |r| > z·se (FOLDTEMP §R2.3: "缩放响应
+/// 在运行末仍可读出"); no where even its upper end |r| + z·se is within the allowance -- a unit kick of the initial
+/// state's temperature moves the end's T by less than its target; none otherwise (no flag: the run's groups do not tell).
 pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
     if !(r.is_finite() && se.is_finite()) {
         None
