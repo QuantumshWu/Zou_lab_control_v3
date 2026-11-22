@@ -7113,17 +7113,29 @@ mod tests {
         }
     }
 
-    /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its
-    /// atoms at the trap's centre at rest and at one to three times the thermal speed along each lab axis, held (no jump,
-    /// each its own representation: its start's), at two steps -- a trajectory's work a µs priced at every state is that
-    /// state's step's own count (`Step::work`, its scratch primed as a run's) over its length and its jumps' counted work
-    /// a µs (`Pick::jumping`), the mean over the states by their weights, to the rounding. The step is the run's from the
-    /// state: where the scheme refuses it, at its half, and so on (adapt.rs `halving`) -- at 0.4335 µs the decomposition
-    /// refuses one state's step for an entry of no route, and the price is that of its half (before, it was the price
-    /// without bound, and a rung with such a step was left whatever its read).
+    /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's explicit model below,
+    /// at states of its atoms at the trap's centre at rest and at one to three times the thermal speed along each lab
+    /// axis, held (no jump, each its own representation: its start's), at two steps -- a trajectory's work a µs priced at
+    /// every state is that state's step's own count (`Step::work`, its scratch primed as a run's) over its length and its
+    /// jumps' counted work a µs (`Pick::jumping`), the mean over the states by their weights, to the rounding. The step is
+    /// the run's from the state: where the scheme refuses it, at its half, and so on (adapt.rs `halving`) -- at 0.4335 µs
+    /// the decomposition refuses one state's step, and the price is that of its half (before, it was the price without
+    /// bound, and a rung with such a step was left whatever its read).
+    ///
+    /// The model is the one the test was written on, named by its states: the ground states and the excited states 20,
+    /// 21 and 23 to 31, the selection's run model of R4_LIN_2 until 429c36cd. Since then the selection gives the solve
+    /// the full-ground model G to run its pilot on (select.rs `choose`, the chain's first; `run_of`), P chosen later on
+    /// the pilot's paths -- and G, every excited state folded, has no step here that the scheme refuses: on it the
+    /// halving and the refused attempts' work this test reads would go unread (2.558·10⁶ a µs at 0.2 µs, every step
+    /// whole at 0.4335 µs).
     #[test]
     fn a_state_s_price_is_its_step_s_count() {
-        let (request, run, trap) = scene_run("R4_LIN_2", false, 0);
+        let (request, _, _) = scene_run("R4_LIN_2", false, 0);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let keep: Vec<usize> = (0..GROUND).chain([20, 21]).chain(23..STATES).collect();
+        let run = Selected::new(scene, Selection { keep, ..selection }, alone(0)).unwrap();
+        let trap = Prepared::new(&run, alone(0)).unwrap().trap;
         let b = chief(&request);
         let speed = thermal(&request, &run);
         let widest = Widest::of(&request);
