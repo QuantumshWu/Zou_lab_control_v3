@@ -104,7 +104,7 @@
 //!
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
-//! pilot's thermal speed against the reference (`scan`, at the paths' setting), each scan to the turning point of the pilot's most
+//! pilot's thermal speed against the reference (`scan`), each scan to the turning point of the pilot's most
 //! energetic held atom on the reference state's prepared potential, or to the trap region's edge (`REGION_INTENSITY` of
 //! the tweezer's peak), whichever is nearer -- the reach the pilot's atoms show (solve.rs `choose_on_the_pilot`): where
 //! the paths did not go -- the tweezer's intensity s below the least the paths reached --, the readings where a row errs
@@ -113,6 +113,13 @@
 //! error whole (`Region`). The run books every atom in either (solve.rs `booked_at`): a share f of them errs by at most e
 //! (one) on what is shown and moves T by the bound set's `Estimate::moved(f)`. (Only the chosen one: a scan of the
 //! 32-state reference to the trap's region's edge took R4 50 s at its pilot's step, the candidates' own a minute more.)
+//!
+//! A scan is read every `SCAN_READ` of the pilot's steps, its knots there (a straight line at a constant speed has no
+//! step ends of its own), and each scan's scheme is settled on its own first `CALIBRATION` µs by the error of what it
+//! reads, the candidate's rows' difference to the reference's (`settle`, the paths' rule): along a line H changes as
+//! the light does there -- along R4's tweezer axis only with its
+//! intensity, over z_R = 92 µm --, not as along the paths, whose setting (taken until SELCOST: four pieces a 0.12 µs step
+//! there, a node every 2.7 nm) the scans then followed.
 use crate::field::Light;
 use crate::linalg::{larger, symmetric3_eigen, C64, Mat, V3};
 use crate::model::rs::{self, decay, ModelAt};
@@ -488,26 +495,28 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
     (runs, std::array::from_fn(|k| if k + 1 == pieces { (at, pieces) } else { (0, k + 1) }))
 }
 
-/// The paths' scheme's setting by its error on the reference (module documentation, # The paths): from `COARSEST`, on
-/// the walk's first `piece` µs, the reference at the setting, at twice its substeps and at twice its pieces, each
-/// refinement's largest change of a displayed row read as that knob's part of the setting's error (`RICHARDSON`); while
-/// the parts' sum is beyond `TOLERANCE`, the knob of the larger part doubled (the other where it is at `FINEST`), both
-/// at the finest the last. A setting's rate is the substeps' own: no less than a piece of the path's step `step` takes
-/// (`Form::along` never takes fewer than one substep a piece; below that a doubled rate would change nothing, and read
-/// as no error). The setting with its parts, and the reference's three series at it (the calibration's).
-fn settle(form: &Form, walk: &Walk, piece: f64, step: f64) -> Result<(Settled, Vec<Series>), String> {
+/// The scheme's setting by its error (module documentation, # The paths): from `COARSEST`, on the walk's first `piece`
+/// µs, the models `forms` at the setting and its refinements (`refinements`), each knob's part of the setting's error
+/// the largest change between its two runs (`change`: of a displayed row of the reference, the paths'; of a row's
+/// difference of the candidate to the reference, a scan's), read as its error (`RICHARDSON`); while the parts' sum is
+/// beyond `TOLERANCE`, the knob of the largest part doubled (of those below `FINEST`), all at the finest the last. A
+/// setting's rate is the substeps' own: no less than a piece of the path's step `step` takes (`Form::along` never takes
+/// fewer than one substep a piece; below that a doubled rate would change nothing, and read as no error). The setting
+/// with its parts and runs, and the first model's series at its runs (the calibration's).
+fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64) -> Result<(Settled, Vec<Series>), String> {
     let clock = Instant::now();
-    let run = |s: Setting| form.along(walk, &walk.start, 0.0, piece, scheme(s, 1));
+    let run = |s: Setting| -> Result<Vec<Series>, String> { forms.iter().map(|f| f.along(walk, &walk.start, 0.0, piece, scheme(s, 1))).collect() };
     let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
     let mut setting = own(COARSEST);
     let mut at = run(setting)?;
-    let (mut tried, mut products) = (1, at.counts.products);
+    let work = |x: &[Series]| x.iter().map(|s| s.counts.products).sum::<u64>();
+    let (mut tried, mut products) = (1, work(&at));
     loop {
         let (runs, pairs) = refinements(setting, &own);
-        let made: Vec<Series> = runs[1..].par_iter().map(|&s| run(s)).collect::<Result<_, _>>()?;
+        let made: Vec<Vec<Series>> = runs[1..].par_iter().map(|&s| run(s)).collect::<Result<_, _>>()?;
         tried += made.len();
-        products += made.iter().map(|s| s.counts.products).sum::<u64>();
-        let series: Vec<Series> = std::iter::once(at).chain(made).collect();
+        products += made.iter().map(|s| work(s)).sum::<u64>();
+        let series: Vec<Vec<Series>> = std::iter::once(at).chain(made).collect();
         let errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
         #[cfg(test)]
         if traced() {
@@ -515,8 +524,9 @@ fn settle(form: &Form, walk: &Walk, piece: f64, step: f64) -> Result<(Settled, V
         }
         let open: [bool; KNOBS] = std::array::from_fn(|k| setting.open(k));
         if errors.iter().sum::<f64>() <= TOLERANCE || !open.iter().any(|&o| o) {
-            let opening = series[0].counts.opening;
-            return Ok((Settled { setting, opening, errors, runs, pairs, tried, products, seconds: clock.elapsed().as_secs_f64() }, series));
+            let opening = series[0][0].counts.opening;
+            let first = series.into_iter().map(|mut x| x.swap_remove(0)).collect();
+            return Ok((Settled { setting, opening, errors, runs, pairs, tried, products, seconds: clock.elapsed().as_secs_f64() }, first));
         }
         let k = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| errors[a].total_cmp(&errors[b])).expect("an open knob");
         setting = runs[1 + k];
@@ -524,22 +534,33 @@ fn settle(form: &Form, walk: &Walk, piece: f64, step: f64) -> Result<(Settled, V
     }
 }
 
-/// The largest change of a displayed row between two series of one model along one path, at the times both read.
-fn change(a: &Series, b: &Series) -> f64 {
+/// The largest change between two runs, along one path at the times both read: of a displayed row of one model (one
+/// series each), or of a row's difference of the second model to the first (two).
+fn change(a: &[Series], b: &[Series]) -> f64 {
+    let at = |s: &Series, t: f64| s.readings.iter().find(|y| y.t == t).map(|y| y.rows);
     let mut e = 0.0;
-    for x in &a.readings {
-        if let Some(y) = b.readings.iter().find(|y| y.t == x.t) {
-            for k in 0..STATES {
-                e = larger(e, (x.rows[k] - y.rows[k]).abs());
-            }
+    for x in &a[0].readings {
+        let Some(y) = at(&b[0], x.t) else { continue };
+        let (u, v) = match (a.get(1), b.get(1)) {
+            (Some(p), Some(q)) => match (at(p, x.t), at(q, x.t)) {
+                (Some(u), Some(v)) => (u, v),
+                _ => continue,
+            },
+            _ => ([0.0; STATES], [0.0; STATES]),
+        };
+        for k in 0..STATES {
+            e = larger(e, ((u[k] - x.rows[k]) - (v[k] - y[k])).abs());
         }
     }
     e
 }
 
+/// A scan's readings (module documentation, # The region left out): one every `SCAN_READ` of the pilot's steps.
+pub const SCAN_READ: f64 = 4.0;
+
 /// The scans' walks (module documentation, # The region left out): per principal axis of the trap and each way along
 /// it, from the trap's centre at the speed `speed` (µm/µs) to where `beyond` first holds -- the pilot's most energetic
-/// held atom's turning point, or the trap region's edge --, its knots `step` apart (µs), the atom's state at its start
+/// held atom's turning point, or the trap region's edge --, its knots `step` apart (µs: its readings), the atom's state at its start
 /// `start`.
 pub fn scan_walks(beyond: &dyn Fn(V3) -> bool, centre: V3, axes: &[V3; 3], speed: f64, step: f64, hbar_over_mass: f64, start: &[(usize, C64)]) -> Vec<Walk> {
     let mut walks = Vec::new();
@@ -589,7 +610,7 @@ impl<'a> Paths<'a> {
         let windows = paths::windows(length, memory, step);
         let piece = CALIBRATION.min(length).min(walks[0].end());
         let late_from = (run > 2.0 * length).then_some(run - length);
-        let (settled, calibrated) = settle(&form, &walks[0], piece, step)?;
+        let (settled, calibrated) = settle(&[&form], &walks[0], piece, step)?;
         let scheme = settled.scheme(1);
         #[cfg(test)]
         if traced() {
@@ -761,13 +782,23 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
 }
 
-/// The region left out of a candidate (module documentation, # The region left out; `Region`): the candidate and the
-/// reference along the scans `scans` at the paths' scheme `settled`, read at every fourth knot, every job on the pool;
+/// The region left out of a candidate (module documentation, # The region left out; `Region`): each scan's scheme
+/// settled on its own start by the error of what it reads (`settle`: the candidate's rows' difference to the
+/// reference's), the candidate and the reference along the scans `scans`
+/// at their own, read at every knot, every job on the pool;
 /// beyond the paths' least intensity `least`, each reading's largest row error, a quarter of the target or more
 /// marking. With the time it took.
-pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], least: f64, light: &Light, settled: &Settled) -> Result<(Region, f64), String> {
+pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], least: f64, light: &Light) -> Result<(Region, Vec<Setting>, f64), String> {
     let clock = Instant::now();
     let forms = [Form::new(reference, at), Form::new(model, at)];
+    // Each scan's setting on its own first `CALIBRATION` µs (its knots its steps).
+    let settled: Vec<Settled> = scans
+        .par_iter()
+        .map(|w| {
+            let step = w.ends.get(1).map_or(w.end(), |e| e[0] - w.ends[0][0]);
+            settle(&[&forms[0], &forms[1]], w, CALIBRATION.min(w.end()), step).map(|x| x.0)
+        })
+        .collect::<Result<_, _>>()?;
     let jobs: Vec<(usize, usize)> = (0..2).flat_map(|m| (0..scans.len()).map(move |w| (m, w))).collect();
     #[cfg(test)]
     let _ = crate::paths::freeze_parts();
@@ -784,7 +815,14 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
         .map(|&(m, w)| {
             #[cfg(test)]
             let clock = Instant::now();
-            let out = forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), settled.scheme(4));
+            #[cfg(test)]
+            let fixed: Option<Setting> = std::env::var("SELCOST_SCAN_SETTING").ok().filter(|x| !x.is_empty()).map(|x| {
+                let p: Vec<f64> = x.split('/').map(|v| v.parse().unwrap()).collect();
+                Setting { turns: p[0], rate: p[1], pieces: p[2] as usize }
+            });
+            #[cfg(not(test))]
+            let fixed: Option<Setting> = None;
+            let out = forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), fixed.map_or(settled[w].scheme(1), |s| scheme(s, 1)));
             #[cfg(test)]
             if let Ok(s) = &out {
                 trace_job(&format!("scan {w} {}", if m == 0 { "reference" } else { "candidate" }), s, clock.elapsed().as_secs_f64());
@@ -802,21 +840,31 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
     let mut region = Region::NONE;
     // Unread: below the least intensity both the scans and the paths reached (the paths read where they went).
     region.edge = scans.iter().filter_map(|w| w.ends.last()).map(|e| intensity(light, [e[1], e[2], e[3]])).fold(least, crate::linalg::smaller);
-    for (r, c) in reference.iter().zip(candidate) {
+    for (_line, (r, c)) in reference.iter().zip(candidate).enumerate() {
+        #[cfg(test)]
+        let mut worst = (0.0_f64, 0.0_f64, 0.0_f64);
         for (c, r) in c.readings.iter().zip(&r.readings) {
             let s = intensity(light, c.r);
             if s >= least {
                 continue;
             }
             let e = (0..STATES).map(|k| (c.rows[k] - r.rows[k]).abs()).fold(0.0, larger);
+            #[cfg(test)]
+            if e > worst.0 {
+                worst = (e, c.t, s);
+            }
             region.largest = larger(region.largest, e);
             if e >= quarter {
                 region.intensity = larger(region.intensity, s);
                 region.error = larger(region.error, e.min(1.0));
             }
         }
+        #[cfg(test)]
+        if traced() {
+            eprintln!("    [trace] scan {_line}: largest error {:.3e} at {:.2} µs, s {:.4}", worst.0, worst.1, worst.2);
+        }
     }
-    Ok((region, clock.elapsed().as_secs_f64()))
+    Ok((region, settled.iter().map(|s| s.setting).collect(), clock.elapsed().as_secs_f64()))
 }
 
 /// The calibration (`Calibration`) of a candidate's series on the calibration's piece at the paths' runs
