@@ -488,11 +488,14 @@ fn t2step_run() {
             let start = (std::time::Instant::now(), process_seconds(), counts());
             let mut last = (start.0, start.1, start.2, String::from("solve_on"));
             let pilot = crate::solve::pilot_size();
+            let total = std::cell::Cell::new((0u64, 0u64));
             let mark = |what: String, last: &mut (std::time::Instant, f64, (u64, u64, f64), String)| {
                 let (now, cpu, (steps, refused, mean)) = (std::time::Instant::now(), process_seconds(), counts());
-                let (steps0, refused0, mean0) = last.2;
+                // A solve's end tallies the counts to zero (solve.rs, `adapt::counted(true)`): after it, from zero.
+                let (steps0, refused0, mean0) = if steps < last.2 .0 { (0, 0, 0.0) } else { last.2 };
                 let stepping = (steps as f64 * mean - steps0 as f64 * mean0) * 1e-6;
                 let (ds, wall, dcpu) = (steps - steps0, (now - last.0).as_secs_f64(), cpu - last.1);
+                total.set((total.get().0 + ds, total.get().1 + refused - refused0));
                 eprintln!(
                     "T2S-RUN {name} {label} {:>7.1} s | {:<40} lasted {:>6.1} s: steps {:>7} refused {:>5}, in steps {:>7.1} thread-s ({:>7.1} µs a step), process CPU {:>7.1} s ({:>4.1} threads busy)",
                     (now - start.0).as_secs_f64(),
@@ -524,8 +527,8 @@ fn t2step_run() {
                 Ok(Err(e)) => format!("refused: {e}"),
                 Err(_) => "the product began".to_string(),
             };
-            let (steps, refused, mean) = counts();
-            eprintln!("T2S-RUN {name} {label} ended at {:.1} s ({how}); steps {} refused {}, {mean:.1} µs a step; process CPU {:.1} s", start.0.elapsed().as_secs_f64(), steps - (start.2).0, refused - (start.2).1, process_seconds() - start.1);
+            let (steps, refused) = total.get();
+            eprintln!("T2S-RUN {name} {label} ended at {:.1} s ({how}); steps {steps} refused {refused}; process CPU {:.1} s", start.0.elapsed().as_secs_f64(), process_seconds() - start.1);
         }
     }
 }
