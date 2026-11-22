@@ -611,6 +611,8 @@ pub struct Picture {
     ringing: Vec<(f64, f64)>,
     pairs: Vec<[u8; 2]>,
     rung: bool,
+    /// The numerator's items with their pairs, as they were made (`strip` sorts the numerator's).
+    numerated: Vec<([u8; 2], f64)>,
     /// Where the envelopes' last search for their bound ended (`envelope`; none before the first).
     warm: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
@@ -675,6 +677,7 @@ impl Default for Picture {
             ringing: Vec::new(),
             pairs: Vec::new(),
             rung: false,
+            numerated: Vec::new(),
             warm: f64::NAN,
             work: 0.0,
         }
@@ -2114,6 +2117,7 @@ impl Picture {
         numerator.clear();
         ringing.clear();
         pairs.clear();
+        self.numerated.clear();
         // A weight that is not a number stays in: the quotient is not a number, and the stop it bounds is refused.
         for a in (0..n).filter(|&a| self.held[a] && !(m[a] <= 0.0)) {
             for b in (a..n).filter(|&b| self.held[b] && !(m[b] <= 0.0) && self.part[b] == self.part[a]) {
@@ -2130,6 +2134,7 @@ impl Picture {
                 let (weight, nu) = (linalg::smaller(top, 0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
                 let twice = if a == b { 1.0 } else { 2.0 };
                 numerator.push((twice * weight, nu));
+                self.numerated.push(([a as u8, b as u8], twice * weight));
                 if a != b {
                     let o = self.overlaps[a * n + b];
                     if !(o <= 0.0) {
@@ -2258,12 +2263,49 @@ impl Picture {
         v
     }
 
-    /// The last quotient's ringing (`quotient_from`) by a cut of the eigencomponents into groups (`group[a]`, step.rs,
-    /// # The quadrature by groups): the sums of its items' weights over the pairs of two groups and over the pairs within
-    /// one -- at most Σ_{g≠q}|N_gq|/D and Σ_g (N_gg − D_g)/D of the norm's parts over its diagonal D, anywhere on the
-    /// piece. None where the quotient made no items (its diagonal no positive number).
-    pub(crate) fn ringing(&self, group: &[u8]) -> Option<[f64; 2]> {
-        self.rung.then(|| self.pairs.iter().zip(&self.ringing).fold([0.0; 2], |[across, within], (&[a, b], &(p, _))| if group[a as usize] == group[b as usize] { [across, within + p] } else { [across + p, within] }))
+    /// The last quotient's items (`quotient_from`) by a cut of the eigencomponents into groups (`group[a]` below `groups`;
+    /// step.rs, # The quadrature by groups): per ordered pair of groups (g, q), g ≠ q, its pairs' ringing weights into
+    /// `across` and its numerator's into `numerator` (G × G, each pair once in (g, q) and (q, g) alike, its weight the
+    /// unordered pair's) -- at most Σ|N_gq|/D and the largest |y_g y_q†| over D anywhere on the piece --, and the ringing
+    /// within the groups, Σ_g (N_gg − D_g)/D at the most. None where the quotient made no items (its diagonal no positive
+    /// number).
+    pub(crate) fn weighed_by(&self, group: &[u8], groups: usize, across: &mut [f64], numerator: &mut [f64]) -> Option<f64> {
+        if !self.rung {
+            return None;
+        }
+        across[..groups * groups].fill(0.0);
+        numerator[..groups * groups].fill(0.0);
+        let mut within = 0.0;
+        for (&[a, b], &(p, _)) in self.pairs.iter().zip(&self.ringing) {
+            let (g, q) = (usize::from(group[usize::from(a)]), usize::from(group[usize::from(b)]));
+            if g == q {
+                within += p;
+            } else {
+                across[g * groups + q] += p;
+                across[q * groups + g] += p;
+            }
+        }
+        for &([a, b], p) in &self.numerated {
+            let (g, q) = (usize::from(group[usize::from(a)]), usize::from(group[usize::from(b)]));
+            if g != q {
+                numerator[g * groups + q] += p;
+                numerator[q * groups + g] += p;
+            }
+        }
+        Some(within)
+    }
+
+    /// The counted work of a state at a time (`at`), complex multiply-adds; and whether its matrix is assembled (where
+    /// anything is followed), with the followed beating classes' count.
+    pub(crate) fn state_work(&self) -> (f64, bool, usize) {
+        let n = self.n;
+        let followers = self.classes[1..].iter().filter(|class| class.followed).count();
+        (((if self.followed { 2 + 4 * followers } else { 1 }) * n * n + 4 * n) as f64, self.followed, followers)
+    }
+
+    /// Whether the generator moves along the path (D is anything at all: `prepare`).
+    pub(crate) fn moving(&self) -> bool {
+        self.moving
     }
 
     /// The eigenvalues (the scalar part in), the components the propagated state can hold (`reach`) and each one's exact

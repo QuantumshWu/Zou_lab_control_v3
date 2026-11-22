@@ -184,70 +184,67 @@ fn gstep_census() {
     }
 }
 
-/// The one sum ∫ρ over [a, b] by brute force on a picture launched at or before a: 32-node Gauss panels each 4 rad of
-/// the quotient's bandwidth, 8 more, `split` times as many.
-fn brute(picture: &mut crate::spectral::Picture, a: f64, b: f64, split: usize) -> Vec<C64> {
+/// The step's sums (`Sums`: one where it takes one node, `still`; else the three nodes' and six a tone's) over [a, b] by
+/// brute force on a picture launched at or before a, laid as the step lays them (`accumulate`): 32-node Gauss panels
+/// each 4 rad of the quotient's bandwidth, 8 more, `split` times as many.
+fn brute(picture: &mut crate::spectral::Picture, still: bool, h: f64, a: f64, b: f64, split: usize) -> Vec<f64> {
+    use super::super::row;
     let n = picture.states();
+    let slots = Sums { still, h, tones: &picture.beats }.count();
+    let mut sums = vec![0.0; slots * 2 * n * row(n)];
     let mut x = [C64::ZERO; STATES];
     let rule = crate::special::gauss_legendre(32);
     let count = split * ((picture.quotient * (b - a).abs() / 4.0).ceil() as usize + 8);
     let width = (b - a) / count as f64;
-    let mut sum = vec![C64::ZERO; n * n];
     for p in 0..count {
         for &(t, g) in &rule {
             let u = a + (p as f64 + 0.5 + 0.5 * t) * width;
             picture.at(u, &mut x[..n]);
-            let f = 0.5 * width * g / norm_sqr(&x[..n]);
-            for r in 0..n {
-                let xr = x[r] * f;
-                for c in 0..n {
-                    sum[r * n + c] += xr * x[c].conj();
-                }
-            }
+            Sums { still, h, tones: &picture.beats }.gather(u, 0.5 * width * g, &x[..n], None, &mut sums);
         }
     }
-    sum
+    sums
 }
 
-/// The one sum over [a, b] by the plain rule (`count`, no root) or by the groups' cut already chosen (`Groups::spanned`
-/// where `grouped`): the sum, the nodes, the groups' counted work and the picture's.
-fn by_rule(picture: &mut crate::spectral::Picture, groups: &mut Groups, a: f64, b: f64, grouped: bool) -> (Vec<C64>, usize, f64, f64) {
+/// The step's sums over [a, b] by the plain rule (`count`, no root) or by the groups' cut already chosen
+/// (`Groups::spanned`, where `grouped`), laid as the step lays them: the sums, the nodes, whether every node's series
+/// held, the groups' counted work and the picture's.
+fn by_rule(picture: &mut crate::spectral::Picture, groups: &mut Groups, still: bool, h: f64, a: f64, b: f64, grouped: bool) -> (Vec<f64>, usize, bool, f64, f64) {
     use super::super::row;
     let n = picture.states();
-    let mut sums = vec![0.0; 2 * n * row(n)];
+    let slots = Sums { still, h, tones: &picture.beats }.count();
+    let mut sums = vec![0.0; slots * 2 * n * row(n)];
     let mut x = [C64::ZERO; STATES];
     let (work, made) = (groups.work, picture.work);
-    let mut nodes = 0;
+    let (mut nodes, mut held) = (0, true);
     if grouped {
-        let laid = groups.spanned(b - a, n);
+        let laid = groups.spanned(b - a);
         let mut from = a;
         for (end, rule) in panels(a, b, laid) {
             groups.begin(picture.origin(), from, end, laid.1);
-            for (u, _, k) in rule {
+            for (u, w, k) in rule {
                 groups.parts(picture, u);
-                groups.gather(k, &mut sums);
+                held &= groups.gather(k, u, w, &Sums { still, h, tones: &picture.beats }, &mut sums, None);
                 nodes += 1;
             }
             from = end;
         }
     } else {
-        for (end, rule) in panels(a, b, count(b - a, picture.quotient, FORMS, 2, || false)) {
-            let _ = end;
+        for (_, rule) in panels(a, b, count(b - a, picture.quotient, FORMS, 2, || false)) {
             for (u, w, _) in rule {
                 picture.at(u, &mut x[..n]);
-                Sums { still: true, h: 1.0, tones: &[] }.gather(u, w, &x[..n], None, &mut sums);
+                Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], None, &mut sums);
                 nodes += 1;
             }
         }
     }
-    let mut sum = vec![C64::ZERO; n * n];
-    whole(&sums, 0, n, &mut sum);
-    (sum, nodes, groups.work - work, picture.work - made)
+    (sums, nodes, held, groups.work - work, picture.work - made)
 }
 
 #[test]
 #[ignore]
 fn gstep_filon() {
+    use super::super::{hazard, row};
     let steps = env("GSTEP_STEPS", 24.0) as usize;
     for (name, request) in scenes() {
         let tau = tau_of(&name);
@@ -255,10 +252,17 @@ fn gstep_filon() {
         let chief = crate::solve::chief(&request);
         for (label, run) in models(&name, &request) {
             let mut t = start(&run, &request, chief, 3);
+            if let Some(s) = std::env::var("GSTEP_STATE").ok().and_then(|x| x.parse::<usize>().ok()) {
+                let mut psi = crate::step::Internal::zeros(t.psi.len());
+                psi[s] = C64::ONE;
+                t = Trajectory::new(&run, 0, t.r, t.kappa, t.seed, t.index);
+                t.psi = psi;
+            }
             let mut scratch = Scratch::default();
             // Per kind (plain, after a jump, start): pieces; worst [S, H, K, H(u*)] of the engine's rule and of the plain
             // rule; the brute force's self-check; nodes [plain, engine]; groups, series' order, labels; counted work
-            // [plain, engine (groups + picture), the choice's]; time µs [plain, engine with its choice]; pieces grouped.
+            // [plain, engine (groups + picture), the choice's]; time µs [plain, the choice, the engine's sums]; pieces by
+            // groups; pieces whose series did not hold; bandwidths [ν_Q, ν_env].
             #[derive(Default, Clone)]
             struct Tally {
                 pieces: usize,
@@ -272,6 +276,7 @@ fn gstep_filon() {
                 work: [f64; 3],
                 time: [f64; 3],
                 grouped: usize,
+                failed: usize,
                 bandwidth: [f64; 2],
             }
             let mut tally = vec![Tally::default(); 3];
@@ -290,43 +295,81 @@ fn gstep_filon() {
                         }
                     }
                 }
+                let ground = {
+                    let c = run.cluster(t.cluster);
+                    c.ground == c.states.len()
+                };
                 for (kind, from, x) in pieces {
                     let mut s = Scratch::default();
                     s.fit(n, SUMS);
                     let mut still = along.middle.still();
-                    if pictured(&along, &mut s, tau, Some(&x), true, &mut still).is_err() || !still {
+                    if pictured(&along, &mut s, tau, Some(&x), ground, &mut still).is_err() {
                         continue;
                     }
+                    let decay = s.carve().decay.to_vec();
                     let Scratch { picture, groups, .. } = &mut s;
                     picture.launch(from, &x);
                     let made = picture.work;
-                    let laid = groups.choose(picture, from, h, &mut |_: &mut crate::spectral::Picture| false);
-                    let chosen = picture.work - made;
+                    let tones = picture.beats.len();
+                    groups.choose(picture, from, h, (still, tones), &mut |_: &mut crate::spectral::Picture| false);
+                    let chosen = picture.work - made + groups.work;
                     let grouped = groups.groups > 1;
                     let inner = from + 0.618 * (h - from);
-                    let (engine, nodes, worked, stops) = by_rule(picture, groups, from, h, grouped);
-                    let (engine_in, _, _, _) = by_rule(picture, groups, from, inner, grouped);
-                    let (plain, plain_nodes, _, plain_stops) = by_rule(picture, groups, from, h, false);
-                    let (plain_in, _, _, _) = by_rule(picture, groups, from, inner, false);
-                    let (exact, exact_in, check) = (brute(picture, from, h, 1), brute(picture, from, inner, 1), brute(picture, from, h, 2));
+                    let (engine, nodes, held, worked, stops) = by_rule(picture, groups, still, h, from, h, grouped);
+                    let (engine_in, _, held_in, _, _) = by_rule(picture, groups, still, h, from, inner, grouped);
+                    let (plain, plain_nodes, _, _, plain_stops) = by_rule(picture, groups, still, h, from, h, false);
+                    let (plain_in, _, _, _, _) = by_rule(picture, groups, still, h, from, inner, false);
+                    let (exact, exact_in, check) = (brute(picture, still, h, from, h, 1), brute(picture, still, h, from, inner, 1), brute(picture, still, h, from, h, 2));
                     let times = [
-                        least(&mut || { std::hint::black_box(by_rule(picture, groups, from, h, false)); }, 5) * 1e6,
-                        least(&mut || { std::hint::black_box(groups.choose(picture, from, h, &mut |_: &mut crate::spectral::Picture| false)); }, 5) * 1e6,
-                        least(&mut || { std::hint::black_box(by_rule(picture, groups, from, h, grouped)); }, 5) * 1e6,
+                        least(&mut || { std::hint::black_box(by_rule(picture, groups, still, h, from, h, false)); }, 5) * 1e6,
+                        least(&mut || { std::hint::black_box(groups.choose(picture, from, h, (still, tones), &mut |_: &mut crate::spectral::Picture| false)); }, 5) * 1e6,
+                        least(&mut || { std::hint::black_box(by_rule(picture, groups, still, h, from, h, grouped)); }, 5) * 1e6,
                     ];
-                    let _ = laid;
+                    // The choice's parts on the cut taken: its envelopes' bound, its labels, its rule's sizes (µs).
+                    if let (Some(cut), true) = (groups.cut, std::env::var("GSTEP_PARTS").is_ok()) {
+                        let shift: Vec<f64> = (0..n).map(|a| cut.centres[usize::from(cut.group[a])]).collect();
+                        let envelope = least(&mut || { std::hint::black_box(picture.envelope(from, &shift)); }, 5) * 1e6;
+                        let labels = least(&mut || { std::hint::black_box(groups.label(cut.groups, cut.order, &cut.linked, &cut.centres, usize::MAX)); }, 5) * 1e6;
+                        let sizes = least(&mut || { std::hint::black_box(super::super::arranged(h - from, |w| super::super::resolved(cut.bandwidth, w, FORMS, 2, true), |m| m as f64, || false)); }, 5) * 1e6;
+                        let plain = least(&mut || { std::hint::black_box(count(h - from, picture.quotient, FORMS, 2, || false)); }, 5) * 1e6;
+                        println!("GSTEP-PARTS {name} {label} step {k} kind {kind}: envelope {envelope:.2} us, labels {labels:.2} us, a layout at the envelopes' bandwidth {sizes:.2} us, the plain layout {plain:.2} us");
+                    }
                     let width = (h - from).abs();
                     let blocks = picture.blocks.clone();
                     let block_of: Vec<usize> = (0..n).map(|i| blocks.iter().position(|b| b.contains(&i)).unwrap_or(0)).collect();
-                    let apart = |x: &[C64], y: &[C64]| (0..n * n).filter(|&q| block_of[q / n] == block_of[q % n]).map(|q| (x[q] - y[q]).abs()).fold(0.0, crate::linalg::larger);
-                    let base = picture.base.clone();
-                    let hazard = |s: &[C64]| (0..n * n).map(|q| (C64::I * (base.data[q] - base.data[(q % n) * n + q / n].conj()) * s[(q % n) * n + q / n]).re).sum::<f64>();
-                    let kick = |s: &[C64]| along.middle.force(&along.path, 0.0, s);
+                    let slots = exact.len() / (2 * n * row(n));
+                    let wholes = |sums: &[f64]| -> Vec<Vec<C64>> {
+                        (0..slots)
+                            .map(|j| {
+                                let mut m = vec![C64::ZERO; n * n];
+                                whole(sums, j, n, &mut m);
+                                m
+                            })
+                            .collect()
+                    };
+                    let apart = |x: &[f64], y: &[f64]| {
+                        let (x, y) = (wholes(x), wholes(y));
+                        x.iter().zip(&y).flat_map(|(p, q)| (0..n * n).filter(|&e| block_of[e / n] == block_of[e % n]).map(move |e| (p[e] - q[e]).abs())).fold(0.0, crate::linalg::larger)
+                    };
+                    let kick = |sums: &[f64]| -> [f64; 3] {
+                        let w = wholes(sums);
+                        if still {
+                            return along.middle.force(&along.path, 0.0, &w[0]);
+                        }
+                        let mut f = [0.0; 3];
+                        for (j, s) in [-h, 0.0, h].into_iter().enumerate() {
+                            let g = along.middle.force(&along.path, s, &w[j]);
+                            for c in 0..3 {
+                                f[c] += g[c];
+                            }
+                        }
+                        f
+                    };
                     let kb = kick(&exact);
                     let scale = crate::linalg::larger(kb.iter().map(|x| x.abs()).fold(0.0, crate::linalg::larger), f64::MIN_POSITIVE);
-                    let errors = |x: &[C64], x_in: &[C64]| {
+                    let errors = |x: &[f64], x_in: &[f64]| {
                         let kx = kick(x);
-                        [apart(x, &exact) / width, (hazard(x) - hazard(&exact)).abs(), kx.iter().zip(&kb).map(|(p, q)| (p - q).abs()).fold(0.0, crate::linalg::larger) / scale, (hazard(x_in) - hazard(&exact_in)).abs()]
+                        [apart(x, &exact) / width, (hazard(&decay, x, n) - hazard(&decay, &exact, n)).abs(), kx.iter().zip(&kb).map(|(p, q)| (p - q).abs()).fold(0.0, crate::linalg::larger) / scale, (hazard(&decay, x_in, n) - hazard(&decay, &exact_in, n)).abs()]
                     };
                     let worse = |w: &mut [f64; 4], e: [f64; 4]| {
                         for (a, b) in w.iter_mut().zip(e) {
@@ -342,24 +385,26 @@ fn gstep_filon() {
                     entry.nodes[1] += nodes;
                     entry.groups += groups.groups;
                     entry.grouped += usize::from(grouped);
+                    entry.failed += usize::from(!(held && held_in));
                     if grouped {
                         entry.order = entry.order.max(groups.cut.map_or(0, |c| c.order));
                         entry.labels += groups.labels.len();
                     }
-                    let plain_work = plain_stops + (plain_nodes * n * (n + 1)) as f64;
-                    let engine_work = worked + stops + if grouped { 0.0 } else { (nodes * n * (n + 1)) as f64 };
+                    let unit = crate::step::count::gathered(n, 1, still, tones) / crate::decide::COMPLEX;
+                    let plain_work = plain_stops + plain_nodes as f64 * unit;
+                    let engine_work = worked + stops + if grouped { 0.0 } else { nodes as f64 * unit };
                     entry.work[0] += plain_work;
                     entry.work[1] += engine_work;
                     entry.work[2] += chosen;
-                    entry.time[0] += times[0];
-                    entry.time[1] += times[1];
-                    entry.time[2] += times[2];
+                    for (t, x) in entry.time.iter_mut().zip(times) {
+                        *t += x;
+                    }
                     entry.bandwidth[0] += picture.quotient;
                     entry.bandwidth[1] += groups.cut.map_or(picture.quotient, |c| c.bandwidth);
                     if std::env::var("GSTEP_VERBOSE").is_ok() {
                         let (lambda, held, _) = picture.spectrum();
                         let spectrum: Vec<String> = (0..n).filter(|&a| held[a]).map(|a| format!("{:.1}{:+.2}i", lambda[a].re, lambda[a].im)).collect();
-                        println!("GSTEP-PIECE {name} {label} step {k} kind {kind} from {from:.4}: nu_Q {:.1} plain nodes {plain_nodes} engine nodes {nodes} groups {} centres {:?} nu_env {:.1} | held {}", picture.quotient, groups.groups, groups.cut.map(|c| c.centres[..c.groups].to_vec()), groups.cut.map_or(f64::NAN, |c| c.bandwidth), spectrum.join(" "));
+                        println!("GSTEP-PIECE {name} {label} step {k} kind {kind} from {from:.4}: still {still} tones {tones} nu_Q {:.1} plain nodes {plain_nodes} engine nodes {nodes} groups {} centres {:?} nu_env {:.1} | held {}", picture.quotient, groups.groups, groups.cut.map(|c| c.centres[..c.groups].to_vec()), groups.cut.map_or(f64::NAN, |c| c.bandwidth), spectrum.join(" "));
                     }
                 }
                 match taken {
@@ -374,10 +419,11 @@ fn gstep_filon() {
                 let p = e.pieces as f64;
                 let show = |w: &[f64; 4]| format!("S {:.1e} H {:.1e} K {:.1e} H(u*) {:.1e}", w[0], w[1], w[2], w[3]);
                 println!(
-                    "GSTEP-FILON {name} {label} tau {tau} {}: {} pieces ({} by groups) | engine {} | plain {} | brute's check {:.1e} | nodes plain {:.1} engine {:.1} | groups {:.2} order {} labels {:.1} | nu_Q {:.0} nu_env {:.0} | counted (complex MA) plain {:.0} engine {:.0} its choice {:.0} | us plain {:.1} the choice {:.1} the engine's sums {:.1}",
+                    "GSTEP-FILON {name} {label} tau {tau} {}: {} pieces ({} by groups, {} not held) | engine {} | plain {} | brute's check {:.1e} | nodes plain {:.1} engine {:.1} | groups {:.2} order {} labels {:.1} | nu_Q {:.0} nu_env {:.0} | counted (complex MA) plain {:.0} engine {:.0} its choice {:.0} | us plain {:.1} the choice {:.1} the engine's sums {:.1}",
                     ["plain", "after a jump", "start"][kind],
                     e.pieces,
                     e.grouped,
+                    e.failed,
                     show(&e.engine),
                     show(&e.plain),
                     e.check,
@@ -573,11 +619,17 @@ fn a_piece_s_sums_by_groups_are_its_integral_to_the_round_off() {
     assert!(still, "a generator with no beat is still");
     let Scratch { picture, groups, .. } = &mut s;
     picture.launch(-h, &x);
-    groups.choose(picture, -h, h, &mut |_: &mut crate::spectral::Picture| false);
-    let (grouped, nodes, _, _) = by_rule(picture, groups, -h, h, groups.groups > 1);
-    let (plain, plain_nodes, _, _) = by_rule(picture, groups, -h, h, false);
-    let exact = brute(picture, -h, h, 1);
-    let apart = |a: &[C64], b: &[C64]| a.iter().zip(b).map(|(p, q)| (*p - *q).abs()).fold(0.0, crate::linalg::larger);
+    groups.choose(picture, -h, h, (true, 0), &mut |_: &mut crate::spectral::Picture| false);
+    let (grouped, nodes, held, _, _) = by_rule(picture, groups, true, h, -h, h, groups.groups > 1);
+    let (plain, plain_nodes, _, _, _) = by_rule(picture, groups, true, h, -h, h, false);
+    let exact = brute(picture, true, h, -h, h, 1);
+    assert!(held, "every node's series holds");
+    let apart = |a: &[f64], b: &[f64]| {
+        let (mut x, mut y) = (vec![C64::ZERO; n * n], vec![C64::ZERO; n * n]);
+        whole(a, 0, n, &mut x);
+        whole(b, 0, n, &mut y);
+        x.iter().zip(&y).map(|(p, q)| (*p - *q).abs()).fold(0.0, crate::linalg::larger)
+    };
     eprintln!("groups {}, nodes {nodes} against the plain rule's {plain_nodes}; apart from brute force over the width: groups {:.1e}, plain {:.1e}", groups.groups, apart(&grouped, &exact) / tau, apart(&plain, &exact) / tau);
     assert_eq!(groups.groups, 2, "the two manifolds' groups");
     assert!(4 * nodes <= plain_nodes && plain_nodes > 100, "nodes {nodes} against {plain_nodes}");
