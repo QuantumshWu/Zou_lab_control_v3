@@ -932,7 +932,9 @@ impl Tweezer {
         let varying = factors.0.iter().map(|f| f.varying(Some(scene))).collect();
         // The tweezer's intensity: its unit fold's factor, and its own outside form's |a_tw|² where it has one.
         let intensity = std::iter::once(power_f).chain(factors.0.iter().position(|f| *f == Factor::Scene(scene::Factor::Product(tw, tw)))).collect();
-        let source = Source { hamiltonian, jumps, generator, varying, coefficients: 1 + 2 * (ORDERS - 1), intensity };
+        // Every other beam's own intensity |a_l|² that varies (a Gaussian beam's: its outside form's), one at its focus.
+        let own = factors.0.iter().enumerate().filter(|(_, f)| matches!(f, Factor::Scene(scene::Factor::Product(l, m)) if l == m && *l != tw) && f.varying(Some(scene))).map(|(i, _)| i).collect();
+        let source = Source { hamiltonian, jumps, generator, varying, coefficients: 1 + 2 * (ORDERS - 1), intensity, own };
         let spherical = Source { jumps: spherical_jumps, ..source.clone() };
         let all: Vec<usize> = (0..STATES).collect();
         let groups = levels(&scene.request.states, &all);

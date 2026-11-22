@@ -302,7 +302,7 @@ fn p4table_census() {
             for (b, bt) in t.blocks.iter().enumerate() {
                 if let Some(bt) = bt {
                     let clusters: Vec<usize> = bt.clusters.iter().map(|c| c.states.len()).collect();
-                    let smalls: Vec<String> = bt.smalls.iter().map(|s| format!("c{}", s.coefficient)).collect();
+                    let smalls: Vec<String> = bt.smalls.iter().map(|s| match s { crate::model::rs::fold::table::Small::Doppler(c) => format!("c{c}"), crate::model::rs::fold::table::Small::Own(f) => format!("f{f}") }).collect();
                     let pieces: Vec<String> = bt.pieces.iter().map(|p| format!("[{:.4},{:.4}] d{} e{} tail {:.2} (q{}{}) A {:?}", p.a, p.b, p.degree, p.small_degree, p.tail, p.worst, if p.stalled { " plateau" } else { "" }, p.guards.iter().map(|g| format!("{g:.1e}")).collect::<Vec<_>>())).collect();
                     eprintln!("P4T-TABLE {name} {label}: block {b} size {}: clusters {clusters:?}; smalls {smalls:?}; pieces {pieces:?}; guard floor {:.2e}; work off the table {:.0} against made {:.0} (CMA)", bt.size, bt.relative, bt.work.0, bt.work.1);
                 }

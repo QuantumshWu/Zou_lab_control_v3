@@ -9,8 +9,11 @@
 //! outside form's |a_tw|², both s), and per coefficient c of the tweezer's Doppler series (the powers (±δ)^j of rs.rs
 //! `values_into`, each in front of the intensity) its entries S_c, x_c = s k_c, k_c the point's coefficient. The
 //! Doppler parts are small -- |x_c|‖S_c‖ of 10⁻⁶ rad/µs against the clusters' gaps of 10²–10³ (FOLDDEN) -- and are
-//! taken to first order (# The small parts). A block whose generator holds any other varying factor (a Gaussian beam's
-//! intensity) is not tabled; its node decomposes it as before.
+//! taken to first order (# The small parts). So is another beam's own intensity f_l = |a_l|² where it varies (a
+//! Gaussian beam's outside form's light shift, `Plan::own`): one at its focus, it enters as F + S_l (in F) and the small
+//! part x_l S_l, x_l = f_l − 1 -- 10⁻⁶ to 10⁻⁵ where an atom is held in a tweezer at a millimetre beam's centre (tilt0's,
+//! tilt2's) --, its T̂_l made at the node on the table's eigenbasis (rs/fold.rs). A block whose generator holds any
+//! other varying factor (a beam's amplitude, two beams' product) is not tabled; its node decomposes it as before.
 //!
 //! # Clusters
 //! The block's states are cut into clusters (`clusters`): states whose eigenvalues come within τ = ‖S‖/4 of each other
@@ -35,10 +38,10 @@
 //! (GMD1C's 7), PGC3D P11's 21 and TET P18's 14 the same, R4's 7-state blocks four pieces of degree 6.
 //!
 //! # The small parts
-//! To first order in x_σ (σ a Doppler coefficient): Ŝ_σ = W̃ S_σ W, whose cluster blocks go into B_c exactly; the
-//! clusters' first-order mixing K_σ (B_c′K − KB_c = −Ŝ_σ,c′c, c′ ≠ c, solved in B's eigenbases) as W₁ = W K_σ and
-//! W̃₁ = −K_σ W̃; and T̂'s first order C_σ = Ŝ K_σ − K_σ Ŝ, beside k_σ Ŝ_σ, the part's own share of ∂G₀/∂s -- together
-//! k_σ E_σ, E_σ = s C_σ + Ŝ_σ. Each is tabled as the main quantities, to its main counterpart's floor over the largest
+//! To first order in x_σ (σ a Doppler coefficient, or a beam's own intensity): Ŝ_σ = W̃ S_σ W, whose cluster blocks go
+//! into B_c exactly; the clusters' first-order mixing K_σ (B_c′K − KB_c = −Ŝ_σ,c′c, c′ ≠ c, solved in B's eigenbases) as
+//! W₁ = W K_σ and W̃₁ = −K_σ W̃; and T̂'s first order C_σ = Ŝ K_σ − K_σ Ŝ, beside k_σ Ŝ_σ, a Doppler part's own share of
+//! ∂G₀/∂s -- together k_σ E_σ, E_σ = s C_σ + Ŝ_σ; a beam's has no share of ∂G₀/∂s, its E_σ = C_σ at x_σ. Each is tabled as the main quantities, to its main counterpart's floor over the largest
 //! x the guard lets in; the row [W₁ | W̃₁ | Ŝ_σ's cluster blocks | E_σ] lies as the main one, so that a node adds x_σ
 //! (k_σ for E_σ) times its sums onto the main sums. The second order moves an eigenvalue by (x_σ A_σ)² g, A_σ = ‖Ŝ_σ‖/g
 //! the part off the clusters' blocks over their least gap g at the piece's samples (`Piece::guards`): a node takes the
@@ -88,10 +91,26 @@ pub(crate) struct Cluster {
     pub centre: f64,
 }
 
-/// A small part (module documentation, # The small parts): its coefficient.
-#[derive(Clone, Debug)]
-pub(crate) struct Small {
-    pub coefficient: usize,
+/// A small part (module documentation, # The small parts): a Doppler coefficient's, or a beam's own intensity's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Small {
+    /// The coefficient c: x_c = s k_c.
+    Doppler(usize),
+    /// The factor f: x_f = f − 1.
+    Own(usize),
+}
+
+impl Small {
+    /// Its x at a node of the intensity s, and the factor its E_σ is taken at (`fill`).
+    fn at(self, s: f64, values: &Values) -> (f64, f64) {
+        match self {
+            Small::Doppler(c) => (s * values.coefficients[c], values.coefficients[c]),
+            Small::Own(f) => {
+                let x = values.factors[f].0.re - 1.0;
+                (x, x)
+            }
+        }
+    }
 }
 
 /// One piece of s: its ends, its degrees and coefficients (degree + 1 rows): the main row [W | W̃ | B_c − c_c | Ŝ], the
@@ -138,32 +157,38 @@ pub(crate) struct BlockTable {
 struct Parts {
     f: Mat,
     s: Mat,
-    smalls: Vec<(usize, Mat)>,
+    smalls: Vec<(Small, Mat)>,
 }
 
 impl Parts {
-    /// The parts of block b of the plan; Err where an entry is of a factor other than the intensity's.
+    /// The parts of block b of the plan; Err where an entry is of a factor other than the intensity's and the beams'
+    /// own intensities (these of no Doppler coefficient).
     fn of(plan: &Plan, b: usize) -> Result<Parts, String> {
         let block = &plan.blocks[b];
         let n = block.rows.len();
         let mut parts = Parts { f: Mat { rows: n, cols: n, data: block.fixed.clone() }, s: Mat::zeros(n, n), smalls: Vec::new() };
         for e in &block.rest {
             let (f, scale) = plan.generator_terms[e.term as usize];
-            if !plan.intensity.contains(&f) {
-                return Err(format!("a varying factor ({f}) other than the tweezer's intensity"));
-            }
             let at = e.row as usize * n + e.col as usize;
             let z = scale * e.value;
-            if e.coefficient == 0 {
-                parts.s.data[at] += z;
+            let small = if plan.intensity.contains(&f) {
+                if e.coefficient == 0 {
+                    parts.s.data[at] += z;
+                    continue;
+                }
+                Small::Doppler(e.coefficient as usize)
+            } else if plan.own.contains(&f) && e.coefficient == 0 {
+                // One at the beam's focus: F + S_f, and x_f S_f.
+                parts.f.data[at] += z;
+                Small::Own(f)
             } else {
-                let c = e.coefficient as usize;
-                let i = parts.smalls.iter().position(|x| x.0 == c).unwrap_or_else(|| {
-                    parts.smalls.push((c, Mat::zeros(n, n)));
-                    parts.smalls.len() - 1
-                });
-                parts.smalls[i].1.data[at] += z;
-            }
+                return Err(format!("a varying factor ({f}) other than the tweezer's intensity and the beams' own"));
+            };
+            let i = parts.smalls.iter().position(|x| x.0 == small).unwrap_or_else(|| {
+                parts.smalls.push((small, Mat::zeros(n, n)));
+                parts.smalls.len() - 1
+            });
+            parts.smalls[i].1.data[at] += z;
         }
         parts.smalls.sort_by_key(|x| x.0);
         Ok(parts)
@@ -429,7 +454,7 @@ fn sample(parts: &Parts, clusters: &[Cluster], s: f64) -> Result<Sample, String>
             u.push(Mat::from_fn(m, m, |i, j| (0..n).map(|q| wt[(cl.at + i, q)] * sp.vectors[(q, members[c][j])]).sum()));
             ui.push(Mat::from_fn(m, m, |i, j| (0..n).map(|q| sp.inverse[(members[c][i], q)] * w[(q, cl.at + j)]).sum()));
         }
-        for (_, sm) in &parts.smalls {
+        for (kind, sm) in &parts.smalls {
             let sh = wt.product(&sm.product(&w));
             let mut k = Mat::zeros(n, n);
             let mut off = 0.0_f64;
@@ -457,11 +482,14 @@ fn sample(parts: &Parts, clusters: &[Cluster], s: f64) -> Result<Sample, String>
             norms.push(off);
             let w1 = w.product(&k);
             let wt1 = k.product(&wt).scaled(C64::real(-1.0));
-            // E_σ = s C_σ + Ŝ_σ, C_σ = Ŝ K − K Ŝ: the node's T̂ takes k_σ E_σ (x_σ C_σ and k_σ Ŝ_σ, x_σ = s k_σ).
+            // E_σ = s C_σ + Ŝ_σ, C_σ = Ŝ K − K Ŝ: the node's T̂ takes k_σ E_σ (x_σ C_σ and k_σ Ŝ_σ, x_σ = s k_σ); of a
+            // beam's own intensity E_σ = C_σ at x_σ.
             let mut e = hat.product(&k);
             e.add_scaled(C64::real(-1.0), &k.product(&hat));
-            let mut e = e.scaled(C64::real(s));
-            e.add_scaled(C64::ONE, &sh);
+            if let Small::Doppler(_) = kind {
+                e = e.scaled(C64::real(s));
+                e.add_scaled(C64::ONE, &sh);
+            }
             blocked(&w1, clusters, &mut small);
             small.extend_from_slice(&wt1.data);
             for cl in clusters {
@@ -655,7 +683,11 @@ impl BlockTable {
         let small_width = 3 * n2 + squares;
         let small_ranges: Vec<(usize, usize)> = (0..parts.smalls.len()).flat_map(|q| [(0, n2), (n2, 2 * n2), (2 * n2, 2 * n2 + squares), (2 * n2 + squares, small_width)].map(|(a, b)| (q * small_width + a, q * small_width + b))).collect();
         let k = parts.smalls.len();
-        let active = parts.smalls.iter().filter(|(c, _)| values.coefficients.get(*c).is_some_and(|x| *x != 0.0)).count();
+        // Active: a Doppler part's coefficient not zero at the point, a beam's own intensity everywhere off its focus --
+        // whose T̂ the node makes on the table's eigenbasis.
+        let active = parts.smalls.iter().filter(|(c, _)| match c { Small::Doppler(c) => values.coefficients.get(*c).is_some_and(|x| *x != 0.0), Small::Own(_) => true }).count();
+        let owns = parts.smalls.iter().filter(|(c, _)| matches!(c, Small::Own(_))).count();
+        let decompositions = decompositions + 2.0 * owns as f64 * (n * n * n) as f64;
         let pays = |d: usize| tabled_work(n, squares, active, d, d, decompositions) < made;
         if !pays(0) {
             return Err(format!("does not pay: {:.0} against {made:.0} at degree 0", tabled_work(n, squares, active, 0, 0, decompositions)));
@@ -718,7 +750,7 @@ impl BlockTable {
         if !(off < made) {
             return Err(format!("does not pay: {off:.0} against {made:.0} (degree {d}, small {e})"));
         }
-        let smalls = parts.smalls.iter().map(|(c, _)| Small { coefficient: *c }).collect();
+        let smalls = parts.smalls.iter().map(|(c, _)| *c).collect();
         Ok(BlockTable { size: n, clusters, squares, smalls, pieces, relative, work: (off, made) })
     }
 
@@ -736,7 +768,7 @@ impl BlockTable {
         let k = self.smalls.len();
         scratch.x.clear();
         for (sm, guard) in self.smalls.iter().zip(&p.guards) {
-            let x = s * values.coefficients[sm.coefficient];
+            let (x, _) = sm.at(s, values);
             if x != 0.0 && !((x * guard).powi(2) <= self.relative) {
                 return None;
             }
@@ -763,7 +795,7 @@ impl BlockTable {
             factors.extend(tj[..=p.small_degree].iter().map(|t| x * t));
             onto(&p.smalls[base..], k * width, 0, lean, factors, &mut value[..lean]);
             if gradients {
-                let d = values.coefficients[sm.coefficient];
+                let (_, d) = sm.at(s, values);
                 factors.clear();
                 factors.extend(tj[..=p.small_degree].iter().map(|t| d * t));
                 onto(&p.smalls[base..], k * width, lean, width - lean, factors, &mut value[lean..]);
@@ -947,7 +979,9 @@ impl Table {
                 g.clone_from(&parts.f);
                 g.add_scaled(C64::real(s), &parts.s);
                 for (c, m) in &parts.smalls {
-                    g.add_scaled(C64::real(s * values.coefficients.get(*c).copied().unwrap_or(0.0)), m);
+                    if let Small::Doppler(c) = c {
+                        g.add_scaled(C64::real(s * values.coefficients.get(*c).copied().unwrap_or(0.0)), m);
+                    }
                 }
                 direct.decompose(&g);
                 for _ in 0..plan.blocks[b].varying.len() {
