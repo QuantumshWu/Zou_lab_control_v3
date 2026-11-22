@@ -436,14 +436,17 @@
 //! 2. The response: G's own atoms -- the pilot's trajectory numbers, their initial momenta scaled by 1 ± η, the same
 //!    random numbers -- run through the plan, T's R_T = (T₊ − T₋)/2η at the analysis times (`response`): the flag of T's
 //!    memory not shorter than the run alone (select.rs `Response::collapsed`).
-//! 3. The candidates in the chain's order, G first: each one's model made, its step's work a µs at the pilot's states
-//!    and step (`priced`), its judgment along the paths (select.rs `judge`), its parts at the analysis times and the
-//!    looks they leave (`looks`). A candidate whose looks that the exact model's would meet are met by its account is
-//!    complete, its work W the product's trajectories its looks need times its work over the run, and -- not G -- the
-//!    scout's and the pilot's again on it. The rest are not chosen.
-//! 4. The search stops at the first candidate whose W at no model error at all is no less than the least W found (the
-//!    chain's work grows with its states); P is the complete candidate of least W. The choice is kept for the scene,
-//!    and said (stderr and the ledger's items): every candidate's parts, work and fate, the stages' times.
+//! 3. The candidates of the chain: each one's model made, its step's work a µs at the pilot's states and step
+//!    (`priced`), its judgment along the paths (select.rs `judge`), its parts at the analysis times and the looks they
+//!    leave (`looks`). A candidate whose looks that the exact model's would meet are met by its account is complete,
+//!    its work W the product's trajectories its looks need times its work over the run, and -- not G -- the scout's and
+//!    the pilot's again on it. The rest are not chosen. G is judged first; where it is not complete, the least complete
+//!    candidate (the anchor) is found by bisection (the chain nested, its error taken no less than the next's).
+//! 4. From the anchor the chain is searched upwards until a candidate's least W -- at no model error at all, at the
+//!    ladder's first rung's step, its pilot again -- is no lower than the least W found (the chain's work grows with
+//!    its states); the complete ones but G are scouted at their own step in the order of their least W while it stands
+//!    below the least found; P is the complete candidate of least W. The choice is kept for the scene, and said (stderr
+//!    and the ledger's items): every candidate's parts, work and fate, the stages' times.
 //! The pilot's step check is priced at no model error while the choice is not made: the error is measured on the
 //! paths of the step it settles.
 //!
@@ -2528,7 +2531,8 @@ struct Weighed {
 /// The choice of P on the pilot of G (module documentation, # The selection): the paths and the response; G judged
 /// first, then -- where G is not complete -- the least complete candidate of the chain found by bisection (the chain
 /// nested, each candidate's error no less than the next's: a candidate complete, every one above it taken complete),
-/// every candidate judged on the way weighed; those whose T alone is not met measured in pairs with that anchor; P the
+/// then the chain above it while a candidate's least W stands below the least found, every candidate judged on the way
+/// weighed; the complete ones scouted at their own step while their least W stands below the least found; P the
 /// complete candidate of least W, its region scanned.
 #[allow(clippy::too_many_arguments)]
 fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Choice, String> {
@@ -2678,15 +2682,28 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             }
         });
     }
-    let anchor = anchor.expect("an anchor");
-    // Where G is complete, a candidate above it can be chosen only where the cheapest of them, at no model error at all
-    // and its pilot again, would work less than G (the chain's work grows with its states): said where it would.
-    if anchor == 0 && top > 0 {
-        let model = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[1].clone(), ..run.report.clone() }, reference)?;
-        let price = priced(&model, domain.widest, &rated, tau, false);
-        let lower = need0 * price * span + again(1, price);
-        let w = weighed[0].work.expect("G complete");
-        noted(&mut report, if lower < w { format!("G 之上最便宜的 P{} 在 A = 0 时的代价 {lower:.3e} 低于 G 的 W {w:.3e}：链上更大的候选没有搜（本轮未做）", chain[1].len()) } else { format!("G 之上最便宜的 P{} 在 A = 0 时的代价 {lower:.3e} 已不低于 G 的 W {w:.3e}：不再搜", chain[1].len()) });
+    let anchor = weighed[anchor.expect("an anchor")].place;
+    // Above the anchor a candidate is chosen only where it works less than the least W found: its least -- at no model
+    // error (the run's own need), at the ladder's first rung's step (the longest its scout may stand at), its pilot
+    // again -- bounds it from below, and grows with its states (the chain's work does), so the chain is searched up from
+    // the anchor, each candidate judged and weighed, until one's least W is no lower than the least found.
+    let mut found = weighed.iter().filter_map(|w| w.work).fold(f64::INFINITY, crate::linalg::smaller);
+    for place in anchor + 1..=top {
+        if models[place].is_none() {
+            models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+        }
+        let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
+        let lower = need0 * price * span + again(place, price);
+        if !(lower < found) {
+            noted(&mut report, format!("链上 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不搜", chain[place].len()));
+            break;
+        }
+        if !weighed.iter().any(|w| w.place == place) {
+            let w = weigh(place, &mut models, &mut report)?;
+            messages.alive();
+            found = found.min(w.work.unwrap_or(f64::INFINITY));
+            weighed.push(w);
+        }
     }
     // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
     // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
