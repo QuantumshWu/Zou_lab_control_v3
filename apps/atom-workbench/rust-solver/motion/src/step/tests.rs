@@ -2440,12 +2440,16 @@ impl Dynamics for Synthetic {
 struct Counted<'a, D: Dynamics> {
     model: &'a D,
     calls: std::cell::Cell<[u64; 5]>,
+    /// Whether its middles give no candidate tones (`Middle::beats`): the selected model's, whose generator changes along
+    /// a path by its points (step.rs, # One node a step).
+    quiet: bool,
 }
 
 /// A middle that counts its node calls into its model's counts.
 struct Probe<'a, M: Middle> {
     middle: M,
     calls: &'a std::cell::Cell<[u64; 5]>,
+    quiet: bool,
 }
 
 impl<M: Middle> Probe<'_, M> {
@@ -2498,7 +2502,9 @@ impl<M: Middle> Middle for Probe<'_, M> {
         self.middle.optical(path)
     }
     fn beats(&self, path: &M::Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
-        self.middle.beats(path, beats, keys)
+        if !self.quiet {
+            self.middle.beats(path, beats, keys)
+        }
     }
     fn envelopes(&self, path: &M::Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         self.middle.envelopes(path, m, s, plus, minus)
@@ -2535,7 +2541,7 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
         let mut calls = self.calls.get();
         calls[1] += 1;
         self.calls.set(calls);
-        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls }
+        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls, quiet: self.quiet }
     }
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         self.model.emit(cluster, at, on.map(|(probe, path, s)| (&probe.middle, path, s)), psi, draw)
@@ -2664,7 +2670,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let starts = &held[..];
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
     let kept = std::cell::RefCell::new(fitted(starts[0].psi.len()));
-    let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
+    let counted = Counted { model, calls: std::cell::Cell::new([0; 5]), quiet: false };
     let steps: Vec<step::Step> = starts.iter().map(|s| step_of(&counted, s, tau, &mut step::Scratch::default()).unwrap()).collect();
     let calls = counted.calls.get().map(|c| c as f64 / count as f64);
     // Each start's step, piece by piece as `step_of` makes it.
@@ -2715,7 +2721,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .iter()
         .map(|along| {
             let mut scratch = fitted(n);
-            super::pictured(along, &mut scratch, tau, None).unwrap();
+            super::pictured(along, &mut scratch, tau, None, false, &mut along.middle.still()).unwrap();
             scratch
         })
         .collect();
@@ -3863,7 +3869,7 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
     let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
     let along = super::Along::new(&through.generator, kappa, kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).unwrap();
+    super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).unwrap();
     let picture = &scratch.picture;
     // Ĥ(u): the static group, its middle and (on a beating path) its slope and curvature, and each tone's members, their
     // envelopes' C, A and B (`spectral::Picture::prepare`), at e^{±iνu}.
@@ -3897,7 +3903,7 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> Option<f6
     let through = step::Midway::new(model, start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).ok()?;
+    super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).ok()?;
     let picture = &mut scratch.picture;
     let mut map = Mat::zeros(n, n);
     for a in 0..n {
@@ -3971,7 +3977,7 @@ fn a_propagation_whose_map_grows_keeps_the_survival() {
     let through = step::Midway::new(&model, &start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).expect("the decomposition takes the step");
+    super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).expect("the decomposition takes the step");
     let picture = &mut scratch.picture;
     let generator = |u: f64| {
         let mut g = Mat::from_fn(n, n, |i, j| picture.base[(i, j)] + picture.ends[0][(i, j)] * u + picture.ends[1][(i, j)] * (u * u));
@@ -4151,7 +4157,7 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
         let parts = model.middle(0, r, 0.0);
         let along = super::Along::new(&parts, velocity.map(|v| v / RB), velocity);
         let mut scratch = fitted(n);
-        let scale = super::pictured(&along, &mut scratch, tau, None).unwrap();
+        let scale = super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).unwrap();
         let candidates = parts.pairs().len();
         let super::Carved { picture, decay, part, .. } = scratch.carve();
         assert_eq!(picture.beats.len(), candidates, "case {case}: every beat a tone");
@@ -4542,7 +4548,7 @@ fn a_step_s_price_is_its_count_item_by_item() {
     from.threshold = 0.0;
     let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
     from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
-    let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]) };
+    let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false };
     let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
     through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
     counted.calls.set([0; 5]);
@@ -4727,4 +4733,6 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
 // R1-PROP: the propagation's regression and measurements on the six scenes (ignored, by name).
 mod r1prop;
 mod r2prop2;
+// P2-GSTEP: one node a step and the quadrature by groups (ignored, by name).
+mod gstep;
 
