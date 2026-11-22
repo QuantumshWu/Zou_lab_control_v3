@@ -30,8 +30,9 @@
 //! (expectations and window means are both linear, and commute): the spread about the cloud's motion and the window's
 //! variance of that motion. The second is no spread: a cloud pushed at a = ħkΓρ_ee/m over the window [0, 2t] has it
 //! (m/k_B)a²t²/3 whatever its spread, and over a whole period a cloud sloshing at an amplitude v has (m/k_B)v²/2
-//! (SAT_03, a resonant σ⁺ beam along a heavy atom's tweezer: read until 2026-11-22 as T_z 1.0 → 16.0 µK in 20 µs, where
-//! the window's ramp of the push is 15 µK; satheat.status.md for the engine before, 8.7 of 10.0 µK). T is the first part
+//! (SAT_03, a resonant σ⁺ beam along a heavy atom's tweezer: read until 2026-11-22 as T_z 0.96 → 15.98 µK in 20 µs, of
+//! which the push's window variance 14.37 µK -- the engine's own mean path gives 14.4 --, now 1.61 µK on the same
+//! trajectories; satfix.status.md, and satheat.status.md for the engine before, 8.7 of 10.0 µK). T is the first part
 //! alone. κ̄ is common to every atom, its window's variance a square of a sum over the atoms -- no atom's own sum, and the
 //! trajectories' times are cut by their own jumps, so no common time grid sums them -- so it is taken component by
 //! component on the window's Legendre polynomials, each component's square as the mean's square is (# Estimators):
