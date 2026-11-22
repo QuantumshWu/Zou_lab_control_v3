@@ -346,12 +346,15 @@
 //! (# The analysis times). At an output a trajectory is read inside the step the output falls in (`run`; step.rs
 //! `Step::at`): its rows as shown, its (r, κ) for the listed distributions, and its window's T sums -- cheap sums, no
 //! state kept and nothing read of the model. T's window about an output (estimate.rs `half_window`: one period of the
-//! axis, cut at t = 0) takes a trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::moments`: the
-//! path with the kick spread over the step, of the scheme's order at any cut); the first is the instant t = 0, and the
-//! run goes on through the last output's window (`Plan`). Outputs closer than a period have overlapping windows, so a
-//! window is not summed by itself: per lab axis the trajectory's running integrals of 1, κ and κ² from t = 0 are kept
-//! at every window's two ends, and a window is their difference (`run`) -- each step's path integrated once, and once
-//! more up to each end that falls inside it, whatever the windows' overlap.
+//! axis, cut at t = 0) takes a trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::stretch`: the
+//! path with the kick spread over the step, of the scheme's order at any cut), and its shape -- its κ on the window's
+//! Legendre polynomials, which T takes the cloud's own motion out by (estimate.rs, # The cloud's own motion); the first
+//! is the instant t = 0, and the run goes on through the last output's window (`Plan`). Outputs closer than a period
+//! have overlapping windows, so a window is not summed by itself: per lab axis the trajectory's running integrals of 1,
+//! κ and κ² from t = 0, and its running moments of κ against the powers of the time about a grid of origins
+//! (estimate.rs `Shapes`), are kept at every window's two ends, and a window is their difference (`run`) -- each piece
+//! of a step's path evaluated once (step.rs `Stretch`: its panels' sums, and up to each end inside it the panel's
+//! polynomial), whatever the windows' overlap.
 //!
 //! The times the decisions read (# The analysis times) are read the same way, their windows cut at the run's end as
 //! well, so that they stay centred (the trajectories run to the run's end and no further); a time that is an output
@@ -597,7 +600,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{allowance, between, draws_for, half_window, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Scales, Spread};
+use crate::estimate::{self, allowance, between, draws_for, half_window, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Local, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -607,7 +610,7 @@ use crate::model::optical::Unmade;
 use crate::model::potential::descend;
 use crate::model::{Sample, Trap, GROUND};
 use crate::request::STATES;
-use crate::step::{stumpff, Dynamics, Refused, Scratch, Segment, Trajectory};
+use crate::step::{stumpff, Dynamics, Integrals, Refused, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE};
 use rayon::prelude::*;
 use std::collections::VecDeque;
@@ -3854,24 +3857,34 @@ struct Record {
 /// One trajectory's T windows (module documentation, # Outputs and windows) about some times, and what became of it by
 /// each time: per lab axis the running integrals from t = 0 of the time held, κ and κ² (µs, 1/µm·µs, 1/µm²·µs), and
 /// per time and axis their values at its window's two ends -- the window's time held, ∫κ dt and ∫κ² dt are the
-/// differences. An axis's windows' lower ends come in the times' order, and so do their upper ends (a window is cut at
-/// t = 0, and at the run's end alike): per axis and side, the next time whose end is to come. Time 0 is the instant
-/// t = 0 and has none. A time's ends are kept only while its window or its atom is not in (`open`): its atom takes its
-/// window's mean as soon as both are (`settle`) -- a trajectory keeps the windows that are open, a period of the slowest
-/// axis's times, not one a time read (a pilot's 15 400 for PGC3D's 10 ms).
+/// differences --; and per lab axis the running moments for the windows' shapes (estimate.rs `Shapes`), the window's
+/// origin's at its two ends. An axis's windows' lower ends come in the times' order, and so do their upper ends (a
+/// window is cut at t = 0, and at the run's end alike): per axis and side, the next time whose end is to come. Time 0
+/// is the instant t = 0 and has none. A time's ends are kept only while its window or its atom is not in (`open`): its
+/// atom takes its window's mean as soon as both are (`settle`) -- a trajectory keeps the windows that are open, a period
+/// of the slowest axis's times, not one a time read (a pilot's 15 400 for PGC3D's 10 ms).
 struct Windows<'a> {
     times: &'a [f64],
     halves: &'a [V3],
     running: [[f64; 3]; 3],
+    shapes: [Shapes; 3],
     fates: Vec<Fate>,
-    /// From the time `first` on: per time its ends' values as far as they are read, and whether its atom is in.
-    open: VecDeque<([[[f64; 3]; 2]; 3], bool)>,
+    /// From the time `first` on: per time its ends' values as far as they are read, whether its atom is in, and its
+    /// ends' shape moments (none where its origin was never met).
+    open: VecDeque<([[[f64; 3]; 2]; 3], bool, ShapeEnds)>,
     first: usize,
     next: [[usize; 2]; 3],
 }
+/// A window's shape moments at its two ends per lab axis: its origin and the origin's moments there (`Shapes::at`).
+type ShapeEnds = [[Option<(i64, [f64; SHAPE + 1])>; 2]; 3];
 impl<'a> Windows<'a> {
+    /// The windows of half widths `halves` about `times`: per lab axis the shapes' grid is the axis's longest half window.
     fn new(times: &'a [f64], halves: &'a [V3]) -> Windows<'a> {
-        Windows { times, halves, running: [[0.; 3]; 3], fates: vec![Fate::Lost; times.len()], open: VecDeque::new(), first: 1, next: [[1; 2]; 3] }
+        let shapes = std::array::from_fn(|a| {
+            let longest = halves.iter().map(|h| h[a]).fold(0., crate::linalg::larger);
+            Shapes::new(a, if longest > 0. { longest } else { f64::INFINITY })
+        });
+        Windows { times, halves, running: [[0.; 3]; 3], shapes, fates: vec![Fate::Lost; times.len()], open: VecDeque::new(), first: 1, next: [[1; 2]; 3] }
     }
     /// The lower (side 0) or upper (1) end of time k's window on axis a.
     fn end(&self, k: usize, a: usize, side: usize) -> f64 {
@@ -3879,9 +3892,9 @@ impl<'a> Windows<'a> {
         if side == 0 { t - h } else { t + h }
     }
     /// Time k's place among the open ones (k ≥ `first`), opened as far as it.
-    fn slot(&mut self, k: usize) -> &mut ([[[f64; 3]; 2]; 3], bool) {
+    fn slot(&mut self, k: usize) -> &mut ([[[f64; 3]; 2]; 3], bool, ShapeEnds) {
         while self.open.len() <= k - self.first {
-            self.open.push_back(([[[0.; 3]; 2]; 3], false));
+            self.open.push_back(([[[0.; 3]; 2]; 3], false, [[None; 2]; 3]));
         }
         &mut self.open[k - self.first]
     }
@@ -3893,36 +3906,43 @@ impl<'a> Windows<'a> {
             self.settle();
         }
     }
-    /// The path's piece from `from` to `to` (the next piece starts where this one ends), with its integrals of κ and κ²
-    /// per lab axis between two of its times (step.rs `Segment::moments`): each end inside it reads the integrals up to
-    /// it -- once for the ends that coincide, the axes of one frequency and the windows cut at t = 0 --, and the running
-    /// integrals take the whole piece.
-    fn add(&mut self, from: f64, to: f64, moments: &dyn Fn(f64, f64) -> (V3, V3)) {
+    /// The path's piece from `from` to `to` (the next piece starts where this one ends), with its integrals from `from`
+    /// to any time of it (step.rs `Stretch::to`: of κ and κ² per lab axis, and the shapes' moments): each end inside it
+    /// reads the integrals and its origin's moments up to it -- once for the ends that coincide, the axes of one
+    /// frequency and the windows cut at t = 0 --, and the running integrals and every origin's moments take the whole
+    /// piece.
+    fn add(&mut self, from: f64, to: f64, along: &dyn Fn(f64) -> Integrals) {
         let outputs = self.times.len();
-        let mut made: Vec<(f64, (V3, V3))> = vec![];
+        for shapes in self.shapes.iter_mut() {
+            shapes.reach(from, to);
+        }
+        let mut made: Vec<(f64, Integrals)> = vec![];
         for a in 0..3 {
             for side in 0..2 {
                 while self.next[a][side] < outputs && self.end(self.next[a][side], a, side) <= to {
                     let k = self.next[a][side];
                     let at = crate::linalg::larger(self.end(k, a, side), from);
-                    let (m1, m2) = match made.iter().find(|(x, _)| *x == at) {
-                        Some((_, same)) => *same,
+                    let i = match made.iter().position(|(x, _)| *x == at) {
+                        Some(i) => i,
                         None => {
-                            let m = moments(from, at);
-                            made.push((at, m));
-                            m
+                            made.push((at, along(at)));
+                            made.len() - 1
                         }
                     };
-                    let r = self.running[a];
-                    self.slot(k).0[a][side] = [r[0] + (at - from), r[1] + m1[a], r[2] + m2[a]];
+                    let (m, r) = (made[i].1, self.running[a]);
+                    let q = self.shapes[a].origin(self.end(k, a, 0));
+                    let shape = self.shapes[a].at(q, &m.local).map(|x| (q, x));
+                    let slot = self.slot(k);
+                    (slot.0[a][side], slot.2[a][side]) = ([r[0] + (at - from), r[1] + m.one[a], r[2] + m.two[a]], shape);
                     self.next[a][side] += 1;
                 }
             }
         }
-        let (m1, m2) = moments(from, to);
+        let whole = along(to);
         for a in 0..3 {
             let r = self.running[a];
-            self.running[a] = [r[0] + (to - from), r[1] + m1[a], r[2] + m2[a]];
+            self.running[a] = [r[0] + (to - from), r[1] + whole.one[a], r[2] + whole.two[a]];
+            self.shapes[a].add(&whole.local);
         }
         self.settle();
     }
@@ -3930,47 +3950,54 @@ impl<'a> Windows<'a> {
     /// the time is open no more. A window is in where its upper ends are on every axis (a lower end comes before its
     /// upper one).
     fn settle(&mut self) {
-        while let Some(&(ends, true)) = self.open.front() {
+        while let Some(&(ends, true, shape)) = self.open.front() {
             if self.next.iter().any(|n| n[1] <= self.first) {
                 break;
             }
-            mean(&mut self.fates[self.first], &ends);
+            mean(&mut self.fates[self.first], &ends, &shape, &self.shapes);
             self.open.pop_front();
             self.first += 1;
         }
     }
     /// The trajectory has ended (run through, lost, or stopped), what became of it by every time in: the ends it did
-    /// not reach -- within a window, or past its last piece by the rounding -- take the running integrals where it
-    /// ended, the window over its held part, and every open time's atom takes its window's mean. A time none of whose
-    /// ends was read has a window of no length (and no atom read: `Fate::Lost` or `Fate::Failed`).
+    /// not reach -- within a window, or past its last piece by the rounding -- take the running integrals and moments
+    /// where it ended, the window over its held part, and every open time's atom takes its window's mean. A time none of
+    /// whose ends was read has a window of no length (and no atom read: `Fate::Lost` or `Fate::Failed`).
     fn close(mut self) -> Vec<Fate> {
         for a in 0..3 {
             for side in 0..2 {
-                for e in self.open.iter_mut().skip(self.next[a][side] - self.first) {
-                    e.0[a][side] = self.running[a];
+                for k in self.next[a][side].max(self.first)..self.first + self.open.len() {
+                    let q = self.shapes[a].origin(self.end(k, a, 0));
+                    let shape = self.shapes[a].at(q, &Local::NONE).map(|m| (q, m));
+                    let e = &mut self.open[k - self.first];
+                    (e.0[a][side], e.2[a][side]) = (self.running[a], shape);
                 }
             }
         }
-        for (k, (ends, _)) in (self.first..).zip(&self.open) {
-            mean(&mut self.fates[k], ends);
+        for (k, (ends, _, shape)) in (self.first..).zip(&self.open) {
+            mean(&mut self.fates[k], ends, shape, &self.shapes);
         }
         self.fates
     }
 }
 
-/// An atom held at a time after t = 0 as its window reads it, its window's two ends per lab axis `ends`: its κ and κ²
-/// are the window's means -- over its held part, which is no empty stretch after t = 0 (estimate.rs `half_window`); a
-/// window of no length is the instant's own κ and κ².
-fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3]) {
+/// An atom held at a time after t = 0 as its window reads it, its window's two ends per lab axis `ends` and its shape
+/// moments there: its κ and κ² are the window's means and its shape the window's (estimate.rs `shape`) -- over its held
+/// part, which is no empty stretch after t = 0 (estimate.rs `half_window`); a window of no length is the instant's own
+/// κ and κ², and no shape.
+fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3], shape: &ShapeEnds, shapes: &[Shapes; 3]) {
     if let Fate::Held(h) = fate {
         let w: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|i| ends[a][1][i] - ends[a][0][i]));
         for a in (0..3).filter(|&a| w[a][0] != 0.) {
             (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
+            if let [Some((q, low)), Some((_, high))] = &shape[a] {
+                h.shape[a] = estimate::shape(shapes[a].spacing(), *q, ends[a][0][0], ends[a][1][0], low, high);
+            }
         }
     }
 }
 
-/// The times after t = 0 of two increasing lists from t = 0, merged: each with its place in either list, a time that is
+// The times after t = 0 of two increasing lists from t = 0, merged: each with its place in either list, a time that is
 /// in both once.
 fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
     let (mut i, mut j, mut out) = (1, 1, vec![]);
@@ -4043,7 +4070,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
         let held = match nowhere.get() {
             Some(_) if t.time > 0. => Fate::Failed,
-            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), unresolved: t.unresolved }),
+            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), shape: NO_SHAPE, unresolved: t.unresolved }),
         };
         let mut windows = windows.borrow_mut();
         if let Some(k) = places[0] {
@@ -4076,8 +4103,9 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             if counted != Some(s.step.0) {
                 (steps, counted) = (steps + 1, Some(s.step.0));
             }
+            let stretch = s.stretch(s.start, until);
             for w in windows.borrow_mut().iter_mut() {
-                w.add(s.start, until, &|from, to| s.moments(from, to));
+                w.add(s.start, until, &|at| stretch.to(at));
             }
         };
         // Through the last output's window -- a failure there leaves every output read --, from checkpoint to checkpoint
@@ -5390,7 +5418,7 @@ mod tests {
         let record = |h: f64, out: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * if h > 3. * tau { out } else { 1. };
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
             Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         for members in [1, GROUP] {
@@ -5673,7 +5701,7 @@ mod tests {
         let record = |h: f64, f: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * (1. - f * (1. - 0.5_f64.powi(ORDER)));
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
             let halved = adapt::Halved { steps: 1, time: 4. * f, shortfall: 4. * f * (1. - 0.5_f64.powi(ORDER)) };
             Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
@@ -6036,6 +6064,7 @@ mod tests {
                 temperature_total_error: Spread { error, groups: f64::INFINITY },
                 occupation: [0.; 3],
                 mean_velocity: [0.; 3],
+                mean_speed: [0.; 3],
             }),
             failed: 0.,
             uncounted: 0.,
@@ -6061,7 +6090,7 @@ mod tests {
         let groups: Vec<Group> = (0..4)
             .map(|g| {
                 let mut group = Group::new(4);
-                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], unresolved: false });
+                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], shape: NO_SHAPE, unresolved: false });
                 group.add(&[held.clone(), held.clone(), Fate::Failed, Fate::Failed]);
                 group.add(&[held.clone(), held.clone(), held, Fate::Failed]);
                 group
@@ -6111,7 +6140,7 @@ mod tests {
     /// one atom at 30 μs, none at 40 μs.
     #[test]
     fn a_t_carried_keeps_its_judgement_and_a_t_unread_is_its_own() {
-        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], unresolved: false });
+        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], shape: NO_SHAPE, unresolved: false });
         let groups: Vec<Group> = (0..5)
             .map(|g| {
                 let mut group = Group::new(5);
@@ -6170,7 +6199,7 @@ mod tests {
         let kinds = 11;
         let held = |g: usize, m: usize, scale: f64, still: bool, unresolved: bool| {
             let y = if still { 0. } else { scale * (1. + (g * 4 + m) as f64) };
-            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], unresolved })
+            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], shape: NO_SHAPE, unresolved })
         };
         let level = |scale: f64| -> Vec<Group> {
             (0..5)
@@ -6385,7 +6414,7 @@ mod tests {
                     let mut group = Group::new(2);
                     for m in 0..4 {
                         let kappa2 = t * hotter * (1. + 0.01 * (4 * g + m) as f64);
-                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], unresolved: false });
+                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], shape: NO_SHAPE, unresolved: false });
                         group.add(&[held.clone(), held]);
                     }
                     group
@@ -6624,8 +6653,10 @@ mod tests {
     /// and longer than the interval, overlapping, cut at t = 0), the path in pieces of a step of 0.37 µs and a jump inside
     /// every third step. An atom read at every time, its κ and κ² zero at the instant, takes its window's means whether it
     /// is read before the piece its time lies in is added or after it. Run through to the plan's end, every window's
-    /// mean κ and κ² within 1e-12 of its own scale; an atom lost at 17.6 µs, the windows that reach past it over their
-    /// held part, no atom after it. The times kept open are never more than a window's span of them and two.
+    /// mean κ and κ² within 1e-12 of its own scale, and its shape (estimate.rs `shape`) its means of κ P_ℓ by a dense
+    /// rule within the moments' rounding through the conversion (`amplification`: every summed term's rounding, times
+    /// Σ_j |T_ℓj|), zero past its degree; an atom lost at 17.6 µs, the windows that reach past it over their held part,
+    /// no atom after it. The times kept open are never more than a window's span of them and two.
     #[test]
     fn the_windows_are_their_ends_differences() {
         let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
@@ -6640,6 +6671,19 @@ mod tests {
             let d = |a: usize| { let (p, q) = (antiderivative(a, from), antiderivative(a, to)); [q[1] - p[1], q[2] - p[2]] };
             (std::array::from_fn(|a| d(a)[0]), std::array::from_fn(|a| d(a)[1]))
         };
+        let kappa = |t: f64| -> V3 { std::array::from_fn(|a| amp[a] * (w[a] * t + phase[a]).cos()) };
+        // Dense Gauss-Legendre over a stretch: its nodes, weights and κ; a piece's integrals from its start (as step.rs
+        // `Stretch::to` gives them), κ and κ² exact, the shapes' moments by the dense rule.
+        let rule = crate::special::gauss_legendre(60);
+        let nodes = |from: f64, to: f64| -> Vec<(f64, f64, V3)> {
+            rule.iter().map(|&(x, weight)| { let t = 0.5 * (from + to) + 0.5 * (to - from) * x; (t, 0.5 * (to - from) * weight, kappa(t)) }).collect()
+        };
+        let along = |from: f64, at: f64| -> Integrals {
+            let (one, two) = moments(from, at);
+            Integrals { one, two, local: Integrals::of(from, nodes(from, at)).local }
+        };
+        let longest: V3 = std::array::from_fn(|a| plan.halves.iter().map(|h| h[a]).fold(0., crate::linalg::larger));
+        let mut worst = 0_f64;
         // The pieces: steps of τ, the third of every three cut by a jump at 0.43 τ.
         let tau = 0.37;
         let mut cuts = vec![0.];
@@ -6653,7 +6697,7 @@ mod tests {
                 break;
             }
         }
-        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
+        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
         let span = 2. * plan.halves.iter().flatten().copied().fold(0., crate::linalg::larger);
         for stop in [plan.end, 17.6] {
             let mut windows = Windows::new(&plan.times, &plan.halves);
@@ -6664,7 +6708,7 @@ mod tests {
                 // The times in the piece read before it is added (the odd ones) and after it (the even ones).
                 let inside: Vec<usize> = (next..times.len()).take_while(|&k| times[k] <= to).collect();
                 inside.iter().filter(|&&k| k % 2 == 1).for_each(|&k| windows.record(k, atom.clone()));
-                windows.add(piece[0], to, &moments);
+                windows.add(piece[0], to, &|at| along(piece[0], at));
                 inside.iter().filter(|&&k| k % 2 == 0).for_each(|&k| windows.record(k, atom.clone()));
                 next += inside.len();
                 most = most.max(windows.open.len());
@@ -6681,10 +6725,172 @@ mod tests {
                     let exact: [f64; 3] = { let (p, q) = (antiderivative(a, lo), antiderivative(a, hi)); std::array::from_fn(|i| q[i] - p[i]) };
                     let scale = 1e-12 * stop * crate::linalg::larger(amp[a], 1.).powi(2) / exact[0];
                     assert!((h.kappa[a] - exact[1] / exact[0]).abs() <= scale && (h.kappa2[a] - exact[2] / exact[0]).abs() <= scale, "stop {stop}, output {k}, axis {a}: {} and {} against {} and {}", h.kappa[a], h.kappa2[a], exact[1] / exact[0], exact[2] / exact[0]);
+                    let (centre, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+                    let degree = estimate::shape_degree(PI * half / longest[a]);
+                    // The origin's moments summed every node of every piece since the origin was met (a piece before its
+                    // grid point at the most), each term rounded at its power and in the sum.
+                    let origin = (lo / longest[a]).floor() * longest[a];
+                    let terms = (60 * (cuts.iter().filter(|&&c| c > origin - tau && c < hi).count() + 1) * (SHAPE + 2)) as f64;
+                    let gain = amplification(longest[a], lo, hi);
+                    for l in 1..=SHAPE {
+                        let dense: f64 = if l > degree { 0. } else { nodes(lo, hi).iter().map(|&(t, weight, k)| weight * k[a] * legendre(l, (t - centre) / half)).sum::<f64>() / (hi - lo) };
+                        let error = (h.shape[a][l - 1] - dense).abs() / amp[a];
+                        let bound = (gain[l] * terms * (hi - origin) / (hi - lo) + 64.) * crate::units::UNIT_ROUNDOFF;
+                        worst = worst.max(error / bound);
+                        assert!(error <= bound, "stop {stop}, output {k}, axis {a}, degree {l} of {degree}: {} against {dense}, {error:.2e} of the amplitude beyond {bound:.2e}", h.shape[a][l - 1]);
+                    }
                 }
             }
             assert!(most as f64 <= span + 2., "{most} times open against a span of {span} µs");
         }
+        println!("the shapes' largest error over its bound: {worst:.2e}");
+    }
+
+    /// The conversion's amplification of a window [lower, upper] on a grid of spacing G (estimate.rs `shape`): per
+    /// degree ℓ, Σ_j |T_ℓj| of P_ℓ(αy + β) in the powers of y -- what the rounding of the origin's moments is multiplied
+    /// by -- over the window's half width relative to the spacing's.
+    fn amplification(spacing: f64, lower: f64, upper: f64) -> [f64; SHAPE + 1] {
+        let (h, s) = (0.5 * (upper - lower), 1.5 * spacing);
+        let q = (lower / spacing).floor();
+        let (alpha, beta) = (s / h, (q * spacing + s - (lower + h)) / h);
+        let (mut before, mut now) = ([0.; SHAPE + 2], [0.; SHAPE + 2]);
+        (before[0], now[0], now[1]) = (1., beta, alpha);
+        let mut out = [1.; SHAPE + 1];
+        for l in 1..=SHAPE {
+            out[l] = now.iter().map(|c| c.abs()).sum();
+            let mut next = [0.; SHAPE + 2];
+            for j in 0..=(l + 1).min(SHAPE + 1) {
+                let times = beta * now[j] + if j > 0 { alpha * now[j - 1] } else { 0. };
+                next[j] = ((2 * l + 1) as f64 * times - l as f64 * before[j]) / (l + 1) as f64;
+            }
+            (before, now) = (now, next);
+        }
+        out
+    }
+
+    /// P_ℓ(x) by Bonnet's recurrence.
+    fn legendre(l: usize, x: f64) -> f64 {
+        let (mut before, mut now) = (1., x);
+        if l == 0 {
+            return 1.;
+        }
+        for n in 1..l {
+            (before, now) = (now, ((2 * n + 1) as f64 * x * now - n as f64 * before) / (n + 1) as f64);
+        }
+        now
+    }
+
+    /// The cloud's own motion is no temperature (estimate.rs, # The cloud's own motion), whatever it is: 64 atoms in eight
+    /// groups on the windows of the test above (periods 0.7, 2.3 and 23 µs, outputs 1 µs apart, windows cut at t = 0
+    /// and whole), each its own oscillation κ_a = A cos(ω_a t + φ) with a kick of its own at every jump, and on top of
+    /// them a path every atom shares -- none, a push (a ramp of 0.6/µm per µs, a fall alike) and a sloshing at 0.86 ω_a
+    /// of amplitude 5/µm, the cloud's motion's window variance up to 70 times the atoms' spread. T and its jackknife
+    /// per axis and output read with the shared path are those without it within 1e-9 of the paths' scale (the atoms'
+    /// spread and the shared path's mean square over the window): the shapes take the path out but for the rounding of
+    /// their conversion (bounded in the test above). So is what the atoms whose state the run does not know carry of T:
+    /// every seventh atom unresolved, their share of the held atoms (estimate.rs `Estimate::unresolved`, booked on T as
+    /// the bound of that share moved: `Estimate::moved`) is the same with the shared path and without it. Read with no
+    /// shapes (the estimate of before) T moves with the path by its window variance and twice its window covariance with
+    /// the atoms' own mean path, Var_W(g) + 2Cov_W(g, ū) (the U-statistic's algebra), by a dense rule on the pieces within
+    /// 1e-9 of the scale -- what the shapes take out.
+    #[test]
+    fn the_cloud_s_own_motion_is_no_temperature() {
+        let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
+        let times: Vec<f64> = (0..31).map(|k| k as f64).collect();
+        let plan = Plan::new(&times, w);
+        let tau = 0.37;
+        let mut cuts = vec![0.];
+        for i in 0.. {
+            let (start, step_end) = (i as f64 * tau, crate::linalg::smaller((i + 1) as f64 * tau, plan.end));
+            if i % 3 == 2 && start + 0.43 * tau < step_end {
+                cuts.push(start + 0.43 * tau);
+            }
+            cuts.push(step_end);
+            if step_end >= plan.end {
+                break;
+            }
+        }
+        // Each atom's own numbers, a fixed sequence: amplitudes, phases and kick sizes.
+        let draw = |i: usize, j: usize| -> f64 { ((i * 7919 + j * 104_729 + 13) as f64 * 0.618_033_988_749_895).fract() };
+        let atoms = 64;
+        let own = |i: usize, a: usize, t: f64| -> f64 {
+            let kicks = (cuts.partition_point(|&c| c <= t) - 1) as f64;
+            (0.5 + draw(i, a)) * (w[a] * t + TAU * draw(i, a + 3)).cos() + 0.05 * (draw(i, a + 6) - 0.5) * kicks
+        };
+        let shared: [&dyn Fn(usize, f64) -> f64; 3] = [&|_, _| 0., &|_, t| 0.6 * t, &|a, t| 5. * (0.86 * w[a] * t + 0.4).sin()];
+        let rule = crate::special::gauss_legendre(60);
+        let read = |path: &dyn Fn(usize, f64) -> f64, shapes: bool| -> Vec<Estimate> {
+            let mut groups: Vec<Group> = (0..8).map(|_| Group::new(times.len())).collect();
+            for i in 0..atoms {
+                let kappa = |t: f64| -> V3 { std::array::from_fn(|a| own(i, a, t) + path(a, t)) };
+                // The path is continuous within a piece (a kick lands at a piece's start): a piece's rule from just
+                // inside it.
+                let nodes = |from: f64, to: f64| -> Vec<(f64, f64, V3)> {
+                    rule.iter().map(|&(x, weight)| { let t = 0.5 * (from + to) + 0.5 * (to - from) * x; (t, 0.5 * (to - from) * weight, kappa(t)) }).collect()
+                };
+                let along = |from: f64, at: f64| Integrals::of(from, nodes(from, at));
+                let mut windows = Windows::new(&plan.times, &plan.halves);
+                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, unresolved: i % 7 == 3 });
+                windows.record(0, at(0.));
+                let mut next = 1;
+                for piece in cuts.windows(2) {
+                    windows.add(piece[0], piece[1], &|at| along(piece[0], at));
+                    while next < times.len() && times[next] <= piece[1] {
+                        windows.record(next, at(times[next]));
+                        next += 1;
+                    }
+                }
+                let mut fates = windows.close();
+                if !shapes {
+                    for f in fates.iter_mut() {
+                        if let Fate::Held(h) = f {
+                            h.shape = NO_SHAPE;
+                        }
+                    }
+                }
+                groups[i % 8].add(&fates);
+            }
+            summarize(&groups, &Scales { hbar_over_mass: KT_PER_UK, frequencies: w })
+        };
+        let (alone, alone_before) = (read(shared[0], true), read(shared[0], false));
+        let mut worst = 0_f64;
+        for (case, path) in shared.iter().enumerate().skip(1) {
+            let (with, before) = (read(*path, true), read(*path, false));
+            for k in 1..times.len() {
+                let (m, a0, b, b0) = (with[k].motion.unwrap(), alone[k].motion.unwrap(), before[k].motion.unwrap(), alone_before[k].motion.unwrap());
+                for a in 0..3 {
+                    let h = plan.halves[k][a];
+                    let (lo, hi) = (times[k] - h, times[k] + h);
+                    // The shared path g and the atoms' own mean ū over the window by a dense rule on its pieces.
+                    let mut ends = vec![lo];
+                    ends.extend(cuts.iter().copied().filter(|&c| c > lo && c < hi));
+                    ends.push(hi);
+                    let (mut g1, mut g2, mut u1, mut gu) = (0., 0., 0., 0.);
+                    for piece in ends.windows(2) {
+                        for &(x, wt) in rule.iter() {
+                            let (t, wt) = (0.5 * (piece[0] + piece[1]) + 0.5 * (piece[1] - piece[0]) * x, 0.5 * (piece[1] - piece[0]) * wt / (hi - lo));
+                            let (g, u) = (path(a, t), (0..atoms).map(|i| own(i, a, t)).sum::<f64>() / atoms as f64);
+                            (g1, g2, u1, gu) = (g1 + wt * g, g2 + wt * g * g, u1 + wt * u, gu + wt * g * u);
+                        }
+                    }
+                    let (variance, covariance) = (g2 - g1 * g1, gu - g1 * u1);
+                    // The paths' scale: the atoms' spread and the shared path's mean square over the window.
+                    let scale = a0.temperature[a] + g2;
+                    worst = worst.max((m.temperature[a] - a0.temperature[a]).abs() / scale);
+                    assert!((m.temperature[a] - a0.temperature[a]).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: T {} with the shared path against {} without (its variance {variance})", m.temperature[a], a0.temperature[a]);
+                    assert!((m.temperature_errors[a].error - a0.temperature_errors[a].error).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: its error {} against {}", m.temperature_errors[a].error, a0.temperature_errors[a].error);
+                    let moved = b.temperature[a] - b0.temperature[a];
+                    assert!((moved - variance - 2. * covariance).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: with no shapes T moved by {moved} against {variance} + 2 × {covariance}");
+                }
+                // The unresolved atoms: the same share of the held atoms, what T's bound is booked at.
+                assert!(with[k].unresolved == alone[k].unresolved && alone[k].unresolved > 0., "case {case}, output {k}: the unresolved share {} with the shared path against {} without", with[k].unresolved, alone[k].unresolved);
+            }
+        }
+        println!("T with a shared path against T without it: at most {worst:.2e} of the paths' scale");
+        // The shared paths are large against the spread: the largest window variance over the atoms' T.
+        let sloshing = read(shared[2], false);
+        let most = (1..times.len()).map(|k| sloshing[k].motion.unwrap().temperature[2] / alone[k].motion.unwrap().temperature[2]).fold(0., f64::max);
+        assert!(most > 10., "the sloshing's reading with no shapes is {most} times the spread at the most");
     }
 
     /// The histograms hold every atom, sum to one, put 0 at a bin's centre, and carry a listed output with no atom.
@@ -6745,7 +6951,7 @@ mod tests {
         };
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
-            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false };
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false };
             Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
@@ -6855,7 +7061,7 @@ mod tests {
             method: String::new(),
         };
         let shape = Shape::of(&context.plan, false);
-        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false });
+        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false });
         let nowhere = |i: u64| Record {
             outputs: vec![held(i), Fate::Failed],
             reads: vec![held(i), Fate::Failed],
@@ -7188,7 +7394,7 @@ mod tests {
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false };
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
             Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
@@ -7548,7 +7754,7 @@ mod tests {
     fn the_reads_are_no_farther_apart_than_a_quarter_of_t_s_shortest_window() {
         let candidates = grid(1000., 0.5);
         assert!(candidates.len() == 1001 && candidates[1000] == 1000. && candidates.windows(2).all(|w| (w[1] - w[0] - 1.).abs() < 1e-12));
-        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], unresolved: false });
+        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], shape: NO_SHAPE, unresolved: false });
         let groups: Vec<Group> = (0..11)
             .map(|_| {
                 let mut g = Group::new(candidates.len());
@@ -7773,7 +7979,7 @@ mod tests {
             let mut fate = || {
                 let kappa: V3 = std::array::from_fn(|_| 3. * (uniform() - 0.5));
                 let kappa2: V3 = std::array::from_fn(|a| kappa[a] * kappa[a] * (1. + uniform()));
-                Fate::Held(Held { rows: state(0), kappa, kappa2, unresolved: false })
+                Fate::Held(Held { rows: state(0), kappa, kappa2, shape: NO_SHAPE, unresolved: false })
             };
             let parts: Vec<Group> = (0..groups)
                 .map(|_| {
