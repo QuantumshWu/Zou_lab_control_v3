@@ -219,6 +219,7 @@ fn r1prop_refused() {
 #[ignore]
 fn r1prop_remainder() {
     use crate::linalg::{norm_sqr, C64};
+    use crate::step::Middle;
     use super::super::{pictured, predicted, Along, STATES, SUMS};
     let walk = env("R1PROP_WALK", 0.474);
     let taus = list("R1PROP_TAUS", "0.474,0.948");
@@ -237,7 +238,7 @@ fn r1prop_remainder() {
                 let kappa_m = predicted(&t.forms, midway.reached.1, tau, t.time + h);
                 let along = Along::new(&midway.generator, kappa_m, kappa_m.map(|k| midway.hbar_over_mass * k));
                 let launched = along.turned(&t.psi, -h, true);
-                if let Err(e) = pictured(&along, &mut s, tau, Some(&launched[..n])) {
+                if let Err(e) = pictured(&along, &mut s, tau, Some(&launched[..n]), false, &mut along.middle.still()) {
                     println!("R1-REMAINDER {name} state {k} tau {tau}: refused {e:?}");
                     continue;
                 }
@@ -361,7 +362,7 @@ fn engine_sums(picture: &mut crate::spectral::Picture, a: f64, b: f64, h: f64, e
     let mut sums = vec![0.0; 2 * n * super::super::row(n) * super::super::SUMS];
     let mut nodes = 0;
     let panels = super::super::count(b - a, picture.quotient, super::super::FORMS, 2, || ends);
-    for (u, w) in super::super::panels(a, b, panels).flat_map(|(_, nodes)| nodes) {
+    for (u, w, _) in super::super::panels(a, b, panels).flat_map(|(_, nodes)| nodes) {
         picture.at(u, &mut x[..n]);
         super::super::Sums { still: false, h, tones: &[] }.gather(u, w, &x[..n], None, &mut sums);
         nodes += 1;
@@ -448,7 +449,7 @@ fn r1prop_quadrature() {
                 for (kind, from, x) in pieces {
                     let mut s = Scratch::default();
                     s.fit(n, SUMS);
-                    if pictured(&along, &mut s, tau, Some(&x)).is_err() {
+                    if pictured(&along, &mut s, tau, Some(&x), false, &mut along.middle.still()).is_err() {
                         continue;
                     }
                     let picture = &mut s.picture;
@@ -556,6 +557,7 @@ fn r1prop_quadrature() {
 #[ignore]
 fn r1prop_jumps() {
     use crate::linalg::{norm_sqr, C64};
+    use crate::step::Middle;
     use super::super::{pictured, predicted, Along, STATES, SUMS};
     let taus = list("R1PROP_TAUS", "0.326,0.163");
     let (steps, rk) = (env("R1PROP_STEPS", 12.0) as usize, env("R1PROP_RK", 400000.0));
@@ -574,7 +576,7 @@ fn r1prop_jumps() {
                 let launched = along.turned(&t.psi, -h, true);
                 let mut s = Scratch::default();
                 s.fit(n, SUMS);
-                if pictured(&along, &mut s, tau, Some(&launched[..n])).is_ok() {
+                if pictured(&along, &mut s, tau, Some(&launched[..n]), false, &mut along.middle.still()).is_ok() {
                     let picture = &mut s.picture;
                     let generator = |u: f64| -> Vec<C64> {
                         let mut g: Vec<C64> = (0..n * n).map(|q| picture.base.data[q] + picture.ends[0].data[q] * u + picture.ends[1].data[q] * (u * u)).collect();
