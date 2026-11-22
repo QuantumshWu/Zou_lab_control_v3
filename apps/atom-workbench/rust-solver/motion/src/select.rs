@@ -105,8 +105,15 @@
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
 //! pilot's thermal speed against the reference (`scan`), each scan to the turning point of the pilot's most
-//! energetic held atom on the reference state's prepared potential, or to the trap region's edge (`REGION_INTENSITY` of
-//! the tweezer's peak), whichever is nearer -- the reach the pilot's atoms show (solve.rs `choose_on_the_pilot`): where
+//! energetic held atom on the reference state's prepared potential, to the distance an atom reaches within the
+//! request, or to the trap region's edge (`REGION_INTENSITY` of the tweezer's peak), whichever is nearest -- the reach
+//! the pilot's atoms show (solve.rs `choose_on_the_pilot`). The reach within the request (the readings are the
+//! request's, its times the only ones asked): a held atom's energy E on that potential is at most E_max, the most
+//! energetic one's, so its speed is at most v = √(2(ħ/m)(E_max − V₀)), V₀ the potential's least, at the centre; it started
+//! no farther than R₀ from the centre, the farthest of the pilot's atoms at t = 0; within the request's T it is no
+//! farther than R₀ + vT. Beyond it no atom of the run is, its share f there zero, and below the least intensity the
+//! scans reached the rule stands as it is (unread, booked whole on a share that is none). (Until SELCOST the scans went
+//! to the turning point alone: R4's axial lines to ±200 µm, 2210 µs at the thermal speed, a 400 µs run.) Where
 //! the paths did not go -- the tweezer's intensity s below the least the paths reached --, the readings where a row errs
 //! by a quarter of its target or more mark the region {s ≤ s*}, s* the most intense of them, its error e the largest
 //! row's error there; below the least intensity the scans and the paths reached nothing is read, and an atom there is unknown, its
