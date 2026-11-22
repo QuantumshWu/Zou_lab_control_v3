@@ -264,8 +264,8 @@ struct Reads {
 thread_local! {
     /// The nodes the middles made, without and with the photon forms (a check's count).
     pub(crate) static MADE: RefCell<[usize; 2]> = const { RefCell::new([0; 2]) };
-    /// A check's switch (the tests', the thread's): a held step's jump takes its photon at the path's point there, as
-    /// before 2026-11-22 (`SelectedMiddle::emitted`).
+    /// A check's switch (the tests', the thread's): a held step's jump takes its photon at the path's point there and the
+    /// middle keeps no numbers, as before 2026-11-22 (`SelectedMiddle::emitted`, `node`).
     pub(crate) static PATH_PHOTON: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -1553,8 +1553,17 @@ impl Drop for SelectedMiddle<'_> {
             self.model.release(node);
         }
         LISTS.with(|l| l.borrow_mut().push(nodes));
-        if let Some(kept) = self.kept.borrow_mut().take() {
-            KEPT.with(|k| k.borrow_mut().push((self.model.id, kept)));
+        // The kept numbers back into the thread's buffers, which the next middle's node is made in, warm; the ones the
+        // step's other evaluations took to the pool.
+        if let Some(mut kept) = self.kept.borrow_mut().take() {
+            let key = self.model.id;
+            WORK.with(|w| {
+                if let Some((_, work)) = w.borrow_mut().as_mut().filter(|x| x.0 == key) {
+                    std::mem::swap(&mut work.local, &mut kept.0);
+                    std::mem::swap(&mut work.out, &mut kept.1);
+                }
+            });
+            KEPT.with(|k| k.borrow_mut().push((key, kept)));
         }
     }
 }
@@ -1581,7 +1590,11 @@ impl SelectedMiddle<'_> {
         self.made.set(self.made.get() + node.work);
         #[cfg(test)]
         MADE.with(|m| m.borrow_mut()[usize::from(kicked)] += 1);
-        if self.held.get() && s == 0.0 && !kicked {
+        #[cfg(test)]
+        let keep = self.held.get() && !PATH_PHOTON.with(|x| x.get());
+        #[cfg(not(test))]
+        let keep = self.held.get();
+        if keep && s == 0.0 && !kicked {
             // The held middle's numbers, kept: the thread's buffers take the kept ones' place (none yet: the pool's).
             let key = self.model.id;
             let mut kept = self.kept.borrow_mut().take().or_else(|| KEPT.with(|k| {

@@ -322,8 +322,9 @@
 //! the jump -- on a step of one node (# One node a step) the generator held at the middle, whose envelopes are the
 //! middle's and each beat at the jump's phase (`Middle::hold`: the middle's node, its photon forms given it there;
 //! until 2026-11-22 the model made again at the path's point, a node a jump, while the decay that timed it was the
-//! middle's; measured, step/tests/t2step.rs `t2step_jump`: the momentum after such a step moved by a hundredth to an
-//! eighth of the step's own difference from its two halves, the median over the seven scenes' ground states). The
+//! middle's; measured, step/tests/t2step.rs `t2step_jump`: the momentum after such a step moved, in the median over a
+//! walk's steps with a jump, by a hundredth of the step's own difference from its two halves on tilt2's, PGC3D's and
+//! TET's ground states, by an eighth on GMD1C's, by less on the others'). The
 //! jump's time, its state and its point are one propagation's; rate × kick is then the scattering force
 //! at one point of the step's path, the path the step's own force is read on, and what is left of it is the step's
 //! error, the same both ways in time. (Read apart -- the hazard on one path, the kick at another place of the orbit,
@@ -2737,15 +2738,14 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         picture.blocks.clear();
         picture.blocks.extend_from_slice(along.middle.blocks());
     }
-    let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
-    along.middle.generator(&along.path, 0.0, &mut picture.base);
-    // The model's candidates: none where its generator is still along every path.
     // The model's candidates: none where its generator is still along every path. One model's node on ground states
-    // alone (`held`) or where the generator is still.
+    // alone (`held`, the middle told so before its generator is asked for) or where the generator is still.
     let (candidates, held) = (!*still, ground);
     if held {
         along.middle.hold();
     }
+    let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
+    along.middle.generator(&along.path, 0.0, &mut picture.base);
     let picture = &mut scratch.picture;
     if !(held || *still) {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);

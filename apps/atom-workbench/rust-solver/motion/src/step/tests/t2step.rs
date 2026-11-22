@@ -168,6 +168,8 @@ fn least(f: &mut dyn FnMut(), times: usize) -> f64 {
 #[ignore]
 fn t2step_cost() {
     let (steps, repeat) = (env("T2S_STEPS", 12.0) as usize, env("T2S_REPEAT", 5.0) as usize);
+    // T2S_PATH_PHOTON: a held step's photon at the path's point (model/selected.rs `PATH_PHOTON`).
+    crate::model::selected::PATH_PHOTON.with(|x| x.set(std::env::var("T2S_PATH_PHOTON").is_ok()));
     for (name, request) in scenes() {
         let tau = tau_of(&name);
         let chief = crate::solve::chief(&request);
@@ -562,6 +564,121 @@ fn t2step_jump() {
                 o1.0,
                 o1.1
             );
+        }
+    }
+}
+
+/// A step's time with a held step's photon at the middle against at the path's point (model/selected.rs `PATH_PHOTON`:
+/// the photon and the kept numbers as before 2026-11-22), in one process, interleaved: per model, on T2S_STEPS (12)
+/// states of a walk at the scene's τ, each step the least of T2S_REPEAT (5) in T2S_ROUNDS (4) rounds alternating the two
+/// (a fresh scratch each, its first call not timed), with its counted work.
+#[test]
+#[ignore]
+fn t2step_ab_photon() {
+    use crate::model::selected::PATH_PHOTON;
+    let (steps, repeat, rounds) = (env("T2S_STEPS", 12.0) as usize, env("T2S_REPEAT", 5.0) as usize, env("T2S_ROUNDS", 4.0) as usize);
+    for (name, request) in scenes() {
+        let tau = tau_of(&name);
+        let chief = crate::solve::chief(&request);
+        for (label, run) in models(&name, &request) {
+            let mut t = start(&run, &request, chief, 3);
+            if let Some(s) = std::env::var(format!("T2S_STATE_{name}")).ok().and_then(|x| x.parse::<usize>().ok()) {
+                let mut psi = crate::step::Internal::zeros(t.psi.len());
+                psi[s] = crate::linalg::C64::ONE;
+                t.psi = psi;
+            }
+            let (mut time, mut counted, mut taken, mut jumps) = ([0.0f64; 2], [0.0f64; 2], 0usize, 0usize);
+            // T2S_QUIET: no jump (the threshold at the least number), the steps' own work alone.
+            let quiet = std::env::var("T2S_QUIET").is_ok();
+            for _ in 0..steps {
+                if quiet {
+                    t.threshold = f64::MIN_POSITIVE;
+                }
+                let mut best = [f64::INFINITY; 2];
+                for _ in 0..rounds {
+                    for m in 0..2 {
+                        PATH_PHOTON.with(|x| x.set(m == 1));
+                        for r in 0..=repeat {
+                            let clock = std::time::Instant::now();
+                            let step = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere));
+                            let elapsed = clock.elapsed().as_secs_f64() * 1e6;
+                            std::hint::black_box(step.is_ok());
+                            if r > 0 {
+                                best[m] = best[m].min(elapsed);
+                            }
+                        }
+                    }
+                }
+                let mut next = None;
+                for m in 0..2 {
+                    PATH_PHOTON.with(|x| x.set(m == 1));
+                    if let Ok(step) = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)) {
+                        counted[m] += step.work;
+                        if m == 0 {
+                            jumps += step.made.iter().filter(|x| x.kick.is_some()).count();
+                            next = Some(step.end);
+                        }
+                    }
+                }
+                PATH_PHOTON.with(|x| x.set(false));
+                let Some(end) = next else { break };
+                for m in 0..2 {
+                    time[m] += best[m];
+                }
+                taken += 1;
+                t = end;
+            }
+            let k = taken.max(1) as f64;
+            eprintln!(
+                "T2S-ABPHOTON {name} {label} tau {tau}: a step with the middle's photon {:.1} µs (counted {:.4e}), with the path's {:.1} µs (counted {:.4e}), ratio {:.3}; {:.2} jumps a step (mean over {taken} states, each the least of {rounds}×{repeat})",
+                time[0] / k,
+                counted[0] / k,
+                time[1] / k,
+                counted[1] / k,
+                time[0] / time[1],
+                jumps as f64 / k
+            );
+        }
+    }
+}
+
+/// A jump's photon timed (`Dynamics::emit`): per model at the walk's first state's middle, the middle's node made
+/// (untimed) and then its photon at s = 0.1 µs held (the fold's kicks alone on the kept numbers) and at the path's point
+/// (a node made there with its photon forms), each the least of T2S_REPEAT (30), a fresh middle each.
+#[test]
+#[ignore]
+fn t2step_emit_time() {
+    use crate::linalg::C64;
+    let repeat = env("T2S_REPEAT", 30.0) as usize;
+    for (name, request) in scenes() {
+        let tau = tau_of(&name);
+        let chief = crate::solve::chief(&request);
+        for (label, run) in models(&name, &request) {
+            let t = start(&run, &request, chief, 3);
+            let n = t.psi.len();
+            let psi: Vec<C64> = (0..n).map(|a| C64::cis(0.7 * a as f64) * (1.0 + a as f64)).collect();
+            let velocity = t.kappa.map(|k| run.hbar_over_mass() * k);
+            let at = crate::model::Point { r: t.r, kappa: t.kappa, t: t.time + 0.5 * tau };
+            let mut best = [f64::INFINITY; 3];
+            for _ in 0..=repeat {
+                for way in 0..2 {
+                    let middle = run.middle(0, t.r, at.t);
+                    let path = middle.path(t.kappa, velocity);
+                    if way == 0 {
+                        middle.hold();
+                    }
+                    let mut h = crate::linalg::Mat::zeros(n, n);
+                    let clock = std::time::Instant::now();
+                    middle.generator(&path, 0.0, &mut h);
+                    let made = clock.elapsed().as_secs_f64() * 1e6;
+                    let clock = std::time::Instant::now();
+                    std::hint::black_box(run.emit(0, &at, Some((&middle, &path, 0.1)), &psi, &mut |w: &[f64]| (0..w.len()).max_by(|&a, &b| w[a].total_cmp(&w[b]))));
+                    let emitted = clock.elapsed().as_secs_f64() * 1e6;
+                    best[way] = best[way].min(emitted);
+                    best[2] = best[2].min(made);
+                }
+            }
+            eprintln!("T2S-EMIT {name} {label}: the middle's node {:.1} µs; a jump's photon held {:.1} µs, at the path's point {:.1} µs (each the least of {repeat})", best[2], best[0], best[1]);
         }
     }
 }
