@@ -319,7 +319,12 @@
 //! The jump is made from the state at the root, √θ times the propagation's direction x̂(u*) there, and **at the path's
 //! own point there** -- the position r_h + v_m u*, the momentum κ_m the
 //! generator is taken at: the photons, the kick and the landing (`jump`) are the model's at the point whose decay timed
-//! the jump. The jump's time, its state and its point are one propagation's; rate × kick is then the scattering force
+//! the jump -- on a step of one node (# One node a step) the generator held at the middle, whose envelopes are the
+//! middle's and each beat at the jump's phase (`Middle::hold`: the middle's node, its photon forms given it there;
+//! until 2026-11-22 the model made again at the path's point, a node a jump, while the decay that timed it was the
+//! middle's; measured, step/tests/t2step.rs `t2step_jump`: the momentum after such a step moved by a hundredth to an
+//! eighth of the step's own difference from its two halves, the median over the seven scenes' ground states). The
+//! jump's time, its state and its point are one propagation's; rate × kick is then the scattering force
 //! at one point of the step's path, the path the step's own force is read on, and what is left of it is the step's
 //! error, the same both ways in time. (Read apart -- the hazard on one path, the kick at another place of the orbit,
 //! always to one side --, a kick that depends on the position turns into a force along the velocity: timed by a step
@@ -675,6 +680,12 @@ pub trait Middle {
     /// takes as tones those it resolves better so and the rest with the generator's static group. None here; none on a
     /// path Ĥ is still along.
     fn beats(&self, _path: &Self::Path, _beats: &mut Vec<f64>, _keys: &mut Vec<Vec<i64>>) {}
+
+    /// The step takes this middle's generator at the middle alone, every envelope held there (# One node a step): a
+    /// jump inside the step takes its photon of the same generator -- the middle's envelopes, each beat at the jump's
+    /// phase (`Dynamics::emit`: the decay that timed the jump is that generator's). Told before the middle's generator
+    /// is asked for. Nothing here: a model whose photon at a time of the path is the step's generator's there already.
+    fn hold(&self) {}
 
     /// The model's exact blocks of the cluster's states (model/selected.rs, # Exact blocks): a partition on which every
     /// matrix the middle gives -- the generator at every time, its gradient, every tone's envelopes -- is block-diagonal
@@ -2732,6 +2743,9 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     // The model's candidates: none where its generator is still along every path. One model's node on ground states
     // alone (`held`) or where the generator is still.
     let (candidates, held) = (!*still, ground);
+    if held {
+        along.middle.hold();
+    }
     let picture = &mut scratch.picture;
     if !(held || *still) {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);

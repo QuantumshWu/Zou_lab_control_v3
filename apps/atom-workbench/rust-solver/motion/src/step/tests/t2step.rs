@@ -443,6 +443,129 @@ fn t2step_walk() {
     }
 }
 
+/// A held step's jump takes its photon of the step's own generator (step.rs, # One node a step; model/selected.rs
+/// `SelectedMiddle::hold`): on the ground states alone of a 1D PGC with its probe tilted 2° (refs/requests
+/// PGC1D_TILT_2: its two tones, millimetre beams) and of six beams' cooling (PGC3D_1ms), at a moving point and five
+/// times of the step, the photon a held middle emits -- its node made without the photon forms, which the fold's
+/// kicks alone then give it (`Out::kicks`) -- is to the bit the photon of a node made with them at the middle's point
+/// and momentum, each beat at the jump's phase: the class's rates, its amplitudes, its wave number and its kick.
+#[test]
+fn a_held_step_s_photon_is_the_middle_s_at_the_jump_s_phase() {
+    use crate::linalg::C64;
+    for file in ["PGC1D_TILT_2.json", "PGC3D_1ms.json"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join(file);
+        let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request = Request::from_native(&line).unwrap();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let run = Selected::new(scene, crate::select::Selection { keep: (0..GROUND).collect(), ..selection }, reference).unwrap();
+        let (r, t) = ([0.1, 0.2, 0.3], 0.7);
+        let kappa = [3.0, -2.0, 5.0];
+        let velocity = kappa.map(|k| run.hbar_over_mass() * k);
+        let psi: Vec<C64> = (0..GROUND).map(|a| C64::cis(0.7 * a as f64) * (1.0 + a as f64)).collect();
+        let at = crate::model::Point { r, kappa, t };
+        for s in [-0.2, -0.05, 0.0, 0.1, 0.25] {
+            let photon = |held: bool| {
+                let middle = run.middle(0, r, t);
+                // Held: the step's path through the middle, the node made there first without the photon forms; the
+                // reference: the path at rest through the same point, whose node at any time is the middle's.
+                let path = middle.path(kappa, if held { velocity } else { [0.0; 3] });
+                if held {
+                    middle.hold();
+                    let mut h = crate::linalg::Mat::zeros(GROUND, GROUND);
+                    middle.generator(&path, 0.0, &mut h);
+                }
+                let (mut rates, mut draw) = (Vec::new(), 0usize);
+                let emitted = run.emit(0, &at, Some((&middle, &path, s)), &psi, &mut |w: &[f64]| {
+                    rates = w.to_vec();
+                    draw = (0..w.len()).max_by(|&a, &b| w[a].total_cmp(&w[b]))?;
+                    Some(draw)
+                });
+                (rates, emitted.expect("a photon"))
+            };
+            let ((held_rates, held), (rates, plain)) = (photon(true), photon(false));
+            assert_eq!(held_rates, rates, "{file} s {s}: the classes' rates");
+            assert_eq!((held.wave_number, held.kick), (plain.wave_number, plain.kick), "{file} s {s}: the wave number and the kick");
+            for a in 0..3 {
+                assert_eq!(held.amplitudes[a].to_vec(), plain.amplitudes[a].to_vec(), "{file} s {s}: the amplitudes along {a}");
+            }
+        }
+    }
+}
+
+/// A held step's jump at the middle's envelopes against at the path's point (model/selected.rs `PATH_PHOTON`, before
+/// 2026-11-22), against the step's own error: per model, on T2S_STEPS (12) states of a walk at the scene's τ, each its
+/// threshold set where its own step's norm falls halfway (one jump inside the step), the step's end by the middle's
+/// photon and by the path's -- the same draws --, and by two steps of τ/2 (the middle's): the momenta's and the
+/// internal states' differences, median and largest over the states.
+#[test]
+#[ignore]
+fn t2step_jump() {
+    use crate::model::selected::PATH_PHOTON;
+    let steps = env("T2S_STEPS", 12.0) as usize;
+    let norm = |psi: &[crate::linalg::C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    let step = |run: &Selected, t: &crate::step::Trajectory, tau: f64| Midway::new(run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)).ok().map(|s| s.end);
+    let apart = |a: &crate::step::Trajectory, b: &crate::step::Trajectory| {
+        let dk = (0..3).map(|i| (a.kappa[i] - b.kappa[i]).powi(2)).sum::<f64>().sqrt();
+        let (na, nb) = (norm(&a.psi), norm(&b.psi));
+        let mut rho = 0.0f64;
+        for i in 0..a.psi.len() {
+            for j in 0..a.psi.len() {
+                rho = rho.max((a.psi[i] * a.psi[j].conj() / na - b.psi[i] * b.psi[j].conj() / nb).abs());
+            }
+        }
+        [dk, rho]
+    };
+    for (name, request) in scenes() {
+        let tau = tau_of(&name);
+        let chief = crate::solve::chief(&request);
+        for (label, run) in models(&name, &request) {
+            let mut t = start(&run, &request, chief, 3);
+            let (mut moved, mut own) = (Vec::new(), Vec::new());
+            for _ in 0..steps {
+                let mut free = t.clone();
+                free.threshold = 0.0;
+                let Some(end) = step(&run, &free, tau) else { break };
+                let mut from = t.clone();
+                from.threshold = (norm(&from.psi) * norm(&end.psi)).sqrt();
+                let held = step(&run, &from, tau);
+                PATH_PHOTON.with(|x| x.set(true));
+                let path = step(&run, &from, tau);
+                PATH_PHOTON.with(|x| x.set(false));
+                let halves = step(&run, &from, 0.5 * tau).and_then(|m| step(&run, &m, 0.5 * tau));
+                if let (Some(a), Some(b), Some(c)) = (&held, &path, &halves) {
+                    if a.jumps > from.jumps {
+                        moved.push(apart(a, b));
+                        own.push(apart(a, c));
+                    }
+                }
+                let Some(next) = step(&run, &t, tau) else { break };
+                t = next;
+            }
+            let k = 2.0 * std::f64::consts::PI / 0.780;
+            let stat = |v: &[[f64; 2]], q: usize| {
+                let mut x: Vec<f64> = v.iter().map(|r| r[q]).collect();
+                x.sort_by(f64::total_cmp);
+                (x.get(x.len() / 2).copied().unwrap_or(f64::NAN), x.last().copied().unwrap_or(f64::NAN))
+            };
+            let (m0, m1, o0, o1) = (stat(&moved, 0), stat(&moved, 1), stat(&own, 0), stat(&own, 1));
+            eprintln!(
+                "T2S-JUMP {name} {label} tau {tau}: {} steps with a jump; the middle's photon against the path's: dk {:.2e}/{:.2e} ħk, drho {:.2e}/{:.2e}; the step against its two halves: dk {:.2e}/{:.2e} ħk, drho {:.2e}/{:.2e} (median/largest)",
+                moved.len(),
+                m0.0 / k,
+                m0.1 / k,
+                m1.0,
+                m1.1,
+                o0.0 / k,
+                o0.1 / k,
+                o1.0,
+                o1.1
+            );
+        }
+    }
+}
+
 /// The process's CPU time so far, user and kernel (s): Windows' `GetProcessTimes`.
 fn process_seconds() -> f64 {
     #[repr(C)]
