@@ -137,7 +137,8 @@ fn the_exponential_is_exact() {
     }
 }
 
-/// The scheme of PATHS_SCHEME: "exact:<h>:<read>" (ENGFOLD's) or "sparse:<nodes>[:<turn>[:<read>]]".
+/// The scheme of PATHS_SCHEME: "exact:<h>:<read>" (ENGFOLD's), "sparse:<nodes>[:<turn>[:<read>]]", or
+/// "mid[:<tol>[:<read>]]" / "cf4[:<tol>[:<read>]]" (`Scheme::Steps`), "lawson:<substeps a µs>[:<pieces a step>[:<read>]]".
 fn scheme_of(text: &str) -> Scheme {
     let p: Vec<&str> = text.split(':').collect();
     match p[0] {
@@ -146,6 +147,16 @@ fn scheme_of(text: &str) -> Scheme {
             nodes: p[1].parse().unwrap(),
             turn: p.get(2).map_or(std::f64::consts::TAU, |x| x.parse().unwrap()),
             read: p.get(3).map_or(1, |x| x.parse().unwrap()),
+        },
+        "lawson" => Scheme::Lawson {
+            per_us: p[1].parse().unwrap(),
+            pieces: p.get(2).map_or(1, |x| x.parse().unwrap()),
+            read: p.get(3).map_or(1, |x| x.parse().unwrap()),
+        },
+        "mid" | "cf4" => Scheme::Steps {
+            gauss: p[0] == "cf4",
+            tol: p.get(1).map_or(0.0, |x| x.parse().unwrap()),
+            read: p.get(2).map_or(1, |x| x.parse().unwrap()),
         },
         other => panic!("unknown scheme {other}"),
     }
@@ -292,7 +303,7 @@ fn paths_memory() {
         let form = Form::new(&model, at);
         let clock = std::time::Instant::now();
         let m = memory(&form, at, [0.0; 3], 0.0).expect("the sector's Liouvillian decomposes");
-        eprintln!("{scene} {spec} (P{}, sector {}): slowest nonzero decay {:.4e} /µs ({} rounding zeros): τ_mem {:.4} µs, L {:.1} µs of {run} µs ({:.2} s)", form.n, form.dim, m.rate, m.zeros, m.time, m.length(run), clock.elapsed().as_secs_f64());
+        eprintln!("{scene} {spec} (P{}, sector {}): slowest nonzero decay {:.4e} /µs ({} rounding zeros), next {:.3e} {:.3e} {:.3e}: τ_mem {:.4} µs, L {:.1} µs of {run} µs ({:.2} s)", form.n, form.dim, m.rate, m.zeros, m.rates[0], m.rates[1], m.rates[2], m.time, m.length(run), clock.elapsed().as_secs_f64());
     }
 }
 
@@ -395,7 +406,7 @@ fn paths_cost() {
 }
 
 /// The scheme's check (`check`; module documentation, # The segments): PATHS_MODELS "candidate,reference" on path
-/// PATHS_PATH of PATHS_FILE over [PATHS_FROM, PATHS_TO] at `Scheme::sparse(PATHS_NODES)` against its halves; the
+/// PATHS_PATH of PATHS_FILE over [PATHS_FROM, PATHS_TO] at `Scheme::sparse(PATHS_NODES)` (or PATHS_SCHEME) against its halves; the
 /// largest change of the difference's row, rate and force; and that a turn past 2π is refused.
 #[test]
 #[ignore]
@@ -413,6 +424,7 @@ fn paths_check() {
     let start = [(7, C64::ONE)];
     assert!(check(&c, &r, &walks[path], &start, from, to, Scheme::Sparse { nodes, turn: 4.0 * std::f64::consts::PI, read: 1 }).is_none(), "a turn past 2π is refused");
     let clock = std::time::Instant::now();
-    let [row, rate, force] = check(&c, &r, &walks[path], &start, from, to, Scheme::sparse(nodes)).unwrap().unwrap();
+    let scheme = std::env::var("PATHS_SCHEME").map_or(Scheme::sparse(nodes), |x| scheme_of(&x));
+    let [row, rate, force] = check(&c, &r, &walks[path], &start, from, to, scheme).unwrap().unwrap();
     eprintln!("{scene} {} − {}, path {path} on [{from}, {to}] µs, {nodes} nodes a step against {} and half the turn: the difference changes by row {row:.2e}, rate {rate:.2e} (of the rate), force {force:.2e} (of the rms force); {:.1} s", specs[0], specs[1], 2 * nodes, clock.elapsed().as_secs_f64());
 }
