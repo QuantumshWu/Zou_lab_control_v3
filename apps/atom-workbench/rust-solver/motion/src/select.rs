@@ -34,11 +34,13 @@
 //! window reads the model where the atoms are late in the run, which the start's windows cannot (the motion's own
 //! memory is the longer: R4's atoms heat through the run).
 //!
-//! The scheme's setting (`Setting`) -- the substeps a µs over a stretch's opening (the paths' first window: the
-//! start's transient, paths.rs # The start) and after it, and the pieces a step -- is settled by its own error, not fixed
+//! The scheme's setting (`Setting`) -- the substeps a turn of the fastest coherence over a stretch's opening (the
+//! start's transient, paths.rs # The start), the substeps a µs after it, and the pieces a step -- is settled by its own
+//! error, not fixed
 //! (`settle`): on the first path's first `CALIBRATION` µs the reference is advanced at the setting and at each knob
 //! doubled, each knob's part of the setting's error the largest change of a displayed row from doubling it alone
-//! (Richardson's 2^p/(2^p − 1), p = 2: H frozen at a piece's middle; a rate no lower than one substep a piece, so
+//! (Richardson's 2^p/(2^p − 1), p = 2: the amplitudes' linear interpolation at one piece a step, R's at the substep's
+//! middle -- paths.rs # The nodes, # The substeps; a rate no lower than one substep a piece, so
 //! that where twice the pieces raise a rate to that floor the pieces' part is read at the raised rates,
 //! `refinements`); from
 //! the coarsest (`COARSEST`), the knob of the largest part is doubled while the parts' sum is beyond `TOLERANCE` -- s⁴
@@ -136,11 +138,12 @@ pub const WALKS: usize = 4;
 /// numerical tolerances inside a step take s⁴ of theirs (units.rs `QUADRATURE`): 2.0e-3 at p = 2.
 pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * POPULATION_TARGET;
 
-/// A setting of the paths' scheme (module documentation, # The paths): the substeps a µs over a stretch's opening and
-/// after it (paths.rs, # The start), and the pieces a step.
+/// A setting of the paths' scheme (module documentation, # The paths): the substeps a turn of the fastest coherence over
+/// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Setting {
-    pub rates: [f64; 2],
+    pub turns: f64,
+    pub rate: f64,
     pub pieces: usize,
 }
 
@@ -152,7 +155,8 @@ impl Setting {
     fn doubled(self, k: usize) -> Setting {
         let mut s = self;
         match k {
-            0 | 1 => s.rates[k] *= 2.0,
+            0 => s.turns *= 2.0,
+            1 => s.rate *= 2.0,
             _ => s.pieces *= 2,
         }
         s
@@ -161,29 +165,32 @@ impl Setting {
     /// Whether its knob `k` is below `FINEST`'s.
     fn open(&self, k: usize) -> bool {
         match k {
-            0 | 1 => self.rates[k] < FINEST.rates[k],
+            0 => self.turns < FINEST.turns,
+            1 => self.rate < FINEST.rate,
             _ => self.pieces < FINEST.pieces,
         }
     }
 }
 
-/// The setting the paths' scheme starts from (module documentation, # The paths): 8 substeps a µs, one piece a step --
-/// each knob doubled from there as its error asks.
-pub const COARSEST: Setting = Setting { rates: [8.0, 8.0], pieces: 1 };
+/// The setting the paths' scheme starts from (module documentation, # The paths): a substep a turn of the fastest
+/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a step -- each knob
+/// doubled from there as its error asks.
+pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1 };
 
-/// The finest setting (module documentation, # The paths): 4096 substeps a µs (32 times P1-PATHS's 128), 64 pieces a
-/// step -- a bound on the work, never a measure of accuracy: a setting settled there short of `TOLERANCE` is said
-/// ("到顶未收敛") and its reference's error parts booked whole in every candidate's A (`Settled::unmet`).
-pub const FINEST: Setting = Setting { rates: [4096.0, 4096.0], pieces: 64 };
+/// The finest setting (module documentation, # The paths): 64 substeps a turn, 4096 a µs (32 times P1-PATHS's 128), 64
+/// pieces a step -- a bound on the work, never a measure of accuracy: a setting settled there short of `TOLERANCE` is
+/// said ("到顶未收敛") and its reference's error parts booked whole in every candidate's A (`Settled::unmet`).
+pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 64 };
 
 /// A refinement's change read as the coarser setting's error (module documentation, # The paths): Richardson's
-/// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- H frozen at a piece's middle (the substeps' exponential
-/// Runge–Kutta errs at order 3 or more).
+/// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- the amplitudes' linear interpolation at one piece a step, the
+/// recycling's amplitudes at the substep's middle (the cubic interpolation and the exponential Runge–Kutta err at order
+/// 3 or more).
 const RICHARDSON: f64 = 4.0 / 3.0;
 
-/// The paths' scheme at a setting with its opening `opening` (µs), read at every `read`-th knot.
-fn scheme(setting: Setting, opening: f64, read: usize) -> Scheme {
-    Scheme::Exponential { rates: setting.rates, opening, pieces: setting.pieces, read }
+/// The paths' scheme at a setting, read at every `read`-th knot.
+fn scheme(setting: Setting, read: usize) -> Scheme {
+    Scheme::Exponential { turns: setting.turns, rate: setting.rate, pieces: setting.pieces, read }
 }
 
 /// The calibration's piece (µs): the first path's start, where the readings change fastest (P1-PATHS: one path, 10 µs).
@@ -434,7 +441,7 @@ pub struct Paths<'a> {
     pub products: u64,
 }
 
-/// The paths' scheme as settled (`settle`; module documentation, # The paths): its setting, its opening (µs), the
+/// The paths' scheme as settled (`settle`; module documentation, # The paths): its setting, the calibration's opening (µs), the
 /// reference's error parts there on the calibration's piece (per knob, `KNOBS`), the calibration's runs -- the setting
 /// first, its refinements after -- and per knob the two of them its part is read between (`refinements`), the settings
 /// run, and their work and time.
@@ -461,20 +468,19 @@ impl Settled {
 
     /// The scheme at the setting, read at every `read`-th knot.
     pub fn scheme(&self, read: usize) -> Scheme {
-        scheme(self.setting, self.opening, read)
+        scheme(self.setting, read)
     }
 }
 
 /// A setting's refinements (module documentation, # The paths): its runs -- the setting, and each knob doubled, raised
-/// to one substep a piece (`own`) --, and per knob the two runs its part is read between: a rate's doubled at the
-/// setting's pieces; the pieces' doubled at one pair of rates, the doubled pieces' own -- where twice the pieces raise
-/// a rate to that floor, against the setting's pieces at the raised rates, one run more where that is none of the
-/// others. (Read against the setting itself, the pieces' part held the substeps' wherever the floor doubled them too:
+/// to one substep a piece (`own`) --, and per knob the two runs its part is read between: the substeps' doubled at the
+/// setting's pieces; the pieces' doubled at one rate, the doubled pieces' own -- where twice the pieces raise the rate
+/// to that floor, against the setting's pieces at the raised rate, one run more where that is none of the others. (Read against the setting itself, the pieces' part held the substeps' wherever the floor doubled them too:
 /// TET's ladder doubled the pieces to 16 while its substeps erred, the pieces' own part at 4 a step 1.24e-3, SELCOST.)
 fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setting>, [(usize, usize); KNOBS]) {
     let mut runs: Vec<Setting> = std::iter::once(setting).chain((0..KNOBS).map(|k| own(setting.doubled(k)))).collect();
     let pieces = KNOBS;
-    let partner = Setting { rates: runs[pieces].rates, pieces: setting.pieces };
+    let partner = Setting { rate: runs[pieces].rate, ..setting };
     let at = runs.iter().position(|&s| s == partner).unwrap_or_else(|| {
         runs.push(partner);
         runs.len() - 1
@@ -489,10 +495,10 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 /// at the finest the last. A setting's rate is the substeps' own: no less than a piece of the path's step `step` takes
 /// (`Form::along` never takes fewer than one substep a piece; below that a doubled rate would change nothing, and read
 /// as no error). The setting with its parts, and the reference's three series at it (the calibration's).
-fn settle(form: &Form, walk: &Walk, piece: f64, step: f64, opening: f64) -> Result<(Settled, Vec<Series>), String> {
+fn settle(form: &Form, walk: &Walk, piece: f64, step: f64) -> Result<(Settled, Vec<Series>), String> {
     let clock = Instant::now();
-    let run = |s: Setting| form.along(walk, &walk.start, 0.0, piece, scheme(s, opening, 1));
-    let own = |s: Setting| Setting { rates: s.rates.map(|r| larger(r, s.pieces as f64 / step)), pieces: s.pieces };
+    let run = |s: Setting| form.along(walk, &walk.start, 0.0, piece, scheme(s, 1));
+    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
     let mut setting = own(COARSEST);
     let mut at = run(setting)?;
     let (mut tried, mut products) = (1, at.counts.products);
@@ -509,6 +515,7 @@ fn settle(form: &Form, walk: &Walk, piece: f64, step: f64, opening: f64) -> Resu
         }
         let open: [bool; KNOBS] = std::array::from_fn(|k| setting.open(k));
         if errors.iter().sum::<f64>() <= TOLERANCE || !open.iter().any(|&o| o) {
+            let opening = series[0].counts.opening;
             return Ok((Settled { setting, opening, errors, runs, pairs, tried, products, seconds: clock.elapsed().as_secs_f64() }, series));
         }
         let k = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| errors[a].total_cmp(&errors[b])).expect("an open knob");
@@ -582,9 +589,7 @@ impl<'a> Paths<'a> {
         let windows = paths::windows(length, memory, step);
         let piece = CALIBRATION.min(length).min(walks[0].end());
         let late_from = (run > 2.0 * length).then_some(run - length);
-        // The opening: the first window (# The paths; paths.rs # The start).
-        let opening = windows.first().map_or(0.0, |w| w.1);
-        let (settled, calibrated) = settle(&form, &walks[0], piece, step, opening)?;
+        let (settled, calibrated) = settle(&form, &walks[0], piece, step)?;
         let scheme = settled.scheme(1);
         #[cfg(test)]
         if traced() {
@@ -620,7 +625,7 @@ impl<'a> Paths<'a> {
             .collect();
         #[cfg(test)]
         if traced() {
-            eprintln!("    [trace] reference jobs: {:.2} s wall on {} threads; freezes' parts (node, amplitudes, eigen, exponentials and R, reading's node) {:.2?} s", pool.elapsed().as_secs_f64(), rayon::current_num_threads(), crate::paths::freeze_parts());
+            eprintln!("    [trace] reference jobs: {:.2} s wall on {} threads; freezes' parts (nodes, amplitudes, eigen, weights, R and ΔH) {:.2?} s", pool.elapsed().as_secs_f64(), rayon::current_num_threads(), crate::paths::freeze_parts());
         }
         let mut done = done.into_iter();
         let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
@@ -709,7 +714,7 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let (piece, ref calibrated) = paths.calibration;
     let scheme = paths.settled.scheme(1);
     // The calibration's refinements (the setting's own series is the first walk's, cut to the piece).
-    let refined: Vec<Scheme> = paths.settled.runs[1..].iter().map(|&s| self::scheme(s, paths.settled.opening, 1)).collect();
+    let refined: Vec<Scheme> = paths.settled.runs[1..].iter().map(|&s| self::scheme(s, 1)).collect();
     let r = refined.len();
     let w0 = &paths.walks[0];
     let n = paths.walks.len();
@@ -789,7 +794,7 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
         .collect();
     #[cfg(test)]
     if traced() {
-        eprintln!("    [trace] scans: freezes' parts (node, amplitudes, eigen, exponentials and R, reading's node) {:.2?} s", crate::paths::freeze_parts());
+        eprintln!("    [trace] scans: freezes' parts (nodes, amplitudes, eigen, weights, R and ΔH) {:.2?} s", crate::paths::freeze_parts());
     }
     let done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
     let (reference, candidate) = done.split_at(scans.len());

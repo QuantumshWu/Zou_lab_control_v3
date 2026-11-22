@@ -99,18 +99,18 @@ fn select_the_ladder_top_by_hand() {
 
 /// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 substeps a µs a piece a step): off the
 /// floor the pieces' part is read against the setting itself; where twice the pieces raise the run's rate to its floor
-/// at twice the setting's, against the twice-substepped run; where they raise both rates, against the setting's pieces
-/// at the raised rates, one run more.
+/// at twice the setting's, against the twice-substepped run; where they raise it to less than twice, against the
+/// setting's pieces at the raised rate, one run more.
 #[test]
 fn select_the_refinements_by_hand() {
-    let own = |s: Setting| Setting { rates: s.rates.map(|r| larger(r, s.pieces as f64 / 0.5)), pieces: s.pieces };
-    let at = |o: f64, r: f64, p: usize| Setting { rates: [o, r], pieces: p };
+    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / 0.5), ..s };
+    let at = |o: f64, r: f64, p: usize| Setting { turns: o, rate: r, pieces: p };
     let (runs, pairs) = refinements(at(32.0, 16.0, 2), &own);
     assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3)]));
     let (runs, pairs) = refinements(at(32.0, 8.0, 4), &own);
     assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3)]));
-    let (runs, pairs) = refinements(at(8.0, 8.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(8.0, 8.0, 4), at(16.0, 8.0, 4), at(8.0, 16.0, 4), at(16.0, 16.0, 8), at(16.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3)]));
+    let (runs, pairs) = refinements(at(1.0, 10.0, 4), &own);
+    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 4), at(2.0, 10.0, 4), at(1.0, 20.0, 4), at(1.0, 16.0, 8), at(1.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3)]));
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -353,22 +353,21 @@ fn select_paths_cost() {
         };
         let w = if std::env::var("SELECT_STILL").is_ok() { &still } else { &walks[k] };
         let to = probe.min(w.end());
-        // A setting "opening rate/run rate/pieces"; a rate "sN" is N substeps a piece (N × pieces / τ a µs). The opening the
-        // paths' first window.
+        // A setting "the opening's substeps a turn/the run's a µs/pieces"; a rate "sN" is N substeps a piece (N × pieces /
+        // τ a µs).
         let grid: Vec<Setting> = std::env::var("SELECT_GRID").map_or(vec![COARSEST], |x| {
             x.split(',')
                 .map(|g| {
                     let p: Vec<&str> = g.split('/').collect();
                     let pieces: usize = p[2].parse().unwrap();
-                    let rate = |a: &str| match a.strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => a.parse().unwrap() };
-                    Setting { rates: [rate(p[0]), rate(p[1])], pieces }
+                    let rate = match p[1].strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => p[1].parse().unwrap() };
+                    Setting { turns: p[0].parse().unwrap(), rate, pieces }
                 })
                 .collect()
         });
-        let opening = crate::paths::windows(length.min(5.0 * memory), memory, tau)[0].1;
         let (fr, fg) = (Form::new(&full, centre), Form::new(&g, centre));
-        eprintln!("walk {k} to {to} µs, the opening {opening:.3} µs: reference {}; G {}", fr.shape(), fg.shape());
-        let mut schemes: Vec<Scheme> = grid.iter().map(|&s| scheme(s, opening, 1)).collect();
+        eprintln!("walk {k} to {to} µs: reference {}; G {}", fr.shape(), fg.shape());
+        let mut schemes: Vec<Scheme> = grid.iter().map(|&s| scheme(s, 1)).collect();
         // `SELECT_SPARSE` = 2: the converged scheme at twice its nodes and half its turn first (its own check), compared
         // against it.
         if std::env::var("SELECT_SPARSE").is_ok_and(|x| x == "2") {
