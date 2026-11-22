@@ -140,7 +140,8 @@ fn the_exponential_is_exact() {
 }
 
 /// The scheme of PATHS_SCHEME: "exact:<h>:<read>" (ENGFOLD's), "sparse:<nodes>[:<turn>[:<read>]]", or
-/// "mid[:<tol>[:<read>]]" / "cf4[:<tol>[:<read>]]" (`Scheme::Steps`), "lawson:<substeps a µs>[:<pieces a step>[:<read>]]".
+/// "mid[:<tol>[:<read>]]" / "cf4[:<tol>[:<read>]]" (`Scheme::Steps`), "exponential:<substeps a µs>[:<pieces a step>[:<read>[:<the
+/// opening's substeps a turn>]]]".
 fn scheme_of(text: &str) -> Scheme {
     let p: Vec<&str> = text.split(':').collect();
     match p[0] {
@@ -150,11 +151,14 @@ fn scheme_of(text: &str) -> Scheme {
             turn: p.get(2).map_or(std::f64::consts::TAU, |x| x.parse().unwrap()),
             read: p.get(3).map_or(1, |x| x.parse().unwrap()),
         },
-        "lawson" => Scheme::Lawson {
-            per_us: p[1].parse().unwrap(),
-            pieces: p.get(2).map_or(1, |x| x.parse().unwrap()),
-            read: p.get(3).map_or(1, |x| x.parse().unwrap()),
-        },
+        "exponential" => {
+            Scheme::Exponential {
+                turns: p.get(4).map_or(1.0, |x| x.parse().unwrap()),
+                rate: p[1].parse().unwrap(),
+                pieces: p.get(2).map_or(1, |x| x.parse().unwrap()),
+                read: p.get(3).map_or(1, |x| x.parse().unwrap()),
+            }
+        }
         "mid" | "cf4" => Scheme::Steps {
             gauss: p[0] == "cf4",
             tol: p.get(1).map_or(0.0, |x| x.parse().unwrap()),

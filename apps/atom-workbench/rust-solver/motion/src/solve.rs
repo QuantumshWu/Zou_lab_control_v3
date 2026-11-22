@@ -2578,14 +2578,14 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let walks = walks(run, &domain, tau, context.plan.end, &fine_refs, WALKS, length);
     let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
     let paths = Paths::new(&full, centre, walks, memory, length, tau, light)?;
-    let settled = paths.settled;
+    let settled = &paths.settled;
     noted(
         &mut report,
         format!(
-            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 Lawson 每 µs {:.1} 个子步、每步 {} 段（按误差定：校准段上参照的误差 子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
+            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快相干每转 {} 个子步、其后每 µs {:.1} 个，每步 {} 段（按误差定：校准段上参照的误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
             paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
-            settled.setting.0, settled.setting.1, settled.errors[0], settled.errors[1], crate::select::TOLERANCE,
-            settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：两份误差 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
+            settled.opening, settled.setting.turns, settled.setting.rate, settled.setting.pieces, settled.errors[0], settled.errors[1], settled.errors[2], crate::select::TOLERANCE,
+            settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
         ),
     );
     messages.alive();
@@ -2742,18 +2742,24 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     // Its region (`select::scan`): the scans of the trap's axes at the pilot's last T's thermal speed.
     let last = read.estimates.last().and_then(|e| e.motion).map_or(request.temperature_uk, |m| m.temperature_total);
     let speed = (KT_PER_UK * last * hm).sqrt();
-    // Each scan to the pilot's most energetic held atom's turning point on the reference state's prepared potential, or
-    // to the trap region's edge, whichever is nearer (select.rs, # The region left out).
+    // Each scan to the pilot's most energetic held atom's turning point on the reference state's prepared potential, to
+    // the distance an atom reaches within the request, or to the trap region's edge, whichever is nearest (select.rs, #
+    // The region left out): the reach R₀ + v T, R₀ the farthest of the pilot's atoms from the centre at t = 0, v the
+    // speed of that energy at the potential's least, at the centre.
     let prepared = run.prepared(&reference);
     let energy = pilot.iter().flat_map(|p| p.samples.iter().flatten()).map(|s| 0.5 * hm * s.sample.at.kappa.iter().map(|k| k * k).sum::<f64>() + prepared.at(s.sample.at.r).value).fold(f64::NEG_INFINITY, crate::linalg::larger);
-    let beyond = |r: V3| crate::select::intensity(light, r) <= crate::units::REGION_INTENSITY || prepared.at(r).value >= energy;
-    let scans = crate::select::scan_walks(&beyond, centre, &trap.axes, speed, tau, hm, &[(chief(request), crate::linalg::C64::ONE)]);
+    let away = |r: V3| crate::linalg::norm3(std::array::from_fn(|k| r[k] - centre[k]));
+    let fastest = (2. * hm * (energy - prepared.at(centre).value).max(0.)).sqrt();
+    let reach = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).map(|c| away(c.trajectory.r)).fold(0., crate::linalg::larger) + fastest * length;
+    let beyond = |r: V3| crate::select::intensity(light, r) <= crate::units::REGION_INTENSITY || prepared.at(r).value >= energy || away(r) >= reach;
+    let scans = crate::select::scan_walks(&beyond, centre, &trap.axes, speed, crate::select::SCAN_READ * tau, hm, &[(chief(request), crate::linalg::C64::ONE)]);
     let chosen_model = models[weighed[chosen].place].as_ref().unwrap_or(run);
     if chosen_model.rs.keep.len() < STATES {
-        let (region, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light, paths.settled.setting)?;
+        let (region, settings, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light)?;
         weighed[chosen].judged.region = region;
         weighed[chosen].model = account(&weighed[chosen].judged);
-        noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点或光镊区域边缘，{speed:.3} µm/µs）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,
+        let lines = scans.iter().zip(&settings).map(|(w, s)| format!("{:.0} µs（每转 {}、每 µs {:.1}、每读 {} 段）", w.end(), s.turns, s.rate, s.pieces)).collect::<Vec<_>>().join("、");
+        noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点、请求时长内可达的距离 {reach:.1} µm（起点最远 + 最快 {fastest:.3} µm/µs × {length} µs）或光镊区域边缘中最近者，{speed:.3} µm/µs；各条长与格式按自己的误差定：{lines}）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,
             if region.intensity > f64::NEG_INFINITY { format!("标出 s ≤ {:.3e}，误差 {:.2e}", region.intensity, region.error) } else { format!("无标记（最大误差 {:.1e}）", region.largest) }, region.edge));
     }
     // The tests' candidates beside the chain (select.rs `ALSO`): judged and weighed for comparison, never chosen.

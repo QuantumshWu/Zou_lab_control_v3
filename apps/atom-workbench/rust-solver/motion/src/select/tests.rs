@@ -92,9 +92,25 @@ fn select_the_memory_flag_by_hand() {
 /// setting stopped at `FINEST` -- book their whole sum.
 #[test]
 fn select_the_ladder_top_by_hand() {
-    let settled = |errors: [f64; 2]| Settled { setting: FINEST, errors, tried: 1, products: 0, seconds: 0.0 };
-    assert_eq!(settled([0.5 * TOLERANCE, 0.25 * TOLERANCE]).unmet(), None);
-    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE]).unmet(), Some(1.5 * TOLERANCE));
+    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, seconds: 0.0 };
+    assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE]).unmet(), None);
+    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0]).unmet(), Some(1.5 * TOLERANCE));
+}
+
+/// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 substeps a µs a piece a step): off the
+/// floor the pieces' part is read against the setting itself; where twice the pieces raise the run's rate to its floor
+/// at twice the setting's, against the twice-substepped run; where they raise it to less than twice, against the
+/// setting's pieces at the raised rate, one run more.
+#[test]
+fn select_the_refinements_by_hand() {
+    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / 0.5), ..s };
+    let at = |o: f64, r: f64, p: usize| Setting { turns: o, rate: r, pieces: p };
+    let (runs, pairs) = refinements(at(32.0, 16.0, 2), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3)]));
+    let (runs, pairs) = refinements(at(32.0, 8.0, 4), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3)]));
+    let (runs, pairs) = refinements(at(1.0, 10.0, 4), &own);
+    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 4), at(2.0, 10.0, 4), at(1.0, 20.0, 4), at(1.0, 16.0, 8), at(1.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3)]));
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -329,26 +345,80 @@ fn select_paths_cost() {
         // error against the finest's; `SELECT_SPARSE` set, the converged scheme too.
         let probe: f64 = probe.parse().unwrap();
         let k: usize = std::env::var("SELECT_WALK").map_or(0, |x| x.parse().unwrap());
-        let w = &walks[k];
+        // `SELECT_STILL`: the walk held at its first place at rest (the same knots).
+        let still: Walk = {
+            let w = &walks[k];
+            let e0 = w.ends[0];
+            Walk { index: w.index, start: w.start.clone(), ends: w.ends.iter().map(|e| [e[0], e0[1], e0[2], e0[3], 0.0, 0.0, 0.0]).collect() }
+        };
+        let w = if std::env::var("SELECT_STILL").is_ok() { &still } else { &walks[k] };
         let to = probe.min(w.end());
-        let grid: Vec<(f64, usize)> = std::env::var("SELECT_GRID").map_or(vec![(128.0, 2)], |x| x.split(',').map(|g| { let (a, b) = g.split_once('/').unwrap(); (a.parse().unwrap(), b.parse().unwrap()) }).collect());
+        // A setting "the opening's substeps a turn/the run's a µs/pieces"; a rate "sN" is N substeps a piece (N × pieces /
+        // τ a µs).
+        let grid: Vec<Setting> = std::env::var("SELECT_GRID").map_or(vec![COARSEST], |x| {
+            x.split(',')
+                .map(|g| {
+                    let p: Vec<&str> = g.split('/').collect();
+                    let pieces: usize = p[2].parse().unwrap();
+                    let rate = match p[1].strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => p[1].parse().unwrap() };
+                    Setting { turns: p[0].parse().unwrap(), rate, pieces }
+                })
+                .collect()
+        });
         let (fr, fg) = (Form::new(&full, centre), Form::new(&g, centre));
         eprintln!("walk {k} to {to} µs: reference {}; G {}", fr.shape(), fg.shape());
-        let mut schemes: Vec<Scheme> = grid.iter().map(|&(per_us, pieces)| Scheme::Lawson { per_us, pieces, read: 1 }).collect();
+        let mut schemes: Vec<Scheme> = grid.iter().map(|&s| scheme(s, 1)).collect();
+        // `SELECT_SPARSE` = 2: the converged scheme at twice its nodes and half its turn first (its own check), compared
+        // against it.
+        if std::env::var("SELECT_SPARSE").is_ok_and(|x| x == "2") {
+            schemes.push(Scheme::Sparse { nodes: 8, turn: std::f64::consts::PI, read: 1 });
+        }
         if std::env::var("SELECT_SPARSE").is_ok() {
             schemes.push(Scheme::sparse(4));
         }
+        // `SELECT_FROM`: every scheme from the converged scheme's state at the first knot at or past it (the start's
+        // transient left behind).
+        let from: f64 = std::env::var("SELECT_FROM").map_or(0.0, |x| { let x: f64 = x.parse().unwrap(); w.ends.iter().map(|e| e[0]).find(|&t| t >= x).unwrap() });
+        let states = (from > 0.0).then(|| (fr.along(w, &w.start, 0.0, from, Scheme::sparse(4)).unwrap().state, fg.along(w, &w.start, 0.0, from, Scheme::sparse(4)).unwrap().state));
         let runs: Vec<(Series, Series)> = schemes
             .iter()
             .map(|&scheme| {
-                let a = fr.along(w, &w.start, 0.0, to, scheme).unwrap();
-                let b = fg.along(w, &w.start, 0.0, to, scheme).unwrap();
-                (a, b)
+                match &states {
+                    Some((x, y)) => (fr.along_from(w, x.clone(), from, to, scheme).unwrap(), fg.along_from(w, y.clone(), from, to, scheme).unwrap()),
+                    None => (fr.along(w, &w.start, 0.0, to, scheme).unwrap(), fg.along(w, &w.start, 0.0, to, scheme).unwrap()),
+                }
             })
             .collect();
         let finest = grid.len() - 1;
         let at = |s: &Series, t: f64| s.readings.iter().find(|r| r.t == t).map(|r| r.rows);
+        let sparse = (runs.len() > grid.len()).then(|| runs.last().unwrap());
+        let against = |a: &Series, b: &Series, fa: &Series, fb: &Series| -> (f64, f64) {
+            let (mut rows, mut fold) = (0.0_f64, 0.0_f64);
+            for x in &a.readings {
+                let (Some(y), Some(u), Some(v)) = (at(fa, x.t), at(b, x.t), at(fb, x.t)) else { continue };
+                for q in 0..STATES {
+                    rows = rows.max((x.rows[q] - y[q]).abs());
+                    fold = fold.max(((u[q] - x.rows[q]) - (v[q] - y[q])).abs());
+                }
+            }
+            (rows, fold)
+        };
         for (scheme, (a, b)) in schemes.iter().zip(&runs) {
+            if let Some((sa, sb)) = sparse {
+                let (rows, fold) = against(a, b, sa, sb);
+                // Where the reference's rows differ most, and at the first readings.
+                let mut worst = (0.0_f64, 0.0_f64, 0usize);
+                for x in &a.readings {
+                    let Some(y) = at(sa, x.t) else { continue };
+                    for q in 0..STATES {
+                        if (x.rows[q] - y[q]).abs() > worst.0 {
+                            worst = ((x.rows[q] - y[q]).abs(), x.t, q);
+                        }
+                    }
+                }
+                let first: Vec<String> = a.readings.iter().take(std::env::var("SELECT_FIRST").map_or(6, |x| x.parse().unwrap())).filter_map(|x| at(sa, x.t).map(|y| format!("{:.3}:{:.1e}", x.t, (0..STATES).map(|q| (x.rows[q] - y[q]).abs()).fold(0.0, f64::max)))).collect();
+                eprintln!("  {scheme:?} vs the converged scheme: reference's rows {rows:.2e} (at {:.3} µs, row {}), G's fold error {fold:.2e}; condition {:.1e}; first readings {first:?}", worst.1, worst.2, a.counts.condition);
+            }
             let (fa, fb) = &runs[finest];
             let (mut rows, mut fold) = (0.0_f64, 0.0_f64);
             for x in &a.readings {
