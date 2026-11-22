@@ -266,6 +266,70 @@ mod tests {
             .collect()
     }
 
+    /// The evaluations `node` makes (its stop as there), counted.
+    fn evaluations(n: usize, k: usize, constant: Option<f64>) -> usize {
+        let (nf, middle) = (n as f64, 2 * k - 1 == n);
+        let start = PI * (4 * k - 1) as f64 / (4 * n + 2) as f64;
+        let mut delta = if middle { 0.0 } else { (1.0 - 1.0 / nf) / (8.0 * nf * nf) / start.tan() };
+        let mut count = 0;
+        loop {
+            let (step, _) = constant.and_then(|c| stieltjes(n, k, start + delta, delta, c)).unwrap_or_else(|| recurrence(n, start + delta));
+            count += 1;
+            if middle {
+                return count;
+            }
+            delta -= step;
+            if nf * (nf + 1.0) * step * step <= 0.5 * UNIT_ROUNDOFF {
+                return count;
+            }
+        }
+    }
+
+    /// The rule's evaluations of P_n against the iteration until the step stops shrinking (`node_until_stalled`), its nodes
+    /// and weights against that one's in ε of the largest node (one) and of the largest weight -- golden's measure --, and
+    /// the time of a rule of 512 nodes either way (the step's rule, made where asked: P2-GSTEP's 160 µs a piece), at n up
+    /// to 64 and 99 … 64 000. Every evaluation the iteration made and this one does not was only to see the step stop.
+    #[test]
+    fn the_rule_s_evaluations_are_newton_s_without_a_confirming_one() {
+        for n in (2..=64).chain([99, 100, 128, 200, 256, 400, 512, 1000, 4000, 16_000, 64_000]) {
+            let constant = stieltjes_constant(n);
+            let (mut now, mut before, mut node, mut weight, mut top) = (0usize, 0usize, 0.0_f64, 0.0_f64, 0.0_f64);
+            let rule = gauss_legendre(n);
+            for k in 1..=n.div_ceil(2) {
+                let (x, w, e) = node_until_stalled(n, k, constant);
+                before += e;
+                now += evaluations(n, k, constant);
+                let (xn, wn) = rule[k - 1];
+                node = crate::linalg::larger(node, (xn - x).abs());
+                weight = crate::linalg::larger(weight, (wn - w).abs());
+                top = crate::linalg::larger(top, w);
+            }
+            if n <= 8 || n.is_power_of_two() || n % 100 == 0 || n == 99 {
+                eprintln!("n {n}: evaluations {now} against {before} ({:.2} a node against {:.2}); nodes apart {:.1} ε, weights {:.1} ε of the largest", now as f64 / n.div_ceil(2) as f64, before as f64 / n.div_ceil(2) as f64, node / f64::EPSILON, weight / (f64::EPSILON * top));
+            }
+            assert!(now <= before, "n {n}: {now} evaluations against {before}");
+        }
+        let time = |f: &dyn Fn()| {
+            (0..30)
+                .map(|_| {
+                    let clock = std::time::Instant::now();
+                    f();
+                    clock.elapsed().as_secs_f64() * 1e6
+                })
+                .fold(f64::INFINITY, crate::linalg::smaller)
+        };
+        let constant = stieltjes_constant(512);
+        let new = time(&|| {
+            std::hint::black_box(gauss_legendre(512));
+        });
+        let old = time(&|| {
+            for k in 1..=256 {
+                std::hint::black_box(node_until_stalled(512, k, constant));
+            }
+        });
+        eprintln!("a rule of 512 nodes: {new:.1} µs, until the step stops shrinking {old:.1} µs");
+    }
+
     /// `gauss_legendre` against the rule in twice the digits (`by_twice`), node by node, and against the rule it replaced
     /// (`by_recurrence`), at every n up to 64 and at 99, 100, 101, 128, 200, 256, 300, 400 and 500 -- the recurrence's
     /// nodes alone below n ≈ 8, the Stieltjes expansion's from the first few on at each end above. Within its rounding:
@@ -307,8 +371,9 @@ mod tests {
 /// Gauss–Legendre's nodes and weights on [−1, 1], from the largest node down, to the round-off in O(n) operations (Hale &
 /// Townsend, SIAM J. Sci. Comput. 35 (2013) A652, the interior's construction): node k = 1…⌈n/2⌉ from x = 1 (the others
 /// by the symmetry x → −x, exactly) at x = cos θ by Newton's iteration in θ from Tricomi's start θ⁰ + δ⁰ -- θ⁰ =
-/// π(k − ¼)/(n + ½), and x = (1 − (1 − 1/n)/(8n²)) cos θ⁰ to O(n⁻⁴) (Tricomi 1950), δ⁰ = (1 − 1/n)/(8n²) cot θ⁰ --
-/// until the step stops shrinking (the round-off's floor), on P_n(cos θ) and dP_n/dθ by Stieltjes' expansion
+/// π(k − ¼)/(n + ½), and x = (1 − (1 − 1/n)/(8n²)) cos θ⁰ to O(n⁻⁴) (Tricomi 1950), δ⁰ = (1 − 1/n)/(8n²) cot θ⁰ --,
+/// each evaluation's own step saying whether it is the last (`node`: no evaluation made only to see the step stop
+/// shrinking), on P_n(cos θ) and dP_n/dθ by Stieltjes' expansion
 /// (`stieltjes`), whose terms do not grow in number with n, wherever it reaches the round-off, else by the three-term
 /// recurrence (`recurrence`, n terms). The recurrence takes the nodes where n sin θ is below some twenty -- a few at
 /// each end, as many at every n -- and every node of a rule of fewer than some twenty-five: the rule costs O(n). The
@@ -318,6 +383,13 @@ pub fn gauss_legendre(n: usize) -> Vec<(f64, f64)> {
     let constant = stieltjes_constant(n);
     let mut rule = vec![(0.0, 0.0); n];
     for k in 1..=n.div_ceil(2) {
+        #[cfg(test)]
+        if STALLED.with(|x| x.get()) {
+            let (x, weight, _) = node_until_stalled(n, k, constant);
+            rule[n - k] = (-x, weight);
+            rule[k - 1] = (x, weight);
+            continue;
+        }
         let (x, weight) = node(n, k, constant);
         rule[n - k] = (-x, weight);
         rule[k - 1] = (x, weight);
@@ -325,20 +397,65 @@ pub fn gauss_legendre(n: usize) -> Vec<(f64, f64)> {
     rule
 }
 
-/// Node k of the rule of n nodes and its weight (`gauss_legendre`); `constant` the Stieltjes expansion's weight factor
-/// where its series reaches the round-off (`stieltjes_constant`).
-fn node(n: usize, k: usize, constant: Option<f64>) -> (f64, f64) {
+#[cfg(test)]
+thread_local! {
+    /// A check's switch (tests alone, the thread's): the rule's nodes by Newton's step until it no longer shrinks
+    /// (`node_until_stalled`), as until 2026-11-22.
+    pub(crate) static STALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+/// `node` as it was until 2026-11-22 (a check's reference): Newton's step taken until it no longer shrinks, the weight
+/// of the evaluation that said so; and its evaluations.
+pub(crate) fn node_until_stalled(n: usize, k: usize, constant: Option<f64>) -> (f64, f64, usize) {
     let (nf, middle) = (n as f64, 2 * k - 1 == n);
     let start = PI * (4 * k - 1) as f64 / (4 * n + 2) as f64;
     let mut delta = if middle { 0.0 } else { (1.0 - 1.0 / nf) / (8.0 * nf * nf) / start.tan() };
-    let mut last = f64::INFINITY;
+    let (mut last, mut evaluations) = (f64::INFINITY, 0);
     let weight = loop {
         let (step, weight) = constant.and_then(|c| stieltjes(n, k, start + delta, delta, c)).unwrap_or_else(|| recurrence(n, start + delta));
+        evaluations += 1;
         if middle || !(step.abs() < last) {
             break weight;
         }
         last = step.abs();
         delta -= step;
+    };
+    ((PI * (n + 1 - 2 * k) as f64 / (2 * n + 1) as f64 - delta).sin(), weight, evaluations)
+}
+
+
+/// Node k of the rule of n nodes and its weight (`gauss_legendre`); `constant` the Stieltjes expansion's weight factor
+/// where its series reaches the round-off (`stieltjes_constant`). Newton's step s = f/f′ of f(θ) = P_n(cos θ) at θ leaves
+/// the node's error f″s²/(2f′) and the weight's, 2/f′² taken at θ and not at the root θ − s. Legendre's equation,
+/// f″ = −cot θ f′ − N f (N = n(n + 1)), with f = s f′, gives both: f″/f′ = −(cot θ + Ns), and f′(θ − s)/f′(θ) =
+/// 1 + s cot θ + s²(N + csc²θ + cot²θ)/2 + O(s³ N cot θ), so the step is taken and the weight carried to the root by that
+/// factor's square; the evaluation is the last where N s² is within half the round-off -- then the node's error
+/// (|cot θ| + N|s|)s²/2 is within it (|cot θ| < N at every node: θ ≥ 2/n) and the weight's O(N|cot θ||s|³) too. From
+/// Tricomi's start (its error O(n⁻⁴), and more towards the ends) a node takes 2–2.5 evaluations below n = 32, 1.7 at 100,
+/// 1.3 at 400–512 and one from some 4000 on (measured, `the_rule_s_evaluations_are_newton_s_without_a_confirming_one`);
+/// until 2026-11-22 the step was taken until it no longer shrank (`node_until_stalled`), 3.5–5 evaluations a node: the
+/// rule of 512 nodes 117 µs, now 48 µs, its nodes within 0.5 ε and its weights within 4 ε of the largest of the old ones.
+fn node(n: usize, k: usize, constant: Option<f64>) -> (f64, f64) {
+    let (nf, middle) = (n as f64, 2 * k - 1 == n);
+    let start = PI * (4 * k - 1) as f64 / (4 * n + 2) as f64;
+    let mut delta = if middle { 0.0 } else { (1.0 - 1.0 / nf) / (8.0 * nf * nf) / start.tan() };
+    let (big, mut last) = (nf * (nf + 1.0), f64::INFINITY);
+    let weight = loop {
+        let theta = start + delta;
+        let (step, weight) = constant.and_then(|c| stieltjes(n, k, theta, delta, c)).unwrap_or_else(|| recurrence(n, theta));
+        if middle {
+            break weight;
+        }
+        delta -= step;
+        // (A step that no longer shrinks is the round-off's floor too: never reached before the first, measured.)
+        if big * step * step <= 0.5 * UNIT_ROUNDOFF || !(step.abs() < last) {
+            let (sin, cos) = theta.sin_cos();
+            let cot = cos / sin;
+            let carried = 1.0 + step * cot + 0.5 * step * step * (big + 1.0 / (sin * sin) + cot * cot);
+            break weight / (carried * carried);
+        }
+        last = step.abs();
     };
     ((PI * (n + 1 - 2 * k) as f64 / (2 * n + 1) as f64 - delta).sin(), weight)
 }
