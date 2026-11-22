@@ -702,6 +702,23 @@ fn made_with(request: &Request, drops: &Drops) -> Selected {
     Selected::made(scene, selection, reference, true, drops).unwrap()
 }
 
+/// A request's run on the ground states and the excited states `excited` (labels), the beats `drops` says dropped: a
+/// model with explicit excited states, whatever the selection's chain would take (`made_with` is G's, the selection's
+/// before its pilot).
+fn made_on(request: &Request, excited: &[&str], drops: &Drops) -> Selected {
+    let reference = crate::solve::alone(crate::solve::chief(request));
+    let scene = crate::scene::Scene::new(request).unwrap();
+    let selection = crate::select::choose(&scene).unwrap();
+    let mut keep: Vec<usize> = (0..GROUND).collect();
+    keep.extend(excited.iter().map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+    keep.sort_unstable();
+    Selected::made(scene, crate::select::Selection { keep, ..selection }, reference, true, drops).unwrap()
+}
+
+/// tilt0's and tilt2's P19 of 2026-11-21 (the three-point choice's; JUDGE item 2): every D2 F′ = 3 state and D2 F′ = 2
+/// but m = −2 -- the model the drop tier's checks were made on.
+pub(crate) const TILT_P19: [&str; 11] = ["D2-3--3", "D2-3--2", "D2-3--1", "D2-3-0", "D2-3-1", "D2-3-2", "D2-3-3", "D2-2--1", "D2-2-0", "D2-2-1", "D2-2-2"];
+
 /// A request's run as the solve makes it (`solve::run_of`, its reference state the chief's) in its exact blocks, and
 /// (`split` false) the same model with its states one block.
 fn made(request: &Request, split: bool) -> Selected {

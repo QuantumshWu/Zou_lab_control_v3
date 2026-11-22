@@ -29,12 +29,12 @@ fn norm_below(g: &Mat) -> f64 {
 /// pairs those of the judged run), at points of the trap's region, along and across the tweezer's axis to well beyond
 /// its intensity's 1/20 and far off it (s → 0), at rest and moving with κ_max(s) = √(2U₀s/(ħ/m)) along each lab axis
 /// and the diagonal: each pair's two slots' ‖G_k‖₂ + ‖G_−k‖₂ (from below) at most its Y; said per pair beside its Y,
-/// its H_eff part's and decay's largest, and the run's drop (the pairs dropped, Y, the run's D). tilt2's judged run
+/// its H_eff part's and decay's largest, and the run's drop (the pairs dropped, Y, the run's D). tilt2's judged run on its P19 of 2026-11-21 (`TILT_P19`: the selection's chain is the pilot's now)
 /// drops ±3ν, ±4ν, ±5ν, ±6ν and keeps ±ν, ±2ν.
 #[test]
 fn the_dropped_beats_are_within_their_bound() {
     let request = tilt2();
-    let (run, whole) = (made_with(&request, &Drops::Judged), made_with(&request, &Drops::Only(Vec::new())));
+    let (run, whole) = (made_on(&request, &TILT_P19, &Drops::Judged), made_on(&request, &TILT_P19, &Drops::Only(Vec::new())));
     let tw = &whole.scene.geometry[whole.scene.tweezer()];
     let (w, zr) = (tw.waist.unwrap(), tw.rayleigh().unwrap());
     let (across, other) = crate::linalg::perpendicular(tw.direction);
@@ -117,12 +117,12 @@ fn values_of(run: &Selected) -> Vec<f64> {
 fn judge_step_time() {
     let (tau, steps, passes, warm) = (env("V3E_TAU", 0.326), env("V3E_STEPS", 20.0) as usize, env("V3E_PASSES", 5.0) as usize, env("V3E_WARM", 5.0) as usize);
     let request = tilt2();
-    let whole = made_with(&request, &Drops::Only(Vec::new()));
+    let whole = made_on(&request, &TILT_P19, &Drops::Only(Vec::new()));
     let values = values_of(&whole);
     let omegas: Vec<f64> = whole.judgment().pairs.iter().map(|p| values[whole.judgment().tiers[p.0[0]].0].abs()).collect();
     let nu = omegas.iter().copied().fold(f64::INFINITY, smaller);
     let high: Vec<f64> = omegas.iter().copied().filter(|v| (v / nu).round() >= 5.0).collect();
-    let runs = [("none", whole), ("before (±5ν, ±6ν dropped)", made_with(&request, &Drops::Only(high))), ("judged", made_with(&request, &Drops::Judged))];
+    let runs = [("none", whole), ("before (±5ν, ±6ν dropped)", made_on(&request, &TILT_P19, &Drops::Only(high))), ("judged", made_on(&request, &TILT_P19, &Drops::Judged))];
     let start = starts(&runs[2].1, request.temperature_uk, 1);
     let (warmed, _) = through(&runs[2].1, &start, tau, warm);
     let t = &warmed[0];

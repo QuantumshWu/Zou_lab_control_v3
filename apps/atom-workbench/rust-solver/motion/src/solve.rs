@@ -2269,7 +2269,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let mut read = read;
     if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
         let pilot_refs: Vec<&Part> = pilot.iter().collect();
-        let made = std::sync::Arc::new(choose_on_the_pilot(request, setting, &context, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)?);
+        let made = std::sync::Arc::new(choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)?);
         crate::select::keep(request, made.clone());
         let stop = {
             #[cfg(test)]
@@ -2552,7 +2552,7 @@ struct Weighed {
 /// every candidate judged on the way weighed; those whose T alone is not met measured in pairs with that anchor; P the
 /// complete candidate of least W, its region scanned.
 #[allow(clippy::too_many_arguments)]
-fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Choice, String> {
+fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Choice, String> {
     use crate::select::{judge, parts, Fallback, Paths, WALKS};
     let clock = Instant::now();
     let run = setting.run;
@@ -2764,8 +2764,24 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, the
     // check's course on them, as the attempt's own scout), its work a µs at the rung the scout stands at, and its W again
     // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
-    for i in 0..weighed.len() {
-        if weighed[i].work.is_none() || weighed[i].place == 0 || weighed[i].place == usize::MAX {
+    // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
+    // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
+    // (G's at its own step where G is complete, the scouted ones' at theirs); the rest keep their W at G's step, which is
+    // no less than their least.
+    let scout_of = |price: f64| 1.5 * numbers.len() as f64 * price * span;
+    let mut order: Vec<(usize, f64)> = (0..weighed.len())
+        .filter(|&i| weighed[i].work.is_some() && weighed[i].place != 0 && weighed[i].place != usize::MAX)
+        .map(|i| {
+            let w = &weighed[i];
+            let price = priced(models[w.place].as_ref().expect("a candidate's model"), domain.widest, &rated, first, false);
+            (i, w.need * price * span + again(w.place, price) + w.pairs + scout_of(price))
+        })
+        .collect();
+    order.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut best = weighed.iter().find(|w| w.place == 0).and_then(|w| w.work).unwrap_or(f64::INFINITY);
+    for (i, least) in order {
+        if !(least < best) {
+            weighed[i].fate += &format!("；第一级步长 {first:.4} µs 上的最小 W {least:.3e} 已不低于最小的 W {best:.3e}，不侦察");
             continue;
         }
         let clock = Instant::now();
@@ -2776,9 +2792,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         };
         messages.stage(Stage { step: Step::Select, tau: Some(tau), batch: None });
         let price = priced(model, domain.widest, &rated, rung, false);
-        let scout = 1.5 * numbers.len() as f64 * price * span;
+        let scout = scout_of(price);
         let entry = &mut weighed[i];
         let w = entry.need * price * span + again(entry.place, price) + entry.pairs + scout;
+        best = crate::linalg::smaller(best, w);
         entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
         (entry.price, entry.work) = (price, Some(w));
         noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
