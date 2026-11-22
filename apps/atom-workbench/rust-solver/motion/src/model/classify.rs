@@ -97,11 +97,16 @@ pub fn zero(x: C64, scale: f64, terms: usize) -> bool {
     x.abs() <= rounding(terms) * scale
 }
 
-/// The integration-by-parts lemma the judgment's bounds take (PIPELINE_V3_FINAL A.2: the fold's fast elements, the
-/// photons' classes by their fast index, a step's band's rounding cut), for a complex rate μ = −γ + iω, γ ≥ 0:
+/// The integration-by-parts lemma (PIPELINE_V3_FINAL A.2), for a complex rate μ = −γ + iω, γ ≥ 0:
 /// |∫_a^b c(u) e^{μu} du| = |[c e^{μu}/μ]_a^b − ∫ ċ e^{μu} du/μ| ≤ (|c(a)| + |c(b)| + ∫_a^b |ċ| du)/|μ|, |e^{μu}| ≤ 1 on
 /// u ≥ 0 -- the turning and the decay together, |μ| = √(γ² + ω²) (for a real frequency Ω, |μ| = Ω). Of the ends'
-/// sizes `ends` = |c(a)| + |c(b)|, the variation `variation` = ∫|ċ|, and the rate.
+/// sizes `ends` = |c(a)| + |c(b)|, the variation `variation` = ∫|ċ|, and the rate. Its one implementation, every bound
+/// it gives computed here: a stretch's opening's booked modes (paths.rs `Form::opening`); a step's cut between two
+/// groups (step.rs `Groups::choose`: on an envelope of the band β the lemma to every order, |c⁽ᵏ⁾| ≤ βᵏ sup|c| by
+/// Bernstein, its ends' terms summed to 2 sup|c| at the rate Ω − β, within Bohr–Favard's π sup|c| taken as the ends);
+/// the split's turning integrals of a constant envelope (spectral.rs `followed`, `Picture::remainder`). The fold's fast
+/// elements and the photons' classes by their fast index are its consequence on the frame's lattice: they are decided
+/// by the index (n ≠ 0, floquet/frame.rs `Frame::fast_index`) and compute no bound.
 pub fn by_parts(ends: f64, variation: f64, rate: C64) -> f64 {
     (ends + variation) / rate.abs()
 }
