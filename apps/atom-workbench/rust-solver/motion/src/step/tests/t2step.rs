@@ -442,3 +442,182 @@ fn t2step_walk() {
         }
     }
 }
+
+/// The process's CPU time so far, user and kernel (s): Windows' `GetProcessTimes`.
+fn process_seconds() -> f64 {
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn GetProcessTimes(process: *mut std::ffi::c_void, creation: *mut FileTime, exit: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
+    }
+    let mut t: [FileTime; 4] = std::array::from_fn(|_| FileTime { low: 0, high: 0 });
+    let [c, e, k, u] = &mut t;
+    // SAFETY: the current process's pseudo handle and four FILETIMEs to write.
+    let ok = unsafe { GetProcessTimes(GetCurrentProcess(), c, e, k, u) };
+    assert!(ok != 0, "GetProcessTimes");
+    let seconds = |f: &FileTime| ((u64::from(f.high) << 32) | u64::from(f.low)) as f64 * 1e-7;
+    seconds(&t[2]) + seconds(&t[3])
+}
+
+/// The run's counts as `adapt::counted` says them: steps, refused, the mean step's time (µs).
+fn counts() -> (u64, u64, f64) {
+    let line = crate::adapt::counted(false);
+    let number = |after: &str, upto: &str| -> f64 {
+        let from = line.find(after).map(|i| i + after.len()).unwrap_or(0);
+        line[from..].split(upto).next().unwrap_or("0").trim().parse().unwrap_or(f64::NAN)
+    };
+    (number("步 ", "（") as u64, number("拒 ", "）") as u64, number("每步 ", "µs"))
+}
+
+/// The whole solve on a model, stage by stage (the coordinator's 11-22 ask): per stage the solve says (`Message::Stage`:
+/// its step and rung) and per checkpoint, the wall time since the solve's start and since the last message, the steps
+/// taken and refused in it, the time in steps (adapt.rs STEPPING: each step's wall time on its thread, summed) and
+/// the process's CPU time, with the thread time per step and the mean busy threads; the models' making beside. The
+/// product's first batch ends it (as `gstep_ladder`).
+#[test]
+#[ignore]
+fn t2step_run() {
+    for (name, request) in scenes() {
+        let clock = std::time::Instant::now();
+        for (label, run) in models(&name, &request) {
+            eprintln!("T2S-RUN {name} {label}: the models made by {:.1} s", clock.elapsed().as_secs_f64());
+            let start = (std::time::Instant::now(), process_seconds(), counts());
+            let mut last = (start.0, start.1, start.2, String::from("solve_on"));
+            let pilot = crate::solve::pilot_size();
+            let mark = |what: String, last: &mut (std::time::Instant, f64, (u64, u64, f64), String)| {
+                let (now, cpu, (steps, refused, mean)) = (std::time::Instant::now(), process_seconds(), counts());
+                let (steps0, refused0, mean0) = last.2;
+                let stepping = (steps as f64 * mean - steps0 as f64 * mean0) * 1e-6;
+                let (ds, wall, dcpu) = (steps - steps0, (now - last.0).as_secs_f64(), cpu - last.1);
+                eprintln!(
+                    "T2S-RUN {name} {label} {:>7.1} s | {:<40} lasted {:>6.1} s: steps {:>7} refused {:>5}, in steps {:>7.1} thread-s ({:>7.1} µs a step), process CPU {:>7.1} s ({:>4.1} threads busy)",
+                    (now - start.0).as_secs_f64(),
+                    last.3,
+                    wall,
+                    ds,
+                    refused - refused0,
+                    stepping,
+                    if ds > 0 { stepping / ds as f64 * 1e6 } else { 0.0 },
+                    dcpu,
+                    dcpu / wall.max(1e-9)
+                );
+                *last = (now, cpu, (steps, refused, mean), what);
+            };
+            let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::solve::solve_on(&request, &run, &mut |m| match m {
+                    crate::solve::Message::Stage(s) => mark(format!("{:?} tau {:?} batch {:?}", s.step, s.tau, s.batch.as_ref().map(|b| b.trajectories)), &mut last),
+                    crate::solve::Message::Checkpoint(s, _) => {
+                        mark(format!("checkpoint {} trajectories tau {}", s.trajectories, s.time_step_us), &mut last);
+                        if s.trajectories > pilot {
+                            panic!("T2S-RUN the product's first batch");
+                        }
+                    }
+                })
+            }));
+            mark("end".into(), &mut last);
+            let how = match ended {
+                Ok(Ok(s)) => format!("solved: tau {} us, {} trajectories", s.time_step_us, s.trajectories),
+                Ok(Err(e)) => format!("refused: {e}"),
+                Err(_) => "the product began".to_string(),
+            };
+            let (steps, refused, mean) = counts();
+            eprintln!("T2S-RUN {name} {label} ended at {:.1} s ({how}); steps {} refused {}, {mean:.1} µs a step; process CPU {:.1} s", start.0.elapsed().as_secs_f64(), steps - (start.2).0, refused - (start.2).1, process_seconds() - start.1);
+        }
+    }
+}
+
+/// This thread's affinity (Windows' `SetThreadAffinityMask`).
+fn pin(mask: usize) {
+    extern "system" {
+        fn GetCurrentThread() -> *mut std::ffi::c_void;
+        fn SetThreadAffinityMask(thread: *mut std::ffi::c_void, mask: usize) -> usize;
+    }
+    // SAFETY: the current thread's pseudo handle and a mask of its process's processors.
+    let old = unsafe { SetThreadAffinityMask(GetCurrentThread(), mask) };
+    assert!(old != 0, "SetThreadAffinityMask {mask:#x}");
+}
+
+/// A step's time on each logical processor, alone and with every processor busy (the coordinator's 11-22 ask: the run's
+/// step against the pinned one, by the cores' kinds): T2S_STEPS (6) states of a walk from `r1prop::start` at the scene's
+/// τ, each step on a fresh scratch. Alone: each processor in turn, the least of T2S_REPEAT (3) a state, the others idle
+/// (as far as the machine is ours). Busy: a thread on every processor at once, each pinned to its own, each stepping
+/// the same states round after round for T2S_BUSY seconds (4): per processor its mean and its least over the rounds.
+#[test]
+#[ignore]
+fn t2step_cores() {
+    let (steps, repeat, busy) = (env("T2S_STEPS", 6.0) as usize, env("T2S_REPEAT", 3.0) as usize, env("T2S_BUSY", 4.0));
+    let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+    for (name, request) in scenes() {
+        let tau = tau_of(&name);
+        let chief = crate::solve::chief(&request);
+        for (label, run) in models(&name, &request) {
+            let mut states = vec![start(&run, &request, chief, 3)];
+            while states.len() < steps {
+                let t = states.last().unwrap().clone();
+                let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)) else { break };
+                states.push(step.end);
+            }
+            let one = |t: &crate::step::Trajectory| -> f64 {
+                let clock = std::time::Instant::now();
+                let _ = Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere));
+                clock.elapsed().as_secs_f64() * 1e6
+            };
+            // Alone, processor by processor.
+            let alone: Vec<f64> = (0..processors)
+                .map(|p| {
+                    let (states, one) = (&states, &one);
+                    std::thread::scope(|s| {
+                        s.spawn(move || {
+                            pin(1 << p);
+                            states.iter().map(|t| (0..=repeat).map(|_| one(t)).skip(1).fold(f64::INFINITY, crate::linalg::smaller)).sum::<f64>() / states.len() as f64
+                        })
+                        .join()
+                        .unwrap()
+                    })
+                })
+                .collect();
+            // Busy: every processor at once.
+            let loaded: Vec<(f64, f64, usize)> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..processors)
+                    .map(|p| {
+                        let (states, one) = (&states, &one);
+                        s.spawn(move || {
+                            pin(1 << p);
+                            let clock = std::time::Instant::now();
+                            let (mut sum, mut least, mut rounds) = (0.0, vec![f64::INFINITY; states.len()], 0usize);
+                            while clock.elapsed().as_secs_f64() < busy {
+                                for (t, l) in states.iter().zip(least.iter_mut()) {
+                                    let x = one(t);
+                                    sum += x;
+                                    *l = crate::linalg::smaller(*l, x);
+                                }
+                                rounds += 1;
+                            }
+                            (sum / (rounds * states.len()).max(1) as f64, least.iter().sum::<f64>() / states.len() as f64, rounds)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for p in 0..processors {
+                eprintln!("T2S-CORE {name} {label} tau {tau} cpu {p:>2}: alone {:>7.1} µs a step | all busy mean {:>7.1} least {:>7.1} µs ({} rounds of {} states)", alone[p], loaded[p].0, loaded[p].1, loaded[p].2, states.len());
+            }
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+            let rate = |v: &[f64]| v.iter().map(|x| 1.0 / x).sum::<f64>();
+            let loaded_mean: Vec<f64> = loaded.iter().map(|x| x.0).collect();
+            let best = alone.iter().copied().fold(f64::INFINITY, crate::linalg::smaller);
+            eprintln!(
+                "T2S-CORES {name} {label}: alone best {best:.1} µs, mean {:.1}; all busy mean {:.1}; steps a µs, the processors alone summed {:.4} against all busy {:.4}: all busy is {:.2} processors' worth of the best alone",
+                mean(&alone),
+                mean(&loaded_mean),
+                rate(&alone),
+                rate(&loaded_mean),
+                rate(&loaded_mean) * best
+            );
+        }
+    }
+}
