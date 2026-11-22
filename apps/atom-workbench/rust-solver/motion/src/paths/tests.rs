@@ -8,7 +8,7 @@
 //! - `paths_pilot`: the pilot's paths handed out by the solve (solve.rs `walks`), and the path errors along them;
 //! - `paths_cost`: the work of a model a path's µs, one thread, the least of five;
 //! - `paths_check`: the scheme's check against its halves on a path piece (`check`);
-//! - `paths_go_on_after_the_opening`: a run gone on from another's opening is the run from the start (`Opened`).
+//! - `paths_a_family_is_its_members`: a family's series are its members' runs alone (`Form::along_family`).
 use super::*;
 use crate::request::Request;
 use crate::scene::Scene;
@@ -437,13 +437,14 @@ fn paths_check() {
     eprintln!("{scene} {} − {}, path {path} on [{from}, {to}] µs, {nodes} nodes a step against {} and half the turn: the difference changes by row {row:.2e}, rate {rate:.2e} (of the rate), force {force:.2e} (of the rms force); {:.1} s", specs[0], specs[1], 2 * nodes, clock.elapsed().as_secs_f64());
 }
 
-/// A run that differs from another only in `rate`, gone on from where the other's opening ends, is the run from the
-/// start (module documentation, # The start, once): on TET's and R4's 32 states along a slow line through the trap's
-/// centre, every reading and the end state the same bit for bit, at one and at two pieces a step; its work the part
-/// after the opening's end.
+/// A family's series are its members' runs alone, to the bit (module documentation, # The nodes): on TET's and R4's 32
+/// states along a slow line through the trap's centre, a setting and its refinements -- the opening's substeps, the
+/// rate, the pieces and a partner's rate doubled or raised alone, at one and at two pieces a step --, every reading's
+/// time, rows and rates, the opening, its bound, the condition and the end state the same as each run's alone; its
+/// nodes and products fewer.
 #[test]
 #[ignore]
-fn paths_go_on_after_the_opening() {
+fn paths_a_family_is_its_members() {
     for scene in ["TET", "R4"] {
         let request = request_of(scene);
         let model = models(&request, &["full".to_string()]).remove(0);
@@ -455,21 +456,28 @@ fn paths_go_on_after_the_opening() {
             [t, c[0] + speed * t, c[1], c[2], speed / hm, 0.0, 0.0]
         });
         let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect() };
+        let at = |turns: f64, rate: f64, pieces: usize| Scheme::Exponential { turns, rate, pieces, cutoff: f64::INFINITY, read: 1 };
         for pieces in [1, 2] {
-            let at = |rate: f64| Scheme::Exponential { turns: 1.0, rate, pieces, cutoff: f64::INFINITY, read: 1 };
-            let (base, opened) = form.along_opened(&walk, &walk.start, 0.0, walk.end(), at(8.0)).unwrap();
-            let opened = opened.expect("a piece after the opening");
-            let whole = form.along(&walk, &walk.start, 0.0, walk.end(), at(16.0)).unwrap();
-            let after = form.along_after(&walk, &opened, walk.end(), at(16.0)).unwrap();
+            let members = [at(1.0, 8.0, pieces), at(2.0, 8.0, pieces), at(1.0, 16.0, pieces), at(1.0, 8.0, 2 * pieces), at(1.0, 9.0, pieces)];
+            let family = form.along_family(&walk, &walk.start, 0.0, walk.end(), &members).unwrap();
+            let alone: Vec<Series> = members.iter().map(|&s| form.along(&walk, &walk.start, 0.0, walk.end(), s).unwrap()).collect();
             let same = |a: &Series, b: &Series| a.readings.len() == b.readings.len() && a.readings.iter().zip(&b.readings).all(|(x, y)| x.t == y.t && x.rows == y.rows && x.rates == y.rates) && a.state == b.state;
+            let sum = |x: &[Series], f: &dyn Fn(&Counts) -> u64| x.iter().map(|s| f(&s.counts)).sum::<u64>();
             eprintln!(
-                "{scene} P{} pieces {pieces}: opening {:.2} µs, ends at piece {} of knot interval {} ({:?}); 16 a µs from the start {} products, after the opening {}; 8 a µs {}",
-                form.n, opened.opening, opened.piece, opened.interval, opened.ends, whole.counts.products, after.counts.products, base.counts.products
+                "{scene} P{} pieces {pieces}: the family's nodes {} and products {}; its members' alone {} and {}",
+                form.n,
+                sum(&family, &|c| c.nodes),
+                sum(&family, &|c| c.products),
+                sum(&alone, &|c| c.nodes),
+                sum(&alone, &|c| c.products)
             );
-            assert!(same(&whole, &after), "{scene} pieces {pieces}: gone on from the opening differs from the run from the start");
-            assert!(!same(&whole, &base), "{scene} pieces {pieces}: the rate changes nothing");
-            assert!(after.counts.products < whole.counts.products);
-            assert!(form.along_after(&walk, &opened, walk.end(), Scheme::Exponential { turns: 2.0, rate: 16.0, pieces, cutoff: f64::INFINITY, read: 1 }).is_err(), "another opening refused");
+            for (k, (f, a)) in family.iter().zip(&alone).enumerate() {
+                assert!(same(f, a), "{scene} pieces {pieces}: member {k}'s series is not its run alone");
+                assert_eq!((f.counts.opening, f.counts.booked, f.counts.condition), (a.counts.opening, a.counts.booked, a.counts.condition), "{scene} pieces {pieces}: member {k}'s opening");
+            }
+            assert!(!same(&family[0], &family[2]), "{scene} pieces {pieces}: the rate changes nothing");
+            assert!(sum(&family, &|c| c.nodes) < sum(&alone, &|c| c.nodes) && sum(&family, &|c| c.products) < sum(&alone, &|c| c.products));
         }
+        assert!(form.along_family(&walk, &walk.start, 0.0, walk.end(), &[at(1.0, 8.0, 3), at(1.0, 8.0, 2)]).is_err(), "pieces not powers of two of one another refused");
     }
 }

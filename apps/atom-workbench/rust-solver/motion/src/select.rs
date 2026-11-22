@@ -521,28 +521,19 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 /// difference of the candidate to the reference, a scan's), read as its error (`RICHARDSON`); while the parts' sum is
 /// beyond `TOLERANCE`, the knob of the largest part doubled (of those below `FINEST`), all at the finest the last. A
 /// setting's rate is the substeps' own: no less than a piece of the path's step `step` takes (`Form::along` never takes
-/// fewer than one substep a piece; below that a doubled rate would change nothing, and read as no error). A run that
-/// differs from the setting's only in the rate goes on from where the setting's opening ends (paths.rs, # The start,
-/// once). The setting with its parts and runs, and the first model's series at its runs (the calibration's).
+/// fewer than one substep a piece; below that a doubled rate would change nothing, and read as no error). The setting's
+/// refinements are one family along the piece (paths.rs `Form::along_family`: each node made once for them all), the
+/// setting's own runs with them where they are not in hand. The setting with its parts and runs, and the first model's
+/// series at its runs (the calibration's).
 fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk, f64)]) -> Result<(Settled, Vec<Series>), String> {
     let clock = Instant::now();
-    // A setting's runs, the models' each with where its opening ends: gone on from there where the setting differs
-    // from the one of the runs `base` only in the rate after the opening (paths.rs, # The start, once), else from the
-    // start.
-    type Opens = Vec<Option<std::sync::Arc<paths::Opened>>>;
-    let run = |s: Setting, base: Option<(Setting, &Opens)>| -> Result<(Vec<Series>, Opens), String> {
-        let made: Vec<(Series, Option<std::sync::Arc<paths::Opened>>)> = match base {
-            Some((b, opens)) if Setting { rate: b.rate, ..s } == b && opens.iter().all(Option::is_some) => forms
-                .iter()
-                .zip(opens)
-                .map(|(f, o)| {
-                    let o = o.clone().expect("an opening");
-                    Ok((f.along_after(walk, &o, piece, scheme(s, 1))?, Some(o)))
-                })
-                .collect::<Result<_, String>>()?,
-            _ => forms.iter().map(|f| f.along_opened(walk, &walk.start, 0.0, piece, scheme(s, 1)).map(|(x, o)| (x, o.map(std::sync::Arc::new)))).collect::<Result<_, String>>()?,
-        };
-        Ok(made.into_iter().unzip())
+    // A family of settings' runs, each model's (paths.rs `Form::along_family`: each node made once for them all): per
+    // setting the models' series.
+    let family = |settings: &[Setting]| -> Result<Vec<Vec<Series>>, String> {
+        let schemes: Vec<Scheme> = settings.iter().map(|&s| scheme(s, 1)).collect();
+        let made: Vec<Vec<Series>> = forms.par_iter().map(|f| f.along_family(walk, &walk.start, 0.0, piece, &schemes)).collect::<Result<_, _>>()?;
+        let mut made: Vec<std::vec::IntoIter<Series>> = made.into_iter().map(Vec::into_iter).collect();
+        Ok(settings.iter().map(|_| made.iter_mut().map(|x| x.next().expect("a member's series")).collect()).collect())
     };
     let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
     // The cutoff's part: the largest over the stretches the setting takes (`starts`: each from its walk's own start) of
@@ -552,17 +543,16 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk,
         Ok(each.into_iter().fold(0.0, larger))
     };
     let mut setting = own(COARSEST);
-    let (mut at, mut opens) = run(setting, None)?;
+    // The setting's own runs where they are in hand (the refinement it was), else made in its refinements' family.
+    let mut at: Option<Vec<Series>> = None;
     let work = |x: &[Series]| x.iter().map(|s| s.counts.products).sum::<u64>();
-    let (mut tried, mut products) = (1, work(&at));
+    let (mut tried, mut products) = (0, 0);
     loop {
         let (runs, pairs) = refinements(setting, &own);
-        let made: Vec<(Vec<Series>, Opens)> = runs[1..].par_iter().map(|&s| run(s, Some((setting, &opens)))).collect::<Result<_, _>>()?;
+        let made = family(if at.is_some() { &runs[1..] } else { &runs[..] })?;
         tried += made.len();
-        products += made.iter().map(|s| work(&s.0)).sum::<u64>();
-        let (made, made_opens): (Vec<Vec<Series>>, Vec<Opens>) = made.into_iter().unzip();
-        let series: Vec<Vec<Series>> = std::iter::once(at).chain(made).collect();
-        let mut opened: Vec<Opens> = std::iter::once(opens).chain(made_opens).collect();
+        products += made.iter().map(|s| work(s)).sum::<u64>();
+        let series: Vec<Vec<Series>> = at.take().into_iter().chain(made).collect();
         let mut errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
         // The cutoff's part: what the setting's openings book (a scan's two models' both).
         errors[RUN_KNOBS] = booked(setting)?;
@@ -579,8 +569,7 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk,
         let k = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| errors[a].total_cmp(&errors[b])).expect("an open knob");
         if k < RUN_KNOBS {
             setting = runs[1 + k];
-            at = series.into_iter().nth(1 + k).expect("the refinement");
-            opens = opened.swap_remove(1 + k);
+            at = series.into_iter().nth(1 + k);
         } else {
             // The cutoff's part is the setting's own bound: raised while it stays the largest, and the setting run once.
             let others = errors[..RUN_KNOBS].iter().copied().fold(0.0, larger);
@@ -590,9 +579,7 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk,
                     break;
                 }
             }
-            (at, opens) = run(setting, None)?;
-            tried += 1;
-            products += work(&at);
+            // Its own runs made with its refinements, the next family.
         }
     }
 }
@@ -800,40 +787,42 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let form = Form::new(model, at);
     let (piece, ref calibrated) = paths.calibration;
     let scheme = paths.settled.scheme(1);
-    // The calibration's refinements (the setting's own series is the first walk's, cut to the piece).
+    // The calibration's refinements, one family on the piece (the setting's own series is the first walk's, cut to it).
     let refined: Vec<Scheme> = paths.settled.runs[1..].iter().map(|&s| self::scheme(s, 1)).collect();
-    let r = refined.len();
     let w0 = &paths.walks[0];
     let n = paths.walks.len();
     let run = paths.late.as_ref().map_or(0.0, |(from, ..)| from + paths.length);
-    let jobs: Vec<usize> = (0..r + n * (1 + usize::from(paths.late.is_some()))).collect();
-    let done: Vec<Result<Series, String>> = jobs
+    let jobs: Vec<usize> = (0..1 + n * (1 + usize::from(paths.late.is_some()))).collect();
+    let done: Vec<Result<Vec<Series>, String>> = jobs
         .par_iter()
         .map(|&j| {
             #[cfg(test)]
             let clock = Instant::now();
             let out = match j {
-                j if j < r => form.along(w0, &w0.start, 0.0, piece, refined[j]),
-                j if j < r + n => {
-                    let w = &paths.walks[j - r];
-                    form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme)
+                0 => form.along_family(w0, &w0.start, 0.0, piece, &refined),
+                j if j <= n => {
+                    let w = &paths.walks[j - 1];
+                    form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme).map(|s| vec![s])
                 }
                 j => {
-                    let (w, from) = (&paths.walks[j - r - n], paths.late.as_ref().expect("a late segment").0);
-                    if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
+                    let (w, from) = (&paths.walks[j - 1 - n], paths.late.as_ref().expect("a late segment").0);
+                    (if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
             };
             #[cfg(test)]
-            if let Ok(s) = &out {
-                trace_job(&format!("P{} job {j}", model.rs.keep.len()), s, clock.elapsed().as_secs_f64());
+            if let Ok(made) = &out {
+                for s in made {
+                    trace_job(&format!("P{} job {j}", model.rs.keep.len()), s, clock.elapsed().as_secs_f64());
+                }
             }
             out
         })
         .collect();
     let mut done = done.into_iter();
-    let finer: Vec<Series> = (0..r).map(|_| done.next().expect("a refinement")).collect::<Result<_, _>>()?;
-    let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
-    let late_series: Vec<Series> = done.collect::<Result<_, _>>()?;
+    let finer: Vec<Series> = done.next().expect("the refinements")?;
+    let one = |x: Option<Result<Vec<Series>, String>>| x.expect("a walk").map(|mut x| x.swap_remove(0));
+    let series: Vec<Series> = (0..n).map(|_| one(done.next())).collect::<Result<_, _>>()?;
+    let late_series: Vec<Series> = done.map(|x| one(Some(x))).collect::<Result<_, _>>()?;
     let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm);
