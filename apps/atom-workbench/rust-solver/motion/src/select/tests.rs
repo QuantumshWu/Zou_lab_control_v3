@@ -200,6 +200,36 @@ fn select_where_every_atom_is_lost() {
     assert_eq!(choice.keep, run.rs.keep);
 }
 
+/// The whole selection where G's fold runs away at every start (refs/scenes SAT_3: σ⁺ on resonance with the cycling
+/// line, s = 3, D2-3-3's first-order excitation 1.5 -- its fold's series does not converge, and the folded ground state
+/// scatters beyond every state of the atom, step.rs # The domain): G's pilot takes no step, the attempt is made again on
+/// the structural chain's next model (solve.rs `piloted`), its paths go past their starts, and the choice holds D2-3-3
+/// explicit -- P9 or above --, complete (its W a number), no line of its report saying a number that is none. (On
+/// d6b78fad: "no path of the pilot's goes past its start", 0 steps and 279 refused.) Seconds; a gate's.
+#[test]
+#[ignore]
+fn select_where_g_runs_away_at_every_start() {
+    let request = crate::model::testing::scene("SAT_3");
+    let clock = Instant::now();
+    let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).expect("SAT_3's choice");
+    let choice = run.report.choice.clone().expect("the chosen run holds its choice");
+    for line in &choice.report {
+        eprintln!("  {line}");
+    }
+    eprintln!("SAT_3: P{} chosen in {:.1} s", run.rs.keep.len(), clock.elapsed().as_secs_f64());
+    let excited = request.states.iter().position(|s| s == "D2-3-3").expect("D2-3-3 among the states");
+    assert!(choice.keep.contains(&excited) && choice.keep.len() > GROUND, "P{} {:?}", choice.keep.len(), choice.keep);
+    // The pilot on a model above G, and its paths read.
+    let pilot = choice.report.iter().find(|l| l.starts_with("先导立定于")).expect("the pilot's line");
+    let model: usize = pilot.split("先导的模型 P").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).expect("the pilot's model");
+    assert!(model > GROUND, "{pilot}");
+    assert!(choice.report.iter().any(|l| l.starts_with("路径：") && !l.starts_with("路径：0 ")), "{:#?}", choice.report);
+    let chosen = choice.report.iter().find(|l| l.contains("（选中）")).expect("the chosen candidate's line");
+    assert!(chosen.contains("W ") && !chosen.contains("W —") && !chosen.contains("inf"), "{chosen}");
+    assert!(choice.report.iter().all(|l| !l.contains("NaN")), "{:#?}", choice.report);
+    assert_eq!(choice.keep, run.rs.keep);
+}
+
 /// The six scenes' requests (the directory `V3D_REQ`: scratchpad reqprec/req; `PSTATE_SCENE` one of them), each with
 /// its name in the prototype's files.
 pub(crate) fn requests() -> Vec<(&'static str, crate::request::Request)> {
