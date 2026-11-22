@@ -1906,9 +1906,9 @@ impl Groups {
     /// series' labels, into `slots` sums, its state's (`Picture::state_work`: its matrix assembled where anything is
     /// followed, the followed classes'): its parts, norms, z_g and density by its blocks (`Shape`), the norm's phases, the
     /// series and the blocks' weights a label each, and where the step takes several sums each its share of the density.
-    fn node(n: usize, groups: usize, ordered: usize, inner: usize, slots: usize, (_, followed, followers): (f64, bool, usize), shape: Shape) -> f64 {
+    fn node(n: usize, groups: usize, ordered: usize, inner: usize, slots: usize, (_, _, assembled): (f64, bool, usize), shape: Shape) -> f64 {
         let blocks = ordered + groups;
-        let assembly = if followed { (1 + 4 * followers) * n * n } else { 0 };
+        let assembly = assembled * n * n;
         let shares = if slots > 1 { slots * n * (n + 1) / 2 } else { 0 };
         (assembly + shape.products + 4 * n + shape.norms + ordered / 2 + inner * (ordered + blocks) + shape.z + shape.density + shares) as f64
     }
