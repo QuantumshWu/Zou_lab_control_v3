@@ -60,6 +60,13 @@
 //! The path's length is set by the generator's slowest nonzero decay rate λ (`memory`): the sector Liouvillian's
 //! eigenvalues at a point, a rounding zero |μ| ≤ κ_μ γ_d ‖L‖₁ (its first-order perturbation bound, κ_μ its condition)
 //! the stationary states'; τ_mem = 1/λ, and a path's length L = min(T_run, 5τ_mem) (`Memory::length`).
+//!
+//! # The errors
+//! Per path the candidate's readings less the reference's at the same times, averaged over a time window; over the
+//! paths their mean and its standard error (the paths' spread over √P), and per path its worst row (`compare`,
+//! `Window`). The windows are octaves of τ_mem from the start's transient to L (`windows`); an output time takes its
+//! window's error, past L the last window's (`window_of`): the path has forgotten its start there. The paths are the
+//! pilot's trajectories at the run's step (solve.rs `walks`), each from its own initial state.
 use crate::linalg::{fused_product, fused_product_onto, hermitian_eigen, larger, mul_add, C64, Eigen, Mat, V3};
 use crate::model::selected::{Node, Selected};
 use crate::model::Point;
