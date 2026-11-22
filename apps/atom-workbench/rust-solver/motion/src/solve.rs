@@ -464,12 +464,20 @@
 //! mean over the atoms of the error of each one's fate (`Measured::means`): the held atoms' at their states there, by
 //! the held share 1 − L, and the lost atoms' along their paths, by L. A lost atom's fate was decided along its path
 //! from t = 0 to its loss, the first of its own states whose loss energy is above the escape value, the potential's far
-//! value (SPEC §1.7; adapt.rs, # The reads; step.rs `Dynamics::lost`): a rate's relative error x along that path moves
-//! its loss's time by x of it to the first order, and its fate's error is the path's mean of x, read where the run reads
-//! every atom and at the path's end: at t = 0, at the analysis times it was held at, and at its last checkpoint
-//! (`Record::trail`), within one window of its loss -- a state the loss test found held, as every checkpoint after
-//! t = 0 is (`run`: a trajectory is stopped at a checkpoint only while it holds its atom) -- by the trapezoid on them
-//! (`Booking::path`). The state it was found lost in is read nowhere: its fate is sealed there. (Read there, as half of the path, the 1D
+//! value (SPEC §1.7; adapt.rs, # The reads; step.rs `Dynamics::lost`): its fate's error is the path's mean of the
+//! model's error at its states -- each state's the region left out's there (`booked_at`: the row's error a scan read
+//! where it flagged the region, none elsewhere; PIPELINE_V3_FINAL §二 C.13) --, read where the run reads every atom and
+//! at the path's end: at t = 0, at the analysis times it was held at, and at its last checkpoint (`Record::trail`),
+//! within one window of its loss -- a state the loss test found held, as every checkpoint after t = 0 is (`run`: a
+//! trajectory is stopped at a checkpoint only while it holds its atom) -- by the trapezoid on them (`Booking::path`).
+//! The state it was found lost in is read nowhere: its fate is sealed there. What the model's error in the rates along
+//! the path does to the loss's time -- a relative error x moves it by x of it to the first order -- is the motion's
+//! feedback, and is not booked (select.rs, # The feedback through the motion: zero, the user's of 2026-11-22): R9_PUSH's
+//! full-ground model scatters 11 to 12 % above the 32 states on its paths and pushes its atoms out that much early, its
+//! loss 0.18 above the reference at 26 µs, none of it booked. (Until 2026-11-22 this said the fate's error was the
+//! path's mean of the rates' relative error x: written when every state took the three points' measured error
+//! (`Selected::error`), and left when P3 (429c36cd) read the region's row error at the states instead and the feedback
+//! was then set to zero; motion3d_status/rewrite/selcost.status.md, 十五.) (Read there, as half of the path, the 1D
 //! PGC tilted 3° over 10 ms -- three of four atoms lost by 4 ms, each found at the trap's rim, 2 µm off its axis, where
 //! its strong near light (3 to 5 Γ, 38 I_sat a beam) left the old model's fold wrong by 0.32–0.48 against 0.004–0.032
 //! at every held state -- booked half its error there.) An atom held near the rim is read there where an analysis time
