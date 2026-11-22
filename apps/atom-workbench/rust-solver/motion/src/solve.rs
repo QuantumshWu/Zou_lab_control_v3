@@ -2555,18 +2555,26 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let reference = alone(chief(request));
     let length = request.times_us.last().copied().unwrap_or(0.);
     let mut report: Vec<String> = vec![];
-    // The chain on the couplings where the pilot's atoms went (select.rs `amplitudes_over`).
+    // The chain on the first-order excitation where the pilot's atoms went, from the ground states they were in
+    // (select.rs `importance`): G's states are the ground states, a state's populations its own (P = G).
     let started = Instant::now();
-    let places: Vec<V3> = pilot.iter().flat_map(|p| p.samples.iter().flatten()).map(|s| s.sample.at.r).collect();
-    let amplitudes = crate::select::amplitudes_over(&run.scene, &places, &run.report.amplitudes);
+    let places: Vec<(V3, [f64; GROUND])> = pilot
+        .iter()
+        .flat_map(|p| p.samples.iter().flatten())
+        .map(|s| {
+            let n: f64 = s.sample.psi.iter().map(|z| z.norm_sqr()).sum();
+            (s.sample.at.r, std::array::from_fn(|g| s.sample.psi.get(g).map_or(0., |z| z.norm_sqr() / n)))
+        })
+        .collect();
+    let amplitudes = crate::select::importance(&run.scene, &places);
     let chain = &crate::select::chain(&amplitudes);
     let labels = &request.states;
     let order: Vec<String> = chain.windows(2).map(|w| w[1].iter().filter(|s| !w[0].contains(s)).map(|&s| format!("{} {:.2e}", labels[s], amplitudes[s])).collect::<Vec<_>>().join(" + ")).collect();
-    noted(&mut report, format!("链上依次加入的激发态（结构振幅）：{}", order.join("；")));
+    noted(&mut report, format!("链上依次加入的激发态（先导位置上的最大一阶激发布居）：{}", order.join("；")));
     noted(
         &mut report,
         format!(
-            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；G = P{}；链按三个结构点与先导的 {} 个位置上的最大一阶振幅，{} 档（{}），{:.1} s",
+            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；G = P{}；链按先导的 {} 个状态上的一阶激发，{} 档（{}），{:.1} s",
             times.len(), run.rs.keep.len(), places.len(), chain.len(), chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" "), started.elapsed().as_secs_f64()
         ),
     );
@@ -2696,11 +2704,22 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // The pairs (select.rs, # The temperature measured in pairs): their difference's z·se within half T's allowance,
         // foretold by the pilot's own interval -- two independent sets of n against its N.
         let needed = (1..times.len()).filter(|&k| times[k] <= lt).map(|k| 8. * ran * (read.estimates[k].temperature_interval() / read.estimates[k].temperature_target).powi(2)).fold(0., crate::linalg::larger);
-        let groups = ((needed / GROUP as f64).ceil() as usize).clamp(1, numbers.len());
+        let groups = ((needed / GROUP as f64).ceil() as usize).max(1);
         let pairs_work = (groups as u64 * GROUP) as f64 * lt * (weighed[anchor].price + weighed[d].price);
         let lower = weighed[d].need * weighed[d].price * span + again(weighed[d].place, weighed[d].price) + pairs_work;
-        if cut_times.len() < 2 || !(lower < best) {
-            weighed[d].fate += if cut_times.len() < 2 { "；成对实测的长度不足一个分析时刻，不选" } else { "；成对实测之前的代价已不低于最小的 W，不测" };
+        // The pairs are the pilot's numbers: more than it has would be trajectories of the product's own numbers, and
+        // their interval would not meet half the allowance anyway on the pilot's -- not measured.
+        let why = if cut_times.len() < 2 {
+            Some("；成对实测的长度不足一个分析时刻，不选".to_string())
+        } else if groups > numbers.len() {
+            Some(format!("；成对实测要 {} 对才分辨到允许量的一半，多于先导的 {} 条，不测", groups as u64 * GROUP, numbers.len() as u64 * GROUP))
+        } else if !(lower < best) {
+            Some("；成对实测之前的代价已不低于最小的 W，不测".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            weighed[d].fate += &why;
             continue;
         }
         let mut cut = Plan::new(&cut_times, scales.frequencies);
@@ -2747,6 +2766,17 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         weighed[chosen].model = account(&weighed[chosen].judged, fallback.as_ref().map(|(f, a)| (f, a)));
         noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点或光镊区域边缘，{speed:.3} µm/µs）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,
             if region.intensity > f64::NEG_INFINITY { format!("标出 s ≤ {:.3e}，误差 {:.2e}", region.intensity, region.error) } else { format!("无标记（最大误差 {:.1e}）", region.largest) }, region.edge));
+    }
+    // The tests' candidates beside the chain (select.rs `ALSO`): judged and weighed for comparison, never chosen.
+    #[cfg(test)]
+    for keep in crate::select::ALSO.with(|a| a.borrow().clone()) {
+        let model = Selected::new(crate::scene::Scene::new(request)?, Selection { keep, ..run.report.clone() }, reference)?;
+        let judged = judge(&paths, &model, centre)?;
+        let price = priced(&model, domain.widest, &rated, tau, false);
+        let model_error = account(&judged, None);
+        let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+        let (met, need) = (met(&own), most_needed(&own));
+        weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, met, fallback: None, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }) });
     }
     // The report: every candidate weighed with its parts at their largest over the times.
     for w in &weighed {

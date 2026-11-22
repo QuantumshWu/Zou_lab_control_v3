@@ -25,9 +25,9 @@ fn select_the_chain_by_hand() {
 
 /// The middle point (`middle`), on two reference requests (refs/scenes): R10_NODE, the trap at a node of the standing
 /// wave whose nodal plane holds the tweezer's axis -- the middle leaves the plane (n̂ across the axis, |n̂·d| at
-/// rounding), the tweezer's intensity there half its peak to rounding, and the light other than the tweezer's reaches it
-/// (`reach` ≥ ε) where one Rayleigh range along the axis it does not; R1_TWEEZER, the tweezer alone (M = 0) -- the middle
-/// on the axis at the Rayleigh range, z_R d, to rounding.
+/// rounding), the tweezer's intensity there half its peak to rounding, and the light other than the tweezer's excites
+/// the atom there (`excitation` ≥ ε², an amplitude's square at the rounding) where one Rayleigh range along the axis it
+/// does not; R1_TWEEZER, the tweezer alone (M = 0) -- the middle on the axis at the Rayleigh range, z_R d, to rounding.
 #[test]
 fn select_the_middle_point_leaves_a_node() {
     let half = |scene: &Scene, r: V3| scene.geometry[scene.tweezer()].amplitude_to(r, 0).value.norm_sqr();
@@ -39,10 +39,12 @@ fn select_the_middle_point_leaves_a_node() {
     assert!((half(&node, r) - 0.5).abs() <= 8.0 * f64::EPSILON, "R10_NODE: the tweezer's intensity {}", half(&node, r));
     let zero = vec![0.0; node.request.beams.len()];
     let tw = node.tweezer();
-    let other = |point: &Components| reach(&node, &rs::reference(&node, point), point, &|l| l != tw).iter().fold(0.0, |m: f64, &a| larger(m, a));
+    let even = [1.0 / GROUND as f64; GROUND];
+    let other = |point: &Components| excitation(&node, &rs::reference(&node, point), point, &|l| l != tw, &even).iter().fold(0.0, |m: f64, &a| larger(m, a));
     let at_middle = other(&node.components(r, &zero, 1.0));
     let on_axis = other(&node.components(d.map(|x| x * node.geometry[tw].rayleigh().unwrap()), &zero, 1.0));
-    assert!(at_middle >= f64::EPSILON && on_axis < f64::EPSILON, "R10_NODE: the other light's reach {at_middle:e} at the middle, {on_axis:e} on the axis");
+    let floor = f64::EPSILON * f64::EPSILON;
+    assert!(at_middle >= floor && on_axis < floor, "R10_NODE: the other light's excitation {at_middle:e} at the middle, {on_axis:e} on the axis");
     let alone = Scene::new(&crate::model::testing::scene("R1_TWEEZER")).unwrap();
     let tweezer = alone.geometry[alone.tweezer()];
     let r = middle(&alone);
@@ -200,7 +202,8 @@ fn read_request(p: &std::path::Path) -> crate::request::Request {
 /// separated: the six's names in `requests`, or a native request's path, e.g. R5_PUMP's and S1's), one after another:
 /// G's pilot, the paths, the response, the candidates judged and weighed, P -- its report (every candidate's parts, work
 /// and fate; the stages' times), and with `SELECT_OUT` a directory, each scene's choice to <scene>.json there: P, the
-/// parts at the response's times, the response's Λ_T, the pairs.
+/// parts at the response's times, the response's Λ_T, the pairs. `SELECT_ALSO`: candidates beside the chain judged for
+/// comparison (`ALSO`), ';'-separated, each the excited states' labels it keeps, ','-separated (the ground states always).
 #[test]
 #[ignore]
 fn select_on_the_scenes() {
@@ -222,6 +225,18 @@ fn select_on_the_scenes() {
             }
             _ => read_request(std::path::Path::new(name)),
         };
+        let also: Vec<Vec<usize>> = std::env::var("SELECT_ALSO").map_or(vec![], |a| {
+            a.split(';')
+                .filter(|g| !g.is_empty())
+                .map(|g| {
+                    let mut keep: Vec<usize> = (0..GROUND).collect();
+                    keep.extend(g.split(',').map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+                    keep.sort_unstable();
+                    keep
+                })
+                .collect()
+        });
+        ALSO.with(|a| *a.borrow_mut() = also);
         let clock = Instant::now();
         let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).unwrap();
         let choice = run.report.choice.clone().expect("the chosen run holds its choice");
@@ -244,7 +259,8 @@ fn select_on_the_scenes() {
                 "collapsed": choice.response.collapsed(), "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
                 "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate, choice.judged.calibration.power],
                 "pairs": choice.fallback.as_ref().map(|(f, a)| serde_json::json!({"pairs": f.pairs, "length": f.length, "anchor": a.keep.len(), "times": f.times, "temperature": f.temperature, "loss": f.loss})),
-                "response": {"times": choice.response.times, "temperature": choice.response.temperature, "loss": choice.response.loss, "kappa2": choice.response.kappa2},
+                "response": {"times": choice.response.times, "temperature": choice.response.temperature, "loss": choice.response.loss, "kappa2": choice.response.kappa2,
+                    "rows": choice.response.rows.iter().map(|r| r.to_vec()).collect::<Vec<_>>(), "errors": choice.response.errors.iter().map(|r| r.to_vec()).collect::<Vec<_>>()},
                 "parts": parts, "report": choice.report,
             });
             let stem = name.rsplit(['/', '\\']).next().unwrap().trim_end_matches(".json").to_string();

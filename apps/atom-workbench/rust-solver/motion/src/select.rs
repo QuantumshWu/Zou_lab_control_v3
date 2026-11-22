@@ -6,14 +6,19 @@
 //! solve's (solve.rs, # The selection); what is here is the model's side and the accounts.
 //!
 //! # The candidates
-//! Every excited state e has a structural amplitude a_e: the largest first-order amplitude |V_eg|/|E_g + f − E_e +
-//! iΓ_e/2| the light other than the tweezer's gives it, over the ground states, the light's frequencies and the three
-//! structural points -- the tweezer's focus with its light full (s = 1), the focus with it off (s = 0), and the place of
-//! half its intensity along the direction the other light changes fastest (`middle`) -- (`reach`, `amplitudes`). No
-//! equation is solved for it: it is the coupling over the detuning. The chain (`chain`) starts at the model in which every
-//! level is whole -- the 32 states, nothing folded -- and folds the excited states one at a time in increasing a_e, the
-//! states of equal a_e to the rounding together (a mirror pair is folded as a pair: one side kept would lose the pair's
-//! cancellation), down to the full-ground model G, every excited state folded. The chain is nested and made by the
+//! Every excited state e has an importance: its first-order excitation Σ_g p_g Σ_ω |V_eg|²/|E_g + f − E_e + iΓ_e/2|²
+//! by the light other than the tweezer's (`excitation`: the population it would hold to the first order, the fold's
+//! leading term weighed by the ground states its atoms come from), the largest over the places the pilot's atoms were
+//! seen at with their ground populations there (`importance`; before the pilot, `amplitudes`: over the three structural
+//! points -- the tweezer's focus with its light full (s = 1), the focus with it off (s = 0), and the place of half its
+//! intensity along the direction the other light changes fastest (`middle`) -- from every ground state alike). No
+//! equation is solved for it: it is the coupling over the detuning, where the atoms are. (By the amplitude alone,
+//! |V|/|Δ + iΓ/2|, PGC3D's repumper resonant on F = 1 → F′ = 2 put F′ = 2 first, 0.27 against 0.06–0.11 for F′ = 3,
+//! while 90 % of the atoms are in F = 2: the three-point choice of 2026-11-21 kept F′ = 3 m = 0, ±1 and folded every
+//! F′ = 2 state.) The chain (`chain`) starts at the model in which every
+//! level is whole -- the 32 states, nothing folded -- and folds the excited states one at a time in increasing
+//! importance, those equal to the rounding together (a mirror pair is folded as a pair: one side kept would lose the
+//! pair's cancellation), down to the full-ground model G, every excited state folded. The chain is nested and made by the
 //! structure alone: no candidate is judged at a point, no gate is read (the three-point check, its 1 % gate, the
 //! leave-one-out and its stopping at the gate, and the fold condition s < ½ of model/reach.rs are gone: the user's of
 //! 2026-11-21, PIPELINE_V3_FINAL §二 A.6). What stays is the runaway's check of the steps (step.rs, # The domain): a fold
@@ -237,16 +242,34 @@ pub fn middle(scene: &Scene) -> V3 {
     n.map(|x| t * x)
 }
 
-/// The light's reach at a point: per excited state e the largest first-order amplitude |V_eg| / |E_g + f − E_e +
-/// iΓ_e/2| over the ground states g and the beams `beams` takes -- V the coupling of a frequency's beams together (its
-/// field: the beams of one frequency index summed, so that beams cancelling at the point cancel), at f and its conjugate
-/// at −f; E the reference's static energies at the point (the tweezer's shift in), Γ its decay. A beam with no component
-/// at the point couples nothing there.
-pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn Fn(usize) -> bool) -> [f64; STATES] {
+/// Per state its importance at the structural points (module documentation, # The candidates), before any atom is
+/// seen: the largest over the three of its first-order excitation by the light other than the tweezer's from every
+/// ground state alike (`excitation`, p_g = 1/8); zero on the ground states. The chain the pilot's choice is made on takes
+/// the pilot's states instead (`importance`).
+pub fn amplitudes(scene: &Scene) -> [f64; STATES] {
+    let tw = scene.request.trap_beam;
+    let even = [1.0 / GROUND as f64; GROUND];
+    let mut score = [0.0_f64; STATES];
+    for point in points(scene) {
+        let reference = rs::reference(scene, &point);
+        for (s, a) in score.iter_mut().zip(excitation(scene, &reference, &point, &|l| l != tw, &even)) {
+            *s = larger(*s, a);
+        }
+    }
+    score
+}
+
+/// The first-order excitation of each excited state at a point by the light `beams` takes, from the ground populations
+/// `p`: Σ_g p_g Σ_± |V^±_eg|²/|E_g ± f − E_e + iΓ_e/2|² -- V the coupling of a frequency's beams together (its field:
+/// the beams of one frequency index summed, so that beams cancelling at the point cancel), at f and its conjugate at −f;
+/// E the reference's static energies at the point (the tweezer's shift in), Γ its decay; a beam with no component at the
+/// point couples nothing there --: the population the state would hold to the first order, the fold's leading term
+/// weighed by the ground states it takes its atoms from.
+pub fn excitation(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn Fn(usize) -> bool, p: &[f64; GROUND]) -> [f64; STATES] {
     let request = &scene.request;
     let still = &reference.still().value;
     let gamma = decay(&reference.jumps, STATES).0;
-    let mut score = [0.0_f64; STATES];
+    let mut out = [0.0_f64; STATES];
     let mut seen: Vec<&Vec<i32>> = Vec::new();
     for (l, beam) in request.beams.iter().enumerate().filter(|&(l, _)| beams(l)) {
         if seen.contains(&&beam.frequency_index) {
@@ -266,43 +289,31 @@ pub fn reach(scene: &Scene, reference: &ModelAt, point: &Components, beams: &dyn
                 for g in 0..GROUND {
                     if x[(e, g)] != C64::ZERO {
                         let away = C64::new(still[(g, g)].re + f - still[(e, e)].re, 0.5 * gamma[(e, e)].re);
-                        score[e] = larger(score[e], x[(e, g)].abs() / away.abs());
+                        out[e] += p[g] * x[(e, g)].norm_sqr() / away.norm_sqr();
                     }
                 }
             }
         }
     }
-    score
+    out
 }
 
-/// Per state its structural amplitude (module documentation, # The candidates): the largest over the structural points
-/// of the reach of the light other than the tweezer's (`reach`); zero on the ground states.
-pub fn amplitudes(scene: &Scene) -> [f64; STATES] {
-    let tw = scene.request.trap_beam;
-    let mut score = [0.0_f64; STATES];
-    for point in points(scene) {
-        let reference = rs::reference(scene, &point);
-        for (s, a) in score.iter_mut().zip(reach(scene, &reference, &point, &|l| l != tw)) {
-            *s = larger(*s, a);
-        }
-    }
-    score
-}
-
-/// The structural amplitudes `base` (the structural points', `amplitudes`) widened by the light's reach at the places
-/// `places` an atom was seen at (the pilot's states: an atom at rest there, the tweezer's light as it is), each state's
-/// the largest -- the couplings where the atoms go, a lattice's polarization where the structural points do not see it
-/// (R4: the F′ = 3 stretched states, dark to the π light at the three points, coupled by the σ light between them).
-pub fn amplitudes_over(scene: &Scene, places: &[V3], base: &[f64; STATES]) -> [f64; STATES] {
+/// Each excited state's importance on the chain (module documentation, # The candidates): the largest, over the places
+/// `places` an atom was seen at with its ground populations there (the pilot's states: an atom at rest there, the
+/// tweezer's light as it is), of its first-order excitation by the light other than the tweezer's (`excitation`). Where
+/// the atoms go and from the states they are in: a repumper resonant on F = 1 → F′ = 2 gives F′ = 2 the larger
+/// amplitude (PGC3D: 0.27 against 0.06–0.11 for F′ = 3), but the atoms are in F = 2 (90 %), whose F′ = 3 holds the
+/// excitation; a lattice's polarization reaches states between the structural points (R4's F′ = 3 stretched states).
+pub fn importance(scene: &Scene, places: &[(V3, [f64; GROUND])]) -> [f64; STATES] {
     let tw = scene.request.trap_beam;
     let zero = vec![0.0; scene.request.beams.len()];
     places
         .par_iter()
-        .map(|&r| {
-            let point = scene.components(r, &zero, 1.0);
-            reach(scene, &rs::reference(scene, &point), &point, &|l| l != tw)
+        .map(|(r, p)| {
+            let point = scene.components(*r, &zero, 1.0);
+            excitation(scene, &rs::reference(scene, &point), &point, &|l| l != tw, p)
         })
-        .reduce(|| *base, |a, b| std::array::from_fn(|s| larger(a[s], b[s])))
+        .reduce(|| [0.0; STATES], |a, b| std::array::from_fn(|s| larger(a[s], b[s])))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -401,8 +412,9 @@ impl<'a> Paths<'a> {
                     let w = &walks[j - 1];
                     form.along(w, &w.start, 0.0, length.min(w.end()), LAWSON)
                 } else {
+                    // A walk that ended before the late segment (its atom lost) reads nothing there.
                     let (w, from) = (&walks[j - 1 - n], late_from.expect("a late segment"));
-                    form.along(w, &w.start, from.min(w.end()), run.min(w.end()), LAWSON)
+                    if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), LAWSON) } else { Ok(Series::default()) }
                 }
             })
             .collect();
@@ -514,7 +526,7 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
             }
             j => {
                 let (w, from) = (&paths.walks[j - 1 - n], paths.late.as_ref().expect("a late segment").0);
-                form.along(w, &w.start, from.min(w.end()), run.min(w.end()), LAWSON)
+                if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), LAWSON) } else { Ok(Series::default()) }
             }
         })
         .collect();
@@ -783,7 +795,7 @@ pub fn parts(judged: &Judged, windows: &[(f64, f64)], response: &Response, k2: f
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub keep: Vec<usize>,
-    /// The chain the choice was made on: the structural amplitudes widened by the pilot's places (`amplitudes_over`).
+    /// The chain the choice was made on: by the importance at the pilot's states (`importance`).
     pub chain: Vec<Vec<usize>>,
     pub judged: Judged,
     pub fallback: Option<(Fallback, Judged)>,
@@ -814,6 +826,13 @@ pub fn key(request: &crate::request::Request) -> String {
     let mut r = request.clone();
     r.times_us = Vec::new();
     format!("{r:?}")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Candidates beside the chain a test asks the choice to judge and weigh for comparison, never to choose (solve.rs
+    /// `choose_on_the_pilot`): each its states.
+    pub(crate) static ALSO: std::cell::RefCell<Vec<Vec<usize>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The choices made (`key`), in the order they were made.

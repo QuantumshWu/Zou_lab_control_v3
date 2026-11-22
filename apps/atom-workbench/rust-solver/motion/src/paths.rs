@@ -1507,7 +1507,8 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             None => levels.push((level, vec![s])),
         }
     }
-    let classes = &reference[0].classes;
+    // The photon classes of the first path that reads any (a path that ended before the windows reads none).
+    let classes = &reference.iter().find(|s| !s.readings.is_empty()).unwrap_or(&reference[0]).classes;
     windows
         .iter()
         .map(|&(from, to)| {
