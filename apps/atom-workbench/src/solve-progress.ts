@@ -3,14 +3,16 @@
 // checkpoint is drawn but its numbers, and the result is drawn once, at the end (or on 停止, the last checkpoint).
 //
 // What the course knows is what the engine sends (rust-solver/motion/src/solve.rs, # Checkpoints, # Steps):
-// - a stage as each step of its pipeline begins -- the selection, the model, the scout, the pilot, every batch of the
-//   product -- and as the step's check moves to another rung (solver-types.ts `SolveStage`);
+// - a stage as each step of its pipeline begins -- the model, the scout, the pilot, the selection, every batch of the
+//   product -- and as the step's check moves to another rung (solver-types.ts `SolveStage`), in the order it runs
+//   them: a new selection after the pilot, and on a chosen model other than the all-ground one the model, the scout
+//   and the pilot again before the product; a selection kept for the scene first, at once;
 // - a checkpoint, a complete result so far, every 60 s while trajectories run and at every batch.
-// So the course is the pipeline's steps, each done, in progress or to come -- a done step with the time it took, the
-// step in progress with the time it has taken so far --, and the result; beside them what the step in progress is at
-// (the rungs of its time step, a batch's trajectories), the checkpoints so far, and a gauge of how far the run stands
-// from its targets: a batch's own (its looks' largest total over target, the stop's number), before the product the
-// last checkpoint's largest population error against the target.
+// So the course is the steps as they came, each done or in progress -- a done step with the time it took, the step in
+// progress with the time it has taken so far --, the steps still to come and the result; beside them what the step in
+// progress is at (the rungs of its time step, a batch's trajectories), the checkpoints so far, and a gauge of how far
+// the run stands from its targets: a batch's own (its looks' largest total over target, the stop's number), before the
+// product the last checkpoint's largest population error against the target.
 import type {DynamicsResult,SolveStage,SolveStep} from './solver-types.js';
 import {SEMICLASSICAL_POPULATION_TARGET,SOLVE_STEPS} from './solver-types.js';
 import {errorPercent} from './accuracy.js';
@@ -45,10 +47,10 @@ export interface CourseView {nodes:CourseNode[];gauge?:{fraction:number;words:st
 
 /** Each step's name and what it does. */
 const STEPS:Record<SolveStep,{label:string;does:string}>={
-  select:{label:'选态',does:'在中心、边缘和光镊轴上 +z_R 三点上对完整参照检查，选出显式保留的能级'},
-  model:{label:'建模型',does:'保留能级以外的按 RS 折叠，整个求解只建一次；再建初态的准备阱与初始系综'},
+  model:{label:'建模型',does:'按选定的能级折叠其余能级（还没有选定时先用全基态模型），再建初态的准备阱与初始系综'},
   scout:{label:'侦察',does:'先导各组的第一条轨迹，在第一级时间步长和它的两倍（或一半）上跑，检查步长，按代价选先导用的一级'},
-  pilot:{label:'先导',does:'先导各组的全部轨迹，在两层步长上跑，检查时间步长，读出模型误差'},
+  pilot:{label:'先导',does:'先导各组的全部轨迹，在两层步长上跑，检查时间步长，并为选态提供原子走过的路径'},
+  select:{label:'选态',does:'沿先导原子走过的路径，把各候选模型与 32 态参照比较，在误差达标的候选里选总代价最小的；同一场景只改时长或采样点时沿用之前的选择'},
   product:{label:'正式批次',does:'每批至多把轨迹数翻倍，直到布居与总温度在各分析时刻都到目标'},
 };
 
@@ -70,30 +72,49 @@ function rungWords(stages:readonly SolveStage[]):string{
   return rungs.length?`${rungs.map(t=>formatNumber(t,{digits:3})).join(' → ')} μs`:'';
 }
 
-/** The step in progress and when it began (ms after the request): the selection from the request on, before its
- * first stage is in. */
-export function currentStep(course:Course):{step:SolveStep;sinceMs:number}{
-  const last=course.stages.at(-1);if(!last)return {step:'select',sinceMs:0};
-  return {step:last.stage.step,sinceMs:course.stages.find(s=>s.stage.step===last.stage.step)!.atMs};
+/** A step of the course as it came: a run of stages of one step, from its first stage's arrival -- the first step's
+ * from the request -- to the next step's; the step again after another (a second round's model, scout and pilot) is
+ * another. Keyed by its step, the second time and on with its count. */
+interface Reached {key:string;step:SolveStep;fromMs:number;stages:SolveStage[]}
+function reached(course:Course):Reached[]{
+  const steps:Reached[]=[];
+  for(const {atMs,stage} of course.stages){
+    const last=steps.at(-1);if(last?.step===stage.step){last.stages.push(stage);continue;}
+    const before=steps.filter(s=>s.step===stage.step).length;
+    steps.push({key:before?`${stage.step}-${before+1}`:stage.step,step:stage.step,fromMs:steps.length?atMs:0,stages:[stage]});
+  }
+  return steps;
+}
+/** The steps as they came, the last in progress; before any stage is in, the first step in their order (the model)
+ * from the request on. */
+function reachedSoFar(course:Course):Reached[]{
+  const steps=reached(course),first=SOLVE_STEPS[0];
+  return steps.length?steps:[{key:first,step:first,fromMs:0,stages:[]}];
 }
 
-/** The course at `nowMs` (performance.now()). */
+/** The step in progress and when it began (ms after the request): its own run of stages, not the step's first time;
+ * the model from the request on, before any stage is in. */
+export function currentStep(course:Course):{step:SolveStep;sinceMs:number}{
+  const now=reachedSoFar(course).at(-1)!;
+  return {step:now.step,sinceMs:now.fromMs};
+}
+
+/** The course at `nowMs` (performance.now()): the steps as they came, the last in progress; then, in their order
+ * (`SOLVE_STEPS`), those after the one in progress that have not come -- the product last until it comes --; then the
+ * result. */
 export function courseView(course:Course,nowMs:number):CourseView{
-  const elapsed=nowMs-course.startedAt,{step:now}=currentStep(course),at=SOLVE_STEPS.indexOf(now);
-  // When each step began: its first stage's arrival; the selection's, the request's where its stage is not in.
-  const began=(step:SolveStep):number|undefined=>course.stages.find(s=>s.stage.step===step)?.atMs??(step==='select'?0:undefined);
-  const stagesOf=(step:SolveStep)=>course.stages.filter(s=>s.stage.step===step).map(s=>s.stage);
-  const nodes:CourseNode[]=SOLVE_STEPS.map((step,i)=>{
-    const from=began(step),to=SOLVE_STEPS.slice(i+1).map(began).find(t=>t!==undefined),words=STEPS[step],rungs=rungWords(stagesOf(step));
-    const state:CourseState=i<at?'done':i===at?'current':'pending';
-    const took=state==='done'&&from!==undefined&&to!==undefined?clockWords(to-from):state==='current'&&from!==undefined?clockWords(elapsed-from):'';
-    const detail=state==='done'?took:state==='current'?`已用 ${took}`:'';
-    const when=from===undefined||state==='pending'?'':`（开始后 ${clockWords(from)} 开始，${state==='done'?'用时':'已用'} ${took}${rungs?`；时间步长 ${rungs}`:''}）`;
-    return {key:step,label:words.label,detail,state,title:`${words.label}：${words.does}${when}`};
+  const elapsed=nowMs-course.startedAt,steps=reachedSoFar(course),current=steps.at(-1)!,now=current.step;
+  const nodes:CourseNode[]=steps.map((s,i):CourseNode=>{
+    const words=STEPS[s.step],rungs=rungWords(s.stages),done=i<steps.length-1;
+    const took=clockWords(done?steps[i+1]!.fromMs-s.fromMs:elapsed-s.fromMs);
+    const when=`（开始后 ${clockWords(s.fromMs)} 开始，${done?'用时':'已用'} ${took}${rungs?`；时间步长 ${rungs}`:''}）`;
+    return {key:s.key,label:words.label,detail:done?took:`已用 ${took}`,state:done?'done':'current',title:`${words.label}：${words.does}${when}`};
   });
+  for(const step of SOLVE_STEPS.slice(SOLVE_STEPS.indexOf(now)+1))if(!steps.some(s=>s.step===step))
+    nodes.push({key:step,label:STEPS[step].label,detail:'',state:'pending',title:`${STEPS[step].label}：${STEPS[step].does}`});
   nodes.push({key:'result',label:'结果',state:'pending',detail:'',title:'结果：布居与温度都到目标时引擎停下，最终结果一次画出；按“停止”时画最后一个检查点。'});
   // What the step in progress is at, and the checkpoints so far.
-  const stages=stagesOf(now),batch=now==='product'?stages.at(-1)?.batch:undefined,marks=course.marks,last=marks.at(-1);
+  const stages=current.stages,batch=now==='product'?stages.at(-1)?.batch:undefined,marks=course.marks,last=marks.at(-1);
   const doing=batch?`第 ${batch.number} 批：${batch.trajectories} → ${batch.want} 条轨迹 · 时间步长 ${stepWords(stages.at(-1)!.stepUs!)}`
     :now==='scout'||now==='pilot'?`${STEPS[now].label} · 时间步长 ${rungWords(stages)}`:'';
   const words=[doing,marks.length?`检查点 ${marks.length}`:'尚无检查点'].filter(Boolean).join(' · ');
