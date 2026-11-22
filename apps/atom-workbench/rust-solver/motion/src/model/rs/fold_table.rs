@@ -104,9 +104,13 @@ pub(crate) struct Piece {
     pub small_degree: usize,
     main: Vec<C64>,
     smalls: Vec<C64>,
+    /// The largest tail over its floor, the quantity of the largest main tail (`main_ranges`' order) and whether the
+    /// piece is taken at its plateau: the census's (the tests').
+    #[cfg_attr(not(test), allow(dead_code))]
     pub tail: f64,
-    /// The quantity of the largest main tail (`main_ranges`' order) and whether the piece is taken at its plateau.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub worst: usize,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub stalled: bool,
     /// Per small part its guard on the piece, A_σ: the largest ‖Ŝ_σ‖∞ (off the clusters' blocks) over the clusters'
     /// least gap at the piece's samples.
@@ -125,7 +129,8 @@ pub(crate) struct BlockTable {
     /// B's relative floor (the guard's bound on the second order).
     pub relative: f64,
     /// A node's counted work off the table (its active small parts', # Where it pays) and made at the node (complex
-    /// multiply-adds).
+    /// multiply-adds): the census's (the tests').
+    #[cfg_attr(not(test), allow(dead_code))]
     pub work: (f64, f64),
 }
 
@@ -906,7 +911,8 @@ impl Table {
         out
     }
 
-    /// The tables' memory (bytes of coefficients).
+    /// The tables' memory (bytes of coefficients): the census's (the tests').
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> usize {
         self.blocks.iter().flatten().map(|t| t.pieces.iter().map(|p| (p.main.len() + p.smalls.len()) * 16).sum::<usize>()).sum()
     }

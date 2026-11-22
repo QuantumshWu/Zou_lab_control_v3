@@ -394,6 +394,11 @@ fn p4table_ab_step() {
     let set = |m: usize| match switch.as_str() {
         "count" => super::super::SUMMED.with(|x| x.set(m == 1)),
         "rule" => crate::special::STALLED.with(|x| x.set(m == 1)),
+        "all" => {
+            super::super::SUMMED.with(|x| x.set(m == 1));
+            crate::special::STALLED.with(|x| x.set(m == 1));
+            crate::model::rs::fold::table::MODE.with(|x| x.set(m as u8));
+        }
         _ => crate::model::rs::fold::table::MODE.with(|x| x.set(m as u8)),
     };
     for (name, request) in scenes() {
@@ -456,6 +461,7 @@ fn p4table_ab_step() {
             let (new, old) = match switch.as_str() {
                 "count" => ("the count by the bound", "by the tail summed"),
                 "rule" => ("the rule by Newton's own stop", "until the step stops shrinking"),
+                "all" => ("now (the tables, the count's bound, the rule's stop)", "as at 24ce4deb"),
                 _ => ("off the tables", "decomposed"),
             };
             eprintln!("P4T-ABSTEP {name} {label} tau {tau}: a step {new} {:.1} µs (counted {:.4e}), {old} {:.1} µs (counted {:.4e}), ratio {:.3} (mean over {taken} states, each the least of {rounds}×{repeat}); a step's ends apart r {:.1} κ {:.1} ψ {:.1} ε of the largest", time[0] / k, counted[0] / k, time[1] / k, counted[1] / k, time[0] / time[1], apart[0], apart[1], apart[2]);
