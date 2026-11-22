@@ -52,44 +52,30 @@ fn select_the_middle_point_leaves_a_node() {
     assert!((0..3).all(|i| (r[i] - z * tweezer.direction[i]).abs() <= 8.0 * f64::EPSILON * z), "R1_TWEEZER: {r:?} for z_R {z} along {:?}", tweezer.direction);
 }
 
-/// A window of the given drive and rate errors, every row's error `row`.
-fn window(from: f64, to: f64, power: f64, rate: f64, row: f64) -> Window {
-    let m = |v: f64| Mean { value: v, error: 0.0 };
-    Window { from, to, paths: 4, rows: vec![m(row); STATES], power: m(power), rates: vec![([0, 0], m(rate), 1.0)], ..Window::default() }
+/// A window of every row's error `row` (no spread over the paths).
+fn window(from: f64, to: f64, row: f64) -> Window {
+    Window { from, to, paths: 4, rows: vec![Mean { value: row, error: 0.0 }; STATES], ..Window::default() }
 }
 
-/// The feedback bound by hand (module documentation, # The feedback bound): one window over the run, the drive D =
-/// 3·power/(ħ/m) + k²·|δλ| constant, T's response R(τ) = R₀ e^{−τ/λ} on a fine grid, ⟨κ²⟩ given: the bound at t is
-/// D R₀ λ (1 − e^{−t/λ})/⟨κ²⟩ to the trapezoid's error; and for k_BT it is PATHGAP's 2·A_F·Λ (A_F = ⅓Σ⟨|δF||v|⟩, here
-/// `power`) plus ⅔(ħ/m)k²|δλ|Λ, Λ = ∫R/R(0), where R₀ = ⅔(ħ/m)⟨κ²⟩ (in rad/µs: T in its rate units). The direct part
-/// at a time is its window's rows' worst, and the shown account adds the rows' bound to it.
+/// The direct part by hand (module documentation, # The direct part): the start's windows to L = 100 µs, a late segment
+/// over [900, 1000] µs; at a time in the start's windows its own window's worst row, past L the larger of the start's last
+/// and the late's last, past the late segment's start the late's last; the calibration beside it; none at t = 0.
 #[test]
-fn select_the_feedback_bound_by_hand() {
-    let (hm, k2, kappa2, lambda) = (7.3e-4, 64.0, 2.0e3, 30.0);
-    let (power, rate) = (4e-3, 2e-3);
-    let times: Vec<f64> = (0..=4000).map(|k| 0.25 * k as f64).collect();
-    let r0 = 2.0 / 3.0 * hm * kappa2;
-    let response = Response {
-        loss: vec![0.0; times.len()],
-        rows: times.iter().map(|&t| [0.01 * (1.0 - (-t / lambda).exp()); STATES]).collect(),
-        temperature: times.iter().map(|&t| r0 * (-t / lambda).exp()).collect(),
-        errors: vec![[0.0; STATES + 2]; 4001],
-        times,
-        kappa2,
-        last_interval: 1e-30,
+fn select_the_direct_part_by_hand() {
+    let judged = Judged {
+        keep: vec![],
+        windows: vec![window(0.0, 10.0, 4e-3), window(10.0, 100.0, 1e-3)],
+        late: vec![window(900.0, 910.0, 9e-3), window(910.0, 1000.0, 2e-3)],
+        calibration: Calibration { rows: 1e-5, rate: 0.0 },
+        region: Region::NONE,
+        seconds: 0.0,
+        products: 0,
     };
-    let judged = Judged { keep: vec![], windows: vec![window(0.0, 1000.0, power, rate, 1e-3)], late: vec![], calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 };
-    let windows = vec![(0.0, 1000.0)];
-    for t in [10.0, 100.0, 900.0] {
-        let p = parts(&judged, &windows, &response, k2, hm, t);
-        let d = 3.0 * power / hm + k2 * rate;
-        let expected = d * r0 * lambda * (1.0 - (-t / lambda).exp()) / kappa2;
-        assert!((p.temperature - expected).abs() <= 1e-4 * expected, "t {t}: {} against {expected}", p.temperature);
-        let pathgap = 2.0 * power * response.memory(t) * r0 / (2.0 / 3.0 * hm * kappa2) + 2.0 / 3.0 * hm * k2 * rate * response.memory(t);
-        assert!((p.temperature - pathgap).abs() <= 1e-4 * pathgap, "t {t}: {} against PATHGAP's {pathgap}", p.temperature);
-        assert!((p.direct - 1e-3).abs() <= 1e-15 && p.shown > p.direct, "t {t}: the direct part {} under the shown {}", p.direct, p.shown);
-    }
-    assert!(response.collapsed(), "R at the end above its interval: read");
+    let windows = vec![(0.0, 10.0), (10.0, 100.0)];
+    let at = |t: f64| direct_at(&judged, &windows, t);
+    assert_eq!(at(0.0), 0.0);
+    assert!((at(5.0) - 4.01e-3).abs() < 1e-15 && (at(50.0) - 1.01e-3).abs() < 1e-15, "{} {}", at(5.0), at(50.0));
+    assert!((at(500.0) - 2.01e-3).abs() < 1e-15 && (at(950.0) - 2.01e-3).abs() < 1e-15, "{} {}", at(500.0), at(950.0));
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -229,18 +215,12 @@ fn select_on_the_scenes() {
         }
         if let Some(dir) = &out {
             let times = &choice.response.times;
-            let parts: Vec<serde_json::Value> = times
-                .iter()
-                .map(|&t| {
-                    let p = choice.at(t);
-                    serde_json::json!({"t": t, "direct": p.direct, "feedback": p.feedback, "shown": p.shown, "temperature_uk": p.temperature})
-                })
-                .collect();
+            let parts: Vec<serde_json::Value> = times.iter().map(|&t| serde_json::json!({"t": t, "direct": choice.at(t)})).collect();
             let doc = serde_json::json!({
                 "scene": name, "keep": choice.keep, "labels": choice.keep.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>(),
                 "memory": choice.memory, "length": choice.length, "lambda_t": choice.response.memory(*request.times_us.last().unwrap()),
                 "collapsed": choice.response.collapsed(), "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
-                "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate, choice.judged.calibration.power],
+                "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate],
                 "response": {"times": choice.response.times, "temperature": choice.response.temperature, "loss": choice.response.loss, "kappa2": choice.response.kappa2,
                     "rows": choice.response.rows.iter().map(|r| r.to_vec()).collect::<Vec<_>>(), "errors": choice.response.errors.iter().map(|r| r.to_vec()).collect::<Vec<_>>()},
                 "parts": parts, "report": choice.report,

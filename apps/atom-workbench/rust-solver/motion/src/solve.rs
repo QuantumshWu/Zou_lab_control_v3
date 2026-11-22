@@ -420,9 +420,10 @@
 //! # The model (SPEC §5.2)
 //! An attempt's model is one object, made before its trajectories run (RUSTPLAN §3.2; model/selected.rs `Selected`),
 //! and decides nothing during it. What the solve books of the model is its choice's account (# The selection; select.rs
-//! `Choice::at`), at every analysis time: on what is shown the path-measured direct part and the feedback bound of the
-//! rows and the loss, on T the feedback bound or the pairs' measurement (relative to the pilot's T there); beside them
-//! the region left out, read at the states (`booked_at`, # Where the atoms went), and the bounds of `bounded`. An
+//! `Choice::at`), at every analysis time: on what is shown the path-measured direct part, T and the loss none of their
+//! own -- the internal error's feedback through the motion is not booked, the user's of 2026-11-22, and the run says so
+//! once (`NO_FEEDBACK`) --; beside them the region left out, read at the states (`booked_at`, # Where the atoms went),
+//! and the bounds of `bounded`. An
 //! attempt with no choice -- G's before it chooses, a test's model of its own -- books none and says so (the ledger's
 //! flag): its error is not measured.
 //!
@@ -433,8 +434,8 @@
 //!    τ_mem the full-ground model's memory time, the longest over their starts; the 32-state reference along them, on
 //!    the calibration's piece and along the scans of the trap's axes (select.rs `Paths`).
 //! 2. The response: G's own atoms -- the pilot's trajectory numbers, their initial momenta scaled by 1 ± η, the same
-//!    random numbers -- run through the plan, and every reading's R_O = (O₊ − O₋)/2η at the analysis times (`response`):
-//!    the feedback bound's weights (select.rs, # The feedback bound).
+//!    random numbers -- run through the plan, T's R_T = (T₊ − T₋)/2η at the analysis times (`response`): the flag of T's
+//!    memory not shorter than the run alone (select.rs `Response::collapsed`).
 //! 3. The candidates in the chain's order, G first: each one's model made, its step's work a µs at the pilot's states
 //!    and step (`priced`), its judgment along the paths (select.rs `judge`), its parts at the analysis times and the
 //!    looks they leave (`looks`). A candidate whose looks that the exact model's would meet are met by its account is
@@ -618,7 +619,9 @@ const CHECKPOINT: Duration = Duration::from_secs(60);
 /// What the engine did with each part of the model's error (the ledger's items' `action`, shown by the app; module
 /// documentation, # The model, # The selection): the paths' direct part, the feedback bound, T in pairs, the region.
 const MODEL_DIRECT: &str = "沿先导的原子路径，候选模型与 32 态模型推进内态密度矩阵、比较显示的各行（按记忆时间分窗的路径平均 + 2 倍路径间统计误差），另加路径格式对收敛格式的校准";
-const MODEL_FEEDBACK: &str = "力差与各类散射率差沿路径的驱动，乘只跑模型的动量缩放响应（同一个恒等式给布居、丢失和温度），对时间卷积得到上界";
+/// The run's one word on the feedback through the motion (module documentation, # The model; select.rs, # The feedback
+/// through the motion: zero): the ledger's item of no estimate, read by the app's error budget list.
+const NO_FEEDBACK: [&str; 2] = ["模型误差：内态误差经运动对读数的影响", "未计：按用户 2026-11-22 的决定取 0（更严格的上界收不紧，FOLDTEMP 第三轮）；温度与丢失没有模型误差项"];
 const MODEL_REGION: &str = "沿准备阱三条主轴的扫描在路径没到过的地方标出误差大于目标四分之一的区域；轨迹在其中的份额按该处误差（布居）与束缚集里的移动界（温度）记账";
 
 /// The model's accounts a state's error is booked by (module documentation, # Where the atoms went): the region left
@@ -2312,17 +2315,14 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
             context.ledger.item(label, most, MODEL_REGION);
         }
         if let Some(c) = &choice {
-            let parts: Vec<crate::select::Parts> = context.at.iter().map(|&t| c.at(t)).collect();
-            let largest = |f: &dyn Fn(usize) -> f64| (1..n).filter(|&k| held[k] != 0.).map(f).fold(0., crate::linalg::larger);
-            context.ledger.item("模型误差：路径实测的直接部分", largest(&|k| parts[k].direct), MODEL_DIRECT);
-            context.ledger.item("模型误差：运动反馈上界（布居与丢失）", largest(&|k| parts[k].feedback), MODEL_FEEDBACK);
-            let relative = |k: usize, uk: f64| read.estimates[k].motion.map_or(f64::INFINITY, |m| uk / m.temperature_total) * held[k];
-            let (label, action) = ("模型误差：运动反馈上界（温度）", MODEL_FEEDBACK);
-            context.ledger.item(label, largest(&|k| relative(k, parts[k].temperature)), action);
+            let direct = (1..n).filter(|&k| held[k] != 0.).map(|k| c.at(context.at[k])).fold(0., crate::linalg::larger);
+            context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
             for flag in model_flags(c, &read, request) {
                 context.ledger.flag(flag);
             }
         }
+        // The feedback through the motion, not booked: said once a run, as an item of no estimate.
+        context.ledger.items.push(crate::ledger::Item { label: NO_FEEDBACK[0].into(), estimate: 0., action: NO_FEEDBACK[1].into() });
     }
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
@@ -2386,14 +2386,15 @@ fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales, choice: Option<
     let region = choice.map_or(Region::NONE, |c| c.judged.region);
     let sampled = sampled(run, pilot, &region);
     let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
-    let model = model_of(&|t| choice.map_or(crate::select::Parts::default(), |c| c.at(t)), &sampled, &estimates, times, optical, escape);
+    let model = model_of(&|t| choice.map_or(0., |c| c.at(t)), &sampled, &estimates, times, optical, escape);
     PilotRead { estimates, counts, sampled, model }
 }
 
-/// The model's error per time (`pilot_reads`) of its parts `parts(t)`, the region's at the states `sampled`, the
-/// optical sector's booking `optical` on T: on what is shown the parts' and the region's, at most one; on T the parts'
-/// (µK) over the time's T, the region's share moved, the optical booking -- none at t = 0, the request's state.
-fn model_of(parts: &dyn Fn(f64) -> crate::select::Parts, sampled: &Sampled, estimates: &[Estimate], times: &[f64], optical: f64, escape: &Escape) -> Vec<[f64; 2]> {
+/// The model's error per time (`pilot_reads`) of its direct part `direct(t)`, the region's at the states `sampled`,
+/// the optical sector's booking `optical` on T: on what is shown the direct part and the region's, at most one; on T
+/// the region's share moved and the optical booking -- T has no model error of its own (select.rs, # The feedback
+/// through the motion: zero) --; none at t = 0, the request's state.
+fn model_of(direct: &dyn Fn(f64) -> f64, sampled: &Sampled, estimates: &[Estimate], times: &[f64], optical: f64, escape: &Escape) -> Vec<[f64; 2]> {
     let region = sampled.measured().means(estimates.len(), estimates);
     estimates
         .iter()
@@ -2402,10 +2403,7 @@ fn model_of(parts: &dyn Fn(f64) -> crate::select::Parts, sampled: &Sampled, esti
             if k == 0 {
                 return [0.; 2];
             }
-            let p = parts(times[k]);
-            let t = e.motion.map_or(f64::NAN, |m| m.temperature_total);
-            let relative = if p.temperature == 0. { 0. } else if t > 0. { p.temperature / t } else { f64::INFINITY };
-            [probability_error(p.shown + region[k][0][0]), relative + e.moved(region[k][0][1], escape) + optical]
+            [probability_error(direct(times[k]) + region[k][0][0]), e.moved(region[k][0][1], escape) + optical]
         })
         .collect()
 }
@@ -2517,7 +2515,7 @@ struct Weighed {
 /// complete candidate of least W, its region scanned.
 #[allow(clippy::too_many_arguments)]
 fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Choice, String> {
-    use crate::select::{judge, parts, Paths, WALKS};
+    use crate::select::{direct_at, judge, Paths, WALKS};
     let clock = Instant::now();
     let run = setting.run;
     let (trap, ensemble) = (setting.trap, setting.ensemble);
@@ -2577,7 +2575,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         ),
     );
     // 3. The candidates.
-    let k2 = light.beams.iter().map(|b| b.wave_number).fold(0., crate::linalg::larger).powi(2);
     let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
     let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), context.step);
     let need0 = most_needed(&base);
@@ -2599,7 +2596,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let optical = crate::ledger::optical(&mut Ledger::default(), read.counts.optical);
     let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> {
         let sampled = sampled(run, pilot, &j.region);
-        model_of(&|t| parts(j, &paths.windows, &response, k2, hm, t), &sampled, &read.estimates, times, optical, &context.fixed.escape)
+        model_of(&|t| direct_at(j, &paths.windows, t), &sampled, &read.estimates, times, optical, &context.fixed.escape)
     };
     let mut models: Vec<Option<Selected>> = (0..chain.len()).map(|_| None).collect();
     let mut weighed: Vec<Weighed> = vec![];
@@ -2736,25 +2733,18 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     }
     // The report: every candidate weighed with its parts at their largest over the times.
     for w in &weighed {
-        let at: Vec<crate::select::Parts> = times
-            .iter()
-            .map(|&t| parts(&w.judged, &paths.windows, &response, k2, hm, t))
-            .collect();
-        let most = |f: &dyn Fn(&crate::select::Parts) -> f64| at.iter().map(f).fold(0., crate::linalg::larger);
-        let of_allowance = |f: &dyn Fn(&crate::select::Parts) -> f64| (1..times.len()).map(|k| read.estimates[k].motion.map_or(f64::NAN, |m| f(&at[k]) / (m.temperature_total * read.estimates[k].temperature_target))).fold(0., crate::linalg::larger);
+        let direct = times.iter().map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
+        let region = (1..times.len()).map(|k| w.model[k][0] - direct_at(&w.judged, &paths.windows, times[k])).fold(0., crate::linalg::larger);
         noted(
             &mut report,
             format!(
-                "P{}{}：直接 {:.2e}（校准 {:.1e}）、反馈 {:.2e}、显示量 A {:.2e}；温度上界 {:.2} 个允许量；驱动（力 / 率，各窗最大）{:.3e} / {:.3e} /µm²/µs；need {:.0}、W {}；{}",
+                "P{}{}：直接 {:.2e}（校准 {:.1e}，率 {:.1e}）、少去区域 {:.1e}；need {:.0}、W {}；{}",
                 w.judged.keep.len(),
                 if w.place == weighed[chosen].place { "（选中）" } else { "" },
-                most(&|p| p.direct),
+                direct,
                 w.judged.calibration.rows,
-                most(&|p| p.feedback),
-                most(&|p| p.shown),
-                of_allowance(&|p| p.temperature),
-                w.judged.windows.iter().map(|x| crate::select::drive(x, &w.judged.calibration, hm, 0.)).fold(0., crate::linalg::larger),
-                w.judged.windows.iter().map(|x| crate::select::drive(x, &crate::select::Calibration::default(), hm, k2) - crate::select::drive(x, &crate::select::Calibration::default(), hm, 0.)).fold(0., crate::linalg::larger),
+                w.judged.calibration.rate,
+                region,
                 w.need,
                 w.work.map_or("—".to_string(), |x| format!("{x:.3e}")),
                 w.fate
@@ -2763,7 +2753,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     }
     noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
     let w = weighed.swap_remove(chosen);
-    Ok(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, response, windows: paths.windows.clone(), k2, hbar_over_mass: hm, memory, length: paths.length, report })
+    Ok(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, response, windows: paths.windows.clone(), memory, length: paths.length, report })
 }
 
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The

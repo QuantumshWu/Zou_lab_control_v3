@@ -1,7 +1,6 @@
 //! The selection of P (PIPELINE_V3_FINAL §二 A.3, A.5–A.6, B.7–B.11, C.13–C.15): the candidates by structure, each
-//! judged by what it does to the run's readings -- along the atoms' own paths against the 32-state model (paths.rs), its
-//! feedback through the motion bounded by the identity below --, and the candidate of least total work chosen among
-//! those whose model error A leaves the targets room.
+//! judged by what it does to the run's readings along the atoms' own paths against the 32-state model (paths.rs), and
+//! the candidate of least total work chosen among those whose model error A leaves the targets room.
 //! The trajectories' parts (the pilot the paths come from, the model-only scaling response, the work) are the
 //! solve's (solve.rs, # The selection); what is here is the model's side and the accounts.
 //!
@@ -33,10 +32,9 @@
 //! differs with the place by up to 2.4 times) -- the start's transient and the internal state's forgetting of it --, and,
 //! where the run is longer than 2L, again over its last L from the walk's own start state (`Paths::late_from`): its last
 //! window reads the model where the atoms are late in the run, which the start's windows cannot (the motion's own
-//! memory, Λ_T, is the longer: R4's start windows' drive is the transient's, its late one the heated atoms'). The scheme's own error on the fold's error is read once per candidate against the
-//! converged `Scheme::sparse` on the first path's first `CALIBRATION` µs (`Calibration`) and booked: Lawson's force
-//! errs high by 1.2–5 times on the scenes measured (P1 R2.1), so its drive bounds the converged one's from above, and
-//! the difference is booked beside it.
+//! memory is the longer: R4's atoms heat through the run). The scheme's own error on the fold's error is read once per
+//! candidate against the converged `Scheme::sparse` on the first path's first `CALIBRATION` µs (`Calibration`), and
+//! the rows' booked beside the direct part.
 //!
 //! The reference is the 32-state model itself (B.8), not a whole-level base: under Lawson its path costs 10–20 % more
 //! than the base's (P1 R2.3), and with it nothing remains of a base's own error to check request by request.
@@ -47,26 +45,14 @@
 //! the larger of the start's last window's and the late segment's last window's, and past the late segment's start the
 //! latter's.
 //!
-//! # The feedback bound
-//! The model's error moves the atoms, and where they go moves every reading. For any reading O -- a displayed row, the
-//! loss, k_BT -- the Duhamel identity on the motion's Markov projection (FOLDTEMP §R2.2) gives
-//!   δO(t) = ∫₀ᵗ μ^R_s[δF̄·∇_κh_O + Σ_c δλ̄_c E_c(h_O(κ + Δκ) − h_O(κ))] ds,
-//! h_O(s, r, κ) the model's backward function of O at t. The scaling response reads h_O's gradient: the momenta of the
-//! model's own atoms scaled by 1 ± η at a time, the same random numbers, the reading's change R_O(τ) = dO/dη a time τ
-//! later is Σ_a⟨κ_a ∂_a h_O⟩ (`Response`). Taking ∂_a h_O = c_O(τ) κ_a (the measurement's ansatz: the user's approval of
-//! 2026-11-22, "Λ 用只跑模型的动量缩放响应读出"), c_O = R_O/⟨κ²⟩ with ⟨κ²⟩ = Σ_a⟨κ_a²⟩ at the kick; the jumps' first
-//! moment, the scattered light's mean momentum, is the force's own part (the readout's absorbed momentum, paths.rs
-//! # The readings), so the jump term keeps its second moment, ½ c_O Σ_a⟨Δκ_a²⟩ ≤ c_O k², k the light's largest wave
-//! number (an absorbed and an emitted photon). So
-//!   |δO(t)| ≤ ∫₀ᵗ D(s) |R_O(t − s)| ds / ⟨κ²⟩,   D = Σ_a⟨|δF_a||κ_a|⟩ + k² Σ_c |δλ_c|,
-//! the drive D the path's (`Window::power` = ⅓Σ_a⟨|δF_a||v_a|⟩, the rates' differences by photon class, both over tr ρ_P
-//! as the trajectories take them), window by window in s, exactly for a drive constant in each (`feedback`): the
-//! start's windows to L, then the mean of the start's last and the late segment's last to the late segment's start,
-//! then the late segment's last (where there is no late segment, the start's last). For O = k_BT, R(0) = ⅔(ħ/m)⟨κ²⟩ and the bound is
-//! PATHGAP's 2 A_F Λ with Λ = ∫ R_T/R_T(0), its recoil term ⅔(ħ/m) k² Σ|δλ_c| Λ (PATHGAP wrote twice this). The rows and
-//! the loss take the same identity with their own responses: one bound for every reading (BRIEF_P3_SELECT item 4).
-//! What is not strict: the ansatz (a mean weight, not the supremum, FOLDTEMP), the drive taken on the histories the paths
-//! saw (not the histories the error itself made), and the response's noise, which |R̄| takes up.
+//! # The feedback through the motion: zero
+//! The model's internal error moves the atoms, and where they go moves every reading. Its effect is not booked: the
+//! user's of 2026-11-22, "更严格的上界，尝试解决这个问题，如果确实解决不了，那么取消掉反馈这块，直接认为反馈这点等于0" --
+//! the strict bound by the Duhamel identity and the model-only momentum-scaling response (P3-SELECT's first rounds)
+//! read 5–200 times PAIR's truth on PGC3D and R4 and kept every scene off its full-ground model, and FOLDTEMP's third
+//! round found no tighter bound to be had. The temperature and the loss have no model error; the run says so once (the
+//! ledger's item, solve.rs `NO_FEEDBACK`). The scaling response is kept for one flag alone, T's memory not shorter than
+//! the run (`Response::collapsed`, solve.rs `response`).
 //!
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
@@ -83,7 +69,7 @@ use crate::field::Light;
 use crate::linalg::{larger, symmetric3_eigen, C64, Mat, V3};
 use crate::model::rs::{self, decay, ModelAt};
 use crate::model::selected::Selected;
-use crate::paths::{self, Form, Mean, Scheme, Series, Walk, Window};
+use crate::paths::{self, Form, Scheme, Series, Walk, Window};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Components, Scene};
 use crate::step::Dynamics;
@@ -437,22 +423,12 @@ impl<'a> Paths<'a> {
 }
 
 /// The scheme's error on the fold's error (module documentation, # The paths): on the calibration's piece the largest
-/// change, between `LAWSON` and the converged `Scheme::sparse`, of a row's difference to the reference and of the total
-/// rate's relative difference -- booked beside the direct part --, and the converged scheme's drive (⅓Σ_a|δF_a||v_a|, its
-/// mean) over Lawson's, at least one: the factor Lawson's drive is taken at (Lawson's force errs high where the pieces
-/// freeze H, P1-PATHS R2.1, so mostly one).
-#[derive(Clone, Copy, Debug)]
+/// change, between `LAWSON` and the converged `Scheme::sparse`, of a row's difference to the reference -- booked beside
+/// the direct part -- and of the total rate's relative difference (said).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Calibration {
     pub rows: f64,
     pub rate: f64,
-    pub power: f64,
-}
-
-impl Default for Calibration {
-    /// No scheme error: the rows' and the rate's none, the drive's factor one.
-    fn default() -> Calibration {
-        Calibration { rows: 0.0, rate: 0.0, power: 1.0 }
-    }
 }
 
 /// The region left out (module documentation, # The region left out): {s ≤ `intensity`} where a scan found a row's
@@ -534,7 +510,7 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     // The calibration: the converged scheme's difference to the reference against Lawson's, on the same piece -- the
     // first walk's own Lawson series there (the same scheme from the same start), the candidate's and the reference's.
     let cut = |s: &Series| Series { readings: s.readings.iter().filter(|r| r.t <= piece).cloned().collect(), ..Series::default() };
-    let calibration = calibrate(&cut(&series[0]), &cut(&paths.series[0]), &sparse, calibrated, hm);
+    let calibration = calibrate(&cut(&series[0]), &cut(&paths.series[0]), &sparse, calibrated);
     let products = series.iter().chain(&late_series).chain([&sparse]).map(|s| s.counts.products).sum();
     Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
 }
@@ -572,10 +548,9 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
 
 /// The calibration (`Calibration`) of a candidate's Lawson series `lawson` and the reference's `reference` against their
 /// converged series `sparse` and `converged` on the same piece, read at the times both read (the knots).
-fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &Series, hm: f64) -> Calibration {
+fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &Series) -> Calibration {
     let mut c = Calibration::default();
     let at = |s: &Series, t: f64| s.readings.iter().find(|r| r.t == t).cloned();
-    let (mut power_l, mut power_s, mut count) = (0.0, 0.0, 0.0);
     for x in &lawson.readings {
         let (Some(y), Some(u), Some(v)) = (at(reference, x.t), at(sparse, x.t), at(converged, x.t)) else { continue };
         let (y, u, v) = (&y, &u, &v);
@@ -584,14 +559,6 @@ fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &S
         }
         let total = |r: &paths::Reading| r.rates.iter().sum::<f64>();
         c.rate = larger(c.rate, ((total(x) / total(y) - 1.0) - (total(u) / total(v) - 1.0)).abs());
-        for a in 0..3 {
-            power_l += (x.force[a] - y.force[a]).abs() * (hm * y.kappa[a]).abs() / 3.0;
-            power_s += (u.force[a] - v.force[a]).abs() * (hm * v.kappa[a]).abs() / 3.0;
-        }
-        count += 1.0;
-    }
-    if count > 0.0 && power_l > 0.0 {
-        c.power = larger(1.0, power_s / power_l);
     }
     c
 }
@@ -599,7 +566,7 @@ fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &S
 // ---------------------------------------------------------------------------------------------------------------------
 // The accounts.
 
-/// The model-only scaling response (module documentation, # The feedback bound): at the times `times` (µs, from t = 0)
+/// The model-only scaling response (module documentation, # The feedback through the motion: zero): at the times `times` (µs, from t = 0)
 /// per reading its R_O = (O₊ − O₋)/2η of the model's own atoms with their initial momenta scaled by 1 ± η -- the loss,
 /// each row as shown, the total T (µK) --, the group mean; ⟨κ²⟩ = Σ_a⟨κ_a²⟩ at the kick; and T's response's own
 /// statistical interval at the last time (whether it is still read there: the memory not shorter than the run).
@@ -666,90 +633,33 @@ impl Response {
     }
 }
 
-/// A candidate's model error at a time, by parts (module documentation): on what is shown the direct part (the rows'
-/// worst, with the scheme's calibration) and the feedback bound (the rows' with their direct part, the loss's), on T
-/// (µK) the feedback bound.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Parts {
-    pub direct: f64,
-    pub feedback: f64,
-    pub shown: f64,
-    pub temperature: f64,
-}
-
-/// The feedback bound at the time t of the windows' drives `drives` (1/µm²/µs, one a window of `windows`, the last's past
-/// its end) and one reading's response `r` (module documentation, # The feedback bound): ∫₀ᵗ D(s)|R(t − s)| ds/⟨κ²⟩,
-/// window by window exactly, D constant there: D_w [Λ(t − a) − Λ(t − b)] over (a, b] ∩ (0, t], Λ(x) = ∫₀ˣ|R|
-/// (`Response::integral`).
-fn feedback(response: &Response, windows: &[(f64, f64)], drives: &[f64], r: &dyn Fn(usize) -> f64, t: f64) -> f64 {
-    let lambda = |x: f64| response.integral(r, x);
-    let last = windows.len() - 1;
-    let mut sum = 0.0;
-    for (w, &(a, b)) in windows.iter().enumerate() {
-        if a >= t {
-            break;
-        }
-        let b = if w == last { t } else { b.min(t) };
-        sum += drives[w] * (lambda(t - a) - lambda(t - b));
-    }
-    sum / response.kappa2
-}
-
-/// The drive D (1/µm²/µs) of a window (module documentation, # The feedback bound): Σ_a⟨|δF_a||κ_a|⟩ = 3·power/(ħ/m)
-/// and k² Σ_c |δλ_c|, each at its mean + z·se over the paths, with the calibration's drive beside it.
-pub fn drive(w: &Window, calibration: &Calibration, hbar_over_mass: f64, k2: f64) -> f64 {
-    let up = |m: &Mean| m.value.abs() + CONFIDENCE * m.error.abs();
-    let force = 3.0 * up(&w.power) * calibration.power / hbar_over_mass;
-    let rates: f64 = w.rates.iter().map(|(_, m, _)| up(m)).sum();
-    force + k2 * rates
-}
-
-/// The direct part of a window: per row |mean| + z·se, the largest.
+/// The direct part of a window: per row |mean| + z·se.
 fn direct(w: &Window) -> Vec<f64> {
     w.rows.iter().map(|m| m.value.abs() + CONFIDENCE * m.error.abs()).collect()
 }
 
-/// A candidate's error at the time t (`Parts`; module documentation): its windows (the time's, `paths::window_of`), the
-/// response, and k² (1/µm², the light's largest wave number's square).
-pub fn parts(judged: &Judged, windows: &[(f64, f64)], response: &Response, k2: f64, hbar_over_mass: f64, t: f64) -> Parts {
+/// A candidate's direct error at the time t (module documentation, # The direct part): the largest row's |mean| + z·se
+/// of the time's window (`paths::window_of` on the start's windows `windows`), past L the larger of the start's last
+/// window's and the late segment's last window's, past the late segment's start the latter's; the scheme's calibration
+/// beside it. None at t = 0, where every model starts in the same state.
+pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> f64 {
     if t <= 0.0 || judged.windows.is_empty() {
-        return Parts::default();
+        return 0.0;
     }
-    // The drive in s (module documentation, # The paths): the start's windows to L; past it, where the late segment
-    // stands, the mean of the start's last window's and the late segment's last window's to the late segment's start,
-    // the late's last from there; else the start's last.
-    let drive_of = |w: &Window| drive(w, &judged.calibration, hbar_over_mass, k2);
-    let mut bounds = windows.to_vec();
-    let mut drives: Vec<f64> = judged.windows.iter().map(drive_of).collect();
     let length = windows.last().map_or(0.0, |w| w.1);
-    let late = judged.late.last().map(|w| (w.from - (w.to - w.from).max(0.0), w));
-    let late_from = judged.late.first().map(|w| w.from);
-    if let (Some(from), Some(last), Some((_, late_last))) = (late_from, judged.windows.last(), late) {
-        let (early, end) = (drive_of(last), drive_of(late_last));
-        if from > length {
-            bounds.push((length, from));
-            drives.push(0.5 * (early + end));
-        }
-        bounds.push((larger(from, length), f64::INFINITY));
-        drives.push(end);
-    }
-    let own = match (late_from, judged.windows.last(), late) {
-        (Some(from), Some(last), Some((_, late_last))) if t > length => {
+    let own = match (judged.late.first().map(|w| w.from), judged.windows.last(), judged.late.last()) {
+        (Some(from), Some(last), Some(late_last)) if t > length => {
             let (a, b) = (direct(last), direct(late_last));
             if t > from { b } else { a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect() }
         }
         _ => direct(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
     };
-    let worst = own.iter().copied().fold(0.0, larger) + judged.calibration.rows;
-    let rows = (0..STATES).map(|s| own[s] + feedback(response, &bounds, &drives, &|k| response.size(1 + s, k), t)).fold(0.0, larger) + judged.calibration.rows;
-    let loss_bound = feedback(response, &bounds, &drives, &|k| response.size(0, k), t);
-    let temperature_bound = feedback(response, &bounds, &drives, &|k| response.size(1 + STATES, k), t);
-    Parts { direct: worst, feedback: larger(rows - worst, loss_bound), shown: larger(rows, loss_bound), temperature: temperature_bound }
+    own.iter().copied().fold(0.0, larger) + judged.calibration.rows
 }
 
-/// What the choice made of the chain (solve.rs, # The selection): P, its judgment, the response, the paths' windows
-/// and k², and the report's lines -- every candidate judged with its
-/// parts, its cost and why it was or was not chosen, the stages' times.
+/// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the response (its flag
+/// alone), the paths' windows, the memory time and L, and the report's lines -- every candidate judged with its direct
+/// part, its cost and why it was or was not chosen, the stages' times.
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub keep: Vec<usize>,
@@ -758,17 +668,16 @@ pub struct Choice {
     pub judged: Judged,
     pub response: Response,
     pub windows: Vec<(f64, f64)>,
-    pub k2: f64,
-    pub hbar_over_mass: f64,
     pub memory: f64,
     pub length: f64,
     pub report: Vec<String>,
 }
 
 impl Choice {
-    /// P's error at the time t (`parts`).
-    pub fn at(&self, t: f64) -> Parts {
-        parts(&self.judged, &self.windows, &self.response, self.k2, self.hbar_over_mass, t)
+    /// P's direct error at the time t (`direct_at`): what is shown; T and the loss have none (module documentation, # The
+    /// feedback through the motion: zero).
+    pub fn at(&self, t: f64) -> f64 {
+        direct_at(&self.judged, &self.windows, t)
     }
 }
 
