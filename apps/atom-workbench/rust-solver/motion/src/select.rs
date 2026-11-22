@@ -38,9 +38,10 @@
 //! (`settle`): on the first path's first `CALIBRATION` µs the reference is advanced at the setting, at twice its
 //! substeps and at twice its pieces, each refinement's largest change of a displayed row read as that knob's part of
 //! the setting's error (Richardson's 2^p/(2^p − 1), p = 2: H frozen at a piece's middle, the recycling at a
-//! substep's); from the coarsest (`COARSEST`), the knob of the larger part is doubled while the parts' sum is beyond
-//! `TOLERANCE` -- s⁴ of the population target, the share the numerical tolerances inside a step take of theirs
-//! (units.rs `QUADRATURE`) --, to `FINEST` at the most. Every path, every candidate and the scans take that setting. The
+//! substep's; a rate no lower than one substep a piece); from the coarsest (`COARSEST`), the knob of the larger part is
+//! doubled while the parts' sum is beyond `TOLERANCE` -- s⁴ of the population target, the share the numerical
+//! tolerances inside a step take of theirs (units.rs `QUADRATURE`) --, to `FINEST` at the most. Every path, every
+//! candidate and the scans take that setting. The
 //! same refinements of each candidate on the same piece give its calibration (`Calibration`): the change of its rows'
 //! difference to the reference, read alike, booked beside the direct part. (Until 2026-11-22 the setting was fixed at
 //! 128 substeps a µs and two pieces, P1-PATHS's measure on R4, and the calibration read against the converged
@@ -370,15 +371,18 @@ pub struct Settled {
 /// the walk's first `piece` µs, the reference at the setting, at twice its substeps and at twice its pieces, each
 /// refinement's largest change of a displayed row read as that knob's part of the setting's error (`RICHARDSON`); while
 /// the parts' sum is beyond `TOLERANCE`, the knob of the larger part doubled (the other where it is at `FINEST`), both
-/// at the finest the last. The setting with its parts, and the reference's three series at it (the calibration's).
-fn settle(form: &Form, walk: &Walk, piece: f64) -> Result<(Settled, [Series; 3]), String> {
+/// at the finest the last. A setting's rate is the substeps' own: no less than a piece of the path's step `step` takes
+/// (`Form::along` never takes fewer than one substep a piece; below that a doubled rate would change nothing, and read
+/// as no error). The setting with its parts, and the reference's three series at it (the calibration's).
+fn settle(form: &Form, walk: &Walk, piece: f64, step: f64) -> Result<(Settled, [Series; 3]), String> {
     let clock = Instant::now();
     let run = |s: (f64, usize)| form.along(walk, &walk.start, 0.0, piece, lawson(s, 1));
-    let mut setting = COARSEST;
+    let own = |(rate, pieces): (f64, usize)| (larger(rate, pieces as f64 / step), pieces);
+    let mut setting = own(COARSEST);
     let mut at = run(setting)?;
     let (mut tried, mut products) = (1, at.counts.products);
     loop {
-        let finer = [(2.0 * setting.0, setting.1), (setting.0, 2 * setting.1)];
+        let finer = [own((2.0 * setting.0, setting.1)), own((setting.0, 2 * setting.1))];
         let made: Vec<Series> = finer.par_iter().map(|&s| run(s)).collect::<Result<_, _>>()?;
         tried += 2;
         products += made.iter().map(|s| s.counts.products).sum::<u64>();
@@ -459,7 +463,7 @@ impl<'a> Paths<'a> {
         let windows = paths::windows(length, memory, step);
         let piece = CALIBRATION.min(length).min(walks[0].end());
         let late_from = (run > 2.0 * length).then_some(run - length);
-        let (settled, calibrated) = settle(&form, &walks[0], piece)?;
+        let (settled, calibrated) = settle(&form, &walks[0], piece, step)?;
         let scheme = lawson(settled.setting, 1);
         // One job a walk's start and its end; on the pool.
         let n = walks.len();

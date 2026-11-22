@@ -912,7 +912,8 @@ impl<'a> Form<'a> {
                 for (i, w) in knots.windows(2).enumerate() {
                     let (a, b) = (w[0], w[1]);
                     let piece = (b - a) / pieces as f64;
-                    let n = (piece * per_us).ceil().max(1.0) as usize;
+                    // The substeps a piece: a product's rounding up never adds one (a rate of whole substeps a piece).
+                    let n = (piece * per_us * (1.0 - 4.0 * f64::EPSILON)).ceil().max(1.0) as usize;
                     for j in 0..pieces {
                         let p0 = a + j as f64 * piece;
                         let read = (j + 1 == pieces && ((i + 1) % read == 0 || i + 2 == knots.len())).then_some(b);
