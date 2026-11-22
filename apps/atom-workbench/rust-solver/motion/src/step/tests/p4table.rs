@@ -387,7 +387,16 @@ fn p4table_fill_time() {
 #[ignore]
 fn p4table_ab_step() {
     let (steps, repeat, rounds) = (env("P4T_STEPS", 12.0) as usize, env("P4T_REPEAT_STEP", 5.0) as usize, env("P4T_ROUNDS", 4.0) as usize);
-    let mode = &crate::model::rs::fold::table::MODE;
+    // P4T_SWITCH: "table" (model/rs/fold_table.rs `MODE` 0 against 1) or "count" (step.rs `count` by the tail's bound
+    // against the tail summed, `SUMMED`).
+    let by_count = std::env::var("P4T_SWITCH").is_ok_and(|x| x == "count");
+    let set = |m: usize| {
+        if by_count {
+            super::super::SUMMED.with(|x| x.set(m == 1));
+        } else {
+            crate::model::rs::fold::table::MODE.with(|x| x.set(m as u8));
+        }
+    };
     for (name, request) in scenes() {
         let tau = tau_of(&name);
         let chief = crate::solve::chief(&request);
@@ -399,7 +408,7 @@ fn p4table_ab_step() {
                 let mut next = None;
                 for _ in 0..rounds {
                     for m in 0..2 {
-                        mode.with(|x| x.set(m as u8));
+                        set(m);
                         for _ in 0..repeat {
                             let mut s = Scratch::default();
                             let _ = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere));
@@ -415,13 +424,13 @@ fn p4table_ab_step() {
                     }
                 }
                 for m in 0..2 {
-                    mode.with(|x| x.set(m as u8));
+                    set(m);
                     let mut s = Scratch::default();
                     if let Ok(step) = Midway::new(&run, &t, tau).and_then(|x| x.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere)) {
                         counted[m] += step.work;
                     }
                 }
-                mode.with(|x| x.set(0));
+                set(0);
                 match next {
                     Some(end) => {
                         for m in 0..2 {
@@ -434,7 +443,8 @@ fn p4table_ab_step() {
                 }
             }
             let k = taken.max(1) as f64;
-            eprintln!("P4T-ABSTEP {name} {label} tau {tau}: a step off the tables {:.1} µs (counted {:.4e}), decomposed {:.1} µs (counted {:.4e}), ratio {:.3} (mean over {taken} states, each the least of {rounds}×{repeat})", time[0] / k, counted[0] / k, time[1] / k, counted[1] / k, time[0] / time[1]);
+            let (new, old) = if by_count { ("the count by the bound", "by the tail summed") } else { ("off the tables", "decomposed") };
+            eprintln!("P4T-ABSTEP {name} {label} tau {tau}: a step {new} {:.1} µs (counted {:.4e}), {old} {:.1} µs (counted {:.4e}), ratio {:.3} (mean over {taken} states, each the least of {rounds}×{repeat})", time[0] / k, counted[0] / k, time[1] / k, counted[1] / k, time[0] / time[1]);
         }
     }
 }
