@@ -412,6 +412,13 @@ impl<'a> Ensemble<'a> {
     /// The initial state of trajectory `index` of the run `seed`: its group the `GROUP` trajectories from index − index mod
     /// GROUP, its strata from that group's Latin stream, the rest from its own (module documentation, # Latin hypercube).
     pub fn draw(&self, seed: u64, index: u64) -> Start {
+        self.draw_kinetic(seed, index).0
+    }
+
+    /// `draw`, with the classical draw's kinetic energy K (in k_BT; # Its draw): the statistic of the initial state's
+    /// tilt e^{−εK} whose score ⟨K⟩ − K T's memory is read by (select.rs, # T's memory, read on the run's own
+    /// trajectories). Bounded: 0 ≤ K ≤ y, the depth of the draw's place, at most the well's.
+    pub fn draw_kinetic(&self, seed: u64, index: u64) -> (Start, f64) {
         let (first, member) = (index - index % GROUP, (index % GROUP) as usize);
         let mut shared = Stream::new(seed, Purpose::Latin, first, 0);
         let mut own = Stream::new(seed, Purpose::Initial, index, 0);
@@ -447,7 +454,7 @@ impl<'a> Ensemble<'a> {
         let size = (2. * k * self.kt / self.hbar_over_mass).sqrt();
         let kappa = direction(2. * deviates[6] - 1., TAU * deviates[7]).map(|x| x * size);
         let (r, kappa) = c.wigner(r, gradient, kappa);
-        Start { state: c.state, r, kappa }
+        (Start { state: c.state, r, kappa }, k)
     }
 
     /// Each component's quadrature of η (module documentation, # The exact moments: the draws' reference): every

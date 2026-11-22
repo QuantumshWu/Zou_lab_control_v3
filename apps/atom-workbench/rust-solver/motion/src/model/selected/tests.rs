@@ -212,7 +212,7 @@ fn the_node_is_the_model_now_in_its_frame() {
         let n = keep.len();
         let frequency = |key: &Key| -> f64 {
             let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
-            run.value(&run.frame.split(&v))
+            run.value_of(&run.frame.split(&v))
         };
         for (r, kappa) in [([0.0; 3], [0.0; 3]), (POINTS[1].0, [0.0; 3]), POINTS[1]] {
             let node = run.node(r, kappa, true);
@@ -643,7 +643,7 @@ fn the_readout_is_the_lift_by_fast_index() {
                         if z == C64::ZERO {
                             continue;
                         }
-                        let slow = value - run.value(&(fast, vec![]));
+                        let slow = value - run.value_of(&(fast, vec![]));
                         let i = match by_fast.iter().position(|f| f.0 == fast) {
                             Some(i) => i,
                             None => {
@@ -701,6 +701,23 @@ fn made_with(request: &Request, drops: &Drops) -> Selected {
     let selection = crate::select::choose(&scene).unwrap();
     Selected::made(scene, selection, reference, true, drops).unwrap()
 }
+
+/// A request's run on the ground states and the excited states `excited` (labels), the beats `drops` says dropped: a
+/// model with explicit excited states, whatever the selection's chain would take (`made_with` is G's, the selection's
+/// before its pilot).
+fn made_on(request: &Request, excited: &[&str], drops: &Drops) -> Selected {
+    let reference = crate::solve::alone(crate::solve::chief(request));
+    let scene = crate::scene::Scene::new(request).unwrap();
+    let selection = crate::select::choose(&scene).unwrap();
+    let mut keep: Vec<usize> = (0..GROUND).collect();
+    keep.extend(excited.iter().map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+    keep.sort_unstable();
+    Selected::made(scene, crate::select::Selection { keep, ..selection }, reference, true, drops).unwrap()
+}
+
+/// tilt0's and tilt2's P19 of 2026-11-21 (the three-point choice's; JUDGE item 2): every D2 F′ = 3 state and D2 F′ = 2
+/// but m = −2 -- the model the drop tier's checks were made on.
+pub(crate) const TILT_P19: [&str; 11] = ["D2-3--3", "D2-3--2", "D2-3--1", "D2-3-0", "D2-3-1", "D2-3-2", "D2-3-3", "D2-2--1", "D2-2-0", "D2-2-1", "D2-2-2"];
 
 /// A request's run as the solve makes it (`solve::run_of`, its reference state the chief's) in its exact blocks, and
 /// (`split` false) the same model with its states one block.
@@ -1038,8 +1055,8 @@ mod drops;
 #[path = "steps.rs"]
 mod steps;
 
-/// The selection's report (`Selected::report`): P state by state, the states left out, and a point not judged said as
-/// such -- R10_NODE's edge, where no light reaches the atom (`Selection::notes`) --, never as zero errors.
+/// The selection's report (`Selected::report`): P state by state, the states folded, and the selection's notes -- the
+/// structural chain, its candidates' sizes from G up (`Selection::notes`) -- on R10_NODE, G's run.
 #[test]
 fn the_report_lists_p_the_states_left_out_and_the_notes() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R10_NODE.json");
@@ -1048,10 +1065,10 @@ fn the_report_lists_p_the_states_left_out_and_the_notes() {
     let run = crate::solve::run_of(&request, crate::solve::alone(crate::solve::chief(&request))).unwrap();
     let report = run.report();
     eprint!("{report}");
-    assert!(report.contains("P 的态：") && report.contains("删去 "), "{report}");
+    assert!(report.contains("P 的态：") && report.contains("折叠 "), "{report}");
     let notes = run.report.notes();
     assert!(!notes.is_empty() && notes.iter().all(|n| report.contains(n.as_str())), "{report}");
-    assert!(report.contains("不判"), "{report}");
+    assert!(report.contains("结构链") && run.rs.keep == run.report.chain[0], "{report}");
 }
 
 
