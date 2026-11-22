@@ -78,6 +78,16 @@ fn select_the_direct_part_by_hand() {
     assert!((at(500.0) - 2.01e-3).abs() < 1e-15 && (at(950.0) - 2.01e-3).abs() < 1e-15, "{} {}", at(500.0), at(950.0));
 }
 
+/// The flag's question by hand (`decide`): read at the end (|r| > z·se), yes; its upper end within the allowance, no;
+/// else not told; a number that is none tells nothing.
+#[test]
+fn select_the_memory_flag_by_hand() {
+    assert_eq!(decide(3.0, 1.0, 100.0), Some(true));
+    assert_eq!(decide(0.5, 1.0, 3.0), Some(false));
+    assert_eq!(decide(0.5, 1.0, 2.0), None);
+    assert_eq!(decide(f64::NAN, 1.0, 2.0), None);
+}
+
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
 /// but its *.scene.json app scenes and the manifest, read as the model's tests read them, model/testing.rs `scene`) and
 /// the six scenes' own requests (`V3D_REQ`): on every one the chain is G first and the 32 states last, nested, every
@@ -219,10 +229,9 @@ fn select_on_the_scenes() {
             let doc = serde_json::json!({
                 "scene": name, "keep": choice.keep, "labels": choice.keep.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>(),
                 "memory": choice.memory, "length": choice.length, "lambda_t": choice.response.memory(*request.times_us.last().unwrap()),
-                "collapsed": choice.response.collapsed(), "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
+                "collapsed": choice.response.decided, "response_groups": choice.response.groups, "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
                 "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate],
-                "response": {"times": choice.response.times, "temperature": choice.response.temperature, "loss": choice.response.loss, "kappa2": choice.response.kappa2,
-                    "rows": choice.response.rows.iter().map(|r| r.to_vec()).collect::<Vec<_>>(), "errors": choice.response.errors.iter().map(|r| r.to_vec()).collect::<Vec<_>>()},
+                "response": {"times": choice.response.times, "temperature": choice.response.temperature, "errors": choice.response.errors},
                 "parts": parts, "report": choice.report,
             });
             let stem = name.rsplit(['/', '\\']).next().unwrap().trim_end_matches(".json").to_string();

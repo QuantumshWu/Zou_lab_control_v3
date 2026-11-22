@@ -566,70 +566,65 @@ fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &S
 // ---------------------------------------------------------------------------------------------------------------------
 // The accounts.
 
-/// The model-only scaling response (module documentation, # The feedback through the motion: zero): at the times `times` (µs, from t = 0)
-/// per reading its R_O = (O₊ − O₋)/2η of the model's own atoms with their initial momenta scaled by 1 ± η -- the loss,
-/// each row as shown, the total T (µK) --, the group mean; ⟨κ²⟩ = Σ_a⟨κ_a²⟩ at the kick; and T's response's own
-/// statistical interval at the last time (whether it is still read there: the memory not shorter than the run).
+/// The model-only scaling response, for its flag alone (module documentation, # The feedback through the motion:
+/// zero): at the times `times` (µs, from t = 0) T's R_T = (T₊ − T₋)/2η (µK a unit η) of the model's own atoms with their
+/// initial momenta scaled by 1 ± η, and its standard error (the groups' jackknife), on the first `groups` of the pilot's
+/// groups; and whether T's memory is not shorter than the run (`decide`), none where the pilot's groups did not tell.
 #[derive(Clone, Debug)]
 pub struct Response {
     pub times: Vec<f64>,
-    pub loss: Vec<f64>,
-    pub rows: Vec<[f64; STATES]>,
     pub temperature: Vec<f64>,
-    /// Each one's standard error (the groups' jackknife), at the same times.
-    pub errors: Vec<[f64; STATES + 2]>,
-    pub kappa2: f64,
-    pub last_interval: f64,
+    pub errors: Vec<f64>,
+    pub groups: usize,
+    pub decided: Option<bool>,
+}
+
+/// Whether T's memory is not shorter than the run, of its response at the run's end `r` (µK a unit η) and its standard
+/// error `se`, T's allowance there `allowance` (µK): yes where the response is read there, |r| > z·se (FOLDTEMP §R2.3:
+/// "缩放响应在运行末仍可读出"); no where even its upper end |r| + z·se is within the allowance -- a unit kick of the
+/// initial momenta moves the end's T by less than its target; none otherwise (more groups would tell).
+pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
+    if !(r.is_finite() && se.is_finite()) {
+        None
+    } else if r.abs() > CONFIDENCE * se {
+        Some(true)
+    } else if r.abs() + CONFIDENCE * se < allowance {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 impl Response {
-    /// The size |R| of the reading q (0 the loss, 1 + s the row s, 1 + `STATES` T) at the k-th time, its noise taken out:
-    /// √max(R̄² − se², 0), R̄² being R² + se² on average -- a response the noise hides reads none, where |R̄| would read
-    /// the noise (88 atoms: a row's ±η difference has a noise of about 0.09 a unit η, PGC3D's rows' |R̄| integrated to
-    /// 71 µs over 1 ms of it).
-    fn size(&self, q: usize, k: usize) -> f64 {
-        let r = if q == 0 { self.loss[k] } else if q <= STATES { self.rows[k][q - 1] } else { self.temperature[k] };
-        let e = self.errors[k][q];
+    /// The size |R_T| at the k-th time, its noise taken out: √max(R̄² − se², 0), R̄² being R² + se² on average.
+    fn size(&self, k: usize) -> f64 {
+        let (r, e) = (self.temperature[k], self.errors[k]);
         let d = r * r - if e.is_finite() { e * e } else { 0.0 };
         if d > 0.0 { d.sqrt() } else { 0.0 }
     }
 
-    /// ∫₀ᵗ |R(τ)| dτ of one reading's response size `r` (`size`) at the response's times (the trapezoid; beyond its last
-    /// time R held at its last value).
-    fn integral(&self, r: &dyn Fn(usize) -> f64, t: f64) -> f64 {
+    /// Λ_T = ∫₀ᵗ|R_T| / R_T(0): T's memory time (µs) to the time t, for the report (the trapezoid; beyond the last time
+    /// R held at its last value).
+    pub fn memory(&self, t: f64) -> f64 {
         let mut sum = 0.0;
         for k in 1..self.times.len() {
             let (a, b) = (self.times[k - 1], self.times[k]);
             if a >= t {
-                return sum;
+                break;
             }
-            let (ra, rb) = (r(k - 1).abs(), r(k).abs());
-            if b <= t {
-                sum += 0.5 * (b - a) * (ra + rb);
-            } else {
-                let rt = ra + (rb - ra) * (t - a) / (b - a);
-                return sum + 0.5 * (t - a) * (ra + rt);
-            }
+            let (ra, rb) = (self.size(k - 1), self.size(k));
+            sum += if b <= t { 0.5 * (b - a) * (ra + rb) } else { 0.5 * (t - a) * (ra + ra + (rb - ra) * (t - a) / (b - a)) };
         }
         let last = self.times.len() - 1;
-        sum + (t - self.times[last]).max(0.0) * r(last).abs()
+        if t > self.times[last] {
+            sum += (t - self.times[last]) * self.size(last);
+        }
+        sum / self.temperature[0].abs()
     }
 
-    /// Λ_T = ∫₀ᵗ|R_T| / R_T(0): T's memory time (µs) to the time t.
-    pub fn memory(&self, t: f64) -> f64 {
-        self.integral(&|k| self.size(1 + STATES, k), t) / self.temperature[0].abs()
-    }
-
-    /// The rows' and the loss's ∫₀ᵗ|R| (µs per unit η): the largest row's and the loss's -- the feedback bound's
-    /// weights on what is shown, for the report.
-    pub fn shown_weights(&self, t: f64) -> [f64; 2] {
-        [(0..STATES).map(|s| self.integral(&|k| self.size(1 + s, k), t)).fold(0.0, larger), self.integral(&|k| self.size(0, k), t)]
-    }
-
-    /// Whether T's response is still read at its last time, beyond its interval: no memory shorter than the run (the
-    /// flag "Λ 塌掉", FOLDTEMP §R2.3).
+    /// Whether T's memory was found not shorter than the run (`decide`): the flag "Λ 塌掉".
     pub fn collapsed(&self) -> bool {
-        self.temperature.last().is_some_and(|r| r.abs() > self.last_interval)
+        self.decided == Some(true)
     }
 }
 

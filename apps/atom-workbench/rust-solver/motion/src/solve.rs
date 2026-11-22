@@ -2351,7 +2351,14 @@ fn unmeasured() -> String {
 fn model_flags(choice: &Choice, read: &PilotRead, request: &Request) -> Vec<String> {
     let mut flags = vec![];
     if choice.response.collapsed() {
-        flags.push("温度的记忆时间不短于运行（只跑模型的动量缩放响应在运行末仍可读出：Λ 塌掉，反馈上界随运行长度增长）".to_string());
+        flags.push("温度的记忆时间不短于运行（只跑模型的动量缩放响应在运行末仍可读出：Λ 塌掉）".to_string());
+    }
+    // T still drifting at the end: its last two analysis times apart by more than their intervals together.
+    let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
+    if let [.., (a, ea), (b, eb)] = held[..] {
+        if (b - a).abs() > ea.hypot(eb) {
+            flags.push(format!("温度在运行末段仍在漂移：最后两个分析时刻差 {:.2} µK，超过它们的误差棒 {:.2} µK", b - a, ea.hypot(eb)));
+        }
     }
     let length = request.times_us.last().copied().unwrap_or(0.);
     if 5. * choice.memory >= length {
@@ -2439,12 +2446,14 @@ fn priced(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: bool)
     over_the_run(rated, taken.into_iter(), None)
 }
 
-/// The model-only scaling response (select.rs `Response`; module documentation, # The selection, 2): the pilot's
-/// trajectory numbers `numbers` on the model `run` at the step τ through the plan, their initial momenta scaled by
-/// 1 ± `select::KICK` (the same atoms and random numbers otherwise), at the plan's read times; per reading the
-/// difference of the two over 2η, the jackknife of T's at the last time, and ⟨κ²⟩ of the unscaled atoms. One hand-out
-/// of both (`run_groups`), the last result sent again where a message is due.
-fn response(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], scales: &Scales, messages: &mut Messages) -> crate::select::Response {
+/// The model-only scaling response, for its flag alone (select.rs `Response`, `decide`; module documentation, # The
+/// selection, 2): the pilot's trajectory numbers `numbers` on the model `run` at the step τ through the plan, their
+/// initial momenta scaled by 1 ± `select::KICK` (the same atoms and random numbers otherwise), T's difference over 2η at
+/// the plan's read times with the groups' jackknife. As many groups as its question asks: three first -- the fewest a
+/// jackknife's spread reads -- and twice as many while its answer at the run's end (against T's allowance there,
+/// `allowance` µK) is not yet told, the pilot's groups at the most. Each batch one hand-out of both levels
+/// (`run_groups`), the last result sent again where a message is due.
+fn response(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], scales: &Scales, allowance: f64, messages: &mut Messages) -> crate::select::Response {
     let eta = crate::select::KICK;
     let kicked = |sign: f64| {
         move |index: u64| {
@@ -2454,39 +2463,32 @@ fn response(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, t
         }
     };
     let (plus, minus) = (kicked(1.), kicked(-1.));
-    let shape = || Shape::of(plan, false);
-    let hands = [Hand { groups: numbers, members: 0..GROUP, shape: shape(), record: &plus }, Hand { groups: numbers, members: 0..GROUP, shape: shape(), record: &minus }];
-    let made = run_groups(&hands, 0, messages, &mut |_, m| m.again());
-    let (p, m): (Vec<&Group>, Vec<&Group>) = (made[0].iter().map(|x| &x.reads).collect(), made[1].iter().map(|x| &x.reads).collect());
+    let (mut p, mut m): (Vec<Part>, Vec<Part>) = (vec![], vec![]);
     let none: [&Group; 0] = [];
-    let (mut loss, mut rows, mut temperature) = (vec![], vec![], vec![]);
-    let mut last_interval = f64::INFINITY;
-    let mut errors: Vec<[f64; STATES + 2]> = vec![];
-    let groups = numbers.len();
-    for k in 0..plan.reads.len() {
-        let (a, b) = (readings(&p, &none, k, scales), readings(&m, &none, k, scales));
-        // A reading's value -- q the loss (0), a row (1 + s), T's total (1 + STATES, the axes' mean) -- of a level's
-        // readings, whole or without the group g.
-        let value = |r: &[crate::analysis::Reading], q: usize, g: Option<usize>| -> f64 {
-            let one = |x: &crate::analysis::Reading| g.map_or(x.whole, |g| x.leave[g]);
-            if q <= STATES { one(&r[q]) } else { (0..3).map(|x| one(&r[1 + STATES + x])).sum::<f64>() / 3. }
-        };
-        let d = |q: usize, g: Option<usize>| (value(&a, q, g) - value(&b, q, g)) / (2. * eta);
-        let spread = |q: usize| crate::estimate::spread((0..groups).map(|g| d(q, Some(g))).collect::<Vec<_>>().into_iter(), groups as f64);
-        loss.push(d(0, None));
-        rows.push(std::array::from_fn(|s| d(1 + s, None)));
-        temperature.push(d(1 + STATES, None));
-        errors.push(std::array::from_fn(|q| spread(q).error));
-        if k + 1 == plan.reads.len() {
-            last_interval = spread(1 + STATES).interval();
+    let mut done = 0;
+    let mut wanted = numbers.len().min(3);
+    loop {
+        let batch = &numbers[done..wanted];
+        let hands = [Hand { groups: batch, members: 0..GROUP, shape: Shape::of(plan, false), record: &plus }, Hand { groups: batch, members: 0..GROUP, shape: Shape::of(plan, false), record: &minus }];
+        let mut made = run_groups(&hands, 0, messages, &mut |_, m| m.again()).into_iter();
+        p.extend(made.next().expect("the + level"));
+        m.extend(made.next().expect("the − level"));
+        done = wanted;
+        let (a, b): (Vec<&Group>, Vec<&Group>) = (p.iter().map(|x| &x.reads).collect(), m.iter().map(|x| &x.reads).collect());
+        let (mut temperature, mut errors) = (vec![], vec![]);
+        for k in 0..plan.reads.len() {
+            let (x, y) = (readings(&a, &none, k, scales), readings(&b, &none, k, scales));
+            let t = |r: &[crate::analysis::Reading], g: Option<usize>| (0..3).map(|q| g.map_or(r[1 + STATES + q].whole, |g| r[1 + STATES + q].leave[g])).sum::<f64>() / 3.;
+            let d = |g: Option<usize>| (t(&x, g) - t(&y, g)) / (2. * eta);
+            temperature.push(d(None));
+            errors.push(crate::estimate::spread((0..done).map(|g| d(Some(g))).collect::<Vec<_>>().into_iter(), done as f64).error);
         }
+        let decided = crate::select::decide(*temperature.last().expect("a read time"), *errors.last().expect("a read time"), allowance);
+        if decided.is_some() || done == numbers.len() {
+            return crate::select::Response { times: plan.reads.clone(), temperature, errors, groups: done, decided };
+        }
+        wanted = (2 * done).min(numbers.len());
     }
-    let draws = numbers.iter().flat_map(|&g| (0..GROUP).map(move |m| g * GROUP + m));
-    let (sum, count) = draws.fold((0., 0.), |(s, c), i| {
-        let start = ensemble.draw(SEED, i);
-        (s + start.kappa.iter().map(|k| k * k).sum::<f64>(), c + 1.)
-    });
-    crate::select::Response { times: plan.reads.clone(), loss, rows, temperature, errors, kappa2: sum / count, last_interval }
 }
 
 /// A line of the choice's report (`Choice::report`), said as it is made (stderr: the solve's own log).
@@ -2566,12 +2568,16 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     messages.alive();
     // 2. The response.
     let started = Instant::now();
-    let response = response(run, ensemble, &domain, &context.plan, tau, numbers, &scales, messages);
+    let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
+    let response = response(run, ensemble, &domain, &context.plan, tau, numbers, &scales, end, messages);
+    let response_seconds = started.elapsed().as_secs_f64();
+    let response_trajectories = 2 * response.groups as u64 * GROUP;
     noted(
         &mut report,
         format!(
-            "动量缩放响应：{} 条 × 2，η = {}；T 的记忆 Λ_T = {:.1} µs（到 {length} µs）{}；∫|R| 最大的行 {:.3e} µs、丢失 {:.3e} µs；⟨κ²⟩ {:.4e} /µm²；{:.1} s",
-            numbers.len() as u64 * GROUP, crate::select::KICK, response.memory(length), if response.collapsed() { "，运行末仍可读出" } else { "" }, response.shown_weights(length)[0], response.shown_weights(length)[1], response.kappa2, started.elapsed().as_secs_f64()
+            "动量缩放响应（只为「Λ 塌掉」的旗标）：{} 组 × 8 条 × 2，η = {}；运行末 R_T = {:.2} ± {:.2} µK，允许量 {:.2} µK：{}；Λ_T = {:.1} µs（到 {length} µs）；{response_seconds:.1} s",
+            response.groups, crate::select::KICK, response.temperature.last().copied().unwrap_or(f64::NAN), response.errors.last().copied().unwrap_or(f64::NAN), end,
+            match response.decided { Some(true) => "塌掉（运行末仍可读出）", Some(false) => "没塌掉（运行末的上端在允许量以内）", None => "先导的组数内定不下来" }, response.memory(length)
         ),
     );
     // 3. The candidates.
@@ -2751,6 +2757,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             ),
         );
     }
+    // The response's cost, beside the run's: its trajectories at G's work a µs over the run, against the chosen W.
+    let response_work = response_trajectories as f64 * weighed[0].price * span;
+    noted(&mut report, format!("动量缩放响应 {response_trajectories} 条：计数代价 {response_work:.3e}，是选中候选 W 的 {:.2} %；{response_seconds:.1} s", 100. * response_work / weighed[chosen].work.unwrap_or(f64::NAN)));
     noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
     let w = weighed.swap_remove(chosen);
     Ok(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, response, windows: paths.windows.clone(), memory, length: paths.length, report })
