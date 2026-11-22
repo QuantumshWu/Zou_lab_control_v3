@@ -2451,7 +2451,8 @@ fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales, choice: Option<
     let region = choice.map_or(Region::NONE, |c| c.judged.region);
     let sampled = sampled(run, pilot, &region);
     let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
-    let model = model_of(&|t| choice.map_or(Some(0.), |c| c.at(t)), &sampled, &estimates, times, optical, escape);
+    // On the reference itself (P all 32 states) no model error at any time, as the choice weighed it (`choose_on_the_pilot`).
+    let model = if choice.is_some_and(|c| c.keep.len() == STATES) { vec![[0.; 2]; times.len()] } else { model_of(&|t| choice.map_or(Some(0.), |c| c.at(t)), &sampled, &estimates, times, optical, escape) };
     PilotRead { estimates, counts, sampled, model }
 }
 
@@ -2675,11 +2676,15 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         }
         let model = models[place].as_ref().unwrap_or(run);
         let price = priced(model, domain.widest, &rated, tau, place == 0);
-        let judged = if chain[place].len() == STATES { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
-        let model_error = account(&judged);
+        // The chain's top is the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
+        // (`base`) -- complete by construction, whatever its atoms do (the invariant the choice stands on).
+        let exact = chain[place].len() == STATES;
+        let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
+        let model_error = if exact { vec![[0.; 2]; times.len()] } else { account(&judged) };
         let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
         let met = met(&own);
         let need = most_needed(&own);
+        debug_assert!(!exact || met == [true; 2], "the reference itself meets every look the run's own does");
         let (work, fate) = match met {
             [true, true] => (Some(need * price * span + again(place, price)), "上界够用".to_string()),
             [true, false] => (None, "温度上界不够，不选".to_string()),
@@ -2690,10 +2695,13 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     };
     weighed.push(weigh(0, &mut models, &mut report)?);
     messages.alive();
-    // The least complete candidate (the anchor), by bisection where G is not complete; the top (all 32) is complete.
+    // The least complete candidate (the anchor, its place among the weighed `anchored`), by bisection where G is not
+    // complete; the top (all 32) is complete by construction (`weigh`: the reference itself), so the bisection's upper
+    // end is complete at every turn -- weighed at last where no candidate below it is.
     let top = chain.len() - 1;
-    let mut anchor: Option<usize> = (weighed[0].work.is_some()).then_some(0);
-    if anchor.is_none() {
+    let anchored = if weighed[0].work.is_some() {
+        0
+    } else {
         let (mut lo, mut hi) = (0, top);
         let mut at_hi: Option<usize> = None;
         while hi - lo > 1 {
@@ -2708,15 +2716,16 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 lo = mid;
             }
         }
-        anchor = Some(match at_hi {
+        match at_hi {
             Some(a) => a,
             None => {
                 weighed.push(weigh(hi, &mut models, &mut report)?);
                 weighed.len() - 1
             }
-        });
-    }
-    let anchor = weighed[anchor.expect("an anchor")].place;
+        }
+    };
+    debug_assert!(weighed[anchored].work.is_some(), "the anchor is complete: the chain's top is the reference itself");
+    let anchor = weighed[anchored].place;
     // Above the anchor a candidate is chosen only where it works less than the least W found: its least -- at no model
     // error (the run's own need), at the ladder's first rung's step (the longest its scout may stand at), its pilot
     // again -- bounds it from below, and grows with its states (the chain's work does), so the chain is searched up from
@@ -2781,8 +2790,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
         messages.alive();
     }
-    // P: the complete candidate of least W.
-    let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).min_by(|&a, &b| weighed[a].work.unwrap().total_cmp(&weighed[b].work.unwrap())).expect("the anchor is complete");
+    // P: the complete candidate of least W (the first of them where several are) -- the anchor among them, complete by
+    // construction; no candidate's W is ever taken back (a scout's replaces it).
+    let w = |i: usize| weighed[i].work.unwrap_or(f64::INFINITY);
+    let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).fold(anchored, |best, i| if w(i).total_cmp(&w(best)).then(i.cmp(&best)).is_lt() { i } else { best });
     // Its region (`select::scan`): the scans of the trap's axes at the pilot's last T's thermal speed.
     let last = read.estimates.last().and_then(|e| e.motion).map_or(request.temperature_uk, |m| m.temperature_total);
     let speed = (KT_PER_UK * last * hm).sqrt();

@@ -766,14 +766,14 @@ impl<'a> Paths<'a> {
         self.late.as_ref().map(|l| l.0)
     }
 
-    /// The reference judged against itself (`Judged`): every error none -- the 32 states are the reference.
+    /// The reference judged against itself (`Judged`): no error at all -- the 32 states are the reference, and relative to
+    /// itself a model errs by nothing. No windows (its direct part zero at every time, `direct_at`), no calibration: the
+    /// paths' scheme errs where a candidate is compared with the reference (`Settled::unmet`, `Paths::booked`, booked in
+    /// every other candidate's calibration, `judge`), not in the reference's own model. (Until 2026-11-22 it booked the
+    /// scheme's unmet sum and the openings' bound as its own, and read its windows against themselves: no number where no
+    /// path read a window -- R9_PUSH's, every atom pushed out by 45 µs.)
     pub fn itself(&self, keep: Vec<usize>) -> Judged {
-        let labels = &self.reference.model.scene.request.states;
-        let hm = self.reference.model.hbar_over_mass();
-        let windows = paths::compare(&self.series, &self.series, &self.windows, labels, hm);
-        let late = self.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(s, s, w, labels, hm));
-        let calibration = Calibration { rows: self.settled.unmet().unwrap_or(0.0) + self.booked, rate: 0.0 };
-        Judged { keep, windows, late, calibration, region: Region::NONE, seconds: 0.0, products: 0 }
+        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 }
     }
 }
 
