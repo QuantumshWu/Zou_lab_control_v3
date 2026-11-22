@@ -579,9 +579,11 @@
 //! trajectories, the number it brings the run to and how far its looks stand from their targets) and as the step's
 //! check moves to another rung (`check`) -- when it changes, never otherwise. The order (the app's, src/solve-progress.ts):
 //! - a new selection: Model (the structural chain and G's model are the model's making) → Scout (G's) → Pilot →
-//!   Select (along the pilot's paths; a candidate's short scout is part of it and says no Scout of its own, at most
-//!   Select at its rung) → where the choice is not G, Model → Scout → Pilot → Product; where it is G, Product;
+//!   Select (along the pilot's paths; a candidate's short scout is part of it and says nothing of its own) → where the
+//!   choice is not G, Model → Scout → Pilot → Product; where it is G, Product;
 //! - the choice kept for the scene: Select (at once) → Model → Scout → Pilot → Product.
+//! Select and Model have no rung (`Stage::tau` none: the app takes a step there for no progress); the scout, the pilot
+//! and the product are at theirs.
 //! It decides nothing, is no part of the result and is kept nowhere: its one reader is the app's course of a running
 //! solve (src/solve-progress.ts).
 use crate::adapt;
@@ -896,9 +898,10 @@ impl Messages<'_> {
             self.stage = Some(stage);
         }
     }
-    /// The step's check moves to the rung `tau` (`check`): the step in hand, at that rung.
+    /// The step's check moves to the rung `tau` (`check`): the step in hand, at that rung -- where it is one that has a
+    /// rung, the scout, the pilot or the product (# Steps): a candidate's short scout runs under Select, which has none.
     fn rung(&mut self, tau: f64) {
-        if let Some(stage) = &self.stage {
+        if let Some(stage) = self.stage.as_ref().filter(|s| matches!(s.step, Step::Scout | Step::Pilot | Step::Product)) {
             let moved = Stage { tau: Some(tau), ..stage.clone() };
             self.stage(moved);
         }
@@ -2539,7 +2542,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let scales = context.scales;
     let light = run.light();
     let centre = trap.centre;
-    messages.stage(Stage { step: Step::Select, tau: Some(tau), batch: None });
+    messages.stage(Stage { step: Step::Select, tau: None, batch: None });
     let reference = alone(chief(request));
     let length = request.times_us.last().copied().unwrap_or(0.);
     let mut report: Vec<String> = vec![];
@@ -2708,7 +2711,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             Attempted::Scouted(t) => t,
             _ => unreachable!("a scout's attempt stops at its rung"),
         };
-        messages.stage(Stage { step: Step::Select, tau: Some(tau), batch: None });
+        messages.stage(Stage { step: Step::Select, tau: None, batch: None });
         let price = priced(model, domain.widest, &rated, rung, false);
         let scout = scout_of(price);
         let entry = &mut weighed[i];
@@ -6597,10 +6600,10 @@ mod tests {
     }
 
     /// A solve's stages in order (module documentation, # Steps), on R1_TWEEZER's own request over 20 µs, solved twice:
-    /// the first a new selection -- Model with no rung, then G's Scout and Pilot, Select, and either Product (G chosen) or
-    /// Model, Scout, Pilot and Product again --, the second on the choice kept -- Select and Model with no rung, then
-    /// Scout, Pilot, Product --; each stage another than the one before, the steps (consecutive stages of one step taken
-    /// once) in that order, every stage but Model and the kept choice's Select at a rung; no checkpoint before the first
+    /// the first a new selection -- Model, then G's Scout and Pilot, Select, and either Product (G chosen) or Model, Scout,
+    /// Pilot and Product again --, the second on the choice kept -- Select, Model, Scout, Pilot, Product --; each stage
+    /// another than the one before, the steps (consecutive stages of one step taken once) in that order, Select and Model
+    /// at no rung and every other stage at one; no checkpoint before the first
     /// Scout. A batch brings the run beyond the trajectories in hand, its numbers count from 1, and its looks stand beyond
     /// their targets (else no batch).
     #[test]
@@ -6629,7 +6632,7 @@ mod tests {
             } else {
                 assert_eq!(steps, [Select, Model, Scout, Pilot, Product]);
             }
-            assert!(stages.iter().all(|s| (s.step == Model || (!new && s.step == Select && s.tau.is_none())) == s.tau.is_none()), "a rung where none is, or none where one is");
+            assert!(stages.iter().all(|s| matches!(s.step, Select | Model) == s.tau.is_none()), "a rung where none is, or none where one is");
             let scout = came.iter().position(|m| m.as_ref().is_some_and(|s| s.step == Scout)).unwrap();
             assert!(came[..scout].iter().all(Option::is_some), "no checkpoint before the scout");
             let batches: Vec<&Batch> = stages.iter().filter_map(|s| s.batch.as_ref()).collect();
