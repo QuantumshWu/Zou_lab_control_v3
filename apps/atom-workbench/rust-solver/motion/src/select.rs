@@ -40,8 +40,10 @@
 //! the setting's error (Richardson's 2^p/(2^p − 1), p = 2: H frozen at a piece's middle, the recycling at a
 //! substep's; a rate no lower than one substep a piece); from the coarsest (`COARSEST`), the knob of the larger part is
 //! doubled while the parts' sum is beyond `TOLERANCE` -- s⁴ of the population target, the share the numerical
-//! tolerances inside a step take of theirs (units.rs `QUADRATURE`) --, to `FINEST` at the most. Every path, every
-//! candidate and the scans take that setting. The
+//! tolerances inside a step take of theirs (units.rs `QUADRATURE`) --, to `FINEST` at the most (a bound on the work,
+//! not on the accuracy: stopped there short of the tolerance, the setting is said not converged and the reference's
+//! two parts are booked whole in every candidate's A, `Settled::unmet`). Every path, every candidate and the scans
+//! take that setting. The
 //! same refinements of each candidate on the same piece give its calibration (`Calibration`): the change of its rows'
 //! difference to the reference, read alike, booked beside the direct part. (Until 2026-11-22 the setting was fixed at
 //! 128 substeps a µs and two pieces, P1-PATHS's measure on R4, and the calibration read against the converged
@@ -108,7 +110,8 @@ pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * P
 pub const COARSEST: (f64, usize) = (8.0, 1);
 
 /// Lawson's finest setting (module documentation, # The paths): 4096 substeps a µs (32 times P1-PATHS's 128), 64
-/// pieces a step.
+/// pieces a step -- a bound on the work, never a measure of accuracy: a setting settled there short of `TOLERANCE` is
+/// said ("到顶未收敛") and its reference's two error parts booked whole in every candidate's A (`Settled::unmet`).
 pub const FINEST: (f64, usize) = (4096.0, 64);
 
 /// A refinement's change read as the coarser setting's error (module documentation, # The paths): Richardson's
@@ -367,6 +370,16 @@ pub struct Settled {
     pub seconds: f64,
 }
 
+impl Settled {
+    /// Where the setting stopped at `FINEST` with its parts still beyond `TOLERANCE` (the ladder's top, not
+    /// converged): their sum, booked in every candidate's A beside its own calibration (`judge`, `Paths::itself`); none
+    /// where the parts met the tolerance.
+    pub fn unmet(&self) -> Option<f64> {
+        let sum = self.errors[0] + self.errors[1];
+        (sum > TOLERANCE).then_some(sum)
+    }
+}
+
 /// The paths' scheme's setting by its error on the reference (module documentation, # The paths): from `COARSEST`, on
 /// the walk's first `piece` µs, the reference at the setting, at twice its substeps and at twice its pieces, each
 /// refinement's largest change of a displayed row read as that knob's part of the setting's error (`RICHARDSON`); while
@@ -501,7 +514,8 @@ impl<'a> Paths<'a> {
         let hm = self.reference.model.hbar_over_mass();
         let windows = paths::compare(&self.series, &self.series, &self.windows, labels, hm);
         let late = self.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(s, s, w, labels, hm));
-        Judged { keep, windows, late, calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 }
+        let calibration = Calibration { rows: self.settled.unmet().unwrap_or(0.0), rate: 0.0 };
+        Judged { keep, windows, late, calibration, region: Region::NONE, seconds: 0.0, products: 0 }
     }
 }
 
@@ -597,7 +611,8 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     // The calibration: the first walk's own series at the setting on the piece (the same scheme from the same start)
     // and its two refinements, against the reference's.
     let cut = Series { readings: series[0].readings.iter().filter(|r| r.t <= piece).cloned().collect(), ..Series::default() };
-    let calibration = calibrate([&cut, &finer[0], &finer[1]], calibrated);
+    let mut calibration = calibrate([&cut, &finer[0], &finer[1]], calibrated);
+    calibration.rows += paths.settled.unmet().unwrap_or(0.0);
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
 }

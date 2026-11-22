@@ -88,6 +88,15 @@ fn select_the_memory_flag_by_hand() {
     assert_eq!(decide(f64::NAN, 1.0, 2.0), None);
 }
 
+/// The ladder's top by hand (`Settled::unmet`): parts within the tolerance book nothing more; parts beyond it -- the
+/// setting stopped at `FINEST` -- book their whole sum.
+#[test]
+fn select_the_ladder_top_by_hand() {
+    let settled = |errors: [f64; 2]| Settled { setting: FINEST, errors, tried: 1, products: 0, seconds: 0.0 };
+    assert_eq!(settled([0.5 * TOLERANCE, 0.25 * TOLERANCE]).unmet(), None);
+    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE]).unmet(), Some(1.5 * TOLERANCE));
+}
+
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
 /// but its *.scene.json app scenes and the manifest, read as the model's tests read them, model/testing.rs `scene`) and
 /// the six scenes' own requests (`V3D_REQ`): on every one the chain is G first and the 32 states last, nested, every
