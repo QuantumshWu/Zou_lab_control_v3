@@ -172,7 +172,8 @@
 //! TET's) lays some 510 nodes a step of 0.474 µs where each level's own frequencies ask some 35; R5_PUMP's, whose frame
 //! leaves the hyperfine splitting of 4.3·10⁴ rad/µs on its slow diagonal and whose exact blocks join F = 1 and F = 2 of
 //! one m, tens of thousands. Every step's integrals are taken by groups of the piece's eigencomponents (`Groups`): cut at
-//! gaps of their frequencies Re λ within an exact block (not by blocks alone), each group g of centre ω_g, the state is
+//! gaps of their frequencies Re λ that an exact block straddles -- not by blocks alone, and across the blocks alike:
+//! R5_PUMP's two groups are F = 1 and F = 2 of each of its blocks --, each group g of centre ω_g, the state is
 //! x = Σ_g e^{−iω_g s} y_g (s from the launch), each y_g slow -- its components' frequencies less the centre, in the
 //! propagation's own coordinates, R(1 + X(u)) on the group's components of e^{−i(Λ − ω)s}m(u) (`Picture::parts`; in a
 //! fixed or an instantaneous eigenbasis the groups' cross terms hold a part that does not turn, the basis' change along
@@ -1553,10 +1554,12 @@ impl Groups {
     /// of the least cost, and its panels' count and nodes (`arranged`). The plain rule's cost is its nodes' at the
     /// quotient's bandwidth (`count`), a node its state (`Picture::state_work`) and its densities into the sums
     /// (`count::gathered`). The cuts are at the k largest gaps between neighbouring frequencies Re λ of the components the
-    /// state can hold within an exact block (`Picture::spectrum`), k = 1, 2, …, each block's run between two cuts a group
-    /// of its own, a component the state cannot hold to the nearest centre in its block; the groups' centres the middles
-    /// of their frequencies. Two groups of a block ring together unless their cross terms integrate within the round-off
-    /// of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's constant), sup|c|
+    /// state can hold (`Picture::spectrum`) that some exact block straddles, k = 1, 2, …: a gap no block straddles cuts
+    /// no pair a form reads, and the groups are the runs between two cuts across the blocks alike, so that a level split
+    /// in every block -- R5_PUMP's F = 1 and F = 2, joined in each of its blocks by m -- is cut once; a component the
+    /// state cannot hold to the nearest centre; the groups' centres the middles of their frequencies. Two groups ring
+    /// together where a block holds members of both (the others' pairs are no form's and no ringing's: R is
+    /// block-diagonal), unless their cross terms integrate within the round-off of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's constant), sup|c|
     /// the numerator's weights between them over 1 − r (`Picture::weighed_by`), Ω their least gap, β the shifted pairs'
     /// band; a pair not taken is neither in the density nor in the norm's ringing. A cut's cost: its panels' nodes
     /// (`resolved`, interpolated, at the envelopes' bandwidth) each its parts, norms, series, weights and densities
@@ -1615,19 +1618,20 @@ impl Groups {
             held[..n].copy_from_slice(h);
             part[..n].copy_from_slice(p);
         }
-        // The held components block by block in their frequencies' order, and the gaps between neighbours of a block.
+        // The held components in their frequencies' order, and the gaps between neighbours that some exact block
+        // straddles -- a gap no block straddles cuts no pair any form reads.
         let (mut order, mut kept) = ([0usize; STATES], 0);
         for a in (0..n).filter(|&a| held[a]) {
             order[kept] = a;
             kept += 1;
         }
         let order = &mut order[..kept];
-        order.sort_by(|&a, &b| part[a].cmp(&part[b]).then(lambda[a].re.total_cmp(&lambda[b].re)));
+        order.sort_by(|&a, &b| lambda[a].re.total_cmp(&lambda[b].re));
         let (mut gaps, mut found) = ([(0.0, 0usize); STATES], 0);
         for i in 1..kept {
-            let (a, b) = (order[i - 1], order[i]);
-            if part[a] == part[b] {
-                gaps[found] = (lambda[b].re - lambda[a].re, i);
+            let straddled = order[..i].iter().any(|&a| order[i..].iter().any(|&b| part[a] == part[b]));
+            if straddled {
+                gaps[found] = (lambda[order[i]].re - lambda[order[i - 1]].re, i);
                 found += 1;
             }
         }
@@ -1640,13 +1644,12 @@ impl Groups {
             for &(_, i) in &gaps[..k] {
                 cut_before[i] = true;
             }
-            let (mut group, mut block, mut groups) = ([0u8; STATES], [0usize; GROUPS], 0usize);
+            let (mut group, mut groups) = ([0u8; STATES], 0usize);
             for (i, &a) in order.iter().enumerate() {
-                if i == 0 || part[a] != part[order[i - 1]] || cut_before[i] {
+                if i == 0 || cut_before[i] {
                     groups += 1;
                 }
                 group[a] = (groups - 1) as u8;
-                block[groups - 1] = part[a];
             }
             if groups > GROUPS {
                 break;
@@ -1662,8 +1665,14 @@ impl Groups {
             }
             for a in (0..n).filter(|&a| !held[a]) {
                 let distance = |g: usize| (centres[g] - lambda[a].re).abs();
-                let own = (0..groups).filter(|&g| block[g] == part[a]).min_by(|&x, &y| distance(x).total_cmp(&distance(y)));
-                group[a] = own.unwrap_or_else(|| (0..groups).min_by(|&x, &y| distance(x).total_cmp(&distance(y))).expect("a group")) as u8;
+                group[a] = (0..groups).min_by(|&x, &y| distance(x).total_cmp(&distance(y))).expect("a group") as u8;
+            }
+            // Two groups some block holds members of both of (the others' pairs are no form's and no ringing's).
+            let mut shared = [0u32; GROUPS];
+            for a in (0..n).filter(|&a| held[a]) {
+                for b in (0..n).filter(|&b| held[b] && part[b] == part[a]) {
+                    shared[usize::from(group[a])] |= 1 << group[b];
+                }
             }
             let shift: [f64; STATES] = std::array::from_fn(|a| if a < n { centres[usize::from(group[a])] } else { 0.0 });
             // The guess: the quotient's bandwidth by the shifted pairs' over the forms' (`Picture::spanned`); and each two
@@ -1691,13 +1700,14 @@ impl Groups {
             }
             let all_across: f64 = (0..groups).flat_map(|g| (g + 1..groups).map(move |q| (g, q))).map(|(g, q)| self.across[g * groups + q]).sum();
             let ratio_all = all_across / (1.0 - within);
-            // Linked: one block, and the pair's cross terms beyond the round-off of the width by parts (above).
+            // Linked: a block holds both, and the pair's cross terms beyond the round-off of the width by parts (above).
             let mut linked = [0u32; GROUPS];
             for g in 0..groups {
-                for q in 0..groups {
+                linked[g] |= 1 << g;
+                for q in (0..groups).filter(|&q| q != g && shared[g] & (1 << q) != 0) {
                     let omega = gap[g * groups + q] - spanned;
-                    let small = g != q && ratio_all < 1.0 && omega > 0.0 && std::f64::consts::PI * self.numerator[g * groups + q] / ((1.0 - ratio_all) * omega) <= UNIT_ROUNDOFF * width.abs();
-                    if block[g] == block[q] && !small {
+                    let small = ratio_all < 1.0 && omega > 0.0 && std::f64::consts::PI * self.numerator[g * groups + q] / ((1.0 - ratio_all) * omega) <= UNIT_ROUNDOFF * width.abs();
+                    if !small {
                         linked[g] |= 1 << q;
                     }
                 }

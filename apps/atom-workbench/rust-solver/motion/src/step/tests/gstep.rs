@@ -191,7 +191,8 @@ fn brute(picture: &mut crate::spectral::Picture, still: bool, h: f64, a: f64, b:
     use super::super::row;
     let n = picture.states();
     let slots = Sums { still, h, tones: &picture.beats }.count();
-    let mut sums = vec![0.0; slots * 2 * n * row(n)];
+    let size = slots * 2 * n * row(n);
+    let (mut sums, mut lost, mut node) = (vec![0.0; size], vec![0.0; size], vec![0.0; size]);
     let mut x = [C64::ZERO; STATES];
     let rule = crate::special::gauss_legendre(32);
     let count = split * ((picture.quotient * (b - a).abs() / 4.0).ceil() as usize + 8);
@@ -200,10 +201,17 @@ fn brute(picture: &mut crate::spectral::Picture, still: bool, h: f64, a: f64, b:
         for &(t, g) in &rule {
             let u = a + (p as f64 + 0.5 + 0.5 * t) * width;
             picture.at(u, &mut x[..n]);
-            Sums { still, h, tones: &picture.beats }.gather(u, 0.5 * width * g, &x[..n], None, &mut sums);
+            node.fill(0.0);
+            Sums { still, h, tones: &picture.beats }.gather(u, 0.5 * width * g, &x[..n], None, &mut node);
+            // Neumaier's compensated sum: what each addition rounds off is kept and added back at the end.
+            for ((s, c), v) in sums.iter_mut().zip(lost.iter_mut()).zip(&node) {
+                let t = *s + v;
+                *c += if s.abs() >= v.abs() { (*s - t) + v } else { (v - t) + *s };
+                *s = t;
+            }
         }
     }
-    sums
+    sums.iter().zip(&lost).map(|(s, c)| s + c).collect()
 }
 
 /// The step's sums over [a, b] by the plain rule (`count`, no root) or by the groups' cut already chosen
@@ -666,5 +674,27 @@ fn a_ground_cluster_beating_in_no_time_takes_one_node_of_the_second_order() {
         let errors = [walk(&one_step, t, tau, 1), walk(&one_step, t, 0.5 * tau, 2), walk(&three_step, t, tau, 1), walk(&three_step, t, 0.5 * tau, 2)].map(|e| off(&e, &reference));
         eprintln!("momentum off the reference: one node {:.2e} / {:.2e} ({:.1}), three {:.2e} / {:.2e} ({:.1})", errors[0], errors[1], errors[0] / errors[1], errors[2], errors[3], errors[2] / errors[3]);
         assert!(errors[0] / errors[1] > 3.0, "one node's step of the second order: {errors:?}");
+    }
+}
+
+/// The whole solve on the model (solve.rs `solve_on`), every output said: the ground states' populations, the
+/// populations' estimated error, T and its error, the loss; and the step, the trajectories and the wall time.
+#[test]
+#[ignore]
+fn gstep_solve() {
+    for (name, request) in scenes() {
+        for (label, run) in models(&name, &request) {
+            let clock = std::time::Instant::now();
+            match crate::solve::solve_on(&request, &run, &mut |_| {}) {
+                Ok(s) => {
+                    for (k, p) in s.populations.iter().enumerate() {
+                        let ground: Vec<String> = p[..GROUND].iter().map(|x| format!("{x:.6e}")).collect();
+                        println!("GSTEP-SOLVE-AT {name} {label} {k} pops {} err {:.3e} T {:.4} {:?} loss {:.3e}", ground.join(","), s.estimated_errors.get(k).copied().unwrap_or(f64::NAN), s.temperature_total_uk[k], s.temperature_total_errors_uk[k], s.loss_probability[k]);
+                    }
+                    println!("GSTEP-SOLVE {name} {label}: tau {} us, {} trajectories, {:.1} s", s.time_step_us, s.trajectories, clock.elapsed().as_secs_f64());
+                }
+                Err(e) => println!("GSTEP-SOLVE {name} {label}: refused {e} after {:.1} s", clock.elapsed().as_secs_f64()),
+            }
+        }
     }
 }
