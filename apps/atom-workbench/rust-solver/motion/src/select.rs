@@ -1,8 +1,8 @@
 //! The selection of P (PIPELINE_V3_FINAL §二 A.3, A.5–A.6, B.7–B.11, C.13–C.15): the candidates by structure, each
 //! judged by what it does to the run's readings along the atoms' own paths against the 32-state model (paths.rs), and
 //! the candidate of least total work chosen among those whose model error A leaves the targets room.
-//! The trajectories' parts (the pilot the paths come from, the model-only scaling response, the work) are the
-//! solve's (solve.rs, # The selection); what is here is the model's side and the accounts.
+//! The trajectories' parts (the pilot the paths come from, T's memory read on the run's own trajectories, the work)
+//! are the solve's (solve.rs, # The selection); what is here is the model's side and the accounts.
 //!
 //! # The candidates
 //! Every excited state e has an importance: its first-order excitation Σ_g p_g Σ_ω |V_eg|²/|E_g + f − E_e + iΓ_e/2|²
@@ -66,8 +66,30 @@
 //! the strict bound by the Duhamel identity and the model-only momentum-scaling response (P3-SELECT's first rounds)
 //! read 5–200 times PAIR's truth on PGC3D and R4 and kept every scene off its full-ground model, and FOLDTEMP's third
 //! round found no tighter bound to be had. The temperature and the loss have no model error; the run says so once (the
-//! ledger's item, solve.rs `NO_FEEDBACK`). The scaling response is kept for one flag alone, T's memory not shorter than
-//! the run (`Response::collapsed`, solve.rs `response`).
+//! ledger's item, solve.rs `NO_FEEDBACK`).
+//!
+//! ## T's memory, read on the run's own trajectories
+//! One flag is left of the momentum-scaling response: T's memory not shorter than the run (FOLDTEMP §R2.3, "缩放响应在
+//! 运行末仍可读出"). It is read on the product's own trajectories, no trajectory more (solve.rs `memory_at_the_end`;
+//! until the coordinator's item 7 of 2026-11-22 two more runs of the pilot's atoms at 1 ± η did it, 4–52 % of the
+//! chosen W):
+//! - The response R_O(t) = d⟨O(t)⟩/dε, every initial momentum scaled by 1 + ε at t = 0, is by the likelihood-ratio
+//!   (score-function) identity R_O(t) = d/dε ∫ O(t; x₀) p_ε(x₀) dx₀ = E[O(t) s(x₀)], s = ∂_ε log p_ε at ε = 0 the
+//!   draw's score, p_ε the density of the scaled draws, the dynamics after t = 0 unchanged. E[s] = 0, so R_O =
+//!   Cov(O(t), s); for an estimate that is a smooth function of the run's sums -- T, a U-statistic of the held atoms'
+//!   κ and κ² over their number -- R is its derivative with every trajectory reweighed by 1 + εs.
+//! - The engine's draw (ensemble.rs, # The lowered isothermal, # Its draw, # The Wigner factor) is no Maxwell
+//!   distribution independent of the place: the classical density is f(r, κ) ∝ (e^{y−K} − 1)₊, y = −V(r)/k_BT the
+//!   depth in the component's prepared well, K = (ħ/m)κ²/2k_BT; the Wigner map then scales κ by S (linear, along the
+//!   well's axes) and moves r by a function of r alone. Scaling the mapped momenta by 1 + ε scales κ alike, K by
+//!   (1 + ε)², the density's Jacobian by (1 + ε)⁻³, so s = 2K e^{y−K}/(e^{y−K} − 1) − 3 at the classical draw's K
+//!   and y (`Ensemble::draw_scored`; a mixture's component is the trajectory's internal state, its own density).
+//!   Deep in the well, y − K ≫ 1, it is Σ_a κ_a²/σ_a² − 3, the Maxwell distribution's.
+//! - Near the escape energy, K → y, s grows as 2y/(y − K): the density vanishes linearly there, and s's second moment
+//!   diverges as the logarithm of the nearest draw's distance to escape. Its weight is that of the atoms within a few
+//!   k_BT of escape, of order e^{−D/k_BT} in a well D deep; the run's groups' jackknife reads the spread it has.
+//! - The flag at the run's end against T's allowance there (`decide`): read there (|R| > z·se), flagged; within the
+//!   allowance at its upper end, or not told, no flag.
 //!
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
@@ -126,10 +148,6 @@ fn lawson((per_us, pieces): (f64, usize), read: usize) -> Scheme {
 
 /// The calibration's piece (µs): the first path's start, where the readings change fastest (P1-PATHS: one path, 10 µs).
 pub const CALIBRATION: f64 = 10.0;
-
-/// The momenta's relative kick of the scaling response (PATHGAP's, measured on PGC3D, TET, R4 and tilt0): its symmetric
-/// difference errs by O(η²).
-pub const KICK: f64 = 0.25;
 
 /// A run's states: P, the structural chain it is one of (module documentation, # The candidates), the states'
 /// structural amplitudes, the chain's time, and what the choice made of the chain where it was made (`Choice`: after the
@@ -675,23 +693,10 @@ fn calibrate(candidate: [&Series; 3], reference: &[Series; 3]) -> Calibration {
 // ---------------------------------------------------------------------------------------------------------------------
 // The accounts.
 
-/// The model-only scaling response, for its flag alone (module documentation, # The feedback through the motion:
-/// zero): at the times `times` (µs, from t = 0) T's R_T = (T₊ − T₋)/2η (µK a unit η) of the model's own atoms with their
-/// initial momenta scaled by 1 ± η, and its standard error (the groups' jackknife), on the first `groups` of the pilot's
-/// groups; and whether T's memory is not shorter than the run (`decide`), none where the pilot's groups did not tell.
-#[derive(Clone, Debug)]
-pub struct Response {
-    pub times: Vec<f64>,
-    pub temperature: Vec<f64>,
-    pub errors: Vec<f64>,
-    pub groups: usize,
-    pub decided: Option<bool>,
-}
-
-/// Whether T's memory is not shorter than the run, of its response at the run's end `r` (µK a unit η) and its standard
+/// Whether T's memory is not shorter than the run, of its response at the run's end `r` (µK a unit ε) and its standard
 /// error `se`, T's allowance there `allowance` (µK): yes where the response is read there, |r| > z·se (FOLDTEMP §R2.3:
 /// "缩放响应在运行末仍可读出"); no where even its upper end |r| + z·se is within the allowance -- a unit kick of the
-/// initial momenta moves the end's T by less than its target; none otherwise (more groups would tell).
+/// initial momenta moves the end's T by less than its target; none otherwise (no flag: the run's groups do not tell).
 pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
     if !(r.is_finite() && se.is_finite()) {
         None
@@ -701,39 +706,6 @@ pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
         Some(false)
     } else {
         None
-    }
-}
-
-impl Response {
-    /// The size |R_T| at the k-th time, its noise taken out: √max(R̄² − se², 0), R̄² being R² + se² on average.
-    fn size(&self, k: usize) -> f64 {
-        let (r, e) = (self.temperature[k], self.errors[k]);
-        let d = r * r - if e.is_finite() { e * e } else { 0.0 };
-        if d > 0.0 { d.sqrt() } else { 0.0 }
-    }
-
-    /// Λ_T = ∫₀ᵗ|R_T| / R_T(0): T's memory time (µs) to the time t, for the report (the trapezoid; beyond the last time
-    /// R held at its last value).
-    pub fn memory(&self, t: f64) -> f64 {
-        let mut sum = 0.0;
-        for k in 1..self.times.len() {
-            let (a, b) = (self.times[k - 1], self.times[k]);
-            if a >= t {
-                break;
-            }
-            let (ra, rb) = (self.size(k - 1), self.size(k));
-            sum += if b <= t { 0.5 * (b - a) * (ra + rb) } else { 0.5 * (t - a) * (ra + ra + (rb - ra) * (t - a) / (b - a)) };
-        }
-        let last = self.times.len() - 1;
-        if t > self.times[last] {
-            sum += (t - self.times[last]) * self.size(last);
-        }
-        sum / self.temperature[0].abs()
-    }
-
-    /// Whether T's memory was found not shorter than the run (`decide`): the flag "Λ 塌掉".
-    pub fn collapsed(&self) -> bool {
-        self.decided == Some(true)
     }
 }
 
@@ -761,16 +733,15 @@ pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> f64 {
     own.iter().copied().fold(0.0, larger) + judged.calibration.rows
 }
 
-/// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the response (its flag
-/// alone), the paths' windows, the memory time and L, and the report's lines -- every candidate judged with its direct
-/// part, its cost and why it was or was not chosen, the stages' times.
+/// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the paths' windows, the
+/// memory time and L, and the report's lines -- every candidate judged with its direct part, its cost and why it was or
+/// was not chosen, the stages' times.
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub keep: Vec<usize>,
     /// The chain the choice was made on: by the importance at the pilot's states (`importance`).
     pub chain: Vec<Vec<usize>>,
     pub judged: Judged,
-    pub response: Response,
     pub windows: Vec<(f64, f64)>,
     pub memory: f64,
     pub length: f64,

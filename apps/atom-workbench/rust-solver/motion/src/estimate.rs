@@ -344,24 +344,29 @@ impl Sums {
     pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], unresolved: 0. };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
+        self.add_weighted(fate, 1.);
+    }
+    /// One trajectory at the output, its every count and sum weighed by `w` (`add` at w = 1; solve.rs: a run's reads
+    /// weighed by its trajectories' scores, `Group::tilted`).
+    pub fn add_weighted(&mut self, fate: &Fate, w: f64) {
         if matches!(fate, Fate::Failed | Fate::Refused) {
-            self.failed += 1.;
-            self.refused += if *fate == Fate::Refused { 1. } else { 0. };
+            self.failed += w;
+            self.refused += if *fate == Fate::Refused { w } else { 0. };
             return;
         }
-        self.trajectories += 1.;
+        self.trajectories += w;
         if let Fate::Held(h) = fate {
-            self.held += 1.;
+            self.held += w;
             for (s, r) in self.rows.iter_mut().zip(&h.rows) {
-                *s += r;
+                *s += w * r;
             }
             for a in 0..3 {
-                self.kappa[a] += h.kappa[a];
-                self.kappa_squared[a] += h.kappa[a] * h.kappa[a];
-                self.kappa2[a] += h.kappa2[a];
+                self.kappa[a] += w * h.kappa[a];
+                self.kappa_squared[a] += w * h.kappa[a] * h.kappa[a];
+                self.kappa2[a] += w * h.kappa2[a];
             }
             if h.unresolved {
-                self.unresolved += 1.;
+                self.unresolved += w;
             }
         }
     }
@@ -411,10 +416,24 @@ impl Group {
     }
     /// One trajectory at every output, in order.
     pub fn add(&mut self, outputs: &[Fate]) {
+        self.add_weighted(outputs, 1.);
+    }
+    /// One trajectory at every output, in order, weighed by `w` (`Sums::add_weighted`).
+    pub fn add_weighted(&mut self, outputs: &[Fate], w: f64) {
         assert_eq!(outputs.len(), self.sums.len(), "a trajectory has every output");
         for (s, o) in self.sums.iter_mut().zip(outputs) {
-            s.add(o);
+            s.add_weighted(o, w);
         }
+    }
+    /// The group's sums with another's of the same trajectories weighed by `h` added in: the group reweighed by 1 + h s
+    /// where `weighed` holds its trajectories weighed by their scores s (solve.rs `memory_at_the_end`).
+    pub fn tilted(&self, weighed: &Group, h: f64) -> Group {
+        let mut g = self.clone();
+        for (s, o) in g.sums.iter_mut().zip(&weighed.sums) {
+            s.combine(o, h);
+        }
+        g.scattered = [self.scattered[0] + h * weighed.scattered[0], self.scattered[1] + h * weighed.scattered[1]];
+        g
     }
 }
 

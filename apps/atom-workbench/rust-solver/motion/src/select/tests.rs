@@ -206,10 +206,11 @@ fn scene_request(name: &str, six: Option<&std::path::Path>) -> crate::request::R
 
 /// The whole selection (module documentation; solve.rs # The selection) on the scenes named by `SELECT_SCENES` (comma-
 /// separated: the six's names in `requests`, or a native request's path, e.g. R5_PUMP's and S1's), one after another:
-/// G's pilot, the paths, the response, the candidates judged and weighed, P -- its report (every candidate's parts, work
+/// G's pilot, the paths, the candidates judged and weighed, P -- its report (every candidate's parts, work
 /// and fate; the stages' times), and with `SELECT_OUT` a directory, each scene's choice to <scene>.json there: P, the
-/// parts at the response's times, the response's Λ_T, the pairs. `SELECT_ALSO`: candidates beside the chain judged for
+/// direct part at the windows' ends, the region, the calibration. `SELECT_ALSO`: candidates beside the chain judged for
 /// comparison (`ALSO`), ';'-separated, each the excited states' labels it keeps, ','-separated (the ground states always).
+/// `SELECT_SOLVE` set: the whole solve instead (the product's own lines, its memory flag among them).
 #[test]
 #[ignore]
 fn select_on_the_scenes() {
@@ -231,6 +232,12 @@ fn select_on_the_scenes() {
         });
         ALSO.with(|a| *a.borrow_mut() = also);
         let clock = Instant::now();
+        // `SELECT_SOLVE`: the whole solve instead, its product and its flags (the run's own lines on stderr).
+        if std::env::var("SELECT_SOLVE").is_ok() {
+            let solved = crate::solve::solve(&request, &mut |_| {});
+            eprintln!("{name}: solved in {:.1} s: {}", clock.elapsed().as_secs_f64(), if solved.is_ok() { "ok" } else { "an error" });
+            continue;
+        }
         let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).unwrap();
         let choice = run.report.choice.clone().expect("the chosen run holds its choice");
         eprintln!("{name}: P{} chosen in {:.1} s", run.rs.keep.len(), clock.elapsed().as_secs_f64());
@@ -238,14 +245,11 @@ fn select_on_the_scenes() {
             eprintln!("  {line}");
         }
         if let Some(dir) = &out {
-            let times = &choice.response.times;
-            let parts: Vec<serde_json::Value> = times.iter().map(|&t| serde_json::json!({"t": t, "direct": choice.at(t)})).collect();
+            let parts: Vec<serde_json::Value> = choice.windows.iter().map(|&(_, t)| serde_json::json!({"t": t, "direct": choice.at(t)})).collect();
             let doc = serde_json::json!({
                 "scene": name, "keep": choice.keep, "labels": choice.keep.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>(),
-                "memory": choice.memory, "length": choice.length, "lambda_t": choice.response.memory(*request.times_us.last().unwrap()),
-                "collapsed": choice.response.decided, "response_groups": choice.response.groups, "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
+                "memory": choice.memory, "length": choice.length, "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
                 "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate],
-                "response": {"times": choice.response.times, "temperature": choice.response.temperature, "errors": choice.response.errors},
                 "parts": parts, "report": choice.report,
             });
             let stem = name.rsplit(['/', '\\']).next().unwrap().trim_end_matches(".json").to_string();
