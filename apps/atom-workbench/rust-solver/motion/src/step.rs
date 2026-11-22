@@ -1223,11 +1223,6 @@ fn rule(m: usize) -> std::rc::Rc<Rule> {
     std::rc::Rc::new(Rule { nodes, weights })
 }
 
-thread_local! {
-    /// The spherical Bessel functions' scratch (`fewest`).
-    static BESSELS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// The index past `from` where the three-term recurrence's growing solution (p_{from−1} = 0, p_from = 1, upward) has
 /// grown by the round-off's inverse: there j_l has fallen below the round-off of j_from, and Miller's recurrence started
 /// there has j_from to the round-off (Gautschi 1967).
@@ -1247,10 +1242,11 @@ fn grown(x: f64, from: usize) -> usize {
 /// `degree` places; the rule of m nodes integrates P_l exactly up to l = 2m − 1 and errs on a P_l beyond by no more
 /// than 2 (|P_l| ≤ 1, its weights' sum 2), so within Σ_{l ≥ 2m − degree} (2l + 1)|j_l(κ)| over the integral's scale 2:
 /// the least m that holds that within the unit round-off -- the phase over four and the Bessel functions' tail past
-/// l ≈ κ, which falls faster than any power --, not fewer than `least`. Measured tight (CARRIER: at κ = 20, 150, 600
-/// the rule of 27, 106, 349 nodes errs by 10⁻¹⁶–10⁻¹⁵, a tenth fewer nodes by 3·10⁻¹⁴, 6·10⁻¹⁰, 5·10⁻⁴). j_l by
-/// Miller's backward recurrence from where it has fallen below the round-off (`grown`), normalized by
-/// Σ(2l + 1)j_l² = 1.
+/// l ≈ κ, which falls faster than any power --, not fewer than `least`. The tail is bounded in closed form (`tail`), not
+/// summed: the least L whose bound is within the round-off, found by doubling and halving its distance past κ. Measured
+/// tight (CARRIER: at κ = 20, 150, 600 the rule of 27, 106, 349 nodes errs by 10⁻¹⁶–10⁻¹⁵, a tenth fewer nodes by
+/// 3·10⁻¹⁴, 6·10⁻¹⁰, 5·10⁻⁴); the bound asks 0 to 3 nodes more than the tail summed by Miller's recurrence did (until
+/// 2026-11-22, 15–16 µs a piece at κ ≈ 1900; `resolved_by_recurrence` in the tests), in some 1 µs.
 fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
     resolved(nu, width, least, degree, false)
 }
@@ -1262,6 +1258,10 @@ fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
 /// its square --: the least S that holds Σ_{l ≥ S − degree} (2l + 1)|j_l(κ)| within half the round-off, not fewer than
 /// twice `least`.
 fn resolved(nu: f64, width: f64, least: usize, degree: usize, interpolated: bool) -> usize {
+    #[cfg(test)]
+    if SUMMED.with(|x| x.get()) {
+        return resolved_by_recurrence(nu, width, least, degree, interpolated);
+    }
     let kappa = 0.5 * nu * width.abs();
     // A beat that is not a number would size the rule by a recurrence that stops at once: no rule is sized for it.
     assert!(!kappa.is_nan(), "a tone's frequency is not a number");
@@ -1273,26 +1273,84 @@ fn resolved(nu: f64, width: f64, least: usize, degree: usize, interpolated: bool
     if !kappa.is_finite() {
         return usize::MAX;
     }
-    BESSELS.with(|f| {
-        let f = &mut *f.borrow_mut();
-        let top = grown(kappa, grown(kappa, kappa.ceil() as usize + 1).max(2 * least));
-        f.clear();
-        f.resize(top + 2, 0.0);
-        f[top] = 1.0;
-        for l in (1..=top).rev() {
-            f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
-            if f[l - 1].abs() > 1e100 {
-                f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
-            }
+    // The least L whose tail's bound is within: past the first L of a finite bound, the bound falls with L (`tail`), so
+    // "within" holds from L on -- found by doubling the distance past the turning point, then halving.
+    let first = (kappa - 0.5).ceil().max(0.0) as usize;
+    let holds = |l: usize| tail(kappa, l) <= within;
+    let (mut lo, mut hi) = (first, first);
+    let mut step = 1;
+    while !holds(hi) {
+        lo = hi + 1;
+        hi = first + step;
+        step *= 2;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if holds(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
-        let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
-        let mut tail = 0.0;
-        let start = (0..=top).rev().find(|&l| {
-            tail += (2 * l + 1) as f64 * f[l].abs() / norm;
-            tail > within
-        });
-        start.map_or(floor, |l| if interpolated { (l + 1 + degree).max(floor) } else { (l + 1 + degree).div_ceil(2).max(least) })
-    })
+    }
+    // The largest l whose tail is not within is L − 1: none where L is 0.
+    if hi == 0 {
+        return floor;
+    }
+    if interpolated { (hi + degree).max(floor) } else { (hi + degree).div_ceil(2).max(least) }
+}
+
+/// A closed-form bound on Σ_{l ≥ L} (2l + 1)|j_l(κ)| for L + ½ ≥ κ (∞ below, or where the bound's ratio is not below
+/// one): |j_l(κ)| = (π/2κ)^{1/2} |J_ν(κ)|, ν = l + ½, and |J_ν(νx)| ≤ e^{νφ(x)}, φ(x) = (1 − x²)^{1/2} −
+/// ln((1 + (1 − x²)^{1/2})/x), for ν ≥ 0, 0 < x ≤ 1 (DLMF 10.14.5); νφ(κ/ν) falls with ν at the rate arccosh(ν/κ), which
+/// grows with ν, and (2l + 3)/(2l + 1) falls with l, so each term from L on is within r = (2L + 3)/(2L + 1)
+/// e^{−arccosh((L + ½)/κ)} of the one before -- e^{−arccosh(1/x)} = x/(1 + (1 − x²)^{1/2}) -- and the tail within its
+/// first term over 1 − r.
+fn tail(kappa: f64, l: usize) -> f64 {
+    let nu = l as f64 + 0.5;
+    if nu < kappa {
+        return f64::INFINITY;
+    }
+    let x = kappa / nu;
+    let root = ((1.0 - x) * (1.0 + x)).sqrt();
+    let ratio = (2 * l + 3) as f64 / (2 * l + 1) as f64 * (x / (1.0 + root));
+    if !(ratio < 1.0) {
+        return f64::INFINITY;
+    }
+    let first = (2 * l + 1) as f64 * (std::f64::consts::FRAC_PI_2 / kappa).sqrt() * (nu * (root - ((1.0 + root) / x).ln())).exp();
+    first / (1.0 - ratio)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A check's switch (tests alone, the thread's): `resolved` by the tail summed (`resolved_by_recurrence`).
+    pub(crate) static SUMMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `resolved` as it was until 2026-11-22, the tail summed (a check's reference): j_l by Miller's backward recurrence from
+/// where it has fallen below the round-off (`grown`), normalized by Σ(2l + 1)j_l² = 1, the tail summed from there down.
+#[cfg(test)]
+fn resolved_by_recurrence(nu: f64, width: f64, least: usize, degree: usize, interpolated: bool) -> usize {
+    let kappa = 0.5 * nu * width.abs();
+    let (floor, within) = if interpolated { (2 * least, 0.5 * UNIT_ROUNDOFF) } else { (least, UNIT_ROUNDOFF) };
+    if kappa <= 0.0 {
+        return floor;
+    }
+    let top = grown(kappa, grown(kappa, kappa.ceil() as usize + 1).max(2 * least));
+    let mut f = vec![0.0; top + 2];
+    f[top] = 1.0;
+    for l in (1..=top).rev() {
+        f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
+        if f[l - 1].abs() > 1e100 {
+            f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+        }
+    }
+    let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+    let mut tail = 0.0;
+    let start = (0..=top).rev().find(|&l| {
+        tail += (2 * l + 1) as f64 * f[l].abs() / norm;
+        tail > within
+    });
+    start.map_or(floor, |l| if interpolated { (l + 1 + degree).max(floor) } else { (l + 1 + degree).div_ceil(2).max(least) })
 }
 
 /// The panels' count over a piece of the width w at the bandwidth ν (`panels`; `fewest` of `nodes` nodes and more, on

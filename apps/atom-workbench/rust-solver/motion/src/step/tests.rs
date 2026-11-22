@@ -1684,6 +1684,69 @@ fn the_quadrature_integrates_a_bandwidth_within_its_tolerance() {
     }
 }
 
+/// The rule's node count by the tail's closed-form bound (`fewest`, `resolved`, `tail`) against the tail summed by
+/// Miller's recurrence (`resolved_by_recurrence`, the count until 2026-11-22): at κ = νw/2 from 10⁻³ to 7.5·10⁴ (eight
+/// a decade), every degree 0 to 4, plain and interpolated, the bound's count is never below the sum's (it
+/// bounds the same tail) and is above it by a few nodes and a hundredth of it; and the bound itself is above the summed tail at every L
+/// past the turning point where it is finite. Their times at κ = 1900 (P2-GSTEP's ν_Q ≈ 3800 a unit width) printed.
+#[test]
+fn the_rule_s_count_by_the_tail_s_bound_is_the_summed_tail_s_or_a_few_more() {
+    let (mut most, mut more, mut cases, mut worst) = (0usize, 0usize, 0usize, 0.0_f64);
+    for decade in -3..5 {
+        for step in 0..8 {
+            let kappa = 10f64.powf(decade as f64 + step as f64 / 8.0);
+            for degree in 0..=4 {
+                for interpolated in [false, true] {
+                    let (new, old) = (super::resolved(2.0 * kappa, 1.0, 1, degree, interpolated), super::resolved_by_recurrence(2.0 * kappa, 1.0, 1, degree, interpolated));
+                    assert!(new >= old, "κ {kappa}, degree {degree}, interpolated {interpolated}: {new} below the summed tail's {old}");
+                    // A few more, and a hundredth more where the rule is long (measured: 0–1 node below κ ≈ 30, 1–5 to
+                    // κ ≈ 2000, 22 of 37 753 at 7.5·10⁴; twice that interpolated, no halving there).
+                    assert!(new - old <= 3 + old / 100, "κ {kappa}, degree {degree}, interpolated {interpolated}: {new} against the summed tail's {old}");
+                    most = most.max(new - old);
+                    worst = crate::linalg::larger(worst, (new - old) as f64 / old as f64);
+                    more += new - old;
+                    cases += 1;
+                }
+            }
+        }
+    }
+    eprintln!("the bound's count above the summed tail's: at most {most} (a share {worst:.4} of the sum's), on the mean {:.2} ({cases} cases)", more as f64 / cases as f64);
+    // The bound against the tail summed (Miller's normalized j_l, as above) at κ = 1, 37, 600, 1900.
+    for kappa in [1.0_f64, 37.0, 600.0, 1900.0] {
+        let top = super::grown(kappa, super::grown(kappa, kappa.ceil() as usize + 1));
+        let mut f = vec![0.0; top + 2];
+        f[top] = 1.0;
+        for l in (1..=top).rev() {
+            f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
+            if f[l - 1].abs() > 1e100 {
+                f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+            }
+        }
+        let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+        let mut summed = vec![0.0; top + 2];
+        for l in (0..=top).rev() {
+            summed[l] = summed[l + 1] + (2 * l + 1) as f64 * f[l].abs() / norm;
+        }
+        for l in 0..=top {
+            let bound = super::tail(kappa, l);
+            if bound.is_finite() && summed[l] > 1e3 * f64::MIN_POSITIVE {
+                assert!(bound >= summed[l] * (1.0 - 1e-12), "κ {kappa}, L {l}: the bound {bound:e} below the tail {:e}", summed[l]);
+            }
+        }
+    }
+    let time = |f: &dyn Fn() -> usize| {
+        (0..50)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                std::hint::black_box(f());
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, crate::linalg::smaller)
+    };
+    let (new, old) = (time(&|| super::fewest(3800.0, 1.0, super::FORMS, 2)), time(&|| super::resolved_by_recurrence(3800.0, 1.0, super::FORMS, 2, false)));
+    eprintln!("κ 1900: the bound {new:.2} µs ({} nodes), the summed tail {old:.2} µs ({} nodes)", super::fewest(3800.0, 1.0, super::FORMS, 2), super::resolved_by_recurrence(3800.0, 1.0, super::FORMS, 2, false));
+}
+
 /// A rule of many nodes (`special::gauss_legendre`, O(m)) at the widest phase its node count is laid for (`fewest`: the
 /// largest κ whose least rule on [−1, 1] is m nodes, by bisection) and at a resolved one (κ = m/2) and none (Σw = 2),
 /// m = 1000 to 64 000: Σ w_k e^{iκx_k} against ∫e^{iκt} = 2 sin κ/κ, summed with its error carried (Neumaier). Within
@@ -4736,3 +4799,5 @@ mod r2prop2;
 // P2-GSTEP: one node a step and the quadrature by groups (ignored, by name).
 mod gstep;
 
+// P4-TABLE: the folded blocks tabled in the tweezer's intensity, against the node before it and its cost (ignored, by name).
+mod p4table;
