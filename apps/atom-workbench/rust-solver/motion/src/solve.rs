@@ -2578,14 +2578,14 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let walks = walks(run, &domain, tau, context.plan.end, &fine_refs, WALKS, length);
     let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
     let paths = Paths::new(&full, centre, walks, memory, length, tau, light)?;
-    let settled = paths.settled;
+    let settled = &paths.settled;
     noted(
         &mut report,
         format!(
-            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 Lawson 每 µs {:.1} 个子步、每步 {} 段（按误差定：校准段上参照的误差 子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
+            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头 {:.2} µs 每 µs {:.1} 个子步、其后每 µs {:.1} 个，每步 {} 段（按误差定：校准段上参照的误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
             paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
-            settled.setting.0, settled.setting.1, settled.errors[0], settled.errors[1], crate::select::TOLERANCE,
-            settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：两份误差 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
+            settled.opening, settled.setting.rates[0], settled.setting.rates[1], settled.setting.pieces, settled.errors[0], settled.errors[1], settled.errors[2], crate::select::TOLERANCE,
+            settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
         ),
     );
     messages.alive();
@@ -2750,7 +2750,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let scans = crate::select::scan_walks(&beyond, centre, &trap.axes, speed, tau, hm, &[(chief(request), crate::linalg::C64::ONE)]);
     let chosen_model = models[weighed[chosen].place].as_ref().unwrap_or(run);
     if chosen_model.rs.keep.len() < STATES {
-        let (region, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light, paths.settled.setting)?;
+        let (region, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light, &paths.settled)?;
         weighed[chosen].judged.region = region;
         weighed[chosen].model = account(&weighed[chosen].judged);
         noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点或光镊区域边缘，{speed:.3} µm/µs）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,

@@ -92,9 +92,9 @@ fn select_the_memory_flag_by_hand() {
 /// setting stopped at `FINEST` -- book their whole sum.
 #[test]
 fn select_the_ladder_top_by_hand() {
-    let settled = |errors: [f64; 2]| Settled { setting: FINEST, errors, tried: 1, products: 0, seconds: 0.0 };
-    assert_eq!(settled([0.5 * TOLERANCE, 0.25 * TOLERANCE]).unmet(), None);
-    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE]).unmet(), Some(1.5 * TOLERANCE));
+    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, seconds: 0.0 };
+    assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE]).unmet(), None);
+    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0]).unmet(), Some(1.5 * TOLERANCE));
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -337,20 +337,22 @@ fn select_paths_cost() {
         };
         let w = if std::env::var("SELECT_STILL").is_ok() { &still } else { &walks[k] };
         let to = probe.min(w.end());
-        // A rate "sN" is N substeps a piece (N × pieces / τ a µs).
-        let grid: Vec<(f64, usize)> = std::env::var("SELECT_GRID").map_or(vec![(128.0, 2)], |x| {
+        // A setting "opening rate/run rate/pieces"; a rate "sN" is N substeps a piece (N × pieces / τ a µs). The opening the
+        // paths' first window.
+        let grid: Vec<Setting> = std::env::var("SELECT_GRID").map_or(vec![COARSEST], |x| {
             x.split(',')
                 .map(|g| {
-                    let (a, b) = g.split_once('/').unwrap();
-                    let pieces: usize = b.parse().unwrap();
-                    let rate = match a.strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => a.parse().unwrap() };
-                    (rate, pieces)
+                    let p: Vec<&str> = g.split('/').collect();
+                    let pieces: usize = p[2].parse().unwrap();
+                    let rate = |a: &str| match a.strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => a.parse().unwrap() };
+                    Setting { rates: [rate(p[0]), rate(p[1])], pieces }
                 })
                 .collect()
         });
+        let opening = crate::paths::windows(length.min(5.0 * memory), memory, tau)[0].1;
         let (fr, fg) = (Form::new(&full, centre), Form::new(&g, centre));
-        eprintln!("walk {k} to {to} µs: reference {}; G {}", fr.shape(), fg.shape());
-        let mut schemes: Vec<Scheme> = grid.iter().map(|&(per_us, pieces)| Scheme::Lawson { per_us, pieces, read: 1 }).collect();
+        eprintln!("walk {k} to {to} µs, the opening {opening:.3} µs: reference {}; G {}", fr.shape(), fg.shape());
+        let mut schemes: Vec<Scheme> = grid.iter().map(|&s| scheme(s, opening, 1)).collect();
         // `SELECT_SPARSE` = 2: the converged scheme at twice its nodes and half its turn first (its own check), compared
         // against it.
         if std::env::var("SELECT_SPARSE").is_ok_and(|x| x == "2") {

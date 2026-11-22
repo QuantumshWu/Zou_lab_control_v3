@@ -67,16 +67,43 @@
 //! converged scheme (its check reads 1e-7 … 1e-5 of the fold error on every scene); its cost is about 4‖L‖₁ products a
 //! µs whatever the segment (a polynomial exponential cannot resolve the coherences turning at ω with fewer than about
 //! ω T products). The cheap schemes take the path's own steps: `Steps` (one exponential a step: the products' count
-//! still about 4‖L‖₁ T), and `Lawson`, which takes H's fast turning exactly in its eigenbasis and leaves to the
-//! substeps only what turns at the decay's rate and at the beats -- its cost set by the substeps, not by ‖L‖. Their
+//! still about 4‖L‖₁ T), and `Exponential`, which takes H's fast turning exactly in its eigenbasis and leaves to the
+//! substeps only what the readings change by -- its cost set by the substeps, not by ‖L‖ (# The substeps). Their
 //! errors on the fold error are read against `Sparse` on the same paths (tests, `paths_replay`, `py/scheme.py`); the
-//! selection reads Lawson's against its own refinements (select.rs `settle`: `Sparse` follows the fastest coherence,
-//! and on scenes whose 32 states hold levels far off the light's frame it does not end).
+//! selection reads the exponential scheme's against its own refinements (select.rs `settle`: `Sparse` follows the
+//! fastest coherence, and on scenes whose 32 states hold levels far off the light's frame it does not end).
 //!
-//! What a Lawson piece needs before its substeps reads no state -- its node and amplitudes, H at its middle and the
-//! blocks' eigendecompositions, the substep's exponentials, R at every substep's middle, the node a reading takes at
-//! its end (`Frozen`) --, so it is made on the pool, a chunk of pieces ahead of the propagation, which alone runs in
-//! order; the readings of a chunk are made on the pool after it (`Form::along_from`).
+//! # The substeps
+//! On a piece of `Scheme::Exponential` H is frozen at its middle t_m and the sector's state is held in H(t_m)'s
+//! eigenbasis, σ = V⁻¹ρV⁻†, where −i(H(t_m)ρ − ρH(t_m)†) is the diagonal Λ, μ_ab = −i(λ_a − conj λ_b); the rest -- the
+//! recycling R(t) and H's beats from t_m -- is the remainder g(t, σ) = N(t)σ, linear in σ:
+//! σ' = Λσ + g(t, σ), σ(t + d) = e^{Λd}σ(t) + ∫₀^d e^{Λ(d−s)} g(t + s, σ(t + s)) ds.
+//! - Lawson's scheme (the integrating factor, until 2026-11-22) took u = e^{−Λs}σ and RK4 on u' = e^{−Λs}N e^{Λs}u. A
+//!   coherence the light drives -- between a dressed ground and a dressed excited state -- is steady where the
+//!   readings are (it follows the populations, σ_ab ≈ −(Nσ)_ab/μ_ab), but its u_ab turns at Im μ_ab, the detuning: RK4
+//!   had to resolve it, d·|Im μ| ≲ 1, the substeps set by the detuning and not by what the readings change by. The
+//!   scheme does not keep the fixed point Λσ* + Nσ* = 0 (Hochbruck and Ostermann 2010, Acta Numerica 19, §2.3). Measured
+//!   (SELCOST, the reference against `Sparse` on R4's walk held at rest, past its start): 4.2e-3 at 8.4 substeps a µs,
+//!   1.2e-4 at 270; TET's 135 a µs and R4's 270 were the detunings', 250–1000 rad/µs.
+//! - The exponential Runge–Kutta scheme of Krogstad (2005; Hochbruck and Ostermann 2010, (2.37)) takes g itself as a
+//!   polynomial in s over the substep and integrates e^{Λ(d−s)} exactly by φ_k(Λd) (`phis`, `etd_weights`): constant g
+//!   is integrated exactly, so σ* is kept, and its error follows the change of g along the substep -- the populations'
+//!   pumping, the beats, the start's transient. Same work a substep as Lawson's (four remainders), classical order 4,
+//!   stiff order 3 (for a linear inhomogeneous problem Σ b_i c_i³/3! ≠ φ₄); R at its stages' times. Measured on the same
+//!   walk: 1.9e-5 at 8.4 substeps a µs, 2.1e-6 at 16.9.
+//!
+//! # The start
+//! A stretch from a start state (a walk's start; the late segment and the scans begin from it too) starts off the slow
+//! manifold: its coherences turn at the dressed splittings and decay at the excited decay -- a real transient, which
+//! feeds g at those frequencies until it has decayed, and which the substeps must resolve there and nowhere else
+//! (R4 at rest from its start: the exponential scheme 4.96e-3 at 33.8 a µs, 1.0e-3 at 270). So a setting has two rates:
+//! the opening's, over the stretch's first `opening` µs -- the paths' first window (`windows`: the start's transient
+//! resolved where it changes fastest) --, and the run's after it, each settled by its own error (select.rs `settle`).
+//!
+//! What an exponential piece needs before its substeps reads no state -- its node and amplitudes, H at its middle and
+//! the blocks' eigendecompositions, the substep's weights, R at the substeps' stages, the node a reading takes at its
+//! end (`Frozen`) --, so it is made on the pool, a chunk of pieces ahead of the propagation, which alone runs in order;
+//! the readings of a chunk are made on the pool after it (`Form::along_from`).
 //!
 //! # The errors
 //! Per path the candidate's readings less the reference's at the same times, averaged over a time window; over the
@@ -153,11 +180,11 @@ pub enum Scheme {
     /// a piece of the paths and booked (module documentation, # The budget).
     Steps { gauss: bool, read: usize, tol: f64 },
     /// Each step of the path in `pieces` equal pieces, the model made at each piece's middle: H there integrated exactly
-    /// in its eigenbasis (block by block), the rest -- the recycling Σ J ρ J†, H's beats -- by Lawson's RK4 in `per_us`
-    /// substeps a µs; a readout at every `read`-th knot and at the end. The substeps are set by the decay, not by ‖L‖.
-    /// (H's change along a piece is the pieces' to follow, not the substeps': in the remainder its couplings would turn
-    /// at the detunings.) The scheme's error is read against `Sparse` and booked (module documentation, # The budget).
-    Lawson { per_us: f64, pieces: usize, read: usize },
+    /// in its eigenbasis (block by block), the rest -- the recycling Σ J ρ J†, H's beats -- by the exponential
+    /// Runge–Kutta substeps (module documentation, # The substeps), `rates[0]` a µs over a stretch's first `opening` µs
+    /// (# The start) and `rates[1]` a µs after; a readout at every `read`-th knot and at the end. The scheme's error is
+    /// read by its own refinements and booked (module documentation, # The budget).
+    Exponential { rates: [f64; 2], opening: f64, pieces: usize, read: usize },
 }
 
 impl Scheme {
@@ -183,7 +210,7 @@ pub struct Counts {
     pub readout_seconds: f64,
     /// The path's time advanced (µs).
     pub time: f64,
-    /// The largest condition of an eigenvector matrix the scheme took (`Scheme::Lawson`).
+    /// The largest condition of an eigenvector matrix the scheme took (`Scheme::Exponential`).
     pub condition: f64,
 }
 
@@ -530,7 +557,7 @@ impl<'a> Form<'a> {
     }
 
     /// `amps`, the width and R's columns' bounds made only where `width` (the segments' rule and the exponential's norm
-    /// need them; Lawson's substeps do not: NaN and none there).
+    /// need them; the exponential scheme's substeps do not: NaN and none there).
     fn amps_with(&self, node: &Node, width: bool) -> Amps {
         let n = self.n;
         let mut h = vec![C64::ZERO; self.h_beats.len() * self.h_slot];
@@ -908,7 +935,7 @@ impl<'a> Form<'a> {
                     }
                 }
             }
-            Scheme::Lawson { per_us, pieces, read } => {
+            Scheme::Exponential { rates, opening, pieces, read } => {
                 assert!(pieces >= 1, "a step in one piece at least");
                 let knots = walk.knots(from, to);
                 let node = made(from, &mut counts);
@@ -918,10 +945,12 @@ impl<'a> Form<'a> {
                 for (i, w) in knots.windows(2).enumerate() {
                     let (a, b) = (w[0], w[1]);
                     let piece = (b - a) / pieces as f64;
-                    // The substeps a piece: a product's rounding up never adds one (a rate of whole substeps a piece).
-                    let n = (piece * per_us * (1.0 - 4.0 * f64::EPSILON)).ceil().max(1.0) as usize;
                     for j in 0..pieces {
                         let p0 = a + j as f64 * piece;
+                        // The substeps a piece, at the opening's rate where the piece starts in it (# The start): a
+                        // product's rounding up never adds one (a rate of whole substeps a piece).
+                        let rate = if p0 < from + opening { rates[0] } else { rates[1] };
+                        let n = (piece * rate * (1.0 - 4.0 * f64::EPSILON)).ceil().max(1.0) as usize;
                         let read = (j + 1 == pieces && ((i + 1) % read == 0 || i + 2 == knots.len())).then_some(b);
                         plan.push(Piece { tm: p0 + 0.5 * piece, a: p0, d: piece / n as f64, n, read });
                     }
@@ -929,10 +958,10 @@ impl<'a> Form<'a> {
                 // A chunk of pieces frozen on the pool while the one before is propagated; its readings on the pool
                 // after it. The chunk: what `FROZEN_BYTES` holds of a piece's numbers, at most four per thread.
                 let most = plan.iter().map(|p| p.n).max().unwrap_or(1);
-                let size = 16 * (self.h_beats.len() * self.h_slot + most * self.cols.len() * self.rows.len() + 5 * self.h_slot + 2 * self.dim) + 1;
+                let size = 16 * (self.h_beats.len() * self.h_slot + (2 * most + 1) * self.cols.len() * self.rows.len() + 5 * self.h_slot + ETD_WEIGHTS * self.dim) + 1;
                 let chunk = (FROZEN_BYTES / size).clamp(1, 4 * rayon::current_num_threads());
                 let freeze = |range: std::ops::Range<usize>| -> Vec<Result<Frozen, String>> { plan[range].par_iter().map(|p| self.freeze(walk, p)).collect() };
-                let mut lw = Lawson::new(self);
+                let mut lw = Stages::new(self);
                 let mut ahead = freeze(0..chunk.min(plan.len()));
                 let mut start = 0;
                 while start < plan.len() {
@@ -944,7 +973,7 @@ impl<'a> Form<'a> {
                             let clock = std::time::Instant::now();
                             let mut made: Vec<(f64, &Node, Vec<C64>)> = Vec::new();
                             for f in &current {
-                                self.lawson_run(f, &mut v, &mut lw, &mut counts);
+                                self.piece_run(f, &mut v, &mut lw, &mut counts);
                                 if let Some((t, node)) = &f.read {
                                     made.push((*t, node, v.clone()));
                                 }
@@ -1221,7 +1250,7 @@ impl Op {
 /// the pool as the paths run side by side.
 const FROZEN_BYTES: usize = 64 << 20;
 
-/// A piece of a Lawson step (`Scheme::Lawson`): its middle t_m and start (µs), its substeps' length and count, and the
+/// A piece of a step (`Scheme::Exponential`): its middle t_m and start (µs), its substeps' length and count, and the
 /// time of the reading at its end where the path is read there.
 struct Piece {
     tm: f64,
@@ -1232,8 +1261,8 @@ struct Piece {
 }
 
 /// A piece frozen (`Form::freeze`; module documentation, # The budget): its plan, its node's H amplitudes, H(t_m) and
-/// per block its eigenvectors V and V⁻¹ with their adjoints, per sector entry the substep's half and whole exponentials,
-/// R^T at each substep's middle (one where it holds no beat: constant over the piece), the reading's node at its end;
+/// per block its eigenvectors V and V⁻¹ with their adjoints, per sector entry the substep's weights (`etd_weights`), R^T
+/// at each substep's stages' times (one where it holds no beat: constant over the piece), the reading's node at its end;
 /// the largest eigenvector condition, and the seconds it took. It reads no state.
 struct Frozen {
     a: f64,
@@ -1245,17 +1274,55 @@ struct Frozen {
     vinv: Vec<Vec<C64>>,
     vadj: Vec<Vec<C64>>,
     vinvadj: Vec<Vec<C64>>,
-    half: Vec<C64>,
-    full: Vec<C64>,
+    weights: Vec<Vec<C64>>,
     rs: Vec<Vec<C64>>,
     read: Option<(f64, Node)>,
     condition: f64,
     seconds: f64,
 }
 
-/// A path's Lawson scratch (`Scheme::Lawson`; `Form::lawson_run`): H(t), the beats' change −iΔH(t) and its right
+/// φ₀ … φ₃ of z (φ₀ = e^z, φ_{k+1}(z) = (φ_k(z) − 1/k!)/z): the Taylor series where |z| < 1 -- 24 terms, the 24th
+/// below 1/24! of the first --, the recurrence beyond, its cancellation no worse than a factor 1/|z| ≤ 1 a step.
+fn phis(z: C64) -> [C64; 4] {
+    if z.abs() < 1.0 {
+        let mut out = [C64::ZERO; 4];
+        let mut power = C64::ONE;
+        let mut factorial = [1.0_f64, 1.0, 2.0, 6.0];
+        for j in 0..24 {
+            for (o, f) in out.iter_mut().zip(&factorial) {
+                *o += power * (1.0 / f);
+            }
+            power = power * z;
+            for (k, f) in factorial.iter_mut().enumerate() {
+                *f *= (j + k + 1) as f64;
+            }
+        }
+        out
+    } else {
+        let e = z.exp();
+        let p1 = (e - C64::ONE) / z;
+        let p2 = (p1 - C64::ONE) / z;
+        let p3 = (p2 - C64::real(0.5)) / z;
+        [e, p1, p2, p3]
+    }
+}
+
+/// The count of `etd_weights`.
+const ETD_WEIGHTS: usize = 10;
+
+/// Krogstad's exponential Runge–Kutta weights (module documentation, # The substeps) of an entry of rate μ at the
+/// substep d, z = μd: e^z and e^{z/2}; the stages' a₂₁ = ½φ₁(z/2), a₃₁ = ½φ₁(z/2) − φ₂(z/2), a₃₂ = φ₂(z/2), a₄₁ = φ₁(z) −
+/// 2φ₂(z), a₄₃ = 2φ₂(z); the step's b₁ = φ₁ − 3φ₂ + 4φ₃, b₂ = b₃ = 2φ₂ − 4φ₃, b₄ = 4φ₃ − φ₂ (at z), the stages at c = 0,
+/// ½, ½, 1.
+fn etd_weights(mu: C64, d: f64) -> [C64; ETD_WEIGHTS] {
+    let [e, p1, p2, p3] = phis(mu * d);
+    let [e2, q1, q2, _] = phis(mu * (0.5 * d));
+    [e, e2, q1 * 0.5, q1 * 0.5 - q2, q2, p1 - p2 * 2.0, p2 * 2.0, p1 - p2 * 3.0 + p3 * 4.0, p2 * 2.0 - p3 * 4.0, p3 * 4.0 - p2]
+}
+
+/// A path's substeps' scratch (`Scheme::Exponential`; `Form::piece_run`): H(t), the beats' change −iΔH(t) and its right
 /// factor per block, the stages' vectors.
-struct Lawson {
+struct Stages {
     now: Vec<C64>,
     dh: Vec<Vec<C64>>,
     dha: Vec<Vec<C64>>,
@@ -1268,11 +1335,11 @@ struct Lawson {
     product: Vec<C64>,
 }
 
-impl Lawson {
-    fn new(form: &Form) -> Lawson {
+impl Stages {
+    fn new(form: &Form) -> Stages {
         let d = form.dim;
         let sq = |b: &Vec<usize>| vec![C64::ZERO; b.len() * b.len()];
-        Lawson {
+        Stages {
             now: vec![C64::ZERO; form.h_slot],
             dh: form.blocks.iter().map(sq).collect(),
             dha: form.blocks.iter().map(sq).collect(),
@@ -1321,10 +1388,10 @@ impl Form<'_> {
         }
     }
 
-    /// The remainder N = L(t) − L₀ on an eigenbasis vector σ, into `out` (eigenbasis), of the frozen piece `f`, ΔH(t) =
+    /// The remainder g = (L(t) − L₀)σ on an eigenbasis vector σ, into `out` (eigenbasis), of the frozen piece `f`, ΔH(t) =
     /// H(t) − H(t_m) (in `lw.dh` as −iΔH and `lw.dha` as its right factor iΔH†; none where `moving` is false) and R(t)
     /// (`rt`): ρ = VσV†, then −i(ΔHρ − ρΔH†) + Rρ, back by V⁻¹ · V⁻†.
-    fn lawson_n(&self, f: &Frozen, rt: &[C64], lw: &mut Lawson, moving: bool, sigma: &[C64], out: &mut [C64]) {
+    fn remainder(&self, f: &Frozen, rt: &[C64], lw: &mut Stages, moving: bool, sigma: &[C64], out: &mut [C64]) {
         let (mut rho, mut tmp, mut bare) = (std::mem::take(&mut lw.rho), std::mem::take(&mut lw.tmp), std::mem::take(&mut lw.bare));
         self.sandwich(&f.v, &f.vadj, sigma, &mut rho, &mut tmp);
         if moving {
@@ -1353,7 +1420,7 @@ impl Form<'_> {
 
     /// ΔH(t) = H(t) − H(t_m) per block into `lw.dh` (−iΔH) and `lw.dha` (iΔH†, the right factor), H(t) of `of`, H(t_m)
     /// `hm`.
-    fn lawson_dh(&self, lw: &mut Lawson, hm: &[C64], of: &[(&Amps, f64)], t: f64) {
+    fn beat_change(&self, lw: &mut Stages, hm: &[C64], of: &[(&Amps, f64)], t: f64) {
         let mut now = std::mem::take(&mut lw.now);
         self.h_at(of, t, &mut now);
         for (x, b) in self.blocks.iter().enumerate() {
@@ -1420,26 +1487,27 @@ impl Form<'_> {
         traced(2, part);
         #[cfg(test)]
         let part = std::time::Instant::now();
-        // μ = −i(λ_a − conj λ_b) per sector entry, and the substep's exponentials.
-        let (mut half, mut full) = (vec![C64::ZERO; self.dim], vec![C64::ZERO; self.dim]);
+        // μ = −i(λ_a − conj λ_b) per sector entry, and the substep's weights.
+        let mut weights = vec![vec![C64::ZERO; self.dim]; ETD_WEIGHTS];
         for (k, &(px, py)) in self.pairs.iter().enumerate() {
             let wy = self.blocks[py].len();
             for (i, la) in values[px].iter().enumerate() {
                 for (j, lb) in values[py].iter().enumerate() {
                     let at = self.offsets[k] + i * wy + j;
                     let mu = C64::new(0.0, -1.0) * (*la - lb.conj());
-                    half[at] = (mu * (0.5 * p.d)).exp();
-                    full[at] = (mu * p.d).exp();
+                    for (w, x) in weights.iter_mut().zip(etd_weights(mu, p.d)) {
+                        w[at] = x;
+                    }
                 }
             }
         }
-        // R^T at every substep's middle -- once where it holds no beat (constant over the piece) --, its amplitudes
-        // dropped then.
+        // R^T at the substeps' stages' times, a + j d/2 (j = 0 … 2n) -- once where it holds no beat (constant over the
+        // piece) --, its amplitudes dropped then.
         let still = !(self.beats_r.len() > 1 || self.beats_r.first().is_some_and(|x| *x != 0.0));
-        let rs = (0..if still { 1 } else { p.n })
+        let rs = (0..if still { 1 } else { 2 * p.n + 1 })
             .map(|j| {
                 let mut rt = vec![C64::ZERO; self.cols.len() * self.rows.len()];
-                self.r_at(&[(&amps, 1.0)], if still { p.tm } else { p.a + (j as f64 + 0.5) * p.d }, &mut rt);
+                self.r_at(&[(&amps, 1.0)], if still { p.tm } else { p.a + j as f64 * 0.5 * p.d }, &mut rt);
                 rt
             })
             .collect();
@@ -1451,13 +1519,13 @@ impl Form<'_> {
         let read = p.read.map(|t| (t, self.node_at(walk, t)));
         #[cfg(test)]
         traced(4, part);
-        Ok(Frozen { a: p.a, d: p.d, n: p.n, amps, hm, v, vinv, vadj, vinvadj, half, full, rs, read, condition, seconds: clock.elapsed().as_secs_f64() })
+        Ok(Frozen { a: p.a, d: p.d, n: p.n, amps, hm, v, vinv, vadj, vinvadj, weights, rs, read, condition, seconds: clock.elapsed().as_secs_f64() })
     }
 
-    /// A frozen piece's substeps (`Scheme::Lawson`): the remainder N(t) -- the recycling R(t) (the piece's, at each
-    /// substep's middle) and H's beats from t_m, of the piece's amplitudes at their phases -- by Lawson's RK4 in its n
-    /// substeps of d, on the state `v`.
-    fn lawson_run(&self, f: &Frozen, v: &mut [C64], lw: &mut Lawson, counts: &mut Counts) {
+    /// A frozen piece's substeps (module documentation, # The substeps): Krogstad's exponential Runge–Kutta on σ' = Λσ +
+    /// g(t, σ) in H(t_m)'s eigenbasis, g the remainder -- the recycling R(t) and H's beats from t_m, of the piece's
+    /// amplitudes at their phases -- at the stages' times t, t + d/2, t + d, in its n substeps of d, on the state `v`.
+    fn piece_run(&self, f: &Frozen, v: &mut [C64], lw: &mut Stages, counts: &mut Counts) {
         let of = [(&f.amps, 1.0)];
         let d = f.d;
         let changing = self.h_beats.iter().any(|&b| self.values[b] != 0.0);
@@ -1467,38 +1535,40 @@ impl Form<'_> {
         self.sandwich(&f.vinv, &f.vinvadj, v, &mut sigma, &mut tmp);
         lw.tmp = tmp;
         let mut k = std::mem::take(&mut lw.k);
-        let [mut x1, mut x2] = [std::mem::take(&mut lw.s[1]), std::mem::take(&mut lw.s[2])];
+        let mut u = std::mem::take(&mut lw.s[1]);
+        let w = &f.weights;
+        let (e, e2, a21, a31, a32, a41, a43, b1, b23, b4) = (&w[0], &w[1], &w[2], &w[3], &w[4], &w[5], &w[6], &w[7], &w[8], &w[9]);
+        let r = |j: usize| -> &[C64] { &f.rs[if f.rs.len() == 1 { 0 } else { j }] };
         for step in 0..f.n {
             let t = f.a + step as f64 * d;
-            let rt: &[C64] = &f.rs[if f.rs.len() == 1 { 0 } else { step }];
-            // k1 = N(t)σ; x1 = E½(σ + d/2 k1); k2 = N(t + d/2) x1.
+            // G1 = g(t, σ); U2 = e^{z/2}σ + d a21 G1; G2 = g(t + d/2, U2).
             if changing {
-                self.lawson_dh(lw, &f.hm, &of, t);
+                self.beat_change(lw, &f.hm, &of, t);
             }
-            self.lawson_n(f, rt, lw, changing, &sigma, &mut k[0]);
+            self.remainder(f, r(2 * step), lw, changing, &sigma, &mut k[0]);
             for i in 0..sigma.len() {
-                x1[i] = f.half[i] * (sigma[i] + k[0][i] * (0.5 * d));
-            }
-            if changing {
-                self.lawson_dh(lw, &f.hm, &of, t + 0.5 * d);
-            }
-            self.lawson_n(f, rt, lw, changing, &x1, &mut k[1]);
-            // x2 = E½σ + d/2 k2; k3 = N(t + d/2) x2.
-            for i in 0..sigma.len() {
-                x2[i] = f.half[i] * sigma[i] + k[1][i] * (0.5 * d);
-            }
-            self.lawson_n(f, rt, lw, changing, &x2, &mut k[2]);
-            // x1 = E σ + d E½ k3; k4 = N(t + d) x1.
-            for i in 0..sigma.len() {
-                x1[i] = f.full[i] * sigma[i] + f.half[i] * k[2][i] * d;
+                u[i] = e2[i] * sigma[i] + a21[i] * k[0][i] * d;
             }
             if changing {
-                self.lawson_dh(lw, &f.hm, &of, t + d);
+                self.beat_change(lw, &f.hm, &of, t + 0.5 * d);
             }
-            self.lawson_n(f, rt, lw, changing, &x1, &mut k[3]);
-            // σ ← E(σ + d/6 k1) + d/3 E½(k2 + k3) + d/6 k4.
+            self.remainder(f, r(2 * step + 1), lw, changing, &u, &mut k[1]);
+            // U3 = e^{z/2}σ + d (a31 G1 + a32 G2); G3 = g(t + d/2, U3).
             for i in 0..sigma.len() {
-                sigma[i] = f.full[i] * (sigma[i] + k[0][i] * (d / 6.0)) + f.half[i] * (k[1][i] + k[2][i]) * (d / 3.0) + k[3][i] * (d / 6.0);
+                u[i] = e2[i] * sigma[i] + (a31[i] * k[0][i] + a32[i] * k[1][i]) * d;
+            }
+            self.remainder(f, r(2 * step + 1), lw, changing, &u, &mut k[2]);
+            // U4 = e^z σ + d (a41 G1 + a43 G3); G4 = g(t + d, U4).
+            for i in 0..sigma.len() {
+                u[i] = e[i] * sigma[i] + (a41[i] * k[0][i] + a43[i] * k[2][i]) * d;
+            }
+            if changing {
+                self.beat_change(lw, &f.hm, &of, t + d);
+            }
+            self.remainder(f, r(2 * step + 2), lw, changing, &u, &mut k[3]);
+            // σ ← e^z σ + d (b1 G1 + b23 (G2 + G3) + b4 G4).
+            for i in 0..sigma.len() {
+                sigma[i] = e[i] * sigma[i] + (b1[i] * k[0][i] + b23[i] * (k[1][i] + k[2][i]) + b4[i] * k[3][i]) * d;
             }
             counts.products += 4;
             counts.segments += 1;
@@ -1508,7 +1578,7 @@ impl Form<'_> {
         self.sandwich(&f.v, &f.vadj, &sigma, v, &mut tmp);
         lw.tmp = tmp;
         lw.k = k;
-        (lw.s[0], lw.s[1], lw.s[2]) = (sigma, x1, x2);
+        (lw.s[0], lw.s[1]) = (sigma, u);
         counts.exponentials += 1;
     }
 }
@@ -1738,14 +1808,14 @@ pub fn path_errors(reference: &Form, candidates: &[&Form], walks: &[Walk], start
 
 /// The h-against-h/2 check of a scheme on one path piece (module documentation, # The segments, # The budget): the
 /// candidate's difference to the reference read at the scheme and at its halves -- `Sparse`: twice the nodes and half
-/// the turn; `Lawson`: twice the pieces and the substeps --, the largest change of a row's, a rate's (relative to the
+/// the turn; `Exponential`: twice the pieces and the substeps --, the largest change of a row's, a rate's (relative to the
 /// reference's) and the force's (relative to the reference's rms) over the readings; None for `Sparse` where the coarser
 /// scheme's segments may leave the plateau's side (turn > 2π) -- the comparison reads nothing there -- and for the
 /// fixed schemes.
 pub fn check(candidate: &Form, reference: &Form, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Option<Result<[f64; 3], String>> {
     let halves = match scheme {
         Scheme::Sparse { nodes, turn, read } if turn <= std::f64::consts::TAU => Scheme::Sparse { nodes: 2 * nodes, turn: 0.5 * turn, read },
-        Scheme::Lawson { per_us, pieces, read } => Scheme::Lawson { per_us: 2.0 * per_us, pieces: 2 * pieces, read },
+        Scheme::Exponential { rates, opening, pieces, read } => Scheme::Exponential { rates: rates.map(|r| 2.0 * r), opening, pieces: 2 * pieces, read },
         _ => return None,
     };
     let run = |s: Scheme| -> Result<(Series, Series), String> { Ok((candidate.along(walk, start, from, to, s)?, reference.along(walk, start, from, to, s)?)) };
