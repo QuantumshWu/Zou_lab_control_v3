@@ -628,7 +628,13 @@ pub struct Picture {
     rung: bool,
     /// The numerator's items with their pairs, as they were made (`strip` sorts the numerator's).
     numerated: Vec<([u8; 2], f64)>,
-    /// Where the envelopes' last search for their bound ended (`envelope`; none before the first).
+    /// Where the envelopes' last search for their bound ended in this step (`envelope`; none before the step's first:
+    /// `prepare` clears it). A step's searches start from its own spectrum alone, so a step is its inputs' alone and a
+    /// trajectory taken up again at a step's end with a fresh scratch goes on to the bit (step.rs `Scratch`). (Until
+    /// 2026-11-22 the search started where the trajectory's last step's had ended: a step then read its scratch's past --
+    /// the bound it found differed by the rounding with where the search began --, and a trajectory made again from a
+    /// checkpoint went apart from itself by the rounding: PGC3D_1ms's ground states, solve.rs
+    /// `a_kept_trajectory_s_states_are_made_again_from_its_checkpoints_to_the_bit`.)
     warm: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
@@ -1303,14 +1309,15 @@ impl Picture {
     /// Prepares the picture of a step of 2h from `base` and, unless the generator is `still` along the path (then they
     /// are not read, and there are no tones), `ends` and the tones (`beats`): the changes, Ĥ₀'s decomposition, the
     /// changes in its eigenbasis and their following (`follow`). `start` is the state the step is launched with (none:
-    /// any), whose reached states (`reach`) the forms' bandwidth is of. `work` begins anew with what this counted.
+    /// any), whose reached states (`reach`) the forms' bandwidth is of. `work` begins anew with what this counted, and so
+    /// do the envelopes' searches (`warm`): nothing of the last step is read.
     /// Refused where the decomposition does not take the step (module documentation, # Where the decomposition does not
     /// take the step): the picture is then of no use until it is prepared again.
     pub fn prepare(&mut self, half: f64, still: bool, start: Option<&[C64]>) -> Result<(), Refusal> {
         assert!(!still || self.beats.is_empty(), "exact tones on a still path");
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
-        (self.half, self.followed, self.spread, self.factored, self.grown, self.slopes) = (half, false, 0.0, f64::NAN, 1.0, [0.0; 3]);
+        (self.half, self.followed, self.spread, self.factored, self.grown, self.slopes, self.warm) = (half, false, 0.0, f64::NAN, 1.0, [0.0; 3], f64::NAN);
         let classified = crate::prof::scope(84);
         self.classify();
         drop(classified);
@@ -2298,8 +2305,9 @@ impl Picture {
                 // Newton within the bracket, a bisection where its step leaves it, doubling until a bracket stands; until the
                 // step, once bracketed, stops shrinking (the round-off's floor). Every σ's value bounds V: the least is taken.
                 let (mut lo, mut hi) = (0.0_f64, f64::INFINITY);
-                // The envelopes' search (`envelope`, no strip) starts where its last one ended: a piece's envelopes keep
-                // the step's spectrum less the same centres, and every σ bounds V alike.
+                // The envelopes' search (`envelope`, no strip) starts where the step's last one ended (`warm`; the step's
+                // first from the fastest pair): a piece's envelopes keep the step's spectrum less the same centres, and
+                // every σ bounds V alike.
                 let mut sigma = if !strip && self.warm.is_finite() { self.warm } else { 1.0 / linalg::larger(fastest, f64::MIN_POSITIVE) };
                 let (mut best, mut last, mut least) = (f64::INFINITY, f64::INFINITY, sigma);
                 loop {

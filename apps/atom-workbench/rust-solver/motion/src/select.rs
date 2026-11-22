@@ -688,12 +688,16 @@ impl<'a> Paths<'a> {
         let length = run.min(5.0 * memory);
         let windows = paths::windows(length, memory, step);
         let late_from = (run > 2.0 * length).then_some(run - length);
-        // The stretches the setting takes: every walk from its start, and from the late segment's where there is one.
-        let starts: Vec<(&Walk, f64)> = walks.iter().map(|w| (w, 0.0)).chain(late_from.iter().flat_map(|&f| walks.iter().filter(move |w| f < w.end()).map(move |w| (w, f)))).collect();
+        // The stretches the setting takes: every walk that took a step from its start, and from the late segment's where
+        // there is one.
+        let starts: Vec<(&Walk, f64)> = walks.iter().filter(|w| w.end() > 0.0).map(|w| (w, 0.0)).chain(late_from.iter().flat_map(|&f| walks.iter().filter(move |w| f < w.end()).map(move |w| (w, f)))).collect();
         // The calibration's walk: the longest (the first of them), along its whole [0, L].
         let reach = |w: &Walk| length.min(w.end());
         let longest = (0..walks.len()).fold(0, |best, k| if reach(&walks[k]) > reach(&walks[best]) { k } else { best });
         let stretch = reach(&walks[longest]);
+        if !(stretch > 0.0) {
+            return Err("no path of the pilot's goes past its start (every one's atom lost or its trajectory ended at its first step)".into());
+        }
         #[cfg(test)]
         if traced() {
             eprintln!("    [trace] reference form: {}; beats H {:?}, R {:?}", form.shape(), form.beat_values().0, form.beat_values().1);
@@ -714,7 +718,8 @@ impl<'a> Paths<'a> {
                     let clock = Instant::now();
                     let out = if j < n {
                         let w = &walks[j];
-                        form.along(w, &w.start, 0.0, reach(w), scheme)
+                        // A walk that took no step (its trajectory ended at its first) reads nothing.
+                        if reach(w) > 0.0 { form.along(w, &w.start, 0.0, reach(w), scheme) } else { Ok(Series::default()) }
                     } else {
                         // A walk that ended before the late segment (its atom lost) reads nothing there.
                         let (w, from) = (&walks[j - n], late_from.expect("a late segment"));
@@ -766,14 +771,14 @@ impl<'a> Paths<'a> {
         self.late.as_ref().map(|l| l.0)
     }
 
-    /// The reference judged against itself (`Judged`): every error none -- the 32 states are the reference.
+    /// The reference judged against itself (`Judged`): no error at all -- the 32 states are the reference, and relative to
+    /// itself a model errs by nothing. No windows (its direct part zero at every time, `direct_at`), no calibration: the
+    /// paths' scheme errs where a candidate is compared with the reference (`Settled::unmet`, `Paths::booked`, booked in
+    /// every other candidate's calibration, `judge`), not in the reference's own model. (Until 2026-11-22 it booked the
+    /// scheme's unmet sum and the openings' bound as its own, and read its windows against themselves: no number where no
+    /// path read a window -- R9_PUSH's, every atom pushed out by 45 µs.)
     pub fn itself(&self, keep: Vec<usize>) -> Judged {
-        let labels = &self.reference.model.scene.request.states;
-        let hm = self.reference.model.hbar_over_mass();
-        let windows = paths::compare(&self.series, &self.series, &self.windows, labels, hm);
-        let late = self.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(s, s, w, labels, hm));
-        let calibration = Calibration { rows: self.settled.unmet().unwrap_or(0.0) + self.booked, rate: 0.0 };
-        Judged { keep, windows, late, calibration, region: Region::NONE, seconds: 0.0, products: 0 }
+        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 }
     }
 }
 
@@ -856,7 +861,8 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
                 }
                 j if j < n => {
                     let w = &paths.walks[j];
-                    form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme).map(|s| vec![s])
+                    let reach = paths.length.min(w.end());
+                    (if reach > 0.0 { form.along(w, &w.start, 0.0, reach, scheme) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
@@ -1037,20 +1043,29 @@ fn direct(w: &Window) -> Vec<f64> {
 /// A candidate's direct error at the time t (module documentation, # The direct part): the largest row's |mean| + z·se
 /// of the time's window (`paths::window_of` on the start's windows `windows`), past L the larger of the start's last
 /// window's and the late segment's last window's, past the late segment's start the latter's; the scheme's calibration
-/// beside it. None at t = 0, where every model starts in the same state.
-pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> f64 {
+/// beside it. Zero at t = 0, where every model starts in the same state; none where the window it takes no path reads
+/// (`paths::Window::paths`: every path's atom lost before it) -- nothing held there on the paths to err on, no number.
+pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> Option<f64> {
     if t <= 0.0 || judged.windows.is_empty() {
-        return 0.0;
+        return Some(0.0);
     }
+    let read = |w: &Window| (w.paths > 0).then(|| direct(w));
     let length = windows.last().map_or(0.0, |w| w.1);
     let own = match (judged.late.first().map(|w| w.from), judged.windows.last(), judged.late.last()) {
         (Some(from), Some(last), Some(late_last)) if t > length => {
-            let (a, b) = (direct(last), direct(late_last));
-            if t > from { b } else { a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect() }
+            let (a, b) = (read(last), read(late_last));
+            if t > from {
+                b
+            } else {
+                match (a, b) {
+                    (Some(a), Some(b)) => Some(a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect()),
+                    (a, b) => a.or(b),
+                }
+            }
         }
-        _ => direct(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
+        _ => read(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
     };
-    own.iter().copied().fold(0.0, larger) + judged.calibration.rows
+    own.map(|own| own.iter().copied().fold(0.0, larger) + judged.calibration.rows)
 }
 
 /// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the paths' windows, the
@@ -1070,8 +1085,8 @@ pub struct Choice {
 
 impl Choice {
     /// P's direct error at the time t (`direct_at`): what is shown; T and the loss have none (module documentation, # The
-    /// feedback through the motion: zero).
-    pub fn at(&self, t: f64) -> f64 {
+    /// feedback through the motion: zero); none where its window reads no path.
+    pub fn at(&self, t: f64) -> Option<f64> {
         direct_at(&self.judged, &self.windows, t)
     }
 }
