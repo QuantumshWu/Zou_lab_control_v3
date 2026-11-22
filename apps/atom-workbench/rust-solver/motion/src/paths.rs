@@ -69,7 +69,14 @@
 //! ω T products). The cheap schemes take the path's own steps: `Steps` (one exponential a step: the products' count
 //! still about 4‖L‖₁ T), and `Lawson`, which takes H's fast turning exactly in its eigenbasis and leaves to the
 //! substeps only what turns at the decay's rate and at the beats -- its cost set by the substeps, not by ‖L‖. Their
-//! errors on the fold error are read against `Sparse` on the same paths (tests, `paths_replay`, `py/scheme.py`).
+//! errors on the fold error are read against `Sparse` on the same paths (tests, `paths_replay`, `py/scheme.py`); the
+//! selection reads Lawson's against its own refinements (select.rs `settle`: `Sparse` follows the fastest coherence,
+//! and on scenes whose 32 states hold levels far off the light's frame it does not end).
+//!
+//! What a Lawson piece needs before its substeps reads no state -- its node and amplitudes, H at its middle and the
+//! blocks' eigendecompositions, the substep's exponentials, R at every substep's middle, the node a reading takes at
+//! its end (`Frozen`) --, so it is made on the pool, a chunk of pieces ahead of the propagation, which alone runs in
+//! order; the readings of a chunk are made on the pool after it (`Form::along_from`).
 //!
 //! # The errors
 //! Per path the candidate's readings less the reference's at the same times, averaged over a time window; over the
@@ -78,7 +85,8 @@
 //! window's error, past L the last window's (`window_of`): the path has forgotten its start there. The paths are the
 //! pilot's trajectories at the run's step (solve.rs `walks`), each from its own initial state.
 use crate::linalg::{fused_product, fused_product_onto, hermitian_eigen, larger, mul_add, C64, Eigen, Mat, V3};
-use crate::model::selected::{Node, Selected};
+use crate::floquet::frame::Ratio;
+use crate::model::selected::{Exact, Node, Selected};
 use crate::model::Point;
 use crate::request::{GROUND, STATES};
 use crate::step::Dynamics;
@@ -242,7 +250,8 @@ pub struct Form<'a> {
     h_block: Vec<usize>,
     h_slot: usize,
     /// The jumps: their elements' count (in the node's order); the recycling's groups by
-    /// the beat Δ = Ω_b − Ω_b′ of two components of one channel (rad/µs; the same number, to the bit, one group: every
+    /// the beat Δ = Ω_b − Ω_b′ of two components of one channel (rad/µs; one exact difference one group, its value
+    /// correctly rounded -- tilt2's 17 differences met as 51 numbers to the bit, each group R's whole size --: every
     /// (b, b) one, at Δ = 0), at e^{−iΔt}, and its terms -- (group, R's place, two elements): R_group[place] +=
     /// J_e J_e′* --, in the order of their places.
     elements: usize,
@@ -396,14 +405,16 @@ impl<'a> Form<'a> {
         let mut col_of = vec![u32::MAX; n * n];
         let mut cols = Vec::new();
         let mut raw: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
-        let values = model.components().0;
+        let (values, exact) = model.components();
         let mut beats_r: Vec<f64> = Vec::new();
+        let mut keys: Vec<Exact> = Vec::new();
         for ch in &channels {
             for (b1, c1) in ch {
                 for (b2, c2) in ch {
-                    let delta = if b1 == b2 { 0.0 } else { values[*b1] - values[*b2] };
-                    let bp = beats_r.iter().position(|x| x.to_bits() == delta.to_bits()).unwrap_or_else(|| {
-                        beats_r.push(delta);
+                    let key = if b1 == b2 { ([0; 3], Vec::new()) } else { difference(&exact[*b1], &exact[*b2]) };
+                    let bp = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                        beats_r.push(if key.0 == [0; 3] && key.1.is_empty() { 0.0 } else { model.value_of(&key) });
+                        keys.push(key);
                         beats_r.len() - 1
                     });
                     for &(e1, g, s) in c1 {
@@ -459,6 +470,17 @@ impl<'a> Form<'a> {
         form
     }
 
+    /// The form's sizes (the measurements' line): P's states, the blocks, the sector, H's slots, R and its groups, the
+    /// terms, the jumps' elements, the photon classes.
+    #[cfg(test)]
+    pub(crate) fn shape(&self) -> String {
+        format!(
+            "n {}, blocks {:?}, pairs {}, dim {}, H beats {} (nonzero {}), H slot {}, R {} x {} by {} beat groups, terms {}, elements {}, classes {}",
+            self.n, self.blocks.iter().map(|b| b.len()).collect::<Vec<_>>(), self.pairs.len(), self.dim, self.h_beats.len(), self.h_beats.iter().filter(|&&b| self.values[b] != 0.0).count(), self.h_slot,
+            self.cols.len(), self.rows.len(), self.beats_r.len(), self.terms.len(), self.elements, self.classes.len()
+        )
+    }
+
     /// The sector vector's length (module documentation, # The sector).
     pub fn dim(&self) -> usize {
         self.dim
@@ -501,7 +523,8 @@ impl<'a> Form<'a> {
         self.amps_with(node, true)
     }
 
-    /// `amps`, the width made only where `width` (the segments' rule needs it; Lawson's substeps do not: NaN there).
+    /// `amps`, the width and R's columns' bounds made only where `width` (the segments' rule and the exponential's norm
+    /// need them; Lawson's substeps do not: NaN and none there).
     fn amps_with(&self, node: &Node, width: bool) -> Amps {
         let n = self.n;
         let mut h = vec![C64::ZERO; self.h_beats.len() * self.h_slot];
@@ -530,9 +553,7 @@ impl<'a> Form<'a> {
             r[bp as usize * size + place as usize] += j[e1 as usize] * j[e2 as usize].conj();
         }
         if !width {
-            let nr = self.rows.len();
-            let columns = r.chunks(nr.max(1)).map(|c| c.iter().map(|z| z.abs()).sum::<f64>()).collect();
-            return Amps { h, r, columns, width: f64::NAN };
+            return Amps { h, r, columns: Vec::new(), width: f64::NAN };
         }
         let ends: Vec<(f64, f64)> = self
             .blocks
@@ -886,28 +907,64 @@ impl<'a> Form<'a> {
                 let knots = walk.knots(from, to);
                 let node = made(from, &mut counts);
                 readings.push(self.read(&node, walk, from, &v, &mut counts));
-                let mut lw = Lawson::new(self);
+                // The pieces in order, each with the time of the reading at its end where one is made there.
+                let mut plan: Vec<Piece> = Vec::new();
                 for (i, w) in knots.windows(2).enumerate() {
                     let (a, b) = (w[0], w[1]);
                     let piece = (b - a) / pieces as f64;
                     let n = (piece * per_us).ceil().max(1.0) as usize;
                     for j in 0..pieces {
                         let p0 = a + j as f64 * piece;
-                        let tm = p0 + 0.5 * piece;
-                        let node = made(tm, &mut counts);
-                        let clock = std::time::Instant::now();
-                        let grid = [self.amps_with(&node, false)];
-                        counts.node_seconds += clock.elapsed().as_secs_f64();
-                        let clock = std::time::Instant::now();
-                        self.lawson_step(&|_| vec![(0, 1.0)], &grid, tm, p0, piece / n as f64, n, false, &mut v, &mut lw, &mut counts)?;
-                        counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    }
-                    if (i + 1) % read == 0 || i + 2 == knots.len() {
-                        let node = made(b, &mut counts);
-                        readings.push(self.read(&node, walk, b, &v, &mut counts));
+                        let read = (j + 1 == pieces && ((i + 1) % read == 0 || i + 2 == knots.len())).then_some(b);
+                        plan.push(Piece { tm: p0 + 0.5 * piece, a: p0, d: piece / n as f64, n, read });
                     }
                 }
-                counts.condition = lw.condition;
+                // A chunk of pieces frozen on the pool while the one before is propagated; its readings on the pool
+                // after it. The chunk: what `FROZEN_BYTES` holds of a piece's numbers, at most four per thread.
+                let most = plan.iter().map(|p| p.n).max().unwrap_or(1);
+                let size = 16 * (self.h_beats.len() * self.h_slot + most * self.cols.len() * self.rows.len() + 5 * self.h_slot + 2 * self.dim) + 1;
+                let chunk = (FROZEN_BYTES / size).clamp(1, 4 * rayon::current_num_threads());
+                let freeze = |range: std::ops::Range<usize>| -> Vec<Result<Frozen, String>> { plan[range].par_iter().map(|p| self.freeze(walk, p)).collect() };
+                let mut lw = Lawson::new(self);
+                let mut ahead = freeze(0..chunk.min(plan.len()));
+                let mut start = 0;
+                while start < plan.len() {
+                    let current: Vec<Frozen> = std::mem::take(&mut ahead).into_iter().collect::<Result<_, _>>()?;
+                    let end = start + current.len();
+                    let (next, made) = rayon::join(
+                        || freeze(end..(end + chunk).min(plan.len())),
+                        || {
+                            let clock = std::time::Instant::now();
+                            let mut made: Vec<(f64, &Node, Vec<C64>)> = Vec::new();
+                            for f in &current {
+                                self.lawson_run(f, &mut v, &mut lw, &mut counts);
+                                if let Some((t, node)) = &f.read {
+                                    made.push((*t, node, v.clone()));
+                                }
+                            }
+                            counts.propagation_seconds += clock.elapsed().as_secs_f64();
+                            made
+                        },
+                    );
+                    for f in &current {
+                        counts.nodes += 1 + u64::from(f.read.is_some());
+                        counts.node_seconds += f.seconds;
+                        counts.condition = larger(counts.condition, f.condition);
+                    }
+                    let read: Vec<(Reading, Counts)> = made
+                        .par_iter()
+                        .map(|(t, node, state)| {
+                            let mut c = Counts::default();
+                            let r = self.read(node, walk, *t, state, &mut c);
+                            (r, c)
+                        })
+                        .collect();
+                    for (r, c) in read {
+                        readings.push(r);
+                        counts.add(&Counts { time: 0.0, ..c });
+                    }
+                    (ahead, start) = (next, end);
+                }
             }
             Scheme::Exact { h, read } => {
                 let segments = ((to - from) / h).round() as usize;
@@ -1010,6 +1067,23 @@ fn stencil(m: usize, u: f64) -> (usize, [f64; 4]) {
     let start = j.saturating_sub(1).min(m - 3);
     let x: [f64; 4] = std::array::from_fn(|k| (start + k) as f64);
     (start, std::array::from_fn(|k| (0..4).filter(|&l| l != k).map(|l| (u - x[l]) / (x[k] - x[l])).product()))
+}
+
+/// The exact vector of a beat difference Ω_a − Ω_b (model/selected.rs `Exact`): the fast integers' and the slow
+/// ratios' differences, the ratios to the longer's length and its trailing zeros cut (one difference, one vector).
+fn difference(a: &Exact, b: &Exact) -> Exact {
+    let n = std::array::from_fn(|k| a.0[k] - b.0[k]);
+    let at = |p: &Vec<Ratio>, k: usize| p.get(k).copied().unwrap_or(Ratio::ZERO);
+    let mut p: Vec<Ratio> = (0..a.1.len().max(b.1.len()))
+        .map(|k| {
+            let (x, y) = (at(&a.1, k), at(&b.1, k));
+            Ratio::new(x.num * y.den - y.num * x.den, x.den * y.den)
+        })
+        .collect();
+    while p.last().is_some_and(|r| r.num == 0) {
+        p.pop();
+    }
+    (n, p)
 }
 
 /// The scratch of the operator's products: the gathered columns and R's product, the Taylor series' vectors, the
@@ -1136,22 +1210,48 @@ impl Op {
     }
 }
 
-/// A step's Lawson scratch (`Scheme::Lawson`; `Form::lawson_step`): per block the eigendecomposition of H at the step's
-/// middle (V, V⁻¹ and their adjoints), per sector entry e^{μ c} for the substep's half and whole, H(t_m) and H(t),
-/// the beats' and the path's change −iΔH(t) and its right factor per block, the recycling R(t)^T, the stages' vectors.
-struct Lawson {
-    eig: Vec<Eigen>,
+/// The memory a path's chunk of frozen pieces may hold (bytes; `Form::along_from`): 64 MB, a few chunks' at once on
+/// the pool as the paths run side by side.
+const FROZEN_BYTES: usize = 64 << 20;
+
+/// A piece of a Lawson step (`Scheme::Lawson`): its middle t_m and start (µs), its substeps' length and count, and the
+/// time of the reading at its end where the path is read there.
+struct Piece {
+    tm: f64,
+    a: f64,
+    d: f64,
+    n: usize,
+    read: Option<f64>,
+}
+
+/// A piece frozen (`Form::freeze`; module documentation, # The budget): its plan, its node's H amplitudes, H(t_m) and
+/// per block its eigenvectors V and V⁻¹ with their adjoints, per sector entry the substep's half and whole exponentials,
+/// R^T at each substep's middle (one where it holds no beat: constant over the piece), the reading's node at its end;
+/// the largest eigenvector condition, and the seconds it took. It reads no state.
+struct Frozen {
+    a: f64,
+    d: f64,
+    n: usize,
+    amps: Amps,
+    hm: Vec<C64>,
     v: Vec<Vec<C64>>,
     vinv: Vec<Vec<C64>>,
     vadj: Vec<Vec<C64>>,
     vinvadj: Vec<Vec<C64>>,
     half: Vec<C64>,
     full: Vec<C64>,
-    hm: Vec<C64>,
+    rs: Vec<Vec<C64>>,
+    read: Option<(f64, Node)>,
+    condition: f64,
+    seconds: f64,
+}
+
+/// A path's Lawson scratch (`Scheme::Lawson`; `Form::lawson_run`): H(t), the beats' change −iΔH(t) and its right
+/// factor per block, the stages' vectors.
+struct Lawson {
     now: Vec<C64>,
     dh: Vec<Vec<C64>>,
     dha: Vec<Vec<C64>>,
-    rt: Vec<C64>,
     rho: Vec<C64>,
     tmp: Vec<C64>,
     bare: Vec<C64>,
@@ -1159,8 +1259,6 @@ struct Lawson {
     s: [Vec<C64>; 3],
     gathered: Vec<C64>,
     product: Vec<C64>,
-    /// The largest condition of an eigenvector matrix met.
-    condition: f64,
 }
 
 impl Lawson {
@@ -1168,18 +1266,9 @@ impl Lawson {
         let d = form.dim;
         let sq = |b: &Vec<usize>| vec![C64::ZERO; b.len() * b.len()];
         Lawson {
-            eig: form.blocks.iter().map(|_| Eigen::default()).collect(),
-            v: form.blocks.iter().map(sq).collect(),
-            vinv: form.blocks.iter().map(sq).collect(),
-            vadj: form.blocks.iter().map(sq).collect(),
-            vinvadj: form.blocks.iter().map(sq).collect(),
-            half: vec![C64::ZERO; d],
-            full: vec![C64::ZERO; d],
-            hm: vec![C64::ZERO; form.h_slot],
             now: vec![C64::ZERO; form.h_slot],
             dh: form.blocks.iter().map(sq).collect(),
             dha: form.blocks.iter().map(sq).collect(),
-            rt: vec![C64::ZERO; form.cols.len() * form.rows.len()],
             rho: vec![C64::ZERO; d],
             tmp: vec![C64::ZERO; d],
             bare: vec![C64::ZERO; d],
@@ -1187,7 +1276,6 @@ impl Lawson {
             s: std::array::from_fn(|_| vec![C64::ZERO; d]),
             gathered: vec![C64::ZERO; form.cols.len()],
             product: vec![C64::ZERO; form.rows.len()],
-            condition: 0.0,
         }
     }
 }
@@ -1226,12 +1314,12 @@ impl Form<'_> {
         }
     }
 
-    /// The remainder N = L(t) − L₀ on an eigenbasis vector σ, into `out` (eigenbasis), of ΔH(t) = H(t) − H(t_m) (in
-    /// `lw.dh` as −iΔH and `lw.dha` as its right factor iΔH†; none where `moving` is false) and R(t) (`lw.rt`): ρ = VσV†,
-    /// then −i(ΔHρ − ρΔH†) + Rρ, back by V⁻¹ · V⁻†.
-    fn lawson_n(&self, lw: &mut Lawson, moving: bool, sigma: &[C64], out: &mut [C64]) {
+    /// The remainder N = L(t) − L₀ on an eigenbasis vector σ, into `out` (eigenbasis), of the frozen piece `f`, ΔH(t) =
+    /// H(t) − H(t_m) (in `lw.dh` as −iΔH and `lw.dha` as its right factor iΔH†; none where `moving` is false) and R(t)
+    /// (`rt`): ρ = VσV†, then −i(ΔHρ − ρΔH†) + Rρ, back by V⁻¹ · V⁻†.
+    fn lawson_n(&self, f: &Frozen, rt: &[C64], lw: &mut Lawson, moving: bool, sigma: &[C64], out: &mut [C64]) {
         let (mut rho, mut tmp, mut bare) = (std::mem::take(&mut lw.rho), std::mem::take(&mut lw.tmp), std::mem::take(&mut lw.bare));
-        self.sandwich(&lw.v, &lw.vadj, sigma, &mut rho, &mut tmp);
+        self.sandwich(&f.v, &f.vadj, sigma, &mut rho, &mut tmp);
         if moving {
             for (k, &(px, py)) in self.pairs.iter().enumerate() {
                 let (wx, wy) = (self.blocks[px].len(), self.blocks[py].len());
@@ -1247,17 +1335,18 @@ impl Form<'_> {
             for (g, &c) in lw.gathered.iter_mut().zip(&self.cols) {
                 *g = rho[c];
             }
-            fused_product(&lw.gathered, &lw.rt, (1, self.cols.len(), nr), &mut lw.product);
+            fused_product(&lw.gathered, rt, (1, self.cols.len(), nr), &mut lw.product);
             for (p, &r) in lw.product.iter().zip(&self.rows) {
                 bare[r] += *p;
             }
         }
-        self.sandwich(&lw.vinv, &lw.vinvadj, &bare, out, &mut tmp);
+        self.sandwich(&f.vinv, &f.vinvadj, &bare, out, &mut tmp);
         (lw.rho, lw.tmp, lw.bare) = (rho, tmp, bare);
     }
 
-    /// ΔH(t) = H(t) − H(t_m) per block into `lw.dh` (−iΔH) and `lw.dha` (iΔH†, the right factor), H(t) of `of`.
-    fn lawson_dh(&self, lw: &mut Lawson, of: &[(&Amps, f64)], t: f64) {
+    /// ΔH(t) = H(t) − H(t_m) per block into `lw.dh` (−iΔH) and `lw.dha` (iΔH†, the right factor), H(t) of `of`, H(t_m)
+    /// `hm`.
+    fn lawson_dh(&self, lw: &mut Lawson, hm: &[C64], of: &[(&Amps, f64)], t: f64) {
         let mut now = std::mem::take(&mut lw.now);
         self.h_at(of, t, &mut now);
         for (x, b) in self.blocks.iter().enumerate() {
@@ -1265,7 +1354,7 @@ impl Form<'_> {
             let at = self.h_block[x];
             for i in 0..w {
                 for j in 0..w {
-                    let z = now[at + i * w + j] - lw.hm[at + i * w + j];
+                    let z = now[at + i * w + j] - hm[at + i * w + j];
                     lw.dh[x][i * w + j] = C64::new(0.0, -1.0) * z;
                     lw.dha[x][j * w + i] = C64::new(0.0, 1.0) * z.conj();
                 }
@@ -1274,109 +1363,128 @@ impl Form<'_> {
         lw.now = now;
     }
 
-    /// One step of the path [a, a + n d] by Lawson's RK4 (`Scheme::Lawson`): H at the step's middle t_m exactly, in its
-    /// eigenbasis block by block (ρ̃ = V⁻¹ρV⁻†, e^{L₀c} diagonal there), and the remainder N(t) -- the recycling R(t)
-    /// and H's change from t_m, of the amplitudes `at(t)` (one node's, or the step's interpolant) at their phases -- by n
-    /// substeps of d, R(t) taken at each substep's middle. Err where an eigendecomposition fails.
-    #[allow(clippy::too_many_arguments)]
-    fn lawson_step(&self, at: &dyn Fn(f64) -> Vec<(usize, f64)>, grid: &[Amps], tm: f64, a: f64, d: f64, n: usize, moving: bool, v: &mut [C64], lw: &mut Lawson, counts: &mut Counts) -> Result<(), String> {
-        let of = |t: f64| -> Vec<(&Amps, f64)> { at(t).into_iter().map(|(i, w)| (&grid[i], w)).collect() };
-        // H(t_m) and its eigendecomposition per block.
-        let mut hm = std::mem::take(&mut lw.hm);
-        self.h_at(&of(tm), tm, &mut hm);
-        lw.hm = hm;
+    /// A piece frozen (`Frozen`): its node at t_m and its amplitudes, H(t_m) and its eigendecomposition per block (ρ̃ =
+    /// V⁻¹ρV⁻†, e^{L₀c} diagonal there), the substep's exponentials, R^T at its substeps' middles, and the reading's
+    /// node at its end. Err where an eigendecomposition fails.
+    fn freeze(&self, walk: &Walk, p: &Piece) -> Result<Frozen, String> {
+        let clock = std::time::Instant::now();
+        let node = self.node_at(walk, p.tm);
+        let mut amps = self.amps_with(&node, false);
+        drop(node);
+        let mut hm = vec![C64::ZERO; self.h_slot];
+        self.h_at(&[(&amps, 1.0)], p.tm, &mut hm);
+        let nb = self.blocks.len();
+        let (mut v, mut vinv, mut vadj, mut vinvadj) = (Vec::with_capacity(nb), Vec::with_capacity(nb), Vec::with_capacity(nb), Vec::with_capacity(nb));
+        let mut values: Vec<Vec<C64>> = Vec::with_capacity(nb);
+        let mut condition: f64 = 0.0;
         for (x, b) in self.blocks.iter().enumerate() {
             let w = b.len();
-            let m = Mat { rows: w, cols: w, data: lw.hm[self.h_block[x]..self.h_block[x] + w * w].to_vec() };
-            if !lw.eig[x].decompose(&m) {
-                return Err(format!("H's block {x} at {tm} µs has no eigendecomposition"));
+            let m = Mat { rows: w, cols: w, data: hm[self.h_block[x]..self.h_block[x] + w * w].to_vec() };
+            let mut eig = Eigen::default();
+            if !eig.decompose(&m) {
+                return Err(format!("H's block {x} at {} µs has no eigendecomposition", p.tm));
             }
-            lw.condition = larger(lw.condition, lw.eig[x].condition);
+            condition = larger(condition, eig.condition);
+            let (mut a, mut ai, mut aa, mut aia) = (vec![C64::ZERO; w * w], vec![C64::ZERO; w * w], vec![C64::ZERO; w * w], vec![C64::ZERO; w * w]);
             for i in 0..w {
                 for j in 0..w {
-                    let (p, q) = (lw.eig[x].vectors[(i, j)], lw.eig[x].inverse[(i, j)]);
-                    lw.v[x][i * w + j] = p;
-                    lw.vinv[x][i * w + j] = q;
-                    lw.vadj[x][j * w + i] = p.conj();
-                    lw.vinvadj[x][j * w + i] = q.conj();
+                    let (p, q) = (eig.vectors[(i, j)], eig.inverse[(i, j)]);
+                    a[i * w + j] = p;
+                    ai[i * w + j] = q;
+                    aa[j * w + i] = p.conj();
+                    aia[j * w + i] = q.conj();
                 }
             }
+            v.push(a);
+            vinv.push(ai);
+            vadj.push(aa);
+            vinvadj.push(aia);
+            values.push(eig.values.clone());
         }
         // μ = −i(λ_a − conj λ_b) per sector entry, and the substep's exponentials.
+        let (mut half, mut full) = (vec![C64::ZERO; self.dim], vec![C64::ZERO; self.dim]);
         for (k, &(px, py)) in self.pairs.iter().enumerate() {
             let wy = self.blocks[py].len();
-            for (i, la) in lw.eig[px].values.iter().enumerate() {
-                for (j, lb) in lw.eig[py].values.iter().enumerate() {
+            for (i, la) in values[px].iter().enumerate() {
+                for (j, lb) in values[py].iter().enumerate() {
                     let at = self.offsets[k] + i * wy + j;
                     let mu = C64::new(0.0, -1.0) * (*la - lb.conj());
-                    lw.half[at] = (mu * (0.5 * d)).exp();
-                    lw.full[at] = (mu * d).exp();
+                    half[at] = (mu * (0.5 * p.d)).exp();
+                    full[at] = (mu * p.d).exp();
                 }
             }
         }
-        // R constant over the step where its amplitudes are one node's and it holds no beat.
-        let still_r = !moving && !(self.beats_r.len() > 1 || self.beats_r.first().is_some_and(|x| *x != 0.0));
-        let beats = self.h_beats.iter().any(|&b| self.values[b] != 0.0);
-        let changing = moving || beats;
-        let mut rt = std::mem::take(&mut lw.rt);
-        if still_r {
-            self.r_at(&of(tm), tm, &mut rt);
-        }
-        lw.rt = rt;
+        // R^T at every substep's middle -- once where it holds no beat (constant over the piece) --, its amplitudes
+        // dropped then.
+        let still = !(self.beats_r.len() > 1 || self.beats_r.first().is_some_and(|x| *x != 0.0));
+        let rs = (0..if still { 1 } else { p.n })
+            .map(|j| {
+                let mut rt = vec![C64::ZERO; self.cols.len() * self.rows.len()];
+                self.r_at(&[(&amps, 1.0)], if still { p.tm } else { p.a + (j as f64 + 0.5) * p.d }, &mut rt);
+                rt
+            })
+            .collect();
+        amps.r = Vec::new();
+        let read = p.read.map(|t| (t, self.node_at(walk, t)));
+        Ok(Frozen { a: p.a, d: p.d, n: p.n, amps, hm, v, vinv, vadj, vinvadj, half, full, rs, read, condition, seconds: clock.elapsed().as_secs_f64() })
+    }
+
+    /// A frozen piece's substeps (`Scheme::Lawson`): the remainder N(t) -- the recycling R(t) (the piece's, at each
+    /// substep's middle) and H's beats from t_m, of the piece's amplitudes at their phases -- by Lawson's RK4 in its n
+    /// substeps of d, on the state `v`.
+    fn lawson_run(&self, f: &Frozen, v: &mut [C64], lw: &mut Lawson, counts: &mut Counts) {
+        let of = [(&f.amps, 1.0)];
+        let d = f.d;
+        let changing = self.h_beats.iter().any(|&b| self.values[b] != 0.0);
         // σ = V⁻¹ ρ V⁻†.
         let mut sigma = std::mem::take(&mut lw.s[0]);
         let mut tmp = std::mem::take(&mut lw.tmp);
-        self.sandwich(&lw.vinv, &lw.vinvadj, v, &mut sigma, &mut tmp);
+        self.sandwich(&f.vinv, &f.vinvadj, v, &mut sigma, &mut tmp);
         lw.tmp = tmp;
         let mut k = std::mem::take(&mut lw.k);
         let [mut x1, mut x2] = [std::mem::take(&mut lw.s[1]), std::mem::take(&mut lw.s[2])];
-        for step in 0..n {
-            let t = a + step as f64 * d;
-            if !still_r {
-                let mut rt = std::mem::take(&mut lw.rt);
-                self.r_at(&of(t + 0.5 * d), t + 0.5 * d, &mut rt);
-                lw.rt = rt;
-            }
+        for step in 0..f.n {
+            let t = f.a + step as f64 * d;
+            let rt: &[C64] = &f.rs[if f.rs.len() == 1 { 0 } else { step }];
             // k1 = N(t)σ; x1 = E½(σ + d/2 k1); k2 = N(t + d/2) x1.
             if changing {
-                self.lawson_dh(lw, &of(t), t);
+                self.lawson_dh(lw, &f.hm, &of, t);
             }
-            self.lawson_n(lw, changing, &sigma, &mut k[0]);
+            self.lawson_n(f, rt, lw, changing, &sigma, &mut k[0]);
             for i in 0..sigma.len() {
-                x1[i] = lw.half[i] * (sigma[i] + k[0][i] * (0.5 * d));
+                x1[i] = f.half[i] * (sigma[i] + k[0][i] * (0.5 * d));
             }
             if changing {
-                self.lawson_dh(lw, &of(t + 0.5 * d), t + 0.5 * d);
+                self.lawson_dh(lw, &f.hm, &of, t + 0.5 * d);
             }
-            self.lawson_n(lw, changing, &x1, &mut k[1]);
+            self.lawson_n(f, rt, lw, changing, &x1, &mut k[1]);
             // x2 = E½σ + d/2 k2; k3 = N(t + d/2) x2.
             for i in 0..sigma.len() {
-                x2[i] = lw.half[i] * sigma[i] + k[1][i] * (0.5 * d);
+                x2[i] = f.half[i] * sigma[i] + k[1][i] * (0.5 * d);
             }
-            self.lawson_n(lw, changing, &x2, &mut k[2]);
+            self.lawson_n(f, rt, lw, changing, &x2, &mut k[2]);
             // x1 = E σ + d E½ k3; k4 = N(t + d) x1.
             for i in 0..sigma.len() {
-                x1[i] = lw.full[i] * sigma[i] + lw.half[i] * k[2][i] * d;
+                x1[i] = f.full[i] * sigma[i] + f.half[i] * k[2][i] * d;
             }
             if changing {
-                self.lawson_dh(lw, &of(t + d), t + d);
+                self.lawson_dh(lw, &f.hm, &of, t + d);
             }
-            self.lawson_n(lw, changing, &x1, &mut k[3]);
+            self.lawson_n(f, rt, lw, changing, &x1, &mut k[3]);
             // σ ← E(σ + d/6 k1) + d/3 E½(k2 + k3) + d/6 k4.
             for i in 0..sigma.len() {
-                sigma[i] = lw.full[i] * (sigma[i] + k[0][i] * (d / 6.0)) + lw.half[i] * (k[1][i] + k[2][i]) * (d / 3.0) + k[3][i] * (d / 6.0);
+                sigma[i] = f.full[i] * (sigma[i] + k[0][i] * (d / 6.0)) + f.half[i] * (k[1][i] + k[2][i]) * (d / 3.0) + k[3][i] * (d / 6.0);
             }
             counts.products += 4;
             counts.segments += 1;
         }
         // ρ = V σ V†.
         let mut tmp = std::mem::take(&mut lw.tmp);
-        self.sandwich(&lw.v, &lw.vadj, &sigma, v, &mut tmp);
+        self.sandwich(&f.v, &f.vadj, &sigma, v, &mut tmp);
         lw.tmp = tmp;
         lw.k = k;
         (lw.s[0], lw.s[1], lw.s[2]) = (sigma, x1, x2);
         counts.exponentials += 1;
-        Ok(())
     }
 }
 

@@ -177,6 +177,24 @@ fn read_request(p: &std::path::Path) -> crate::request::Request {
     crate::request::Request::from_native(&line).unwrap()
 }
 
+/// A scene's request by its name: one of the six's in `six` (V3D_REQ), or a native request's path.
+fn scene_request(name: &str, six: Option<&std::path::Path>) -> crate::request::Request {
+    match (name, six) {
+        ("tilt0" | "tilt2" | "r4" | "gmd1c" | "pgc3d" | "tet", Some(dir)) => {
+            let file = match name {
+                "tilt0" => "tilt0.json",
+                "tilt2" => "tilt2.json",
+                "r4" => "R4_LIN_4.json",
+                "gmd1c" => "GMD1C_1ms.json",
+                "pgc3d" => "PGC3D_1ms.json",
+                _ => "TET_1ms.json",
+            };
+            read_request(&dir.join(file))
+        }
+        _ => read_request(std::path::Path::new(name)),
+    }
+}
+
 /// The whole selection (module documentation; solve.rs # The selection) on the scenes named by `SELECT_SCENES` (comma-
 /// separated: the six's names in `requests`, or a native request's path, e.g. R5_PUMP's and S1's), one after another:
 /// G's pilot, the paths, the response, the candidates judged and weighed, P -- its report (every candidate's parts, work
@@ -190,20 +208,7 @@ fn select_on_the_scenes() {
     let out = std::env::var("SELECT_OUT").ok().map(std::path::PathBuf::from);
     let six = std::env::var("V3D_REQ").ok().map(std::path::PathBuf::from);
     for name in names.split(',') {
-        let request = match (name, &six) {
-            ("tilt0" | "tilt2" | "r4" | "gmd1c" | "pgc3d" | "tet", Some(dir)) => {
-                let file = match name {
-                    "tilt0" => "tilt0.json",
-                    "tilt2" => "tilt2.json",
-                    "r4" => "R4_LIN_4.json",
-                    "gmd1c" => "GMD1C_1ms.json",
-                    "pgc3d" => "PGC3D_1ms.json",
-                    _ => "TET_1ms.json",
-                };
-                read_request(&dir.join(file))
-            }
-            _ => read_request(std::path::Path::new(name)),
-        };
+        let request = scene_request(name, six.as_deref());
         let also: Vec<Vec<usize>> = std::env::var("SELECT_ALSO").map_or(vec![], |a| {
             a.split(';')
                 .filter(|g| !g.is_empty())
@@ -238,4 +243,133 @@ fn select_on_the_scenes() {
             std::fs::write(dir.join(format!("{stem}.json")), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
         }
     }
+}
+
+/// The paths' work, measured (module documentation, # The paths): on the scene `SELECT_SCENES` (one), G's pilot's
+/// walks -- read from `SELECT_WALKS` where that file is, else the solve run up to the selection's stage (stopped there)
+/// and its walks written to it --; the reference's `Paths` to a run of `SELECT_UPTO` µs at the most, each job's work and
+/// the pool's threads; and Lawson at the substeps a µs `SELECT_RATES` (comma-separated, increasing): on the
+/// calibration's piece the reference's rows against the converged scheme's and the calibration (`calibrate`) of G,
+/// along every walk's first `SELECT_SPAN` µs the reference's rows against the last rate's, and the seconds.
+#[test]
+#[ignore]
+fn select_paths_cost() {
+    use crate::paths::{Form, Scheme, Series, Walk};
+    let name = std::env::var("SELECT_SCENES").expect("SELECT_SCENES: one scene");
+    let six = std::env::var("V3D_REQ").ok().map(std::path::PathBuf::from);
+    let request = scene_request(&name, six.as_deref());
+    let file = std::path::PathBuf::from(std::env::var("SELECT_WALKS").expect("SELECT_WALKS: the walks' file"));
+    let length = request.times_us.last().copied().unwrap();
+    let reference = crate::solve::alone(crate::solve::chief(&request));
+    if std::env::var("SELECT_SHAPE").is_ok() {
+        let g = crate::solve::run_of(&request, reference).unwrap();
+        let centre = crate::solve::reported(&g, &reference).unwrap().centre;
+        let full = Selected::new(crate::scene::Scene::new(&request).unwrap(), Selection { keep: (0..STATES).collect(), ..g.report.clone() }, reference).unwrap();
+        eprintln!("{name}: reference {}", Form::new(&full, centre).shape());
+        eprintln!("{name}: G {}", Form::new(&g, centre).shape());
+        return;
+    }
+    let walks: Vec<Walk> = if file.exists() {
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        doc["walks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| Walk {
+                index: w["index"].as_u64().unwrap(),
+                start: w["start"].as_array().unwrap().iter().map(|x| (x[0].as_u64().unwrap() as usize, C64::new(x[1].as_f64().unwrap(), x[2].as_f64().unwrap()))).collect(),
+                ends: serde_json::from_value(w["ends"].clone()).unwrap(),
+            })
+            .collect()
+    } else {
+        let clock = Instant::now();
+        crate::paths::WALKS.with(|w| *w.borrow_mut() = Some((WALKS, length, vec![])));
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::solve::solve(&request, &mut |m| {
+                if let crate::solve::Message::Stage(s) = m {
+                    assert!(s.step != crate::solve::Step::Select, "stopped at the selection");
+                }
+            })
+        }));
+        assert!(stopped.is_err(), "the solve stopped at the selection");
+        let walks = crate::paths::WALKS.with(|w| w.borrow_mut().take().unwrap().2);
+        let doc = serde_json::json!({"walks": walks.iter().map(|w| serde_json::json!({
+            "index": w.index, "start": w.start.iter().map(|(s, z)| serde_json::json!([s, z.re, z.im])).collect::<Vec<_>>(), "ends": w.ends,
+        })).collect::<Vec<_>>()});
+        std::fs::write(&file, serde_json::to_string(&doc).unwrap()).unwrap();
+        eprintln!("{name}: the pilot's walks in {:.1} s, written", clock.elapsed().as_secs_f64());
+        walks
+    };
+    let g = crate::solve::run_of(&request, reference).unwrap();
+    let centre = crate::solve::reported(&g, &reference).unwrap().centre;
+    let form = Form::new(&g, centre);
+    let memory = walks.iter().filter_map(|w| crate::paths::memory(&form, [w.ends[0][1], w.ends[0][2], w.ends[0][3]], [w.ends[0][4], w.ends[0][5], w.ends[0][6]], w.ends[0][0])).map(|m| m.time).fold(0.0, larger);
+    let tau = walks[0].ends[1][0] - walks[0].ends[0][0];
+    let upto: f64 = std::env::var("SELECT_UPTO").map_or(length, |x| x.parse().unwrap());
+    let run = length.min(upto);
+    eprintln!("{name}: {} walks to {:?} µs, τ {tau:.4} µs, τ_mem {memory:.3} µs, run {length} µs (measured to {run}); pool {} threads", walks.len(), walks.iter().map(|w| w.end()).collect::<Vec<_>>(), rayon::current_num_threads());
+    let full = Selected::new(crate::scene::Scene::new(&request).unwrap(), Selection { keep: (0..STATES).collect(), ..g.report.clone() }, reference).unwrap();
+    let light = g.light();
+    if let Ok(probe) = std::env::var("SELECT_PROBE") {
+        // Lawson on walk `SELECT_WALK` (0)'s first `probe` µs at the settings `SELECT_GRID` ("rate/pieces", comma-
+        // separated, the finest last), the reference and G: seconds and counts; the reference's rows and G's fold
+        // error against the finest's; `SELECT_SPARSE` set, the converged scheme too.
+        let probe: f64 = probe.parse().unwrap();
+        let k: usize = std::env::var("SELECT_WALK").map_or(0, |x| x.parse().unwrap());
+        let w = &walks[k];
+        let to = probe.min(w.end());
+        let grid: Vec<(f64, usize)> = std::env::var("SELECT_GRID").map_or(vec![(128.0, 2)], |x| x.split(',').map(|g| { let (a, b) = g.split_once('/').unwrap(); (a.parse().unwrap(), b.parse().unwrap()) }).collect());
+        let (fr, fg) = (Form::new(&full, centre), Form::new(&g, centre));
+        eprintln!("walk {k} to {to} µs: reference {}; G {}", fr.shape(), fg.shape());
+        let mut schemes: Vec<Scheme> = grid.iter().map(|&(per_us, pieces)| Scheme::Lawson { per_us, pieces, read: 1 }).collect();
+        if std::env::var("SELECT_SPARSE").is_ok() {
+            schemes.push(Scheme::sparse(4));
+        }
+        let runs: Vec<(Series, Series)> = schemes
+            .iter()
+            .map(|&scheme| {
+                let a = fr.along(w, &w.start, 0.0, to, scheme).unwrap();
+                let b = fg.along(w, &w.start, 0.0, to, scheme).unwrap();
+                (a, b)
+            })
+            .collect();
+        let finest = grid.len() - 1;
+        let at = |s: &Series, t: f64| s.readings.iter().find(|r| r.t == t).map(|r| r.rows);
+        for (scheme, (a, b)) in schemes.iter().zip(&runs) {
+            let (fa, fb) = &runs[finest];
+            let (mut rows, mut fold) = (0.0_f64, 0.0_f64);
+            for x in &a.readings {
+                let (Some(y), Some(u), Some(v)) = (at(fa, x.t), at(b, x.t), at(fb, x.t)) else { continue };
+                for q in 0..STATES {
+                    rows = rows.max((x.rows[q] - y[q]).abs());
+                    fold = fold.max(((u[q] - x.rows[q]) - (v[q] - y[q])).abs());
+                }
+            }
+            let (c, d) = (&a.counts, &b.counts);
+            eprintln!(
+                "  {scheme:?}: reference {:.3} s (nodes {:.3} + propagation {:.3} + readouts {:.3}; {} nodes, {} segments, {} products), G {:.3} s; vs the finest: reference's rows {rows:.2e}, G's fold error {fold:.2e}",
+                c.seconds(), c.node_seconds, c.propagation_seconds, c.readout_seconds, c.nodes, c.segments, c.products, d.seconds()
+            );
+        }
+        return;
+    }
+    let paths = Paths::new(&full, centre, walks.clone(), memory, run, tau, light).unwrap();
+    let say = |what: &str, s: &Series| {
+        let c = &s.counts;
+        eprintln!(
+            "  {what}: {:.1} µs, {:.2} s (nodes {:.2} + propagation {:.2} + readouts {:.2}); {} nodes, {} segments, {} products, {} readouts",
+            c.time, c.seconds(), c.node_seconds, c.propagation_seconds, c.readout_seconds, c.nodes, c.segments, c.products, c.readouts
+        );
+    };
+    let jobs: f64 = paths.series.iter().chain(paths.late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.seconds()).sum();
+    eprintln!("{name}: Paths L {:.1} µs, {} windows, late {:?}: {:.1} s wall, {jobs:.1} s over the walks' jobs; settled {:?}", paths.length, paths.windows.len(), paths.late_from(), paths.seconds, paths.settled);
+    for (k, s) in paths.series.iter().enumerate() {
+        say(&format!("walk {k} start"), s);
+    }
+    for (k, s) in paths.late.iter().flat_map(|l| l.2.iter()).enumerate() {
+        say(&format!("walk {k} late"), s);
+    }
+    let clock = Instant::now();
+    let judged = judge(&paths, &g, centre).unwrap();
+    eprintln!("{name}: G judged in {:.1} s ({:.1} s wall): calibration {:?}", judged.seconds, clock.elapsed().as_secs_f64(), judged.calibration);
 }

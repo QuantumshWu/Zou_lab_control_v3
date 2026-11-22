@@ -578,8 +578,9 @@ impl Selected {
         Potential { model: self, weights: *p, running: true }
     }
 
-    /// A beat's value (rad/µs): n·(φ, Φ_tw, Φ_ν) + Σ_i p_i Φ_i, its own vector's, correctly rounded.
-    fn value(&self, (n, p): &Exact) -> f64 {
+    /// A beat's value (rad/µs): n·(φ, Φ_tw, Φ_ν) + Σ_i p_i Φ_i, its own vector's, correctly rounded (paths.rs: the
+    /// recycling's beat differences' too).
+    pub(crate) fn value_of(&self, (n, p): &Exact) -> f64 {
         let fast = n.iter().zip(&self.frame.fast).filter(|(k, _)| **k != 0).map(|(&k, f)| k as f64 * f);
         exact_sum(fast.chain(p.iter().zip(&self.axes).filter(|(c, _)| c.num != 0).map(|(c, x)| c.num as f64 / c.den as f64 * x)))
     }
@@ -590,7 +591,7 @@ impl Selected {
             return id;
         }
         let id = beats.exact.len();
-        beats.value.push(self.value(&exact));
+        beats.value.push(self.value_of(&exact));
         beats.ids.insert(exact.clone(), id);
         beats.exact.push(exact);
         id
@@ -1148,7 +1149,7 @@ impl Selected {
                         fasts.len() - 1
                     });
                     // Within a fast index the slow beat's value (the fast part's is the index's, common).
-                    (f, value - self.value(&(fast, vec![])))
+                    (f, value - self.value_of(&(fast, vec![])))
                 })
                 .collect();
             lifts.push((g, elements));

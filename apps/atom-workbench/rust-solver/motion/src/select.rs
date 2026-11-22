@@ -32,9 +32,21 @@
 //! differs with the place by up to 2.4 times) -- the start's transient and the internal state's forgetting of it --, and,
 //! where the run is longer than 2L, again over its last L from the walk's own start state (`Paths::late_from`): its last
 //! window reads the model where the atoms are late in the run, which the start's windows cannot (the motion's own
-//! memory is the longer: R4's atoms heat through the run). The scheme's own error on the fold's error is read once per
-//! candidate against the converged `Scheme::sparse` on the first path's first `CALIBRATION` µs (`Calibration`), and
-//! the rows' booked beside the direct part.
+//! memory is the longer: R4's atoms heat through the run).
+//!
+//! The scheme's setting -- Lawson's substeps a µs and pieces a step -- is settled by its own error, not fixed
+//! (`settle`): on the first path's first `CALIBRATION` µs the reference is advanced at the setting, at twice its
+//! substeps and at twice its pieces, each refinement's largest change of a displayed row read as that knob's part of
+//! the setting's error (Richardson's 2^p/(2^p − 1), p = 2: H frozen at a piece's middle, the recycling at a
+//! substep's); from the coarsest (`COARSEST`), the knob of the larger part is doubled while the parts' sum is beyond
+//! `TOLERANCE` -- s⁴ of the population target, the share the numerical tolerances inside a step take of theirs
+//! (units.rs `QUADRATURE`) --, to `FINEST` at the most. Every path, every candidate and the scans take that setting. The
+//! same refinements of each candidate on the same piece give its calibration (`Calibration`): the change of its rows'
+//! difference to the reference, read alike, booked beside the direct part. (Until 2026-11-22 the setting was fixed at
+//! 128 substeps a µs and two pieces, P1-PATHS's measure on R4, and the calibration read against the converged
+//! `Scheme::sparse`, whose segments follow the fastest coherence: on S1 -- its 32 states hold levels far off the light's
+//! frame -- 0.5 µs of it took more than 190 s, where Lawson's whole setting ladder takes a second. The refinements
+//! converge to the same limit: H exact in each piece's eigenbasis as the pieces shorten, RK4 as the substeps do.)
 //!
 //! The reference is the 32-state model itself (B.8), not a whole-level base: under Lawson its path costs 10–20 % more
 //! than the base's (P1 R2.3), and with it nothing remains of a base's own error to check request by request.
@@ -56,7 +68,7 @@
 //!
 //! # The region left out
 //! The chosen candidate is scanned along the prepared trap's three principal axes, both ways, from its centre at the
-//! pilot's thermal speed against the reference (`scan`, `SCANNING`), each scan to the turning point of the pilot's most
+//! pilot's thermal speed against the reference (`scan`, at the paths' setting), each scan to the turning point of the pilot's most
 //! energetic held atom on the reference state's prepared potential, or to the trap region's edge (`REGION_INTENSITY` of
 //! the tweezer's peak), whichever is nearer -- the reach the pilot's atoms show (solve.rs `choose_on_the_pilot`): where
 //! the paths did not go -- the tweezer's intensity s below the least the paths reached --, the readings where a row errs
@@ -73,7 +85,7 @@ use crate::paths::{self, Form, Scheme, Series, Walk, Window};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Components, Scene};
 use crate::step::Dynamics;
-use crate::units::{CONFIDENCE, POPULATION_TARGET};
+use crate::units::{CONFIDENCE, POPULATION_TARGET, STEP_SHARE};
 use rayon::prelude::*;
 use std::time::Instant;
 
@@ -85,10 +97,28 @@ pub const POINTS: usize = 3;
 /// one or two paths reach a quarter of the target, four cover the start's draws).
 pub const WALKS: usize = 4;
 
-/// The path scheme (P1-PATHS R2): each step of the path in two pieces, H exact in its eigenbasis there, the recycling
-/// and the beats by RK4 in 128 substeps a µs (set by the decay, about 3.4 a lifetime of the D lines; P1's 64 erred by
-/// 3e-3, 128 by 2.4e-4 on R4). Its error on the fold's error is read and booked (`Calibration`).
-pub const LAWSON: Scheme = Scheme::Lawson { per_us: 128.0, pieces: 2, read: 1 };
+/// The paths' scheme's tolerance (module documentation, # The paths): the largest error of a displayed row the
+/// reference may take from Lawson's setting on the calibration's piece -- s⁴ of the population target, as the
+/// numerical tolerances inside a step take s⁴ of theirs (units.rs `QUADRATURE`): 2.0e-3 at p = 2.
+pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * POPULATION_TARGET;
+
+/// Lawson's setting the paths' scheme starts from (module documentation, # The paths): 8 substeps a µs, one piece a
+/// step -- each knob doubled from there as its error asks.
+pub const COARSEST: (f64, usize) = (8.0, 1);
+
+/// Lawson's finest setting (module documentation, # The paths): 4096 substeps a µs (32 times P1-PATHS's 128), 64
+/// pieces a step.
+pub const FINEST: (f64, usize) = (4096.0, 64);
+
+/// A refinement's change read as the coarser setting's error (module documentation, # The paths): Richardson's
+/// 2^p/(2^p − 1) at Lawson's lowest order p = 2 -- H frozen at a piece's middle, the recycling at a substep's (RK4's
+/// own order 4 errs less).
+const RICHARDSON: f64 = 4.0 / 3.0;
+
+/// Lawson's scheme at a setting (substeps a µs, pieces a step), read at every `read`-th knot.
+fn lawson((per_us, pieces): (f64, usize), read: usize) -> Scheme {
+    Scheme::Lawson { per_us, pieces, read }
+}
 
 /// The calibration's piece (µs): the first path's start, where the readings change fastest (P1-PATHS: one path, 10 µs).
 pub const CALIBRATION: f64 = 10.0;
@@ -304,16 +334,18 @@ pub fn intensity(light: &Light, r: V3) -> f64 {
 }
 
 //// What every candidate is judged against (module documentation, # The paths): the walks cut at L, their windows, the
-/// reference's form and its series along them by `LAWSON` and on the calibration's piece by `Scheme::sparse`, the least
-/// tweezer intensity the walks reached, the memory time, and the work it took.
+/// reference's form, the scheme's setting (`settle`), the reference's series along the walks at it and on the
+/// calibration's piece at it and its two refinements, the least tweezer intensity the walks reached, the memory time,
+/// and the work it took.
 pub struct Paths<'a> {
     pub walks: Vec<Walk>,
     pub length: f64,
     pub memory: f64,
     pub windows: Vec<(f64, f64)>,
     pub reference: Form<'a>,
+    pub settled: Settled,
     series: Vec<Series>,
-    calibration: (f64, Series),
+    calibration: (f64, [Series; 3]),
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
     /// none where the run is no longer than twice L.
     late: Option<(f64, Vec<(f64, f64)>, Vec<Series>)>,
@@ -322,10 +354,58 @@ pub struct Paths<'a> {
     pub products: u64,
 }
 
-/// The scans' scheme (module documentation, # The region left out): `LAWSON` in one piece a step (P1-PATHS R2.1: on R4
-/// one piece and two err alike on the populations, 2.4e-4 and 2.5e-4, a fiftieth of a quarter of the target the scans
-/// mark at), read at every fourth step's end.
-pub const SCANNING: Scheme = Scheme::Lawson { per_us: 128.0, pieces: 1, read: 4 };
+/// The paths' scheme as settled (`settle`; module documentation, # The paths): Lawson's setting (substeps a µs, pieces a
+/// step), the reference's error parts there on the calibration's piece (the substeps', the pieces'), the settings run,
+/// and their work and time.
+#[derive(Clone, Copy, Debug)]
+pub struct Settled {
+    pub setting: (f64, usize),
+    pub errors: [f64; 2],
+    pub tried: usize,
+    pub products: u64,
+    pub seconds: f64,
+}
+
+/// The paths' scheme's setting by its error on the reference (module documentation, # The paths): from `COARSEST`, on
+/// the walk's first `piece` µs, the reference at the setting, at twice its substeps and at twice its pieces, each
+/// refinement's largest change of a displayed row read as that knob's part of the setting's error (`RICHARDSON`); while
+/// the parts' sum is beyond `TOLERANCE`, the knob of the larger part doubled (the other where it is at `FINEST`), both
+/// at the finest the last. The setting with its parts, and the reference's three series at it (the calibration's).
+fn settle(form: &Form, walk: &Walk, piece: f64) -> Result<(Settled, [Series; 3]), String> {
+    let clock = Instant::now();
+    let run = |s: (f64, usize)| form.along(walk, &walk.start, 0.0, piece, lawson(s, 1));
+    let mut setting = COARSEST;
+    let mut at = run(setting)?;
+    let (mut tried, mut products) = (1, at.counts.products);
+    loop {
+        let finer = [(2.0 * setting.0, setting.1), (setting.0, 2 * setting.1)];
+        let made: Vec<Series> = finer.par_iter().map(|&s| run(s)).collect::<Result<_, _>>()?;
+        tried += 2;
+        products += made.iter().map(|s| s.counts.products).sum::<u64>();
+        let [a, b]: [Series; 2] = made.try_into().expect("two refinements");
+        let errors = [RICHARDSON * change(&at, &a), RICHARDSON * change(&at, &b)];
+        let open = [setting.0 < FINEST.0, setting.1 < FINEST.1];
+        if errors[0] + errors[1] <= TOLERANCE || !(open[0] || open[1]) {
+            return Ok((Settled { setting, errors, tried, products, seconds: clock.elapsed().as_secs_f64() }, [at, a, b]));
+        }
+        let k = usize::from(!(open[0] && (errors[0] >= errors[1] || !open[1])));
+        setting = finer[k];
+        at = if k == 0 { a } else { b };
+    }
+}
+
+/// The largest change of a displayed row between two series of one model along one path, at the times both read.
+fn change(a: &Series, b: &Series) -> f64 {
+    let mut e = 0.0;
+    for x in &a.readings {
+        if let Some(y) = b.readings.iter().find(|y| y.t == x.t) {
+            for k in 0..STATES {
+                e = larger(e, (x.rows[k] - y.rows[k]).abs());
+            }
+        }
+    }
+    e
+}
 
 /// The scans' walks (module documentation, # The region left out): per principal axis of the trap and each way along
 /// it, from the trap's centre at the speed `speed` (µm/µs) to where `beyond` first holds -- the pilot's most energetic
@@ -371,40 +451,39 @@ impl<'a> Paths<'a> {
     /// start, [0, L], L = min(`run`, 5 τ_mem) -- `memory` the memory time (`paths::memory`, the longest over the walks'
     /// starts) --, and at the run's end, [run − L, run], each from the walk's own start state (the late segment: its
     /// last window has forgotten that start), where the run is longer than twice L; the windows of their step `step`;
-    /// the reference along them and on the calibration's piece.
+    /// the scheme's setting on the first walk's piece (`settle`), and the reference along the walks at it.
     pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light) -> Result<Paths<'a>, String> {
         let clock = Instant::now();
         let form = Form::new(reference, at);
         let length = run.min(5.0 * memory);
         let windows = paths::windows(length, memory, step);
-        let piece = CALIBRATION.min(length);
+        let piece = CALIBRATION.min(length).min(walks[0].end());
         let late_from = (run > 2.0 * length).then_some(run - length);
-        // One job the calibration, a walk's start and its end; on the pool.
+        let (settled, calibrated) = settle(&form, &walks[0], piece)?;
+        let scheme = lawson(settled.setting, 1);
+        // One job a walk's start and its end; on the pool.
         let n = walks.len();
-        let jobs: Vec<usize> = (0..1 + n * (1 + usize::from(late_from.is_some()))).collect();
+        let jobs: Vec<usize> = (0..n * (1 + usize::from(late_from.is_some()))).collect();
         let done: Vec<Result<Series, String>> = jobs
             .par_iter()
             .map(|&j| {
-                if j == 0 {
-                    form.along(&walks[0], &walks[0].start, 0.0, piece.min(walks[0].end()), Scheme::sparse(4))
-                } else if j <= n {
-                    let w = &walks[j - 1];
-                    form.along(w, &w.start, 0.0, length.min(w.end()), LAWSON)
+                if j < n {
+                    let w = &walks[j];
+                    form.along(w, &w.start, 0.0, length.min(w.end()), scheme)
                 } else {
                     // A walk that ended before the late segment (its atom lost) reads nothing there.
-                    let (w, from) = (&walks[j - 1 - n], late_from.expect("a late segment"));
-                    if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), LAWSON) } else { Ok(Series::default()) }
+                    let (w, from) = (&walks[j - n], late_from.expect("a late segment"));
+                    if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
                 }
             })
             .collect();
         let mut done = done.into_iter();
-        let calibration = (piece, done.next().expect("the calibration")?);
         let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
         let late_series: Vec<Series> = done.collect::<Result<_, _>>()?;
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
         let least = walks.iter().flat_map(|w| w.ends.iter().map(|e| intensity(light, [e[1], e[2], e[3]]))).fold(f64::INFINITY, crate::linalg::smaller);
-        let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).chain(std::iter::once(&calibration.1)).map(|s| s.counts.products).sum();
-        Ok(Paths { walks, length, memory, windows, reference: form, series, calibration, late, least, seconds: clock.elapsed().as_secs_f64(), products })
+        let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.products).sum::<u64>() + settled.products;
+        Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (piece, calibrated), late, least, seconds: clock.elapsed().as_secs_f64(), products })
     }
 
     /// Where the late segment starts (µs), where there is one.
@@ -423,8 +502,9 @@ impl<'a> Paths<'a> {
 }
 
 /// The scheme's error on the fold's error (module documentation, # The paths): on the calibration's piece the largest
-/// change, between `LAWSON` and the converged `Scheme::sparse`, of a row's difference to the reference -- booked beside
-/// the direct part -- and of the total rate's relative difference (said).
+/// change of a row's difference to the reference under each refinement of the setting, read as its error part
+/// (`RICHARDSON`), the two parts added -- booked beside the direct part --, and of the total rate's relative difference
+/// alike (said).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Calibration {
     pub rows: f64,
@@ -475,54 +555,58 @@ pub struct Judged {
     pub products: u64,
 }
 
-/// A candidate model judged against the reference along the paths (`Judged`): its series along the walks by `LAWSON`
-/// and on the calibration's piece by `Scheme::sparse`, every job on the pool.
+/// A candidate model judged against the reference along the paths (`Judged`): its series along the walks at the paths'
+/// setting and on the calibration's piece at the setting's two refinements, every job on the pool.
 pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> {
     let clock = Instant::now();
     let form = Form::new(model, at);
     let (piece, ref calibrated) = paths.calibration;
+    let (rate, pieces) = paths.settled.setting;
+    let scheme = lawson(paths.settled.setting, 1);
+    let refined = [lawson((2.0 * rate, pieces), 1), lawson((rate, 2 * pieces), 1)];
     let w0 = &paths.walks[0];
     let n = paths.walks.len();
     let run = paths.late.as_ref().map_or(0.0, |(from, ..)| from + paths.length);
-    let jobs: Vec<usize> = (0..1 + n * (1 + usize::from(paths.late.is_some()))).collect();
+    let jobs: Vec<usize> = (0..2 + n * (1 + usize::from(paths.late.is_some()))).collect();
     let done: Vec<Result<Series, String>> = jobs
         .par_iter()
         .map(|&j| match j {
-            0 => form.along(w0, &w0.start, 0.0, piece.min(w0.end()), Scheme::sparse(4)),
-            j if j <= n => {
-                let w = &paths.walks[j - 1];
-                form.along(w, &w.start, 0.0, paths.length.min(w.end()), LAWSON)
+            0 | 1 => form.along(w0, &w0.start, 0.0, piece, refined[j]),
+            j if j < 2 + n => {
+                let w = &paths.walks[j - 2];
+                form.along(w, &w.start, 0.0, paths.length.min(w.end()), scheme)
             }
             j => {
-                let (w, from) = (&paths.walks[j - 1 - n], paths.late.as_ref().expect("a late segment").0);
-                if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), LAWSON) } else { Ok(Series::default()) }
+                let (w, from) = (&paths.walks[j - 2 - n], paths.late.as_ref().expect("a late segment").0);
+                if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
             }
         })
         .collect();
     let mut done = done.into_iter();
-    let sparse = done.next().expect("the calibration")?;
+    let finer: [Series; 2] = [done.next().expect("a refinement")?, done.next().expect("a refinement")?];
     let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect::<Result<_, _>>()?;
     let late_series: Vec<Series> = done.collect::<Result<_, _>>()?;
     let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm);
     let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm));
-    // The calibration: the converged scheme's difference to the reference against Lawson's, on the same piece -- the
-    // first walk's own Lawson series there (the same scheme from the same start), the candidate's and the reference's.
-    let cut = |s: &Series| Series { readings: s.readings.iter().filter(|r| r.t <= piece).cloned().collect(), ..Series::default() };
-    let calibration = calibrate(&cut(&series[0]), &cut(&paths.series[0]), &sparse, calibrated);
-    let products = series.iter().chain(&late_series).chain([&sparse]).map(|s| s.counts.products).sum();
+    // The calibration: the first walk's own series at the setting on the piece (the same scheme from the same start)
+    // and its two refinements, against the reference's.
+    let cut = Series { readings: series[0].readings.iter().filter(|r| r.t <= piece).cloned().collect(), ..Series::default() };
+    let calibration = calibrate([&cut, &finer[0], &finer[1]], calibrated);
+    let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
 }
 
 /// The region left out of a candidate (module documentation, # The region left out; `Region`): the candidate and the
-/// reference along the scans `scans` by `SCANNING`, every job on the pool; beyond the paths' least intensity `least`,
-/// each reading's largest row error, a quarter of the target or more marking. With the time it took.
-pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], least: f64, light: &Light) -> Result<(Region, f64), String> {
+/// reference along the scans `scans` at the paths' setting `setting`, read at every fourth knot, every job on the pool;
+/// beyond the paths' least intensity `least`, each reading's largest row error, a quarter of the target or more
+/// marking. With the time it took.
+pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], least: f64, light: &Light, setting: (f64, usize)) -> Result<(Region, f64), String> {
     let clock = Instant::now();
     let forms = [Form::new(reference, at), Form::new(model, at)];
     let jobs: Vec<(usize, usize)> = (0..2).flat_map(|m| (0..scans.len()).map(move |w| (m, w))).collect();
-    let done: Vec<Result<Series, String>> = jobs.par_iter().map(|&(m, w)| forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), SCANNING)).collect();
+    let done: Vec<Result<Series, String>> = jobs.par_iter().map(|&(m, w)| forms[m].along(&scans[w], &scans[w].start, 0.0, scans[w].end(), lawson(setting, 4))).collect();
     let done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
     let (reference, candidate) = done.split_at(scans.len());
     let quarter = 0.25 * POPULATION_TARGET;
@@ -546,21 +630,27 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
     Ok((region, clock.elapsed().as_secs_f64()))
 }
 
-/// The calibration (`Calibration`) of a candidate's Lawson series `lawson` and the reference's `reference` against their
-/// converged series `sparse` and `converged` on the same piece, read at the times both read (the knots).
-fn calibrate(lawson: &Series, reference: &Series, sparse: &Series, converged: &Series) -> Calibration {
-    let mut c = Calibration::default();
-    let at = |s: &Series, t: f64| s.readings.iter().find(|r| r.t == t).cloned();
-    for x in &lawson.readings {
-        let (Some(y), Some(u), Some(v)) = (at(reference, x.t), at(sparse, x.t), at(converged, x.t)) else { continue };
-        let (y, u, v) = (&y, &u, &v);
-        for k in 0..STATES {
-            c.rows = larger(c.rows, ((x.rows[k] - y.rows[k]) - (u.rows[k] - v.rows[k])).abs());
-        }
-        let total = |r: &paths::Reading| r.rates.iter().sum::<f64>();
-        c.rate = larger(c.rate, ((total(x) / total(y) - 1.0) - (total(u) / total(v) - 1.0)).abs());
+/// The calibration (`Calibration`) of a candidate's series on the calibration's piece at the paths' setting, at twice
+/// its substeps and at twice its pieces (`candidate`), against the reference's alike (`reference`), read at the times
+/// all read (the knots): each refinement's largest change of a row's difference to the reference, and of the total
+/// rate's relative difference, read as its error part (`RICHARDSON`), the two parts added.
+fn calibrate(candidate: [&Series; 3], reference: &[Series; 3]) -> Calibration {
+    fn at(s: &Series, t: f64) -> Option<&paths::Reading> {
+        s.readings.iter().find(|r| r.t == t)
     }
-    c
+    let total = |r: &paths::Reading| r.rates.iter().sum::<f64>();
+    let mut parts = [Calibration::default(); 2];
+    for x in &candidate[0].readings {
+        let Some(y) = at(&reference[0], x.t) else { continue };
+        for (k, part) in parts.iter_mut().enumerate() {
+            let (Some(u), Some(v)) = (at(candidate[k + 1], x.t), at(&reference[k + 1], x.t)) else { continue };
+            for q in 0..STATES {
+                part.rows = larger(part.rows, ((x.rows[q] - y.rows[q]) - (u.rows[q] - v.rows[q])).abs());
+            }
+            part.rate = larger(part.rate, ((total(x) / total(y) - 1.0) - (total(u) / total(v) - 1.0)).abs());
+        }
+    }
+    Calibration { rows: RICHARDSON * (parts[0].rows + parts[1].rows), rate: RICHARDSON * (parts[0].rate + parts[1].rate) }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -212,7 +212,7 @@ fn the_node_is_the_model_now_in_its_frame() {
         let n = keep.len();
         let frequency = |key: &Key| -> f64 {
             let v: FrameKey = key.iter().map(|&k| i64::from(k)).chain(std::iter::once(0)).collect();
-            run.value(&run.frame.split(&v))
+            run.value_of(&run.frame.split(&v))
         };
         for (r, kappa) in [([0.0; 3], [0.0; 3]), (POINTS[1].0, [0.0; 3]), POINTS[1]] {
             let node = run.node(r, kappa, true);
@@ -643,7 +643,7 @@ fn the_readout_is_the_lift_by_fast_index() {
                         if z == C64::ZERO {
                             continue;
                         }
-                        let slow = value - run.value(&(fast, vec![]));
+                        let slow = value - run.value_of(&(fast, vec![]));
                         let i = match by_fast.iter().position(|f| f.0 == fast) {
                             Some(i) => i,
                             None => {
