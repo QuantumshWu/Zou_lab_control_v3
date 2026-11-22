@@ -172,8 +172,8 @@
 //! TET's) lays some 510 nodes a step of 0.474 µs where each level's own frequencies ask some 35; R5_PUMP's, whose frame
 //! leaves the hyperfine splitting of 4.3·10⁴ rad/µs on its slow diagonal and whose exact blocks join F = 1 and F = 2 of
 //! one m, tens of thousands. Every step's integrals are taken by groups of the piece's eigencomponents (`Groups`): cut at
-//! gaps of their frequencies Re λ that an exact block straddles -- not by blocks alone, and across the blocks alike:
-//! R5_PUMP's two groups are F = 1 and F = 2 of each of its blocks --, each group g of centre ω_g, the state is
+//! gaps of their frequencies Re λ that an exact block straddles, every block at the same places, a group one block's run
+//! between two cuts (R5_PUMP's: F = 1 and F = 2 of each of its blocks), each group g of centre ω_g, the state is
 //! x = Σ_g e^{−iω_g s} y_g (s from the launch), each y_g slow -- its components' frequencies less the centre, in the
 //! propagation's own coordinates, R(1 + X(u)) on the group's components of e^{−i(Λ − ω)s}m(u) (`Picture::parts`; in a
 //! fixed or an instantaneous eigenbasis the groups' cross terms hold a part that does not turn, the basis' change along
@@ -1492,6 +1492,7 @@ struct Cut {
     bandwidth: f64,
     cut: usize,
     node: f64,
+    block: [usize; GROUPS],
 }
 
 /// The kick's and the survival's sums of a piece by its eigencomponents' groups (module documentation, # The quadrature
@@ -1540,7 +1541,20 @@ struct Groups {
     /// The ringing's and the numerator's weights between two groups (`Picture::weighed_by`, G × G), for the cut weighed.
     across: Vec<f64>,
     numerator: Vec<f64>,
+    /// Each group's rows: its block's states (R is block-diagonal), every state where the states are one block.
+    rows: Vec<Vec<usize>>,
     work: f64,
+}
+
+/// What a node of a cut does beside its series and its weights (`Groups::node`), complex multiply-adds: its parts'
+/// products (each component its block's rows), its norms (each linked pair its block's rows), its z_g and its density
+/// (each group its block's upper triangle).
+#[derive(Clone, Copy)]
+struct Shape {
+    products: usize,
+    norms: usize,
+    z: usize,
+    density: usize,
 }
 
 impl Groups {
@@ -1555,11 +1569,14 @@ impl Groups {
     /// quotient's bandwidth (`count`), a node its state (`Picture::state_work`) and its densities into the sums
     /// (`count::gathered`). The cuts are at the k largest gaps between neighbouring frequencies Re λ of the components the
     /// state can hold (`Picture::spectrum`) that some exact block straddles, k = 1, 2, …: a gap no block straddles cuts
-    /// no pair a form reads, and the groups are the runs between two cuts across the blocks alike, so that a level split
-    /// in every block -- R5_PUMP's F = 1 and F = 2, joined in each of its blocks by m -- is cut once; a component the
-    /// state cannot hold to the nearest centre; the groups' centres the middles of their frequencies. Two groups ring
-    /// together where a block holds members of both (the others' pairs are no form's and no ringing's: R is
-    /// block-diagonal), unless their cross terms integrate within the round-off of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's constant), sup|c|
+    /// no pair a form reads, and every block is cut at the same places, so that a level split in every block --
+    /// R5_PUMP's F = 1 and F = 2, joined in each of its blocks by m -- is cut at once. A group is one block's run between
+    /// two cuts, of its own centre, the middle of its frequencies: each block's levels lie apart by its own gaps (R5_PUMP's
+    /// by the hyperfine splitting less each m's Zeeman shifts), and its envelopes keep its own spread alone. A component
+    /// the state cannot hold goes to the nearest centre in its block, or to its block's own group. A group's parts, norms
+    /// and density are its block's rows alone (R is block-diagonal: `Picture::parts`), so that many small groups cost what
+    /// one product of n² does. Two groups of a block ring together unless their cross terms integrate within the
+    /// round-off of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's constant), sup|c|
     /// the numerator's weights between them over 1 − r (`Picture::weighed_by`), Ω their least gap, β the shifted pairs'
     /// band; a pair not taken is neither in the density nor in the norm's ringing. A cut's cost: its panels' nodes
     /// (`resolved`, interpolated, at the envelopes' bandwidth) each its parts, norms, series, weights and densities
@@ -1618,6 +1635,7 @@ impl Groups {
             held[..n].copy_from_slice(h);
             part[..n].copy_from_slice(p);
         }
+        let blocked: Vec<Vec<usize>> = picture.blocked().0.to_vec();
         // The held components in their frequencies' order, and the gaps between neighbours that some exact block
         // straddles -- a gap no block straddles cuts no pair any form reads.
         let (mut order, mut kept) = ([0usize; STATES], 0);
@@ -1644,16 +1662,35 @@ impl Groups {
             for &(_, i) in &gaps[..k] {
                 cut_before[i] = true;
             }
-            let (mut group, mut groups) = ([0u8; STATES], 0usize);
-            for (i, &a) in order.iter().enumerate() {
-                if i == 0 || cut_before[i] {
-                    groups += 1;
-                }
-                group[a] = (groups - 1) as u8;
+            // A group a block's run between two cuts (its own centre: each block's levels apart by its own gaps), the
+            // runs' order the cuts' across the blocks.
+            let mut runs = [0usize; STATES];
+            for i in 1..kept {
+                runs[i] = runs[i - 1] + usize::from(cut_before[i]);
             }
-            if groups > GROUPS {
+            let (mut group, mut keys, mut groups) = ([0u8; STATES], [(0usize, 0usize); GROUPS], 0usize);
+            fn place(keys: &mut [(usize, usize); GROUPS], groups: &mut usize, key: (usize, usize)) -> Option<u8> {
+                match keys[..*groups].iter().position(|k| *k == key) {
+                    Some(g) => Some(g as u8),
+                    None if *groups < GROUPS => {
+                        keys[*groups] = key;
+                        *groups += 1;
+                        Some((*groups - 1) as u8)
+                    }
+                    None => None,
+                }
+            }
+            let mut over = false;
+            for (i, &a) in order.iter().enumerate() {
+                match place(&mut keys, &mut groups, (part[a], runs[i])) {
+                    Some(g) => group[a] = g,
+                    None => over = true,
+                }
+            }
+            if over {
                 break;
             }
+            let held_groups = groups;
             let mut spans = [(f64::INFINITY, f64::NEG_INFINITY); GROUPS];
             for &a in order.iter() {
                 let s = &mut spans[usize::from(group[a])];
@@ -1663,17 +1700,24 @@ impl Groups {
             for (c, s) in centres.iter_mut().zip(&spans[..groups]) {
                 *c = 0.5 * (s.0 + s.1);
             }
+            // A component the state cannot hold: the nearest centre in its block, or its block's own group.
             for a in (0..n).filter(|&a| !held[a]) {
                 let distance = |g: usize| (centres[g] - lambda[a].re).abs();
-                group[a] = (0..groups).min_by(|&x, &y| distance(x).total_cmp(&distance(y))).expect("a group") as u8;
-            }
-            // Two groups some block holds members of both of (the others' pairs are no form's and no ringing's).
-            let mut shared = [0u32; GROUPS];
-            for a in (0..n).filter(|&a| held[a]) {
-                for b in (0..n).filter(|&b| held[b] && part[b] == part[a]) {
-                    shared[usize::from(group[a])] |= 1 << group[b];
+                match (0..held_groups).filter(|&g| keys[g].0 == part[a]).min_by(|&x, &y| distance(x).total_cmp(&distance(y))) {
+                    Some(g) => group[a] = g as u8,
+                    None => match place(&mut keys, &mut groups, (part[a], usize::MAX)) {
+                        Some(g) => {
+                            group[a] = g;
+                            centres[usize::from(g)] = lambda[a].re;
+                        }
+                        None => over = true,
+                    },
                 }
             }
+            if over {
+                break;
+            }
+            let block_of: [usize; GROUPS] = std::array::from_fn(|g| keys[g].0);
             let shift: [f64; STATES] = std::array::from_fn(|a| if a < n { centres[usize::from(group[a])] } else { 0.0 });
             // The guess: the quotient's bandwidth by the shifted pairs' over the forms' (`Picture::spanned`); and each two
             // groups' least gap.
@@ -1700,11 +1744,11 @@ impl Groups {
             }
             let all_across: f64 = (0..groups).flat_map(|g| (g + 1..groups).map(move |q| (g, q))).map(|(g, q)| self.across[g * groups + q]).sum();
             let ratio_all = all_across / (1.0 - within);
-            // Linked: a block holds both, and the pair's cross terms beyond the round-off of the width by parts (above).
+            // Linked: one block's, and the pair's cross terms beyond the round-off of the width by parts (above).
             let mut linked = [0u32; GROUPS];
             for g in 0..groups {
                 linked[g] |= 1 << g;
-                for q in (0..groups).filter(|&q| q != g && shared[g] & (1 << q) != 0) {
+                for q in (0..groups).filter(|&q| q != g && block_of[q] == block_of[g]) {
                     let omega = gap[g * groups + q] - spanned;
                     let small = ratio_all < 1.0 && omega > 0.0 && std::f64::consts::PI * self.numerator[g * groups + q] / ((1.0 - ratio_all) * omega) <= UNIT_ROUNDOFF * width.abs();
                     if !small {
@@ -1716,13 +1760,20 @@ impl Groups {
             let mut ratio = across / (1.0 - within);
             let ordered: usize = (0..groups).map(|g| linked[g].count_ones() as usize - 1).sum();
             let blocks = ordered + groups;
+            let size_of = |g: usize| if blocked.len() > 1 { blocked[block_of[g]].len() } else { n };
+            let shape = Shape {
+                products: (0..n).map(|a| if blocked.len() > 1 { blocked[part[a]].len() } else { n }).sum(),
+                norms: (0..groups).map(|g| (g..groups).filter(|&q| linked[g] & (1 << q) != 0).count() * size_of(g)).sum(),
+                z: (0..groups).map(|g| linked[g].count_ones() as usize * size_of(g)).sum(),
+                density: (0..groups).map(|g| size_of(g) * (size_of(g) + 1) / 2).sum(),
+            };
             // K + 1 ≥ ln(u(1 − r)/8)/ln r, none where nothing rings between the groups.
             let order_of = |ratio: f64| if ratio > 0.0 { linalg::larger(((0.125 * UNIT_ROUNDOFF * (1.0 - ratio)).ln() / ratio.ln()).ceil() - 1.0, 0.0) } else { 0.0 };
             // At the guess with the fewest labels a series of the order K holds where groups ring together, 2K + 1 (a line
             // of the labels' lattice): the least the cut can cost.
             let least = |ratio: f64| {
                 let labels = if ordered > 0 { 2.0 * order_of(ratio) + 1.0 } else { 1.0 };
-                let node = Groups::node(n, groups, ordered, 1, slots, state) + (labels - 1.0) * (ordered + blocks) as f64;
+                let node = Groups::node(n, groups, ordered, 1, slots, state, shape) + (labels - 1.0) * (ordered + blocks) as f64;
                 arranged(width, |w| resolved(guess, w, FORMS, 2, true), |m| m as f64 * node, || false).2
             };
             if !(ratio < 1.0) || !beats(least(ratio), &mut best, &mut exact, picture, &mut known) {
@@ -1757,7 +1808,7 @@ impl Groups {
             }
             labelled = k;
             let (inner, all) = (self.inner, self.labels.len());
-            let node = Groups::node(n, groups, ordered, inner, slots, state);
+            let node = Groups::node(n, groups, ordered, inner, slots, state, shape);
             let (_, _, guessed) = arranged(width, |w| resolved(guess, w, FORMS, 2, true), |m| m as f64 * node + Groups::panel(all, m), || known(picture));
             if !beats(guessed, &mut best, &mut exact, picture, &mut known) {
                 break;
@@ -1770,11 +1821,11 @@ impl Groups {
             if !beats(cost, &mut best, &mut exact, picture, &mut known) {
                 break;
             }
-            best = (cost, Some((count, nodes, Cut { group, centres, groups, linked, order: series, bandwidth, cut: k, node })));
+            best = (cost, Some((count, nodes, Cut { group, centres, groups, linked, order: series, bandwidth, cut: k, node, block: block_of })));
         }
         match best.1 {
             Some((count, nodes, cut)) => {
-                self.set(cut, &lambda[..n], labelled == cut.cut, slots, n);
+                self.set(cut, &lambda[..n], labelled == cut.cut, slots, n, &blocked);
                 (count, nodes)
             }
             None => {
@@ -1786,14 +1837,13 @@ impl Groups {
 
     /// A node's counted work on n states in G groups, `ordered` the ordered pairs of linked groups and `inner` the
     /// series' labels, into `slots` sums, its state's (`Picture::state_work`: its matrix assembled where anything is
-    /// followed, the followed classes'): its parts (a product of n² a group), their norms, the series and the blocks'
-    /// weights a label each, z_g, the density G n(n + 1)/2 (`outer`), and where the step takes several sums each its
-    /// share of it.
-    fn node(n: usize, groups: usize, ordered: usize, inner: usize, slots: usize, (_, followed, followers): (f64, bool, usize)) -> f64 {
+    /// followed, the followed classes'): its parts, norms, z_g and density by its blocks (`Shape`), the norm's phases, the
+    /// series and the blocks' weights a label each, and where the step takes several sums each its share of the density.
+    fn node(n: usize, groups: usize, ordered: usize, inner: usize, slots: usize, (_, followed, followers): (f64, bool, usize), shape: Shape) -> f64 {
         let blocks = ordered + groups;
-        let parts = if followed { 1 + 4 * followers + groups } else { groups };
+        let assembly = if followed { (1 + 4 * followers) * n * n } else { 0 };
         let shares = if slots > 1 { slots * n * (n + 1) / 2 } else { 0 };
-        (parts * n * n + 4 * n + (blocks + ordered / 2 + 1) * n + inner * (ordered + blocks) + blocks * n + groups * n * (n + 1) / 2 + shares) as f64
+        (assembly + shape.products + 4 * n + shape.norms + ordered / 2 + inner * (ordered + blocks) + shape.z + shape.density + shares) as f64
     }
 
     /// The labels of a cut's series of `order` steps and one more (breadth first from the zero label, a step e_g − e_q
@@ -1859,8 +1909,17 @@ impl Groups {
 
     /// The cut taken (`choose`): its groups, its eigenvalues less their centres, its labels (made already where they are
     /// the last made, `labelled`), a node's buffers for `slots` sums on n states.
-    fn set(&mut self, cut: Cut, lambda: &[C64], labelled: bool, slots: usize, n: usize) {
+    fn set(&mut self, cut: Cut, lambda: &[C64], labelled: bool, slots: usize, n: usize, blocks: &[Vec<usize>]) {
         (self.groups, self.cut) = (cut.groups, Some(cut));
+        self.rows.resize_with(cut.groups, Vec::new);
+        for (g, rows) in self.rows.iter_mut().enumerate().take(cut.groups) {
+            rows.clear();
+            if blocks.len() > 1 {
+                rows.extend_from_slice(&blocks[cut.block[g]]);
+            } else {
+                rows.extend(0..n);
+            }
+        }
         self.shifted.clear();
         self.shifted.extend((0..n).map(|a| lambda[a] - C64::real(cut.centres[usize::from(cut.group[a])])));
         assert!(labelled || self.label(cut.groups, cut.order, &cut.linked, &cut.centres, usize::MAX), "a cut's labels");
@@ -1979,7 +2038,7 @@ impl Groups {
         let (mut diagonal, mut ringing, mut across, mut pairs) = (0.0, 0.0, 0.0, 0);
         for g in 0..groups {
             for q in (g..groups).filter(|&q| cut.linked[g] & (1 << q) != 0) {
-                let z: C64 = self.parts[g][..n].iter().zip(&self.parts[q][..n]).map(|(p, r)| p.conj() * *r).sum();
+                let z: C64 = self.rows[g].iter().map(|&i| self.parts[g][i].conj() * self.parts[q][i]).sum();
                 (self.norms[g * groups + q], self.norms[q * groups + g]) = (z, z.conj());
                 if q == g {
                     diagonal += z.re;
@@ -1992,7 +2051,7 @@ impl Groups {
             }
         }
         (self.diagonal, self.ratio) = (diagonal, across / diagonal);
-        self.work += (pairs * n + pairs) as f64;
+        self.work += (pairs * self.rows.first().map_or(n, Vec::len) + pairs) as f64;
         diagonal + ringing
     }
 
@@ -2085,16 +2144,30 @@ impl Groups {
             self.node.fill(0.0);
         }
         for g in 0..groups {
-            let z = &mut self.z[g];
+            let (z, rows) = (&mut self.z[g], &self.rows[g]);
             z[..n].fill(C64::ZERO);
             for q in (0..groups).filter(|&q| cut.linked[g] & (1 << q) != 0) {
                 let w = self.weights[g * groups + q].conj();
-                for (z, y) in z[..n].iter_mut().zip(&self.parts[q][..n]) {
-                    *z += w * *y;
+                for &i in rows {
+                    z[i] += w * self.parts[q][i];
                 }
-                done += n;
+                done += rows.len();
             }
-            outer(&self.parts[g][..n], &self.z[g][..n], if slots > 1 { &mut self.node[..] } else { &mut sums[..width] });
+            let to = if slots > 1 { &mut self.node[..] } else { &mut sums[..width] };
+            if rows.len() == n {
+                outer(&self.parts[g][..n], &self.z[g][..n], to);
+            } else {
+                // The block's upper triangle alone: the group's parts and z_g are none off its block's rows.
+                let row_width = row(n);
+                for &a in rows {
+                    let left = self.parts[g][a];
+                    for &b in rows.iter().filter(|&&b| b >= a) {
+                        let value = left * self.z[g][b].conj();
+                        to[2 * a * row_width + b] += value.re;
+                        to[(2 * a + 1) * row_width + b] += value.im;
+                    }
+                }
+            }
         }
         if slots > 1 {
             let node = &self.node;
@@ -2109,7 +2182,7 @@ impl Groups {
             });
             done += slots * n * (n + 1) / 2;
         }
-        self.work += (done + groups * n * (n + 1) / 2) as f64;
+        self.work += (done + self.rows[..groups].iter().map(|r| r.len() * (r.len() + 1) / 2).sum::<usize>()) as f64;
         true
     }
 }

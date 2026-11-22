@@ -2474,22 +2474,42 @@ impl Picture {
     /// The frame's state at the time u by groups of its eigencomponents (step.rs, # The quadrature by groups): out[g] =
     /// R(1 + X(u)) e^{−i(Λ − ω)(u − u₀)} m(u) on the components a of `group[a]` = g alone, `shifted` = Λ less each
     /// component's group's centre ω -- so that x(u) = Σ_g e^{−iω_g(u − u₀)} out[g], `at`'s state --, for g below
-    /// `groups`. `at`'s work with a product of n² a group.
+    /// `groups`. R(1 + X(u)) is block-diagonal on the exact blocks (`blocks`), so a group of one block's components holds
+    /// that block's rows alone: its product is the block's rows times its own components, Σ_a |block(a)| ≤ n² in all,
+    /// with `at`'s matrix and exponentials.
     pub(crate) fn parts(&mut self, u: f64, shifted: &[C64], group: &[u8], groups: usize, out: &mut [[C64; crate::model::STATES]]) {
         let n = self.n;
         let size = n * n;
         self.coordinates_at(u, Some(shifted));
         let followers = self.matrix_at(u);
         let matrix = if self.followed { &self.spare[0] } else { &self.right };
-        let mut masked = [C64::ZERO; crate::model::STATES];
-        for (g, out) in out[..groups].iter_mut().enumerate() {
-            for ((m, d), &of) in masked[..n].iter_mut().zip(&self.coordinates).zip(group) {
-                *m = if usize::from(of) == g { *d } else { C64::ZERO };
-            }
-            combine(false, &masked[..n], n, matrix, &mut self.lanes, 1, 0);
-            unlay(&self.lanes, 1, &mut out[..n]);
+        for out in out[..groups].iter_mut() {
+            out[..n].fill(C64::ZERO);
         }
-        self.work += ((if self.followed { 1 + 4 * followers + groups } else { groups }) * size + 4 * n) as f64;
+        let mut products = 0;
+        for a in 0..n {
+            let (d, out) = (self.coordinates[a], &mut out[usize::from(group[a])]);
+            match self.blocks.get(self.part[a]) {
+                Some(rows) if self.blocks.len() > 1 => {
+                    for &i in rows {
+                        out[i] += entry(matrix, laid(i, a, n)) * d;
+                    }
+                    products += rows.len();
+                }
+                _ => {
+                    for (i, o) in out[..n].iter_mut().enumerate() {
+                        *o += entry(matrix, laid(i, a, n)) * d;
+                    }
+                    products += n;
+                }
+            }
+        }
+        self.work += ((if self.followed { 1 + 4 * followers } else { 0 }) * size + products + 4 * n) as f64;
+    }
+
+    /// The exact blocks' states (`blocks`, none: one block) and each eigencomponent's block (`part`).
+    pub(crate) fn blocked(&self) -> (&[Vec<usize>], &[usize]) {
+        (&self.blocks, &self.part[..self.n])
     }
 
     /// The state's coordinates at the time u from the last launch (`at`): e^{−iΛ(u − u₀)} m(u), m its three stops'

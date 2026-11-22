@@ -488,6 +488,12 @@ fn gstep_one_node() {
         for (label, run) in models(&name, &request) {
             let three = Three::new(&run);
             let mut t = start(&run, &request, chief, 3);
+            if let Some(s) = std::env::var("GSTEP_STATE").ok().and_then(|x| x.parse::<usize>().ok()) {
+                let mut psi = crate::step::Internal::zeros(t.psi.len());
+                psi[s] = C64::ONE;
+                t = Trajectory::new(&run, 0, t.r, t.kappa, t.seed, t.index);
+                t.psi = psi;
+            }
             let mut scratch = Scratch::default();
             for _ in 0..burn {
                 if let Ok(step) = stepped(&three, &t, tau, &mut scratch) {
