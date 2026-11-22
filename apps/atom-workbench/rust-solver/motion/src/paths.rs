@@ -125,6 +125,21 @@
 //!   rate.) Until the opening was so set it was the paths' first window, 0.29 µs on R4, and the transient's rest stood
 //!   at 3.8e-4 whatever the run's rate: with 0.5 µs or more, 2.3e-4 at 8.4 a µs -- the pieces' part -- falling with
 //!   the pieces.
+//! - **Resolve or book** (the model's own judgment, model/classify.rs: zero, drop under a strict bound booked, fold,
+//!   keep): a held mode faster than the setting's `cutoff` is not resolved -- its part of the start, σ₀ⱼ m_j (m_j = v_a
+//!   v_b†, V's columns of the mode's pair of eigenstates), is dropped at the start, and a strict bound of what that does
+//!   to a displayed row is booked; the cutoff is the setting's fourth knob, its part that bound, doubled while it is the
+//!   largest of the parts (select.rs `settle`): a mode is booked where its bound fits the tolerance, resolved where it
+//!   does not, the same for every mode and scene. The bound: the dropped part goes on as δ(t) = Φ(t, 0)σ₀ⱼm_j; with L₀
+//!   the piece's frozen part (L₀m_j = μ_j m_j, μ_j = −γ_j + iω_j) and N = L − L₀ (the recycling R and H's change ΔH),
+//!   Duhamel gives δ(t)/σ₀ⱼ = e^{μ_j t} m_j + ∫₀ᵗ c(u) e^{μ_j u} du, c(u) = Φ(t, u) N(u) m_j. The first is read from the
+//!   first knot on, |·| ≤ ‖m_j‖₁ e^{−γ_j t₁} (‖m_j‖₁ = ‖v_a‖‖v_b‖); the second is the lemma's (model/classify.rs
+//!   `by_parts`, with the whole complex rate: the turning and the decay together, |μ_j|), |c| ≤ ‖N m_j‖₁ ≤ ‖R m_j‖₁ +
+//!   2‖ΔH‖‖m_j‖₁ (Φ contracts the trace norm), |ċ| ≤ ‖L N m_j‖₁ + ‖Ṅ m_j‖₁, ∫₀ᵗ |ċ| e^{−γ_j u} du ≤ sup|ċ|/γ_j: B_j =
+//!   |σ₀ⱼ| (‖m_j‖₁ e^{−γ_j t₁} + (2‖N m_j‖₁ + (‖L R m_j‖₁ + 2‖L‖‖ΔH‖‖m_j‖₁ + 2‖Ḣ‖‖m_j‖₁)/γ_j)/|μ_j|), a displayed row
+//!   moving by at most the trace norm (bounded by the entries' moduli). ‖ΔH‖ is H's change over half a piece of the
+//!   first knot interval with every beat's amplitude twice, ‖Ḣ‖ the change over that interval and each beat's amplitude
+//!   twice times its rate, ‖L‖ the generator's 1-norm bound, L R m_j taken at the start (`Form::opening`).
 //!
 //! What an exponential piece needs before its substeps reads no state -- the nodes, H at its middle and the blocks'
 //! eigendecompositions, the substep's weights, the node a reading takes at its end (`Frozen`) --, so it is made on the
@@ -209,9 +224,10 @@ pub enum Scheme {
     /// Each step of the path in `pieces` equal pieces, the model made at the pieces' ends and interpolated between them
     /// (# The nodes): H at a piece's middle integrated exactly in its eigenbasis (block by block), the rest -- H's change
     /// from there, the recycling Σ J ρ J† -- by the exponential Runge–Kutta substeps (# The substeps), over a stretch's
-    /// opening `turns` a turn of the fastest coherence and `rate` a µs after it (# The start); a readout at every
-    /// `read`-th knot and at the end. The scheme's error is read by its own refinements and booked (# The budget).
-    Exponential { turns: f64, rate: f64, pieces: usize, read: usize },
+    /// opening `turns` a turn of the fastest coherence it resolves -- the start's modes up to `cutoff` (rad/µs), the
+    /// faster ones booked by their bound -- and `rate` a µs after it (# The start); a readout at every `read`-th knot and
+    /// at the end. The scheme's error is read by its own refinements and booked (# The budget).
+    Exponential { turns: f64, rate: f64, pieces: usize, cutoff: f64, read: usize },
 }
 
 impl Scheme {
@@ -241,6 +257,8 @@ pub struct Counts {
     pub condition: f64,
     /// The stretch's opening (µs; `Scheme::Exponential`, module documentation # The start).
     pub opening: f64,
+    /// The bound of what the start's modes the opening books instead of resolving can do to a displayed row (# The start).
+    pub booked: f64,
 }
 
 impl Counts {
@@ -257,6 +275,7 @@ impl Counts {
         self.time += o.time;
         self.condition = larger(self.condition, o.condition);
         self.opening = larger(self.opening, o.opening);
+        self.booked = larger(self.booked, o.booked);
     }
     pub fn seconds(&self) -> f64 {
         self.node_seconds + self.propagation_seconds + self.readout_seconds
@@ -907,6 +926,15 @@ impl<'a> Form<'a> {
 
     /// The model's readings along a path from `from` to `to` from the state `start` (module documentation): its
     /// series, and Err where the state is not the model's.
+    /// What the opening of a stretch from the state `start` at `from` books at the pieces a step `pieces` and the cutoff
+    /// `cutoff` (# The start), without the stretch: the bound alone.
+    pub fn booked_at(&self, walk: &Walk, start: &[(usize, C64)], from: f64, pieces: usize, cutoff: f64) -> Result<f64, String> {
+        let v = self.initial(start)?;
+        let knots = walk.knots(from, walk.end().max(from + f64::MIN_POSITIVE));
+        let (first, next) = (self.amps_with(&self.node_at(walk, from), false), self.amps_with(&self.node_at(walk, knots[1]), false));
+        Ok(self.opening(&first, &next, from, knots[1], pieces, &v, cutoff)?.2)
+    }
+
     pub fn along(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
         self.along_from(walk, self.initial(start)?, from, to, scheme)
     }
@@ -965,16 +993,20 @@ impl<'a> Form<'a> {
                     }
                 }
             }
-            Scheme::Exponential { turns, rate, pieces, read } => {
+            Scheme::Exponential { turns, rate, pieces, cutoff, read } => {
                 assert!(pieces >= 1, "a step in one piece at least");
                 let knots = walk.knots(from, to);
                 let node = made(from, &mut counts);
                 readings.push(self.read(&node, walk, from, &v, &mut counts));
                 let first = std::sync::Arc::new(self.amps_with(&node, false));
                 drop(node);
-                // The opening (# The start), and the fastest coherence's rate at the stretch's start.
-                let (opening, fastest) = self.opening(&first, from, &v)?;
-                counts.opening = opening;
+                // The opening (# The start): its length, the fastest coherence it resolves, and the bound it books; H's
+                // change along a piece from the path's first knot interval.
+                let next = self.amps_with(&made(knots[1], &mut counts), false);
+                let (opening, fastest, booked, kept) = self.opening(&first, &next, from, knots[1], pieces, &v, cutoff)?;
+                (counts.opening, counts.booked) = (opening, booked);
+                // The booked modes' start dropped (their part of the state's start: the reading at the start is made).
+                v = kept;
                 // The knot intervals, each with whether a reading is made at its end.
                 let intervals: Vec<(f64, f64, bool)> = knots.windows(2).enumerate().map(|(i, w)| (w[0], w[1], (i + 1) % read == 0 || i + 2 == knots.len())).collect();
                 // A piece's substeps (# The start), of its start and length: `turns` a turn of the fastest coherence the
@@ -1492,17 +1524,19 @@ impl Form<'_> {
     }
 
     /// A stretch's opening (module documentation, # The start) from the state `v` at the time `t`, the amplitudes there
-    /// `amps`: its length (µs), the time the start's optical coherences take to decay to the double's unit rounding u,
-    /// 2 ln(1/u)/Γ, Γ the slowest decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited
-    /// states are all folded holds no such coherence); and the fastest coherence it resolves, max |Im μ_j| of H(t)'s Λ
-    /// over the modes the start holds, |σ₀ⱼ| above u of the largest, that the opening outlasts, |σ₀ⱼ| e^{Re μ_j t_open}
-    /// at most that (a mode it does not outlast goes on into the run, which takes it as it takes every mode then; none
-    /// held, no turn to resolve). Err where an eigendecomposition fails.
-    fn opening(&self, amps: &Amps, t: f64, v: &[C64]) -> Result<(f64, f64), String> {
+    /// `amps` and at the path's first knot `t1` after it `next`, the step's `pieces`, the cutoff `cutoff` (rad/µs): its
+    /// length (µs), the time the start's optical coherences take to decay to the double's unit rounding u, 2 ln(1/u)/Γ,
+    /// Γ the slowest decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited states are
+    /// all folded holds no such coherence); of the modes the start holds, |σ₀ⱼ| above u of the largest, that the opening
+    /// outlasts, |σ₀ⱼ| e^{Re μ_j t_open} at most that (a mode it does not outlast goes on into the run, which takes it as
+    /// it takes every mode then), the fastest |Im μ_j| up to the cutoff (resolved), the sum of the others' bounds
+    /// (`booked`; # The start), and the start with those others' parts dropped. Err where an eigendecomposition fails.
+    #[allow(clippy::too_many_arguments)]
+    fn opening(&self, amps: &Amps, next: &Amps, t: f64, t1: f64, pieces: usize, v: &[C64], cutoff: f64) -> Result<(f64, f64, f64, Vec<C64>), String> {
         let mut h = vec![C64::ZERO; self.h_slot];
         self.h_at(&[(amps, 1.0)], t, &mut h);
         let mut decay = f64::INFINITY;
-        let (mut values, mut vinv, mut vinvadj) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut values, mut vecs, mut vinv, mut vinvadj) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (x, blk) in self.blocks.iter().enumerate() {
             let (w, o) = (blk.len(), self.h_block[x]);
             for (i, &p) in blk.iter().enumerate() {
@@ -1522,19 +1556,109 @@ impl Form<'_> {
                 }
             }
             values.push(eig.values.clone());
+            vecs.push(eig.vectors.clone());
             vinv.push(a);
             vinvadj.push(b);
         }
         if !(decay.is_finite() && decay > 0.0) {
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0, v.to_vec()));
         }
         let length = 2.0 * (2.0 / f64::EPSILON).ln() / decay;
         let mus = self.rates_of(&values);
         let (mut sigma, mut tmp) = (vec![C64::ZERO; self.dim], vec![C64::ZERO; self.dim]);
         self.sandwich(&vinv, &vinvadj, v, &mut sigma, &mut tmp);
         let floor = 0.5 * f64::EPSILON * sigma.iter().map(|z| z.abs()).fold(0.0, larger);
-        let fastest = mus.iter().zip(&sigma).filter(|(m, z)| z.abs() > floor && z.abs() * (m.re * length).exp() <= floor).map(|(m, _)| m.im.abs()).fold(0.0, larger);
-        Ok((length, fastest))
+        let held: Vec<usize> = (0..self.dim).filter(|&j| sigma[j].abs() > floor && sigma[j].abs() * (mus[j].re * length).exp() <= floor).collect();
+        let fastest = held.iter().filter(|&&j| mus[j].im.abs() <= cutoff).map(|&j| mus[j].im.abs()).fold(0.0, larger);
+        let faster: Vec<usize> = held.iter().copied().filter(|&j| mus[j].im.abs() > cutoff).collect();
+        if faster.is_empty() {
+            return Ok((length, fastest, 0.0, v.to_vec()));
+        }
+        // ‖ΔH‖: H's change over half a piece, and every beat's amplitude twice; ‖Ḣ‖: H's change over the first knot
+        // interval, and every beat's amplitude twice times its rate.
+        let mut later = vec![C64::ZERO; self.h_slot];
+        self.h_at(&[(next, 1.0)], t, &mut later);
+        let norm_of = |m: &dyn Fn(usize) -> C64| -> f64 {
+            let mut most: f64 = 0.0;
+            for (x, blk) in self.blocks.iter().enumerate() {
+                let (w, o) = (blk.len(), self.h_block[x]);
+                for i in 0..w {
+                    let (row, col) = ((0..w).map(|k| m(o + i * w + k).abs()).sum::<f64>(), (0..w).map(|k| m(o + k * w + i).abs()).sum::<f64>());
+                    most = larger(most, larger(row, col));
+                }
+            }
+            most
+        };
+        let change = norm_of(&|k| later[k] - h[k]);
+        let beats: Vec<(f64, f64)> = self.h_beats.iter().enumerate().filter(|&(_, &b)| self.values[b] != 0.0).map(|(k, &b)| (2.0 * norm_of(&|e| amps.h[k * self.h_slot + e]), self.values[b].abs())).collect();
+        let dh = change / (2.0 * pieces as f64) + beats.iter().map(|b| b.0).sum::<f64>();
+        let rate = change / (t1 - t) + beats.iter().map(|b| b.0 * b.1).sum::<f64>();
+        // The generator at the start, to take L x of the recycled part (its shift's scalar back: L = L′ + 2 Im(c)).
+        let mut op = Op::default();
+        let nr = self.rows.len();
+        let whole = Amps { columns: amps.r.chunks(nr.max(1)).map(|c| c.iter().map(|z| z.abs()).sum::<f64>()).collect(), ..amps.clone() };
+        self.op_into(&[(&whole, 1.0, t)], 1.0, &mut op);
+        let mut work = Work::new(self);
+        let (bound_l, shift) = (op.norm, op.eta.ln());
+        // R^T at the start, and each faster mode's place: its pair and its two eigenstates.
+        let mut rt = vec![C64::ZERO; self.cols.len() * self.rows.len()];
+        self.r_at(&[(amps, 1.0)], t, &mut rt);
+        let mut gathered = vec![C64::ZERO; self.cols.len()];
+        let mut product = vec![C64::ZERO; nr];
+        let (mut x, mut lx) = (vec![C64::ZERO; self.dim], vec![C64::ZERO; self.dim]);
+        let first_reading = t1 - t;
+        let mut booked = 0.0;
+        let mut kept = sigma.clone();
+        for &j in &faster {
+            let q = self.offsets.partition_point(|&o| o <= j) - 1;
+            let (px, py) = self.pairs[q];
+            let wy = self.blocks[py].len();
+            let (a, b) = ((j - self.offsets[q]) / wy, (j - self.offsets[q]) % wy);
+            let (va, vb) = (&vecs[px], &vecs[py]);
+            let wx = self.blocks[px].len();
+            // m_j on the sector: v_a v_b† on the pair (X, Y), nothing elsewhere.
+            for (g, &c) in gathered.iter_mut().zip(&self.cols) {
+                *g = if c >= self.offsets[q] && c < self.offsets[q + 1] {
+                    let (i, k) = ((c - self.offsets[q]) / wy, (c - self.offsets[q]) % wy);
+                    va[(i, a)] * vb[(k, b)].conj()
+                } else {
+                    C64::ZERO
+                };
+            }
+            fused_product(&gathered, &rt, (1, self.cols.len(), nr), &mut product);
+            // x = R m_j on the sector, and L x.
+            x.fill(C64::ZERO);
+            for (p, &r) in product.iter().zip(&self.rows) {
+                x[r] += *p;
+            }
+            op.apply(self, &x, &mut lx, &mut work);
+            let recycled: f64 = x.iter().map(|z| z.abs()).sum();
+            let moved: f64 = lx.iter().zip(&x).map(|(l, z)| (*l + *z * shift).abs()).sum();
+            let size = (0..wx).map(|i| va[(i, a)].norm_sqr()).sum::<f64>().sqrt() * (0..wy).map(|k| vb[(k, b)].norm_sqr()).sum::<f64>().sqrt();
+            // c(u) = Φ(t, u) N(u) m_j: |c| ≤ ‖N m_j‖₁, |ċ| ≤ ‖L N m_j‖₁ + ‖Ṅ m_j‖₁ (# The start).
+            let ends = 2.0 * (recycled + 2.0 * dh * size);
+            let variation = (moved + bound_l * 2.0 * dh * size + 2.0 * rate * size) / -mus[j].re;
+            booked += sigma[j].abs() * (size * (mus[j].re * first_reading).exp() + crate::model::classify::by_parts(ends, variation, mus[j]));
+            kept[j] = C64::ZERO;
+        }
+        // The start with the booked modes' parts dropped: V σ V†.
+        let (vs, vsadj): (Vec<Vec<C64>>, Vec<Vec<C64>>) = vecs
+            .iter()
+            .map(|m| {
+                let w = m.rows;
+                let (mut a, mut b) = (vec![C64::ZERO; w * w], vec![C64::ZERO; w * w]);
+                for i in 0..w {
+                    for k in 0..w {
+                        a[i * w + k] = m[(i, k)];
+                        b[k * w + i] = m[(i, k)].conj();
+                    }
+                }
+                (a, b)
+            })
+            .unzip();
+        let mut start = vec![C64::ZERO; self.dim];
+        self.sandwich(&vs, &vsadj, &kept, &mut start, &mut tmp);
+        Ok((length, fastest, booked, start))
     }
 
     /// A chunk of knot intervals frozen (module documentation, # The nodes, # The substeps): each interval's nodes at its
@@ -1929,7 +2053,7 @@ pub fn path_errors(reference: &Form, candidates: &[&Form], walks: &[Walk], start
 pub fn check(candidate: &Form, reference: &Form, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Option<Result<[f64; 3], String>> {
     let halves = match scheme {
         Scheme::Sparse { nodes, turn, read } if turn <= std::f64::consts::TAU => Scheme::Sparse { nodes: 2 * nodes, turn: 0.5 * turn, read },
-        Scheme::Exponential { turns, rate, pieces, read } => Scheme::Exponential { turns: 2.0 * turns, rate: 2.0 * rate, pieces: 2 * pieces, read },
+        Scheme::Exponential { turns, rate, pieces, cutoff, read } => Scheme::Exponential { turns: 2.0 * turns, rate: 2.0 * rate, pieces: 2 * pieces, cutoff: 2.0 * cutoff, read },
         _ => return None,
     };
     let run = |s: Scheme| -> Result<(Series, Series), String> { Ok((candidate.along(walk, start, from, to, s)?, reference.along(walk, start, from, to, s)?)) };

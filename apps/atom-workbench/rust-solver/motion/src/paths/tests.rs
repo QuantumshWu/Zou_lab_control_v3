@@ -153,6 +153,7 @@ fn scheme_of(text: &str) -> Scheme {
         },
         "exponential" => {
             Scheme::Exponential {
+                cutoff: f64::INFINITY,
                 turns: p.get(4).map_or(1.0, |x| x.parse().unwrap()),
                 rate: p[1].parse().unwrap(),
                 pieces: p.get(2).map_or(1, |x| x.parse().unwrap()),

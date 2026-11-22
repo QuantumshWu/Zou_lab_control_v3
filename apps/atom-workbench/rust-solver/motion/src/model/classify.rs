@@ -97,6 +97,15 @@ pub fn zero(x: C64, scale: f64, terms: usize) -> bool {
     x.abs() <= rounding(terms) * scale
 }
 
+/// The integration-by-parts lemma the judgment's bounds take (PIPELINE_V3_FINAL A.2: the fold's fast elements, the
+/// photons' classes by their fast index, a step's band's rounding cut), for a complex rate μ = −γ + iω, γ ≥ 0:
+/// |∫_a^b c(u) e^{μu} du| = |[c e^{μu}/μ]_a^b − ∫ ċ e^{μu} du/μ| ≤ (|c(a)| + |c(b)| + ∫_a^b |ċ| du)/|μ|, |e^{μu}| ≤ 1 on
+/// u ≥ 0 -- the turning and the decay together, |μ| = √(γ² + ω²) (for a real frequency Ω, |μ| = Ω). Of the ends'
+/// sizes `ends` = |c(a)| + |c(b)|, the variation `variation` = ∫|ċ|, and the rate.
+pub fn by_parts(ends: f64, variation: f64, rate: C64) -> f64 {
+    (ends + variation) / rate.abs()
+}
+
 /// The fold's input by the zero tier's input side, the user's rule (module documentation, # The tiers): a coupling
 /// of the fold's input at the frequency f (a term of H ∝ e^{−ift}, `Scene::terms` at rest) whose first-order
 /// amplitude a = |M_ij| / |E_i − E_j − f + i(Γ_i + Γ_j)/2| is below the format's ε is no coupling and is zero -- on the

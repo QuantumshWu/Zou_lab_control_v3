@@ -159,10 +159,17 @@ pub struct Setting {
     pub turns: f64,
     pub rate: f64,
     pub pieces: usize,
+    /// The opening's cutoff (rad/µs): the start's modes up to it resolved, the faster ones booked by their bound
+    /// (paths.rs, # The start).
+    pub cutoff: f64,
 }
 
-/// The knobs of a setting (`Setting`): the opening's substeps, the run's substeps, the pieces.
-pub const KNOBS: usize = 3;
+/// The knobs of a setting (`Setting`): the opening's substeps, the run's substeps, the pieces, the opening's cutoff --
+/// the last one's part not read from a run but the bound of what the opening books (`Settled`).
+pub const KNOBS: usize = 4;
+
+/// The knobs a setting's refinements run (`refinements`): every knob but the cutoff.
+const RUN_KNOBS: usize = 3;
 
 impl Setting {
     /// The setting with its knob `k` (`KNOBS`) doubled.
@@ -171,7 +178,8 @@ impl Setting {
         match k {
             0 => s.turns *= 2.0,
             1 => s.rate *= 2.0,
-            _ => s.pieces *= 2,
+            2 => s.pieces *= 2,
+            _ => s.cutoff *= 2.0,
         }
         s
     }
@@ -181,20 +189,22 @@ impl Setting {
         match k {
             0 => self.turns < FINEST.turns,
             1 => self.rate < FINEST.rate,
-            _ => self.pieces < FINEST.pieces,
+            2 => self.pieces < FINEST.pieces,
+            _ => self.cutoff < FINEST.cutoff,
         }
     }
 }
 
 /// The setting the paths' scheme starts from (module documentation, # The paths): a substep a turn of the fastest
-/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a step -- each knob
-/// doubled from there as its error asks.
-pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1 };
+/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a step, the opening
+/// resolving the start's modes up to what those 8 a µs resolve (2π × 8 rad/µs) -- each knob doubled from there as its
+/// error asks.
+pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1, cutoff: std::f64::consts::TAU * 8.0 };
 
 /// The finest setting (module documentation, # The paths): 64 substeps a turn, 4096 a µs (32 times P1-PATHS's 128), 64
 /// pieces a step -- a bound on the work, never a measure of accuracy: a setting settled there short of `TOLERANCE` is
 /// said ("到顶未收敛") and its reference's error parts booked whole in every candidate's A (`Settled::unmet`).
-pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 64 };
+pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 64, cutoff: f64::INFINITY };
 
 /// A refinement's change read as the coarser setting's error (module documentation, # The paths): Richardson's
 /// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- the amplitudes' linear interpolation at one piece a step, the
@@ -204,7 +214,7 @@ const RICHARDSON: f64 = 4.0 / 3.0;
 
 /// The paths' scheme at a setting, read at every `read`-th knot.
 fn scheme(setting: Setting, read: usize) -> Scheme {
-    Scheme::Exponential { turns: setting.turns, rate: setting.rate, pieces: setting.pieces, read }
+    Scheme::Exponential { turns: setting.turns, rate: setting.rate, pieces: setting.pieces, cutoff: setting.cutoff, read }
 }
 
 /// The calibration's piece (µs): the first path's start, where the readings change fastest (P1-PATHS: one path, 10 µs).
@@ -451,6 +461,8 @@ pub struct Paths<'a> {
     /// none where the run is no longer than twice L.
     late: Option<(f64, Vec<(f64, f64)>, Vec<Series>)>,
     pub least: f64,
+    /// The largest bound the reference's openings book over its stretches (paths.rs, # The start).
+    pub booked: f64,
     pub seconds: f64,
     pub products: u64,
 }
@@ -492,14 +504,15 @@ impl Settled {
 /// to that floor, against the setting's pieces at the raised rate, one run more where that is none of the others. (Read against the setting itself, the pieces' part held the substeps' wherever the floor doubled them too:
 /// TET's ladder doubled the pieces to 16 while its substeps erred, the pieces' own part at 4 a step 1.24e-3, SELCOST.)
 fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setting>, [(usize, usize); KNOBS]) {
-    let mut runs: Vec<Setting> = std::iter::once(setting).chain((0..KNOBS).map(|k| own(setting.doubled(k)))).collect();
-    let pieces = KNOBS;
+    let mut runs: Vec<Setting> = std::iter::once(setting).chain((0..RUN_KNOBS).map(|k| own(setting.doubled(k)))).collect();
+    let pieces = RUN_KNOBS;
     let partner = Setting { rate: runs[pieces].rate, ..setting };
     let at = runs.iter().position(|&s| s == partner).unwrap_or_else(|| {
         runs.push(partner);
         runs.len() - 1
     });
-    (runs, std::array::from_fn(|k| if k + 1 == pieces { (at, pieces) } else { (0, k + 1) }))
+    // The cutoff's part is the setting's own bound (no pair: `settle`).
+    (runs, std::array::from_fn(|k| if k + 1 == pieces { (at, pieces) } else if k < RUN_KNOBS { (0, k + 1) } else { (0, 0) }))
 }
 
 /// The scheme's setting by its error (module documentation, # The paths): from `COARSEST`, on the walk's first `piece`
@@ -510,10 +523,16 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 /// setting's rate is the substeps' own: no less than a piece of the path's step `step` takes (`Form::along` never takes
 /// fewer than one substep a piece; below that a doubled rate would change nothing, and read as no error). The setting
 /// with its parts and runs, and the first model's series at its runs (the calibration's).
-fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64) -> Result<(Settled, Vec<Series>), String> {
+fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64, starts: &[(&Walk, f64)]) -> Result<(Settled, Vec<Series>), String> {
     let clock = Instant::now();
     let run = |s: Setting| -> Result<Vec<Series>, String> { forms.iter().map(|f| f.along(walk, &walk.start, 0.0, piece, scheme(s, 1))).collect() };
     let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
+    // The cutoff's part: the largest over the stretches the setting takes (`starts`: each from its walk's own start) of
+    // what their openings book, the models' together.
+    let booked = |s: Setting| -> Result<f64, String> {
+        let each: Vec<f64> = starts.par_iter().map(|&(w, from)| forms.iter().map(|f| f.booked_at(w, &w.start, from, s.pieces, s.cutoff)).sum::<Result<f64, String>>()).collect::<Result<_, _>>()?;
+        Ok(each.into_iter().fold(0.0, larger))
+    };
     let mut setting = own(COARSEST);
     let mut at = run(setting)?;
     let work = |x: &[Series]| x.iter().map(|s| s.counts.products).sum::<u64>();
@@ -524,7 +543,9 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64) -> Result<(Settle
         tried += made.len();
         products += made.iter().map(|s| work(s)).sum::<u64>();
         let series: Vec<Vec<Series>> = std::iter::once(at).chain(made).collect();
-        let errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
+        let mut errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
+        // The cutoff's part: what the setting's openings book (a scan's two models' both).
+        errors[RUN_KNOBS] = booked(setting)?;
         #[cfg(test)]
         if traced() {
             eprintln!("    [trace] settle {setting:?}: parts {:?}", errors.map(|e| format!("{e:.2e}")));
@@ -536,8 +557,22 @@ fn settle(forms: &[&Form], walk: &Walk, piece: f64, step: f64) -> Result<(Settle
             return Ok((Settled { setting, opening, errors, runs, pairs, tried, products, seconds: clock.elapsed().as_secs_f64() }, first));
         }
         let k = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| errors[a].total_cmp(&errors[b])).expect("an open knob");
-        setting = runs[1 + k];
-        at = series.into_iter().nth(1 + k).expect("the refinement");
+        if k < RUN_KNOBS {
+            setting = runs[1 + k];
+            at = series.into_iter().nth(1 + k).expect("the refinement");
+        } else {
+            // The cutoff's part is the setting's own bound: raised while it stays the largest, and the setting run once.
+            let others = errors[..RUN_KNOBS].iter().copied().fold(0.0, larger);
+            loop {
+                setting = setting.doubled(k);
+                if !(setting.open(k) && booked(setting)? > others) {
+                    break;
+                }
+            }
+            at = run(setting)?;
+            tried += 1;
+            products += work(&at);
+        }
     }
 }
 
@@ -617,7 +652,9 @@ impl<'a> Paths<'a> {
         let windows = paths::windows(length, memory, step);
         let piece = CALIBRATION.min(length).min(walks[0].end());
         let late_from = (run > 2.0 * length).then_some(run - length);
-        let (settled, calibrated) = settle(&[&form], &walks[0], piece, step)?;
+        // The stretches the setting takes: every walk from its start, and from the late segment's where there is one.
+        let starts: Vec<(&Walk, f64)> = walks.iter().map(|w| (w, 0.0)).chain(late_from.iter().flat_map(|&f| walks.iter().filter(move |w| f < w.end()).map(move |w| (w, f)))).collect();
+        let (settled, calibrated) = settle(&[&form], &walks[0], piece, step, &starts)?;
         let scheme = settled.scheme(1);
         #[cfg(test)]
         if traced() {
@@ -661,7 +698,8 @@ impl<'a> Paths<'a> {
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
         let least = walks.iter().flat_map(|w| w.ends.iter().map(|e| intensity(light, [e[1], e[2], e[3]]))).fold(f64::INFINITY, crate::linalg::smaller);
         let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.products).sum::<u64>() + settled.products;
-        Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (piece, calibrated), late, least, seconds: clock.elapsed().as_secs_f64(), products })
+        let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
+        Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (piece, calibrated), late, least, booked, seconds: clock.elapsed().as_secs_f64(), products })
     }
 
     /// Where the late segment starts (µs), where there is one.
@@ -675,7 +713,7 @@ impl<'a> Paths<'a> {
         let hm = self.reference.model.hbar_over_mass();
         let windows = paths::compare(&self.series, &self.series, &self.windows, labels, hm);
         let late = self.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(s, s, w, labels, hm));
-        let calibration = Calibration { rows: self.settled.unmet().unwrap_or(0.0), rate: 0.0 };
+        let calibration = Calibration { rows: self.settled.unmet().unwrap_or(0.0) + self.booked, rate: 0.0 };
         Judged { keep, windows, late, calibration, region: Region::NONE, seconds: 0.0, products: 0 }
     }
 }
@@ -784,7 +822,8 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let cut = Series { readings: series[0].readings.iter().filter(|r| r.t <= piece).cloned().collect(), ..Series::default() };
     let candidate: Vec<&Series> = std::iter::once(&cut).chain(&finer).collect();
     let mut calibration = calibrate(&candidate, calibrated, &paths.settled.pairs);
-    calibration.rows += paths.settled.unmet().unwrap_or(0.0);
+    // The ladder's top unmet, and what the openings book, the reference's and the candidate's (paths.rs, # The start).
+    calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + series.iter().chain(&late_series).map(|s| s.counts.booked).fold(0.0, larger);
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
 }
@@ -803,7 +842,7 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
         .par_iter()
         .map(|w| {
             let step = w.ends.get(1).map_or(w.end(), |e| e[0] - w.ends[0][0]);
-            settle(&[&forms[0], &forms[1]], w, CALIBRATION.min(w.end()), step).map(|x| x.0)
+            settle(&[&forms[0], &forms[1]], w, CALIBRATION.min(w.end()), step, &[(w, 0.0)]).map(|x| x.0)
         })
         .collect::<Result<_, _>>()?;
     let jobs: Vec<(usize, usize)> = (0..2).flat_map(|m| (0..scans.len()).map(move |w| (m, w))).collect();
@@ -825,7 +864,7 @@ pub fn scan(reference: &Selected, model: &Selected, at: V3, scans: &[Walk], leas
             #[cfg(test)]
             let fixed: Option<Setting> = std::env::var("SELCOST_SCAN_SETTING").ok().filter(|x| !x.is_empty()).map(|x| {
                 let p: Vec<f64> = x.split('/').map(|v| v.parse().unwrap()).collect();
-                Setting { turns: p[0], rate: p[1], pieces: p[2] as usize }
+                Setting { turns: p[0], rate: p[1], pieces: p[2] as usize, cutoff: p.get(3).copied().unwrap_or(f64::INFINITY) }
             });
             #[cfg(not(test))]
             let fixed: Option<Setting> = None;
