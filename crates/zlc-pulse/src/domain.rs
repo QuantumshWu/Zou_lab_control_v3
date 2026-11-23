@@ -51,11 +51,13 @@ impl Grid {
     pub fn steps(&self, value: &Decimal) -> (bool, BigUint) { steps_to(&Decimal::from_f64(self.step), self.ties, value) }
 
     /// The grid point nearest `value`; a value that is not finite has none and stays as it is.
+    /// A zero keeps the sign of the value it is nearest, as `round_ties_even`'s does (-0.3 is -0).
     pub fn nearest(&self, value: f64) -> f64 {
         if !value.is_finite() { return value; }
         let step = Decimal::from_f64(self.step);
         let (negative, steps) = steps_to(&step, self.ties, &Decimal::from_f64(value));
-        point(&step, negative, steps).to_f64()
+        let nearest = point(&step, negative, steps).to_f64();
+        if nearest == 0.0 { 0.0f64.copysign(value) } else { nearest }
     }
 }
 
@@ -216,10 +218,11 @@ mod tests {
         // 0.03 us is 1.5 ticks exactly, though 0.03 / 0.02 is not 1.5 in binary.
         assert_eq!([clock.nearest(0.03), clock.nearest(-0.03), clock.nearest(0.029), clock.nearest(0.0)], [0.04, -0.04, 0.02, 0.0]);
         assert_eq!([2.5, 3.5, -2.5, 0.4, -0.4].map(|value| WHOLE.nearest(value)), [2.0, 4.0, -2.0, 0.0, 0.0]);
-        assert_eq!(WHOLE.nearest(-0.4).to_bits(), 0f64.to_bits(), "no negative zero");
-        // A scan table's DAC column rounds through WHOLE as it rounded before (Python's round).
-        for value in (-40..=40).map(|quarter| f64::from(quarter) / 4.0).chain([2.4999999999999996, 4503599627370495.5, -511.5]) {
-            assert_eq!(WHOLE.nearest(value), value.round_ties_even() + 0.0, "{value}");
+        // A scan table's DAC column rounds through WHOLE as it rounded before (Python's round), bit for
+        // bit: a zero keeps its sign, from -0.5 through -0.0.
+        let zeros = [-0.5, -0.4999999999999999, -0.25, -1e-300, -0.0, 0.0, 1e-300, 0.5];
+        for value in (-40..=40).map(|quarter| f64::from(quarter) / 4.0).chain([2.4999999999999996, 4503599627370495.5, -511.5]).chain(zeros) {
+            assert_eq!(WHOLE.nearest(value).to_bits(), value.round_ties_even().to_bits(), "{value}");
         }
         let ends = Domain { lo: 0.5, hi: 9.5, grid: Some(Grid { step: 1.0, ties: Ties::Away }) };
         assert_eq!([0.6, 9.4, 4.5, 9.5, 0.5].map(|value| ends.quantize(value)), [1.0, 9.0, 5.0, 9.0, 1.0],
