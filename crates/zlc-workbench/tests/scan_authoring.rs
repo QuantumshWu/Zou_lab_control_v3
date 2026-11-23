@@ -6,6 +6,31 @@ fn compile(document: Value, mode: &str) -> Result<Value, String> {
     dispatch("scan.compile", &json!({"document":document,"mode":mode}))
 }
 
+/// `facts` with `more`'s fields beside its own.
+fn merged(mut facts: Value, more: &Value) -> Value {
+    for (key, value) in more.as_object().unwrap() { facts[key] = value.clone(); }
+    facts
+}
+
+/// A plan compiled with its ports' domains, as the scan's owners state them.
+fn on_ports(document: Value, mode: &str, ports: Value) -> Result<Value, String> {
+    dispatch("scan.compile", &json!({"document":document,"mode":mode,"ports":ports}))
+}
+
+/// A bracket's repeat count (zlc-pulse's description of it: 1..2^32-1, whole, halves to even),
+/// a duration on a 20 ns clock (at least one tick) and a device frequency on no grid.
+fn bench() -> Value {
+    json!([
+        {"port":"api:bracket_count:loop","unit":"count","lo":1.0,"hi":4294967295.0,"grid":{"step":1.0,"ties":"even"}},
+        {"port":"api:duration:hold","unit":"s","lo":2e-8,"hi":85.89934590,"grid":{"step":2e-8,"ties":"away"}},
+        {"port":"device:rf:frequency","unit":"Hz","lo":1e6,"hi":1e9,"grid":null},
+    ])
+}
+
+fn values(compiled: &Value, axis: usize) -> Vec<f64> {
+    compiled["axes"][axis]["values"].as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect()
+}
+
 #[test]
 fn inactive_banks_and_disabled_links_survive_without_being_evaluated() {
     let document = json!({"axes":[{"port":"pulse:param:A","values":[1,2,3],"unit":"us","mode":"range",
@@ -59,9 +84,10 @@ fn linked_formulas_follow_their_axis_and_move_the_whole_group_outside() {
     assert_eq!(axes[2]["coordinate_of"],"pulse:param:A");
     // The editor's facts say what each plays, its ends and count, without the whole bank.
     let facts = &result["axis_facts"][0];
-    assert_eq!(facts["played"], json!({"first":1.0,"last":3.0,"count":3}));
-    assert_eq!(facts["links"], json!([{"port":"api:B","first":7.5,"last":9.5,"count":3,"problem":""},
-        {"port":"device:rf:frequency","first":118.0,"last":114.0,"count":3,"problem":""}]));
+    let unmoved = json!({"written":3,"moved":0,"distinct":3});
+    assert_eq!(facts["played"], merged(json!({"first":1.0,"last":3.0,"count":3}), &unmoved));
+    assert_eq!(facts["links"], json!([merged(json!({"port":"api:B","first":7.5,"last":9.5,"count":3,"problem":""}), &unmoved),
+        merged(json!({"port":"device:rf:frequency","first":118.0,"last":114.0,"count":3,"problem":""}), &unmoved)]));
     assert_eq!(result["axis_facts"][1]["links"], json!([]));
     let broken = json!({"axes":[{"port":"pulse:param:A","values":[1,2],"link_enabled":true,"links":[
         {"port":"api:B","mode":"formula","formula":"x +"},{"port":"api:C","mode":"formula","formula":"1 / (x - 1)"}]}]});
@@ -155,4 +181,96 @@ fn a_preview_keeps_every_row_when_one_breaks_a_rule() {
     assert_eq!(preview["rows"][0]["range"]["count"], 200000, "as written");
     assert!(preview["problem"].as_str().unwrap().contains("Range points"), "{}", preview["problem"]);
     assert!(compile(json!("not json"),"preview").is_err(), "an unreadable document is still refused");
+}
+
+/// A whole-number port plays whole numbers, however its range divides: 1 to 10 in five
+/// points is 1, 3.25, 5.5, 7.75, 10 as written and 1, 3, 6, 8, 10 as played.
+#[test]
+fn a_whole_number_port_plays_its_range_on_whole_numbers() {
+    let document = json!({"axes":[{"port":"api:bracket_count:loop","values":[],"range":{"start":1.0,"stop":10.0,"count":5},"unit":"","mode":"range","value_text":""}]});
+    let compiled = on_ports(document.clone(), "preview", bench()).unwrap();
+    assert_eq!(values(&compiled, 0), [1.0, 3.0, 6.0, 8.0, 10.0]);
+    assert_eq!(compiled["axis_facts"][0]["played"], json!({"first":1.0,"last":10.0,"count":5,"written":5,"moved":3,"distinct":5}));
+    assert_eq!(compiled["rows"][0]["range"], document["axes"][0]["range"], "the plan as written is kept");
+    // Without its port's domain the plan plays what was written.
+    assert_eq!(values(&compile(document, "compile").unwrap(), 0), [1.0, 3.25, 5.5, 7.75, 10.0]);
+}
+
+/// Durations play on the clock grid, in the unit the axis is written in: 0.03 us is a tick and a
+/// half and goes up, as the binding layer aligns it; a value below one tick is the binding's to refuse.
+#[test]
+fn durations_play_on_the_clock_grid_in_the_axis_unit() {
+    let document = |text: &str| json!({"axes":[{"port":"api:duration:hold","values":[],"unit":"us","mode":"values","value_text":text}]});
+    let compiled = on_ports(document("0.03, 0.05, 0.029, 1.234567"), "compile", bench()).unwrap();
+    assert_eq!(values(&compiled, 0), [0.04, 0.06, 0.02, 1.24]);
+    let compiled = on_ports(document("0.01, 0.1"), "compile", bench()).unwrap();
+    assert_eq!(values(&compiled, 0), [0.01, 0.1], "0.01 us lies outside the port: kept as written");
+    let refused = dispatch("scan.bind", &json!({"axes":compiled["axes"],"ports":bench(),"withheld":{}})).unwrap_err();
+    assert!(refused.contains("outside the port's range"), "{refused}");
+    // A port that cannot read the axis's unit leaves its values as written too.
+    let compiled = on_ports(json!({"axes":[{"port":"api:duration:hold","values":[0.03],"unit":"MHz"}]}), "compile", bench()).unwrap();
+    assert_eq!(values(&compiled, 0), [0.03]);
+}
+
+/// Values typed by hand play on the port's grid; a device knob that states no grid plays them as typed.
+#[test]
+fn hand_typed_values_play_on_the_ports_grid() {
+    let document = json!({"axes":[
+        {"port":"api:bracket_count:loop","values":[],"unit":"count","mode":"values","value_text":"1.2, 2.8, 4, 6.5"},
+        {"port":"device:rf:frequency","values":[],"unit":"MHz","mode":"values","value_text":"80.1234567, 81"}]});
+    let compiled = on_ports(document, "preview", bench()).unwrap();
+    let axis = |port: &str| compiled["axes"].as_array().unwrap().iter().position(|axis| axis["port"] == port).unwrap();
+    assert_eq!(values(&compiled, axis("api:bracket_count:loop")), [1.0, 3.0, 4.0, 6.0]);
+    assert_eq!(values(&compiled, axis("device:rf:frequency")), [80.1234567, 81.0]);
+    assert_eq!(compiled["axis_facts"][0]["played"]["moved"], 3);
+    assert_eq!(compiled["axis_facts"][1]["played"]["moved"], 0);
+}
+
+/// A linked parameter follows what its axis plays, and plays on its own port's grid.
+#[test]
+fn a_linked_formula_follows_the_played_axis_onto_its_own_ports_grid() {
+    let document = |duration: &str| json!({"axes":[{"port":"api:bracket_count:loop","values":[1.4, 2.6, 4],"unit":"count","link_enabled":true,"links":[
+        {"port":"device:rf:frequency","mode":"formula","formula":"x * 10","unit":"MHz"},
+        {"port":"api:duration:hold","mode":"formula","formula":duration,"unit":"us"}]}]});
+    let compiled = on_ports(document("x / 50 + 0.001"), "preview", bench()).unwrap();
+    assert_eq!(compiled["problem"], "");
+    assert_eq!(values(&compiled, 0), [1.0, 3.0, 4.0]);
+    assert_eq!(values(&compiled, 1), [10.0, 30.0, 40.0], "x is the count played");
+    assert_eq!(values(&compiled, 2), [0.02, 0.06, 0.08], "0.021, 0.061, 0.081 us on the 20 ns clock");
+    let links = &compiled["axis_facts"][0]["links"];
+    assert_eq!((links[0]["moved"].as_u64(), links[1]["moved"].as_u64(), links[1]["first"].as_f64()), (Some(0), Some(3), Some(0.02)));
+    // Two counts the clock makes one duration (0.051 and 0.061 us are both 3 ticks): the dataset
+    // cannot tell them apart, and the plan says so.
+    let compiled = on_ports(document("x / 100 + 0.021"), "preview", bench()).unwrap();
+    assert!(compiled["problem"].as_str().unwrap().contains("alternative coordinates must be unique"), "{}", compiled["problem"]);
+}
+
+/// Points a port's grid makes one are played once (the user's choice of 2026-11-23: no
+/// refusal, the editor says how many were written and how many distinct values play); a
+/// point written twice still plays twice, and what is linked to a merged point goes with it.
+#[test]
+fn points_the_grid_makes_one_are_played_once() {
+    let document = json!({"axes":[{"port":"api:bracket_count:loop","values":[],"range":{"start":1.0,"stop":3.0,"count":5},"unit":"",
+        "mode":"range","value_text":"","link_enabled":true,"links":[{"port":"device:rf:frequency","mode":"formula","formula":"x * 10","unit":"MHz"}]}]});
+    let compiled = on_ports(document, "preview", bench()).unwrap();
+    assert_eq!(compiled["problem"], "");
+    assert_eq!((values(&compiled, 0), values(&compiled, 1)), (vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]));
+    assert_eq!((compiled["shape"].clone(), compiled["point_count"].clone()), (json!([3]), json!(3)));
+    let facts = &compiled["axis_facts"][0];
+    assert_eq!(facts["played"], json!({"first":1.0,"last":3.0,"count":3,"written":5,"moved":2,"distinct":3}));
+    assert_eq!((facts["links"][0]["count"].as_u64(), facts["links"][0]["written"].as_u64()), (Some(3), Some(5)));
+    let twice = json!({"axes":[{"port":"api:bracket_count:loop","values":[],"unit":"","mode":"values","value_text":"2, 2.4, 2, 1.6"}]});
+    let compiled = on_ports(twice, "preview", bench()).unwrap();
+    assert_eq!(values(&compiled, 0), [2.0, 2.0], "the 2 written twice plays twice; 2.4 and 1.6 were 2 only on the grid");
+    assert_eq!(compiled["axis_facts"][0]["played"], json!({"first":2.0,"last":2.0,"count":2,"written":4,"moved":2,"distinct":1}));
+}
+
+#[test]
+fn a_ports_domain_must_be_one() {
+    let document = json!({"axes":[{"port":"api:bracket_count:loop","values":[1]}]});
+    for (port, problem) in [(json!({"port":"api:x","unit":"","lo":2.0,"hi":1.0}), "no usable range"),
+                            (json!({"port":"api:x","unit":"","lo":0.0,"hi":1.0,"grid":{"step":0.0}}), "step must be positive"),
+                            (json!({"port":"api:x","unit":"","lo":0.0,"hi":1.0,"grid":{"step":1.0,"ties":"up"}}), "away or even")] {
+        assert!(on_ports(document.clone(), "compile", json!([port])).unwrap_err().contains(problem), "{problem}");
+    }
 }

@@ -71,7 +71,7 @@ fn group_key(axis: &AxisSpec) -> &str { axis.coordinate_of.as_deref().unwrap_or(
 
 /// Python floating-coordinate equality, including signed zero. NaN is refused
 /// at admission, so the bit representation is otherwise a valid hash key.
-fn number_key(value: f64) -> u64 { if value == 0.0 { 0 } else { value.to_bits() } }
+pub fn number_key(value: f64) -> u64 { if value == 0.0 { 0 } else { value.to_bits() } }
 
 impl Plan {
     pub fn new(mut spec: PlanSpec) -> Result<Self> {

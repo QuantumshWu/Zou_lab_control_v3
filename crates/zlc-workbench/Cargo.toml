@@ -7,6 +7,8 @@ publish.workspace = true
 [dependencies]
 zlc-core = { path = "../zlc-core" }
 zlc-archive = { path = "../zlc-archive" }
+# A pulse field's value domain and its quantizer (scan::authoring).
+zlc-pulse = { path = "../zlc-pulse" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 uuid = { version = "1", features = ["v4"] }

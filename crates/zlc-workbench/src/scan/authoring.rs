@@ -1,11 +1,15 @@
 //! Canonical scan authoring: dormant input banks remain authored data; only
 //! the selected banks compile. No device access or Cartesian expansion occurs.
-use std::collections::{BTreeMap, HashSet};
+//! Each value plays on its port's domain, as the port's owner states it beside
+//! the plan (`ports`).
+use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
-use zlc_core::scan::{AxisSpec, Plan, PlanSpec, Result};
+use zlc_core::decimal::Decimal;
+use zlc_core::scan::{AxisSpec, Plan, PlanSpec, Result, number_key};
 use zlc_core::units::DEFAULT_UNITS;
+use zlc_pulse::domain::{Domain, Grid, Ties};
 
 const MAX_RANGE_POINTS: usize = 100_000;
 
@@ -270,27 +274,115 @@ fn axis(row: &Value, values: Vec<f64>, parent: Option<String>) -> Result<AxisSpe
         values, coordinate_of:parent, host_advanced:host(port) })
 }
 
-fn compile(rows: &[Value]) -> Result<Plan> {
-    let mut axes = Vec::new();
-    for (index,row) in rows.iter().enumerate() {
-        let compile_row = || -> Result<Vec<AxisSpec>> {
-            let values = bank(row)?;
-            let mut axes = vec![axis(row, values.clone(), row["coordinate_of"].as_str().map(str::to_owned))?];
-            if row["link_enabled"] == true {
-                for linked in row["links"].as_array().into_iter().flatten() {
-                    let played = formula_values(linked["formula"].as_str().unwrap(), &values)?;
-                    if linked["port"].as_str().unwrap().starts_with("manual:") { return Err("a linked parameter must be a scan slot, API or device parameter".into()); }
-                    axes.push(axis(linked, played, Some(row["port"].as_str().unwrap().into()))?);
-                }
-            }
-            Ok(axes)
+/// A port's value domain as its owner states it (`{port, unit, lo, hi, grid: {step, ties} | null}`;
+/// ties "away" unless "even"), in the port's own unit.
+struct Port { unit: String, domain: Domain }
+
+fn ports(args: &Value) -> Result<HashMap<String, Port>> {
+    let Some(entries) = args.get("ports").filter(|entries| !entries.is_null()) else { return Ok(HashMap::new()) };
+    entries.as_array().ok_or("scan ports must be a list")?.iter().map(|entry| {
+        let name = text(&entry["port"], "scan port")?;
+        let bound = |key: &str| entry[key].as_f64().filter(|v| v.is_finite()).ok_or_else(|| format!("port {name:?} {key} must be finite"));
+        let (lo, hi) = (bound("lo")?, bound("hi")?);
+        if lo > hi { return Err(format!("port {name:?} has no usable range")); }
+        let grid = match entry.get("grid").filter(|grid| !grid.is_null()) {
+            None => None,
+            Some(grid) => Some(Grid {
+                step: grid["step"].as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| format!("port {name:?} grid step must be positive"))?,
+                ties: grid.get("ties").map_or(Ok(Ties::Away), |ties| text(ties, "grid ties").and_then(|ties|
+                    Ties::parse(ties).ok_or_else(|| format!("port {name:?} grid ties must be away or even"))))?,
+            }),
         };
-        axes.extend(compile_row().map_err(|error| format!("scan axis {} ({:?}): {error}", index+1, row["port"].as_str().unwrap()))?);
+        Ok((name.to_owned(), Port { unit: text(&entry["unit"], "port unit")?.to_owned(), domain: Domain { lo, hi, grid } }))
+    }).collect()
+}
+
+/// One number in another unit, a prefix moving its decimal point (UnitRegistry::convert_decimal).
+fn convert(value: f64, source: &str, target: &str) -> Option<f64> {
+    if source == target { return Some(value); }
+    let (source, target) = (DEFAULT_UNITS.resolve(source).ok()?, DEFAULT_UNITS.resolve(target).ok()?);
+    Some(DEFAULT_UNITS.convert_decimal(&Decimal::from_repr(value)?, &source, &target).ok()?.to_f64()).filter(|v| v.is_finite())
+}
+
+/// `value`, authored in `unit` (empty: the port's), as the port plays it, read back in `unit`.
+/// A value the port cannot read, or outside its bounds, stays as written: the binding refuses it.
+fn on_port(port: &Port, unit: &str, value: f64) -> f64 {
+    let unit = if unit.is_empty() { port.unit.as_str() } else { unit };
+    match convert(value, unit, &port.unit) {
+        Some(native) if port.domain.holds(native) => convert(port.domain.quantize(native), &port.unit, unit).unwrap_or(value),
+        _ => value,
+    }
+}
+
+/// One axis as it plays: every value as written, and those it plays (`spec.values`), each on
+/// its port's domain; `moved` of the written ones are not played as written.
+struct Played { spec: AxisSpec, written: Vec<f64>, moved: usize }
+
+fn played(row: &Value, written: Vec<f64>, parent: Option<String>, ports: &HashMap<String, Port>) -> Result<Played> {
+    let unit = row["unit"].as_str().unwrap().trim();
+    let values: Vec<f64> = match ports.get(row["port"].as_str().unwrap()) {
+        Some(port) => written.iter().map(|value| on_port(port, unit, *value)).collect(),
+        None => written.clone(),
+    };
+    let moved = values.iter().zip(&written).filter(|(played, written)| number_key(**played) != number_key(**written)).count();
+    Ok(Played { spec: axis(row, values, parent)?, written, moved })
+}
+
+/// A row as it plays: its axis, then each linked parameter -- its formula of what the axis
+/// plays -- or why one cannot be played.
+struct RowPlay { axis: Result<Played>, links: Vec<Result<Played>> }
+
+fn play(row: &Value, ports: &HashMap<String, Port>) -> RowPlay {
+    let axis = bank(row).and_then(|values| played(row, values, row["coordinate_of"].as_str().map(str::to_owned), ports));
+    let links = match &axis {
+        Ok(master) if row["link_enabled"] == true => row["links"].as_array().into_iter().flatten().map(|linked| {
+            let values = formula_values(linked["formula"].as_str().unwrap(), &master.spec.values)?;
+            if linked["port"].as_str().unwrap().starts_with("manual:") { return Err("a linked parameter must be a scan slot, API or device parameter".into()); }
+            played(linked, values, Some(row["port"].as_str().unwrap().into()), ports)
+        }).collect(),
+        _ => Vec::new(),
+    };
+    RowPlay { axis, links }
+}
+
+/// Points a port's grid made one: a point that plays what an earlier point of its group
+/// plays, written otherwise, is played once, at the first (the axis and every coordinate
+/// linked to it lose it together). A point written twice still plays twice.
+fn merge(plays: &mut [RowPlay]) {
+    let mut axes: Vec<&mut Played> = plays.iter_mut().flat_map(|row| row.axis.iter_mut().chain(row.links.iter_mut().flatten())).collect();
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (index, axis) in axes.iter().enumerate() {
+        let key = axis.spec.coordinate_of.clone().unwrap_or_else(|| axis.spec.port.clone());
+        match groups.iter_mut().find(|(group, _)| *group == key) { Some((_, members)) => members.push(index), None => groups.push((key, vec![index])) }
+    }
+    for (_, members) in groups {
+        let length = axes[members[0]].written.len();
+        // Members of unequal lengths are Plan::new's to refuse.
+        if members.iter().any(|member| axes[*member].written.len() != length || axes[*member].spec.values.len() != length) { continue; }
+        let point = |at: usize, of: fn(&Played) -> &[f64]| -> Vec<u64> { members.iter().map(|member| number_key(of(&*axes[*member])[at])).collect() };
+        let mut first: HashMap<Vec<u64>, Vec<u64>> = HashMap::new();
+        let keep: Vec<bool> = (0..length).map(|at| {
+            let written = point(at, |axis| axis.written.as_slice());
+            *first.entry(point(at, |axis| axis.spec.values.as_slice())).or_insert_with(|| written.clone()) == written
+        }).collect();
+        for member in &members {
+            let values = &mut axes[*member].spec.values;
+            *values = values.iter().zip(&keep).filter(|(_, kept)| **kept).map(|(value, _)| *value).collect();
+        }
+    }
+}
+
+fn compile(rows: &[Value], plays: Vec<RowPlay>) -> Result<Plan> {
+    let mut axes = Vec::new();
+    for (index, (row, play)) in rows.iter().zip(plays).enumerate() {
+        let failed = |error: String| format!("scan axis {} ({:?}): {error}", index+1, row["port"].as_str().unwrap());
+        axes.push(play.axis.map_err(failed)?.spec);
+        for linked in play.links { axes.push(linked.map_err(failed)?.spec); }
     }
     Plan::new(PlanSpec { axes, scan_repeats:1, run_repeats:1 })
 }
 
-fn facts(row: &Value) -> Value {
+fn facts(row: &Value, play: &RowPlay) -> Value {
     let explicit = row["values"].as_array().unwrap();
     let generated = range(row).unwrap();
     let (start,stop,count) = generated.unwrap_or_else(|| (explicit.first().and_then(Value::as_f64).unwrap_or(0.0),
@@ -306,22 +398,21 @@ fn facts(row: &Value) -> Value {
         [values.iter().copied().fold(f64::INFINITY,f64::min),values.iter().copied().fold(f64::NEG_INFINITY,f64::max)]);
     let values_bounds=parse_values(row["value_text"].as_str().unwrap()).ok().map(|values|
         [values.iter().copied().fold(f64::INFINITY,f64::min),values.iter().copied().fold(f64::NEG_INFINITY,f64::max)]);
-    // What plays, as its ends and count: the axis's own bank, and each linked parameter's
-    // formula of it -- or why that formula cannot be evaluated (an editor's preview line).
-    let ends = |values: &[f64]| json!({"first":values.first(),"last":values.last(),"count":values.len()});
-    let played = active.as_ref().ok().filter(|values| !values.is_empty());
-    let links: Vec<Value> = match played {
-        Some(values) if row["link_enabled"] == true => row["links"].as_array().into_iter().flatten().map(|link| {
-            match formula_values(link["formula"].as_str().unwrap(), values) {
-                Ok(linked) => { let mut fact = ends(&linked); fact["port"] = link["port"].clone(); fact["problem"] = json!(""); fact },
-                Err(error) => json!({"port":link["port"],"first":null,"last":null,"count":0,"problem":error}),
-            }
-        }).collect(),
-        _ => Vec::new(),
-    };
+    // What plays, as its ends and count: the axis on its port's domain, and each linked
+    // parameter's formula of it -- or why that formula cannot be evaluated (an editor's preview
+    // line) -- with how many points were written, how many of them the port moved and how many
+    // distinct values play.
+    let ends = |axis: &Played| { let values = &axis.spec.values;
+        json!({"first":values.first(),"last":values.last(),"count":values.len(),"written":axis.written.len(),"moved":axis.moved,
+            "distinct":values.iter().map(|value| number_key(*value)).collect::<HashSet<_>>().len()}) };
+    let played = play.axis.as_ref().ok().filter(|axis| !axis.spec.values.is_empty());
+    let links: Vec<Value> = play.links.iter().zip(row["links"].as_array().into_iter().flatten()).map(|(linked, link)| match linked {
+        Ok(axis) => { let mut fact = ends(axis); fact["port"] = link["port"].clone(); fact["problem"] = json!(""); fact },
+        Err(error) => json!({"port":link["port"],"first":null,"last":null,"count":0,"problem":error}),
+    }).collect();
     json!({"port":row["port"],"range_start":start,"range_stop":stop,"range_count":count,"range_uniform":uniform,
         "mode":row["mode"],"value_text":row["value_text"],"active_bounds":bounds,"values_bounds":values_bounds,
-        "played":played.map(|values| ends(values)),"links":links,"problem":active.err().unwrap_or_default()})
+        "played":played.map(ends),"links":links,"problem":play.axis.as_ref().err().cloned().unwrap_or_default()})
 }
 
 /// Ordering/binding may inspect a filtered view whose linked parent is outside
@@ -427,8 +518,11 @@ pub fn dispatch(operation: &str, args: &Value) -> Result<Value> {
     };
     let mut result = json!({"document":{"axes":rows},"rows":rows});
     if mode == "normalize" { return Ok(result); }
-    result["axis_facts"] = Value::Array(rows.iter().map(facts).collect());
-    match compile(&rows) {
+    let ports = ports(args)?;
+    let mut plays: Vec<RowPlay> = rows.iter().map(|row| play(row, &ports)).collect();
+    merge(&mut plays);
+    result["axis_facts"] = Value::Array(rows.iter().zip(&plays).map(|(row, play)| facts(row, play)).collect());
+    match compile(&rows, plays) {
         Ok(plan) => {
             result["axes"] = Value::Array(plan.axes().iter().map(|axis| { let mut value = json!({"port":axis.port,"values":axis.values,"unit":axis.unit});
                 if let Some(parent) = &axis.coordinate_of { value["coordinate_of"] = json!(parent); } value }).collect());
