@@ -13,7 +13,7 @@ import { confirmPulseDiscard } from "../pulse/widgets.js";
 import { boardKinds } from "../protocol.js";
 import { queueStatus, saveImage } from "../shell.js";
 import { DataEditorView, saveDataAs } from "./data_editor.js";
-import { LogicEditorView, projectRow } from "./logic.js";
+import { LogicEditorView, NodeStarts, projectRow } from "./logic.js";
 import { PanelEditView } from "./panel_edit.js";
 const baseName = (path) => path.split(/[\\/]/).pop() ?? path;
 /** The record's tabs bound the InfoPane width and stand empty until the host sends them. */
@@ -63,6 +63,7 @@ export class FigureViewerView {
     constructor(ctx, board) {
         this.ctx = ctx;
         this.board = board;
+        this.starts = new NodeStarts(ctx.transport, () => this.nodeRows());
         this.info = new InfoPane("File", {
             // v2 open: "opening <file>…" until the Figure is on the board (the dialog of Browse… says nothing).
             commit: path => { if (path)
@@ -113,6 +114,7 @@ export class FigureViewerView {
     /** Shown with its Figure: the viewer's document comes after the window's first state. */
     ready() { return Boolean(this.ctx.latest.viewer); }
     update(state) {
+        this.starts.settle(state);
         const latest = this.ctx.latest;
         const doc = latest.viewer?.document;
         // A Figure opened here (or again: Refresh) is "opening" until its pictures are on the board.
@@ -259,23 +261,29 @@ export class FigureViewerView {
         this.ctx.transport.send({ action: "close_panel", panel: edit }, "Closing the Edit…");
     }
     nodeRows() { return this.ctx.latest.viewer?.logic ?? []; }
+    starts;
     nodeIntents = {
+        // A Start that waits for this window's edits says so at once, on its node's page.
         start: id => {
             const row = this.nodeRows().find(item => item.node_id === id);
-            this.ctx.transport.send({ action: "start_node", node: id, ...(row ? { expected_draft_revision: row.draft_revision } : {}) }, `Starting ${row?.name ?? id}…`);
+            if (this.starts.start(id) && row)
+                this.nodes.get(id)?.update(row, this.projection(row), FREE);
         },
         stop: id => { this.ctx.transport.send({ action: "stop_node", node: id }, "Stopping…"); },
         edit: id => this.tabs.setCurrent(`node:${id}`),
         remove: id => { this.ctx.transport.send({ action: "remove_node", node: id }, "Removing…"); },
         preview: () => { },
         rename: (id, name) => this.ctx.transport.send({ action: "rename_node", node: id, name }, "Renaming…"),
-        editDraft: (id, change, label) => this.ctx.transport.send({ action: "edit_node", node: id, ...change }, `Updating ${label}…`),
-        revert: id => this.ctx.transport.send({ action: "revert_node", node: id }, "Reverting…"),
+        editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),
+        revert: id => this.starts.edit(id, { action: "revert_node", node: id }, "Reverting…"),
         check: id => { this.ctx.transport.send({ action: "check_node", node: id }, "Checking files…"); },
         choose: ask => this.ctx.transport.choosePath(ask),
     };
-    /** A Viewer's node as its Edit page draws it: no Plot switch here, its outputs are bound in a panel's Setting. */
-    projection(row) { return { ...projectRow(row), previewOffered: false }; }
+    /** A Viewer's node as its Edit page draws it: no Plot switch here, its outputs are bound in a panel's Setting;
+     * "Starting…" while its Start waits for this window's edits (NodeStarts). */
+    projection(row) {
+        return { ...projectRow(row), previewOffered: false, ...(this.starts.waits(row.node_id) ? { pending: true } : {}) };
+    }
     /** The chooser, and one closable tab per processor, "Edit · name" as on the Logic page. */
     updateNodes(state, hasData) {
         const offered = this.ctx.latest.viewer?.processor_types ?? [];
@@ -341,6 +349,8 @@ export class FigureViewerView {
         this.ctx.transport.send({ action: "add_panel", kind: this.kind.value }, "Adding panel…");
     }
     status() {
+        // A refusal answers an edit too.
+        this.starts.settle();
         // v2 viewer: "opening <file>…" until the opened Figure is on the board, then "showing <its
         // first panel's data>" once, or what the viewer said last; "no figure open" before one is.
         const doc = this.ctx.latest.viewer?.document;

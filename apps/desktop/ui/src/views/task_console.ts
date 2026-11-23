@@ -12,7 +12,7 @@ import type { Board, LogicRow, NodeType, RunRow } from "../workbench.js";
 import { DiagnosticsPopup, type DiagnosticsState } from "./diagnostics.js";
 import type { PanelBoard } from "./board.js";
 import { forgetModels } from "./node_editors/index.js";
-import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow, type EditorIntents, type NodeProjection } from "./logic.js";
+import { LogicEditorView, LogicRowView, NodeStarts, PublisherEditorView, projectRow, type EditorIntents, type NodeProjection } from "./logic.js";
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
 
 const ADD_WORDS = { plot: "Add panel", logic: "Add node" } as const;
@@ -60,6 +60,7 @@ export class TaskConsoleView implements View {
   private kindsSignature = "";
 
   constructor(private ctx: ViewContext, private board: PanelBoard) {
+    this.starts = new NodeStarts(ctx.transport, () => this.nodeRows());
     const header = element("header", "card header");
     const identity = element("div", "identity");
     // v2: the dot and the word a dot gap apart (the strip's), the summary a row gap after them.
@@ -146,6 +147,7 @@ export class TaskConsoleView implements View {
   hidden(): void { this.onScreen = false; this.board.hidden(); }
 
   update(state: State): void {
+    this.starts.settle(state);
     // Load/New/Clear and recipe replacement may reuse the same node IDs.
     // The accepted response is the boundary; cancelled/failed dialogs are not.
     if (!state.error && (state.result as { replaced?: boolean } | null)?.replaced === true) {
@@ -233,9 +235,12 @@ export class TaskConsoleView implements View {
     });
   }
 
-  private project(row: LogicRow): NodeProjection { return projectRow(row); }
+  /** A row as drawn: "Starting…" while its Start waits for this window's edits (NodeStarts). */
+  private project(row: LogicRow): NodeProjection { return { ...projectRow(row), ...(this.starts.waits(row.node_id) ? { pending: true } : {}) }; }
 
   status(): void {
+    // A refusal answers an edit too.
+    this.starts.settle();
     // v2: the strip keeps the console's newest line (a command's outcome, a note, the running
     // Task's status), said once by the workbench; a picture being presented says nothing.
     const report = this.boardState()?.report;
@@ -309,11 +314,10 @@ export class TaskConsoleView implements View {
   }
 
   // ---------------------------------------------------------------- rows
+  private readonly starts: NodeStarts;
   private readonly intents: EditorIntents = {
-    start: id => {
-      const row = this.logic()?.find(item => item.node_id === id);
-      this.send({ action: "start_node", node: id, ...(row ? { expected_draft_revision: row.draft_revision } : {}) }, `Starting ${row?.name ?? id}…`);
-    },
+    // A Start that waits for this window's edits says so at once.
+    start: id => { if (this.starts.start(id)) this.update({ type: "state" }); },
     stop: id => {
       this.send({ action: "stop_node", node: id }, `Stopping ${this.nameOf(id)}…`);
     },
@@ -321,10 +325,8 @@ export class TaskConsoleView implements View {
     remove: id => this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`),
     preview: (id, on) => this.send({ action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
     rename: (id, name) => this.send({ action: "rename_node", node: id, name }, "Renaming…"),
-    editDraft: (id, change, label) => {
-      return this.send({ action: "edit_node", node: id, ...change }, `Updating ${label}…`);
-    },
-    revert: id => this.send({ action: "revert_node", node: id }, "Reverting…"),
+    editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),
+    revert: id => this.starts.edit(id, { action: "revert_node", node: id }, "Reverting…"),
     check: id => this.send({ action: "check_node", node: id }, "Checking files…"),
     choose: ask => this.ctx.transport.choosePath(ask),
   };

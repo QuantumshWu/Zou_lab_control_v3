@@ -105,6 +105,62 @@ export class LogicRowView {
     }
     get state() { return this.projection ? STATE_WORDS[this.projection.state] : "idle"; }
 }
+/** A node's Start (start_node) and this window's edits of its draft (edit_node, revert_node), for
+ * every page that starts nodes.  A Start waits while an edit of its node sent from here is
+ * unanswered -- the node says "Starting…" (`waits`) -- then goes with the draft revision the
+ * last of them left (its reply's draft_revision, else the row's after it): the operator's own
+ * edits are part of what they start, while an edit from elsewhere still has the host refuse it
+ * (expected_draft_revision). */
+export class NodeStarts {
+    transport;
+    rows;
+    /** Per node: its edits sent from here and unanswered, the revision the answered ones left, and whether a Start waits. */
+    nodes = new Map();
+    constructor(transport, rows) {
+        this.transport = transport;
+        this.rows = rows;
+    }
+    /** An edit of node `id`'s draft, sent now. */
+    edit(id, command, feedback) {
+        const request = this.transport.send(command, feedback);
+        this.node(id).edits.add(request);
+        return request;
+    }
+    /** The operator's Start: sent now, or once the node's edits are answered (true: it waits). */
+    start(id) {
+        this.node(id).waiting = true;
+        this.settle();
+        return this.waits(id);
+    }
+    waits(id) { return this.nodes.get(id)?.waiting ?? false; }
+    /** After each state (`state`, which may answer an edit) and each refusal: an answered edit notes
+     * the revision it left; a waiting Start whose node has no edit left goes.  A node with neither is forgotten. */
+    settle(state) {
+        for (const [id, node] of this.nodes) {
+            for (const request of node.edits) {
+                if (this.transport.pending.has(request))
+                    continue;
+                node.edits.delete(request);
+                const reply = state?.request === request && !state.error ? state.result?.draft_revision : undefined;
+                node.revision = reply ?? this.row(id)?.draft_revision;
+            }
+            if (node.edits.size)
+                continue;
+            this.nodes.delete(id);
+            if (!node.waiting)
+                continue;
+            const row = this.row(id), revision = node.revision ?? row?.draft_revision;
+            this.transport.send({ action: "start_node", node: id, ...(revision === undefined ? {} : { expected_draft_revision: revision }) }, `Starting ${row?.name ?? id}…`);
+        }
+    }
+    row(id) { return this.rows().find(row => row.node_id === id); }
+    node(id) {
+        let node = this.nodes.get(id);
+        if (!node)
+            this.nodes.set(id, node = { edits: new Set(), waiting: false });
+        return node;
+    }
+}
 /** One node's Edit page: what it is and how it stands, its Name, its source
  * and devices, its files and its parameters in one label column, and the
  * action bar (Remove … Revert, Plot, Start, Stop).  Only the rows scroll. */

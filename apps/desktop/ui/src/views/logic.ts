@@ -5,6 +5,8 @@ import {
   Command, Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, heldNote, row as formRow, sectionTitle, setChecked, setState, setTitle,
   shareLabelColumn, showHeld, switchButton, type FieldSpec, type PathAsk, type StatusWord, type Value,
 } from "../fluent/index.js";
+import type { Command as HostCommand, State } from "../protocol.js";
+import type { Transport } from "../transport.js";
 import type { LogicRow } from "../workbench.js";
 import { KEPT_LOCK, NodeEditors, editorModels, editorProblem, nodeModel } from "./node_editors/index.js";
 
@@ -150,6 +152,61 @@ export type EditorIntents = NodeIntents & {
   /** The window's dialog for a path the node reads (v2 FluentPathEdit Browse…): the chosen path, or null. */
   choose(ask: PathAsk): Promise<string | null>;
 };
+
+/** A node's Start (start_node) and this window's edits of its draft (edit_node, revert_node), for
+ * every page that starts nodes.  A Start waits while an edit of its node sent from here is
+ * unanswered -- the node says "Starting…" (`waits`) -- then goes with the draft revision the
+ * last of them left (its reply's draft_revision, else the row's after it): the operator's own
+ * edits are part of what they start, while an edit from elsewhere still has the host refuse it
+ * (expected_draft_revision). */
+export class NodeStarts {
+  /** Per node: its edits sent from here and unanswered, the revision the answered ones left, and whether a Start waits. */
+  private nodes = new Map<string, { edits: Set<number>; revision?: number; waiting: boolean }>();
+
+  constructor(private transport: Transport, private rows: () => LogicRow[]) {}
+
+  /** An edit of node `id`'s draft, sent now. */
+  edit(id: string, command: HostCommand, feedback: string): number {
+    const request = this.transport.send(command, feedback);
+    this.node(id).edits.add(request);
+    return request;
+  }
+
+  /** The operator's Start: sent now, or once the node's edits are answered (true: it waits). */
+  start(id: string): boolean {
+    this.node(id).waiting = true;
+    this.settle();
+    return this.waits(id);
+  }
+
+  waits(id: string): boolean { return this.nodes.get(id)?.waiting ?? false; }
+
+  /** After each state (`state`, which may answer an edit) and each refusal: an answered edit notes
+   * the revision it left; a waiting Start whose node has no edit left goes.  A node with neither is forgotten. */
+  settle(state?: State): void {
+    for (const [id, node] of this.nodes) {
+      for (const request of node.edits) {
+        if (this.transport.pending.has(request)) continue;
+        node.edits.delete(request);
+        const reply = state?.request === request && !state.error ? (state.result as { draft_revision?: number } | null | undefined)?.draft_revision : undefined;
+        node.revision = reply ?? this.row(id)?.draft_revision;
+      }
+      if (node.edits.size) continue;
+      this.nodes.delete(id);
+      if (!node.waiting) continue;
+      const row = this.row(id), revision = node.revision ?? row?.draft_revision;
+      this.transport.send({ action: "start_node", node: id, ...(revision === undefined ? {} : { expected_draft_revision: revision }) }, `Starting ${row?.name ?? id}…`);
+    }
+  }
+
+  private row(id: string): LogicRow | undefined { return this.rows().find(row => row.node_id === id); }
+
+  private node(id: string): { edits: Set<number>; revision?: number; waiting: boolean } {
+    let node = this.nodes.get(id);
+    if (!node) this.nodes.set(id, node = { edits: new Set(), waiting: false });
+    return node;
+  }
+}
 
 /** One node's Edit page: what it is and how it stands, its Name, its source
  * and devices, its files and its parameters in one label column, and the
