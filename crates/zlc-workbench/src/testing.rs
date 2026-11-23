@@ -2188,10 +2188,11 @@ mod tests {
         let old=asked(&calls,"editor_facts");
         apply(&mut wb,&mut host,"check_node",json!({"node":"seamless_scan"})).unwrap();
         assert_eq!(asked(&calls,"editor_facts"),old,"the Check waits for the question in flight");
-        // The question asked before the Check is no answer to it: the Check's own is asked then.
+        // The question asked before the Check is no answer to it: drawn as the newest meanwhile, it is
+        // still being checked, and the Check's own is asked then.
         event(&mut wb,Event::Answered{ticket:old,result:Ok(json!({"marker":"old"}))},&mut host);
         let fresh=asked(&calls,"editor_facts");assert_ne!(old,fresh);
-        assert_ne!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts"]["marker"],"old");
+        assert_eq!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts_pending"],true);
         event(&mut wb,Event::Answered{ticket:fresh,result:Ok(json!({"marker":"fresh"}))},&mut host);
         assert_eq!(wb.node_row(wb.node("seamless_scan").unwrap(),&[])["editor_facts"]["marker"],"fresh");
     }
@@ -2411,6 +2412,51 @@ mod tests {
         event(&mut wb, Event::Facts { instance: "mot_camera".into(), facts: Value::Null }, &mut host);
         assert_eq!(asked_since(&calls, before), ["prepare_run"], "it stands: nothing is asked but the Start's preparation");
         assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"));
+    }
+
+    /// The node's questions in flight (their tickets).
+    fn flights(wb: &Workbench, id: &str) -> Vec<u64> {
+        wb.tickets.iter().filter_map(|(ticket, purpose)| matches!(purpose, crate::Ticket::Query { node, .. } if node == id).then_some(*ticket)).collect()
+    }
+
+    /// The board's facts change once per round trip (each point of a running scan): every answer
+    /// lands after the next change. A Start waiting for its check goes on the answers asked since its
+    /// click: one round trip.
+    #[test]
+    fn a_start_waiting_through_bench_changes_goes_within_one_round_trip() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("storm-start", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        let revision = wb.node_row(wb.node("lanes").unwrap(), &[])["draft_revision"].as_u64().unwrap();
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        let started = apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap();
+        assert_eq!(started["phase"], "checking");
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(2) }, &mut host);
+        for ticket in flights(&wb, "lanes") { event(&mut wb, Event::Answered { ticket, result: Ok(json!({})) }, &mut host); }
+        assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"), "the answers asked since its click carry it");
+        assert!(flights(&wb, "lanes").len() <= LANES.len());
+    }
+
+    /// A running scan's own points change the board's facts once per round trip. The operator edits
+    /// the draft and presses Restart: the row shows it waiting (Starting…, Stop still offered), and
+    /// one round trip later the Restart is prepared and the run stopped for it.
+    #[test]
+    fn a_restart_while_the_scan_runs_shows_and_goes_within_one_round_trip() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("storm-restart", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        apply(&mut wb, &mut host, "start_node", json!({"node": "lanes"})).unwrap();
+        event(&mut wb, Event::RunStarted { run: "lanes#1".into() }, &mut host);
+        let edited = apply(&mut wb, &mut host, "edit_node", json!({"node": "lanes", "values": {"plan": "x"}})).unwrap();
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        let restarted = apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": edited["draft_revision"]})).unwrap();
+        assert_eq!(restarted["phase"], "checking");
+        let row = wb.node_row(wb.node("lanes").unwrap(), &[]);
+        assert_eq!((&row["phase"], &row["can_stop"]), (&json!("waiting"), &json!(true)), "{}", row["status"]);
+        assert!(row["status"].as_str().unwrap().ends_with("restarting once the draft is checked · edited"), "{}", row["status"]);
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(2) }, &mut host);
+        for ticket in flights(&wb, "lanes") { event(&mut wb, Event::Answered { ticket, result: Ok(json!({})) }, &mut host); }
+        assert_eq!(count(&calls, "stop lanes#1"), 1, "the run makes way for its Restart");
+        assert_eq!(wb.node_row(wb.node("lanes").unwrap(), &[])["phase"], "stopping");
     }
 
     #[test]

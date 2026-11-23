@@ -76,8 +76,9 @@ pub struct Node {
     /// A Start's read of the files its configuration names: in flight, then its answer (what was read, the files).
     pub start_reading: Option<u64>,
     pub start_read: Option<(Value, Value)>,
-    /// A Start that waits for the plugin to finish checking the draft: (origin, acquisition request).
-    pub start_after_check: Option<(String, Option<(String, u64, String)>)>,
+    /// A Start that waits for the plugin to finish checking the draft: (origin, acquisition request,
+    /// the check it was asked at: the answers asked since are what it waits for).
+    pub start_after_check: Option<(String, Option<(String, u64, String)>, u64)>,
 }
 
 /// The node editor's model (`editor_facts`).
@@ -120,13 +121,16 @@ impl Node {
     /// The draft revision and check its questions are asked for now.
     fn stamp(&self) -> Stamp { (self.revision, self.check) }
 
-    /// Whether `name`'s answer stands for this draft and check, and it is not being asked again
-    /// (a Start waits until each is). The page goes on drawing the newest answers meanwhile (v2
+    /// Whether `name`'s newest answer stands for this draft, asked at check `from` or after, and it
+    /// is not asked again for the check it stands for (the page: `from` is this check; a Start waits
+    /// for answers asked since its own, so a bench changing at each point of a scan delays it one
+    /// round trip, not for good). The page goes on drawing the newest answers meanwhile (v2
     /// answered a draft at once), so a field an edit did not touch keeps its value, its choices
     /// and its words.
-    fn checked(&self, name: &str) -> bool {
-        self.answers.get(name).is_some_and(|(stamp, _)| *stamp == self.stamp())
-            && self.asks.get(name).is_none_or(|ask| ask.flying.is_none() && ask.waiting.is_none())
+    fn checked(&self, name: &str, from: u64) -> bool {
+        let Some((stamp, _)) = self.answers.get(name) else { return false };
+        let again = self.asks.get(name).is_some_and(|ask| ask.flying.iter().map(|(_, question)| question).chain(&ask.waiting).any(|question| question.stamp == *stamp));
+        stamp.0 == self.revision && stamp.1 >= from && !again
     }
 }
 
@@ -768,26 +772,23 @@ impl Workbench {
         let mut changed = None;
         let mut readmit = false;
         if let Ok(node) = self.node_mut(id) {
-            let (stamp, rechecked) = (node.stamp(), node.rechecked);
+            let rechecked = node.rechecked;
             let ask = node.asks.entry(name.to_owned()).or_default();
             if let Some((_, asked)) = ask.flying.take_if(|(flying, _)| *flying == ticket) {
-                // It stands for the draft and check it was asked for when nothing was asked since; else
-                // for what was asked since, if that was told the same and it is no failure.
+                // The newest answer, for the draft and check it was asked for; for what was asked since
+                // too, when that was told the same and it is no failure.
                 let stands = match ask.waiting.take() {
-                    None => (asked.stamp == stamp).then_some(stamp),
-                    Some(waiting) if result.is_ok() && waiting.facts == asked.facts && asked.stamp.1 >= rechecked => Some(waiting.stamp),
-                    Some(waiting) => { ask.waiting = Some(waiting); None }
+                    Some(waiting) if result.is_ok() && waiting.facts == asked.facts && asked.stamp.1 >= rechecked => waiting.stamp,
+                    waiting => { ask.waiting = waiting; asked.stamp }
                 };
-                if let Some(stands) = stands {
-                    ask.told = Some((asked.stamp.1, asked.facts));
-                    let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
-                    let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
-                    let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
-                    // Its readers are told the frames, not the check: the same frames under a new one tell them nothing.
-                    changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
-                    // Defaults the node fills in change what its schema admits: ask that again.
-                    readmit = name == "resolve_defaults" && fresh;
-                }
+                ask.told = Some((asked.stamp.1, asked.facts));
+                let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
+                let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
+                let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
+                // Its readers are told the frames, not the check: the same frames under a new one tell them nothing.
+                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
+                // Defaults the node fills in change what its schema admits: ask that again.
+                readmit = name == "resolve_defaults" && fresh;
             }
         }
         // New frames of an output: the nodes reading it ask again with their new source.
@@ -813,12 +814,12 @@ impl Workbench {
     /// A Start that waited for the draft check: now it starts, or reports why not.
     fn start_checked(&mut self, id: &str, host: &mut dyn Host) {
         let Some(node) = self.node(id) else { return };
-        let Some((origin, acquisition)) = node.start_after_check.clone() else { return };
+        let Some((origin, acquisition, from)) = node.start_after_check.clone() else { return };
         let signals = host.signals();
-        if self.issues(node, &signals).iter().any(|issue| waiting(issue)) { return; }
+        if self.issues_from(node, &signals, from).iter().any(|issue| waiting(issue)) { return; }
         if let Ok(node) = self.node_mut(id) { node.start_after_check = None; }
         let parent = acquisition.clone();
-        if let Err(error) = self.start_node(id, None, &origin, acquisition, host) {
+        if let Err(error) = self.start_from(id, None, &origin, acquisition, from, host) {
             if let Some((parent, ticket, _)) = parent { self.plugins.acquired(&parent, ticket, Err(error)); }
         }
     }
@@ -1052,7 +1053,10 @@ impl Workbench {
     }
 
     /// Admission: every reason the draft cannot start now, in v2's order.
-    pub(crate) fn issues(&self, node: &Node, signals: &[SignalInfo]) -> Vec<String> {
+    pub(crate) fn issues(&self, node: &Node, signals: &[SignalInfo]) -> Vec<String> { self.issues_from(node, signals, node.check) }
+
+    /// The issues of the draft as checked since check `from` (a Start's: answers asked since its click).
+    fn issues_from(&self, node: &Node, signals: &[SignalInfo], from: u64) -> Vec<String> {
         let Some(descriptor) = self.catalog.get(&node.type_id) else { return vec![format!("{} is not installed", node.type_id)] };
         let spec = descriptor.node();
         let mut issues = Vec::new();
@@ -1067,7 +1071,7 @@ impl Workbench {
         let answer = |name: &str| node.answers.get(name).map(|(_, answer)| answer);
         let outstanding = spec.queries.iter().filter(|name| DRAFT_QUERIES.contains(&name.as_str()))
             .filter(|name| name.as_str() != ADMIT_SOURCE || self.bundle_complete(&node.id))
-            .any(|name| !node.checked(name));
+            .any(|name| !node.checked(name, from));
         // What the variables cannot compute from what the source published (v2: draft issues).
         if let Some(Ok(Value::Array(found))) = answer(ADMIT_SOURCE).filter(|_| self.bundle_complete(&node.id)) {
             issues.extend(found.iter().filter_map(Value::as_str).map(str::to_owned));
@@ -1203,6 +1207,13 @@ impl Workbench {
     /// its running configuration (or its draft) and answers the parent.
     pub(crate) fn start_node(&mut self, id: &str, expected: Option<u64>, origin: &str, acquisition: Option<(String, u64, String)>,
                              host: &mut dyn Host) -> Result<Value, String> {
+        let from = self.node(id).map_or(0, |node| node.check);
+        self.start_from(id, expected, origin, acquisition, from, host)
+    }
+
+    /// A Start on the draft as checked since check `from` (its click's).
+    fn start_from(&mut self, id: &str, expected: Option<u64>, origin: &str, acquisition: Option<(String, u64, String)>, from: u64,
+                  host: &mut dyn Host) -> Result<Value, String> {
         let node = self.node(id).ok_or_else(|| format!("No logic node {id:?}"))?;
         if node.removing { return Err(format!("{} is being removed", node.name)); }
         if let Some(task) = self.active_task().filter(|task| task.id != id) {
@@ -1219,11 +1230,11 @@ impl Workbench {
         let signals = host.signals();
         let running = acquisition.as_ref().and(node.running.clone());
         if running.is_none() || reopened {
-            let issues = self.issues(node, &signals);
+            let issues = self.issues_from(node, &signals, from);
             // The plugin has not answered for this draft yet: Start once it has.
             if !issues.is_empty() && issues.iter().all(|issue| waiting(issue)) {
                 self.cancel_start(id, "superseded by another Start");
-                self.node_mut(id)?.start_after_check = Some((origin.to_owned(), acquisition));
+                self.node_mut(id)?.start_after_check = Some((origin.to_owned(), acquisition, from));
                 // A Start is a boundary, as a Check is: what waits to be asked goes.
                 self.resume_asks(id);
                 return Ok(json!({"node": id, "phase": "checking"}));
@@ -1250,7 +1261,7 @@ impl Workbench {
                     let ticket = self.ticket(Ticket::DraftFiles { node: id.to_owned(), key, start: true });
                     let node = self.node_mut(id)?;
                     node.start_reading = Some(ticket);
-                    node.start_after_check = Some((origin.to_owned(), acquisition));
+                    node.start_after_check = Some((origin.to_owned(), acquisition, from));
                     self.plugins.work(ticket, crate::Lane::Files, Box::new(move || Ok(files.read())));
                     return Ok(json!({"node": id, "phase": "checking"}));
                 }
@@ -1339,7 +1350,7 @@ impl Workbench {
     pub(crate) fn cancel_start(&mut self, id: &str, reason: &str) {
         let Ok(node) = self.node_mut(id) else { return };
         (node.start_reading, node.start_read) = (None, None);
-        let checking = node.start_after_check.take().and_then(|(_, acquisition)| acquisition);
+        let checking = node.start_after_check.take().and_then(|(_, acquisition, _)| acquisition);
         let preparing = node.preparing.take(); let pending = node.pending.take();
         let preparing = preparing.and_then(|ticket| match self.tickets.get_mut(&ticket) { Some(Ticket::Prepare { acquisition, .. }) => acquisition.take(), _ => None });
         for (parent, ticket, _) in checking.into_iter().chain(preparing).chain(pending.as_ref().and_then(|pending| pending.acquisition.clone())) {
@@ -1355,7 +1366,7 @@ impl Workbench {
 
     fn stop_acquisitions(&mut self, parent: &str, reason: &str) {
         let pending: Vec<String> = self.nodes.iter().filter(|node|
-            node.start_after_check.as_ref().and_then(|(_, a)| a.as_ref()).is_some_and(|(owner, ..)| owner == parent)
+            node.start_after_check.as_ref().and_then(|(_, a, _)| a.as_ref()).is_some_and(|(owner, ..)| owner == parent)
             || node.pending.as_ref().and_then(|p| p.acquisition.as_ref()).is_some_and(|(owner, ..)| owner == parent)
             || node.preparing.and_then(|ticket| self.tickets.get(&ticket)).is_some_and(|ticket| matches!(ticket, Ticket::Prepare { acquisition: Some((owner, ..)), .. } if owner == parent)))
             .map(|node| node.id.clone()).collect();
@@ -1975,7 +1986,14 @@ impl Workbench {
                 (_, _, "stopping") => "stopping".to_owned(),
                 _ => if run.ready || descriptor.is_some_and(|item| !item.node().reports_ready) { "running".to_owned() } else { "preparing".to_owned() },
             };
-            (if run.state == "stopping" { "stopping" } else if run.state == "starting" { "starting" } else { "running" }, "running", text)
+            // A Restart under way shows as a waiting Start does, beside what the run does; the run
+            // stops once its successor is prepared.
+            let restart = if run.state == "stopping" { None } else if node.start_after_check.is_some() { Some("restarting once the draft is checked") }
+                else if node.preparing.is_some() { Some("building the candidate run") } else { None };
+            match restart {
+                Some(restart) => ("waiting", "running", format!("{text}; {restart}")),
+                None => (if run.state == "stopping" { "stopping" } else if run.state == "starting" { "starting" } else { "running" }, "running", text),
+            }
         } else if node.preparing.is_some() {
             ("waiting", "running", "building the candidate run".to_owned())
         } else if node.start_after_check.is_some() {
@@ -2101,7 +2119,7 @@ impl Workbench {
             "device_choices": device_choices,
             "editor_facts_error": editor_facts.and_then(|answer| answer.as_ref().err()),
             // The newest answer is not this draft's and check's, and its process is asked for theirs.
-            "editor_facts_pending": node.instance == Instance::Open && node.answers.contains_key(EDITOR_FACTS) && !node.checked(EDITOR_FACTS),
+            "editor_facts_pending": node.instance == Instance::Open && node.answers.contains_key(EDITOR_FACTS) && !node.checked(EDITOR_FACTS, node.check),
             "artifact_inputs": node.draft.artifact_inputs,
             "artifact_specs": descriptor.map(|item| item.node().artifact_inputs.iter().map(|spec| json!({"name": spec.name, "label": spec.label,
                 "file_filter": spec.file_filter, "required": spec.required.unwrap_or(true), "frame_claims": spec.frame_claims})).collect::<Vec<_>>()).unwrap_or_default(),
