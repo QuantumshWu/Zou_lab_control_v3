@@ -1,4 +1,4 @@
-//! The frame and the slow lattice (td_s.choose_frame, mdlat.Prim / choose_frame_x / PerM / hermite).
+//! The frame (td_s.choose_frame, mdlat.Prim / choose_frame_x / PerM).
 //!
 //! Frequencies are exact integer vectors over B = (the scene's generators, α): a Hilbert component's key with α = 0; the
 //! frame θ_a = α m_a + β_level(a) an integer vector per state; a Liouville component's vector their difference.
@@ -39,12 +39,11 @@
 //! element's fast part is then that of its detuning -- the split's own rounding of a frequency on the lattice, read
 //! of the frequency the frame does not choose. Where every diagonal is within half a φ of the reference's, nothing moves.
 //!
-//! # The lattice
+//! # The split
 //! A vector's fast part n = (n_φ, n_tw, n_ν) is split off exactly (`Frame::split`): n_ν the carrier axis' coefficient,
-//! n_tw the tweezer's own axis', n_φ = round(f/φ), φ = β_g2 − β_g1 (the ground hyperfine in the frame). The slow
-//! remainders of every Liouville component and readout row generate a Z-module; its Hermite basis b gives the slow
-//! coordinates m (`Lattice`). A lattice key (m, n) has the frequency m·b + n·(φ, Φ_tw, Φ_ν). The split is the
-//! product's (the fold's sectors, `Frame::sectors`); the lattice is the tests' static reference's (floquet/mod.rs).
+//! n_tw the tweezer's own axis', n_φ = round(f/φ), φ = β_g2 − β_g1 (the ground hyperfine in the frame); the rest is its
+//! slow remainder. The fold's sectors are the fast parts (`Frame::sectors`). (Until 2026-11-23 the slow remainders'
+//! Hermite basis gave the static checkpoint's lattice, floquet/mod.rs.)
 
 use crate::linalg::larger;
 use std::cmp::Ordering;
@@ -95,17 +94,6 @@ fn gcd(a: i64, b: i64) -> i64 {
         (a, b) = (b, a % b);
     }
     a
-}
-
-/// ⌊a/b⌋ (Python's //).
-#[cfg(test)]
-fn floor_div(a: i64, b: i64) -> i64 {
-    let q = a / b;
-    if a % b != 0 && ((a < 0) != (b < 0)) {
-        q - 1
-    } else {
-        q
-    }
 }
 
 impl Ratio {
@@ -568,12 +556,6 @@ impl Frame {
             generators: (0..count).map(|g| pick(self.fast_index(&(0..count).map(|h| (h == g) as i32).collect()))).collect(),
         }
     }
-
-    /// The value of a primitive vector (rad/µs), correctly rounded.
-    #[cfg(test)]
-    fn value(&self, p: &[Ratio]) -> f64 {
-        self.primitives.value(p)
-    }
 }
 
 /// The fast parts (n_φ, n_tw) of the 32 states' frames and of the generators (`Frame::sectors`; the reference's, the
@@ -586,8 +568,7 @@ pub struct Sectors {
 
 /// One coordinate of the frame vector of the element b ← a (row b, column a) of a component at the vector c: c − θ_b +
 /// θ_a. In the frame ψ_a = e^{−iθ_a t} ψ̃_a, so H_ba e^{−ict} ψ_a enters i dψ̃_b/dt as H_ba e^{−i(c − θ_b + θ_a)t} ψ̃_a.
-/// The one definition: the assembly's on whole vectors (floquet/assemble.rs `to_frame`), the fold's on their fast parts
-/// (`Sectors::element`).
+/// The one definition: on whole vectors, and the fold's on their fast parts (`Sectors::element`).
 pub fn element(c: i64, row: i64, col: i64) -> i64 {
     c - row + col
 }
@@ -597,91 +578,5 @@ impl Sectors {
     /// of b and a (`element` on the fast parts).
     pub fn element(key: [i64; 2], row: [i64; 2], col: [i64; 2]) -> [i64; 2] {
         std::array::from_fn(|i| element(key[i], row[i], col[i]))
-    }
-}
-
-/// The slow lattice: the Hermite basis of the slow remainders.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq)]
-pub struct Lattice {
-    /// b_i (rad/µs): the slow basis' frequencies; M = b.len().
-    pub slow: Vec<f64>,
-    /// (φ, Φ_tw, Φ_ν) (rad/µs).
-    pub fast: [f64; 3],
-    /// The common denominator L of the remainders, the basis rows (integers over the primitives, × L) and their pivots.
-    scale: i64,
-    basis: Vec<Vec<i64>>,
-    pivots: Vec<usize>,
-}
-
-/// Integer row reduction to echelon form (Euclid per pivot column): the nonzero rows, a Z-basis of the module the rows
-/// generate, and their pivot columns (mdlat.hermite).
-#[cfg(test)]
-fn hermite(rows: &[Vec<i64>]) -> (Vec<Vec<i64>>, Vec<usize>) {
-    let ncol = rows.first().map_or(0, Vec::len);
-    let mut rest: Vec<Vec<i64>> = rows.iter().filter(|r| r.iter().any(|&x| x != 0)).cloned().collect();
-    let (mut basis, mut pivots) = (Vec::new(), Vec::new());
-    for c in 0..ncol {
-        let (mut nz, zero): (Vec<Vec<i64>>, Vec<Vec<i64>>) = rest.into_iter().partition(|r| r[c] != 0);
-        rest = zero;
-        while nz.len() > 1 {
-            nz.sort_by_key(|r| r[c].abs());
-            let p = nz[0].clone();
-            let mut next = Vec::new();
-            for r in &nz[1..] {
-                let k = floor_div(r[c], p[c]);
-                let r2: Vec<i64> = r.iter().zip(&p).map(|(x, y)| x - k * y).collect();
-                if r2[c] != 0 {
-                    next.push(r2);
-                } else if r2.iter().any(|&x| x != 0) {
-                    rest.push(r2);
-                }
-            }
-            nz = std::iter::once(p).chain(next).collect();
-        }
-        if let Some(mut p) = nz.pop() {
-            if p[c] < 0 {
-                p.iter_mut().for_each(|x| *x = -*x);
-            }
-            basis.push(p);
-            pivots.push(c);
-        }
-        rest.retain(|r| r.iter().any(|&x| x != 0));
-    }
-    (basis, pivots)
-}
-
-#[cfg(test)]
-impl Lattice {
-    /// The lattice generated by the slow remainders of `vectors` (every Liouville component's and readout row's).
-    pub fn new(frame: &Frame, vectors: &[FrameKey]) -> Lattice {
-        let mut slows: Vec<Vec<Ratio>> = vectors.iter().map(|v| frame.split(v).1).collect();
-        slows.sort();
-        slows.dedup();
-        let scale = slows.iter().flatten().fold(1i64, |l, c| l / gcd(l, c.den) * c.den);
-        let rows: Vec<Vec<i64>> = slows.iter().map(|s| s.iter().map(|c| c.num * (scale / c.den)).collect()).collect();
-        let (basis, pivots) = hermite(&rows);
-        let slow = basis.iter().map(|row| frame.value(&row.iter().map(|&x| Ratio::new(x, scale)).collect::<Vec<_>>())).collect();
-        Lattice { slow, fast: frame.fast, scale, basis, pivots }
-    }
-
-    /// A frame vector's lattice key (m, n), exact.
-    pub fn key(&self, frame: &Frame, vector: &FrameKey) -> (Vec<i64>, [i64; 3]) {
-        let (n, s) = frame.split(vector);
-        let mut r: Vec<i64> = s.iter().map(|c| c.num * (self.scale / c.den)).collect();
-        let mut m = Vec::with_capacity(self.basis.len());
-        for (row, &c) in self.basis.iter().zip(&self.pivots) {
-            assert_eq!(r[c] % row[c], 0, "a lattice vector");
-            let k = r[c] / row[c];
-            m.push(k);
-            r.iter_mut().zip(row).for_each(|(x, y)| *x -= k * y);
-        }
-        assert!(r.iter().all(|&x| x == 0), "a lattice vector");
-        (m, n)
-    }
-
-    /// The frequency m·b + n·(φ, Φ_tw, Φ_ν) (rad/µs).
-    pub fn frequency(&self, m: &[i64], n: &[i64; 3]) -> f64 {
-        m.iter().zip(&self.slow).map(|(&k, b)| k as f64 * b).sum::<f64>() + n.iter().zip(&self.fast).map(|(&k, f)| k as f64 * f).sum::<f64>()
     }
 }

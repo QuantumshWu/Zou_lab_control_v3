@@ -10,8 +10,6 @@ pub mod request;
 pub mod field;
 pub mod scene;
 pub mod floquet;
-#[cfg(test)]
-pub mod krylov;
 pub mod select;
 pub mod model;
 pub mod spectral;

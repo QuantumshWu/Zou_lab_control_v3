@@ -13,12 +13,6 @@ rayon = "=1.12.0"
 # a request's numbers by 1-2 ulp).
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 
-[dev-dependencies]
-# Sparse LU (COLAMD column order, partial pivoting) for the krylov module's preconditioner blocks and fallbacks -- the
-# tests' static steady-state reference (src/krylov, compiled with the tests alone); pinned (published before
-# 2026-10-22), single-threaded (no rayon feature): the module parallelises over blocks itself.
-faer = { version = "=0.24.4", default-features = false, features = ["std", "sparse-linalg"] }
-
 [features]
 # Profiling counters (src/prof.rs), measurement only: off in every released build.
 prof = []
