@@ -1,6 +1,8 @@
 //! A field's value domain: the bounds its values keep and the grid they lie
 //! on, in the field's own unit. One quantizer places a value on it, whoever
 //! writes the field: the binding layer an edit, a scan plan each of its points.
+use std::cmp::Ordering;
+
 use crate::exact::{BigUint, Decimal, Ratio};
 
 /// Where a value exactly halfway between two grid points goes.
@@ -31,11 +33,46 @@ impl Grid {
         (value.negative, match self.ties { Ties::Away => ratio.round_half_up(), Ties::Even => ratio.round_half_even() })
     }
 
-    /// The grid point nearest a finite `value`.
-    pub fn nearest(&self, value: f64) -> f64 {
-        let (negative, steps) = self.steps(&Decimal::from_f64(value));
-        Decimal { negative, mantissa: steps, exponent: 0 }.mul(&Decimal::from_f64(self.step)).to_f64()
+    /// The grid point `steps` steps from zero, on the side `negative` says.
+    fn point(&self, negative: bool, steps: BigUint) -> Decimal {
+        Decimal { negative, mantissa: steps, exponent: 0 }.mul(&Decimal::from_f64(self.step))
     }
+
+    /// The grid point nearest an exact `value`.
+    pub fn nearest_to(&self, value: &Decimal) -> Decimal {
+        let (negative, steps) = self.steps(value);
+        self.point(negative, steps)
+    }
+
+    /// The grid point nearest `value`; a value that is not finite has none and stays as it is.
+    pub fn nearest(&self, value: f64) -> f64 {
+        if !value.is_finite() { return value; }
+        self.nearest_to(&Decimal::from_f64(value)).to_f64()
+    }
+
+    /// The grid point at or above `value` (`up`), else at or below it.
+    fn toward(&self, value: &Decimal, up: bool) -> Decimal {
+        let ratio = Ratio::of(value, &Decimal::from_f64(self.step));
+        let (whole, part) = ratio.numerator.divrem(&ratio.denominator);
+        // Up from a positive value, or down from a negative one, is away from zero.
+        let steps = if up != value.negative && !part.is_zero() { whole.add(&BigUint::from_u128(1)) } else { whole };
+        self.point(value.negative, steps)
+    }
+}
+
+/// Two exact values in order, signs included.
+fn order(a: &Decimal, b: &Decimal) -> Ordering {
+    match (a.negative && !a.is_zero(), b.negative && !b.is_zero()) {
+        (false, true) => Ordering::Greater,
+        (true, false) => Ordering::Less,
+        (false, false) => a.cmp_abs(b),
+        (true, true) => b.cmp_abs(a),
+    }
+}
+
+/// `value` within `lo..=hi`.
+fn within(value: Decimal, lo: Decimal, hi: Decimal) -> Decimal {
+    if order(&value, &lo) == Ordering::Less { lo } else if order(&value, &hi) == Ordering::Greater { hi } else { value }
 }
 
 /// The values a field may take: `lo..=hi`, on `grid` (None: any value between).
@@ -45,9 +82,21 @@ pub struct Domain { pub lo: f64, pub hi: f64, pub grid: Option<Grid> }
 impl Domain {
     pub fn holds(&self, value: f64) -> bool { self.lo <= value && value <= self.hi }
 
-    /// A finite `value` as the field takes it: the nearest grid point, kept within the bounds.
+    /// An exact `value` as the field takes it: the nearest grid point, kept within the bounds --
+    /// where that point lies past one, the innermost grid point inside it (a domain whose
+    /// bounds hold no grid point keeps the bound).
+    pub fn place(&self, value: &Decimal) -> Decimal {
+        let (lo, hi) = (Decimal::from_f64(self.lo), Decimal::from_f64(self.hi));
+        let Some(grid) = self.grid else { return within(value.clone(), lo, hi) };
+        let (first, last) = (grid.toward(&lo, true), grid.toward(&hi, false));
+        let nearest = grid.nearest_to(value);
+        if order(&first, &last) == Ordering::Greater { within(nearest, lo, hi) } else { within(nearest, first, last) }
+    }
+
+    /// `value` as the field takes it ([`Domain::place`]); a value that is not finite stays as it is.
     pub fn quantize(&self, value: f64) -> f64 {
-        self.grid.map_or(value, |grid| grid.nearest(value)).clamp(self.lo, self.hi)
+        if !value.is_finite() { return value; }
+        self.place(&Decimal::from_f64(value)).to_f64()
     }
 }
 
@@ -148,12 +197,21 @@ mod tests {
         assert_eq!([clock.nearest(0.03), clock.nearest(-0.03), clock.nearest(0.029), clock.nearest(0.0)], [0.04, -0.04, 0.02, 0.0]);
         assert_eq!([2.5, 3.5, -2.5, 0.4, -0.4].map(|value| WHOLE.nearest(value)), [2.0, 4.0, -2.0, 0.0, 0.0]);
         assert_eq!(WHOLE.nearest(-0.4).to_bits(), 0f64.to_bits(), "no negative zero");
+        // A scan table's DAC column rounds through WHOLE as it rounded before (Python's round).
+        for value in (-40..=40).map(|quarter| f64::from(quarter) / 4.0).chain([2.4999999999999996, 4503599627370495.5, -511.5]) {
+            assert_eq!(WHOLE.nearest(value), value.round_ties_even() + 0.0, "{value}");
+        }
         let ends = Domain { lo: 0.5, hi: 9.5, grid: Some(Grid { step: 1.0, ties: Ties::Away }) };
-        assert_eq!([0.6, 9.4, 4.5].map(|value| ends.quantize(value)), [1.0, 9.0, 5.0]);
-        let off_grid = Domain { lo: 0.0, hi: 9.5, grid: Some(Grid { step: 2.0, ties: Ties::Away }) };
-        assert_eq!(off_grid.quantize(9.4), 9.5, "a grid point past a bound is the bound");
+        assert_eq!([0.6, 9.4, 4.5, 9.5, 0.5].map(|value| ends.quantize(value)), [1.0, 9.0, 5.0, 9.0, 1.0],
+                   "a grid point past a bound is the innermost one inside it");
+        let negative = Domain { lo: -9.5, hi: -0.5, grid: Some(Grid { step: 2.0, ties: Ties::Away }) };
+        assert_eq!([-9.4, -0.6, -5.0].map(|value| negative.quantize(value)), [-8.0, -2.0, -6.0]);
+        let none = Domain { lo: 0.2, hi: 0.4, grid: Some(WHOLE) };
+        assert_eq!(none.quantize(0.3), 0.2, "bounds that hold no grid point keep the bound");
         let continuous = Domain { lo: -1.0, hi: 1.0, grid: None };
         assert_eq!(continuous.quantize(0.123), 0.123);
         assert!(!continuous.holds(1.5) && continuous.holds(-1.0));
+        assert!(WHOLE.nearest(f64::NAN).is_nan() && clock.nearest(f64::INFINITY) == f64::INFINITY, "not finite: no grid point");
+        assert_eq!(WHOLE.nearest(f64::NAN) as i64, f64::NAN.round_ties_even() as i64, "a DAC write of NaN codes as it did");
     }
 }
