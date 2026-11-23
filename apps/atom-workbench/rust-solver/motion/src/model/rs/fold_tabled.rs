@@ -187,6 +187,8 @@ pub(crate) struct Layout {
     s_mats: Vec<Option<Mat>>,
     pub work: f64,
     pub price: f64,
+    /// What filling one piece takes (`price` over the pieces).
+    pub per_piece: f64,
     seconds: f64,
 }
 
@@ -751,12 +753,20 @@ impl Tables {
             + grouping.zs.iter().zip(&z_vectors).map(|(s, v)| (s.index.len() * plan.blocks[s.block].rows.len().pow(2) * v.len()) as f64).sum::<f64>()
             + tables.iter().map(|t| (t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * t.rows * t.cols * plan.blocks[grouping.zs[t.z].block].rows.len() * (orders + 2)) as f64).sum::<f64>();
         let transform: f64 = tables.iter().map(|t| (t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * orders * m * m * t.rows * t.cols) as f64).sum();
-        let price = pieces.len() as f64 * (m as f64 * per_sample + transform);
-        Some(Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, tables, e_rest: e0, e_slope, used, s_mats, work, price, seconds: clock.elapsed().as_secs_f64() })
+        let per_piece = m as f64 * per_sample + transform;
+        let price = pieces.len() as f64 * per_piece;
+        Some(Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, tables, e_rest: e0, e_slope, used, s_mats, work, price, per_piece, seconds: clock.elapsed().as_secs_f64() })
     }
 }
 
 impl Layout {
+    /// The layout with the pieces `keep` takes alone (model/selected.rs `Selected::buy_tables`: each piece bought where
+    /// its own rent covers it), its price theirs; the others no node reads (`Tables::read`: no piece holds their s).
+    pub(crate) fn keep(&mut self, keep: &dyn Fn(&Piece) -> bool) {
+        self.pieces.retain(|p| keep(p));
+        self.price = self.pieces.len() as f64 * self.per_piece;
+    }
+
     /// The tables of a layout (`Tables::layout`): per piece the samples at its m Chebyshev points -- each table's
     /// entries Σ_q (LV)_iq (V⁻¹U)_qj (z₀ − λ_q)^{−(J+1)} for J < `orders` -- and their Chebyshev coefficients. None
     /// where a block does not decompose.
