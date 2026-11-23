@@ -114,6 +114,25 @@
 //! account's factor at the dropped beats' Y and theirs --, left out of the fold (`Plan::drop_sideband`: its spectrum,
 //! amplitudes and pairs, values, gradients and photon forms, not made), their Y booked with the dropped beats'.
 //!
+//! # The parts turned
+//! K's fast parts (F = 1 and F = 2: `Plan::parts`) within an exact block are coupled by the fold's pairs through Q
+//! (two-photon couplings, not elements of the fold) whose frequency in the frame's diagonal interaction picture -- the
+//! diagonal's gap, about 1446 rad/µs on PGC3D, θ apart -- is far above them (V/μ ≈ 1e-4 … 6e-4). A node is turned by
+//! their second order (Schrieffer–Wolff, `Selected::turned`): S between the parts solving [S, G_d] = −V (its diagonal
+//! first, then `ROUNDS` of the blocks' own couplings), each block's static slot plus ½[S, V] (V's opposite beats' too,
+//! each S_k = V_k/(d_a − d_b − ω_k)), its gradient's likewise, every slot's elements between the parts left out, and
+//! every jump component turned to L + [S, L] (its value, gradient and photon form; the layout's places closed under
+//! S). The state is then the turned one; what is booked (`Selected::turn_parts`): once 2‖S‖ (the frame at the start
+//! and at a reading, and 2‖S_k‖), and as a rate the remainder -- 2‖S‖²‖V‖ (the third order of e^S G e^{−S}), the
+//! rounds' residual ‖V‖(2‖G_off‖/μ)^{ROUNDS+1}, 4‖S‖²Σ‖L‖² (the channels' second order), and of the opposite beats
+//! 2‖S_k‖(‖V‖ + ‖V_k‖) + 4‖S_k‖Σ‖L‖² --, each over the reach: V's bound (H's pairs, `Out::bounds`, and the decay's
+//! products of the channels' bounds), μ the gap at the structure's point less twice the shifts' bound (the pairs' and
+//! the varying direct diagonal's, `Plan::diagonal_spread`). Which parts are turned is the drop tier's rule: in the order
+//! of ‖V‖/μ, of none and every first few pairs of parts the cut of least W, the step's counted work by the blocks'
+//! sizes (Σ n_b³) times `Account::factor_with`. Measured (STEP, 2026-11-23, `the_split_s_walk`): over 100 µs
+//! jump-free the turned state stays 1.1–2.0e-4 apart from the whole model's (the frame), the parts' elements left out
+//! (no turn) drift to 0.5–1e-3.
+//!
 //! # Exact blocks
 //! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
 //! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis. They are the run's judgment's
@@ -218,10 +237,9 @@ pub struct Selected {
     /// and each place's block.
     blocks: Vec<Vec<usize>>,
     block_of: Vec<usize>,
-    /// (A measurement's, the profiling build's alone: ATOM_PROF_SPLIT=sw.) The blocks cut by K's fast parts with the
-    /// elements between them kept in the layout, each node turned by S (`Selected::turned`).
-    #[cfg(feature = "prof")]
-    sw: bool,
+    /// The parts turned (# The parts turned): the pairs of places (a, b) of one exact block in two turned ones, both
+    /// ways; none where no part is turned.
+    turn: Option<Vec<(usize, usize)>>,
     beats: RwLock<Beats>,
     /// The candidate tones and their keys (module documentation, # The generator by beats): every node holds the
     /// layout's beats, so they are the run's, made once (`Selected::tones`).
@@ -241,6 +259,24 @@ pub(crate) enum Drops {
     Judged,
     #[cfg(test)]
     Only(Vec<f64>),
+}
+
+/// The rounds of the blocks' own couplings in S (# The parts turned): the residual ‖V‖(2‖G_off‖/μ)^{ROUNDS+1}.
+const ROUNDS: usize = 3;
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a run turns its parts (# The parts turned; the tests': the node against the fold's components is the
+    /// unturned run's).
+    pub(crate) static TURNING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a run turns its parts (`TURNING` in the tests; always in the product).
+fn turning() -> bool {
+    #[cfg(test)]
+    return TURNING.with(|t| t.get());
+    #[cfg(not(test))]
+    true
 }
 
 /// The runs' numbers (`Selected::id`).
@@ -507,18 +543,13 @@ impl Selected {
     fn made(scene: Scene, report: Selection, reference: [f64; GROUND], split: bool, drops: &Drops) -> Result<Selected, String> {
         let run = Selected::made_model(scene, report, reference, split, drops)?;
         // (A measurement's, the profiling build's alone: ATOM_PROF_SPLIT=drop cuts the blocks by K's fast parts where
-        // the elements between them are below a hundredth of their diagonal gap, leaving those elements out; =sw keeps
-        // them in the layout and turns each node by their second-order Schrieffer–Wolff, `turned`.)
+        // the elements between them are below a hundredth of their diagonal gap, leaving those elements out, on a run
+        // made unturned (# The parts turned).)
         #[cfg(feature = "prof")]
         if let Ok(mode) = std::env::var("ATOM_PROF_SPLIT") {
             let pairs = run.across_pairs(1e-2);
             crate::prof::note(|| format!("split {mode}: the parts' pairs below 1e-2 of their gap {pairs:?}"));
             if !pairs.is_empty() && split {
-                if mode == "sw" {
-                    let mut run = run;
-                    run.turn_parts(&pairs);
-                    return Ok(run);
-                }
                 let mut run = run;
                 run.cut_parts(&pairs);
                 return Ok(run);
@@ -672,11 +703,10 @@ impl Selected {
             template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, whole: true, work: 0.0, lift: Vec::new() },
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0, pairs: Vec::new() },
+            judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0, pairs: Vec::new(), once: 0.0 },
             blocks: vec![(0..n).collect()],
             block_of: vec![0; n],
-            #[cfg(feature = "prof")]
-            sw: false,
+            turn: None,
             beats: RwLock::new(beats),
             candidates: Vec::new(),
             keys: Vec::new(),
@@ -794,123 +824,15 @@ impl Selected {
         POOL.with(|p| p.borrow_mut().retain(|x| x.0 != id));
     }
 
-    /// The blocks cut by K's fast parts `pairs` with the elements between them kept in the layout, each node turned by
-    /// S (`turned`; the profiling build's measurement, ATOM_PROF_SPLIT=sw).
-    #[cfg(feature = "prof")]
-    pub(crate) fn turn_parts(&mut self, pairs: &[[[i64; 2]; 2]]) {
-        let (tables, decay) = (self.tables.h.clone(), (self.tables.terms.clone(), self.tables.entries.clone()));
-        self.cut_parts(pairs);
-        (self.tables.h, (self.tables.terms, self.tables.entries)) = (tables, decay);
-        self.sw = true;
-    }
-
     /// The pairs of K's fast parts below `ratio` of their gap (`across_pairs`) and the blocks cut by them, the elements
     /// between left out (`cut_parts`; the tests').
     #[cfg(all(test, feature = "prof"))]
-    pub(crate) fn split_for_test(&mut self, turned: bool) -> Vec<[[i64; 2]; 2]> {
+    pub(crate) fn split_for_test(&mut self) -> Vec<[[i64; 2]; 2]> {
         let pairs = self.across_pairs(1e-2);
         if !pairs.is_empty() {
-            if turned {
-                self.turn_parts(&pairs);
-            } else {
-                self.cut_parts(&pairs);
-            }
+            self.cut_parts(&pairs);
         }
         pairs
-    }
-
-    /// A node turned by S (the profiling build's measurement, ATOM_PROF_SPLIT=sw): the second order of Schrieffer–Wolff
-    /// on the elements V between the cut blocks of the static slot `g` (the frame's, every place), S_ab = V_ab/(d_a − d_b)
-    /// of its diagonal d (complex: the decay's in it); within each block G_aa′ += ½ Σ_b V_ab V_ba′ (1/(d_a − d_b) +
-    /// 1/(d_a′ − d_b)); every slot's elements between the blocks, of the generator and of its gradient, left out; each
-    /// jump component's L, ∇L and K turned to L + [S, L] on its places (what falls off them said once).
-    #[cfg(feature = "prof")]
-    fn turned(&self, node: &mut Node, g: &Mat, whole: bool) {
-        let n = self.rs.keep.len();
-        let of = &self.block_of;
-        let mut sw = Mat::zeros(n, n);
-        for a in 0..n {
-            for b in 0..n {
-                if of[a] != of[b] {
-                    sw[(a, b)] = g[(a, b)] * (C64::ONE / (g[(a, a)] - g[(b, b)]));
-                }
-            }
-        }
-        if whole {
-            let mut delta = Mat::zeros(n, n);
-            for a in 0..n {
-                for c in 0..n {
-                    if of[a] != of[c] {
-                        continue;
-                    }
-                    let mut x = C64::ZERO;
-                    for b in (0..n).filter(|&b| of[b] != of[a]) {
-                        x += g[(a, b)] * g[(b, c)] * (C64::ONE / (g[(a, a)] - g[(b, b)]) + C64::ONE / (g[(c, c)] - g[(b, b)])) * 0.5;
-                    }
-                    delta[(a, c)] = x;
-                }
-            }
-            for (beat, m) in node.generator.iter_mut() {
-                for a in 0..n {
-                    for b in 0..n {
-                        if of[a] != of[b] {
-                            m[(a, b)] = C64::ZERO;
-                        } else if *beat == 0 {
-                            m[(a, b)] += delta[(a, b)];
-                        }
-                    }
-                }
-            }
-            for (_, gs) in node.gradient.iter_mut() {
-                for m in gs.iter_mut() {
-                    for a in 0..n {
-                        for b in 0..n {
-                            if of[a] != of[b] {
-                                m[(a, b)] = C64::ZERO;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let mut off = 0.0_f64;
-        for class in node.classes.iter_mut() {
-            for axis in class.axes.iter_mut() {
-                for jump in axis.iter_mut() {
-                    let (mut l, mut k) = (Mat::zeros(n, n), Mat::zeros(n, n));
-                    let mut dl = [Mat::zeros(n, n), Mat::zeros(n, n), Mat::zeros(n, n)];
-                    for e in &jump.elements {
-                        l.data[e.at] = e.value;
-                        k.data[e.at] = e.kick;
-                        for i in 0..3 {
-                            dl[i].data[e.at] = e.gradient[i];
-                        }
-                    }
-                    let commute = |x: &Mat| -> Mat { Mat::from_fn(n, n, |c, a| (0..n).map(|q| sw[(c, q)] * x[(q, a)] - x[(c, q)] * sw[(q, a)]).sum::<C64>()) };
-                    let (tl, tk) = (commute(&l), commute(&k));
-                    let td: Vec<Mat> = dl.iter().map(commute).collect();
-                    let mut placed = vec![false; n * n];
-                    for e in jump.elements.iter_mut() {
-                        placed[e.at] = true;
-                        e.value += tl.data[e.at];
-                        e.kick += tk.data[e.at];
-                        for i in 0..3 {
-                            e.gradient[i] += td[i].data[e.at];
-                        }
-                    }
-                    for x in 0..n * n {
-                        if !placed[x] {
-                            off = larger(off, tl.data[x].abs());
-                        }
-                    }
-                }
-            }
-        }
-        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            let most = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).filter(|&(a, b)| of[a] != of[b]).map(|(a, b)| sw[(a, b)].abs()).fold(0.0, larger);
-            crate::prof::note(|| format!("split sw: |S| largest {most:.3e}; [S, L] off the layout's places, largest {off:.3e}"));
-        }
     }
 
     /// The selection's report (stderr): P by levels and state by state, the states folded, the selection's notes (its
@@ -1285,8 +1207,326 @@ impl Selected {
         }
         self.judgment = judgment;
         self.decay_terms();
+        // K's fast parts turned where that costs the run the less (module documentation, # The parts turned), after
+        // the decay's products are laid on the exact blocks: the elements between the parts are what S is made of.
+        if matches!(drops, Drops::Judged) && split && turning() {
+            self.turn_parts(spherical);
+        }
         // The pooled nodes were made on the layout before.
         POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
+    }
+
+    /// K's fast parts turned (module documentation, # The parts turned): the pairs of parts within an exact block, by
+    /// ‖V‖/μ over the reach; of none and every first few the cut of least W; the cut's blocks set, the layout's jump
+    /// places closed under S, the turn's Y and once booked on the judgment.
+    fn turn_parts(&mut self, spherical: (&Plan, &Grouping)) {
+        let n = self.rs.keep.len();
+        let parts = self.rs.plan().parts().to_vec();
+        let (node, _) = self.structure();
+        let (_, account, _) = self.drop_sizes(&node, &[], spherical);
+        let (moduli, coefficients, norms) = self.reach_bounds();
+        let plan = self.rs.plan();
+        let ((h, channels), (shift, _)) = (Out::bounds(plan, &self.lab, &moduli, &coefficients), Out::bounds_of(plan, &self.lab, &moduli, &coefficients, &|x| x.is_some()));
+        // Per slot its places' bounds: H's (its pairs and direct entries), and the static slot's shifts (the pairs').
+        let slots = self.template.generator.len();
+        let (mut bound, mut shifts) = (vec![vec![0.0_f64; n * n]; slots], vec![0.0_f64; n]);
+        for (o, list) in self.tables.h.iter().enumerate() {
+            for (k, &(x, g, _)) in list.iter().enumerate() {
+                if g != u32::MAX {
+                    bound[g as usize][x as usize] += h[o][k];
+                    if g == 0 && x as usize / n == x as usize % n {
+                        shifts[x as usize / n] += shift[o][k];
+                    }
+                }
+            }
+        }
+        // The decay's products on the static slot: ½ Σ_r B_c[r][a] B_c[r][b] of each channel's elements' bounds.
+        let mut per: HashMap<(usize, [i64; 2]), Vec<f64>> = HashMap::new();
+        for (o, list) in self.tables.channels.iter().enumerate() {
+            let (q, fast, which, ..) = &self.lab.channel_outputs[o];
+            if *which != 0 {
+                continue;
+            }
+            let m = per.entry((*q, *fast)).or_insert_with(|| vec![0.0; n * n]);
+            for (k, &(_, class, axis, jump, element)) in list.iter().enumerate() {
+                m[self.template.classes[class as usize].axes[axis as usize][jump as usize].elements[element as usize].at] += channels[o][k];
+            }
+        }
+        for m in per.values() {
+            for a in 0..n {
+                for b in 0..n {
+                    bound[0][a * n + b] += 0.5 * (0..n).map(|r| m[r * n + a] * m[r * n + b]).sum::<f64>();
+                }
+            }
+        }
+        let decay: f64 = {
+            let mut seen: Vec<f64> = Vec::new();
+            for (o, (_, _, which, ..)) in self.lab.channel_outputs.iter().enumerate() {
+                if *which == 0 && !seen.iter().any(|&x| x == norms[o]) {
+                    seen.push(norms[o]);
+                }
+            }
+            seen.iter().map(|x| x * x).sum()
+        };
+        let g = &node.generator[0].1;
+        let gap = |a: usize, b: usize| -> f64 {
+            let raw = ((g[(a, a)].re - self.theta[a]) - (g[(b, b)].re - self.theta[b])).abs();
+            raw - 2.0 * (shifts[a] + shifts[b] + plan.diagonal_spread(a, b, &coefficients))
+        };
+        // The pairs of parts within an exact block, by ‖V‖/μ.
+        let mut pairs: Vec<([[i64; 2]; 2], f64)> = Vec::new();
+        for a in 0..n {
+            for b in 0..n {
+                if self.block_of[a] != self.block_of[b] || parts[a] >= parts[b] {
+                    continue;
+                }
+                let key = [parts[a], parts[b]];
+                let r = (bound[0][a * n + b].hypot(bound[0][b * n + a])) / gap(a, b).max(0.0);
+                match pairs.iter_mut().find(|p| p.0 == key) {
+                    Some(p) => p.1 = larger(p.1, r),
+                    None => pairs.push((key, r)),
+                }
+            }
+        }
+        if pairs.is_empty() {
+            return;
+        }
+        pairs.sort_by(|x, y| x.1.total_cmp(&y.1));
+        let values: Vec<f64> = self.read(|b| self.template.generator.iter().map(|(beat, _)| b.value[*beat]).collect());
+        let kept: Vec<usize> = self.template.generator.iter().map(|g| g.0).collect();
+        let nodes = self.counted_node();
+        let sizes = |blocks: &[Vec<usize>]| blocks.iter().map(|b| (b.len() as f64).powi(3)).sum::<f64>();
+        let base = (self.judgment.dropped, self.judgment.once);
+        let mut least: (f64, Option<(Vec<Vec<usize>>, Vec<(usize, usize)>, f64, f64)>) = (self.counted_sized(&kept, nodes, sizes(&self.blocks)) * account.factor_with(base.0, base.1), None);
+        crate::prof::note(|| format!("turn: the parts' pairs (pair, ‖V‖/μ) {pairs:?}; none W {:.4e}", least.0));
+        let mut last = self.blocks.clone();
+        for k in 1..=pairs.len() {
+            let apart = &pairs[..k];
+            let blocks = self.cut_blocks(&parts, &|x, y| apart.iter().any(|p| (p.0[0] == x && p.0[1] == y) || (p.0[0] == y && p.0[1] == x)));
+            if blocks == last {
+                continue;
+            }
+            last.clone_from(&blocks);
+            let mut of = vec![0; n];
+            for (i, b) in blocks.iter().enumerate() {
+                for &x in b {
+                    of[x] = i;
+                }
+            }
+            let cross: Vec<(usize, usize)> = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).filter(|&(a, b)| self.block_of[a] == self.block_of[b] && of[a] != of[b]).collect();
+            let frob = |m: &[f64]| cross.iter().map(|&(a, b)| m[a * n + b] * m[a * n + b]).sum::<f64>().sqrt();
+            let mu = cross.iter().map(|&(a, b)| gap(a, b)).fold(f64::INFINITY, smaller);
+            let v = frob(&bound[0]);
+            let s = cross.iter().map(|&(a, b)| (bound[0][a * n + b] / gap(a, b).max(0.0)).powi(2)).sum::<f64>().sqrt();
+            let off = blocks
+                .iter()
+                .map(|b| b.iter().flat_map(|&x| b.iter().map(move |&y| (x, y))).filter(|(x, y)| x != y).map(|(x, y)| bound[0][x * n + y] * bound[0][x * n + y]).sum::<f64>().sqrt())
+                .fold(0.0, larger);
+            let mut rate = 2.0 * s * s * v + v * (2.0 * off / mu).powi(ROUNDS as i32 + 1) + 4.0 * s * s * decay;
+            let mut once = 2.0 * s;
+            for (slot, w) in values.iter().enumerate().skip(1) {
+                let vk = frob(&bound[slot]);
+                if vk == 0.0 {
+                    continue;
+                }
+                let sk = vk / (mu - w.abs()).max(0.0);
+                rate += 2.0 * sk * (v + vk) + 4.0 * sk * decay;
+                once += 2.0 * sk;
+            }
+            let work = self.counted_sized(&kept, nodes + 3.0 * (cross.len() * n) as f64 * 8.0, sizes(&blocks));
+            let w = work * account.factor_with(base.0 + rate, base.1 + once);
+            crate::prof::note(|| format!("turn: the first {k} pairs apart: blocks {:?}, ‖V‖ {v:.3e}, μ {mu:.4e}, ‖S‖ {s:.3e}, off {off:.3e}; Y {rate:.3e} /µs, once {once:.3e}; W {w:.4e}", blocks.iter().map(Vec::len).collect::<Vec<_>>()));
+            if w < least.0 {
+                least = (w, Some((blocks, cross, rate, once)));
+            }
+        }
+        let Some((blocks, cross, rate, once)) = least.1 else { return };
+        // The layout's jump places closed under S: (x, a) where (y, a) is, (c, y) where (c, x) is, x and y apart.
+        for class in self.template.classes.iter_mut() {
+            for axis in class.axes.iter_mut() {
+                for jump in axis.iter_mut() {
+                    let mut have: Vec<bool> = vec![false; n * n];
+                    for e in &jump.elements {
+                        have[e.at] = true;
+                    }
+                    let mut more = Vec::new();
+                    for &(x, y) in &cross {
+                        for a in 0..n {
+                            if have[y * n + a] && !have[x * n + a] && !more.contains(&(x * n + a)) {
+                                more.push(x * n + a);
+                            }
+                            if have[a * n + x] && !have[a * n + y] && !more.contains(&(a * n + y)) {
+                                more.push(a * n + y);
+                            }
+                        }
+                    }
+                    jump.elements.extend(more.into_iter().map(|at| Element { at, value: C64::ZERO, gradient: [C64::ZERO; 3], kick: C64::ZERO }));
+                }
+            }
+        }
+        for (i, b) in blocks.iter().enumerate() {
+            for &x in b {
+                self.block_of[x] = i;
+            }
+        }
+        self.blocks.clone_from(&blocks);
+        self.judgment.blocks = blocks;
+        self.judgment.dropped += rate;
+        self.judgment.once += once;
+        self.turn = Some(cross);
+    }
+
+    /// The exact blocks cut by K's fast parts (# The parts turned): within each block the parts joined but where
+    /// `apart` says so; each block's places sorted, the blocks in the order of their first place.
+    fn cut_blocks(&self, parts: &[[i64; 2]], apart: &dyn Fn([i64; 2], [i64; 2]) -> bool) -> Vec<Vec<usize>> {
+        let n = parts.len();
+        let mut root: Vec<usize> = (0..n).collect();
+        fn find(root: &mut [usize], x: usize) -> usize {
+            let mut x = x;
+            while root[x] != x {
+                root[x] = root[root[x]];
+                x = root[x];
+            }
+            x
+        }
+        for a in 0..n {
+            for b in 0..n {
+                if self.block_of[a] == self.block_of[b] && !apart(parts[a], parts[b]) {
+                    let (ra, rb) = (find(&mut root, a), find(&mut root, b));
+                    root[ra.max(rb)] = ra.min(rb);
+                }
+            }
+        }
+        let (mut blocks, mut of): (Vec<Vec<usize>>, Vec<usize>) = (Vec::new(), Vec::new());
+        for a in 0..n {
+            let r = find(&mut root, a);
+            match of.iter().position(|&x| x == r) {
+                Some(i) => blocks[i].push(a),
+                None => {
+                    of.push(r);
+                    blocks.push(vec![a]);
+                }
+            }
+        }
+        blocks
+    }
+
+    /// A node turned (module documentation, # The parts turned): S between the turned blocks from its static slot (the
+    /// frame's, θ on it), its diagonal d first and `ROUNDS` of the blocks' own couplings; within each block the static
+    /// slot plus ½ Σ_b (S_ab V_bc − V_ab S_bc) and each opposite pair of beats' ½(S_k V_−k − V_k S_−k), S_k = V_k/(d_a
+    /// − d_b − ω_k); the static gradient slot plus the same of ∇V and ∇S = ∇V/(d_a − d_b); every slot's elements between
+    /// the blocks left out; each jump component to L + [S, L], its photon form likewise, its gradient + [S, ∇L] + [∇S, L].
+    fn turned(&self, node: &mut Node, cross: &[(usize, usize)]) {
+        let n = self.rs.keep.len();
+        let (of, blocks) = (&self.block_of, &self.blocks);
+        let g = node.generator[0].1.clone();
+        let gap = |a: usize, b: usize| g[(a, a)] - g[(b, b)];
+        let mut s = vec![C64::ZERO; n * n];
+        for &(a, b) in cross {
+            s[a * n + b] = g[(a, b)] / gap(a, b);
+        }
+        for _ in 0..ROUNDS {
+            let prev = s.clone();
+            for &(a, b) in cross {
+                let mut x = g[(a, b)];
+                for &q in blocks[of[b]].iter().filter(|&&q| q != b) {
+                    x += prev[a * n + q] * g[(q, b)];
+                }
+                for &q in blocks[of[a]].iter().filter(|&&q| q != a) {
+                    x -= g[(a, q)] * prev[q * n + b];
+                }
+                s[a * n + b] = x / gap(a, b);
+            }
+        }
+        // ½[S, V] within the blocks, of S and V given as dense n × n (the places apart alone set).
+        let half = |s: &[C64], v: &Mat, out: &mut Mat| {
+            for &(a, b) in cross {
+                for &c in &blocks[of[a]] {
+                    out[(a, c)] += (s[a * n + b] * v[(b, c)] - v[(a, b)] * s[b * n + c]) * 0.5;
+                }
+            }
+        };
+        let mut delta = Mat::zeros(n, n);
+        half(&s, &g, &mut delta);
+        let values: Vec<f64> = self.read(|b| node.generator.iter().map(|(beat, _)| b.value[*beat]).collect());
+        for (k, (_, m)) in node.generator.iter().enumerate().skip(1) {
+            if let Some(j) = values.iter().position(|&w| w == -values[k]) {
+                let opposite = &node.generator[j].1;
+                let mut sk = vec![C64::ZERO; n * n];
+                for &(a, b) in cross {
+                    sk[a * n + b] = m[(a, b)] / (gap(a, b) - C64::real(values[k]));
+                }
+                half(&sk, opposite, &mut delta);
+            }
+        }
+        // The gradient: ∇S = ∇V/(d_a − d_b), ½([∇S, V] + [S, ∇V]) within the blocks.
+        let mut ds: [Vec<C64>; 3] = std::array::from_fn(|_| vec![C64::ZERO; n * n]);
+        if let Some((_, dg)) = node.gradient.iter_mut().find(|g| g.0 == 0) {
+            for i in 0..3 {
+                for &(a, b) in cross {
+                    ds[i][a * n + b] = dg[i][(a, b)] / gap(a, b);
+                }
+                let mut dd = Mat::zeros(n, n);
+                half(&ds[i], &g, &mut dd);
+                half(&s, &dg[i], &mut dd);
+                dg[i].add_scaled(C64::ONE, &dd);
+            }
+        }
+        for (_, gs) in node.gradient.iter_mut() {
+            for m in gs.iter_mut() {
+                for &(a, b) in cross {
+                    m[(a, b)] = C64::ZERO;
+                }
+            }
+        }
+        for (_, m) in node.generator.iter_mut() {
+            for &(a, b) in cross {
+                m[(a, b)] = C64::ZERO;
+            }
+        }
+        node.generator[0].1.add_scaled(C64::ONE, &delta);
+        // The jump components: L + [S, L], [S, L]_xa = Σ_y S_xy L_ya − L_xy S_ya over the places apart.
+        let mut dense = vec![[C64::ZERO; 5]; n * n];
+        for class in node.classes.iter_mut() {
+            for axis in class.axes.iter_mut() {
+                for jump in axis.iter_mut() {
+                    for e in &jump.elements {
+                        dense[e.at] = [e.value, e.kick, e.gradient[0], e.gradient[1], e.gradient[2]];
+                    }
+                    let mut turn = vec![[C64::ZERO; 5]; n * n];
+                    for &(x, y) in cross {
+                        let sxy = s[x * n + y];
+                        let dxy = [ds[0][x * n + y], ds[1][x * n + y], ds[2][x * n + y]];
+                        for a in 0..n {
+                            let (l, r) = (dense[y * n + a], dense[a * n + x]);
+                            let t = &mut turn[x * n + a];
+                            for f in 0..5 {
+                                t[f] += sxy * l[f];
+                            }
+                            for i in 0..3 {
+                                t[2 + i] += dxy[i] * l[0];
+                            }
+                            let t = &mut turn[a * n + y];
+                            for f in 0..5 {
+                                t[f] -= r[f] * sxy;
+                            }
+                            for i in 0..3 {
+                                t[2 + i] -= r[0] * dxy[i];
+                            }
+                        }
+                    }
+                    for e in jump.elements.iter_mut() {
+                        let t = turn[e.at];
+                        e.value += t[0];
+                        e.kick += t[1];
+                        for i in 0..3 {
+                            e.gradient[i] += t[2 + i];
+                        }
+                        dense[e.at] = [C64::ZERO; 5];
+                    }
+                }
+            }
+        }
     }
 
     /// The direct entries spanned (module documentation, # The direct entries spanned): of the lab's grouping's spans
@@ -1439,6 +1679,12 @@ impl Selected {
         self.judgment.dropped
     }
 
+    /// The trace distance booked once beside the rate's (`Judgment::once`: the frame of the parts turned, # The parts
+    /// turned), zero where no part is turned.
+    pub fn dropped_once(&self) -> f64 {
+        self.judgment.once
+    }
+
     /// The candidate pairs of the drop tier with their Y (model/classify.rs, # The drop tier), the drop's account, and
     /// the three nodes' counted work of a step (complex multiply-adds): per candidate slot of the structure's node
     /// (`candidates`, before the layout drops anything) its pair -- it and the slot of its opposite beat -- and the sum
@@ -1544,6 +1790,11 @@ impl Selected {
     /// followed three products of n³; the middle's solve where there are tones, n³ + n³/3 + n³ --, the tones T the
     /// kept beats with their opposites, the classes the distinct sums of two of their exact beats and the static one.
     fn counted(&self, kept: &[usize], nodes: f64) -> f64 {
+        self.counted_sized(kept, nodes, (self.rs.keep.len() as f64).powi(3))
+    }
+
+    /// `counted` with the cube of P's size in place of `cube` (the blocks' Σ n_b³, # The parts turned).
+    fn counted_sized(&self, kept: &[usize], nodes: f64, cube: f64) -> f64 {
         let exact: Vec<Exact> = self.read(|b| kept.iter().map(|&k| b.exact[k].clone()).collect());
         let plus = |a: &Exact, b: &Exact| -> Exact {
             (std::array::from_fn(|i| a.0[i] + b.0[i]), a.1.iter().zip(&b.1).map(|(x, y)| Ratio::new(x.num * y.den + y.num * x.den, x.den * y.den)).collect())
@@ -1568,7 +1819,6 @@ impl Selected {
                 }
             }
         }
-        let cube = (self.rs.keep.len() as f64).powi(3);
         let first = (1 + 2 * tones) as f64;
         let solve = if tones > 0 { 7.0 / 3.0 } else { 0.0 };
         nodes + cube * (12.0 * tones as f64 + 6.0 * (first * first - 1.0) + 3.0 * (classes.len() as f64 - 1.0) + solve)
@@ -1630,10 +1880,15 @@ impl Selected {
             }
             let work = &mut w.as_mut().expect("the thread's buffers").1;
             self.scene.point_into(at, kappa, &mut work.point);
-            let making = if whole { Making { lift: lifted, ..Making::node(kicked) } } else { Making { lift: lifted, ..Making::PHOTONS } };
+            // A run of turned parts makes a jump's photon's node whole: its S is the static slot's at the point.
+            let made = whole || self.turn.is_some();
+            let making = if made { Making { lift: lifted, ..Making::node(kicked) } } else { Making { lift: lifted, ..Making::PHOTONS } };
             self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
             work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
-            self.fill(node, &work.out, (kicked, whole), &mut work.jumps);
+            self.fill(node, &work.out, (kicked, made), &mut work.jumps);
+            if let Some(cross) = &self.turn {
+                self.turned(node, cross);
+            }
             node.work = crate::decide::COMPLEX * (work.local.work + work.out.work);
             node.lift.truncate(if lifted { work.out.lift.len() } else { 0 });
             if lifted {
@@ -1644,23 +1899,6 @@ impl Selected {
                         m.data.clear();
                         m.data.extend_from_slice(&f.data);
                     }
-                }
-            }
-            #[cfg(feature = "prof")]
-            if self.sw {
-                let g = if whole {
-                    node.generator.iter().find(|g| g.0 == 0).map(|g| g.1.clone())
-                } else {
-                    // A jump's photon's node holds no generator: the whole node's static slot at the point for S.
-                    let making = Making::node(false);
-                    self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
-                    work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
-                    let mut whole_node = self.template.clone();
-                    self.fill(&mut whole_node, &work.out, (false, true), &mut work.jumps);
-                    whole_node.generator.iter().find(|g| g.0 == 0).map(|g| g.1.clone())
-                };
-                if let Some(g) = g {
-                    self.turned(node, &g, whole);
                 }
             }
         });

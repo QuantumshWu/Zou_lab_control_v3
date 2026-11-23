@@ -843,8 +843,8 @@ fn the_cross_parts_against_their_gap() {
 
 /// The blocks cut by K's fast parts, the elements between them left out or turned (STEP item 2 of 2026-11-23, a
 /// measurement, the profiling build's: ignored, by name): on PGC3D, TET, tilt0 and tilt2 (V3E_SCENE one of them), the
-/// run whole, cut (the elements between the blocks left out) and turned (`Selected::turned`, second-order
-/// Schrieffer–Wolff), V3E_ATOMS atoms (4) of `starts` held from any jump, steps of τ = V3E_TAU µs (0.163) with one noise,
+/// run whole (unturned), cut (the elements between the blocks left out, `across_pairs` at 1e-2) and as the product makes
+/// it (# The parts turned: turned where its rule says so), V3E_ATOMS atoms (4) of `starts` held from any jump, steps of τ = V3E_TAU µs (0.163) with one noise,
 /// each on its own model throughout: every 20 µs to V3E_UNTIL µs (100) the largest difference of a state's populations
 /// |ψ_a|²/‖ψ‖² from the whole run's and of κ over the largest |κ|. Said "SPLITWALK".
 #[cfg(feature = "prof")]
@@ -855,9 +855,10 @@ fn the_split_s_walk() {
     for (name, request, keep) in scenes().into_iter().filter(|(n, ..)| ["PGC3D", "TET", "tilt0", "tilt2"].contains(n)) {
         let whole = run_of(&request, &keep);
         let mut cut = run_of(&request, &keep);
-        let pairs = cut.split_for_test(false);
-        let mut turned = run_of(&request, &keep);
-        turned.split_for_test(true);
+        let pairs = cut.split_for_test();
+        crate::model::selected::TURNING.with(|t| t.set(true));
+        let turned = run_of(&request, &keep);
+        crate::model::selected::TURNING.with(|t| t.set(false));
         eprintln!("SPLITWALK {name}: pairs {pairs:?}, blocks whole {:?}, cut {:?}", whole.blocks().iter().map(Vec::len).collect::<Vec<_>>(), cut.blocks().iter().map(Vec::len).collect::<Vec<_>>());
         let from = starts(&whole, request.temperature_uk, atoms);
         let runs = [&whole, &cut, &turned];

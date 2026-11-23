@@ -450,6 +450,27 @@ impl Plan {
         &self.parts
     }
 
+    /// The bound over the reach of how far apart the varying direct diagonal entries of the K states `a` and `b` can
+    /// move (model/selected.rs, # The parts turned): over H's pieces' direct slow entries on the diagonal whose term's
+    /// factor varies (the tweezer's intensity, a Gaussian beam's), per term and coefficient |scale| times the
+    /// coefficient's largest (`coefficients`) times |v_aa − v_bb|, summed.
+    pub(crate) fn diagonal_spread(&self, a: usize, b: usize, coefficients: &[f64]) -> f64 {
+        let mut per: BTreeMap<(usize, u32, u32), [C64; 2]> = BTreeMap::new();
+        for p in 0..self.hamiltonian {
+            for (e, _) in &self.direct[p] {
+                let (f, _) = self.terms[p][e.term as usize];
+                if !self.varying[f] || e.row != e.col || (e.row as usize != a && e.row as usize != b) {
+                    continue;
+                }
+                let x = per.entry((p, e.term, e.coefficient)).or_insert([C64::ZERO; 2]);
+                x[usize::from(e.row as usize == b)] += e.value;
+            }
+        }
+        per.iter()
+            .map(|(&(p, t, c), v)| self.terms[p][t as usize].1.abs() * if c == 0 { 1.0 } else { coefficients[c as usize] } * (v[0] - v[1]).abs())
+            .sum()
+    }
+
     /// K's sideband parts (`Block::sideband`): their blocks' indices.
     pub(crate) fn sidebands(&self) -> Vec<usize> {
         (0..self.blocks.len()).filter(|&b| self.blocks[b].sideband.is_some()).collect()
