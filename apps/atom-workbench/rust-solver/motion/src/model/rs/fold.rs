@@ -445,6 +445,11 @@ impl Plan {
         self.blocks.iter().map(|b| (b.rows.len(), b.sideband.is_none())).collect()
     }
 
+    /// K's states' fast parts (`Sectors::state` on the folding coordinates), in K's order.
+    pub(crate) fn parts(&self) -> &[[i64; 2]] {
+        &self.parts
+    }
+
     /// K's sideband parts (`Block::sideband`): their blocks' indices.
     pub(crate) fn sidebands(&self) -> Vec<usize> {
         (0..self.blocks.len()).filter(|&b| self.blocks[b].sideband.is_some()).collect()
