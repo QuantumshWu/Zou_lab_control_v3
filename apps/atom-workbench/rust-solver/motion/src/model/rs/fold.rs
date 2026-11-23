@@ -34,6 +34,10 @@ use crate::floquet::Sectors;
 /// The folded blocks tabled in the tweezer's intensity (fold_table.rs).
 #[path = "fold_table.rs"]
 pub(crate) mod table;
+/// OLDNEW's prototype: the contraction off tables of pair products (tests alone).
+#[cfg(test)]
+#[path = "fold_pairs.rs"]
+pub(crate) mod pairs;
 use crate::linalg::{self, C64, Mat};
 use crate::scene::Key;
 use crate::units::UNIT_ROUNDOFF;
