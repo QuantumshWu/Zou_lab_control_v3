@@ -2435,12 +2435,15 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
             return Ok(Attempted::Chose(made));
         }
         eprint!("{}", made.report.iter().map(|l| format!("  注：{l}\n")).collect::<String>());
-        // The ledger as it was but the flag of an error not measured, with what the pilot's check flagged since.
-        let flagged = std::mem::replace(&mut context.ledger, clean).flagged;
-        if let Some(f) = flagged {
-            for part in f.split('；').filter(|p| *p != unmeasured()) {
-                context.ledger.flag(part.to_string());
-            }
+        // The ledger as it was but the flag of an error not measured, with what the pilot's check flagged since: the
+        // flags past the clean ledger's own, that one taken out whole. (`Ledger::flag` joins flags with '；', and that
+        // flag's own text holds one: until 2026-11-23 the flags were split there and each compared with it, which never
+        // matched -- every product whose pilot chose G kept "模型误差尚未测得", and the clean ledger's own flags twice.)
+        let flagged = std::mem::replace(&mut context.ledger, clean).flagged.unwrap_or_default();
+        let own = context.ledger.flagged.clone().unwrap_or_default();
+        let since = flagged.strip_prefix(own.as_str()).unwrap_or(&flagged).replacen(&unmeasured(), "", 1);
+        for part in since.split('；').filter(|p| !p.is_empty()) {
+            context.ledger.flag(part.to_string());
         }
         read = pilot_reads(&pilot_refs, &scales, Some(&made), &times, &context.fixed.escape);
         choice = Some(made);
