@@ -285,6 +285,14 @@ fn origin(text: &str) -> Origin { if text == "operator" || text.is_empty() { Ori
 
 fn refused(message: String) -> zlc_plugin_host::CallError { zlc_plugin_host::CallError::new(zlc_plugin_host::ErrorKind::Refused, message) }
 
+/// A call its plugin's code did not answer (PLUGIN_PROTOCOL §7): refused before it ran (its
+/// instance's queue full, the instance still releasing), expired or timed out, its channel lost
+/// or closing. Any other failure is the code's own answer.
+fn unanswered(error: &zlc_plugin_host::CallError) -> bool {
+    use zlc_plugin_host::ErrorKind::{Cancelled, Lost, Refused, Timeout};
+    matches!(error.kind, Refused | Timeout | Lost | Cancelled)
+}
+
 /// `run.figure` (PLUGIN_PROTOCOL §5): the run's figure archive, and its image
 /// when asked, written inside its run directory; `{archive, image}`.
 /// A path a run names, inside its run directory (relative ones are taken from it).
@@ -731,8 +739,11 @@ impl Plugins for Builtin {
             }
         }
         let instance = instance.to_owned();
-        let started = self.spawn("query", move |host| Event::Answered { ticket,
-            result: host.call(&instance, "query", params, CALL).map(|reply| reply.value).map_err(|error| error.to_string()) });
+        let started = self.spawn("query", move |host| match host.call(&instance, "query", params, CALL) {
+            Ok(reply) => Event::Answered { ticket, result: Ok(reply.value) },
+            Err(error) if unanswered(&error) => Event::Unanswered { ticket, error: error.to_string() },
+            Err(error) => Event::Answered { ticket, result: Err(error.to_string()) },
+        });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
     fn call(&mut self, instance: &str, ticket: u64, op: &str, params: &Value) {
