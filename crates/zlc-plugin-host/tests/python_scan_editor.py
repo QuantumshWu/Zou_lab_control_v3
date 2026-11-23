@@ -30,6 +30,15 @@ class Reads:
         return (TunableField(field, 1.5, True, ('frequency',)),)
 
 
+class Counts:
+    """A device whose knob is an int field in hertz (no device in the tree has one)."""
+    role = 'counter'
+
+    def tunable_fields(self):
+        field = AuthoringField('frequency', 'int', 'Frequency', None, minimum=0, maximum=1_000_000, unit='Hz')
+        return (TunableField(field, 1000, True, ('frequency',)),)
+
+
 class Fails:
     role = 'rigol'
 
@@ -106,6 +115,17 @@ class ScanEditorFacts(unittest.TestCase):
         self.assertEqual(bind_plan(played, ports), ports)
         self.assertEqual(plan_from_authored(json.dumps(plan)).axes[0].values, (1.0, 1.5, 2.0, 2.5, 3.0),
                          'a draft read without its ports is the plan as written')
+
+    def test_an_int_field_read_in_another_unit_keeps_its_whole_numbers(self):
+        port = 'device:counter:frequency'
+        own, = scan_ports_for_devices({'counter': Counts()})
+        start, = scan_ports_for_devices({'counter': Counts()}, units={port: 'kHz'})
+        self.assertEqual((own.unit, own.grid), ('Hz', PortGrid(1.0)))
+        self.assertEqual((start.unit, start.grid), ('kHz', PortGrid(0.001)), 'one hertz, read in kHz')
+        plan = json.dumps({'axes': [{'port': port, 'unit': 'kHz', 'mode': 'values', 'value_text': '1.0004, 2.5', 'values': []}]})
+        # The editor reads the knob in its own unit, a Start in the plan's: both play 1 kHz and 2.5 kHz.
+        self.assertEqual(plan_from_authored(plan, (own,)).axes[0].values, (1.0, 2.5))
+        self.assertEqual(plan_from_authored(plan, (start,)).axes[0].values, (1.0, 2.5))
 
 
 if __name__ == '__main__':

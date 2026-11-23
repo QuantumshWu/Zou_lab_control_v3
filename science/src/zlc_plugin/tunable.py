@@ -54,6 +54,23 @@ def read_tunable_in_unit(device: Any, name: str, unit: str = "") -> Any:
     return convert_tunable_field(field, unit)
 
 
+def convert_step(step: float, source: str, target: str) -> float | None:
+    """A step -- a difference -- in another spelling, exactly: where the two differ
+    by a factor (Hz and MHz); None where a level is a power (dBm and mW), which
+    has no constant step.  The registry's conversion types decide (converting 0
+    can itself fail for W -> dBm)."""
+    source, target = source or "1", target or "1"
+    if source == target:
+        return step
+    origin, destination = DEFAULT_UNITS.resolve(source), DEFAULT_UNITS.resolve(target)
+    own_family, _ = DEFAULT_UNITS.family_and_prefix(origin)
+    target_family, _ = DEFAULT_UNITS.family_and_prefix(destination)
+    linear = own_family == target_family or (
+        isinstance(origin.conversion, Scaled) and isinstance(destination.conversion, Scaled)
+    )
+    return _converted(step, source, target) if linear else None
+
+
 def convert_tunable_field(field: Any, unit: str) -> Any:
     """Re-spell an ordinary field, including its step, through one scalar path.
 
@@ -68,19 +85,7 @@ def convert_tunable_field(field: Any, unit: str) -> Any:
     def converted(value):
         return None if value is None else _converted(value, source, target)
 
-    # A step is a difference: it is read in the other spelling only where the two
-    # differ by a factor (Hz and MHz), not where a level is a power (dBm and mW).
-    step = field.metadata.step
-    if step is not None:
-        origin, destination = DEFAULT_UNITS.resolve(source), DEFAULT_UNITS.resolve(target)
-        own_family, _ = DEFAULT_UNITS.family_and_prefix(origin)
-        target_family, _ = DEFAULT_UNITS.family_and_prefix(destination)
-        linear = own_family == target_family or (
-            isinstance(origin.conversion, Scaled) and isinstance(destination.conversion, Scaled)
-        )
-        # Testing converted(0) can itself fail for W -> dBm. The registry's
-        # conversion types decide whether a constant step exists.
-        step = converted(step) if linear else None
+    step = None if field.metadata.step is None else convert_step(field.metadata.step, source, target)
     return replace(
         field,
         metadata=replace(field.metadata, unit=target,
@@ -176,4 +181,4 @@ def in_units(device: Any, record: Any, units: Mapping[str, str] | None) -> Any:
     return {**record, "values": values, "units": recorded}
 
 
-__all__ = ["convert_tunable_field", "convert_tunable_value", "in_units", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]
+__all__ = ["convert_step", "convert_tunable_field", "convert_tunable_value", "in_units", "read_tunable_in_unit", "refresh_tunable_fields", "reports_settings", "snapshot", "tune_in_unit"]

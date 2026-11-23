@@ -35,6 +35,7 @@ from numbers import Real
 from zlc_data.units import DEFAULT_UNITS, VoltageIntoLoad, format_quantity
 from zlc_durable import strict_json_loads
 from zlc_plugin.services import call as native
+from zlc_plugin.tunable import convert_step
 
 from zlc_atom.authoring import TunableField, read_tunable_in_unit
 from zlc_atom.nodes._framework.descriptor import (
@@ -301,9 +302,6 @@ def unscannable_api_ports(description: Mapping[str, object]) -> dict[str, str]:
 #: Between a device's name and its field's in a device port's label ("Trap RF · CH1 Power").
 DEVICE_LABEL_SEPARATOR = " · "
 
-#: The grid of a device's ``int`` field, in its own unit: whole numbers.
-_WHOLE_NUMBERS = PortGrid(1.0)
-
 
 def device_port_label(device: str, field: str) -> str:
     """What a device port is called wherever it is shown: the name Device
@@ -339,9 +337,10 @@ def scan_ports_for_devices(
     ``units``, picked in Device Control), else the field's own declared
     unit -- an RF frequency axis publishes hertz; its label names the device
     by its ``role`` and the knob by its label; it stands at the device's
-    reading, in that unit.  An ``int`` field takes whole numbers; any other
-    takes any value within its bounds (a field's ``step`` is how far a
-    stepper moves it, not a grid its values lie on).
+    reading, in that unit.  An ``int`` field takes whole numbers of its own
+    unit, its grid one of them read in the port's unit (none where a level
+    reads as a power); any other takes any value within its bounds (a field's
+    ``step`` is how far a stepper moves it, not a grid its values lie on).
     """
 
     ports: list[ScanPort] = []
@@ -358,6 +357,8 @@ def scan_ports_for_devices(
             if not isinstance(tunable, TunableField):
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
+            # An int field takes whole numbers of its own unit: one of them is its grid's step.
+            whole, own_unit = field.value_type == "int", field.unit or ""
             port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
             selected_unit = (units or {}).get(port) or dict(getattr(device, "units", None) or {}).get(field.name)
             if selected_unit and selected_unit != field.unit:
@@ -370,6 +371,7 @@ def scan_ports_for_devices(
             if not tunable.live_write or tunable.dependency_group != (field.name,):
                 continue
             reading = tunable.current
+            step = convert_step(1.0, own_unit, field.unit or "") if whole else None
             ports.append(
                 ScanPort(
                     port,
@@ -380,7 +382,7 @@ def scan_ports_for_devices(
                     current=float(reading) if isinstance(reading, Real) and not isinstance(reading, bool)
                     and math.isfinite(reading) else None,
                     display_unit=field.display_unit,
-                    grid=_WHOLE_NUMBERS if field.value_type == "int" else None,
+                    grid=None if step is None else PortGrid(step),
                 )
             )
     return tuple(ports)
