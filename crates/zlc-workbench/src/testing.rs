@@ -2671,6 +2671,39 @@ mod tests {
         assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"));
     }
 
+    /// Problem 4 as the operator met it: a running node whose draft names a file is edited and
+    /// Restart pressed at once, while the edit's read of the file is in flight. Restart stays offered,
+    /// the click waits, and once the read and the checks land the run makes way for one with the edit.
+    #[test]
+    fn a_restart_pressed_right_after_an_edit_goes_once_its_read_lands() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "player", "kind": "node", "label": "Player",
+            "parameters": [{"name": "pulse", "type": "str", "label": "Pulse", "default": ""}, {"name": "plan", "type": "text", "label": "Plan", "default": ""}],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": ["resolve_defaults", "editor_facts"],
+                     "devices": [{"capability": "sequencer.streamer", "argument": "sequencer", "protected_fields": []}],
+                     "workspace_resources": [{"field": "pulse", "contract": "zlc.pulse/1", "directory": "pulses", "suffixes": [".json"], "argument": "description"}]}}));
+        let (root, mut wb, calls, mut host) = rig("edit-restart", catalog);
+        std::fs::write(root.join("pulses").join("a.json"), b"{}").unwrap();
+        wb.add_resource_resolver("zlc.pulse/", std::sync::Arc::new(move |path: &std::path::Path| Ok(json!({"read": path}))));
+        add_open_node(&mut wb, &mut host, json!({"type_id": "player", "values": {"pulse": "a.json"}}));
+        for kind in ["resolve_defaults", "editor_facts"] { answer_asked(&mut wb, &mut host, &calls, "player", kind, |_| Ok(json!({}))); }
+        apply(&mut wb, &mut host, "start_node", json!({"node": "player"})).unwrap();
+        event(&mut wb, Event::RunStarted { run: "player#1".into() }, &mut host);
+        let row = |wb: &Workbench| wb.node_row(wb.node("player").unwrap(), &[]);
+        wb.apply("edit_node", &json!({"node": "player", "values": {"plan": "x"}}), &Origin::Operator, 5, &mut host);
+        let edited = wb.take_replies().pop().unwrap().1.unwrap();
+        assert!(wb.node("player").unwrap().reading.is_some(), "the edit reads the file again");
+        assert_eq!(row(&wb)["can_start"], true, "Restart stays offered: {}", row(&wb)["issues"]);
+        wb.apply("start_node", &json!({"node": "player", "expected_draft_revision": edited["draft_revision"]}), &Origin::Operator, 6, &mut host);
+        assert_eq!(wb.take_replies().pop().unwrap().1.unwrap()["phase"], "checking");
+        settle(&mut wb, &mut host);
+        for kind in ["resolve_defaults", "editor_facts"] { answer_asked(&mut wb, &mut host, &calls, "player", kind, |_| Ok(json!({}))); }
+        assert_eq!(count(&calls, "stop player#1"), 1, "the run makes way for the Restart");
+        event(&mut wb, Event::RunFinished { run: "player#1".into(), outcome: "stopped".into(), error: None, generation: None }, &mut host);
+        let run = calls.borrow().1.last().cloned().unwrap();
+        assert_eq!((run.run.as_str(), &run.values["plan"]), ("player#2", &json!("x")));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());
@@ -3230,7 +3263,7 @@ mod tests {
     }
 
     /// The files a draft names are read off the turn at each boundary (a change, a Start): its
-    /// row says so meanwhile, and a Start waits for its own read.
+    /// row keeps Start offered meanwhile, and a Start waits for its own read.
     #[test]
     fn a_draft_reads_the_files_it_names_off_the_turn_and_a_start_reads_them_again() {
         let mut catalog = catalog();
@@ -3249,7 +3282,8 @@ mod tests {
         wb.apply("add_node", &json!({"type_id": "player", "values": {"pulse": "a.json"}}), &Origin::Operator, 1, &mut host);
         wb.on_event(Event::Opened { instance: node_instance("player"), working_point: Value::Null }, &mut host);
         let row = |wb: &Workbench| wb.node_row(wb.node("player").unwrap(), &[]);
-        assert!(row(&wb)["issues"].as_array().unwrap().contains(&json!(crate::logic::READING)), "{}", row(&wb));
+        assert!(wb.issues(wb.node("player").unwrap(), &[]).contains(&crate::logic::READING.to_owned()));
+        assert_eq!(row(&wb)["can_start"], true, "{}", row(&wb));
         let (works, _) = handed();
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing is read on the turn");
         for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, &mut host); }

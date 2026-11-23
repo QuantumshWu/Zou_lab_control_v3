@@ -1999,11 +1999,12 @@ impl Workbench {
 
     pub(crate) fn node_row(&self, node: &Node, signals: &[SignalInfo]) -> Value {
         let descriptor = self.catalog.get(&node.type_id);
-        // A draft its plugin is still starting for, or checking, shows what the newest answers it
-        // has say (its type's for a new node); a Start waits for its own (v2 answered at once).
+        // A draft its plugin is still starting for, checking, or reading the files of, shows what the
+        // newest answers it has say (its type's for a new node), Start offered; a Start waits for its
+        // own (v2 answered at once).
         let known = descriptor.is_some_and(|item| item.node().queries.iter()
             .filter(|name| DRAFT_QUERIES.contains(&name.as_str()) && ![ADMIT_SOURCE, ADMIT].contains(&name.as_str())).all(|name| node.answers.contains_key(name)));
-        let issues: Vec<String> = self.issues(node, signals).into_iter().filter(|issue| !(known && (issue == CHECKING || issue.ends_with(STARTING_PLUGIN)))).collect();
+        let issues: Vec<String> = self.issues(node, signals).into_iter().filter(|issue| !(known && (issue == CHECKING || issue == READING || issue.ends_with(STARTING_PLUGIN)))).collect();
         let run = node.run.as_deref().and_then(|id| self.run(id));
         let active = run.filter(|run| !run.terminal());
         let edited = node.running.as_ref().is_some_and(|running| *running != node.draft);
