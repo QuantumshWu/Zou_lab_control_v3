@@ -393,41 +393,9 @@ fn oldnew_pairs() {
     }
 }
 
-/// K split into its fast parts (a check of item D: what the step costs and changes when the static F = 1 ↔ F = 2
-/// elements are left out): the run's blocks set to K's fast parts (the states of one fast part one block) as `judge`
-/// sets judged blocks, every H place across two blocks out of the layout and the decay's products recut.
+/// K split into its fast parts within the run's blocks (`Selected::split_by_parts`).
 fn split_by_parts(run: &mut Selected) -> Vec<Vec<usize>> {
-    let n = run.rs.keep.len();
-    let parts = run.rs.plan().parts().to_vec();
-    // Within the run's own exact blocks (tilt0's Δm parity): a state's block its old block and its fast part.
-    let mut blocks: Vec<Vec<usize>> = Vec::new();
-    let mut seen: Vec<(usize, [i64; 2])> = Vec::new();
-    for a in 0..n {
-        let key = (run.block_of[a], parts[a]);
-        match seen.iter().position(|p| *p == key) {
-            Some(i) => blocks[i].push(a),
-            None => {
-                seen.push(key);
-                blocks.push(vec![a]);
-            }
-        }
-    }
-    run.blocks.clone_from(&blocks);
-    for (b, states) in blocks.iter().enumerate() {
-        for &s in states {
-            run.block_of[s] = b;
-        }
-    }
-    let block_of = run.block_of.clone();
-    for list in run.tables.h.iter_mut() {
-        for e in list.iter_mut().filter(|e| block_of[e.0 as usize / n] != block_of[e.0 as usize % n]) {
-            *e = (e.0, u32::MAX, u32::MAX);
-        }
-    }
-    run.decay_terms();
-    let id = run.id;
-    POOL.with(|p| p.borrow_mut().retain(|x| x.0 != id));
-    blocks
+    run.split_by_parts()
 }
 
 /// OLDNEW item D: per scene of OLDNEW_SPLIT_SCENES (`name=model@tau`, default PGC3D, TET and tilt2 on their ground
@@ -640,5 +608,288 @@ fn oldnew_tol() {
             eprintln!("OLDNEW-TOL {name}{} ε {eps:.0e}: a step {:.1} µs ({:.2} of the round-off's); against the round-off's end κ {mk:.2e}, ψ {mp:.2e}, ln N {mn:.2e}; {moved} steps whose jumps moved", if split { " split" } else { "" }, te / k, te / t0);
         }
         set(0.0);
+    }
+}
+
+/// OLDNEW's scheme check (the coordinator's 11-23 follow-up): on the model split by K's fast parts (OLDNEW_SCHEME_WHOLE
+/// for the whole one), per scene of OLDNEW_SCHEME_SCENES (`name=model@tau`) a walk of OLDNEW_STEPS (60) steps; per state
+/// and scheme of OLDNEW_SCHEMES (`fixed:m` a fixed rule of m Gauss nodes, `three` the generator at three nodes; the
+/// current scheme first) the step (the least of OLDNEW_REPEAT, 5), its end against the current scheme's, and its own error
+/// -- one step of τ against two of τ/2, and one of τ/2 against two of τ/4, by the scheme itself --: what the step check
+/// would read of it and its order.
+#[test]
+#[ignore]
+fn oldnew_scheme() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (steps, repeat) = (env("OLDNEW_STEPS", 60), env("OLDNEW_REPEAT", 5));
+    let list = std::env::var("OLDNEW_SCHEME_SCENES").unwrap_or_else(|_| "PGC3D=ground@0.4741346189956611".to_string());
+    let schemes: Vec<String> = std::iter::once("current".to_string()).chain(std::env::var("OLDNEW_SCHEMES").unwrap_or_else(|_| "fixed:1,fixed:2,fixed:3,three".to_string()).split(',').map(String::from)).collect();
+    let set = |scheme: &str| {
+        let (m, three) = match scheme.split_once(':') {
+            Some(("fixed", m)) => (m.parse().unwrap(), false),
+            _ => (0usize, scheme == "three"),
+        };
+        crate::step::FIXED_NODES.store(m, std::sync::atomic::Ordering::Relaxed);
+        crate::step::THREE_NODES.store(three, std::sync::atomic::Ordering::Relaxed);
+    };
+    let least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..repeat)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                f();
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for entry in list.split(',') {
+        let (name, rest) = entry.split_once('=').unwrap();
+        let (_, tau) = rest.split_once('@').unwrap();
+        let tau: f64 = tau.parse().unwrap();
+        let request = request_of(name);
+        let keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let mut run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let whole = std::env::var("OLDNEW_SCHEME_WHOLE").is_ok();
+        if !whole {
+            run.split_by_parts();
+        }
+        let chief = crate::solve::chief(&request);
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let attempt = |t: &Trajectory, tau: f64| Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &Anywhere));
+        set("current");
+        let mut states = Vec::new();
+        let mut t = Trajectory::new(&run, chief, [0.1, 0.2, 0.3], [-speed, 0.7 * speed, -1.2 * speed], 7, 203);
+        for _ in 0..steps {
+            states.push(t.clone());
+            let Ok(s) = attempt(&t, tau) else { break };
+            t = s.end;
+        }
+        let norm_psi = |psi: &[C64]| norm_sqr(psi).sqrt();
+        let dpsi = |x: &Trajectory, y: &Trajectory| {
+            let (nx, ny) = (norm_psi(&x.psi), norm_psi(&y.psi));
+            x.psi.iter().zip(y.psi.iter()).map(|(u, v)| (*u * (1.0 / nx) - *v * (1.0 / ny)).norm_sqr()).sum::<f64>().sqrt()
+        };
+        let dk = |x: &Trajectory, y: &Trajectory| (0..3).map(|c| (x.kappa[c] - y.kappa[c]).powi(2)).sum::<f64>().sqrt();
+        let dn = |x: &Trajectory, y: &Trajectory| ((norm_sqr(&x.psi)).ln() - (norm_sqr(&y.psi)).ln()).abs();
+        let jumps = |s: &crate::step::Step| s.made.iter().filter(|m| m.kick.is_some()).count();
+        let quiet = |s: &crate::step::Step| jumps(s) == 0;
+        // One step of h against two of h/2 by the scheme set, where none jumps: (|Δκ|, |Δψ|).
+        let doubling = |s: &Trajectory, h: f64| -> Option<(f64, f64)> {
+            let a = attempt(s, h).ok()?;
+            let h1 = attempt(s, 0.5 * h).ok()?;
+            let h2 = attempt(&h1.end, 0.5 * h).ok()?;
+            (quiet(&a) && quiet(&h1) && quiet(&h2)).then(|| (dk(&a.end, &h2.end), dpsi(&a.end, &h2.end)))
+        };
+        set("current");
+        let base: Vec<Option<crate::step::Step>> = states.iter().map(|s| attempt(s, tau).ok()).collect();
+        let mut t_current = 0.0;
+        for (i, scheme) in schemes.iter().enumerate() {
+            set(scheme);
+            let (mut te, mut mk, mut mp, mut mn, mut moved) = (0.0, 0.0f64, 0.0f64, 0.0f64, 0usize);
+            let (mut e1k, mut e1p, mut e2k, mut e2p, mut ratio_k, mut ratios) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize);
+            let (mut with, mut without, mut jumped) = (0.0, 0.0, 0usize);
+            for (s, b) in states.iter().zip(&base) {
+                let Ok(a) = attempt(s, tau) else { continue };
+                let x = least(&mut || {
+                    std::hint::black_box(attempt(s, tau).is_ok());
+                });
+                te += x;
+                if jumps(&a) > 0 {
+                    let mut q = s.clone();
+                    q.threshold = f64::MIN_POSITIVE;
+                    without += least(&mut || {
+                        std::hint::black_box(attempt(&q, tau).is_ok());
+                    });
+                    with += x;
+                    jumped += jumps(&a);
+                }
+                if let Some(b) = b {
+                    if jumps(&a) == jumps(b) {
+                        mk = mk.max(dk(&a.end, &b.end));
+                        mp = mp.max(dpsi(&a.end, &b.end));
+                        mn = mn.max(dn(&a.end, &b.end));
+                    } else {
+                        moved += 1;
+                    }
+                }
+                if let (Some(d1), Some(d2)) = (doubling(s, tau), doubling(s, 0.5 * tau)) {
+                    e1k = e1k.max(d1.0);
+                    e1p = e1p.max(d1.1);
+                    e2k = e2k.max(d2.0);
+                    e2p = e2p.max(d2.1);
+                    if d2.0 > 0.0 {
+                        ratio_k += (d1.0 / d2.0).log2();
+                        ratios += 1;
+                    }
+                }
+            }
+            let k = states.len().max(1) as f64;
+            if i == 0 {
+                t_current = te;
+            }
+            eprintln!(
+                "OLDNEW-SCHEME {name}{} tau {tau} {scheme}: a step {:.1} µs ({:.2} of the current scheme's); against the current scheme's end κ {mk:.2e}, ψ {mp:.2e}, ln N {mn:.2e} ({moved} steps' jumps moved); its own doubling error at τ κ {e1k:.2e}, ψ {e1p:.2e}, at τ/2 κ {e2k:.2e}, ψ {e2p:.2e}, the order log₂(τ-error/τ/2-error) {:.2} (mean over {ratios} states); a jump {:.1} µs ({jumped} jumps)",
+                if whole { "" } else { " split" },
+                te / k,
+                te / t_current,
+                ratio_k / ratios.max(1) as f64,
+                (with - without) / jumped.max(1) as f64
+            );
+        }
+        set("current");
+    }
+}
+
+/// OLDNEW item 2: the node's filling (`Selected::fill`) taken apart, its parts timed as it makes them (the least of
+/// OLDNEW_REPEAT, 7) at OLDNEW_POINTS (24) points of the centre's cloud: the photon classes zeroed and their channel
+/// elements put in, H's outputs put in the generator and its gradient, the decay's spherical components and their
+/// products; with their counts. And the middle's scattered light (`photons` + `Scattering::of_moments`) on a state.
+#[test]
+#[ignore]
+fn oldnew_fill() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (count, repeat) = (env("OLDNEW_POINTS", 24), env("OLDNEW_REPEAT", 7));
+    let list = std::env::var("OLDNEW_FILL").unwrap_or_else(|_| "PGC3D,TET,tilt0,tilt2".to_string());
+    let least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..repeat)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                f();
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for name in list.split(',') {
+        let request = request_of(name);
+        let keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let plan = run.rs.plan();
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let n = run.rs.keep.len();
+        let mut work = Work::default();
+        let making = Making::node(false);
+        let (mut t_whole, mut t_ch, mut t_h, mut t_decay, mut t_photons, mut t_moments) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut node = run.template.clone();
+        for i in 0..count {
+            let u = i as f64;
+            let r = [0.3 * (1.3 * u).sin(), 0.3 * (2.1 * u + 0.4).cos(), 1.0 * (0.7 * u + 1.1).sin()];
+            let kappa = [speed * (0.9 * u).sin(), speed * (1.7 * u).cos(), speed];
+            run.scene.point_into(r, kappa, &mut work.point);
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local, making);
+            work.out.contract(plan, &run.lab, &work.local, None, making);
+            let out = &work.out;
+            let jumps = &mut work.jumps;
+            t_whole += least(&mut || run.fill(&mut node, out, (false, true), jumps));
+            // (a) the classes zeroed and their channel elements put in.
+            t_ch += least(&mut || {
+                for c in node.classes.iter_mut() {
+                    for axis in c.axes.iter_mut() {
+                        for j in axis.iter_mut() {
+                            for e in j.elements.iter_mut() {
+                                (e.value, e.gradient, e.kick) = (C64::ZERO, [C64::ZERO; 3], C64::ZERO);
+                            }
+                        }
+                    }
+                }
+                for ((list, c), (_, _, which, _, _)) in run.tables.channels.iter().zip(&out.channels).zip(&run.lab.channel_outputs) {
+                    if *which == 1 {
+                        continue;
+                    }
+                    for (k, &(_, class, axis, jump, element)) in list.iter().enumerate() {
+                        let e = &mut node.classes[class as usize].axes[axis as usize][jump as usize].elements[element as usize];
+                        e.value += c.value[k];
+                        for (g, d) in e.gradient.iter_mut().zip(&c.gradient) {
+                            *g += d[k];
+                        }
+                    }
+                }
+            });
+            // (b) H's outputs into the generator and its gradient.
+            t_h += least(&mut || {
+                for (_, m) in node.generator.iter_mut() {
+                    m.data.fill(C64::ZERO);
+                }
+                for (_, g) in node.gradient.iter_mut() {
+                    for m in g.iter_mut() {
+                        m.data.fill(C64::ZERO);
+                    }
+                }
+                for (list, c) in run.tables.h.iter().zip(&out.h) {
+                    for (k, &(x, g, d)) in list.iter().enumerate() {
+                        if g == u32::MAX {
+                            continue;
+                        }
+                        let x = x as usize;
+                        node.generator[g as usize].1.data[x] += c.value[k];
+                        for (m, dg) in node.gradient[d as usize].1.iter_mut().zip(&c.gradient) {
+                            m.data[x] += dg[k];
+                        }
+                    }
+                }
+            });
+            // (c) the decay: the spherical components, then each product.
+            t_decay += least(&mut || {
+                jumps.clear();
+                for j in &run.tables.jumps {
+                    let at = jumps.len();
+                    jumps.resize(at + GROUND * j.cols.len(), C64::ZERO);
+                    let axes = &node.classes[j.class].axes;
+                    for (p, sources) in &j.elements {
+                        jumps[at + p] = sources.iter().map(|&(a, c, e, u)| u * axes[a][c].elements[e].value).sum();
+                    }
+                }
+                let half = C64::new(0.0, -0.5);
+                let mut from = 0;
+                for e in &run.tables.entries {
+                    let (mut re, mut im) = (0.0_f64, 0.0_f64);
+                    for &(l, r) in &run.tables.terms[from..e.end as usize] {
+                        let (x, y) = (jumps[l as usize].conj(), jumps[r as usize]);
+                        re = x.re.mul_add(y.re, (-x.im).mul_add(y.im, re));
+                        im = x.re.mul_add(y.im, x.im.mul_add(y.re, im));
+                    }
+                    from = e.end as usize;
+                    let p = C64::new(re, im);
+                    node.generator[e.forward.0 as usize].1.data[e.forward.1 as usize] += half * p;
+                    if e.back.0 != u32::MAX {
+                        node.generator[e.back.0 as usize].1.data[e.back.1 as usize] += half * p.conj();
+                    }
+                }
+            });
+            // The middle's scattered light on a state: the classes' amplitudes and their moments.
+            let psi = spread(n);
+            let mut list = Vec::new();
+            let values: Vec<f64> = run.read(|b| b.value.clone());
+            t_photons += least(&mut || {
+                std::hint::black_box(photons(&node, &values, 0.0, &psi, &mut list).len());
+            });
+            let moments: Vec<Moments> = photons(&node, &values, 0.0, &psi, &mut list).iter().map(|p| p.moments).collect();
+            t_moments += least(&mut || {
+                std::hint::black_box(Scattering::of_moments(&moments));
+            });
+        }
+        let k = count as f64;
+        let channel_elements: usize = run.tables.channels.iter().map(Vec::len).sum();
+        let h_elements: usize = run.tables.h.iter().map(Vec::len).sum();
+        let elements: usize = node.classes.iter().flat_map(|c| c.axes.iter().flatten().map(|j| j.elements.len())).sum();
+        eprintln!(
+            "OLDNEW-FILL {name}: the filling {:.1} µs = classes and channels {:.1} ({channel_elements} channel places) + H {:.1} ({h_elements} H places, {} beats) + decay {:.1} ({} components, {} products' terms); the middle's photons {:.1} µs ({} classes, {elements} elements) + moments {:.2} µs",
+            t_whole / k,
+            t_ch / k,
+            t_h / k,
+            node.generator.len(),
+            t_decay / k,
+            run.tables.jumps.iter().map(|j| j.elements.len()).sum::<usize>(),
+            run.tables.terms.len(),
+            t_photons / k,
+            node.classes.len(),
+            t_moments / k
+        );
     }
 }

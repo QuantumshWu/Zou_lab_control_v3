@@ -269,6 +269,11 @@ struct Decay {
     back: usize,
 }
 
+/// OLDNEW's check (tests alone): every run of ground states alone split by K's fast parts as it is made
+/// (`Selected::split_by_parts`), whole solves included.
+#[cfg(test)]
+pub(crate) static SPLIT_PARTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// A thread's buffers for the nodes and the readouts of one run (`Selected::node_into`, `Selected::rows`): the point,
 /// the fold's numbers, the contraction.
 #[derive(Default)]
@@ -629,9 +634,50 @@ impl Selected {
         };
         run.layout(&spherical);
         run.judge(split, (&spherical_plan, &spherical), drops);
+        // (OLDNEW's check, tests alone: a model of ground states alone split by K's fast parts within its blocks.)
+        #[cfg(test)]
+        if SPLIT_PARTS.load(std::sync::atomic::Ordering::Relaxed) && run.rs.keep.iter().all(|&s| s < GROUND) {
+            run.split_by_parts();
+        }
         run.tones();
         run.lift_tables();
         Ok(run)
+    }
+
+    /// OLDNEW's check (tests alone): the blocks cut by K's fast parts within the judged ones (F = 1 and F = 2 apart, the
+    /// static elements between them left out of the layout as `judge` leaves a judged block's), the decay's products recut.
+    #[cfg(test)]
+    pub(crate) fn split_by_parts(&mut self) -> Vec<Vec<usize>> {
+        let n = self.rs.keep.len();
+        let parts = self.rs.plan().parts().to_vec();
+        let mut blocks: Vec<Vec<usize>> = Vec::new();
+        let mut seen: Vec<(usize, [i64; 2])> = Vec::new();
+        for a in 0..n {
+            let key = (self.block_of[a], parts[a]);
+            match seen.iter().position(|p| *p == key) {
+                Some(i) => blocks[i].push(a),
+                None => {
+                    seen.push(key);
+                    blocks.push(vec![a]);
+                }
+            }
+        }
+        self.blocks.clone_from(&blocks);
+        for (b, states) in blocks.iter().enumerate() {
+            for &st in states {
+                self.block_of[st] = b;
+            }
+        }
+        let block_of = self.block_of.clone();
+        for list in self.tables.h.iter_mut() {
+            for e in list.iter_mut().filter(|e| block_of[e.0 as usize / n] != block_of[e.0 as usize % n]) {
+                *e = (e.0, u32::MAX, u32::MAX);
+            }
+        }
+        self.decay_terms();
+        let id = self.id;
+        POOL.with(|p| p.borrow_mut().retain(|x| x.0 != id));
+        blocks
     }
 
     /// The selection's report (stderr): P by levels and state by state, the states folded, the selection's notes (its

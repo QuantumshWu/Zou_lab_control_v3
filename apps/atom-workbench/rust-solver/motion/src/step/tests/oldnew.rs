@@ -186,6 +186,17 @@ fn oldnew_solve() {
     let name = std::env::var("OLDNEW_REQ").expect("OLDNEW_REQ");
     let request = request_of(&name);
     // OLDNEW's budget check: the quadrature and the cuts at a tolerance in place of the round-off (step.rs `QUAD_TOL`).
+    // And the scheme: a fixed rule of OLDNEW_FIXED_NODES nodes, three nodes a step (step.rs `FIXED_NODES`, `THREE_NODES`).
+    if let Ok(x) = std::env::var("OLDNEW_FIXED_NODES") {
+        crate::step::FIXED_NODES.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var("OLDNEW_THREE_NODES").is_ok() {
+        crate::step::THREE_NODES.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // And K split by its fast parts in every run of ground states alone (model/selected.rs `SPLIT_PARTS`).
+    if std::env::var("OLDNEW_SPLIT_PARTS").is_ok() {
+        crate::model::selected::SPLIT_PARTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // And the folded blocks' Doppler series truncated (rs/fold.rs `DOPPLER_ORDERS`).
     if let Ok(x) = std::env::var("OLDNEW_DOPPLER_ORDERS") {
         crate::model::rs::fold::DOPPLER_ORDERS.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);

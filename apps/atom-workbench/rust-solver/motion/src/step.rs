@@ -584,6 +584,14 @@ use crate::units::{rounding, UNIT_ROUNDOFF};
 #[cfg(test)]
 pub(crate) static QUAD_TOL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// OLDNEW's scheme checks (tests alone): the quadrature a fixed rule of FIXED_NODES Gauss–Legendre nodes on one panel,
+/// no cut (0, the default: the rule laid to the tolerance); THREE_NODES the generator at three nodes a step on a cluster
+/// of ground states too (false: one node, # One node a step).
+#[cfg(test)]
+pub(crate) static FIXED_NODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static THREE_NODES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The tolerance the quadrature's rule, the quotient's bandwidth and the cuts are laid to: the unit round-off (a check's
 /// own where set, tests alone: `QUAD_TOL`).
 #[inline]
@@ -1428,6 +1436,13 @@ fn resolved_by_recurrence(nu: f64, width: f64, least: usize, degree: usize, inte
 /// its panels' m, each m(n) made once (`fewest` is a recurrence of some κ terms; the two costs ask the same n again,
 /// and until 2026-11-21 the panels made their m once more: 2 to 3 % of a step, PGC3D, R4, tilt0).
 fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> (usize, usize) {
+    #[cfg(test)]
+    {
+        let m = FIXED_NODES.load(std::sync::atomic::Ordering::Relaxed);
+        if m > 0 {
+            return (1, m);
+        }
+    }
     let (n, m, _) = arranged(width, |w| fewest(bandwidth, w, nodes, degree), |m| m as f64, ends);
     (n, m)
 }
@@ -1714,6 +1729,13 @@ impl Groups {
     /// says so (`gather`).
     fn choose(&mut self, picture: &mut Picture, from: f64, h: f64, (still, tones): (bool, usize), ends: &mut dyn FnMut(&mut Picture) -> bool) -> (usize, usize) {
         self.plain();
+        #[cfg(test)]
+        {
+            let m = FIXED_NODES.load(std::sync::atomic::Ordering::Relaxed);
+            if m > 0 {
+                return (1, m);
+            }
+        }
         let n = picture.states();
         let width = h - from;
         let mut ended: Option<bool> = None;
@@ -3680,6 +3702,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let shape = self.model.cluster(cluster);
             shape.ground == shape.states.len()
         };
+        #[cfg(test)]
+        let ground = ground && !THREE_NODES.load(std::sync::atomic::Ordering::Relaxed);
         march.progress = Progress { states: n, still: generator.still(), held: ground, ..Progress::default() };
         scratch.groups.work = 0.0;
         let mut launched = Some(along.turned(&march.state.psi, march.u, true));
