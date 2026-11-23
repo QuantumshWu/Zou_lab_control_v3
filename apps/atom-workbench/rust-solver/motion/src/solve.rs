@@ -2397,6 +2397,10 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     } else {
         first_rung
     };
+    // (A measurement's, the profiling build's alone: ATOM_PROF_TAU=x starts the ladder at the step x -- with
+    // ATOM_PROF_FORCE=1 the check stands it whatever it reads.)
+    #[cfg(feature = "prof")]
+    let first_rung = std::env::var("ATOM_PROF_TAU").ok().and_then(|x| x.parse::<f64>().ok()).map_or(first_rung, |x| end / (2. * (end / (2. * x)).round()));
     // Whether the rung above a step is a rung of the ladder (`first_rung`'s test at twice the step): the check then
     // reads that rung on a third level, at 4τ (`settle`): a cell of the Brownian path.
     let above = |tau: f64| 4. * tau <= end && stable(2. * tau, frequency, kick) && stable(4. * tau, frequency, kick);
@@ -3477,11 +3481,27 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         let upward = !levels.above_pilot && sides.iter().any(|&side| side);
         let ordered = levels.ordered(tau, members, times, window, &context.scales);
         let verdict = verdict(&read, levels.above.as_ref(), ordered, pilot, upward);
+        #[cfg(feature = "prof")]
+        let verdict = if std::env::var("ATOM_PROF_FORCE").is_ok_and(|x| x == "1") && verdict != Verdict::Unread { Verdict::Stands } else { verdict };
         crate::prof::note(|| {
             let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
             let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
             let halved = |level: &[Part]| level.iter().fold((0, 0.), |(n, f), p| (n + p.counts.halved.steps, f + p.counts.halved.time / level.iter().map(|q| q.counts.time).sum::<f64>()));
             format!("ladder tau {} pilot {pilot} members {members} groups {} companion {:?} verdict {verdict:?} ordered {ordered:?} screen {} halved (steps, share of time) {:?} / {:?} factor {:.5} looks [{}] above [{}]", context.tau, numbers.len(), levels.companion, screen(&read), halved(&levels.fine), halved(&levels.coarse), { let (fine, coarse) = levels.paired(); amplified(if levels.companion == Companion::Double { coarse } else { fine }) }, looks.join(" "), above.join(" "))
+        });
+        // (The profiling build's: the worst looks of the own read and of the third, each by its quantity and window.)
+        crate::prof::note(|| {
+            let [sp, st] = step_bound();
+            let worst = |b: &Between| -> String {
+                let mut all: Vec<(f64, String)> = b.reads.iter().enumerate().flat_map(|(q, reads)| reads.iter().enumerate().map(move |(w, r)| (q, w, r))).filter(|(_, _, r)| r.value.is_finite()).map(|(q, w, r)| {
+                    let quantity = Quantity::of(q);
+                    let bound = if quantity.shown() { sp * sp } else { st * st };
+                    (r.value / bound, format!("{quantity:?} [{:.1}, {:.1}] {:.2} ± {:.2}", b.windows[w][0], b.windows[w][1], r.value / bound, r.spread.error / bound))
+                }).collect();
+                all.sort_by(|a, b| b.0.total_cmp(&a.0));
+                all.iter().take(4).map(|x| x.1.clone()).collect::<Vec<_>>().join("; ")
+            };
+            format!("ladder worst tau {} members {members}: own {} | above {}", context.tau, worst(&read), levels.above.as_ref().map_or(String::new(), |a| worst(a)))
         });
         // A read of which no look reads decides nothing and prices nothing (`Verdict::Unread`): the check ends unable to
         // see where it is.
