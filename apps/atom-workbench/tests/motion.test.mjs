@@ -17,7 +17,7 @@ import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/d
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
-import {exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
+import {approximationTotal,exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
 import {definitionNotes,modelNotes} from '../dist/js/atom-workbench/src/model-notes.js';
 import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 import {SEMICLASSICAL_POPULATION_TARGET} from '../dist/js/atom-workbench/src/solver-types.js';
@@ -26,7 +26,7 @@ import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-w
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 import {populationChart,populationColor} from '../dist/js/atom-workbench/src/population-chart.js';
 import {LOSS_CURVE,recommendedCurves,withPopulationGroups} from '../dist/js/atom-workbench/src/population-selection.js';
-import {TEMPERATURE_WINDOW,TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
+import {TEMPERATURE_WINDOW,TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart,velocitySeries} from '../dist/js/atom-workbench/src/motion-chart.js';
 import {MOTION_DIAGNOSTICS,motionBlock,motionResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
 import {readFileSync,readdirSync} from 'node:fs';
@@ -275,6 +275,14 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   const result=readMotion(),m=result.motion,block=motionBlock(3);
   assert.deepEqual([m.temperatureUK,m.temperatureErrorUK],[[block.temperatureUK.x,block.temperatureUK.y,block.temperatureUK.z],[[1.5,1.5,1.5],[1.5,1.5,1.5],[1.5,1.5,1.5]]]);
   assert.deepEqual([m.temperatureTotalUK,m.temperatureTotalErrorUK,m.trapFrequencyKHz,m.classical],[[31,31,31],[.9,.9,.9],[100.5,100.5,19.3],[true,true,false]]);
+  // The held atoms' mean velocity and push per axis, each with its standard error and its target.
+  assert.deepEqual([m.meanVelocityMps,m.meanVelocityErrorMps[2],m.meanVelocityTargetMps[0]],[[block.meanVelocityMps.x,block.meanVelocityMps.y,block.meanVelocityMps.z],[.0004,.0004,.0004],[.032,.032,.032]]);
+  // The push and its target have none at t = 0 (no window there).
+  assert.deepEqual([m.pushMps2,m.pushErrorMps2[2],m.pushTargetMps2[1]],[[[null,0,0],[null,0,0],[null,30,30]],[null,2,2],[null,6.4,6.4]]);
+  // The details' 近似误差 line: the four totals against their targets; the velocity's and the push's {0, 0} are no account.
+  assert.equal(approximationTotal(m.approximations),'布居 0.21%（目标 5%），温度 0.3%（目标 10%），平均速度 0.0011 m/s（目标 0.032 m/s），推力 0.4 m/s²（目标 6.4 m/s²）；未超出');
+  const unbooked=readMotion(d=>{d.diagnostics.approximations.totals.velocity={error:0,target:0};d.diagnostics.approximations.totals.push={error:0,target:0};}).motion;
+  assert.equal(approximationTotal(unbooked.approximations),'布居 0.21%（目标 5%），温度 0.3%（目标 10%），平均速度无账，推力无账；未超出');
   assert.deepEqual([m.device,m.deviceNote,m.approximations],[MOTION_DIAGNOSTICS.device,MOTION_DIAGNOSTICS.deviceNote,MOTION_DIAGNOSTICS.approximations]);
   assert.equal(result.populationAccuracy.requestedTolerance,.05);assert.equal(result.mean.status,'not-requested');
   const few=readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;d.motion.temperatureTotalErrorUK[1]=null;}).motion;
@@ -288,6 +296,10 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['a total short of a sample',d=>{d.motion.temperatureTotalUK.pop();}],['a negative total error',d=>{d.motion.temperatureTotalErrorUK[1]=-.1;}],
     ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
+    ['no push',d=>{delete d.motion.pushMps2;}],['no velocity error',d=>{delete d.motion.meanVelocityErrorMps;}],['a push error below zero',d=>{d.motion.pushErrorMps2.z[1]=-1;}],
+    ['a velocity target of zero',d=>{d.motion.meanVelocityTargetMps.x[0]=0;}],['a push target of zero',d=>{d.motion.pushTargetMps2.z[1]=0;}],['a push target short of a sample',d=>{d.motion.pushTargetMps2.y.pop();}],
+    ['a push that is no number',d=>{d.motion.pushMps2.x[2]='0';}],['a mean velocity that is none',d=>{d.motion.meanVelocityMps.y[1]=null;}],
+    ['no push total',d=>{delete d.diagnostics.approximations.totals.push;}],['no velocity total',d=>{delete d.diagnostics.approximations.totals.velocity;}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
     ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],['items not from the largest down',d=>{d.diagnostics.approximations.items.reverse();}],
     ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],['an empty ledger note',d=>{d.diagnostics.approximations.note='';}],
@@ -399,6 +411,35 @@ test('温度与 n̄: a line per axis and the total temperature apart from them; 
   const reference=result.motion.classical.map(inside=>!inside);
   assert.deepEqual(bands(seriesChart(result.timesUs,[temperature,occupation],'ms',{reference})).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,176],[599.5,778,212,300]]);
   assert.deepEqual(bands(chart),[]);
+});
+
+test('速度与推力: ⟨v⟩ and the push a line per axis on an axis through zero, each in the unit that fits it; the readout says value ± 误差',()=>{
+  const result=readMotion(),[velocity,push]=velocitySeries(result.motion),chart=seriesChart(result.timesUs,[velocity,push],'ms');
+  assert.deepEqual(velocity.lines.map(l=>[l.name,l.ink,l.width]),[['⟨v⟩（x 轴）','#517FA6',undefined],['⟨v⟩（y 轴）','#B17D4B',undefined],['⟨v⟩（z 轴）','#568C79',undefined]]);
+  assert.deepEqual(push.lines.map(l=>l.name),['a（x 轴）','a（y 轴）','a（z 轴）']);
+  // ⟨v⟩ at most 1.5 cm/s: in cm/s; the push 30 m/s²: in m/s².
+  assert.deepEqual([velocity.unit.name,velocity.title,push.unit.name,push.title],['cm/s','平均速度 ⟨v⟩ / cm/s','m/s²','推力 a = d⟨v⟩/dt / m/s²']);
+  assert.equal(lineReading(velocity.lines[2],2,velocity.unit),'1.5 ± 0.04 cm/s');assert.equal(lineReading(velocity.lines[1],1,velocity.unit),'−0.2 ± 0.04 cm/s');
+  assert.equal(lineReading(push.lines[2],1,push.unit),'30 ± 2 m/s²');assert.equal(lineReading(push.lines[2],0,push.unit),'无读数','t = 0 has no window');
+  // The push's lines start at the first sample that has one: the polyline over samples 1 and 2 alone.
+  assert.equal([...chart.matchAll(/<polyline points="([^"]+)"[^>]*data-series-id="push-2"/g)].map(m=>m[1].split(' ').length).join(),'2');
+  // A reading missing inside the series breaks its line in two, and the axis reads the values it has.
+  const broken=velocitySeries(readMotion(d=>{d.motion.pushMps2.z=[30,null,30];}).motion)[1],three=readMotion().timesUs;
+  assert.equal([...seriesChart(three,[velocity,broken],'ms').matchAll(/data-series-id="push-2"/g)].length,2);
+  // The velocity's axis runs through zero, from a tick below y's −0.2 cm/s to one above z's 1.5 cm/s; zero is a grid line, and
+  // a value lies at its place on it (the panel 32 to 176): 0 at 176 − 0.5/2·144 for ticks −0.5 … 1.5.
+  const ticks=[...chart.matchAll(/<text x="52" y="([\d.]+)" [^>]*>([^<]+)<\/text>/g)].map(m=>[Number(m[1]),m[2]]);
+  assert.deepEqual(ticks.slice(0,5).map(t=>t[1]),['−0.5','0','0.5','1','1.5']);
+  const zero=ticks.find(t=>t[1]==='0')[0]-4;assert.ok(Math.abs(zero-(176-.5/2*144))<1e-9,`${zero}`);
+  // The push's axis is the temperature's kind, from 0: no line below zero.
+  assert.deepEqual(ticks.slice(5).map(t=>t[1]),['0','10','20','30']);
+  // No velocity on the temperature's chart, no temperature here.
+  assert.doesNotMatch(chart,/温度|n̄/);
+  const few=velocitySeries(readMotion(d=>{d.motion.meanVelocityErrorMps.y[1]=null;}).motion)[0];
+  assert.equal(lineReading(few.lines[1],1,few.unit),'−0.2 cm/s（误差未知）');
+  // An atom cloud at rest with no push: both in their base units, both axes from 0.
+  const still=velocitySeries(readMotion(d=>{for(const a of ['x','y','z']){d.motion.meanVelocityMps[a].fill(0);d.motion.pushMps2[a].fill(0);}}).motion);
+  assert.deepEqual(still.map(s=>s.unit.name),['m/s','m/s²']);
 });
 
 test('the examples: three scenes of the atom moving in its designated tweezer from |2,+2⟩ at 100 μK on D2; a retro-reflection is the app\'s mirror',()=>{

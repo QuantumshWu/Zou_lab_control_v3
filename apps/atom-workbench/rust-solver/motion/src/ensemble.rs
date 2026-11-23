@@ -52,8 +52,7 @@
 //!
 //! # The exact moments
 //! The draws' second moments up to one integral: the tests' reference for the draws (`Ensemble::kinetic`, built for
-//! the tests alone -- the run's T at t = 0 is the draws' own estimate, solve.rs # Outputs and windows), and the nodes
-//! what a level leaves out is integrated on (`summed`, below).
+//! the tests alone -- the run's T at t = 0 is the draws' own estimate, solve.rs # Outputs and windows).
 //!
 //! Before the map the momenta at each r are isotropic, so the map's ⟨κκᵀ⟩ = S² ⟨κ²⟩/3 with S = Σ_i s_i e_i e_iᵀ, and
 //! (ħ/m)⟨κ²⟩/3 = η k_BT, η = ∫ kept(5/2, y(r)) d³r / ∫ kept(3/2, y(r)) d³r the classical ensemble's kinetic temperature
@@ -71,28 +70,6 @@
 //! structure far below the cloud's own scale, the other sites of a lattice as deep as the bottom's -- is in the two
 //! last levels' difference, the quadrature's own error.
 //!
-//! # What a level leaves out
-//! A set of phase space given by the kinetic energy it holds at each place, {(r, κ) : (ħ/m)κ²/2 ≤ A(r)} (the model's
-//! reach of a level L above the bottom, A = V_min + L − V(r)), leaves out a share of the ensemble as it is drawn -- the classical draw
-//! (r, κ) mapped by the Wigner factor to (r′, Sκ), r′ = r + Σ_i (s_i − 1)(e_i·K⁻¹∇V(r)) e_i, S = Σ_i s_i e_i e_iᵀ. At r the
-//! classical momenta are isotropic with the kinetic energy K (in k_BT) of density ∝ (e^{y−K} − 1) K^{1/2} on [0, y]; a
-//! momentum along n (its components on the well's axes) has the mapped kinetic energy q(n) K, q = Σ_i s_i² n_i², and
-//! lies beyond the set where K > k₀(n) = A(r′)/(k_BT q(n)). With kept(s, y, k) the momenta below k (`kept`: their
-//! number at s = 3/2, their energy at 5/2, both to one constant) the shares left out are
-//!
-//! ```text
-//! atoms:           ∫d³r ⟨kept(3/2, y, y) − kept(3/2, y, min(y, k₀(n)))⟩_n     /  ∫d³r kept(3/2, y, y)
-//! kinetic energy:  ∫d³r ⟨q(n) [kept(5/2, y, y) − kept(5/2, y, min(y, k₀(n)))]⟩_n  /  ⟨q⟩ ∫d³r kept(5/2, y, y)
-//! ```
-//!
-//! ⟨·⟩_n the mean over the directions, ⟨q⟩ = Σ_i s_i²/3; over the components by their populations (each component's
-//! integrals over its own number ∫kept(3/2); the energy's share the components' energies summed, beyond over all). No
-//! atom is drawn: the integrals over r are `kinetic`'s (the same nodes about the bottom, `summed`), the mean
-//! over n on one octant of the sphere (q is even in every n_i) by Gauss–Legendre in cos θ on (0, 1) and the midpoint
-//! rule in the azimuth on (0, π/2), with the level's node count; every count is doubled as `kinetic`'s are, and the
-//! last two levels' difference is the share's own error (`Share`). In a classical harmonic well (s_i = 1, V quadratic)
-//! the two are Q(3, L) and Q(4, L), the regularized upper incomplete gamma functions.
-//!
 //! # Latin hypercube
 //! A group's members draw each of the `DEVIATES` uniform deviates of a first proposal and a momentum -- the component, the
 //! piece, the radial coordinate, the direction's two, the kinetic energy's quantile, the momentum direction's two -- in
@@ -106,6 +83,7 @@ use crate::linalg::{dot3, perpendicular, V3};
 use crate::random::{Purpose, Stream};
 use crate::special::{by_series, gamma, series, upper};
 use crate::units::{rounding, KT_PER_UK};
+#[cfg(test)]
 use rayon::prelude::*;
 use std::f64::consts::TAU;
 
@@ -342,14 +320,6 @@ pub struct Quadrature {
     pub difference: f64,
 }
 
-/// A share of the ensemble by quadrature (`Ensemble::beyond`): its value at the last level and its difference from the
-/// level before, the quadrature's own error.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Share {
-    pub value: f64,
-    pub difference: f64,
-}
-
 /// The initial ensemble of a request (module documentation).
 pub struct Ensemble<'a> {
     components: Vec<Component<'a>>,
@@ -357,19 +327,6 @@ pub struct Ensemble<'a> {
     hbar_over_mass: f64,
     /// The proposals that read deeper than their well's bottom (`deeper`).
     over: std::sync::atomic::AtomicU64,
-    /// The draws made, the potential's evaluations they read (one a proposal), and the quadratures' (`evaluations`).
-    drawn: std::sync::atomic::AtomicU64,
-    proposed: std::sync::atomic::AtomicU64,
-    integrated: std::sync::atomic::AtomicU64,
-}
-
-/// What an ensemble's draws and quadratures cost its model so far, in evaluations of the prepared potential
-/// (`Ensemble::evaluations`): per draw the proposals it read -- one at the least, where none was drawn yet --, and the
-/// quadratures' evaluations in all (`summed`) -- what a model's potential costs it beside its steps (solve.rs `Formula`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Evaluations {
-    pub per_draw: f64,
-    pub integrated: f64,
 }
 
 impl<'a> Ensemble<'a> {
@@ -405,12 +362,13 @@ impl<'a> Ensemble<'a> {
                 Ok(component)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let zero = || std::sync::atomic::AtomicU64::new(0);
-        Ok(Ensemble { components, kt, hbar_over_mass, over: zero(), drawn: zero(), proposed: zero(), integrated: zero() })
+        Ok(Ensemble { components, kt, hbar_over_mass, over: std::sync::atomic::AtomicU64::new(0) })
     }
 
     /// The initial state of trajectory `index` of the run `seed`: its group the `GROUP` trajectories from index − index mod
-    /// GROUP, its strata from that group's Latin stream, the rest from its own (module documentation, # Latin hypercube).
+    /// GROUP, its strata from that group's Latin stream, the rest from its own (module documentation, # Latin hypercube);
+    /// the tests' (the run draws with `draw_kinetic`).
+    #[cfg(test)]
     pub fn draw(&self, seed: u64, index: u64) -> Start {
         self.draw_kinetic(seed, index).0
     }
@@ -434,10 +392,8 @@ impl<'a> Ensemble<'a> {
         let c = self.components.iter().position(|c| { let inside = pick < c.weight; pick -= c.weight; inside }).unwrap_or(self.components.len() - 1);
         let c = &self.components[c];
         let mut proposal = [deviates[1], deviates[2], deviates[3], deviates[4]];
-        self.drawn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (r, y, gradient) = loop {
             let r = c.propose(proposal[0], proposal[1], proposal[2], proposal[3]);
-            self.proposed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (v, gradient) = c.well.potential(r);
             let y = -v / self.kt;
             // A potential that is not a number would be rejected at every proposal, and the draw would never end.
@@ -489,6 +445,7 @@ impl<'a> Ensemble<'a> {
     /// ∫ f d³r over a component's bound places (y > 0) of the functions `of` of a place, its depth y and the potential's
     /// gradient there, with n nodes per coordinate about the component's bottom in units of its drawn widths (module
     /// documentation, # The exact moments), and the evaluations of the potential.
+    #[cfg(test)]
     fn summed<const K: usize>(&self, c: &Component, n: usize, of: &(dyn Fn(V3, f64, V3) -> [f64; K] + Sync)) -> ([f64; K], usize) {
         let nodes = crate::special::gauss_legendre(n);
         let widths: V3 = std::array::from_fn(|i| c.scales[i] * (self.kt / c.curvatures[i]).sqrt());
@@ -520,72 +477,7 @@ impl<'a> Ensemble<'a> {
             })
             .collect();
         // The rows summed in their order: the result does not depend on the threads.
-        self.integrated.fetch_add((n * n * n) as u64, std::sync::atomic::Ordering::Relaxed);
         (rows.iter().fold([0.; K], |s, x| std::array::from_fn(|i| s[i] + x[i])), n * n * n)
-    }
-
-    /// What the set {(r, κ) : (ħ/m)κ²/2 ≤ `room`(r)} leaves out of the ensemble (module documentation, # What a level
-    /// leaves out; `room` in rad/µs): the share of the atoms and the share of their kinetic energy, by quadrature -- per
-    /// component the node counts doubled as `kinetic`'s, until the integrals at two levels agree within their sums'
-    /// rounding or the next level would take more than `most` evaluations of the component's potential (two levels at
-    /// least) --, each with its difference between the last two levels.
-    pub fn beyond(&self, room: &(dyn Fn(V3) -> f64 + Sync), most: u64) -> [Share; 2] {
-        // Per component at a level: the atoms beyond over its number, their mapped kinetic energy and all of it over its
-        // number (in k_BT, to the energy's one constant).
-        let level = |c: &Component, n: usize| -> ([f64; 4], usize) {
-            let nodes = crate::special::gauss_legendre(n);
-            let squares = c.scales.map(|s| s * s);
-            let octant: Vec<(f64, f64)> = nodes
-                .iter()
-                .flat_map(|&(x, w)| (0..n).map(move |j| (0.5 * (x + 1.), 0.25 * TAU * (j as f64 + 0.5) / n as f64, 0.5 * w / n as f64)))
-                .map(|(mu, phi, weight)| {
-                    let unit = direction(mu, phi);
-                    ((0..3).map(|i| squares[i] * unit[i] * unit[i]).sum::<f64>(), weight)
-                })
-                .collect();
-            self.summed(c, n, &|r, y, gradient| {
-                let held = crate::linalg::larger(room(c.wigner(r, gradient, [0.; 3]).0) / self.kt, 0.);
-                let (number, energy) = (kept(1.5, y, y, c.ceiling), kept(2.5, y, y, c.ceiling));
-                let mut out = [number, energy, 0., 0.];
-                for &(q, weight) in &octant {
-                    let k = crate::linalg::smaller(held / q, y);
-                    out[2] += weight * (number - kept(1.5, y, k, c.ceiling));
-                    out[3] += weight * q * (energy - kept(2.5, y, k, c.ceiling));
-                }
-                out
-            })
-        };
-        // Per component its last two levels.
-        let levels: Vec<[[f64; 4]; 2]> = self
-            .components
-            .iter()
-            .map(|c| {
-                let mut n = 2;
-                let mut last = level(c, n);
-                loop {
-                    n *= 2;
-                    let next = level(c, n);
-                    let within = (0..4).all(|s| (next.0[s] - last.0[s]).abs() <= rounding(next.1) * next.0[s] + rounding(last.1) * last.0[s]);
-                    let read = [last.0, next.0];
-                    last = next;
-                    if within || (2 * n as u64).pow(3) > most {
-                        break read;
-                    }
-                }
-            })
-            .collect();
-        let shares = |at: usize| -> [f64; 2] {
-            let (mut atoms, mut beyond, mut all) = (0., 0., 0.);
-            for (c, sums) in self.components.iter().zip(&levels) {
-                let [number, energy, out, out_energy] = sums[at];
-                atoms += c.weight * out / number;
-                beyond += c.weight * out_energy / number;
-                all += c.weight * c.scales.iter().map(|s| s * s).sum::<f64>() / 3. * energy / number;
-            }
-            [atoms, beyond / all]
-        };
-        let (before, now) = (shares(0), shares(1));
-        std::array::from_fn(|i| Share { value: now[i], difference: (now[i] - before[i]).abs() })
     }
 
     /// (ħ/m)⟨κ_a²⟩ per lab axis (rad/µs) of the ensemble with the components' η (`kinetic`): Σ_b p_b η_b k_BT (S_b²)_aa (module
@@ -601,12 +493,6 @@ impl<'a> Ensemble<'a> {
             }
         }
         out
-    }
-
-    /// The prepared potential's evaluations so far (`Evaluations`): per draw, and the quadratures'.
-    pub fn evaluations(&self) -> Evaluations {
-        let (drawn, proposed) = (self.drawn.load(std::sync::atomic::Ordering::Relaxed), self.proposed.load(std::sync::atomic::Ordering::Relaxed));
-        Evaluations { per_draw: if drawn > 0 { proposed as f64 / drawn as f64 } else { 1. }, integrated: self.integrated.load(std::sync::atomic::Ordering::Relaxed) as f64 }
     }
 
     /// The proposals so far that read deeper than their well's bottom (module documentation, # Its draw): none where the
@@ -716,59 +602,6 @@ mod tests {
         let well = Broken(Harmonic { depth: 30. * kt, waist: 1.0, rayleigh: 3.0, hbar_over_mass: 1e-12 });
         let ensemble = Ensemble::new(&[(0, 1., &well as &dyn Well)], 1., 1e-12).unwrap();
         ensemble.draw(3, 0);
-    }
-
-    /// What a level leaves out of the ensemble (`Ensemble::beyond`) against the harmonic well's closed forms. A well
-    /// quadratic to its escape (`Harmonic`), 30 k_BT deep (a millikelvin tweezer at 30 µK; the lowering is e^{−(30−L)} of
-    /// the Boltzmann factor at the level) and 30000 k_BT deep (the same well at 0.03 µK: the cloud a thousandth of the
-    /// beam's scale in each direction, where nodes on the beam's scale had none in it), the set
-    /// {V + (ħ/m)κ²/2 ≤ V_min + L k_BT}:
-    /// - classical (ħω ≪ k_BT: the Wigner scales are one): the energy of six quadratic degrees of freedom over k_BT
-    ///   follows Γ(3), so the atoms beyond are Q(3, L) = e^{−L}(1 + L + L²/2) and their share of the kinetic energy
-    ///   Q(4, L) = Q(3, L) + e^{−L} L³/6, at L = 6, 9 and 12.89 (where Q(3, L) = z²/(2¹⁴ + z²));
-    /// - with the Wigner factor (ħω_ρ = 3 k_BT, ω_ζ 0.24 of it: s_ρ² = 1.66, s_ζ² = 1.04): each axis's energy is
-    ///   s_i² times an exponential's, X = s_ρ² G₂ + s_ζ² G₁ (G_k of Γ(k)): the atoms beyond P(X > L) = e^{−L/a}(1 + L/a) +
-    ///   e^{−L/b}(1 − e^{−cL}(1 + cL))/(a c)², a = s_ρ², b = s_ζ², c = 1/a − 1/b, and the kinetic energy's share
-    ///   E[X; X > L]/E[X] = (L P(X > L) + ∫_L^∞ P(X > x) dx)/(2a + b) (the kinetic half of each axis's energy is half of
-    ///   it in the mean, beyond any level of the whole).
-    /// The quadrature with 2¹⁶ evaluations a level (32 nodes a coordinate) gives each to a tenth of itself at either
-    /// depth, the same numbers in the cloud's own units (measured: the atoms' share −2 %, +0.1 % and +8 % at the three
-    /// levels, the energy's within 1 %): the momenta's cut at the level is a kink of the radial integrand, which a
-    /// Gauss rule takes algebraically (a share of 2.4e-4 known to a tenth is 2e-5 of the ensemble; two levels' difference
-    /// is its booked error, and may be smaller than the error itself where two levels happen to agree).
-    #[test]
-    fn what_a_level_leaves_out_is_the_harmonic_well_s_closed_form() {
-        let (kt, waist, rayleigh) = (KT_PER_UK * 1., 1.0, 3.0);
-        let tail = |a: f64, b: f64, level: f64| -> f64 {
-            let c = 1. / a - 1. / b;
-            (-level / a).exp() * (1. + level / a) + (-level / b).exp() * (1. - (-c * level).exp() * (1. + c * level)) / (a * c).powi(2)
-        };
-        for (depth, quantum) in [(30. * kt, false), (30. * kt, true), (30000. * kt, false), (30000. * kt, true)] {
-            // ħω_ρ = 3 k_BT: (ħ/m) 4D/w² = (3 k_BT)².
-            let hbar_over_mass = if quantum { 9. * kt * kt * waist * waist / (4. * depth) } else { 1e-12 };
-            let well = Harmonic { depth, waist, rayleigh, hbar_over_mass };
-            let ensemble = Ensemble::new(&[(0, 1., &well as &dyn Well)], 1., hbar_over_mass).unwrap();
-            let squares = ensemble.components[0].scales.map(|s| s * s);
-            assert!(if quantum { (squares[0] - 1.657).abs() < 1e-3 && (squares[2] - 1.041).abs() < 1e-3 } else { squares.iter().all(|s| (s - 1.).abs() < 1e-6) }, "the Wigner scales {squares:?}");
-            for level in [6., 9., 12.89] {
-                let room = |r: V3| level * kt - (well.potential(r).0 + depth);
-                let [atoms, energy] = ensemble.beyond(&room, 1 << 16);
-                let exact = if quantum {
-                    let (a, b) = (squares[0], squares[2]);
-                    // ∫_L^∞ P(X > x) dx by Simpson to 60 of the larger scale beyond L.
-                    let (panels, top) = (20000, 60. * crate::linalg::larger(a, b));
-                    let integral: f64 = (0..=2 * panels).map(|i| (if i == 0 || i == 2 * panels { 1. } else if i % 2 == 1 { 4. } else { 2. }) * tail(a, b, level + top * i as f64 / (2 * panels) as f64)).sum::<f64>() * top / (6 * panels) as f64;
-                    [tail(a, b, level), (level * tail(a, b, level) + integral) / (2. * a + b)]
-                } else {
-                    let q3 = (-level).exp() * (1. + level + 0.5 * level * level);
-                    [q3, q3 + (-level).exp() * level.powi(3) / 6.]
-                };
-                eprintln!("depth {} k_BT, quantum {quantum}, L = {level}: atoms {:.4e} ± {:.1e} against {:.4e}; kinetic energy {:.4e} ± {:.1e} against {:.4e}", depth / kt, atoms.value, atoms.difference, exact[0], energy.value, energy.difference, exact[1]);
-                for (share, exact) in [atoms, energy].iter().zip(exact) {
-                    assert!((share.value - exact).abs() <= 0.1 * exact, "depth {} k_BT, quantum {quantum}, L = {level}: {:e} ± {:e} against {exact:e}", depth / kt, share.value, share.difference);
-                }
-            }
-        }
     }
 
     /// An isotropic Lorentzian well V = −D/(1 + |r|²/R²) (rad/µs), its envelope tight: one beam whose u is |r|²/R²
