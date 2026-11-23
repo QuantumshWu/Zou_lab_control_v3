@@ -136,13 +136,18 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
     };
     let mut failed = Vec::new();
     for entry in scenes.split(',') {
-        let (name, tau) = entry.split_once(':').expect("name:tau");
+        // `name:tau`, or `name+label+label:tau` with explicit excited states (R4+D2-2-1).
+        let (spec, tau) = entry.split_once(':').expect("name:tau");
         let tau: f64 = tau.parse().unwrap();
+        let mut labels = spec.split('+');
+        let name = labels.next().unwrap();
         let request = request_of(name);
         let scene = crate::scene::Scene::new(&request).unwrap();
         let selection = crate::select::choose(&scene).unwrap();
         let reference = crate::solve::alone(crate::solve::chief(&request));
-        let keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        let mut keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        keep.extend(labels.map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+        keep.sort_unstable();
         let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep, ..selection }, reference).unwrap();
         let plan = run.rs.plan();
         // The walk: the whole model's steps from an off-centre thermal atom.
@@ -189,7 +194,8 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
         for p in &tables.pieces {
             eprintln!("TABLED {name} piece [{:.4}, {:.4}]: the singularity {:.1} half widths off; worst {:.1e}", p.range[0], p.range[1], p.room, p.worst);
         }
-        let making = Making { lift: true, ..Making::node(false) };
+        // The model with its gradients, the photon forms and the lift: every table read.
+        let making = Making { lift: true, ..Making::node(true) };
         let (mut scratch, mut table_out) = (TableScratch::default(), Out::default());
         let mut worst = vec![(Worst { over_scale: [[0.0; 2]; 3], over_bound: [[0.0; 2]; 3] }, 0.0f64); orders];
         let mut strict = vec![Strict { over_scale: [[0.0; 2]; 3], over_value: [[0.0; 2]; 3] }; orders];
@@ -283,4 +289,102 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
         }
     }
     assert!(failed.is_empty(), "beyond the bounds: {failed:?}");
+}
+
+/// Two filled nodes' largest difference over the second's largest entry: [the generator's, its gradient's, the photon
+/// classes' elements' (values and photon forms)] (from OLDNEW's `oldnew_pairs`).
+fn node_difference(a: &Node, b: &Node) -> [f64; 3] {
+    let (mut d, mut top) = ([0.0f64; 3], [0.0f64; 3]);
+    for ((_, x), (_, y)) in a.generator.iter().zip(&b.generator) {
+        for (p, q) in x.data.iter().zip(&y.data) {
+            d[0] = d[0].max((*p - *q).abs());
+            top[0] = top[0].max(q.abs());
+        }
+    }
+    for ((_, x), (_, y)) in a.gradient.iter().zip(&b.gradient) {
+        for (gx, gy) in x.iter().zip(y) {
+            for (p, q) in gx.data.iter().zip(&gy.data) {
+                d[1] = d[1].max((*p - *q).abs());
+                top[1] = top[1].max(q.abs());
+            }
+        }
+    }
+    for (x, y) in a.classes.iter().zip(&b.classes) {
+        for (ax, ay) in x.axes.iter().zip(&y.axes) {
+            for (jx, jy) in ax.iter().zip(ay) {
+                for (p, q) in jx.elements.iter().zip(&jy.elements) {
+                    d[2] = d[2].max((p.value - q.value).abs().max((p.kick - q.kick).abs()));
+                    top[2] = top[2].max(q.value.abs().max(q.kick.abs()));
+                }
+            }
+        }
+    }
+    std::array::from_fn(|k| d[k] / top[k].max(f64::MIN_POSITIVE))
+}
+
+/// The run's node off the tables it bought (model/selected.rs, # The tables, # The tables' budget) against its fold's
+/// own, filled -- what a step reads: on PGC3D, TET, tilt2 and R4 with D2-2-1 (TABLED_SCENES as the test above's), the
+/// tables bought on [the walk's least s, 1] (`Selected::buy_tables_now`), at every point of a walk of TABLED_STEPS (60)
+/// the node with the photon forms on version 1 and on version 0 (`step::on_version`), their largest difference over
+/// the largest entry (`node_difference`: the generator, its gradient, the photon classes), beside the node's own booked
+/// deviation (`Node::deviation`); and the kinds the tables are read for and their budget. Ignored, by name.
+#[test]
+#[ignore]
+fn the_run_s_tabled_node_is_its_fold_s() {
+    let scenes = std::env::var("TABLED_SCENES").unwrap_or_else(|_| "PGC3D:0.474,TET:0.474,tilt2:0.326,R4+D2-2-1:0.237".to_string());
+    let steps: usize = std::env::var("TABLED_STEPS").ok().and_then(|x| x.parse().ok()).unwrap_or(60);
+    for entry in scenes.split(',') {
+        let (spec, tau) = entry.split_once(':').expect("name:tau");
+        let tau: f64 = tau.parse().unwrap();
+        let mut labels = spec.split('+');
+        let name = labels.next().unwrap();
+        let request = request_of(name);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let mut keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        keep.extend(labels.map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+        keep.sort_unstable();
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep, ..selection }, crate::solve::alone(chief)).unwrap();
+        let v0 = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let mut t = Trajectory::new(&run, chief, [0.1, 0.2, 0.3], [-v0, 0.7 * v0, -1.2 * v0], 7, 203);
+        let mut walk = Vec::new();
+        for _ in 0..steps {
+            let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Anywhere)) else { break };
+            t = step.end;
+            walk.push((t.r, t.kappa));
+        }
+        let mut work = Work::default();
+        let low = walk
+            .iter()
+            .map(|&(r, k)| {
+                run.scene.point_into(r, k, &mut work.point);
+                let mut v = Values::default();
+                run.rs.tweezer().values_into(&run.scene, &work.point, &mut v);
+                Tables::intensity(run.rs.plan(), &v)
+            })
+            .fold(1.0, f64::min);
+        if !run.buy_tables_now(low) {
+            eprintln!("TABLED-RUN {spec}: no tables kept (no kind of node costs less off them)");
+            continue;
+        }
+        let (uses, budget) = run.bought_for().unwrap();
+        let (mut worst, mut deviation, mut off) = ([0.0f64; 3], [0.0f64; 2], 0usize);
+        for &(r, kappa) in &walk {
+            let (a, b) = (crate::step::on_version(1, || run.node(r, kappa, true)), crate::step::on_version(0, || run.node(r, kappa, true)));
+            let d = node_difference(&a, &b);
+            worst = std::array::from_fn(|k| worst[k].max(d[k]));
+            deviation = [deviation[0].max(a.deviation[0]), deviation[1].max(a.deviation[1])];
+            off += usize::from(a.deviation != [0.0; 2]);
+        }
+        eprintln!(
+            "TABLED-RUN {spec}: for the kinds [node, with the lift, photon, with the photon forms] {uses:?}, budget {budget:?}; {off} of {} walk points off the tables; the filled node's largest difference over the largest entry: generator {:.2e}, gradient {:.2e}, photon classes {:.2e}; its booked deviation at the most {:.2e} (rates), {:.2e} (friction)",
+            walk.len(),
+            worst[0],
+            worst[1],
+            worst[2],
+            deviation[0],
+            deviation[1]
+        );
+    }
 }
