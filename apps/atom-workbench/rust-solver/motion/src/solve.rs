@@ -2928,6 +2928,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 _ => format!("P{}", keep.len()),
             }
         };
+        // A candidate's account at its upper end (the tests' candidates beside the chain, `ALSO`).
+        #[cfg(test)]
         let account = |j: &crate::select::Judged| -> Booked { accounts(j).into_iter().next().expect("the upper end") };
         // The candidates (select.rs # The candidates): the pilot's model first (place 0), the nominees above it.
         let mut chain: Vec<Vec<usize>> = vec![own.clone()];

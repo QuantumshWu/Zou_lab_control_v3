@@ -455,17 +455,15 @@ pub struct Form<'a> {
     hbar_over_mass: f64,
 }
 
-/// A node's amplitudes on the sector (# The nodes): H's slots' blocks, the recycling's R per group of its beats (R^T, at
-/// the places its terms take, `Form::r_places`: the others are zero at every node), and the blocks' spectral width
-/// (rad/µs) at the node -- the interpolated quantities: H and R are linear in the Liouvillian, each beat's amplitude a
-/// smooth function of the time along the path.
+/// A node's amplitudes on the sector (# The nodes): H's slots' blocks and the recycling's R per group of its beats (R^T,
+/// at the places its terms take, `Form::r_places`: the others are zero at every node) -- the interpolated quantities: H
+/// and R are linear in the Liouvillian, each beat's amplitude a smooth function of the time along the path.
 #[derive(Clone, Debug)]
 struct Amps {
     h: Vec<C64>,
     r: Vec<C64>,
     /// Per R group and column Σ_rows |R| (the 1-norm's bound of a combination: Σ |w| of these).
     columns: Vec<f64>,
-    width: f64,
 }
 
 impl<'a> Form<'a> {
@@ -724,17 +722,16 @@ impl<'a> Form<'a> {
         self.model.node(r, kappa, false)
     }
 
-    /// A node's amplitudes on the sector (`Amps`): H's slots' blocks; R per group of beats from the jumps' elements; and the
-    /// width -- per block the static beat's Hermitian part's eigenvalues' span, widened on each side by every other
-    /// beat's Frobenius norm (Weyl: e^{−iΩt}G_k and its Hermitian part move no eigenvalue by more), the widest of the
-    /// sector's pairs' spans (a coherence between two blocks turns at their levels' differences).
+    /// A node's amplitudes on the sector (`Amps`): H's slots' blocks; R per group of beats from the jumps' elements, and
+    /// R's columns' bounds (the operator's norm needs them, `Form::op_into`).
     fn amps(&self, node: &Node) -> Amps {
         self.amps_with(node, true)
     }
 
-    /// `amps`, the width and R's columns' bounds made only where `width` (the segments' rule and the exponential's norm
-    /// need them; the exponential scheme's substeps do not: NaN and none there).
-    fn amps_with(&self, node: &Node, width: bool) -> Amps {
+    /// `amps`, R's columns' bounds made only where `columns` (the exponential scheme's substeps take none: none there).
+    /// (Until 2026-11-23 also the blocks' spectral width, which the Magnus segments' rule read: no reader since they went,
+    /// 37d0047d, its eigendecompositions made at every dense Liouvillian's node for nothing.)
+    fn amps_with(&self, node: &Node, columns: bool) -> Amps {
         let n = self.n;
         let mut h = vec![C64::ZERO; self.h_beats.len() * self.h_slot];
         for (k, (_, m)) in node.generator.iter().enumerate() {
@@ -760,32 +757,8 @@ impl<'a> Form<'a> {
         for (&(_, _, e1, e2), &slot) in self.terms.iter().zip(&self.r_slot) {
             r[slot as usize] += j[e1 as usize] * j[e2 as usize].conj();
         }
-        if !width {
-            return Amps { h, r, columns: Vec::new(), width: f64::NAN };
-        }
-        let ends: Vec<(f64, f64)> = self
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(x, b)| {
-                let w = b.len();
-                let at = |k: usize| k * self.h_slot + self.h_block[x];
-                let (mut lo, mut hi, mut moved) = (0.0, 0.0, 0.0);
-                for (k, &beat) in self.h_beats.iter().enumerate() {
-                    let block = &h[at(k)..at(k) + w * w];
-                    if self.values[beat] == 0.0 {
-                        let e = hermitian_eigen(&Mat { rows: w, cols: w, data: block.to_vec() });
-                        (lo, hi) = (e.values[0], e.values[w - 1]);
-                    } else {
-                        moved += block.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-                    }
-                }
-                (lo - moved, hi + moved)
-            })
-            .collect();
-        let width = self.pairs.iter().map(|&(x, y)| larger(ends[x].1 - ends[y].0, ends[y].1 - ends[x].0)).fold(0.0, larger);
-        let columns = self.columns_of(&r);
-        Amps { h, r, columns, width }
+        let columns = if columns { self.columns_of(&r) } else { Vec::new() };
+        Amps { h, r, columns }
     }
 
     /// R's columns' moduli summed over its rows, per group and column (`Amps::columns`), of R at its places `r`.
