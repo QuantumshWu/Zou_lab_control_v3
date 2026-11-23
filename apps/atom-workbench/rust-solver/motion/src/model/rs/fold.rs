@@ -38,6 +38,13 @@ use crate::linalg::{self, C64, Mat};
 use crate::scene::Key;
 use crate::units::UNIT_ROUNDOFF;
 
+/// A complex number moved, zeroed or added into another, and a real number's operation, in complex multiply-adds
+/// (decide.rs, # Work): the fold's and the contraction's element-wise loops are counted in them.
+const MOVED: f64 = crate::decide::MOVED / crate::decide::COMPLEX;
+const REAL: f64 = 1. / crate::decide::COMPLEX;
+/// A complex reciprocal 1/(z − w − κ) (`linalg::reciprocals`): the two differences, |z|², its division, the two products.
+const RECIPROCAL: f64 = (7. + crate::decide::DIVISION) / crate::decide::COMPLEX;
+
 /// A term: `scale` × factor × Σ coefficient · matrix (each matrix's adjoint where `adjoint`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Term {
@@ -982,6 +989,8 @@ impl Local {
         gen.extend(plan.generator_terms.iter().map(|&(f, s)| factor(f, s)));
         terms.clear();
         terms.extend(plan.terms.iter().flat_map(|ts| ts.iter().map(|&(f, s)| factor(f, s))));
+        // Each term's factor and its three gradients times its scale.
+        work += 4.0 * (gen.len() + terms.len()) as f64;
         let nb = plan.blocks.len();
         spectra.resize_with(nb, Spectrum::default);
         g.resize_with(nb, Mat::default);
@@ -1032,7 +1041,7 @@ impl Local {
                             product(&sp.inverse, t, &mut hats[b][used].1);
                             hats[b][used].0 = *f;
                             used += 1;
-                            work += 2.0 * (size * size * size) as f64;
+                            work += 2.0 * (size * size * size) as f64 + MOVED * (size * size) as f64 + entries.len() as f64;
                         }
                     }
                     hats[b].truncate(used);
@@ -1048,6 +1057,7 @@ impl Local {
                 let c = e.value * v.coefficients[e.coefficient as usize];
                 g[b].data[e.row as usize * size + e.col as usize] += s * c;
             }
+            work += MOVED * (size * size) as f64 + block.rest.len() as f64;
             // (A check's: mode 2 moves every entry of G₀ by one unit round-off, its sign by the entry's place -- the
             // rounding's floor of what follows.)
             if mode == 2 {
@@ -1079,7 +1089,7 @@ impl Local {
                 product(&s.inverse, t, &mut hats[b][used].1);
                 hats[b][used].0 = *f;
                 used += 1;
-                work += 2.0 * (size * size * size) as f64;
+                work += 2.0 * (size * size * size) as f64 + MOVED * (size * size) as f64 + entries.len() as f64;
             }
             hats[b].truncate(used);
         }
@@ -1098,6 +1108,8 @@ impl Local {
                 sl[e.row as usize] += (dd * c).re;
             }
         }
+        // The energies and slopes zeroed; per entry four real parts of a product, each two multiply-adds.
+        work += REAL * (4 * plan.n) as f64 + 2.0 * plan.diagonal.len() as f64;
         // The amplitudes, block by block, all of a block's in one batch (`Plan::batches`): X of every component side by
         // side, one product V⁻¹X, the gradients likewise.
         ms.resize_with(nb, Mat::default);
@@ -1114,6 +1126,7 @@ impl Local {
             if making.gradients {
                 sized(dm, size, 3 * total);
             }
+            work += MOVED * (size * total * if making.gradients { 4 } else { 1 }) as f64;
             if batch.amplitudes.is_empty() {
                 continue;
             }
@@ -1151,7 +1164,12 @@ impl Local {
                         }
                     }
                 }
+                // Its columns' z, its entries (a factor's: the value and, where the gradients are made, three more).
+                let per = if r.single.is_some() { MOVED } else if making.gradients { 4.0 } else { 1.0 };
+                work += REAL * count as f64 + per * r.rest.len() as f64;
             }
+            // X's fixed part copied.
+            work += MOVED * (size * wide) as f64;
             let s = &spectra[b];
             product(&s.inverse, x, y);
             work += (size * size * wide) as f64;
@@ -1163,6 +1181,11 @@ impl Local {
             for k in 0..size {
                 linalg::reciprocals(zc, s.centre[k], s.values[k], &mut d[k * total..(k + 1) * total]);
             }
+            // D zeroed and made, a reciprocal an entry; then per entry of M̂ its product and its place, a single
+            // component's factor on X̂ and its three gradients, and the three gradients ∂X̂ − M̂∂E in their places.
+            let per = 1.0 + MOVED + if making.gradients { 3.0 + 3.0 * MOVED } else { 0.0 };
+            let singles: usize = batch.amplitudes.iter().filter(|&&i| plan.amplitudes[i].single.is_some()).map(|&i| plan.amplitudes[i].cols.len()).sum();
+            work += (MOVED + RECIPROCAL + per) * (size * total) as f64 + MOVED * total as f64 + 4.0 * (size * singles) as f64;
             for (&i, &(off, xoff)) in batch.amplitudes.iter().zip(&batch.offsets) {
                 let r = &plan.amplitudes[i];
                 let count = r.cols.len();
@@ -1201,6 +1224,7 @@ impl Local {
                         }
                     }
                 }
+                work += (ds.iter().filter(|d| **d != C64::ZERO).count() * size * total) as f64;
             }
             for k in 0..size {
                 let dk = &d[k * total..(k + 1) * total];
@@ -1210,6 +1234,7 @@ impl Local {
                     }
                 }
             }
+            work += (3 * size * total) as f64;
         }
         self.work = work;
     }
@@ -1629,6 +1654,12 @@ fn zero(m: &mut Mat, rows: usize, cols: usize) {
     sized(m, rows, cols);
 }
 
+/// A piece's direct entries' counted complex multiply-adds (`Out::contract`): its terms' factors with their scales and
+/// weight (a value and three gradients each), and per entry its value and, where its factor moves, three gradients.
+fn direct_work(factors: &[(C64, [C64; 3], bool)], entries: &[(Entry, [i64; 2])]) -> f64 {
+    4.0 * factors.len() as f64 + entries.iter().map(|(e, _)| if factors[e.term as usize].2 { 4.0 } else { 1.0 }).sum::<f64>()
+}
+
 /// out (r × c) = a b by `Mat::product`'s own operations (each row a's entries' multiples of b's rows in turn, the
 /// product rounded and then the sum), on out's memory.
 fn plain_product(a: &Mat, b: &Mat, out: &mut Mat) {
@@ -1658,6 +1689,8 @@ impl Out {
         for (c, list) in self.channels.iter_mut().zip(&grouping.channel_lists) {
             c.zeroed(list.len());
         }
+        // The outputs zeroed: each element its value and three gradients.
+        work += 4.0 * MOVED * grouping.lists.iter().chain(&grouping.channel_lists).map(Vec::len).sum::<usize>() as f64;
         self.made = usize::MAX;
         // The amplitudes' sums, block by block side by side, then M = V Ẑ: two products a block.
         let nb = plan.blocks.len();
@@ -1674,6 +1707,8 @@ impl Out {
             if making.gradients {
                 zero(zd, size, 3 * width);
             }
+            let sides = if making.gradients { 4 } else { 1 };
+            work += MOVED * (sides * size * width) as f64;
             if list.is_empty() {
                 continue;
             }
@@ -1698,6 +1733,8 @@ impl Out {
                             }
                         }
                     }
+                    // Each of its columns' weight on a row and, with the gradients, on three more.
+                    work += (sides * size * map.len()) as f64;
                 }
             }
             let vectors = &local.spectra[b].vectors;
@@ -1743,6 +1780,8 @@ impl Out {
                     }
                 }
             }
+            // The coordinates zeroed; per atom its factor, scale, weight and coefficient (four products with the gradients).
+            work += 4.0 * MOVED * d.basis.len() as f64 + 4.0 * d.atoms.len() as f64;
             let o = if d.h { &mut self.h[d.out] } else { &mut self.channels[d.out] };
             for (sum, b) in self.span.iter().zip(&d.basis) {
                 for (&place, z) in d.places.iter().zip(b) {
@@ -1752,7 +1791,8 @@ impl Out {
                     }
                 }
             }
-            work += (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
+            // Each coordinate an atom's value and three gradients, each place a basis vector's.
+            work += 4.0 * (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
         }
         let spanned = !grouping.spans.is_empty();
         if making.model && making.effective {
@@ -1771,18 +1811,22 @@ impl Out {
                         }
                     }
                 }
+                work += direct_work(&self.tf, &plan.direct[p]);
             }
             for pair in &grouping.h_pairs {
                 if !plan.made(grouping.ws[pair.w].block, true) {
                     continue;
                 }
                 if self.made != pair.w {
-                    self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.legs(plan, grouping, v, &weight, pair.w);
                     work += self.product(grouping, pair.w);
                     self.made = pair.w;
                 }
                 let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
                 let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
+                // Per element: its gradients' two parts added where the leg sum moves, the half of it and its gradients,
+                // and its value and gradients into two outputs (the conjugate's).
+                work += (rows * cols) as f64 * (if self.moving { 3.0 * MOVED } else { 0.0 } + 2.0 + 8.0 * MOVED);
                 for i in 0..rows {
                     let (places, conjugates) = (&pair.places[i * cols..(i + 1) * cols], &pair.conjugate_places[i * cols..(i + 1) * cols]);
                     for (j, (&k, &kc)) in places.iter().zip(conjugates).enumerate() {
@@ -1825,18 +1869,21 @@ impl Out {
                         }
                     }
                 }
+                work += direct_work(&self.tf, &plan.direct[p]);
             }
             for pair in &grouping.j_pairs {
                 if (grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks) || !plan.made(grouping.ws[pair.w].block, true) {
                     continue;
                 }
                 if self.made != pair.w {
-                    self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.legs(plan, grouping, v, &weight, pair.w);
                     work += self.product(grouping, pair.w);
                     self.made = pair.w;
                 }
                 let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
                 let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
+                // Per element: its gradients' two parts added where the leg sum moves, its value and gradients added out.
+                work += (rows * cols) as f64 * (if self.moving { 3.0 * MOVED } else { 0.0 } + 4.0 * MOVED);
                 let out = &mut self.channels[pair.out];
                 for i in 0..rows {
                     for (j, &k) in pair.places[i * cols..(i + 1) * cols].iter().enumerate() {
@@ -1858,11 +1905,14 @@ impl Out {
                     zero(d, if making.gradients { plan.nq } else { 0 }, n);
                 }
             }
+            let sides = if making.gradients { 4 } else { 1 };
+            work += MOVED * (sides * plan.nq * n * self.lift.len()) as f64;
             for (b, group, mine) in &grouping.lift {
                 let (lv, lg) = &mut self.lift[*group];
                 let (mv, md, width) = (&self.mv[*b], &self.md[*b], grouping.layout[*b].1);
                 for &i in mine {
                     let (s, o) = (&grouping.zs[i], grouping.z_offset[i]);
+                    work += MOVED * (sides * plan.blocks[*b].rows.len() * s.index.len()) as f64;
                     for (k, &row) in plan.blocks[*b].rows.iter().enumerate() {
                         for (j, &a) in s.index.iter().enumerate() {
                             lv.data[row * n + a] += mv.data[k * width + o + j];
@@ -1881,11 +1931,14 @@ impl Out {
 
     /// The leg sum wi at the point, dense: X and ∂X (`x`), its members' fixed entries at their factors, weights and
     /// coefficients, each on its row in the sum (`Grouping::wmaps`) and its column in the block.
-    fn legs(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, wi: usize) {
+    fn legs(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, wi: usize) -> f64 {
         let s = &grouping.ws[wi];
         let (rows, size) = (s.index.len(), plan.blocks[s.block].rows.len());
         zero(&mut self.x, 4 * rows, size);
         self.moving = false;
+        // X and ∂X zeroed; per entry its value (four reals' product with the coefficient, the scale and the weight) and
+        // its moving factors' gradients.
+        let mut work = MOVED * (4 * rows * size) as f64;
         for (member, map) in &grouping.wmaps[s.at] {
             let r = &plan.legs[*member];
             let f = weight(r.piece);
@@ -1900,14 +1953,17 @@ impl Out {
                 let c = e.value * k * sc * f;
                 let at = to as usize * size + e.col as usize;
                 self.x.data[at] += x * c;
+                work += 1.0 + 3.0 * REAL;
                 for (a, d) in g.iter().enumerate() {
                     if *d != C64::ZERO {
                         self.x.data[(a + 1) * rows * size + at] += *d * c;
                         self.moving = true;
+                        work += 1.0;
                     }
                 }
             }
         }
+        work
     }
 
     /// The products of the leg sum wi (made, `legs`) with its block's M, by the product kernel: [X; ∂X] M_v -- X M_v

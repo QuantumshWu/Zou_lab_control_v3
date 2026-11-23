@@ -298,7 +298,8 @@ fn jumpcost() {
 /// profiling build's ATOM_PROF_SPLIT splits the run's blocks (`Selected::new`). Per state of the walk each part the least
 /// of STEPCOST_REPEAT (5) calls in the thread's own cycles, after one call, with the count it adds as the step counts it
 /// (`Price`):
-/// - the step whole, on a fresh scratch: `Step::work`;
+/// - the step whole, on the scratch its last step left, as a trajectory takes it (`step::priced`'s second attempt):
+///   `Step::work`;
 /// - the middle with its nodes (`Midway::new`, its nodes made where the picture first asks its generator): its making
 ///   (`Middle::made`), its time a fresh middle's and its picture's less the picture's on the nodes made;
 /// - a node at the step's middle by its parts (`Selected::node_parts`: the point, the values, the fold, the contraction,
@@ -309,7 +310,8 @@ fn jumpcost() {
 ///   counts, the quadrature's densities (`count::gathered`) with it;
 /// - the forms of the sums (their part of `count::impulse` beside the densities) and the scattered light at the middle
 ///   (`Middle::scattering`'s count).
-/// - the step whole with no jump (its threshold 10⁻³⁰⁰): the jumps' part is the step's less it.
+/// - the step whole with no jump (its threshold 10⁻³⁰⁰): the jumps' part is the step's less it;
+/// - the scattered light again, each call after a step with no jump untimed: what the caches leave of it in a step.
 /// The rest is the step's less these (its jumps -- photon nodes, emission, landing, roots --, the survival's traces, the
 /// end's forms). Said per part, "COUNT-PART <scene> <part>": the count and the time a step, and their ratio (real
 /// multiply-adds a ns); "COUNT-STEP" the step's.
@@ -375,7 +377,7 @@ fn count_parts() {
             c.ground == c.states.len()
         };
         let blocks = run.blocks().iter().map(Vec::len).collect::<Vec<_>>();
-        const PARTS: [&str; 16] = ["step", "middle", "node", "node.point", "node.values", "node.fold", "node.contract", "node.fill", "photon node", "picture", "launch", "choice", "quadrature", "forms", "scattering", "step with no jump"];
+        const PARTS: [&str; 17] = ["step", "middle", "node", "node.point", "node.values", "node.fold", "node.contract", "node.fill", "photon node", "picture", "launch", "choice", "quadrature", "forms", "scattering", "step with no jump", "scattering after a step"];
         // Per part [count, time] summed over the walk's states.
         let mut sum = [[0.0f64; 2]; PARTS.len()];
         let mut t = start(&run, &request, chief, index);
@@ -386,15 +388,19 @@ fn count_parts() {
             made += crate::model::selected::MADE.with(|m| m.borrow()[0]) - before;
             jumps += step.made.iter().filter(|m| m.kick.is_some()).count();
             let mut parts = [[0.0f64; 2]; PARTS.len()];
-            parts[0] = [step.work, least(&mut || {
-                std::hint::black_box(Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)).is_ok());
+            // The step as a trajectory takes it: on the scratch its last step left (`step::priced`'s second attempt).
+            let mut warm = Scratch::default();
+            let _ = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut warm, &Everywhere));
+            let counted = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut warm, &Everywhere)).map_or(f64::NAN, |s| s.work);
+            parts[0] = [counted, least(&mut || {
+                std::hint::black_box(Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut warm, &Everywhere)).is_ok());
             })];
             // The same step with no jump (its threshold below any norm): what of the step its jumps are.
             let mut still_t = t.clone();
             still_t.threshold = 1e-300;
-            let plain = Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)).map_or(f64::NAN, |s| s.work);
+            let plain = Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut warm, &Everywhere)).map_or(f64::NAN, |s| s.work);
             parts[15] = [plain, least(&mut || {
-                std::hint::black_box(Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)).is_ok());
+                std::hint::black_box(Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut warm, &Everywhere)).is_ok());
             })];
             let midway = Midway::new(&run, &t, tau).unwrap();
             // The middle with the nodes it makes (where the picture first asks its generator): its making's count, the
@@ -496,6 +502,18 @@ fn count_parts() {
             parts[14] = [along.middle.scattering(&along.path, &x).1, least(&mut || {
                 std::hint::black_box(along.middle.scattering(&along.path, &x));
             })];
+            // The same scattered light as the step reads it, after the rest of a step (another middle's step untimed,
+            // between): what the caches hold of it then.
+            parts[16] = [parts[14][0], {
+                let mut fastest = f64::INFINITY;
+                for _ in 0..repeat {
+                    std::hint::black_box(Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)).is_ok());
+                    let c0 = thread_cycles();
+                    std::hint::black_box(along.middle.scattering(&along.path, &x));
+                    fastest = crate::linalg::smaller(fastest, (thread_cycles() - c0) as f64 / (ghz * 1e3));
+                }
+                fastest
+            }];
             for (s, p) in sum.iter_mut().zip(&parts) {
                 s[0] += p[0];
                 s[1] += p[1];
@@ -531,5 +549,9 @@ fn count_parts() {
             jumps as f64 / k,
             points as f64 / k
         );
+        // COUNT_PROF: the profiling build's regions over the scene's calls (cumulative over the process).
+        if std::env::var("COUNT_PROF").is_ok() {
+            eprintln!("COUNT-PROF {label}:{}", crate::prof::report());
+        }
     }
 }

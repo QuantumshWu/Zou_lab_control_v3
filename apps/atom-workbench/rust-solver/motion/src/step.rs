@@ -1467,6 +1467,11 @@ fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> im
 /// The most groups a piece's cut makes: one an eigencomponent.
 const GROUPS: usize = STATES;
 
+/// A real number's operation (a comparison, a sum's term, a number laid) and a label hashed and compared (its GROUPS
+/// numbers twice), in complex multiply-adds (decide.rs, # Work): the cut's search is counted in them (`Groups::choose`).
+const REAL: f64 = 1.0 / COMPLEX;
+const HASHED: f64 = 2.0 * GROUPS as f64 * REAL;
+
 /// A phase's label: whole numbers L_g on the groups' centres ω_g, the phase turning at Σ_g L_g ω_g. Their sum is zero:
 /// each factor of the norm's ringing between two groups adds e_g − e_q.
 type Label = [i16; GROUPS];
@@ -1757,6 +1762,10 @@ impl Groups {
         }
         let gaps = &mut gaps[..found];
         gaps.sort_by(|x, y| y.0.total_cmp(&x.0));
+        // The search's own count: the spectrum copied (an eigenvalue moved, its two marks laid), the held components and
+        // the gaps ordered (a comparison a step of each sort), the straddling blocks' scan.
+        let sorted = |m: usize| m as f64 * (m.max(2) as f64).log2();
+        self.work += n as f64 * (crate::decide::MOVED / COMPLEX + 2.0 * REAL) + REAL * (sorted(kept) + sorted(found) + (kept * kept * kept) as f64 / 6.0);
         // The cut whose labels were made last (`label`).
         let mut labelled = 0;
         for k in 1..=found {
@@ -1793,6 +1802,8 @@ impl Groups {
                 break;
             }
             let held_groups = groups;
+            // The cut's runs and groups: per held component its run and its group's place among those found.
+            self.work += REAL * (k + kept * (2 + groups)) as f64;
             let mut spans = [(f64::INFINITY, f64::NEG_INFINITY); GROUPS];
             for &a in order.iter() {
                 let s = &mut spans[usize::from(group[a])];
@@ -1837,6 +1848,10 @@ impl Groups {
                 }
             }
             let guess = quotient * spanned / forms;
+            // The centres, the unheld components' nearest, the shifts, the pairs' spread and gaps (a pair two moduli),
+            // the ringing's weights between the groups (`Picture::weighed_by`, three a pair), the links' lemma and the
+            // cut's shape (a group pair's few each).
+            self.work += REAL * (2 * groups + n * groups + n) as f64 + 3.0 * (n * (n + 1) / 2) as f64 + REAL * (3 * picture.weighing() + 2 * groups * groups + 16 * groups * groups + 3 * n) as f64;
             // The norm's ringing between the groups and within them, and the numerator's between them, over the piece.
             self.across.resize(groups * groups, 0.0);
             self.numerator.resize(groups * groups, 0.0);
@@ -1959,8 +1974,12 @@ impl Groups {
         labels.push([0; GROUPS]);
         index.insert([0; GROUPS], 0);
         let (mut layer, mut inner) = (0..1, 1);
+        // Each label stepped to (a link of its groups) hashed and compared, and each table's entry likewise (below).
+        let links: usize = (0..groups).map(|g| (linked[g] & !(1 << g)).count_ones() as usize).sum();
+        let mut tried = 0;
         for depth in 1..=order + 1 {
             for i in layer.clone() {
+                tried += links;
                 for g in 0..groups {
                     for q in (0..groups).filter(|&q| q != g && linked[g] & (1 << q) != 0) {
                         let mut l = labels[i];
@@ -1977,6 +1996,7 @@ impl Groups {
                 inner = labels.len();
             }
             if labels.len() > most {
+                self.work += HASHED * tried as f64;
                 return false;
             }
         }
@@ -2008,6 +2028,7 @@ impl Groups {
         self.negated.extend(labels.iter().map(|l| find(&l.map(|x| -x))));
         self.frequencies.clear();
         self.frequencies.extend(labels.iter().map(|l| l.iter().zip(centres).map(|(&x, w)| f64::from(x) * w).sum::<f64>()));
+        self.work += HASHED * (tried + 2 * inner * links + labels.len()) as f64 + REAL * (labels.len() * groups) as f64;
         true
     }
 

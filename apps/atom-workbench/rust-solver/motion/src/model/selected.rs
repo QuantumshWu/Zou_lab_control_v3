@@ -197,6 +197,7 @@ use crate::scene::{Key, Scene};
 use crate::select::Selection;
 use crate::step::{Emitted, Internal, Optical};
 use crate::units::{hbar_over_mass, rounding, RAD_PER_US_PER_MHZ};
+use crate::decide::{COMPLEX, DIVISION, ELEMENTARY, MOVED};
 
 /// The selected model of a run (module documentation): the scene, the fold on P, the selection's report, the frame,
 /// and what the potential and the photons read, made once.
@@ -488,8 +489,9 @@ pub struct Class {
 
 /// The model at one point of a path in the frame (module documentation, # The nodes): the generator's components by
 /// beat, H_eff's gradient's, the photon classes and whether they hold the photon forms (a jump's node); the point and
-/// momentum it was made at; its counted work (real multiply-adds of putting the model in the frame, P × P's matrices
-/// counted whole; `Rs::at`'s own is not counted, its count not given); and at a middle the lift by the lab's groups
+/// momentum it was made at; its counted work (real multiply-adds, decide.rs # Work: the point and the source's values,
+/// the fold, its contraction, the filling and the turn, each loop as it runs, `Selected::node_work`); and at a middle
+/// the lift by the lab's groups
 /// with its gradient (`Out::lift`: the readings on the middle, `SelectedMiddle::readout`), elsewhere none. A jump's
 /// photon's node holds the photon classes alone (`whole` false, `Making::PHOTONS`: its generator and gradient none).
 #[derive(Clone, Debug)]
@@ -1234,7 +1236,9 @@ impl Selected {
         }
         // K's sideband parts left out and the direct entries spanned where that costs the run the less (module
         // documentation, # The sideband parts dropped, # The direct entries spanned), what they leave out booked with
-        // the dropped beats.
+        // the dropped beats. The decay's products laid on the slots and blocks left first: the nodes these weigh are
+        // made (`counted_node`).
+        self.decay_terms();
         if matches!(drops, Drops::Judged) {
             let (_, account, _) = self.drop_sizes(&node, &[], spherical);
             judgment.dropped += self.drop_sidebands(&account, judgment.dropped);
@@ -1408,9 +1412,14 @@ impl Selected {
     /// slot plus ½ Σ_b (S_ab V_bc − V_ab S_bc) and each opposite pair of beats' ½(S_k V_−k − V_k S_−k), S_k = V_k/(d_a
     /// − d_b − ω_k); the static gradient slot plus the same of ∇V and ∇S = ∇V/(d_a − d_b); every slot's elements between
     /// the blocks left out; each jump component to L + [S, L], its photon form likewise, its gradient + [S, ∇L] + [∇S, L].
-    fn turned(&self, node: &mut Node, cross: &[(usize, usize)]) {
+    fn turned(&self, node: &mut Node, cross: &[(usize, usize)]) -> f64 {
         let n = self.rs.keep.len();
         let (of, blocks) = (&self.block_of, &self.blocks);
+        // The counted complex multiply-adds (decide.rs, # Work): a complex division two, a matrix of n² made or copied
+        // MOVED a number; per place apart its share of each pass below.
+        let (moved, square, places) = (MOVED / COMPLEX, (n * n) as f64, cross.len() as f64);
+        let within = |a: usize| blocks[of[a]].len() as f64;
+        let mut work = 2.0 * moved * square + 2.0 * places;
         let g = node.generator[0].1.clone();
         let gap = |a: usize, b: usize| g[(a, a)] - g[(b, b)];
         let mut s = vec![C64::ZERO; n * n];
@@ -1419,6 +1428,7 @@ impl Selected {
         }
         for _ in 0..ROUNDS {
             let prev = s.clone();
+            work += moved * square + cross.iter().map(|&(a, b)| within(a) + within(b) + 2.0).sum::<f64>();
             for &(a, b) in cross {
                 let mut x = g[(a, b)];
                 for &q in blocks[of[b]].iter().filter(|&&q| q != b) {
@@ -1440,6 +1450,9 @@ impl Selected {
         };
         let mut delta = Mat::zeros(n, n);
         half(&s, &g, &mut delta);
+        // A half commutator: per place apart and state of its block two products added.
+        let halving = cross.iter().map(|&(a, _)| 2.0 * within(a)).sum::<f64>();
+        work += moved * square + halving;
         let values: Vec<f64> = self.read(|b| node.generator.iter().map(|(beat, _)| b.value[*beat]).collect());
         for (k, (_, m)) in node.generator.iter().enumerate().skip(1) {
             if let Some(j) = values.iter().position(|&w| w == -values[k]) {
@@ -1449,6 +1462,7 @@ impl Selected {
                     sk[a * n + b] = m[(a, b)] / (gap(a, b) - C64::real(values[k]));
                 }
                 half(&sk, opposite, &mut delta);
+                work += moved * square + 2.0 * places + halving;
             }
         }
         // The gradient: ∇S = ∇V/(d_a − d_b), ½([∇S, V] + [S, ∇V]) within the blocks.
@@ -1462,6 +1476,7 @@ impl Selected {
                 half(&ds[i], &g, &mut dd);
                 half(&s, &dg[i], &mut dd);
                 dg[i].add_scaled(C64::ONE, &dd);
+                work += 3.0 * moved * square + 2.0 * places + 2.0 * halving;
             }
         }
         for (_, gs) in node.gradient.iter_mut() {
@@ -1476,6 +1491,7 @@ impl Selected {
                 m[(a, b)] = C64::ZERO;
             }
         }
+        work += moved * places * (node.generator.len() + 3 * node.gradient.len()) as f64;
         // The node's own sizes (`Seen`): ‖S‖, ‖V‖ over the places apart, the blocks' couplings, the channels'.
         {
             let norm = |m: &dyn Fn(usize, usize) -> f64| cross.iter().map(|&(a, b)| m(a, b).powi(2)).sum::<f64>().sqrt();
@@ -1494,8 +1510,11 @@ impl Selected {
                 }
             }
             self.seen.note(frame, rate);
+            // The norms: per place apart and slot a modulus and its square; the blocks' couplings.
+            work += 2.0 * places * node.generator.len() as f64 + square;
         }
         node.generator[0].1.add_scaled(C64::ONE, &delta);
+        work += square;
         // The jump components: L + [S, L], [S, L]_xa = Σ_y S_xy L_ya − L_xy S_ya over the places apart.
         let mut dense = vec![[C64::ZERO; 5]; n * n];
         for class in node.classes.iter_mut() {
@@ -1535,9 +1554,13 @@ impl Selected {
                         }
                         dense[e.at] = [C64::ZERO; 5];
                     }
+                    // Its elements laid dense and back (five numbers each, added and zeroed), the turn's matrix made,
+                    // and per place apart and state sixteen products.
+                    work += 15.0 * moved * jump.elements.len() as f64 + 5.0 * moved * square + 16.0 * places * n as f64;
                 }
             }
         }
+        work
     }
 
     /// The direct entries spanned (module documentation, # The direct entries spanned): of the lab's grouping's spans
@@ -1624,14 +1647,26 @@ impl Selected {
         parts[..least.0].iter().map(|p| p.1).sum()
     }
 
-    /// A node's counted work at the structure's point (complex multiply-adds, three a step: the fold and its contraction
-    /// by the lab's grouping, `drop_sizes`').
+    /// The three nodes' counted work of a step at the structure's point (complex multiply-adds): a node's own
+    /// (`Node::work`, `node_work`).
     fn counted_node(&self) -> f64 {
-        let mut work = Work::default();
-        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
-        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
-        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
-        3.0 * (work.local.work + work.out.work)
+        3.0 * self.node([0.0; 3], [0.0; 3], false).work / COMPLEX
+    }
+
+    /// A node's counted work (real multiply-adds; decide.rs, # Work), `Node::work`: the point (its beams' amplitudes,
+    /// `point_work`) and the source's values there (`Tweezer::values_work`), the fold's numbers and their contraction
+    /// (`Local::work`, `Out::work`), and `rest` -- the filling and the turn (`fill`, `turned`; complex multiply-adds). The
+    /// one count of a node: a trajectory's, a path's and the judgment's.
+    fn node_work(&self, local: &Local, out: &Out, rest: f64) -> f64 {
+        COMPLEX * (local.work + out.work + rest) + self.point_work() + COMPLEX * self.rs.tweezer().values_work()
+    }
+
+    /// The point's counted work (real multiply-adds; `Scene::point_into`): per beam its amplitude and gradient -- a plane
+    /// wave's cis and four products, a Gaussian beam's cis, exp and reciprocal with its twenty products --, per generator
+    /// its rate (two dot products and their sum).
+    fn point_work(&self) -> f64 {
+        let beams: f64 = self.scene.geometry.iter().map(|g| if g.waist.is_some() { 2.0 * ELEMENTARY + DIVISION + 20.0 * COMPLEX } else { ELEMENTARY + 4.0 * COMPLEX }).sum();
+        beams + 8.0 * self.scene.generators.len() as f64
     }
 
     /// The reach's bounds the judgment's later parts weigh (# The direct entries spanned): the folded blocks' amplitudes
@@ -1720,8 +1755,7 @@ impl Selected {
         let mut work = Work::default();
         self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
         self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
-        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
-        let nodes = 3.0 * (work.local.work + work.out.work);
+        let nodes = self.counted_node();
         let values = &work.local.values;
         // The H_eff part per slot.
         let (h, _) = Out::bounds(self.rs.plan(), &self.lab, &self.rs.plan().reach(values, &reach), &reach.coefficients);
@@ -1905,9 +1939,11 @@ impl Selected {
         });
         let t_fold = least(&mut || local.evaluate(self.rs.plan(), making));
         let t_contract = least(&mut || out.contract(self.rs.plan(), &self.lab, local, None, making));
-        let t_fill = least(&mut || self.fill(&mut node, out, (false, true), jumps));
-        let c = crate::decide::COMPLEX;
-        [(0.0, t_point), (0.0, t_values), (c * local.work, t_fold), (c * out.work, t_contract), (0.0, t_fill)]
+        let t_fill = least(&mut || {
+            self.fill(&mut node, out, (false, true), jumps);
+        });
+        let filled = self.fill(&mut node, out, (false, true), jumps);
+        [(self.point_work(), t_point), (COMPLEX * self.rs.tweezer().values_work(), t_values), (COMPLEX * local.work, t_fold), (COMPLEX * out.work, t_contract), (COMPLEX * filled, t_fill)]
     }
 
     /// The node at a point (`node`) into one of the run's layout: `kicked` with the photon forms, `whole` with the
@@ -1929,11 +1965,9 @@ impl Selected {
             let making = if made { Making { lift: lifted, ..Making::node(kicked) } } else { Making { lift: lifted, ..Making::PHOTONS } };
             self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
             work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
-            self.fill(node, &work.out, (kicked, made), &mut work.jumps);
-            if let Some(cross) = &self.turn {
-                self.turned(node, cross);
-            }
-            node.work = crate::decide::COMPLEX * (work.local.work + work.out.work);
+            let filled = self.fill(node, &work.out, (kicked, made), &mut work.jumps);
+            let turned = self.turn.as_ref().map_or(0.0, |cross| self.turned(node, cross));
+            node.work = self.node_work(&work.local, &work.out, filled + turned);
             node.lift.truncate(if lifted { work.out.lift.len() } else { 0 });
             if lifted {
                 node.lift.resize_with(work.out.lift.len(), Default::default);
@@ -2178,14 +2212,18 @@ impl Selected {
 
     /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places): its photon classes, and where
     /// `whole` its generator and gradient.
-    fn fill(&self, node: &mut Node, out: &Out, (kicked, whole): (bool, bool), jumps: &mut Vec<C64>) {
+    fn fill(&self, node: &mut Node, out: &Out, (kicked, whole): (bool, bool), jumps: &mut Vec<C64>) -> f64 {
         let n = self.rs.keep.len();
+        // The counted complex multiply-adds (decide.rs, # Work): every number laid MOVED, every product one.
+        let moved = MOVED / COMPLEX;
+        let mut work = 0.0;
         for c in node.classes.iter_mut() {
             for axis in c.axes.iter_mut() {
                 for j in axis.iter_mut() {
                     for e in j.elements.iter_mut() {
                         (e.value, e.gradient, e.kick) = (C64::ZERO, [C64::ZERO; 3], C64::ZERO);
                     }
+                    work += 5.0 * moved * j.elements.len() as f64;
                 }
             }
         }
@@ -2193,6 +2231,7 @@ impl Selected {
             if *which == 1 && !kicked {
                 continue;
             }
+            work += moved * (if *which == 0 { 4 } else { 1 } * list.len()) as f64;
             for (k, &(_, class, axis, jump, element)) in list.iter().enumerate() {
                 let e = &mut node.classes[class as usize].axes[axis as usize][jump as usize].elements[element as usize];
                 if *which == 0 {
@@ -2206,8 +2245,10 @@ impl Selected {
             }
         }
         if !whole {
-            return;
+            return work;
         }
+        work += moved * ((node.generator.len() + 3 * node.gradient.len()) * n * n + n) as f64;
+        work += 4.0 * moved * self.tables.h.iter().map(Vec::len).sum::<usize>() as f64;
         for (_, m) in node.generator.iter_mut() {
             m.data.fill(C64::ZERO);
         }
@@ -2239,8 +2280,12 @@ impl Selected {
             let axes = &node.classes[j.class].axes;
             for (p, sources) in &j.elements {
                 jumps[at + p] = sources.iter().map(|&(a, c, e, u)| u * axes[a][c].elements[e].value).sum();
+                work += sources.len() as f64;
             }
+            work += moved * (GROUND * j.cols.len()) as f64;
         }
+        // Each product's terms (four real multiply-adds each), its −i/2 and its conjugate's at their places.
+        work += self.tables.terms.len() as f64 + 2.0 * (1.0 + moved) * self.tables.entries.len() as f64;
         // Each product's entries by their structural terms (`decay_terms`; between two exact blocks nothing, `judge`):
         // Σ_g conj(ℓ_l[g, i]) ℓ_r[g, j] over the rows the two share, each term two fused multiply-adds a part as the
         // product kernel makes them (`linalg::adjoint_product`, whose other terms are the structural zeros'), then −i/2
@@ -2261,6 +2306,7 @@ impl Selected {
                 node.generator[e.back.0 as usize].1.data[e.back.1 as usize] += half * p.conj();
             }
         }
+        work
     }
 
     /// The ground populations of a state of P (an explicit excited state's by its decay's branching), over its norm.
@@ -2504,9 +2550,10 @@ impl SelectedMiddle<'_> {
             let p = &list[k];
             let n = psi.len();
             let amplitudes = p.u.each_ref().map(|u| u.iter().copied().collect::<Internal>());
-            let jumps: usize = node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum::<usize>()).sum();
+            // Every class's rate on its amplitudes alone and the drawn one's whole, as they were made.
+            let work = node.classes.iter().map(|c| class_photons_work(c, node.kicked, false, n)).sum::<f64>() + class_photons_work(&node.classes[k], node.kicked, true, n);
             let wave_number = p.wave_number.expect("a jump's node holds the photon forms");
-            Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.moments.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
+            Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.moments.kick, work })
         });
         self.model.release(node);
         emitted
@@ -2554,6 +2601,23 @@ fn photons<'a>(node: &Node, values: &[f64], t: f64, psi: &[C64], list: &'a mut V
         class_photons(class, node.kicked, (values, t), psi, norm, p, true);
     }
     &list[..node.classes.len()]
+}
+
+/// `class_photons`' counted real multiply-adds (decide.rs, # Work) of a class on n states: its fifteen vectors zeroed;
+/// per jump component its beat's phase (a cis where it beats) and per element its products -- u's, and where `whole`
+/// the three gradients' and the photon forms' where `kicked` --, each of its rows (at most n) their sum added out; then
+/// u's weight alone (its norm, over ‖ψ‖²), or where `whole` the moments (`Moments::of`: W, the three means' and the nine
+/// second moments' inner products over the three axes) and the photon's wave number.
+fn class_photons_work(class: &Class, kicked: bool, whole: bool, n: usize) -> f64 {
+    let per = if whole { 4 + usize::from(kicked) } else { 1 } as f64;
+    let parts: f64 = class
+        .axes
+        .iter()
+        .flatten()
+        .map(|jump| if jump.beat == 0 { 0.0 } else { ELEMENTARY } + COMPLEX * per * (jump.elements.len() + jump.elements.len().min(n)) as f64)
+        .sum();
+    let after = if whole { COMPLEX * ((3 + 9 + 27 + if kicked { 3 } else { 0 }) * n) as f64 } else { (6 * n) as f64 + DIVISION };
+    15.0 * MOVED * n as f64 + parts + after
 }
 
 /// A class's photons of the state ψ at the time t (`photons`): where `whole`, u_a, ∇u_a, the photon forms' K u_a where
@@ -2808,7 +2872,9 @@ impl crate::step::Middle for SelectedMiddle<'_> {
             moments.extend(classes.iter().map(|p| p.moments));
             Scattering::of_moments(moments)
         });
-        (scattering, crate::decide::COMPLEX * (12 * n * n * node.classes.len()) as f64)
+        let work: f64 = node.classes.iter().map(|c| class_photons_work(c, node.kicked, true, n)).sum();
+        // The moments' sum over the classes (`Scattering::of_moments`): a class's sixteen numbers, the diffusion's factor's.
+        (scattering, work + (16 * node.classes.len() + 64) as f64)
     }
 
     fn work(&self) -> [f64; 3] {

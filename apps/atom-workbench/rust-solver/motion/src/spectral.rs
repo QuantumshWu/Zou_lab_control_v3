@@ -1387,6 +1387,11 @@ impl Picture {
         self.work += (n * n * n) as f64;
         lay(&e.vectors.data, n, &mut self.right);
         lay(&e.inverse.data, n, &mut self.left);
+        // The element-wise passes about the decomposition (decide.rs, # Work): Ĥ₀ copied less its trace's share, every
+        // matrix's entries tested for the connections (the static group's, its changes' and the tones' members'), the
+        // reached components and the bounds a pass over n² each, R and R⁻¹ laid for the lanes.
+        let matrices = 1 + if still { 0 } else { 2 + 3 * 2 * self.beats.len() };
+        self.work += (crate::decide::MOVED / crate::decide::COMPLEX) * (3 * n * n) as f64 + (matrices * n * n + 3 * n * n) as f64 / crate::decide::COMPLEX;
         drop(decomposing);
         if self.moving {
             let changing = crate::prof::scope(86);
@@ -2376,6 +2381,11 @@ impl Picture {
         let v = self.quotient_by(from, false);
         self.lambda[..n].copy_from_slice(&kept[..n]);
         v
+    }
+
+    /// The pairs `weighed_by` weighs (its count: three real operations each, step.rs `Groups::choose`).
+    pub(crate) fn weighing(&self) -> usize {
+        self.pairs.len() + self.numerated.len()
     }
 
     /// The last quotient's items (`quotient_from`) by a cut of the eigencomponents into groups (`group[a]` below `groups`;

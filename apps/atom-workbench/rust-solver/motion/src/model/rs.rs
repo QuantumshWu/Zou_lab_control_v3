@@ -982,6 +982,26 @@ impl Tweezer {
         v.frequencies.extend(self.source.pieces().map(|(p, _)| point.frequency(&p.key)));
     }
 
+    /// `values_into`'s counted work (complex multiply-adds; decide.rs, # Work): per factor its value and gradient -- a
+    /// beam's or its conjugate's four numbers moved, a product's value and its gradient's two products an axis, the
+    /// tweezer's intensity |a|² and its gradient --, the tweezer's Doppler powers, and per piece its key's frequency
+    /// (a real multiply-add a generator).
+    pub fn values_work(&self) -> f64 {
+        let moved = crate::decide::MOVED / crate::decide::COMPLEX;
+        let factors: f64 = self
+            .factors
+            .0
+            .iter()
+            .map(|f| match f {
+                Factor::Scene(scene::Factor::Product(..)) => 7.0,
+                Factor::Power => 4.0,
+                _ => 4.0 * moved,
+            })
+            .sum();
+        let pieces: usize = self.source.pieces().map(|(p, _)| p.key.len()).sum();
+        factors + (2 * ORDERS) as f64 / crate::decide::COMPLEX + pieces as f64 / crate::decide::COMPLEX
+    }
+
     /// The unit fold's static part on the 32 states at rest (rad/µs at the tweezer's focus intensity): its ground
     /// diagonal the tweezer's ground shift (`Scene::trap_potential`'s depth), its excited block the tweezer's shifts of
     /// the excited states (`Scene::smooth`).
