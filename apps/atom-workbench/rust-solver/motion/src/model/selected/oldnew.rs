@@ -893,3 +893,274 @@ fn oldnew_fill() {
         );
     }
 }
+
+/// OLDNEW implementation round, items 2 and 3 (the coordinator's 11-23): a jump's photon node and the middle's photons
+/// taken apart on the run split by K's fast parts (OLDNEW_JN_WHOLE for the whole one), per scene of OLDNEW_JN (PGC3D,
+/// TET, tilt0, tilt2) at OLDNEW_POINTS (12) moving points, each the least of OLDNEW_REPEAT (9): the fold (`Rs::evaluate`)
+/// and the contraction (`Out::contract`) with the photon forms (`Making::PHOTONS`) and without them, the photon classes
+/// filled (`Selected::fill`); per class the channel outputs that feed it; and on a full node at the point every class's
+/// photons whole (`photons`), every class's rate alone and one class whole (`class_photons`).
+#[test]
+#[ignore]
+fn oldnew_jumpnode() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (count, repeat) = (env("OLDNEW_POINTS", 12), env("OLDNEW_REPEAT", 9));
+    let list = std::env::var("OLDNEW_JN").unwrap_or_else(|_| "PGC3D,TET,tilt0,tilt2".to_string());
+    let least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..repeat)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                f();
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for name in list.split(',') {
+        let request = request_of(name);
+        let keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let mut run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let whole = std::env::var("OLDNEW_JN_WHOLE").is_ok();
+        if !whole {
+            run.split_by_parts();
+        }
+        let plan = run.rs.plan();
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let n = run.rs.keep.len();
+        let mut work = Work::default();
+        let no_kicks = Making { kicks: false, ..Making::PHOTONS };
+        let (mut ev_ph, mut co_ph, mut fill_ph, mut ev_nk, mut co_nk) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut w_ev, mut w_co) = (0.0, 0.0);
+        let (mut t_photons, mut t_rates, mut t_one) = (0.0, 0.0, 0.0);
+        let mut photon_node = run.template.clone();
+        let mut full = run.template.clone();
+        for i in 0..count {
+            let u = i as f64;
+            let r = [0.3 * (1.3 * u).sin(), 0.3 * (2.1 * u + 0.4).cos(), 1.0 * (0.7 * u + 1.1).sin()];
+            let kappa = [speed * (0.9 * u).sin(), speed * (1.7 * u).cos(), speed];
+            run.scene.point_into(r, kappa, &mut work.point);
+            ev_ph += least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making::PHOTONS));
+            w_ev += work.local.work;
+            co_ph += least(&mut || work.out.contract(plan, &run.lab, &work.local, None, Making::PHOTONS));
+            w_co += work.out.work;
+            let out = &work.out;
+            let jumps = &mut work.jumps;
+            fill_ph += least(&mut || run.fill(&mut photon_node, out, (true, false), jumps));
+            ev_nk += least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, no_kicks));
+            co_nk += least(&mut || work.out.contract(plan, &run.lab, &work.local, None, no_kicks));
+            // The middle's photons on a full node at the point.
+            run.node_into(&mut full, r, kappa, (false, true), false);
+            let psi = spread(n);
+            let norm = norm_sqr(&psi);
+            let mut list = Vec::new();
+            let values: Vec<f64> = run.read(|b| b.value.clone());
+            t_photons += least(&mut || {
+                std::hint::black_box(photons(&full, &values, 0.37, &psi, &mut list).len());
+            });
+            let mut rates = Vec::new();
+            t_rates += least(&mut || {
+                rates.clear();
+                for (class, p) in full.classes.iter().zip(list.iter_mut()) {
+                    rates.push(class_photons(class, full.kicked, (&values, 0.37), &psi, norm, p, false));
+                }
+                std::hint::black_box(rates.len());
+            });
+            let k = full.classes.len() / 2;
+            t_one += least(&mut || {
+                std::hint::black_box(class_photons(&full.classes[k], full.kicked, (&values, 0.37), &psi, norm, &mut list[k], true));
+            });
+        }
+        let k = count as f64;
+        // Per class the channel outputs that feed it, and the jump pairs and direct entries behind each output.
+        let classes = photon_node.classes.len();
+        let mut feeds = vec![std::collections::BTreeSet::new(); classes];
+        for (o, list) in run.tables.channels.iter().enumerate() {
+            for &(_, class, _, _, _) in list {
+                feeds[class as usize].insert(o);
+            }
+        }
+        let outputs = run.lab.channel_outputs.len();
+        let feeds: Vec<usize> = feeds.iter().map(|s| s.len()).collect();
+        let elements: Vec<usize> = photon_node.classes.iter().map(|c| c.axes.iter().flatten().map(|j| j.elements.len()).sum()).collect();
+        let jumps: Vec<usize> = photon_node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum()).collect();
+        eprintln!(
+            "OLDNEW-JN {name}{}: n {n}; a jump's photon node: fold {:.1} µs ({:.3e} CMA counted) + contraction {:.1} µs ({:.3e}) + fill {:.1} µs; without the photon forms fold {:.1} + contraction {:.1} µs; {classes} classes, {outputs} channel outputs, per class outputs {feeds:?}, components {jumps:?}, elements {elements:?}; the middle's photons every class whole {:.2} µs, every class's rate alone {:.2} µs, one class whole {:.2} µs",
+            if whole { "" } else { " split" },
+            ev_ph / k,
+            w_ev / k,
+            co_ph / k,
+            w_co / k,
+            fill_ph / k,
+            ev_nk / k,
+            co_nk / k,
+            t_photons / k,
+            t_rates / k,
+            t_one / k
+        );
+    }
+}
+
+/// `class_photons` as it was until 2026-11-23 (the kernel check's reference, `oldnew_kernel`): five passes a component,
+/// every buffer cleared and grown again.
+fn class_photons_before(class: &Class, kicked: bool, (values, t): (&[f64], f64), psi: &[C64], norm: f64, p: &mut Photons, whole: bool) -> f64 {
+    let n = psi.len();
+    let Photons { u, du, ku, .. } = &mut *p;
+    for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
+        v.clear();
+        v.resize(n, C64::ZERO);
+    }
+    for (a, axis) in class.axes.iter().enumerate() {
+        for jump in axis {
+            let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
+            let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
+                for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
+                    let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
+                    out[row[0].at / n] += f * z;
+                }
+            };
+            apply(&|e| e.value, &mut u[a]);
+            if !whole {
+                continue;
+            }
+            if kicked {
+                apply(&|e| e.kick, &mut ku[a]);
+            }
+            for (i, d) in du.iter_mut().enumerate() {
+                apply(&|e| e.gradient[i], &mut d[a]);
+            }
+        }
+    }
+    if !whole {
+        let weight: f64 = (0..3).map(|a| norm_sqr(&u[a])).sum();
+        return weight / norm;
+    }
+    let moments = Moments::of(u, du, class.absorbed);
+    let weight = moments.weight;
+    p.wave_number = kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
+    p.moments = moments.over(norm);
+    p.moments.weight
+}
+
+/// OLDNEW item 3 (the coordinator's 11-23): the photons' kernel (`class_photons`, one pass a component) against its
+/// form before (`class_photons_before`) to the bit -- every class's u_a, ∇u_a, K u_a, moments, rate and wave number, whole
+/// and its rate alone -- on the middle's node (no photon forms) and on a jump's photon node (with them), on the run
+/// split by K's fast parts (OLDNEW_KERNEL_WHOLE for the whole one), per scene of OLDNEW_KERNEL (PGC3D, TET, tilt0,
+/// tilt2) at OLDNEW_POINTS (12) moving points, three states each, at a time where the beats turn; and each way's time
+/// (the least of OLDNEW_REPEAT, 9) of the middle's photons (`photons`: every class whole) and of a jump's rates.
+#[test]
+#[ignore]
+fn oldnew_kernel() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (count, repeat) = (env("OLDNEW_POINTS", 12), env("OLDNEW_REPEAT", 9));
+    let list = std::env::var("OLDNEW_KERNEL").unwrap_or_else(|_| "PGC3D,TET,tilt0,tilt2".to_string());
+    let least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..repeat)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                f();
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let bits = |v: &[C64]| v.iter().flat_map(|z| [z.re.to_bits(), z.im.to_bits()]).collect::<Vec<u64>>();
+    let same = |p: &Photons, q: &Photons, whole: bool| -> bool {
+        let u = (0..3).all(|a| bits(&p.u[a]) == bits(&q.u[a]));
+        if !whole {
+            return u;
+        }
+        let du = (0..3).all(|i| (0..3).all(|a| bits(&p.du[i][a]) == bits(&q.du[i][a])));
+        let ku = (0..3).all(|a| bits(&p.ku[a]) == bits(&q.ku[a]));
+        let m = |m: &Moments| (m.weight.to_bits(), m.mean.map(f64::to_bits), m.second.map(|r| r.map(f64::to_bits)), m.share.to_bits(), m.kick.map(f64::to_bits), m.states);
+        u && du && ku && m(&p.moments) == m(&q.moments) && p.wave_number.map(f64::to_bits) == q.wave_number.map(f64::to_bits)
+    };
+    for name in list.split(',') {
+        let request = request_of(name);
+        let keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let mut run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let whole_model = std::env::var("OLDNEW_KERNEL_WHOLE").is_ok();
+        if !whole_model {
+            run.split_by_parts();
+        }
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let n = run.rs.keep.len();
+        let values: Vec<f64> = run.read(|b| b.value.clone());
+        let (mut t_new, mut t_old, mut r_new, mut r_old, mut checked) = (0.0, 0.0, 0.0, 0.0, 0usize);
+        let mut node = run.template.clone();
+        let mut photon_node = run.template.clone();
+        for i in 0..count {
+            let u = i as f64;
+            let r = [0.3 * (1.3 * u).sin(), 0.3 * (2.1 * u + 0.4).cos(), 1.0 * (0.7 * u + 1.1).sin()];
+            let kappa = [speed * (0.9 * u).sin(), speed * (1.7 * u).cos(), speed];
+            run.node_into(&mut node, r, kappa, (false, true), false);
+            run.node_into(&mut photon_node, r, kappa, (true, false), false);
+            for s in 0..3 {
+                let psi: Vec<C64> = (0..n).map(|k| C64::new((0.7 * (k + s) as f64 + 0.3 * u).sin(), (1.3 * (k * s) as f64 + 0.11 * u).cos())).collect();
+                let norm = norm_sqr(&psi);
+                let t = 0.37 + 0.05 * s as f64;
+                for nd in [&node, &photon_node] {
+                    for class in &nd.classes {
+                        for whole in [true, false] {
+                            let (mut p, mut q) = (Photons::default(), Photons::default());
+                            let a = class_photons(class, nd.kicked, (&values, t), &psi, norm, &mut p, whole);
+                            let b = class_photons_before(class, nd.kicked, (&values, t), &psi, norm, &mut q, whole);
+                            assert_eq!(a.to_bits(), b.to_bits(), "{name}: a class's rate apart");
+                            assert!(same(&p, &q, whole), "{name}: a class's photons apart (whole {whole}, kicked {})", nd.kicked);
+                            // And on buffers a class made before: the kernel's zeroing in place.
+                            let c = class_photons(class, nd.kicked, (&values, t), &psi, norm, &mut p, whole);
+                            assert_eq!(c.to_bits(), b.to_bits(), "{name}: a reused buffer's rate apart");
+                            assert!(same(&p, &q, whole), "{name}: a reused buffer's photons apart");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+            let psi = spread(n);
+            let norm = norm_sqr(&psi);
+            let mut list: Vec<Photons> = Vec::new();
+            list.resize_with(node.classes.len(), Photons::default);
+            t_new += least(&mut || {
+                for (class, p) in node.classes.iter().zip(list.iter_mut()) {
+                    std::hint::black_box(class_photons(class, node.kicked, (&values, 0.37), &psi, norm, p, true));
+                }
+            });
+            t_old += least(&mut || {
+                for (class, p) in node.classes.iter().zip(list.iter_mut()) {
+                    std::hint::black_box(class_photons_before(class, node.kicked, (&values, 0.37), &psi, norm, p, true));
+                }
+            });
+            r_new += least(&mut || {
+                for (class, p) in photon_node.classes.iter().zip(list.iter_mut()) {
+                    std::hint::black_box(class_photons(class, true, (&values, 0.37), &psi, norm, p, false));
+                }
+            });
+            r_old += least(&mut || {
+                for (class, p) in photon_node.classes.iter().zip(list.iter_mut()) {
+                    std::hint::black_box(class_photons_before(class, true, (&values, 0.37), &psi, norm, p, false));
+                }
+            });
+        }
+        let k = count as f64;
+        let elements: usize = node.classes.iter().flat_map(|c| c.axes.iter().flatten().map(|j| j.elements.len())).sum();
+        let components: usize = node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum::<usize>()).sum();
+        let beats: Vec<usize> = node.classes.iter().map(|c| c.axes.iter().flatten().map(|j| j.beat).collect::<std::collections::BTreeSet<_>>().len()).collect();
+        eprintln!("OLDNEW-KERNEL {name}: distinct beats per class {beats:?}");
+        eprintln!(
+            "OLDNEW-KERNEL {name}{}: {checked} class photons the same to the bit; the middle's photons (every class whole, {} classes, {components} components, {elements} elements) {:.2} µs before, {:.2} µs now ({:.2}); a jump's rates {:.2} µs before, {:.2} µs now ({:.2})",
+            if whole_model { "" } else { " split" },
+            node.classes.len(),
+            t_old / k,
+            t_new / k,
+            t_new / t_old,
+            r_old / k,
+            r_new / k,
+            r_new / r_old
+        );
+    }
+}
