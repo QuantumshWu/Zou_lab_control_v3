@@ -240,8 +240,6 @@ export class TaskConsoleView implements View {
   private project(row: LogicRow): NodeProjection { return { ...projectRow(row), ...(this.starts.waits(row.node_id) ? { pending: true } : {}) }; }
 
   status(): void {
-    // A refusal answers an edit too.
-    this.starts.settle();
     // v2: the strip keeps the console's newest line (a command's outcome, a note, the running
     // Task's status), said once by the workbench; a picture being presented says nothing.
     const report = this.boardState()?.report;

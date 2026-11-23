@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Start after an edit in the Figure Viewer's window</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. the Figure Viewer's window from its own entry (dist/main.js) on a fake native host
+// (start_main.js): a field committed by its blur, then Restart -- the Start waits for the edit's reply, read where
+// the reply is taken (views/logic.ts NodeStarts.settle), and goes once, with the edited revision, taken.
+import {startAfterEdit} from './start_main.js';
+const assert=(condition,message)=>{if(!condition)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+try {
+  const {step,input,start,said,starts,handled}=await startAfterEdit(true);
+  input.value='b';input.dispatchEvent(new InputEvent('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));
+  start.click();
+  equal(starts(),[],'no Start before the edit is answered');
+  equal(said(start),'Starting…','"Starting…" meanwhile');
+  equal(step().error,null,'the edit taken');
+  equal(starts().map(command=>command.expected_draft_revision),[2],'one Start, with the edited revision');
+  equal(step().error,null,'the Start taken');
+  equal(handled.map(item=>item.action),['edit_node','start_node'],'the host took the edit, then the Start');
+  results.push('a field committed by its blur, then Restart: one Start after the edit\'s reply, with its revision, taken');
+  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+document.title='done';
+</script>

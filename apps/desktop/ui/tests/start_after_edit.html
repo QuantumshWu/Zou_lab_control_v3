@@ -28,21 +28,25 @@ const nodeRow=(node,fields={})=>({node_id:node,name:node,type_id:'calibration',n
   device_labels:{},artifact_inputs:{},artifact_specs:[],auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:true,preview_offered:true,
   edited:false,state:'running',status:'running',phase:'running',run:null,editor_facts:null,...fields});
 /** The workbench, faked: one step takes this window's next command in the order sent and answers it on the state
- * that carries its change -- an edit (or a revert) moves the draft revision on and says it, a Start of another
- * revision is refused, a Stop leaves the node idle, a Remove takes it away. `foreign` is a change made elsewhere,
- * told to this window or not yet. */
+ * that carries its change -- an edit (or a revert) moves the draft revision on where it changes the draft and says
+ * the revision it started from and the one it left, a Start of another revision is refused, a Stop leaves the node
+ * idle, a Remove takes it away. `foreign` is a change made elsewhere, told to this window or not yet. */
 function workbench(rows,deliver){
   let taken=0;
   const apply=command=>{
     const row=rows.find(item=>item.node_id===command.node);
     if(!row)return {error:`No logic node "${command.node}"`};
+    const before=row.draft_revision;
     if(command.action==='edit_node'){
       if(command.refuse)return {error:'the edit is refused'};
       if(command.values){row.values={...row.values,...command.values};row.controls=row.controls.map(control=>({...control,value:row.values[control.name]}));row.draft_revision++;row.edited=true}
       if('auto_preview' in command)row.auto_preview=command.auto_preview;
-      return {result:{node:row.node_id,draft_revision:row.draft_revision}};
+      return {result:{node:row.node_id,draft_revision:row.draft_revision,draft_revision_before:before}};
     }
-    if(command.action==='revert_node'){row.values={label:'a'};row.edited=false;row.draft_revision++;return {result:{node:row.node_id,draft_revision:row.draft_revision}}}
+    if(command.action==='revert_node'){
+      if(row.edited){row.values={label:'a'};row.edited=false;row.draft_revision++}
+      return {result:{node:row.node_id,draft_revision:row.draft_revision,draft_revision_before:before}};
+    }
     if(command.action==='start_node'){
       if(command.expected_draft_revision!==undefined&&command.expected_draft_revision!==row.draft_revision)
         return {error:`${row.name} changed (draft revision ${row.draft_revision} is not ${command.expected_draft_revision}); read it again`};
@@ -148,7 +152,7 @@ try {
      const {host,page,done}=consoleWindow();
      type(field(page,'Label'),'b');startButton(page).click();
      host.foreign('scan',told);host.step();
-     equal(starts().map(entry=>entry.expected_draft_revision),[2],`${told?'told':'not told'}: the click's revision and the edit's own step`);
+     equal(starts().map(entry=>entry.expected_draft_revision),[1],`${told?'told':'not told'}: the click's revision, the edit having started from another`);
      assert(refused(host.step()),`${told?'told':'not told'}: refused`);
      done();
    }
@@ -160,6 +164,27 @@ try {
    equal(starts().map(entry=>entry.expected_draft_revision),[1],'the click\'s revision');
    assert(refused(host.step()),'refused');
    done();
+ });
+ await check('an edit that changes nothing after a change from elsewhere does not take that change for its own: refused',()=>{
+   // The Plot switch changes no draft; then a Revert with nothing left to revert (reverted elsewhere).
+   {
+     const {host,page,done}=consoleWindow();
+     page.querySelector('.row-switch').click();startButton(page).click();
+     host.foreign('scan',false);host.step();
+     equal(starts().map(entry=>entry.expected_draft_revision),[1],'the Plot switch: the click\'s revision');
+     assert(refused(host.step()),'the Plot switch: refused');
+     done();
+   }
+   {
+     const {host,page,done}=consoleWindow();
+     type(field(page,'Label'),'b');host.step();
+     Object.assign(host.rows[0],{values:{label:'a'},edited:false});host.foreign('scan',false);
+     button(page,/^Revert$/).click();startButton(page).click();
+     host.step();
+     equal(starts().map(entry=>entry.expected_draft_revision),[2],'a Revert with nothing to revert: the click\'s revision');
+     assert(refused(host.step()),'the Revert: refused');
+     done();
+   }
  });
  await check('a change from elsewhere after the edit is refused',()=>{
    const {host,page,done}=consoleWindow();

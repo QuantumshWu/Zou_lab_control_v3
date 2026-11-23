@@ -982,7 +982,7 @@ impl Workbench {
             self.send_queries(id);
         }
         if changed || auto_preview.is_some() { self.board.dirty = true; }
-        Ok(json!({"node": id, "draft_revision": revision}))
+        Ok(json!({"node": id, "draft_revision": revision, "draft_revision_before": revision - u64::from(changed)}))
     }
 
     /// v2 `_commit_logic_draft`: a field whose value changes is no longer a region's to
@@ -1084,6 +1084,7 @@ impl Workbench {
         self.task_gate("changing a logic draft")?;
         let node = self.node_mut(id)?;
         let running = node.running.clone().ok_or_else(|| format!("{} is not running; there is no running configuration to return to", node.name))?;
+        let before = node.revision;
         if node.draft != running {
             let moved = changed_fields(&node.draft.values, &running.values);
             node.draft = running;
@@ -1092,7 +1093,7 @@ impl Workbench {
             self.release_selections(id, &moved);
             self.send_queries(id);
         }
-        Ok(json!({"node": id, "draft_revision": self.node(id).map(|node| node.revision)}))
+        Ok(json!({"node": id, "draft_revision": self.node(id).map(|node| node.revision), "draft_revision_before": before}))
     }
 
     /// Admission: every reason the draft cannot start now, in v2's order.

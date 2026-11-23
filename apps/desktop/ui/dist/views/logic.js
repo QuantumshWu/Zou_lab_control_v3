@@ -115,16 +115,17 @@ export class LogicRowView {
 export class NodeStarts {
     transport;
     rows;
-    /** Per node: its edits sent from here and unanswered, in order, and the revision a waiting Start goes with (null: none waits). */
+    /** Per node: its edits sent from here whose replies have not come, in order, and the revision a waiting Start goes with (null: none waits). */
     nodes = new Map();
     constructor(transport, rows) {
         this.transport = transport;
         this.rows = rows;
     }
-    /** An edit of node `id`'s draft, sent now. */
+    /** An edit of node `id`'s draft, sent now; one the host will answer (not a shared view's) is awaited. */
     edit(id, command, feedback) {
         const request = this.transport.send(command, feedback);
-        this.node(id).edits.push(request);
+        if (this.transport.pending.has(request))
+            this.node(id).edits.push(request);
         return request;
     }
     /** The operator's Start: sent now with the revision this window read, or, an edit of its own still
@@ -133,7 +134,7 @@ export class NodeStarts {
         if (this.waits(id))
             return true;
         const revision = this.row(id)?.draft_revision;
-        if (revision === undefined || !this.nodes.get(id)?.edits.some(request => this.transport.pending.has(request))) {
+        if (revision === undefined || !this.nodes.get(id)?.edits.length) {
             this.send(id, revision);
             return false;
         }
@@ -149,28 +150,29 @@ export class NodeStarts {
         return true;
     }
     waits(id) { return (this.nodes.get(id)?.start ?? null) !== null; }
-    /** After each state (`state`, which may answer an edit) and each refusal: an answered edit of a
-     * node whose Start waits moves its revision on by one where its reply's draft_revision is not the
-     * revision so far -- one more than it, the edit's own change; further on, a change from elsewhere
-     * too, which the one step leaves for the host to refuse -- and a refused edit leaves it; once none
-     * is left the Start goes.  Edits sent after the click ride along and put the Start off until they
-     * are answered (a Revert after it restarts the reverted draft): taking the draft as it stood at the
+    /** Each state the page takes: only the one that is an edit's reply (`state.request`) settles that
+     * edit -- what else reads the answer before it (the board, the status line) has no reply to read.
+     * Of a node whose Start waits, the reply takes its revision on to the one the edit left only where
+     * the edit started from it (draft_revision_before): something changed elsewhere before the edit
+     * leaves it, for the host to refuse, and so does a refusal; once its node has no edit left the
+     * Start goes.  Edits sent after the click ride along and put the Start off until they are
+     * answered (a Revert after it restarts the reverted draft): taking the draft as it stood at the
      * click would bring back the refusal of the first click. */
     settle(state) {
         for (const [id, node] of this.nodes) {
-            for (const request of [...node.edits]) {
-                if (this.transport.pending.has(request))
-                    continue;
-                node.edits.splice(node.edits.indexOf(request), 1);
-                const reply = state?.request === request && !state.error ? state.result?.draft_revision : undefined;
-                if (node.start !== null && typeof reply === "number" && reply !== node.start)
-                    node.start += 1;
-            }
-            if (node.edits.length)
+            const at = state.request === undefined ? -1 : node.edits.indexOf(state.request);
+            if (at < 0)
                 continue;
+            node.edits.splice(at, 1);
+            const reply = state.error ? undefined : state.result;
+            if (node.start !== null && reply?.draft_revision_before === node.start && typeof reply.draft_revision === "number")
+                node.start = reply.draft_revision;
+            if (node.edits.length)
+                return;
             this.nodes.delete(id);
             if (node.start !== null)
                 this.send(id, node.start);
+            return;
         }
     }
     send(id, revision) {

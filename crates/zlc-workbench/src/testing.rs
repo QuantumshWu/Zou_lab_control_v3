@@ -1085,7 +1085,8 @@ mod tests {
         apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).unwrap();
         assert_eq!(calls.borrow().1.len(), 1, "launched once the device is free");
         event(&mut workbench,Event::RunStarted { run: "camera_measurement#1".into() }, &mut host);
-        apply(&mut workbench, &mut host, "edit_node", json!({"node": "camera_measurement", "device_keys": {"camera": "gone"}})).unwrap();
+        let edited = apply(&mut workbench, &mut host, "edit_node", json!({"node": "camera_measurement", "device_keys": {"camera": "gone"}})).unwrap();
+        assert_eq!(edited["draft_revision_before"].as_u64().unwrap() + 1, edited["draft_revision"].as_u64().unwrap(), "an edit says the revision it started from and the one it left");
         assert!(apply(&mut workbench, &mut host, "start_node", json!({"node": "camera_measurement"})).is_err());
         let row = workbench.node_row(workbench.node("camera_measurement").unwrap(), &[]);
         assert_eq!(row["state"], "warning");
@@ -1095,6 +1096,7 @@ mod tests {
         let reverted = apply(&mut workbench, &mut host, "revert_node", json!({"node": "camera_measurement"})).unwrap();
         let row = workbench.node_row(workbench.node("camera_measurement").unwrap(), &[]);
         assert_eq!(reverted["draft_revision"], row["draft_revision"], "a revert says the revision it left, as an edit does");
+        assert_eq!(reverted["draft_revision_before"], edited["draft_revision"], "and the one it started from");
         assert_eq!(row["state"], "running");
         assert!(!row["status"].as_str().unwrap().contains("Restart refused:"));
     }
