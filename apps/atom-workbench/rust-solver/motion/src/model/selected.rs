@@ -1882,6 +1882,34 @@ impl Selected {
         node
     }
 
+    /// A node's parts at a point as `node_into` makes a plain one (a measurement's, the tests'): per part -- the point
+    /// (`Scene::point_into`), the source's values there (`Tweezer::values_into`), the fold's numbers (`Local::evaluate`),
+    /// the contraction (`Out::contract`), the filling (`fill`) -- its counted real multiply-adds as the node counts them
+    /// (`Node::work`'s parts) and its time as `least` takes it (µs). Each part is made once first, untimed, so that each
+    /// times its own operations on its inputs.
+    #[cfg(test)]
+    pub(crate) fn node_parts(&self, at: V3, kappa: V3, least: &mut dyn FnMut(&mut dyn FnMut()) -> f64) -> [(f64, f64); 5] {
+        let mut work = Work::default();
+        let mut node = self.template.clone();
+        let making = Making { lift: false, ..Making::node(false) };
+        self.scene.point_into(at, kappa, &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
+        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
+        self.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+        let Work { point, local, out, jumps, .. } = &mut work;
+        let t_point = least(&mut || self.scene.point_into(at, kappa, point));
+        let t_values = least(&mut || {
+            let mut v = std::mem::take(&mut local.values);
+            self.rs.tweezer().values_into(&self.scene, point, &mut v);
+            local.values = v;
+        });
+        let t_fold = least(&mut || local.evaluate(self.rs.plan(), making));
+        let t_contract = least(&mut || out.contract(self.rs.plan(), &self.lab, local, None, making));
+        let t_fill = least(&mut || self.fill(&mut node, out, (false, true), jumps));
+        let c = crate::decide::COMPLEX;
+        [(0.0, t_point), (0.0, t_values), (c * local.work, t_fold), (c * out.work, t_contract), (0.0, t_fill)]
+    }
+
     /// The node at a point (`node`) into one of the run's layout: `kicked` with the photon forms, `whole` with the
     /// generator (else the photon classes alone, a jump's photon's: `Making::PHOTONS`); with the lift and its gradient
     /// where `lifted` (a middle's, `Node::lift`: copied from the contraction, which makes them for the model's gradient

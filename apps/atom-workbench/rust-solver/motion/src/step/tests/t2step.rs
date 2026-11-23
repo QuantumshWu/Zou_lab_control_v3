@@ -233,7 +233,7 @@ fn t2step_cost() {
 /// A piece's sums over [a, b] by the cut already chosen (`Groups::spanned`, where `grouped`) or by the plain rule
 /// (`count`), laid as the step lays them (gstep.rs `by_rule`): the nodes taken.
 #[allow(clippy::too_many_arguments)]
-fn quadrature(picture: &mut crate::spectral::Picture, groups: &mut super::super::Groups, still: bool, h: f64, a: f64, b: f64, grouped: bool, sums: &mut [f64]) -> usize {
+pub(super) fn quadrature(picture: &mut crate::spectral::Picture, groups: &mut super::super::Groups, still: bool, h: f64, a: f64, b: f64, grouped: bool, sums: &mut [f64]) -> usize {
     use super::super::{count, panels, FORMS};
     let n = picture.states();
     sums.fill(0.0);
