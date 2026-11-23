@@ -79,6 +79,27 @@ fn select_the_direct_part_by_hand() {
     assert!((at(500.0) - 2.01e-3).abs() < 1e-15 && (at(950.0) - 2.01e-3).abs() < 1e-15, "{} {}", at(500.0), at(950.0));
 }
 
+/// The direct part at the paths' own statistics by hand (module documentation, # The direct part, # How many paths): a
+/// window of four paths reads |mean| ± q·se, q Student's t at three degrees of freedom at the run's confidence (95.4 %
+/// two-sided: 3.31, where the normal's z is 2), its lower end none below zero; eight paths take seven degrees (2.43);
+/// one path's spread is unknown: its upper end without bound, its lower nothing; the calibration beside both ends.
+#[test]
+fn select_the_direct_part_at_the_paths_statistics() {
+    let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
+    let at = |w: Window, upper: bool| {
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, region: Region::NONE, seconds: 0.0, products: 0 };
+        direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, upper).expect("the window read")
+    };
+    let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
+    assert!((q(3) - 3.31).abs() < 0.01 && (q(7) - 2.43).abs() < 0.01, "{} {}", q(3), q(7));
+    assert!((at(spread(4, -2e-3, 1e-3), true) - (2e-3 + q(3) * 1e-3 + 1e-5)).abs() < 1e-15);
+    assert!((at(spread(4, -2e-3, 1e-3), false) - 1e-5).abs() < 1e-15, "the lower end none below zero");
+    assert!((at(spread(4, -5e-3, 1e-3), false) - (5e-3 - q(3) * 1e-3 + 1e-5)).abs() < 1e-15);
+    assert!((at(spread(8, 5e-3, 1e-3), true) - (5e-3 + q(7) * 1e-3 + 1e-5)).abs() < 1e-15);
+    assert_eq!(at(spread(1, 5e-3, f64::INFINITY), true), f64::INFINITY);
+    assert_eq!(at(spread(1, 5e-3, f64::INFINITY), false), 1e-5);
+}
+
 /// The flag's question by hand (`decide`): read at the end (|r| > z·se), yes; its upper end within the allowance, no;
 /// else not told; a number that is none tells nothing.
 #[test]
@@ -194,6 +215,36 @@ fn select_where_every_atom_is_lost() {
         eprintln!("  {line}");
     }
     eprintln!("R9_PUSH: P{} chosen in {:.1} s", run.rs.keep.len(), clock.elapsed().as_secs_f64());
+    let chosen = choice.report.iter().find(|l| l.contains("（选中）")).expect("the chosen candidate's line");
+    assert!(chosen.contains("W ") && !chosen.contains("W —") && !chosen.contains("inf"), "{chosen}");
+    assert!(choice.report.iter().all(|l| !l.contains("NaN")), "{:#?}", choice.report);
+    assert_eq!(choice.keep, run.rs.keep);
+}
+
+/// The whole selection where G's fold runs away at every start (refs/scenes SAT_3: σ⁺ on resonance with the cycling
+/// line, s = 3, D2-3-3's first-order excitation 1.5 -- its fold's series does not converge, and the folded ground state
+/// scatters beyond every state of the atom, step.rs # The domain): G's pilot takes no step, the attempt is made again on
+/// the structural chain's next model (solve.rs `piloted`), its paths go past their starts, and the choice holds D2-3-3
+/// explicit -- P9 or above --, complete (its W a number), no line of its report saying a number that is none. (On
+/// d6b78fad: "no path of the pilot's goes past its start", 0 steps and 279 refused.) Seconds; a gate's.
+#[test]
+#[ignore]
+fn select_where_g_runs_away_at_every_start() {
+    let request = crate::model::testing::scene("SAT_3");
+    let clock = Instant::now();
+    let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).expect("SAT_3's choice");
+    let choice = run.report.choice.clone().expect("the chosen run holds its choice");
+    for line in &choice.report {
+        eprintln!("  {line}");
+    }
+    eprintln!("SAT_3: P{} chosen in {:.1} s", run.rs.keep.len(), clock.elapsed().as_secs_f64());
+    let excited = request.states.iter().position(|s| s == "D2-3-3").expect("D2-3-3 among the states");
+    assert!(choice.keep.contains(&excited) && choice.keep.len() > GROUND, "P{} {:?}", choice.keep.len(), choice.keep);
+    // The pilot on a model above G, and its paths read.
+    let pilot = choice.report.iter().find(|l| l.starts_with("先导立定于")).expect("the pilot's line");
+    let model: usize = pilot.split("先导的模型 P").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).expect("the pilot's model");
+    assert!(model > GROUND, "{pilot}");
+    assert!(choice.report.iter().any(|l| l.starts_with("路径：") && !l.starts_with("路径：0 ")), "{:#?}", choice.report);
     let chosen = choice.report.iter().find(|l| l.contains("（选中）")).expect("the chosen candidate's line");
     assert!(chosen.contains("W ") && !chosen.contains("W —") && !chosen.contains("inf"), "{chosen}");
     assert!(choice.report.iter().all(|l| !l.contains("NaN")), "{:#?}", choice.report);
