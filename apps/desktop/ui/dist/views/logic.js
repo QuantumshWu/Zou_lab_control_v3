@@ -2,7 +2,7 @@
 // LogicEditorView).  Both draw one node's projection and send its intents;
 // admission, follow intent, restarts and claims are the workbench's.
 import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, heldNote, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, showHeld, switchButton, } from "../fluent/index.js";
-import { KEPT_LOCK, NodeEditors, editorModels, editorProblem, forgetModel, nodeModel } from "./node_editors/index.js";
+import { KEPT_LOCK, NodeEditors, editorModels, editorProblem, nodeModel } from "./node_editors/index.js";
 /** The held note's lines: the Task gate, then each reason several rows share. */
 const NEWLINE = "\n";
 /** Every word the Start slot can say, on the row and on its Edit page. */
@@ -181,17 +181,15 @@ export class LogicEditorView {
         shareLabelColumn(this.body, this.editors.labelFloor());
     }
     labelsQueued = false;
-    /** A successful explicit replacement: the node is another one (Load/New/Clear may reuse
-     * its ID), so the per-axis editor memory and its last editor model go. */
-    resetLocalState() { this.editors.reset(); forgetModel(this.id); }
+    /** Only a successful explicit replacement discards per-axis editor memory. */
+    resetLocalState() { this.editors.reset(); }
     /** The node's page from its workbench row; `projection` is the row's
      * drawn words, `takeover` the console-wide Task gate. */
     update(row, projection, takeover, request, failed = false) {
         if (request === this.revertRequest) {
             this.revertRequest = null;
-            // A successful Revert discards per-axis editor memory; the node and its last model stay.
             if (!failed)
-                this.editors.reset();
+                this.resetLocalState();
         }
         this.row = row;
         this.projection = projection;

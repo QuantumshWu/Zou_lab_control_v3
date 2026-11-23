@@ -10,8 +10,9 @@
 // nodeModel): a draft whose model cannot be had keeps the node's last model while the draft is still the one it was
 // answered for, drawn locked, its error said; a draft changed since (by its editor, another writer, a Revert, another
 // pulse) shows its fields as plain rows with their true values; a node that never had one does too. The model is the
-// node's: its Edit tab closed and opened again keeps it, a node of another type or an accepted replacement drops it,
-// and Panel Edit's producer draws it the same way. No draft edit is written from a kept model: every one is recorded.
+// node's: its Edit tab closed and opened again keeps it; a node of another type, a draft revision gone back or an
+// accepted replacement (every node's) drops it; Panel Edit's producer draws it the same way. No draft edit is
+// written from a kept model: every one is recorded.
 import {LogicEditorView,projectRow} from '../dist/views/logic.js';
 import {TaskConsoleView} from '../dist/views/task_console.js';
 import {PanelBoard} from '../dist/views/board.js';
@@ -131,20 +132,33 @@ try {
    assert(!editor(view.root),'the type back: the model is gone');equal(plain(view.root),{Plan:PLAN,'API values':''},'plain rows');
    view.root.remove();
  });
- await check('an accepted replacement through the Task Console drops the last model',()=>{
+ await check('an accepted replacement through the Task Console drops every kept model, its node\'s Edit tab open or not',()=>{
+   // Two nodes with a model each; the second one's Edit tab closed.
    const view=page('replaced');
-   let row=rowOf('replaced',PLAN,{editor_facts:model(PLAN)});
-   show(view,row);
+   let rows=['replaced','closed'].map(node=>rowOf(node,PLAN,{editor_facts:model(PLAN)}));
+   show(view,rows[0]);
+   const closed=page('closed');show(closed,rows[1]);closed.root.remove();
    const transport={pending:new Map(),lastError:'',notice:null,busyText(){return ''},send(){return 1},post(){},report(error){throw error}};
    const board=new PanelBoard(transport);
-   const ctx={transport,latest:{type:'state',logic:[row],board:{panels:[],paused:false,selectors:true,active_task:null,frozen:{}},panels:[]},show(){}};
+   const ctx={transport,latest:{type:'state',logic:rows,board:{panels:[],paused:false,selectors:true,active_task:null,frozen:{}},panels:[]},show(){}};
    const consoleView=new TaskConsoleView(ctx,board);document.body.append(consoleView.root);consoleView.editors.set('replaced',view);
-   // The same ID, the same draft, a new node: its plugin has not answered.
-   row=rowOf('replaced',PLAN,FAILED);ctx.latest.logic=[row];
+   // The same IDs, the same drafts, new nodes: their plugins have not answered.
+   rows=['replaced','closed'].map(node=>rowOf(node,PLAN,FAILED));ctx.latest.logic=rows;
    consoleView.update({type:'state',result:{replaced:true},error:null});
-   show(view,row);
-   assert(!editor(view.root),'replaced: no editor');equal(plain(view.root),{Plan:PLAN,'API values':''},'replaced: plain rows');
-   consoleView.root.remove();view.root.remove();
+   show(view,rows[0]);
+   assert(!editor(view.root),'replaced, its tab open: no editor');equal(plain(view.root),{Plan:PLAN,'API values':''},'replaced, its tab open: plain rows');
+   const reopened=page('closed');show(reopened,rows[1]);
+   assert(!editor(reopened.root),'replaced, its tab closed: no editor');equal(plain(reopened.root),{Plan:PLAN,'API values':''},'replaced, its tab closed: plain rows');
+   consoleView.root.remove();view.root.remove();reopened.root.remove();
+ });
+ await check('a draft revision gone back (a replacement the Task Console is not told of, a reload) drops the kept model',()=>{
+   const view=page('reloaded');
+   show(view,rowOf('reloaded',PLAN,{draft_revision:3,editor_facts:model(PLAN)}));
+   show(view,rowOf('reloaded',PLAN,{draft_revision:1,...FAILED}));
+   assert(!editor(view.root),'no editor');equal(plain(view.root),{Plan:PLAN,'API values':''},'plain rows');
+   show(view,rowOf('reloaded',PLAN,{draft_revision:3,...FAILED}));
+   assert(!editor(view.root),'the model is gone');
+   view.root.remove();
  });
  await check('Panel Edit\'s producer draws the node\'s kept model read only, says the error, and shows a changed plan as a plain row',async()=>{
    const sent=[];

@@ -64,10 +64,10 @@ export function editorModels(facts: EditorFacts | null | undefined): EditorFacts
   return facts?.editor === "stack" ? (facts.editors as EditorFacts[] | undefined) ?? [] : facts ? [facts] : [];
 }
 
-/** Each node's last model its plugin answered for the draft as it then stood (by node ID), kept
- * across the pages that draw the node (its Edit tab closed and opened again, Panel Edit's
- * producer) while the UI runs; never written anywhere. */
-const answered = new Map<string, { type: string; draft: string; facts: EditorFacts }>();
+/** Each node's last model its plugin answered for the draft as it then stood (by node ID: its
+ * type, that draft and its revision), kept across the pages that draw the node (its Edit tab
+ * closed and opened again, Panel Edit's producer) while the UI runs; never written anywhere. */
+const answered = new Map<string, { type: string; draft: string; revision: number; facts: EditorFacts }>();
 
 /** The draft a node's model is answered from, as its row says it: values, devices, source, files. */
 const draftOf = (row: LogicRow): string => JSON.stringify([row.values, row.device_keys, row.source_signal, row.artifact_inputs]);
@@ -78,20 +78,23 @@ export const KEPT_LOCK = "Shown from the last editor model of this same draft: r
 /** The model a node's editors draw from its row: the row's own; where it has none (its plugin
  * could not answer), the node's last one while the draft is still the one it was answered for
  * (`kept`: drawn locked, KEPT_LOCK, so a model that may be stale never writes); else none, and
- * the fields it would manage are plain rows.  A node of another type under the ID is another
- * node: its last model goes. */
+ * the fields it would manage are plain rows.  A node of another type under the ID, or one whose
+ * draft revision went back (a replacement or a reload under the ID), is another node: its last
+ * model goes. */
 export function nodeModel(row: LogicRow): { facts: EditorFacts | null; kept: boolean } {
   // A model of an older draft (the draft's own still asked) is not the one kept for this draft.
-  if (row.editor_facts && !row.editor_facts_pending) answered.set(row.node_id, { type: row.type_id, draft: draftOf(row), facts: row.editor_facts });
+  if (row.editor_facts && !row.editor_facts_pending) {
+    answered.set(row.node_id, { type: row.type_id, draft: draftOf(row), revision: row.draft_revision, facts: row.editor_facts });
+  }
   if (row.editor_facts) return { facts: row.editor_facts, kept: false };
-  const last = answered.get(row.node_id);
-  if (last && last.type !== row.type_id) answered.delete(row.node_id);
-  const kept = last?.type === row.type_id && last.draft === draftOf(row);
+  let last = answered.get(row.node_id);
+  if (last && (last.type !== row.type_id || row.draft_revision < last.revision)) { answered.delete(row.node_id); last = undefined; }
+  const kept = last?.draft === draftOf(row);
   return { facts: kept ? last!.facts : null, kept };
 }
 
-/** An accepted replacement: the node under `node` is another one, and its last model goes. */
-export function forgetModel(node: string): void { answered.delete(node); }
+/** An accepted replacement (Load/New/Clear): any node may be another one, so every kept model goes. */
+export function forgetModels(): void { answered.clear(); }
 
 /** Why the node's editor model could not be had for this draft (`editor_facts_error`), as its pages say it. */
 export function editorProblem(row: LogicRow): string {

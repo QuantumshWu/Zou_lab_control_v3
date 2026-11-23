@@ -6,6 +6,7 @@ import { ComboBox, Dialog, Field, StatusStrip, TabWidget, command, confirm, elem
 import { boardKinds } from "../protocol.js";
 import { queueStatus, saveImage } from "../shell.js";
 import { DiagnosticsPopup } from "./diagnostics.js";
+import { forgetModels } from "./node_editors/index.js";
 import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow } from "./logic.js";
 import { PanelEditView } from "./panel_edit.js";
 const ADD_WORDS = { plot: "Add panel", logic: "Add node" };
@@ -145,6 +146,7 @@ export class TaskConsoleView {
         // Load/New/Clear and recipe replacement may reuse the same node IDs.
         // The accepted response is the boundary; cancelled/failed dialogs are not.
         if (!state.error && state.result?.replaced === true) {
+            forgetModels();
             for (const editor of this.editors.values())
                 editor.resetLocalState();
         }

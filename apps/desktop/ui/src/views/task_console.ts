@@ -11,6 +11,7 @@ import { queueStatus, saveImage, type View, type ViewContext } from "../shell.js
 import type { Board, LogicRow, NodeType, RunRow } from "../workbench.js";
 import { DiagnosticsPopup, type DiagnosticsState } from "./diagnostics.js";
 import type { PanelBoard } from "./board.js";
+import { forgetModels } from "./node_editors/index.js";
 import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow, type EditorIntents, type NodeProjection } from "./logic.js";
 import { PanelEditView, type EditInfo } from "./panel_edit.js";
 
@@ -148,6 +149,7 @@ export class TaskConsoleView implements View {
     // Load/New/Clear and recipe replacement may reuse the same node IDs.
     // The accepted response is the boundary; cancelled/failed dialogs are not.
     if (!state.error && (state.result as { replaced?: boolean } | null)?.replaced === true) {
+      forgetModels();
       for (const editor of this.editors.values()) editor.resetLocalState();
     }
     const latest = this.ctx.latest;
