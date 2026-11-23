@@ -24,7 +24,13 @@
 //!   to the pilot's model, judged on the first `NOMINATION_WALKS` paths (`judge_on`) at its point estimates (`Reach::Point`):
 //!   its contribution the misfit it takes away -- the model error over its target, the largest over the times and the
 //!   readings -- per work it adds a µs, and whether it meets every look there;
-//! - each single that does is judged alone on every path and weighed, a candidate: where a single state is enough, the
+//! - each single that does and whose bound leaves it cheaper than the least found is judged alone on every path and
+//!   weighed, a candidate -- the bound on its booked account on every path the pilot's model's own there less the single's
+//!   contribution against it (`contribution`: their paired difference on those paths, which on the same paths is a row's
+//!   mean exactly and bounds its standard error by the seminorm's triangle) at its upper end there, Student's t on their
+//!   one degree of freedom, its calibration, its loss and its push left out (tilt0 2026-11-23: its 14 singles' bounds 559
+//!   to 914 trajectories, on every path 589 to 2889; none below the pilot's model's W, none judged alone); where a single
+//!   state is enough, the
 //!   singles' needs at their point estimates are the run's own statistics' (R4 2026-11-23: 771 to 794 trajectories each,
 //!   the pilot's own 780), and what tells their W apart is their direct part's spread over the paths, which two paths do
 //!   not see -- on every path 833 to 3133 trajectories; the one first by its misfit on two paths was 13th of 24 by its W,
@@ -969,6 +975,19 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
 /// `judge` on the paths' first `walks` walks alone (the nomination's, # The candidates): the others' series none, read in
 /// no window; the calibration where its walk is among them.
 pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<Judged, String> {
+    judge_walked(paths, model, at, walks).map(|x| x.0)
+}
+
+/// A candidate's own along the walks (`judge_walked`): its series along the starts and the late segments, and its
+/// landing checks per stretch -- what its contribution against another model is read on (`contribution`).
+pub struct Walked {
+    series: Vec<Series>,
+    late: Vec<Series>,
+    landed: Vec<Vec<paths::Statistics>>,
+}
+
+/// `judge_on`, its walks' own kept (`Walked`).
+pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<(Judged, Walked), String> {
     let clock = Instant::now();
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
@@ -1095,7 +1114,31 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
     let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum::<f64>() + landing_work.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work })
+    let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work };
+    Ok((judged, Walked { series, late: late_series, landed }))
+}
+
+/// A candidate's contribution against another model of the chain (the nomination's, module documentation # The
+/// candidates): its walks' paired difference to the other's (`of`, `against`: both judged on the same walks,
+/// `judge_walked`), read as a judgment is -- per window and row the paths' mean difference and its standard error, the
+/// energy rates' difference per path and its stationary part, each landing check's Q and diffusion the two models' own
+/// --; no calibration, no escape (neither is a difference of the paths' readings).
+pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walked) -> Judged {
+    let labels = &model.scene.request.states;
+    let hm = model.hbar_over_mass();
+    let weights: Vec<f64> = paths.walks.iter().map(|w| w.weight).collect();
+    let paired: Vec<Vec<paths::Statistics>> = of
+        .landed
+        .iter()
+        .zip(&against.landed)
+        .map(|(x, y)| x.iter().zip(y).map(|(x, y)| paths::Statistics { t: x.t, q: [x.q[0], y.q[0]], diffusion: [x.diffusion[0], y.diffusion[0]], q_error: [x.q_error[0], y.q_error[0]] }).collect())
+        .collect();
+    let n = paths.walks.len();
+    let (landed_start, landed_late) = paired.split_at(n.min(paired.len()));
+    let windows = paths::compare(&of.series, &against.series, &paths.windows, labels, hm, landed_start, &weights);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, _)| paths::compare(&of.late, &against.late, w, labels, hm, landed_late, &weights));
+    let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
+    Judged { keep: model.rs.keep.clone(), windows, late, calibration: Calibration::default(), escape: None, statistics: None, stationary, seconds: 0.0, products: 0, work: 0.0 }
 }
 
 /// The loss's x of a candidate (module documentation, # The motion; `Judged::escape`) of its series along the walks'
