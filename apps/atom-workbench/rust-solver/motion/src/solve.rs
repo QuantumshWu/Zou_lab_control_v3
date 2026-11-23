@@ -2376,13 +2376,8 @@ fn course_of(estimates: &[Estimate], times: &[f64], scales: &Scales) -> crate::s
 /// A trajectory's work a µs at the step τ at the states `rated` on a model `model` of the chain (`work_at`'s count at
 /// one step): each state's place, momentum and time, its internal state the ground state of its largest population
 /// (the state's own where the model is the one it was run on), the step taken from it as the run takes it, and its
-/// jumps' work as on the pilot's model (a jump's work is its photons' and landings'). Unbounded where no step is taken.
-fn priced(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: bool) -> f64 {
-    priced_with(model, widest, rated, tau, own).0
-}
-
-/// `priced` and the share of the states, weighed as the price is (`over_the_run`), from which no step is taken -- a fold
-/// that runs away there (step.rs # The domain): such a state's trajectory stops there, unresolved, and works nothing on;
+/// jumps' work as on the pilot's model (a jump's work is its photons' and landings'); and the share of the states,
+/// weighed as the price is (`over_the_run`), from which no step is taken -- a fold that runs away there (step.rs # The domain): such a state's trajectory stops there, unresolved, and works nothing on;
 /// its share is booked whole in the candidate's account (`choose_on_the_pilot`, # The unresolved atoms). (Until 2026-11-22
 /// one such state made the model's price without bound: p5d5's G, one of its 254 pilot's states at the trap's rim, s =
 /// 0.37; Study A §2.4.)
@@ -2519,7 +2514,31 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     // is open, up to the pilot's trajectories, every candidate judged again on them.
     let fine_refs: Vec<&Part> = fine.iter().collect();
     let available = fine.iter().flat_map(|p| p.trails.iter()).filter(|t| !t.is_empty()).count();
-    let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
+    // The candidates' models and their prices a µs, each made once for the choice: neither depends on the paths, which
+    // are doubled and every candidate judged again on them, not made or priced again. A model by its states; a price by
+    // the model's states, the step and whether the pilot's states are its own (`priced_with`: the price and the share
+    // no step leaves).
+    let rated = one_each(pilot);
+    let built: std::sync::Mutex<std::collections::HashMap<Vec<usize>, std::sync::Arc<Selected>>> = Default::default();
+    let costed: std::sync::Mutex<std::collections::HashMap<(Vec<usize>, u64, bool), (f64, f64)>> = Default::default();
+    let make = |keep: &[usize]| -> Result<std::sync::Arc<Selected>, String> {
+        if let Some(m) = built.lock().expect("the models' cache").get(keep) {
+            return Ok(m.clone());
+        }
+        let model = std::sync::Arc::new(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: keep.to_vec(), ..run.report.clone() }, reference)?);
+        built.lock().expect("the models' cache").insert(keep.to_vec(), model.clone());
+        Ok(model)
+    };
+    let price = |model: &Selected, step: f64, own: bool| -> (f64, f64) {
+        let key = (model.rs.keep.clone(), step.to_bits(), own);
+        if let Some(&p) = costed.lock().expect("the prices' cache").get(&key) {
+            return p;
+        }
+        let p = priced_with(model, domain.widest, &rated, step, own);
+        costed.lock().expect("the prices' cache").insert(key, p);
+        p
+    };
+    let full = make(&(0..STATES).collect::<Vec<_>>())?;
     let (head, mut doubled, mut count) = (report, Vec::<String>::new(), WALKS.min(available));
     // A test's fixed count of paths (`SEL_WALKS`): that many, never doubled (the measurements' probe).
     #[cfg(test)]
@@ -2578,7 +2597,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
         let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), context.step);
         let need0 = most_needed(&base);
-        let rated = one_each(pilot);
         let ran = (numbers.len() as u64 * GROUP) as f64;
         // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); the scout's and the
         // pilot's again on a model not G (two levels, the companion's at most half the run level's work).
@@ -2631,10 +2649,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             }
         };
         let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> { accounts(j).into_iter().next().expect("the upper end") };
-        let make = |keep: &[usize]| -> Result<Selected, String> { Selected::new(crate::scene::Scene::new(request)?, Selection { keep: keep.to_vec(), ..run.report.clone() }, reference) };
         // The candidates (select.rs # The candidates): the pilot's model first (place 0), the nominees above it.
         let mut chain: Vec<Vec<usize>> = vec![own.clone()];
-        let mut models: Vec<Option<Selected>> = vec![None];
+        let mut models: Vec<Option<std::sync::Arc<Selected>>> = vec![None];
         let mut weighed: Vec<Weighed> = vec![];
         // A candidate judged on every path, its price a µs and the share of the pilot's states it cannot step from
         // (`priced_with`), and the seconds it took. The 32 states are the reference itself: no model error at any time
@@ -2642,7 +2659,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // invariant the choice stands on).
         let judgment = |place: usize, keep: &[usize], model: &Selected| -> Result<(crate::select::Judged, f64, f64, f64), String> {
             let started = Instant::now();
-            let (price, runaway) = priced_with(model, domain.widest, &rated, tau, place == 0);
+            let (price, runaway) = price(model, tau, place == 0);
             let judged = if keep.len() == STATES { paths.itself(keep.to_vec()) } else { judge(&paths, model, centre)? };
             Ok((judged, price, runaway, started.elapsed().as_secs_f64()))
         };
@@ -2679,11 +2696,11 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             Weighed { place, judged, price, need, work, fate, open, settled_low }
         };
         // A candidate judged and weighed (its model made where it is not the pilot's).
-        let weigh = |place: usize, keep: &[usize], models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
+        let weigh = |place: usize, keep: &[usize], models: &mut Vec<Option<std::sync::Arc<Selected>>>, report: &mut Vec<String>| -> Result<Weighed, String> {
             if place > 0 && models[place].is_none() {
                 models[place] = Some(make(keep)?);
             }
-            Ok(booked(place, judgment(place, keep, models[place].as_ref().unwrap_or(run))?, report))
+            Ok(booked(place, judgment(place, keep, models[place].as_deref().unwrap_or(run))?, report))
         };
         weighed.push(weigh(0, own, &mut models, &mut report)?);
         messages.alive();
@@ -2695,7 +2712,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // A model with more states works no less a µs at the same step than the pilot's (its states more): at the ladder's
         // first rung -- the longest its own scout may stand at --, at no model error, its pilot again, its W is no less than
         // that bound. Where the pilot's model is complete below it, no nominee can cost less, and none is made.
-        let price_own = priced(run, domain.widest, &rated, first, true);
+        let price_own = price(run, first, true).0;
         let floor = need0 * price_own * span + again(1, price_own);
         let mut predicted: Vec<f64> = vec![f64::NAN];
         // The chain's first prefix of the nomination (after the singles weighed alone), and whether a fate open at the paths'
@@ -2710,17 +2727,17 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             // away after them by their excitation; the nominees the order's prefixes, the 32 states last.
             let clock = Instant::now();
             let few = crate::select::NOMINATION_WALKS.min(paths.walks.len());
-            let price_tau = priced(run, domain.widest, &rated, tau, true);
+            let price_tau = price(run, tau, true).0;
             // A single whose least W -- at no model error, at the ladder's first rung, its pilot again -- is no lower than
             // the least found, and every nominee holding it, can cost no less: it is not judged, and nominated last.
-            let made: Vec<(usize, Selected, bool)> = addable
+            let made: Vec<(usize, std::sync::Arc<Selected>, bool)> = addable
                 .par_iter()
-                .map(|&e| -> Result<(usize, Selected, bool), String> {
+                .map(|&e| -> Result<(usize, std::sync::Arc<Selected>, bool), String> {
                     let mut keep = own.clone();
                     keep.push(e);
                     keep.sort_unstable();
                     let model = make(&keep)?;
-                    let least = priced(&model, domain.widest, &rated, first, false);
+                    let least = price(&model, first, false).0;
                     Ok((e, model, need0 * least * span + again(1, least) < found))
                 })
                 .collect::<Result<_, _>>()?;
@@ -2733,13 +2750,13 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             };
             // Per single: its state, the misfit it takes away, the work it adds a µs, whether it meets every look at its point
             // estimates on those paths (its unresolved states booked whole, `asks`), and its model.
-            let singles: Vec<(usize, f64, f64, bool, Selected)> = made
+            let singles: Vec<(usize, f64, f64, bool, std::sync::Arc<Selected>)> = made
                 .into_par_iter()
-                .map(|(e, model, open)| -> Result<(usize, f64, f64, bool, Selected), String> {
+                .map(|(e, model, open)| -> Result<(usize, f64, f64, bool, std::sync::Arc<Selected>), String> {
                     if !open {
                         return Ok((e, f64::NAN, f64::INFINITY, false, model));
                     }
-                    let (price, runaway) = priced_with(&model, domain.widest, &rated, tau, false);
+                    let (price, runaway) = price(&model, tau, false);
                     let at = point(&crate::select::judge_on(&paths, &model, centre, few)?);
                     let taken = mine - misfit(&at);
                     let (met, _, _) = asks(unresolved(at, runaway), price, 1);
@@ -2757,7 +2774,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let clock_alone = Instant::now();
             let judged_alone: Vec<_> = alone.par_iter().map(|&i| judgment(1, &with(singles[i].0), &singles[i].4)).collect::<Result<_, _>>()?;
             let info: Vec<(usize, f64)> = singles.iter().map(|s| (s.0, s.1)).collect();
-            let mut singles: Vec<Option<Selected>> = singles.into_iter().map(|s| Some(s.4)).collect();
+            let mut singles: Vec<Option<std::sync::Arc<Selected>>> = singles.into_iter().map(|s| Some(s.4)).collect();
             let mut alone_work: Vec<(usize, f64)> = vec![];
             for (&i, j) in alone.iter().zip(judged_alone) {
                 let place = chain.len();
@@ -2825,8 +2842,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             if models[place].is_none() {
                 models[place] = Some(make(&chain[place])?);
             }
-            let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
-            let lower = need0 * price * span + again(place, price);
+            let least = price(models[place].as_deref().expect("its model"), first, false).0;
+            let lower = need0 * least * span + again(place, least);
             if !(lower < found) {
                 noted(&mut report, format!("提名的 {} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不判", named(&chain[place])));
                 break;
@@ -2857,7 +2874,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let more = spent * (next - count) as f64 / count as f64;
             // Against the least W found, or the 32 states' -- complete by construction -- where that is less.
             let top = {
-                let price = priced(&full, domain.widest, &rated, tau, false);
+                let price = price(&full, tau, false).0;
                 need0 * price * span + again(1, price)
             };
             let saving = open.iter().map(|w| found.min(top) - w.settled_low).fold(f64::NEG_INFINITY, crate::linalg::larger);
@@ -2884,8 +2901,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             .filter(|&i| weighed[i].work.is_some() && weighed[i].place != 0 && weighed[i].place != usize::MAX)
             .map(|i| {
                 let w = &weighed[i];
-                let price = priced(models[w.place].as_ref().expect("a candidate's model"), domain.widest, &rated, first, false);
-                (i, w.need * price * span + again(w.place, price) + scout_of(price))
+                let least = price(models[w.place].as_deref().expect("a candidate's model"), first, false).0;
+                (i, w.need * least * span + again(w.place, least) + scout_of(least))
             })
             .collect();
         order.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -2896,13 +2913,13 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 continue;
             }
             let clock = Instant::now();
-            let model = models[weighed[i].place].as_ref().expect("a candidate's model");
+            let model = models[weighed[i].place].as_deref().expect("a candidate's model");
             let rung = match solve_with(request, model, Choosing::Scout, messages)? {
                 Attempted::Scouted(t) => t,
                 _ => unreachable!("a scout's attempt stops at its rung"),
             };
             messages.stage(Stage { step: Step::Select, tau: None, batch: None });
-            let price = priced(model, domain.widest, &rated, rung, false);
+            let price = price(model, rung, false).0;
             let scout = scout_of(price);
             let entry = &mut weighed[i];
             let w = entry.need * price * span + again(entry.place, price) + scout;
@@ -2922,7 +2939,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         for keep in crate::select::ALSO.with(|a| a.borrow().clone()) {
             let model = Selected::new(crate::scene::Scene::new(request)?, Selection { keep, ..run.report.clone() }, reference)?;
             let judged = judge(&paths, &model, centre)?;
-            let price = priced(&model, domain.widest, &rated, tau, false);
+            let price = price(&model, tau, false).0;
             let model_error = account(&judged);
             let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
             let (met, need) = (met(&own), most_needed(&own));
