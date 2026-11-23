@@ -1230,6 +1230,12 @@ impl Selected {
         node
     }
 
+    /// The run with its direct entries one by one (the tests'): its spans taken off (# The direct entries spanned).
+    #[cfg(test)]
+    pub(crate) fn unspanned(&mut self) {
+        self.lab.spans.clear();
+    }
+
     /// A jump's photon's node at a point (`SelectedMiddle::photon`, the tests'): the photon classes alone.
     #[cfg(test)]
     pub(crate) fn photon_node(&self, at: V3, kappa: V3) -> Node {

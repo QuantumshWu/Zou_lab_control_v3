@@ -10,6 +10,9 @@
 //!   photon's alone (`Selected::photon_node`, where the build has it); an
 //!   output's readout at the point (`Dynamics::readout`) and on the step's middle (`Middle::readout`, where the model
 //!   reads there). Said: their means over the walk, the jumps and the nodes a step makes, the counted work a step.
+//!   With STEPCOST_PAIRED=1 (2) also the step and the node on the same run with its direct entries one by one
+//!   (`Selected::unspanned`), timed in turn with the run's on the same states (each repeat the spanned one first (the
+//!   one by one first), the first call of each not timed: a load that comes and goes weighs on both), "STEPCOST-PAIRED".
 //!   Ignored; run by name, pinned to one performance core by the caller:
 //!   `<test exe> step::tests::stepcost::stepcost --exact --include-ignored --nocapture --test-threads 1`.
 use std::time::Instant;
@@ -108,6 +111,12 @@ fn stepcost() {
         let chief = crate::solve::chief(&request);
         let reference = crate::solve::alone(chief);
         let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let order = std::env::var("STEPCOST_PAIRED").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let paired = order > 0;
+        let mut plain = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..crate::select::choose(&scene).unwrap() }, reference).unwrap();
+        plain.unspanned();
+        // [step spanned, step plain, node spanned, node plain]
+        let mut pair = [0.0f64; 4];
         let mut t = start(&run, &request, chief, index);
         let domain = Everywhere;
         // [step, node, node with the photon forms, readout at the point, readout on the middle, a jump's photon's node]
@@ -125,6 +134,32 @@ fn stepcost() {
             });
             let midway = Midway::new(&run, &t, tau).unwrap();
             let at = midway.reached;
+            if paired {
+                let timed = |f: &mut dyn FnMut()| -> f64 {
+                    let c0 = thread_cycles();
+                    f();
+                    (thread_cycles() - c0) as f64 / (ghz * 1e3)
+                };
+                let mut least4 = [f64::INFINITY; 4];
+                let runs = if order == 2 { [(1, &plain), (0, &run)] } else { [(0, &run), (1, &plain)] };
+                for &(_, r) in &runs {
+                    std::hint::black_box(Midway::new(r, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).is_ok());
+                    std::hint::black_box(r.node(at.0, at.1, false));
+                }
+                for _ in 0..repeat {
+                    for &(i, r) in &runs {
+                        least4[i] = least4[i].min(timed(&mut || {
+                            std::hint::black_box(Midway::new(r, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).is_ok());
+                        }));
+                        least4[2 + i] = least4[2 + i].min(timed(&mut || {
+                            std::hint::black_box(r.node(at.0, at.1, false));
+                        }));
+                    }
+                }
+                for i in 0..4 {
+                    pair[i] += least4[i];
+                }
+            }
             sum[1] += least(&mut || {
                 std::hint::black_box(run.node(at.0, at.1, false));
             });
@@ -152,6 +187,9 @@ fn stepcost() {
             t = step.end;
         }
         let k = taken.max(1) as f64;
+        if paired {
+            eprintln!("STEPCOST-PAIRED {name} {spec} tau {tau}: a step spanned {:.1} µs, one by one {:.1} µs ({:.3}); a node spanned {:.1} µs, one by one {:.1} µs ({:.3}); over {taken} steps", pair[0] / k, pair[1] / k, pair[0] / pair[1], pair[2] / k, pair[3] / k, pair[2] / pair[3]);
+        }
         eprintln!(
             "STEPCOST {name} {spec} (P{}) tau {tau}: a step {:.1} µs | a node {:.1} µs, with the photon forms {:.1} µs, a jump's photon's {:.1} µs | an output's readout at the point {:.1} µs, on the middle {} | nodes a step {:.2} plain + {:.2} with photons, jumps a step {:.3}, counted {:.3e} real MA a step over {taken} steps",
             keep.len(),

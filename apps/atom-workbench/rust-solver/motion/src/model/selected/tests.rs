@@ -716,6 +716,55 @@ fn the_direct_entries_spanned_are_the_entries_within_what_the_span_books() {
     }
 }
 
+/// How a model's change by its span's booked Y moves a run's trajectories (STEP, the coordinator's of 2026-11-23: a solve
+/// spanned took 184 trajectories where the one by one took 240, TET): on PGC3D and TET (V3E_SCENE one of them),
+/// V3E_ATOMS atoms (8) of `starts`, each with one noise on the run spanned and on it one by one (`Selected::unspanned`),
+/// each on its own model throughout, steps of τ = V3E_TAU µs (0.474) to 1 ms: every 100 µs the largest |Δr| (µm) and
+/// |Δκ| (1/µm) over the atoms, the atoms whose jumps differ, and the jumps. A measurement (ignored, by name).
+#[test]
+#[ignore]
+fn the_span_s_trajectories_part() {
+    let (atoms, tau) = (env("V3E_ATOMS", 8.0) as u64, env("V3E_TAU", 0.4741346189956611));
+    for (name, request, keep) in scenes().into_iter().filter(|(n, ..)| ["PGC3D", "TET"].contains(n)) {
+        let run = run_of(&request, &keep);
+        let mut plain = run_of(&request, &keep);
+        plain.unspanned();
+        let from = starts(&run, request.temperature_uk, atoms);
+        let mut pairs: Vec<[Trajectory; 2]> = from
+            .iter()
+            .enumerate()
+            .map(|(i, (r, kappa, psi, threshold))| {
+                [&run, &plain].map(|m| {
+                    let mut t = Trajectory::new(m, m.cluster(0).states[0], *r, *kappa, 97, i as u64);
+                    t.psi = psi.iter().copied().collect();
+                    t.forms = m.forms(t.cluster, &t.point(), &t.psi);
+                    t.threshold = *threshold;
+                    t
+                })
+            })
+            .collect();
+        let mut noises: Vec<_> = (0..atoms).map(|i| crate::random::Stream::brownian(97, i, 0, 0)).collect();
+        let mut scratch: Vec<[Scratch; 2]> = (0..atoms).map(|_| Default::default()).collect();
+        let count = (1000.0 / tau).round() as usize;
+        let every = (100.0 / tau).round() as usize;
+        for k in 1..=count {
+            for (i, pair) in pairs.iter_mut().enumerate() {
+                let brownian = Brownian::over(tau, &[noises[i].normals(), noises[i].normals()]);
+                for (j, m) in [&run, &plain].into_iter().enumerate() {
+                    pair[j] = Midway::new(m, &pair[j], tau).and_then(|s| s.attempt(&pair[j], &brownian, &[], &mut scratch[i][j], &Anywhere)).expect("a step").end;
+                }
+            }
+            if k % every == 0 || k == count {
+                let dr = pairs.iter().map(|p| (0..3).map(|a| (p[0].r[a] - p[1].r[a]).abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                let dk = pairs.iter().map(|p| (0..3).map(|a| (p[0].kappa[a] - p[1].kappa[a]).abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                let apart = pairs.iter().filter(|p| p[0].jumps != p[1].jumps).count();
+                let jumps: u32 = pairs.iter().map(|p| p[0].jumps).sum();
+                eprintln!("SPANPART {name} t {:.1} µs: |Δr| {dr:.3e} µm, |Δκ| {dk:.3e} /µm, atoms whose jumps differ {apart} of {atoms}, jumps {jumps}", pairs[0][0].time);
+            }
+        }
+    }
+}
+
 /// The dropped beats' Y alone (the span's taken out): the pairs the judgment dropped.
 fn plain_dropped(run: &Selected) -> f64 {
     run.judgment.pairs.iter().filter(|(slots, _)| slots.iter().all(|&k| run.judgment.tiers[k].1 == crate::model::classify::Tier::Drop)).map(|(_, y)| y).sum()
