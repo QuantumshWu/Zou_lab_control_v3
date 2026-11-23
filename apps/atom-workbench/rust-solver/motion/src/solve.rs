@@ -5283,6 +5283,7 @@ mod tests {
     use crate::units::TEMPERATURE_TARGET;
 
     mod escape;
+    mod tscan;
 
     /// The model's errors `model` booked at as many times (`Fixed`), with nothing dropped and a held atom's kinetic
     /// energy bounded at a millikelvin (ħ/m = k_B/ħ: a velocity's square is its temperature).
