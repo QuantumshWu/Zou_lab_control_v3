@@ -104,6 +104,16 @@
 //! taken. (Until 2026-11-23 the entries one by one: PGC3D's 4134
 //! direct entries, 13.5 µs of its 141 µs node; OLDNEW, motion3d_status/rewrite/impl/OLDNEW.report.md §3.1.)
 //!
+//! # The sideband parts dropped
+//! K's sideband parts (rs/fold.rs `Block::sideband`: K's states by fast part, where a class has a fast element into
+//! them) fold the fast elements within K; their pairs add to H_eff and to the channels what those elements make at
+//! second order, on PGC3D and TET about 10⁻¹⁰ (OLDNEW §3.1), each a spectrum and its products a node. The drop tier
+//! weighs them as it weighs beats (`Selected::drop_sidebands`): each part's Y -- its pairs' bounds over the reach
+//! (`Out::bounds_of`), H's outputs and the channels' as a span's (`Selected::rate`) --; the parts in the order of their
+//! Y, of every first few (none among them) the one of least W -- the node's counted work without them times the
+//! account's factor at the dropped beats' Y and theirs --, left out of the fold (`Plan::drop_sideband`: its spectrum,
+//! amplitudes and pairs, values, gradients and photon forms, not made), their Y booked with the dropped beats'.
+//!
 //! # Exact blocks
 //! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
 //! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis. They are the run's judgment's
@@ -1013,12 +1023,14 @@ impl Selected {
                 }
             }
         }
-        // The direct entries spanned where that costs the run the less (module documentation, # The direct entries
-        // spanned), what they leave out booked with the dropped beats.
+        // K's sideband parts left out and the direct entries spanned where that costs the run the less (module
+        // documentation, # The sideband parts dropped, # The direct entries spanned), what they leave out booked with
+        // the dropped beats.
         if matches!(drops, Drops::Judged) {
-            let (_, account, nodes) = self.drop_sizes(&node, &[], spherical);
-            let base = judgment.dropped;
-            judgment.dropped += self.span_directs(&account, nodes, base);
+            let (_, account, _) = self.drop_sizes(&node, &[], spherical);
+            judgment.dropped += self.drop_sidebands(&account, judgment.dropped);
+            let nodes = self.counted_node();
+            judgment.dropped += self.span_directs(&account, nodes, judgment.dropped);
         }
         self.judgment = judgment;
         self.decay_terms();
@@ -1070,6 +1082,54 @@ impl Selected {
                 0.0
             }
         }
+    }
+
+    /// K's sideband parts left out (module documentation, # The sideband parts dropped): each part's Y, its pairs' bounds
+    /// over the reach (`Out::bounds_of`, the part's pairs alone) booked by `rate`; the parts in the order of their Y, of
+    /// none and every first few the one of least W (`counted_node` without them times `Account::factor` at `base` plus
+    /// their Y), left out of the fold (`Plan::drop_sideband`). Returns their Y.
+    fn drop_sidebands(&mut self, account: &Account, base: f64) -> f64 {
+        let sidebands = self.rs.plan().sidebands();
+        if sidebands.is_empty() {
+            return 0.0;
+        }
+        let (moduli, coefficients, norms) = self.reach_bounds();
+        let frobenius = |b: &Vec<f64>| b.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let mut parts: Vec<(usize, f64)> = sidebands
+            .iter()
+            .map(|&b| {
+                let (h, channels) = Out::bounds_of(self.rs.plan(), &self.lab, &moduli, &coefficients, &|x| x == Some(b));
+                (b, self.rate(&h.iter().map(frobenius).collect::<Vec<_>>(), &channels.iter().map(frobenius).collect::<Vec<_>>(), &norms))
+            })
+            .collect();
+        parts.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let sizes = self.rs.plan().blocks();
+        let mut least = (0, self.counted_node() * account.factor(base));
+        crate::prof::note(|| format!("sidebands none: W {:.6e}; parts (block, size, Y) {:?}", least.1, parts.iter().map(|&(b, y)| (b, sizes[b].0, y)).collect::<Vec<_>>()));
+        let mut y = 0.0;
+        for k in 0..parts.len() {
+            self.rs.folding.plan.drop_sideband(parts[k].0, true);
+            y += parts[k].1;
+            let w = self.counted_node() * account.factor(base + y);
+            crate::prof::note(|| format!("sidebands the first {}: Y {y:.3e} W {w:.6e} (factor {:.6e})", k + 1, account.factor(base + y)));
+            if w < least.1 {
+                least = (k + 1, w);
+            }
+        }
+        for (k, &(b, _)) in parts.iter().enumerate() {
+            self.rs.folding.plan.drop_sideband(b, k < least.0);
+        }
+        parts[..least.0].iter().map(|p| p.1).sum()
+    }
+
+    /// A node's counted work at the structure's point (complex multiply-adds, three a step: the fold and its contraction
+    /// by the lab's grouping, `drop_sizes`').
+    fn counted_node(&self) -> f64 {
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
+        3.0 * (work.local.work + work.out.work)
     }
 
     /// The reach's bounds the judgment's later parts weigh (# The direct entries spanned): the folded blocks' amplitudes
@@ -1276,6 +1336,25 @@ impl Selected {
     #[cfg(test)]
     pub(crate) fn unspanned(&mut self) {
         self.lab.spans.clear();
+    }
+
+    /// The run with nothing left out but its dropped beats (the tests'): its spans taken off and K's sideband parts put
+    /// back (# The direct entries spanned, # The sideband parts dropped); whether any part was left out.
+    #[cfg(test)]
+    pub(crate) fn whole(&mut self) -> bool {
+        self.lab.spans.clear();
+        self.sidebands_in()
+    }
+
+    /// The run with K's sideband parts put back (the tests', # The sideband parts dropped); whether any was left out.
+    #[cfg(test)]
+    pub(crate) fn sidebands_in(&mut self) -> bool {
+        let parts = self.rs.plan().sidebands();
+        let left = parts.iter().filter(|&&b| self.rs.plan().dropped(b)).count();
+        for b in parts {
+            self.rs.folding.plan.drop_sideband(b, false);
+        }
+        left > 0
     }
 
     /// A jump's photon's node at a point (`SelectedMiddle::photon`, the tests'): the photon classes alone.

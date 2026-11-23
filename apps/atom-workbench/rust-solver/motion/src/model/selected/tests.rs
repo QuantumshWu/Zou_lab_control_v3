@@ -365,13 +365,13 @@ fn apart(a: &Mat, b: &Mat) -> f64 {
 /// and the step's scattering carry between them -- at the centre and at a moving point, on a state of P with every
 /// amplitude set, to the rounding of the traces: the run's with nothing dropped (model/classify.rs, # The drop tier),
 /// and the run's as the solve makes it apart from that by its dropped beats' −Re tr(Ĝ_k ρ) alone (tilt2's ±3ν … ±6ν),
-/// its direct entries one by one (what their span leaves out is booked, not a beat: its own test reads it,
-/// `the_direct_entries_spanned_are_the_entries_within_what_the_span_books`).
+/// its direct entries one by one and K's sideband parts in (what their span and the parts' leaving leave out is booked,
+/// not a beat: their own test reads it, `the_direct_entries_spanned_are_the_entries_within_what_the_span_books`).
 #[test]
 fn the_selected_force_at_time_zero_is_the_model_s() {
     for (name, request, keep) in scenes() {
         let mut dropping = run_of(&request, &keep);
-        dropping.lab.spans.clear();
+        dropping.whole();
         let run = made_with(&request, &Drops::Only(Vec::new()));
         let dropped: Vec<usize> = dropping.judgment().tiers.iter().filter(|t| t.1 == crate::model::classify::Tier::Drop).map(|t| t.0).collect();
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
@@ -685,18 +685,19 @@ fn a_jump_s_photon_node_is_the_whole_node_s_classes() {
     }
 }
 
-/// The direct entries spanned (module documentation, # The direct entries spanned): on the six scenes at the centre at
-/// rest and at a moving point, the node with the run's spans against the node with the entries one by one, entry by
-/// entry of every slot of the generator and of its gradient: apart by no more than the span's booked Y
-/// (`Selected::span_directs`, every output's left part summed) and the two computations' rounding of the entry; said
-/// per scene: the spans' outputs, atoms and directions, Y, the largest difference.
+/// The direct entries spanned and K's sideband parts dropped (module documentation, # The direct entries spanned, # The
+/// sideband parts dropped): on the six scenes at the centre at rest and at a moving point, the run's node against the
+/// node with the entries one by one and every sideband part in (`Selected::whole`), entry by entry of every slot of the
+/// generator and of its gradient: apart by no more than the two's booked Y (`Selected::span_directs`,
+/// `Selected::drop_sidebands`) and the two computations' rounding of the entry; said per scene: the spans' outputs,
+/// atoms and directions, whether parts were dropped, Y, the largest difference.
 #[test]
 fn the_direct_entries_spanned_are_the_entries_within_what_the_span_books() {
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
         let mut plain = run_of(&request, &keep);
         let spans = (run.lab.spans.len(), run.lab.spans.iter().map(|d| d.atoms.len()).sum::<usize>(), run.lab.spans.iter().map(|d| d.basis.len()).sum::<usize>());
-        plain.lab.spans.clear();
+        let parts = plain.whole();
         let booked = run.judgment.dropped - plain_dropped(&run);
         let (node, scales) = run.structure();
         let rounded = |k: usize, x: usize| crate::units::rounding(scales.generator[k].1[x] + 64) * scales.generator[k].0[x];
@@ -712,7 +713,7 @@ fn the_direct_entries_spanned_are_the_entries_within_what_the_span_books() {
             }
         }
         let _ = node;
-        eprintln!("{name}: spans (outputs, atoms, directions) {spans:?}, booked Y {booked:.3e} rad/µs, the largest difference {worst:.3e}");
+        eprintln!("{name}: spans (outputs, atoms, directions) {spans:?}, sideband parts dropped {parts}, booked Y {booked:.3e} rad/µs, the largest difference {worst:.3e}");
     }
 }
 

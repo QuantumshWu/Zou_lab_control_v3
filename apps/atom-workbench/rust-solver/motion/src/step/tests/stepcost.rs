@@ -11,7 +11,8 @@
 //!   output's readout at the point (`Dynamics::readout`) and on the step's middle (`Middle::readout`, where the model
 //!   reads there). Said: their means over the walk, the jumps and the nodes a step makes, the counted work a step.
 //!   With STEPCOST_PAIRED=1 (2) also the step and the node on the same run with its direct entries one by one
-//!   (`Selected::unspanned`), timed in turn with the run's on the same states (each repeat the spanned one first (the
+//!   (`Selected::unspanned`; STEPCOST_PLAIN=sidebands: with K's sideband parts in, `Selected::sidebands_in`; =whole:
+//!   both, `Selected::whole`), timed in turn with the run's on the same states (each repeat the spanned one first (the
 //!   one by one first), the first call of each not timed: a load that comes and goes weighs on both), "STEPCOST-PAIRED".
 //!   Ignored; run by name, pinned to one performance core by the caller:
 //!   `<test exe> step::tests::stepcost::stepcost --exact --include-ignored --nocapture --test-threads 1`.
@@ -114,7 +115,15 @@ fn stepcost() {
         let order = std::env::var("STEPCOST_PAIRED").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
         let paired = order > 0;
         let mut plain = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..crate::select::choose(&scene).unwrap() }, reference).unwrap();
-        plain.unspanned();
+        match std::env::var("STEPCOST_PLAIN").as_deref() {
+            Ok("sidebands") => {
+                plain.sidebands_in();
+            }
+            Ok("whole") => {
+                plain.whole();
+            }
+            _ => plain.unspanned(),
+        }
         // [step spanned, step plain, node spanned, node plain]
         let mut pair = [0.0f64; 4];
         let mut t = start(&run, &request, chief, index);

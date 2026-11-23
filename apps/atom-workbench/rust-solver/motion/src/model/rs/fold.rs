@@ -156,6 +156,8 @@ struct Block {
     /// puts in, the others.
     fixed: Vec<C64>,
     rest: Vec<Entry>,
+    /// A sideband part of K left out (`Plan::drop_sideband`): its spectrum, amplitudes and pairs not made.
+    dropped: bool,
 }
 
 /// The fold's structure for a kept set K (module documentation, # Structure once).
@@ -264,7 +266,7 @@ impl Plan {
             for (r, &i) in members.iter().enumerate() {
                 q_of[i] = (blocks.len(), r);
             }
-            blocks.push(Block { rows: members, sideband: None, generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new() });
+            blocks.push(Block { rows: members, sideband: None, generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new(), dropped: false });
         }
         let piece_classes: Vec<[i64; 2]> = classes[..hamiltonian].to_vec();
         let mut by_part: BTreeMap<[i64; 2], Vec<usize>> = BTreeMap::new();
@@ -282,7 +284,7 @@ impl Plan {
                 for (r, &a) in sub.iter().enumerate() {
                     s_of[a] = (blocks.len(), r);
                 }
-                blocks.push(Block { rows: sub, sideband: Some(*s), generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new() });
+                blocks.push(Block { rows: sub, sideband: Some(*s), generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new(), dropped: false });
             }
         }
         // The generator's entries by block, and K's diagonal.
@@ -441,6 +443,31 @@ impl Plan {
     /// The folded blocks' sizes and which are Q's.
     pub fn blocks(&self) -> Vec<(usize, bool)> {
         self.blocks.iter().map(|b| (b.rows.len(), b.sideband.is_none())).collect()
+    }
+
+    /// K's sideband parts (`Block::sideband`): their blocks' indices.
+    pub(crate) fn sidebands(&self) -> Vec<usize> {
+        (0..self.blocks.len()).filter(|&b| self.blocks[b].sideband.is_some()).collect()
+    }
+
+    /// K's sideband part `b` left out of the fold (`out`) or put back: what it adds -- its pairs into H_eff and the
+    /// channels, values, gradients and photon forms -- is then not made (`Local::evaluate`, `Out::contract`), nor
+    /// bounded (`Out::bounds`); its caller books it (model/selected.rs, # The sideband parts dropped).
+    pub(crate) fn drop_sideband(&mut self, b: usize, out: bool) {
+        assert!(self.blocks[b].sideband.is_some(), "only K's sideband parts are left out");
+        self.blocks[b].dropped = out;
+    }
+
+    /// Whether K's sideband part `b` is left out (`drop_sideband`; the tests').
+    #[cfg(test)]
+    pub(crate) fn dropped(&self, b: usize) -> bool {
+        self.blocks[b].dropped
+    }
+
+    /// Whether the block `b` is made where `model` (K's sideband parts only where a model is made, and not left out).
+    fn made(&self, b: usize, model: bool) -> bool {
+        let block = &self.blocks[b];
+        block.sideband.is_none() || (model && !block.dropped)
     }
 
     /// The count of pieces (H's and the jumps').
@@ -964,7 +991,7 @@ impl Local {
         let table = (mode == 0).then(|| plan.table(v));
         let s = plan.intensity.first().map_or(0.0, |&f| v.factors[f].0.re);
         for (b, block) in plan.blocks.iter().enumerate() {
-            if block.sideband.is_some() && !making.model {
+            if !plan.made(b, making.model) {
                 continue;
             }
             if let Some(tabled) = table.and_then(|t| t.blocks[b].as_deref()) {
@@ -1072,7 +1099,7 @@ impl Local {
         dms.resize_with(nb, Mat::default);
         for (b, batch) in plan.batches.iter().enumerate() {
             let block = &plan.blocks[b];
-            if block.sideband.is_some() && !making.model {
+            if !plan.made(b, making.model) {
                 continue;
             }
             let size = block.rows.len();
@@ -1202,6 +1229,10 @@ impl Local {
             let size = block.rows.len();
             let (total, wide) = (batch.total, batch.wide);
             let (m, dm) = (&self.m[b], &self.dm[b]);
+            if !plan.made(b, true) {
+                out.push((Vec::new(), Vec::new()));
+                continue;
+            }
             if batch.amplitudes.is_empty() {
                 out.push((m.data.iter().map(|z| z.abs()).collect(), dm.data.iter().map(|z| z.abs()).collect()));
                 continue;
@@ -1629,7 +1660,7 @@ impl Out {
             list.resize_with(nb, Default::default);
         }
         for (b, (list, width)) in grouping.layout.iter().enumerate() {
-            if plan.blocks[b].sideband.is_some() && !making.model {
+            if !plan.made(b, making.model) {
                 continue;
             }
             let (size, width) = (plan.blocks[b].rows.len(), *width);
@@ -1737,6 +1768,9 @@ impl Out {
                 }
             }
             for pair in &grouping.h_pairs {
+                if !plan.made(grouping.ws[pair.w].block, true) {
+                    continue;
+                }
                 if self.made != pair.w {
                     self.legs(plan, grouping, v, &weight, pair.w);
                     work += self.product(grouping, pair.w);
@@ -1788,7 +1822,7 @@ impl Out {
                 }
             }
             for pair in &grouping.j_pairs {
-                if grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks {
+                if (grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks) || !plan.made(grouping.ws[pair.w].block, true) {
                     continue;
                 }
                 if self.made != pair.w {
@@ -1942,6 +1976,10 @@ impl Out {
         for (b, (list, width)) in grouping.layout.iter().enumerate() {
             let (size, width) = (plan.blocks[b].rows.len(), *width);
             let (mut zv, mut zd) = (vec![0.0; size * width], vec![0.0; size * 3 * width]);
+            if !plan.made(b, true) {
+                blocks.push((zv, zd));
+                continue;
+            }
             for &zi in list {
                 let (s, o) = (&grouping.zs[zi], grouping.z_offset[zi]);
                 for (member, map) in &s.members {
@@ -2022,6 +2060,9 @@ impl Out {
                 (p.w, p.z, true)
             };
             let s = &grouping.ws[wi];
+            if !plan.made(s.block, true) {
+                continue;
+            }
             let (rows, size, width) = (s.index.len(), plan.blocks[s.block].rows.len(), grouping.layout[s.block].1);
             if made != wi {
                 // |X| and |∂X| (4 rows × |B|): each member's entry's modulus.
@@ -2353,6 +2394,11 @@ impl Out {
     /// entry |x c|; a pair ½ Σ_q |X_iq| M̄_qj (a jump's pair without the ½). The weights are one (the lab's grouping).
     /// Per H output and per channel output (the photon forms' outputs left at zero), on their structural elements.
     pub fn bounds(plan: &Plan, grouping: &Grouping, moduli: &[Vec<f64>], coefficients: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        Out::bounds_of(plan, grouping, moduli, coefficients, &|b| b.is_none_or(|b| plan.made(b, true)))
+    }
+
+    /// `bounds` of the parts `take` takes: the direct entries (None), the pairs of a block (Some(b)).
+    pub fn bounds_of(plan: &Plan, grouping: &Grouping, moduli: &[Vec<f64>], coefficients: &[f64], take: &dyn Fn(Option<usize>) -> bool) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
         let coefficient = |c: u32| -> f64 { if c == 0 { 1.0 } else { coefficients[c as usize] } };
         let mut h: Vec<Vec<f64>> = grouping.lists.iter().map(|l| vec![0.0; l.len()]).collect();
         let mut channels: Vec<Vec<f64>> = grouping.channel_lists.iter().map(|l| vec![0.0; l.len()]).collect();
@@ -2376,7 +2422,7 @@ impl Out {
             sums.push(z);
         }
         // The direct entries.
-        for p in 0..plan.keys.len() {
+        for p in (0..plan.keys.len()).filter(|_| take(None)) {
             let terms = &plan.terms[p];
             if p >= plan.hamiltonian && plan.jump[p].is_some_and(|(_, which)| which == 1) {
                 continue;
@@ -2404,7 +2450,7 @@ impl Out {
                 (p.w, p.z, true)
             };
             let s = &grouping.ws[wi];
-            if s.jump.is_some_and(|(_, which)| which == 1) {
+            if s.jump.is_some_and(|(_, which)| which == 1) || !take(Some(s.block)) {
                 continue;
             }
             let (rows, size, width) = (s.index.len(), plan.blocks[s.block].rows.len(), grouping.layout[s.block].1);
