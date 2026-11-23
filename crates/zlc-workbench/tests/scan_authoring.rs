@@ -286,13 +286,18 @@ fn a_value_on_the_grid_or_a_knob_without_one_plays_as_written() {
         "range":{"start":start,"stop":stop,"count":count},"unit":unit,"mode":"range","value_text":""}]});
     for document in [range("api:duration:hold", "us", 0.1, 1.0, 10), range("api:duration:hold", "us", 0.02, 0.2, 10),
                      range("api:bracket_count:loop", "", 1.0, 9.0, 5), range("device:rf:carrier", "GHz", 6.734, 6.934, 11),
-                     range("device:dds:frequency", "kHz", 100.1, 200.3, 37)] {
+                     range("device:dds:frequency", "kHz", 100.1, 200.3, 37),
+                     // The editor's first sweep of 10 us on the 20 ns clock (scan_plan.ts firstSweep), 3 ticks apart.
+                     range("api:duration:hold", "us", 9.88, 10.12, 5)] {
         let compiled = on_ports(document.clone(), "preview", bench()).unwrap();
         let played = &compiled["axis_facts"][0]["played"];
         assert_eq!((played["moved"].as_u64(), played["count"].clone(), played["written"].clone()), (Some(0), document["axes"][0]["range"]["count"].clone(),
             document["axes"][0]["range"]["count"].clone()), "{document}");
         assert_eq!(values(&compiled, 0), values(&compile(document.clone(), "compile").unwrap(), 0), "as written: {document}");
     }
+    // 0.05 us apart, 2.5 ticks, two of five points would move.
+    let halfway = on_ports(range("api:duration:hold", "us", 9.9, 10.1, 5), "preview", bench()).unwrap();
+    assert_eq!(halfway["axis_facts"][0]["played"]["moved"], 2);
     // Each the float of its decimal, bit for bit: 0.1, 0.2, ... 1 us on the clock, 6.734 ... 6.934 GHz
     // on a gridless knob -- not the Range's arithmetic, which reaches 0.30000000000000004.
     let bits = |values: Vec<f64>| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();

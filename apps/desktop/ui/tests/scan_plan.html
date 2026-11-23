@@ -46,6 +46,10 @@ const ports={
   cooling:{port:'api:delay:cooling',label:'cooling.delay',group:'api',leaf:'delay:cooling',unit:'ns',lo:-10000,hi:10000,current:500,
     grid:{step:20,ties:'away',whole:false},display_unit:null,units:[['s',9],['ms',6],['µs',3],['ns',0]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
 };
+// Durations on the same 20 ns clock, standing at 10 µs and 2 µs.
+for (const [name,current] of [['pause',1e-5],['brief',2e-6]]) ports[name]={port:`pulse:param:duration:${name}`,label:name,group:'pulse',leaf:`duration:${name}`,
+  unit:'s',lo:2e-8,hi:85,current,grid:{step:2e-8,ties:'away',whole:false},display_unit:null,units:[['s',0],['ms',-3],['µs',-6],['ns',-9]],
+  limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}};
 const delay=(value,overrides=[])=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},
   description:'delay',minimum:0,maximum:1,authored:0.001,value,unavailable_reason:''}],overrides,parked:[],note:'',tidy:null});
 function setup(axes,api=null,offered=[port],more={}) {
@@ -98,12 +102,14 @@ try {
    equal(axes.edge.unit,'MHz','at its lower limit');equal(rangeOf(axes.edge),{start:500,stop:500.1,count:5},'clipped to its limit');
    equal([axes.unknown.unit,rangeOf(axes.unknown)],['GHz',{start:0.5,stop:0.5,count:1}],'one point, in the unit its range reads in');
  });
- await check('a knob on a grid coarser than the five points of a sweep sweeps one grid point a value',async()=>{
-   const t=setup([],null,[ports.cooling,ports.hold]);
-   t.add();t.add();
+ await check('a first sweep on a grid stands a whole number of grid steps apart, none moved; a coarse grid one point a value',async()=>{
+   const t=setup([],null,[ports.cooling,ports.hold,ports.pause,ports.brief]);
+   for(let k=0;k<4;k++) t.add();
    const axes=Object.fromEntries(t.plan().map(axis=>[axis.port.split(':').at(-1),axis]));
    equal([axes.cooling.unit,rangeOf(axes.cooling)],['ns',{start:480,stop:520,count:3}],'500 ns on a 20 ns clock: 480, 500, 520 ns');
-   equal([axes.hold.unit,rangeOf(axes.hold)],['ms',{start:9.9,stop:10.1,count:5}],'10 ms on the same clock: five points 0.05 ms apart');
+   equal([axes.hold.unit,rangeOf(axes.hold)],['ms',{start:9.9,stop:10.1,count:5}],'10 ms on the same clock: five points 0.05 ms (2500 ticks) apart');
+   equal([axes.pause.unit,rangeOf(axes.pause)],['µs',{start:9.88,stop:10.12,count:5}],'10 µs: 60 ns (3 ticks) apart, not 50 ns');
+   equal([axes.brief.unit,rangeOf(axes.brief)],['µs',{start:1.88,stop:2.12,count:5}],'2 µs likewise');
  });
  await check('a unit the operator picks stays until the knob is changed; a new knob starts again',async()=>{
    const t=setup([],null,[ports.drive,ports.carrier]);

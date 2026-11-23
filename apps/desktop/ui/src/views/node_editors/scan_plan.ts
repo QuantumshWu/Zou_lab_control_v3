@@ -81,13 +81,21 @@ function rangeBank(start: number, stop: number, count: number): Pick<Axis, "valu
 
 /** `value` + `step` in decimal, each as its shortest spelling: 80 − 0.1 is 79.9, never 79.90000000000001. */
 function decimalSum(value: number, step: number): number {
-  const parts = (number: number): [bigint, number] => {
-    const [mantissa = "0", exponent = "0"] = String(number).split("e");
-    const [whole = "0", fraction = ""] = mantissa.split(".");
-    return [BigInt(whole + fraction), Number(exponent) - fraction.length];
-  };
-  const [a, at] = parts(value), [b, bt] = parts(step), last = Math.min(at, bt);
+  const [a, at] = decimalParts(value), [b, bt] = decimalParts(step), last = Math.min(at, bt);
   return Number(`${a * 10n ** BigInt(at - last) + b * 10n ** BigInt(bt - last)}e${last}`);
+}
+
+/** A number's shortest spelling as whole digits and a power of ten: 0.02 is 2 and -2. */
+function decimalParts(number: number): [bigint, number] {
+  const [mantissa = "0", exponent = "0"] = String(number).split("e");
+  const [whole = "0", fraction = ""] = mantissa.split(".");
+  return [BigInt(whole + fraction), Number(exponent) - fraction.length];
+}
+
+/** `value` times a whole `count`, in decimal: 3 times 0.02 is 0.06. */
+function decimalTimes(value: number, count: number): number {
+  const [digits, exponent] = decimalParts(value);
+  return Number(`${digits * BigInt(count)}e${exponent}`);
 }
 
 /** The port's reading and limits in `symbol`: a decimal shift on its ladder, else the device's conversion. */
@@ -109,9 +117,11 @@ const SWEEP_SPREAD = 0.1, SWEEP_POINTS = 5;
 
 /** A knob's first sweep, when an axis is added or its knob changed: in the unit `defaultUnit` picks
  * from where it stands (in the family its owner shows it in), from 0.1 below to 0.1 above that
- * in it in five points, inside its limits -- a knob whose grid is coarser than those points one
- * grid point a value, from one step below to one above (a count 1, a 20 ns clock 20 ns).  A knob
- * that says nowhere it stands is one point, at its lower limit: never its whole range. */
+ * in it in five points, inside its limits.  On a grid its points stand a whole number of grid
+ * steps apart, the nearest to those five points' spacing, so none is moved (10 µs on a 20 ns clock:
+ * 9.88 … 10.12 µs, 60 ns apart); a grid coarser than that spacing sweeps one grid point a value,
+ * one step below to one above (a count 1, a 20 ns clock in ns 20 ns).  A knob that says nowhere it
+ * stands is one point, at its lower limit: never its whole range. */
 function firstSweep(port: Port): Pick<Axis, "unit" | "values" | "range"> {
   const family = (symbol: string): string => port.families[symbol] ?? symbol;
   const own = port.display_unit && port.units.some(([symbol]) => symbol === port.display_unit) ? port.display_unit : port.unit;
@@ -122,12 +132,17 @@ function firstSweep(port: Port): Pick<Axis, "unit" | "values" | "range"> {
   const { current, bounds: [low, high] } = inSpelling(port, unit);
   const inside = (value: number): number => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
   if (current === null) return { unit, ...rangeBank(low ?? high ?? 0, low ?? high ?? 0, 1) };
-  const step = gridStep(port, unit);
-  if (step !== null && step > 2 * SWEEP_SPREAD / (SWEEP_POINTS - 1)) {
-    const below = decimalSum(current, -step), above = decimalSum(current, step);
-    const from = low !== null && below < low ? current : below, to = high !== null && above > high ? current : above;
-    if (!(from < to)) return { unit, ...rangeBank(inside(current), inside(current), 1) };
-    return { unit, ...rangeBank(from, to, Math.round((to - from) / step) + 1) };
+  const step = gridStep(port, unit), spacing = 2 * SWEEP_SPREAD / (SWEEP_POINTS - 1);
+  if (step !== null) {
+    const apart = decimalTimes(step, Math.max(1, Math.round(spacing / step)));
+    const reach = step > spacing ? 1 : (SWEEP_POINTS - 1) / 2;
+    const points: number[] = [];
+    for (let offset = -reach; offset <= reach; offset++) {
+      const value = decimalSum(current, decimalTimes(apart, offset));
+      if ((low === null || value >= low) && (high === null || value <= high)) points.push(value);
+    }
+    if (points.length < 2) return { unit, ...rangeBank(inside(current), inside(current), 1) };
+    return { unit, ...rangeBank(points[0]!, points[points.length - 1]!, points.length) };
   }
   const from = inside(decimalSum(current, -SWEEP_SPREAD)), to = inside(decimalSum(current, SWEEP_SPREAD));
   if (!(from < to)) return { unit, ...rangeBank(inside(current), inside(current), 1) };
