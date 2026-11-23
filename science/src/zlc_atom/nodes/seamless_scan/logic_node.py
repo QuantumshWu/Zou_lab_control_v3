@@ -36,6 +36,7 @@ from zlc_atom.nodes.scan import (
     plan_from_authored,
     resolve_api_overrides,
     scan_ports_for_devices,
+    swept_api_fields,
     unscannable_api_ports,
 )
 import zlc_plugin
@@ -145,7 +146,9 @@ def _admit_resources(values, resources, installation=None) -> tuple[str, ...]:
     except TypeError:
         return ()
     try:
-        resolve_api_overrides(pulse, api_overrides_from_authored(values.get("api_values")))
+        # The plan as written says which API parameters it sweeps (the validator has read it).
+        swept = swept_api_fields(plan_from_authored(values["plan"]))
+        resolve_api_overrides(pulse, api_overrides_from_authored(values.get("api_values")), swept)
     except ValueError as error:
         issues.append(str(error))
     try:
@@ -185,11 +188,11 @@ def _build(
     # still overrides the ones it sweeps; a value for a name this pulse does
     # not declare is kept in the draft and named in the run record as not
     # applied.
-    applied, unapplied = resolve_api_overrides(pulse, api_overrides_from_authored(api_values))
     tunables = _tunables(devices)
     # The plan as the knobs play it: every value on its knob's domain.
     offered = _offered(pulse, tunables, plan)
     parsed = plan_from_authored(plan, offered)
+    applied, unapplied = resolve_api_overrides(pulse, api_overrides_from_authored(api_values), swept_api_fields(parsed))
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to a claimed knob the HOST moves between
     # fires, and an API axis to a parameter of the pulse the host plays with

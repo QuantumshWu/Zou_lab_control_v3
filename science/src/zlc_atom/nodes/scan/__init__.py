@@ -36,6 +36,7 @@ from .plan import (
     plan_from_authored,
     resolve_api_overrides,
     scan_ports_for_devices,
+    swept_api_fields,
     unscannable_api_ports,
 )
 
@@ -70,5 +71,6 @@ __all__ = [
     "scan_dataset_schema",
     "scan_repeat_domain",
     "scan_ports_for_devices",
+    "swept_api_fields",
     "unscannable_api_ports",
 ]

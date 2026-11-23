@@ -92,6 +92,18 @@ function decimalParts(number: number): [bigint, number] {
   return [BigInt(whole + fraction), Number(exponent) - fraction.length];
 }
 
+/** `value` on a grid of `step`, in decimal: the nearest grid point, a value halfway between two going
+ * away from zero, or to the even one where the grid's `ties` says "even" -- the native quantizer's
+ * rule, as the knob's `grid` states it (10.01 on a grid of 0.02 is 10.02). */
+function onGrid(value: number, step: number, ties: string): number {
+  const [a, at] = decimalParts(value), [b, bt] = decimalParts(step), last = Math.min(at, bt);
+  const magnitude = (a < 0n ? -a : a) * 10n ** BigInt(at - last), size = b * 10n ** BigInt(bt - last);
+  let steps = magnitude / size;
+  const twice = 2n * (magnitude - steps * size);
+  if (twice > size || (twice === size && (ties !== "even" || steps % 2n === 1n))) steps += 1n;
+  return decimalTimes(step, Number(a < 0n ? -steps : steps));
+}
+
 /** `value` times a whole `count`, in decimal: 3 times 0.02 is 0.06. */
 function decimalTimes(value: number, count: number): number {
   const [digits, exponent] = decimalParts(value);
@@ -117,9 +129,10 @@ const SWEEP_SPREAD = 0.1, SWEEP_POINTS = 5;
 
 /** A knob's first sweep, when an axis is added or its knob changed: in the unit `defaultUnit` picks
  * from where it stands (in the family its owner shows it in), from 0.1 below to 0.1 above that
- * in it in five points, inside its limits.  On a grid its points stand a whole number of grid
- * steps apart, the nearest to those five points' spacing, so none is moved (10 µs on a 20 ns clock:
- * 9.88 … 10.12 µs, 60 ns apart); a grid coarser than that spacing sweeps one grid point a value,
+ * in it in five points, inside its limits.  On a grid it is centred on the grid point nearest where
+ * the knob stands and its points stand a whole number of grid steps apart, the nearest to those five
+ * points' spacing, so none is moved (10 µs on a 20 ns clock: 9.88 … 10.12 µs, 60 ns apart; 10.01 µs:
+ * 9.9 … 10.14 µs about 10.02); a grid coarser than that spacing sweeps one grid point a value,
  * one step below to one above (a count 1, a 20 ns clock in ns 20 ns).  A knob that says nowhere it
  * stands is one point, at its lower limit: never its whole range. */
 function firstSweep(port: Port): Pick<Axis, "unit" | "values" | "range"> {
@@ -134,14 +147,16 @@ function firstSweep(port: Port): Pick<Axis, "unit" | "values" | "range"> {
   if (current === null) return { unit, ...rangeBank(low ?? high ?? 0, low ?? high ?? 0, 1) };
   const step = gridStep(port, unit), spacing = 2 * SWEEP_SPREAD / (SWEEP_POINTS - 1);
   if (step !== null) {
+    // Centred on the grid point where the knob stands nearest, so every point is on the grid.
+    const centre = onGrid(current, step, port.grid!.ties);
     const apart = decimalTimes(step, Math.max(1, Math.round(spacing / step)));
     const reach = step > spacing ? 1 : (SWEEP_POINTS - 1) / 2;
     const points: number[] = [];
     for (let offset = -reach; offset <= reach; offset++) {
-      const value = decimalSum(current, decimalTimes(apart, offset));
+      const value = decimalSum(centre, decimalTimes(apart, offset));
       if ((low === null || value >= low) && (high === null || value <= high)) points.push(value);
     }
-    if (points.length < 2) return { unit, ...rangeBank(inside(current), inside(current), 1) };
+    if (points.length < 2) return { unit, ...rangeBank(inside(centre), inside(centre), 1) };
     return { unit, ...rangeBank(points[0]!, points[points.length - 1]!, points.length) };
   }
   const from = inside(decimalSum(current, -SWEEP_SPREAD)), to = inside(decimalSum(current, SWEEP_SPREAD));

@@ -27,7 +27,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
 
@@ -677,8 +677,14 @@ def api_overrides_from_authored(payload: object) -> dict[str, float]:
     return overrides
 
 
+def swept_api_fields(plan: ScanPlan) -> set[str]:
+    """The API parameters a plan sweeps, by field id (an axis or a linked one)."""
+
+    return {axis.port[len(API_PARAM_FAMILY):] for axis in plan.axes if axis.port.startswith(API_PARAM_FAMILY)}
+
+
 def resolve_api_overrides(
-    description: Mapping[str, object], overrides: Mapping[str, float]
+    description: Mapping[str, object], overrides: Mapping[str, float], swept: Collection[str] = ()
 ) -> tuple[dict[str, tuple[float, str]], dict[str, float]]:
     """This run's API values as the board takes them -- ``{field_id: (value,
     unit)}`` in each field's declared unit -- and the values it does not
@@ -686,7 +692,9 @@ def resolve_api_overrides(
 
     A name may be a field id or a label one field answers to; a label two
     fields answer to is refused (:func:`ambiguous_api_value`), and so is a
-    value that is not whole for a field that takes whole numbers.  A name the
+    value that is not whole for a field that takes whole numbers -- unless the
+    plan sweeps that field (``swept``, :func:`swept_api_fields`): then the
+    value is kept for when its axis is taken out and plays nowhere.  A name the
     pulse does not declare -- a value kept from another pulse, or for a field
     its Subpulse file no longer offers -- is parked: applied to nothing and
     returned, so the run record names it as not applied, as the editor shows
@@ -712,7 +720,7 @@ def resolve_api_overrides(
         else:
             unapplied[name] = float(value)
             continue
-        if field_id in whole and not float(value).is_integer():
+        if field_id in whole and field_id not in swept and not float(value).is_integer():
             raise ValueError(not_whole_api_value(name, value, field_id))
         applied[field_id] = (float(value), declared[field_id])
     return applied, unapplied
@@ -973,4 +981,5 @@ __all__ = [
     "plan_input_rows",
     "parse_scan_values",
     "scan_ports_for_devices",
+    "swept_api_fields",
 ]

@@ -56,6 +56,7 @@ from .plan import (
     resolve_api_overrides,
     split_outer_axes,
     scan_row_count,
+    swept_api_fields,
     host_advanced_port,
     unscannable_api_ports,
 )
@@ -101,7 +102,7 @@ def estimate_scan_time(
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} must be a positive integer")
     description = pulse_description(description)
-    resolve_api_overrides(description, api_overrides_from_authored(api_values))
+    resolve_api_overrides(description, api_overrides_from_authored(api_values), swept_api_fields(plan))
     pulse_axes = tuple(axis for axis in plan.axes if axis.port.startswith((API_PARAM_FAMILY, PULSE_PARAM_FAMILY)))
     ports = bind_plan(ScanPlan(pulse_axes), (*hardware_scan_ports_for(description), *api_scan_ports_for(description)),
                       withheld=unscannable_api_ports(description)) if pulse_axes else ()
