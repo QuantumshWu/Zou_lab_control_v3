@@ -133,3 +133,62 @@ fn doppler_census() {
         eprintln!("DOP-SPLIT {name} {spec}: exact blocks {:?}; F=1↔F=2 elements of the generator {}; static: the largest {coupling:.3e} rad/µs over the least diagonal gap {gap:.3e} rad/µs, ratio {:.3e}", run.blocks, if cross.is_empty() { "none".to_string() } else { cross.join("; ") }, coupling / gap);
     }
 }
+
+/// A jump's photons' cost (STEP phase 2, the jump's parts): at a moving point of each scene of DOP_SCENE, on a jump's
+/// photon node (`Selected::photon_node`), the least of 50 wall times (µs) of every class's photons whole (`photons`,
+/// what a jump took until 2026-11-23) against every class's rate alone and the drawn class's whole (`class_photons`, as
+/// `SelectedMiddle::emitted` takes them now); and that the drawn class's numbers are the same to the bit.
+#[test]
+#[ignore]
+fn photon_cost() {
+    let list = std::env::var("DOP_SCENE").unwrap_or_else(|_| "PGC3D=ground@0.47,TET=ground@0.47,tilt0=ground@0.326,tilt2=ground@0.326,R4=+D2-2-1@0.237".into());
+    let least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..50)
+            .map(|_| {
+                let c = std::time::Instant::now();
+                f();
+                c.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for entry in list.split(',') {
+        let (name, rest) = entry.split_once('=').unwrap();
+        let spec = rest.split_once('@').unwrap().0;
+        let request = request_of(name);
+        let mut keep: Vec<usize> = (0..GROUND).collect();
+        if let Some(labels) = spec.strip_prefix('+') {
+            keep.extend(labels.split('+').map(|l| request.states.iter().position(|s| s == l).unwrap()));
+        }
+        keep.sort_unstable();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep, ..selection }, crate::solve::alone(chief)).unwrap();
+        let (r, kappa) = POINTS[1];
+        let node = run.photon_node(r, kappa);
+        let psi = spread(run.rs.keep.len());
+        let norm = norm_sqr(&psi);
+        let mut list: Vec<Photons> = Vec::new();
+        let whole = least(&mut || {
+            std::hint::black_box(run.read(|b| photons(&node, &b.value, 0.37, &psi, &mut list)).len());
+        });
+        let mut rates = Vec::new();
+        let mut short: Vec<Photons> = Vec::new();
+        short.resize_with(node.classes.len(), Photons::default);
+        let k = node.classes.len() / 2;
+        let drawn = least(&mut || {
+            rates.clear();
+            run.read(|b| {
+                for (class, p) in node.classes.iter().zip(short.iter_mut()) {
+                    rates.push(class_photons(class, node.kicked, (&b.value, 0.37), &psi, norm, p, false));
+                }
+                class_photons(&node.classes[k], node.kicked, (&b.value, 0.37), &psi, norm, &mut short[k], true);
+            });
+        });
+        let all = run.read(|b| photons(&node, &b.value, 0.37, &psi, &mut list).iter().map(|p| (p.moments.weight.to_bits(), p.moments.kick.map(f64::to_bits), p.wave_number.map(f64::to_bits))).collect::<Vec<_>>());
+        assert!(rates.iter().zip(&all).all(|(r, a)| r.to_bits() == a.0), "{name}: the rates apart");
+        assert_eq!((short[k].moments.kick.map(f64::to_bits), short[k].wave_number.map(f64::to_bits)), (all[k].1, all[k].2), "{name}: the drawn class apart");
+        eprintln!("PHOTONS {name} {spec}: {} classes; every class whole {whole:.2} µs, the rates and the drawn class {drawn:.2} µs", node.classes.len());
+    }
+}

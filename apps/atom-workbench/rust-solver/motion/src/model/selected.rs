@@ -1739,10 +1739,20 @@ impl SelectedMiddle<'_> {
         let emitted = READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { photons: list, rates, .. } = &mut *r;
-            let classes = self.model.read(|b| photons(&node, &b.value, self.t + s, psi, list));
+            // Every class's rate on its amplitudes alone; the photon of the class drawn whole (`class_photons`: the
+            // same numbers as every class's whole, `photons`, to the bit).
+            let norm = norm_sqr(psi);
+            if list.len() < node.classes.len() {
+                list.resize_with(node.classes.len(), Photons::default);
+            }
             rates.clear();
-            rates.extend(classes.iter().map(|p| p.moments.weight));
+            self.model.read(|b| {
+                for (class, p) in node.classes.iter().zip(list.iter_mut()) {
+                    rates.push(class_photons(class, node.kicked, (&b.value, self.t + s), psi, norm, p, false));
+                }
+            });
             let k = draw(rates)?;
+            self.model.read(|b| class_photons(&node.classes[k], node.kicked, (&b.value, self.t + s), psi, norm, &mut list[k], true));
             let p = &list[k];
             let n = psi.len();
             let amplitudes = p.u.each_ref().map(|u| u.iter().copied().collect::<Internal>());
@@ -1788,44 +1798,57 @@ impl Default for Photons {
 /// Every class's photons of the state ψ at the time t on a node (module documentation, # The photons), into `list`
 /// (as long as it needs, never shorter): the node's classes' in their order.
 fn photons<'a>(node: &Node, values: &[f64], t: f64, psi: &[C64], list: &'a mut Vec<Photons>) -> &'a [Photons] {
-    let n = psi.len();
     let norm = norm_sqr(psi);
     if list.len() < node.classes.len() {
         list.resize_with(node.classes.len(), Photons::default);
     }
     for (class, p) in node.classes.iter().zip(list.iter_mut()) {
-        let Photons { u, du, ku, .. } = &mut *p;
-        for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
-            v.clear();
-            v.resize(n, C64::ZERO);
-        }
-        {
-            for (a, axis) in class.axes.iter().enumerate() {
-                for jump in axis {
-                    let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
-                    // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
-                    let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
-                        for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
-                            let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
-                            out[row[0].at / n] += f * z;
-                        }
-                    };
-                    apply(&|e| e.value, &mut u[a]);
-                    if node.kicked {
-                        apply(&|e| e.kick, &mut ku[a]);
-                    }
-                    for (i, d) in du.iter_mut().enumerate() {
-                        apply(&|e| e.gradient[i], &mut d[a]);
-                    }
-                }
-            }
-            let moments = Moments::of(u, du, class.absorbed);
-            let weight = moments.weight;
-            p.wave_number = node.kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
-            p.moments = moments.over(norm);
-        }
+        class_photons(class, node.kicked, (values, t), psi, norm, p, true);
     }
     &list[..node.classes.len()]
+}
+
+/// A class's photons of the state ψ at the time t (`photons`): where `whole`, u_a, ∇u_a, the photon forms' K u_a where
+/// the node holds them, its moments over ‖ψ‖² = `norm` and its wave number; else u_a alone. Returns its rate W/‖ψ‖²,
+/// the moments' weight (`Moments::of`, then `over`: the same operations either way).
+fn class_photons(class: &Class, kicked: bool, (values, t): (&[f64], f64), psi: &[C64], norm: f64, p: &mut Photons, whole: bool) -> f64 {
+    let n = psi.len();
+    let Photons { u, du, ku, .. } = &mut *p;
+    for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
+        v.clear();
+        v.resize(n, C64::ZERO);
+    }
+    for (a, axis) in class.axes.iter().enumerate() {
+        for jump in axis {
+            let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
+            // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
+            let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
+                for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
+                    let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
+                    out[row[0].at / n] += f * z;
+                }
+            };
+            apply(&|e| e.value, &mut u[a]);
+            if !whole {
+                continue;
+            }
+            if kicked {
+                apply(&|e| e.kick, &mut ku[a]);
+            }
+            for (i, d) in du.iter_mut().enumerate() {
+                apply(&|e| e.gradient[i], &mut d[a]);
+            }
+        }
+    }
+    if !whole {
+        let weight: f64 = (0..3).map(|a| norm_sqr(&u[a])).sum();
+        return weight / norm;
+    }
+    let moments = Moments::of(u, du, class.absorbed);
+    let weight = moments.weight;
+    p.wave_number = kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
+    p.moments = moments.over(norm);
+    p.moments.weight
 }
 
 #[cfg(test)]
