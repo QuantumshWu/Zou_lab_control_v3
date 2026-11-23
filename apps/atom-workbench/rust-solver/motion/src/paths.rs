@@ -2227,6 +2227,9 @@ pub struct Window {
     /// error weighs the axes by each one's response, and reads its rates over the paths' whole forgotten stretches
     /// (select.rs `Stationary`), its spread over the paths that sum's own.
     pub energy_rates: Vec<(usize, [f64; 3], [f64; 3])>,
+    /// Per path read in the window its mean force difference δF_a and the reference's own mean force F_a there (1/µm/µs):
+    /// the push's error is read on their regression (select.rs `motion_at`, # The push's error).
+    pub forces: Vec<(f64, [f64; 3], [f64; 3])>,
 }
 
 /// A landing check's numbers at a time of a path (# The landing check), the candidate's first and the reference's:
@@ -2313,6 +2316,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             let mut rate_ref = vec![0.0; classes.len()];
             let mut rate = vec![0.0; p];
             let mut force = vec![[0.0; 3]; p];
+            let mut own_force = vec![[0.0; 3]; p];
             let mut force_rms = vec![0.0; p];
             let (mut heating, mut energy_rate) = (vec![[0.0; 3]; p], vec![[0.0; 3]; p]);
             let mut read = vec![false; p];
@@ -2360,6 +2364,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                     for a in 0..3 {
                         let d = x.force[a] - y.force[a];
                         force[k][a] += d / q;
+                        own_force[k][a] += y.force[a] / q;
                         df2 += d * d / q;
                         f2 += y.force[a] * y.force[a] / q;
                     }
@@ -2389,6 +2394,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 heating: std::array::from_fn(|a| of(&heating.iter().map(|h| h[a]).collect::<Vec<_>>())),
                 energy_rate: std::array::from_fn(|a| of(&energy_rate.iter().map(|h| h[a]).collect::<Vec<_>>())),
                 energy_rates: held.iter().map(|&k| (k, energy_rate[k], heating[k])).collect(),
+                forces: held.iter().map(|&k| (weight(k), force[k], own_force[k])).collect(),
             }
         })
         .collect()

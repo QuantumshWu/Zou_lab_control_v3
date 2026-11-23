@@ -159,9 +159,21 @@
 //!   E(0))/t_loss on the reference's prepared potential -- the paths' time mean over every atom thins out the trap's rim,
 //!   where an atom about to be lost is (Study A §2.1.4: S2's loss 55–75 % predicted so) --; over every path's heating
 //!   where fewer than two paths' atoms are lost (no spread to read of fewer) (`Judged::escape`).
-//! - **The push and the mean velocity** per lab axis: the force's window mean difference δF_a, the push's error
+//! - **The push and the mean velocity** per lab axis: the cloud's mean force difference δF_a in a window, the push's error
 //!   (ħ/m)|δF_a| (µm/µs²), and the mean velocity's (ħ/m)|δF_a| min(t, 1/ω_a) (m/s) -- a constant force's response of a
-//!   mean velocity in a harmonic well, (δF/mω) sin ωt, at most that.
+//!   mean velocity in a harmonic well, (δF/mω) sin ωt, at most that. The cloud's mean is read on the regression of each
+//!   path's δF_a on the reference's own F_a there, the reference's cloud mean the pilot's less the difference (`pushed`,
+//!   # The push's error below): a folded model's force errs as its potential does, δF ≈ ε F, and the atoms sit at every
+//!   phase of the lattice or the trap, so the paths' plain mean reads that spread, not the cloud's mean.
+//!
+//! ## The push's error
+//! The regression estimator of a population mean with an auxiliary variable whose population mean is known (Cochran,
+//! Sampling Techniques, §7.1): d̂ = d̄ + ĉ(μ_F − f̄), its variance s_r²(1/n + (μ_F − f̄)²/S_ff), the paths less two its
+//! degrees of freedom (`pushed`). μ_F is read on the pilot's cloud -- all its trajectories, on the model judged:
+//! μ_G = μ_F + E[δF], so d̂ = (d̄ + ĉ(μ_G − f̄))/(1 + ĉ), and μ_G's own standard error enters as ĉ² se(μ_G)². On
+//! two paths the line through them, its point alone (the nomination's). R4's G (2026-11-23): per path δF_z ≈ 0.1 F_z
+//! with |F_z| up to 2e2 /µm/µs; the plain mean on eight paths read the push 5.5e-3 µm/µs² at its upper end against its
+//! target 1.3e-3 and none at its lower, so every candidate below P26 stayed open through every doubling to 88 paths.
 //! Each a window's |mean| + q·se over the paths (Student's t, # The direct part), the window the direct part takes at the
 //! time. Point estimates of the first order, not bounds: the second order is x² (2 % at x = 15 %), and a mechanism mixed
 //! of several is read as their whole energy rate. (Until 2026-11-22 the motion's feedback was set to nought, the user's
@@ -1258,9 +1270,28 @@ pub struct Course {
     pub temperature: Vec<Option<[f64; 3]>>,
     pub frequencies: [f64; 3],
     pub halves: Option<Vec<[f64; 3]>>,
+    /// The pilot's cloud's mean push per lab axis at each time and its standard error (µm/µs²; estimate.rs `Motion::push`),
+    /// none where it holds too few atoms: the regression's mean of the reference's force (`motion_at`, # The push's
+    /// error).
+    pub push: Vec<Option<([f64; 3], [f64; 3])>>,
 }
 
 impl Course {
+    /// The cloud's mean push along the lab axis a over the times in [from, to] (the nearest time where none is), with its
+    /// standard error there (µm/µs²); none where the pilot reads no push there.
+    fn cloud_push(&self, from: f64, to: f64, a: usize) -> Option<(f64, f64)> {
+        let inside: Vec<([f64; 3], [f64; 3])> = self.times.iter().zip(&self.push).filter(|(t, _)| **t >= from && **t <= to).filter_map(|(_, p)| *p).collect();
+        let picked = if inside.is_empty() {
+            let middle = 0.5 * (from + to);
+            let nearest = (0..self.times.len()).filter(|&k| self.push.get(k).is_some_and(Option::is_some)).min_by(|&x, &y| (self.times[x] - middle).abs().total_cmp(&(self.times[y] - middle).abs()))?;
+            vec![self.push[nearest]?]
+        } else {
+            inside
+        };
+        let n = picked.len() as f64;
+        Some((picked.iter().map(|p| p.0[a]).sum::<f64>() / n, picked.iter().map(|p| p.1[a]).sum::<f64>() / n))
+    }
+
     /// The loss at the time t on the line through the times read, past the last on its last interval's line (the
     /// first order where the course reads nothing), within [0, 1].
     fn loss_at(&self, t: f64) -> f64 {
@@ -1412,9 +1443,58 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
             temperature_total = end(&paths::Mean::weighted(&each, &own.weights), paths, reach);
         }
     }
-    let push: [f64; 3] = std::array::from_fn(|a| hbar_over_mass * most(&|w| end(&w.force[a], w.paths, reach)));
+    let push: [f64; 3] = std::array::from_fn(|a| hbar_over_mass * most(&|w| match pushed(w, course, a, hbar_over_mass) {
+        Some((m, dof)) => end(&m, dof + 1, reach),
+        None => end(&w.force[a], w.paths, reach),
+    }));
     let velocity = std::array::from_fn(|a| push[a] * if course.frequencies[a] > 0.0 { t.min(1.0 / course.frequencies[a]) } else { t });
     Some(Motion { loss, temperature_total, push, velocity, temperature })
+}
+
+/// The push's error along the lab axis a in a window, in force units (1/µm/µs; module documentation, # The push's
+/// error): the cloud's mean force difference read on its regression on the reference's own force, path by path, the
+/// reference's cloud mean that of the pilot's cloud less the difference itself -- and its degrees of freedom, the paths
+/// less two. On two paths the line through them, its point alone read (no degree of freedom left for its spread: the
+/// nomination's point estimates, # The candidates). None where the window holds fewer than two paths, the pilot no push,
+/// or the force does not vary over the paths (the paths' plain mean, `Window::force`).
+///
+/// A folded model's force errs mostly as its potential does, δF ≈ ε F: where the atoms sit at all the lattice's or the
+/// trap's phases, each path's δF is large and of either sign while the cloud's mean is small, and the paths' plain mean
+/// reads that spread over √P -- R4's G: per path δF_z ≈ 0.1 F_z, |F_z| up to 2e2 /µm/µs, eight paths' mean ± 3.3
+/// (push 5.5e-3 µm/µs² at the upper end against its target 1.3e-3, none at the lower: every candidate below P26 open
+/// at every doubling, 2026-11-23). The regression estimator d̂ = d̄ + ĉ (μ_F − f̄), ĉ = S_df/S_ff (Cochran, Sampling
+/// Techniques, §7.1), takes out of the spread what the force's own explains; the population's μ_F is the reference's
+/// cloud mean, which the paths alone read no better, and the pilot's cloud -- all its trajectories, the model judged on
+/// -- reads μ_G = μ_F + E[d], so d̂ = (d̄ + ĉ (μ_G − f̄))/(1 + ĉ). Its variance: the residuals' s_r² (1/n + (μ_G −
+/// f̄)²/S_ff) and ĉ² se(μ_G)², over (1 + ĉ)².
+fn pushed(w: &Window, course: &Course, a: usize, hbar_over_mass: f64) -> Option<(paths::Mean, usize)> {
+    let n = w.forces.len();
+    if n < 2 {
+        return None;
+    }
+    let (mu, mu_se) = course.cloud_push(w.from, w.to, a)?;
+    let (mu, mu_se) = (mu / hbar_over_mass, mu_se / hbar_over_mass);
+    let total: f64 = w.forces.iter().map(|x| x.0).sum();
+    let mean = |of: &dyn Fn(&(f64, [f64; 3], [f64; 3])) -> f64| w.forces.iter().map(|x| x.0 * of(x)).sum::<f64>() / total;
+    let (d, f) = (mean(&|x| x.1[a]), mean(&|x| x.2[a]));
+    let s_ff = mean(&|x| (x.2[a] - f) * (x.2[a] - f));
+    if !(s_ff > 0.0) {
+        return None;
+    }
+    let c = mean(&|x| (x.1[a] - d) * (x.2[a] - f)) / s_ff;
+    if !(1.0 + c > 0.0) {
+        return None;
+    }
+    let value = (d + c * (mu - f)) / (1.0 + c);
+    if n == 2 {
+        return Some((paths::Mean { value, error: f64::INFINITY }, 0));
+    }
+    let residual = mean(&|x| {
+        let r = x.1[a] - d - c * (x.2[a] - f);
+        r * r
+    }) * n as f64 / (n - 2) as f64;
+    let spread = residual * (1.0 / n as f64 + (mu - f) * (mu - f) / (s_ff * n as f64)) + c * c * mu_se * mu_se;
+    Some((paths::Mean { value, error: spread.sqrt() / (1.0 + c) }, n - 2))
 }
 
 /// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the paths' windows, the
