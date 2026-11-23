@@ -28,9 +28,11 @@ field's own (a DAC field's is ``value``).
 What a scan reads besides (v2 ``scan_columns_for`` / ``api_parameter_columns_for``
 / the empty-bracket rule): every ``api_fields`` entry and every entry of
 ``scan_fields`` -- the scan slots the template carries, in slot order, each with
-the ``value`` it holds in the pulse -- also states ``is_dac`` and
-``limit_lo``/``limit_hi`` (the widest the field may be given), in the column's
-own unit (a DAC column's is the signed code, 0 = 0 V); ``unscannable`` maps an
+the ``value`` it holds in the pulse -- also states ``is_dac``,
+``limit_lo``/``limit_hi`` (the widest the field may be given) and ``grid``
+(``{"step", "ties"}``: the values the pulse puts the field on, a duration's or a
+delay's clock ticks, a code's or a count's whole numbers), in the column's own
+unit (a DAC column's is the signed code, 0 = 0 V); ``unscannable`` maps an
 API field the pulse offers no plan to the sentence that says why (an empty
 bracket's repeat count).
 

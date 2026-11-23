@@ -32,6 +32,7 @@ from .plan import (
     device_port_parts,
     hardware_scan_ports_for,
     host_advanced_port,
+    port_domains,
     port_group,
     port_leaf,
     unscannable_api_ports,
@@ -309,7 +310,9 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
     ports.extend(device_ports)
     document = values.get("plan")
     try:
-        preview = native("scan.compile", document=document if str(document or "").strip() else {"axes": []}, mode="preview")
+        # What plays: every axis on its knob's domain, as a Start would play it.
+        preview = native("scan.compile", document=document if str(document or "").strip() else {"axes": []}, mode="preview",
+                         ports=port_domains(ports))
         summary, problem = _summary(document, preview)
     except (TypeError, ValueError) as error:
         preview = {"rows": [], "axis_facts": []}

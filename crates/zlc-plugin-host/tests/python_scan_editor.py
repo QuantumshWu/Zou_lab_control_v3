@@ -6,12 +6,20 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_atom.authoring import AuthoringField, TunableField
-from zlc_atom.nodes.scan.plan import ScanPlan, plan_input_rows, scan_ports_for_devices
+from zlc_atom.nodes.scan.plan import (ScanPlan, api_scan_ports_for, bind_plan, plan_from_authored, plan_input_rows,
+                                     scan_ports_for_devices)
 from zlc_atom.nodes.scan.editor import scan_editor_facts
 from zlc_atom.nodes.seamless_scan.logic_node import _editor_facts
 from zlc_plugin import PluginError
 
 VISA = 'VI_ERROR_SYSTEM_ERROR (-1073807360): Unknown system error'
+
+#: A pulse whose bracket's repeat count is an API parameter, as pulse_describe states it
+#: (zlc-pulse's own test checks the grid it states for every kind of field).
+REPEATS = {'path': 'repeats.json', 'name': 'repeats', 'scan_fields': [], 'unscannable': {}, 'periods': [],
+           'api_fields': [{'field_id': 'bracket_count:loop', 'label': 'Loop.repeats', 'kind': 'bracket_count', 'unit': 'count',
+                           'value': 2.0, 'is_dac': False, 'limit_lo': 1.0, 'limit_hi': 4294967295.0,
+                           'grid': {'step': 1.0, 'ties': 'even'}}]}
 
 
 class Reads:
@@ -82,6 +90,22 @@ class ScanEditorFacts(unittest.TestCase):
         self.assertEqual(answer['rows'][0]['value_text'], '1,')
         self.assertEqual(plan_input_rows(plan)[0]['values'], [1, 2, 3])
         self.assertEqual(answer['summary'], '')
+
+    def test_a_repeat_count_swept_through_fractions_plays_and_shows_whole_counts(self):
+        plan = {'axes': [{'port': 'api:bracket_count:loop', 'unit': 'count', 'values': [],
+                          'range': {'start': 1, 'stop': 3, 'count': 5}, 'mode': 'range', 'value_text': ''}]}
+        answer = scan_editor_facts({'plan': json.dumps(plan), 'api_values': ''}, REPEATS, ())
+        self.assertEqual(answer['axis_facts'][0]['played'],
+                         {'first': 1.0, 'last': 3.0, 'count': 3, 'written': 5, 'moved': 2, 'distinct': 3})
+        self.assertIn('3 = 3 points', answer['summary'])
+        self.assertEqual(answer['problem'], '')
+        ports = api_scan_ports_for(REPEATS)
+        self.assertEqual(ports[0].grid, {'step': 1.0, 'ties': 'even'})
+        played = plan_from_authored(json.dumps(plan), ports)
+        self.assertEqual(played.axes[0].values, (1.0, 2.0, 3.0))
+        self.assertEqual(bind_plan(played, ports), ports)
+        self.assertEqual(plan_from_authored(json.dumps(plan)).axes[0].values, (1.0, 1.5, 2.0, 2.5, 3.0),
+                         'a draft read without its ports is the plan as written')
 
 
 if __name__ == '__main__':

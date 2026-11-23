@@ -89,6 +89,12 @@ class ScanPort:
     integer: bool = False
     #: The unit family its owner shows it in by default (AuthoringField.display_unit).
     display_unit: str | None = None
+    #: The grid its owner puts a value on, in ``unit``: ``{"step": s}``, the whole
+    #: multiples of ``s``, halfway going away from zero (the clock grid's rule), or
+    #: with ``"ties": "even"``, halfway going to the even one (a pulse's DAC code or
+    #: repeat count); None: any value from ``lo`` to ``hi``.  The native compiler
+    #: plays every axis value on it (:func:`port_domains`).
+    grid: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not str(self.port):
@@ -207,8 +213,9 @@ def scan_axis_ids(labels: Sequence[str]) -> tuple[str, ...]:
 
 def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[ScanPort, ...]:
     """One port per column of the description (``field_id, label, kind, unit,
-    value, is_dac, limit_lo, limit_hi``): the range a plan may play is the
-    column's limit, and it stands at the field's value in the pulse."""
+    value, is_dac, limit_lo, limit_hi, grid``): the range a plan may play is the
+    column's limit, on the grid the pulse puts the field's values on, and it
+    stands at the field's value in the pulse."""
 
     ports = []
     for column in columns:
@@ -225,6 +232,7 @@ def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[S
                 float(column["limit_hi"]),
                 current=float(column["value"]),
                 integer=bool(column.get("is_dac")) or column.get("kind") == "bracket_count",
+                grid=dict(column["grid"]),
             )
         )
     return tuple(ports)
@@ -275,6 +283,9 @@ def unscannable_api_ports(description: Mapping[str, object]) -> dict[str, str]:
 #: Between a device's name and its field's in a device port's label ("Trap RF · CH1 Power").
 DEVICE_LABEL_SEPARATOR = " · "
 
+#: The grid of a device's ``int`` field: whole numbers.
+_WHOLE_NUMBERS = {"step": 1.0}
+
 
 def device_port_label(device: str, field: str) -> str:
     """What a device port is called wherever it is shown: the name Device
@@ -310,7 +321,9 @@ def scan_ports_for_devices(
     ``units``, picked in Device Control), else the field's own declared
     unit -- an RF frequency axis publishes hertz; its label names the device
     by its ``role`` and the knob by its label; it stands at the device's
-    reading, in that unit.
+    reading, in that unit.  An ``int`` field takes whole numbers; any other
+    takes any value within its bounds (a field's ``step`` is how far a
+    stepper moves it, not a grid its values lie on).
     """
 
     ports: list[ScanPort] = []
@@ -350,6 +363,7 @@ def scan_ports_for_devices(
                     and math.isfinite(reading) else None,
                     integer=field.value_type == "int",
                     display_unit=field.display_unit,
+                    grid=dict(_WHOLE_NUMBERS) if field.value_type == "int" else None,
                 )
             )
     return tuple(ports)
@@ -484,10 +498,12 @@ class ScanPlan:
         }
 
     @classmethod
-    def from_tree(cls, tree: object) -> "ScanPlan":
-        """Compile authored banks through the canonical native authority."""
+    def from_tree(cls, tree: object, ports: Sequence[ScanPort] = ()) -> "ScanPlan":
+        """Compile authored banks through the canonical native authority, each
+        value on the domain of its port among ``ports`` (:func:`port_domains`)."""
 
-        compiled = native("scan.compile", document=tree.to_tree() if isinstance(tree, cls) else tree, mode="compile")
+        compiled = native("scan.compile", document=tree.to_tree() if isinstance(tree, cls) else tree, mode="compile",
+                          ports=port_domains(ports))
         result = object.__new__(cls)
         object.__setattr__(result, "axes", tuple(
             ScanAxis(axis["port"], tuple(axis["values"]), axis["unit"], axis.get("coordinate_of"))
@@ -569,10 +585,15 @@ def bind_plan(
     by_name = {port.port: port for port in ports}
     answer = native("scan.bind", axes=[
         {"port": axis.port, "values": list(axis.values), "unit": axis.unit, "coordinate_of": axis.coordinate_of}
-        for axis in plan.axes], ports=[
-        {"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi}
-        for port in ports], withheld=dict(withheld or {}))
+        for axis in plan.axes], ports=port_domains(ports), withheld=dict(withheld or {}))
     return tuple(by_name[name] for name in answer["ports"])
+
+
+def port_domains(ports: Sequence[ScanPort]) -> list[dict[str, object]]:
+    """The ports as the native compiler and binding read them: each one's
+    unit, bounds and grid, as its owner states them."""
+
+    return [{"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi, "grid": port.grid} for port in ports]
 
 
 #: A seamless plan may carry only host axes and play an ordinary fixed Pulse;
@@ -693,9 +714,11 @@ def _range_values(row: Mapping[str, object]) -> tuple[float, ...]:
     return tuple(native("scan.range", **descriptor)["values"] if descriptor is not None else row["values"])
 
 
-def plan_from_authored(payload: object) -> ScanPlan:
-    """Compile the active bank to the existing immutable execution plan."""
-    return payload if isinstance(payload, ScanPlan) else ScanPlan.from_tree(payload)
+def plan_from_authored(payload: object, ports: Sequence[ScanPort] = ()) -> ScanPlan:
+    """Compile the active bank to the existing immutable execution plan, each
+    axis playing on its port's domain among ``ports`` -- what the bench plays
+    -- and as written where none is given."""
+    return payload if isinstance(payload, ScanPlan) else ScanPlan.from_tree(payload, ports)
 
 
 def _scanned_axes(context: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -890,6 +913,7 @@ __all__ = [
     "device_port_parts",
     "hardware_scan_ports_for",
     "plan_from_authored",
+    "port_domains",
     "DeviceKnob",
     "resolve_api_overrides",
     "plan_input_rows",
