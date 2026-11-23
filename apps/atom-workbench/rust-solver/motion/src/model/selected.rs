@@ -131,7 +131,9 @@
 //! ratio of a member's shift to its gap, rs/fold_tabled.rs # The bounds); where none does, the fold's own. The budget is
 //! weighed when the tables are bought (`Selected::budget`), as the drop tier weighs: of J = 1 … 4 terms at the run's
 //! thermal speed, x(J) = [ρ^J, ρ^{J−1}]/(1 − ρ), the J of least W -- the node's counted work at J terms times the
-//! account's factor with x(J) beside its errors --, its x the budget. Each node's own errors -- the tail at its terms,
+//! account's factor with x(J) beside its errors --, its x the budget; the tables are laid and filled again to it where
+//! a piece of their first layout (to the reach's tail) is beyond it (rs/fold_tabled.rs, # The pieces: the values to the
+//! rates' budget, the slopes to the friction's). Each node's own errors -- the tail at its terms,
 //! its interpolation's relative bound, ΔG's and the spans' parts (`Node::deviation`) -- are what its run books
 //! (solve.rs, # The tables' deviation). One term leaves the friction out (x_T = 1/(1 − ρ): no factor bounds it); the
 //! rule takes two on PGC3D, TET, tilt0 and tilt2 (ρ 3.1e-3 … 4.6e-3 thermal: x = 1e-5 … 2e-5 on the rates, 3e-3 …
@@ -2368,7 +2370,7 @@ impl Selected {
         self.scene.point_into([0.0; 3], [0.0; 3], &mut point);
         let rest = self.rs.tweezer().values(&self.scene, &point);
         let plan = self.rs.plan();
-        let Some(layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low) else {
+        let Some(layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, None) else {
             crate::prof::note(|| "tables: none for the plan".to_string());
             let _ = tabling.tables.set(None);
             return;
@@ -2379,10 +2381,18 @@ impl Selected {
             tabling.price.store(price.to_bits(), Relaxed);
             return;
         }
-        // Filled, their budget weighed (`budget`), and kept for the kinds of node they cost less for at its terms -- none
-        // where no kind does.
+        // Filled, their budget weighed (`budget`) -- laid and filled again to it where a piece is beyond it (rs/
+        // fold_tabled.rs, # The pieces) --, and kept for the kinds of node they cost less for at its terms; none where
+        // no kind does.
         let tables = layout.fill(plan, &self.lab, &rest).and_then(|t| {
             let (budget, orders) = self.budget(&t)?;
+            let t = if t.pieces.iter().all(|p| p.worst[0] <= budget[0] && p.worst[1] <= budget[1]) {
+                t
+            } else {
+                let again = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, Some(budget))?;
+                crate::prof::note(|| format!("tables laid again to the budget {budget:?}: {} pieces, priced {:.4e}", again.pieces.len(), COMPLEX * (again.work + again.price)));
+                again.fill(plan, &self.lab, &rest)?
+            };
             let uses = self.tables_pay(&t, orders).filter(|uses| uses.iter().any(|&u| u))?;
             Some(Bought { tables: Arc::new(t), uses, budget })
         });

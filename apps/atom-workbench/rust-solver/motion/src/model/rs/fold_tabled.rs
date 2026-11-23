@@ -72,14 +72,17 @@
 //!
 //! # The pieces
 //! A piece [a, b] of s holds where its strict bound (`Piece::worst`: per table and term its value's bound over its
-//! entries' scale, the J-th weighed by the reach's ratio ρ_reach^J) is within the Doppler series' tail at the tables'
-//! terms at the reach (the largest ratio of the members' shifts there to the sums' gaps at s = 1: a piece never adds
-//! more to a node's bound than the series takes at the run's fastest atom); else it is halved, but where the halves'
-//! bounds no longer fall by half -- the samples' rounding reached -- the piece is taken at its bound; one s's round-off
-//! cannot halve is taken at its bound too, and where that is none no node reads it. Measured: PGC3D 8 pieces (9.2 MB),
-//! TET 4 (2.6 MB), tilt0 8 (1.0 MB), tilt2 8 (3.8 MB), 0.1–0.3 s. (Until 2026-11-23 the last two Chebyshev
-//! coefficients against the pair's largest, the series' own estimate and no bound -- on each output's largest scale
-//! 5 to 230 times the strict bound on the values, 1/45 to 2/3 of it on the gradients -- and TET 8 pieces, tilt0 16.)
+//! entries' own bound c ‖D‖^p, and its slope's over theirs c p ‖D‖^p ‖K‖, the J-th weighed by the reach's ratio
+//! ρ_reach^J) is within the target: the run's budget where it is known (model/selected.rs, # The tables' budget: the
+//! rates' relative error on the values, the friction's on the slopes -- the interpolation never adds more to a node
+//! than the series' tail it is held to), else the Doppler series' tail at the tables' terms at the reach (the largest
+//! ratio of the members' shifts there to the sums' gaps at s = 1) and at one term fewer. Else it is halved, but where
+//! the halves' bounds no longer fall by half -- the samples' rounding reached -- the piece is taken at its bound; one
+//! s's round-off cannot halve is taken at its bound too, and where that is none no node reads it. (Until 2026-11-23 the
+//! slopes held to nothing: R4's G, ρ 0.08 thermal, laid to the reach's tail in 16 pieces, booked 14.5 % of T at its
+//! nodes' gradients. And before, the last two Chebyshev coefficients against the pair's largest, the series' own
+//! estimate and no bound -- on each output's largest scale 5 to 230 times the strict bound on the values, 1/45 to 2/3
+//! of it on the gradients.)
 use super::*;
 
 /// One fixed matrix of a sum on its layout: its member's piece, its term (into `Plan::terms[piece]`), its coefficient,
@@ -128,9 +131,10 @@ pub(crate) struct Piece {
     pub range: [f64; 2],
     gaps: Vec<f64>,
     kappa: Vec<f64>,
-    /// The strict bound's worst over its tables (`Tables::layout`, # The pieces): the largest value's bound over its
-    /// entries' own bound c ‖D‖^p, the J-th term's weighed by the reach's ratio to the J.
-    pub worst: f64,
+    /// The strict bound's worst over its tables (`Tables::layout`, # The pieces): [the largest value's bound over its
+    /// entries' own bound c ‖D‖^p, the largest slope's over theirs c p ‖D‖^p ‖K‖], the J-th term's weighed by the
+    /// reach's ratio to the J.
+    pub worst: [f64; 2],
     /// Per table and Doppler term J (`[t·orders + J]`) the strict bound of its entries' interpolation (`bernstein`, with
     /// the samples' rounding through the interpolant), [the value's, the slope's in s], absolute.
     pub bounds: Vec<[f64; 2]>,
@@ -455,7 +459,7 @@ impl Tables {
     /// shifts at its momentum, the coefficients' largest), `orders` the Doppler series' terms kept, `degree` the pieces'
     /// Chebyshev degree. None where a block a sum is on is not tabled (its generator varies by another factor than the
     /// intensities), the plan has no intensity, or a block does not decompose.
-    pub(crate) fn layout(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Reach, orders: usize, degree: usize, low: f64) -> Option<Layout> {
+    pub(crate) fn layout(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Reach, orders: usize, degree: usize, low: f64, target: Option<[f64; 2]>) -> Option<Layout> {
         let clock = std::time::Instant::now();
         if plan.intensity.is_empty() || !(low < 1.0) {
             return None;
@@ -592,7 +596,9 @@ impl Tables {
                 })
             })
             .fold(0.0, f64::max);
-        let target = if reach_rho < 1.0 { reach_rho.powi(orders as i32) / (1.0 - reach_rho) } else { 0.0 };
+        // Where the run's budget is known, it (# The pieces).
+        let tail = |o: i32| if reach_rho < 1.0 { reach_rho.powi(o) / (1.0 - reach_rho) } else { 0.0 };
+        let target = target.unwrap_or([tail(orders as i32), tail(orders as i32 - 1)]);
         // A sample element's rounding: γ_n of the moduli of the terms it is the sum of, n the operations behind it and
         // its transform.
         let floor = {
@@ -675,7 +681,7 @@ impl Tables {
             // per table and term its value's bound over that, the J-th weighed by the reach's ratio to the J (what it
             // adds beside the leading term at the run's fastest atom).
             let half = 0.5 * (b - a);
-            let (mut bounds, mut worst): (Vec<[f64; 2]>, f64) = (Vec::with_capacity(tables.len() * orders), 0.0);
+            let (mut bounds, mut worst): (Vec<[f64; 2]>, [f64; 2]) = (Vec::with_capacity(tables.len() * orders), [0.0; 2]);
             for t in &tables {
                 let side = t.w.map_or(identity[grouping.zs[t.z].block], |w| legs[w]) * amplitudes[t.z];
                 for jj in 0..orders {
@@ -685,7 +691,13 @@ impl Tables {
                     let rounding = (lebesgue + 1.0) * floor * scale;
                     bounds.push([value + rounding, slope_bound + ((m - 1) * (m - 1)) as f64 * rounding / half]);
                     if scale > 0.0 {
-                        worst = worst.max(reach_rho.powi(jj as i32) * (value + rounding) / scale);
+                        let weight = reach_rho.powi(jj as i32);
+                        worst[0] = worst[0].max(weight * (value + rounding) / scale);
+                        // An entry's slope in s is within c p ‖D‖^p ‖K‖ (the Neumann series' first order).
+                        let slope_scale = scale * p as f64 * moves[t.z];
+                        if slope_scale > 0.0 {
+                            worst[1] = worst[1].max(weight * (slope_bound + ((m - 1) * (m - 1)) as f64 * rounding / half) / slope_scale);
+                        }
                     }
                 }
             }
@@ -701,13 +713,15 @@ impl Tables {
         while let Some(piece) = todo.pop() {
             let [a, b] = piece.range;
             let c = 0.5 * (a + b);
-            if piece.worst <= target || !(c > a && c < b) {
+            if (piece.worst[0] <= target[0] && piece.worst[1] <= target[1]) || !(c > a && c < b) {
                 pieces.push(piece);
                 continue;
             }
             let (left, right) = (bounded(a, c)?, bounded(c, b)?);
             work += left.1 + right.1;
-            if left.0.worst.max(right.0.worst) > 0.5 * piece.worst {
+            // Halving helps where every part beyond its target falls by half.
+            let falls = (0..2).all(|k| piece.worst[k] <= target[k] || left.0.worst[k].max(right.0.worst[k]) <= 0.5 * piece.worst[k]);
+            if !falls {
                 pieces.push(piece);
             } else {
                 todo.push(right.0);
@@ -865,7 +879,7 @@ impl Tables {
         let piece = self.pieces.iter().position(|p| s >= p.range[0] && s <= p.range[1])?;
         let p = &self.pieces[piece];
         // A piece whose interpolation no ellipse bounds (`bernstein`): the node is the fold's own.
-        if !p.worst.is_finite() {
+        if !p.worst.iter().all(|w| w.is_finite()) {
             return None;
         }
         self.shifts(plan, v, s, ds, scratch);

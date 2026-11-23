@@ -170,7 +170,7 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
         let rest = values([0.0; 3], [0.0; 3], &mut work);
         let reach = run.reach();
         let low = walk.iter().map(|&(r, k)| Tables::intensity(plan, &values(r, k, &mut work))).fold(1.0, f64::min);
-        let Some(layout) = Tables::layout(plan, &run.lab, &rest, &reach, orders, degree, low) else {
+        let Some(layout) = Tables::layout(plan, &run.lab, &rest, &reach, orders, degree, low, None) else {
             eprintln!("TABLED {name}: no tables (a block not tabled)");
             continue;
         };
@@ -186,13 +186,13 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
             tables.build_seconds,
             tables.bytes as f64 / 1e6,
             tables.pieces.len(),
-            tables.pieces.iter().map(|p| p.worst).fold(0.0, f64::max),
+            tables.pieces.iter().map(|p| p.worst[0]).fold(0.0, f64::max),
             tables.dropped
         );
         // Per piece the strict bound against the entries' scale, per term (the largest over the tables), beside the
         // coefficients' estimate.
         for p in &tables.pieces {
-            eprintln!("TABLED {name} piece [{:.4}, {:.4}]: the singularity {:.1} half widths off; worst {:.1e}", p.range[0], p.range[1], p.room, p.worst);
+            eprintln!("TABLED {name} piece [{:.4}, {:.4}]: the singularity {:.1} half widths off; worst {:.1e} (values), {:.1e} (slopes)", p.range[0], p.range[1], p.room, p.worst[0], p.worst[1]);
         }
         // The model with its gradients, the photon forms and the lift: every table read.
         let making = Making { lift: true, ..Making::node(true) };
