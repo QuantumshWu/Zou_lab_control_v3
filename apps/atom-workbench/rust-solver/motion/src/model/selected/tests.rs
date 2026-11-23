@@ -105,41 +105,84 @@ fn the_selected_model_is_slow_in_its_frame() {
     assert!(fast.is_empty(), "elements with a fast part in the frame: {fast:?}");
 }
 
-/// The decay is the photons' (model/selected.rs, # The generator by beats): at a moving point off the centre and at the
-/// time t = 3.7 µs, i(Ĥ − Ĥ†) of the middle's generator is Σ_class Σ_a L_a(t)†L_a(t) of the same node's photon
-/// operators, to the rounding of the products (n u max|Γ|, n the states).
+/// The decay is the photons' (model/selected.rs, # The generator by beats): at the centre at rest and at a moving point
+/// off it, at the time t = 3.7 µs, i(Ĥ − Ĥ†) of the middle's generator is Σ_class Σ_a L_a(t)†L_a(t) of the same node's
+/// photon operators but for the products of two components at a beat the model drops (model/classify.rs, # The drop
+/// tier: a beat dropped is dropped from the decay as from H, its bound booked, `Judgment::dropped`), entry by entry
+/// within the two computations' own rounding (Higham: a computed sum of K terms errs by γ_K times the sum of their
+/// moduli; units.rs `rounding`): each generator entry a ← b and b ← a by its fold's terms' moduli and count at the point
+/// (`Selected::structure_at`, the structure's rule: # The structure's rounding) -- their Hermitian parts cancel in
+/// i(Ĥ − Ĥ†) but for that rounding --, and the decay's products both ways, Σ_k (Σ_j |ℓ_j,ka|)(Σ_j |ℓ_j,kb|) of the photon
+/// components' moduli, K the generator's beats, the components and the n rows of a product. (Until 2026-11-22 the
+/// products were all taken and the allowance n u max|Γ| sixteen times over: tilt2, whose judgment drops the beats ±3ν
+/// to ±6ν of its Larmor ν = 13.19 rad/µs, read 4.3·10⁻¹³ of Γ's 2.72 -- 30 times its entries' rounding, the dropped
+/// beats' products, no rounding.)
 #[test]
 fn the_selected_decay_is_its_photons() {
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
-        let keep = run.rs.keep.clone();
-        let (r, kappa) = POINTS[1];
-        let n = keep.len();
-        let middle = run.middle(0, r, 3.7);
-        let path = middle.path(kappa, [0.0; 3]);
-        let mut h = Mat::zeros(n, n);
-        middle.generator(&path, 0.0, &mut h);
-        let node = middle.node(&path, 0.0, false);
+        let n = run.rs.keep.len();
         let (values, _) = run.components();
-        let mut gamma = Mat::zeros(n, n);
-        for class in &node.classes {
-            for axis in &class.axes {
-                let mut l = Mat::zeros(n, n);
-                for jump in axis {
-                    let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * 3.7) };
-                    for e in &jump.elements {
-                        l.data[e.at] += f * e.value;
+        let dropped: Vec<f64> = run.read(|b| run.judgment.tiers.iter().filter(|t| t.1 == Tier::Drop).map(|t| b.value[t.0].abs()).collect());
+        let kept = |omega: f64| !dropped.iter().any(|&d| (omega.abs() - d).abs() <= 1e-9 * d);
+        let t = 3.7;
+        for (r, kappa) in POINTS {
+            let middle = run.middle(0, r, t);
+            let path = middle.path(kappa, [0.0; 3]);
+            let mut h = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut h);
+            let node = middle.node(&path, 0.0, false);
+            // Σ L†L of the components' products at kept beats, and the products' moduli.
+            let (mut gamma, mut products, mut terms) = (Mat::zeros(n, n), vec![0.0_f64; n * n], node.generator.len());
+            for class in &node.classes {
+                for axis in &class.axes {
+                    let components: Vec<(f64, Mat, Vec<f64>)> = axis
+                        .iter()
+                        .map(|jump| {
+                            let (omega, f) = if jump.beat == 0 { (0.0, C64::ONE) } else { (values[jump.beat], C64::cis(-values[jump.beat] * t)) };
+                            let (mut m, mut size) = (Mat::zeros(n, n), vec![0.0_f64; n * n]);
+                            for e in &jump.elements {
+                                m.data[e.at] += f * e.value;
+                                size[e.at] += e.value.abs();
+                            }
+                            (omega, m, size)
+                        })
+                        .collect();
+                    terms += axis.len() + n;
+                    for (wl, ml, sl) in &components {
+                        for (wr, mr, sr) in &components {
+                            if !kept(wr - wl) {
+                                continue;
+                            }
+                            gamma.add_scaled(C64::ONE, &ml.adjoint_product(mr));
+                            for a in 0..n {
+                                for b in 0..n {
+                                    products[a * n + b] += (0..n).map(|k| sl[k * n + a] * sr[k * n + b]).sum::<f64>();
+                                }
+                            }
+                        }
                     }
                 }
-                gamma.add_scaled(C64::ONE, &l.adjoint_product(&l));
             }
+            let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
+            let (_, scales) = run.structure_at(r, kappa);
+            let rounded = |x: usize| scales.generator.iter().map(|(s, k)| crate::units::rounding(k[x] + node.generator.len()) * s[x]).sum::<f64>();
+            let gamma_k = crate::units::rounding(terms);
+            let (mut worst, mut most) = (0.0_f64, 0.0_f64);
+            for a in 0..n {
+                for b in 0..n {
+                    let off = (decay[(a, b)] - gamma[(a, b)]).abs();
+                    let bound = rounded(a * n + b) + rounded(b * n + a) + 2.0 * gamma_k * products[a * n + b];
+                    worst = crate::linalg::larger(worst, off);
+                    if off > 0. {
+                        most = crate::linalg::larger(most, off / bound);
+                    }
+                    assert!(off <= bound, "{name} at {r:?}, {kappa:?} ({a}, {b}): {off:e} against the rounding's {bound:e}");
+                }
+            }
+            eprintln!("{name} at {r:?}, {kappa:?}: |i(H − H†) − Σ L†L| {worst:.3e} of {:.3e}, at most {most:.3} of its entry's rounding (γ_{terms}); {} beats dropped", gamma.max_abs(), dropped.len());
         }
-        let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
-        let size = gamma.max_abs();
-        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, crate::linalg::larger);
-        eprintln!("{name}: |i(H − H†) − Σ L†L| {worst:.3e} of {size:.3e}");
-        assert!(worst <= n as f64 * crate::units::UNIT_ROUNDOFF * size * 16.0, "{name}: {worst:e} of {size:e}");
     }
 }
 

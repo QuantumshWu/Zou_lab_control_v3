@@ -1242,6 +1242,12 @@ impl Selected {
     /// sum of and their count (`Out::scales`: H_eff's outputs; the decay's products ½ Σ_g |l_g| |r_g| over their landing
     /// states, each jump amplitude's |l| its sources' |u| times their channel elements' scales).
     fn structure(&self) -> (Node, Scales) {
+        self.structure_at([0.0; 3], [0.0; 3])
+    }
+
+    /// The node and its rounding scales (`structure`) at a point and momentum: what a check of the node's entries holds
+    /// them to there (tests).
+    fn structure_at(&self, at: V3, kappa: V3) -> (Node, Scales) {
         let n = self.rs.keep.len();
         let mut node = self.template.clone();
         let mut scales = Scales {
@@ -1249,7 +1255,7 @@ impl Selected {
             gradient: node.gradient.iter().map(|_| std::array::from_fn(|_| (vec![0.0; n * n], vec![0; n * n]))).collect(),
         };
         let mut work = Work::default();
-        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.scene.point_into(at, kappa, &mut work.point);
         self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
         work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
         work.out.scales(self.rs.plan(), &self.lab, &work.local, None);
