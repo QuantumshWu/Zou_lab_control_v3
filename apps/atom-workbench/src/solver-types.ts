@@ -145,9 +145,12 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
     trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number,device,...(note===undefined?{}:{deviceNote:note}),
     approximations:{totals:{population:total(totals.population),temperature:total(totals.temperature)},items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
 }
-/** The steps of a motion solve's pipeline, in their order (rust-solver/motion/src/solve.rs # Steps): the three-point
- * selection of the states kept, the model, the scout, the pilot and the product. */
-export const SOLVE_STEPS=['select','model','scout','pilot','product'] as const;
+/** The steps of a motion solve's pipeline (rust-solver/motion/src/solve.rs # Steps), in their order of a new selection:
+ * the model, the scout, the pilot, the selection of the model on the pilot's paths and the product. The engine sends
+ * them as it runs them: on a chosen model other than the all-ground one, the model, the scout and the pilot again after
+ * the selection; with the selection kept for the scene, the selection first. The course draws them as they came and
+ * those to come in this order (solve-progress.ts); `readStage` takes a step in any order. */
+export const SOLVE_STEPS=['model','scout','pilot','select','product'] as const;
 export type SolveStep=typeof SOLVE_STEPS[number];
 /** Where a running motion solve's pipeline stands (rust-solver/src/motion_adapter.rs `stage`), sent as a step begins
  * and as its numbers change: its step; the rung τ (μs) the scout, the pilot or the product runs at (`stepUs`); and a

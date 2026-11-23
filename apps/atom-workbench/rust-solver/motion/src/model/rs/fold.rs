@@ -7,7 +7,11 @@
 //! falls in, are read once off the fixed matrices (their rounding rule: rs.rs `fixed`) and the frame's integer fast
 //! parts. So are the parts of G₀ and of X no point changes -- the entries of a factor that does not vary, at the first
 //! coefficient (one) -- summed once into dense blocks (`Block::fixed`, `Batch::fixed`): a point adds the rest. A point puts in the factors (the beams' amplitudes, the tweezer's intensity, its Doppler series' powers) and
-//! the frequencies; it makes the folded blocks' spectra at their local generator and the products.
+//! the frequencies; it makes the folded blocks' spectra at their local generator and the products. A block whose
+//! generator varies with the tweezer's intensity s alone (its Doppler series' powers and the other beams' own
+//! intensities about their focus' one to first order) takes its spectrum and the intensity's T̂ off its table in s, made
+//! once at the plan's first evaluation where a node's counted work off it is below the work of making them there
+//! (`table`, fold_table.rs), and each beam's own intensity's T̂ on the table's eigenbasis.
 //!
 //! # At a point, per component m and kept state a
 //! - every folded block, Q's and K's sideband parts alike: M̂ = D ∘ (V⁻¹X), D[k, a] = 1/(((E_a + f_m) − c_k) − μ′_k)
@@ -26,6 +30,10 @@ use std::collections::BTreeMap;
 
 use super::spectrum::Spectrum;
 use crate::floquet::Sectors;
+
+/// The folded blocks tabled in the tweezer's intensity (fold_table.rs).
+#[path = "fold_table.rs"]
+pub(crate) mod table;
 use crate::linalg::{self, C64, Mat};
 use crate::scene::Key;
 use crate::units::UNIT_ROUNDOFF;
@@ -71,6 +79,13 @@ pub struct Source {
     pub generator: Vec<Term>,
     pub varying: Vec<bool>,
     pub coefficients: usize,
+    /// The factors that are the tweezer's intensity s (its unit fold's `Power` first, then its own outside form's
+    /// |a_tw|²): the folded blocks' tables are in s (fold_table.rs). None in a check's source.
+    pub intensity: Vec<usize>,
+    /// The factors that are another beam's own intensity |a_l|² and vary (a Gaussian beam's outside form's, one at
+    /// its focus): the tables take each as a small part about one (fold_table.rs, # The small parts). None in a
+    /// check's source.
+    pub own: Vec<usize>,
 }
 
 impl Source {
@@ -176,6 +191,11 @@ pub struct Plan {
     legs: Vec<Routed>,
     /// Per piece its K × K entries: H's slow ones, a jump's all with their fast index.
     direct: Vec<Vec<(Entry, [i64; 2])>>,
+    /// The factors that are the tweezer's intensity (`Source::intensity`) and the beams' own (`Source::own`), and the
+    /// blocks' tables in s, made at the plan's first evaluation (`Plan::table`).
+    intensity: Vec<usize>,
+    own: Vec<usize>,
+    table: std::sync::OnceLock<std::sync::Arc<table::Table>>,
 }
 
 fn element(class: [i64; 2], row: [i64; 2], col: [i64; 2]) -> [i64; 2] {
@@ -415,7 +435,7 @@ impl Plan {
             }
             batch.fixed = fixed;
         }
-        Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct }
+        Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct, intensity: source.intensity.clone(), own: source.own.clone(), table: std::sync::OnceLock::new() }
     }
 
     /// The folded blocks' sizes and which are Q's.
@@ -431,6 +451,12 @@ impl Plan {
     /// The pieces' keys (`Source::pieces`' order).
     pub fn keys(&self) -> &[Key] {
         &self.keys
+    }
+
+    /// The folded blocks' tables in the tweezer's intensity (fold_table.rs), made where first asked for, at the values
+    /// of that point (`table::BlockTable::new`: their active small parts count a node's work).
+    pub(crate) fn table(&self, values: &Values) -> &table::Table {
+        self.table.get_or_init(|| std::sync::Arc::new(table::Table::new(self, values)))
     }
 }
 
@@ -816,6 +842,7 @@ pub struct Local {
     y: Mat,
     t: Mat,
     gs: Mat,
+    tables: table::Scratch,
     /// The counted complex multiply-adds of the last evaluation.
     pub work: f64,
 }
@@ -842,7 +869,7 @@ impl Local {
     pub fn evaluate(&mut self, plan: &Plan, making: Making) {
         assert!(making.gradients || !making.model, "a model is made with its gradients");
         let mut work = 0.0;
-        let Local { values: v, spectra, g, hats, energies, slopes, m: ms, dm: dms, gen, terms, z, zc, d, x, y, t, gs, .. } = self;
+        let Local { values: v, spectra, g, hats, energies, slopes, m: ms, dm: dms, gen, terms, z, zc, d, x, y, t, gs, tables, .. } = self;
         let v = &*v;
         // Each term's factor with its scale: the generator's, then every piece's (flat, `Plan::offsets`).
         let factor = |f: usize, s: C64| -> (C64, [C64; 3]) {
@@ -857,10 +884,58 @@ impl Local {
         spectra.resize_with(nb, Spectrum::default);
         g.resize_with(nb, Mat::default);
         hats.resize_with(nb, Vec::new);
-        // G₀ on each block, its spectrum and T̂_σ.
+        // G₀ on each block, its spectrum and T̂_σ: a tabled block's off its table (fold_table.rs), its T̂ the intensity's
+        // whole, at the intensity's gradient.
+        // (A check's: `table::MODE` 1 and 2 take no table, and make none.)
+        #[cfg(test)]
+        let mode = table::MODE.with(|m| m.get());
+        #[cfg(not(test))]
+        let mode = 0;
+        let table = (mode == 0).then(|| plan.table(v));
+        let s = plan.intensity.first().map_or(0.0, |&f| v.factors[f].0.re);
         for (b, block) in plan.blocks.iter().enumerate() {
             if block.sideband.is_some() && !making.model {
                 continue;
+            }
+            if let Some(tabled) = table.and_then(|t| t.blocks[b].as_deref()) {
+                let moving = making.gradients && plan.intensity.first().is_some_and(|&f| v.factors[f].1.iter().any(|d| *d != C64::ZERO));
+                if hats[b].is_empty() {
+                    hats[b].push((0, Mat::default()));
+                }
+                if let Some(w) = tabled.fill(s, v, moving, &mut spectra[b], &mut hats[b][0].1, tables) {
+                    work += w;
+                    let mut used = 0;
+                    if moving {
+                        hats[b][0].0 = plan.intensity[0];
+                        used = 1;
+                    }
+                    // A beam's own intensity's T̂ on the table's eigenbasis, as the node makes every other varying
+                    // factor's (below).
+                    if making.gradients {
+                        let size = block.rows.len();
+                        let sp = &spectra[b];
+                        for (f, entries) in block.varying.iter().filter(|(f, _)| plan.own.contains(f)) {
+                            if v.factors[*f].1.iter().all(|d| *d == C64::ZERO) {
+                                continue;
+                            }
+                            sized(gs, size, size);
+                            for e in entries {
+                                let (_, scale) = plan.generator_terms[e.term as usize];
+                                gs.data[e.row as usize * size + e.col as usize] += scale * e.value * v.coefficients[e.coefficient as usize];
+                            }
+                            if hats[b].len() <= used {
+                                hats[b].push((0, Mat::default()));
+                            }
+                            product(gs, &sp.vectors, t);
+                            product(&sp.inverse, t, &mut hats[b][used].1);
+                            hats[b][used].0 = *f;
+                            used += 1;
+                            work += 2.0 * (size * size * size) as f64;
+                        }
+                    }
+                    hats[b].truncate(used);
+                    continue;
+                }
             }
             let size = block.rows.len();
             (g[b].rows, g[b].cols) = (size, size);
@@ -870,6 +945,14 @@ impl Local {
                 let (s, _) = gen[e.term as usize];
                 let c = e.value * v.coefficients[e.coefficient as usize];
                 g[b].data[e.row as usize * size + e.col as usize] += s * c;
+            }
+            // (A check's: mode 2 moves every entry of G₀ by one unit round-off, its sign by the entry's place -- the
+            // rounding's floor of what follows.)
+            if mode == 2 {
+                for (i, z) in g[b].data.iter_mut().enumerate() {
+                    let sign = if (i.wrapping_mul(2654435761) >> 7) & 1 == 0 { 1.0 } else { -1.0 };
+                    *z = *z * (1.0 + sign * UNIT_ROUNDOFF);
+                }
             }
             let s = &mut spectra[b];
             assert!(s.decompose(&g[b]), "a folded block's G₀ has no eigendecomposition (defective)");

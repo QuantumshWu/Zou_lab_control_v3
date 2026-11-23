@@ -1684,6 +1684,69 @@ fn the_quadrature_integrates_a_bandwidth_within_its_tolerance() {
     }
 }
 
+/// The rule's node count by the tail's closed-form bound (`fewest`, `resolved`, `tail`) against the tail summed by
+/// Miller's recurrence (`resolved_by_recurrence`, the count until 2026-11-22): at κ = νw/2 from 10⁻³ to 7.5·10⁴ (eight
+/// a decade), every degree 0 to 4, plain and interpolated, the bound's count is never below the sum's (it
+/// bounds the same tail) and is above it by a few nodes and a hundredth of it; and the bound itself is above the summed tail at every L
+/// past the turning point where it is finite. Their times at κ = 1900 (P2-GSTEP's ν_Q ≈ 3800 a unit width) printed.
+#[test]
+fn the_rule_s_count_by_the_tail_s_bound_is_the_summed_tail_s_or_a_few_more() {
+    let (mut most, mut more, mut cases, mut worst) = (0usize, 0usize, 0usize, 0.0_f64);
+    for decade in -3..5 {
+        for step in 0..8 {
+            let kappa = 10f64.powf(decade as f64 + step as f64 / 8.0);
+            for degree in 0..=4 {
+                for interpolated in [false, true] {
+                    let (new, old) = (super::resolved(2.0 * kappa, 1.0, 1, degree, interpolated), super::resolved_by_recurrence(2.0 * kappa, 1.0, 1, degree, interpolated));
+                    assert!(new >= old, "κ {kappa}, degree {degree}, interpolated {interpolated}: {new} below the summed tail's {old}");
+                    // A few more, and a hundredth more where the rule is long (measured: 0–1 node below κ ≈ 30, 1–5 to
+                    // κ ≈ 2000, 22 of 37 753 at 7.5·10⁴; twice that interpolated, no halving there).
+                    assert!(new - old <= 3 + old / 100, "κ {kappa}, degree {degree}, interpolated {interpolated}: {new} against the summed tail's {old}");
+                    most = most.max(new - old);
+                    worst = crate::linalg::larger(worst, (new - old) as f64 / old as f64);
+                    more += new - old;
+                    cases += 1;
+                }
+            }
+        }
+    }
+    eprintln!("the bound's count above the summed tail's: at most {most} (a share {worst:.4} of the sum's), on the mean {:.2} ({cases} cases)", more as f64 / cases as f64);
+    // The bound against the tail summed (Miller's normalized j_l, as above) at κ = 1, 37, 600, 1900.
+    for kappa in [1.0_f64, 37.0, 600.0, 1900.0] {
+        let top = super::grown(kappa, super::grown(kappa, kappa.ceil() as usize + 1));
+        let mut f = vec![0.0; top + 2];
+        f[top] = 1.0;
+        for l in (1..=top).rev() {
+            f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
+            if f[l - 1].abs() > 1e100 {
+                f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+            }
+        }
+        let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+        let mut summed = vec![0.0; top + 2];
+        for l in (0..=top).rev() {
+            summed[l] = summed[l + 1] + (2 * l + 1) as f64 * f[l].abs() / norm;
+        }
+        for l in 0..=top {
+            let bound = super::tail(kappa, l);
+            if bound.is_finite() && summed[l] > 1e3 * f64::MIN_POSITIVE {
+                assert!(bound >= summed[l] * (1.0 - 1e-12), "κ {kappa}, L {l}: the bound {bound:e} below the tail {:e}", summed[l]);
+            }
+        }
+    }
+    let time = |f: &dyn Fn() -> usize| {
+        (0..50)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                std::hint::black_box(f());
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, crate::linalg::smaller)
+    };
+    let (new, old) = (time(&|| super::fewest(3800.0, 1.0, super::FORMS, 2)), time(&|| super::resolved_by_recurrence(3800.0, 1.0, super::FORMS, 2, false)));
+    eprintln!("κ 1900: the bound {new:.2} µs ({} nodes), the summed tail {old:.2} µs ({} nodes)", super::fewest(3800.0, 1.0, super::FORMS, 2), super::resolved_by_recurrence(3800.0, 1.0, super::FORMS, 2, false));
+}
+
 /// A rule of many nodes (`special::gauss_legendre`, O(m)) at the widest phase its node count is laid for (`fewest`: the
 /// largest κ whose least rule on [−1, 1] is m nodes, by bisection) and at a resolved one (κ = m/2) and none (Σw = 2),
 /// m = 1000 to 64 000: Σ w_k e^{iκx_k} against ∫e^{iκt} = 2 sin κ/κ, summed with its error carried (Neumaier). Within
@@ -1725,10 +1788,14 @@ fn sizes(errors: &[f64]) -> String {
 /// A step's path (`Segment`; step.rs, # The path between a step's ends) in a tilted quadratic trap with a stiff axis
 /// (ω τ = 1.26), a hyperbolic and a flat one, under a kick with every part: the force two unequal counter-propagating
 /// waves leave to the step, and their diffusion's part of a Brownian path, its increment and its first moment. The path
-/// begins at the step's start and ends at the step's end, to the rounding of the flow's sums. Its moments
-/// (`Segment::moments`) over cuts of the step -- before the middle, across it, after it, the whole -- are the dense
-/// trapezoids of its own κ and κ² (`Segment::at`) with, on κ², the diffusion's rate times the integral of what the
-/// step's two moments do not tell of the Brownian path (|τ|σ(1 − 3σ), τ²/15 over the step).
+/// begins at the step's start and ends at the step's end, to the rounding of the flow's sums. Its stretches
+/// (`Segment::stretch`) over pieces of the step -- before the middle, across it, after it, the whole --, read from the
+/// piece's start to a time inside a panel, to a panel's end and to the piece's end (`Stretch::to`), on the panels it
+/// takes and on three, are the dense trapezoids of the path's own κ and κ² (`Segment::at`) with, on κ², the
+/// diffusion's rate times the integral of what the step's two moments do not tell of the Brownian path
+/// (|τ|σ(1 − 3σ), τ²/15 over the step), and of κ times every power (t − c)^j, j ≤ `SHAPE`, about the piece's middle c.
+/// Two halves' integrals add up to the whole's. And the panel's polynomial (`Stretch::interpolate`) is the one through
+/// its nodes: a polynomial of the rule's degree less one, at points between them, to the rounding.
 #[test]
 fn a_step_s_path_goes_from_its_start_to_its_end_and_its_moments_are_its_integrals() {
     let (c, s) = (0.6_f64, 0.8_f64);
@@ -1752,27 +1819,55 @@ fn a_step_s_path_goes_from_its_start_to_its_end_and_its_moments_are_its_integral
     // The same step without the kick ends elsewhere: the path's end is the kicked step's.
     let unkicked = seg.flow.advance(seg.from, tau);
     assert!(relative(&unkicked.1, &step.end.kappa) > 1e-4, "the kick moves the end: {unkicked:?}");
-    for (from, to) in [(0.2, 0.9), (0.7, 1.6), (1.3, 1.95), (0.0, 2.0), (1.6, 0.7)] {
-        let (one, two) = seg.moments(from, to);
-        let n = 200_000;
-        let h = (to - from) / n as f64;
-        let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
-        for i in 0..=n {
-            let w = if i == 0 || i == n { 0.5 * h } else { h };
-            let time = from + i as f64 * h;
-            let kappa = seg.at(time).1;
-            let sigma = time / tau * (1.0 - time / tau);
-            for x in 0..3 {
-                a[x] += w * kappa[x];
-                b[x] += w * (kappa[x] * kappa[x] + scatter[x] * tau * sigma * (1.0 - 3.0 * sigma));
+    for (from, to) in [(0.2, 0.9), (0.7, 1.6), (1.3, 1.95), (0.0, 2.0)] {
+        let centre = 0.5 * (from + to);
+        let own = seg.stretch(from, to).sums.len() - 1;
+        for panels in [own, 3] {
+            let stretch = step::Stretch::on(seg, from, to, panels);
+            assert!(stretch.sums.len() == panels + 1 && panels >= 1, "[{from}, {to}] on {panels} panels");
+            let ends = [from + 0.37 * (to - from), from + (to - from) / panels as f64, to];
+            for at in ends {
+                let got = stretch.to(at);
+                let n = 200_000;
+                let h = (at - from) / n as f64;
+                let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
+                let mut powers = [[0.0; 3]; crate::estimate::SHAPE + 1];
+                for i in 0..=n {
+                    let w = if i == 0 || i == n { 0.5 * h } else { h };
+                    let time = from + i as f64 * h;
+                    let kappa = seg.at(time).1;
+                    let sigma = time / tau * (1.0 - time / tau);
+                    for x in 0..3 {
+                        a[x] += w * kappa[x];
+                        b[x] += w * (kappa[x] * kappa[x] + scatter[x] * tau * sigma * (1.0 - 3.0 * sigma));
+                    }
+                    for (j, p) in powers.iter_mut().enumerate() {
+                        for x in 0..3 {
+                            p[x] += w * kappa[x] * (time - centre).powi(j as i32);
+                        }
+                    }
+                }
+                assert!(relative(&got.one, &a) < 1e-8 && relative(&got.two, &b) < 1e-8, "[{from}, {at}] of [{from}, {to}] on {panels} panels: {:?} vs {a:?}, {:?} vs {b:?}", got.one, got.two);
+                for (j, p) in powers.iter().enumerate() {
+                    let sum: [f64; 3] = std::array::from_fn(|x| got.local.moments[x][j]);
+                    assert!(relative(&sum, p) < 1e-8, "[{from}, {at}] of [{from}, {to}] on {panels} panels, power {j}: {sum:?} vs {p:?}");
+                }
             }
         }
-        assert!(relative(&one, &a) < 1e-8 && relative(&two, &b) < 1e-8, "[{from}, {to}]: {one:?} vs {a:?}, {two:?} vs {b:?}");
     }
-    // The cuts' moments add up to the whole's.
-    let (lo, hi, whole) = (seg.moments(0.0, 0.5 * tau), seg.moments(0.5 * tau, tau), seg.moments(0.0, tau));
+    // Two halves' integrals add up to the whole's.
+    let (lo, hi, whole) = (seg.stretch(0.0, 0.5 * tau).to(0.5 * tau), seg.stretch(0.5 * tau, tau).to(tau), seg.stretch(0.0, tau).to(tau));
     for x in 0..3 {
-        assert!((lo.0[x] + hi.0[x] - whole.0[x]).abs() <= 1e-12 * whole.0[x].abs() && (lo.1[x] + hi.1[x] - whole.1[x]).abs() <= 1e-12 * whole.1[x], "axis {x}: {lo:?} and {hi:?} against {whole:?}");
+        assert!((lo.one[x] + hi.one[x] - whole.one[x]).abs() <= 1e-12 * whole.one[x].abs() && (lo.two[x] + hi.two[x] - whole.two[x]).abs() <= 1e-12 * whole.two[x], "axis {x}: {lo:?} and {hi:?} against {whole:?}");
+    }
+    // The panel's polynomial: through a polynomial of the degree n − 1 at the rule's nodes, read between them.
+    let stretch = seg.stretch(0.0, tau);
+    let n = stretch.rule.nodes.len();
+    let poly = |x: f64| -> [f64; 3] { std::array::from_fn(|a| (0..n).map(|j| ((j + a) as f64 * 0.37).sin() * x.powi(j as i32)).sum()) };
+    let values: Vec<[f64; 3]> = stretch.rule.nodes.iter().map(|&x| poly(x)).collect();
+    for x in [-0.999, -0.61, -0.05, 0.0, 0.33, 0.87, 1.0] {
+        let (got, want) = (stretch.interpolate(&values, x), poly(x));
+        assert!(relative(&got, &want) < 1e-12, "{n} nodes at {x}: {got:?} vs {want:?}");
     }
 }
 
@@ -2440,12 +2535,16 @@ impl Dynamics for Synthetic {
 struct Counted<'a, D: Dynamics> {
     model: &'a D,
     calls: std::cell::Cell<[u64; 5]>,
+    /// Whether its middles give no candidate tones (`Middle::beats`): the selected model's, whose generator changes along
+    /// a path by its points (step.rs, # One node a step).
+    quiet: bool,
 }
 
 /// A middle that counts its node calls into its model's counts.
 struct Probe<'a, M: Middle> {
     middle: M,
     calls: &'a std::cell::Cell<[u64; 5]>,
+    quiet: bool,
 }
 
 impl<M: Middle> Probe<'_, M> {
@@ -2498,7 +2597,9 @@ impl<M: Middle> Middle for Probe<'_, M> {
         self.middle.optical(path)
     }
     fn beats(&self, path: &M::Path, beats: &mut Vec<f64>, keys: &mut Vec<Vec<i64>>) {
-        self.middle.beats(path, beats, keys)
+        if !self.quiet {
+            self.middle.beats(path, beats, keys)
+        }
     }
     fn envelopes(&self, path: &M::Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         self.middle.envelopes(path, m, s, plus, minus)
@@ -2535,7 +2636,7 @@ impl<D: Dynamics> Dynamics for Counted<'_, D> {
         let mut calls = self.calls.get();
         calls[1] += 1;
         self.calls.set(calls);
-        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls }
+        Probe { middle: self.model.middle(cluster, r, t), calls: &self.calls, quiet: self.quiet }
     }
     fn emit<'m>(&'m self, cluster: usize, at: &Point, on: Option<(&Self::Middle<'m>, &<Self::Middle<'m> as crate::step::Middle>::Path, f64)>, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<step::Emitted> {
         self.model.emit(cluster, at, on.map(|(probe, path, s)| (&probe.middle, path, s)), psi, draw)
@@ -2664,7 +2765,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
     let starts = &held[..];
     let (count, half, hm) = (starts.len(), 0.5 * tau, model.hbar_over_mass());
     let kept = std::cell::RefCell::new(fitted(starts[0].psi.len()));
-    let counted = Counted { model, calls: std::cell::Cell::new([0; 5]) };
+    let counted = Counted { model, calls: std::cell::Cell::new([0; 5]), quiet: false };
     let steps: Vec<step::Step> = starts.iter().map(|s| step_of(&counted, s, tau, &mut step::Scratch::default()).unwrap()).collect();
     let calls = counted.calls.get().map(|c| c as f64 / count as f64);
     // Each start's step, piece by piece as `step_of` makes it.
@@ -2715,7 +2816,7 @@ fn cost<D: Dynamics>(name: &str, model: &D, starts: &[Trajectory], tau: f64) -> 
         .iter()
         .map(|along| {
             let mut scratch = fitted(n);
-            super::pictured(along, &mut scratch, tau, None).unwrap();
+            super::pictured(along, &mut scratch, tau, None, false, &mut along.middle.still()).unwrap();
             scratch
         })
         .collect();
@@ -3863,7 +3964,7 @@ fn negative_decay<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> (f64,
     let kappa = super::predicted(&start.forms, kappa_h, tau, start.time + h);
     let along = super::Along::new(&through.generator, kappa, kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).unwrap();
+    super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).unwrap();
     let picture = &scratch.picture;
     // Ĥ(u): the static group, its middle and (on a beating path) its slope and curvature, and each tone's members, their
     // envelopes' C, A and B (`spectral::Picture::prepare`), at e^{±iνu}.
@@ -3897,7 +3998,7 @@ fn map_growth<D: Dynamics>(model: &D, start: &Trajectory, tau: f64) -> Option<f6
     let through = step::Midway::new(model, start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).ok()?;
+    super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).ok()?;
     let picture = &mut scratch.picture;
     let mut map = Mat::zeros(n, n);
     for a in 0..n {
@@ -3971,7 +4072,7 @@ fn a_propagation_whose_map_grows_keeps_the_survival() {
     let through = step::Midway::new(&model, &start, tau).unwrap();
     let along = super::Along::new(&through.generator, start.kappa, start.kappa.map(|k| model.hbar_over_mass() * k));
     let mut scratch = fitted(n);
-    super::pictured(&along, &mut scratch, tau, None).expect("the decomposition takes the step");
+    super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).expect("the decomposition takes the step");
     let picture = &mut scratch.picture;
     let generator = |u: f64| {
         let mut g = Mat::from_fn(n, n, |i, j| picture.base[(i, j)] + picture.ends[0][(i, j)] * u + picture.ends[1][(i, j)] * (u * u));
@@ -4151,7 +4252,7 @@ fn the_hazard_is_the_decay_at_every_time_of_a_step_whose_decay_beats() {
         let parts = model.middle(0, r, 0.0);
         let along = super::Along::new(&parts, velocity.map(|v| v / RB), velocity);
         let mut scratch = fitted(n);
-        let scale = super::pictured(&along, &mut scratch, tau, None).unwrap();
+        let scale = super::pictured(&along, &mut scratch, tau, None, false, &mut along.middle.still()).unwrap();
         let candidates = parts.pairs().len();
         let super::Carved { picture, decay, part, .. } = scratch.carve();
         assert_eq!(picture.beats.len(), candidates, "case {case}: every beat a tone");
@@ -4387,6 +4488,12 @@ impl Grouped {
         let cluster = Cluster { states: (0..4).collect(), ground: 4, frames: vec![crate::model::Beat::whole(vec![0]); 4], waves: vec![[0.0; 3]; 4], waves_exact: vec![crate::model::Beat::whole(vec![]); 4] };
         Grouped { theta, cluster }
     }
+    /// The model with its cluster said to hold an explicit excited state (its ground states three): its steps take
+    /// three nodes (step.rs, # One node a step).
+    fn explicit(mut self) -> Grouped {
+        self.cluster.ground = 3;
+        self
+    }
 }
 
 impl Dynamics for Grouped {
@@ -4528,37 +4635,43 @@ impl Dynamics for Emitting {
 /// fall of the norm -- one jump inside the step, the picture launched again from there, on one cluster: one stretch -- a
 /// step between two decisions (a decision's forward at the step's end is the decision's count, `Midway::decided`). The
 /// step's count is its stretch's price; the price's calls of the model are the calls the step made, counted by a probe
-/// (`Counted`) -- the generator at the three nodes, the kick's three forms and the fixed point's tones twice, at the
-/// middle's form and in the start state's shear --, read off the price's count at unit counts of each; it holds the two
-/// tones and their envelopes; the trajectory's photons are the one constant, one a jump; and the price a step taken from
-/// the state reads (`priced`) is this step's own on the scratch its first step primed.
+/// (`Counted`) -- on three nodes (the cluster said to hold an explicit state) the generator at the three nodes, the
+/// kick's three forms and the fixed point's tones twice, at the middle's form and in the start state's shear; on one
+/// (the cluster's states ground states alone, # One node a step) the generator at the middle, the middle's form and the
+/// end state's --, read off the price's count at unit counts of each; it holds the two tones and their envelopes; the
+/// trajectory's photons are the one constant, one a jump; and the price a step taken from the state reads (`priced`) is
+/// this step's own on the scratch its first step primed.
 #[test]
 fn a_step_s_price_is_its_count_item_by_item() {
     use crate::decide::COMPLEX;
-    let (model, tau) = (Emitting(Grouped::new(0.0)), 0.2);
-    let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
-    let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
-    from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
-    from.threshold = 0.0;
-    let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
-    from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
-    let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]) };
-    let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
-    through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
-    counted.calls.set([0; 5]);
-    let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
-    let calls = counted.calls.get();
-    let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
-    assert_eq!((jumps, taken.prices.len()), (1, 1), "one jump inside the step, one stretch");
-    let (_, price) = taken.prices[0];
-    let costs = model.middle(0, [0.0; 3], 0.0).work();
-    assert_eq!(taken.work, price.work(costs), "the step's count is its stretch's price");
-    let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
-    eprintln!("calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
-    assert_eq!([unit(0), unit(1), unit(2)], [calls[2] as f64, calls[3] as f64, calls[4] as f64], "the price's calls of the model are the step's");
-    assert!(price.tones == 2 && price.toned[0] > (6 * 2 * 4 * 4) as f64 && price.centred && price.ended, "{price:?}");
-    assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "a jump's photons");
-    assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "a step taken from the state");
+    for (model, nodes, calls_of) in [(Emitting(Grouped::new(0.0).explicit()), 3, [3, 4, 1]), (Emitting(Grouped::new(0.0)), 1, [1, 2, 0])] {
+        let tau = 0.2;
+        let norm = |psi: &[C64]| psi.iter().map(|z| z.norm_sqr()).sum::<f64>();
+        let mut from = Trajectory::new(&model, 0, [0.0; 3], [3.0, -1.0, 2.0], 7, 0);
+        from.psi = [C64::real(0.5), C64::new(0.1, 0.4), C64::new(-0.3, 0.2), C64::new(0.0, -0.6)].into_iter().collect();
+        from.threshold = 0.0;
+        let free = step::Midway::new(&model, &from, tau).unwrap().attempt(&from, &step::Brownian::STILL, &[], &mut step::Scratch::default(), &Everywhere).unwrap();
+        from.threshold = (norm(&from.psi) * norm(&free.end.psi)).sqrt();
+        let counted = Counted { model: &model, calls: std::cell::Cell::new([0; 5]), quiet: false };
+        let (through, mut scratch) = (step::Midway::new(&counted, &from, tau).unwrap(), step::Scratch::default());
+        through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        counted.calls.set([0; 5]);
+        let taken = through.attempt(&from, &step::Brownian::STILL, &[], &mut scratch, &Everywhere).unwrap();
+        let calls = counted.calls.get();
+        let jumps = taken.made.iter().filter(|m| m.kick.is_some()).count();
+        assert_eq!((jumps, taken.prices.len()), (1, 1), "{nodes} nodes: one jump inside the step, one stretch");
+        let (_, price) = taken.prices[0];
+        let costs = model.middle(0, [0.0; 3], 0.0).work();
+        assert_eq!(taken.work, price.work(costs), "{nodes} nodes: the step's count is its stretch's price");
+        let unit = |which: usize| (price.stepped(std::array::from_fn(|i| if i == which { 1.0 } else { 0.0 })) - price.stepped([0.0; 3])) / COMPLEX;
+        eprintln!("{nodes} nodes: calls {calls:?}; the price's calls of the generator, the force and the tones {:?}; {} tones", [unit(0), unit(1), unit(2)], price.tones);
+        assert_eq!([unit(0), unit(1), unit(2)], [calls[2] as f64, calls[3] as f64, calls[4] as f64], "{nodes} nodes: the price's calls of the model are the step's");
+        assert_eq!([calls[2], calls[3], calls[4]], calls_of, "{nodes} nodes: the model's calls");
+        assert_eq!(price.still, nodes == 1, "{nodes} nodes");
+        assert!(price.tones == 2 && price.toned[0] > (2 * nodes * 2 * 4 * 4) as f64 && price.centred && price.ended, "{price:?}");
+        assert_eq!(taken.end.work - from.work, model.photon_work() * jumps as f64, "{nodes} nodes: a jump's photons");
+        assert_eq!(step::priced(&model, &from, tau, &Everywhere).unwrap(), taken.prices, "{nodes} nodes: a step taken from the state");
+    }
 }
 
 /// The fast-tone check (RUSTPLAN 3.2): can the picture take a hyperfine-sized beat of the model as an exact tone? Three
@@ -4656,6 +4769,7 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
             if toned {
                 picture.separate(
                     h,
+                    false,
                     |beats, keys| {
                         beats.push(nu);
                         keys.push(vec![1]);
@@ -4727,4 +4841,11 @@ fn a_hyperfine_beat_through_the_picture_against_its_floquet_flow() {
 // R1-PROP: the propagation's regression and measurements on the six scenes (ignored, by name).
 mod r1prop;
 mod r2prop2;
+// P2-GSTEP: one node a step and the quadrature by groups (ignored, by name).
+mod gstep;
 
+// P4-TABLE: the folded blocks tabled in the tweezer's intensity, against the node before it and its cost (ignored, by name).
+mod p4table;
+
+// T2STEP: the ground states' step taken apart, tilt2's against the other scenes' (ignored, by name).
+mod t2step;

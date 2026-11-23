@@ -66,7 +66,7 @@ fn source(doc: &serde_json::Value, point: &serde_json::Value, length: usize) -> 
     generator.push(Term { factor: 0, adjoint: false, scale: C64::new(0.0, -0.5), matrices: vec![(decay, 0)] });
     let jumps = emission_channels(length, 0, parts, kicks);
     frequencies.extend(std::iter::repeat_n(0.0, 6));
-    let source = Source { hamiltonian, jumps, generator, varying: vec![false, true], coefficients: 1 };
+    let source = Source { hamiltonian, jumps, generator, varying: vec![false, true], coefficients: 1, intensity: Vec::new(), own: Vec::new() };
     let values = Values { factors: vec![(C64::ONE, [C64::ZERO; 3]), (C64::ZERO, [C64::ZERO, C64::ZERO, C64::ONE])], coefficients: vec![1.0], frequencies };
     (library, source, values)
 }
@@ -492,6 +492,43 @@ fn rs_at_is_the_exact_fold_to_rounding() {
         }
     }
     assert!(worst <= 1e-10, "{worst:e}");
+}
+
+/// The folded blocks off their tables (rs/fold_table.rs) are the blocks decomposed at the point within the point's own
+/// rounding: on the six scenes' P and on their ground states alone (every excited state folded: PGC3D's, TET's and
+/// GMD1C's 24-state blocks), at the checkpoint's centre and edge and at the moving point, H_eff, the jumps and their
+/// gradients off the tables against every block decomposed (`table::MODE` 1), each relative to its quantity's largest
+/// entry, within n times the same quantity's change where every entry of the blocks' generators is moved by one unit
+/// round-off (`MODE` 2: the decomposition's own rounding at the point), or n u -- a table's quantities are held to n u of
+/// their products' moduli (fold_table.rs, # The table), n its block's size. Measured (P4-TABLE, the nodes at 27 points):
+/// one to three and a half times that change.
+#[test]
+fn a_tabled_fold_is_the_decomposed_fold_within_its_rounding() {
+    use crate::model::rs::fold::table::MODE;
+    let mut tabled = 0;
+    for (name, scene, keep) in scenes() {
+        for keep in [keep, (0..crate::request::GROUND).collect::<Vec<usize>>()] {
+            let rs = Rs::new(&scene, &keep, sectors(&scene));
+            for (point, components) in points(&scene) {
+                let at = |mode: u8| {
+                    MODE.with(|m| m.set(mode));
+                    let model = rs.at(&scene, &components);
+                    MODE.with(|m| m.set(0));
+                    model
+                };
+                let (off, decomposed, moved) = (at(0), at(1), at(2));
+                let table = rs.plan().table(&Values::default());
+                let n = table.blocks.iter().flatten().map(|t| t.size).max().unwrap_or(0);
+                let (d, f) = (differ(&off, &decomposed), differ(&moved, &decomposed));
+                eprintln!("{name} P{} {point}: tabled blocks {:?}; off the tables H {:.1e} ∇H {:.1e} L {:.1e} ∇L {:.1e}, moved by u {:.1e} {:.1e} {:.1e} {:.1e}", keep.len(), table.blocks.iter().flatten().map(|t| t.size).collect::<Vec<_>>(), d[0], d[1], d[2], d[3], f[0], f[1], f[2], f[3]);
+                for q in 0..4 {
+                    assert!(d[q] <= n as f64 * linalg::larger(f[q], UNIT_ROUNDOFF), "{name} P{} {point}: quantity {q} off the tables {:.2e} against {n} times the rounding's {:.2e}", keep.len(), d[q], f[q]);
+                }
+                tabled += table.blocks.iter().flatten().count();
+            }
+        }
+    }
+    assert!(tabled > 0, "no block tabled");
 }
 
 /// The model keeps slow elements alone, by the frame's own rule (V3E's the_selected_model_is_slow_in_its_frame): on the

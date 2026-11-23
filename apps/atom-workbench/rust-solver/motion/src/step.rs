@@ -69,6 +69,37 @@
 //!   (k·v h V/ω)² at the coupling V and the pair's frequency ω: it falls with the step and with the detuning.
 //! An atom at rest, or a generator still along the path, has D = 0: its state and its kick are exact.
 //!
+//! # One node a step
+//! A cluster of ground states alone -- every excited state folded (`Cluster::ground`, its states' count) -- is stepped
+//! with its generator and its gradient at the middle for the whole step: the static group and every tone's envelope
+//! held at their middle's values, each tone at its exact phase, Ĥ(u) = G₀(0) + Σ_m (e^{iν_m u} G_m⁺(0) + e^{−iν_m u}
+//! G_m⁻(0)) and Ĝ(u) alike (`pictured`; `spectral::Picture::separate`, `held`): one model's node a step. Without tones
+//! the propagation is exact on it (D = 0), the kick −Re tr(Ĝ(0) ∫ρ) of one sum; with them D is the tones' constants at
+//! their beats, followed or hopped by the propagation's split as any tone's (spectral.rs), and the kick and the
+//! survival's hazard take each tone at its phase on two more sums, ∫cos νu ρ and ∫sin νu ρ (`Sums`). It is the midpoint
+//! rule of the generator's change along the path -- the envelopes', the light's pattern and profile at the path's points
+//! --, not of its beats: of the second order, as the splitting is, and what it leaves -- the change's slope and
+//! curvature over the step, the gradient's and the decay's with them -- falls with the step and is read with the rest of
+//! the step's error by its companion at twice the step (solve.rs, # The step). What decides it is the model's
+//! structure, its clusters' states, the same at every step of a run; no number is compared. Not elsewhere: an explicit
+//! excited state follows the generator's change (spectral.rs, # The split); held at the middle, the generator jumps at
+//! every step's end, the dressed state is excited again each time by (δH/Δ)², δH ∝ τ, 1/τ times a unit time: its
+//! scattering errs in the first order (R4: the internal state's error 8.5·10⁻³ at τ, 1.8·10⁻² at τ/2; tilt0's 26 times
+//! three nodes'); and the optical sector's K loses its first order along the path (# The optical sector's noise), which
+//! no check reads. A beat held at its middle's phase would err by νh in the first order: a step of one node takes every
+//! candidate as a tone, none into its static group (until 2026-11-22 a cluster of ground states whose model gave a
+//! candidate took three nodes -- tilt2's, at three times the model's nodes; motion3d_status/rewrite/t2step.status.md).
+//! Measured (motion3d_status/rewrite/foldstudy/steps.status.md, item 2; step/tests/gstep.rs): against three nodes at
+//! τ/16, the momentum's error of one step 3.6 times three nodes' on PGC3D's ground states at 0.474 µs, 1.2 times on
+//! TET's, 5.9 on GMD1C's, falling as three nodes' do on halving; the ladder's step the same as three nodes' on the three;
+//! a step 0.36 to 0.42 of three nodes' time. On tilt2's ground states at 0.326 µs, its two tones (ν and 2ν, ν = 13.19
+//! rad/µs) at their phases: the momentum's error 5.8 times three nodes' (median 0.10 ħk), the state's density 53 times
+//! (0.21), falling 2.9 and 4.4 on halving -- tilt0's ground states, of no tone, one node since 2026-11-21: 4.8 and 51
+//! times, falling 3.6 and 4.7 --; a step 0.64 of three nodes' time (step/tests/t2step.rs `t2step_parts`: 1331 to 853 µs;
+//! motion3d_status/rewrite/t2step.status.md). Where the generator held at the middle is the generator -- envelopes that
+//! do not change along the path -- one node's step is three nodes' to their rounding (tests). The quadrature of such a
+//! step: # The quadrature by groups.
+//!
 //! The step is of the second order all the same: its splitting's. The position is held at r_h through the kick, the
 //! path is straight where the reference's flow bends it, and the path's momentum is predicted (below). Measured on six
 //! beams' cooling in a tweezer (PGC3D, F = 2, atoms at 25 µK, τ = 0.625 µs: k·v τ = 0.25): the propagation's own error
@@ -76,23 +107,24 @@
 //! and at half the step it falls seventyfold and fiftyfold, where the difference falls fourteenfold and eightfold. The
 //! pilot's companion at twice the step reads all of it (solve.rs, # The step).
 //!
-//! The impulse is exact in its decomposition about the state at the step's middle, held in the frame, x_m = x(t_m)
-//! (= ψ(t_m), U(t_m) = 1):
-//! - the shear: the conservative force at the fixed r_h on x_m, −∫⟨x_m|G(r_h, t)|x_m⟩dt/‖x_m‖². At a fixed point the
+//! The impulse is exact in its decomposition about the step's mean state, held in the frame: its density's mean over the
+//! step, ρ̄ = (1/τ)∫ρ dt (over its stretch's part where a jump leaves its cluster; `Midway::stretch`) -- of a state that
+//! does not change, the state itself, x_m = x(t_m) at the middle (= ψ(t_m), U(t_m) = 1), as of the step taken back:
+//! - the shear: the conservative force at the fixed r_h on ρ̄, −∫tr(G(r_h, t)ρ̄)dt. At a fixed point the
 //!   gradient beats in time alone, G(r_h, t) = Σ_m G_m e^{iΩ_m(t − t_m)} over its tones (`Middle::tones`), each
 //!   τ sinc(Ω_mτ/2) (`Midway::stretch`'s weights). Of a state that does not change it depends on r_h alone: the
 //!   conservative kick is a shear and the step symplectic (propagation.md §2.3);
-//! - what the state's change along the path adds: the evolved state's force along the path less x_m's held in the frame,
-//!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − ⟨x_m|Ĝ(t)|x_m⟩/‖x_m‖²)dt, Ĝ(t) the gradient on the path, one quadrature of the
+//! - what the state's change along the path adds: the evolved state's force along the path less ρ̄'s held in the frame,
+//!   −∫(⟨x(t)|Ĝ(t)|x(t)⟩/‖x(t)‖² − tr(Ĝ(t)ρ̄))dt, Ĝ(t) the gradient on the path, one quadrature of the
 //!   difference on the propagation's nodes: it vanishes at every node where the state does not
 //!   change -- a lone ground state in a standing wave's far light takes no error of the path's nodes, however long its
 //!   step. The lag that friction and the Sisyphus effect live in;
 //! - less the reference's force: + τ∇V_ref(r_h), since V_ref's force is the A flow's.
 //!
 //! The first two are read together (`propagate`): a mean ⟨x|G|x⟩/‖x‖² is tr(Gρ) of the state's density ρ, which the
-//! model contracts without forming G (`Middle::force`). With ρ_m the middle state's, (s_k, w_k, ρ_k) the quadrature's
+//! model contracts without forming G (`Middle::force`). With ρ̄ the step's mean state, (s_k, w_k, ρ_k) the quadrature's
 //! times from the middle, weights and densities, and ℓ_j the Lagrange polynomials of the step's three nodes s_j, they are
-//! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ_m) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ_m): the atom's own frequencies
+//! −Σ_m τ sinc(Ω_mτ/2) Re tr(G_m ρ̄) − Σ_j Re tr(Ĝ(s_j) Q_j), Q_j = Σ_k w_k ℓ_j(s_k)(ρ_k − ρ̄): the atom's own frequencies
 //! are in the Q_j, integrated to the round-off, and the model's forms are three. Where Ĥ is still, Ĝ is one matrix and the
 //! whole is its one form with ∫ρ = Σ_k w_k ρ_k. (With a decay the mean is a quotient by the norm, whose own ringing --
 //! of the size Γ/Δ times the excited share -- puts parts of the quotient at twice the forms' bandwidth and beyond (# The
@@ -144,6 +176,51 @@
 //! where the norm rings by tenths of itself (a light shift of a third of the detuning: the tests' Δτ = 10) no order
 //! of that series is enough.
 //!
+//! # The quadrature by groups
+//! The nodes follow the quotient's bandwidth, and that is set by the farthest frequencies the state holds at once: a
+//! cluster of ground states alone (# One node a step) in two hyperfine levels 1450 rad/µs apart in its frame (PGC3D's,
+//! TET's) lays some 510 nodes a step of 0.474 µs where each level's own frequencies ask some 35; R5_PUMP's, whose frame
+//! leaves the hyperfine splitting of 4.3·10⁴ rad/µs on its slow diagonal and whose exact blocks join F = 1 and F = 2 of
+//! one m, tens of thousands. Every step's integrals are taken by groups of the piece's eigencomponents (`Groups`): cut at
+//! gaps of their frequencies Re λ that an exact block straddles, every block at the same places, a group one block's run
+//! between two cuts (R5_PUMP's: F = 1 and F = 2 of each of its blocks), each group g of centre ω_g, the state is
+//! x = Σ_g e^{−iω_g s} y_g (s from the launch), each y_g slow -- its components' frequencies less the centre, in the
+//! propagation's own coordinates, R(1 + X(u)) on the group's components of e^{−i(Λ − ω)s}m(u) (`Picture::parts`; in a
+//! fixed or an instantaneous eigenbasis the groups' cross terms hold a part that does not turn, the basis' change along
+//! the path: TAVG measured it 48 to 130 times beyond the bound, motion3d_status/rewrite/tavg.status.md). With N_gq =
+//! y_g†y_q, N₀ = Σ_g N_gg and the norm's ringing between the groups δN = Σ_{g≠q} e^{i(ω_g − ω_q)s} N_gq,
+//! ```text
+//!   ρ = x x†/‖x‖² = Σ_{g,q} Σ_L e^{iΩ(L + e_q − e_g) s} c_L y_g y_q†/N₀,   1/(N₀ + δN) = (1/N₀) Σ_L c_L e^{iΩ(L) s},
+//! ```
+//! c_L the terms of Σ_k (−δN/N₀)^k by their labels L (whole combinations of the centres, Ω(L) = Σ_g L_g ω_g), taken at
+//! each node until an order's terms are within an eighth of the round-off. Every phase is exact and every envelope
+//! slow: each envelope is interpolated at a panel's S Gauss–Legendre nodes and integrated against its phase exactly,
+//! ∫ L_k(u) e^{iΩs} du = η e^{iΩ(c − u₀)} Σ_l w_k (2l + 1) P_l(t_k) iˡ j_l(Ωη) (`Groups::moment`), so that the node k
+//! adds Σ_{g,q} V_gq y_g y_q†, V_gq = (1/N₀) Σ_L c_L μ_k(L + e_q − e_g), to each of the step's sums at its factor there
+//! -- one sum where the step takes one node; the three nodes' Lagrange polynomials and each tone's at its phase where it
+//! takes three (`Sums::factors`) --, S at the envelopes' bandwidth (`resolved`, the quotient's rule on the eigenvalues
+//! less their centres, its tones' beats in: `Picture::envelope`). One group is the plain rule: its only label is 0, its
+//! moments the rule's weights, its nodes the quadrature's (`count`). Two groups' cross terms are left out only where
+//! they integrate within the round-off of the width, by parts: |∫c e^{iΩu}du| ≤ (|c(a)| + |c(b)| + ∫|ċ|)/Ω ≤ π sup|c|/(Ω
+//! − β) of an envelope of the band β (model/classify.rs `by_parts`, the lemma's one implementation); else every cross
+//! term is integrated, the norm's ringing to the round-off. No level
+//! is named: which cut is taken is the cost's alone (`Groups::choose`), on every step alike, and every cut is to the
+//! round-off -- where a node's series does not hold after all (a moving generator's following may ring between the
+//! groups beyond what the piece's start, middle and end said), the node says so and the piece's rest is taken by the
+//! plain rule from that panel's start (`Midway::stretch`, `fallen`). The survival's hazard and a root's spans take the
+//! same sums (`fallen`). On the explicit models a cut seldom pays: the norm's ringing between the groups is 10⁻⁵ to 10⁻³
+//! of it on a plain step and past one after a jump, against 10⁻⁹ on the ground states' (steps.status.md,
+//! tavg.status.md), so its series is long, and the cheap weighings (`Groups::choose`) turn most cuts down before any
+//! count is spent on them.
+//!
+//! Measured on the ground states of PGC3D and TET at 0.474 µs and of GMD1C at 0.948 µs along a walk's 24 steps, the
+//! steps' starts, the pieces after a jump and the bare starts, against brute force (step/tests/gstep.rs `gstep_filon`):
+//! the sum within 6.3·10⁻¹⁵ of the width, the hazard within 9.2·10⁻¹⁶, the kick within 7.3·10⁻¹⁵ of its largest
+//! component (the plain rule 2.6·10⁻¹⁴, brute force against itself 9.3·10⁻¹⁵); PGC3D's and TET's two groups, the series
+//! of the second order, six labels; 512 and 506 nodes a plain piece to 36.5 and 32.9, the counted work 86 000 to 13 600
+//! with 8 400 of the choice, 64 µs to 21 µs of the choice and 13 µs of the sums (one thread); GMD1C's one group, by
+//! cost: its levels lie within 40 rad/µs.
+//!
 //! A generator's scalar part, tr/n -- the trap's light shift and the decay every state shares --, is a phase and a
 //! factor on the whole state: it goes with Ĥ₀'s eigenvalues, exactly, and the exponentials take it out
 //! (`linalg::exp_apply`), so that their work and their rounding go with the states' differences alone.
@@ -154,12 +231,24 @@
 //! (sinc(k·vτ/2)), counting the steady force twice -- a running wave's pressure came out doubled. Shear and path then differ
 //! only by the path's beats, the light pattern's spatial modulation the atom crosses, which is what the shear holds at r_h.
 //!
-//! The middle state, not the start's: the step's reverse propagates back through the same x_m, so the decomposition is the
-//! same both ways and the step its own inverse with the internal state changing too. About the start state the reverse
+//! The step's own state, not the start's: the step's reverse propagates back through the same states -- the same x_m,
+//! the same mean ρ̄ = Σ_k w_k ρ_k/τ over them --, so the decomposition is the same both ways and the step its own inverse
+//! with the internal state changing too. About the start state the reverse
 //! took its own start, x(t₀ + τ), and Q(x) = ∫[F(r_h, x) − F(path, x)]dt, the midpoint rule's O(τ³(v·∇)²F) on that state,
 //! differed between the two: a two-level atom in a far-detuned standing wave missed its start by two hundred times the
 //! step's own error (tests). A one-dimensional PGC read the same T on the middle state as on the start state
-//! (propagation.md §2.3).
+//! (propagation.md §2.3). The mean, not the middle state itself (until 2026-11-22 x_m): the two are one where the state
+//! changes smoothly, but where a jump falls in the step's first half the middle state is the bare state the jump left,
+//! its excited amplitudes still rising and ringing at their Rabi frequency within 1/Γ of it, whose force is no mean of
+//! the step's: the shear on it over the whole step, less it along the path, left the dropped part of its force's
+//! change along the path -- the shear's own, of the second order on the step's states -- without bound on that state.
+//! Measured on R9_PUSH's atoms with D2-3-3 explicit (a σ⁺ push 40 Γ off, s = 711), one step from a state of a trajectory
+//! with its jump moved across the step: the kick at 1.41 µs −239 to +256 per µm where the jump fell 0.006 to 0.09 µs
+//! before the middle, against 24 to 25 elsewhere and 20.3 by the plain three nodes; at 0.705 µs 5.4 to 17.4 against
+//! 10.7; at 0.352 µs within 0.09. On the mean state the kick is 24.3 to 25.5 and 10.66 ± 0.01 wherever the jump falls,
+//! as it was after the middle. The loss of those steps' atoms did not fall as the step's order on halving -- the same
+//! at 1.41, 2.82 and 5.64 µs --, so the companion did not read it: the 32-state model stood at 1.41 µs and lost 23 % of
+//! R9_PUSH's atoms by 10 µs against the reference's 0.13 % (motion3d_status/rewrite/selcost.status.md, 十四).
 //!
 //! # The path's momentum
 //! v_m = (ħ/m)κ_m, κ_m the momentum at the step's middle time: the mean of the momenta before and after the kick,
@@ -432,7 +521,7 @@
 //!   - for the Brownian part the path's mean given the two moments the step takes of it: in free flight
 //!     E[W(s) | ΔW, ΔZ] = sΔW/τ − 6s(τ − s)ΔZ/τ³ is that flow exactly. What the two moments do not tell is the
 //!     bridge's rest, of the variance τσ(1 − 3σ), σ = (s/τ)(1 − s/τ), through Λ: none at the ends, τ/12 at the most.
-//!     A state read at a time takes it by a draw (`Segment::place`), a window's ∫κ² in the mean (`Segment::moments`).
+//!     A state read at a time takes it by a draw (`Segment::place`), a window's ∫κ² in the mean (`Segment::stretch`).
 //! One path for every time of the step; no other is kept. A read's error is the scheme's accumulated one at the
 //! step's start and this one term of its own step, which is not accumulated: second order.
 //!
@@ -467,9 +556,8 @@
 //! falls by the decay the step takes and never rises (# Jumps) --, and how inaccurate is the check's to read
 //! (step/tests.rs: an atom past its standing wave's resolution).
 
-use std::sync::RwLock;
-
 use crate::decide::COMPLEX;
+use crate::estimate::{Local, SHAPE};
 use crate::linalg::{self, inner, norm_sqr, C64, Mat, LANES};
 use crate::model::optical::{Sector, Unmade};
 use crate::model::{Cluster, Point, Quadratic, Scattering, STATES};
@@ -1152,25 +1240,11 @@ struct Rule {
     weights: Vec<f64>,
 }
 
-/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is first asked and
-/// kept for the process -- the same rule whichever thread makes it.
-fn rule(m: usize) -> &'static Rule {
-    static RULES: RwLock<Vec<Option<&'static Rule>>> = RwLock::new(Vec::new());
-    if let Some(&Some(rule)) = RULES.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(m) {
-        return rule;
-    }
+/// The rule of m nodes (`special::gauss_legendre`: O(m) operations, to the round-off), made where it is asked and held by
+/// the panels that take it (`panels`) while they run: nothing of it outlives its quadrature.
+fn rule(m: usize) -> std::rc::Rc<Rule> {
     let (nodes, weights) = crate::special::gauss_legendre(m).into_iter().unzip();
-    let made = Rule { nodes, weights };
-    let mut rules = RULES.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if rules.len() <= m {
-        rules.resize(m + 1, None);
-    }
-    *rules[m].get_or_insert_with(|| Box::leak(Box::new(made)))
-}
-
-thread_local! {
-    /// The spherical Bessel functions' scratch (`fewest`).
-    static BESSELS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+    std::rc::Rc::new(Rule { nodes, weights })
 }
 
 /// The index past `from` where the three-term recurrence's growing solution (p_{from−1} = 0, p_from = 1, upward) has
@@ -1192,41 +1266,115 @@ fn grown(x: f64, from: usize) -> usize {
 /// `degree` places; the rule of m nodes integrates P_l exactly up to l = 2m − 1 and errs on a P_l beyond by no more
 /// than 2 (|P_l| ≤ 1, its weights' sum 2), so within Σ_{l ≥ 2m − degree} (2l + 1)|j_l(κ)| over the integral's scale 2:
 /// the least m that holds that within the unit round-off -- the phase over four and the Bessel functions' tail past
-/// l ≈ κ, which falls faster than any power --, not fewer than `least`. Measured tight (CARRIER: at κ = 20, 150, 600
-/// the rule of 27, 106, 349 nodes errs by 10⁻¹⁶–10⁻¹⁵, a tenth fewer nodes by 3·10⁻¹⁴, 6·10⁻¹⁰, 5·10⁻⁴). j_l by
-/// Miller's backward recurrence from where it has fallen below the round-off (`grown`), normalized by
-/// Σ(2l + 1)j_l² = 1.
+/// l ≈ κ, which falls faster than any power --, not fewer than `least`. The tail is bounded in closed form (`tail`), not
+/// summed: the least L whose bound is within the round-off, found by doubling and halving its distance past κ. Measured
+/// tight (CARRIER: at κ = 20, 150, 600 the rule of 27, 106, 349 nodes errs by 10⁻¹⁶–10⁻¹⁵, a tenth fewer nodes by
+/// 3·10⁻¹⁴, 6·10⁻¹⁰, 5·10⁻⁴); the bound asks 0 to 3 nodes more than the tail summed by Miller's recurrence did (until
+/// 2026-11-22, 15–16 µs a piece at κ ≈ 1900; `resolved_by_recurrence` in the tests), in some 1 µs.
 fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
+    resolved(nu, width, least, degree, false)
+}
+
+/// The fewest nodes of `fewest`'s rule (`interpolated` false), or of an interpolation at the nodes of one Gauss–Legendre
+/// panel whose interpolant is integrated against any phase exactly (# The quadrature by groups): the interpolant of S
+/// nodes is exact on P_l up to l = S − 1 and errs on a P_l beyond, against any phase e^{iΩt}, by no more than
+/// ∫|P_l| + ∫|I P_l| ≤ 2 + 2 -- the interpolant's ∫|I P_l| ≤ √2 (Σ_k w_k P_l(t_k)²)^{1/2} ≤ 2 by the rule's exactness on
+/// its square --: the least S that holds Σ_{l ≥ S − degree} (2l + 1)|j_l(κ)| within half the round-off, not fewer than
+/// twice `least`.
+fn resolved(nu: f64, width: f64, least: usize, degree: usize, interpolated: bool) -> usize {
+    #[cfg(test)]
+    if SUMMED.with(|x| x.get()) {
+        return resolved_by_recurrence(nu, width, least, degree, interpolated);
+    }
     let kappa = 0.5 * nu * width.abs();
     // A beat that is not a number would size the rule by a recurrence that stops at once: no rule is sized for it.
     assert!(!kappa.is_nan(), "a tone's frequency is not a number");
+    let (floor, within) = if interpolated { (2 * least, 0.5 * UNIT_ROUNDOFF) } else { (least, UNIT_ROUNDOFF) };
     if kappa <= 0.0 {
-        return least;
+        return floor;
     }
     // No finite bandwidth -- ∞ or NaN, never read as none -- has a rule: its caller refuses it first (`Midway::stretch`).
     if !kappa.is_finite() {
         return usize::MAX;
     }
-    BESSELS.with(|f| {
-        let f = &mut *f.borrow_mut();
-        let top = grown(kappa, grown(kappa, kappa.ceil() as usize + 1).max(2 * least));
-        f.clear();
-        f.resize(top + 2, 0.0);
-        f[top] = 1.0;
-        for l in (1..=top).rev() {
-            f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
-            if f[l - 1].abs() > 1e100 {
-                f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
-            }
+    // The least L whose tail's bound is within: past the first L of a finite bound, the bound falls with L (`tail`), so
+    // "within" holds from L on -- found by doubling the distance past the turning point, then halving.
+    let first = (kappa - 0.5).ceil().max(0.0) as usize;
+    let holds = |l: usize| tail(kappa, l) <= within;
+    let (mut lo, mut hi) = (first, first);
+    let mut step = 1;
+    while !holds(hi) {
+        lo = hi + 1;
+        hi = first + step;
+        step *= 2;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if holds(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
-        let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
-        let mut tail = 0.0;
-        let start = (0..=top).rev().find(|&l| {
-            tail += (2 * l + 1) as f64 * f[l].abs() / norm;
-            tail > UNIT_ROUNDOFF
-        });
-        start.map_or(least, |l| (l + 1 + degree).div_ceil(2).max(least))
-    })
+    }
+    // The largest l whose tail is not within is L − 1: none where L is 0.
+    if hi == 0 {
+        return floor;
+    }
+    if interpolated { (hi + degree).max(floor) } else { (hi + degree).div_ceil(2).max(least) }
+}
+
+/// A closed-form bound on Σ_{l ≥ L} (2l + 1)|j_l(κ)| for L + ½ ≥ κ (∞ below, or where the bound's ratio is not below
+/// one): |j_l(κ)| = (π/2κ)^{1/2} |J_ν(κ)|, ν = l + ½, and |J_ν(νx)| ≤ e^{νφ(x)}, φ(x) = (1 − x²)^{1/2} −
+/// ln((1 + (1 − x²)^{1/2})/x), for ν ≥ 0, 0 < x ≤ 1 (DLMF 10.14.5); νφ(κ/ν) falls with ν at the rate arccosh(ν/κ), which
+/// grows with ν, and (2l + 3)/(2l + 1) falls with l, so each term from L on is within r = (2L + 3)/(2L + 1)
+/// e^{−arccosh((L + ½)/κ)} of the one before -- e^{−arccosh(1/x)} = x/(1 + (1 − x²)^{1/2}) -- and the tail within its
+/// first term over 1 − r.
+fn tail(kappa: f64, l: usize) -> f64 {
+    let nu = l as f64 + 0.5;
+    if nu < kappa {
+        return f64::INFINITY;
+    }
+    let x = kappa / nu;
+    let root = ((1.0 - x) * (1.0 + x)).sqrt();
+    let ratio = (2 * l + 3) as f64 / (2 * l + 1) as f64 * (x / (1.0 + root));
+    if !(ratio < 1.0) {
+        return f64::INFINITY;
+    }
+    let first = (2 * l + 1) as f64 * (std::f64::consts::FRAC_PI_2 / kappa).sqrt() * (nu * (root - ((1.0 + root) / x).ln())).exp();
+    first / (1.0 - ratio)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A check's switch (tests alone, the thread's): `resolved` by the tail summed (`resolved_by_recurrence`).
+    pub(crate) static SUMMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `resolved` as it was until 2026-11-22, the tail summed (a check's reference): j_l by Miller's backward recurrence from
+/// where it has fallen below the round-off (`grown`), normalized by Σ(2l + 1)j_l² = 1, the tail summed from there down.
+#[cfg(test)]
+fn resolved_by_recurrence(nu: f64, width: f64, least: usize, degree: usize, interpolated: bool) -> usize {
+    let kappa = 0.5 * nu * width.abs();
+    let (floor, within) = if interpolated { (2 * least, 0.5 * UNIT_ROUNDOFF) } else { (least, UNIT_ROUNDOFF) };
+    if kappa <= 0.0 {
+        return floor;
+    }
+    let top = grown(kappa, grown(kappa, kappa.ceil() as usize + 1).max(2 * least));
+    let mut f = vec![0.0; top + 2];
+    f[top] = 1.0;
+    for l in (1..=top).rev() {
+        f[l - 1] = (2 * l + 1) as f64 / kappa * f[l] - f[l + 1];
+        if f[l - 1].abs() > 1e100 {
+            f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+        }
+    }
+    let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+    let mut tail = 0.0;
+    let start = (0..=top).rev().find(|&l| {
+        tail += (2 * l + 1) as f64 * f[l].abs() / norm;
+        tail > within
+    });
+    start.map_or(floor, |l| if interpolated { (l + 1 + degree).max(floor) } else { (l + 1 + degree).div_ceil(2).max(least) })
 }
 
 /// The panels' count over a piece of the width w at the bandwidth ν (`panels`; `fewest` of `nodes` nodes and more, on
@@ -1247,54 +1395,887 @@ fn fewest(nu: f64, width: f64, least: usize, degree: usize) -> usize {
 /// its panels' m, each m(n) made once (`fewest` is a recurrence of some κ terms; the two costs ask the same n again,
 /// and until 2026-11-21 the panels made their m once more: 2 to 3 % of a step, PGC3D, R4, tilt0).
 fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> (usize, usize) {
+    let (n, m, _) = arranged(width, |w| fewest(bandwidth, w, nodes, degree), |m| m as f64, ends);
+    (n, m)
+}
+
+/// `count`'s panels over a piece of the width w by the cost of a panel of m nodes, `cost(m)` -- its nodes' (one each
+/// where they are all of a node's work, `count`) and what a panel takes beside them (# The quadrature by groups: its
+/// moments) --, m(w/n) of the panels' rule (`rule`): n, its m and its cost, as `count` lays them out.
+fn arranged(width: f64, rule: impl Fn(f64) -> usize, cost: impl Fn(usize) -> f64, ends: impl FnOnce() -> bool) -> (usize, usize, f64) {
     let mut known = [0usize; 256];
     let mut m = |n: usize| -> usize {
         if let Some(&m) = known.get(n).filter(|&&m| m != 0) {
             return m;
         }
-        let m = fewest(bandwidth, width / n as f64, nodes, degree);
+        let m = rule(width / n as f64);
         if let Some(slot) = known.get_mut(n) {
             *slot = m;
         }
         m
     };
-    let least = |m: &mut dyn FnMut(usize) -> usize, cost: &dyn Fn(usize, &mut dyn FnMut(usize) -> usize) -> f64| {
-        let (mut n, mut best) = (1, cost(1, &mut *m));
+    let least = |m: &mut dyn FnMut(usize) -> usize, total: &dyn Fn(usize, &mut dyn FnMut(usize) -> usize) -> f64| {
+        let (mut n, mut best) = (1, total(1, &mut *m));
         loop {
-            let next = cost(n + 1, &mut *m);
+            let next = total(n + 1, &mut *m);
             if !(next < best) {
-                break n;
+                break (n, best);
             }
             (n, best) = (n + 1, next);
         }
     };
-    let rooted = least(&mut m, &|n, m| 0.5 * n as f64 * m(n) as f64 + m(2 * n) as f64);
-    let n = if rooted > 1 && ends() { rooted } else { least(&mut m, &|n, m| n as f64 * m(n) as f64) };
-    (n, m(n))
+    let rooted = least(&mut m, &|n, m| 0.5 * n as f64 * cost(m(n)) + cost(m(2 * n)));
+    let (n, total) = if rooted.0 > 1 && ends() { rooted } else { least(&mut m, &|n, m| n as f64 * cost(m(n))) };
+    (n, m(n), total)
 }
 
 /// The `count` equal panels over [a, b] of `nodes` nodes each (`count`: the fewest that integrate each to the
-/// round-off), in their order from a to b: each panel's end (b itself for the last) and its nodes and weights in their
-/// order.
-fn panels(a: f64, b: f64, (count, nodes): (usize, usize)) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64)>)> {
+/// round-off), in their order from a to b: each panel's end (b itself for the last) and its nodes, weights and places
+/// in the rule (`rule`'s order: a panel's nodes are given from its start, the rule's last first).
+fn panels(a: f64, b: f64, (count, nodes): (usize, usize)) -> impl Iterator<Item = (f64, impl Iterator<Item = (f64, f64, usize)>)> {
     let w = (b - a) / count as f64;
     let rule = rule(nodes);
     (0..count).map(move |p| {
-        let (centre, end) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w });
-        (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k])))
+        let (centre, end, rule) = (a + (p as f64 + 0.5) * w, if p + 1 == count { b } else { a + (p + 1) as f64 * w }, rule.clone());
+        (end, (0..rule.nodes.len()).rev().map(move |k| (centre + 0.5 * w * rule.nodes[k], 0.5 * w * rule.weights[k], k)))
     })
 }
 
 /// The nodes and weights over [a, b] of an integrand entire at the bandwidth ν times a polynomial of `degree`, to the
 /// round-off, where no jump's root is sought (`count`).
 fn quadrature(a: f64, b: f64, bandwidth: f64, nodes: usize, degree: usize) -> impl Iterator<Item = (f64, f64)> {
-    panels(a, b, count(b - a, bandwidth, nodes, degree, || false)).flat_map(|(_, nodes)| nodes)
+    panels(a, b, count(b - a, bandwidth, nodes, degree, || false)).flat_map(|(_, nodes)| nodes.map(|(u, w, _)| (u, w)))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The quadrature by groups (module documentation, # The quadrature by groups).
+
+/// The most groups a piece's cut makes: one an eigencomponent.
+const GROUPS: usize = STATES;
+
+/// A phase's label: whole numbers L_g on the groups' centres ω_g, the phase turning at Σ_g L_g ω_g. Their sum is zero:
+/// each factor of the norm's ringing between two groups adds e_g − e_q.
+type Label = [i16; GROUPS];
+
+/// The spherical Bessel functions j_l(κ), l below `count`, into `out`; j_l(−κ) = (−1)^l j_l(κ). Below the turning point
+/// of every l asked, (count − 1) count ≤ κ², where j_l oscillates and the recurrence's two solutions keep their sizes, by
+/// the recurrence upward from j₀ = sin κ/κ and j₁ = sin κ/κ² − cos κ/κ; else by Miller's backward recurrence (`fewest`)
+/// from where they have fallen below the round-off past both κ and `count` (`grown`), normalized by Σ(2l + 1)j_l² = 1
+/// and signed by j₀ or j₁, the larger of the two. Returns the recurrence's length.
+fn bessels(kappa: f64, count: usize, out: &mut Vec<f64>, recurrence: &mut Vec<f64>) -> usize {
+    out.clear();
+    out.resize(count, 0.0);
+    let x = kappa.abs();
+    if x == 0.0 {
+        out[0] = 1.0;
+        return 0;
+    }
+    if ((count.saturating_sub(1) * count) as f64) <= x * x {
+        let (sin, cos) = x.sin_cos();
+        let (mut before, mut last) = (sin / x, sin / (x * x) - cos / x);
+        for (l, o) in out.iter_mut().enumerate() {
+            let value = match l {
+                0 => before,
+                1 => last,
+                _ => {
+                    let next = (2 * l - 1) as f64 / x * last - before;
+                    (before, last) = (last, next);
+                    next
+                }
+            };
+            *o = if kappa < 0.0 && l % 2 == 1 { -value } else { value };
+        }
+        return count;
+    }
+    let top = grown(x, grown(x, x.ceil() as usize + 1).max(count + 2));
+    recurrence.clear();
+    recurrence.resize(top + 2, 0.0);
+    let f = &mut recurrence[..];
+    f[top] = 1.0;
+    for l in (1..=top).rev() {
+        f[l - 1] = (2 * l + 1) as f64 / x * f[l] - f[l + 1];
+        if f[l - 1].abs() > 1e100 {
+            f[l - 1..].iter_mut().for_each(|v| *v *= 1e-100);
+        }
+    }
+    let norm = f.iter().enumerate().map(|(l, v)| (2 * l + 1) as f64 * v * v).sum::<f64>().sqrt();
+    let (j0, j1) = (x.sin() / x, x.sin() / (x * x) - x.cos() / x);
+    let sign = if j0.abs() > j1.abs() { (j0 * f[0]).signum() } else { (j1 * f[1]).signum() };
+    for (l, o) in out.iter_mut().enumerate() {
+        *o = sign * f[l] / norm * if kappa < 0.0 && l % 2 == 1 { -1.0 } else { 1.0 };
+    }
+    top
+}
+
+/// Hermitian sums' first: sums[0] += left right† on the entries a ≤ b (`accumulate`'s layout and lanes; `whole` reads
+/// those): the groups' node densities (`Groups::gather`), two a real for the product, one a sum.
+fn outer(left: &[C64], right: &[C64], sums: &mut [f64]) {
+    use std::arch::x86_64::{_mm256_add_pd, _mm256_fmadd_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd, _mm256_xor_pd};
+    let n = left.len();
+    let width = row(n);
+    assert!(n <= STATES && right.len() == n && sums.len() >= 2 * n * width);
+    let (mut re, mut im) = ([0.0; row(STATES)], [0.0; row(STATES)]);
+    for (z, (re, im)) in right.iter().zip(re.iter_mut().zip(&mut im)) {
+        (*re, *im) = (z.re, z.im);
+    }
+    // SAFETY: every vector read and written lies within the row's `width` reals of `re`, `im` and the sum (above); the
+    // build has AVX2 and FMA (linalg.rs).
+    unsafe {
+        let negative = _mm256_set1_pd(-0.0);
+        for (a, left) in left.iter().enumerate() {
+            let from = a / LANES * LANES;
+            let (real_part, imaginary_part) = (_mm256_set1_pd(left.re), _mm256_set1_pd(left.im));
+            for column in (from..width).step_by(LANES) {
+                let (r, i) = (_mm256_loadu_pd(re.as_ptr().add(column)), _mm256_loadu_pd(im.as_ptr().add(column)));
+                let real = _mm256_fmadd_pd(real_part, r, _mm256_mul_pd(imaginary_part, i));
+                let imaginary = _mm256_fmadd_pd(imaginary_part, r, _mm256_xor_pd(_mm256_mul_pd(real_part, i), negative));
+                let head = sums.as_mut_ptr().add(2 * a * width + column);
+                _mm256_storeu_pd(head, _mm256_add_pd(real, _mm256_loadu_pd(head)));
+                _mm256_storeu_pd(head.add(width), _mm256_add_pd(imaginary, _mm256_loadu_pd(head.add(width))));
+            }
+        }
+    }
+}
+
+/// The labels' hash (`Groups::label`): a multiply and a rotation a number, as the compilers' tables take short keys (the
+/// keys are the cut's own, no one else's).
+#[derive(Default)]
+struct Mixed(u64);
+
+impl std::hash::Hasher for Mixed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            let word = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+            self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        for &b in chunks.remainder() {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_i16(&mut self, x: i16) {
+        self.0 = (self.0.rotate_left(5) ^ x as u16 as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+/// A cut of a piece's eigencomponents (`Groups::choose`): each one's group, the groups' centres (rad/µs) and count, which
+/// groups ring together (one exact block, their cross terms not below the round-off: a bit per group), the series' order,
+/// the envelopes' bandwidth, its gaps' count and a node's counted work as it was weighed (`Groups::node`).
+#[derive(Clone, Copy)]
+struct Cut {
+    group: [u8; STATES],
+    centres: [f64; GROUPS],
+    groups: usize,
+    linked: [u32; GROUPS],
+    order: usize,
+    bandwidth: f64,
+    cut: usize,
+    node: f64,
+    block: [usize; GROUPS],
+}
+
+/// The kick's and the survival's sums of a piece by its eigencomponents' groups (module documentation, # The quadrature
+/// by groups): the piece's cut, its eigenvalues less their groups' centres, its labels and their steps; a panel's
+/// moments; a node's parts, their norms, its ringing's ratio, the series and the blocks' weights, its density where the
+/// step takes several sums; and the counted work of all that is not a node's state (`Picture::parts`, the picture's) and
+/// its plain density (complex multiply-adds; `Price::grouped`). One group is the plain rule (`count`), none of this made.
+#[derive(Default)]
+struct Groups {
+    groups: usize,
+    cut: Option<Cut>,
+    shifted: Vec<C64>,
+    /// The labels within the series' order of steps and one more (the first the zero), the count within the order; per
+    /// label within it and ordered pair (g, q) of linked groups the label one step on, L + e_g − e_q, and the label of
+    /// its block's density, L + e_q − e_g (`u32::MAX` where the groups do not ring together); each label's negation and
+    /// frequency.
+    labels: Vec<Label>,
+    index: std::collections::HashMap<Label, u32, std::hash::BuildHasherDefault<Mixed>>,
+    inner: usize,
+    steps: Vec<u32>,
+    blocks: Vec<u32>,
+    negated: Vec<u32>,
+    frequencies: Vec<f64>,
+    /// The panel: its centre, its half width, its nodes, the launch's time; the moments made, label by label, each its
+    /// nodes'.
+    panel: (f64, f64, usize, f64),
+    made: Vec<bool>,
+    moments: Vec<C64>,
+    bessel: Vec<f64>,
+    recurrence: Vec<f64>,
+    signed: Vec<f64>,
+    legendre: Vec<f64>,
+    /// A node: its parts y_g, their norms N_gq (G × G), N₀ = Σ_g N_gg and Σ_{g≠q}|N_gq|/N₀ over the linked groups; the
+    /// series' terms by label at an order, the next order's and their sum; the blocks' weights V_gq (G × G), z_g =
+    /// Σ_q V_gq* y_q, and the node's density laid as a sum is (`accumulate`) where the step takes several.
+    parts: Vec<[C64; STATES]>,
+    norms: Vec<C64>,
+    diagonal: f64,
+    ratio: f64,
+    current: Vec<C64>,
+    next: Vec<C64>,
+    total: Vec<C64>,
+    weights: Vec<C64>,
+    z: Vec<[C64; STATES]>,
+    node: Vec<f64>,
+    /// The ringing's and the numerator's weights between two groups (`Picture::weighed_by`, G × G), for the cut weighed.
+    across: Vec<f64>,
+    numerator: Vec<f64>,
+    /// Each group's rows: its block's states (R is block-diagonal), every state where the states are one block.
+    rows: Vec<Vec<usize>>,
+    work: f64,
+}
+
+/// What a node of a cut does beside its series and its weights (`Groups::node`), complex multiply-adds: its parts'
+/// products (each component its block's rows), its norms (each linked pair its block's rows), its z_g and its density
+/// (each group its block's upper triangle).
+#[derive(Clone, Copy)]
+struct Shape {
+    products: usize,
+    norms: usize,
+    z: usize,
+    density: usize,
+}
+
+impl Groups {
+    /// One group: the plain rule (`count`).
+    fn plain(&mut self) {
+        (self.groups, self.cut) = (1, None);
+    }
+
+    /// The piece's rule from the last launch at `from` to the step's end h, its sums the step's (`Sums`: one where it
+    /// takes one node, `still`; else the three nodes' and six a tone's, `tones` of them): the cut of its eigencomponents
+    /// of the least cost, and its panels' count and nodes (`arranged`). The plain rule's cost is its nodes' at the
+    /// quotient's bandwidth (`count`), a node its state (`Picture::state_work`) and its densities into the sums
+    /// (`count::gathered`). The cuts are at the k largest gaps between neighbouring frequencies Re λ of the components the
+    /// state can hold (`Picture::spectrum`) that some exact block straddles, k = 1, 2, …: a gap no block straddles cuts
+    /// no pair a form reads, and every block is cut at the same places, so that a level split in every block --
+    /// R5_PUMP's F = 1 and F = 2, joined in each of its blocks by m -- is cut at once. A group is one block's run between
+    /// two cuts, of its own centre, the middle of its frequencies: each block's levels lie apart by its own gaps (R5_PUMP's
+    /// by the hyperfine splitting less each m's Zeeman shifts), and its envelopes keep its own spread alone. A component
+    /// the state cannot hold goes to the nearest centre in its block, or to its block's own group. A group's parts, norms
+    /// and density are its block's rows alone (R is block-diagonal: `Picture::parts`), so that many small groups cost what
+    /// one product of n² does. Two groups of a block ring together unless their cross terms integrate within the
+    /// round-off of the width: by parts, |∫c e^{iΩu}| ≤ π sup|c|/(Ω − β) of an envelope c of the band β (Bohr–Favard's
+    /// constant; model/classify.rs `by_parts`), sup|c|
+    /// the numerator's weights between them over 1 − r (`Picture::weighed_by`), Ω their least gap, β the shifted pairs'
+    /// band; a pair not taken is neither in the density nor in the norm's ringing. A cut's cost: its panels' nodes
+    /// (`resolved`, interpolated, at the envelopes' bandwidth) each its parts, norms, series, weights and densities
+    /// (`node`), and each panel its moments (`panel`). It is weighed where the norm's ringing between its groups has a
+    /// series, r = Σ_{g≠q}|N_gq|/N₀ < 1 anywhere on the piece -- r ≤ X/(1 − W) of the ringing's weights between and
+    /// within the groups (`Picture::weighed_by`), and on a moving generator, whose following mixes the groups'
+    /// coordinates beyond R's overlaps, no less than at the piece's start, middle and end (`Picture::parts`, counted) --,
+    /// its order the least K with r^{K+1}/(1 − r) within an eighth of the round-off; first by what it costs at the least
+    /// -- at a guess of the envelopes' bandwidth (the quotient's scaled by the shifted pairs' over the forms'), with the
+    /// fewest labels a series of the order K holds, 2K + 1 --, then with its labels, then at the envelopes' bandwidth
+    /// itself (`Picture::envelope`, counted), each against the least cost so far: the plain rule's no less than its
+    /// fewest nodes' until it is made. The first k past which the cost does not fall ends the search, as `count`'s does.
+    /// Which cut is taken is a matter of cost alone: every one is to the round-off, and a node whose series does not hold
+    /// says so (`gather`).
+    fn choose(&mut self, picture: &mut Picture, from: f64, h: f64, (still, tones): (bool, usize), ends: &mut dyn FnMut(&mut Picture) -> bool) -> (usize, usize) {
+        self.plain();
+        let n = picture.states();
+        let width = h - from;
+        let mut ended: Option<bool> = None;
+        let mut known = |picture: &mut Picture| *ended.get_or_insert_with(|| ends(picture));
+        let quotient = picture.quotient;
+        let state = picture.state_work();
+        let slots = slots(still, tones);
+        let unit = state.0 + count::gathered(n, 1, still, tones) / COMPLEX;
+        // The plain rule's layout, made where it is asked (its rules' sizes are recurrences of some κ terms each).
+        let plain = |picture: &mut Picture, known: &mut dyn FnMut(&mut Picture) -> bool| -> (usize, usize, f64) {
+            let (count, nodes, cost) = arranged(width, |w| fewest(quotient, w, FORMS, 2), |m| m as f64, || known(picture));
+            (count, nodes, cost * unit)
+        };
+        let forms = picture.bandwidth;
+        if !(forms > 0.0 && quotient.is_finite()) {
+            let (count, nodes, _) = plain(picture, &mut known);
+            return (count, nodes);
+        }
+        // The least cost so far: the plain rule's no less than its fewest nodes', νw/8 -- m ≥ κ/2 at κ = νw/2n on each of
+        // n panels, and a root's piece takes half of them -- until it is made (`exact`), or a cut's.
+        let mut exact: Option<(usize, usize, f64)> = None;
+        let mut best: (f64, Option<(usize, usize, Cut)>) = (linalg::larger(FORMS as f64, 0.125 * quotient * width.abs()) * unit, None);
+        // Whether a cut's cost beats the least so far: where the least is the plain rule's floor and does not settle it,
+        // against the plain rule's own cost, made then.
+        let beats = |cost: f64, best: &mut (f64, Option<(usize, usize, Cut)>), exact: &mut Option<(usize, usize, f64)>, picture: &mut Picture, known: &mut dyn FnMut(&mut Picture) -> bool| -> bool {
+            if cost < best.0 {
+                return true;
+            }
+            if best.1.is_none() && exact.is_none() {
+                let made = plain(picture, known);
+                (*exact, best.0) = (Some(made), made.2);
+                return cost < best.0;
+            }
+            false
+        };
+        let (mut lambda, mut held, mut part) = ([C64::ZERO; STATES], [false; STATES], [0usize; STATES]);
+        {
+            let (l, h, p) = picture.spectrum();
+            lambda[..n].copy_from_slice(l);
+            held[..n].copy_from_slice(h);
+            part[..n].copy_from_slice(p);
+        }
+        let blocked: Vec<Vec<usize>> = picture.blocked().0.to_vec();
+        // The held components in their frequencies' order, and the gaps between neighbours that some exact block
+        // straddles -- a gap no block straddles cuts no pair any form reads.
+        let (mut order, mut kept) = ([0usize; STATES], 0);
+        for a in (0..n).filter(|&a| held[a]) {
+            order[kept] = a;
+            kept += 1;
+        }
+        let order = &mut order[..kept];
+        order.sort_by(|&a, &b| lambda[a].re.total_cmp(&lambda[b].re));
+        let (mut gaps, mut found) = ([(0.0, 0usize); STATES], 0);
+        for i in 1..kept {
+            let straddled = order[..i].iter().any(|&a| order[i..].iter().any(|&b| part[a] == part[b]));
+            if straddled {
+                gaps[found] = (lambda[order[i]].re - lambda[order[i - 1]].re, i);
+                found += 1;
+            }
+        }
+        let gaps = &mut gaps[..found];
+        gaps.sort_by(|x, y| y.0.total_cmp(&x.0));
+        // The cut whose labels were made last (`label`).
+        let mut labelled = 0;
+        for k in 1..=found {
+            let mut cut_before = [false; STATES];
+            for &(_, i) in &gaps[..k] {
+                cut_before[i] = true;
+            }
+            // A group a block's run between two cuts (its own centre: each block's levels apart by its own gaps), the
+            // runs' order the cuts' across the blocks.
+            let mut runs = [0usize; STATES];
+            for i in 1..kept {
+                runs[i] = runs[i - 1] + usize::from(cut_before[i]);
+            }
+            let (mut group, mut keys, mut groups) = ([0u8; STATES], [(0usize, 0usize); GROUPS], 0usize);
+            fn place(keys: &mut [(usize, usize); GROUPS], groups: &mut usize, key: (usize, usize)) -> Option<u8> {
+                match keys[..*groups].iter().position(|k| *k == key) {
+                    Some(g) => Some(g as u8),
+                    None if *groups < GROUPS => {
+                        keys[*groups] = key;
+                        *groups += 1;
+                        Some((*groups - 1) as u8)
+                    }
+                    None => None,
+                }
+            }
+            let mut over = false;
+            for (i, &a) in order.iter().enumerate() {
+                match place(&mut keys, &mut groups, (part[a], runs[i])) {
+                    Some(g) => group[a] = g,
+                    None => over = true,
+                }
+            }
+            if over {
+                break;
+            }
+            let held_groups = groups;
+            let mut spans = [(f64::INFINITY, f64::NEG_INFINITY); GROUPS];
+            for &a in order.iter() {
+                let s = &mut spans[usize::from(group[a])];
+                *s = (linalg::smaller(s.0, lambda[a].re), linalg::larger(s.1, lambda[a].re));
+            }
+            let mut centres = [0.0; GROUPS];
+            for (c, s) in centres.iter_mut().zip(&spans[..groups]) {
+                *c = 0.5 * (s.0 + s.1);
+            }
+            // A component the state cannot hold: the nearest centre in its block, or its block's own group.
+            for a in (0..n).filter(|&a| !held[a]) {
+                let distance = |g: usize| (centres[g] - lambda[a].re).abs();
+                match (0..held_groups).filter(|&g| keys[g].0 == part[a]).min_by(|&x, &y| distance(x).total_cmp(&distance(y))) {
+                    Some(g) => group[a] = g as u8,
+                    None => match place(&mut keys, &mut groups, (part[a], usize::MAX)) {
+                        Some(g) => {
+                            group[a] = g;
+                            centres[usize::from(g)] = lambda[a].re;
+                        }
+                        None => over = true,
+                    },
+                }
+            }
+            if over {
+                break;
+            }
+            let block_of: [usize; GROUPS] = std::array::from_fn(|g| keys[g].0);
+            let shift: [f64; STATES] = std::array::from_fn(|a| if a < n { centres[usize::from(group[a])] } else { 0.0 });
+            // The guess: the quotient's bandwidth by the shifted pairs' over the forms' (`Picture::spanned`); and each two
+            // groups' least gap.
+            let (mut spanned, mut gap) = (0.0, [f64::INFINITY; GROUPS * GROUPS]);
+            for a in (0..n).filter(|&a| held[a]) {
+                for b in (a..n).filter(|&b| held[b] && part[b] == part[a]) {
+                    let pair = ((lambda[a] - C64::real(shift[a])).conj() - (lambda[b] - C64::real(shift[b]))).abs();
+                    spanned = linalg::larger(spanned, pair);
+                    let (g, q) = (usize::from(group[a]), usize::from(group[b]));
+                    if g != q {
+                        let apart = (lambda[a].re - lambda[b].re).abs();
+                        gap[g * groups + q] = linalg::smaller(gap[g * groups + q], apart);
+                        gap[q * groups + g] = gap[g * groups + q];
+                    }
+                }
+            }
+            let guess = quotient * spanned / forms;
+            // The norm's ringing between the groups and within them, and the numerator's between them, over the piece.
+            self.across.resize(groups * groups, 0.0);
+            self.numerator.resize(groups * groups, 0.0);
+            let Some(within) = picture.weighed_by(&group[..n], groups, &mut self.across, &mut self.numerator) else { break };
+            if !(within < 1.0) {
+                break;
+            }
+            let all_across: f64 = (0..groups).flat_map(|g| (g + 1..groups).map(move |q| (g, q))).map(|(g, q)| self.across[g * groups + q]).sum();
+            let ratio_all = all_across / (1.0 - within);
+            // Linked: one block's, and the pair's cross terms beyond the round-off of the width by parts (above).
+            let mut linked = [0u32; GROUPS];
+            for g in 0..groups {
+                linked[g] |= 1 << g;
+                for q in (0..groups).filter(|&q| q != g && block_of[q] == block_of[g]) {
+                    // The lemma's bound: the ends π sup|c| (sup|c| the numerator's weights over 1 − r) at the rate Ω − β.
+                    let omega = gap[g * groups + q] - spanned;
+                    let ends = std::f64::consts::PI * self.numerator[g * groups + q] / (1.0 - ratio_all);
+                    let small = ratio_all < 1.0 && omega > 0.0 && crate::model::classify::by_parts(ends, 0.0, C64::real(omega)) <= UNIT_ROUNDOFF * width.abs();
+                    if !small {
+                        linked[g] |= 1 << q;
+                    }
+                }
+            }
+            let across: f64 = (0..groups).flat_map(|g| (g + 1..groups).map(move |q| (g, q))).filter(|&(g, q)| linked[g] & (1 << q) != 0).map(|(g, q)| self.across[g * groups + q]).sum();
+            let mut ratio = across / (1.0 - within);
+            let ordered: usize = (0..groups).map(|g| linked[g].count_ones() as usize - 1).sum();
+            let blocks = ordered + groups;
+            let size_of = |g: usize| if blocked.len() > 1 { blocked[block_of[g]].len() } else { n };
+            let shape = Shape {
+                products: (0..n).map(|a| if blocked.len() > 1 { blocked[part[a]].len() } else { n }).sum(),
+                norms: (0..groups).map(|g| (g..groups).filter(|&q| linked[g] & (1 << q) != 0).count() * size_of(g)).sum(),
+                z: (0..groups).map(|g| linked[g].count_ones() as usize * size_of(g)).sum(),
+                density: (0..groups).map(|g| size_of(g) * (size_of(g) + 1) / 2).sum(),
+            };
+            // K + 1 ≥ ln(u(1 − r)/8)/ln r, none where nothing rings between the groups.
+            let order_of = |ratio: f64| if ratio > 0.0 { linalg::larger(((0.125 * UNIT_ROUNDOFF * (1.0 - ratio)).ln() / ratio.ln()).ceil() - 1.0, 0.0) } else { 0.0 };
+            // At the guess with the fewest labels a series of the order K holds where groups ring together, 2K + 1 (a line
+            // of the labels' lattice): the least the cut can cost.
+            let least = |ratio: f64| {
+                let labels = if ordered > 0 { 2.0 * order_of(ratio) + 1.0 } else { 1.0 };
+                let node = Groups::node(n, groups, ordered, 1, slots, state, shape) + (labels - 1.0) * (ordered + blocks) as f64;
+                arranged(width, |w| resolved(guess, w, FORMS, 2, true), |m| m as f64 * node, || false).2
+            };
+            if !(ratio < 1.0) || !beats(least(ratio), &mut best, &mut exact, picture, &mut known) {
+                break;
+            }
+            // On a moving generator the ringing at the piece's start, middle and end too (the following's overlaps).
+            if picture.moving() && ordered > 0 {
+                self.shifted.clear();
+                self.shifted.extend((0..n).map(|a| lambda[a] - C64::real(shift[a])));
+                self.parts.resize(groups, [C64::ZERO; STATES]);
+                let origin = picture.origin();
+                for u in [origin, 0.5 * (origin + h), h] {
+                    picture.parts(u, &self.shifted, &group[..n], groups, &mut self.parts);
+                    let norm = |g: usize, q: usize| -> C64 { self.parts[g][..n].iter().zip(&self.parts[q][..n]).map(|(p, r)| p.conj() * *r).sum() };
+                    let diagonal: f64 = (0..groups).map(|g| norm(g, g).re).sum();
+                    let ringing: f64 = (0..groups).flat_map(|g| (g + 1..groups).map(move |q| (g, q))).filter(|&(g, q)| linked[g] & (1 << q) != 0).map(|(g, q)| 2.0 * norm(g, q).abs()).sum();
+                    ratio = linalg::larger(ratio, ringing / diagonal);
+                    self.work += ((groups * (groups + 1) / 2) * n) as f64;
+                }
+                if !(ratio < 1.0) || !beats(least(ratio), &mut best, &mut exact, picture, &mut known) {
+                    break;
+                }
+            }
+            let series = order_of(ratio) as usize;
+            // The labels, no more of them than a node's weights alone at the guess's fewest nodes leave below the least
+            // cost so far.
+            let fewest = resolved(guess, width, FORMS, 2, true);
+            let most = (best.0 / (fewest * blocks) as f64) as usize;
+            labelled = 0;
+            if !self.label(groups, series, &linked, &centres, most) {
+                break;
+            }
+            labelled = k;
+            let (inner, all) = (self.inner, self.labels.len());
+            let node = Groups::node(n, groups, ordered, inner, slots, state, shape);
+            let (_, _, guessed) = arranged(width, |w| resolved(guess, w, FORMS, 2, true), |m| m as f64 * node + Groups::panel(all, m), || known(picture));
+            if !beats(guessed, &mut best, &mut exact, picture, &mut known) {
+                break;
+            }
+            let bandwidth = picture.envelope(from, &shift[..n]);
+            if !bandwidth.is_finite() {
+                break;
+            }
+            let (count, nodes, cost) = arranged(width, |w| resolved(bandwidth, w, FORMS, 2, true), |m| m as f64 * node + Groups::panel(all, m), || known(picture));
+            if !beats(cost, &mut best, &mut exact, picture, &mut known) {
+                break;
+            }
+            best = (cost, Some((count, nodes, Cut { group, centres, groups, linked, order: series, bandwidth, cut: k, node, block: block_of })));
+        }
+        match best.1 {
+            Some((count, nodes, cut)) => {
+                self.set(cut, &lambda[..n], labelled == cut.cut, slots, n, &blocked);
+                (count, nodes)
+            }
+            None => {
+                let (count, nodes, _) = exact.unwrap_or_else(|| plain(picture, &mut known));
+                (count, nodes)
+            }
+        }
+    }
+
+    /// A node's counted work on n states in G groups, `ordered` the ordered pairs of linked groups and `inner` the
+    /// series' labels, into `slots` sums, its state's (`Picture::state_work`: its matrix assembled where anything is
+    /// followed, the followed classes'): its parts, norms, z_g and density by its blocks (`Shape`), the norm's phases, the
+    /// series and the blocks' weights a label each, and where the step takes several sums each its share of the density.
+    fn node(n: usize, groups: usize, ordered: usize, inner: usize, slots: usize, (_, _, assembled): (f64, bool, usize), shape: Shape) -> f64 {
+        let blocks = ordered + groups;
+        let assembly = assembled * n * n;
+        let shares = if slots > 1 { slots * n * (n + 1) / 2 } else { 0 };
+        (assembly + shape.products + 4 * n + shape.norms + ordered / 2 + inner * (ordered + blocks) + shape.z + shape.density + shares) as f64
+    }
+
+    /// The labels of a cut's series of `order` steps and one more (breadth first from the zero label, a step e_g − e_q
+    /// of two linked groups), with their tables (`Groups`); false, and none made, where they are more than `most`.
+    fn label(&mut self, groups: usize, order: usize, linked: &[u32; GROUPS], centres: &[f64; GROUPS], most: usize) -> bool {
+        let (labels, index) = (&mut self.labels, &mut self.index);
+        labels.clear();
+        index.clear();
+        labels.push([0; GROUPS]);
+        index.insert([0; GROUPS], 0);
+        let (mut layer, mut inner) = (0..1, 1);
+        for depth in 1..=order + 1 {
+            for i in layer.clone() {
+                for g in 0..groups {
+                    for q in (0..groups).filter(|&q| q != g && linked[g] & (1 << q) != 0) {
+                        let mut l = labels[i];
+                        (l[g], l[q]) = (l[g] + 1, l[q] - 1);
+                        if !index.contains_key(&l) {
+                            index.insert(l, labels.len() as u32);
+                            labels.push(l);
+                        }
+                    }
+                }
+            }
+            layer = layer.end..labels.len();
+            if depth == order {
+                inner = labels.len();
+            }
+            if labels.len() > most {
+                return false;
+            }
+        }
+        self.inner = inner;
+        let size = groups * groups;
+        let find = |l: &Label| index.get(l).copied().expect("a label within the series' steps");
+        self.steps.clear();
+        self.blocks.clear();
+        self.steps.resize(inner * size, u32::MAX);
+        self.blocks.resize(inner * size, u32::MAX);
+        for i in 0..inner {
+            for g in 0..groups {
+                for q in (0..groups).filter(|&q| linked[g] & (1 << q) != 0) {
+                    let at = i * size + g * groups + q;
+                    if q == g {
+                        self.blocks[at] = i as u32;
+                        continue;
+                    }
+                    let mut l = labels[i];
+                    (l[g], l[q]) = (l[g] + 1, l[q] - 1);
+                    self.steps[at] = find(&l);
+                    let mut l = labels[i];
+                    (l[g], l[q]) = (l[g] - 1, l[q] + 1);
+                    self.blocks[at] = find(&l);
+                }
+            }
+        }
+        self.negated.clear();
+        self.negated.extend(labels.iter().map(|l| find(&l.map(|x| -x))));
+        self.frequencies.clear();
+        self.frequencies.extend(labels.iter().map(|l| l.iter().zip(centres).map(|(&x, w)| f64::from(x) * w).sum::<f64>()));
+        true
+    }
+
+    /// The cut taken (`choose`): its groups, its eigenvalues less their centres, its labels (made already where they are
+    /// the last made, `labelled`), a node's buffers for `slots` sums on n states.
+    fn set(&mut self, cut: Cut, lambda: &[C64], labelled: bool, slots: usize, n: usize, blocks: &[Vec<usize>]) {
+        (self.groups, self.cut) = (cut.groups, Some(cut));
+        self.rows.resize_with(cut.groups, Vec::new);
+        for (g, rows) in self.rows.iter_mut().enumerate().take(cut.groups) {
+            rows.clear();
+            if blocks.len() > 1 {
+                rows.extend_from_slice(&blocks[cut.block[g]]);
+            } else {
+                rows.extend(0..n);
+            }
+        }
+        self.shifted.clear();
+        self.shifted.extend((0..n).map(|a| lambda[a] - C64::real(cut.centres[usize::from(cut.group[a])])));
+        assert!(labelled || self.label(cut.groups, cut.order, &cut.linked, &cut.centres, usize::MAX), "a cut's labels");
+        let (all, size) = (self.labels.len(), cut.groups * cut.groups);
+        self.parts.resize(cut.groups, [C64::ZERO; STATES]);
+        self.z.resize(cut.groups, [C64::ZERO; STATES]);
+        self.norms.resize(size, C64::ZERO);
+        self.weights.resize(size, C64::ZERO);
+        for v in [&mut self.current, &mut self.next, &mut self.total] {
+            v.clear();
+            v.resize(all, C64::ZERO);
+        }
+        if slots > 1 {
+            self.node.resize(2 * n * row(n), 0.0);
+        }
+    }
+
+    /// The panels' count and nodes over a span of the width w by the cut's rule, no root sought in it (`fallen`).
+    fn spanned(&self, width: f64) -> (usize, usize) {
+        let cut = self.cut.expect("a cut");
+        let all = self.labels.len();
+        let (count, nodes, _) = arranged(width, |w| resolved(cut.bandwidth, w, FORMS, 2, true), |m| m as f64 * cut.node + Groups::panel(all, m), || false);
+        (count, nodes)
+    }
+
+    /// A panel's counted work beside its nodes' (`moment`), its m nodes and the cut's labels `all`: each label and its
+    /// negation's moments at once, some m² complex multiply-adds, and each label's phase at a node.
+    fn panel(all: usize, m: usize) -> f64 {
+        0.5 * (all - 1) as f64 * (m * m) as f64 + (all * m) as f64
+    }
+
+    /// A panel [a, b] of `nodes` nodes on the picture launched at `origin`: its moments to be made.
+    fn begin(&mut self, origin: f64, a: f64, b: f64, nodes: usize) {
+        self.legendre(nodes);
+        self.panel = (0.5 * (a + b), 0.5 * (b - a), nodes, origin);
+        self.made.clear();
+        self.made.resize(self.labels.len(), false);
+        self.moments.resize(self.labels.len() * nodes, C64::ZERO);
+    }
+
+    /// The panel's moment of the label j at its node k: ∫ L_k(u) e^{iΩ_j(u − u₀)} du over the panel, η e^{iΩ_j(c − u₀)}
+    /// ∫₋₁¹ L_k(t) e^{iκt} dt at κ = Ω_j η (c its centre, η its half width), the interpolant's moment Σ_{l<m} T_kl iˡ
+    /// j_l(κ) (`legendre`'s table). The rule's nodes lie in mirrored pairs, t and −t, whose Lagrange polynomials mirror
+    /// each other: their moments are conjugates, and half are made. Made with its negation's, the conjugate, where first
+    /// asked: the Bessel functions' recurrence and m²/2 real multiply-adds.
+    fn moment(&mut self, j: usize, k: usize) -> C64 {
+        let (centre, half, m, origin) = self.panel;
+        if !self.made[j] {
+            let omega = self.frequencies[j];
+            let top = bessels(omega * half, m, &mut self.bessel, &mut self.recurrence);
+            let phase = C64::cis(omega * (centre - origin)) * half;
+            let (even, odd): ([f64; 2], [f64; 2]) = ([1.0, -1.0], [1.0, -1.0]);
+            let signed = &mut self.signed;
+            signed.clear();
+            signed.extend(self.bessel.iter().enumerate().map(|(l, b)| if l % 2 == 0 { even[l / 2 % 2] * b } else { odd[l / 2 % 2] * b }));
+            let negated = self.negated[j] as usize;
+            for node in 0..m.div_ceil(2) {
+                let row = &self.legendre[node * m..(node + 1) * m];
+                let (mut re, mut im) = (0.0, 0.0);
+                for l in (0..m).step_by(2) {
+                    re = row[l].mul_add(signed[l], re);
+                }
+                for l in (1..m).step_by(2) {
+                    im = row[l].mul_add(signed[l], im);
+                }
+                let (z, mirror) = (phase * C64::new(re, im), phase * C64::new(re, -im));
+                let other = m - 1 - node;
+                (self.moments[j * m + node], self.moments[negated * m + node]) = (z, z.conj());
+                (self.moments[j * m + other], self.moments[negated * m + other]) = (mirror, mirror.conj());
+            }
+            (self.made[j], self.made[negated]) = (true, true);
+            self.work += (m * m / 2 + 2 * top + 6 * m) as f64 / 4.0;
+        }
+        self.moments[j * m + k]
+    }
+
+    /// The rule of m nodes' Legendre table, node k by row, l < m: T_kl = w_k (2l + 1) P_l(t_k) -- an interpolant's moments
+    /// ∫₋₁¹ L_k(t) e^{iκt} dt = Σ_l T_kl iˡ j_l(κ), L_k's Legendre coefficients w_k (2l + 1)/2 P_l(t_k) by the rule's
+    /// exactness to the degree 2m − 1 and ∫₋₁¹ P_l e^{iκt} = 2 iˡ j_l(κ). Kept for the panels' m alone, made again where it
+    /// changes (a trajectory's pieces at one step and bandwidth lay the same m; the rules are made where asked, `rule`):
+    /// its making's m² recurrence's terms are counted.
+    fn legendre(&mut self, m: usize) {
+        if self.legendre.len() == m * m {
+            return;
+        }
+        let rule = rule(m);
+        self.legendre.clear();
+        self.legendre.resize(m * m, 0.0);
+        for (k, row) in self.legendre.chunks_exact_mut(m).enumerate() {
+            let t = rule.nodes[k];
+            let (mut before, mut last) = (1.0, t);
+            for (l, entry) in row.iter_mut().enumerate() {
+                let p = match l {
+                    0 => 1.0,
+                    1 => t,
+                    _ => {
+                        let next = ((2 * l - 1) as f64 * t * last - (l - 1) as f64 * before) / l as f64;
+                        (before, last) = (last, next);
+                        next
+                    }
+                };
+                *entry = rule.weights[k] * (2 * l + 1) as f64 * p;
+            }
+        }
+        self.work += (m * m) as f64;
+    }
+
+    /// A node's parts at the time u (`Picture::parts`: in the propagation's own coordinates, R(1 + X(u)) on each group's
+    /// components), their norms N_gq of linked groups, N₀, the ratio Σ_{g≠q}|N_gq|/N₀; and the state's norm there,
+    /// Σ_{g,q} e^{i(ω_g − ω_q)(u − u₀)} N_gq -- the survival's crossing's guess (`Midway::stretch`).
+    fn parts(&mut self, picture: &mut Picture, u: f64) -> f64 {
+        let cut = self.cut.expect("a cut");
+        let (n, groups) = (picture.states(), cut.groups);
+        picture.parts(u, &self.shifted, &cut.group[..n], groups, &mut self.parts);
+        let s = u - self.panel.3;
+        let (mut diagonal, mut ringing, mut across, mut pairs) = (0.0, 0.0, 0.0, 0);
+        for g in 0..groups {
+            for q in (g..groups).filter(|&q| cut.linked[g] & (1 << q) != 0) {
+                let z: C64 = self.rows[g].iter().map(|&i| self.parts[g][i].conj() * self.parts[q][i]).sum();
+                (self.norms[g * groups + q], self.norms[q * groups + g]) = (z, z.conj());
+                if q == g {
+                    diagonal += z.re;
+                } else {
+                    ringing += 2.0 * (C64::cis((cut.centres[g] - cut.centres[q]) * s) * z).re;
+                    across += 2.0 * z.abs();
+                    pairs += 1;
+                }
+                pairs += 1;
+            }
+        }
+        (self.diagonal, self.ratio) = (diagonal, across / diagonal);
+        self.work += (pairs * self.rows.first().map_or(n, Vec::len) + pairs) as f64;
+        diagonal + ringing
+    }
+
+    /// The state at the node of the last `parts`, x = Σ_g e^{−iω_g(u − u₀)} y_g (a kept stop there).
+    fn state(&mut self, u: f64, x: &mut [C64]) {
+        let cut = self.cut.expect("a cut");
+        let s = u - self.panel.3;
+        x.fill(C64::ZERO);
+        for (part, centre) in self.parts.iter().zip(&cut.centres[..cut.groups]) {
+            let turn = C64::cis(-centre * s);
+            for (x, y) in x.iter_mut().zip(part) {
+                *x += turn * *y;
+            }
+        }
+        self.work += (cut.groups * x.len()) as f64;
+    }
+
+    /// The node k at the time u, of the weight w of its panel's rule, at the last `parts`, into the step's sums (`Sums`):
+    /// its density Σ_{g,q} V_gq y_g y_q†, V_gq = (1/N₀) Σ_L c_L μ_k(L + e_q − e_g) -- the series 1/‖x‖² = (1/N₀) Σ_L c_L
+    /// e^{iΩ_L(u − u₀)} of (−δN/N₀)^k by labels at the node, an order's terms within an eighth of the round-off ending it
+    /// (a term within a sixteenth of it left), no more than the cut's order --, as y_g z_g† (`outer`), each sum taking it
+    /// at its factor there (`Sums::factors`: its weight is in the moments) and the weights' sums w times the factor. False,
+    /// and nothing added, where the series does not hold at the node: its ratio Σ_{g≠q}|N_gq|/N₀ = r is no less than one,
+    /// or what its orders leave beyond the cut's, r^{K+1}/(1 − r), is more than an eighth of the round-off where its last
+    /// order did not end it -- the cut's order a priori is the piece's at its start, middle and end on a moving generator
+    /// (`choose`), and a node between them may ring more.
+    fn gather(&mut self, k: usize, u: f64, weight: f64, shape: &Sums, sums: &mut [f64], weights: Option<&mut [f64]>) -> bool {
+        let cut = self.cut.expect("a cut");
+        let groups = cut.groups;
+        let n = self.shifted.len();
+        let size = groups * groups;
+        let inverse = 1.0 / self.diagonal;
+        let (current, next, total) = (&mut self.current, &mut self.next, &mut self.total);
+        current.fill(C64::ZERO);
+        total.fill(C64::ZERO);
+        (current[0], total[0]) = (C64::ONE, C64::ONE);
+        let (mut done, mut ended) = (0, false);
+        for _ in 0..cut.order {
+            next.fill(C64::ZERO);
+            for i in 0..self.inner {
+                let z = current[i];
+                if z == C64::ZERO {
+                    continue;
+                }
+                for g in 0..groups {
+                    for q in (0..groups).filter(|&q| q != g && cut.linked[g] & (1 << q) != 0) {
+                        next[self.steps[i * size + g * groups + q] as usize] -= z * (self.norms[g * groups + q] * inverse);
+                        done += 1;
+                    }
+                }
+            }
+            let mut sum = 0.0;
+            for (z, t) in next.iter_mut().zip(total.iter_mut()) {
+                if z.abs() <= 0.0625 * UNIT_ROUNDOFF {
+                    *z = C64::ZERO;
+                }
+                sum += z.abs();
+                *t += *z;
+            }
+            std::mem::swap(current, next);
+            if sum <= 0.125 * UNIT_ROUNDOFF {
+                ended = true;
+                break;
+            }
+        }
+        let r = self.ratio;
+        if !(r < 1.0 && (ended || r.powi(cut.order as i32 + 1) / (1.0 - r) <= 0.125 * UNIT_ROUNDOFF)) {
+            self.work += done as f64;
+            return false;
+        }
+        for g in 0..groups {
+            for q in 0..groups {
+                let at = g * groups + q;
+                let mut v = C64::ZERO;
+                if cut.linked[g] & (1 << q) != 0 {
+                    for i in 0..self.inner {
+                        let c = self.total[i];
+                        if c != C64::ZERO {
+                            v += c * self.moment(self.blocks[i * size + at] as usize, k);
+                            done += 1;
+                        }
+                    }
+                }
+                self.weights[at] = v * inverse;
+            }
+        }
+        let slots = shape.count();
+        let width = 2 * n * row(n);
+        if slots > 1 {
+            self.node.fill(0.0);
+        }
+        for g in 0..groups {
+            let (z, rows) = (&mut self.z[g], &self.rows[g]);
+            z[..n].fill(C64::ZERO);
+            for q in (0..groups).filter(|&q| cut.linked[g] & (1 << q) != 0) {
+                let w = self.weights[g * groups + q].conj();
+                for &i in rows {
+                    z[i] += w * self.parts[q][i];
+                }
+                done += rows.len();
+            }
+            let to = if slots > 1 { &mut self.node[..] } else { &mut sums[..width] };
+            if rows.len() == n {
+                outer(&self.parts[g][..n], &self.z[g][..n], to);
+            } else {
+                // The block's upper triangle alone: the group's parts and z_g are none off its block's rows.
+                let row_width = row(n);
+                for &a in rows {
+                    let left = self.parts[g][a];
+                    for &b in rows.iter().filter(|&&b| b >= a) {
+                        let value = left * self.z[g][b].conj();
+                        to[2 * a * row_width + b] += value.re;
+                        to[(2 * a + 1) * row_width + b] += value.im;
+                    }
+                }
+            }
+        }
+        if slots > 1 {
+            let node = &self.node;
+            let mut weights = weights;
+            shape.factors(u, &mut |slot, factor| {
+                for (t, f) in sums[slot * width..(slot + 1) * width].iter_mut().zip(node) {
+                    *t = factor.mul_add(*f, *t);
+                }
+                if let Some(weights) = weights.as_deref_mut() {
+                    weights[slot] += weight * factor;
+                }
+            });
+            done += slots * n * (n + 1) / 2;
+        }
+        self.work += (done + self.rows[..groups].iter().map(|r| r.len() * (r.len() + 1) / 2).sum::<usize>()) as f64;
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The step's path and its moments.
 
-/// The fewest nodes of a path's moments (`Segment::moments`): in free flight under a force linear in the time κ is a
+/// The fewest nodes of a path's integrals (`Stretch`): in free flight under a force linear in the time κ is a
 /// quadratic and κ² a quartic of the time, which the rule of three nodes integrates exactly (to the degree 5).
 const MOMENTS: usize = 3;
 
@@ -1302,7 +2283,7 @@ const MOMENTS: usize = 3;
 /// step's kick spread over the step -- the force linear in the time that ends the step where the kick at the middle
 /// ends it --, from the step's start, or from one of the step's jumps with the momentum the jump leaves (`after`).
 /// Second order in τ at every time of the step, the step's own start and end at its two ends. T's window means are
-/// its integrals of κ (`Segment::moments`, SPEC §1.7), an output inside the step its value (`Segment::at`,
+/// its integrals of κ (`Segment::stretch`, SPEC §1.7), an output inside the step its value (`Segment::at`,
 /// `Segment::place`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment {
@@ -1369,36 +2350,172 @@ impl Segment {
         let sigma = linalg::larger(theta * (1.0 - theta), 0.0);
         sigma * (1.0 - 3.0 * sigma)
     }
-    /// ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs) per lab axis over [from, to] within the path's part of the step:
-    /// Gauss–Legendre to round-off on the path, κ² of bandwidth twice the flow's rate (`quadrature`). κ² in the mean
-    /// over the Brownian path: the path is the mean given the step's two moments, and the square of what they do not
-    /// tell is added, (Λ Λᵀ)_aa |τ| ∫σ(1 − 3σ)dt (`untold`; ∫₀^θ σ(1 − 3σ)dθ = θ²/2 − 4θ³/3 + 3θ⁴/2 − 3θ⁵/5, 1/15 over the
-    /// step) -- so that a cut of a step has the diffusion's input up to it, as the whole step has. (The residual is the
-    /// free flight's; the reference's rotation changes it by its (ωτ)² share, the third order.)
-    pub fn moments(&self, from: f64, to: f64) -> ([f64; 3], [f64; 3]) {
-        let (lo, hi) = (linalg::smaller(from, to), linalg::larger(from, to));
-        let sign = if to >= from { 1.0 } else { -1.0 };
-        let (mut one, mut two) = ([0.0; 3], [0.0; 3]);
-        if !(hi > lo) {
-            return (one, two);
-        }
-        for (t, w) in quadrature(lo, hi, 2.0 * self.flow.rate(), MOMENTS, 0) {
-            let k = self.at(t).1;
-            for x in 0..3 {
-                one[x] += sign * w * k[x];
-                two[x] += sign * w * k[x] * k[x];
-            }
-        }
+    /// What the path's piece [from, to] (within its part of the step, from ≤ to) gives T's windows: its integrals over
+    /// every part [from, at] of it (`Stretch`), the flow evaluated once per node of the piece.
+    pub fn stretch(&self, from: f64, to: f64) -> Stretch<'_> {
+        Stretch::new(self, from, to)
+    }
+    /// What the step's two moments do not tell of the Brownian path, integrated over [from, to] within the step (from ≤
+    /// to), over |τ| (`untold`; ∫₀^θ σ(1 − 3σ)dθ = θ²/2 − 4θ³/3 + 3θ⁴/2 − 3θ⁵/5, 1/15 over the step).
+    fn untold_over(&self, from: f64, to: f64) -> f64 {
         let (start, tau) = self.step;
         let integral = |time: f64| {
             let theta = (time - start) / tau;
             theta * theta * (0.5 + theta * (-4.0 / 3.0 + theta * (1.5 - 0.6 * theta)))
         };
-        let untold = sign * tau * tau * (integral(hi) - integral(lo)).abs();
-        for x in 0..3 {
-            two[x] += self.spread[x].iter().map(|l| l * l).sum::<f64>() * untold;
+        tau * tau * (integral(to) - integral(from)).abs()
+    }
+}
+
+/// The integrals of a stretch of the path (`Stretch::to`): per lab axis ∫κ_a dt and ∫κ_a² dt (1/µm·µs, 1/µm²·µs), κ² in
+/// the mean over the Brownian path -- the path is the mean given the step's two moments, and the square of what they do
+/// not tell is added, (Λ Λᵀ)_aa |τ| ∫σ(1 − 3σ)dt (`Segment::untold`), so that a cut of a step has the diffusion's input up
+/// to it, as the whole step has (the residual is the free flight's; the reference's rotation changes it by its (ωτ)²
+/// share, the third order) --; and the moments for the windows' shapes (estimate.rs `Local`), of κ alone: the path's
+/// mean, what the step's moments do not tell of the Brownian path has no mean.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Integrals {
+    pub one: [f64; 3],
+    pub two: [f64; 3],
+    pub local: Local,
+}
+impl Integrals {
+    /// Nothing integrated, the shapes' moments about the time `centre`.
+    pub fn none(centre: f64) -> Integrals {
+        Integrals { one: [0.0; 3], two: [0.0; 3], local: Local { centre, ..Local::NONE } }
+    }
+    /// The sums over nodes (t, w, κ) -- each its time, its weight and κ there --, the shapes' moments about `centre`.
+    pub fn of(centre: f64, nodes: impl IntoIterator<Item = (f64, f64, [f64; 3])>) -> Integrals {
+        let mut sums = Integrals::none(centre);
+        for (t, w, kappa) in nodes {
+            sums.add(t, w, kappa);
         }
-        (one, two)
+        sums
+    }
+    fn add(&mut self, t: f64, w: f64, kappa: [f64; 3]) {
+        let d = t - self.local.centre;
+        for x in 0..3 {
+            let mut power = w * kappa[x];
+            self.one[x] += power;
+            self.two[x] += power * kappa[x];
+            for m in self.local.moments[x].iter_mut() {
+                *m += power;
+                power *= d;
+            }
+        }
+    }
+    fn plus(&self, o: &Integrals) -> Integrals {
+        let mut sum = *self;
+        for x in 0..3 {
+            sum.one[x] += o.one[x];
+            sum.two[x] += o.two[x];
+            for (m, n) in sum.local.moments[x].iter_mut().zip(&o.local.moments[x]) {
+                *m += n;
+            }
+        }
+        sum
+    }
+}
+
+/// The nodes of one of a stretch's panels of the width w (`Stretch`), κ of the flow's bandwidth ν: the most of three
+/// rules, each to the round-off (`fewest`, `resolved`) -- κ² (the bandwidth 2ν), κ times a polynomial of the degree
+/// `SHAPE` (the shapes' moments; at least `MOMENTS` + ⌈SHAPE/2⌉ nodes, the degree of a quadratic κ times the power
+/// whatever the bandwidth), and the interpolant through κ at the nodes, which is κ to the round-off (a panel's part).
+fn stretched(nu: f64, width: f64) -> usize {
+    let shapes = fewest(nu, width, MOMENTS + SHAPE.div_ceil(2), SHAPE);
+    fewest(2.0 * nu, width, MOMENTS, 0).max(shapes).max(resolved(nu, width, MOMENTS, 0, true))
+}
+
+/// A piece [from, to] of a step's path as T's windows read it (solve.rs `Windows`): its integrals over every part
+/// [from, at] (`to`), the flow evaluated once per node of the piece, whatever the windows' ends inside it. Its panels
+/// are the fewest nodes in all (`arranged`) of rules that each integrate to the round-off κ², κ times every power of the
+/// time to the degree `SHAPE`, and whose polynomial through κ at the nodes is κ to the round-off (`stretched`). A part
+/// ends inside a panel: the panels before it are their sums, the panel's part the same rule over it on that polynomial
+/// (barycentric on the Gauss–Legendre nodes, its weights (−1)^j √((1 − x_j²) w_j); exact to round-off: it is κ's degree
+/// the rule integrates, not the interpolant's). The shapes' moments are about the piece's middle.
+pub struct Stretch<'a> {
+    segment: &'a Segment,
+    from: f64,
+    width: f64,
+    rule: std::rc::Rc<Rule>,
+    barycentric: Vec<f64>,
+    kappa: Vec<[f64; 3]>,
+    /// The integrals over the first p panels, p = 0…panels.
+    sums: Vec<Integrals>,
+}
+impl<'a> Stretch<'a> {
+    /// The piece on the fewest nodes in all (`arranged`), none where it has no length.
+    fn new(segment: &'a Segment, from: f64, to: f64) -> Stretch<'a> {
+        let (length, nu) = (to - from, segment.flow.rate());
+        let panels = if length > 0.0 { arranged(length, |w| stretched(nu, w), |m| m as f64, || false).0 } else { 0 };
+        Stretch::on(segment, from, to, panels)
+    }
+    /// The piece on `panels` equal panels, each of the nodes its width asks (`stretched`).
+    fn on(segment: &'a Segment, from: f64, to: f64, panels: usize) -> Stretch<'a> {
+        let (centre, length) = (0.5 * (from + to), to - from);
+        let n = if panels > 0 { stretched(segment.flow.rate(), length / panels as f64) } else { MOMENTS };
+        let rule = rule(n);
+        let barycentric = rule.nodes.iter().zip(&rule.weights).enumerate().map(|(j, (x, w))| if j % 2 == 0 { 1.0 } else { -1.0 } * ((1.0 - x * x) * w).sqrt()).collect();
+        let width = if panels > 0 { length / panels as f64 } else { 0.0 };
+        let mut kappa = Vec::with_capacity(panels * n);
+        let mut sums = Vec::with_capacity(panels + 1);
+        sums.push(Integrals::none(centre));
+        for p in 0..panels {
+            let middle = from + (p as f64 + 0.5) * width;
+            let mut panel = Integrals::none(centre);
+            for (x, weight) in rule.nodes.iter().zip(&rule.weights) {
+                let t = middle + 0.5 * width * x;
+                let k = segment.at(t).1;
+                kappa.push(k);
+                panel.add(t, 0.5 * width * weight, k);
+            }
+            sums.push(sums[p].plus(&panel));
+        }
+        Stretch { segment, from, width, rule, barycentric, kappa, sums }
+    }
+    /// The integrals over [from, at] (`Integrals`), `at` within the piece.
+    pub fn to(&self, at: f64) -> Integrals {
+        let panels = self.sums.len() - 1;
+        let mut sums = if panels == 0 || !(at > self.from) {
+            self.sums[0]
+        } else {
+            let p = (((at - self.from) / self.width).floor() as usize).min(panels);
+            let start = self.from + p as f64 * self.width;
+            if p == panels || !(at > start) {
+                self.sums[p]
+            } else {
+                // The panel's part [start, at] by the rule over it, κ there the panel's polynomial.
+                let n = self.rule.nodes.len();
+                let values = &self.kappa[p * n..(p + 1) * n];
+                let (middle, half) = (start + 0.5 * self.width, 0.5 * self.width);
+                let mut part = Integrals::none(self.sums[0].local.centre);
+                for (x, weight) in self.rule.nodes.iter().zip(&self.rule.weights) {
+                    let t = 0.5 * (start + at) + 0.5 * (at - start) * x;
+                    part.add(t, 0.5 * (at - start) * weight, self.interpolate(values, (t - middle) / half));
+                }
+                self.sums[p].plus(&part)
+            }
+        };
+        let untold = self.segment.untold_over(self.from, linalg::larger(at, self.from));
+        for x in 0..3 {
+            sums.two[x] += self.segment.spread[x].iter().map(|l| l * l).sum::<f64>() * untold;
+        }
+        sums
+    }
+    /// The polynomial through `values` at the rule's nodes at x (barycentric, the second form; a node's own value at it).
+    fn interpolate(&self, values: &[[f64; 3]], x: f64) -> [f64; 3] {
+        let (mut top, mut bottom) = ([0.0; 3], 0.0);
+        for ((node, lambda), value) in self.rule.nodes.iter().zip(&self.barycentric).zip(values) {
+            if x == *node {
+                return *value;
+            }
+            let c = lambda / (x - node);
+            bottom += c;
+            for a in 0..3 {
+                top[a] += c * value[a];
+            }
+        }
+        top.map(|t| t / bottom)
     }
 }
 
@@ -1573,7 +2690,7 @@ pub fn density(x: &[C64], rho: &mut [C64]) {
 
 /// A trajectory's scratch memory for its steps, made with it and fitted to each step's cluster (`Scratch::fit`): the
 /// generator's picture along the step's path (`spectral::Picture`: the generator at the step's nodes, its decomposition,
-/// its following, the state's path), one array carved (`Scratch::carve`) into the middle state's density and a
+/// its following, the state's path), one array carved (`Scratch::carve`) into the step's mean state's density and a
 /// Hermitian sum the model takes, and four laid as `accumulate` holds its sums: the nodes' weighted sums of the states'
 /// densities, the sums as they stood where the panel being propagated began (`Midway::stretch`), a span's own inside a
 /// panel (`fallen`), and the generator's decay laid on the sums (`pictured`); and the states a panel keeps -- its
@@ -1591,6 +2708,9 @@ pub struct Scratch {
     sums: Vec<f64>,
     met: Vec<(Stop, f64, [C64; STATES])>,
     noise: Noise,
+    /// The kick's sums by groups (`Groups`). (Until 2026-11-22 also the model's candidate tones at a step's middle, which
+    /// told whether a cluster of ground states took one node: it takes one whatever its tones, `pictured`.)
+    groups: Groups,
     /// The sums' count (`Sums`), and the weights' sums of the step and as they stood at a panel's start.
     slots: usize,
     weights: Vec<f64>,
@@ -1614,14 +2734,16 @@ enum Stage {
     Prepared,
 }
 
-/// What a stretch has done as far as it went, beside its picture (`Midway::stretch`): its states and whether its
-/// generator is still, the nodes gathered into the sums and the hazard's traces (`Price::nodes`, `Price::traces`), and
+/// What a stretch has done as far as it went, beside its picture (`Midway::stretch`): its states, whether its static
+/// group does not change over the step (`still`: one sum, `Sums`) and whether it takes the model's generator at the
+/// middle alone, held there (`held`; # One node a step), the nodes gathered into the sums and the hazard's traces (`Price::nodes`, `Price::traces`), and
 /// where it passed the middle the scattered light's count (`Price::scattering`) -- what a refused stretch's count reads
 /// (`unfinished`).
 #[derive(Clone, Copy, Default)]
 struct Progress {
     states: usize,
     still: bool,
+    held: bool,
     counted: usize,
     traces: usize,
     scattering: f64,
@@ -1630,6 +2752,7 @@ struct Progress {
 struct Carved<'a> {
     picture: &'a mut Picture,
     noise: &'a mut Noise,
+    groups: &'a mut Groups,
     held: &'a mut [C64],
     sum: &'a mut [C64],
     tones: &'a mut [C64],
@@ -1658,7 +2781,8 @@ impl Scratch {
     fn fit(&mut self, n: usize, slots: usize) {
         self.picture.fit(n);
         self.slots = slots;
-        self.rest.resize((4 + TONE * (slots.saturating_sub(SUMS) / TONE)) * n * n, C64::ZERO);
+        // The middle's density, three sums and the tones' (`Carved`): of three nodes six a tone, of one two.
+        self.rest.resize((4 + slots) * n * n, C64::ZERO);
         self.sums.resize(4 * slots * 2 * n * row(n), 0.0);
         self.weights.resize(slots.max(SUMS), 0.0);
         self.kept.resize(slots.max(SUMS), 0.0);
@@ -1676,7 +2800,7 @@ impl Scratch {
         let decay = &mut rest[..size];
         let width = self.slots.max(SUMS);
         let (weights, kept) = (&mut self.weights[..width], &mut self.kept[..width]);
-        Carved { picture: &mut self.picture, noise: &mut self.noise, held, sum, tones, sums, saved, part, decay, met: &mut self.met, weights, kept }
+        Carved { picture: &mut self.picture, noise: &mut self.noise, groups: &mut self.groups, held, sum, tones, sums, saved, part, decay, met: &mut self.met, weights, kept }
     }
 }
 
@@ -1688,38 +2812,42 @@ impl Scratch {
 /// stretch adds up (`Price::work`): its count and its price at once.
 mod count {
     use super::COMPLEX;
-    /// The propagation: the model's generator at the step's nodes -- three, or the one of a path it is still along --
+    /// The propagation: the model's generator at the step's nodes -- three, or the one of a step of one node (`one`) --
     /// and the picture's own count of its complex multiply-adds (`spectral::Picture::work`: the decomposition, the
     /// slopes, the following, the hops, the states at the nodes).
-    pub fn propagation(model: [f64; 3], still: bool, picture: f64, tones: f64) -> f64 {
-        COMPLEX * (if still { 1.0 } else { 3.0 } * model[0] + picture + tones)
+    pub fn propagation(model: [f64; 3], one: bool, picture: f64, tones: f64) -> f64 {
+        COMPLEX * (if one { 1.0 } else { 3.0 } * model[0] + picture + tones)
     }
     /// The kick's part of the state through `nodes` nodes: per node its density's upper triangle into the weighted
-    /// sums (one on a still path, three on a beating one); then the model's one form of the sum, or on a beating path
-    /// the middle state's density, laid with the middle node's sum, and the three nodes' forms -- where the stretch
-    /// holds the step's middle (`centred`), the middle's with the fixed point's tones on the middle state
+    /// sums (one on a step of one node, three on one of three); then the model's one form of the sum, or on three nodes
+    /// the reference state's density laid with the middle node's sum, and the three nodes' forms -- where the stretch
+    /// holds the step's middle (`centred`), the mean state's from its three sums and the middle's form with the fixed
+    /// point's tones on it
     /// (`Middle::centre`: a form and a `tones`). Of the exact tones (`tones` of them, their forms' counted work
-    /// `forces`): per node and tone a density again and its six sums (`super::Sums`); their two matrices, each its three
-    /// nodes' sums added, with the nodes' sums at their phases, and their forms.
+    /// `forces`): on three nodes per node and tone a density again and its six sums (`super::Sums`), their two
+    /// matrices, each its three nodes' sums added, with the nodes' sums at their phases, and their forms; on one node
+    /// its two sums into the density's pass and their two matrices less the static sum, and their forms.
     pub fn impulse(n: usize, model: [f64; 3], nodes: usize, still: bool, centred: bool, tones: usize, forces: f64) -> f64 {
-        let forms = if still { model[1] } else { (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] } else { 0.0 } };
-        gathered(n, nodes, still, tones) + COMPLEX * (forms + (16 * tones * n * n) as f64 + forces)
+        let forms = if still { model[1] } else { (2 * n * n) as f64 + 3.0 * model[1] + if centred { model[2] + (2 * n * n) as f64 } else { 0.0 } };
+        let toned = if still { 3 } else { 16 };
+        gathered(n, nodes, still, tones) + COMPLEX * (forms + (toned * tones * n * n) as f64 + forces)
     }
-    /// The kick's nodes alone (`impulse`'s first part): per node its density's upper triangle into the weighted sums,
-    /// and per node and tone a density again and its six sums.
+    /// The kick's nodes alone (`impulse`'s first part): per node its density's upper triangle into the weighted sums;
+    /// on three nodes per node and tone a density again and its six sums, on one node each tone's two sums in the
+    /// density's pass.
     pub fn gathered(n: usize, nodes: usize, still: bool, tones: usize) -> f64 {
-        let sums = if still { 1 } else { 3 };
-        COMPLEX * (nodes * ((1 + sums) * n * (n + 1) / 2 + (1 + super::TONE) * tones * n * (n + 1) / 2)) as f64
+        let per = if still { 2 + 2 * tones } else { 4 + (1 + super::TONE) * tones };
+        COMPLEX * (nodes * per * n * (n + 1) / 2) as f64
     }
     /// The end state's held forms (# The path's momentum): its density and one more node's forms with its tones'.
     pub fn end(n: usize, model: [f64; 3], tones: f64) -> f64 {
         COMPLEX * ((n * n) as f64 + model[1] + tones)
     }
-    /// The survival's hazard (# Jumps): the generator's decay laid on the sums -- at the step's nodes, one or three on a
-    /// beating path, and each of the `tones` exact tones' six (`super::Sums`) -- once, and `traces` of it on the sums,
-    /// each over the same upper triangles.
+    /// The survival's hazard (# Jumps): the generator's decay laid on the sums -- at the step's nodes, one or three, and
+    /// each of the `tones` exact tones' two or six (`super::Sums`) -- once, and `traces` of it on the sums, each over the
+    /// same upper triangles.
     pub fn hazard(n: usize, traces: usize, still: bool, tones: usize) -> f64 {
-        let sums = if still { 1 } else { super::SUMS + super::TONE * tones };
+        let sums = super::slots(still, tones);
         COMPLEX * ((1 + traces) * sums * n * (n + 1) / 2) as f64
     }
 }
@@ -1732,16 +2860,20 @@ fn nodes(tau: f64, bandwidth: f64) -> usize {
 
 /// The picture of the generator along a step's path (`spectral::Picture`), prepared on `start`, the frame's state the
 /// step is launched with (none: any; `Picture::prepare`'s reached states): the model's generator at the step's middle
-/// and, unless it is still along every path, at the step's two ends -- its static group, and its exact tones' envelopes
-/// at the three nodes (`Middle::beats`). The decay is laid into `decay` first in the order of the kick's sums
-/// (`Sums`): the static group's node by node (−h, 0, h, or the middle alone where Ĥ is still), then each tone's at each
-/// node at the phases 0 and π/2 -- the survival's hazard (# Jumps). Returns the largest sum over the nodes of the moduli
-/// the decay's entries can reach (the static group's and each tone's two at once); a generator at a node that is no
-/// number refuses the step (`Refused::Overflow`: nothing of it can be propagated), and so does a step the decomposition
-/// does not take (`Refused::Propagation`).
-fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<&[C64]>) -> Result<f64, Refused> {
+/// and, unless the step takes one model's node -- the generator still along every path, or held at the middle on a
+/// cluster of ground states alone (`ground`; # One node a step) --, at the step's two ends: its static group, and its
+/// exact tones' envelopes at the three nodes or at the middle alone (`Middle::beats`; `Picture::separate`, `held`). The
+/// decay is laid into `decay` first in the order of the kick's sums (`Sums`): the static group's node by node (−h, 0,
+/// h, or the middle alone where it does not change), then each tone's at each node at the phases 0 and π/2 -- the
+/// survival's hazard (# Jumps). Returns the largest sum over the nodes of the moduli the decay's entries can reach (the
+/// static group's and each tone's two at once); a generator at a node that is no number refuses the step
+/// (`Refused::Overflow`: nothing of it can be propagated), and so does a step the decomposition does not take
+/// (`Refused::Propagation`). `still` is given as whether the generator is still along every path (`Middle::still`:
+/// then it has no candidates) and is returned as whether the static group does not change over the step (`Sums`): a
+/// still generator's, or a held one's whose candidates are all tones.
+fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start: Option<&[C64]>, ground: bool, still: &mut bool) -> Result<f64, Refused> {
     let _p = crate::prof::scope(crate::prof::PICTURED);
-    let (h, still, n) = (0.5 * tau, along.middle.still(), along.n);
+    let (h, n) = (0.5 * tau, along.n);
     scratch.stage = Stage::None;
     let picture = &mut scratch.picture;
     picture.fit(n);
@@ -1751,7 +2883,12 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     }
     let _g = crate::prof::scope(crate::prof::PIC_GENERATOR);
     along.middle.generator(&along.path, 0.0, &mut picture.base);
-    if !still {
+    // The model's candidates: none where its generator is still along every path.
+    // The model's candidates: none where its generator is still along every path. One model's node on ground states
+    // alone (`held`) or where the generator is still.
+    let (candidates, held) = (!*still, ground);
+    let picture = &mut scratch.picture;
+    if !(held || *still) {
         along.middle.generator(&along.path, -h, &mut picture.ends[0]);
         along.middle.generator(&along.path, h, &mut picture.ends[1]);
     }
@@ -1759,14 +2896,15 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     scratch.stage = Stage::Made;
     let picture = &mut scratch.picture;
     let numbers = |m: &Mat| m.data.iter().all(|z| z.re.is_finite() && z.im.is_finite());
-    if !(numbers(&picture.base) && (still || picture.ends.iter().all(numbers))) {
+    if !(numbers(&picture.base) && (held || *still || picture.ends.iter().all(numbers))) {
         return Err(Refused::Overflow);
     }
     let _s = crate::prof::scope(crate::prof::PIC_SEPARATE);
     picture.separate(
         h,
+        held,
         |beats, keys| {
-            if !still {
+            if candidates {
                 along.middle.beats(&along.path, beats, keys);
             }
         },
@@ -1778,6 +2916,12 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
     if !picture.beats.iter().flat_map(|tone| tone.members.iter().flatten()).all(numbers) {
         return Err(Refused::Overflow);
     }
+    // The static group's sum alone where it does not change over the step: a held generator's whose candidates are all
+    // tones (`separate`), or a still one's.
+    if held {
+        *still = picture.weighed.is_empty();
+    }
+    let still = *still;
     let slots = Sums { still, h, tones: &picture.beats }.count();
     scratch.fit(n, slots);
     let Carved { picture, decay, .. } = scratch.carve();
@@ -1794,16 +2938,20 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
         *size = laid(of(|k| g.data[k], n), n, j, decay);
     }
     for (m, tone) in picture.beats.iter().enumerate() {
-        for (j, size) in sizes.iter_mut().enumerate() {
-            let [plus, minus] = [&tone.members[0][j].data, &tone.members[1][j].data];
-            let at = SUMS + TONE * m + 2 * j;
+        for (j, size) in sizes.iter_mut().enumerate().take(if still { 1 } else { SUMS }) {
+            let node = if still { 1 } else { j };
+            let [plus, minus] = [&tone.members[0][node].data, &tone.members[1][node].data];
+            let at = if still { 1 + 2 * m } else { SUMS + TONE * m + 2 * j };
             *size += laid(of(|k| plus[k] + minus[k], n), n, at, decay) + laid(of(|k| C64::I * (plus[k] - minus[k]), n), n, at + 1, decay);
         }
     }
     let scale = sizes.into_iter().fold(0.0, linalg::larger);
     let _r = crate::prof::scope(crate::prof::PIC_PREPARE);
     scratch.stage = Stage::Prepared;
-    scratch.picture.prepare(h, still, start).map_err(Refused::Propagation)?;
+    // A static group that does not change with tones beside it is prepared as one of three whose envelopes are their
+    // constants (`separate`, `held`).
+    let static_path = still && scratch.picture.beats.is_empty();
+    scratch.picture.prepare(h, static_path, start).map_err(Refused::Propagation)?;
     Ok(scale)
 }
 
@@ -1814,23 +2962,29 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
 /// scattered light where the stretch passed the middle. Not the middle's forms, the end state's held forms nor the
 /// optical sector: each is made past the last place a stretch is refused before it.
 fn unfinished<M: Middle>(generator: &M, progress: &Progress, scratch: &Scratch) -> f64 {
-    let (n, still, picture) = (progress.states, progress.still, &scratch.picture);
+    let (n, still, held, picture) = (progress.states, progress.still, progress.held, &scratch.picture);
     let costs = generator.work();
-    let (tones, toned) = if scratch.stage >= Stage::Separated { (picture.beats.len(), toned(generator, picture, n)) } else { (0, [0.0; 2]) };
-    let made = if scratch.stage >= Stage::Made { count::propagation(costs, still, if scratch.stage == Stage::Prepared { picture.work } else { 0.0 }, toned[0]) } else { 0.0 };
+    let (tones, toned) = if scratch.stage >= Stage::Separated { (picture.beats.len(), toned(generator, picture, n, still, held)) } else { (0, [0.0; 2]) };
+    let made = if scratch.stage >= Stage::Made { count::propagation(costs, still || held, if scratch.stage == Stage::Prepared { picture.work } else { 0.0 }, toned[0]) } else { 0.0 };
     let laid = if scratch.stage == Stage::Prepared { count::hazard(n, progress.traces, still, tones) } else { 0.0 };
-    generator.made() + made + laid + count::gathered(n, progress.counted, still, tones) + progress.scattering
+    generator.made() + made + laid + count::gathered(n, progress.counted, still, tones) + COMPLEX * scratch.groups.work + progress.scattering
 }
 
 /// A stretch's tones' counts (`Price::toned`): their envelopes at the three nodes, the candidates weighed and left in the
 /// static group at the middle alone, the weighing (`spectral::Picture::separate`) and the tones' sums; and their forms'.
-fn toned<M: Middle>(generator: &M, picture: &Picture, n: usize) -> [f64; 2] {
+/// Where the step holds its generator at the middle (`held`; # One node a step) each tone's envelopes a third
+/// (`Middle::tone_work`: of three nodes), taken out at the middle alone, each candidate left in the static group its
+/// two phases at the outer nodes; its forms a third where the static group does not change (`still`: one sum), else the
+/// three nodes' at the middle and each candidate's phases at the outer nodes, two forms of a third each.
+fn toned<M: Middle>(generator: &M, picture: &Picture, n: usize, still: bool, held: bool) -> [f64; 2] {
     let [envelopes, forces] = picture.beats.iter().fold([0.0; 2], |sum, tone| {
-        let work = generator.tone_work(tone.candidate);
-        [sum[0] + work[0], sum[1] + work[1]]
+        let [envelopes, forces] = generator.tone_work(tone.candidate);
+        [sum[0] + if held { envelopes / 3.0 } else { envelopes }, sum[1] + if still { forces / 3.0 } else { forces }]
     });
     let envelopes = envelopes + picture.weighed.iter().map(|&m| generator.tone_work(m)[0] / 3.0).sum::<f64>() + picture.weighing;
-    [envelopes + (6 * picture.beats.len() * n * n) as f64, forces]
+    let (taken, phases) = if held { (2, 4 * picture.weighed.len()) } else { (6, 0) };
+    let shifted = if held && !still { picture.beats.iter().map(|t| t.candidate).chain(picture.weighed.iter().copied()).map(|m| 2.0 * generator.tone_work(m)[1] / 3.0).sum::<f64>() } else { 0.0 };
+    [envelopes + ((taken * picture.beats.len() + phases) * n * n) as f64, forces + shifted]
 }
 
 /// A Hermitian matrix Γ (by its entries `gamma`) laid as the sum j of those `accumulate` holds: on each entry a ≤ b its
@@ -1872,12 +3026,36 @@ fn hazard(decay: &[f64], sums: &[f64], n: usize) -> f64 {
 /// ∫h over [from, to] (# Jumps) on the propagation's states at the nodes of the span's own quadrature at the step's
 /// bandwidth to the round-off (`Picture::at`: any time after the launch), their densities summed into
 /// `part` as the kick's sums are, the weights' sums into `weights` (`gather`): the survival inside a panel, where a
-/// jump's root lies -- and, a span before the root, the kick's part of it. Returns it and the nodes taken.
-fn fallen(picture: &mut Picture, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
+/// jump's root lies -- and, a span before the root, the kick's part of it. Where the piece's sums are by groups
+/// (`Groups`), the span's are by its cut, its own panels (`Groups::spanned`). Returns it and the nodes taken.
+#[allow(clippy::too_many_arguments)]
+fn fallen(picture: &mut Picture, groups: &mut Groups, still: bool, h: f64, (from, to): (f64, f64), bandwidth: f64, decay: &[f64], part: &mut [f64], weights: &mut [f64]) -> (f64, usize) {
     let _p = crate::prof::scope(crate::prof::FALLEN);
     let n = picture.states();
     part.fill(0.0);
     let (mut x, mut nodes) = ([C64::ZERO; STATES], 0);
+    if groups.groups > 1 {
+        let (spanned, mut a, mut held) = (groups.spanned(to - from), from, true);
+        'span: for (b, rule) in panels(from, to, spanned) {
+            groups.begin(picture.origin(), a, b, spanned.1);
+            for (u, w, k) in rule {
+                groups.parts(picture, u);
+                nodes += 1;
+                if !groups.gather(k, u, w, &Sums { still, h, tones: &picture.beats }, part, Some(&mut *weights)) {
+                    held = false;
+                    break 'span;
+                }
+            }
+            a = b;
+        }
+        if held {
+            return (hazard(decay, part, n), nodes);
+        }
+        // The cut's series does not hold at a node (`Groups::gather`): the span, and the piece's rest, by the plain rule.
+        groups.plain();
+        part.fill(0.0);
+        weights.fill(0.0);
+    }
     for (u, w) in quadrature(from, to, bandwidth, FORMS, 2) {
         picture.at(u, &mut x[..n]);
         Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), part);
@@ -1896,11 +3074,13 @@ fn taken(part: &[f64], spanned: &[f64], sums: &mut [f64], weights: &mut [f64]) {
     }
 }
 
-/// What the kick's and the survival's sums hold (`accumulate`): one where Ĥ is still along the path, the three nodes'
-/// on a beating one (each node's weight times the nodes' Lagrange polynomials), and six of each exact tone of the step
-/// (`spectral::Picture::separate`) -- per node j its weight times ℓ_j(u) cos νu and ℓ_j(u) sin νu, the density's sum at
-/// e^{iνu} with the node's weight = the first + i the second (their sum over j the tone's whole, Σ_j ℓ_j = 1) --, in that
-/// order: the tone's forms at its exact phase, its envelope through the nodes as the propagation takes it.
+/// What the kick's and the survival's sums hold (`accumulate`). Where the step takes one node (`still`; # One node a
+/// step): the static group's one, each node's weight, and two of each exact tone of the step, its weight times cos νu
+/// and sin νu -- the density's sum at e^{iνu} the first + i the second --, the generator at the middle and each tone at
+/// its exact phase (`spectral::Picture::separate`, `held`). On three nodes: the three nodes' (each node's weight times
+/// the nodes' Lagrange polynomials), and six of each exact tone -- per node j its weight times ℓ_j(u) cos νu and ℓ_j(u)
+/// sin νu (their sum over j the tone's whole, Σ_j ℓ_j = 1) --, in that order: the tone's forms at its exact phase, its
+/// envelope through the nodes as the propagation takes it.
 #[derive(Clone, Copy)]
 struct Sums<'a> {
     still: bool,
@@ -1908,16 +3088,65 @@ struct Sums<'a> {
     tones: &'a [Beat],
 }
 
+/// The sums' count of a step (`Sums`): of one node (`still`) one and two a tone, of three nodes three and six a tone.
+const fn slots(still: bool, tones: usize) -> usize {
+    if still { 1 + 2 * tones } else { SUMS + TONE * tones }
+}
+
 impl Sums<'_> {
     /// The sums' count.
     fn count(&self) -> usize {
-        if self.still { 1 } else { SUMS + TONE * self.tones.len() }
+        slots(self.still, self.tones.len())
     }
 
-    /// A node's state at the time u with its weight into the sums, the weights' sums into `weights` where asked.
+    /// Each sum's factor at the time u, its node's weight apart (`Groups::gather`): where the step takes one node, one
+    /// and each tone's cos νu and sin νu; else the three nodes' Lagrange polynomials ℓ_j(u) and each tone's ℓ_j(u) cos νu
+    /// and ℓ_j(u) sin νu, in the sums' order.
+    fn factors(&self, u: f64, each: &mut dyn FnMut(usize, f64)) {
+        if self.still {
+            each(0, 1.0);
+            for (m, tone) in self.tones.iter().enumerate() {
+                let (sin, cos) = (tone.beat * u).sin_cos();
+                each(1 + 2 * m, cos);
+                each(2 + 2 * m, sin);
+            }
+            return;
+        }
+        let s = u / self.h;
+        let lagrange = [0.5 * s * (s - 1.0), 1.0 - s * s, 0.5 * s * (s + 1.0)];
+        for (j, l) in lagrange.iter().enumerate() {
+            each(j, *l);
+        }
+        for (m, tone) in self.tones.iter().enumerate() {
+            let (sin, cos) = (tone.beat * u).sin_cos();
+            for k in 0..TONE {
+                each(SUMS + TONE * m + k, lagrange[k / 2] * if k % 2 == 0 { cos } else { sin });
+            }
+        }
+    }
+
+    /// A node's state at the time u with its weight into the sums, the weights' sums into `weights` where asked (on
+    /// three nodes: one node's are none of the step's).
     fn gather(&self, u: f64, weight: f64, x: &[C64], weights: Option<&mut [f64]>, sums: &mut [f64]) {
         if self.still {
-            accumulate(x, &[weight], sums);
+            if self.tones.is_empty() {
+                accumulate(x, &[weight], sums);
+                return;
+            }
+            // The factors in the sums' order, a few at once into one pass of the density (`accumulate`).
+            let size = 2 * x.len() * row(x.len());
+            let (mut chunk, mut first, mut held) = ([0.0; 8], 0, 0);
+            self.factors(u, &mut |_, factor| {
+                chunk[held] = weight * factor;
+                held += 1;
+                if held == chunk.len() {
+                    accumulate(x, &chunk, &mut sums[first * size..]);
+                    (first, held) = (first + held, 0);
+                }
+            });
+            if held > 0 {
+                accumulate(x, &chunk[..held], &mut sums[first * size..]);
+            }
             return;
         }
         let s = u / self.h;
@@ -1995,7 +3224,8 @@ fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f6
 /// below, the sliver past it within the rounding. Without a far end the spans may reach the panel's end below ln θ: the
 /// panel holds no root, and its sums are the spans'. Returns the root (none in the panel), ∫h from the panel's start to
 /// the latest time below, the nodes taken and the hazard's traces.
-fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
+#[allow(clippy::too_many_arguments)]
+fn root(picture: &mut Picture, groups: &mut Groups, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
     let _p = crate::prof::scope(crate::prof::ROOT);
     let after = |u: f64, v: f64| (v - u) * (b - a) > 0.0;
     // (time, ∫h from the panel's start) at the latest time below the root.
@@ -2025,7 +3255,7 @@ fn root(picture: &mut Picture, (still, h, bandwidth): (bool, f64, f64), (decay, 
             break;
         }
         let mut spanned = vec![0.0; weights.len()];
-        let (fell, taken_nodes) = fallen(picture, still, h, (below.0, u), bandwidth, decay, part, &mut spanned);
+        let (fell, taken_nodes) = fallen(picture, groups, still, h, (below.0, u), bandwidth, decay, part, &mut spanned);
         (nodes, traces) = (nodes + taken_nodes, traces + 1);
         // A span that ends within ln N's rounding past the root ends at it: a step aimed at the root lands there within
         // that rounding either way, and is taken.
@@ -2327,8 +3557,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// The stretch's part of the kick is exact in its decomposition (module documentation, # The kick): the force
     /// along the path, −∫Re tr(Ĝ(u)ρ(u))du over the stretch, Ĝ through the step's three nodes u_j = −h, 0, h and their
     /// Lagrange polynomials ℓ_j -- Σ_j Re tr(Ĝ(u_j) S_j), S_j = Σ_k w_k ℓ_j(u_k) ρ_k over the stretch's nodes, three
-    /// forms of the model --; and in the stretch the step's middle lies in, about the middle state held in the frame
-    /// over the whole step: its shear at r_h, each tone at its beat alone (τ sinc(Ωτ/2)), and S_j less W_j ρ_m, W_j = ∫ℓ_j
+    /// forms of the model --; and in the stretch the step's middle lies in, about the stretch's mean state ρ̄ held in the
+    /// frame over the whole step (Σ_j S_j/Σ_j W_j over what the stretch took, # The kick): its shear at r_h, each tone at
+    /// its beat alone (τ sinc(Ωτ/2)), and S_j less W_j ρ̄, W_j = ∫ℓ_j
     /// over the step -- the weights' sum over every piece of the step, and of what is left of it past this stretch.
     /// Of a state that does not change that difference is its rounding, and nothing where there is one state. Where
     /// Ĥ is still along every path Ĝ is one matrix, and the stretch's part its one form with ∫ρ(u)du. The middle's
@@ -2340,13 +3571,21 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let h = 0.5 * tau;
         let velocity = kappa_m.map(|k| hm * k);
         let along = Along::new(generator, kappa_m, velocity);
-        let (n, still, cluster) = (along.n, generator.still(), march.state.cluster);
-        march.progress = Progress { states: n, still, ..Progress::default() };
+        let (n, cluster) = (along.n, march.state.cluster);
+        // Whether the step takes its generator at the middle alone (# One node a step): where it is still, or where the
+        // cluster holds ground states alone, whatever its tones (`pictured`).
+        let ground = {
+            let shape = self.model.cluster(cluster);
+            shape.ground == shape.states.len()
+        };
+        march.progress = Progress { states: n, still: generator.still(), held: ground, ..Progress::default() };
+        scratch.groups.work = 0.0;
         let mut launched = Some(along.turned(&march.state.psi, march.u, true));
-        // The nodes' sums (`Sums`): one where Ĥ is still, the three nodes' and the step's tones' on a beating path; the
-        // decay laid alike.
-        let scale = pictured(&along, scratch, tau, launched.as_ref().map(|x| &x[..n]))?;
-        let Carved { picture, noise, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
+        // The nodes' sums (`Sums`): one where the step takes one node, the three nodes' and the step's tones' on a
+        // beating path; the decay laid alike.
+        let scale = pictured(&along, scratch, tau, launched.as_ref().map(|x| &x[..n]), ground, &mut march.progress.still)?;
+        let (still, single) = (march.progress.still, march.progress.held);
+        let Carved { picture, noise, groups, held, sum, tones, sums, saved, part, decay, met, weights, kept } = scratch.carve();
         // What the picture's preparation counted (`Price::made`); what it counts on from here is its states'.
         let (bandwidth, size, prepared) = (picture.bandwidth, sums.len(), picture.work);
         sums.fill(0.0);
@@ -2411,16 +3650,30 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             march.progress.traces += 1;
             // The panel's start and ln N there; the stops met, the middle and the times read as far as they stand.
             let (mut a, mut log, mut passed, mut read, mut crossed) = (from, first, march.passed, march.read, None);
-            // The panels: as many as leave the fewest nodes, on whether the survival ends in the piece (`count`).
-            let laid = count(h - from, bandwidth, FORMS, 2, || {
-                picture.at(h, &mut x[..n]);
-                norm_sqr(&x[..n]) <= march.state.threshold
-            });
-            for (b, nodes) in panels(from, h, laid) {
+            // The panels: as many as leave the fewest nodes, on whether the survival ends in the piece (`count`); on a
+            // step of one node by the piece's eigencomponents in the groups of the least cost (`Groups::choose`).
+            let threshold = march.state.threshold;
+            let mut ends = |picture: &mut Picture| {
+                let mut y = [C64::ZERO; STATES];
+                picture.at(h, &mut y[..n]);
+                norm_sqr(&y[..n]) <= threshold
+            };
+            let tones = picture.beats.len();
+            let choosing = crate::prof::scope(89);
+            let mut laid = groups.choose(picture, from, h, (still, tones), &mut ends);
+            drop(choosing);
+            let mut layout = panels(from, h, laid);
+            while let Some((b, nodes)) = layout.next() {
+                let grouped = groups.groups > 1;
+                if grouped {
+                    groups.begin(picture.origin(), a, b, laid.1);
+                }
                 let mut nodes = nodes.peekable();
                 met.clear();
                 saved.copy_from_slice(sums);
                 kept.copy_from_slice(weights);
+                // Where a node's series does not hold (`Groups::gather`), the panel is taken again from its start.
+                let (passed_at, read_at, mut held) = (passed, read, true);
                 // The latest time taken and, once the propagation's norm is at the threshold, that time: the crossing
                 // the norm predicts lies past it (the norm is the survival to the propagation's accuracy, and costs n a
                 // stop). From then on the panel's nodes are not taken -- its kick's part is the root's spans --, its kept
@@ -2433,33 +3686,51 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     let kept = Some(fixed).filter(|&(u, _)| ahead(u) <= ahead(b));
                     let node = if predicted.is_none() { nodes.peek().copied() } else { None };
                     let (u, weight, keep) = match (node, kept) {
-                        (Some((u, w)), Some((stop, kind))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
+                        (Some((u, w, k)), Some((stop, kind))) if (u - stop).abs() <= f64::EPSILON * h.abs() => {
                             nodes.next();
-                            (stop, Some(w), Some(kind))
+                            (stop, Some((w, k)), Some(kind))
                         }
-                        (Some((u, w)), Some((stop, _))) if ahead(u) < ahead(stop) => {
+                        (Some((u, w, k)), Some((stop, _))) if ahead(u) < ahead(stop) => {
                             nodes.next();
-                            (u, Some(w), None)
+                            (u, Some((w, k)), None)
                         }
                         (_, Some((stop, kind))) => (stop, None, Some(kind)),
-                        (Some((u, w)), None) => {
+                        (Some((u, w, k)), None) => {
                             nodes.next();
-                            (u, Some(w), None)
+                            (u, Some((w, k)), None)
                         }
                         (None, None) => break,
                     };
-                    {
+                    // The state there: a node's parts by groups (its state itself where a stop is there too), or the
+                    // state; and its norm.
+                    let norm = {
                         let _p = crate::prof::scope(crate::prof::AT_NODES);
-                        picture.at(u, &mut x[..n]);
-                    }
+                        if grouped && weight.is_some() {
+                            let norm = groups.parts(picture, u);
+                            if keep.is_some() {
+                                groups.state(u, &mut x[..n]);
+                            }
+                            norm
+                        } else {
+                            picture.at(u, &mut x[..n]);
+                            norm_sqr(&x[..n])
+                        }
+                    };
                     read = looked(picture, reads, read, (start, h), u, met);
-                    if predicted.is_none() && norm_sqr(&x[..n]) <= march.state.threshold {
+                    if predicted.is_none() && norm <= march.state.threshold {
                         predicted = Some(last);
                     }
-                    if let (Some(w), None) = (weight, predicted) {
+                    if let (Some((w, k)), None) = (weight, predicted) {
                         march.progress.counted += 1;
                         let _p = crate::prof::scope(crate::prof::GATHER);
-                        Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), sums);
+                        if grouped {
+                            if !groups.gather(k, u, w, &Sums { still, h, tones: &picture.beats }, sums, Some(&mut *weights)) {
+                                held = false;
+                                break;
+                            }
+                        } else {
+                            Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), sums);
+                        }
                     }
                     last = u;
                     if let Some(kind) = keep {
@@ -2469,6 +3740,17 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                             _ => passed = true,
                         }
                     }
+                }
+                if !held {
+                    // The cut's series does not hold at a node of this panel: the piece's rest from the panel's start by the
+                    // plain rule (`count`), the sums, the weights, the stops and the reads as they stood at its start.
+                    sums.copy_from_slice(saved);
+                    weights.copy_from_slice(kept);
+                    (passed, read) = (passed_at, read_at);
+                    groups.plain();
+                    laid = count(h - a, bandwidth, FORMS, 2, || ends(picture));
+                    layout = panels(a, h, laid);
+                    continue;
                 }
                 read = looked(picture, reads, read, (start, h), b, met);
                 // The panel's end: where the norm predicted a crossing, the root from the panel's start (`root`); else ln N
@@ -2488,7 +3770,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     let floor = rounding(2 * march.progress.counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
                     sums.copy_from_slice(saved);
                     weights.copy_from_slice(kept);
-                    let (crossed, fell, nodes, spans) = root(picture, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
+                    let (crossed, fell, nodes, spans) = root(picture, groups, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
                     (march.progress.counted, march.progress.traces) = (march.progress.counted + nodes, march.progress.traces + spans);
                     match crossed {
                         Some(crossed) => picture.at(crossed, &mut x[..n]),
@@ -2518,6 +3800,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     break;
                 }
                 (a, log) = (b, end);
+                // A root's span that left the cut (`fallen`): the piece's rest by the plain rule.
+                if grouped && groups.groups == 1 {
+                    laid = count(h - a, bandwidth, FORMS, 2, || ends(picture));
+                    layout = panels(a, h, laid);
+                }
             }
             let Some(crossed) = crossed else {
                 march.state.psi = at(&x[..n], h, log);
@@ -2562,8 +3849,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             march.state.forms = forms;
         }
         let t_m = start + h;
-        // The stretch's part of the kick; in the middle's stretch about the middle state, with the scattered light and the
+        // The stretch's part of the kick; in the middle's stretch about its mean state, with the scattered light and the
         // optical sector's rate there.
+        let forming = crate::prof::scope(91);
         let part = if still {
             let sum = &mut sum[..n * n];
             whole(sums, 0, n, sum);
@@ -2571,11 +3859,40 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 let fixed = along.middle.path(kappa_m, [0.0; 3]);
                 march.state.forms = Forms { time: t_m, ..forms_at(along.middle, &fixed, rho) }.less(self.reference);
             }
-            along.middle.force(&along.path, 0.0, sum).map(|f| -f)
+            // The middle's forms: the static group's and every tone's at the middle on the static sum; each tone's sums
+            // at its beat, σ = ∫e^{iνu}ρ, less that sum, by its own forms (`Middle::tone_force`) -- the tone at its exact
+            // phase over the step.
+            let mut out = along.middle.force(&along.path, 0.0, sum).map(|f| -f);
+            let size = n * n;
+            for ((m, tone), pair) in picture.beats.iter().enumerate().zip(tones.chunks_exact_mut(2 * size)) {
+                let (re, im) = pair.split_at_mut(size);
+                whole(sums, 1 + 2 * m, n, re);
+                whole(sums, 2 + 2 * m, n, im);
+                for (r, q) in re.iter_mut().zip(sum.iter()) {
+                    *r -= *q;
+                }
+                let form = along.middle.tone_force(&along.path, tone.candidate, &[(0.0, re, im)]);
+                for a in 0..3 {
+                    out[a] -= form[a];
+                }
+            }
+            out
         } else {
             let mut out = [0.0; 3];
             let size = n * n;
-            if let Some(middle) = &middle {
+            if middle.is_some() {
+                // The state the kick is decomposed about (module documentation, # The kick): the stretch's mean density,
+                // ∫ρ du over what of the step it took by its length -- its three nodes' sums and weights added, Σ_j ℓ_j =
+                // 1 --, before what is left of the step past it is weighed in. Of a state that does not change it is the
+                // state itself.
+                let covered: f64 = weights[..SUMS].iter().sum();
+                held[..size].fill(C64::ZERO);
+                for j in 0..SUMS {
+                    whole(sums, j, n, &mut sum[..size]);
+                    for (r, q) in held[..size].iter_mut().zip(&sum[..size]) {
+                        *r += *q * (1.0 / covered);
+                    }
+                }
                 if !done {
                     for (u, w) in quadrature(march.u, h, 0.0, FORMS, 2) {
                         let s = u / h;
@@ -2584,10 +3901,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                     }
                 }
-                density(&middle[..n], held);
             }
-            // A tone's sums at its beat at each of the three nodes (`Sums`), less the middle state's at their weights: its
-            // σ_j = Σ_k w_k ℓ_j(u_k) e^{iνu_k}(ρ_k − ρ_m) -- the weights' sums with what of the step lies outside this
+            // A tone's sums at its beat at each of the three nodes (`Sums`), less the mean state's at their weights: its
+            // σ_j = Σ_k w_k ℓ_j(u_k) e^{iνu_k}(ρ_k − ρ̄) -- the weights' sums with what of the step lies outside this
             // stretch, ∫ℓ_j(u)e^{iνu}du over [−h, its start] and past its end by the kick's rule at the tone's beat.
             for ((m, node_sums), tone) in tones.chunks_exact_mut(TONE * size).enumerate().zip(&picture.beats) {
                 let mut outside = [0.0; TONE];
@@ -2612,7 +3928,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     }
                 }
             }
-            // The middle node's form and the shear of the middle state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
+            // The middle node's form and the shear of the mean state -- each tone at its beat alone, τ sinc(Ωτ/2) -- in
             // one pass of the model's forms (`Middle::centre`); the nodes' forms hold the exact tones' at the nodes, and
             // each tone's sums at its beat take them out node by node (`Middle::tone_force`).
             let shear = |omega: f64| tau * sinc(0.5 * omega * tau);
@@ -2636,7 +3952,37 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let (s1, s2) = rest.split_at(size);
             let fixed = end.as_ref().map(|_| along.middle.path(kappa_m, [0.0; 3]));
             let _pn = crate::prof::scope(crate::prof::NODES_CALL);
-            let (forms, forms_end) = along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64)), end.as_deref().zip(fixed.as_ref()));
+            let (forms, forms_end) = if single {
+                // The held generator's forms at the three nodes from the middle's node alone (# One node a step): at
+                // s_j every beat at its phase there -- the middle's form, and each candidate's change of phase from the
+                // middle's by its own form (`Middle::tone_force` on (e^{iνs_j} − 1)S_j).
+                let candidates: Vec<(usize, f64)> = picture.beats.iter().map(|t| (t.candidate, t.beat)).chain(picture.weighed.iter().map(|&m| (m, picture.candidate_beat(m)))).collect();
+                let mut shifted = vec![C64::ZERO; 2 * size];
+                let mut forms = [[0.0; 3]; 3];
+                for (j, (at, rho)) in [-h, 0.0, h].into_iter().zip([s0, s1, &s2[..size]]).enumerate() {
+                    forms[j] = match &middle {
+                        Some(_) if j == 1 => along.middle.centre(&along.path, &held[..], &shear, rho),
+                        _ => along.middle.force(&along.path, 0.0, rho),
+                    };
+                    if j == 1 {
+                        continue;
+                    }
+                    for &(c, beat) in &candidates {
+                        let (sin, cos) = (beat * at).sin_cos();
+                        let (re, im) = shifted.split_at_mut(size);
+                        for ((r, i), q) in re.iter_mut().zip(im.iter_mut()).zip(rho) {
+                            (*r, *i) = (*q * (cos - 1.0), *q * sin);
+                        }
+                        let form = along.middle.tone_force(&along.path, c, &[(0.0, re, im)]);
+                        for a in 0..3 {
+                            forms[j][a] += form[a];
+                        }
+                    }
+                }
+                (forms, end.as_deref().zip(fixed.as_ref()).map(|(rho, fixed)| forms_at(along.middle, fixed, rho)))
+            } else {
+                along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64)), end.as_deref().zip(fixed.as_ref()))
+            };
             for form in forms {
                 for a in 0..3 {
                     out[a] -= form[a];
@@ -2646,8 +3992,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 march.state.forms = Forms { time: t_m, ..forms }.less(self.reference);
             }
             drop(_pn);
+            let _toning = crate::prof::scope(90);
             for (node_sums, tone) in tones.chunks_exact(TONE * size).zip(&picture.beats) {
-                let at: Vec<(f64, &[C64], &[C64])> = node_sums.chunks_exact(2 * size).zip([-h, 0.0, h]).map(|(pair, s)| (s, &pair[..size], &pair[size..])).collect();
+                // A held tone's envelopes are its middle's at every node (# One node a step).
+                let nodes = if single { [0.0; 3] } else { [-h, 0.0, h] };
+                let at: Vec<(f64, &[C64], &[C64])> = node_sums.chunks_exact(2 * size).zip(nodes).map(|(pair, s)| (s, &pair[..size], &pair[size..])).collect();
                 let form = along.middle.tone_force(&along.path, tone.candidate, &at);
                 for a in 0..3 {
                     out[a] -= form[a];
@@ -2655,6 +4004,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             out
         };
+        drop(forming);
         for a in 0..3 {
             march.impulse[a] += part[a];
         }
@@ -2674,6 +4024,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let price = Price {
             states: n,
             still,
+            held: single,
             tau,
             bandwidth,
             nodes: march.progress.counted,
@@ -2682,12 +4033,13 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             stops: picture.work - prepared,
             sector,
             tones: picture.beats.len(),
-            toned: toned(generator, picture, n),
+            toned: toned(generator, picture, n, still, single),
             centred: middle.is_some(),
             ended,
             middle: generator.made(),
             scattering,
             costs: generator.work(),
+            grouped: groups.work,
         };
         march.work += price.work(price.costs);
         march.prices.push((cluster, price));
@@ -2815,7 +4167,10 @@ impl Brownian {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Price {
     pub states: usize,
+    /// Whether the static group does not change over the step (one sum, `Sums`), and whether the step takes the model's
+    /// generator at the middle alone (# One node a step).
     pub still: bool,
+    pub held: bool,
     pub tau: f64,
     pub bandwidth: f64,
     pub nodes: usize,
@@ -2837,6 +4192,9 @@ pub struct Price {
     pub middle: f64,
     pub scattering: f64,
     pub costs: [f64; 3],
+    /// The kick's sums by groups beside the nodes' states and their plain densities (`Groups`: their parts' norms, the
+    /// series, the weights, the densities and the panels' moments; complex multiply-adds), none on the plain rule.
+    pub grouped: f64,
 }
 
 impl Price {
@@ -2853,7 +4211,7 @@ impl Price {
         let (n, still) = (self.states, self.still);
         let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, make));
         let end = if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 };
-        count::propagation(costs, still, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still, self.tones) + optical + end
+        count::propagation(costs, still || self.held, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still, self.tones) + optical + end + COMPLEX * self.grouped
     }
 
     /// The model's own there: the middle's making and the light scattered at the middle.
@@ -2867,8 +4225,8 @@ impl Price {
     pub fn parts(&self, costs: [f64; 3]) -> [f64; 6] {
         let (n, still) = (self.states, self.still);
         [
-            count::propagation(costs, still, self.made + self.stops, self.toned[0]),
-            count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]),
+            count::propagation(costs, still || self.held, self.made + self.stops, self.toned[0]),
+            count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + COMPLEX * self.grouped,
             count::hazard(n, self.traces, still, self.tones),
             self.sector.map_or(0.0, |(_, make)| optical_work(n, make)),
             if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 },

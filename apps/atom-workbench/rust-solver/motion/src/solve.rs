@@ -1,10 +1,11 @@
 //! The pipeline: request, run, pilot, step's check, batches, checkpoints, result (SPEC §3, §5, §9).
 //!
 //! # The pipeline
-//! 1. The request's checks; the initial components; the run (model/selected.rs `Selected`: the scene, the three-point
-//!    check's P (select.rs `choose`) and its RS fold, one object for every step of the solve, decided once before any
-//!    trajectory runs, RUSTPLAN §3.2); every initial component's prepared well and the initial ensemble drawn in them,
-//!    the reported trap, the kick's curvature (`solve`, `Setting`); the outputs' plan, the first rung (# The step).
+//! 1. The request's checks; the initial components; the selection's structural chain (select.rs `choose`) and the run
+//!    on its cheapest candidate, the full-ground model G (model/selected.rs `Selected`: the scene, P and its RS fold,
+//!    one object for every step of an attempt) -- or on the choice kept for the scene (# The selection) --; every
+//!    initial component's prepared well and the initial ensemble drawn in them, the reported trap, the kick's curvature
+//!    (`solve`, `Setting`); the outputs' plan, the first rung (# The step).
 //! 2. The scout: the first member of every pilot group, at the first rung and at twice it -- or at half it, ## A companion
 //!    at τ/2 -- (# The step), screened; where
 //!    its rung stands on its reads, its states price the rungs (## The ladder) and the pilot runs at the one the run is
@@ -12,9 +13,10 @@
 //!    (the scout's are its groups' first members and are not run again). Its groups have numbers of their own, from
 //!    trajectory `MOST_TRAJECTORIES` on: beyond every number a group of the product takes, which is its place in the
 //!    run's list (`product`). It checks the step -- on two levels, a third above and a rung below where they pay, and on
-//!    further pairs where they pay (# The step) --, and reads the model's error at every state of its run level at the
-//!    analysis times (# The model) -- every read at the analysis times, not at the outputs (# The analysis times). Its
-//!    trajectories at the run's step stay in the result: they are trajectories of the run and its step.
+//!    further pairs where they pay (# The step) --, every read at the analysis times, not at the outputs (# The analysis
+//!    times). Its trajectories at the run's step stay in the result: they are trajectories of the run and its step.
+//!    On G, where no choice is kept, the pilot's trajectories then choose P (# The selection): G chosen, the product goes
+//!    on from them; another, the attempt is made again on it, its scout and pilot its own.
 //! 3. The product: batches of whole groups at the settled step, one level, every trajectory run to the run's end and
 //!    read at the pilot's analysis times beside the outputs, until every held quantity's total lies within its target
 //!    there (# Stopping) or the trajectories reach `MOST_TRAJECTORIES`.
@@ -90,7 +92,11 @@
 //! to τ by the order (`carried`) -- lowered 2^{2p} times in the mean square, noise and all. The triple is (4τ, 2τ, τ), τ
 //! its finest step. The third level is the rung left above where the check came down from it (a level the ladder ran,
 //! left on its reads or for its price), else the pilot's trajectories at 4τ where the rung buys them (`above`: the
-//! ladder has the rung above; `buys`: their price no more than what a rung below would add, ## The ladder). Where
+//! ladder has the rung above; `buys`: their price no more than what a rung below would add, ## The ladder) -- as
+//! many of the pilot's groups as its read asks at the best, three at the least (`Third::pairs`; on more of them where
+//! it cannot see, as further pairs are taken for an own read): its pairs are its read's precision's, not the pilot's
+//! number (tilt2's third level on all 88 of its trajectories was a third of its pilot's work, each trajectory's jumps
+//! as dear at 4τ as at τ). Where
 //! the order holds across the triple both reads are of one mean square, e(τ)'s. A rung stands (`verdict`) where both
 //! estimates are within the share, M̂ ≤ b on every look (`within`) -- the larger of the two, as multilevel Monte Carlo
 //! takes the larger of its finest difference and the next one lowered by the order, so that two levels that agree by
@@ -210,7 +216,8 @@
 //!   τ/2: ## A companion at τ/2) and r_j the trajectories run at τ/2^j beside the members at τ (the scout's pairs at
 //!   τ/2 or τ/4, `foresee`; the members at τ/2 where that is the companion):
 //!   - staying: the pilot's companions still to run and the run level to the most of N, P and n, (P − P_m) w(c) +
-//!     (max(N, P, n) − n) w(τ) (`staying`), and the third level P w(4τ) where the rung buys it;
+//!     (max(N, P, n) − n) w(τ) (`staying`), and the third level N₃ w(4τ) where the rung buys it, N₃ the pairs its read
+//!     asks in whole groups (`Third::pairs`);
 //!   - the k-th rung below, τ_k = τ/2^k, reached a rung at a time (each rung's own level its next one's companion, or
 //!     the next one's own level its companion): the members in hand at every rung on the way, the pilot's run level at
 //!     τ_k and its companions at τ_{k−1} -- or at τ_{k+1}, where that reads it at less work for its precision: τ's halved steps as its members
@@ -339,12 +346,15 @@
 //! (# The analysis times). At an output a trajectory is read inside the step the output falls in (`run`; step.rs
 //! `Step::at`): its rows as shown, its (r, κ) for the listed distributions, and its window's T sums -- cheap sums, no
 //! state kept and nothing read of the model. T's window about an output (estimate.rs `half_window`: one period of the
-//! axis, cut at t = 0) takes a trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::moments`: the
-//! path with the kick spread over the step, of the scheme's order at any cut); the first is the instant t = 0, and the
-//! run goes on through the last output's window (`Plan`). Outputs closer than a period have overlapping windows, so a
-//! window is not summed by itself: per lab axis the trajectory's running integrals of 1, κ and κ² from t = 0 are kept
-//! at every window's two ends, and a window is their difference (`run`) -- each step's path integrated once, and once
-//! more up to each end that falls inside it, whatever the windows' overlap.
+//! axis, cut at t = 0) takes a trajectory's κ and κ² over the cuts of its steps' paths (step.rs `Segment::stretch`: the
+//! path with the kick spread over the step, of the scheme's order at any cut), and its shape -- its κ on the window's
+//! Legendre polynomials, which T takes the cloud's own motion out by (estimate.rs, # The cloud's own motion); the first
+//! is the instant t = 0, and the run goes on through the last output's window (`Plan`). Outputs closer than a period
+//! have overlapping windows, so a window is not summed by itself: per lab axis the trajectory's running integrals of 1,
+//! κ and κ² from t = 0, and its running moments of κ against the powers of the time about a grid of origins
+//! (estimate.rs `Shapes`), are kept at every window's two ends, and a window is their difference (`run`) -- each piece
+//! of a step's path evaluated once (step.rs `Stretch`: its panels' sums, and up to each end inside it the panel's
+//! polynomial), whatever the windows' overlap.
 //!
 //! The times the decisions read (# The analysis times) are read the same way, their windows cut at the run's end as
 //! well, so that they stay centred (the trajectories run to the run's end and no further); a time that is an output
@@ -403,8 +413,8 @@
 //!   read is no end -- an interval whose reads lie on its line stands whole and adds no time. (First built with the
 //!   intervals bounded instead, by the slowest axis's window, every end a time: PGC3D 1 ms read at 26 analysis times,
 //!   2200 rows of the units, and took 1.23 times 717cb386's CPU over three alternating pairs.)
-//! - The model's error is no reading of the times: it is the three points' measured error, the same at every state
-//!   (`booked_at`), read where the atoms went (# Where the atoms went).
+//! - The model's error is no reading of the times: it is the choice's account at each of them (# The selection), and
+//!   the region left out read at the states where the atoms went (`booked_at`; # Where the atoms went).
 //! - What stands on them: the step's mean square (estimate.rs `between`, each time by its share of the run); every
 //!   state of the pilot's run level there, each group's every member held and every atom lost by then (`sampled`), the
 //!   model's error and the looks'; the product's looks, batches and unresolved atoms; the prices at one state of every
@@ -416,27 +426,64 @@
 //!   flagged at 11 of 1000 outputs, at most 5.4 % with 5.1 % of statistics, and 2 of 100, its reason "not finished".)
 //!
 //! # The model (SPEC §5.2)
-//! The model is decided once, before any trajectory runs (RUSTPLAN §3.2; model/selected.rs `Selected`): P is the
-//! smallest set of the ground states and whole excited levels whose RS fold meets the 1 % gate against the full
-//! reference at the three points, the centre, the edge and on the tweezer's axis at +z_R, where its intensity is half
-//! (select.rs `choose`), and the fold's formula and coefficients
-//! are fixed with it. The solve decides nothing of it. What the solve books of the model is that measurement
-//! (`Selected::error`), one account (`READINGS`): at every state the chosen P's largest population error at the three
-//! points on the populations (absolute) and its largest rate or force error on T (relative), as a rate or a force
-//! wrong by x moves T by x (`booked_at`); one that is no number -- a P no check measured -- the state's whole.
-
+//! An attempt's model is one object, made before its trajectories run (RUSTPLAN §3.2; model/selected.rs `Selected`),
+//! and decides nothing during it. What the solve books of the model is its choice's account (# The selection; select.rs
+//! `Choice::at`), at every analysis time: on what is shown the path-measured direct part, T and the loss none of their
+//! own -- the internal error's feedback through the motion is not booked, the user's of 2026-11-22, and the run says so
+//! once (`NO_FEEDBACK`) --; beside them the region left out, read at the states (`booked_at`, # Where the atoms went),
+//! and the bounds of `bounded`. An
+//! attempt with no choice -- G's before it chooses, a test's model of its own -- books none and says so (the ledger's
+//! flag): its error is not measured.
+//!
+//! # The selection (PIPELINE_V3_FINAL §二 B.7–B.11; select.rs)
+//! Where no choice is kept for the scene (select.rs `kept`: the request without its times), the attempt on G chooses P
+//! once its pilot stands (`choose_on_the_pilot`). Where G's fold scatters beyond every state of the atom at every one of
+//! its pilot's paths' starts (step.rs, # The domain: the runaway, which no step's length helps; SAT_3's resonant
+//! D2-3-3, its first-order excitation 1.5), no path goes past its start and nothing can be chosen on them: the attempt
+//! is made on the structural chain's next model, and so on up (`piloted`; the top folds nothing), and the choice is made
+//! on that pilot among the chain's models above it (G and the others below it ran away where the atoms start).
+//! 1. The paths: `select::WALKS` of the pilot's trajectories at the run's step (`walks`) -- twice as many, and so on up
+//!    to all of them, while a candidate weighed is complete at its direct part's lower end and not at its upper (its
+//!    fate open at the paths' statistics, Student's t at the paths less one; select.rs, # How many paths), every
+//!    candidate judged again on them before any is scouted --, cut at L = min(T, 5 τ_mem),
+//!    τ_mem the full-ground model's memory time, the longest over their starts; the 32-state reference along them, at
+//!    the setting read along the longest of them, and along the scans of the trap's axes (select.rs `Paths`).
+//! 2. T's memory is not read here: the flag of its being no shorter than the run is the product's, on the run's own
+//!    trajectories at its end (`memory_at_the_end`; select.rs, # The feedback through the motion: zero).
+//! 3. The candidates of the chain: each one's model made, its step's work a µs at the pilot's states and step
+//!    (`priced`), its judgment along the paths (select.rs `judge`), its parts at the analysis times and the looks they
+//!    leave (`looks`). A candidate whose looks that the exact model's would meet are met by its account is complete,
+//!    its work W the product's trajectories its looks need times its work over the run, and -- not G -- the scout's and
+//!    the pilot's again on it. The rest are not chosen. G is judged first; where it is not complete, the least complete
+//!    candidate (the anchor) is found by bisection (the chain nested, its error taken no less than the next's).
+//! 4. From the anchor the chain is searched upwards until a candidate's least W -- at no model error at all, at the
+//!    ladder's first rung's step, its pilot again -- is no lower than the least W found (the chain's work grows with
+//!    its states); the complete ones but G are scouted at their own step in the order of their least W while it stands
+//!    below the least found; P is the complete candidate of least W. The choice is kept for the scene, and said (stderr
+//!    and the ledger's items): every candidate's parts, work and fate, the stages' times.
+//! The pilot's step check is priced at no model error while the choice is not made: the error is measured on the
+//! paths of the step it settles.
+//!
 //! ## Where the atoms went
 //! The model is judged where the atoms went, not only where the held ones are at the analysis times (`sampled`). What is
 //! shown at a time is every atom's fate there -- a held atom's rows, a lost one's loss --, so the model errs on it by the
 //! mean over the atoms of the error of each one's fate (`Measured::means`): the held atoms' at their states there, by
 //! the held share 1 − L, and the lost atoms' along their paths, by L. A lost atom's fate was decided along its path
 //! from t = 0 to its loss, the first of its own states whose loss energy is above the escape value, the potential's far
-//! value (SPEC §1.7; adapt.rs, # The reads; step.rs `Dynamics::lost`): a rate's relative error x along that path moves
-//! its loss's time by x of it to the first order, and its fate's error is the path's mean of x, read where the run reads
-//! every atom and at the path's end: at t = 0, at the analysis times it was held at, and at its last checkpoint
-//! (`Record::trail`), within one window of its loss -- a state the loss test found held, as every checkpoint after
-//! t = 0 is (`run`: a trajectory is stopped at a checkpoint only while it holds its atom) -- by the trapezoid on them
-//! (`Booking::path`). The state it was found lost in is read nowhere: its fate is sealed there. (Read there, as half of the path, the 1D
+//! value (SPEC §1.7; adapt.rs, # The reads; step.rs `Dynamics::lost`): its fate's error is the path's mean of the
+//! model's error at its states -- each state's the region left out's there (`booked_at`: the row's error a scan read
+//! where it flagged the region, none elsewhere; PIPELINE_V3_FINAL §二 C.13) --, read where the run reads every atom and
+//! at the path's end: at t = 0, at the analysis times it was held at, and at its last checkpoint (`Record::trail`),
+//! within one window of its loss -- a state the loss test found held, as every checkpoint after t = 0 is (`run`: a
+//! trajectory is stopped at a checkpoint only while it holds its atom) -- by the trapezoid on them (`Booking::path`).
+//! The state it was found lost in is read nowhere: its fate is sealed there. What the model's error in the rates along
+//! the path does to the loss's time -- a relative error x moves it by x of it to the first order -- is the motion's
+//! feedback, and is not booked (select.rs, # The feedback through the motion: zero, the user's of 2026-11-22): R9_PUSH's
+//! full-ground model scatters 11 to 12 % above the 32 states on its paths and pushes its atoms out that much early, its
+//! loss 0.18 above the reference at 26 µs, none of it booked. (Until 2026-11-22 this said the fate's error was the
+//! path's mean of the rates' relative error x: written when every state took the three points' measured error
+//! (`Selected::error`), and left when P3 (429c36cd) read the region's row error at the states instead and the feedback
+//! was then set to zero; motion3d_status/rewrite/selcost.status.md, 十五.) (Read there, as half of the path, the 1D
 //! PGC tilted 3° over 10 ms -- three of four atoms lost by 4 ms, each found at the trap's rim, 2 µm off its axis, where
 //! its strong near light (3 to 5 Γ, 38 I_sat a beam) left the old model's fold wrong by 0.32–0.48 against 0.004–0.032
 //! at every held state -- booked half its error there.) An atom held near the rim is read there where an analysis time
@@ -478,15 +525,16 @@
 //!
 //! # Stopping (SPEC §3)
 //! Every quantity held to a target -- at every analysis time after t = 0 what is shown, and the total T -- has the total
-//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the three points' measurement booked at the pilot's states
-//! -- its held atoms' and its lost atoms' paths (# The model: where the atoms went) -- and the optical sector's booking, and c
+//! E² = A² + c² + S² (ledger.rs; `Look`): A the model's error, the choice's account at the time (# The model, # The
+//! selection) with the region left out booked at the pilot's states -- its held atoms' and its lost atoms' paths (# Where
+//! the atoms went) -- and the optical sector's booking, and c
 //! what the step's check leaves open (its rms over the run), both fixed by the pilot -- A with what the atoms whose
 //! state the run does not know carry, read with every look (# The unresolved atoms; `bounded`) --; S the statistics'
 //! interval. The
 //! run stops where every one of them lies within its target: the test the ledger flags an output by, at the outputs
 //! (`Look::met`). The stop reads the run's standard errors, its unresolved atoms, and nothing else of its estimates. A
 //! look that no run's trajectories bring within its target -- its need beyond `MOST_TRAJECTORIES`, or A² + c² ≥ ε²
-//! (`Look::fits`): the model's error booked is the selected P's measurement, which no number of trajectories lowers -- is
+//! (`Look::fits`): the model's error booked is the selected P's account, which no number of trajectories lowers -- is
 //! not chased: the ledger flags it.
 //!
 //! The trajectories a look needs (`Look::need`): the statistics may take the room R² = ε² − A² − c², and fall as
@@ -551,25 +599,33 @@
 //! # Steps
 //! Beside the results, the solve says where its pipeline stands (`Stage`, `Messages::stage`) -- what no result can say
 //! where no trajectory runs: the selection, the model, and which of the scout, the pilot and the product's batches the
-//! trajectories are of. A stage is sent as a step begins (`run_of`: the selection and the model; `attempt`: the scout
-//! and the pilot; `product`: every batch, with its trajectories, the number it brings the run to and how far its looks
-//! stand from their targets) and as the step's check moves to another rung (`check`) -- when it changes, never
-//! otherwise. It decides nothing, is no part of the result and is kept nowhere: its one reader is the app's course of a
-//! running solve (src/solve-progress.ts).
+//! trajectories are of. A stage is sent as a step begins (`solve`: the model, and the selection where it is the kept
+//! one; `attempt`: the scout and the pilot; `choose_on_the_pilot`: the selection; `product`: every batch, with its
+//! trajectories, the number it brings the run to and how far its looks stand from their targets) and as the step's
+//! check moves to another rung (`check`) -- when it changes, never otherwise. The order (the app's, src/solve-progress.ts):
+//! - a new selection: Model (the structural chain and G's model are the model's making) → Scout (G's) → Pilot →
+//!   Select (along the pilot's paths; a candidate's short scout is part of it and says nothing of its own) → where the
+//!   choice is not G, Model → Scout → Pilot → Product; where it is G, Product;
+//! - the choice kept for the scene: Select (at once) → Model → Scout → Pilot → Product.
+//! Select and Model have no rung (`Stage::tau` none: the app takes a step there for no progress); the scout, the pilot
+//! and the product are at theirs.
+//! It decides nothing, is no part of the result and is kept nowhere: its one reader is the app's course of a running
+//! solve (src/solve-progress.ts).
 use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{allowance, between, draws_for, half_window, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Scales, Spread};
+use crate::estimate::{self, allowance, between, draws_for, half_window, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Local, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
 use crate::model::selected::{Potential, Selected};
+use crate::select::{Choice, Region, Selection};
 use crate::model::optical::Unmade;
 use crate::model::potential::descend;
 use crate::model::{Sample, Trap, GROUND};
 use crate::request::STATES;
-use crate::step::{stumpff, Dynamics, Refused, Scratch, Segment, Trajectory};
+use crate::step::{stumpff, Dynamics, Integrals, Refused, Scratch, Segment, Trajectory};
 use crate::units::{hbar_over_mass, CLASSICAL, CONFIDENCE, KT_PER_UK, MOST_STEPS, MOST_TRAJECTORIES, ORDER, STEP_SHARE};
 use rayon::prelude::*;
 use std::collections::VecDeque;
@@ -592,13 +648,17 @@ const DISTRIBUTION_TIMES: usize = 21;
 /// interval. The other half is left to what runs between two messages and sends none (module documentation,
 /// # Checkpoints): a margin, not a bound derived from those stages' work. It times messages and decides no result.
 const CHECKPOINT: Duration = Duration::from_secs(60);
-/// What the engine did with the model's error (the ledger's `action`, shown by the app): measured once, at the three
-/// points, against the full reference (module documentation, # The model).
-const MODEL_MEASURED: &str = "模型（选出的 P 及其 RS 折叠）在开头一次定下；这一项误差是中心、边缘和光镊轴上 +z_R（光强一半）处三点上对完整参照的实测";
+/// What the engine did with each part of the model's error (the ledger's items' `action`, shown by the app; module
+/// documentation, # The model, # The selection): the paths' direct part, the feedback bound, T in pairs, the region.
+const MODEL_DIRECT: &str = "沿先导的原子路径，候选模型与 32 态模型推进内态密度矩阵、比较显示的各行（按记忆时间分窗的路径平均 + 2 倍路径间统计误差），另加路径格式对其自身细化（子步、分段各加倍）的校准";
+/// The run's one word on the feedback through the motion (module documentation, # The model; select.rs, # The feedback
+/// through the motion: zero): the ledger's item of no estimate, read by the app's error budget list.
+const NO_FEEDBACK: [&str; 2] = ["模型误差：内态误差经运动对读数的影响", "未计：按用户 2026-11-22 的决定取 0（更严格的上界收不紧，FOLDTEMP 第三轮）；温度与丢失没有模型误差项"];
+const MODEL_REGION: &str = "沿准备阱三条主轴的扫描在路径没到过的地方标出误差大于目标四分之一的区域；轨迹在其中的份额按该处误差（布居）与束缚集里的移动界（温度）记账";
 
-/// The model's accounts a state's error is booked by, with the ledger's name of each (module documentation, # The
-/// model): the three points' measured error, one account; a state's row holds it and its combination (the same).
-const READINGS: [&str; 1] = ["选出的 P 的模型误差（中心、边缘、光镊轴上 +z_R 三点实测）"];
+/// The model's accounts a state's error is booked by (module documentation, # Where the atoms went): the region left
+/// out; a state's row holds it and its combination (the same).
+const READINGS: [&str; 1] = ["模型误差：少去区域"];
 
 /// A distribution along one lab axis on one grid (strictly increasing, at least two points) at some of the output
 /// times (`samples`: increasing indices, the last output among them), each the probability at every grid point
@@ -651,32 +711,131 @@ pub struct Solution {
 /// wall time left (ms) where the run's pace gives one, and each step the pipeline enters (# Steps) --, the final
 /// solution returned; partial results are never withheld.
 ///
-/// The run is one object, made once for the request and the same at every step of the solve (model/selected.rs
-/// `Selected`: the scene, the three-point check's P and its fold): what the solve takes of it beside the steps -- the
-/// prepared potentials and their traps, the initial ensemble drawn in them, the reported trap, the kick's curvature
-/// (`Setting`) -- is made from it here, and the pipeline runs once (`attempt`). A request it refuses (the scene, the
-/// selection, a trap that does not hold the atom, no step below the edge) is refused with its reason, before a
-/// trajectory runs.
+/// An attempt's run is one object, the same at every step of the attempt (model/selected.rs `Selected`: the scene, P
+/// and its fold): what the solve takes of it beside the steps -- the prepared potentials and their traps, the initial
+/// ensemble drawn in them, the reported trap, the kick's curvature (`Setting`) -- is made from it (`solve_with`), and
+/// the pipeline runs on it (`attempt`). The first is the choice kept for the scene, or else G (where G's fold runs away
+/// at every start of its pilot, the chain's first model that does not, `piloted`), whose pilot makes the choice (# The
+/// selection): it chosen, its attempt is the solve; another, the attempt is made again on it. A request
+/// it refuses (the scene, a trap that does not hold the atom, no step below the edge) is refused with its reason,
+/// before a trajectory runs.
 pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
     request.validate()?;
-    let run = run_entered(request, alone(chief(request)), &mut |step| send(Message::Stage(&Stage { step, tau: None, batch: None })))?;
-    solve_on(request, &run, send)
+    let mut messages = Messages { send, clock: Instant::now(), last: None, least: 0, stage: None };
+    let reference = alone(chief(request));
+    // The choice kept for the scene (# Steps: Select at once, then the model).
+    if let Some(choice) = crate::select::kept(request) {
+        messages.stage(Stage { step: Step::Select, tau: None, batch: None });
+        messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+        let scene = crate::scene::Scene::new(request)?;
+        let selection = crate::select::choose(&scene)?;
+        let run = Selected::new(scene, Selection { keep: choice.keep.clone(), choice: Some(choice.clone()), ..selection }, reference)?;
+        return solved(solve_with(request, &run, Choosing::Made(Some(choice)), &mut messages));
+    }
+    // A new selection (# Steps: the structural chain and G's model are the model's making).
+    messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+    let (attempted, selection) = piloted(request, reference, Choosing::Make, &mut messages)?;
+    match attempted {
+        Attempted::Solved(s) => Ok(s),
+        Attempted::Scouted(_) => unreachable!("an attempt that makes the choice is no scout"),
+        Attempted::RanAway => unreachable!("`piloted` goes up the chain past a model that ran away"),
+        Attempted::Chose(choice) => {
+            messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+            let run = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: choice.keep.clone(), choice: Some(choice.clone()), ..selection }, reference)?;
+            solved(solve_with(request, &run, Choosing::Made(Some(choice)), &mut messages))
+        }
+    }
 }
 
-/// The run of a request at the reference populations `reference` (`solve`): its scene, the three-point check's P
-/// (`select::choose`) and its fold (`run_entered`, its steps said to no one): the tests' run.
+/// An attempt that was to solve (`Choosing::Made`): its solution.
+fn solved(attempted: Result<Attempted, String>) -> Result<Solution, String> {
+    match attempted? {
+        Attempted::Solved(s) => Ok(s),
+        Attempted::Chose(_) | Attempted::Scouted(_) | Attempted::RanAway => unreachable!("an attempt on a choice made solves"),
+    }
+}
+
+/// The attempt that makes the choice (`Choosing::Make`; the tests' `Choose`) on the cheapest model of the structural
+/// chain whose pilot goes past its start (# The selection; PIPELINE_V3_FINAL §二 B.7: the scout and the pilot on the
+/// cheapest candidate): G, and where every one of G's paths stopped at its start, its fold scattering beyond every state
+/// of the atom there (`Attempted::RanAway`; step.rs, # The domain: no length of a step makes the fold hold), the chain's
+/// next model, and so on up -- the chain's top folds nothing, and no state of it scatters beyond the atom's. Each model
+/// made again is the pipeline's Model step again. With it the selection it was taken from (the structural chain).
+fn piloted(request: &Request, reference: [f64; GROUND], choosing: Choosing, messages: &mut Messages) -> Result<(Attempted, Selection), String> {
+    let selection = crate::select::choose(&crate::scene::Scene::new(request)?)?;
+    let top = selection.chain.len() - 1;
+    for place in 0..=top {
+        if place > 0 {
+            messages.stage(Stage { step: Step::Model, tau: None, batch: None });
+        }
+        let run = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: selection.chain[place].clone(), ..selection.clone() }, reference)?;
+        match solve_with(request, &run, choosing.clone(), messages)? {
+            Attempted::RanAway if place < top => eprintln!(
+                "  注：P{} 的折叠在先导每条路径的起点就超过原子任何状态的散射率（失控，任何步长都一样），没有一条路径走过起点：先导改在链上的下一档 P{} 上重做",
+                selection.chain[place].len(),
+                selection.chain[place + 1].len()
+            ),
+            Attempted::RanAway => return Err("the chain's top ran away at its pilot's every start (it folds nothing: no state of it can)".into()),
+            attempted => return Ok((attempted, selection)),
+        }
+    }
+    unreachable!("the chain's top ends the climb")
+}
+
+/// What an attempt does with the choice of P (module documentation, # The selection): takes the one made, or none
+/// (`Made`: its model's error booked from it, or not measured); makes it on its pilot and goes on to the product where
+/// it chose the attempt's own model (`Make`), or stops there whatever it chose (`Choose`: the tests' `chosen`); or a
+/// candidate's own scout alone, its rung read and nothing chosen (`Scout`: the choice's pricing of a candidate at its
+/// own step, `choose_on_the_pilot`).
+#[derive(Clone)]
+enum Choosing {
+    Made(Option<std::sync::Arc<Choice>>),
+    Make,
+    Scout,
+    #[cfg(test)]
+    Choose,
+}
+
+/// How an attempt ended: its solution, the choice of another model (or, `Choosing::Choose`, of any), (`Scout`) the
+/// rung its scout stands at (µs), or -- where it was to make the choice -- its model's fold beyond every state of the
+/// atom at every one of its pilot's paths' starts, so that no path went past its start and nothing is chosen on them
+/// (`choose_on_the_pilot`; `piloted` takes the chain's next model).
+enum Attempted {
+    Solved(Solution),
+    Chose(std::sync::Arc<Choice>),
+    Scouted(f64),
+    RanAway,
+}
+
+/// The run of a request at the reference populations `reference`: its scene and the selection's cheapest candidate,
+/// the full-ground model G, with its fold -- the run the scout and the pilot are made on where no choice is kept (# The
+/// selection) --: the tests' run of a model, whose error is not measured.
 #[cfg(test)]
 pub(crate) fn run_of(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
-    run_entered(request, reference, &mut |_| {})
-}
-
-/// The run of a request (`run_of`), each of its steps handed to `entered` as it begins (# Steps).
-fn run_entered(request: &Request, reference: [f64; GROUND], entered: &mut dyn FnMut(Step)) -> Result<Selected, String> {
-    entered(Step::Select);
     let scene = crate::scene::Scene::new(request)?;
     let selection = crate::select::choose(&scene)?;
-    entered(Step::Model);
     Selected::new(scene, selection, reference)
+}
+
+/// The run of a request on the P its selection chooses (# The selection), at the reference populations `reference`:
+/// the choice kept for the scene, or made on the pilot (`piloted`: G's, or the chain's first model that does not run
+/// away; its attempt stopped there) and kept. The tests' chosen run.
+#[cfg(test)]
+pub(crate) fn chosen(request: &Request, reference: [f64; GROUND]) -> Result<Selected, String> {
+    let scene = crate::scene::Scene::new(request)?;
+    let selection = crate::select::choose(&scene)?;
+    let choice = match crate::select::kept(request) {
+        Some(choice) => choice,
+        None => {
+            let mut send = |_: Message| {};
+            let mut messages = Messages { send: &mut send, clock: Instant::now(), last: None, least: 0, stage: None };
+            match piloted(request, alone(chief(request)), Choosing::Choose, &mut messages)?.0 {
+                Attempted::Chose(choice) => choice,
+                Attempted::Solved(_) | Attempted::Scouted(_) | Attempted::RanAway => unreachable!("an attempt that chooses stops at its choice"),
+            }
+        }
+    };
+    Selected::new(scene, Selection { keep: choice.keep.clone(), choice: Some(choice), ..selection }, reference)
 }
 
 /// The reference state (SPEC §2.1): the initial component of the largest population, of equal ones the last.
@@ -686,8 +845,17 @@ pub(crate) fn chief(request: &Request) -> usize {
     initial[chief].0
 }
 
-/// The solve of a request on its run (`solve`): the selection's report to stderr, the run's setting, the pipeline.
+/// The solve of a request on a run of its own (the tests'): its error booked from the choice kept for the scene where
+/// that choice is this run's P, and else not measured (# The model).
+#[cfg(test)]
 pub(crate) fn solve_on(request: &Request, run: &Selected, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
+    let choice = crate::select::kept(request).filter(|c| c.keep == run.rs.keep);
+    let mut messages = Messages { send, clock: Instant::now(), last: None, least: 0, stage: None };
+    solved(solve_with(request, run, Choosing::Made(choice), &mut messages))
+}
+
+/// An attempt of a request on a run (`solve`): the run's report to stderr, its setting, the pipeline (`attempt`).
+fn solve_with(request: &Request, run: &Selected, choosing: Choosing, messages: &mut Messages) -> Result<Attempted, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let initial = components(request);
     let chief = initial.iter().position(|&(s, _)| s == chief(request)).expect("the reference state is a component");
@@ -698,11 +866,10 @@ pub(crate) fn solve_on(request: &Request, run: &Selected, send: &mut dyn FnMut(M
     let trap = &wells[chief].trap;
     let reported = reported(run, &reference).ok();
     let setting = Setting { run, trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported, kick: kick_curvature(run, trap) };
-    let mut messages = Messages { send, clock: Instant::now(), last: None, least: 0, stage: None };
-    let solved = attempt(request, &setting, &mut messages);
+    let attempted = attempt(request, &setting, messages, choosing);
     // The run's counts (adapt.rs `tally`), to stderr.
     eprintln!("{}", crate::adapt::counted(true));
-    solved
+    attempted
 }
 
 /// What the solve takes of its run beside the steps (`solve`), made once.
@@ -744,8 +911,9 @@ pub enum Message<'a> {
     Stage(&'a Stage),
 }
 
-/// The steps of the pipeline a stage names (module documentation, # The pipeline): the three-point selection of P,
-/// the model (its fold, the prepared wells and the initial ensemble), the scout, the pilot and the product.
+/// The steps of the pipeline a stage names (module documentation, # The pipeline): the selection of P -- its structural
+/// chain before the scout, the choice on the pilot's paths after it (# The selection) --, the model (its fold, the
+/// prepared wells and the initial ensemble), the scout, the pilot and the product.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     Select,
@@ -784,9 +952,10 @@ impl Messages<'_> {
             self.stage = Some(stage);
         }
     }
-    /// The step's check moves to the rung `tau` (`check`): the step in hand, at that rung.
+    /// The step's check moves to the rung `tau` (`check`): the step in hand, at that rung -- where it is one that has a
+    /// rung, the scout, the pilot or the product (# Steps): a candidate's short scout runs under Select, which has none.
     fn rung(&mut self, tau: f64) {
-        if let Some(stage) = &self.stage {
+        if let Some(stage) = self.stage.as_ref().filter(|s| matches!(s.step, Step::Scout | Step::Pilot | Step::Product)) {
             let moved = Stage { tau: Some(tau), ..stage.clone() };
             self.stage(moved);
         }
@@ -821,6 +990,20 @@ impl Messages<'_> {
     /// The time until the next message is due.
     fn due(&self) -> Duration {
         CHECKPOINT.saturating_sub(self.clock.elapsed())
+    }
+    /// Between the selection's stages that run no trajectory (# The selection): where a message is due, the last
+    /// result again, or with none yet the stage the pipeline stands at again -- the app hears from the worker within its
+    /// wait (`CHECKPOINT`).
+    fn alive(&mut self) {
+        if !self.due().is_zero() {
+            return;
+        }
+        if self.last.is_some() {
+            self.again();
+        } else if let Some(stage) = &self.stage {
+            (self.send)(Message::Stage(stage));
+            self.clock = Instant::now();
+        }
     }
 }
 
@@ -1476,19 +1659,40 @@ struct Third {
     measured: Option<f64>,
 }
 impl Third {
-    /// Its work on the pilot's `pilot` trajectories: those still to run at its step.
-    fn work(&self, prices: &Prices, pilot: f64) -> f64 {
-        crate::linalg::larger(pilot - self.held, 0.) * (prices.work)(self.step)
+    /// The pairs its read is run on (module documentation, ## Two levels, three levels; `third_on_the_pilot`): those it
+    /// asks at the best -- measured on the scout's pairs (`measured`), or the rung's own noise `raw` lifted and taken back
+    /// by its factor --, above the rung in whole groups of the pilot's `pilot`, `THIRD_GROUPS` at the least, and beyond
+    /// the pilot's, further pairs; below it the pilot's at the least, its level the rung below's own or its companion's,
+    /// every member of it.
+    fn pairs(&self, pilot: f64, raw: f64) -> f64 {
+        let asks = self.measured.unwrap_or(raw * self.lift * self.factor);
+        let groups = crate::linalg::larger((asks / GROUP as f64).ceil(), THIRD_GROUPS as f64) * GROUP as f64;
+        if self.step > self.beside && groups <= pilot { groups } else { crate::linalg::larger(asks, pilot) }
     }
 
-    /// Its work for its read's precision (`read_cost`): the pairs its read needs at the best, its lift and factor on the
-    /// rung's own noise `raw`, on the pilot's at least, at its level and at the rung's level beside it.
-    fn cost(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
-        match self.measured {
-            Some(pairs) => read_cost(prices, self.step, self.held, self.beside, pilot, pilot, pairs, 1., 1.),
-            None => read_cost(prices, self.step, self.held, self.beside, pilot, pilot, raw, self.lift, self.factor),
-        }
+    /// Its work on the pilot's `pilot` trajectories: those of its pairs still to run at its step (`pairs`).
+    fn work(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
+        crate::linalg::larger(self.pairs(pilot, raw).min(pilot) - self.held, 0.) * (prices.work)(self.step)
     }
+
+    /// Its work for its read's precision (`read_cost`): its pairs (`pairs`) at its level, and those beyond the pilot's
+    /// `pilot` at the rung's level beside it; without bound where its factor is.
+    fn cost(&self, prices: &Prices, pilot: f64, raw: f64) -> f64 {
+        if self.measured.is_none() && !(self.factor < f64::INFINITY) {
+            return f64::INFINITY;
+        }
+        let pairs = self.pairs(pilot, raw);
+        crate::linalg::larger(pairs - self.held, 0.) * (prices.work)(self.step) + crate::linalg::larger(pairs - pilot, 0.) * (prices.work)(self.beside)
+    }
+}
+
+/// The least of the pilot's groups a third level above the rung is read on (`Third::pairs`): a read's spread is over
+/// its groups, and there is none on fewer than three (estimate.rs `between`).
+const THIRD_GROUPS: u64 = 3;
+
+/// The pilot's groups the pairs `pairs` fill, of the `groups` it has: the whole groups, all of them at the most.
+fn groups_for(pairs: f64, groups: usize) -> usize {
+    if pairs.is_finite() { ((pairs / GROUP as f64).ceil() as usize).clamp(1, groups) } else { groups }
 }
 
 /// The third level a rung reads where it reads one (module documentation, ## Two levels, three levels): of the sides
@@ -1611,17 +1815,19 @@ fn remedy(own: &Between, upper: Option<Upper>, holding: Holding, below: Option<B
     // The own read's pairs where its estimate is beyond (`seeing`: none it can see on, the rung below); none asked
     // where it is within.
     let own_at = if within(own) { None } else { Some(seeing(own, have)?) };
-    // The third level's pairs: those its read asks, at its levels -- the pilot's at 4τ first where it holds none.
-    let (upper_at, buy, coarser) = match upper {
+    // The third level's pairs: those its read asks, at its levels -- the pilot's at 4τ first where it holds none, as
+    // many of its groups as the read asks (`THIRD_GROUPS` at the least).
+    let (upper_at, buy, coarser, bought) = match upper {
         Some(upper) if !within(upper.read) => {
             let need = seeing(upper.read, upper.pairs)?;
             if !upper.held && !upper.buys {
                 return None;
             }
-            let base = if upper.held { upper.pairs as f64 } else { pilot };
-            (Some(n + crate::linalg::larger(need - base, 0.)), !upper.held, true)
+            let bought = (groups_for(need, (pilot / GROUP as f64) as usize).max(THIRD_GROUPS as usize) as f64 * GROUP as f64).min(pilot);
+            let base = if upper.held { upper.pairs as f64 } else { bought };
+            (Some(n + crate::linalg::larger(need - base, 0.)), !upper.held, true, bought)
         }
-        upper => (None, false, upper.is_some_and(|upper| upper.held)),
+        upper => (None, false, upper.is_some_and(|upper| upper.held), 0.),
     };
     // Nothing that cannot see asks nothing; pairs beyond a run's trajectories are none to be had.
     let at = match (own_at, upper_at) {
@@ -1639,8 +1845,8 @@ fn remedy(own: &Between, upper: Option<Upper>, holding: Holding, below: Option<B
     let extra = upper.map_or(0., |upper| upper.step);
     let stay = (at - n) * work(holding.companion.step(tau))
         + (crate::linalg::larger(at, product) - n) * work(tau)
-        + third.map_or(0., |third| third.work(prices, pilot))
-        + if buy { (pilot - upper.map_or(0., |upper| upper.ran as f64)) * work(extra) } else { 0. }
+        + third.map_or(0., |third| third.work(prices, pilot, holding.raw))
+        + if buy { crate::linalg::larger(bought - upper.map_or(0., |upper| upper.ran as f64), 0.) * work(extra) } else { 0. }
         + if coarser { (at - n) * work(extra) } else { 0. };
     // The rung below's run level at τ/2 and its companion's, each beyond what it holds.
     let (step, held) = below.companion;
@@ -1844,7 +2050,7 @@ impl Booking {
     const NONE: Booking = Booking { error: [0.; 2] };
     const WHOLE: Booking = Booking { error: [1.; 2] };
 
-    /// An error x at a state, on the populations and on T (`Selected::error`). One that is no number or without bound is
+    /// An error x at a state, on the populations and on T (`booked_at`). One that is no number or without bound is
     /// the state's whole, as an unresolved atom is booked: every row of the atom (a probability's range) and its whole
     /// part of T.
     fn of(x: [f64; 2]) -> Booking {
@@ -1883,11 +2089,13 @@ fn held_path<'a>(samples: &'a [Vec<State>], first: usize, end: &'a State) -> Opt
     Some(along)
 }
 
-/// The model's error at a state as the books take it (module documentation, # The model): the three points' measured
-/// error (`Selected::error`), the same at every state, and its combination (one account: itself); the state's whole
-/// where it is no number.
-fn booked_at(run: &Selected, _state: &State) -> Vec<Booking> {
-    vec![Booking::of(run.error()); READINGS.len() + 1]
+/// The model's error at a state as the books take it (module documentation, # The model, # Where the atoms went): the
+/// region left out (select.rs `Region`) -- a state where the tweezer's intensity is in it errs by the region's error on
+/// what is shown and is one of the share moved on T, `[e, 1]`; elsewhere none --, and its combination (one account:
+/// itself).
+fn booked_at(run: &Selected, region: &Region, state: &State) -> Vec<Booking> {
+    let at = region.error_at(crate::select::intensity(run.light(), state.sample.at.r));
+    vec![at.map_or(Booking::NONE, |e| Booking::of([e, 1.])); READINGS.len() + 1]
 }
 
 /// The states the model is read at and the model's error there (SPEC §5.2; module documentation, # Where the atoms
@@ -1921,7 +2129,7 @@ impl Sampled {
     }
 }
 
-fn sampled(run: &Selected, parts: &[&Part]) -> Sampled {
+fn sampled(run: &Selected, parts: &[&Part], region: &Region) -> Sampled {
     // The states read -- a held atom's at a time, a lost atom's at t = 0 and at its path's end --, and per lost atom its
     // path's nodes (their times and rows); per group its held states' rows by time and its lost atoms' first times lost
     // and paths.
@@ -1971,7 +2179,7 @@ fn sampled(run: &Selected, parts: &[&Part]) -> Sampled {
     let mut errors = vec![Booking::NONE; (states + paths.len()) * width];
     // A state's row, then each path's of its nodes' rows.
     let (read_rows, path_rows) = errors.split_at_mut(states * width);
-    read_rows.par_chunks_mut(width).zip(&rows).for_each(|(out, state)| out.copy_from_slice(&booked_at(run, state)));
+    read_rows.par_chunks_mut(width).zip(&rows).for_each(|(out, state)| out.copy_from_slice(&booked_at(run, region, state)));
     for (nodes, out) in paths.iter().zip(path_rows.chunks_mut(width)) {
         for (u, out) in out.iter_mut().enumerate() {
             *out = Booking::path(&nodes.iter().map(|&(t, r)| (t, read_rows[r * width + u])).collect::<Vec<_>>());
@@ -1981,8 +2189,8 @@ fn sampled(run: &Selected, parts: &[&Part]) -> Sampled {
 }
 
 /// The solve's pipeline on its run (module documentation, # The pipeline): the scout, the pilot and the step's check,
-/// the product, the result.
-fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Result<Solution, String> {
+/// the choice where it is made on this pilot (# The selection), the product, the result.
+fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosing: Choosing) -> Result<Attempted, String> {
     let hm = hbar_over_mass(request.mass_kg);
     let Setting { run, trap, ensemble, depth, kick, .. } = *setting;
     let (report, unheld) = (setting.reported.as_ref().unwrap_or(trap), setting.reported.is_none());
@@ -1995,6 +2203,16 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     ledger.note = Some(format!("初始系综：每个初态分量的原子束缚在它自己的势阱里（降低的等温分布 f ∝ e^(−E/k_BT) − 1，只含束缚原子，阱深比 k_BT 大得多时即热分布；每个主轴再乘谐振子的 Wigner 因子，T = {} μK）；布居最大的初态的阱深为 {:.1} k_BT", request.temperature_uk, depth));
     if unheld {
         ledger.flag("计算所用光场中的势没有极小：阱频、n̄、温度的窗口（一个阱周期）与验证范围都按初始势阱给出".into());
+    }
+    // The choice the model's error is booked from (module documentation, # The model): the one made, or none -- not
+    // measured, said in the ledger (the ledger without it kept for when this pilot makes the choice).
+    let mut choice: Option<std::sync::Arc<Choice>> = match &choosing {
+        Choosing::Made(c) => c.clone(),
+        _ => None,
+    };
+    let clean = ledger.clone();
+    if choice.is_none() {
+        ledger.flag(unmeasured());
     }
     // The ladder's first rung (# The step): within the physics prior's step at the initial ensemble's mean kinetic
     // temperature in the reference state's trap (`kinetic_uk`), and below the step's edge.
@@ -2021,7 +2239,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         scales,
         initial: row,
         ledger,
-        method: "三维半经典运动：内态在三点选态一次定好的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），模型在开头只构造一次，整个求解共用".into(),
+        method: "三维半经典运动：内态在选出的态集 P 上演化（P 里的态显式保留，P 以外的能级按 RS 折叠），P 由先导的原子路径上对 32 态模型的实测误差与运动反馈上界选出，模型在每次尝试开头只构造一次".into(),
     };
     context.plan.read_at(candidates.clone());
 
@@ -2037,22 +2255,34 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // Where its rung stands on its reads, its course by the run's work from here, priced at its states at its analysis
     // times -- the rung, or one below where that is expected to cost the run less: the product's trajectories its looks
     // ask beside the model's error at those states (`Prices`).
-    messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
-    let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, messages);
-    if matches!(scouting, Settled::Pending) {
-        let (here, at) = {
-            let scout: Vec<&Part> = levels.fine.iter().collect();
-            let at = analysed_alone(&scout);
-            (parts_at(run, &domain, context.tau, &context.plan, &scout, &at), at)
-        };
-        let refs: Vec<&Part> = here.iter().collect();
-        let estimates = summarize(&reads_of(&refs), &scales);
-        let read = sampled(run, &refs);
-        let fixed = context.fixed.with(model_error(&read.measured().combined(estimates.len(), &estimates)), &at.iter().map(|&k| candidates[k]).collect::<Vec<_>>());
-        let need = most_needed(&looks(&estimates, &fixed, Bound::share()));
-        let rated = one_each(&refs);
-        let priced = work_at(run, domain.widest, &rated);
-        let (work, halving) = (|t: f64| priced(t)[0], |t: f64| priced(t)[1]);
+    // A candidate's short scout is the selection's, and says no Scout of its own (# Steps).
+    if !matches!(choosing, Choosing::Scout) {
+        messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
+    }
+    let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, None, messages);
+    // A candidate's short scout (`Choosing::Scout`): the rung its own two levels stand on (`settle`: down the ladder
+    // to the first rung whose own read is in and not clearly beyond), the check's priced course not taken -- a scout
+    // with it took PGC3D's P20 34-68 s, R4's P26 87 s.
+    if matches!(choosing, Choosing::Scout) {
+        return Ok(Attempted::Scouted(context.tau));
+    }
+    // The scout's states where its check is priced (`Settled::Pending`): its prices, and the pilot's levels' hand-out's
+    // order after them (`foretold`).
+    let here = matches!(scouting, Settled::Pending).then(|| {
+        let scout: Vec<&Part> = levels.fine.iter().collect();
+        let at = analysed_alone(&scout);
+        (parts_at(run, &domain, context.tau, &context.plan, &scout, &at), at)
+    });
+    let refs: Vec<&Part> = here.iter().flat_map(|(here, _)| here.iter()).collect();
+    let rated = one_each(&refs);
+    let priced = work_at(run, domain.widest, &rated);
+    let work = |t: f64| priced(t)[0];
+    if let Some((_, at)) = &here {
+        let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
+        let read = pilot_reads(run, &refs, &scales, choice.as_deref(), &times, &context.fixed.escape);
+        let fixed = context.fixed.with(read.model, &times);
+        let need = most_needed(&looks(&read.estimates, &fixed, Bound::share()));
+        let halving = |t: f64| priced(t)[1];
         check(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1, &above, Some(&Prices { work: &work, halving: &halving, product: need }), messages);
     }
     // The pilot: its groups' other members at both levels, screened, and the step's check (module documentation,
@@ -2060,7 +2290,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // its states are read, and the check goes on from there priced at them. Whether it saw: a step that stands
     // uncertified -- at the steps' cap, or unable to see -- is flagged.
     messages.stage(Stage { step: Step::Pilot, tau: Some(context.tau), batch: None });
-    let mut settled = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, messages);
+    let mut settled = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1..GROUP, &above, here.as_ref().map(|_| &work as &dyn Fn(f64) -> f64), messages);
     // Nothing integrated (# Exits): the pilot's every trajectory ended with no outcome before the first output after
     // t = 0 -- no step, no rung and no further trajectory is checked or priced on what shows nothing --, the request's
     // exit with its reason.
@@ -2081,7 +2311,8 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
                 let level: Vec<&Part> = levels.fine.iter().collect();
                 let at = analysed_alone(&level);
                 let pilot = parts_at(run, &domain, tau, &context.plan, &level, &at);
-                let read = pilot_reads(run, &pilot.iter().collect::<Vec<_>>(), &scales);
+                let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
+                let read = pilot_reads(run, &pilot.iter().collect::<Vec<_>>(), &scales, choice.as_deref(), &times, &context.fixed.escape);
                 (at, pilot, read)
             }
         };
@@ -2115,6 +2346,9 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
         _ => true,
     };
     let tau = context.tau;
+    // The pilot's paths at the run's step, handed out where a test asks for them (`walks`; PIPELINE_V3_FINAL §二 B.7).
+    #[cfg(test)]
+    crate::paths::hand_out(&|count, until| walks(run, &domain, tau, context.plan.end, &levels.fine.iter().collect::<Vec<_>>(), count, until));
     // The step's check (module documentation, # The step): what the reads the rung stands by do not exclude into the
     // accounts, their resolution into the result's words (`Levels::told`, `checked`).
     let (own, third, step_of_third, pairs) = levels.told(&candidates, window, &scales);
@@ -2126,8 +2360,42 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // the further pairs' groups are the product's, at the same times.
     let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
     let further: Vec<Part> = levels.further[0].iter().map(|p| p.at(&at)).collect();
-    drop(levels);
     context.plan.read_at(times.clone());
+    // The choice (module documentation, # The selection), where this pilot makes it: G chosen, the product goes on
+    // from here with the model's error booked from it; another, the attempt ends with it.
+    let mut read = read;
+    if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
+        let pilot_refs: Vec<&Part> = pilot.iter().collect();
+        let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
+            return Ok(Attempted::RanAway);
+        };
+        let made = std::sync::Arc::new(made);
+        crate::select::keep(request, made.clone());
+        let stop = {
+            #[cfg(test)]
+            {
+                matches!(choosing, Choosing::Choose)
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        if stop || made.keep != run.rs.keep {
+            return Ok(Attempted::Chose(made));
+        }
+        eprint!("{}", made.report.iter().map(|l| format!("  注：{l}\n")).collect::<String>());
+        // The ledger as it was but the flag of an error not measured, with what the pilot's check flagged since.
+        let flagged = std::mem::replace(&mut context.ledger, clean).flagged;
+        if let Some(f) = flagged {
+            for part in f.split('；').filter(|p| *p != unmeasured()) {
+                context.ledger.flag(part.to_string());
+            }
+        }
+        read = pilot_reads(run, &pilot_refs, &scales, Some(&made), &times, &context.fixed.escape);
+        choice = Some(made);
+    }
+    drop(levels);
     let n = times.len();
     context.at = times;
     context.fixed = context.fixed.with(read.model.clone(), &context.at);
@@ -2135,15 +2403,25 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     // made (`pilot_reads`).
     crate::ledger::optical(&mut context.ledger, read.counts.optical);
     {
-        // The ledger's items: each account's error on what is shown and on T (its largest over the
-        // analysis times, weighed by the pilot's held share as the totals are; a time where the pilot holds no atom
-        // weighs nothing: its errors are their bounds, `Measured::means`).
+        // The ledger's items: each part of the model's error on what is shown and on T (its largest over the analysis
+        // times, weighed by the pilot's held share as the totals are; a time where the pilot holds no atom weighs
+        // nothing: its errors are their bounds, `Measured::means`).
         let held: Vec<f64> = read.estimates.iter().map(|e| 1. - e.loss).collect();
         let means = read.sampled.measured().means(n, &read.estimates);
         for (i, label) in READINGS.iter().enumerate() {
             let most = (1..n).filter(|&k| held[k] != 0.).map(|k| crate::linalg::larger(means[k][i][0], held[k] * means[k][i][1])).fold(0., crate::linalg::larger);
-            context.ledger.item(label, most, MODEL_MEASURED);
+            context.ledger.item(label, most, MODEL_REGION);
         }
+        if let Some(c) = &choice {
+            // Where the paths read no direct part, the held atoms' bound (`model_of`).
+            let direct = (1..n).filter(|&k| held[k] != 0.).map(|k| c.at(context.at[k]).unwrap_or(held[k])).fold(0., crate::linalg::larger);
+            context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
+            for flag in model_flags(c, &read, request) {
+                context.ledger.flag(flag);
+            }
+        }
+        // The feedback through the motion, not booked: said once a run, as an item of no estimate.
+        context.ledger.items.push(crate::ledger::Item { label: NO_FEEDBACK[0].into(), estimate: 0., action: NO_FEEDBACK[1].into() });
     }
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
@@ -2152,15 +2430,60 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages) -> Res
     forget(&mut parts);
     parts.extend(further);
     let (e, l, c, reads) = product(run, ensemble, &domain, &mut context, &mut parts, &numbers, messages);
+    // T's memory not shorter than the run, read on the run's own trajectories (`memory_at_the_end`): flagged where it is.
+    if choice.is_some() {
+        let allowance = reads.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
+        let (r, se, decided) = memory_at_the_end(&parts.iter().collect::<Vec<_>>(), &context.scales, allowance);
+        // At the run's end no atom held: no T there, its memory unread (no flag).
+        let said = if allowance.is_finite() && r.is_finite() && se.is_finite() {
+            format!("m = {r:.2} ± {se:.2} µK，允许量 {allowance:.2} µK：{}", match decided { Some(true) => "塌掉（运行末仍可读出）", Some(false) => "没塌掉（运行末的上端在允许量以内）", None => "定不下来，不出旗标" })
+        } else {
+            "运行末没有被抱住的原子，T 无读数，不出旗标".to_string()
+        };
+        eprintln!("  注：运行末 T 的记忆（运行自己的 {} 条轨迹，初态动能倾斜的似然比）：{said}", parts.len() as u64 * GROUP);
+        if decided == Some(true) {
+            context.ledger.flag("温度的记忆时间不短于运行（运行自己轨迹上的动量缩放响应在运行末仍可读出：Λ 塌掉）".to_string());
+        }
+    }
     // A point of the prepared potential below the bottom the ensemble was drawn about (ensemble.rs, # Its draw).
     if ensemble.deeper() > deeper {
         context.ledger.flag("初态的势在所取的阱底之外还有更深的地方：初始系综只取到该阱底的阱深为止".into());
     }
-    Ok(assemble(&context, &e, &reads, &l, &c, parts.len() as u64 * GROUP))
+    Ok(Attempted::Solved(assemble(&context, &e, &reads, &l, &c, parts.len() as u64 * GROUP)))
 }
 
-/// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, the model's error
-/// at its states (`Sampled`), and the model's error per time -- the readings' combination and the optical sector's
+/// The flag of a model whose error is not measured (module documentation, # The model): G's before its pilot chooses,
+/// a test's model of its own.
+fn unmeasured() -> String {
+    "模型误差尚未测得（选态在先导之后做；这之前的结果不含模型误差）".to_string()
+}
+
+/// What the choice says of itself that a result is less for (module documentation, # The selection; PIPELINE_V3_FINAL
+/// C.15): T still drifting at the run's end, the paths run through the whole request (the memory of the dark states longer than a fifth of it), and
+/// a region left out whose share takes a quarter of the target or more at some time.
+fn model_flags(choice: &Choice, read: &PilotRead, request: &Request) -> Vec<String> {
+    let mut flags = vec![];
+    // T still drifting at the end: its last two analysis times apart by more than their intervals together.
+    let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
+    if let [.., (a, ea), (b, eb)] = held[..] {
+        if (b - a).abs() > ea.hypot(eb) {
+            flags.push(format!("温度在运行末段仍在漂移：最后两个分析时刻差 {:.2} µK，超过它们的误差棒 {:.2} µK", b - a, ea.hypot(eb)));
+        }
+    }
+    let length = request.times_us.last().copied().unwrap_or(0.);
+    if 5. * choice.memory >= length {
+        flags.push(format!("暗态的长记忆：内态记忆时间 {:.3} µs，路径跑满整个请求（{length} µs）", choice.memory));
+    }
+    let means = read.sampled.measured().means(read.estimates.len(), &read.estimates);
+    let share = means.iter().skip(1).map(|m| m[0][0]).fold(0., crate::linalg::larger);
+    if share >= 0.25 * POPULATION_TARGET {
+        flags.push(format!("少去区域的份额大：先导的原子在扫描标出的区域里，按那里的误差记账达 {}（目标的四分之一以上）", percent(share)));
+    }
+    flags
+}
+
+/// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, the region's error
+/// at its states (`Sampled`), and the model's error per time -- the choice's parts, the region's, the optical sector's
 /// booking on T.
 struct PilotRead {
     estimates: Vec<Estimate>,
@@ -2169,19 +2492,467 @@ struct PilotRead {
     model: Vec<[f64; 2]>,
 }
 
-/// The pilot's reads (`PilotRead`) of its groups `pilot`:
-/// - the model's error at the pilot's states (SPEC §5.2; # The model): its accounts' combination per time, the
-///   held atoms' mean and the lost atoms' along their paths (`Measured::combined`);
+/// The pilot's reads (`PilotRead`) of its groups `pilot` at the times `times`:
+/// - the model's error (SPEC §5.2; # The model): the choice's parts at each time (`Choice::at`; none where there is no
+///   choice), on T relative to the pilot's T there, and the region left out at the pilot's states (`sampled`: the held
+///   atoms' mean and the lost atoms' along their paths, `Measured::means`; on T the bound set's move of the share in
+///   it, `Estimate::moved`);
 /// - the optical sector's noise (ledger.rs `optical`): its booking on T at every time, a part of the model's error.
-fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales) -> PilotRead {
+fn pilot_reads(run: &Selected, pilot: &[&Part], scales: &Scales, choice: Option<&Choice>, times: &[f64], escape: &Escape) -> PilotRead {
     let (estimates, counts) = (summarize(&reads_of(pilot), scales), counts_of(pilot));
-    let sampled = sampled(run, pilot);
-    let mut model = model_error(&sampled.measured().combined(estimates.len(), &estimates));
+    let region = choice.map_or(Region::NONE, |c| c.judged.region);
+    let sampled = sampled(run, pilot, &region);
     let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
-    for e in model.iter_mut().skip(1) {
-        e[1] += optical;
-    }
+    // On the reference itself (P all 32 states) no model error at any time, as the choice weighed it (`choose_on_the_pilot`).
+    let model = if choice.is_some_and(|c| c.keep.len() == STATES) { vec![[0.; 2]; times.len()] } else { model_of(&|t| choice.map_or(Some(0.), |c| c.at(t)), &sampled, &estimates, times, optical, escape) };
     PilotRead { estimates, counts, sampled, model }
+}
+
+/// The model's error per time (`pilot_reads`) of its direct part `direct(t)`, the region's at the states `sampled`,
+/// the optical sector's booking `optical` on T: on what is shown the direct part and the region's, at most one; on T
+/// the region's share moved and the optical booking -- T has no model error of its own (select.rs, # The feedback
+/// through the motion: zero) --; none at t = 0, the request's state. Where the paths read no direct part (no path's
+/// atom held there, `select::direct_at`) the held atoms' rows are unread: their bound, the share of the atoms held
+/// there (1 − L: none where every atom is lost, nothing held to err on).
+fn model_of(direct: &dyn Fn(f64) -> Option<f64>, sampled: &Sampled, estimates: &[Estimate], times: &[f64], optical: f64, escape: &Escape) -> Vec<[f64; 2]> {
+    let region = sampled.measured().means(estimates.len(), estimates);
+    estimates
+        .iter()
+        .enumerate()
+        .map(|(k, e)| {
+            if k == 0 {
+                return [0.; 2];
+            }
+            [probability_error(direct(times[k]).unwrap_or(1. - e.loss) + region[k][0][0]), e.moved(region[k][0][1], escape) + optical]
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The selection on the pilot (module documentation, # The selection).
+
+/// A trajectory's work a µs at the step τ at the states `rated` on a model `model` of the chain (`work_at`'s count at
+/// one step): each state's place, momentum and time, its internal state the ground state of its largest population
+/// (the state's own where the model is the one it was run on), the step taken from it as the run takes it, and its
+/// jumps' work as on the pilot's model (a jump's work is its photons' and landings'). Unbounded where no step is taken.
+fn priced(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: bool) -> f64 {
+    let taken: Vec<f64> = rated
+        .par_iter()
+        .map(|pick| {
+            let mine = pick.state.trajectory();
+            let from = if own {
+                mine
+            } else {
+                let states = &pick.state.sample.psi;
+                let ground = (0..GROUND).max_by(|&a, &b| states.get(a).map_or(0., |z| z.norm_sqr()).total_cmp(&states.get(b).map_or(0., |z| z.norm_sqr()))).unwrap_or(0);
+                let mut t = Trajectory::new(model, ground, mine.r, mine.kappa, SEED, mine.index);
+                (t.time, t.threshold, t.jumps) = (mine.time, mine.threshold, mine.jumps);
+                t
+            };
+            let mut refused = 0.;
+            match adapt::halving(from.time, tau, |length| crate::step::priced(model, &from, length, &widest).inspect_err(|_| refused += refused_at(model, &from, length, &widest))) {
+                Ok((stretches, length)) => (stretches.iter().map(|(_, price)| price.work(price.costs)).sum::<f64>() + refused) / length + pick.jumping,
+                Err(_) => f64::INFINITY,
+            }
+        })
+        .collect();
+    over_the_run(rated, taken.into_iter(), None)
+}
+
+/// T's memory at the run's end, read on the run's own trajectories at no trajectory more (select.rs, # T's memory, read
+/// on the run's own trajectories): R_T(t) = dT(t)/dε of the initial tilt e^{−εK}, by the likelihood ratio the run's T
+/// estimate with its reads reweighed by 1 + ε(K̄ − K) (`Group::tilted`; K each trajectory's classical kinetic energy,
+/// ensemble.rs `Ensemble::draw_kinetic`, K̄ the run's own mean) -- the difference at ±h over 2h --; T's memory at the
+/// end the response there over its start's, R_T(end)/R_T(0), and on the momenta's-scaling scale the question asks it on
+/// (`select::decide`: a unit scaling moves T(0) by 2T(0)) m = 2T(0)·R_T(end)/R_T(0) (µK), its standard error the groups'
+/// jackknife of that ratio; the flag's question against T's allowance at the end `allowance` (µK). The memory m and its
+/// error, and the answer.
+fn memory_at_the_end(parts: &[&Part], scales: &Scales, allowance: f64) -> (f64, f64, Option<bool>) {
+    let h = MEMORY_TILT;
+    // K̄: every trajectory's K over their number, at t = 0 (every trajectory counted there, failed or not).
+    let total = |g: &Group| g.sums.first().map_or(0., |s| s.trajectories + s.failed);
+    let mean = parts.iter().map(|p| total(&p.kinetic)).sum::<f64>() / parts.iter().map(|p| total(&p.reads)).sum::<f64>();
+    let tilted = |sign: f64| -> Vec<Group> { parts.iter().map(|p| p.reads.tilted(&p.reads, sign * h * mean).tilted(&p.kinetic, -sign * h)).collect() };
+    let (plus, minus) = (tilted(1.), tilted(-1.));
+    let (a, b): (Vec<&Group>, Vec<&Group>) = (plus.iter().collect(), minus.iter().collect());
+    let plain: Vec<&Group> = parts.iter().map(|p| &p.reads).collect();
+    let none: [&Group; 0] = [];
+    let last = parts.first().map_or(0, |p| p.reads.sums.len()).saturating_sub(1);
+    let t = |r: &[crate::analysis::Reading], g: Option<usize>| (0..3).map(|q| g.map_or(r[1 + STATES + q].whole, |g| r[1 + STATES + q].leave[g])).sum::<f64>() / 3.;
+    let at = |k: usize| (readings(&a, &none, k, scales), readings(&b, &none, k, scales));
+    let ((x0, y0), (x1, y1)) = (at(0), at(last));
+    let start = readings(&plain, &none, 0, scales);
+    let m = |g: Option<usize>| 2. * t(&start, g) * (t(&x1, g) - t(&y1, g)) / (t(&x0, g) - t(&y0, g));
+    let groups = parts.len();
+    let (r, se) = (m(None), crate::estimate::spread((0..groups).map(|g| m(Some(g))).collect::<Vec<_>>().into_iter(), groups as f64).error);
+    (r, se, crate::select::decide(r, se, allowance))
+}
+
+/// The reweighing's step h of `memory_at_the_end`: the run's estimate is smooth in it, and its difference over ±h is
+/// the derivative to O(h²) with a rounding of ε/h -- 2⁻²⁰ leaves both near 10⁻¹².
+const MEMORY_TILT: f64 = 1. / (1u64 << 20) as f64;
+
+/// A line of the choice's report (`Choice::report`), said as it is made (stderr: the solve's own log).
+fn noted(report: &mut Vec<String>, line: String) {
+    eprintln!("  选态：{line}");
+    report.push(line);
+}
+
+/// One candidate as the choice weighs it (`choose_on_the_pilot`): its place on the chain, its judgment, its work a µs,
+/// the model's error per time it books, the product's trajectories its looks need, whether its looks meet what the
+/// exact model's would (on what is shown, on T), its total work W where it is complete, and its fate in words.
+struct Weighed {
+    place: usize,
+    judged: crate::select::Judged,
+    price: f64,
+    model: Vec<[f64; 2]>,
+    need: f64,
+    work: Option<f64>,
+    fate: String,
+    /// Whether its fate is open at the paths' statistics: complete at its direct part's lower end and not at its upper
+    /// (select.rs, # How many paths).
+    open: bool,
+}
+
+/// The choice of P on the pilot of the attempt's model -- G, or the chain's first whose pilot went past its start
+/// (`piloted`) -- (module documentation, # The selection): the paths; the pilot's model judged first, then -- where it
+/// is not complete -- the least complete candidate of the chain above it found by bisection (the chain nested, each
+/// candidate's error no less than the next's: a candidate complete, every one above it taken complete), then the chain
+/// above that while a candidate's least W stands below the least found, every candidate judged on the way weighed; the
+/// complete ones scouted at their own step while their least W stands below the least found; P the complete candidate
+/// of least W, its region scanned. None where no path went past its start because the model's fold scattered beyond
+/// every state of the atom there (a pilot's trajectory ran away at t = 0, step.rs # The domain): nothing to choose on.
+#[allow(clippy::too_many_arguments)]
+fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
+    use crate::select::{direct_at, direct_bound_at, judge, Paths, WALKS};
+    let clock = Instant::now();
+    let run = setting.run;
+    let trap = setting.trap;
+    let hm = run.hbar_over_mass();
+    let tau = context.tau;
+    let domain = Domain { widest: Widest::of(request) };
+    let light = run.light();
+    let centre = trap.centre;
+    messages.stage(Stage { step: Step::Select, tau: None, batch: None });
+    let reference = alone(chief(request));
+    let length = request.times_us.last().copied().unwrap_or(0.);
+    let mut report: Vec<String> = vec![];
+    // The chain on the first-order excitation where the pilot's atoms went, from the ground states they were in
+    // (select.rs `importance`; a model's cluster holds its ground states first, model.rs `Cluster`), from the pilot's own
+    // model up: every model of it holds the pilot's states, the pilot's first (place 0, the attempt's run).
+    let started = Instant::now();
+    let places: Vec<(V3, [f64; GROUND])> = pilot
+        .iter()
+        .flat_map(|p| p.samples.iter().flatten())
+        .map(|s| {
+            let n: f64 = s.sample.psi.iter().map(|z| z.norm_sqr()).sum();
+            (s.sample.at.r, std::array::from_fn(|g| s.sample.psi.get(g).map_or(0., |z| z.norm_sqr() / n)))
+        })
+        .collect();
+    let amplitudes = crate::select::importance(&run.scene, &places);
+    let own = &run.rs.keep;
+    let mut chain: Vec<Vec<usize>> = crate::select::chain(&amplitudes).into_iter().filter(|c| own.iter().all(|s| c.contains(s))).collect();
+    if chain.first() != Some(own) {
+        chain.insert(0, own.clone());
+    }
+    let chain = &chain;
+    let labels = &request.states;
+    let order: Vec<String> = chain.windows(2).map(|w| w[1].iter().filter(|s| !w[0].contains(s)).map(|&s| format!("{} {:.2e}", labels[s], amplitudes[s])).collect::<Vec<_>>().join(" + ")).collect();
+    noted(&mut report, format!("链上依次加入的激发态（先导位置上的最大一阶激发布居）：{}", order.join("；")));
+    noted(
+        &mut report,
+        format!(
+            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；先导的模型 P{}{}；链按先导的 {} 个状态上的一阶激发，从先导的模型往上 {} 档（{}），{:.1} s",
+            times.len(), run.rs.keep.len(), if run.rs.keep.len() == GROUND { "（G）" } else { "（G 的折叠在先导起点失控，链上第一个走得动的）" }, places.len(), chain.len(), chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" "), started.elapsed().as_secs_f64()
+        ),
+    );
+    // 1. The paths: the pilot's first trajectories' starts, the memory time there (the longest), the walks to L -- as
+    // many as the judgment's statistics ask (select.rs, # How many paths): from `WALKS`, doubled while a candidate's fate
+    // is open, up to the pilot's trajectories, every candidate judged again on them.
+    let fine_refs: Vec<&Part> = fine.iter().collect();
+    let available = fine.iter().flat_map(|p| p.trails.iter()).filter(|t| !t.is_empty()).count();
+    let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
+    let (head, mut doubled, mut count) = (report, Vec::<String>::new(), WALKS.min(available));
+    loop {
+        let mut report = head.clone();
+        report.extend(doubled.iter().cloned());
+        let firsts: Vec<&Checkpoint> = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).take(count).collect();
+        let form = crate::paths::Form::new(run, centre);
+        let memory = firsts.iter().filter_map(|c| crate::paths::memory(&form, c.trajectory.r, c.trajectory.kappa, c.trajectory.time)).map(|m| m.time).fold(0., crate::linalg::larger);
+        let memory = if memory > 0. { memory } else { length };
+        drop(form);
+        let walked = walks(run, &domain, tau, context.plan.end, &fine_refs, count, length);
+        // No path past its start, the model's fold beyond every state of the atom where a pilot's atom started: the chain's
+        // next model is the pilot's (`piloted`). (No path past its start otherwise -- every atom lost at its first step --
+        // is said by `Paths::new`.)
+        if walked.iter().all(|w| !(w.end() > 0.)) && read.counts.runaway.since == Some(0.) {
+            return Ok(None);
+        }
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, light)?;
+        let settled = &paths.settled;
+        noted(
+            &mut report,
+            format!(
+                "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快相干每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每步 {} 段（按误差定：最长一条路径全长 {:.1} µs 上参照的误差（先在前 {} µs 上爬梯） 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
+                paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
+                settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, paths.calibrated_over(), crate::select::CALIBRATION, settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], crate::select::TOLERANCE,
+                settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
+            ),
+        );
+        messages.alive();
+        // 2. T's memory on the pilot's own trajectories, said beside the choice (the run's flag is the product's).
+        {
+            let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
+            let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
+            let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
+            let drift = match held[..] {
+                [.., (a, ea), (b, eb)] if ea.hypot(eb).is_finite() => format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }),
+                [.., (a, _), (b, _)] => format!("末两个分析时刻 T 差 {:.2} µK、误差棒无读数：定不下来", b - a),
+                _ => "末段无 T".to_string(),
+            };
+            // At the run's end no atom held: no T there, its memory unread.
+            let memory = if end.is_finite() && r.is_finite() && se.is_finite() {
+                format!("运行末 m = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}", match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" })
+            } else {
+                "运行末没有被抱住的原子，T 无读数".to_string()
+            };
+            noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：{memory}；{drift}", pilot.len() as u64 * GROUP));
+        }
+        // 3. The candidates.
+        let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
+        let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), context.step);
+        let need0 = most_needed(&base);
+        let rated = one_each(pilot);
+        let ran = (numbers.len() as u64 * GROUP) as f64;
+        // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); the scout's and the
+        // pilot's again on a model not G (two levels, the companion's at most half the run level's work).
+        let span = context.plan.end;
+        let again = |place: usize, price: f64| if place == 0 { 0. } else { 1.5 * ran * price * span };
+        let met = |looks: &[Look]| -> [bool; 2] {
+            let mut met = [true; 2];
+            for (b, l) in base.iter().zip(looks) {
+                if b.fits() && !l.fits() {
+                    met[usize::from(!l.shown)] = false;
+                }
+            }
+            met
+        };
+        let optical = crate::ledger::optical(&mut Ledger::default(), read.counts.optical);
+        // A candidate's model error per time at its direct part's upper end (the one booked) and at its lower, on one
+        // reading of its region at the pilot's states.
+        let accounts = |j: &crate::select::Judged| -> [Vec<[f64; 2]>; 2] {
+            let sampled = sampled(run, pilot, &j.region);
+            [true, false].map(|upper| model_of(&|t| direct_bound_at(j, &paths.windows, t, upper), &sampled, &read.estimates, times, optical, &context.fixed.escape))
+        };
+        let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> { accounts(j).into_iter().next().expect("the upper end") };
+        let mut models: Vec<Option<Selected>> = (0..chain.len()).map(|_| None).collect();
+        let mut weighed: Vec<Weighed> = vec![];
+        // A candidate of the chain judged and weighed (its model made where it is not G).
+        let weigh = |place: usize, models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
+            let started = Instant::now();
+            if place > 0 && models[place].is_none() {
+                models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+            }
+            let model = models[place].as_ref().unwrap_or(run);
+            let price = priced(model, domain.widest, &rated, tau, place == 0);
+            // The chain's top is the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
+            // (`base`) -- complete by construction, whatever its atoms do (the invariant the choice stands on).
+            let exact = chain[place].len() == STATES;
+            let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
+            let [model_error, lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
+            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            // Complete at the direct part's lower end as well where it is not at its upper: its fate open at the paths'
+            // statistics (select.rs, # How many paths).
+            let at_least = met(&looks(&read.estimates, &fixed(lower), context.step));
+            let met = met(&own);
+            let open = met != [true; 2] && at_least == [true; 2];
+            let need = most_needed(&own);
+            debug_assert!(!exact || met == [true; 2], "the reference itself meets every look the run's own does");
+            // Its fate in words: complete where every look the run's own meets (no model error, `base`) is still met at its
+            // model error -- the room that error leaves the statistics filled within the trajectories' cap (`Look::fits`) --,
+            // else the first kind of look it leaves unmet, what is shown (the populations and the loss) before T.
+            let (work, fate) = match met {
+                [true, true] => (Some(need * price * span + again(place, price)), "模型误差留给统计的余量够用".to_string()),
+                [true, false] => (None, "温度：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
+                _ => (None, "显示量（布居、丢失）：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
+            };
+            noted(report, format!("候选 P{}：每 µs 代价 {:.3e}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
+            Ok(Weighed { place, judged, price, model: model_error, need, work, fate, open })
+        };
+        weighed.push(weigh(0, &mut models, &mut report)?);
+        messages.alive();
+        // The least complete candidate (the anchor, its place among the weighed `anchored`), by bisection where G is not
+        // complete; the top (all 32) is complete by construction (`weigh`: the reference itself), so the bisection's upper
+        // end is complete at every turn -- weighed at last where no candidate below it is.
+        let top = chain.len() - 1;
+        let anchored = if weighed[0].work.is_some() {
+            0
+        } else {
+            let (mut lo, mut hi) = (0, top);
+            let mut at_hi: Option<usize> = None;
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                let w = weigh(mid, &mut models, &mut report)?;
+                messages.alive();
+                let complete = w.work.is_some();
+                weighed.push(w);
+                if complete {
+                    (hi, at_hi) = (mid, Some(weighed.len() - 1));
+                } else {
+                    lo = mid;
+                }
+            }
+            match at_hi {
+                Some(a) => a,
+                None => {
+                    weighed.push(weigh(hi, &mut models, &mut report)?);
+                    weighed.len() - 1
+                }
+            }
+        };
+        debug_assert!(weighed[anchored].work.is_some(), "the anchor is complete: the chain's top is the reference itself");
+        let anchor = weighed[anchored].place;
+        // Above the anchor a candidate is chosen only where it works less than the least W found: its least -- at no model
+        // error (the run's own need), at the ladder's first rung's step (the longest its scout may stand at), its pilot
+        // again -- bounds it from below, and grows with its states (the chain's work does), so the chain is searched up from
+        // the anchor, each candidate judged and weighed, until one's least W is no lower than the least found.
+        let mut found = weighed.iter().filter_map(|w| w.work).fold(f64::INFINITY, crate::linalg::smaller);
+        for place in anchor + 1..=top {
+            if models[place].is_none() {
+                models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+            }
+            let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
+            let lower = need0 * price * span + again(place, price);
+            if !(lower < found) {
+                noted(&mut report, format!("链上 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不搜", chain[place].len()));
+                break;
+            }
+            if !weighed.iter().any(|w| w.place == place) {
+                let w = weigh(place, &mut models, &mut report)?;
+                messages.alive();
+                found = found.min(w.work.unwrap_or(f64::INFINITY));
+                weighed.push(w);
+            }
+        }
+        // A fate open at the paths' statistics (select.rs, # How many paths): the paths doubled, up to the pilot's
+        // trajectories, and every candidate judged again on them -- before any is scouted. At all of them, its upper end
+        // stands, said.
+        let open: Vec<String> = weighed.iter().filter(|w| w.open).map(|w| format!("P{}", w.judged.keep.len())).collect();
+        if !open.is_empty() {
+            if count < available {
+                let next = (2 * count).min(available);
+                doubled.push(format!("{count} 条路径上 {} 够用与否在路径的统计（t 分布，自由度为窗内路径数减一）下定不下来：路径加倍到 {next} 条，候选重判", open.join("、")));
+                count = next;
+                continue;
+            }
+            noted(&mut report, format!("已用先导的全部 {count} 条路径，{} 够用与否仍定不下来：按直接部分的上端记", open.join("、")));
+        }
+        // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
+        // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
+        // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, down
+        // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), its work a µs at the rung the scout stands at, and its W again
+        // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
+        // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
+        // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
+        // (G's at its own step where G is complete, the scouted ones' at theirs); the rest keep their W at G's step, which is
+        // no less than their least.
+        let scout_of = |price: f64| 1.5 * numbers.len() as f64 * price * span;
+        let mut order: Vec<(usize, f64)> = (0..weighed.len())
+            .filter(|&i| weighed[i].work.is_some() && weighed[i].place != 0 && weighed[i].place != usize::MAX)
+            .map(|i| {
+                let w = &weighed[i];
+                let price = priced(models[w.place].as_ref().expect("a candidate's model"), domain.widest, &rated, first, false);
+                (i, w.need * price * span + again(w.place, price) + scout_of(price))
+            })
+            .collect();
+        order.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut best = weighed.iter().find(|w| w.place == 0).and_then(|w| w.work).unwrap_or(f64::INFINITY);
+        for (i, least) in order {
+            if !(least < best) {
+                weighed[i].fate += &format!("；第一级步长 {first:.4} µs 上的最小 W {least:.3e} 已不低于最小的 W {best:.3e}，不侦察");
+                continue;
+            }
+            let clock = Instant::now();
+            let model = models[weighed[i].place].as_ref().expect("a candidate's model");
+            let rung = match solve_with(request, model, Choosing::Scout, messages)? {
+                Attempted::Scouted(t) => t,
+                _ => unreachable!("a scout's attempt stops at its rung"),
+            };
+            messages.stage(Stage { step: Step::Select, tau: None, batch: None });
+            let price = priced(model, domain.widest, &rated, rung, false);
+            let scout = scout_of(price);
+            let entry = &mut weighed[i];
+            let w = entry.need * price * span + again(entry.place, price) + scout;
+            best = crate::linalg::smaller(best, w);
+            entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
+            (entry.price, entry.work) = (price, Some(w));
+            noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
+            messages.alive();
+        }
+        // P: the complete candidate of least W (the first of them where several are) -- the anchor among them, complete by
+        // construction; no candidate's W is ever taken back (a scout's replaces it).
+        let w = |i: usize| weighed[i].work.unwrap_or(f64::INFINITY);
+        let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).fold(anchored, |best, i| if w(i).total_cmp(&w(best)).then(i.cmp(&best)).is_lt() { i } else { best });
+        // Its region (`select::scan`): the scans of the trap's axes at the pilot's last T's thermal speed.
+        let last = read.estimates.last().and_then(|e| e.motion).map_or(request.temperature_uk, |m| m.temperature_total);
+        let speed = (KT_PER_UK * last * hm).sqrt();
+        // Each scan to the pilot's most energetic held atom's turning point on the reference state's prepared potential, to
+        // the distance an atom reaches within the request, or to the trap region's edge, whichever is nearest (select.rs, #
+        // The region left out): the reach R₀ + v T, R₀ the farthest of the pilot's atoms from the centre at t = 0, v the
+        // speed of that energy at the potential's least, at the centre.
+        let prepared = run.prepared(&reference);
+        let energy = pilot.iter().flat_map(|p| p.samples.iter().flatten()).map(|s| 0.5 * hm * s.sample.at.kappa.iter().map(|k| k * k).sum::<f64>() + prepared.at(s.sample.at.r).value).fold(f64::NEG_INFINITY, crate::linalg::larger);
+        let away = |r: V3| crate::linalg::norm3(std::array::from_fn(|k| r[k] - centre[k]));
+        let fastest = (2. * hm * (energy - prepared.at(centre).value).max(0.)).sqrt();
+        let reach = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).map(|c| away(c.trajectory.r)).fold(0., crate::linalg::larger) + fastest * length;
+        let beyond = |r: V3| crate::select::intensity(light, r) <= crate::units::REGION_INTENSITY || prepared.at(r).value >= energy || away(r) >= reach;
+        let scans = crate::select::scan_walks(&beyond, centre, &trap.axes, speed, crate::select::SCAN_READ * tau, hm, &[(chief(request), crate::linalg::C64::ONE)]);
+        let chosen_model = models[weighed[chosen].place].as_ref().unwrap_or(run);
+        if chosen_model.rs.keep.len() < STATES {
+            let (region, settings, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light)?;
+            weighed[chosen].judged.region = region;
+            weighed[chosen].model = account(&weighed[chosen].judged);
+            let lines = scans.iter().zip(&settings).map(|(w, s)| format!("{:.0} µs（每转 {}、每 µs {:.1}、每读 {} 段）", w.end(), s.turns, s.rate, s.pieces)).collect::<Vec<_>>().join("、");
+            noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点、请求时长内可达的距离 {reach:.1} µm（起点最远 + 最快 {fastest:.3} µm/µs × {length} µs）或光镊区域边缘中最近者，{speed:.3} µm/µs；各条长与格式按自己的误差定：{lines}）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,
+                if region.intensity > f64::NEG_INFINITY { format!("标出 s ≤ {:.3e}，误差 {:.2e}", region.intensity, region.error) } else { format!("无标记（最大误差 {:.1e}）", region.largest) }, region.edge));
+        }
+        // The tests' candidates beside the chain (select.rs `ALSO`): judged and weighed for comparison, never chosen.
+        #[cfg(test)]
+        for keep in crate::select::ALSO.with(|a| a.borrow().clone()) {
+            let model = Selected::new(crate::scene::Scene::new(request)?, Selection { keep, ..run.report.clone() }, reference)?;
+            let judged = judge(&paths, &model, centre)?;
+            let price = priced(&model, domain.widest, &rated, tau, false);
+            let model_error = account(&judged);
+            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            let (met, need) = (met(&own), most_needed(&own));
+            weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }), open: false });
+        }
+        // The report: every candidate weighed with its parts at their largest over the times.
+        for w in &weighed {
+            // The direct part where the paths read it; the rest of the shown error, its region's (and where the paths read
+            // no direct part, the held atoms' bound there: `model_of`).
+            let direct = times.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
+            let region = (1..times.len()).map(|k| w.model[k][0] - direct_at(&w.judged, &paths.windows, times[k]).unwrap_or(0.)).fold(0., crate::linalg::larger);
+            noted(
+                &mut report,
+                format!(
+                    "P{}{}：直接 {:.2e}（校准 {:.1e}，率 {:.1e}）、少去区域 {:.1e}；need {:.0}、W {}；{}",
+                    w.judged.keep.len(),
+                    if w.place == weighed[chosen].place { "（选中）" } else { "" },
+                    direct,
+                    w.judged.calibration.rows,
+                    w.judged.calibration.rate,
+                    region,
+                    w.need,
+                    w.work.map_or("—".to_string(), |x| format!("{x:.3e}")),
+                    w.fate
+                ),
+            );
+        }
+        noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
+        let w = weighed.swap_remove(chosen);
+        return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
+    }
 }
 
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The
@@ -2265,6 +3036,10 @@ struct Levels {
     third_none: [bool; 2],
     half: Option<Foreseen>,
     scouted: Option<Scouted>,
+    /// The scout's trajectories at the third level's step of the pilot's groups the extra level does not hold yet
+    /// (`third_on_the_pilot`: their first members, `extra_members` of each), kept for the groups it goes on to.
+    extra_first: Vec<Part>,
+    extra_members: u64,
 }
 
 /// The rung's third level above as the scout read it on its own pairs (module documentation, ## The ladder; `check`,
@@ -2316,10 +3091,11 @@ impl Levels {
     fn third_at(&self, tau: f64, step: f64, extra: &[&Part], further: usize, members: u64, times: &[f64], window: f64, scales: &Scales) -> (Between, [f64; 2], u64) {
         let other = self.companion.step(tau);
         let (lower, upper) = if other > tau { ((tau, 0), (other, 1)) } else { ((other, 1), (tau, 0)) };
-        // The rung's level beside the extra one: its pilot's groups and its further pairs that hold the extra level too.
+        // The rung's level beside the extra one: the pilot's groups the extra level holds (`third_on_the_pilot`: all of
+        // them, or as many as its read asked) and its further pairs that hold the extra level too.
         let (next, k) = if step > upper.0 { upper } else { lower };
         let start = self.further[k].len() - further;
-        let beside: Vec<&Part> = [&self.fine, &self.coarse][k].iter().chain(&self.further[k][start..]).collect();
+        let beside: Vec<&Part> = [&self.fine, &self.coarse][k].iter().take(extra.len() - further).chain(&self.further[k][start..]).collect();
         let (finer, coarser, steps) = if step > next { (beside, extra.to_vec(), [next, step]) } else { (extra.to_vec(), beside, [step, next]) };
         let pairs = finer.len() as u64 * members;
         (carried(&read_step(times, window, &finer, &coarser, scales), tau / steps[0]), steps, pairs)
@@ -2354,32 +3130,28 @@ impl Levels {
 /// (a companion's level takes `Domain::companion`): a hand-out of its own (`run_groups`).
 #[allow(clippy::too_many_arguments)]
 fn level(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
-    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i) };
+    let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i), work: 1. };
     run_groups(&[hand], 0, messages, progress).pop().expect("the hand-out's one level")
 }
 
-/// Some levels of the groups `numbers`, the members `members`, one hand-out (`run_groups`): the steps `steps` in their
-/// order, each with whether its states are kept; the finest level first, whose trajectories take the most steps, so
-/// that the threads that wait for the list's last trajectories wait for its shortest. `progress` takes the first
-/// level's groups of `steps` (the run level's); returned in the order of `steps`.
+/// Some levels of the groups `numbers`, the members `members`, one hand-out (`run_groups`): the steps `steps`, each with
+/// whether its states are kept, the dearest trajectories first as foretold at `prices` (`foretold`; with none, the
+/// finest level, whose trajectories take the most steps). `progress` takes the first level's groups of `steps` (the run
+/// level's); returned in the order of `steps`.
 #[allow(clippy::too_many_arguments)]
-fn levels_of(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, steps: &[(f64, bool)], numbers: &[u64], members: std::ops::Range<u64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
+fn levels_of(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, steps: &[(f64, bool)], numbers: &[u64], members: std::ops::Range<u64>, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
     let records: Vec<_> = steps.iter().map(|&(step, keep)| move |i| trajectory(run, ensemble, domain, step, plan, keep, i)).collect();
-    let mut order: Vec<usize> = (0..steps.len()).collect();
-    order.sort_by(|&a, &b| steps[a].0.total_cmp(&steps[b].0));
-    let hands: Vec<Hand> = order.iter().map(|&k| Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, steps[k].1), record: &records[k] }).collect();
-    let shown = order.iter().position(|&k| k == 0).expect("the run level among the steps");
-    let mut made: Vec<Option<Vec<Part>>> = run_groups(&hands, shown, messages, progress).into_iter().map(Some).collect();
-    (0..steps.len()).map(|k| made[order.iter().position(|&o| o == k).expect("every step handed out")].take().expect("one level a step")).collect()
+    let hands: Vec<Hand> = steps.iter().zip(&records).map(|(&(step, keep), record)| Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record, work: foretold(prices, step) }).collect();
+    run_groups(&hands, 0, messages, progress)
 }
 
 /// The members `members` of the groups `numbers` at the step `tau` (their states kept) and at its companion's step
 /// (2τ, or τ/2: its states kept too, the rung below's own level), the two levels of a check (module documentation,
-/// # The step): one hand-out (`levels_of`) -- a check runs both whatever either shows --, the finer level first.
-/// `progress` takes the level at τ's groups.
+/// # The step): one hand-out (`levels_of`) -- a check runs both whatever either shows --, the dearer level first as
+/// foretold at `prices` (`foretold`). `progress` takes the level at τ's groups.
 #[allow(clippy::too_many_arguments)]
-fn pair(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, companion: Companion, numbers: &[u64], members: std::ops::Range<u64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
-    let mut levels = levels_of(run, ensemble, domain, plan, &[(tau, true), (companion.step(tau), companion == Companion::Half)], numbers, members, messages, progress).into_iter();
+fn pair(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, companion: Companion, numbers: &[u64], members: std::ops::Range<u64>, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> [Vec<Part>; 2] {
+    let mut levels = levels_of(run, ensemble, domain, plan, &[(tau, true), (companion.step(tau), companion == Companion::Half)], numbers, members, prices, messages, progress).into_iter();
     std::array::from_fn(|_| levels.next().expect("the hand-out's two levels"))
 }
 
@@ -2449,8 +3221,8 @@ enum Settled {
 /// On the scout and on the pilot alike the check stops where the rung's own read is in and not clearly beyond
 /// (`Settled::Pending`: `check` takes it up again, priced, once the states it is priced at are read).
 #[allow(clippy::too_many_arguments)]
-fn settle(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, messages: &mut Messages) -> Settled {
-    let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, levels.companion, numbers, members.clone(), messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
+fn settle(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Context, levels: &mut Levels, numbers: &[u64], members: std::ops::Range<u64>, above: &dyn Fn(f64) -> bool, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages) -> Settled {
+    let [fine, coarse] = pair(run, ensemble, domain, &context.plan, context.tau, levels.companion, numbers, members.clone(), prices, messages, &mut |prefix, messages| so_far(context, &levels.fine, prefix, messages));
     absorb(&mut levels.fine, fine);
     absorb(&mut levels.coarse, coarse);
     check(run, ensemble, domain, context, levels, numbers, members.end, above, None, messages)
@@ -2574,7 +3346,8 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
             });
             match course(prices, context.tau, context.plan.end, holding, third) {
                 Course::Third if pilot => {
-                    third_on_the_pilot(run, ensemble, domain, context, levels, numbers, third.expect("a third bought").step, messages);
+                    let third = third.expect("a third bought");
+                    third_on_the_pilot(run, ensemble, domain, context, levels, numbers, third.step, groups_for(third.pairs(holding.pilot, holding.raw), numbers.len()), messages);
                     continue;
                 }
                 // On the scout the third level is the pilot's to read.
@@ -2590,6 +3363,17 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // the rung below is weighed where both are to be had. Where the rung below is cheaper, or pairs cannot see, the
         // rung is left, as an adaptive integrator leaves a step whose error estimate is beyond its tolerance.
         let have = holding.pairs as u64;
+        // A third level above the rung held on some of the pilot's groups whose read cannot see: on more of them first,
+        // as many as it asks and twice as many at the least (every group at the most), as further pairs are taken for an
+        // own read -- the extra level alone runs.
+        if let (Verdict::Unseeing, Some(above)) = (verdict, levels.above.as_ref().filter(|above| !within(above) && levels.above_pilot)) {
+            if levels.extra_step > tau && !levels.extra.is_empty() && levels.extra.len() < numbers.len() {
+                let asks = seeing(above, levels.above_pairs).unwrap_or(f64::INFINITY);
+                let groups = groups_for(asks, numbers.len()).max(2 * levels.extra.len()).min(numbers.len());
+                third_on_the_pilot(run, ensemble, domain, context, levels, numbers, levels.extra_step, groups, messages);
+                continue;
+            }
+        }
         let remedied = match (verdict, prices) {
             (Verdict::Unseeing, Some(prices)) => {
                 let own_within = within(&read);
@@ -2607,7 +3391,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
                         // against 2τ; τ/4, τ/2 and τ against τ/2, where the rung below is read against τ/4.
                         let lower = if companion == Companion::Half { below } else { context.tau };
                         if !own_within && seeing(&read, have).is_some() && levels.half.is_none() {
-                            levels.half = Some(foresee(run, ensemble, domain, context, levels, numbers, lower, messages));
+                            levels.half = Some(foresee(run, ensemble, domain, context, levels, numbers, lower, prices.work, messages));
                         }
                         let ran = if companion == Companion::Half { groups * members } else { 0 };
                         match &levels.half {
@@ -2628,8 +3412,10 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         };
         match remedied {
             Some(Remedy::Upper) => {
-                let step = third_of(prices.expect("a remedy is priced"), tau, holding, sides, scouted_up).expect("a third to read").step;
-                third_on_the_pilot(run, ensemble, domain, context, levels, numbers, step, messages);
+                let third = third_of(prices.expect("a remedy is priced"), tau, holding, sides, scouted_up).expect("a third to read");
+                let asks = levels.above.as_ref().and_then(|above| seeing(above, levels.above_pairs)).unwrap_or(f64::INFINITY);
+                let groups = groups_for(crate::linalg::larger(asks, (THIRD_GROUPS * GROUP) as f64), numbers.len());
+                third_on_the_pilot(run, ensemble, domain, context, levels, numbers, third.step, if third.step > tau { groups } else { numbers.len() }, messages);
                 continue;
             }
             Some(Remedy::Pairs(pairs)) => {
@@ -2637,11 +3423,16 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
                 // holds that level.
                 let next: Vec<u64> = (have / GROUP..pairs / GROUP).collect();
                 let upper = !levels.extra.is_empty();
+                // The third level held on some of the pilot's groups: on all of them first (further pairs follow the
+                // pilot's at every level).
+                if upper && levels.extra.len() < numbers.len() {
+                    third_on_the_pilot(run, ensemble, domain, context, levels, numbers, levels.extra_step, numbers.len(), messages);
+                }
                 let mut steps = vec![(tau, false), (levels.companion.step(tau), false)];
                 if upper {
                     steps.push((levels.extra_step, false));
                 }
-                let more = levels_of(run, ensemble, domain, &context.plan, &steps, &next, 0..GROUP, messages, &mut |prefix, messages| {
+                let more = levels_of(run, ensemble, domain, &context.plan, &steps, &next, 0..GROUP, prices.map(|p| p.work), messages, &mut |prefix, messages| {
                     so_far(context, &levels.fine, &levels.further[0].iter().chain(prefix.iter().copied()).collect::<Vec<_>>(), messages)
                 });
                 levels.further.iter_mut().zip(more).for_each(|(further, more)| further.extend(more));
@@ -2673,7 +3464,7 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // A third level held below the rung -- the pilot's trajectories at τ/2, or at τ/4 against τ/2 -- is the rung
         // below's own level or its companion's, its states kept: kept for it, run no more.
         let extra = (levels.extra_step < tau).then(|| std::mem::take(&mut levels.extra)).filter(|extra| !extra.is_empty());
-        (levels.extra, levels.further, levels.scouted) = Default::default();
+        (levels.extra, levels.further, levels.scouted, levels.extra_first) = Default::default();
         if halved_companion {
             // The companion at τ/2 is the rung below's own level, its states kept. A foresight at τ/4 is its companion's
             // first members, where it is read against τ/4 (`halve_companion`), and a third held at τ/4 its whole.
@@ -2761,27 +3552,41 @@ fn halve_companion(run: &Selected, ensemble: &Ensemble, domain: &Domain, context
 }
 
 /// The third level on the pilot's trajectories (`check`: bought, `Course::Third`, or where the third level the rung has
-/// could not see, `Remedy::Upper`): the pilot's groups `numbers` at the third's step `step` (`third_of`: above the
-/// rung's pair or below it), held (`Levels::extra`; their states kept below the rung: a rung below's own level, or its
-/// companion), read against the rung's level beside it (`Levels::third`) -- the first members those the scout ran
-/// there, where it read the level on its own pairs (`Scouted`). Where its read excludes nothing on some look
-/// (`readable`: no output counts a trajectory at both levels), that side is unread.
+/// could not see, `Remedy::Upper`): the first `groups` of the pilot's groups `numbers` at the third's step `step`
+/// (`third_of`: above the rung's pair or below it; below it every group, its level a rung below's own or its
+/// companion's), held (`Levels::extra`; their states kept below the rung), read against the rung's level beside it on
+/// the same groups (`Levels::third`) -- the first members those the scout ran there, where it read the level on its
+/// own pairs (`Scouted`); a level held on fewer groups goes on to the more. Where its read excludes nothing on some
+/// look (`readable`: no output counts a trajectory at both levels), that side is unread.
 #[allow(clippy::too_many_arguments)]
-fn third_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], step: f64, messages: &mut Messages) {
+fn third_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], step: f64, groups: usize, messages: &mut Messages) {
     let tau = context.tau;
+    let groups = if step < tau { numbers.len() } else { groups.clamp(1, numbers.len()) };
     if !(levels.extra_step == step && !levels.extra.is_empty()) {
         let first = levels.scouted.as_mut().filter(|scouted| scouted.tau == tau && scouted.step == step && !scouted.level.is_empty()).map(|scouted| (std::mem::take(&mut scouted.level), scouted.members));
         levels.extra = match first {
             Some((mut first, members)) => {
-                let rest = level(run, ensemble, domain, &context.plan, step, numbers, members..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
+                // The scout's members of the groups beyond kept for them (`Levels::extra_first`).
+                (levels.extra_first, levels.extra_members) = (first.split_off(groups.min(first.len())), members);
+                let rest = level(run, ensemble, domain, &context.plan, step, &numbers[..groups], members..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages));
                 absorb(&mut first, rest);
                 first
             }
-            None => level(run, ensemble, domain, &context.plan, step, numbers, 0..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)),
+            None => {
+                levels.extra_first.clear();
+                level(run, ensemble, domain, &context.plan, step, &numbers[..groups], 0..GROUP, step < tau, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages))
+            }
         };
         (levels.extra_step, levels.further[2]) = (step, vec![]);
+    } else {
+        further_groups(run, ensemble, domain, context, levels, numbers, step, groups, messages);
     }
-    let (read, steps, pairs) = levels.third(tau, &context.plan.reads, context.plan.window, &context.scales);
+    let (mut read, mut steps, mut pairs) = levels.third(tau, &context.plan.reads, context.plan.window, &context.scales);
+    // A read on some of the pilot's groups that excludes nothing on some look: on all of them before the side is unread.
+    if !readable(&read) && levels.extra.len() < numbers.len() {
+        further_groups(run, ensemble, domain, context, levels, numbers, step, numbers.len(), messages);
+        (read, steps, pairs) = levels.third(tau, &context.plan.reads, context.plan.window, &context.scales);
+    }
     crate::prof::note(|| {
         let (halved, time) = levels.extra.iter().fold((0., 0.), |(h, t), p| (h + p.counts.halved.time, t + p.counts.time));
         let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
@@ -2792,6 +3597,29 @@ fn third_on_the_pilot(run: &Selected, ensemble: &Ensemble, domain: &Domain, cont
     } else {
         levels.third_none[usize::from(step < tau)] = true;
     }
+}
+
+/// The extra level held on the pilot's first groups (`third_on_the_pilot`) on to its first `groups`: the scout's
+/// trajectories there (`Levels::extra_first`) with their groups' other members, then whole groups, one hand-out.
+#[allow(clippy::too_many_arguments)]
+fn further_groups(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &mut Levels, numbers: &[u64], step: f64, groups: usize, messages: &mut Messages) {
+    let held = levels.extra.len();
+    if !(held < groups) {
+        return;
+    }
+    let tau = context.tau;
+    let took = (groups - held).min(levels.extra_first.len());
+    let mut first: Vec<Part> = levels.extra_first.drain(..took).collect();
+    let records = [|i| trajectory(run, ensemble, domain, step, &context.plan, step < tau, i)];
+    let hands = [
+        Hand { groups: &numbers[held..held + took], members: levels.extra_members..GROUP, shape: Shape::of(&context.plan, step < tau), record: &records[0], work: 1. },
+        Hand { groups: &numbers[held + took..groups], members: 0..GROUP, shape: Shape::of(&context.plan, step < tau), record: &records[0], work: 1. },
+    ];
+    let mut made = run_groups(&hands, 0, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)).into_iter();
+    let (rest, whole) = (made.next().expect("the scout's groups' other members"), made.next().expect("the whole groups"));
+    absorb(&mut first, rest);
+    levels.extra.extend(first);
+    levels.extra.extend(whole);
 }
 
 /// The rung's third level above on the scout's own pairs (`check`; module documentation, ## The ladder): the members
@@ -2828,15 +3656,16 @@ fn third_on_the_scout(run: &Selected, ensemble: &Ensemble, domain: &Domain, cont
 /// pair's and the pair's own, whose noise's ratio foresees the rung below (`foreseen`). Their cost is the scout's pairs
 /// at three steps, a few dozen of the rung's trajectories against the hundreds of pairs it weighs.
 #[allow(clippy::too_many_arguments)]
-fn foresee(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &Levels, numbers: &[u64], lower: f64, messages: &mut Messages) -> Foreseen {
+fn foresee(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Context, levels: &Levels, numbers: &[u64], lower: f64, prices: &dyn Fn(f64) -> f64, messages: &mut Messages) -> Foreseen {
     let plan = &context.plan;
     let half = |i| trajectory(run, ensemble, domain, 0.5 * lower, plan, true, i);
     let own = |i| trajectory(run, ensemble, domain, lower, plan, false, i);
     let double = |i| trajectory(run, ensemble, domain, 2. * lower, plan, false, i);
+    let work = |step: f64| foretold(Some(prices), step);
     let hands = [
-        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, true), record: &half },
-        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &own },
-        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &double },
+        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, true), record: &half, work: work(0.5 * lower) },
+        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &own, work: work(lower) },
+        Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &double, work: work(2. * lower) },
     ];
     let further: Vec<&Part> = levels.further[0].iter().collect();
     let mut made = run_groups(&hands, 0, messages, &mut |_, messages| so_far(context, &levels.fine, &further, messages)).into_iter();
@@ -3039,10 +3868,9 @@ impl Stopped {
 struct State {
     sample: Sample,
     index: u64,
-    /// The trajectory's jumps up to the state, their counted work (step.rs `Trajectory::jumped`) and the threshold of its
-    /// next one.
+    /// The trajectory's jumps up to the state and the threshold of its next one (its jumps' counted work is its end's,
+    /// `Record::end`).
     jumps: u32,
-    jumped: f64,
     threshold: f64,
     /// Its held forms (step.rs `Forms`: the next step's path momentum).
     forms: crate::step::Forms,
@@ -3054,7 +3882,6 @@ impl State {
             sample: Sample { cluster: t.cluster, at: t.point(), psi: t.psi.to_vec() },
             index: t.index,
             jumps: t.jumps,
-            jumped: t.jumped,
             threshold: t.threshold,
             forms: t.forms.clone(),
         }
@@ -3109,29 +3936,47 @@ struct Record {
     counts: Counts,
     /// Its photons and their Σ k_φ² (step.rs `Trajectory::scattered`).
     scattered: [f64; 2],
+    /// Its classical draw's kinetic energy K in k_BT (ensemble.rs `Ensemble::draw_kinetic`; none where the run does not
+    /// draw it): the statistic of the initial tilt T's memory is read by (`memory_at_the_end`).
+    kinetic: f64,
+    /// Its number, the time the run holds its atom, and its jumps' counted work by then (step.rs `Trajectory::jumped`):
+    /// what a mean over the run weighs it by and its jumps' rate a µs there (`one_each`). The time held: to its loss --
+    /// the moment its energy crossed zero, step.rs `Trajectory::lost` --, to where it ended with no outcome, else through
+    /// the run's end (a runaway is held, unresolved, at every time it did not reach).
+    end: (u64, f64, f64),
 }
 
 /// One trajectory's T windows (module documentation, # Outputs and windows) about some times, and what became of it by
 /// each time: per lab axis the running integrals from t = 0 of the time held, κ and κ² (µs, 1/µm·µs, 1/µm²·µs), and
 /// per time and axis their values at its window's two ends -- the window's time held, ∫κ dt and ∫κ² dt are the
-/// differences. An axis's windows' lower ends come in the times' order, and so do their upper ends (a window is cut at
-/// t = 0, and at the run's end alike): per axis and side, the next time whose end is to come. Time 0 is the instant
-/// t = 0 and has none. A time's ends are kept only while its window or its atom is not in (`open`): its atom takes its
-/// window's mean as soon as both are (`settle`) -- a trajectory keeps the windows that are open, a period of the slowest
-/// axis's times, not one a time read (a pilot's 15 400 for PGC3D's 10 ms).
+/// differences --; and per lab axis the running moments for the windows' shapes (estimate.rs `Shapes`), the window's
+/// origin's at its two ends. An axis's windows' lower ends come in the times' order, and so do their upper ends (a
+/// window is cut at t = 0, and at the run's end alike): per axis and side, the next time whose end is to come. Time 0
+/// is the instant t = 0 and has none. A time's ends are kept only while its window or its atom is not in (`open`): its
+/// atom takes its window's mean as soon as both are (`settle`) -- a trajectory keeps the windows that are open, a period
+/// of the slowest axis's times, not one a time read (a pilot's 15 400 for PGC3D's 10 ms).
 struct Windows<'a> {
     times: &'a [f64],
     halves: &'a [V3],
     running: [[f64; 3]; 3],
+    shapes: [Shapes; 3],
     fates: Vec<Fate>,
-    /// From the time `first` on: per time its ends' values as far as they are read, and whether its atom is in.
-    open: VecDeque<([[[f64; 3]; 2]; 3], bool)>,
+    /// From the time `first` on: per time its ends' values as far as they are read, whether its atom is in, and its
+    /// ends' shape moments (none where its origin was never met).
+    open: VecDeque<([[[f64; 3]; 2]; 3], bool, ShapeEnds)>,
     first: usize,
     next: [[usize; 2]; 3],
 }
+/// A window's shape moments at its two ends per lab axis: its origin and the origin's moments there (`Shapes::at`).
+type ShapeEnds = [[Option<(i64, [f64; SHAPE + 1])>; 2]; 3];
 impl<'a> Windows<'a> {
+    /// The windows of half widths `halves` about `times`: per lab axis the shapes' grid is the axis's longest half window.
     fn new(times: &'a [f64], halves: &'a [V3]) -> Windows<'a> {
-        Windows { times, halves, running: [[0.; 3]; 3], fates: vec![Fate::Lost; times.len()], open: VecDeque::new(), first: 1, next: [[1; 2]; 3] }
+        let shapes = std::array::from_fn(|a| {
+            let longest = halves.iter().map(|h| h[a]).fold(0., crate::linalg::larger);
+            Shapes::new(a, if longest > 0. { longest } else { f64::INFINITY })
+        });
+        Windows { times, halves, running: [[0.; 3]; 3], shapes, fates: vec![Fate::Lost; times.len()], open: VecDeque::new(), first: 1, next: [[1; 2]; 3] }
     }
     /// The lower (side 0) or upper (1) end of time k's window on axis a.
     fn end(&self, k: usize, a: usize, side: usize) -> f64 {
@@ -3139,9 +3984,9 @@ impl<'a> Windows<'a> {
         if side == 0 { t - h } else { t + h }
     }
     /// Time k's place among the open ones (k ≥ `first`), opened as far as it.
-    fn slot(&mut self, k: usize) -> &mut ([[[f64; 3]; 2]; 3], bool) {
+    fn slot(&mut self, k: usize) -> &mut ([[[f64; 3]; 2]; 3], bool, ShapeEnds) {
         while self.open.len() <= k - self.first {
-            self.open.push_back(([[[0.; 3]; 2]; 3], false));
+            self.open.push_back(([[[0.; 3]; 2]; 3], false, [[None; 2]; 3]));
         }
         &mut self.open[k - self.first]
     }
@@ -3153,36 +3998,43 @@ impl<'a> Windows<'a> {
             self.settle();
         }
     }
-    /// The path's piece from `from` to `to` (the next piece starts where this one ends), with its integrals of κ and κ²
-    /// per lab axis between two of its times (step.rs `Segment::moments`): each end inside it reads the integrals up to
-    /// it -- once for the ends that coincide, the axes of one frequency and the windows cut at t = 0 --, and the running
-    /// integrals take the whole piece.
-    fn add(&mut self, from: f64, to: f64, moments: &dyn Fn(f64, f64) -> (V3, V3)) {
+    /// The path's piece from `from` to `to` (the next piece starts where this one ends), with its integrals from `from`
+    /// to any time of it (step.rs `Stretch::to`: of κ and κ² per lab axis, and the shapes' moments): each end inside it
+    /// reads the integrals and its origin's moments up to it -- once for the ends that coincide, the axes of one
+    /// frequency and the windows cut at t = 0 --, and the running integrals and every origin's moments take the whole
+    /// piece.
+    fn add(&mut self, from: f64, to: f64, along: &dyn Fn(f64) -> Integrals) {
         let outputs = self.times.len();
-        let mut made: Vec<(f64, (V3, V3))> = vec![];
+        for shapes in self.shapes.iter_mut() {
+            shapes.reach(from, to);
+        }
+        let mut made: Vec<(f64, Integrals)> = vec![];
         for a in 0..3 {
             for side in 0..2 {
                 while self.next[a][side] < outputs && self.end(self.next[a][side], a, side) <= to {
                     let k = self.next[a][side];
                     let at = crate::linalg::larger(self.end(k, a, side), from);
-                    let (m1, m2) = match made.iter().find(|(x, _)| *x == at) {
-                        Some((_, same)) => *same,
+                    let i = match made.iter().position(|(x, _)| *x == at) {
+                        Some(i) => i,
                         None => {
-                            let m = moments(from, at);
-                            made.push((at, m));
-                            m
+                            made.push((at, along(at)));
+                            made.len() - 1
                         }
                     };
-                    let r = self.running[a];
-                    self.slot(k).0[a][side] = [r[0] + (at - from), r[1] + m1[a], r[2] + m2[a]];
+                    let (m, r) = (made[i].1, self.running[a]);
+                    let q = self.shapes[a].origin(self.end(k, a, 0));
+                    let shape = self.shapes[a].at(q, &m.local).map(|x| (q, x));
+                    let slot = self.slot(k);
+                    (slot.0[a][side], slot.2[a][side]) = ([r[0] + (at - from), r[1] + m.one[a], r[2] + m.two[a]], shape);
                     self.next[a][side] += 1;
                 }
             }
         }
-        let (m1, m2) = moments(from, to);
+        let whole = along(to);
         for a in 0..3 {
             let r = self.running[a];
-            self.running[a] = [r[0] + (to - from), r[1] + m1[a], r[2] + m2[a]];
+            self.running[a] = [r[0] + (to - from), r[1] + whole.one[a], r[2] + whole.two[a]];
+            self.shapes[a].add(&whole.local);
         }
         self.settle();
     }
@@ -3190,47 +4042,54 @@ impl<'a> Windows<'a> {
     /// the time is open no more. A window is in where its upper ends are on every axis (a lower end comes before its
     /// upper one).
     fn settle(&mut self) {
-        while let Some(&(ends, true)) = self.open.front() {
+        while let Some(&(ends, true, shape)) = self.open.front() {
             if self.next.iter().any(|n| n[1] <= self.first) {
                 break;
             }
-            mean(&mut self.fates[self.first], &ends);
+            mean(&mut self.fates[self.first], &ends, &shape, &self.shapes);
             self.open.pop_front();
             self.first += 1;
         }
     }
     /// The trajectory has ended (run through, lost, or stopped), what became of it by every time in: the ends it did
-    /// not reach -- within a window, or past its last piece by the rounding -- take the running integrals where it
-    /// ended, the window over its held part, and every open time's atom takes its window's mean. A time none of whose
-    /// ends was read has a window of no length (and no atom read: `Fate::Lost` or `Fate::Failed`).
+    /// not reach -- within a window, or past its last piece by the rounding -- take the running integrals and moments
+    /// where it ended, the window over its held part, and every open time's atom takes its window's mean. A time none of
+    /// whose ends was read has a window of no length (and no atom read: `Fate::Lost` or `Fate::Failed`).
     fn close(mut self) -> Vec<Fate> {
         for a in 0..3 {
             for side in 0..2 {
-                for e in self.open.iter_mut().skip(self.next[a][side] - self.first) {
-                    e.0[a][side] = self.running[a];
+                for k in self.next[a][side].max(self.first)..self.first + self.open.len() {
+                    let q = self.shapes[a].origin(self.end(k, a, 0));
+                    let shape = self.shapes[a].at(q, &Local::NONE).map(|m| (q, m));
+                    let e = &mut self.open[k - self.first];
+                    (e.0[a][side], e.2[a][side]) = (self.running[a], shape);
                 }
             }
         }
-        for (k, (ends, _)) in (self.first..).zip(&self.open) {
-            mean(&mut self.fates[k], ends);
+        for (k, (ends, _, shape)) in (self.first..).zip(&self.open) {
+            mean(&mut self.fates[k], ends, shape, &self.shapes);
         }
         self.fates
     }
 }
 
-/// An atom held at a time after t = 0 as its window reads it, its window's two ends per lab axis `ends`: its κ and κ²
-/// are the window's means -- over its held part, which is no empty stretch after t = 0 (estimate.rs `half_window`); a
-/// window of no length is the instant's own κ and κ².
-fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3]) {
+/// An atom held at a time after t = 0 as its window reads it, its window's two ends per lab axis `ends` and its shape
+/// moments there: its κ and κ² are the window's means and its shape the window's (estimate.rs `shape`) -- over its held
+/// part, which is no empty stretch after t = 0 (estimate.rs `half_window`); a window of no length is the instant's own
+/// κ and κ², and no shape.
+fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3], shape: &ShapeEnds, shapes: &[Shapes; 3]) {
     if let Fate::Held(h) = fate {
         let w: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|i| ends[a][1][i] - ends[a][0][i]));
         for a in (0..3).filter(|&a| w[a][0] != 0.) {
             (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
+            if let [Some((q, low)), Some((_, high))] = &shape[a] {
+                h.shape[a] = estimate::shape(shapes[a].spacing(), *q, ends[a][0][0], ends[a][1][0], low, high);
+            }
         }
     }
 }
 
-/// The times after t = 0 of two increasing lists from t = 0, merged: each with its place in either list, a time that is
+// The times after t = 0 of two increasing lists from t = 0, merged: each with its place in either list, a time that is
 /// in both once.
 fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
     let (mut i, mut j, mut out) = (1, 1, vec![]);
@@ -3303,7 +4162,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
         let held = match nowhere.get() {
             Some(_) if t.time > 0. => Fate::Failed,
-            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), unresolved: t.unresolved }),
+            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), shape: NO_SHAPE, unresolved: t.unresolved }),
         };
         let mut windows = windows.borrow_mut();
         if let Some(k) = places[0] {
@@ -3336,8 +4195,9 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
             if counted != Some(s.step.0) {
                 (steps, counted) = (steps + 1, Some(s.step.0));
             }
+            let stretch = s.stretch(s.start, until);
             for w in windows.borrow_mut().iter_mut() {
-                w.add(s.start, until, &|from, to| s.moments(from, to));
+                w.add(s.start, until, &|at| stretch.to(at));
             }
         };
         // Through the last output's window -- a failure there leaves every output read --, from checkpoint to checkpoint
@@ -3401,7 +4261,12 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         halved: path.halved(),
         time: t.time,
     };
-    Record { outputs, listed, reads, trail, lost, counts, scattered: t.scattered }
+    let held = match t.lost {
+        Some(at) => at,
+        None if failed || refused => t.time,
+        None => plan.end,
+    };
+    Record { outputs, listed, reads, trail, lost, counts, scattered: t.scattered, kinetic: 0., end: (index, held, t.jumped) }
 }
 
 /// A kept trajectory's states at the times `times` (increasing, from t = 0; µs) made again from its checkpoints `trail`
@@ -3439,19 +4304,49 @@ fn replay<D: Dynamics>(model: &D, domain: &Domain, tau: f64, end: f64, trail: &[
     states
 }
 
+/// The atom paths of a level whose states are kept (PIPELINE_V3_FINAL §二 B.7; paths.rs `Walk`): the first `count`
+/// trajectories of its groups `parts` in their members' order, each made again from its first checkpoint at the step τ
+/// toward the run's end `end` (`replay`'s way: the same trajectory to the bit), one step at a time -- advanced to the
+/// first step's end past its time (adapt.rs `advance`: a stop is no step's end) --, its (t, r, κ) at every step's end as
+/// far as the first at or past `until`, its loss or its failure; and its state at t = 0 by the request's states. Reads
+/// and changes nothing of the run.
+fn walks(run: &Selected, domain: &Domain, tau: f64, end: f64, parts: &[&Part], count: usize, until: f64) -> Vec<crate::paths::Walk> {
+    let trails: Vec<&Checkpoint> = parts.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).take(count).collect();
+    trails
+        .par_iter()
+        .map(|first| {
+            let (mut t, mut path, mut scratch) = (first.trajectory.clone(), first.path.clone(), Scratch::default());
+            let states = &run.cluster(t.cluster).states;
+            let norm = crate::linalg::norm_sqr(&t.psi).sqrt();
+            let start = t.psi.iter().zip(states).filter(|(z, _)| z.norm_sqr() > 0.).map(|(z, &s)| (s, *z * (1. / norm))).collect();
+            let mut ends = vec![[t.time, t.r[0], t.r[1], t.r[2], t.kappa[0], t.kappa[1], t.kappa[2]]];
+            while t.time < until && t.time < end && t.lost.is_none() {
+                let stop = t.time.next_up();
+                if adapt::advance(run, domain, tau, &mut t, &mut scratch, &mut path, end, stop, &[], &mut |_, _, _| {}, &mut |_, _| {}).is_err() {
+                    break;
+                }
+                ends.push([t.time, t.r[0], t.r[1], t.r[2], t.kappa[0], t.kappa[1], t.kappa[2]]);
+            }
+            crate::paths::Walk { index: t.index, start, ends }
+        })
+        .collect()
+}
+
 /// What a group of trajectories leaves: its sums at the outputs and at the times the decisions read (estimate.rs
 /// `Group`), its held atoms' (r, κ) at the listed outputs; where its states are kept (the pilot's run level: every
 /// member's), its trajectories' checkpoints in its members' order (`Record::trail`) and, at the analysis times
 /// (`parts_at`), its states there; its lost atoms' paths' ends (`Record::lost`) with the first of the times read each
-/// is lost at; its counts.
+/// is lost at; its trajectories' times held and jumps' work by then (`Record::end`); its counts.
 #[derive(Clone)]
 struct Part {
     sums: Group,
     reads: Group,
+    kinetic: Group,
     listed: Vec<Vec<(V3, V3)>>,
     samples: Vec<Vec<State>>,
     trails: Vec<Vec<Checkpoint>>,
     lost: Vec<(usize, State)>,
+    ends: Vec<(u64, f64, f64)>,
     counts: Counts,
 }
 impl Part {
@@ -3459,6 +4354,7 @@ impl Part {
     fn absorb(&mut self, other: Part) {
         self.sums.absorb(other.sums);
         self.reads.absorb(other.reads);
+        self.kinetic.absorb(other.kinetic);
         for (l, x) in self.listed.iter_mut().zip(other.listed) {
             l.extend(x);
         }
@@ -3467,6 +4363,7 @@ impl Part {
         }
         self.trails.extend(other.trails);
         self.lost.extend(other.lost);
+        self.ends.extend(other.ends);
         self.counts.add(&other.counts);
     }
 
@@ -3477,10 +4374,12 @@ impl Part {
         Part {
             sums: self.sums.clone(),
             reads: self.reads.at(at),
+            kinetic: self.kinetic.at(at),
             listed: self.listed.clone(),
             samples: vec![vec![]; at.len()],
             trails: vec![],
             lost: self.lost.iter().map(|(first, state)| (at.partition_point(|&k| k < *first), state.clone())).collect(),
+            ends: self.ends.clone(),
             counts: self.counts,
         }
     }
@@ -3532,10 +4431,12 @@ impl Shape {
         Part {
             sums: Group::new(self.outputs),
             reads: Group::new(self.reads),
+            kinetic: Group::new(self.reads),
             listed: vec![vec![]; self.listed],
             samples: vec![],
             trails: vec![],
             lost: vec![],
+            ends: vec![],
             counts: Counts::default(),
         }
     }
@@ -3545,12 +4446,15 @@ impl Shape {
         part.sums.scatter(r.scattered);
         part.reads.add(&r.reads);
         part.reads.scatter(r.scattered);
+        part.kinetic.add_weighted(&r.reads, r.kinetic);
+        part.kinetic.scatter(r.scattered.map(|x| x * r.kinetic));
         for (l, x) in part.listed.iter_mut().zip(r.listed) {
             l.extend(x);
         }
         if self.keep {
             part.trails.push(r.trail);
             part.lost.extend(r.lost);
+            part.ends.push(r.end);
         }
         part.counts.add(&r.counts);
     }
@@ -3560,16 +4464,26 @@ impl Shape {
 /// through the plan (`run`). A function of the index and the step: the same index at another step is the same atom on
 /// the same streams (module documentation, # The step).
 fn trajectory(model: &Selected, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
-    run(model, domain, ensemble.draw(SEED, index), index, tau, plan, keep)
+    let (start, kinetic) = ensemble.draw_kinetic(SEED, index);
+    Record { kinetic, ..run(model, domain, start, index, tau, plan, keep) }
 }
 
 /// A level of a hand-out (`run_groups`): the members `members` of the groups of the numbers `groups` (all of them:
-/// 0..GROUP), each trajectory made by `record` from its number, a group's records folded as `shape` says.
+/// 0..GROUP), each trajectory made by `record` from its number, a group's records folded as `shape` says, and a
+/// trajectory's work as foretold (`work`: what the hand-out orders its levels by; `foretold`).
 struct Hand<'a> {
     groups: &'a [u64],
     members: std::ops::Range<u64>,
     shape: Shape,
     record: &'a (dyn Fn(u64) -> Record + Sync),
+    work: f64,
+}
+
+/// A trajectory's work at the step `step` as foretold where a hand-out orders its levels (`run_groups`): its work a µs as
+/// priced at the states in hand (`Prices::work`, the scout's or the pilot's), where there are prices; before them its
+/// steps, 1/h a µs.
+fn foretold(prices: Option<&dyn Fn(f64) -> f64>, step: f64) -> f64 {
+    prices.map_or(1. / step, |work| work(step))
 }
 impl Hand<'_> {
     /// The members run of a group.
@@ -3591,8 +4505,10 @@ impl Hand<'_> {
 /// the trajectories, every core unless the process is told otherwise). Each thread takes the list's next trajectory as it ends
 /// one, so a faster core takes more of them, the groups finish nearly in order and the first after about one
 /// trajectory's time. The threads have no trajectory left only at the list's end: what is known to be run together is
-/// handed out together (`pair`, `levels_of`), the level of the longer trajectories first, so that the threads that wait for the
-/// list's last trajectories wait for its shortest. Each group's records are added in its members' order on this thread
+/// handed out together (`pair`, `levels_of`, `foresee`), the level of the dearer trajectories first as foretold
+/// (`Hand::work`, `foretold`: largest first, as a list scheduler takes it), so that the threads that wait for the list's
+/// last trajectories wait for its cheapest. (Ordered by their steps alone -- the finer first --, a level whose steps
+/// cost the more for its tones came last: GMD1C's at 2τ, its pictures 23 times τ's a step.) Each group's records are added in its members' order on this thread
 /// as soon as those before it are in -- a record waits only for its group's members before it, never for the whole
 /// group (a record holds its trajectory's fates at every time read) -- (`Shape::add`, nothing depends on the threads),
 /// each level's groups returned in their order; whenever the solve's
@@ -3605,13 +4521,16 @@ impl Hand<'_> {
 /// once the threads' trajectories in hand end it unwinds to the caller (the worker answers the request with it, main.rs
 /// # Defects).
 fn run_groups(levels: &[Hand], shown: usize, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
-    // Where each level's trajectories begin in the list, and the list's length.
-    let starts: Vec<u64> = levels.iter().scan(0, |next, level| Some(std::mem::replace(next, *next + level.count()))).collect();
+    // The levels in the list's order, the dearest trajectories first (as given where they are foretold alike), where
+    // each level's trajectories begin in the list, and the list's length.
+    let mut order: Vec<usize> = (0..levels.len()).collect();
+    order.sort_by(|&a, &b| levels[b].work.total_cmp(&levels[a].work));
+    let starts: Vec<u64> = order.iter().scan(0, |next, &level| Some(std::mem::replace(next, *next + levels[level].count()))).collect();
     let stop: u64 = levels.iter().map(Hand::count).sum();
     // The list's k-th trajectory: its level and its place there.
     let place = |k: u64| {
-        let level = starts.partition_point(|&start| start <= k) - 1;
-        (level, k - starts[level])
+        let at = starts.partition_point(|&start| start <= k) - 1;
+        (order[at], k - starts[at])
     };
     let next = AtomicU64::new(0);
     let threads = rayon::current_num_threads().min(stop as usize);
@@ -3911,6 +4830,7 @@ impl Measured<'_> {
 
     /// Per time the model's error (`means`): at each read the state's readings combined (`booked_at`: its row's last, the
     /// books' own combination), and their means.
+    #[cfg(test)]
     fn combined(&self, outputs: usize, estimates: &[Estimate]) -> Vec<[f64; 2]> {
         self.reduced(outputs, estimates, 1, &|row, out| out[0] = row[READINGS.len()].error).into_iter().map(|o| o[0]).collect()
     }
@@ -3956,18 +4876,19 @@ impl Measured<'_> {
 
 /// The model's error booked per time (SPEC §4; module documentation, # The model): the accounts combined
 /// measured at the states (`Measured::combined`), a population's at most 1; none at t = 0, the request's state.
+#[cfg(test)]
 fn model_error(combined: &[[f64; 2]]) -> Vec<[f64; 2]> {
     combined.iter().enumerate().map(|(k, c)| if k == 0 { [0.; 2] } else { [probability_error(c[0]), c[1]] }).collect()
 }
 
 /// A state a mean over the run is read at (`one_each`): a pilot trajectory's at one time, with its group's place
-/// among the pilot's and its weight in the mean, the time its trajectory holds its atom (µs).
+/// among the pilot's and its weight in the mean, the time its trajectory holds its atom (µs, `Record::end`).
 struct Pick<'a> {
     state: &'a State,
     group: usize,
     weight: f64,
-    /// The trajectory's jumps' counted work a µs over the time it holds its atom: its last state's (`State::jumped`) over
-    /// that state's time.
+    /// The trajectory's jumps' counted work a µs over the time it holds its atom: its work by then over that time
+    /// (`Record::end`).
     jumping: f64,
 }
 
@@ -3975,7 +4896,8 @@ struct Pick<'a> {
 /// (`attempt`) --: one state of every trajectory of `parts`, the pilot's groups with their states kept.
 ///
 /// What is read is the mean of a function f of the state over the time the run's atoms are held, Σ_i ∫ f_i dt /
-/// Σ_i T_i, T_i the time trajectory i holds its atom -- to its loss (its last state, `Part::lost`), or through the run:
+/// Σ_i T_i, T_i the time trajectory i holds its atom -- to its loss, the moment the engine found its energy past zero,
+/// or to where it ended with no outcome, or through the run's end (`Record::end`): one time for every reader of it --:
 /// a trajectory's work is its rate over the time it is held, and an error is booked on the atoms that are held. A
 /// trajectory is the ensemble's independent draw and its states along the run are not, so each trajectory gives one
 /// state, f at one time of H_i, the times after t = 0 it holds its atom at, for the whole of its time: f_i·T_i, the
@@ -3991,7 +4913,9 @@ struct Pick<'a> {
 /// and reads the run's own change in time as no spread --, and all of them together read it at n evenly spaced
 /// points. A function of the trajectory's number alone: its group's place and its own place in the group. A
 /// trajectory that ends with no outcome before the first time (estimate.rs, # What is counted) has no state to give,
-/// and weighs nothing.
+/// and weighs nothing, as does one that holds its atom for no time (no rate a µs to give). (Until 2026-11-22 a
+/// trajectory weighed by its last state's time, the last checkpoint where it was lost: R9_PUSH's pushed atoms, 85 of 88
+/// held at 11 µs and half of them at 22 µs, weighed nothing, their checkpoint the start, and their jumps a µs read 0/0.)
 fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
     let groups = parts.len();
     let mut picks = vec![];
@@ -4003,10 +4927,14 @@ fn one_each<'a>(parts: &[&'a Part]) -> Vec<Pick<'a>> {
             let lost = part.lost.iter().find(|(_, state)| state.index == first.index).map(|(_, state)| state);
             // Its states to pick from, and its last: where it was lost, its path's end (`Record::lost`).
             let states = if held.is_empty() { lost.map(|_| vec![first]).unwrap_or_default() } else { held };
-            let Some(last) = lost.or(states.last().copied()) else { continue };
+            // The time it holds its atom and its jumps' work by then (`Record::end`).
+            let Some(&(_, time, jumped)) = part.ends.iter().find(|end| end.0 == first.index).filter(|end| end.1 > 0.) else { continue };
+            if states.is_empty() {
+                continue;
+            }
             let through = ((member * groups + group) as f64 + 0.5) / (members.len() * groups) as f64;
             let state = states[((through * states.len() as f64) as usize).min(states.len() - 1)];
-            picks.push(Pick { state, group, weight: last.sample.at.t, jumping: last.jumped / last.sample.at.t });
+            picks.push(Pick { state, group, weight: time, jumping: jumped / time });
         }
     }
     picks
@@ -4571,8 +5499,9 @@ mod tests {
     /// errs three times C (4τ)², d₂/d₁ = 44/3 and its read is (11/3)² = 13.4 times the own one's: apart beyond either's
     /// error at one look, on the scout's eleven pairs as on the pilot's 88 -- out of the order's range. Priced (a flat
     /// price, the pilot's 88 pairs), the side above as read costs the pairs it asks beyond the eleven held at 4τ and the
-    /// pilot's at 2τ, the pilot's at least; out of the range no pairs make it the rung's: the side below, as foretold,
-    /// where it is to be had, and else the path at the rung is without bound -- the rung below.
+    /// pilot's at 2τ, in whole groups of the pilot's, three at the least (`Third::pairs`); out of the range no pairs make
+    /// it the rung's: the side below, as foretold, where it is to be had, and else the path at the rung is without bound
+    /// -- the rung below.
     #[test]
     fn the_scout_s_third_level_prices_the_path_at_its_rung_by_what_it_reads() {
         let (tau, times, scales) = (0.95, [0., 1., 2., 3., 4.], Scales { hbar_over_mass: 1., frequencies: [1.; 3] });
@@ -4581,8 +5510,8 @@ mod tests {
         let record = |h: f64, out: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * if h > 3. * tau { out } else { 1. };
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
-            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2] }
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
+            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         for members in [1, GROUP] {
             let level = |h: f64, out: f64| -> Vec<Part> { (0..11).map(|g| folded(&shape, (0..members).map(|m| record(h, out, g * GROUP + m)))).collect() };
@@ -4605,7 +5534,9 @@ mod tests {
         let scouted = |pairs: f64| Third { step: 4. * tau, held: 11., factor: 1., beside: 2. * tau, lift: 1., measured: Some(pairs) };
         let read = scouted(200.);
         assert!(close(read.cost(&prices, 88., 1.), 189. / (4. * tau) + 112. / (2. * tau)));
-        assert!(close(scouted(40.).cost(&prices, 88., 1.), 77. / (4. * tau)));
+        assert!(close(scouted(40.).cost(&prices, 88., 1.), 29. / (4. * tau)));
+        assert!(close(scouted(10.).cost(&prices, 88., 1.), 13. / (4. * tau)));
+        assert!(close(scouted(60.).work(&prices, 88., 1.), 53. / (4. * tau)));
         assert_eq!(third_of(&prices, tau, pilot, [true, false], Some(read)), Some(read));
         let out = scouted(f64::INFINITY);
         assert_eq!(third_of(&prices, tau, pilot, [true, false], Some(out)), None);
@@ -4819,12 +5750,14 @@ mod tests {
     /// A rung verified where it stands -- its third level read with its two -- or at the rung below, whichever path costs
     /// the run the less (`course`; module documentation, ## The ladder): the pilot's 88 pairs at 0.95 µs of a 1 ms run, a
     /// product of 287 trajectories, a flat price but the third level's steps dearer by a factor f: the rung below adds
-    /// (N + P)/τ to staying's (N − P)/τ, so the third level, 88 f/(4τ), is read up to f = 4(N + P)/P = 17.05, and beyond
-    /// it the rung below is the cheaper path -- one flip. At the ladder's bottom (no rung below) it is read whatever its
-    /// price. On the scout's position the pilot's purchase to come is priced into staying: the rung below adds 336.5/τ to
-    /// the scout's staying (its companions at 2τ not yet run), so from f = 336.5/22 = 15.3 on the scout goes down. (Until
-    /// R2-LADDER a third dearer than that left the rung to stand on its own two levels; the path at the rung is now
-    /// verified with its third wherever one is to be had.)
+    /// (N + P)/τ to staying's (N − P)/τ, so the third level -- the pairs its read asks, here none beyond its least three
+    /// groups, 24 f/(4τ) (`Third::pairs`) -- is read up to f = 4(N + P)/24 = 62.5, and beyond it the rung below is the
+    /// cheaper path -- one flip. At the ladder's bottom (no rung below) it is read whatever its price. On the scout's
+    /// position the pilot's purchase to come is priced into staying: the rung below adds 336.5/τ to the scout's staying
+    /// (its companions at 2τ not yet run), so from f = 336.5/6 = 56.1 on the scout goes down. (Until R2-LADDER a third
+    /// dearer than that left the rung to stand on its own two levels; the path at the rung is now verified with its third
+    /// wherever one is to be had. Until SELCOST the third was the pilot's 88 trajectories whatever its read asked: the
+    /// flips at 17.05 and 15.3.)
     #[test]
     fn a_third_level_dearer_than_a_rung_below_is_not_read() {
         let (end, tau, product) = (1000., 0.95, 287.);
@@ -4833,15 +5766,16 @@ mod tests {
             let work = move |h: f64| if h == 4. * tau { f / h } else { 1. / h };
             course(&Prices { halving: &|_: f64| 1., work: &work, product }, tau, end, holding, up(tau))
         };
-        let factors: Vec<f64> = (0..=400).map(|k| 1. + 0.1 * k as f64).collect();
+        let factors: Vec<f64> = (0..=1000).map(|k| 1. + 0.1 * k as f64).collect();
         let courses: Vec<Course> = factors.iter().map(|&f| priced(f, tau, pilot)).collect();
         let flips = courses.windows(2).filter(|w| w[0] != w[1]).count();
-        let flip = 4. * (product + 88.) / 88.;
-        assert!(courses[0] == Course::Third && courses[400] == Course::Below && flips == 1, "{courses:?}");
-        assert!(factors.iter().zip(&courses).all(|(&f, &c)| c == if f <= flip { Course::Third } else { Course::Below }), "{flip}");
+        let flip = 4. * (product + 88.) / (THIRD_GROUPS * GROUP) as f64;
+        assert!(courses[0] == Course::Third && courses[1000] == Course::Below && flips == 1, "{courses:?}");
+        // The flip on the grid itself (62.5) goes either way to the rounding.
+        assert!(factors.iter().zip(&courses).all(|(&f, &c)| (f - flip).abs() < 1e-9 || c == if f <= flip { Course::Third } else { Course::Below }), "{flip}");
         let bottom = end / MOST_STEPS as f64 * 1.5;
         assert!(end / (0.5 * bottom) > MOST_STEPS as f64 && priced(1e6, bottom, pilot) == Course::Third);
-        assert_eq!([1., 15.2, 15.4, 17., 17.1, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Below, Course::Below]);
+        assert_eq!([1., 56., 56.2, 62.4, 62.6, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Below, Course::Below]);
     }
 
     /// A rung read against τ/2 reads e(τ) as one read against 2τ does (module documentation, ## A companion at τ/2;
@@ -4859,9 +5793,9 @@ mod tests {
         let record = |h: f64, f: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * (1. - f * (1. - 0.5_f64.powi(ORDER)));
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
             let halved = adapt::Halved { steps: 1, time: 4. * f, shortfall: 4. * f * (1. - 0.5_f64.powi(ORDER)) };
-            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2] }
+            Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let halved = |h: f64, f: f64| -> Vec<Part> { (0..11).map(|g| folded(&shape, (0..GROUP).map(|m| record(h, f, g * GROUP + m)))).collect() };
         let level = |h: f64| halved(h, 0.);
@@ -5222,6 +6156,7 @@ mod tests {
                 temperature_total_error: Spread { error, groups: f64::INFINITY },
                 occupation: [0.; 3],
                 mean_velocity: [0.; 3],
+                mean_speed: [0.; 3],
             }),
             failed: 0.,
             uncounted: 0.,
@@ -5247,7 +6182,7 @@ mod tests {
         let groups: Vec<Group> = (0..4)
             .map(|g| {
                 let mut group = Group::new(4);
-                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], unresolved: false });
+                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], shape: NO_SHAPE, unresolved: false });
                 group.add(&[held.clone(), held.clone(), Fate::Failed, Fate::Failed]);
                 group.add(&[held.clone(), held.clone(), held, Fate::Failed]);
                 group
@@ -5297,7 +6232,7 @@ mod tests {
     /// one atom at 30 μs, none at 40 μs.
     #[test]
     fn a_t_carried_keeps_its_judgement_and_a_t_unread_is_its_own() {
-        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], unresolved: false });
+        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], shape: NO_SHAPE, unresolved: false });
         let groups: Vec<Group> = (0..5)
             .map(|g| {
                 let mut group = Group::new(5);
@@ -5356,7 +6291,7 @@ mod tests {
         let kinds = 11;
         let held = |g: usize, m: usize, scale: f64, still: bool, unresolved: bool| {
             let y = if still { 0. } else { scale * (1. + (g * 4 + m) as f64) };
-            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], unresolved })
+            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], shape: NO_SHAPE, unresolved })
         };
         let level = |scale: f64| -> Vec<Group> {
             (0..5)
@@ -5571,7 +6506,7 @@ mod tests {
                     let mut group = Group::new(2);
                     for m in 0..4 {
                         let kappa2 = t * hotter * (1. + 0.01 * (4 * g + m) as f64);
-                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], unresolved: false });
+                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], shape: NO_SHAPE, unresolved: false });
                         group.add(&[held.clone(), held]);
                     }
                     group
@@ -5608,7 +6543,7 @@ mod tests {
     /// A state at the time t of the trajectory `index` with `jumps` jumps, each of a unit of counted work: no step reads it
     /// (nothing of the run's).
     fn bare_state(index: u64, t: f64, jumps: u32) -> State {
-        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, jumped: f64::from(jumps), threshold: 0.5, forms: crate::step::Forms::default() }
+        State { sample: Sample { cluster: 0, at: crate::model::Point { r: [0.; 3], kappa: [0.; 3], t }, psi: vec![] }, index, jumps, threshold: 0.5, forms: crate::step::Forms::default() }
     }
 
     /// The fold's readings per output (`Measured::means`) and their combination (`Measured::combined`, `model_error`):
@@ -5713,7 +6648,9 @@ mod tests {
                 // Three jumps a unit of time.
                 let state = |m: usize, k: usize| bare_state(MOST_TRAJECTORIES + (g as u64) * GROUP + m as u64, k as f64, 3 * k as u32);
                 let samples = (0..=outputs).map(|k| (0..members).filter(|&m| k <= held(g, m)).map(|m| state(m, k)).collect()).collect();
-                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], counts: Counts::default() }
+                // Each held to its last held output's time, three jumps a unit of time by then.
+                let ends = (0..members).map(|m| (MOST_TRAJECTORIES + (g as u64) * GROUP + m as u64, held(g, m) as f64, 3. * held(g, m) as f64)).collect();
+                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), kinetic: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost: vec![], ends, counts: Counts::default() }
             })
             .collect()
     }
@@ -5808,8 +6745,10 @@ mod tests {
     /// and longer than the interval, overlapping, cut at t = 0), the path in pieces of a step of 0.37 µs and a jump inside
     /// every third step. An atom read at every time, its κ and κ² zero at the instant, takes its window's means whether it
     /// is read before the piece its time lies in is added or after it. Run through to the plan's end, every window's
-    /// mean κ and κ² within 1e-12 of its own scale; an atom lost at 17.6 µs, the windows that reach past it over their
-    /// held part, no atom after it. The times kept open are never more than a window's span of them and two.
+    /// mean κ and κ² within 1e-12 of its own scale, and its shape (estimate.rs `shape`) its means of κ P_ℓ by a dense
+    /// rule within the moments' rounding through the conversion (`amplification`: every summed term's rounding, times
+    /// Σ_j |T_ℓj|), zero past its degree; an atom lost at 17.6 µs, the windows that reach past it over their held part,
+    /// no atom after it. The times kept open are never more than a window's span of them and two.
     #[test]
     fn the_windows_are_their_ends_differences() {
         let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
@@ -5824,6 +6763,19 @@ mod tests {
             let d = |a: usize| { let (p, q) = (antiderivative(a, from), antiderivative(a, to)); [q[1] - p[1], q[2] - p[2]] };
             (std::array::from_fn(|a| d(a)[0]), std::array::from_fn(|a| d(a)[1]))
         };
+        let kappa = |t: f64| -> V3 { std::array::from_fn(|a| amp[a] * (w[a] * t + phase[a]).cos()) };
+        // Dense Gauss-Legendre over a stretch: its nodes, weights and κ; a piece's integrals from its start (as step.rs
+        // `Stretch::to` gives them), κ and κ² exact, the shapes' moments by the dense rule.
+        let rule = crate::special::gauss_legendre(60);
+        let nodes = |from: f64, to: f64| -> Vec<(f64, f64, V3)> {
+            rule.iter().map(|&(x, weight)| { let t = 0.5 * (from + to) + 0.5 * (to - from) * x; (t, 0.5 * (to - from) * weight, kappa(t)) }).collect()
+        };
+        let along = |from: f64, at: f64| -> Integrals {
+            let (one, two) = moments(from, at);
+            Integrals { one, two, local: Integrals::of(from, nodes(from, at)).local }
+        };
+        let longest: V3 = std::array::from_fn(|a| plan.halves.iter().map(|h| h[a]).fold(0., crate::linalg::larger));
+        let mut worst = 0_f64;
         // The pieces: steps of τ, the third of every three cut by a jump at 0.43 τ.
         let tau = 0.37;
         let mut cuts = vec![0.];
@@ -5837,7 +6789,7 @@ mod tests {
                 break;
             }
         }
-        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], unresolved: false });
+        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
         let span = 2. * plan.halves.iter().flatten().copied().fold(0., crate::linalg::larger);
         for stop in [plan.end, 17.6] {
             let mut windows = Windows::new(&plan.times, &plan.halves);
@@ -5848,7 +6800,7 @@ mod tests {
                 // The times in the piece read before it is added (the odd ones) and after it (the even ones).
                 let inside: Vec<usize> = (next..times.len()).take_while(|&k| times[k] <= to).collect();
                 inside.iter().filter(|&&k| k % 2 == 1).for_each(|&k| windows.record(k, atom.clone()));
-                windows.add(piece[0], to, &moments);
+                windows.add(piece[0], to, &|at| along(piece[0], at));
                 inside.iter().filter(|&&k| k % 2 == 0).for_each(|&k| windows.record(k, atom.clone()));
                 next += inside.len();
                 most = most.max(windows.open.len());
@@ -5865,10 +6817,172 @@ mod tests {
                     let exact: [f64; 3] = { let (p, q) = (antiderivative(a, lo), antiderivative(a, hi)); std::array::from_fn(|i| q[i] - p[i]) };
                     let scale = 1e-12 * stop * crate::linalg::larger(amp[a], 1.).powi(2) / exact[0];
                     assert!((h.kappa[a] - exact[1] / exact[0]).abs() <= scale && (h.kappa2[a] - exact[2] / exact[0]).abs() <= scale, "stop {stop}, output {k}, axis {a}: {} and {} against {} and {}", h.kappa[a], h.kappa2[a], exact[1] / exact[0], exact[2] / exact[0]);
+                    let (centre, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+                    let degree = estimate::shape_degree(PI * half / longest[a]);
+                    // The origin's moments summed every node of every piece since the origin was met (a piece before its
+                    // grid point at the most), each term rounded at its power and in the sum.
+                    let origin = (lo / longest[a]).floor() * longest[a];
+                    let terms = (60 * (cuts.iter().filter(|&&c| c > origin - tau && c < hi).count() + 1) * (SHAPE + 2)) as f64;
+                    let gain = amplification(longest[a], lo, hi);
+                    for l in 1..=SHAPE {
+                        let dense: f64 = if l > degree { 0. } else { nodes(lo, hi).iter().map(|&(t, weight, k)| weight * k[a] * legendre(l, (t - centre) / half)).sum::<f64>() / (hi - lo) };
+                        let error = (h.shape[a][l - 1] - dense).abs() / amp[a];
+                        let bound = (gain[l] * terms * (hi - origin) / (hi - lo) + 64.) * crate::units::UNIT_ROUNDOFF;
+                        worst = worst.max(error / bound);
+                        assert!(error <= bound, "stop {stop}, output {k}, axis {a}, degree {l} of {degree}: {} against {dense}, {error:.2e} of the amplitude beyond {bound:.2e}", h.shape[a][l - 1]);
+                    }
                 }
             }
             assert!(most as f64 <= span + 2., "{most} times open against a span of {span} µs");
         }
+        println!("the shapes' largest error over its bound: {worst:.2e}");
+    }
+
+    /// The conversion's amplification of a window [lower, upper] on a grid of spacing G (estimate.rs `shape`): per
+    /// degree ℓ, Σ_j |T_ℓj| of P_ℓ(αy + β) in the powers of y -- what the rounding of the origin's moments is multiplied
+    /// by -- over the window's half width relative to the spacing's.
+    fn amplification(spacing: f64, lower: f64, upper: f64) -> [f64; SHAPE + 1] {
+        let (h, s) = (0.5 * (upper - lower), 1.5 * spacing);
+        let q = (lower / spacing).floor();
+        let (alpha, beta) = (s / h, (q * spacing + s - (lower + h)) / h);
+        let (mut before, mut now) = ([0.; SHAPE + 2], [0.; SHAPE + 2]);
+        (before[0], now[0], now[1]) = (1., beta, alpha);
+        let mut out = [1.; SHAPE + 1];
+        for l in 1..=SHAPE {
+            out[l] = now.iter().map(|c| c.abs()).sum();
+            let mut next = [0.; SHAPE + 2];
+            for j in 0..=(l + 1).min(SHAPE + 1) {
+                let times = beta * now[j] + if j > 0 { alpha * now[j - 1] } else { 0. };
+                next[j] = ((2 * l + 1) as f64 * times - l as f64 * before[j]) / (l + 1) as f64;
+            }
+            (before, now) = (now, next);
+        }
+        out
+    }
+
+    /// P_ℓ(x) by Bonnet's recurrence.
+    fn legendre(l: usize, x: f64) -> f64 {
+        let (mut before, mut now) = (1., x);
+        if l == 0 {
+            return 1.;
+        }
+        for n in 1..l {
+            (before, now) = (now, ((2 * n + 1) as f64 * x * now - n as f64 * before) / (n + 1) as f64);
+        }
+        now
+    }
+
+    /// The cloud's own motion is no temperature (estimate.rs, # The cloud's own motion), whatever it is: 64 atoms in eight
+    /// groups on the windows of the test above (periods 0.7, 2.3 and 23 µs, outputs 1 µs apart, windows cut at t = 0
+    /// and whole), each its own oscillation κ_a = A cos(ω_a t + φ) with a kick of its own at every jump, and on top of
+    /// them a path every atom shares -- none, a push (a ramp of 0.6/µm per µs, a fall alike) and a sloshing at 0.86 ω_a
+    /// of amplitude 5/µm, the cloud's motion's window variance up to 70 times the atoms' spread. T and its jackknife
+    /// per axis and output read with the shared path are those without it within 1e-9 of the paths' scale (the atoms'
+    /// spread and the shared path's mean square over the window): the shapes take the path out but for the rounding of
+    /// their conversion (bounded in the test above). So is what the atoms whose state the run does not know carry of T:
+    /// every seventh atom unresolved, their share of the held atoms (estimate.rs `Estimate::unresolved`, booked on T as
+    /// the bound of that share moved: `Estimate::moved`) is the same with the shared path and without it. Read with no
+    /// shapes (the estimate of before) T moves with the path by its window variance and twice its window covariance with
+    /// the atoms' own mean path, Var_W(g) + 2Cov_W(g, ū) (the U-statistic's algebra), by a dense rule on the pieces within
+    /// 1e-9 of the scale -- what the shapes take out.
+    #[test]
+    fn the_cloud_s_own_motion_is_no_temperature() {
+        let w = [TAU / 0.7, TAU / 2.3, TAU / 23.];
+        let times: Vec<f64> = (0..31).map(|k| k as f64).collect();
+        let plan = Plan::new(&times, w);
+        let tau = 0.37;
+        let mut cuts = vec![0.];
+        for i in 0.. {
+            let (start, step_end) = (i as f64 * tau, crate::linalg::smaller((i + 1) as f64 * tau, plan.end));
+            if i % 3 == 2 && start + 0.43 * tau < step_end {
+                cuts.push(start + 0.43 * tau);
+            }
+            cuts.push(step_end);
+            if step_end >= plan.end {
+                break;
+            }
+        }
+        // Each atom's own numbers, a fixed sequence: amplitudes, phases and kick sizes.
+        let draw = |i: usize, j: usize| -> f64 { ((i * 7919 + j * 104_729 + 13) as f64 * 0.618_033_988_749_895).fract() };
+        let atoms = 64;
+        let own = |i: usize, a: usize, t: f64| -> f64 {
+            let kicks = (cuts.partition_point(|&c| c <= t) - 1) as f64;
+            (0.5 + draw(i, a)) * (w[a] * t + TAU * draw(i, a + 3)).cos() + 0.05 * (draw(i, a + 6) - 0.5) * kicks
+        };
+        let shared: [&dyn Fn(usize, f64) -> f64; 3] = [&|_, _| 0., &|_, t| 0.6 * t, &|a, t| 5. * (0.86 * w[a] * t + 0.4).sin()];
+        let rule = crate::special::gauss_legendre(60);
+        let read = |path: &dyn Fn(usize, f64) -> f64, shapes: bool| -> Vec<Estimate> {
+            let mut groups: Vec<Group> = (0..8).map(|_| Group::new(times.len())).collect();
+            for i in 0..atoms {
+                let kappa = |t: f64| -> V3 { std::array::from_fn(|a| own(i, a, t) + path(a, t)) };
+                // The path is continuous within a piece (a kick lands at a piece's start): a piece's rule from just
+                // inside it.
+                let nodes = |from: f64, to: f64| -> Vec<(f64, f64, V3)> {
+                    rule.iter().map(|&(x, weight)| { let t = 0.5 * (from + to) + 0.5 * (to - from) * x; (t, 0.5 * (to - from) * weight, kappa(t)) }).collect()
+                };
+                let along = |from: f64, at: f64| Integrals::of(from, nodes(from, at));
+                let mut windows = Windows::new(&plan.times, &plan.halves);
+                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, unresolved: i % 7 == 3 });
+                windows.record(0, at(0.));
+                let mut next = 1;
+                for piece in cuts.windows(2) {
+                    windows.add(piece[0], piece[1], &|at| along(piece[0], at));
+                    while next < times.len() && times[next] <= piece[1] {
+                        windows.record(next, at(times[next]));
+                        next += 1;
+                    }
+                }
+                let mut fates = windows.close();
+                if !shapes {
+                    for f in fates.iter_mut() {
+                        if let Fate::Held(h) = f {
+                            h.shape = NO_SHAPE;
+                        }
+                    }
+                }
+                groups[i % 8].add(&fates);
+            }
+            summarize(&groups, &Scales { hbar_over_mass: KT_PER_UK, frequencies: w })
+        };
+        let (alone, alone_before) = (read(shared[0], true), read(shared[0], false));
+        let mut worst = 0_f64;
+        for (case, path) in shared.iter().enumerate().skip(1) {
+            let (with, before) = (read(*path, true), read(*path, false));
+            for k in 1..times.len() {
+                let (m, a0, b, b0) = (with[k].motion.unwrap(), alone[k].motion.unwrap(), before[k].motion.unwrap(), alone_before[k].motion.unwrap());
+                for a in 0..3 {
+                    let h = plan.halves[k][a];
+                    let (lo, hi) = (times[k] - h, times[k] + h);
+                    // The shared path g and the atoms' own mean ū over the window by a dense rule on its pieces.
+                    let mut ends = vec![lo];
+                    ends.extend(cuts.iter().copied().filter(|&c| c > lo && c < hi));
+                    ends.push(hi);
+                    let (mut g1, mut g2, mut u1, mut gu) = (0., 0., 0., 0.);
+                    for piece in ends.windows(2) {
+                        for &(x, wt) in rule.iter() {
+                            let (t, wt) = (0.5 * (piece[0] + piece[1]) + 0.5 * (piece[1] - piece[0]) * x, 0.5 * (piece[1] - piece[0]) * wt / (hi - lo));
+                            let (g, u) = (path(a, t), (0..atoms).map(|i| own(i, a, t)).sum::<f64>() / atoms as f64);
+                            (g1, g2, u1, gu) = (g1 + wt * g, g2 + wt * g * g, u1 + wt * u, gu + wt * g * u);
+                        }
+                    }
+                    let (variance, covariance) = (g2 - g1 * g1, gu - g1 * u1);
+                    // The paths' scale: the atoms' spread and the shared path's mean square over the window.
+                    let scale = a0.temperature[a] + g2;
+                    worst = worst.max((m.temperature[a] - a0.temperature[a]).abs() / scale);
+                    assert!((m.temperature[a] - a0.temperature[a]).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: T {} with the shared path against {} without (its variance {variance})", m.temperature[a], a0.temperature[a]);
+                    assert!((m.temperature_errors[a].error - a0.temperature_errors[a].error).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: its error {} against {}", m.temperature_errors[a].error, a0.temperature_errors[a].error);
+                    let moved = b.temperature[a] - b0.temperature[a];
+                    assert!((moved - variance - 2. * covariance).abs() <= 1e-9 * scale, "case {case}, output {k}, axis {a}: with no shapes T moved by {moved} against {variance} + 2 × {covariance}");
+                }
+                // The unresolved atoms: the same share of the held atoms, what T's bound is booked at.
+                assert!(with[k].unresolved == alone[k].unresolved && alone[k].unresolved > 0., "case {case}, output {k}: the unresolved share {} with the shared path against {} without", with[k].unresolved, alone[k].unresolved);
+            }
+        }
+        println!("T with a shared path against T without it: at most {worst:.2e} of the paths' scale");
+        // The shared paths are large against the spread: the largest window variance over the atoms' T.
+        let sloshing = read(shared[2], false);
+        let most = (1..times.len()).map(|k| sloshing[k].motion.unwrap().temperature[2] / alone[k].motion.unwrap().temperature[2]).fold(0., f64::max);
+        assert!(most > 10., "the sloshing's reading with no shapes is {most} times the spread at the most");
     }
 
     /// The histograms hold every atom, sum to one, put 0 at a bin's centre, and carry a listed output with no atom.
@@ -5929,8 +7043,8 @@ mod tests {
         };
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
-            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false };
-            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false };
+            Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
         let scout: Vec<Part> = (0..3).map(|i| folded(&shape, std::iter::once(record(i)))).collect();
@@ -5973,33 +7087,45 @@ mod tests {
         assert_eq!(sent, [at(Step::Scout, 1.), at(Step::Scout, 0.5), at(Step::Pilot, 0.5), batch(1, 88, 176), batch(2, 176, 352)]);
     }
 
-    /// A solve's stages in order (module documentation, # Steps), on R1_TWEEZER's own request over 20 µs: the selection
-    /// and the model with no rung, then the scout, the pilot and the product's batches at their rungs, never a step back,
-    /// each stage another than the one before; no checkpoint before the scout. A batch brings the run beyond the
-    /// trajectories in hand, its numbers count from 1, and its looks stand beyond their targets (else no batch).
+    /// A solve's stages in order (module documentation, # Steps), on R1_TWEEZER's own request over 20 µs, solved twice:
+    /// the first a new selection -- Model, then G's Scout and Pilot, Select, and either Product (G chosen) or Model, Scout,
+    /// Pilot and Product again --, the second on the choice kept -- Select, Model, Scout, Pilot, Product --; each stage
+    /// another than the one before, the steps (consecutive stages of one step taken once) in that order, Select and Model
+    /// at no rung and every other stage at one; no checkpoint before the first
+    /// Scout. A batch brings the run beyond the trajectories in hand, its numbers count from 1, and its looks stand beyond
+    /// their targets (else no batch).
     #[test]
     fn a_solve_says_its_steps_in_order() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join("R1_TWEEZER.json");
         let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         (line["options"]["durationUs"], line["options"]["samples"]) = (serde_json::json!(20.), serde_json::json!(21));
         let request = Request::from_native(&line).unwrap();
-        // Each message as it came: a stage, or a checkpoint (None).
-        let mut came: Vec<Option<Stage>> = vec![];
-        let solved = solve(&request, &mut |m| came.push(match m {
-            Message::Stage(s) => Some(s.clone()),
-            Message::Checkpoint(..) => None,
-        }));
-        solved.unwrap();
-        let stages: Vec<&Stage> = came.iter().flatten().collect();
-        eprintln!("{} messages; stages {stages:?}", came.len());
-        assert_eq!(stages.iter().take(3).map(|s| s.step).collect::<Vec<_>>(), [Step::Select, Step::Model, Step::Scout]);
-        assert!(stages[..2].iter().all(|s| s.tau.is_none() && s.batch.is_none()) && stages[2..].iter().all(|s| s.tau.is_some_and(|t| t > 0.)));
-        assert!(stages.iter().any(|s| s.step == Step::Pilot));
-        assert!(stages.windows(2).all(|w| w[0] != w[1] && w[0].step as u8 <= w[1].step as u8), "a step back or a stage again");
-        let scout = came.iter().position(|m| m.as_ref().is_some_and(|s| s.step == Step::Scout)).unwrap();
-        assert!(came[..scout].iter().all(Option::is_some), "no checkpoint before the scout");
-        let batches: Vec<&Batch> = stages.iter().filter_map(|s| s.batch.as_ref()).collect();
-        assert!(batches.iter().enumerate().all(|(i, b)| b.number == i as u64 + 1 && b.want > b.trajectories && b.worst.is_none_or(|w| w > 1.)), "{batches:?}");
+        let fresh = crate::select::kept(&request).is_none();
+        for new in [fresh, false] {
+            // Each message as it came: a stage, or a checkpoint (None).
+            let mut came: Vec<Option<Stage>> = vec![];
+            let solved = solve(&request, &mut |m| came.push(match m {
+                Message::Stage(s) => Some(s.clone()),
+                Message::Checkpoint(..) => None,
+            }));
+            solved.unwrap();
+            let stages: Vec<&Stage> = came.iter().flatten().collect();
+            eprintln!("{} messages; stages {stages:?}", came.len());
+            assert!(stages.windows(2).all(|w| w[0] != w[1]), "a stage again");
+            let mut steps: Vec<Step> = stages.iter().map(|s| s.step).collect();
+            steps.dedup();
+            use Step::*;
+            if new {
+                assert!(steps == [Model, Scout, Pilot, Select, Product] || steps == [Model, Scout, Pilot, Select, Model, Scout, Pilot, Product], "{steps:?}");
+            } else {
+                assert_eq!(steps, [Select, Model, Scout, Pilot, Product]);
+            }
+            assert!(stages.iter().all(|s| matches!(s.step, Select | Model) == s.tau.is_none()), "a rung where none is, or none where one is");
+            let scout = came.iter().position(|m| m.as_ref().is_some_and(|s| s.step == Scout)).unwrap();
+            assert!(came[..scout].iter().all(Option::is_some), "no checkpoint before the scout");
+            let batches: Vec<&Batch> = stages.iter().filter_map(|s| s.batch.as_ref()).collect();
+            assert!(batches.iter().enumerate().all(|(i, b)| b.number == i as u64 + 1 && b.want > b.trajectories && b.worst.is_none_or(|w| w > 1.)), "{batches:?}");
+        }
     }
 
     /// A run that integrates nothing hands out nothing (module documentation, # Exits; tilt2 at 24d346ce: every start
@@ -6027,7 +7153,7 @@ mod tests {
             method: String::new(),
         };
         let shape = Shape::of(&context.plan, false);
-        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false });
+        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false });
         let nowhere = |i: u64| Record {
             outputs: vec![held(i), Fate::Failed],
             reads: vec![held(i), Fate::Failed],
@@ -6036,6 +7162,8 @@ mod tests {
             lost: None,
             counts: Counts { nowhere: Stopped::at(0.), ..Counts::default() },
             scattered: [0.; 2],
+            kinetic: 0.,
+            end: (i, 0., 0.),
         };
         let none = [folded(&shape, (0..GROUP).map(nowhere)), folded(&shape, (GROUP..2 * GROUP).map(nowhere))];
         let all: Vec<&Part> = none.iter().collect();
@@ -6079,13 +7207,13 @@ mod tests {
         let record = |_: u64| {
             std::thread::sleep(Duration::from_millis(3));
             over.fetch_add(1, Ordering::Relaxed);
-            Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
+            Record { outputs: vec![Fate::Lost], reads: vec![Fate::Lost], listed: vec![], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now() - CHECKPOINT, last: None, least: 0, stage: None };
         let numbers: Vec<u64> = (0..rayon::current_num_threads() as u64).collect();
         let mut seen = vec![];
-        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }], 0, &mut messages, &mut |_, messages| {
+        let levels = run_groups(&[Hand { groups: &numbers, members: 0..GROUP, shape, record: &record, work: 1. }], 0, &mut messages, &mut |_, messages| {
             seen.push((0..2).into_par_iter().map(|_| over.load(Ordering::Relaxed)).max().expect("the loop's two items"));
             messages.again();
         });
@@ -6283,17 +7411,29 @@ mod tests {
         }
     }
 
-    /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's run, at states of its
-    /// atoms at the trap's centre at rest and at one to three times the thermal speed along each lab axis, held (no jump,
-    /// each its own representation: its start's), at two steps -- a trajectory's work a µs priced at every state is that
-    /// state's step's own count (`Step::work`, its scratch primed as a run's) over its length and its jumps' counted work
-    /// a µs (`Pick::jumping`), the mean over the states by their weights, to the rounding. The step is the run's from the
-    /// state: where the scheme refuses it, at its half, and so on (adapt.rs `halving`) -- at 0.4335 µs the decomposition
-    /// refuses one state's step for an entry of no route, and the price is that of its half (before, it was the price
-    /// without bound, and a rung with such a step was left whatever its read).
+    /// The price a step's check weighs its courses by is the run's count (`work_at`): R4_LIN_2's explicit model below,
+    /// at states of its atoms at the trap's centre at rest and at one to three times the thermal speed along each lab
+    /// axis, held (no jump, each its own representation: its start's), at two steps -- a trajectory's work a µs priced at
+    /// every state is that state's step's own count (`Step::work`, its scratch primed as a run's) over its length and its
+    /// jumps' counted work a µs (`Pick::jumping`), the mean over the states by their weights, to the rounding. The step is
+    /// the run's from the state: where the scheme refuses it, at its half, and so on (adapt.rs `halving`) -- at 0.4335 µs
+    /// the decomposition refuses one state's step, and the price is that of its half (before, it was the price without
+    /// bound, and a rung with such a step was left whatever its read).
+    ///
+    /// The model is the one the test was written on, named by its states: the ground states and the excited states 20,
+    /// 21 and 23 to 31, the selection's run model of R4_LIN_2 until 429c36cd. Since then the selection gives the solve
+    /// the full-ground model G to run its pilot on (select.rs `choose`, the chain's first; `run_of`), P chosen later on
+    /// the pilot's paths -- and G, every excited state folded, has no step here that the scheme refuses: on it the
+    /// halving and the refused attempts' work this test reads would go unread (2.558·10⁶ a µs at 0.2 µs, every step
+    /// whole at 0.4335 µs).
     #[test]
     fn a_state_s_price_is_its_step_s_count() {
-        let (request, run, trap) = scene_run("R4_LIN_2", false, 0);
+        let (request, _, _) = scene_run("R4_LIN_2", false, 0);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let keep: Vec<usize> = (0..GROUND).chain([20, 21]).chain(23..STATES).collect();
+        let run = Selected::new(scene, Selection { keep, ..selection }, alone(0)).unwrap();
+        let trap = Prepared::new(&run, alone(0)).unwrap().trap;
         let b = chief(&request);
         let speed = thermal(&request, &run);
         let widest = Widest::of(&request);
@@ -6338,22 +7478,24 @@ mod tests {
 
     /// The groups come back in their order whatever the threads do: 37 groups' records (five of a pilot's numbers, then a
     /// product's) -- each trajectory's own, its rows marking its number -- folded by `run_groups` equal the same records
-    /// folded one after another; so do the levels of one hand-out, each with its own members of the groups.
+    /// folded one after another; so do the levels of one hand-out, each with its own members of the groups, the one
+    /// foretold the dearer handed out first (`Hand::work`) and returned in its place.
     #[test]
     fn the_groups_come_back_in_order() {
         let shape = Shape { outputs: 2, reads: 2, listed: 1, keep: false };
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], unresolved: false };
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
-            Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2] }
+            Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
         let numbers: Vec<u64> = (2048..2053).chain(5..37).collect();
         let members = [0..GROUP, 1..3];
-        let hands = members.clone().map(|members| Hand { groups: &numbers, members, shape, record: &record });
+        // The second level foretold the dearer: handed out first, returned in its place.
+        let hands = members.clone().map(|members| Hand { groups: &numbers, work: 1. + members.start as f64, members, shape, record: &record });
         let levels = run_groups(&hands, 0, &mut messages, &mut |_, _| {});
         assert_eq!(levels.len(), 2);
         for (parts, members) in levels.iter().zip(members) {
@@ -6380,19 +7522,19 @@ mod tests {
         let record = |i: u64| {
             assert!(i != 2048 * GROUP + 3, "a trajectory's defect at {i}");
             std::thread::sleep(each);
-            Record { reads: vec![Fate::Lost; 2], outputs: vec![Fate::Lost; 2], listed: vec![None], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2] }
+            Record { reads: vec![Fate::Lost; 2], outputs: vec![Fate::Lost; 2], listed: vec![None], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let mut silent = |_: Message| {};
         let mut messages = Messages { send: &mut silent, clock: Instant::now(), last: None, least: 0, stage: None };
         let started = Instant::now();
-        let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &record }];
+        let hands = [Hand { groups: &numbers, members: 0..GROUP, shape, record: &record, work: 1. }];
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_groups(&hands, 0, &mut messages, &mut |_, _| {})));
         let took = started.elapsed();
         let message = outcome.err().and_then(|payload| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
         eprintln!("the hand-out ended after {took:?}: {message}");
         let whole = each * (numbers.len() as u32 * GROUP as u32).div_ceil(rayon::current_num_threads() as u32);
         assert!(message.contains("a trajectory's defect at 16387") && took < whole / 2, "{took:?} against {whole:?}: {message}");
-        let again = run_groups(&[Hand { groups: &numbers[1..2], members: 0..GROUP, shape, record: &record }], 0, &mut messages, &mut |_, _| {});
+        let again = run_groups(&[Hand { groups: &numbers[1..2], members: 0..GROUP, shape, record: &record, work: 1. }], 0, &mut messages, &mut |_, _| {});
         assert_eq!(again[0].len(), 1);
     }
 
@@ -6427,6 +7569,45 @@ mod tests {
                 let error = (groups.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
                 let within = Spread { error, groups: g }.interval_over((3 * names.len()) as f64) + quadrature * exact[a];
                 assert!((mean - exact[a]).abs() <= within, "{name} axis {a}: {mean} against {} ± {within} (quadrature {quadrature:e})", exact[a]);
+            }
+        }
+    }
+
+    /// The draws' tilt statistic (ensemble.rs `Ensemble::draw_kinetic`; select.rs, # T's memory, read on the run's own
+    /// trajectories) on the conservative reference traps (as `the_reference_traps_draw_their_exact_moments`), 2¹² draws
+    /// each: K within the draw's depth (0 ≤ K ≤ y, so the score ⟨K⟩ − K bounded); with ⟨K⟩ = 3η/2 the classical
+    /// ensemble's own (`Ensemble::kinetic`), the score s = ⟨K⟩ − K has none for its mean and E[K s] = −Var K, each within
+    /// its interval over the groups at the confidence z (and the quadrature's error), four looks.
+    #[test]
+    fn the_draws_tilt_scores_their_kinetic_energy() {
+        let names = ["R1_TWEEZER", "R1_SIGMA_P"];
+        for name in names {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
+            let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let request = Request::from_native(&line).unwrap();
+            let run = run_of(&request, alone(chief(&request))).unwrap();
+            let initial = components(&request);
+            let wells: Vec<Prepared> = initial.iter().map(|&(s, _)| Prepared::new(&run, alone(s)).unwrap()).collect();
+            let hm = hbar_over_mass(request.mass_kg);
+            let ensemble = Ensemble::new(&initial.iter().zip(&wells).map(|(&(s, p), w)| (s, p, w as &dyn Well)).collect::<Vec<_>>(), request.temperature_uk, hm).unwrap();
+            let kinetic = ensemble.kinetic(1 << 16);
+            // ⟨K⟩ over the components by their weights (K's mean is 3η/2 in each), and the quadrature's error alike.
+            let weight: f64 = initial.iter().map(|c| c.1).sum();
+            let expected = initial.iter().zip(&kinetic).map(|(c, k)| c.1 * 1.5 * k.eta).sum::<f64>() / weight;
+            let quadrature = initial.iter().zip(&kinetic).map(|(c, k)| c.1 * 1.5 * k.difference).sum::<f64>() / weight;
+            let k: Vec<f64> = (0..1 << 12).map(|i| ensemble.draw_kinetic(SEED, i).1).collect();
+            assert!(k.iter().all(|&k| k >= 0. && k.is_finite()), "{name}: a kinetic energy out of its range");
+            let mean = k.iter().sum::<f64>() / k.len() as f64;
+            let variance = k.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (k.len() - 1) as f64;
+            let looks: [(&str, f64, Box<dyn Fn(f64) -> f64>); 2] = [("s", 0., Box::new(|k| expected - k)), ("K s + Var K", quadrature * mean, Box::new(|k| k * (expected - k) + variance))];
+            for (what, slack, x) in &looks {
+                let groups: Vec<f64> = k.chunks(GROUP as usize).map(|members| members.iter().map(|&k| x(k)).sum::<f64>() / GROUP as f64).collect();
+                let g = groups.len() as f64;
+                let m = groups.iter().sum::<f64>() / g;
+                let error = (groups.iter().map(|y| (y - m).powi(2)).sum::<f64>() / (g - 1.) / g).sqrt();
+                let within = Spread { error, groups: g }.interval_over((looks.len() * names.len()) as f64) + quadrature + slack;
+                eprintln!("{name} {what}: {m:.4e} ± {within:.2e} (⟨K⟩ {expected:.4}, mean {mean:.4}, Var {variance:.4})");
+                assert!(m.abs() <= within, "{name} {what}: {m} beyond ± {within}");
             }
         }
     }
@@ -6665,7 +7846,7 @@ mod tests {
     fn the_reads_are_no_farther_apart_than_a_quarter_of_t_s_shortest_window() {
         let candidates = grid(1000., 0.5);
         assert!(candidates.len() == 1001 && candidates[1000] == 1000. && candidates.windows(2).all(|w| (w[1] - w[0] - 1.).abs() < 1e-12));
-        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], unresolved: false });
+        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], shape: NO_SHAPE, unresolved: false });
         let groups: Vec<Group> = (0..11)
             .map(|_| {
                 let mut g = Group::new(candidates.len());
@@ -6815,8 +7996,9 @@ mod tests {
 
     /// A run is priced where its atoms were (`one_each`): a trajectory weighs by the time it holds its atom, and one lost
     /// before the first output gives its state at t = 0 for its own time. Eleven groups of eight, every atom lost at
-    /// 0.1 to 0.9 of the first output's time (S2Q's first model): every trajectory gives its state at t = 0, weighs by
-    /// its time to the loss, and its jumps a µs are its last state's; a mean over the run of a value reads that value,
+    /// 0.1 to 0.9 of the first output's time (S2Q's first model), each lost before its first checkpoint after the start:
+    /// every trajectory gives its state at t = 0, weighs by its time to the loss (`Record::end`, not its path's end, the
+    /// start), and its jumps a µs are its work by then over that time; a mean over the run of a value reads that value,
     /// where the held states alone read nothing.
     #[test]
     fn a_run_whose_atoms_are_all_lost_is_priced_where_they_were() {
@@ -6827,16 +8009,19 @@ mod tests {
                 let loss = |m: usize| 0.1 + 0.8 * ((g * members + m) % 9) as f64 / 8.;
                 let mut samples = vec![vec![]; outputs + 1];
                 samples[0] = (0..members).map(|m| state(m, 0., 0)).collect();
-                let lost = (0..members).map(|m| (1, state(m, loss(m), 6))).collect();
-                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost, counts: Counts::default() }
+                // Each lost before the first output: its path's end its last checkpoint, the start; its time held to
+                // the loss, six jumps' work by then.
+                let lost = (0..members).map(|m| (1, state(m, 0., 0))).collect();
+                let ends = (0..members).map(|m| (MOST_TRAJECTORIES + (g * members + m) as u64, loss(m), 6.)).collect();
+                Part { sums: Group::new(outputs + 1), reads: Group::new(outputs + 1), kinetic: Group::new(outputs + 1), listed: vec![], samples, trails: vec![], lost, ends, counts: Counts::default() }
             })
             .collect();
         let all: Vec<&Part> = parts.iter().collect();
         let picks = one_each(&all);
         assert_eq!(picks.len(), groups * members);
         for p in &picks {
-            let lost = &parts[p.group].lost.iter().find(|(_, s)| s.index == p.state.index).unwrap().1;
-            assert_eq!((p.state.sample.at.t, p.weight, p.jumping), (0., lost.sample.at.t, 6. / lost.sample.at.t));
+            let end = parts[p.group].ends.iter().find(|e| e.0 == p.state.index).unwrap();
+            assert_eq!((p.state.sample.at.t, p.weight, p.jumping), (0., end.1, 6. / end.1));
         }
         assert!((over_the_run(&picks, picks.iter().map(|_| 2.5), None) - 2.5).abs() < 1e-15);
         // An atom that ends with no outcome before the first output (no state, no loss) gives none.
@@ -6886,7 +8071,7 @@ mod tests {
             let mut fate = || {
                 let kappa: V3 = std::array::from_fn(|_| 3. * (uniform() - 0.5));
                 let kappa2: V3 = std::array::from_fn(|a| kappa[a] * kappa[a] * (1. + uniform()));
-                Fate::Held(Held { rows: state(0), kappa, kappa2, unresolved: false })
+                Fate::Held(Held { rows: state(0), kappa, kappa2, shape: NO_SHAPE, unresolved: false })
             };
             let parts: Vec<Group> = (0..groups)
                 .map(|_| {

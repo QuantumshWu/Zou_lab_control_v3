@@ -154,7 +154,8 @@
 //!   between them, the quartic u⁴|B|²/Ω: ∫(u⁴ − h²u²)du |B|²/Ω = (4/15) s_B²/x, and nothing else; and the third order
 //!   of the following, D₂ on the entry itself, −X D X: for a slope −(|A|²A/Ω²) u (u + i/Ω)², s_A³ |I(x)|/x² with
 //!   I(x) = ∫₋₁¹ e^{ixt} t (t + i/x)² dt = i(2/(3x) + x/15 + …), that is (2/3)(s_A/x)³ to the leading order; for a
-//!   constant −(|C|²C/Ω²) at the entry's turn, (s_C/x)³ |∫₋₁¹ e^{ixt} dt| = 2 s_C³ |sin x|/x³ ≤ 2 s_C³ min(x, 1)/x³.
+//!   constant −(|C|²C/Ω²) at the entry's turn, (s_C/x)³ |∫₋₁¹ e^{ixt} dt| = 2 s_C³ |sin x|/x³ ≤ 2 s_C³ min(x, 1)/x³
+//!   (2|sin x| = |∫₋₁¹ x e^{ixt} dt|: within its length's 2x and the lemma's 2x/x, model/classify.rs `by_parts`).
 //!   They fall with the detuning, the slope's and the curvature's with the step. (A hop through an unresolved pair left
 //!   the light shift of the change, (k·v τ)²/24 of the light shift's turn over the step at any detuning.)
 //! (step/tests.rs, `a_step_is_of_the_fourth_order_in_the_path_s_change_where_its_hops_resolve_the_generator`.)
@@ -414,6 +415,17 @@ fn add_turned(p: C64, from: &[f64], u: f64, to: &mut [f64]) {
     }
 }
 
+/// to += p from, of laid matrices (`add_turned` of a matrix that does not change).
+fn add_phased(p: C64, from: &[f64], to: &mut [f64]) {
+    for (chunk, from) in to.chunks_exact_mut(PAIR).zip(from.chunks_exact(PAIR)) {
+        for l in 0..LANES {
+            let (re, im) = (from[l], from[LANES + l]);
+            chunk[l] += p.re * re - p.im * im;
+            chunk[LANES + l] += p.re * im + p.im * re;
+        }
+    }
+}
+
 /// An entry of a laid matrix.
 fn entry(matrix: &[f64], place: usize) -> C64 {
     C64::new(matrix[place], matrix[place + LANES])
@@ -558,9 +570,12 @@ pub struct Picture {
     left: Vec<f64>,
     spare: [Vec<f64>; 5],
     lanes: Vec<f64>,
-    /// Whether D is anything at all, and the step's half h.
+    /// Whether D is anything at all, and the step's half h; and whether every envelope is its constant over the step
+    /// (`separate`'s `held` with every candidate a tone): the slopes and curvatures of every class, and so the
+    /// following's Y₁ and Y₂, are zero, and nothing is made of them.
     moving: bool,
     half: f64,
+    constant: bool,
     /// Whether any entry of any class is followed, and 1 + X factored (LU with partial pivoting, n² and its pivots) at
     /// the time `factored`: a launched state's way into g -- the following leaves the step's start's, a launch elsewhere
     /// makes its own.
@@ -605,9 +620,22 @@ pub struct Picture {
     /// norm rings by.
     pub quotient: f64,
     overlaps: Vec<f64>,
-    /// The quotient's terms' items, (weight, frequency): the numerator's pairs and the norm's ringing (`quotient_from`).
+    /// The quotient's terms' items, (weight, frequency): the numerator's pairs and the norm's ringing (`quotient_from`),
+    /// the ringing's pairs (a, b), and whether the last quotient made them (`ringing`).
     numerator: Vec<(f64, f64)>,
     ringing: Vec<(f64, f64)>,
+    pairs: Vec<[u8; 2]>,
+    rung: bool,
+    /// The numerator's items with their pairs, as they were made (`strip` sorts the numerator's).
+    numerated: Vec<([u8; 2], f64)>,
+    /// Where the envelopes' last search for their bound ended in this step (`envelope`; none before the step's first:
+    /// `prepare` clears it). A step's searches start from its own spectrum alone, so a step is its inputs' alone and a
+    /// trajectory taken up again at a step's end with a fresh scratch goes on to the bit (step.rs `Scratch`). (Until
+    /// 2026-11-22 the search started where the trajectory's last step's had ended: a step then read its scratch's past --
+    /// the bound it found differed by the rounding with where the search began --, and a trajectory made again from a
+    /// checkpoint went apart from itself by the rounding: PGC3D_1ms's ground states, solve.rs
+    /// `a_kept_trajectory_s_states_are_made_again_from_its_checkpoints_to_the_bit`.)
+    warm: f64,
     /// The complex multiply-adds counted so far (`decide::Work` counts them four real ones each).
     pub work: f64,
 }
@@ -645,6 +673,7 @@ impl Default for Picture {
             lanes: Vec::new(),
             moving: false,
             half: 0.0,
+            constant: false,
             followed: false,
             factors: Vec::new(),
             pivots: Vec::new(),
@@ -668,6 +697,10 @@ impl Default for Picture {
             overlaps: Vec::new(),
             numerator: Vec::new(),
             ringing: Vec::new(),
+            pairs: Vec::new(),
+            rung: false,
+            numerated: Vec::new(),
+            warm: f64::NAN,
             work: 0.0,
         }
     }
@@ -705,7 +738,9 @@ fn followed(x: f64, decay: f64, [slope, curvature, constant]: [f64; 3], r: f64, 
         return (hops_converge.then_some(false), 0.0);
     }
     let (first, second, zeroth) = (slope * slope, curvature * curvature, constant * constant);
-    let leading = 2.0 / 3.0 * first * slope + 2.0 * zeroth * constant * linalg::smaller(x, 1.0) + 2.0 * coupled * r * x.powi(3);
+    // 2|sin x| = |∫₋₁¹ x e^{ixt} dt| within its length's 2x and the lemma's (module documentation, # The state at any time).
+    let turned = linalg::smaller(2.0 * x, crate::model::classify::by_parts(2.0 * x, 0.0, C64::real(x)));
+    let leading = 2.0 / 3.0 * first * slope + zeroth * constant * turned + 2.0 * coupled * r * x.powi(3);
     let hops = x.powi(4) * (zeroth / 3.0 + first / 15.0 + second / 42.0) * (2.0 * decay).exp();
     let (light, cube) = (4.0 / 15.0 * second * (x * x), x.powi(3));
     match (r < 1.0, hops_converge) {
@@ -1114,7 +1149,15 @@ impl Picture {
     /// changes along the path (the light's profile at the path's points) goes through the nodes as the static group does.
     /// The routes are weighed on the generator's diagonal at the middle as given, before any candidate is taken out: a
     /// candidate's route does not depend on the others' order.
-    pub fn separate(&mut self, half: f64, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
+    ///
+    /// `held`: the step takes its generator at the middle alone (step.rs, # One node a step) -- the static group and
+    /// every envelope held at their middle's values, each beat at its exact phase: Ĥ(u) = G₀(0) + Σ_m (e^{iν_m u} G_m⁺(0)
+    /// + e^{−iν_m u} G_m⁻(0)), known at every time from the middle's generator and envelopes alone (`ends` are not read
+    /// before, the envelopes asked at the middle alone). The routes are weighed as on three nodes; a tone's members at
+    /// the outer nodes are its middle's, and the static group at the outer nodes is the middle's with each candidate left
+    /// in it at its exact phase there: the parabola the propagation takes of such a candidate is its beat's through the
+    /// three nodes, as on three nodes, and of everything else its constant.
+    pub fn separate(&mut self, half: f64, held: bool, candidates: impl FnOnce(&mut Vec<f64>, &mut Vec<Vec<i64>>), mut envelopes: impl FnMut(usize, f64, &mut Mat, &mut Mat)) {
         let n = self.n;
         self.beating.clear();
         self.keys.clear();
@@ -1127,6 +1170,12 @@ impl Picture {
         }
         let mut count = 0;
         let Picture { beats, base, ends, beating, keys, reciprocals, weighed, weighing, .. } = self;
+        if held {
+            // The static group's change at the outer nodes: each candidate left in it, its phase there less its middle's.
+            for end in ends.iter_mut() {
+                end.data.fill(C64::ZERO);
+            }
+        }
         for (candidate, &beat) in beating.iter().enumerate() {
             if beats.len() == count {
                 beats.push(Beat { beat: 0.0, key: vec![], candidate: 0, members: std::array::from_fn(|_| std::array::from_fn(|_| Mat::zeros(n, n))) });
@@ -1142,10 +1191,30 @@ impl Picture {
             *weighing += work;
             if !taken {
                 weighed.push(candidate);
+                if held {
+                    for (end, u) in ends.iter_mut().zip([-half, half]) {
+                        let (p, q) = (C64::cis(beat * u) - C64::ONE, C64::cis(-beat * u) - C64::ONE);
+                        for ((z, g), h) in end.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                            *z += p * *g + q * *h;
+                        }
+                    }
+                }
                 continue;
             }
             (tone.beat, tone.candidate) = (beat, candidate);
             tone.key.clone_from(&keys[candidate]);
+            if held {
+                for member in [&mut *plus, &mut *minus] {
+                    let [before, middle, after] = member;
+                    before.data.copy_from_slice(&middle.data);
+                    after.data.copy_from_slice(&middle.data);
+                }
+                for ((z, g), h) in base.data.iter_mut().zip(&plus[1].data).zip(&minus[1].data) {
+                    *z -= *g + *h;
+                }
+                count += 1;
+                continue;
+            }
             for (j, u) in [(0, -half), (2, half)] {
                 envelopes(candidate, u, &mut plus[j], &mut minus[j]);
             }
@@ -1159,6 +1228,19 @@ impl Picture {
             count += 1;
         }
         beats.truncate(count);
+        if held {
+            for end in ends.iter_mut() {
+                for (z, b) in end.data.iter_mut().zip(&base.data) {
+                    *z += *b;
+                }
+            }
+        }
+        self.constant = held && self.weighed.is_empty();
+    }
+
+    /// The beat of the caller's candidate `m` as `separate` was given it (rad/µs).
+    pub fn candidate_beat(&self, m: usize) -> f64 {
+        self.beating[m]
     }
 
     /// The states.
@@ -1227,15 +1309,18 @@ impl Picture {
     /// Prepares the picture of a step of 2h from `base` and, unless the generator is `still` along the path (then they
     /// are not read, and there are no tones), `ends` and the tones (`beats`): the changes, Ĥ₀'s decomposition, the
     /// changes in its eigenbasis and their following (`follow`). `start` is the state the step is launched with (none:
-    /// any), whose reached states (`reach`) the forms' bandwidth is of. `work` begins anew with what this counted.
+    /// any), whose reached states (`reach`) the forms' bandwidth is of. `work` begins anew with what this counted, and so
+    /// do the envelopes' searches (`warm`): nothing of the last step is read.
     /// Refused where the decomposition does not take the step (module documentation, # Where the decomposition does not
     /// take the step): the picture is then of no use until it is prepared again.
     pub fn prepare(&mut self, half: f64, still: bool, start: Option<&[C64]>) -> Result<(), Refusal> {
         assert!(!still || self.beats.is_empty(), "exact tones on a still path");
         let n = self.n;
         (self.work, self.width, self.moving) = (0.0, f64::NAN, false);
-        (self.half, self.followed, self.spread, self.factored, self.grown, self.slopes) = (half, false, 0.0, f64::NAN, 1.0, [0.0; 3]);
+        (self.half, self.followed, self.spread, self.factored, self.grown, self.slopes, self.warm) = (half, false, 0.0, f64::NAN, 1.0, [0.0; 3], f64::NAN);
+        let classified = crate::prof::scope(84);
         self.classify();
+        drop(classified);
         if !still {
             let [minus, plus] = &mut self.ends;
             let (first, second) = (0.5 / half, 0.5 / (half * half));
@@ -1268,6 +1353,7 @@ impl Picture {
         self.reach(start);
         // The decomposition where it converges and a state through it rounds no more than through Ĥ₀'s exponential over
         // the step (module documentation, # Where the decomposition does not take the step).
+        let decomposing = crate::prof::scope(85);
         self.bounded();
         let [rho, gamma] = self.bounds;
         let tau = 2.0 * half.abs();
@@ -1301,7 +1387,9 @@ impl Picture {
         self.work += (n * n * n) as f64;
         lay(&e.vectors.data, n, &mut self.right);
         lay(&e.inverse.data, n, &mut self.left);
+        drop(decomposing);
         if self.moving {
+            let changing = crate::prof::scope(86);
             // Each change M ← (R⁻¹M)R: two products of n³, a product's right factor column by column -- the static
             // group's A and B, each member's C, A and B.
             let block = self.right.len();
@@ -1316,20 +1404,39 @@ impl Picture {
                 combine(false, e.columns(), n, product, laid, n, 0);
                 unlay(laid, n, change);
             };
+            // A constant picture's slopes and curvatures are zero: laid as zero, not changed.
+            let constant = self.constant;
+            let mut changed = 0;
             let group = &mut self.classes[0];
             for (j, given) in self.ends.iter().enumerate() {
-                basis(given, &mut group.laid[(1 + j) * block..(2 + j) * block], &mut group.change[1 + j]);
+                if constant {
+                    group.laid[(1 + j) * block..(2 + j) * block].fill(0.0);
+                    group.change[1 + j].fill(C64::ZERO);
+                } else {
+                    basis(given, &mut group.laid[(1 + j) * block..(2 + j) * block], &mut group.change[1 + j]);
+                    changed += 1;
+                }
             }
             for (m, tone) in self.beats.iter().enumerate() {
                 for (sign, member) in tone.members.iter().enumerate() {
                     let class = &mut self.classes[1 + 2 * m + sign];
                     for (j, given) in member.iter().enumerate() {
-                        basis(given, &mut class.laid[j * block..(j + 1) * block], &mut class.change[j]);
+                        if constant && j > 0 {
+                            class.laid[j * block..(j + 1) * block].fill(0.0);
+                            class.change[j].fill(C64::ZERO);
+                        } else {
+                            basis(given, &mut class.laid[j * block..(j + 1) * block], &mut class.change[j]);
+                            changed += 1;
+                        }
                     }
                 }
             }
-            self.work += ((4 + 12 * self.beats.len()) * n * n * n) as f64;
+            self.work += (2 * changed * n * n * n) as f64;
+            drop(changing);
+            let following = crate::prof::scope(87);
             self.follow()?;
+            drop(following);
+            let _hopping = crate::prof::scope(88);
             // The hops' radius on the whole hopped operator (`hops_radius`), of the hop's own envelope as the following
             // leaves it: every entry's own within π is no convergence of the whole series.
             let reach = self.hops_radius();
@@ -1495,8 +1602,10 @@ impl Picture {
             return Ok(());
         }
         let (first, second) = (0.5 / h, 0.5 / (h * h));
-        // The nodes −h, h and, where tones put a constant into D, 0.
+        // The nodes −h, h and, where tones put a constant into D, 0. Where every envelope is constant the products are
+        // the same at every node: made at the middle alone and laid at the others.
         let (count, times) = (if tones > 0 { 3 } else { 2 }, [-h, h, 0.0]);
+        let constant = self.constant;
         let block = self.right.len();
         for class in classes.iter_mut() {
             class.second[..count * block].fill(0.0);
@@ -1511,6 +1620,12 @@ impl Picture {
         // The products beyond the static group's with itself.
         let mut made = 0;
         for (j, &u) in times[..count].iter().enumerate() {
+            if constant && j < 2 {
+                // The static group's change none at the outer nodes too: its D and −D_s zero there, for D₂ below.
+                changes[j].fill(0.0);
+                slows[j * size..(j + 1) * size].fill(C64::ZERO);
+                continue;
+            }
             // Each followed first-order class's Y at u, column by column and laid.
             for class in classes[..order].iter_mut().filter(|class| class.followed) {
                 polynomial(&class.follow, size, u, &mut class.now);
@@ -1538,8 +1653,9 @@ impl Picture {
                 d.fill(0.0);
                 slow.fill(C64::ZERO);
             }
-            // The products D_t Y_t′ − Y_t′ D_t^s, each into the class of its beats' sum.
-            for t in (0..order).filter(|&t| t > 0 || j < 2) {
+            // The products D_t Y_t′ − Y_t′ D_t^s, each into the class of its beats' sum (of the static group's change
+            // none at the middle, and none at all where every envelope is constant).
+            for t in (0..order).filter(|&t| t > 0 || (j < 2 && !constant)) {
                 if t > 0 {
                     let class = &classes[t];
                     for (i, z) in change.iter_mut().enumerate() {
@@ -1565,6 +1681,13 @@ impl Picture {
                     (classes[into].second, classes[into].hops) = (out, true);
                     made += usize::from(t > 0 || following > 0);
                 }
+            }
+        }
+        if constant {
+            for class in classes.iter_mut() {
+                let (outer, middle) = class.second.split_at_mut(2 * block);
+                outer[..block].copy_from_slice(&middle[..block]);
+                outer[block..].copy_from_slice(&middle[..block]);
             }
         }
         // F, each class's fast part of its second order through the three nodes, followed -- a product's entries taken
@@ -1892,7 +2015,8 @@ impl Picture {
     /// stood: E is no part of the propagation.
     /// - E_f, the following's third order, D₂'s fast entries left out (# The state at any time of the step): made whole
     ///   at the nodes by the factors of 1 + X (`follow`), each entry of the static group's at its largest node value
-    ///   times what its turning integral reaches over what is left of the step, min(h − u₀, 2/|Ω|), on |m|;
+    ///   times what its turning integral reaches over what is left of the step, min(h − u₀, 2/|Ω|) (the lemma's,
+    ///   model/classify.rs `by_parts`), on |m|;
     /// - E_h, the hops' second Magnus term, −½∫∫[D̃₂(t₁), D̃₂(t₂)]: of each of the launch's two hops by its two halves'
     ///   exponents J_a, J_b, ½‖[J_b, J_a] m‖ -- the term of a linear envelope at three quarters of its size --, summed;
     /// - E_L, what the three nodes' parabola of D₂ misses of the change's own light shift between them on the hopped
@@ -1928,7 +2052,8 @@ impl Picture {
                     let k = a * n + b;
                     if group.fast[k] {
                         let omega = (self.lambda[a] - self.lambda[b]).abs();
-                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * linalg::smaller(width, 2.0 / omega) * m[b].abs();
+                        let turned = linalg::smaller(width, crate::model::classify::by_parts(2.0, 0.0, C64::real(omega)));
+                        row += (0..count).map(|j| wholes[j * size + k].abs()).fold(0.0, linalg::larger) * turned * m[b].abs();
                     }
                 }
                 total += row * row;
@@ -2072,9 +2197,17 @@ impl Picture {
     /// O(0) ≥ 1, the series has no sum; there, and beside a series whose V is worth more nodes than it costs, the
     /// quotient as F times 1/N on the state's own continuation (`strip`), the less of the two. Its count: the
     /// pairs' weights and per Newton step the sums with their two derivatives, an exponential and six multiply-adds an
-    /// item, counted as seven.
+    /// item, counted as seven. The ringing's items are kept with their pairs (`ringing`: step.rs, # The quadrature by
+    /// groups).
     fn quotient_from(&mut self, from: f64) -> f64 {
+        self.quotient_by(from, true)
+    }
+
+    /// `quotient_from`, the strip taken where `strip` lets it (`envelope` does not: the strip's bound is of the norm's
+    /// own continuation).
+    fn quotient_by(&mut self, from: f64, strip: bool) -> f64 {
         let n = self.n;
+        self.rung = false;
         let width = (self.half - from).abs();
         let (mut m, mut rates) = ([0.0; crate::model::STATES], [0.0; crate::model::STATES]);
         for a in 0..n {
@@ -2093,10 +2226,12 @@ impl Picture {
         if !(ends[0].0 > 0.0 && ends[1].0 > 0.0) {
             return self.bandwidth;
         }
-        // The items: (weight, frequency), the numerator's and the ringing's.
-        let (mut numerator, mut ringing) = (std::mem::take(&mut self.numerator), std::mem::take(&mut self.ringing));
+        // The items: (weight, frequency), the numerator's and the ringing's, the ringing's with its pairs.
+        let (mut numerator, mut ringing, mut pairs) = (std::mem::take(&mut self.numerator), std::mem::take(&mut self.ringing), std::mem::take(&mut self.pairs));
         numerator.clear();
         ringing.clear();
+        pairs.clear();
+        self.numerated.clear();
         // A weight that is not a number stays in: the quotient is not a number, and the stop it bounds is refused.
         for a in (0..n).filter(|&a| self.held[a] && !(m[a] <= 0.0)) {
             for b in (a..n).filter(|&b| self.held[b] && !(m[b] <= 0.0) && self.part[b] == self.part[a]) {
@@ -2113,14 +2248,17 @@ impl Picture {
                 let (weight, nu) = (linalg::smaller(top, 0.0).exp(), (self.lambda[a].conj() - self.lambda[b]).abs());
                 let twice = if a == b { 1.0 } else { 2.0 };
                 numerator.push((twice * weight, nu));
+                self.numerated.push(([a as u8, b as u8], twice * weight));
                 if a != b {
                     let o = self.overlaps[a * n + b];
                     if !(o <= 0.0) {
                         ringing.push((twice * o * weight, nu));
+                        pairs.push([a as u8, b as u8]);
                     }
                 }
             }
         }
+        self.rung = true;
         let mut count = (numerator.len() * 12) as f64;
         let log = -UNIT_ROUNDOFF.ln();
         let sums = |items: &[(f64, f64)], sigma: f64| {
@@ -2147,7 +2285,11 @@ impl Picture {
             // The ringing's series where it has a sum (Chernoff's bound), and the quotient as F times 1/N on the
             // state's own continuation (`strip`) where it has none or where the series' V is worth more nodes than
             // the strip costs: the less of the two.
-            let series = if total < 1.0 {
+            // Items all at frequency zero (an envelope's, `envelope`, of groups of one component each and no decay): no
+            // term beyond zero, and no σ to search (the bound falls as 1/σ for ever).
+            let series = if total < 1.0 && fastest == 0.0 {
+                0.0
+            } else if total < 1.0 {
                 // F(σ) = ln N − ln(1 − O) + ln 1/u, φ(σ) = σF′ − F, φ′ = σF″ > 0; V = F(σ*)/σ* at φ(σ*) = 0.
                 let f = |sigma: f64| {
                     let ([w, w1, w2], [o, o1, o2]) = (sums(&numerator, sigma), sums(&ringing, sigma));
@@ -2163,8 +2305,11 @@ impl Picture {
                 // Newton within the bracket, a bisection where its step leaves it, doubling until a bracket stands; until the
                 // step, once bracketed, stops shrinking (the round-off's floor). Every σ's value bounds V: the least is taken.
                 let (mut lo, mut hi) = (0.0_f64, f64::INFINITY);
-                let mut sigma = 1.0 / linalg::larger(fastest, f64::MIN_POSITIVE);
-                let (mut best, mut last) = (f64::INFINITY, f64::INFINITY);
+                // The envelopes' search (`envelope`, no strip) starts where the step's last one ended (`warm`; the step's
+                // first from the fastest pair): a piece's envelopes keep the step's spectrum less the same centres, and
+                // every σ bounds V alike.
+                let mut sigma = if !strip && self.warm.is_finite() { self.warm } else { 1.0 / linalg::larger(fastest, f64::MIN_POSITIVE) };
+                let (mut best, mut last, mut least) = (f64::INFINITY, f64::INFINITY, sigma);
                 loop {
                     count += (7 * (numerator.len() + ringing.len())) as f64;
                     let next = match f(sigma) {
@@ -2173,6 +2318,9 @@ impl Picture {
                             0.5 * (lo + hi)
                         }
                         Some((value, first, second)) => {
+                            if value / sigma < best {
+                                least = sigma;
+                            }
                             best = linalg::smaller(best, value / sigma);
                             let phi = sigma * first - value;
                             if phi < 0.0 {
@@ -2192,18 +2340,99 @@ impl Picture {
                         last = step;
                     }
                     sigma = next;
+                    // A σ that left the numbers ends the search (every σ before it bounds V).
+                    if !sigma.is_finite() {
+                        break;
+                    }
+                }
+                if !strip {
+                    self.warm = least;
                 }
                 best
             } else {
                 f64::INFINITY
             };
-            let (strip, work) = self.strip(from, &mut numerator, fastest, log, series);
+            let (strip, work) = if strip { self.strip(from, &mut numerator, fastest, log, series) } else { (f64::INFINITY, 0.0) };
             count += work;
             linalg::smaller(series, strip)
         };
         self.work += count;
-        (self.numerator, self.ringing) = (numerator, ringing);
+        (self.numerator, self.ringing, self.pairs) = (numerator, ringing, pairs);
         linalg::larger(v + shift, 0.0)
+    }
+
+    /// The bandwidth of the quotient's envelopes over the last launch's piece where its eigencomponents are cut into
+    /// groups (step.rs, # The quadrature by groups): the quotient's rule (`quotient_from`) on the eigenvalues less each
+    /// one's group's centre, `shift[a]` -- the frequencies the envelopes keep, the groups' centres' phases taken out
+    /// exactly --, by the ringing's series alone (the strip bounds the norm's own continuation, not the envelopes'): ∞
+    /// where the series has no sum. Counted as `quotient_from` counts; the eigenvalues as they were after.
+    pub(crate) fn envelope(&mut self, from: f64, shift: &[f64]) -> f64 {
+        let n = self.n;
+        let mut kept = [C64::ZERO; crate::model::STATES];
+        kept[..n].copy_from_slice(&self.lambda[..n]);
+        for (l, s) in self.lambda[..n].iter_mut().zip(shift) {
+            *l -= C64::real(*s);
+        }
+        let v = self.quotient_by(from, false);
+        self.lambda[..n].copy_from_slice(&kept[..n]);
+        v
+    }
+
+    /// The last quotient's items (`quotient_from`) by a cut of the eigencomponents into groups (`group[a]` below `groups`;
+    /// step.rs, # The quadrature by groups): per ordered pair of groups (g, q), g ≠ q, its pairs' ringing weights into
+    /// `across` and its numerator's into `numerator` (G × G, each pair once in (g, q) and (q, g) alike, its weight the
+    /// unordered pair's) -- at most Σ|N_gq|/D and the largest |y_g y_q†| over D anywhere on the piece --, and the ringing
+    /// within the groups, Σ_g (N_gg − D_g)/D at the most. None where the quotient made no items (its diagonal no positive
+    /// number).
+    pub(crate) fn weighed_by(&self, group: &[u8], groups: usize, across: &mut [f64], numerator: &mut [f64]) -> Option<f64> {
+        if !self.rung {
+            return None;
+        }
+        across[..groups * groups].fill(0.0);
+        numerator[..groups * groups].fill(0.0);
+        let mut within = 0.0;
+        for (&[a, b], &(p, _)) in self.pairs.iter().zip(&self.ringing) {
+            let (g, q) = (usize::from(group[usize::from(a)]), usize::from(group[usize::from(b)]));
+            if g == q {
+                within += p;
+            } else {
+                across[g * groups + q] += p;
+                across[q * groups + g] += p;
+            }
+        }
+        for &([a, b], p) in &self.numerated {
+            let (g, q) = (usize::from(group[usize::from(a)]), usize::from(group[usize::from(b)]));
+            if g != q {
+                numerator[g * groups + q] += p;
+                numerator[q * groups + g] += p;
+            }
+        }
+        Some(within)
+    }
+
+    /// The counted work of a state at a time (`at`), complex multiply-adds; and whether its matrix is assembled (where
+    /// anything is followed), with the followed beating classes' count.
+    pub(crate) fn state_work(&self) -> (f64, bool, usize) {
+        let n = self.n;
+        let followers = self.classes[1..].iter().filter(|class| class.followed).count();
+        (((1 + self.assembly(followers)) * n * n + 4 * n) as f64, self.followed, self.assembly(followers))
+    }
+
+    /// Whether the generator moves along the path (D is anything at all: `prepare`).
+    pub(crate) fn moving(&self) -> bool {
+        self.moving
+    }
+
+    /// The eigenvalues (the scalar part in), the components the propagated state can hold (`reach`) and each one's exact
+    /// block (step.rs, # The quadrature by groups).
+    pub(crate) fn spectrum(&self) -> (&[C64], &[bool], &[usize]) {
+        let n = self.n;
+        (&self.lambda[..n], &self.held[..n], &self.part[..n])
+    }
+
+    /// The time of the last launch.
+    pub(crate) fn origin(&self) -> f64 {
+        self.origin
     }
 
     /// The quotient's bandwidth as F times 1/N (`quotient_from`): ∞ where it is not taken. q = F/N, F an exponential
@@ -2349,6 +2578,71 @@ impl Picture {
     pub fn at(&mut self, u: f64, x: &mut [C64]) {
         let n = self.n;
         let size = n * n;
+        self.coordinates_at(u, None);
+        let followers = self.matrix_at(u);
+        let matrix = if self.followed { &self.spare[0] } else { &self.right };
+        combine(false, &self.coordinates, n, matrix, &mut self.lanes, 1, 0);
+        unlay(&self.lanes, 1, x);
+        self.work += ((1 + self.assembly(followers)) * size + 4 * n) as f64;
+    }
+
+    /// The state's matrix at a time made of the followed classes' (`matrix_at`), complex multiply-adds an entry:
+    /// R(1 + Y₀) + uRY₁ + u²RY₂ and each class's three at its phase, or where every envelope is constant R(1 + Y₀) and
+    /// each class's RY₀; none where nothing is followed.
+    fn assembly(&self, followers: usize) -> usize {
+        match (self.followed, self.constant) {
+            (false, _) => 0,
+            (true, false) => 1 + 4 * followers,
+            (true, true) => followers,
+        }
+    }
+
+    /// The frame's state at the time u by groups of its eigencomponents (step.rs, # The quadrature by groups): out[g] =
+    /// R(1 + X(u)) e^{−i(Λ − ω)(u − u₀)} m(u) on the components a of `group[a]` = g alone, `shifted` = Λ less each
+    /// component's group's centre ω -- so that x(u) = Σ_g e^{−iω_g(u − u₀)} out[g], `at`'s state --, for g below
+    /// `groups`. R(1 + X(u)) is block-diagonal on the exact blocks (`blocks`), so a group of one block's components holds
+    /// that block's rows alone: its product is the block's rows times its own components, Σ_a |block(a)| ≤ n² in all,
+    /// with `at`'s matrix and exponentials.
+    pub(crate) fn parts(&mut self, u: f64, shifted: &[C64], group: &[u8], groups: usize, out: &mut [[C64; crate::model::STATES]]) {
+        let n = self.n;
+        let size = n * n;
+        self.coordinates_at(u, Some(shifted));
+        let followers = self.matrix_at(u);
+        let matrix = if self.followed { &self.spare[0] } else { &self.right };
+        for out in out[..groups].iter_mut() {
+            out[..n].fill(C64::ZERO);
+        }
+        let mut products = 0;
+        for a in 0..n {
+            let (d, out) = (self.coordinates[a], &mut out[usize::from(group[a])]);
+            match self.blocks.get(self.part[a]) {
+                Some(rows) if self.blocks.len() > 1 => {
+                    for &i in rows {
+                        out[i] += entry(matrix, laid(i, a, n)) * d;
+                    }
+                    products += rows.len();
+                }
+                _ => {
+                    for (i, o) in out[..n].iter_mut().enumerate() {
+                        *o += entry(matrix, laid(i, a, n)) * d;
+                    }
+                    products += n;
+                }
+            }
+        }
+        self.work += (self.assembly(followers) * size + products + 4 * n) as f64;
+    }
+
+    /// The exact blocks' states (`blocks`, none: one block) and each eigencomponent's block (`part`).
+    pub(crate) fn blocked(&self) -> (&[Vec<usize>], &[usize]) {
+        (&self.blocks, &self.part[..self.n])
+    }
+
+    /// The state's coordinates at the time u from the last launch (`at`): e^{−iΛ(u − u₀)} m(u), m its three stops'
+    /// quintic, the eigenvalues Λ (or `shifted` in their place: `parts`), the n exponentials four at a time
+    /// (`linalg::times_exp`).
+    fn coordinates_at(&mut self, u: f64, shifted: Option<&[C64]>) {
+        let n = self.n;
         let d = &mut self.coordinates[..];
         let path = &self.path;
         let node = |k: usize| &path[k * n..(k + 1) * n];
@@ -2361,13 +2655,23 @@ impl Picture {
                 d[a] = start[a] * values[0] + middle[a] * values[1] + end[a] * values[2] + (first[a] * rates[0] + second[a] * rates[1] + last[a] * rates[2]) * self.spacing;
             }
         }
-        // e^{−iΛ(u − u₀)}: the n exponentials four at a time (`linalg::times_exp`).
-        linalg::times_exp(d, C64::new(0.0, -(u - self.origin)), &self.lambda);
-        // R(1 + X(u)) d: the matrix at the time from its three, R(1 + Y₀) + u RY₁ + u² RY₂ of the static group's and each
-        // beating class's at its phase; R where nothing is followed.
+        linalg::times_exp(d, C64::new(0.0, -(u - self.origin)), shifted.unwrap_or(&self.lambda[..]));
+    }
+
+    /// The state's matrix at the time u (`at`): R(1 + X(u)) from its three, R(1 + Y₀) + u RY₁ + u² RY₂ of the static
+    /// group's and each beating class's at its phase, into `spare[0]` where anything is followed (R itself where nothing
+    /// is: `right`). The followed beating classes' count.
+    fn matrix_at(&mut self, u: f64) -> usize {
         let (group, beating) = self.classes.split_first().expect("the static group");
         let followers = beating.iter().filter(|class| class.followed).count();
-        let matrix = if self.followed {
+        if self.followed && self.constant {
+            // Y₁ = Y₂ = 0: R(1 + Y₀) and each class's R Y₀ at its phase.
+            let matrix = self.right.len();
+            self.spare[0].copy_from_slice(&group.nodes[..matrix]);
+            for class in beating.iter().filter(|class| class.followed) {
+                add_phased(class.turn(u), &class.nodes[..matrix], &mut self.spare[0]);
+            }
+        } else if self.followed {
             let (first, rest) = group.nodes.split_at(self.right.len());
             let (second, third) = rest.split_at(self.right.len());
             for (((m, first), second), third) in self.spare[0].iter_mut().zip(first).zip(second).zip(third) {
@@ -2376,13 +2680,8 @@ impl Picture {
             for class in beating.iter().filter(|class| class.followed) {
                 add_turned(class.turn(u), &class.nodes, u, &mut self.spare[0]);
             }
-            &self.spare[0]
-        } else {
-            &self.right
-        };
-        combine(false, d, n, matrix, &mut self.lanes, 1, 0);
-        unlay(&self.lanes, 1, x);
-        self.work += ((if self.followed { 2 + 4 * followers } else { 1 }) * size + 4 * n) as f64;
+        }
+        followers
     }
 }
 
@@ -3061,6 +3360,7 @@ pub(crate) mod tests {
         picture.ends = [-half, half].map(|u| toned(group, tones, u));
         picture.separate(
             half,
+            false,
             |beats, keys| {
                 beats.extend(tones.iter().map(|t| t.beat));
                 keys.extend((0..tones.len()).map(|m| (0..tones.len()).map(|j| i64::from(j == m)).collect()));
@@ -3234,6 +3534,7 @@ pub(crate) mod tests {
                 picture.ends = [-half, half].map(generator);
                 picture.separate(
                     half,
+                    false,
                     |beats, keys| {
                         beats.push(beat);
                         keys.push(vec![1]);
@@ -3436,7 +3737,7 @@ pub(crate) mod tests {
                             beats.push(tones[0].beat);
                             keys.push(vec![1]);
                         };
-                        rule.separate(half, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
+                        rule.separate(half, false, candidate, |_, _, plus, minus| (*plus, *minus) = (tones[0].plus.clone(), tones[0].minus.clone()));
                         let taken = rule.beats.len() == 1;
                         let (mut tone, mut nodes) = (as_tones(&group, &tones, half), without_tones(&group, &tones, half));
                         let times = [-0.3 * half, 0.4 * half, half];
