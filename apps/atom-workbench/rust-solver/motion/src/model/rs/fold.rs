@@ -172,8 +172,12 @@ struct Block {
 pub struct Plan {
     pub n: usize,
     pub nq: usize,
+    /// K, Q and the levels over the 32 (a test's model, rs.rs `model_of`).
+    #[cfg(test)]
     pub keep: Vec<usize>,
+    #[cfg(test)]
     pub folded: Vec<usize>,
+    #[cfg(test)]
     pub groups: Vec<Vec<usize>>,
     parts: Vec<[i64; 2]>,
     /// Per piece (`Source::pieces`' order): its key, its class (fast index of its key), its terms' factors and scales,
@@ -214,7 +218,7 @@ fn element(class: [i64; 2], row: [i64; 2], col: [i64; 2]) -> [i64; 2] {
 impl Plan {
     /// The structure of `source`'s fold keeping `keep` (sorted) by `sectors` on the fast coordinates `axes`, Q the rest;
     /// `splits` the library's fixed matrices split for this K and Q (rs.rs `Split::all`).
-    pub fn new(splits: &[super::Split], keep: &[usize], folded: &[usize], source: &Source, sectors: &Sectors, axes: [bool; 2], groups: &[Vec<usize>]) -> Plan {
+    pub fn new(splits: &[super::Split], keep: &[usize], folded: &[usize], source: &Source, sectors: &Sectors, axes: [bool; 2], #[cfg_attr(not(test), allow(unused_variables))] groups: &[Vec<usize>]) -> Plan {
         let (n, nq) = (keep.len(), folded.len());
         let parts: Vec<[i64; 2]> = keep.iter().map(|&s| sectors.state(s, axes)).collect();
         let mut keys = Vec::new();
@@ -444,7 +448,16 @@ impl Plan {
             }
             batch.fixed = fixed;
         }
-        Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct, intensity: source.intensity.clone(), own: source.own.clone(), table: std::sync::OnceLock::new() }
+        Plan {
+            n,
+            nq,
+            #[cfg(test)]
+            keep: keep.to_vec(),
+            #[cfg(test)]
+            folded: folded.to_vec(),
+            #[cfg(test)]
+            groups: groups.to_vec(),
+            parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct, intensity: source.intensity.clone(), own: source.own.clone(), table: std::sync::OnceLock::new() }
     }
 
     /// The folded blocks' sizes and which are Q's.
@@ -482,6 +495,7 @@ impl Plan {
         block.sideband.is_none() || (model && !block.dropped)
     }
 
+    #[cfg(test)]
     /// The count of pieces (H's and the jumps').
     pub fn pieces(&self) -> usize {
         self.keys.len()
@@ -564,7 +578,6 @@ struct Sum {
 pub struct Grouping {
     /// Per group its label (a key) and the piece whose frequency it carries.
     pub labels: Vec<(Key, usize)>,
-    of: Vec<usize>,
     zs: Vec<Sum>,
     ws: Vec<Sum>,
     /// H's pairs and the jumps'.
@@ -870,12 +883,7 @@ impl Grouping {
             l.0.push(zi);
             l.1 += z.index.len();
         }
-        Grouping { labels, of, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset, spans: Vec::new() }
-    }
-
-    /// Each piece's group.
-    pub fn group_of(&self, piece: usize) -> usize {
-        self.of[piece]
+        Grouping { labels, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset, spans: Vec::new() }
     }
 }
 
@@ -1571,6 +1579,7 @@ pub struct Making {
 }
 
 impl Making {
+    #[cfg(test)]
     pub const ALL: Making = Making { model: true, effective: true, kicks: true, lift: true, gradients: true };
     /// A node's: the model with its gradients, the photon forms where `kicks`.
     pub const fn node(kicks: bool) -> Making {
@@ -1603,6 +1612,7 @@ impl Compact {
         }
     }
 
+    #[cfg(test)]
     /// The output as dense n × n matrices on its places.
     pub fn dense(&self, list: &[u32], n: usize) -> (Mat, [Mat; 3]) {
         let mut value = Mat::zeros(n, n);
@@ -2654,6 +2664,7 @@ impl Grouping {
         Spanned { spans, dropped, work: [plain, work] }
     }
 
+    #[cfg(test)]
     /// The structure's sizes (a measurement's): Z sums, W sums, H pairs, jump pairs, and their products' summed
     /// rows × |B| × cols.
     pub fn sizes(&self, plan: &Plan) -> [usize; 6] {

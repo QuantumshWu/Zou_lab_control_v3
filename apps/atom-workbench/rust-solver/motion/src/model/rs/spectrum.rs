@@ -6,12 +6,12 @@
 //! scale.
 //!
 //! # The decoupling
-//! At a split of the indices into J and K (`split`), G = [[A₁₁, A₁₂], [A₂₁, A₂₂]] in that order; the transform
+//! At a split of the indices into J and K (`split_into`), G = [[A₁₁, A₁₂], [A₂₁, A₂₂]] in that order; the transform
 //! T = [[I, Y], [X, I + XY]], T⁻¹ = [[I + YX, −Y], [−X, I]] makes T⁻¹GT = diag(B₁₁, B₂₂), B₁₁ = A₁₁ + A₁₂X,
 //! B₂₂ = A₂₂ − XA₁₂, where X solves the Riccati equation A₂₂X − XA₁₁ + A₂₁ − XA₁₂X = 0 and Y the Sylvester equation
 //! B₁₁Y − YB₂₂ = −A₁₂. Both are solved by the iteration about the diagonals, X ← (−A₂₁ + XA₁₂X − N₂X + XN₁) ⊘ Δ, Δ_ij =
 //! d₂ᵢ − d₁ⱼ (N the off-diagonal parts, d the diagonals), until a sweep no longer moves X by more than its rounding (or
-//! no longer moves it less than the sweep before: the rounding's floor). A split is taken where it pays (`split`): the
+//! no longer moves it less than the sweep before: the rounding's floor). A split is taken where it pays (`split_into`): the
 //! gap between the two sides' diagonals is wider than both sides' spreads (their diagonals' range and twice their
 //! largest off-diagonal row sum) and than twice the coupling across: the iteration's ratio is then below one half. Which
 //! split is taken chooses only which exact transform is used.
@@ -41,7 +41,7 @@ pub struct Spectrum {
     /// The leaves' decompositions, by leaf (`Eigen` keeps its memory), and the decoupling's buffers by depth.
     eigens: Vec<linalg::Eigen>,
     levels: Vec<Level>,
-    /// `split`'s: the diagonal, its order, the gaps.
+    /// `split_into`'s: the diagonal, its order, the gaps.
     diagonal: Vec<f64>,
     order: Vec<usize>,
     gaps: Vec<(f64, usize)>,
@@ -138,12 +138,6 @@ fn split_into(g: &[C64], m: usize, (d, order, gaps): (&mut Vec<f64>, &mut Vec<us
     true
 }
 
-/// The widest gap of G's diagonal at which a split pays (`split_into`): the two sides, each sorted.
-pub fn split(g: &Mat) -> Option<(Vec<usize>, Vec<usize>)> {
-    let (mut d, mut order, mut gaps, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    split_into(&g.data, g.rows, (&mut d, &mut order, &mut gaps), &mut left, &mut right).then_some((left, right))
-}
-
 /// An iteration's buffers (`iterate`): the denominators, −N_L, N_R, the right-hand side, a product's.
 struct Sweep<'a> {
     delta: &'a mut Vec<C64>,
@@ -197,7 +191,7 @@ fn iterate(left: &[C64], right: &[C64], c: &[C64], (p, q): (usize, usize), quadr
     }
 }
 
-/// What every depth of the decoupling shares: the leaves' decompositions, `split`'s buffers, the leaves' sizes, the
+/// What every depth of the decoupling shares: the leaves' decompositions, `split_into`'s buffers, the leaves' sizes, the
 /// count.
 struct Shared<'a> {
     eigens: &'a mut Vec<linalg::Eigen>,

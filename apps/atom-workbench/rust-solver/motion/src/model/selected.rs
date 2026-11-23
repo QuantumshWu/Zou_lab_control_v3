@@ -1918,6 +1918,7 @@ impl Selected {
 
     /// The run's judgment of its node's beats (model/classify.rs): per slot of the structure's node, before the beats
     /// left out were taken from the layout, its beat and tier; the blocks; what the dropped beats cost.
+    #[cfg(test)]
     pub fn judgment(&self) -> &Judgment {
         &self.judgment
     }

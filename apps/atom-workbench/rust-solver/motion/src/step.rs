@@ -929,6 +929,7 @@ pub struct Emitted {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Landing {
     On(Landed),
+    #[cfg(test)]
     Nowhere,
 }
 
@@ -957,6 +958,7 @@ fn land<'m, D: Dynamics>(model: &'m D, cluster: usize, at: &Point, places: Optio
     let on = places.map(|p| p.of(cluster));
     match model.landed(cluster, at, on, f, threshold) {
         Landing::On(landed) => Some((cluster, f.iter().copied().collect(), landed)),
+        #[cfg(test)]
         Landing::Nowhere => None,
     }
 }
@@ -1120,6 +1122,7 @@ impl Flow {
     /// The reference potential's largest value on the straight path r + v u, |u| ≤ |half| (rad/µs), by its expansion
     /// about p -- the potential the step's flow moves in: V(p) + g·y + ½ yᵀΛy along the axes, y = (r − p) + v u, a parabola
     /// c + b u + ½ a u² in u, its largest at an end, or at its vertex where it bends down within the path.
+    #[cfg(test)]
     pub fn highest(&self, r: [f64; 3], v: [f64; 3], half: f64) -> f64 {
         let (mut a, mut b, mut c) = (0.0, 0.0, self.value);
         for i in 0..3 {
@@ -2428,6 +2431,7 @@ impl Integrals {
         Integrals { one: [0.0; 3], two: [0.0; 3], local: Local { centre, ..Local::NONE } }
     }
     /// The sums over nodes (t, w, κ) -- each its time, its weight and κ there --, the shapes' moments about `centre`.
+    #[cfg(test)]
     pub fn of(centre: f64, nodes: impl IntoIterator<Item = (f64, f64, [f64; 3])>) -> Integrals {
         let mut sums = Integrals::none(centre);
         for (t, w, kappa) in nodes {
@@ -2709,6 +2713,7 @@ pub fn forms_at<M: Middle>(middle: &M, fixed: &M::Path, rho: &[C64]) -> Forms {
 
 /// The nodes' sums of a tone summed, Σ_j re_j and Σ_j im_j (`Middle::tone_force`): the whole σ, for a model whose
 /// envelopes are the same at every time of the path.
+#[cfg(test)]
 pub fn summed(sums: &[(f64, &[C64], &[C64])]) -> (Vec<C64>, Vec<C64>) {
     let size = sums.first().map_or(0, |x| x.1.len());
     let (mut re, mut im) = (vec![C64::ZERO; size], vec![C64::ZERO; size]);
@@ -3397,8 +3402,10 @@ pub struct Step {
     pub prices: Vec<(usize, Price)>,
     /// The momenta the step makes in turn (1/µm, lab axes; module documentation, # The step's momentum): its start κ₀,
     /// the middle the first half flow reaches κ_h, the middle kicked without its jumps κ_k and with them κ_j, its end κ₁.
+    #[cfg(test)]
     momenta: [[f64; 3]; 5],
     /// The position the first half flow reaches, r_h: where the kick is made.
+    #[cfg(test)]
     reached: [f64; 3],
 }
 
@@ -3406,6 +3413,7 @@ pub struct Step {
 /// start.κ, and its one decomposition, each part a difference of the step's own momenta -- the reference's two half
 /// flows, the kick at the middle (the force less the reference's, # The kick) and the jumps' kicks as they enter the
 /// flow at the middle --, which add up to the whole to rounding.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Momentum {
     pub whole: [f64; 3],
@@ -3414,6 +3422,7 @@ pub struct Momentum {
     pub jumps: [f64; 3],
 }
 
+#[cfg(test)]
 impl Step {
     /// The step's momentum change and its decomposition (`Momentum`).
     pub fn momentum(&self) -> Momentum {
@@ -3615,6 +3624,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let kick = (shift.map(|x| -hm * x), std::array::from_fn(|a| impulse[a] + tau * (reference[a] + force[a]) + push[a]));
         // The jumps' kicks, each at its time u from the middle: in the reference's flow the kick δκ cos ωu and the
         // displacement −(ħ/m) δκ sin(ωu)/ω = −(ħ/m) δκ u c₁(ω²u²) at the middle, per principal axis.
+        #[cfg(test)]
         let unjumped = kicked.1;
         for (jumped, u) in made.iter().filter_map(|m| m.kick.map(|kick| (kick, (m.state.time - from.time) - h))) {
             for (e, lambda) in flow.axes.iter().zip(&flow.curvatures) {
@@ -3634,7 +3644,17 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() }, rows: ended }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
-        Ok(Step { end, segment, made, work, prices, momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1], reached: r_h })
+        Ok(Step {
+            end,
+            segment,
+            made,
+            work,
+            prices,
+            #[cfg(test)]
+            momenta: [from.kappa, kappa_h, unjumped, kicked.1, kappa1],
+            #[cfg(test)]
+            reached: r_h,
+        })
     }
 
     /// The propagation of B on the step's path from where the march stands, in the cluster its state is in, as far as

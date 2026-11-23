@@ -4905,6 +4905,7 @@ struct Fixed {
 impl Fixed {
     /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`;
     /// of the motion nothing more read (`MotionError::UNREAD`).
+    #[cfg(test)]
     fn new(model: Vec<[f64; 2]>, times: &[f64], rate: f64, escape: Escape) -> Fixed {
         Fixed::booked(model, times, (rate, 0.), None, escape)
     }
