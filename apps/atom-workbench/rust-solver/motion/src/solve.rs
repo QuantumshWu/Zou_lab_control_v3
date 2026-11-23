@@ -530,7 +530,11 @@
 //! ∫x dt, so what is shown moves by X̄_pop(t)·|dO/dt| -- X̄_pop the held atoms' mean ∫x_pop dt to t, |dO/dt| the largest
 //! of what is shown and of the loss by its neighbours' estimates --; and T, the steady ratio of the diffusion to the
 //! friction, by x̄_T·T, x̄_T the window's own mean of x_T between the time and the one before (the step's check's
-//! windows). Nothing where the nodes are the model's own; nothing persisted.
+//! windows). The held atoms' motion is driven by the forces -- the gradients' outputs, off by x_T, and the jumps'
+//! recoils, by x_pop --, each off by at most x_pop + x_T of itself: the push ā, a mean force, by (x̄_pop + x̄_T)·|ā| as T
+//! by its window's mean, and the mean velocity, the push's integral, shifted in time as what is shown is, by
+//! (X̄_pop + X̄_T)·|ā|, per lab axis (`motion_deviation_at`; until 2026-11-23 the motion booked none of it). Nothing where
+//! the nodes are the model's own; nothing persisted.
 //!
 //! # Exits
 //! Two exits, each said where it is met, none carried on as a number (unify2 §7):
@@ -5393,12 +5397,13 @@ fn motion_accounts(estimates: &[Estimate], fixed: &Fixed, step: &Bound, scales: 
             let t = fixed.times[k];
             let half: V3 = scales.frequencies.map(|w| half_window(w, t));
             let (model, part, held) = (fixed.motion_at(k, e, half), step.motion_at(t), 1. - e.loss);
+            let deviation = motion_deviation_at(estimates, &fixed.times, k);
             let values = [m.mean_velocity, m.push];
             let errors = [m.mean_velocity_errors, m.push_errors];
             std::array::from_fn(|i| {
                 std::array::from_fn(|a| {
                     let target = if i == 0 { velocity_target(values[i][a], e.scale, hm) } else { push_target(values[i][a], e.scale, hm, half[a]) };
-                    let account = Account { model: weighed(held, model[i][a]), step: part[i][a] * target, statistics: weighed(held, errors[i][a].interval()) };
+                    let account = Account { model: weighed(held, model[i][a] + deviation[i][a]), step: part[i][a] * target, statistics: weighed(held, errors[i][a].interval()) };
                     (account.model.is_finite() && account.step.is_finite() && account.statistics.is_finite() && target.is_finite()).then_some((account, target))
                 })
             })
@@ -5444,8 +5449,8 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &Bound) -> (Vec<Account
 
 /// The tables' deviation booked at the k-th time of `estimates` at `times` (module documentation, # The tables'
 /// deviation): [on what is shown X̄_pop·|dO/dt|, on T relative x̄_T] -- |dO/dt| the largest of each shown row's
-/// (1 − L)p and of the loss L by its neighbours' estimates (one-sided at the last time), x̄_T the held atoms' mean
-/// ∫x_T dt over the window from the time before, over its length. None at t = 0.
+/// (1 − L)p and of the loss L by its neighbours' estimates (one-sided at the last time), x̄_T the window's
+/// (`deviated_over`). None at t = 0.
 fn deviation_at(estimates: &[Estimate], times: &[f64], k: usize) -> [f64; 2] {
     if k == 0 || estimates[k].deviated == [0.; 2] {
         return [0.; 2];
@@ -5454,9 +5459,25 @@ fn deviation_at(estimates: &[Estimate], times: &[f64], k: usize) -> [f64; 2] {
     let shown = |e: &Estimate| -> Vec<f64> { e.populations.iter().map(|p| (1. - e.loss) * p).chain(std::iter::once(e.loss)).collect() };
     let span = times[b] - times[a];
     let slope = if span > 0. { shown(&estimates[b]).iter().zip(shown(&estimates[a])).map(|(x, y)| (x - y).abs()).fold(0., crate::linalg::larger) / span } else { 0. };
+    [estimates[k].deviated[0] * slope, deviated_over(estimates, times, k)[1]]
+}
+
+/// The tables' deviation booked on the motion at the k-th time (module documentation, # The tables' deviation): per lab
+/// axis [on the mean velocity (X̄_pop + X̄_T)·|ā|, on the push (x̄_pop + x̄_T)·|ā|] (µm/µs, µm/µs²), ā the push there,
+/// X̄ the held atoms' mean ∫x dt to the time, x̄ the window's (`deviated_over`). None at t = 0 or where no motion is read.
+fn motion_deviation_at(estimates: &[Estimate], times: &[f64], k: usize) -> [[f64; 3]; 2] {
+    let e = &estimates[k];
+    let (Some(m), true) = (e.motion.as_ref(), k > 0 && e.deviated != [0.; 2]) else { return [[0.; 3]; 2] };
+    let window = deviated_over(estimates, times, k);
+    let (whole, mean) = (e.deviated[0] + e.deviated[1], window[0] + window[1]);
+    [m.push.map(|p| whole * p.abs()), m.push.map(|p| mean * p.abs())]
+}
+
+/// The held atoms' mean x over the window from the time before to the k-th, [x̄_pop, x̄_T]: their mean ∫x dt's change
+/// over the window's length.
+fn deviated_over(estimates: &[Estimate], times: &[f64], k: usize) -> [f64; 2] {
     let window = times[k] - times[k - 1];
-    let friction = if window > 0. { crate::linalg::larger(estimates[k].deviated[1] - estimates[k - 1].deviated[1], 0.) / window } else { 0. };
-    [estimates[k].deviated[0] * slope, friction]
+    std::array::from_fn(|i| if window > 0. { crate::linalg::larger(estimates[k].deviated[i] - estimates[k - 1].deviated[i], 0.) / window } else { 0. })
 }
 
 /// T's account at a time (`accounts`) from its estimate, the model's error on T there `model` (with its bounds,
@@ -5866,7 +5887,16 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     crate::prof::note(|| {
         let most = (1..outputs).map(|k| deviation_at(estimates, times, k)).fold([0.; 2], |m, d| [crate::linalg::larger(m[0], d[0]), crate::linalg::larger(m[1], d[1])]);
         let last = estimates.last().map_or([0.; 2], |e| e.deviated);
-        format!("the tables' deviation booked at the outputs at its largest: {:.3e} on what is shown, {:.3e} of T; the held atoms' mean ∫x dt at the end {last:?} µs", most[0], most[1])
+        // The motion's over its targets.
+        let motion = (1..outputs)
+            .filter_map(|k| {
+                let (e, m) = (&estimates[k], estimates[k].motion.as_ref()?);
+                let d = motion_deviation_at(estimates, times, k);
+                let half: V3 = c.scales.frequencies.map(|w| half_window(w, times[k]));
+                Some((0..3).fold([0.0f64; 2], |x, a| [x[0].max(d[0][a] / velocity_target(m.mean_velocity[a], e.scale, c.scales.hbar_over_mass)), x[1].max(d[1][a] / push_target(m.push[a], e.scale, c.scales.hbar_over_mass, half[a]))]))
+            })
+            .fold([0.0f64; 2], |x, y| [x[0].max(y[0]), x[1].max(y[1])]);
+        format!("the tables' deviation booked at the outputs at its largest: {:.3e} on what is shown, {:.3e} of T, {:.3e} of the mean velocity's target, {:.3e} of the push's; the held atoms' mean ∫x dt at the end {last:?} µs", most[0], most[1], motion[0], motion[1])
     });
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;
