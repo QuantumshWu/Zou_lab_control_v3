@@ -338,14 +338,20 @@ export class TaskConsoleView {
     // ---------------------------------------------------------------- rows
     starts;
     intents = {
-        // A Start that waits for this window's edits says so at once.
+        // A Start that waits for this window's edits says so at once; a Stop or a Remove cancels it.
         start: id => { if (this.starts.start(id))
             this.drawStart(id); },
         stop: id => {
+            if (this.starts.cancel(id))
+                this.drawStart(id);
             this.send({ action: "stop_node", node: id }, `Stopping ${this.nameOf(id)}…`);
         },
         edit: id => id.startsWith("panel:") ? this.editPublisher(id) : this.edit(id),
-        remove: id => this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`),
+        remove: id => {
+            if (this.starts.cancel(id))
+                this.drawStart(id);
+            this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`);
+        },
         preview: (id, on) => this.send({ action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
         rename: (id, name) => this.send({ action: "rename_node", node: id, name }, "Renaming…"),
         editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),

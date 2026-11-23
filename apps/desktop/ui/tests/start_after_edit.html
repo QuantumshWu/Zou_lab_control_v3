@@ -9,7 +9,7 @@
 // unanswered -- a field committed by the blur of that very click -- waits, saying "Starting…", and goes once the
 // edits are answered, with the revision read at the click chained through their replies (views/logic.ts NodeStarts):
 // the operator's own edits are part of what they start; a change from elsewhere, before or after them, is still
-// refused. The workbench here is a fake one that takes the window's
+// refused; a Stop or a Remove clicked meanwhile cancels it. The workbench here is a fake one that takes the window's
 // commands in the order they were sent, as the host does.
 import {TaskConsoleView} from '../dist/views/task_console.js';
 import {FigureViewerView} from '../dist/views/figure_viewer.js';
@@ -126,6 +126,23 @@ try {
    assert(refused(host.step()),'refused: read it again');
    done();
  });
+ await check('a Stop clicked while the Restart waits cancels it: the node ends stopped',()=>{
+   const {host,page,done}=consoleWindow();
+   type(field(page,'Label'),'b');startButton(page).click();
+   button(page,/^Stop$/).click();
+   assert(said(startButton(page))!=='Starting…','no longer "Starting…"');
+   host.drain();
+   equal(starts(),[],'no Start sent');equal(host.rows[0].phase,'idle','stopped');
+   done();
+ });
+ await check('a Remove while the Restart waits cancels it: the node is removed, not started',()=>{
+   const {host,view,page,done}=consoleWindow();
+   type(field(page,'Label'),'b');startButton(page).click();
+   view.intents.remove('scan');
+   host.drain();
+   equal(starts(),[],'no Start sent');equal(host.rows.length,0,'removed');
+   done();
+ });
  await check('a change from elsewhere before the edit is still refused, told to this window or not',()=>{
    for(const told of [false,true]){
      const {host,page,done}=consoleWindow();
@@ -169,7 +186,7 @@ try {
    equal(host.step().error,undefined,'taken');
    done();
  });
- await check('the Figure Viewer\'s node page waits the same way',()=>{
+ await check('the Figure Viewer\'s node page waits the same way, and a Stop there cancels it',()=>{
    {
      const {host,page,done}=viewerWindow();
      type(field(page,'Label'),'b');startButton(page).click();
@@ -177,6 +194,13 @@ try {
      host.step();
      equal(starts().map(entry=>entry.expected_draft_revision),[2],'one Start, with the edited revision');
      equal(host.step().error,undefined,'taken');
+     done();
+   }
+   {
+     const {host,page,done}=viewerWindow();
+     type(field(page,'Label'),'b');startButton(page).click();
+     button(page,/^Stop$/).click();host.drain();
+     equal(starts(),[],'a Stop cancels it');equal(host.rows[0].phase,'idle','stopped');
      done();
    }
  });

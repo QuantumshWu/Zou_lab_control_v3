@@ -250,11 +250,17 @@ export class FigureViewerView implements View {
 
   private readonly starts: NodeStarts;
   private readonly nodeIntents: EditorIntents = {
-    // A Start that waits for this window's edits says so at once.
+    // A Start that waits for this window's edits says so at once; a Stop or a Remove cancels it.
     start: id => { if (this.starts.start(id)) this.drawStart(id); },
-    stop: id => { this.ctx.transport.send({ action: "stop_node", node: id }, "Stopping…"); },
+    stop: id => {
+      if (this.starts.cancel(id)) this.drawStart(id);
+      this.ctx.transport.send({ action: "stop_node", node: id }, "Stopping…");
+    },
     edit: id => this.tabs.setCurrent(`node:${id}`),
-    remove: id => { this.ctx.transport.send({ action: "remove_node", node: id }, "Removing…"); },
+    remove: id => {
+      if (this.starts.cancel(id)) this.drawStart(id);
+      this.ctx.transport.send({ action: "remove_node", node: id }, "Removing…");
+    },
     preview: () => {},
     rename: (id, name) => this.ctx.transport.send({ action: "rename_node", node: id, name }, "Renaming…"),
     editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),

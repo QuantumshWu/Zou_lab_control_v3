@@ -158,7 +158,8 @@ export type EditorIntents = NodeIntents & {
  * unanswered waits -- the node says "Starting…" (`waits`) -- and goes once they are answered,
  * with the revision read at the click chained through their replies: the operator's own edits
  * are part of what they start, while a change from elsewhere, before or after them, still has the
- * host refuse it (expected_draft_revision). */
+ * host refuse it (expected_draft_revision).  A Stop or a Remove of the node cancels it (`cancel`):
+ * the operator's last action wins. */
 export class NodeStarts {
   /** Per node: its edits sent from here and unanswered, in order, and the revision a waiting Start goes with (null: none waits). */
   private nodes = new Map<string, { edits: number[]; start: number | null }>();
@@ -179,6 +180,14 @@ export class NodeStarts {
     const revision = this.row(id)?.draft_revision;
     if (revision === undefined || !this.nodes.get(id)?.edits.some(request => this.transport.pending.has(request))) { this.send(id, revision); return false; }
     this.node(id).start = revision;
+    return true;
+  }
+
+  /** A Stop or a Remove of the node: its waiting Start no longer goes (true: one waited). */
+  cancel(id: string): boolean {
+    const node = this.nodes.get(id);
+    if (!node || node.start === null) return false;
+    node.start = null;
     return true;
   }
 
