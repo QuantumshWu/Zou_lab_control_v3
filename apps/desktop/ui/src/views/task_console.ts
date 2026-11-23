@@ -170,8 +170,9 @@ export class TaskConsoleView implements View {
     if (this.onScreen) this.board.interactive = board?.selectors ?? true;
     this.pause.text = board?.paused ? "Resume" : "Pause";
     this.pause.setActive(Boolean(board?.paused));
-    // One rule for the summary (v2): panels, live/paused, nodes running.
-    const running = rows.filter(row => row.phase === "running").length;
+    // One rule for the summary (v2): panels, live/paused, nodes running -- a run still going
+    // counts while its node waits to restart it.
+    const running = rows.filter(row => row.phase === "running" || row.run?.state === "running").length;
     const words = [counted(this.board.size, "panel"), board?.paused ? "paused" : "live", ...(rows.length ? [`${running}/${counted(rows.length, "node")} running`] : [])].join(" · ");
     setElided(this.summary, words);
     this.monitorHint.hidden = this.board.size > 0;
