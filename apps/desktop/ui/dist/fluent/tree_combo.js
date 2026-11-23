@@ -1,4 +1,4 @@
-import { hintWidest, placeDrop, selectedFace } from "./combo.js";
+import { dropRoom, hintWidest, placeDrop, selectedFace } from "./combo.js";
 import { assign, element } from "./dom.js";
 import { hidePopup, isShown, showPopup } from "./popover.js";
 import { flattenTree } from "./tree_model.js";
@@ -58,8 +58,8 @@ export class TreeCombo {
     cursor = -1;
     typed = "";
     typedAt = 0;
-    /** The side this opening chose and the room it leaves the list (placeDrop): kept while it is open. */
-    drop = { up: false, room: 0 };
+    /** The side this opening chose (placeDrop): kept while it is open. */
+    up = false;
     constructor(changed, placeholder = "") {
         this.changed = changed;
         this.placeholder = placeholder;
@@ -95,8 +95,9 @@ export class TreeCombo {
     setTree(groups, current, none = null) {
         const signature = JSON.stringify([groups, none, this.placeholder]);
         if (signature !== this.signature) {
-            // Open, the cursor's row stands still (else the first row in sight).
-            const marks = this.open ? this.marks([this.rows[this.cursor]?.id, ...this.inSight()]) : [];
+            // Open, the cursor's row stands still where it is in sight, else the first row in sight.
+            const sight = this.open ? this.inSight() : [], cursor = this.rows[this.cursor]?.id;
+            const marks = this.open ? this.marks([...(cursor && sight.includes(cursor) ? [cursor] : []), ...sight]) : [];
             this.signature = signature;
             this.groups = flattenTree(groups);
             this.none = none;
@@ -154,7 +155,7 @@ export class TreeCombo {
         showPopup(this.list, this.root);
         this.cursor = -1;
         this.render();
-        this.drop = placeDrop(this.list, this.root);
+        this.up = placeDrop(this.list, this.root);
         // The picked row is the tree's selection (SELECTED) when it opens.
         this.move(this.rows.findIndex(row => this.picked(row)));
     }
@@ -216,25 +217,27 @@ export class TreeCombo {
         for (const id of ids) {
             const node = this.node(id);
             if (node)
-                marks.push({ id: id, top: node.getBoundingClientRect().top });
+                marks.push({ id, top: node.getBoundingClientRect().top });
         }
         marks.push({ id: null, top: this.list.getBoundingClientRect().top - this.list.scrollTop });
         return marks;
     }
-    /** The rows changed while it is open (a heading opened or closed, a new tree): the side and
-     * its room stay the opening's, the cap stays on, and the first of `marks` still shown stands
-     * where it stood (A), o down the rows.  Below the box the list keeps its top, as tall as its
-     * rows up to the room, and scrolls the mark back to A; above it the list keeps its bottom (B)
-     * and grows up no further than keeps the mark at A (B + o - A), the rest scrolling.  Its
-     * height is the layout's (its rows up to the cap), never measured with the cap lifted. */
+    /** The rows changed while it is open (a heading opened or closed, a new tree): the side stays
+     * the opening's, the cap stays on (the room the window leaves that side where the box stands
+     * now: dropRoom, as a dragged frame or a resized window may have moved it), and the first of
+     * `marks` still shown stands where it stood (A), o down the rows.  Below the box the list
+     * keeps its top, as tall as its rows up to the room, and scrolls the mark back to A; above it
+     * the list keeps its bottom (B) and grows up no further than keeps the mark at A (B + o - A),
+     * the rest scrolling.  Its height is the layout's (its rows up to the cap), never measured
+     * with the cap lifted. */
     hold(marks) {
         const list = this.list, frame = list.getBoundingClientRect();
         const mark = marks.find(item => item.id === null || this.node(item.id));
         const node = this.node(mark.id);
         const offset = node ? node.getBoundingClientRect().top - frame.top + list.scrollTop : 0;
-        const room = this.drop.up ? Math.min(this.drop.room, frame.bottom + offset - mark.top) : this.drop.room;
-        // A height is never below nothing (a negative one would lift the cap).
-        list.style.setProperty("--drop-room", `${Math.max(0, room)}px`);
+        // A box carried past the window's edge leaves that side no room (a negative cap would lift it).
+        const room = Math.max(0, dropRoom(list, this.root, this.up));
+        list.style.setProperty("--drop-room", `${this.up ? Math.min(room, frame.bottom + offset - mark.top) : room}px`);
         list.scrollTop = list.getBoundingClientRect().top + offset - mark.top;
     }
     picked(row) { return row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""; }

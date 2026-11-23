@@ -6,9 +6,10 @@
 <pre id="result">pending</pre>
 <script type="module">
 // Run with tools/test_ui.ps1. An open tree combo whose rows change -- a heading opened or closed by a click or by
-// → / ←, a new tree while it is open -- keeps the side and the room it opened with, and the row the change turns on
-// (the heading; on a new tree the cursor's row, else the first row in sight) stands within a device pixel of where it
-// stood (fluent/tree_combo.ts hold): below the box or above it, scrolled or not.
+// → / ←, a new tree while it is open -- keeps the side it opened on and the room the window leaves it there, and the
+// row the change turns on (the heading; on a new tree the cursor's row where it is in sight, else the first row in
+// sight) stands within a device pixel of where it stood, in sight in a list that shows rows (fluent/tree_combo.ts
+// hold): below the box or above it, scrolled or not, and after the box has moved while the list is open.
 import {TreeCombo} from '../dist/fluent/tree_combo.js';
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const results=[];
@@ -30,21 +31,31 @@ const row=text=>[...list().querySelectorAll('.tree-row')].find(node=>node.textCo
 const top=text=>{const node=row(text);assert(node,`a row ${text}`);return node.getBoundingClientRect().top};
 const click=text=>row(text).dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}));
 const scrolls=()=>list().scrollHeight>list().clientHeight+1;
-/** The headings wholly in sight in the open list. */
+/** The headings wholly in sight in the open list and in the window. */
 const headingsInSight=()=>{const frame=list().getBoundingClientRect();return [...list().querySelectorAll('.tree-row.heading')]
-  .filter(node=>{const rect=node.getBoundingClientRect();return rect.top>=frame.top&&rect.bottom<=frame.bottom}).map(node=>node.textContent)};
-/** The first row in sight (tree_combo.ts inSight). */
-const firstInSight=()=>{const frame=list().getBoundingClientRect();return [...list().querySelectorAll('.tree-row')].find(node=>{const rect=node.getBoundingClientRect();return rect.bottom>frame.top&&rect.top<frame.bottom}).textContent};
+  .filter(node=>{const rect=node.getBoundingClientRect();return rect.top>=Math.max(frame.top,0)&&rect.bottom<=Math.min(frame.bottom,view())}).map(node=>node.textContent)};
+/** Whether a row is in sight in the open list (tree_combo.ts inSight). */
+const seen=node=>{const frame=list().getBoundingClientRect(),rect=node.getBoundingClientRect();return rect.bottom>frame.top&&rect.top<frame.bottom};
+const firstInSight=()=>[...list().querySelectorAll('.tree-row')].find(seen).textContent;
+const cursorRow=()=>list().querySelector('.tree-row.current')?.textContent;
+/** The list shows rows: one at least wholly in its frame, never collapsed to its edges. */
+function shows(message){
+  const frame=list().getBoundingClientRect();
+  assert([...list().querySelectorAll('.tree-row')].some(node=>{const rect=node.getBoundingClientRect();return rect.top>=frame.top-DEVICE_PX&&rect.bottom<=frame.bottom+DEVICE_PX}),
+    `${message}: no row in sight in a list ${frame.height} px tall`);
+}
 /** The list inside the window, on the side it opened on. */
 function placed(up,message){
   const rect=list().getBoundingClientRect();
   assert(list().classList.contains('up')===up,`${message}: opened ${up?'above':'below'}, now ${up?'below':'above'}`);
   assert(rect.top>=-0.5&&rect.bottom<=view()+0.5,`${message}: inside the window: ${rect.top}..${rect.bottom} of ${view()}`);
 }
-/** `act` moves the row `text` by no more than a device pixel. */
+/** `act` moves the row `text` by no more than a device pixel and leaves it in sight, in a list that shows rows. */
 function holds(text,act,message){
   const before=top(text);act();const moved=top(text)-before;
   assert(Math.abs(moved)<=DEVICE_PX,`${message}: ${text} moved ${moved} px`);
+  assert(seen(row(text)),`${message}: ${text} out of sight`);
+  shows(message);
 }
 const SCROLLED=250;
 /** The four cases the jump was measured in: below or above the box, the list short or scrolled by SCROLLED. */
@@ -60,7 +71,7 @@ async function opened(place,{current=''}={}){
   placed(place.up,`${place.name}: opening`);
   assert(scrolls()===place.all,`${place.name}: the list ${place.all?'does not scroll':'scrolls'} when it opens`);
   if(place.all){list().scrollTop=SCROLLED;assert(Math.abs(list().scrollTop-SCROLLED)<=1,`${place.name}: scrolled to ${list().scrollTop}`)}
-  return {combo,done:()=>{combo.dispose();host.remove()}};
+  return {combo,host,done:()=>{combo.dispose();host.remove()}};
 }
 /** The heading in the middle of those in sight. */
 const middle=()=>{const names=headingsInSight();assert(names.length,'a heading in sight');return names[Math.floor(names.length/2)]};
@@ -113,6 +124,56 @@ try {
      const first=firstInSight();
      holds(first,()=>combo.setTree(tree(['Aardvark',...NAMES],()=>1),''),`${place.name}, rows before`);
      placed(place.up,`${place.name}, rows before`);
+     done();
+   }
+ });
+ // The pick is the cursor's row when the list opens; scrolled back to its top, the list leaves it out of sight below.
+ const outOfSight=async place=>{
+   const opening=await opened(place,{current:'Lima-3'});
+   list().scrollTop=0;
+   assert(cursorRow()==='3 of Lima'&&!seen(row('3 of Lima'))&&!seen(row('Golf')),`${place.name}: the cursor's row and Golf out of sight`);
+   return opening;
+ };
+ await check('a new tree while open with the cursor\'s row out of sight keeps the first row in sight in place',async()=>{
+   for(const place of CASES.filter(place=>place.all)){
+     const {combo,done}=await outOfSight(place);
+     const first=firstInSight();
+     // Rows between what is in sight and the cursor's row.
+     holds(first,()=>combo.setTree(tree(NAMES,heading=>heading==='Golf'?20:0),combo.value),`${place.name}, rows between`);
+     placed(place.up,`${place.name}, rows between`);
+     assert(cursorRow()==='3 of Lima','the cursor stayed on its row');
+     done();
+   }
+ });
+ await check('a new tree that keeps none of the rows in sight still shows rows',async()=>{
+   for(const place of CASES.filter(place=>place.all)){
+     const {combo,done}=await outOfSight(place);
+     combo.setTree(tree(['Kilo','Lima']),combo.value);
+     shows(`${place.name}, rows in sight gone`);placed(place.up,`${place.name}, rows in sight gone`);
+     done();
+   }
+ });
+ await check('a new tree without the cursor\'s row keeps the first row in sight in place',async()=>{
+   for(const place of CASES.filter(place=>place.all)){
+     const {combo,done}=await opened(place);
+     const heading=middle();
+     for(const character of heading)press(combo,character);
+     assert(cursorRow()===heading,`${place.name}: the cursor on ${heading}`);
+     const first=firstInSight();
+     holds(first,()=>combo.setTree(tree(NAMES.filter(name=>name!==heading)),''),`${place.name}, ${heading} gone`);
+     placed(place.up,`${place.name}, ${heading} gone`);
+     assert(!cursorRow(),`${place.name}: no cursor once its row is gone`);
+     done();
+   }
+ });
+ await check('the box moved while the list is open: a heading opened and closed stands still, inside the window on its side',async()=>{
+   // A dragged frame carries the box: below, from the top to the window's middle; above, from the bottom to near the top.
+   for(const [place,move] of [[CASES[0],'top:600px'],[CASES[2],'top:200px']]){
+     const {host,done}=await opened(place);
+     host.style.top=host.style.bottom='';host.style.cssText+=`;${move}`;await settle();
+     const heading=middle();
+     holds(heading,()=>click(heading),`${place.name}, moved, first click`);placed(place.up,`${place.name}, moved, first click`);
+     holds(heading,()=>click(heading),`${place.name}, moved, second click`);placed(place.up,`${place.name}, moved, second click`);
      done();
    }
  });
