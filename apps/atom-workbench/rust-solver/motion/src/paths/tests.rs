@@ -96,7 +96,7 @@ fn walks_of(file: &str, state: usize) -> Vec<Walk> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| Walk { index: p["index"].as_u64().unwrap(), start: vec![(state, C64::ONE)], ends: serde_json::from_value(p["samples"].clone()).unwrap(), lost: false })
+        .map(|p| Walk { index: p["index"].as_u64().unwrap(), start: vec![(state, C64::ONE)], ends: serde_json::from_value(p["samples"].clone()).unwrap(), lost: false, weight: 1.0 })
         .collect()
 }
 
@@ -258,7 +258,7 @@ fn paths_replay() {
                     x.into_iter().map(|y| y.1.clone()).collect()
                 };
                 let wins: Vec<(f64, f64)> = edges.windows(2).map(|e| (t0 + e[0], t0 + e[1])).collect();
-                let result = compare(&of(ma), &of(mb), &wins, &request.states, runs[0].hbar_over_mass(), &[]);
+                let result = compare(&of(ma), &of(mb), &wins, &request.states, runs[0].hbar_over_mass(), &[], &[]);
                 for w in &result {
                     eprintln!("{pair} {}", summary(w, &request.states));
                 }
@@ -455,7 +455,7 @@ fn paths_a_family_is_its_members() {
             let t = k as f64 * step;
             [t, c[0] + speed * t, c[1], c[2], speed / hm, 0.0, 0.0]
         });
-        let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect(), lost: false };
+        let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect(), lost: false, weight: 1.0 };
         let at = |turns: f64, rate: f64, pieces: usize| Scheme::Exponential { turns, rate, pieces, cutoff: f64::INFINITY, read: 1 };
         for pieces in [1, 2] {
             let members = [at(1.0, 8.0, pieces), at(2.0, 8.0, pieces), at(1.0, 16.0, pieces), at(1.0, 8.0, 2 * pieces), at(1.0, 9.0, pieces)];

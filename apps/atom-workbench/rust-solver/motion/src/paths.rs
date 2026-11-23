@@ -233,6 +233,9 @@ pub struct Walk {
     pub ends: Vec<[f64; 7]>,
     /// Whether the trajectory lost its atom at its last end (its path ends there; select.rs # The motion).
     pub lost: bool,
+    /// Its weight among the paths: its stratum's share of the pilot's trajectories over the stratum's paths (select.rs
+    /// # How many paths; one alike where the paths are not stratified).
+    pub weight: f64,
 }
 
 impl Walk {
@@ -321,6 +324,9 @@ pub struct Counts {
     pub opening: f64,
     /// The bound of what the start's modes the opening books instead of resolving can do to a displayed row (# The start).
     pub booked: f64,
+    /// The counted work (real multiply-adds, `decide::Work`): the nodes' own (`Node::work`) and the substeps' products
+    /// (`Form::product`) -- the trajectories' price's measure, for what more paths cost (select.rs # How many paths).
+    pub work: f64,
 }
 
 impl Counts {
@@ -338,6 +344,7 @@ impl Counts {
         self.condition = larger(self.condition, o.condition);
         self.opening = larger(self.opening, o.opening);
         self.booked = larger(self.booked, o.booked);
+        self.work += o.work;
     }
     pub fn seconds(&self) -> f64 {
         self.node_seconds + self.propagation_seconds + self.readout_seconds
@@ -456,6 +463,9 @@ pub struct Form<'a> {
     classes: Vec<[i64; 2]>,
     /// Per class its photon's wave number (1/µm; # The motion's readings).
     photon: Vec<f64>,
+    /// A substep's remainder's counted work (real multiply-adds): ΔH's sandwich over the sector's pairs, Σ b_x b_y (b_x +
+    /// b_y) complex multiply-adds, and R's places (`Counts::work`).
+    product: f64,
     hbar_over_mass: f64,
 }
 
@@ -668,6 +678,7 @@ impl<'a> Form<'a> {
                 if ll > 0.0 { lk / ll } else { largest }
             })
             .collect();
+        let product = crate::decide::COMPLEX * (pairs.iter().map(|&(x, y)| (blocks[x].len() * blocks[y].len() * (blocks[x].len() + blocks[y].len())) as f64).sum::<f64>() + r_places.len() as f64);
         let form = Form {
             model,
             n,
@@ -692,6 +703,7 @@ impl<'a> Form<'a> {
             states,
             classes,
             photon,
+            product,
             hbar_over_mass: model.hbar_over_mass(),
         };
         assert!(form.beats_known(&node), "a node's beat outside the model's values");
@@ -1437,7 +1449,7 @@ impl<'a> Form<'a> {
             let (r, k) = walk.at(hm, u);
             [u, r[0], r[1], r[2], k[0], k[1], k[2]]
         });
-        let dense = Walk { index: walk.index, start: walk.start.clone(), ends: ends.collect(), lost: false };
+        let dense = Walk { index: walk.index, start: walk.start.clone(), ends: ends.collect(), lost: false, weight: walk.weight };
         let (turns, rate, cutoff) = knobs;
         let series = self.along_from(&dense, self.from_ground(landed), t, t + span, Scheme::Exponential { turns, rate, pieces: 1, cutoff, read: 1 })?;
         // The own run's readings at a time, linearly between its knots.
@@ -2031,7 +2043,7 @@ impl Form<'_> {
         let clock = std::time::Instant::now();
         let node = self.node_at(walk, from);
         let at_knot = self.node_at(walk, knots[1]);
-        (counts[0].nodes, counts[0].node_seconds) = (2, clock.elapsed().as_secs_f64());
+        (counts[0].nodes, counts[0].node_seconds, counts[0].work) = (2, clock.elapsed().as_secs_f64(), node.work + at_knot.work);
         let mut c = Counts::default();
         let reading = self.read(&node, walk, from, &state, &mut c);
         counts[0].add(&c);
@@ -2180,7 +2192,7 @@ impl Form<'_> {
     #[allow(clippy::type_complexity)]
     fn freeze_family(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, knobs: &[(f64, f64, usize, f64)], finest: usize, substeps: &(dyn Fn(usize, f64, f64) -> usize + Sync)) -> Result<(Vec<Vec<std::sync::Arc<Frozen>>>, Vec<Option<(f64, Node)>>, std::sync::Arc<Amps>, Counts), String> {
         let jobs: Vec<(usize, usize)> = (0..intervals.len()).flat_map(|i| (1..=finest).map(move |j| (i, j))).collect();
-        let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64)> = jobs
+        let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64, f64)> = jobs
             .par_iter()
             .map(|&(i, j)| {
                 let clock = std::time::Instant::now();
@@ -2194,10 +2206,11 @@ impl Form<'_> {
                 let amps = self.amps_with(&node, false);
                 #[cfg(test)]
                 traced(1, part);
-                (std::sync::Arc::new(amps), (j == finest && read).then_some(node), clock.elapsed().as_secs_f64())
+                let work = node.work;
+                (std::sync::Arc::new(amps), (j == finest && read).then_some(node), clock.elapsed().as_secs_f64(), work)
             })
             .collect();
-        let mut counts = Counts { nodes: nodes.len() as u64, node_seconds: nodes.iter().map(|x| x.2).sum(), ..Counts::default() };
+        let mut counts = Counts { nodes: nodes.len() as u64, node_seconds: nodes.iter().map(|x| x.2).sum(), work: nodes.iter().map(|x| x.3).sum(), ..Counts::default() };
         // The distinct pieces -- (pieces a step, interval, place, substeps) -- and each member's among them.
         let mut keys: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut index: std::collections::HashMap<(usize, usize, usize, usize), usize> = std::collections::HashMap::new();
@@ -2341,6 +2354,7 @@ impl Form<'_> {
                 sigma[i] = e[i] * sigma[i] + (b1[i] * k[0][i] + b23[i] * (k[1][i] + k[2][i]) + b4[i] * k[3][i]) * d;
             }
             counts.products += 4;
+            counts.work += 4.0 * self.product;
             counts.segments += 1;
         }
         // ρ = V σ V†.
@@ -2412,13 +2426,21 @@ impl Mean {
     /// The mean of the paths' values `x` and its standard error, the paths' spread over √P: none to read on one path
     /// (without bound). Of no path nothing is read: its window is unread (`Window::paths`, `select::direct_at`).
     pub fn of(x: &[f64]) -> Mean {
+        Mean::weighted(x, &vec![1.0; x.len()])
+    }
+
+    /// The weighted mean of the paths' values `x` by their weights `w` (their strata's, `Walk::weight`) and its standard
+    /// error, n/(n − 1) Σ w²(x − m)² / (Σ w)² -- the paths' spread over √P where the weights are alike; none to read on
+    /// one path.
+    pub fn weighted(x: &[f64], w: &[f64]) -> Mean {
         let p = x.len() as f64;
-        let value = x.iter().sum::<f64>() / p;
+        let sum: f64 = w.iter().sum();
+        let value = x.iter().zip(w).map(|(x, w)| x * w).sum::<f64>() / sum;
         if x.len() < 2 {
             return Mean { value, error: f64::INFINITY };
         }
-        let var = x.iter().map(|y| (y - value) * (y - value)).sum::<f64>() / (p - 1.0);
-        Mean { value, error: (var / p).sqrt() }
+        let var = x.iter().zip(w).map(|(x, w)| w * w * (x - value) * (x - value)).sum::<f64>() / (sum * sum) * p / (p - 1.0);
+        Mean { value, error: var.sqrt() }
     }
 }
 
@@ -2520,7 +2542,7 @@ pub fn window_of(windows: &[(f64, f64)], t: f64) -> Option<usize> {
 /// The candidate's direct errors against the reference on the same paths (`Window` per window `(from, to]`):
 /// `candidate[p]` and `reference[p]` read along path p at the same times; `labels` the request's states. A window's
 /// statistics are over the paths read in it.
-pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)], labels: &[String], hbar_over_mass: f64, landings: &[Vec<Statistics>]) -> Vec<Window> {
+pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)], labels: &[String], hbar_over_mass: f64, landings: &[Vec<Statistics>], weights: &[f64]) -> Vec<Window> {
     let mut levels: Vec<(String, Vec<usize>)> = Vec::new();
     for (s, l) in labels.iter().enumerate() {
         let level = l.rsplit_once('-').map_or(l.as_str(), |x| x.0).trim_end_matches('-').to_string();
@@ -2597,7 +2619,8 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             }
             // The paths read in the window (a lost atom's path ends early).
             let held: Vec<usize> = (0..p).filter(|&k| read[k]).collect();
-            let of = |x: &[f64]| Mean::of(&held.iter().map(|&k| x[k]).collect::<Vec<_>>());
+            let weight = |k: usize| weights.get(k).copied().unwrap_or(1.0);
+            let of = |x: &[f64]| Mean::weighted(&held.iter().map(|&k| x[k]).collect::<Vec<_>>(), &held.iter().map(|&k| weight(k)).collect::<Vec<_>>());
             let row_means: Vec<Mean> = rows.iter().map(|x| of(x)).collect();
             let worst_row = (0..STATES).max_by(|&a, &b| row_means[a].value.abs().total_cmp(&row_means[b].value.abs())).unwrap();
             let worst_per_path = held.iter().map(|&k| rows.iter().map(|x| x[k].abs()).fold(0.0, larger)).collect();
@@ -2643,7 +2666,7 @@ pub fn path_errors(reference: &Form, candidates: &[&Form], walks: &[Walk], start
     }
     let labels = &reference.model.scene.request.states;
     let hm = reference.hbar_over_mass;
-    let windows = (1..models.len()).map(|m| compare(&series[m], &series[0], windows, labels, hm, &[])).collect();
+    let windows = (1..models.len()).map(|m| compare(&series[m], &series[0], windows, labels, hm, &[], &[])).collect();
     Ok(PathErrors { series, windows })
 }
 

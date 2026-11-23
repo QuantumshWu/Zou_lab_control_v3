@@ -71,9 +71,9 @@ fn select_the_direct_part_by_hand() {
         escape: None,
         statistics: None,
         stationary: None,
-        region: Region::NONE,
         seconds: 0.0,
         products: 0,
+        work: 0.0,
     };
     let windows = vec![(0.0, 10.0), (10.0, 100.0)];
     let at = |t: f64| direct_at(&judged, &windows, t).expect("every window read");
@@ -90,7 +90,7 @@ fn select_the_direct_part_by_hand() {
 fn select_the_direct_part_at_the_paths_statistics() {
     let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
     let at = |w: Window, upper: bool| {
-        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 };
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
         direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, if upper { Reach::Upper } else { Reach::Lower }).expect("the window read")
     };
     let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
@@ -123,7 +123,7 @@ fn select_the_motion_by_hand() {
         force: [even(0.0), even(0.0), even(2.0)],
         ..Window::default()
     };
-    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 };
+    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
     let hm = 7.3e-4;
     let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05] };
     let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
@@ -380,7 +380,7 @@ fn select_on_the_scenes() {
             let parts: Vec<serde_json::Value> = choice.windows.iter().map(|&(_, t)| serde_json::json!({"t": t, "direct": choice.at(t)})).collect();
             let doc = serde_json::json!({
                 "scene": name, "keep": choice.keep, "labels": choice.keep.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>(),
-                "memory": choice.memory, "length": choice.length, "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
+                "memory": choice.memory, "length": choice.length,
                 "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate],
                 "parts": parts, "report": choice.report,
             });
@@ -425,6 +425,7 @@ fn select_paths_cost() {
                 start: w["start"].as_array().unwrap().iter().map(|x| (x[0].as_u64().unwrap() as usize, C64::new(x[1].as_f64().unwrap(), x[2].as_f64().unwrap()))).collect(),
                 ends: serde_json::from_value(w["ends"].clone()).unwrap(),
                 lost: false,
+                weight: 1.0,
             })
             .collect()
     } else {
@@ -466,7 +467,7 @@ fn select_paths_cost() {
         let still: Walk = {
             let w = &walks[k];
             let e0 = w.ends[0];
-            Walk { index: w.index, start: w.start.clone(), ends: w.ends.iter().map(|e| [e[0], e0[1], e0[2], e0[3], 0.0, 0.0, 0.0]).collect(), lost: false }
+            Walk { index: w.index, start: w.start.clone(), ends: w.ends.iter().map(|e| [e[0], e0[1], e0[2], e0[3], 0.0, 0.0, 0.0]).collect(), lost: false, weight: 1.0 }
         };
         let w = if std::env::var("SELECT_STILL").is_ok() { &still } else { &walks[k] };
         let to = probe.min(w.end());
