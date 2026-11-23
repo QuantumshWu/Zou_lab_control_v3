@@ -598,9 +598,12 @@ not change group lengths or the scan's traversal. The source's singleton
 Repeat carrier is consumed, its Point/Cell axes preserved, and `scan.repeat`
 and `pulse.run` describe the scan's two repeat counts. Implicit integer repeat
 coordinates are semantically equivalent to the older explicit vectors.
-Outer coordinates retain their nominal setpoint semantics, including a pulse
-column linked to a host axis; actual carried values remain in the applied Pulse
-snapshot. Device readbacks are recorded separately from those setpoints.
+Outer coordinates are the values played: the plan arrives with each value on
+its port's domain (`scan.compile` with the ports' domains), so an API axis's
+coordinate is the value the board plays, a device axis's the value the device
+is sent -- its readback is recorded separately, in `actual_devices` -- and a
+manual axis's the value the operator is asked to set; a pulse column linked to
+a host axis carries its played value too, the applied Pulse snapshot beside it.
 
 Workbench scan configuration freezes `record.plan` and `scan_shape` from the
 effective factored plan. The first collect derives the output schema from its
@@ -715,7 +718,14 @@ hosted arrays keep the shared-memory path.
 
 `scan.compile` normalizes, compiles or previews the authored document. Compact
 Range descriptors `{start,stop,count}`, explicit Values, linked formulas and
-inactive banks are preserved as authored data. `scan.order` and `scan.bind`
+inactive banks are preserved as authored data. Given the ports' domains
+(`ports: [{port, unit, lo, hi, grid: {step, ties} | null}]`, the port owners'
+facts; `scan.bind` reads the same list), every value compiled or previewed
+plays on its port's grid: a decimal off the grid moves to its nearest point,
+points the grid makes one play once, a value outside the port's bounds stays as
+written for the binding to refuse. A preview's `axis_facts[].played` (and each
+link's fact) says what plays -- its ends and `count`, the points `written`, how
+many the grid `moved`, the `distinct` values. `scan.order` and `scan.bind`
 provide execution order and unit/range/port admission for draft and runtime
 callers, including binding views that select only some axes of a linked group.
 TypeScript sends authored patches and accepts canonical preview rows only when

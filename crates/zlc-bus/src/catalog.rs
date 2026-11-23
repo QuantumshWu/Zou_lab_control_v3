@@ -1179,8 +1179,9 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Load a recipe's layout with parameters and start its nodes; the reply names the result panels."),
     // Pulse: the board and its documents (docs/PULSE_V3.md).
     command!("pulse_describe", PulseDocument, read, false,
-        "A pulse document's API fields in the order it plays them and its scan slots (field_id, label, kind, unit, is_dac, lo, hi, \
-         limit_lo, limit_hi; API fields also value), API fields with no scan plan (unscannable) and its periods."),
+        "A pulse document's API fields in the order it plays them and its scan slots (field_id, label, kind, unit, value, is_dac, \
+         limit_lo, limit_hi, and grid {step, ties}: the values a scan plan's points are put on), API fields with no scan plan \
+         (unscannable) and its periods."),
     command!("pulse_run", PulseRun, control, false,
         "Play a pulse document on the attached board with these API values (and a scan table): compile, load, fire. The receipt: \
          command_id for pulse_wait_done, the values played, the table as played, timing (period starts, lane rising edges, ticks)."),

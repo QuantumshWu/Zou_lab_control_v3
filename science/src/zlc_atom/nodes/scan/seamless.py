@@ -11,10 +11,11 @@ retains its effective coordinates and full execution snapshot, and answers a
 compact receipt. The source signal arrives as this run's core-consumed exact
 input, in played order.
 Every coordinate is the value played. The plan arrives with each value on its
-port's domain (scan.compile with the ports' domains): a host axis's coordinate
-is the value it sets -- the API value the board plays, the value a device is
-sent, its readback kept in actual_devices -- and an inner one the value the
-board reports playing, with hardware facts retained in the native snapshot.
+port's domain (scan.compile with the ports' domains): an API axis's coordinate
+is the value the board plays, a device axis's the value the device is sent (its
+readback is kept apart, in actual_devices), a manual axis's the value the
+operator is asked to set, and an inner one the value the board reports playing,
+with hardware facts retained in the native snapshot.
 
 Acquisition preparation happens once at Scan Start. Device writes use their
 actual readback; manual changes are controlled by the operator. No implicit
@@ -524,7 +525,8 @@ class SeamlessScanMeasurement:
 
     def run_record(self, *, sequencer: Mapping[str, object],
                    tunables: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
-        """Factored authored plan and device facts; native configure records effective axes."""
+        """The factored plan as it plays (each value on its port's domain) and the
+        device facts; native configure records the board's effective inner axes."""
 
         axes = self.plan.to_tree()["axes"]
         named_devices = {"sequencer": self.sequencer_key}
