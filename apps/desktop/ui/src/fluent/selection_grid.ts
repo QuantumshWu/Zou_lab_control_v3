@@ -79,7 +79,7 @@ export class SelectionGrid {
       header.title = [spec.rowTips?.[row], this.options.labelAction?.title].filter(Boolean).join("\n");
       if (this.options.labelAction) {
         header.classList.add("action");
-        header.addEventListener("click", () => this.rowAction(row, this.options.labelAction!.value));
+        header.addEventListener("click", () => this.act(row, this.options.labelAction!.value));
       } else if (!this.options.toggle) header.addEventListener("pointerdown", event => this.headerPress(event, row, null));
       nodes.push(header);
       spec.columns.forEach((_, column) => {
@@ -103,7 +103,8 @@ export class SelectionGrid {
           glyph.type = "button";
           glyph.tabIndex = -1;
           glyph.title = action.title;
-          glyph.addEventListener("click", () => this.rowAction(row, action.value));
+          glyph.disabled = !this.live();
+          glyph.addEventListener("click", () => this.act(row, action.value));
           nodes.push(glyph);
         }
       }
@@ -131,13 +132,19 @@ export class SelectionGrid {
     }
   }
 
-  set disabled(disabled: boolean) { this.root.classList.toggle("disabled", disabled); }
+  /** Disabled, it takes no gesture and no row action (its ⋯ and × disabled too). */
+  set disabled(disabled: boolean) {
+    this.root.classList.toggle("disabled", disabled);
+    for (const action of this.root.querySelectorAll<HTMLButtonElement>(".grid-action")) action.disabled = disabled;
+  }
 
   private paint(): void {
     for (const [name, cell] of this.cells) cell.classList.toggle("selected", this.selected.has(name));
   }
 
   private live(): boolean { return !this.root.classList.contains("disabled"); }
+
+  private act(row: number, value: string): void { if (this.live()) this.rowAction(row, value); }
 
   private cellPress(event: PointerEvent, row: number, column: number): void {
     if (event.button !== 0 || !this.live()) return;
