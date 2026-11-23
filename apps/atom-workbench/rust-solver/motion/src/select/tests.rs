@@ -120,13 +120,13 @@ fn select_the_motion_by_hand() {
         paths: 4,
         heating: [even(0.01); 3],
         energy_rate: [even(1e-3), even(0.0), even(0.0)],
-        energy_rates: (0..4).map(|k| (k, [1e-3, 0.0, 0.0], [0.01; 3])).collect(),
+        energy_rates: (0..4).map(|k| (k, [1e-3, 0.0, 0.0], [0.01; 3], [0.01; 3])).collect(),
         force: [even(0.0), even(0.0), even(2.0)],
         ..Window::default()
     };
     let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
     let hm = 7.3e-4;
-    let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05], halves: None, push: vec![] };
+    let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05], halves: None, push: vec![], pilot_heating: Default::default() };
     let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
     let e = 0.5 * 10.0 * kt;
     let alpha = 0.01 / e;

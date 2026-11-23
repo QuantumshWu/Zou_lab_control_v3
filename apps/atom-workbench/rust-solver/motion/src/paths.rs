@@ -2223,10 +2223,11 @@ pub struct Window {
     /// covariance with the velocity over the cloud is what heats or cools it.
     pub heating: [Mean; 3],
     pub energy_rate: [Mean; 3],
-    /// Per path read in the window (its place among the paths) its δP_a and the reference's H_a (rad/µs²): the total T's
-    /// error weighs the axes by each one's response, and reads its rates over the paths' whole forgotten stretches
-    /// (select.rs `Stationary`), its spread over the paths that sum's own.
-    pub energy_rates: Vec<(usize, [f64; 3], [f64; 3])>,
+    /// Per path read in the window (its place among the paths) its δP_a, the reference's H_a and the candidate's own H_a
+    /// (rad/µs²; the heating alone, the work apart): the total T's error weighs the axes by each one's response -- its
+    /// relaxation the energy balance of the model the pilot runs, select.rs `motion_at` --, and reads its rates over the
+    /// paths' whole forgotten stretches (select.rs `Stationary`), its spread over the paths that sum's own.
+    pub energy_rates: Vec<(usize, [f64; 3], [f64; 3], [f64; 3])>,
     /// Per path read in the window its mean force difference δF_a and the reference's own mean force F_a there (1/µm/µs):
     /// the push's error is read on their regression (select.rs `motion_at`, # The push's error).
     pub forces: Vec<(f64, [f64; 3], [f64; 3])>,
@@ -2318,7 +2319,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             let mut force = vec![[0.0; 3]; p];
             let mut own_force = vec![[0.0; 3]; p];
             let mut force_rms = vec![0.0; p];
-            let (mut heating, mut energy_rate) = (vec![[0.0; 3]; p], vec![[0.0; 3]; p]);
+            let (mut heating, mut energy_rate, mut own_heating) = (vec![[0.0; 3]; p], vec![[0.0; 3]; p], vec![[0.0; 3]; p]);
             let mut read = vec![false; p];
             // The cloud's mean velocity and mean force's difference in the window over the paths that read in it (# The
             // motion's readings).
@@ -2346,6 +2347,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                     let (hx, hy) = (x.heating_at(hbar_over_mass, at.q[0], at.diffusion[0]), y.heating_at(hbar_over_mass, at.q[1], at.diffusion[1]));
                     for a in 0..3 {
                         heating[k][a] += hy[a] / q;
+                        own_heating[k][a] += hx[a] / q;
                         energy_rate[k][a] += ((hx[a] - hy[a]) + (x.force[a] - y.force[a] - push[a]) * (hbar_over_mass * y.kappa[a] - cloud[a])) / q;
                     }
                     for s in 0..STATES {
@@ -2393,7 +2395,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 force_rms: of(&force_rms),
                 heating: std::array::from_fn(|a| of(&heating.iter().map(|h| h[a]).collect::<Vec<_>>())),
                 energy_rate: std::array::from_fn(|a| of(&energy_rate.iter().map(|h| h[a]).collect::<Vec<_>>())),
-                energy_rates: held.iter().map(|&k| (k, energy_rate[k], heating[k])).collect(),
+                energy_rates: held.iter().map(|&k| (k, energy_rate[k], heating[k], own_heating[k])).collect(),
                 forces: held.iter().map(|&k| (weight(k), force[k], own_force[k])).collect(),
             }
         })

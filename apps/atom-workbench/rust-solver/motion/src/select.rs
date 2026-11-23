@@ -1274,6 +1274,9 @@ pub struct Course {
     /// none where it holds too few atoms: the regression's mean of the reference's force (`motion_at`, # The push's
     /// error).
     pub push: Vec<Option<([f64; 3], [f64; 3])>>,
+    /// The heating per lab axis (rad/µs²) of the model the pilot runs, read on its paths where it was judged first
+    /// (`motion_at`'s α; solve.rs `choose_on_the_pilot`); unset, each candidate's own.
+    pub pilot_heating: std::sync::OnceLock<[f64; 3]>,
 }
 
 impl Course {
@@ -1375,30 +1378,40 @@ pub struct Motion {
 pub struct Stationary {
     pub rates: Vec<[f64; 3]>,
     pub heating: Vec<[f64; 3]>,
+    /// Per path the candidate's own heating (its photons', its jumps' and its force correlation's; no work).
+    pub own: Vec<[f64; 3]>,
     /// Each path's weight (`paths::Walk::weight`).
     pub weights: Vec<f64>,
 }
 
 impl Stationary {
+    /// The candidate's own heating per lab axis, the paths' weighted mean (rad/µs²).
+    pub fn own_heating(&self) -> [f64; 3] {
+        let weight: f64 = self.weights.iter().sum();
+        std::array::from_fn(|a| self.own.iter().zip(&self.weights).map(|(h, w)| w * h[a]).sum::<f64>() / weight)
+    }
+
     /// The start's windows `windows` and the late segment's `late` (from `late_from`), past the memory time `memory`.
     pub fn of(windows: &[Window], late: &[Window], memory: f64, late_from: Option<f64>, weights: &[f64]) -> Option<Stationary> {
-        let mut sums: std::collections::BTreeMap<usize, ([f64; 3], [f64; 3], f64)> = std::collections::BTreeMap::new();
+        let mut sums: std::collections::BTreeMap<usize, ([f64; 3], [f64; 3], [f64; 3], f64)> = std::collections::BTreeMap::new();
         let forgotten = windows.iter().filter(|w| w.from >= memory).chain(late.iter().filter(|w| late_from.is_some_and(|f| w.from >= f + memory)));
         for w in forgotten {
             let span = w.to - w.from;
-            for &(k, rate, heating) in &w.energy_rates {
-                let entry = sums.entry(k).or_insert(([0.0; 3], [0.0; 3], 0.0));
+            for &(k, rate, heating, own) in &w.energy_rates {
+                let entry = sums.entry(k).or_insert(([0.0; 3], [0.0; 3], [0.0; 3], 0.0));
                 for a in 0..3 {
                     entry.0[a] += span * rate[a];
                     entry.1[a] += span * heating[a];
+                    entry.2[a] += span * own[a];
                 }
-                entry.2 += span;
+                entry.3 += span;
             }
         }
-        let read: Vec<(&usize, &([f64; 3], [f64; 3], f64))> = sums.iter().filter(|x| x.1 .2 > 0.0).collect();
+        let read: Vec<(&usize, &([f64; 3], [f64; 3], [f64; 3], f64))> = sums.iter().filter(|x| x.1 .3 > 0.0).collect();
         (!read.is_empty()).then(|| Stationary {
-            rates: read.iter().map(|x| x.1 .0.map(|v| v / x.1 .2)).collect(),
-            heating: read.iter().map(|x| x.1 .1.map(|v| v / x.1 .2)).collect(),
+            rates: read.iter().map(|x| x.1 .0.map(|v| v / x.1 .3)).collect(),
+            heating: read.iter().map(|x| x.1 .1.map(|v| v / x.1 .3)).collect(),
+            own: read.iter().map(|x| x.1 .2.map(|v| v / x.1 .3)).collect(),
             weights: read.iter().map(|x| weights.get(*x.0).copied().unwrap_or(1.0)).collect(),
         })
     }
@@ -1428,12 +1441,16 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
         let kt = crate::units::KT_PER_UK;
         let own: Option<Stationary> = judged.stationary.clone().or_else(|| {
             let w = read.last()?;
-            Some(Stationary { rates: w.energy_rates.iter().map(|x| x.1).collect(), heating: w.energy_rates.iter().map(|x| x.2).collect(), weights: vec![1.0; w.energy_rates.len()] })
+            Some(Stationary { rates: w.energy_rates.iter().map(|x| x.1).collect(), heating: w.energy_rates.iter().map(|x| x.2).collect(), own: w.energy_rates.iter().map(|x| x.3).collect(), weights: vec![1.0; w.energy_rates.len()] })
         });
         if let Some(own) = own {
             let paths = own.rates.len();
-            let weight: f64 = own.weights.iter().sum();
-            let heating: [f64; 3] = std::array::from_fn(|a| own.heating.iter().zip(&own.weights).map(|(h, w)| w * h[a]).sum::<f64>() / weight);
+            // The relaxation of the energy the pilot's course reads is that of the model the pilot runs: its own heating
+            // there with its warming (`Course::pilot_heating`, the pilot's model's; this one's own where it is that model or
+            // none is set). (Until 2026-11-23 the reference's heating against the pilot's warming: tilt0's G, which heats more
+            // than the reference, read α short by δH/E, on its slowly cooled y axis as much as α itself -- its response there
+            // 374 µs.)
+            let heating: [f64; 3] = course.pilot_heating.get().copied().unwrap_or_else(|| own.own_heating());
             let held: [f64; 3] = std::array::from_fn(|a| {
                 let warming = 0.5 * kt * course.temperature_slope(k, a).unwrap_or(0.0);
                 let energy = 0.5 * kt * at[a];

@@ -2543,7 +2543,7 @@ const NO_MOTION_ERROR: MotionError = MotionError { temperature: 0., velocity: [0
 /// The pilot's course (select.rs `Course`) of its estimates at the times: its loss, its T per lab axis where it holds
 /// atoms, the reported trap's frequencies, and T's windows' half widths where the times are the outputs.
 fn course_of(estimates: &[Estimate], times: &[f64], scales: &Scales, halves: Option<&[V3]>) -> crate::select::Course {
-    crate::select::Course { times: times.to_vec(), loss: estimates.iter().map(|e| e.loss).collect(), temperature: estimates.iter().map(|e| e.motion.map(|m| m.temperature)).collect(), frequencies: scales.frequencies, halves: halves.map(<[V3]>::to_vec), push: estimates.iter().map(|e| e.motion.filter(|m| m.push_errors.iter().all(Spread::read)).map(|m| (m.push, m.push_errors.map(|s| s.error)))).collect() }
+    crate::select::Course { times: times.to_vec(), loss: estimates.iter().map(|e| e.loss).collect(), temperature: estimates.iter().map(|e| e.motion.map(|m| m.temperature)).collect(), frequencies: scales.frequencies, halves: halves.map(<[V3]>::to_vec), push: estimates.iter().map(|e| e.motion.filter(|m| m.push_errors.iter().all(Spread::read)).map(|m| (m.push, m.push_errors.map(|s| s.error)))).collect(), pilot_heating: Default::default() }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2903,6 +2903,11 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             Ok(booked(place, judgment(place, keep, models[place].as_deref().unwrap_or(run))?, report))
         };
         weighed.push(weigh(0, own, &mut models, &mut report)?);
+        // The relaxation every other candidate's T is read with is the pilot's model's (select.rs `motion_at`): its own
+        // heating on its paths, judged first.
+        if let Some(h) = weighed[0].judged.stationary.as_ref().map(crate::select::Stationary::own_heating) {
+            let _ = course.pilot_heating.set(h);
+        }
         let mut found = weighed[0].work.unwrap_or(f64::INFINITY);
         // A fate open at the paths' statistics is settled on more paths before anything is built on it (# How many paths):
         // where more paths can be had, the nomination and the search wait for them.
