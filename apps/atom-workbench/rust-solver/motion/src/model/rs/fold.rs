@@ -1427,24 +1427,29 @@ pub fn neumann_scale(g: &Mat, z: &[f64], y: &[f64]) -> (Vec<f64>, usize) {
 // The contraction.
 
 /// What an evaluation and its contraction make (rs.rs, # Contractions): the model (H_eff and the channels, and with it
-/// K's sideband parts), the channels' photon forms, the lift, and their gradients along r. A model is made with its
-/// gradients; a readout makes the lift's values alone (`READOUT`: Q's blocks, no gradient).
+/// K's sideband parts) -- of it H_eff where `effective` --, the channels' photon forms, the lift, and their gradients
+/// along r. A model is made with its gradients; a readout makes the lift's values alone (`READOUT`: Q's blocks, no
+/// gradient); a jump's photon the channels with their gradients and photon forms alone (`PHOTONS`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Making {
     pub model: bool,
+    pub effective: bool,
     pub kicks: bool,
     pub lift: bool,
     pub gradients: bool,
 }
 
 impl Making {
-    pub const ALL: Making = Making { model: true, kicks: true, lift: true, gradients: true };
+    pub const ALL: Making = Making { model: true, effective: true, kicks: true, lift: true, gradients: true };
     /// A node's: the model with its gradients, the photon forms where `kicks`.
     pub const fn node(kicks: bool) -> Making {
-        Making { model: true, kicks, lift: false, gradients: true }
+        Making { model: true, effective: true, kicks, lift: false, gradients: true }
     }
     /// A readout's: the lift's values (model/selected.rs `Selected::rows`).
-    pub const READOUT: Making = Making { model: false, kicks: false, lift: true, gradients: false };
+    pub const READOUT: Making = Making { model: false, effective: false, kicks: false, lift: true, gradients: false };
+    /// A jump's photon's: the channels with their gradients and photon forms, no H_eff (model/selected.rs
+    /// `SelectedMiddle::emitted`).
+    pub const PHOTONS: Making = Making { model: true, effective: false, kicks: true, lift: false, gradients: true };
 }
 
 /// An output's numbers on its structural elements (`Grouping::lists`' order): values and the three gradients; and where
@@ -1606,7 +1611,7 @@ impl Out {
                 (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
             }));
         };
-        if making.model {
+        if making.model && making.effective {
             // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
             for p in 0..plan.hamiltonian {
                 factors(&mut self.tf, p);
@@ -1650,6 +1655,8 @@ impl Out {
                     }
                 }
             }
+        }
+        if making.model {
             // The jumps: direct entries, then the pairs, each whole in its channel.
             for p in plan.hamiltonian..plan.keys.len() {
                 let (_, which) = plan.jump[p].unwrap();

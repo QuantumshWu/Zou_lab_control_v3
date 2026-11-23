@@ -75,7 +75,7 @@ fn the_selected_model_is_slow_in_its_frame() {
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         for (r, kappa) in POINTS {
-            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true });
+            let model = run.at(r, kappa, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
             let (mut elements, mut beyond) = (0, 0);
             for part in &model.effective {
                 let table = run.elements(&part.key, Of::Generator);
@@ -132,7 +132,7 @@ fn the_selected_decay_is_its_photons() {
             let path = middle.path(kappa, [0.0; 3]);
             let mut h = Mat::zeros(n, n);
             middle.generator(&path, 0.0, &mut h);
-            let node = middle.node(&path, 0.0, false);
+            let node = middle.node(&path, 0.0);
             // Σ L†L of the components' products at kept beats, and the products' moduli.
             let (mut gamma, mut products, mut terms) = (Mat::zeros(n, n), vec![0.0_f64; n * n], node.generator.len());
             for class in &node.classes {
@@ -271,7 +271,7 @@ fn the_node_is_the_model_now_in_its_frame() {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
                 let rest = kappa == [0.0; 3];
-                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false, gradients: true });
+                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, effective: true, kicks: true, lift: false, gradients: true });
                 if rest {
                     let now = local.now(t);
                     assert!(sum.effective.first().is_none_or(|p| (0..n * n).all(|x| (p.value.data[x] - now.hamiltonian.data[x]).abs() <= 1e-12 * now.hamiltonian.max_abs())), "{name}: at rest the sum is now(t)");
@@ -379,7 +379,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let middle = run.middle(0, r, 0.0);
             let path = middle.path(kappa, [0.0; 3]);
             let ehrenfest = middle.force(&path, 0.0, &rho);
-            let node = middle.node(&path, 0.0, false);
+            let node = middle.node(&path, 0.0);
             let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi, &mut Vec::new()).iter().map(|p| p.moments).collect::<Vec<_>>()).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
             let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
@@ -496,7 +496,7 @@ fn a_step_s_time_on_the_selected_model() {
             std::hint::black_box(local.now(0.37));
         });
         let model = least(&mut || {
-            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true }));
+            std::hint::black_box(run.at(r, kappa, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
         });
         let node = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
@@ -596,7 +596,7 @@ fn the_readout_is_the_lift_by_fast_index() {
         let psi = spread(n);
         for (r, kappa) in POINTS {
             for t in [0.0, 0.37, -1.9] {
-                let model = run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true });
+                let model = run.at(r, kappa, Making { model: false, effective: false, kicks: false, lift: true, gradients: true });
                 let mut rho = vec![C64::ZERO; n * n];
                 crate::step::density(&psi, &mut rho);
                 let mut expected = [0.0; STATES];
@@ -653,6 +653,30 @@ fn the_readout_is_the_lift_by_fast_index() {
             }
         }
         eprintln!("{name}: the readout is the lift within its rounding");
+    }
+}
+
+/// A jump's photon's node (module documentation, # The photons; `SelectedMiddle::photon`) is the whole node's photon
+/// classes to the bit -- every element's value, gradient and photon form --, on the six scenes at the centre at rest and
+/// at a moving point, for less work.
+#[test]
+fn a_jump_s_photon_node_is_the_whole_node_s_classes() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        for (r, kappa) in POINTS {
+            let (whole, photon) = (run.node(r, kappa, true), run.photon_node(r, kappa));
+            assert_eq!(whole.classes.len(), photon.classes.len(), "{name}");
+            for (a, b) in whole.classes.iter().zip(&photon.classes) {
+                for (x, y) in a.axes.iter().flatten().zip(b.axes.iter().flatten()) {
+                    for (e, f) in x.elements.iter().zip(&y.elements) {
+                        let bits = |z: C64| (z.re.to_bits(), z.im.to_bits());
+                        assert!(bits(e.value) == bits(f.value) && bits(e.kick) == bits(f.kick) && e.gradient.iter().zip(&f.gradient).all(|(g, h)| bits(*g) == bits(*h)), "{name} r {r:?}: an element apart");
+                    }
+                }
+            }
+            eprintln!("{name} r {r:?}: the photon's node to the bit, its work {:.3e} against the whole node's {:.3e}", photon.work, whole.work);
+            assert!(photon.work < whole.work, "{name}");
+        }
     }
 }
 

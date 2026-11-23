@@ -57,7 +57,10 @@
 //! the largest wave number of the beams its channels' keys hold; the step carries the rest, Σ_c (1 − s_c) Σ_a
 //! Im⟨u_a|∇u_a⟩ and 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ − s_c² W_c b_c b_cᵀ] (model.rs `Moments` and
 //! `Scattering::of_moments`: the one rule). The photon's wave number is the class's rate-weighted mean of the elements' k_eg, read on the
-//! channels' photon forms (`Channel::kicks`, made at a jump's node alone): Σ_a Re⟨u_a|K_aψ⟩/W.
+//! channels' photon forms (`Channel::kicks`, made at a jump's node alone): Σ_a Re⟨u_a|K_aψ⟩/W. A jump's node is the
+//! photon classes alone (`SelectedMiddle::photon`, `Making::PHOTONS`): the channels with their gradients and photon
+//! forms, no H_eff, no generator -- the step goes on at its own nodes after the jump. Until 2026-11-23 a jump made the
+//! whole node with the photon forms (and a middle's node again where the jump fell on it).
 //!
 //! # The rest of the model
 //! The splitting's reference, the prepared wells, the loss energy and the reported trap are one potential
@@ -384,7 +387,8 @@ pub struct Class {
 /// beat, H_eff's gradient's, the photon classes and whether they hold the photon forms (a jump's node); the point and
 /// momentum it was made at; its counted work (real multiply-adds of putting the model in the frame, P × P's matrices
 /// counted whole; `Rs::at`'s own is not counted, its count not given); and at a middle the lift by the lab's groups
-/// with its gradient (`Out::lift`: the readings on the middle, `SelectedMiddle::readout`), elsewhere none.
+/// with its gradient (`Out::lift`: the readings on the middle, `SelectedMiddle::readout`), elsewhere none. A jump's
+/// photon's node holds the photon classes alone (`whole` false, `Making::PHOTONS`: its generator and gradient none).
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kappa: V3,
@@ -393,6 +397,7 @@ pub struct Node {
     pub gradient: Vec<(usize, [Mat; 3])>,
     pub classes: Vec<Class>,
     pub kicked: bool,
+    pub whole: bool,
     pub work: f64,
     pub lift: Vec<(Mat, [Mat; 3])>,
 }
@@ -608,7 +613,7 @@ impl Selected {
             folded_waves,
             pattern,
             lab,
-            template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0, lift: Vec::new() },
+            template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, whole: true, work: 0.0, lift: Vec::new() },
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0, pairs: Vec::new() },
@@ -769,7 +774,7 @@ impl Selected {
     fn layout(&mut self, spherical: &Grouping) {
         let n = self.rs.keep.len();
         let lab = &self.lab;
-        let mut template = Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0, lift: Vec::new() };
+        let mut template = Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, whole: true, work: 0.0, lift: Vec::new() };
         let mut tables = Tables::default();
         for (og, (key, _)) in lab.outputs.iter().enumerate() {
             let beats = self.elements(key, Of::Generator);
@@ -1150,13 +1155,23 @@ impl Selected {
     /// the lab's frequencies, put in the node's structure (`layout`), all in the thread's buffers.
     pub fn node(&self, at: V3, kappa: V3, kicked: bool) -> Node {
         let mut node = self.template.clone();
-        self.node_into(&mut node, at, kappa, kicked, false);
+        self.node_into(&mut node, at, kappa, (kicked, true), false);
         node
     }
 
-    /// The node at a point (`node`) into one of the run's layout; with the lift and its gradient where `lifted` (a
-    /// middle's, `Node::lift`: copied from the contraction, which makes them for the model's gradient anyway).
-    fn node_into(&self, node: &mut Node, at: V3, kappa: V3, kicked: bool, lifted: bool) {
+    /// A jump's photon's node at a point (`SelectedMiddle::photon`, the tests'): the photon classes alone.
+    #[cfg(test)]
+    pub(crate) fn photon_node(&self, at: V3, kappa: V3) -> Node {
+        let mut node = self.template.clone();
+        self.node_into(&mut node, at, kappa, (true, false), false);
+        node
+    }
+
+    /// The node at a point (`node`) into one of the run's layout: `kicked` with the photon forms, `whole` with the
+    /// generator (else the photon classes alone, a jump's photon's: `Making::PHOTONS`); with the lift and its gradient
+    /// where `lifted` (a middle's, `Node::lift`: copied from the contraction, which makes them for the model's gradient
+    /// anyway).
+    fn node_into(&self, node: &mut Node, at: V3, kappa: V3, (kicked, whole): (bool, bool), lifted: bool) {
         NODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = self.id;
         WORK.with(|w| {
@@ -1166,10 +1181,10 @@ impl Selected {
             }
             let work = &mut w.as_mut().expect("the thread's buffers").1;
             self.scene.point_into(at, kappa, &mut work.point);
-            let making = Making { lift: lifted, ..Making::node(kicked) };
+            let making = if whole { Making { lift: lifted, ..Making::node(kicked) } } else { Making { lift: lifted, ..Making::PHOTONS } };
             self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
             work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
-            self.fill(node, &work.out, kicked, &mut work.jumps);
+            self.fill(node, &work.out, (kicked, whole), &mut work.jumps);
             node.work = crate::decide::COMPLEX * (work.local.work + work.out.work);
             node.lift.truncate(if lifted { work.out.lift.len() } else { 0 });
             if lifted {
@@ -1186,18 +1201,19 @@ impl Selected {
         node.kappa = kappa;
         node.at = at;
         node.kicked = kicked;
+        node.whole = whole;
     }
 
-    /// A middle's node at a point (`node`), made in one of the thread's pooled nodes of the run where there is one; with
-    /// the lift where `lifted` (`node_into`).
-    fn pooled(&self, at: V3, kappa: V3, kicked: bool, lifted: bool) -> Rc<Node> {
+    /// A middle's node at a point (`node`), made in one of the thread's pooled nodes of the run where there is one; whole
+    /// or a photon's, with the lift where `lifted` (`node_into`).
+    fn pooled(&self, at: V3, kappa: V3, made: (bool, bool), lifted: bool) -> Rc<Node> {
         let key = self.id;
         let mut node = POOL.with(|p| {
             let mut p = p.borrow_mut();
             p.iter().position(|x| x.0 == key).map(|i| p.swap_remove(i).1)
         })
         .unwrap_or_else(|| Rc::new(self.template.clone()));
-        self.node_into(Rc::get_mut(&mut node).expect("a pooled node is no one else's"), at, kappa, kicked, lifted);
+        self.node_into(Rc::get_mut(&mut node).expect("a pooled node is no one else's"), at, kappa, made, lifted);
         node
     }
 
@@ -1302,7 +1318,7 @@ impl Selected {
         self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
         work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
         work.out.scales(self.rs.plan(), &self.lab, &work.local, None);
-        self.fill(&mut node, &work.out, false, &mut work.jumps);
+        self.fill(&mut node, &work.out, (false, true), &mut work.jumps);
         for (a, t) in self.theta.iter().enumerate() {
             node.generator[0].1[(a, a)] += C64::real(*t);
         }
@@ -1412,38 +1428,16 @@ impl Selected {
         (self.tables.terms, self.tables.entries) = (terms, entries);
     }
 
-    /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places).
-    fn fill(&self, node: &mut Node, out: &Out, kicked: bool, jumps: &mut Vec<C64>) {
+    /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places): its photon classes, and where
+    /// `whole` its generator and gradient.
+    fn fill(&self, node: &mut Node, out: &Out, (kicked, whole): (bool, bool), jumps: &mut Vec<C64>) {
         let n = self.rs.keep.len();
-        for (_, m) in node.generator.iter_mut() {
-            m.data.fill(C64::ZERO);
-        }
-        for (_, g) in node.gradient.iter_mut() {
-            for m in g.iter_mut() {
-                m.data.fill(C64::ZERO);
-            }
-        }
         for c in node.classes.iter_mut() {
             for axis in c.axes.iter_mut() {
                 for j in axis.iter_mut() {
                     for e in j.elements.iter_mut() {
                         (e.value, e.gradient, e.kick) = (C64::ZERO, [C64::ZERO; 3], C64::ZERO);
                     }
-                }
-            }
-        }
-        for (a, t) in self.theta.iter().enumerate() {
-            node.generator[0].1.data[a * n + a] = C64::real(-t);
-        }
-        for (list, c) in self.tables.h.iter().zip(&out.h) {
-            for (k, &(x, g, d)) in list.iter().enumerate() {
-                if g == u32::MAX {
-                    continue;
-                }
-                let x = x as usize;
-                node.generator[g as usize].1.data[x] += c.value[k];
-                for (m, dg) in node.gradient[d as usize].1.iter_mut().zip(&c.gradient) {
-                    m.data[x] += dg[k];
                 }
             }
         }
@@ -1460,6 +1454,32 @@ impl Selected {
                     }
                 } else {
                     e.kick += c.value[k];
+                }
+            }
+        }
+        if !whole {
+            return;
+        }
+        for (_, m) in node.generator.iter_mut() {
+            m.data.fill(C64::ZERO);
+        }
+        for (_, g) in node.gradient.iter_mut() {
+            for m in g.iter_mut() {
+                m.data.fill(C64::ZERO);
+            }
+        }
+        for (a, t) in self.theta.iter().enumerate() {
+            node.generator[0].1.data[a * n + a] = C64::real(-t);
+        }
+        for (list, c) in self.tables.h.iter().zip(&out.h) {
+            for (k, &(x, g, d)) in list.iter().enumerate() {
+                if g == u32::MAX {
+                    continue;
+                }
+                let x = x as usize;
+                node.generator[g as usize].1.data[x] += c.value[k];
+                for (m, dg) in node.gradient[d as usize].1.iter_mut().zip(&c.gradient) {
+                    m.data[x] += dg[k];
                 }
             }
         }
@@ -1636,28 +1656,17 @@ impl Drop for SelectedMiddle<'_> {
 }
 
 impl SelectedMiddle<'_> {
-    /// The node at the time s from the middle along the path, made where first asked for; the middle's with the lift
-    /// (`readout`).
-    fn node(&self, path: &Path, s: f64, kicked: bool) -> Rc<Node> {
+    /// The node at the time s from the middle along the path, made where first asked for, without the photon forms (a
+    /// jump's are its own, `photon`); the middle's with the lift (`readout`).
+    fn node(&self, path: &Path, s: f64) -> Rc<Node> {
         let at: V3 = std::array::from_fn(|i| self.r[i] + path.velocity[i] * s);
-        let made = self.nodes.borrow().iter().position(|x| x.kappa == path.kappa && x.at == at);
-        if let Some(i) = made {
-            let node = self.nodes.borrow()[i].clone();
-            if node.kicked || !kicked {
-                return node;
-            }
-            // A jump at a node made without the photon forms: the node again with them, in its place, its work counted
-            // once.
-            let fresh = self.model.pooled(at, path.kappa, true, s == 0.0);
-            let old = std::mem::replace(&mut self.nodes.borrow_mut()[i], fresh.clone());
-            drop(node);
-            self.model.release(old);
-            return fresh;
+        if let Some(node) = self.nodes.borrow().iter().find(|x| x.kappa == path.kappa && x.at == at) {
+            return node.clone();
         }
-        let node = self.model.pooled(at, path.kappa, kicked, s == 0.0);
+        let node = self.model.pooled(at, path.kappa, (false, true), s == 0.0);
         self.made.set(self.made.get() + node.work);
         #[cfg(test)]
-        MADE.with(|m| m.borrow_mut()[usize::from(kicked)] += 1);
+        MADE.with(|m| m.borrow_mut()[0] += 1);
         self.nodes.borrow_mut().push(node.clone());
         node
     }
@@ -1726,8 +1735,8 @@ impl SelectedMiddle<'_> {
     /// A jump's photon of the state ψ at the time s from the middle, at the jump's place (module documentation,
     /// # The photons): the classes' rates, the class `draw` picks and its photon.
     fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let node = self.node(path, s, true);
-        READS.with(|r| {
+        let node = self.photon(path, s);
+        let emitted = READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { photons: list, rates, .. } = &mut *r;
             let classes = self.model.read(|b| photons(&node, &b.value, self.t + s, psi, list));
@@ -1740,7 +1749,21 @@ impl SelectedMiddle<'_> {
             let jumps: usize = node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum::<usize>()).sum();
             let wave_number = p.wave_number.expect("a jump's node holds the photon forms");
             Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.moments.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
-        })
+        });
+        self.model.release(node);
+        emitted
+    }
+
+    /// A jump's photon's node at the time s from the middle along the path (module documentation, # The photons): the
+    /// photon classes alone (`Making::PHOTONS`: the channels with their gradients and photon forms, no H_eff and no
+    /// generator), made for the jump, its work counted, and not kept -- nothing else reads the model at a jump's point.
+    fn photon(&self, path: &Path, s: f64) -> Rc<Node> {
+        let at: V3 = std::array::from_fn(|i| self.r[i] + path.velocity[i] * s);
+        let node = self.model.pooled(at, path.kappa, (true, false), false);
+        self.made.set(self.made.get() + node.work);
+        #[cfg(test)]
+        MADE.with(|m| m.borrow_mut()[1] += 1);
+        node
     }
 }
 
@@ -1809,7 +1832,7 @@ fn photons<'a>(node: &Node, values: &[f64], t: f64, psi: &[C64], list: &'a mut V
 impl SelectedMiddle<'_> {
     /// Every class's photon moments of the state ψ at the middle (model.rs `Moments`, over ‖ψ‖²; the tests').
     pub(crate) fn moments(&self, path: &Path, psi: &[C64]) -> Vec<Moments> {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         let mut list = Vec::new();
         self.model.read(|b| photons(&node, &b.value, self.t, psi, &mut list)).iter().map(|p| p.moments).collect()
     }
@@ -1844,7 +1867,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// Ĥ(s) = Σ_k G_k(s) e^{−iΩ_k(t_m + s)} (module documentation, # The generator by beats), in the Doppler frame with
     /// its diag(K_a·v).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         h.data.fill(C64::ZERO);
         self.model.read(|b| {
             for (beat, g) in &node.generator {
@@ -1877,7 +1900,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// Candidate m's members at s: G_plus(s) e^{iν t_m} and G_minus(s) e^{−iν t_m} (their parts of `generator`).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         let c = self.candidates(path)[m];
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         self.model.read(|b| {
             for (member, out) in [(c.plus, plus), (c.minus, minus)] {
                 out.data.fill(C64::ZERO);
@@ -1901,7 +1924,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         let n = self.states();
         let mut out = [0.0; 3];
         for &(s, re, im) in sums {
-            let node = self.node(path, s, false);
+            let node = self.node(path, s);
             let forms = READS.with(|r| {
                 let mut r = r.borrow_mut();
                 let Reads { sigma, dagger, lab, .. } = &mut *r;
@@ -1943,7 +1966,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     /// Re tr(Ĝ(s) ρ): H_eff's gradient at the time s, every beat at its phase, on the frame's ρ there.
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         let contract = |rho: &[C64]| self.model.read(|b| SelectedMiddle::contract(&node, |beat| Some(self.phase(&b.value, beat, s)), rho));
         let f = match self.turns(path, s) {
             Some(p) => READS.with(|r| {
@@ -1958,7 +1981,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     /// The gradient at the middle by its beats: Ω_m = −Ω_k with Re tr(∂H_k e^{−iΩ_k t_m} ρ).
     fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         for (beat, _) in &node.gradient {
             let (value, phase) = self.model.read(|b| (b.value[*beat], self.phase(&b.value, *beat, 0.0)));
             let f = SelectedMiddle::contract(&node, |k| (k == *beat).then_some(phase), rho);
@@ -1971,7 +1994,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// frame -- each element q ← a by its first-order change, M + s (v·∇M − i(K_q − K_a)·v M), the state framed --, the
     /// one assembly (`Selected::lifted`).
     fn readout(&self, path: &Path, s: f64, psi: &[C64]) -> Option<[f64; STATES]> {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         let model = self.model;
         let n = self.states();
         let v = path.velocity;
@@ -2004,7 +2027,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// The light the state scatters at the middle beside the Ehrenfest force and the jumps (module documentation,
     /// # The photons).
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         let n = self.states();
         let scattering = READS.with(|r| {
             let mut r = r.borrow_mut();
@@ -2053,9 +2076,9 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                 }
             }
         };
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         let (before, after) = match &slope {
-            Some((h, _)) => (Some(self.node(path, -h, false)), Some(self.node(path, *h, false))),
+            Some((h, _)) => (Some(self.node(path, -h)), Some(self.node(path, *h))),
             None => (None, None),
         };
         READS.with(|r| {
