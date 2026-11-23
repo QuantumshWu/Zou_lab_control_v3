@@ -706,9 +706,17 @@ def resolve_api_overrides(
             unapplied[name] = float(value)
             continue
         if field_id in whole and not float(value).is_integer():
-            raise ValueError(f"API value {name!r} is {float(value):g}: {field_id} takes whole numbers")
+            raise ValueError(not_whole_api_value(name, value, field_id))
         applied[field_id] = (float(value), declared[field_id])
     return applied, unapplied
+
+
+def not_whole_api_value(name: str, value: float, field_id: str) -> str:
+    """Why an API value that is not whole cannot be applied to a field that takes
+    whole numbers: the sentence the draft and the build refuse it with, and the
+    one the Scan editor writes under its box."""
+
+    return f"API value {name!r} is {float(value):g}: {field_id} takes whole numbers"
 
 
 def ambiguous_api_value(name: str, field_ids: Sequence[str]) -> str:
@@ -946,6 +954,7 @@ __all__ = [
     "ScanPlan",
     "ScanPort",
     "ambiguous_api_value",
+    "not_whole_api_value",
     "bind_plan",
     "device_port_label",
     "device_port_parts",

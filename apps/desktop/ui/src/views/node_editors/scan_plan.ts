@@ -34,8 +34,9 @@ type Port = { port: string; label: string; unit: string; lo: number; hi: number;
   units: [symbol: string, decade: number | null][]; limits: Record<string, [number, number]>; currents: Record<string, number>;
   /** The family each spelling belongs to (its unit picker's trunks). */
   families: Record<string, string> };
+/** `problem`: why the value the draft holds cannot be applied (a fraction for a count), shown under its box. */
 type ApiField = { name: string; label: string; kind: "integer" | "number"; unit: string; units: [symbol: string, decade: number][]; families: Record<string, string>;
-  description: string; minimum: number | null; maximum: number | null; authored: number; value: number; unavailable_reason: string };
+  description: string; minimum: number | null; maximum: number | null; authored: number; value: number; unavailable_reason: string; problem: string };
 type Facts = EditorFacts & {
   families: { pulse: string; api: string; device: string; manual: string };
   host_advanced: string[];
@@ -702,7 +703,7 @@ export class ScanPlanEditor implements NodeEditor {
       const spec: FieldSpec = { name: item.name, label: item.label, kind: item.kind, value: shown(item.value), required: false, allow_none: false,
         unit: symbol, units: item.units.map(([value]) => ({ value, label: value, group: item.families[value] })),
         minimum: shown(item.minimum), maximum: shown(item.maximum), description: item.description,
-        unavailable_reason: item.unavailable_reason, held: this.locked, inexact: true };
+        unavailable_reason: item.unavailable_reason, problem: item.problem, held: this.locked, inexact: true };
       let field = this.apiFields.get(item.name);
       if (!field) {
         field = new Field(`${row.node_id}-api`, spec, {

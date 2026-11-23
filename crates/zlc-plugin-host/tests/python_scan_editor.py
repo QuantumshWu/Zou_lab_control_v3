@@ -155,6 +155,12 @@ class ScanEditorFacts(unittest.TestCase):
                                ('bracket_count:loop = 3', None)):
             issues = _admit_resources({**draft, 'api_values': written}, resources)
             self.assertEqual(issues, () if issue is None else (issue,), written)
+        # Its box holds the 2.5 as the draft does, said wrong under it -- not a 2 an edit of another box writes back.
+        field, = scan_editor_facts({'plan': '', 'api_values': 'bracket_count:loop = 2.5'}, REPEATS, ())['api']['fields']
+        self.assertEqual((field['value'], field['problem']),
+                         (2.5, "API value 'bracket_count:loop' is 2.5: bracket_count:loop takes whole numbers"))
+        field, = scan_editor_facts({'plan': '', 'api_values': 'bracket_count:loop = 3'}, REPEATS, ())['api']['fields']
+        self.assertEqual((field['value'], field['problem']), (3, ''))
 
     def test_a_clock_grid_is_no_whole_number_box_however_whole_its_tick_reads(self):
         # An output delay in ns on a 20 ns clock: its step reads 20, a whole number, and it is still a time.

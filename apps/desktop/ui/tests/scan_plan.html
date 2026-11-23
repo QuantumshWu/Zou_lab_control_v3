@@ -130,6 +130,18 @@ try {
    equal(input.value,'2','override digits');
    equal(t.edits.filter(edit=>'api_values' in edit).at(-1),{api_values:'delay = 2'},'override in the pulse\'s unit');
  });
+ await check('a fraction the draft holds for a count stays as it is, said wrong, through an edit of another box',async()=>{
+   const problem="API value 'bracket_count:loop' is 2.5: bracket_count:loop takes whole numbers";
+   const api=delay(0.001,[['bracket_count:loop',2.5]]);
+   api.fields.unshift({name:'bracket_count:loop',label:'Loop.repeats',kind:'integer',unit:'count',units:[],families:{},description:'bracket_count:loop',
+     minimum:1,maximum:4294967295,authored:2,value:2.5,unavailable_reason:'',problem});
+   const t=setup([],api);
+   const [count,hold]=[...t.editor.root.querySelectorAll('.api-values input')];
+   equal(count.value,'2.5','the count as the draft holds it, not 2');
+   assert([...t.editor.root.querySelectorAll('.api-values .field-error')].some(node=>!node.hidden&&node.textContent===problem),'its problem under the box');
+   hold.value='3';hold.dispatchEvent(new Event('input',{bubbles:true}));hold.dispatchEvent(new Event('change',{bubbles:true}));
+   equal(t.edits.filter(edit=>'api_values' in edit).at(-1),{api_values:'bracket_count:loop = 2.5\ndelay = 0.003'},'the 2.5 is kept beside the new delay');
+ });
  await check('a device that cannot be read says so; its axis and the plan stand until it can',async()=>{
    const axis={port:'device:rigol:frequency',unit:'Hz',values:[1,2]};
    const t=setup([axis]);
