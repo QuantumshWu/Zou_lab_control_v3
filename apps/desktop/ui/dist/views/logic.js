@@ -338,7 +338,7 @@ export class LogicEditorView {
             this.editorError.textContent = problem;
         assign(this.editorError, "hidden", !problem);
         if (this.editors.length) {
-            if (this.editors.update(row, locked || (model.kept ? KEPT_LOCK : "")))
+            if (this.editors.update(row, locked || (model.kept ? KEPT_LOCK : ""), model.kept))
                 this.shareLabels();
         }
         else

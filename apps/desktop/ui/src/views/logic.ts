@@ -343,7 +343,7 @@ export class LogicEditorView {
     const problem = editorProblem(row);
     if (this.editorError.textContent !== problem) this.editorError.textContent = problem;
     assign(this.editorError, "hidden", !problem);
-    if (this.editors.length) { if (this.editors.update(row, locked || (model.kept ? KEPT_LOCK : ""))) this.shareLabels(); }
+    if (this.editors.length) { if (this.editors.update(row, locked || (model.kept ? KEPT_LOCK : ""), model.kept)) this.shareLabels(); }
     else this.body.style.removeProperty("--label-width");
     const free = !takeover.active;
     assign(this.plot, "hidden", !projection.previewOffered);

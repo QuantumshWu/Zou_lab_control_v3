@@ -91,13 +91,14 @@ export class NodeEditors {
     }
     /** Each editor handed the row.  A state push that changes nothing an editor draws costs it
      * nothing: its model, the lock, the node's name and the fields it manages (an edit of another
-     * field leaves it as it is).  The row's model still of an older draft draws nothing where the
-     * editor already stands: it would put back what the operator has just changed until the answer
-     * comes (a kept model is of this draft: nodeModel).  True when any editor drew anew. */
-    update(row, locked) {
+     * field leaves it as it is).  A model still of an older draft draws nothing where the editor
+     * already stands: it would put back what the operator has just changed until the answer comes.
+     * `kept`: the models are the node's kept ones, of this same draft (nodeModel), and draw at once.
+     * True when any editor drew anew. */
+    update(row, locked, kept = false) {
         let drew = false;
         for (const editor of this.drawn) {
-            if (row.editor_facts && row.editor_facts_pending && editor.key)
+            if (row.editor_facts_pending && !kept && editor.key)
                 continue;
             const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
             const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);

@@ -71,7 +71,9 @@ try {
    const view=page('same');edits.length=0;
    show(view,rowOf('same',PLAN,{editor_facts:model(PLAN)}));
    const drawn=editor(view.root);assert(drawn,'the editor');assert(open(view.root).includes('Add axis'),'the editor open');
-   // The bench changed and the draft was asked again: the plugin could not answer.
+   // The bench changed and the draft was asked again: the plugin could not answer, and is asked again.
+   show(view,rowOf('same',PLAN,{draft_revision:2,...FAILED,editor_facts_pending:true}));
+   assert(editor(view.root)===drawn,'asked again: the same editor');equal(open(view.root),[],'asked again: locked at once');
    show(view,rowOf('same',PLAN,{draft_revision:2,...FAILED}));
    assert(editor(view.root)===drawn,'the same editor, from the last model');equal(plain(view.root),{},'no plain rows');equal(error(view.root),SAID,'the error');
    equal(open(view.root),[],'every control of the kept model locked');

@@ -220,11 +220,12 @@ export class PanelEditView {
         // the linked ones), and the form the linked fields no editor draws.
         const linked = new Set(producer?.selector_fields ?? []);
         // Its model as its Logic page draws it (nodeModel): here read only in any case.
-        const editors = this.producerEditors.reconcile(editorModels(producer ? nodeModel(producer).facts : null).filter(model => model.manages.some(name => linked.has(name))));
+        const model = producer ? nodeModel(producer) : { facts: null, kept: false };
+        const editors = this.producerEditors.reconcile(editorModels(model.facts).filter(item => item.manages.some(name => linked.has(name))));
         if (editors.length !== this.producerDrawn.children.length || editors.some((root, index) => this.producerDrawn.children[index] !== root))
             this.producerDrawn.replaceChildren(...editors);
         if (producer)
-            this.producerEditors.update(producer, "Shown read only: Open producer to edit it");
+            this.producerEditors.update(producer, "Shown read only: Open producer to edit it", model.kept);
         const drawn = new Set(this.producerEditors.models.flatMap(model => model.manages));
         const shown = (producer?.controls ?? []).filter(control => linked.has(control.name) && !drawn.has(control.name));
         for (const [name, field] of this.producerFields)
