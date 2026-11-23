@@ -139,7 +139,7 @@ impl Plan {
                 if !tuples.insert(tuple.clone()) { continue; }
                 for ((seen, key), member) in coordinates.iter_mut().zip(tuple).zip(&group.members) {
                     if !seen.insert(key) {
-                        return Err(format!("linked axis {:?} repeats a coordinate in different linked tuples; alternative coordinates must be unique", spec.axes[*member].port));
+                        return Err(format!("axis {:?} of a linked group repeats a coordinate under different points; alternative coordinates must be unique", spec.axes[*member].port));
                     }
                 }
             }
