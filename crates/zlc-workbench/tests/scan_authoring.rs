@@ -287,8 +287,9 @@ fn a_value_on_the_grid_or_a_knob_without_one_plays_as_written() {
     for document in [range("api:duration:hold", "us", 0.1, 1.0, 10), range("api:duration:hold", "us", 0.02, 0.2, 10),
                      range("api:bracket_count:loop", "", 1.0, 9.0, 5), range("device:rf:carrier", "GHz", 6.734, 6.934, 11),
                      range("device:dds:frequency", "kHz", 100.1, 200.3, 37),
-                     // The editor's first sweep of 10 us on the 20 ns clock (scan_plan.ts firstSweep), 3 ticks apart.
-                     range("api:duration:hold", "us", 9.88, 10.12, 5)] {
+                     // The editor's first sweeps on the 20 ns clock (scan_plan.ts firstSweep), 3 ticks apart: of 10 us,
+                     // and of 10.01 us (500.5 ticks), centred on 10.02 us.
+                     range("api:duration:hold", "us", 9.88, 10.12, 5), range("api:duration:hold", "us", 9.9, 10.14, 5)] {
         let compiled = on_ports(document.clone(), "preview", bench()).unwrap();
         let played = &compiled["axis_facts"][0]["played"];
         assert_eq!((played["moved"].as_u64(), played["count"].clone(), played["written"].clone()), (Some(0), document["axes"][0]["range"]["count"].clone(),
