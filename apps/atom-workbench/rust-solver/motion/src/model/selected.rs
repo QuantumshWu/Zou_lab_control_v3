@@ -104,6 +104,31 @@
 //! taken. (Until 2026-11-23 the entries one by one: PGC3D's 4134
 //! direct entries, 13.5 µs of its 141 µs node; OLDNEW, motion3d_status/rewrite/impl/OLDNEW.report.md §3.1.)
 //!
+//! # The tables
+//! A node may be read off tables of the fold's pair products in the tweezer's intensity s (rs/fold_tabled.rs: within
+//! strict bounds of what it differs by from the fold's own) instead of folding at the point. The run buys them as it
+//! rents (`Selected::buy_tables`): its trajectories' nodes off the fold count their work (the rent) and the least s they
+//! meet; at a point no node is being made at -- before every hand-out of trajectories (solve.rs) -- where the rent has
+//! reached what the tables were last priced at, their layout on [that s, 1] is made and priced exactly
+//! (`Tables::layout`: the decompositions alone), and they are filled where the rent covers that price, else the price
+//! is kept for the next time. Bought, they are read for the kinds of node they cost less for by count (`kind`, `KINDS`:
+//! a step's node, the middle's with the lift, a jump's photon's, a whole one with the photon forms; `tables_pay`, at the
+//! structure's point), and for none where none does -- then no tables at all. A point the tables do not read (its s
+//! below them, a gap they cannot bound) is folded as before.
+//!
+//! The switch is a version of the model (step.rs `Dynamics::version`): a trajectory runs on the version it started on
+//! through its life -- its checkpoints carry it, and whatever is made again of them (solve.rs `replay`, the selection's
+//! walks) is made on it, to the bit --, and a hand-out's trajectories all start on one, the tables being bought between
+//! hand-outs only. So a run is the same to the bit whatever its threads do. A node made outside a trajectory (a path, a
+//! judgment) is on the run's version at the time.
+//!
+//! A step reads the lift only where it reads a time (`step::Middle::reading`): its middle's node is made with the lift
+//! there alone (until 2026-11-23 every middle's node made it). Measured (STEP4, `step::tests::stepcost::
+//! tabled_step_parts`, pinned, the fold's and the tables' versions on the same states in turn, three Doppler terms; a
+//! step makes one node, its middle's): a step 0.92 (PGC3D; a step that reads 1.0, its lifted node off the fold),
+//! 0.80 (TET), 0.79 (tilt2) of the fold's, tilt0 none bought (no kind cheaper by count); the node 0.84, 0.68, 0.50; a
+//! jump's photon node 0.92, 0.79, 0.58; the tables 2.3, 1.3, 1.9 MB, made in 0.01–0.02 s.
+//!
 //! # The sideband parts dropped
 //! K's sideband parts (rs/fold.rs `Block::sideband`: K's states by fast part, where a class has a fast element into
 //! them) fold the fast elements within K; their pairs add to H_eff and to the channels what those elements make at
@@ -214,6 +239,7 @@ use crate::field::Light;
 use crate::floquet::frame::{exact_sum, FrameKey, Ratio};
 use crate::floquet::{Frame, Hilbert};
 use crate::linalg::{inner, norm_sqr, C64, Mat, V3};
+use crate::model::rs::fold::tabled::{Scratch as PairScratch, Tables as PairTables};
 use crate::model::rs::fold::{Grouping, Local, Out, Plan};
 use crate::model::rs::{Making, Rs};
 use crate::model::classify::{Account, Judgment, Scales, Tier};
@@ -263,6 +289,8 @@ pub struct Selected {
     lab: Grouping,
     template: Node,
     tables: Tables,
+    /// The run's tables of pair products as it buys them (# The tables).
+    tabling: Tabling,
     /// The run's own number (the thread's buffers and pooled nodes are its).
     id: usize,
     /// The run's judgment of its node's beats and blocks (model/classify.rs, `judge`).
@@ -379,6 +407,47 @@ impl Seen {
     }
 }
 
+/// The tables' Chebyshev degree in s and the Doppler series' terms they hold (# The tables; rs/fold_tabled.rs).
+const TABLE_DEGREE: usize = 4;
+const TABLE_ORDERS: usize = 3;
+
+/// A run's tables of pair products as it buys them (module documentation, # The tables): the work its trajectories'
+/// nodes off the fold have taken (real multiply-adds, whole numbers: the same sum in any order), the least tweezer
+/// intensity s at one of them (the bits of a nonnegative f64), what the tables were last priced at where that was more
+/// (the bits of an f64), and the tables once bought with the kinds of node they are read for (`Kind`) -- `Some(None)`
+/// where the run's plan has none or no kind costs less off them.
+#[derive(Debug)]
+struct Tabling {
+    rent: std::sync::atomic::AtomicU64,
+    low: std::sync::atomic::AtomicU64,
+    price: std::sync::atomic::AtomicU64,
+    tables: std::sync::OnceLock<Option<(Arc<PairTables>, [bool; KINDS])>>,
+}
+
+/// The kinds of node the tables are weighed for apart (# The tables): a step's node, the middle's with the lift (a
+/// step that reads), a jump's photon's (the channels with their photon forms, no H_eff), a whole node with the photon
+/// forms.
+const KINDS: usize = 4;
+
+/// A node's kind (`KINDS`) by what it makes.
+fn kind(making: Making) -> usize {
+    match (making.effective, making.lift, making.kicks) {
+        (false, ..) => 2,
+        (true, true, _) => 1,
+        (true, false, true) => 3,
+        (true, false, false) => 0,
+    }
+}
+
+/// What each kind makes, in `KINDS`' order.
+const MAKINGS: [Making; KINDS] = [Making::node(false), Making { lift: true, ..Making::node(false) }, Making::PHOTONS, Making::node(true)];
+
+impl Default for Tabling {
+    fn default() -> Tabling {
+        Tabling { rent: Default::default(), low: f64::INFINITY.to_bits().into(), price: 0f64.to_bits().into(), tables: std::sync::OnceLock::new() }
+    }
+}
+
 /// The turn's decision (`Selected::turn_parts`): the account it was weighed on, the dropped terms' rate and distance
 /// beside the turn's, the unturned run's W, and the turned run's step work a µs.
 #[derive(Debug, Clone, Copy)]
@@ -483,6 +552,8 @@ struct Work {
     jumps: Vec<C64>,
     /// A readout's (`Selected::lifted`).
     rows: Rows,
+    /// A node's off the tables (rs/fold_tabled.rs).
+    pairs: PairScratch,
 }
 
 /// A readout's buffers (`Selected::lifted`): the state over its norm, a group's lift (Q × P), Q's amplitudes by fast
@@ -627,6 +698,10 @@ pub struct SelectedMiddle<'a> {
     t: f64,
     nodes: RefCell<Vec<Rc<Node>>>,
     made: Cell<f64>,
+    /// Whether its nodes are read off the run's tables (# The tables: its trajectory's version), and whether the step
+    /// reads a time on it (`step::Middle::reading`: its middle's node with the lift).
+    tabled: bool,
+    reads: Cell<bool>,
 }
 
 fn zeros(n: usize, m: usize) -> [Mat; 3] {
@@ -838,6 +913,7 @@ impl Selected {
             lab,
             template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, whole: true, work: 0.0, lift: Vec::new() },
             tables: Tables::default(),
+            tabling: Tabling::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0, pairs: Vec::new(), once: 0.0 },
             blocks: vec![(0..n).collect()],
@@ -1925,9 +2001,7 @@ impl Selected {
     /// channel output its channel's ‖L‖ bounded -- the channel (emission axis, fast index) its value outputs' Frobenius
     /// bounds summed over its beats (rs/fold.rs `Out::bounds`).
     fn reach_bounds(&self) -> (Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
-        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
-        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
-        let reach = self.rs.reach(&self.scene, self.hbar_over_mass, (2.0 * depth / self.hbar_over_mass).sqrt());
+        let reach = self.reach();
         let mut work = Work::default();
         self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
         self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
@@ -1943,6 +2017,14 @@ impl Selected {
         }
         let norms = outputs.iter().map(|(q, fast, ..)| whole.get(&(*q, *fast)).copied().unwrap_or(0.0)).collect();
         (moduli, reach.coefficients, norms)
+    }
+
+    /// The run's reach (rs.rs `Rs::reach`): the momentum of an atom at the escape energy at the focus, √(2 U₀ m)/ħ with
+    /// U₀ the deepest well of the trap's potential.
+    fn reach(&self) -> crate::model::rs::fold::Reach {
+        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
+        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
+        self.rs.reach(&self.scene, self.hbar_over_mass, (2.0 * depth / self.hbar_over_mass).sqrt())
     }
 
     /// The rate Y of a change of the node's outputs by at most `h` (per H output, a bound of its Frobenius norm) and
@@ -2179,8 +2261,118 @@ impl Selected {
     /// the lab's frequencies, put in the node's structure (`layout`), all in the thread's buffers.
     pub fn node(&self, at: V3, kappa: V3, kicked: bool) -> Node {
         let mut node = self.template.clone();
-        self.node_into(&mut node, at, kappa, (kicked, true), false);
+        self.node_into(&mut node, at, kappa, (kicked, true), false, self.tabled_here());
         node
+    }
+
+    /// Whether a node made here now is read off the run's tables (# The tables): the version of the trajectory being
+    /// made on this thread (`step::on_version`), else the run's own.
+    fn tabled_here(&self) -> bool {
+        crate::step::version().unwrap_or_else(|| self.version()) >= 1
+    }
+
+    /// The run's version (step.rs `Dynamics::version`; # The tables): 1 once it has bought its tables, else 0.
+    pub(crate) fn version(&self) -> u32 {
+        u32::from(matches!(self.tabling.tables.get(), Some(Some(_))))
+    }
+
+    /// The tables a node of the making `making` is read off where it is `tabled` (# The tables): the run's, where they
+    /// are bought for its kind.
+    fn tables_for(&self, making: Making, tabled: bool) -> Option<&PairTables> {
+        if !tabled {
+            return None;
+        }
+        self.tabling.tables.get().and_then(|t| t.as_ref()).filter(|(_, uses)| uses[kind(making)]).map(|(t, _)| t.as_ref())
+    }
+
+    /// Per kind of node (`KINDS`) whether it costs less off the tables `t` than off the fold: the counted work of its
+    /// fold and contraction (`Local::work`, `Out::work`) against the tables' reading and contraction (`Reading::work`,
+    /// `Tables::contract`) at the structure's point (the trap's centre at rest, s = 1: in the tables) -- the rest of a
+    /// node (the point, the source's values, the filling) the same either way. None where the tables do not read it.
+    fn tables_pay(&self, t: &PairTables) -> Option<[bool; KINDS]> {
+        let plan = self.rs.plan();
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        let mut uses = [false; KINDS];
+        for (k, &making) in MAKINGS.iter().enumerate() {
+            self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
+            work.out.contract(plan, &self.lab, &work.local, None, making);
+            let fold = work.local.work + work.out.work;
+            let reading = t.read(plan, &self.lab, &work.local.values, &mut work.pairs)?;
+            let tables = reading.work + t.contract(plan, &self.lab, &work.local.values, &reading, t.orders, making, &mut work.out, &mut work.pairs);
+            crate::prof::note(|| format!("tables: kind {k} counted {:.4e} off the fold, {:.4e} off the tables", COMPLEX * fold, COMPLEX * tables));
+            uses[k] = tables < fold;
+        }
+        Some(uses)
+    }
+
+    /// The run's tables bought where their price is paid (module documentation, # The tables), at a point no node of the
+    /// run is being made at (solve.rs: before every hand-out of trajectories): where its trajectories' nodes off the fold
+    /// have taken at least what the tables were last priced at, the layout on [the least s they met, 1] (rs/fold_tabled.rs
+    /// `Tables::layout`, priced exactly before it is filled), and the tables filled where that layout's work and its fill's
+    /// are within what they took; else the price kept for the next time. Once bought -- or found to be none for the plan
+    /// -- never again.
+    pub(crate) fn buy_tables(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let tabling = &self.tabling;
+        if tabling.tables.get().is_some() {
+            return;
+        }
+        let (rent, low, price) = (tabling.rent.load(Relaxed) as f64, f64::from_bits(tabling.low.load(Relaxed)), f64::from_bits(tabling.price.load(Relaxed)));
+        if rent == 0.0 || rent < price || !(low < 1.0) {
+            return;
+        }
+        let mut point = crate::scene::Point::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut point);
+        let rest = self.rs.tweezer().values(&self.scene, &point);
+        let plan = self.rs.plan();
+        let Some(layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low) else {
+            crate::prof::note(|| "tables: none for the plan".to_string());
+            let _ = tabling.tables.set(None);
+            return;
+        };
+        let price = COMPLEX * (layout.work + layout.price);
+        crate::prof::note(|| format!("tables: rent {rent:.4e}, price {price:.4e} (layout {:.3e}, fill {:.3e}), {} pieces on [{low:.4}, 1]", COMPLEX * layout.work, COMPLEX * layout.price, layout.pieces.len()));
+        if rent < price {
+            tabling.price.store(price.to_bits(), Relaxed);
+            return;
+        }
+        // Filled, and kept for the kinds of node they cost less for -- none where no kind does.
+        let tables = layout.fill(plan, &self.lab, &rest).and_then(|t| self.tables_pay(&t).filter(|uses| uses.iter().any(|&u| u)).map(|uses| (Arc::new(t), uses)));
+        crate::prof::note(|| tables.as_ref().map_or("tables: none kept".to_string(), |(t, uses)| format!("tables bought: {} pieces, {:.2} MB, {:.3} s, counted {:.4e}, for the kinds {uses:?}", t.pieces.len(), t.bytes as f64 / 1e6, t.build_seconds, COMPLEX * t.work)));
+        let _ = tabling.tables.set(tables);
+    }
+
+    /// The run's tables as bought (the tests'), none where it has none.
+    #[cfg(test)]
+    pub(crate) fn bought(&self) -> Option<&PairTables> {
+        self.tabling.tables.get().and_then(|t| t.as_ref()).map(|(t, _)| t.as_ref())
+    }
+
+    /// The kinds of node the run's tables are read for (the tests').
+    #[cfg(test)]
+    pub(crate) fn bought_for(&self) -> Option<[bool; KINDS]> {
+        self.tabling.tables.get().and_then(|t| t.as_ref()).map(|(_, uses)| *uses)
+    }
+
+    /// Whether the run's tables read the point (the tests').
+    #[cfg(test)]
+    pub(crate) fn tables_read(&self, at: V3, kappa: V3) -> bool {
+        let Some(t) = self.bought() else { return false };
+        let mut point = crate::scene::Point::default();
+        self.scene.point_into(at, kappa, &mut point);
+        let v = self.rs.tweezer().values(&self.scene, &point);
+        t.read(self.rs.plan(), &self.lab, &v, &mut PairScratch::default()).is_some()
+    }
+
+    /// The run's tables bought now on [`low`, 1], whatever their price (the tests'); whether there are any.
+    #[cfg(test)]
+    pub(crate) fn buy_tables_now(&self, low: f64) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.tabling.rent.store(u64::MAX >> 1, Relaxed);
+        self.tabling.low.store(low.to_bits(), Relaxed);
+        self.buy_tables();
+        self.bought().is_some()
     }
 
     /// The run with its direct entries one by one (the tests'): its spans taken off (# The direct entries spanned).
@@ -2212,7 +2404,7 @@ impl Selected {
     #[cfg(test)]
     pub(crate) fn photon_node(&self, at: V3, kappa: V3) -> Node {
         let mut node = self.template.clone();
-        self.node_into(&mut node, at, kappa, (true, false), false);
+        self.node_into(&mut node, at, kappa, (true, false), false, self.tabled_here());
         node
     }
 
@@ -2249,9 +2441,11 @@ impl Selected {
     /// The node at a point (`node`) into one of the run's layout: `kicked` with the photon forms, `whole` with the
     /// generator (else the photon classes alone, a jump's photon's: `Making::PHOTONS`); with the lift and its gradient
     /// where `lifted` (a middle's, `Node::lift`: copied from the contraction, which makes them for the model's gradient
-    /// anyway).
-    fn node_into(&self, node: &mut Node, at: V3, kappa: V3, (kicked, whole): (bool, bool), lifted: bool) {
-        NODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    /// anyway); off the run's tables where `tabled` and they read the point (# The tables), else the fold's own -- a
+    /// trajectory's such node's work the tables' rent, its s the least they would cover (`buy_tables`).
+    fn node_into(&self, node: &mut Node, at: V3, kappa: V3, (kicked, whole): (bool, bool), lifted: bool, tabled: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        NODES.fetch_add(1, Relaxed);
         let key = self.id;
         WORK.with(|w| {
             let mut w = w.borrow_mut();
@@ -2263,11 +2457,35 @@ impl Selected {
             // A run of turned parts makes a jump's photon's node whole: its S is the static slot's at the point.
             let made = whole || self.turn.is_some();
             let making = if made { Making { lift: lifted, ..Making::node(kicked) } } else { Making { lift: lifted, ..Making::PHOTONS } };
-            self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
-            work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
+            let plan = self.rs.plan();
+            let tables = self.tables_for(making, tabled);
+            // Off the tables where they read the point: the source's values there, the reading, the contraction.
+            let mut read = None;
+            if let Some(t) = tables {
+                self.rs.tweezer().values_into(&self.scene, &work.point, &mut work.local.values);
+                if let Some(reading) = t.read(plan, &self.lab, &work.local.values, &mut work.pairs) {
+                    let contracted = t.contract(plan, &self.lab, &work.local.values, &reading, t.orders, making, &mut work.out, &mut work.pairs);
+                    read = Some(reading.work + contracted);
+                }
+            }
+            if read.is_none() {
+                self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
+                work.out.contract(plan, &self.lab, &work.local, None, making);
+            }
             let filled = self.fill(node, &work.out, (kicked, made), &mut work.jumps);
             let turned = self.turn.as_ref().map_or(0.0, |cross| self.turned(node, cross));
-            node.work = self.node_work(&work.local, &work.out, filled + turned);
+            node.work = match read {
+                Some(r) => self.point_work() + COMPLEX * (self.rs.tweezer().values_work() + r + filled + turned),
+                None => self.node_work(&work.local, &work.out, filled + turned),
+            };
+            // A trajectory's node off the fold before the tables are bought: its work their rent, its s the least they
+            // would cover.
+            if read.is_none() && crate::step::version().is_some() && self.tabling.tables.get().is_none() {
+                self.tabling.rent.fetch_add(node.work as u64, Relaxed);
+                if let Some(s) = PairTables::intensity_of(plan, &work.local.values) {
+                    self.tabling.low.fetch_min(s.max(0.0).to_bits(), Relaxed);
+                }
+            }
             node.lift.truncate(if lifted { work.out.lift.len() } else { 0 });
             if lifted {
                 node.lift.resize_with(work.out.lift.len(), Default::default);
@@ -2288,14 +2506,14 @@ impl Selected {
 
     /// A middle's node at a point (`node`), made in one of the thread's pooled nodes of the run where there is one; whole
     /// or a photon's, with the lift where `lifted` (`node_into`).
-    fn pooled(&self, at: V3, kappa: V3, made: (bool, bool), lifted: bool) -> Rc<Node> {
+    fn pooled(&self, at: V3, kappa: V3, made: (bool, bool), lifted: bool, tabled: bool) -> Rc<Node> {
         let key = self.id;
         let mut node = POOL.with(|p| {
             let mut p = p.borrow_mut();
             p.iter().position(|x| x.0 == key).map(|i| p.swap_remove(i).1)
         })
         .unwrap_or_else(|| Rc::new(self.template.clone()));
-        self.node_into(Rc::get_mut(&mut node).expect("a pooled node is no one else's"), at, kappa, made, lifted);
+        self.node_into(Rc::get_mut(&mut node).expect("a pooled node is no one else's"), at, kappa, made, lifted, tabled);
         node
     }
 
@@ -2757,12 +2975,28 @@ impl SelectedMiddle<'_> {
         if let Some(node) = self.nodes.borrow().iter().find(|x| x.kappa == path.kappa && x.at == at) {
             return node.clone();
         }
-        let node = self.model.pooled(at, path.kappa, (false, true), s == 0.0);
+        let node = self.model.pooled(at, path.kappa, (false, true), s == 0.0 && self.reads.get(), self.tabled);
         self.made.set(self.made.get() + node.work);
         #[cfg(test)]
         MADE.with(|m| m.borrow_mut()[0] += 1);
         self.nodes.borrow_mut().push(node.clone());
         node
+    }
+
+    /// The middle's node with its lift (`readout`): the middle's node, made again with the lift where it was made
+    /// without (a step that told it reads nothing, `step::Middle::reading`) and put in its place.
+    fn lifted(&self, path: &Path) -> Rc<Node> {
+        let node = self.node(path, 0.0);
+        if !node.lift.is_empty() {
+            return node;
+        }
+        let made = self.model.pooled(node.at, path.kappa, (false, true), true, self.tabled);
+        self.made.set(self.made.get() + made.work);
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(at) = nodes.iter().position(|x| Rc::ptr_eq(x, &node)) {
+            nodes[at] = made.clone();
+        }
+        made
     }
 
     /// The Doppler frame's turn at the time s from the middle along the path (module documentation, # One cluster, one
@@ -2865,7 +3099,7 @@ impl SelectedMiddle<'_> {
     /// generator), made for the jump, its work counted, and not kept -- nothing else reads the model at a jump's point.
     fn photon(&self, path: &Path, s: f64) -> Rc<Node> {
         let at: V3 = std::array::from_fn(|i| self.r[i] + path.velocity[i] * s);
-        let node = self.model.pooled(at, path.kappa, (true, false), false);
+        let node = self.model.pooled(at, path.kappa, (true, false), false, self.tabled);
         self.made.set(self.made.get() + node.work);
         #[cfg(test)]
         MADE.with(|m| m.borrow_mut()[1] += 1);
@@ -3191,7 +3425,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// frame -- each element q ← a by its first-order change, M + s (v·∇M − i(K_q − K_a)·v M), the state framed --, the
     /// one assembly (`Selected::lifted`).
     fn readout(&self, path: &Path, s: f64, psi: &[C64]) -> Option<[f64; STATES]> {
-        let node = self.node(path, 0.0);
+        let node = self.lifted(path);
         let model = self.model;
         let n = self.states();
         let v = path.velocity;
@@ -3248,6 +3482,10 @@ impl crate::step::Middle for SelectedMiddle<'_> {
 
     fn made(&self) -> f64 {
         self.made.get()
+    }
+
+    fn reading(&self, reads: bool) {
+        self.reads.set(reads);
     }
 
     /// Ĝ_a(s) as matrices in the frame, and where asked their slope along the path at the middle: the envelopes' chord
@@ -3354,7 +3592,9 @@ impl crate::step::Dynamics for Selected {
 
     fn middle(&self, _cluster: usize, r: [f64; 3], t: f64) -> SelectedMiddle<'_> {
         let nodes = LISTS.with(|l| l.borrow_mut().pop()).unwrap_or_default();
-        SelectedMiddle { model: self, r, t, nodes: RefCell::new(nodes), made: Cell::new(0.0) }
+        // The trajectory's version where one is being made on this thread, else the run's (# The tables).
+        let tabled = crate::step::version().unwrap_or_else(|| self.version()) >= 1;
+        SelectedMiddle { model: self, r, t, nodes: RefCell::new(nodes), made: Cell::new(0.0), tabled, reads: Cell::new(false) }
     }
 
     /// A jump's photon: on the step's middle at the jump's time and place, or at a point on a middle made there.
@@ -3379,6 +3619,10 @@ impl crate::step::Dynamics for Selected {
 
     fn readout(&self, _cluster: usize, at: &Point, psi: &[C64]) -> [f64; STATES] {
         self.rows(at, psi)
+    }
+
+    fn version(&self) -> u32 {
+        Selected::version(self)
     }
 }
 

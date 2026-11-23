@@ -564,3 +564,162 @@ fn count_parts() {
         }
     }
 }
+
+/// STEP4 item 2 ("(b) 接入节点"): a step's parts on the run's tables against the fold's own, paired. Per scene of
+/// STEPCOST (names of `SCENES`, their ground states; default PGC3D, TET, tilt0, tilt2) a walk of STEPCOST_STEPS (12)
+/// steps from trajectory STEPCOST_INDEX (3) of `r1prop::start` on the fold's own nodes; the run's tables bought on [the
+/// walk's least s, 1] (`Selected::buy_tables_now`: their time, memory, pieces and counted work); then per state of the
+/// walk, version 0 (the fold's own) and version 1 (the tables) in turn -- each repeat the other first --, each the least
+/// of STEPCOST_REPEAT (5) in the thread's own cycles after one call untimed: the step on a fresh scratch with no read and
+/// with one read at its middle (the lift made where a step reads, `step::Middle::reading`), a node at the step's middle
+/// and a jump's photon node there (each on its version, `step::on_version`), and the counted work of the step and of the
+/// node. Said: "TABLED-STEP <scene>", the means over the walk of both versions and their ratios, and how many of the
+/// steps' points the tables read. Ignored; run by name, pinned to one performance core by the caller.
+#[test]
+#[ignore]
+fn tabled_step_parts() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (steps, repeat, index) = (env("STEPCOST_STEPS", 12), env("STEPCOST_REPEAT", 5), env("STEPCOST_INDEX", 3) as u64);
+    let ghz: f64 = (0..5)
+        .map(|_| {
+            let (c0, clock) = (thread_cycles(), Instant::now());
+            let mut x = 0u64;
+            while clock.elapsed().as_millis() < 50 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            (thread_cycles() - c0) as f64 / clock.elapsed().as_nanos() as f64
+        })
+        .fold(0.0, crate::linalg::larger);
+    let timed = |f: &mut dyn FnMut()| -> f64 {
+        let c0 = thread_cycles();
+        f();
+        (thread_cycles() - c0) as f64 / (ghz * 1e3)
+    };
+    let list = std::env::var("STEPCOST").unwrap_or_else(|_| "PGC3D,TET,tilt0,tilt2".to_string());
+    for entry in list.split(',') {
+        let found = SCENES.split(',').find(|e| e.starts_with(&format!("{entry}="))).unwrap_or_else(|| panic!("no default for {entry}"));
+        let (spec, tau) = found.split_once('=').unwrap().1.split_once('@').unwrap();
+        let (name, tau): (String, f64) = (entry.to_string(), tau.parse().unwrap());
+        assert_eq!(spec, "ground", "the tables' scenes are their ground states");
+        let request = request_of(&name);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: (0..GROUND).collect(), ..selection }, crate::solve::alone(chief)).unwrap();
+        let domain = Everywhere;
+        // The walk on the fold's own nodes, and its least s.
+        let mut t = start(&run, &request, chief, index);
+        let mut walk = Vec::new();
+        for _ in 0..steps {
+            let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)) else { break };
+            walk.push(t.clone());
+            t = step.end;
+        }
+        let values = |r: [f64; 3], kappa: [f64; 3]| -> crate::model::rs::fold::Values {
+            let mut point = crate::scene::Point::default();
+            run.scene.point_into(r, kappa, &mut point);
+            run.rs.tweezer().values(&run.scene, &point)
+        };
+        let low = walk.iter().map(|t| crate::model::rs::fold::tabled::Tables::intensity(run.rs.plan(), &values(t.r, t.kappa))).fold(1.0, crate::linalg::smaller) * 0.999;
+        let clock = Instant::now();
+        let any = run.buy_tables_now(low);
+        let bought = clock.elapsed().as_secs_f64();
+        let Some(tables) = run.bought() else {
+            eprintln!("TABLED-BUY {name}: none kept ({any}): no kind of node costs less off them");
+            continue;
+        };
+        eprintln!(
+            "TABLED-BUY {name}: for the kinds [node, with the lift, photon, with the photon forms] {:?}; {} pieces on [{low:.4}, 1], {:.2} MB, {:.3} s (its own clock {:.3} s), counted {:.3e} real MA",
+            run.bought_for().unwrap(),
+            tables.pieces.len(),
+            tables.bytes as f64 / 1e6,
+            bought,
+            tables.build_seconds,
+            crate::decide::COMPLEX * tables.work
+        );
+        // [version][step, step with a read, node, photon node, node warm]; counted [version][step, node].
+        let (mut sum, mut counted) = ([[0.0f64; 5]; 2], [[0.0f64; 3]; 2]);
+        let (mut taken, mut read_off, mut points) = (0usize, 0usize, 0usize);
+        for from in &walk {
+            let midway = Midway::new(&run, from, tau).unwrap();
+            let at = midway.reached;
+            let read = [from.time + 0.5 * tau];
+            let mut least = [[f64::INFINITY; 5]; 2];
+            let versions = [crate::step::Trajectory { version: 0, ..from.clone() }, crate::step::Trajectory { version: 1, ..from.clone() }];
+            for (v, t) in versions.iter().enumerate() {
+                let step = Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).unwrap();
+                counted[v][0] += step.work;
+                counted[v][1] += crate::step::on_version(v as u32, || run.node(at.0, at.1, false)).work;
+                counted[v][2] += Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &read, &mut Scratch::default(), &domain)).unwrap().work;
+                std::hint::black_box(crate::step::on_version(v as u32, || run.photon_node(at.0, at.1)));
+            }
+            for k in 0..repeat {
+                let order: [usize; 2] = if k % 2 == 0 { [0, 1] } else { [1, 0] };
+                for &v in &order {
+                    let t = &versions[v];
+                    least[v][0] = least[v][0].min(timed(&mut || {
+                        std::hint::black_box(Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).is_ok());
+                    }));
+                    least[v][1] = least[v][1].min(timed(&mut || {
+                        std::hint::black_box(Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &read, &mut Scratch::default(), &domain)).is_ok());
+                    }));
+                    least[v][2] = least[v][2].min(timed(&mut || {
+                        std::hint::black_box(crate::step::on_version(v as u32, || run.node(at.0, at.1, false)));
+                    }));
+                    least[v][3] = least[v][3].min(timed(&mut || {
+                        std::hint::black_box(crate::step::on_version(v as u32, || run.photon_node(at.0, at.1)));
+                    }));
+                }
+            }
+            // The node warm: its version's calls one after another, nothing else between them.
+            for v in 0..2 {
+                for _ in 0..repeat {
+                    least[v][4] = least[v][4].min(timed(&mut || {
+                        std::hint::black_box(crate::step::on_version(v as u32, || run.node(at.0, at.1, false)));
+                    }));
+                }
+            }
+            for v in 0..2 {
+                for p in 0..5 {
+                    sum[v][p] += least[v][p];
+                }
+            }
+            // Whether the tables read the step's three points.
+            for s in [-0.5 * tau, 0.0, 0.5 * tau] {
+                let r: [f64; 3] = std::array::from_fn(|a| at.0[a] + run.hbar_over_mass() * at.1[a] * s);
+                points += 1;
+                read_off += usize::from(run.tables_read(r, at.1));
+            }
+            taken += 1;
+        }
+        let k = taken.max(1) as f64;
+        let m = |v: usize, p: usize| sum[v][p] / k;
+        eprintln!(
+            "TABLED-STEP {name} tau {tau}: the fold's / the tables' (ratio) -- a step {:.1} / {:.1} µs ({:.3}), with a read {:.1} / {:.1} ({:.3}), a node {:.1} / {:.1} ({:.3}), a jump's photon node {:.1} / {:.1} ({:.3}), a node warm (its calls one after another) {:.1} / {:.1} ({:.3}); counted a step {:.3e} / {:.3e} ({:.3}), with a read {:.3e} / {:.3e} ({:.3}), a node {:.3e} / {:.3e} ({:.3}); the tables read {read_off} of {points} points; over {taken} states, each the least of {repeat}",
+            m(0, 0),
+            m(1, 0),
+            m(1, 0) / m(0, 0),
+            m(0, 1),
+            m(1, 1),
+            m(1, 1) / m(0, 1),
+            m(0, 2),
+            m(1, 2),
+            m(1, 2) / m(0, 2),
+            m(0, 3),
+            m(1, 3),
+            m(1, 3) / m(0, 3),
+            m(0, 4),
+            m(1, 4),
+            m(1, 4) / m(0, 4),
+            counted[0][0] / k,
+            counted[1][0] / k,
+            counted[1][0] / counted[0][0],
+            counted[0][2] / k,
+            counted[1][2] / k,
+            counted[1][2] / counted[0][2],
+            counted[0][1] / k,
+            counted[1][1] / k,
+            counted[1][1] / counted[0][1],
+        );
+    }
+}

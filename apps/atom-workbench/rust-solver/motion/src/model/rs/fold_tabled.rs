@@ -128,20 +128,20 @@ pub(crate) struct Piece {
     pub range: [f64; 2],
     gaps: Vec<f64>,
     kappa: Vec<f64>,
-    /// The strict bound's worst over its tables (`Tables::new`, # The pieces): the largest value's bound over its entries'
-    /// scale, the J-th term's weighed by the reach's ratio to the J.
+    /// The strict bound's worst over its tables (`Tables::layout`, # The pieces): the largest value's bound over its
+    /// entries' own bound c ‖D‖^p, the J-th term's weighed by the reach's ratio to the J.
     pub worst: f64,
     /// Per table and Doppler term J (`[t·orders + J]`) the strict bound of its entries' interpolation (`bernstein`, with
-    /// the samples' rounding through the interpolant), [the value's, the slope's in s], absolute; and the largest sum of
-    /// an entry's eigen-terms' moduli over the samples (its scale).
+    /// the samples' rounding through the interpolant), [the value's, the slope's in s], absolute.
     pub bounds: Vec<[f64; 2]>,
-    pub moduli: Vec<f64>,
     /// The least 1/(‖K‖ h) over the sums: how far the nearest singularity of the tables' entries lies, in the piece's
-    /// half widths (the ellipses' room).
+    /// half widths (the ellipses' room; the tests' measurement).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub room: f64,
 }
 
-/// The tables of a run's fold (module documentation): made once (`Tables::new`), read by every node of the run.
+/// The tables of a run's fold (module documentation): made once (`Tables::layout`, `Layout::fill`), read by every node of
+/// the run.
 #[derive(Clone, Debug)]
 pub(crate) struct Tables {
     pub degree: usize,
@@ -149,6 +149,7 @@ pub(crate) struct Tables {
     pub orders: usize,
     pub pieces: Vec<Piece>,
     /// The spans' dropped share, the largest over the sums (relative to each kind's largest atom).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub dropped: f64,
     zs: Vec<Basis>,
     ws: Vec<Basis>,
@@ -158,6 +159,31 @@ pub(crate) struct Tables {
     e_slope: Vec<f64>,
     pub build_seconds: f64,
     pub bytes: usize,
+    /// The counted complex multiply-adds of its making, layout and fill.
+    pub work: f64,
+}
+
+/// A table build before its coefficients (`Tables::layout`): the sums' bases and their vectors, the tables, the pieces
+/// with their bounds, K's energies and the blocks' slopes S; what making it took and what filling it takes (complex
+/// multiply-adds, `Layout::fill`), and its wall time.
+#[derive(Clone, Debug)]
+pub(crate) struct Layout {
+    degree: usize,
+    orders: usize,
+    pub pieces: Vec<Piece>,
+    dropped: f64,
+    zs: Vec<Basis>,
+    ws: Vec<Basis>,
+    z_vectors: Vec<Vec<Vec<C64>>>,
+    w_vectors: Vec<Vec<Vec<C64>>>,
+    tables: Vec<Table>,
+    e_rest: Vec<f64>,
+    e_slope: Vec<f64>,
+    used: Vec<usize>,
+    s_mats: Vec<Option<Mat>>,
+    pub work: f64,
+    pub price: f64,
+    seconds: f64,
 }
 
 /// A point's reading of the tables (`Tables::read`): its piece, s and ∇s, the largest Doppler ratio ρ, and the
@@ -172,10 +198,13 @@ pub(crate) struct Reading {
     pub moved_gradient: f64,
     /// The largest |∇ΔE_a| over the least gap (per µm): what the series' terms' gradients take of δ's.
     pub shift_gradient: f64,
+    /// Its counted complex multiply-adds.
+    pub work: f64,
 }
 
 impl Reading {
     /// The Doppler series' tail at `orders` terms relative to each eigen-term's leading one, ρ^O/(1 − ρ).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tail(&self, orders: usize) -> f64 {
         self.rho.powi(orders as i32) / (1.0 - self.rho)
     }
@@ -193,6 +222,8 @@ pub(crate) struct Scratch {
     psi: Vec<Vec<Vec<Vec<(C64, [C64; 3])>>>>,
     /// Per amplitude sum, term and basis vector the largest |ψ| over its columns and of its gradient (`interpolated`).
     psi_most: Vec<Vec<[f64; 2]>>,
+    /// Per block ΔG's Frobenius norm and its gradient's (`read`).
+    sizes: Vec<Option<(f64, f64)>>,
     de: Vec<(f64, [f64; 3])>,
     t: Vec<f64>,
     dt: Vec<f64>,
@@ -372,9 +403,15 @@ impl Tables {
         v
     }
 
-    /// The tweezer's intensity s at the values `v` (a plan with tables has one).
+    /// The tweezer's intensity s at the values `v` (a plan with tables has one; the tests').
+    #[cfg(test)]
     pub(crate) fn intensity(plan: &Plan, v: &Values) -> f64 {
         v.factors[plan.intensity[0]].0.re
+    }
+
+    /// The tweezer's intensity s at the values `v`, none where the plan has none.
+    pub(crate) fn intensity_of(plan: &Plan, v: &Values) -> Option<f64> {
+        plan.intensity.first().map(|&f| v.factors[f].0.re)
     }
 
     /// Whether a factor is one the tables hold at s or at one (the intensity, a beam's own intensity).
@@ -382,13 +419,45 @@ impl Tables {
         plan.intensity.contains(&f) || plan.own.contains(&f)
     }
 
-    /// The tables of a plan's grouping (module documentation): `rest` the values at a point at rest (the members'
-    /// frequencies f₀), `reach` at a point at the reach's speed (the atoms' point coefficients' bounds), `orders` the
-    /// Doppler series' terms kept, `degree` the pieces' Chebyshev degree in s on [`low`, 1]. None where a block a sum is
-    /// on is not tabled (its generator varies by another factor than the intensities) or the plan has no intensity.
-    pub(crate) fn new(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Values, orders: usize, degree: usize, low: f64) -> Option<Tables> {
+    /// One sample of the tables at the intensity s (`layout`, `fill`): K's energies there, each used block's spectrum
+    /// and, where `turned`, its V⁻¹SV; the counted complex multiply-adds. None where a block does not decompose.
+    fn sample(plan: &Plan, rest: &Values, used: &[usize], s_mats: &[Option<Mat>], s: f64, turned: bool) -> Option<(Vec<f64>, Vec<Option<Spectrum>>, Vec<Mat>, f64)> {
+        let v = Tables::at_intensity(plan, rest, s);
+        let energies = Tables::energies(plan, &v);
+        let (mut spectra, mut hats): (Vec<Option<Spectrum>>, Vec<Mat>) = (vec![None; plan.blocks.len()], vec![Mat::default(); plan.blocks.len()]);
+        let mut work = (plan.diagonal.len() + plan.n) as f64;
+        for &bl in used {
+            if spectra[bl].is_some() {
+                continue;
+            }
+            let g = Tables::generator(plan, bl, &v);
+            let mut sp = Spectrum::default();
+            if !sp.decompose(&g) {
+                return None;
+            }
+            let size = g.rows;
+            work += sp.work + (size * size + plan.blocks[bl].rest.len()) as f64;
+            if turned {
+                if let Some(s) = &s_mats[bl] {
+                    hats[bl] = sp.inverse.product(&s.product(&sp.vectors));
+                    work += (2 * size * size * size) as f64;
+                }
+            }
+            spectra[bl] = Some(sp);
+        }
+        Some((energies, spectra, hats, work))
+    }
+
+    /// The layout of a plan's grouping's tables (module documentation): their sums' bases, the tables, and the pieces of
+    /// s on [`low`, 1] with their strict bounds (# The interpolation's bound, # The pieces), from the blocks'
+    /// decompositions alone -- what filling them takes is then known (`Layout::price`) before it is done. `rest` the
+    /// values at a point at rest (the members' frequencies f₀), `reach` the run's (`Rs::reach`: the pieces' Doppler
+    /// shifts at its momentum, the coefficients' largest), `orders` the Doppler series' terms kept, `degree` the pieces'
+    /// Chebyshev degree. None where a block a sum is on is not tabled (its generator varies by another factor than the
+    /// intensities), the plan has no intensity, or a block does not decompose.
+    pub(crate) fn layout(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Reach, orders: usize, degree: usize, low: f64) -> Option<Layout> {
         let clock = std::time::Instant::now();
-        if plan.intensity.is_empty() {
+        if plan.intensity.is_empty() || !(low < 1.0) {
             return None;
         }
         let used: Vec<usize> = grouping.zs.iter().map(|s| s.block).collect();
@@ -401,12 +470,11 @@ impl Tables {
         if untabled {
             return None;
         }
-        // An atom's point coefficient's bound: its factor's and coefficient's moduli, the larger of rest's and reach's.
+        // An atom's point coefficient's bound over the reach: its scale, its factor at most one (a beam's amplitude, an
+        // intensity) or its value at rest, and its coefficient's largest.
         let bound = |piece: usize, term: usize, coefficient: usize| -> f64 {
             let (f, scale) = plan.terms[piece][term];
-            let x = rest.factors[f].0.abs().max(reach.factors[f].0.abs());
-            let c = rest.coefficients[coefficient].abs().max(reach.coefficients[coefficient].abs());
-            scale.abs() * x * c
+            scale.abs() * rest.factors[f].0.abs().max(1.0) * reach.coefficients[coefficient].abs()
         };
         // The sums' atoms.
         let mut z_atoms: Vec<Atoms> = Vec::new();
@@ -446,12 +514,14 @@ impl Tables {
         let at_one = Tables::at_intensity(plan, rest, 1.0);
         let e_one = Tables::energies(plan, &at_one);
         let f0_of = |s: &Sum| s.members.first().map_or(0.0, |(m, _)| rest.frequencies[plan.amplitudes[*m].piece]);
+        let mut work = 0.0;
         let mut gap_one: Vec<f64> = Vec::with_capacity(grouping.zs.len());
         for s in &grouping.zs {
             let mut sp = Spectrum::default();
             if !sp.decompose(&Tables::generator(plan, s.block, &at_one)) {
                 return None;
             }
+            work += sp.work;
             let f0 = f0_of(s);
             gap_one.push(s.index.iter().flat_map(|&col| (0..sp.centre.len()).map(move |k| (col, k))).map(|(col, k)| (C64::real(e_one[col] + f0 - sp.centre[k]) - sp.values[k]).abs()).fold(f64::INFINITY, f64::min));
         }
@@ -460,7 +530,6 @@ impl Tables {
         let z_top = z_atoms.iter().zip(&gap_one).map(|(a, g)| top_of(a) / g).fold(0.0, f64::max);
         let w_top = w_atoms.iter().map(top_of).fold(0.0, f64::max);
         let mut dropped: f64 = 0.0;
-        let mut z_vectors = Vec::new();
         let mut basis_of = |(keys, mats): Atoms, f0: f64, top: f64, vectors: &mut Vec<Vec<Vec<C64>>>| -> Basis {
             let bounds: Vec<f64> = keys.iter().map(|&(p, t, c)| bound(p, t, c)).collect();
             let limit = keys.len() as f64 * UNIT_ROUNDOFF * top;
@@ -469,12 +538,11 @@ impl Tables {
             vectors.push(basis);
             Basis { atoms: keys.iter().zip(coords).map(|(&(piece, term, coefficient), coords)| Atom { piece, term, coefficient, coords }).collect(), rank: vectors.last().map_or(0, Vec::len), f0 }
         };
-        let mut zs: Vec<Basis> = Vec::new();
+        let (mut zs, mut z_vectors): (Vec<Basis>, Vec<Vec<Vec<C64>>>) = (Vec::new(), Vec::new());
         for ((s, atoms), g) in grouping.zs.iter().zip(z_atoms).zip(&gap_one) {
             zs.push(basis_of(atoms, f0_of(s), z_top * g, &mut z_vectors));
         }
-        let mut w_vectors = Vec::new();
-        let mut ws: Vec<Basis> = Vec::new();
+        let (mut ws, mut w_vectors): (Vec<Basis>, Vec<Vec<Vec<C64>>>) = (Vec::new(), Vec::new());
         for atoms in w_atoms {
             ws.push(basis_of(atoms, 0.0, w_top, &mut w_vectors));
         }
@@ -504,68 +572,60 @@ impl Tables {
             })
             .collect();
         let slope: Vec<f64> = s_mats.iter().map(|s| s.as_ref().map_or(0.0, |s| norm(&s.data))).collect();
-        let e0 = Tables::energies(plan, &Tables::at_intensity(plan, rest, 0.0));
+        let e0 = Tables::energies(plan, &at_zero);
         let e_slope: Vec<f64> = e0.iter().zip(&e_one).map(|(a, b)| b - a).collect();
         let b_most = e_slope.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         let m = degree + 1;
         let largest_block = used.iter().map(|&b| plan.blocks[b].rows.len()).max().unwrap_or(0);
         // The interpolation's target: the Doppler series' tail at the tables' terms at the reach (the largest ratio its
-        // members' shifts there take of the sums' gaps at s = 1), so that a piece never adds more to a node's bound than
-        // the series it holds takes at the run's fastest atom.
+        // members' shifts there take of the sums' gaps at s = 1: each member's frequency at rest off the sum's and its
+        // Doppler shift at the reach's momentum), so that a piece never adds more to a node's bound than the series it
+        // holds takes at the run's fastest atom.
         let reach_rho = grouping
             .zs
             .iter()
             .zip(&gap_one)
-            .flat_map(|(s, g)| s.members.iter().map(move |(m, _)| (reach.frequencies[plan.amplitudes[*m].piece] - f0_of(s)).abs() / g))
+            .flat_map(|(s, g)| {
+                s.members.iter().map(move |(m, _)| {
+                    let piece = plan.amplitudes[*m].piece;
+                    ((rest.frequencies[piece] - f0_of(s)).abs() + reach.doppler[piece] * reach.kappa) / g
+                })
+            })
             .fold(0.0, f64::max);
         let target = if reach_rho < 1.0 { reach_rho.powi(orders as i32) / (1.0 - reach_rho) } else { 0.0 };
-        // A sample element's rounding: γ_n of the moduli of the terms it is the sum of (`moduli`), n the operations
-        // behind it and its transform.
+        // A sample element's rounding: γ_n of the moduli of the terms it is the sum of, n the operations behind it and
+        // its transform.
         let floor = {
             let n = (largest_block * (orders + 1) + m) as f64;
             n * UNIT_ROUNDOFF / (1.0 - n * UNIT_ROUNDOFF)
         };
-        // One piece [a, b]: its tables' coefficients, its gaps' lower bounds per z sum, κ per block, its tail.
-        let make = |a: f64, b: f64| -> Option<(Vec<Vec<C64>>, Piece)> {
-            let xs: Vec<f64> = (0..m).map(|n| (std::f64::consts::PI * (n as f64 + 0.5) / m as f64).cos()).collect();
-            let mut gaps: Vec<f64> = vec![f64::INFINITY; grouping.zs.len()];
-            let mut kappa: Vec<f64> = vec![0.0; plan.blocks.len()];
-            // Per sum, over the samples, the largest ‖D‖ = 1/g and the largest ‖K‖ of its columns, K = D(B_a − V⁻¹SV) in
-            // the sample's eigenbasis (# The interpolation's bound); per table the largest ‖(LV)_row‖ ‖(V⁻¹U)_col‖.
-            let (mut resolvent, mut moves): (Vec<f64>, Vec<f64>) = (vec![0.0; grouping.zs.len()], vec![0.0; grouping.zs.len()]);
-            let mut sides: Vec<f64> = vec![0.0; tables.len()];
-            let mut samples: Vec<Vec<C64>> = tables.iter().map(|t| vec![C64::ZERO; t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * orders * m * t.rows * t.cols]).collect();
-            // Per table and term the largest sum of its sample elements' terms' moduli.
-            let mut moduli: Vec<f64> = vec![0.0; tables.len() * orders];
-            for (n, &x) in xs.iter().enumerate() {
-                let sv = 0.5 * (a + b) + 0.5 * (b - a) * x;
-                let v = Tables::at_intensity(plan, rest, sv);
-                let energies = Tables::energies(plan, &v);
-                let mut spectra: Vec<Option<Spectrum>> = vec![None; plan.blocks.len()];
-                // Per block V⁻¹SV at the sample.
-                let mut turned: Vec<Mat> = vec![Mat::default(); plan.blocks.len()];
+        let lebesgue = 2.0 / std::f64::consts::PI * (m as f64).ln() + 1.0;
+        let xs: Vec<f64> = (0..m).map(|n| (std::f64::consts::PI * (n as f64 + 0.5) / m as f64).cos()).collect();
+        // One piece [a, b] from its samples' decompositions (# The interpolation's bound): per sum the largest ‖D‖ and
+        // ‖K‖ of its columns, per leg sum (and per lift block, the identity's) the largest ‖(LV)_row‖, per amplitude sum
+        // the largest ‖(V⁻¹U)_col‖; per table and term its bound; the gaps' lower bounds per sum and κ per block (# The
+        // bounds). And its counted work.
+        let bounded = |a: f64, b: f64| -> Option<(Piece, f64)> {
+            let mut work = 0.0;
+            let (mut gaps, mut kappa) = (vec![f64::INFINITY; grouping.zs.len()], vec![0.0f64; plan.blocks.len()]);
+            let (mut resolvent, mut moves) = (vec![0.0f64; grouping.zs.len()], vec![0.0f64; grouping.zs.len()]);
+            let (mut legs, mut amplitudes, mut identity) = (vec![0.0f64; grouping.ws.len()], vec![0.0f64; grouping.zs.len()], vec![0.0f64; plan.blocks.len()]);
+            for &x in &xs {
+                let (energies, spectra, hats, w) = Tables::sample(plan, rest, &used, &s_mats, 0.5 * (a + b) + 0.5 * (b - a) * x, true)?;
+                work += w;
                 for &bl in &used {
-                    if spectra[bl].is_some() {
-                        continue;
-                    }
-                    let mut sp = Spectrum::default();
-                    if !sp.decompose(&Tables::generator(plan, bl, &v)) {
-                        return None;
-                    }
+                    let sp = spectra[bl].as_ref().expect("a used block decomposed");
                     kappa[bl] = kappa[bl].max(norm(&sp.vectors.data) * norm(&sp.inverse.data));
-                    if let Some(s) = &s_mats[bl] {
-                        turned[bl] = sp.inverse.product(&s.product(&sp.vectors));
-                    }
-                    spectra[bl] = Some(sp);
+                    let size = sp.centre.len();
+                    identity[bl] = identity[bl].max(sp.vectors.data.chunks(size).map(norm).fold(0.0, f64::max));
                 }
                 for (z, sum) in grouping.zs.iter().enumerate() {
                     let sp = spectra[sum.block].as_ref().expect("a sum's block decomposed");
-                    let hat = &turned[sum.block];
+                    let hat = &hats[sum.block];
                     let size = sp.centre.len();
                     let mut least = f64::INFINITY;
                     for &col in &sum.index {
                         let z0 = energies[col] + zs[z].f0;
-                        let slope_a = e_slope[col];
                         // ‖K‖₂ ≤ its diagonal's largest + its off-diagonal part's Frobenius norm.
                         let (mut diagonal, mut off) = (0.0f64, 0.0f64);
                         for k in 0..size {
@@ -574,7 +634,7 @@ impl Tables {
                             for l in 0..size {
                                 let x = hat.data[k * size + l];
                                 if k == l {
-                                    diagonal = diagonal.max((C64::real(slope_a) - x).abs() / w);
+                                    diagonal = diagonal.max((C64::real(e_slope[col]) - x).abs() / w);
                                 } else {
                                     off += x.norm_sqr() / (w * w);
                                 }
@@ -584,77 +644,166 @@ impl Tables {
                     }
                     gaps[z] = gaps[z].min(least);
                     resolvent[z] = resolvent[z].max(1.0 / least);
+                    // V⁻¹U's columns.
+                    let cols = sum.index.len();
+                    for u in &z_vectors[z] {
+                        let vu = linalg_product(&sp.inverse.data, u, size, size, cols);
+                        for j in 0..cols {
+                            amplitudes[z] = amplitudes[z].max((0..size).map(|k| vu[k * cols + j].norm_sqr()).sum::<f64>().sqrt());
+                        }
+                    }
+                    work += (cols * size * (size + 1) * z_vectors[z].len()) as f64;
                 }
-                for (((out, t), modulus), side) in samples.iter_mut().zip(&tables).zip(moduli.chunks_mut(orders)).zip(sides.iter_mut()) {
+                for (w, sum) in grouping.ws.iter().enumerate() {
+                    // A leg sum on a block no amplitude sum is on is in no table.
+                    let Some(sp) = spectra[sum.block].as_ref() else { continue };
+                    let (size, rows) = (sp.centre.len(), sum.index.len());
+                    for l in &w_vectors[w] {
+                        let lv = linalg_product(l, &sp.vectors.data, rows, size, size);
+                        legs[w] = legs[w].max(lv.chunks(size).map(norm).fold(0.0, f64::max));
+                    }
+                    work += (rows * size * (size + 1) * w_vectors[w].len()) as f64;
+                }
+            }
+            // The gaps' lower bounds over the piece (# The bounds).
+            let h = 0.5 * (b - a) * (std::f64::consts::PI / (2.0 * m as f64)).sin();
+            let moving = |z: usize| kappa[grouping.zs[z].block] * slope[grouping.zs[z].block] + b_most;
+            let gaps: Vec<f64> = gaps.iter().enumerate().map(|(z, g)| g - moving(z) * h).collect();
+            // The strict bounds: per table and term c, ‖D‖ and ‖K‖ (`bernstein`), and the samples' rounding carried
+            // through the interpolant -- the Lebesgue constant of m first-kind points, at most (2/π) ln m + 1, and the
+            // slope's by Markov's (m − 1)² over the half width --, of an entry's own bound c ‖D‖^p. The piece's worst:
+            // per table and term its value's bound over that, the J-th weighed by the reach's ratio to the J (what it
+            // adds beside the leading term at the run's fastest atom).
+            let half = 0.5 * (b - a);
+            let (mut bounds, mut worst): (Vec<[f64; 2]>, f64) = (Vec::with_capacity(tables.len() * orders), 0.0);
+            for t in &tables {
+                let side = t.w.map_or(identity[grouping.zs[t.z].block], |w| legs[w]) * amplitudes[t.z];
+                for jj in 0..orders {
+                    let p = jj as i32 + 1;
+                    let [value, slope_bound] = bernstein(side, resolvent[t.z], moves[t.z], half, m, p);
+                    let scale = side * resolvent[t.z].powi(p);
+                    let rounding = (lebesgue + 1.0) * floor * scale;
+                    bounds.push([value + rounding, slope_bound + ((m - 1) * (m - 1)) as f64 * rounding / half]);
+                    if scale > 0.0 {
+                        worst = worst.max(reach_rho.powi(jj as i32) * (value + rounding) / scale);
+                    }
+                }
+            }
+            let room = moves.iter().map(|k| 1.0 / (k * half)).fold(f64::INFINITY, f64::min);
+            Some((Piece { range: [a, b], gaps, kappa, worst, bounds, room }, work))
+        };
+        // The pieces: halved until their strict bound is within the target, or no longer falls by half (the samples'
+        // rounding reached: # The pieces); one s's round-off cannot halve is taken at its bound.
+        let first = bounded(low, 1.0)?;
+        work += first.1;
+        let mut todo = vec![first.0];
+        let mut pieces: Vec<Piece> = Vec::new();
+        while let Some(piece) = todo.pop() {
+            let [a, b] = piece.range;
+            let c = 0.5 * (a + b);
+            if piece.worst <= target || !(c > a && c < b) {
+                pieces.push(piece);
+                continue;
+            }
+            let (left, right) = (bounded(a, c)?, bounded(c, b)?);
+            work += left.1 + right.1;
+            if left.0.worst.max(right.0.worst) > 0.5 * piece.worst {
+                pieces.push(piece);
+            } else {
+                todo.push(right.0);
+                todo.push(left.0);
+            }
+        }
+        pieces.sort_by(|x, y| x.range[0].total_cmp(&y.range[0]));
+        // What filling takes (`fill`, complex multiply-adds): per piece and sample the decompositions -- each counted as
+        // its first sample's --, LV per leg sum and V⁻¹U per amplitude sum, per table its products (per element and
+        // basis pair |B| terms of the series' `orders` powers, the reciprocal, the product); per piece and table its
+        // Chebyshev transform.
+        let decompositions = {
+            let mut once = 0.0;
+            let mut seen = vec![false; plan.blocks.len()];
+            for &b in &used {
+                if !std::mem::replace(&mut seen[b], true) {
+                    let mut sp = Spectrum::default();
+                    if sp.decompose(&Tables::generator(plan, b, &Tables::at_intensity(plan, rest, low))) {
+                        once += sp.work;
+                    }
+                }
+            }
+            once
+        };
+        let per_sample: f64 = decompositions
+            + grouping.ws.iter().zip(&w_vectors).filter(|(s, _)| used.contains(&s.block)).map(|(s, v)| (s.index.len() * plan.blocks[s.block].rows.len().pow(2) * v.len()) as f64).sum::<f64>()
+            + grouping.zs.iter().zip(&z_vectors).map(|(s, v)| (s.index.len() * plan.blocks[s.block].rows.len().pow(2) * v.len()) as f64).sum::<f64>()
+            + tables.iter().map(|t| (t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * t.rows * t.cols * plan.blocks[grouping.zs[t.z].block].rows.len() * (orders + 2)) as f64).sum::<f64>();
+        let transform: f64 = tables.iter().map(|t| (t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * orders * m * m * t.rows * t.cols) as f64).sum();
+        let price = pieces.len() as f64 * (m as f64 * per_sample + transform);
+        Some(Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, tables, e_rest: e0, e_slope, used, s_mats, work, price, seconds: clock.elapsed().as_secs_f64() })
+    }
+}
+
+impl Layout {
+    /// The tables of a layout (`Tables::layout`): per piece the samples at its m Chebyshev points -- each table's
+    /// entries Σ_q (LV)_iq (V⁻¹U)_qj (z₀ − λ_q)^{−(J+1)} for J < `orders` -- and their Chebyshev coefficients. None
+    /// where a block does not decompose.
+    pub(crate) fn fill(self, plan: &Plan, grouping: &Grouping, rest: &Values) -> Option<Tables> {
+        let clock = std::time::Instant::now();
+        let Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, mut tables, e_rest, e_slope, used, s_mats, work, seconds, .. } = self;
+        let m = degree + 1;
+        let xs: Vec<f64> = (0..m).map(|n| (std::f64::consts::PI * (n as f64 + 0.5) / m as f64).cos()).collect();
+        let mut filled = 0.0;
+        for p in &pieces {
+            let [a, b] = p.range;
+            let mut samples: Vec<Vec<C64>> = tables.iter().map(|t| vec![C64::ZERO; t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * orders * m * t.rows * t.cols]).collect();
+            for (n, &x) in xs.iter().enumerate() {
+                let (energies, spectra, _, w) = Tables::sample(plan, rest, &used, &s_mats, 0.5 * (a + b) + 0.5 * (b - a) * x, false)?;
+                filled += w;
+                // LV per leg sum and basis vector (rows × |B|), V⁻¹U per amplitude sum and basis vector (|B| × cols).
+                let mut lvs: Vec<Vec<Vec<C64>>> = Vec::with_capacity(grouping.ws.len());
+                for (s, vectors) in grouping.ws.iter().zip(&w_vectors) {
+                    let Some(sp) = spectra[s.block].as_ref() else {
+                        lvs.push(Vec::new());
+                        continue;
+                    };
+                    let (size, rows) = (sp.centre.len(), s.index.len());
+                    filled += (vectors.len() * rows * size * size) as f64;
+                    lvs.push(vectors.iter().map(|l| linalg_product(l, &sp.vectors.data, rows, size, size)).collect());
+                }
+                let mut vus: Vec<Vec<Vec<C64>>> = Vec::with_capacity(grouping.zs.len());
+                for (s, vectors) in grouping.zs.iter().zip(&z_vectors) {
+                    let sp = spectra[s.block].as_ref().expect("a sum's block decomposed");
+                    let (size, cols) = (sp.centre.len(), s.index.len());
+                    filled += (vectors.len() * cols * size * size) as f64;
+                    vus.push(vectors.iter().map(|u| linalg_product(&sp.inverse.data, u, size, size, cols)).collect());
+                }
+                for (out, t) in samples.iter_mut().zip(&tables) {
                     let block = grouping.zs[t.z].block;
                     let sp = spectra[block].as_ref().expect("a sum's block decomposed");
-                    let size = plan.blocks[block].rows.len();
+                    let size = sp.centre.len();
                     let (rows, cols, per) = (t.rows, t.cols, t.rows * t.cols);
                     let rz = zs[t.z].rank;
                     let z0: Vec<f64> = grouping.zs[t.z].index.iter().map(|&col| energies[col] + zs[t.z].f0).collect();
                     let lambda: Vec<C64> = (0..size).map(|k| C64::real(sp.centre[k]) + sp.values[k]).collect();
-                    // L V per leg basis vector (rows × |B|): the identity's V for a lift.
-                    let lv: Vec<Vec<C64>> = match t.w {
-                        Some(w) => w_vectors[w]
-                            .iter()
-                            .map(|l| {
-                                let mut o = vec![C64::ZERO; rows * size];
-                                for i in 0..rows {
-                                    for q in 0..size {
-                                        let x = l[i * size + q];
-                                        if x != C64::ZERO {
-                                            for k in 0..size {
-                                                o[i * size + k] += x * sp.vectors.data[q * size + k];
-                                            }
-                                        }
-                                    }
-                                }
-                                o
-                            })
-                            .collect(),
-                        None => vec![sp.vectors.data.clone()],
+                    let identity = [sp.vectors.data.clone()];
+                    let lv: &[Vec<C64>] = match t.w {
+                        Some(w) => &lvs[w],
+                        None => &identity,
                     };
+                    let vu = &vus[t.z];
                     let rw = lv.len();
-                    // V⁻¹ U per amplitude basis vector (|B| × cols).
-                    let vu: Vec<Vec<C64>> = z_vectors[t.z]
-                        .iter()
-                        .map(|u| {
-                            let mut o = vec![C64::ZERO; size * cols];
-                            for k in 0..size {
-                                for q in 0..size {
-                                    let x = sp.inverse.data[k * size + q];
-                                    if x != C64::ZERO {
-                                        for j in 0..cols {
-                                            o[k * cols + j] += x * u[q * cols + j];
-                                        }
-                                    }
-                                }
-                            }
-                            o
-                        })
-                        .collect();
-                    // The largest ‖(LV)_row‖ and ‖(V⁻¹U)_col‖ over the basis vectors (# The interpolation's bound).
-                    let row_most = lv.iter().flat_map(|l| l.chunks(size)).map(|r| r.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt()).fold(0.0, f64::max);
-                    let col_most = vu.iter().flat_map(|u| (0..cols).map(move |j| (0..size).map(|k| u[k * cols + j].norm_sqr()).sum::<f64>().sqrt())).fold(0.0, f64::max);
-                    *side = side.max(row_most * col_most);
-                    let (mut sums, mut moduli_sums) = (vec![C64::ZERO; orders], vec![0.0; orders]);
+                    let mut sums = vec![C64::ZERO; orders];
                     for kp in 0..rw {
                         for k in 0..rz {
                             for i in 0..rows {
                                 for j in 0..cols {
                                     sums.iter_mut().for_each(|x| *x = C64::ZERO);
-                                    moduli_sums.iter_mut().for_each(|x| *x = 0.0);
                                     for q in 0..size {
                                         let d = (C64::real(z0[j]) - lambda[q]).recip();
                                         let mut x = lv[kp][i * size + q] * vu[k][q * cols + j];
-                                        for (t, a) in sums.iter_mut().zip(moduli_sums.iter_mut()) {
+                                        for t in sums.iter_mut() {
                                             x = x * d;
                                             *t += x;
-                                            *a += x.abs();
                                         }
-                                    }
-                                    for (most, &here) in modulus.iter_mut().zip(&moduli_sums) {
-                                        *most = most.max(here);
                                     }
                                     for (jj, t) in sums.iter().enumerate() {
                                         out[((((kp * rz + k) * orders + jj) * m) + n) * per + i * cols + j] = *t;
@@ -663,89 +812,51 @@ impl Tables {
                             }
                         }
                     }
-                }
-            }
-            // The gaps' lower bounds over the piece (# The bounds).
-            let h = 0.5 * (b - a) * (std::f64::consts::PI / (2.0 * m as f64)).sin();
-            let moving = |z: usize| kappa[grouping.zs[z].block] * slope[grouping.zs[z].block] + b_most;
-            let gaps: Vec<f64> = gaps.iter().enumerate().map(|(z, g)| g - moving(z) * h).collect();
-            // The strict bounds (# The interpolation's bound): per table and term c, ‖D‖ and ‖K‖ at its samples
-            // (`bernstein`), and the samples' rounding carried through the interpolant -- the Lebesgue constant of m
-            // first-kind points, at most (2/π) ln m + 1, and the slope's by Markov's (m − 1)² over the half width.
-            // The piece's worst: per table and term its value's bound over its entries' scale, the J-th weighed by the
-            // reach's ratio to the J (what it adds beside the leading term at the run's fastest atom).
-            let half = 0.5 * (b - a);
-            let lebesgue = 2.0 / std::f64::consts::PI * (m as f64).ln() + 1.0;
-            let (mut bounds, mut worst): (Vec<[f64; 2]>, f64) = (Vec::with_capacity(tables.len() * orders), 0.0);
-            for ((t, modulus), &side) in tables.iter().zip(moduli.chunks(orders)).zip(&sides) {
-                for (jj, &scale) in modulus.iter().enumerate() {
-                    let [value, slope_bound] = bernstein(side, resolvent[t.z], moves[t.z], half, m, jj as i32 + 1);
-                    let rounding = (lebesgue + 1.0) * floor * scale;
-                    bounds.push([value + rounding, slope_bound + ((m - 1) * (m - 1)) as f64 * rounding / half]);
-                    if scale > 0.0 {
-                        worst = worst.max(reach_rho.powi(jj as i32) * (value + rounding) / scale);
-                    }
+                    filled += (rw * rz * rows * cols * size * (orders + 2)) as f64;
                 }
             }
             // Chebyshev coefficients from the samples at the Gauss points.
-            let coefs: Vec<Vec<C64>> = samples
-                .iter()
-                .zip(&tables)
-                .map(|(smp, t)| {
-                    let per = t.rows * t.cols;
-                    let count = smp.len() / (m * per);
-                    let mut coef = vec![C64::ZERO; smp.len()];
-                    for c in 0..count {
-                        for d in 0..m {
-                            let scale = if d == 0 { 1.0 / m as f64 } else { 2.0 / m as f64 };
-                            for (n, x) in xs.iter().enumerate() {
-                                let w = (d as f64 * x.acos()).cos() * scale;
-                                for e in 0..per {
-                                    coef[(c * m + d) * per + e] += smp[(c * m + n) * per + e] * w;
-                                }
+            for (smp, t) in samples.iter().zip(tables.iter_mut()) {
+                let per = t.rows * t.cols;
+                let count = smp.len() / (m * per);
+                let mut coef = vec![C64::ZERO; smp.len()];
+                for c in 0..count {
+                    for d in 0..m {
+                        let scale = if d == 0 { 1.0 / m as f64 } else { 2.0 / m as f64 };
+                        for (n, x) in xs.iter().enumerate() {
+                            let w = (d as f64 * x.acos()).cos() * scale;
+                            for e in 0..per {
+                                coef[(c * m + d) * per + e] += smp[(c * m + n) * per + e] * w;
                             }
                         }
                     }
-                    coef
-                })
-                .collect();
-            let room = moves.iter().map(|k| 1.0 / (k * half)).fold(f64::INFINITY, f64::min);
-            Some((coefs, Piece { range: [a, b], gaps, kappa, worst, bounds, moduli, room }))
-        };
-        // The pieces: halved until their strict bound is within the target, or no longer falls by half (the samples'
-        // rounding reached: # The pieces).
-        let mut todo = vec![(low, 1.0, make(low, 1.0)?)];
-        let mut done: Vec<(Vec<Vec<C64>>, Piece)> = Vec::new();
-        while let Some((a, b, (coefs, piece))) = todo.pop() {
-            if piece.worst <= target {
-                done.push((coefs, piece));
-                continue;
-            }
-            let c = 0.5 * (a + b);
-            // A piece s's round-off cannot halve is taken at its bound (unbounded: read by no node, `read`).
-            if !(c > a && c < b) {
-                done.push((coefs, piece));
-                continue;
-            }
-            let (left, right) = (make(a, c)?, make(c, b)?);
-            if left.1.worst.max(right.1.worst) > 0.5 * piece.worst {
-                done.push((coefs, piece));
-            } else {
-                todo.push((c, b, right));
-                todo.push((a, c, left));
+                }
+                filled += (count * m * m * per) as f64;
+                t.coef.extend_from_slice(&coef);
             }
         }
-        done.sort_by(|x, y| x.1.range[0].total_cmp(&y.1.range[0]));
-        for (coefs, _) in &done {
-            for (t, c) in tables.iter_mut().zip(coefs) {
-                t.coef.extend_from_slice(c);
-            }
-        }
-        let pieces: Vec<Piece> = done.into_iter().map(|x| x.1).collect();
         let bytes = tables.iter().map(|t| t.coef.len() * std::mem::size_of::<C64>()).sum();
-        Some(Tables { degree, orders, pieces, dropped, zs, ws, tables, e_rest: e0, e_slope, build_seconds: clock.elapsed().as_secs_f64(), bytes })
+        Some(Tables { degree, orders, pieces, dropped, zs, ws, tables, e_rest, e_slope, build_seconds: seconds + clock.elapsed().as_secs_f64(), bytes, work: work + filled })
     }
+}
 
+/// a (r × k) times b (k × c), row-major.
+fn linalg_product(a: &[C64], b: &[C64], r: usize, k: usize, c: usize) -> Vec<C64> {
+    let mut o = vec![C64::ZERO; r * c];
+    for i in 0..r {
+        for q in 0..k {
+            let x = a[i * k + q];
+            if x != C64::ZERO {
+                for j in 0..c {
+                    o[i * c + j] += x * b[q * c + j];
+                }
+            }
+        }
+    }
+    o
+}
+
+impl Tables {
     /// The tables' reading at the values `v` (`Reading`; # The bounds): None where s lies outside the pieces, the
     /// piece's gap bound is not positive, or ΔG reaches a gap.
     pub(crate) fn read(&self, plan: &Plan, grouping: &Grouping, v: &Values, scratch: &mut Scratch) -> Option<Reading> {
@@ -781,13 +892,19 @@ impl Tables {
         // ΔG per block (its Frobenius norm and its gradient's): the entries the tables hold at rest, at the point less at
         // the tables' values; per amplitude sum its block's against the sum's gap.
         let (mut moved, mut moved_gradient): (f64, f64) = (0.0, 0.0);
-        let mut sizes: Vec<Option<(f64, f64)>> = vec![None; plan.blocks.len()];
+        // The reading's count (complex multiply-adds): K's shifts -- each diagonal entry's value and gradients, each
+        // state's table energy --, the ratio over the members, ΔG's entries' value and three gradients.
+        let mut work = 4.0 * (plan.diagonal.len() + plan.n) as f64 + REAL * (6 * plan.n + 3 * grouping.zs.iter().map(|z| z.members.len()).sum::<usize>()) as f64;
+        let sizes = &mut scratch.sizes;
+        sizes.clear();
+        sizes.resize(plan.blocks.len(), None);
         for (z, sum) in grouping.zs.iter().enumerate() {
             let b = sum.block;
             if !plan.made(b, true) {
                 continue;
             }
             let (value, gradient) = *sizes[b].get_or_insert_with(|| {
+                work += 8.0 * plan.blocks[b].rest.len() as f64;
                 let (mut value, mut gradient) = (0.0, 0.0);
                 for e in &plan.blocks[b].rest {
                     let (fi, scale) = plan.generator_terms[e.term as usize];
@@ -809,7 +926,7 @@ impl Tables {
             moved = moved.max(size / (gap - size));
             moved_gradient = moved_gradient.max(kappa * gradient / gap);
         }
-        Some(Reading { piece, s, ds, rho, moved, moved_gradient, shift_gradient: de_gradient / least_gap })
+        Some(Reading { piece, s, ds, rho, moved, moved_gradient, shift_gradient: de_gradient / least_gap, work })
     }
 
     /// ΔE_a and its gradient at the values `v`: K's energies there less the tables' E_a(s).
@@ -843,7 +960,7 @@ impl Tables {
             let c = v.coefficients[coefficient];
             (scale * x * c, g.map(|d| scale * d * c))
         };
-        let Scratch { interpolated, phi, psi, psi_most, de, t, dt, px, py, value, slope, grad } = scratch;
+        let Scratch { interpolated, phi, psi, psi_most, de, t, dt, px, py, value, slope, grad, .. } = scratch;
         phi.resize_with(self.ws.len(), Vec::new);
         for (b, phi) in self.ws.iter().zip(phi.iter_mut()) {
             phi.clear();

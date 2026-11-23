@@ -1664,7 +1664,7 @@ fn work_at<'a>(run: &'a Selected, widest: Widest, rated: &'a [Pick<'a>]) -> impl
         let taken: Vec<(f64, Option<f64>)> = rated
             .par_iter()
             .map(|pick| {
-                let from = pick.state.trajectory();
+                let from = pick.state.trajectory(run.version());
                 // The work of the attempts refused on the way, each by what it did (step.rs `Scratch::refused`).
                 let mut refused = 0.;
                 match adapt::halving(from.time, tau, |length| crate::step::priced(run, &from, length, &widest).inspect_err(|_| refused += refused_at(run, &from, length, &widest))) {
@@ -2652,7 +2652,7 @@ fn priced_with(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: 
     let taken: Vec<f64> = rated
         .par_iter()
         .map(|pick| {
-            let mine = pick.state.trajectory();
+            let mine = pick.state.trajectory(model.version());
             let from = if own {
                 mine
             } else {
@@ -3549,6 +3549,7 @@ impl Levels {
 /// (a companion's level takes `Domain::companion`): a hand-out of its own (`run_groups`).
 #[allow(clippy::too_many_arguments)]
 fn level(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau: f64, numbers: &[u64], members: std::ops::Range<u64>, keep: bool, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Part> {
+    run.buy_tables();
     let hand = Hand { groups: numbers, members, shape: Shape::of(plan, keep), record: &|i| trajectory(run, ensemble, domain, tau, plan, keep, i), work: 1. };
     run_groups(&[hand], 0, messages, progress).pop().expect("the hand-out's one level")
 }
@@ -3559,6 +3560,7 @@ fn level(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, tau:
 /// level's); returned in the order of `steps`.
 #[allow(clippy::too_many_arguments)]
 fn levels_of(run: &Selected, ensemble: &Ensemble, domain: &Domain, plan: &Plan, steps: &[(f64, bool)], numbers: &[u64], members: std::ops::Range<u64>, prices: Option<&dyn Fn(f64) -> f64>, messages: &mut Messages, progress: &mut dyn FnMut(&[&Part], &mut Messages)) -> Vec<Vec<Part>> {
+    run.buy_tables();
     let records: Vec<_> = steps.iter().map(|&(step, keep)| move |i| trajectory(run, ensemble, domain, step, plan, keep, i)).collect();
     let hands: Vec<Hand> = steps.iter().zip(&records).map(|(&(step, keep), record)| Hand { groups: numbers, members: members.clone(), shape: Shape::of(plan, keep), record, work: foretold(prices, step) }).collect();
     run_groups(&hands, 0, messages, progress)
@@ -4061,6 +4063,7 @@ fn further_groups(run: &Selected, ensemble: &Ensemble, domain: &Domain, context:
         Hand { groups: &numbers[held..held + took], members: levels.extra_members..GROUP, shape: Shape::of(&context.plan, step < tau), record: &records[0], work: 1. },
         Hand { groups: &numbers[held + took..groups], members: 0..GROUP, shape: Shape::of(&context.plan, step < tau), record: &records[0], work: 1. },
     ];
+    run.buy_tables();
     let mut made = run_groups(&hands, 0, messages, &mut |_, messages| so_far(context, &levels.fine, &[], messages)).into_iter();
     let (rest, whole) = (made.next().expect("the scout's groups' other members"), made.next().expect("the whole groups"));
     absorb(&mut first, rest);
@@ -4114,6 +4117,7 @@ fn foresee(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &Conte
         Hand { groups: numbers, members: 0..1, shape: Shape::of(plan, false), record: &double, work: work(2. * lower) },
     ];
     let further: Vec<&Part> = levels.further[0].iter().collect();
+    run.buy_tables();
     let mut made = run_groups(&hands, 0, messages, &mut |_, messages| so_far(context, &levels.fine, &further, messages)).into_iter();
     let (first, own, double) = (made.next().expect("the scout's pairs at the finer pair's half"), made.next().expect("at the finer"), made.next().expect("at the coarser"));
     let (times, window, scales) = (&plan.reads, plan.window, &context.scales);
@@ -4344,8 +4348,9 @@ impl State {
     }
 
     /// The trajectory at the state, as far as a step from it reads it (`step::priced`): its place, momentum, internal
-    /// state and time, its next jump's threshold, its held forms and its streams.
-    fn trajectory(&self) -> Trajectory {
+    /// state and time, its next jump's threshold, its held forms and its streams; on the model's version `version` (the
+    /// run's now: what its steps would cost).
+    fn trajectory(&self, version: u32) -> Trajectory {
         let Sample { cluster, at, psi } = &self.sample;
         Trajectory {
             r: at.r,
@@ -4365,6 +4370,7 @@ impl State {
             pending: [[0.; 3]; 3],
             booked: [0.; 3],
             forms: self.forms.clone(),
+            version,
         }
     }
 }
@@ -8123,7 +8129,7 @@ mod tests {
                     }
                 }
             };
-            let steps: Vec<(f64, f64, f64)> = picks.iter().map(|p| counted(&p.state.trajectory())).collect();
+            let steps: Vec<(f64, f64, f64)> = picks.iter().map(|p| counted(&p.state.trajectory(run.version()))).collect();
             let made = over_the_run(&picks, picks.iter().zip(&steps).map(|(p, (rate, _, _))| rate + p.jumping), None);
             let [priced, factor] = work_at(&run, widest, &picks)(tau);
             let lengths: Vec<f64> = steps.iter().map(|s| s.1).collect();
@@ -8496,6 +8502,55 @@ mod tests {
         }
         eprintln!("{ends} atoms held to the end, {lost} lost; {most} checkpoints at the most");
         assert!(ends > 0 && lost > 0 && most >= 5, "{ends} held, {lost} lost; {most} checkpoints");
+    }
+
+    /// A trajectory runs on the model's version it started on (step.rs `Dynamics::version`; model/selected.rs, # The
+    /// tables): on PGC3D (200 µs, three starts), one kept before the run buys its tables is made again from its
+    /// checkpoints after it, to the bit, on the fold's own nodes; one started after it is on the tables -- its states
+    /// other than the first's -- and made again on them, to the bit.
+    #[test]
+    fn a_trajectory_is_made_again_on_its_own_version() {
+        let key = |s: &Option<State>| s.as_ref().map(|s| format!("{:?} {} {} {:?}", s.sample, s.index, s.jumps, s.forms));
+        let name = "PGC3D_1ms";
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("requests").join(format!("{name}.json"));
+        let request = Request::from_native(&serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()).unwrap();
+        let b = chief(&request);
+        let (request, run, trap) = scene_run(name, true, b);
+        let domain = Domain { widest: Widest::of(&request) };
+        let speed = thermal(&request, &run);
+        let mut plan = Plan::new(&[0., 100., 200.], trap.lab);
+        let tau = plan.end / 800.;
+        plan.cell = 2. * tau;
+        plan.read_at(grid(plan.end, tau));
+        plan.window = plan.end / 5.3;
+        let starts: Vec<(Start, u64)> = (0..3).map(|a| (Start { state: b, r: trap.centre, kappa: std::array::from_fn(|x| if x == a { speed } else { 0. }) }, (a + 7) as u64)).collect();
+        let before: Vec<Record> = starts.iter().map(|&(start, index)| super::run(&run, &domain, start, index, tau, &plan, true)).collect();
+        let states = |r: &Record| replay(&run, &domain, tau, plan.end, &r.trail, &plan.reads);
+        let made: Vec<Vec<Option<State>>> = before.iter().map(states).collect();
+        assert_eq!(run.version(), 0);
+        assert!(run.buy_tables_now(0.5), "PGC3D's tables");
+        assert_eq!(run.version(), 1);
+        for (r, made) in before.iter().zip(&made) {
+            assert!(r.trail.iter().all(|c| c.trajectory.version == 0));
+            assert!(states(r).iter().zip(made).all(|(x, y)| key(x) == key(y)), "a trajectory of version 0 made again after the tables");
+        }
+        for ((&(start, index), r0), made0) in starts.iter().zip(&before).zip(&made) {
+            let r1 = super::run(&run, &domain, start, index, tau, &plan, true);
+            assert!(r1.trail.iter().all(|c| c.trajectory.version == 1));
+            let again = states(&r1);
+            // The states one advance through the run reads, started now (on version 1).
+            let mut t = Trajectory::new(&run, b, start.r, start.kappa, SEED, index);
+            assert_eq!(t.version, 1);
+            let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
+            let mut direct: Vec<Option<State>> = vec![None; plan.reads.len()];
+            direct[0] = Some(State::of(&t));
+            let advanced = adapt::advance(&run, &domain, tau, &mut t, &mut Scratch::default(), &mut path, plan.end, plan.end, &plan.reads, &mut |k, s, _| direct[k] = Some(State::of(s)), &mut |_, _| {});
+            assert!(advanced.is_ok());
+            assert!(again.iter().zip(&direct).all(|(x, y)| key(x) == key(y)), "a trajectory of version 1 made again");
+            let differ = again.iter().zip(made0).skip(1).filter(|(x, y)| key(x) != key(y)).count();
+            eprintln!("start {index}: version 1's states other than version 0's at {differ} of {} times; jumps {:?} against {:?}", again.len() - 1, r1.end, r0.end);
+            assert!(differ > 0, "the tables were read");
+        }
     }
 
     /// The analysis times' candidates and their reads (module documentation, # The analysis times; `grid`, `analysed`):

@@ -34,9 +34,8 @@ use crate::floquet::Sectors;
 /// The folded blocks tabled in the tweezer's intensity (fold_table.rs).
 #[path = "fold_table.rs"]
 pub(crate) mod table;
-/// The node's contraction off tables of pair products (fold_tabled.rs): built and checked element by element against
-/// the node (model/selected/tabled.rs); no node of a run reads it yet (BRIEF_STEP3 item 4 (b)).
-#[cfg(test)]
+/// The node's contraction off tables of pair products (fold_tabled.rs): what a run's nodes read where it has bought
+/// them (model/selected.rs, # The tables), checked element by element against the node (model/selected/tabled.rs).
 #[path = "fold_tabled.rs"]
 pub(crate) mod tabled;
 /// OLDNEW's budget check (tests alone): where above zero, every folded block's denominators taken as their Doppler

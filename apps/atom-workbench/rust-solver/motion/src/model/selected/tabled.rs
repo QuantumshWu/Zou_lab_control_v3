@@ -163,12 +163,19 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
             v
         };
         let rest = values([0.0; 3], [0.0; 3], &mut work);
-        let reach = values([0.0; 3], [3.0 * v0; 3], &mut work);
+        let reach = run.reach();
         let low = walk.iter().map(|&(r, k)| Tables::intensity(plan, &values(r, k, &mut work))).fold(1.0, f64::min);
-        let Some(tables) = Tables::new(plan, &run.lab, &rest, &reach, orders, degree, low) else {
+        let Some(layout) = Tables::layout(plan, &run.lab, &rest, &reach, orders, degree, low) else {
             eprintln!("TABLED {name}: no tables (a block not tabled)");
             continue;
         };
+        eprintln!("TABLED {name}: the layout {:.3e} counted, the fill priced {:.3e}", layout.work, layout.price);
+        let layout_work = layout.work;
+        let Some(tables) = layout.fill(plan, &run.lab, &rest) else {
+            eprintln!("TABLED {name}: no tables (a block not tabled)");
+            continue;
+        };
+        eprintln!("TABLED {name}: the fill counted {:.3e}", tables.work - layout_work);
         eprintln!(
             "TABLED {name}: built in {:.3} s, {:.2} MB, {} pieces of s on [{low:.4}, 1] at degree {degree} (strict ≤ {:.1e}), the spans' dropped share {:.1e}",
             tables.build_seconds,
@@ -180,19 +187,7 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
         // Per piece the strict bound against the entries' scale, per term (the largest over the tables), beside the
         // coefficients' estimate.
         for p in &tables.pieces {
-            let per: Vec<String> = (0..orders)
-                .map(|jj| {
-                    let (mut v, mut s) = (0.0f64, 0.0f64);
-                    for (b, m) in p.bounds.iter().zip(&p.moduli).skip(jj).step_by(orders) {
-                        if *m > 0.0 {
-                            v = v.max(b[0] / m);
-                            s = s.max(b[1] / m);
-                        }
-                    }
-                    format!("J{jj} {v:.1e}/{s:.1e}")
-                })
-                .collect();
-            eprintln!("TABLED {name} piece [{:.4}, {:.4}]: the singularity {:.1} half widths off; worst {:.1e}; strict over the entries' scale (value/slope) {}", p.range[0], p.range[1], p.room, p.worst, per.join(", "));
+            eprintln!("TABLED {name} piece [{:.4}, {:.4}]: the singularity {:.1} half widths off; worst {:.1e}", p.range[0], p.range[1], p.room, p.worst);
         }
         let making = Making { lift: true, ..Making::node(false) };
         let (mut scratch, mut table_out) = (TableScratch::default(), Out::default());

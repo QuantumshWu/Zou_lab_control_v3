@@ -952,7 +952,7 @@ fn oldnew_jumpnode() {
             ev_nk += least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, no_kicks));
             co_nk += least(&mut || work.out.contract(plan, &run.lab, &work.local, None, no_kicks));
             // The middle's photons on a full node at the point.
-            run.node_into(&mut full, r, kappa, (false, true), false);
+            run.node_into(&mut full, r, kappa, (false, true), false, false);
             let psi = spread(n);
             let norm = norm_sqr(&psi);
             let mut list = Vec::new();
@@ -1098,8 +1098,8 @@ fn oldnew_kernel() {
             let u = i as f64;
             let r = [0.3 * (1.3 * u).sin(), 0.3 * (2.1 * u + 0.4).cos(), 1.0 * (0.7 * u + 1.1).sin()];
             let kappa = [speed * (0.9 * u).sin(), speed * (1.7 * u).cos(), speed];
-            run.node_into(&mut node, r, kappa, (false, true), false);
-            run.node_into(&mut photon_node, r, kappa, (true, false), false);
+            run.node_into(&mut node, r, kappa, (false, true), false, false);
+            run.node_into(&mut photon_node, r, kappa, (true, false), false, false);
             for s in 0..3 {
                 let psi: Vec<C64> = (0..n).map(|k| C64::new((0.7 * (k + s) as f64 + 0.3 * u).sin(), (1.3 * (k * s) as f64 + 0.11 * u).cos())).collect();
                 let norm = norm_sqr(&psi);
