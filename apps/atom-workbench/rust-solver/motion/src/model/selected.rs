@@ -96,11 +96,12 @@
 //! over the reach (‖v‖ times |scale| times the coefficient's largest, every factor at most one), each atom's
 //! coordinates on it, a residual left out where it is at most a tolerance of its kind's largest atom (H's outputs, the
 //! channels'); the photon forms' entries one by one. What a span leaves out is a bound of the generator's change over
-//! the reach -- an H output's left residuals' Σ ‖r‖b (its Frobenius norm, above its sup norm), a channel's 2‖L‖ times
-//! it and its square -- booked with the dropped beats' Y (`Judgment::dropped`, model/classify.rs # The drop tier: the
-//! solve books ½(e^{2YT} − 1)). Which tolerance is the drop tier's rule (`Selected::span_directs`): of none and of
-//! 10⁻ᵏ (k = 2 … 16), the least W -- the node's counted work times the account's factor at Y --, so the budget decides
-//! and a span that costs more than it saves is not taken. (Until 2026-11-23 the entries one by one: PGC3D's 4134
+//! the reach -- an H output's left residuals' Σ ‖r‖b (its Frobenius norm, above its sup norm), a channel's (its
+//! outputs' summed over its beats) 2‖L‖ times it and its square, `Selected::rate` -- booked with the dropped beats' Y
+//! (`Judgment::dropped`, model/classify.rs # The drop tier: the solve books ½(e^{2YT} − 1)). Which tolerance is the
+//! drop tier's rule (`Selected::span_directs`): of none and of 10⁻ᵏ (k = 2 … 16), the least W -- the node's counted
+//! work times the account's factor at Y --, so the budget decides and a span that costs more than it saves is not
+//! taken. (Until 2026-11-23 the entries one by one: PGC3D's 4134
 //! direct entries, 13.5 µs of its 141 µs node; OLDNEW, motion3d_status/rewrite/impl/OLDNEW.report.md §3.1.)
 //!
 //! # Exact blocks
@@ -1027,33 +1028,32 @@ impl Selected {
 
     /// The direct entries spanned (module documentation, # The direct entries spanned): of the lab's grouping's spans
     /// at the tolerances 10⁻ᵏ of each kind's largest atom (k = 2 … 16) and of none, the one of least W -- the drop
-    /// tier's rule, the node's counted work (three nodes a step, the direct part as each does it) times the account's
-    /// factor at the dropped beats' Y and the span's (`Account::factor`) --, set on the grouping. The span's Y: what it
-    /// leaves out of each output, its sup norm's bound -- an H output's the dropped part's Frobenius norm, a channel's
-    /// 2‖L‖ times it and its square, ‖L‖ the output's own bound over the reach (rs/fold.rs `Out::bounds`), the change of
-    /// LρL† and of ½{L†L, ρ} --, summed. Returns it.
+    /// tier's rule, the node's counted work (complex multiply-adds, three nodes a step, the direct part as each does it:
+    /// value and gradients) times the account's factor at the dropped beats' Y and the span's (`Account::factor`) --,
+    /// set on the grouping. The span's Y: what it leaves out of each output bounded (`Selected::rate`). Returns it.
     fn span_directs(&mut self, account: &Account, nodes: f64, base: f64) -> f64 {
-        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
-        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
-        let reach = self.rs.reach(&self.scene, self.hbar_over_mass, (2.0 * depth / self.hbar_over_mass).sqrt());
-        let mut work = Work::default();
-        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
-        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        let (_, coefficients, norms) = self.reach_bounds();
         let plan = self.rs.plan();
-        let (_, channels) = Out::bounds(plan, &self.lab, &plan.reach(&work.local.values, &reach), &reach.coefficients);
-        let frobenius = |b: &[f64]| b.iter().map(|x| x * x).sum::<f64>().sqrt();
         let rate = |spanned: &crate::model::rs::fold::Spanned| -> f64 {
-            spanned.dropped.iter().map(|&(h, o, d)| if h { d } else { 2.0 * frobenius(&channels[o]) * d + d * d }).sum()
+            let (mut h, mut channels) = (vec![0.0; self.lab.outputs.len()], vec![0.0; self.lab.channel_outputs.len()]);
+            for &(is_h, o, d) in &spanned.dropped {
+                if is_h {
+                    h[o] += d;
+                } else {
+                    channels[o] += d;
+                }
+            }
+            self.rate(&h, &channels, &norms)
         };
         // The candidates: none (the entries one by one, nothing left out), then the spans at 10⁻ᵏ.
-        let plain = self.lab.spanned(plan, &reach.coefficients, 0.0).work[0];
-        let mut least = (nodes + 3.0 * crate::decide::COMPLEX * plain) * account.factor(base);
+        let plain = self.lab.spanned(plan, &coefficients, 0.0).work[0];
+        let mut least = (nodes + 3.0 * plain) * account.factor(base);
         crate::prof::note(|| format!("span none: work {plain} W {least:.6e} (nodes {nodes:.0}, factor {:.6e})", account.factor(base)));
         let mut best: Option<(f64, crate::model::rs::fold::Spanned)> = None;
         for k in 2..=16 {
-            let spanned = self.lab.spanned(plan, &reach.coefficients, 10f64.powi(-k));
+            let spanned = self.lab.spanned(plan, &coefficients, 10f64.powi(-k));
             let y = rate(&spanned);
-            let w = (nodes + 3.0 * crate::decide::COMPLEX * spanned.work[1]) * account.factor(base + y);
+            let w = (nodes + 3.0 * spanned.work[1]) * account.factor(base + y);
             crate::prof::note(|| format!("span 1e-{k}: directions {} work {} Y {y:.3e} W {w:.6e} (factor {:.6e})", spanned.spans.iter().map(|d| d.basis.len()).sum::<usize>(), spanned.work[1], account.factor(base + y)));
             if w < least {
                 least = w;
@@ -1070,6 +1070,48 @@ impl Selected {
                 0.0
             }
         }
+    }
+
+    /// The reach's bounds the judgment's later parts weigh (# The direct entries spanned): the folded blocks' amplitudes
+    /// over the reach (`Plan::reach`, the structure's point's frequencies), the reach's coefficients' largest, and per
+    /// channel output its channel's ‖L‖ bounded -- the channel (emission axis, fast index) its value outputs' Frobenius
+    /// bounds summed over its beats (rs/fold.rs `Out::bounds`).
+    fn reach_bounds(&self) -> (Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
+        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
+        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
+        let reach = self.rs.reach(&self.scene, self.hbar_over_mass, (2.0 * depth / self.hbar_over_mass).sqrt());
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        let plan = self.rs.plan();
+        let moduli = plan.reach(&work.local.values, &reach);
+        let (_, channels) = Out::bounds(plan, &self.lab, &moduli, &reach.coefficients);
+        let outputs = &self.lab.channel_outputs;
+        let mut whole: HashMap<(usize, [i64; 2]), f64> = HashMap::new();
+        for (o, (q, fast, which, ..)) in outputs.iter().enumerate() {
+            if *which == 0 {
+                *whole.entry((*q, *fast)).or_insert(0.0) += channels[o].iter().map(|x| x * x).sum::<f64>().sqrt();
+            }
+        }
+        let norms = outputs.iter().map(|(q, fast, ..)| whole.get(&(*q, *fast)).copied().unwrap_or(0.0)).collect();
+        (moduli, reach.coefficients, norms)
+    }
+
+    /// The rate Y of a change of the node's outputs by at most `h` (per H output, a bound of its Frobenius norm) and
+    /// `channels` (per channel output, likewise), the drop tier's (model/classify.rs, # The drop tier:
+    /// ‖(𝓛′ − 𝓛)ρ‖₁ ≤ 2Y‖ρ‖₁): ‖δH_eff‖ at most Σ h over the outputs (one a beat); per channel (emission axis, fast index)
+    /// δ its value outputs' sum and ‖L‖ its bound (`reach_bounds`), LρL† and ½{L†L, ρ} each moved by at most
+    /// (2‖L‖δ + δ²)‖ρ‖₁. The photon forms' outputs add none: what a jump reads off them is the state's, which D bounds.
+    fn rate(&self, h: &[f64], channels: &[f64], norms: &[f64]) -> f64 {
+        let outputs = &self.lab.channel_outputs;
+        let mut per: HashMap<(usize, [i64; 2]), (f64, f64)> = HashMap::new();
+        for (o, (q, fast, which, ..)) in outputs.iter().enumerate() {
+            if *which == 0 && channels[o] > 0.0 {
+                let e = per.entry((*q, *fast)).or_insert((0.0, norms[o]));
+                e.0 += channels[o];
+            }
+        }
+        h.iter().sum::<f64>() + per.values().map(|&(d, l)| 2.0 * l * d + d * d).sum::<f64>()
     }
 
     /// The run's judgment of its node's beats (model/classify.rs): per slot of the structure's node, before the beats
