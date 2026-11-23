@@ -185,6 +185,14 @@ fn oldnew_jumps() {
 fn oldnew_solve() {
     let name = std::env::var("OLDNEW_REQ").expect("OLDNEW_REQ");
     let request = request_of(&name);
+    // OLDNEW's budget check: the quadrature and the cuts at a tolerance in place of the round-off (step.rs `QUAD_TOL`).
+    // And the folded blocks' Doppler series truncated (rs/fold.rs `DOPPLER_ORDERS`).
+    if let Ok(x) = std::env::var("OLDNEW_DOPPLER_ORDERS") {
+        crate::model::rs::fold::DOPPLER_ORDERS.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Ok(x) = std::env::var("OLDNEW_QUAD_TOL") {
+        crate::step::QUAD_TOL.store(x.parse::<f64>().unwrap().to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
     let (clock, cpu0) = (Instant::now(), process_cpu());
     let mut last = String::new();
     let solution = crate::solve::solve(&request, &mut |m| {
@@ -199,6 +207,18 @@ fn oldnew_solve() {
     .unwrap();
     let (wall, cpu) = (clock.elapsed().as_secs_f64(), process_cpu() - cpu0);
     let end = solution.temperature_uk.len() - 1;
+    // The readings at the end and their estimated errors: F = 1's and F = 2's populations, the loss, T_total.
+    let p = &solution.populations[end];
+    let f1: f64 = (0..3).map(|i| p[i]).sum();
+    let f2: f64 = (3..8).map(|i| p[i]).sum();
+    eprintln!(
+        "OLDNEW-READ {name}: F=1 {f1:.5}, F=2 {f2:.5} (estimated error {:.3e}); loss {:.4e}; T_total {:.3} ± {:.3} µK; ledger totals {:?}",
+        solution.estimated_errors[end],
+        solution.loss_probability[end],
+        solution.temperature_total_uk[end],
+        solution.temperature_total_errors_uk[end].unwrap_or(f64::NAN),
+        solution.approximations.totals
+    );
     eprintln!(
         "OLDNEW-SOLVE {name}: wall {wall:.2} s, CPU {cpu:.2} s, threads {}, {} trajectories, tau {:.5} µs; T at the end {:?} µK, total {:.2}; loss {:.3e}",
         rayon::current_num_threads(),
