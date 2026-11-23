@@ -2351,6 +2351,68 @@ mod tests {
         assert_eq!(calls.borrow().2.len(), before + 2, "the operator's Check asks each again");
     }
 
+    /// The questions sent since `before`, by name.
+    fn asked_since(calls: &Rc<RefCell<Calls>>, before: usize) -> Vec<String> { calls.borrow().2[before..].iter().map(|(query, ..)| query.clone()).collect() }
+
+    /// The camera, a tunable device the node does not name, changes: only the editor is asked, and
+    /// the plugin refuses it (its host has too many calls pending). Nothing of the node is in flight
+    /// then; a Start asks it again, and goes once it is answered.
+    #[test]
+    fn a_refused_question_with_nothing_else_in_flight_is_asked_again_by_a_start() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("stranded", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        let revision = wb.node_row(wb.node("lanes").unwrap(), &[])["draft_revision"].as_u64().unwrap();
+        let before = calls.borrow().2.len();
+        event(&mut wb, Event::Facts { instance: "mot_camera".into(), facts: json!({"temperature": 21}) }, &mut host);
+        assert_eq!(asked_since(&calls, before), ["editor_facts"]);
+        let refused = asked(&calls, "editor_facts");
+        event(&mut wb, Event::Unanswered { ticket: refused, error: "refused: the plugin has too many pending calls".into() }, &mut host);
+        let started = apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap();
+        assert_eq!(started["phase"], "checking");
+        let again = asked(&calls, "editor_facts");
+        assert_ne!(again, refused, "the Start asks it again");
+        event(&mut wb, Event::Answered { ticket: again, result: Ok(json!({})) }, &mut host);
+        assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"));
+    }
+
+    /// What the plugin refused is asked again once the node's plugin answers anything of it -- here
+    /// an estimate: its queue moves.
+    #[test]
+    fn any_answer_of_the_nodes_plugin_asks_again_what_it_refused() {
+        let mut queries = LANES.to_vec();
+        queries.push("estimate_run");
+        let (_root, mut wb, calls, mut host) = lanes_rig("resumed", json!(queries));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        event(&mut wb, Event::Facts { instance: "mot_camera".into(), facts: json!({"temperature": 21}) }, &mut host);
+        let refused = asked(&calls, "editor_facts");
+        event(&mut wb, Event::Unanswered { ticket: refused, error: "refused: the plugin has too many pending calls".into() }, &mut host);
+        assert_eq!(asked(&calls, "editor_facts"), refused);
+        wb.apply("estimate_node", &json!({"node": "lanes"}), &Origin::Operator, 9, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked(&calls, "estimate_run"), result: Ok(json!({"status": "ok"})) }, &mut host);
+        assert_ne!(asked(&calls, "editor_facts"), refused);
+    }
+
+    /// A Start waits for a question the plugin refuses, asked again by the Start and refused again.
+    /// The bench then goes back to what the standing answer was told: it stands, nothing is asked,
+    /// and the Start goes.
+    #[test]
+    fn a_bench_change_that_brings_back_the_standing_answer_starts_a_waiting_start() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("restamped", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        let revision = wb.node_row(wb.node("lanes").unwrap(), &[])["draft_revision"].as_u64().unwrap();
+        event(&mut wb, Event::Facts { instance: "mot_camera".into(), facts: json!({"temperature": 21}) }, &mut host);
+        let refused = |wb: &mut Workbench, host: &mut FakeHost| event(wb, Event::Unanswered { ticket: asked(&calls, "editor_facts"),
+            error: "refused: the plugin has too many pending calls".into() }, host);
+        refused(&mut wb, &mut host);
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap()["phase"], "checking");
+        refused(&mut wb, &mut host);
+        let before = calls.borrow().2.len();
+        // The camera's facts go back to what the editor's standing answer was told.
+        event(&mut wb, Event::Facts { instance: "mot_camera".into(), facts: Value::Null }, &mut host);
+        assert_eq!(asked_since(&calls, before), ["prepare_run"], "it stands: nothing is asked but the Start's preparation");
+        assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());

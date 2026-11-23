@@ -248,10 +248,10 @@ pub type DiagnosticData = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 #[derive(Clone, Debug)]
 pub(crate) enum Ticket {
     Prepare { node: String, frozen: logic::Frozen, origin: String, acquisition: Option<(String, u64, String)> },
-    Discard,
+    Discard { node: String },
     /// One of a node's questions of its kind `name` (`logic::Ask`): what it asked is its flight's.
     Query { node: String, name: String },
-    Estimate { request: u64 },
+    Estimate { node: String, request: u64 },
     Fields { device: String, request: Option<u64> },
     Tune { device: String, request: u64 },
     Command { request: u64 },
@@ -281,6 +281,17 @@ pub(crate) enum Ticket {
     DraftFiles { node: String, key: Value, start: bool },
     /// The device node owning a serial port a row met refused, restarted (`restart_serial_port`).
     Restart { device: String, port: String, request: u64 },
+}
+
+impl Ticket {
+    /// The node whose plugin answers it.
+    fn node(&self) -> Option<&str> {
+        match self {
+            Ticket::Prepare { node, .. } | Ticket::Discard { node } | Ticket::Query { node, .. } | Ticket::Estimate { node, .. }
+                | Ticket::Selection { node, .. } => Some(node),
+            _ => None,
+        }
+    }
 }
 
 pub struct Workbench {
@@ -603,7 +614,7 @@ impl Workbench {
             Event::Opened { instance, working_point } => self.instance_opened(&instance, working_point, host),
             Event::Failed { instance, error } => self.instance_failed(&instance, error, host),
             Event::Closed { instance, error } => self.instance_closed(&instance, error, host),
-            Event::Facts { instance, facts } => self.device_facts(&instance, facts),
+            Event::Facts { instance, facts } => self.device_facts(&instance, facts, host),
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
             Event::Unanswered { ticket, error } => self.unanswered(ticket, error, host),
             Event::Lifecycle { current, revision, event } => {
@@ -659,13 +670,21 @@ impl Workbench {
         log
     }
 
+    /// An answer: what it was for takes it. One of a node's plugin moves its queue: what waits to
+    /// be asked of the node goes.
     fn answered(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
+        let lane = self.tickets.get(&ticket).and_then(Ticket::node).map(str::to_owned);
+        self.take_answer(ticket, result, host);
+        if let Some(node) = lane { self.resume_asks(&node); }
+    }
+
+    fn take_answer(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
         let Some(purpose) = self.tickets.remove(&ticket) else { return };
         match purpose {
             Ticket::Prepare { node, frozen, origin, acquisition } => self.prepared(&node, ticket, frozen, origin, acquisition, result, host),
-            Ticket::Discard => {},
+            Ticket::Discard { .. } => {},
             Ticket::Query { node, name } => self.query_answered(&node, ticket, &name, result, host),
-            Ticket::Estimate { request } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
+            Ticket::Estimate { request, .. } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
             Ticket::Fields { device, request } => {
                 if self.devices.get(&device).is_none_or(|live| live.fields_ticket != Some(ticket)) {
                     if let Some(request) = request { self.replies.push((request, Err("This device reading was superseded; read the current device again.".into()))); }
@@ -709,7 +728,7 @@ impl Workbench {
                 self.tickets.remove(&ticket);
                 self.query_unanswered(&node, ticket, &name);
             }
-            _ => self.answered(ticket, Err(error), host),
+            _ => self.take_answer(ticket, Err(error), host),
         }
     }
 

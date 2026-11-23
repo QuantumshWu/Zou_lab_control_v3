@@ -101,7 +101,7 @@ pub(crate) struct Ask {
     /// In flight: its ticket and question.
     flying: Option<(u64, Question)>,
     /// To ask once the one in flight lands; or not answered (refused, expired, lost), asked again
-    /// once the plugin answers anything or opens again.
+    /// once the node's plugin answers anything of it, a Start waits for it, or its instance opens.
     waiting: Option<Question>,
     /// The check the newest answer was asked in, and what it was told.
     told: Option<(u64, Value)>,
@@ -582,8 +582,9 @@ impl Workbench {
         if let Ok(node) = self.node_mut(id) { node.asks.entry(name.to_owned()).or_default().flying = Some((ticket, question)); }
     }
 
-    /// The node's plugin answered: its queue moves, and what waits to be asked of it goes.
-    fn resume_asks(&mut self, id: &str) {
+    /// What waits to be asked of the node goes: its plugin answered something of it (its queue
+    /// moves), or a Start waits for it.
+    pub(crate) fn resume_asks(&mut self, id: &str) {
         let Some(node) = self.node(id) else { return };
         let waiting: Vec<String> = node.asks.iter().filter(|(_, ask)| ask.flying.is_none() && ask.waiting.is_some()).map(|(name, _)| name.clone()).collect();
         for name in waiting { self.send_waiting(id, &name); }
@@ -676,7 +677,7 @@ impl Workbench {
     /// every draft that names devices is checked again when it differs from what was known. A change of
     /// who holds it (`held_by`: another client of a board's own pulse server; null: this application)
     /// is the Device Manager's line as well.
-    pub(crate) fn device_facts(&mut self, instance: &str, facts: Value) {
+    pub(crate) fn device_facts(&mut self, instance: &str, facts: Value, host: &mut dyn Host) {
         let Some(live) = self.devices.get_mut(instance) else { return };
         if !live.working_point.is_object() || live.working_point["facts"] == facts { return; }
         let held_by = (live.working_point["facts"]["held_by"] != facts["held_by"]).then(|| facts["held_by"].as_str().map(str::to_owned));
@@ -685,7 +686,7 @@ impl Workbench {
             let role = live.entry.role.clone();
             self.report = match held_by { Some(holder) => (format!("{role}: held by {holder}"), "warning"), None => (format!("{role}: held here again"), "task") };
         }
-        self.bench_changed();
+        self.bench_changed(host);
     }
 
     /// The bench changed (a device opened, failed, closed, its facts, or an Apply): every draft
@@ -693,8 +694,9 @@ impl Workbench {
     /// tunes; an editor also every tunable device of the bench). A node that names one, and every
     /// node with an editor, checks its draft again: the same draft, a new check. An answer given
     /// before the change (a camera not yet open when a layout loaded) does not stand after it; a
-    /// query the change tells nothing new is not asked again.
-    pub(crate) fn bench_changed(&mut self) {
+    /// query the change tells nothing new is not asked again. Then each Start waiting for its check
+    /// goes, or says why it cannot: the bench as it is now may have completed it.
+    pub(crate) fn bench_changed(&mut self, host: &mut dyn Host) {
         let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
             || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == EDITOR_FACTS)))
             .map(|node| node.id.clone()).collect();
@@ -702,6 +704,8 @@ impl Workbench {
             if let Ok(node) = self.node_mut(&id) { node.check += 1; }
             self.send_queries(&id);
         }
+        let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
+        for node in waiting { self.start_checked(&node, host); }
     }
 
     /// The devices the draft itself names (`resolve_device_claims`: a scan's device
@@ -792,13 +796,12 @@ impl Workbench {
             for reader in readers { self.send_queries(&reader); }
         }
         if readmit { self.ask_queries(id, Some(&[ADMIT])); }
-        self.resume_asks(id);
         self.start_checked(id, host);
     }
 
     /// A question its plugin's code did not answer -- refused or expired before it ran, timed out,
-    /// its channel lost: no answer, and the one that stood stands. It waits to be asked again until
-    /// the node's plugin answers anything, or opens again.
+    /// its channel lost: no answer, and the one that stood stands. It waits to be asked again: once
+    /// the node's plugin answers anything of it, a Start waits for it, or its instance opens.
     pub(crate) fn query_unanswered(&mut self, id: &str, ticket: u64, name: &str) {
         let Ok(node) = self.node_mut(id) else { return };
         let stamp = node.stamp();
@@ -988,7 +991,6 @@ impl Workbench {
         let Some(ask) = node.asks.get_mut(SELECTION) else { return };
         let Some((_, asked)) = ask.flying.take_if(|(flying, _)| *flying == ticket) else { return };
         let current = ask.waiting.is_none() && asked.stamp.0 == revision;
-        self.send_waiting(id, SELECTION);
         if !current || self.routed_selections.get(panel) != Some(selection) { return; }
         let patch = match result {
             Ok(Value::Object(patch)) => patch,
@@ -1222,6 +1224,8 @@ impl Workbench {
             if !issues.is_empty() && issues.iter().all(|issue| waiting(issue)) {
                 self.cancel_start(id, "superseded by another Start");
                 self.node_mut(id)?.start_after_check = Some((origin.to_owned(), acquisition));
+                // A Start is a boundary, as a Check is: what waits to be asked goes.
+                self.resume_asks(id);
                 return Ok(json!({"node": id, "phase": "checking"}));
             }
             if let Some(first) = issues.first() {
@@ -1317,7 +1321,7 @@ impl Workbench {
     }
 
     fn discard_prepared(&mut self, id: &str, prepared: &str) {
-        let ticket = self.ticket(Ticket::Discard);
+        let ticket = self.ticket(Ticket::Discard { node: id.to_owned() });
         self.plugins.call(&node_instance(id), ticket, "run.discard", &json!({"prepared": prepared}));
     }
 
@@ -1619,7 +1623,7 @@ impl Workbench {
             return Ok(());
         }
         let args = json!({"values": self.draft_values(node), "devices": self.device_infos(&node.draft.device_keys), "resources": node.resources});
-        let ticket = self.ticket(Ticket::Estimate { request });
+        let ticket = self.ticket(Ticket::Estimate { node: id.to_owned(), request });
         self.plugins.query(&node_instance(id), ticket, "estimate_run", &args);
         Ok(())
     }
@@ -1637,11 +1641,9 @@ impl Workbench {
             }
         } else if self.device_opened(instance, working_point) {
             self.default_device_keys(instance);
-            self.bench_changed();
             self.launch_pending(host);
             // Starts that waited for this device go now.
-            let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
-            for node in waiting { self.start_checked(&node, host); }
+            self.bench_changed(host);
         }
     }
 
@@ -1667,13 +1669,11 @@ impl Workbench {
     pub(crate) fn instance_failed(&mut self, instance: &str, error: String, host: &mut dyn Host) {
         let Some(id) = instance.strip_prefix(NODE_INSTANCE) else {
             if self.device_failed(instance, error) {
-                self.bench_changed();
                 self.cancel_device_starts(instance, "a required device failed");
                 for node in self.claiming_nodes(instance) { self.stop_run_of(&node, "its device failed", None); }
                 self.close_released();
                 // A Start that waited for this device now says why it cannot.
-                let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
-                for node in waiting { self.start_checked(&node, host); }
+                self.bench_changed(host);
             }
             return;
         };
@@ -1688,7 +1688,7 @@ impl Workbench {
     pub(crate) fn instance_closed(&mut self, instance: &str, error: Option<String>, host: &mut dyn Host) {
         match instance.strip_prefix(NODE_INSTANCE) {
             Some(id) => if let (Ok(node), Some(error)) = (self.node_mut(id), error) { node.instance = Instance::Failed(error); },
-            None => if self.device_closed(instance, error) { self.bench_changed(); self.launch_pending(host); },
+            None => if self.device_closed(instance, error) { self.launch_pending(host); self.bench_changed(host); },
         }
     }
 
