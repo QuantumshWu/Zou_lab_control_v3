@@ -9,7 +9,8 @@ from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.nodes.scan.plan import (PortGrid, ScanPlan, api_scan_ports_for, bind_plan, plan_from_authored, plan_input_rows,
                                      scan_ports_for_devices)
 from zlc_atom.nodes.scan.editor import scan_editor_facts
-from zlc_atom.nodes.seamless_scan.logic_node import _editor_facts
+from zlc_atom.nodes.seamless_scan.logic_node import SEAMLESS_SCAN_SCHEMA, _admit_resources, _editor_facts, _estimate_run
+from zlc_atom.nodes.scan.plan import SEAMLESS_PULSE_RESOURCE
 from zlc_plugin import PluginError
 
 VISA = 'VI_ERROR_SYSTEM_ERROR (-1073807360): Unknown system error'
@@ -126,6 +127,21 @@ class ScanEditorFacts(unittest.TestCase):
         # The editor reads the knob in its own unit, a Start in the plan's: both play 1 kHz and 2.5 kHz.
         self.assertEqual(plan_from_authored(plan, (own,)).axes[0].values, (1.0, 2.5))
         self.assertEqual(plan_from_authored(plan, (start,)).axes[0].values, (1.0, 2.5))
+
+    def test_the_draft_and_the_estimate_read_the_plan_as_a_start_plays_it(self):
+        # A count following a manual knob by x: at 1.0 and 1.4 it is a count of 1 both times.
+        plan = json.dumps({'axes': [{'port': 'manual:power', 'unit': '', 'values': [1.0, 1.4, 1.6], 'link_enabled': True,
+                                     'links': [{'port': 'api:bracket_count:loop', 'mode': 'formula', 'formula': 'x', 'unit': 'count'}]}]})
+        values = {'plan': plan, 'api_values': '', 'repeats': 1, 'shots_per_point': 1}
+        resources = {SEAMLESS_PULSE_RESOURCE.field_name: REPEATS}
+        SEAMLESS_SCAN_SCHEMA.validator(values)  # as written, the plan reads
+        issues = _admit_resources(values, resources)
+        self.assertEqual(len(issues), 1, issues)
+        self.assertIn("its knob's grid made them one", issues[0])
+        estimate = _estimate_run(values, {}, resources)
+        self.assertEqual((estimate['status'], estimate['reason']), ('unknown', issues[0]))
+        fine = {**values, 'plan': json.dumps({'axes': [{'port': 'api:bracket_count:loop', 'unit': 'count', 'values': [1.4, 2.6]}]})}
+        self.assertEqual(_admit_resources(fine, resources), ())
 
 
 if __name__ == '__main__':
