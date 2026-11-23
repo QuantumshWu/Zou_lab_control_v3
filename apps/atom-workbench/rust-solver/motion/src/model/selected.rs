@@ -141,6 +141,13 @@
 //!   were taken out, none.) Measured against the whole model's Lindbladian at a point at rest, the jumps averaged
 //!   (`the_turn_s_remainder_with_jumps`, 1 ms): the remainder does not grow -- 3e-6 to 1.3e-4 of trace distance at 1 ms
 //!   against Y₃·1 ms of 1.7e-5 (PGC3D), 2.6e-4 (TET), 1.7e-2 (tilt0) --: strict, 30 to 500 times above what it bounds.
+//! Dormant (2026-11-23, `turning`): a turned step takes 4–18 % longer on PGC3D, TET and tilt2 -- the turned node
+//! 35–55 %, a jump's photon node made whole for its S 60–90 %, the scattered light on the places the turn adds 2.3–5.9
+//! times, against 30–95 µs the integration saves --; tilt0 saves 25 % but its remainder's bound, 300 times what it
+//! bounds, leaves no room; and a turned model keeps the trace to its second order alone, a mode the selection's memory
+//! reads (paths.rs `memory`). What it lacks to pay: a jump's S from the H outputs between the parts and on the diagonal
+//! alone (not a whole node), the places the turn adds laid in their rows (not after a component's), the trace kept (or
+//! the memory telling its mode), and for tilt a bound of the remainder within reach of what it bounds.
 //! The run books D = 2 max frame + ½(e^{2 max Y₃ T} − 1) on what is shown and the remainder's part alone on T, over the
 //! nodes it made -- strict at every node walked, the time's integral taken as the largest rate times T.
 //! Which parts are turned is the drop tier's rule (`Selected::turn_parts`), on the run made whole: in the order of
