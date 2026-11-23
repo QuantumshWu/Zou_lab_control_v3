@@ -140,7 +140,7 @@ draws it in place of the fields it manages and writes them back with `edit_node`
 holds no rule of the node's (the model says what is offered, derived, kept or wrong).
 `source` is the node's source frames `[axis_name | null, [labels...]]` or null.
 Kinds: `scan_plan` (seamless scan, `scan/editor.py`: `ports [{port, label, unit, lo,
-hi, current, integer, display_unit, group, leaf, units, families, limits, currents}]` --
+hi, current, grid {step, ties, whole} | null, display_unit, group, leaf, units, families, limits, currents}]` --
 `current` where the knob stands in its unit (a slot's value in the pulse, this run's
 API value, the device's reading; null when nothing says), the editor's first sweep
 around it; `limits`/`currents` its limits and reading in each spelling no decimal
