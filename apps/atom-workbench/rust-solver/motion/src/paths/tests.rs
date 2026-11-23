@@ -258,7 +258,7 @@ fn paths_replay() {
                     x.into_iter().map(|y| y.1.clone()).collect()
                 };
                 let wins: Vec<(f64, f64)> = edges.windows(2).map(|e| (t0 + e[0], t0 + e[1])).collect();
-                let result = compare(&of(ma), &of(mb), &wins, &request.states, runs[0].hbar_over_mass());
+                let result = compare(&of(ma), &of(mb), &wins, &request.states, runs[0].hbar_over_mass(), &[]);
                 for w in &result {
                     eprintln!("{pair} {}", summary(w, &request.states));
                 }

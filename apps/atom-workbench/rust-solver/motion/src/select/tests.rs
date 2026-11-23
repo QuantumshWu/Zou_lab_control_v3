@@ -69,6 +69,8 @@ fn select_the_direct_part_by_hand() {
         late: vec![window(900.0, 910.0, 9e-3), window(910.0, 1000.0, 2e-3)],
         calibration: Calibration { rows: 1e-5, rate: 0.0 },
         escape: None,
+        statistics: None,
+        stationary: None,
         region: Region::NONE,
         seconds: 0.0,
         products: 0,
@@ -88,7 +90,7 @@ fn select_the_direct_part_by_hand() {
 fn select_the_direct_part_at_the_paths_statistics() {
     let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
     let at = |w: Window, upper: bool| {
-        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, region: Region::NONE, seconds: 0.0, products: 0 };
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 };
         direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, upper).expect("the window read")
     };
     let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
@@ -117,11 +119,11 @@ fn select_the_motion_by_hand() {
         paths: 4,
         heating: [even(0.01); 3],
         energy_rate: [even(1e-3), even(0.0), even(0.0)],
-        energy_rates: vec![[1e-3, 0.0, 0.0]; 4],
+        energy_rates: (0..4).map(|k| (k, [1e-3, 0.0, 0.0], [0.01; 3])).collect(),
         force: [even(0.0), even(0.0), even(2.0)],
         ..Window::default()
     };
-    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), region: Region::NONE, seconds: 0.0, products: 0 };
+    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 };
     let hm = 7.3e-4;
     let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05] };
     let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, true).expect("read");

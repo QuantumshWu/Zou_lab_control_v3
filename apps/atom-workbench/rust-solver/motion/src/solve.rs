@@ -2694,6 +2694,14 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let available = fine.iter().flat_map(|p| p.trails.iter()).filter(|t| !t.is_empty()).count();
     let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
     let (head, mut doubled, mut count) = (report, Vec::<String>::new(), WALKS.min(available));
+    // A test's fixed count of paths (`SEL_WALKS`): that many, never doubled (the measurements' probe).
+    #[cfg(test)]
+    let pinned = std::env::var("SEL_WALKS").ok().map(|w| w.parse::<usize>().expect("SEL_WALKS: a count").min(available));
+    #[cfg(not(test))]
+    let pinned: Option<usize> = None;
+    if let Some(w) = pinned {
+        count = w;
+    }
     loop {
         let mut report = head.clone();
         report.extend(doubled.iter().cloned());
@@ -2868,7 +2876,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // stands, said.
         let open: Vec<String> = weighed.iter().filter(|w| w.open).map(|w| format!("P{}", w.judged.keep.len())).collect();
         if !open.is_empty() {
-            if count < available {
+            if count < available && pinned.is_none() {
                 let next = (2 * count).min(available);
                 doubled.push(format!("{count} 条路径上 {} 够用与否在路径的统计（t 分布，自由度为窗内路径数减一）下定不下来：路径加倍到 {next} 条，候选重判", open.join("、")));
                 count = next;
@@ -2971,11 +2979,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 String::new()
             } else {
                 format!(
-                    "；运动：丢失 {:.2e}（x {}）、总 T {:.2} µK（各方向 {} µK，不记账）、推力 {} µm/µs²、平均速度 {} m/s",
+                    "；运动：丢失 {:.2e}（x {}）、总 T {:.2} µK（各方向 {} µK，不记账；落点检查的 Q 候选 / 参照 {}）、推力 {} µm/µs²、平均速度 {} m/s",
                     most(&|m| m.loss),
                     w.judged.escape.as_ref().map_or("—".to_string(), |(x, n)| format!("{:+.3} ± {:.3}，{n} 条", x.value, x.error)),
                     most(&|m| m.temperature_total),
                     axes(&|m, a| m.temperature[a]),
+                    w.judged.statistics.map_or("—".to_string(), |[c, r]| format!("{c:+.3} / {r:+.3}")),
                     axes(&|m, a| m.push[a]),
                     axes(&|m, a| m.velocity[a])
                 )

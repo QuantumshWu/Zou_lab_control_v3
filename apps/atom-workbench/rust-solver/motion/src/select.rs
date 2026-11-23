@@ -109,6 +109,15 @@
 //!   nought), so δE_a(t) = δP_a (1 − e^{−α_a t})/α_a: δT_a = δP_a t/k_B on an axis that does not cool (α = 0: x t Ṫ of
 //!   the heating's x), δT_a/T_a = δP_a/H_a at the steady state (x_D − x_α: the heating's relative difference less the
 //!   friction's, the work's difference over the friction's power, which is H_a there).
+//! - **The photons' statistics and the force's fluctuations** (paths.rs # The landing check): at each window's last
+//!   reading that leaves it room, the reference's state mapped to its landing after a jump, each model on from there --
+//!   its Mandel Q, of the directed absorbed part its jumps carry --, and each model's force correlation's diffusion at
+//!   its own state there, in its heating (`Paths::landings`, `judge`: SAT_03's resonant two-level cycle, the reference's
+//!   Q = −0.53, the full-ground model's 0; the latter heats the push axis 2.1 times as much, Study A's prediction 2.10
+//!   of the measured 1.80 ± 0.5).
+//! - T's rates are each path's over its whole stretches past the memory time (`Stationary`): a window shorter than the
+//!   motion's periods holds the conservative exchange, bounded over any time, which a short window's rate times an
+//!   axis's whole response would take for heating.
 //! - **The loss**: an atom is lost where its energy reaches the escape value; the energy rate's relative difference x
 //!   moves its time by x of it, δL(t) = x t L̇(t). x is the lost atoms' own: per lost path its mean energy rate's
 //!   difference Σ_a (δH_a + δF_a v_a) over the energy it gained to its loss per µs, (E(loss) −
@@ -519,8 +528,26 @@ pub struct Paths<'a> {
     pub booked: f64,
     /// The reference's largest trace defect over its stretches at the setting (paths.rs `Series::trace_defect`).
     pub trace: f64,
+    /// The landing check (module documentation, # The motion): per stretch -- the walks' starts, then their late
+    /// segments -- its landings with the reference's excess photons and impulse; and the check's span and the fastest
+    /// excited decay (paths.rs `Form::optical`; none of a reference without excited states).
+    pub landings: Vec<Vec<Landing>>,
+    pub optical: Option<(f64, f64)>,
     pub seconds: f64,
     pub products: u64,
+}
+
+/// A landing of the landing check (module documentation, # The motion): its time, the reference's landed ground state
+/// (by the request's ground states, its trace one), the reference's excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and impulse
+/// ∫(F(τ|L) − F̄)dτ (1/µm) from it (paths.rs `Form::landing`), and the reference's force correlation's diffusion at
+/// its own state there (paths.rs `Form::diffusion`; none where its frozen generator has no inverse there).
+#[derive(Clone, Debug)]
+pub struct Landing {
+    pub t: f64,
+    pub landed: [[C64; GROUND]; GROUND],
+    pub photons: f64,
+    pub impulse: V3,
+    pub diffusion: Option<V3>,
 }
 
 /// The paths' scheme as settled (`settle`; module documentation, # The paths): its setting, the calibration's opening (µs), the
@@ -765,9 +792,25 @@ impl<'a> Paths<'a> {
         let pool = Instant::now();
         #[cfg(test)]
         let _ = crate::paths::freeze_parts();
-        // One job a walk's start but the calibration's walk's (the setting's own run there) and its end; on the pool.
+        // One job a walk's start and its end, the calibration's walk's too (the same run as the setting's own there, its
+        // landing states kept); on the pool.
         let n = walks.len();
-        let jobs: Vec<usize> = (0..n * (1 + usize::from(late_from.is_some()))).filter(|&j| j != longest).collect();
+        let jobs: Vec<usize> = (0..n * (1 + usize::from(late_from.is_some()))).collect();
+        let stretch_of = |j: usize| -> (usize, f64, f64) { if j < n { (j, 0.0, reach(&walks[j])) } else { (j - n, late_from.expect("a late segment"), run.min(walks[j - n].end())) } };
+        // The landing check's times (module documentation, # The motion): per stretch one landing a window, at its last
+        // reading that leaves the check's span inside the stretch.
+        let optical = form.optical(at);
+        let keeps: Vec<Vec<f64>> = jobs
+            .iter()
+            .map(|&j| {
+                let (w, from, to) = stretch_of(j);
+                let Some((span, _)) = optical.filter(|_| to > from) else { return vec![] };
+                let reads: Vec<f64> = walks[w].ends.iter().map(|e| e[0]).filter(|&t| t > from && t < to).chain([to]).collect();
+                let mut at: Vec<f64> = windows.iter().filter_map(|&(a, b)| reads.iter().copied().filter(|&t| t > from + a && t <= from + b && t + span <= to).last()).collect();
+                at.dedup();
+                at
+            })
+            .collect();
         let others = |setting: Setting| -> Vec<Result<Series, String>> {
             let scheme = scheme(setting, 1);
             jobs.par_iter()
@@ -777,11 +820,11 @@ impl<'a> Paths<'a> {
                     let out = if j < n {
                         let w = &walks[j];
                         // A walk that took no step (its trajectory ended at its first) reads nothing.
-                        if reach(w) > 0.0 { form.along(w, &w.start, 0.0, reach(w), scheme) } else { Ok(Series::default()) }
+                        if reach(w) > 0.0 { form.along_keeping(w, &w.start, 0.0, reach(w), scheme, &keeps[j]) } else { Ok(Series::default()) }
                     } else {
                         // A walk that ended before the late segment (its atom lost) reads nothing there.
                         let (w, from) = (&walks[j - n], late_from.expect("a late segment"));
-                        if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }
+                        if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme, &keeps[j]) } else { Ok(Series::default()) }
                     };
                     #[cfg(test)]
                     if let Ok(s) = &out {
@@ -813,9 +856,8 @@ impl<'a> Paths<'a> {
         // stretch's defect is beyond the tolerance at the setting, the setting is not converged there -- the ladder goes
         // on along that stretch from the setting, the calibration's walk is run again at the new setting's refinements and
         // every other stretch at it, until every stretch's defect is within the tolerance or the ladder stands.
-        let stretch_of = |j: usize| -> (usize, f64, f64) { if j < n { (j, 0.0, reach(&walks[j])) } else { (j - n, late_from.expect("a late segment"), run.min(walks[j - n].end())) } };
         loop {
-            let worst = jobs.iter().zip(&done).map(|(&j, s)| (j, s.trace_defect())).fold((longest, calibrated[0].trace_defect()), |a, b| if b.1 > a.1 { b } else { a });
+            let worst = jobs.iter().zip(&done).map(|(&j, s)| (j, s.trace_defect())).fold((longest, 0.0), |a, b| if b.1 > a.1 { b } else { a });
             if !(worst.1 > TOLERANCE) || worst.0 == longest {
                 break;
             }
@@ -829,16 +871,33 @@ impl<'a> Paths<'a> {
             let (made, more) = rayon::join(|| form.along_family(&walks[longest], &walks[longest].start, 0.0, stretch, &schemes), || others(settled.setting));
             (calibrated, done) = (made?, more.into_iter().collect::<Result<_, _>>()?);
         }
+        // The landing check of the reference (module documentation, # The motion): at each kept state the landing after a
+        // jump, and the reference's excess photons and impulse from it.
+        let knobs = (settled.setting.turns, settled.setting.rate, settled.setting.cutoff);
+        let landings: Vec<Vec<Landing>> = match optical {
+            None => vec![vec![]; jobs.len()],
+            Some((span, decay)) => jobs
+                .par_iter()
+                .map(|&j| -> Result<Vec<Landing>, String> {
+                    let (w, ..) = stretch_of(j);
+                    done[j]
+                        .kept
+                        .iter()
+                        .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
+                        .map(|(t, v, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs, &done[j]).map(|(photons, impulse)| Landing { t, landed, photons, impulse, diffusion: form.diffusion(&walks[w], t, v) }))
+                        .collect()
+                })
+                .collect::<Result<_, _>>()?,
+        };
         let mut done = done.into_iter();
-        // The calibration's walk's series: the setting's own run there.
-        let series: Vec<Series> = (0..n).map(|j| if j == longest { calibrated[0].clone() } else { done.next().expect("a walk") }).collect();
+        let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect();
         let late_series: Vec<Series> = done.collect();
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
         let least = walks.iter().flat_map(|w| w.ends.iter().map(|e| intensity(light, [e[1], e[2], e[3]]))).fold(f64::INFINITY, crate::linalg::smaller);
         let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.products).sum::<u64>() + settled.products;
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
-        Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, seconds: clock.elapsed().as_secs_f64(), products })
+        Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, seconds: clock.elapsed().as_secs_f64(), products })
     }
 
     /// The calibration's stretch (µs): the longest walk's [0, L], where the setting was read.
@@ -858,7 +917,7 @@ impl<'a> Paths<'a> {
     /// scheme's unmet sum and the openings' bound as its own, and read its windows against themselves: no number where no
     /// path read a window -- R9_PUSH's, every atom pushed out by 45 µs.)
     pub fn itself(&self, keep: Vec<usize>) -> Judged {
-        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, region: Region::NONE, seconds: 0.0, products: 0 }
+        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 }
     }
 }
 
@@ -915,6 +974,11 @@ pub struct Judged {
     /// mean energy rate's difference over the energy its atom gained to its loss per µs (the lost paths', where at least
     /// two are; else every path's over its heating), with the paths' count; none where no path read.
     pub escape: Option<(paths::Mean, usize)>,
+    /// The landing check's Mandel Q, its mean over the landings, the candidate's and the reference's (module
+    /// documentation, # The motion); none where no landing was read.
+    pub statistics: Option<[f64; 2]>,
+    /// The energy rates T's error reads (`Stationary`); none where no path read past its memory time.
+    pub stationary: Option<Stationary>,
     pub region: Region,
     pub seconds: f64,
     pub products: u64,
@@ -933,6 +997,8 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let n = paths.walks.len();
     let run = paths.late.as_ref().map_or(0.0, |(from, ..)| from + paths.length);
     let jobs: Vec<usize> = (0..n * (1 + usize::from(paths.late.is_some()))).collect();
+    // Each stretch's states kept at the reference's landings (the candidate's own force correlation there).
+    let keep = |j: usize| -> Vec<f64> { paths.landings.get(j).map_or(vec![], |l| l.iter().map(|x| x.t).collect()) };
     let done: Vec<Result<Vec<Series>, String>> = jobs
         .par_iter()
         .map(|&j| {
@@ -941,16 +1007,16 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
             let out = match j {
                 j if j == longest => {
                     let w = &paths.walks[j];
-                    form.along_family(w, &w.start, 0.0, stretch, &family)
+                    form.along_family_keeping(w, &w.start, 0.0, stretch, &family, &keep(j))
                 }
                 j if j < n => {
                     let w = &paths.walks[j];
                     let reach = paths.length.min(w.end());
-                    (if reach > 0.0 { form.along(w, &w.start, 0.0, reach, scheme) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme, &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
-                    (if from < w.end() { form.along(w, &w.start, from, run.min(w.end()), scheme) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme, &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
             };
             #[cfg(test)]
@@ -974,13 +1040,46 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let late_series: Vec<Series> = done.map(|x| x.map(|mut x| x.swap_remove(0))).collect::<Result<_, _>>()?;
     let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
-    let escape = escape_of(paths, &series, &late_series, hm);
-    let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm);
-    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm));
+    // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
+    // photons' Mandel Q = 2 n_ex --, and its force correlation's diffusion at its own state there; the reference's beside
+    // (paths.rs `Statistics`). Where either model's frozen generator has no inverse, neither's diffusion is read there.
+    let knobs = (paths.settled.setting.turns, paths.settled.setting.rate, paths.settled.setting.cutoff);
+    let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
+    let landed: Vec<Vec<paths::Statistics>> = match paths.optical {
+        None => vec![vec![]; paths.landings.len()],
+        Some((span, decay)) => paths
+            .landings
+            .par_iter()
+            .enumerate()
+            .map(|(j, list)| -> Result<Vec<paths::Statistics>, String> {
+                let (walk, own) = (&paths.walks[if j < n { j } else { j - n }], own_kept(j));
+                list.iter()
+                    .map(|l| {
+                        let (photons, _) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own)?;
+                        let mine = own.kept.iter().find(|x| x.0 == l.t).and_then(|(t, v)| form.diffusion(walk, *t, v));
+                        let diffusion = match (mine, l.diffusion) {
+                            (Some(c), Some(r)) => [c, r],
+                            _ => [[0.0; 3]; 2],
+                        };
+                        Ok(paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion })
+                    })
+                    .collect()
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    let (landed_start, landed_late) = landed.split_at(n.min(landed.len()));
+    let escape = escape_of(paths, &series, &late_series, landed_start, landed_late, hm);
+    let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm, landed_start);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm, landed_late));
+    let statistics = {
+        let all: Vec<&paths::Statistics> = landed.iter().flatten().collect();
+        (!all.is_empty()).then(|| [0, 1].map(|m| all.iter().map(|x| x.q[m]).sum::<f64>() / all.len() as f64))
+    };
     // The motion's windows, said where a test asks (`SEL_MOTION`).
     #[cfg(test)]
     if std::env::var_os("SEL_MOTION").is_some() {
         let m = |x: &paths::Mean| format!("{:+.3e}±{:.1e}", x.value, x.error);
+        eprintln!("    [motion] P{} landing Q (candidate, reference) mean {:?}; per stretch (t, Q, D_c, D_r) {:?}", model.rs.keep.len(), statistics, landed.iter().map(|l| l.iter().map(|x| (x.t, x.q, x.diffusion)).collect::<Vec<_>>()).collect::<Vec<_>>());
         for w in windows.iter().chain(&late) {
             eprintln!(
                 "    [motion] P{} ({:.2}, {:.2}] {} paths: rate {}; dP_a [{}, {}, {}]; H_a [{:.3e}, {:.3e}, {:.3e}]; dF_a [{}, {}, {}]",
@@ -989,7 +1088,7 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
         }
         eprintln!("    [motion] P{} escape {:?}", model.rs.keep.len(), escape);
         if let (Some(x), Some(y)) = (series.first().and_then(|s| s.readings.get(3)), paths.series.first().and_then(|s| s.readings.get(3))) {
-            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, kick {:?} {:?}, emitted {:?} / {:?}, heating {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.kick, x.kick2, x.emitted, y.emitted, x.heating(hm), y.heating(hm), x.kappa);
+            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, absorbed {:?} / {:?}, carried {:?} / {:?}, emitted {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.absorbed, y.absorbed, x.carried, y.carried, x.emitted, y.emitted, x.kappa);
         }
     }
     // The calibration: the calibration's walk's own series at the setting along its stretch (the same scheme from the
@@ -1002,7 +1101,8 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let own = |f: fn(&Series) -> f64| series.iter().chain(&late_series).map(f).fold(0.0, larger);
     calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked) + paths.trace + own(Series::trace_defect);
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
-    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
+    let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from());
+    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
 }
 
 /// The loss's x of a candidate (module documentation, # The motion; `Judged::escape`) of its series along the walks'
@@ -1010,22 +1110,24 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
 /// the energy rate's difference -- per reading Σ_a (δH_a + δF_a v_a) by the trapezoid --, over the energy its atom gained to its loss per µs
 /// on the reference's prepared potential where it was lost, (E(loss) − E(0))/t_loss, else over the reference's heating's
 /// mean there; the lost paths' where at least two are, else every path's.
-fn escape_of(paths: &Paths, candidate: &[Series], late: &[Series], hm: f64) -> Option<(paths::Mean, usize)> {
+fn escape_of(paths: &Paths, candidate: &[Series], late: &[Series], landed: &[Vec<paths::Statistics>], landed_late: &[Vec<paths::Statistics>], hm: f64) -> Option<(paths::Mean, usize)> {
     let reference = paths.reference.model;
     let well = reference.prepared(&crate::solve::alone(crate::solve::chief(&reference.scene.request)));
     let energy = |e: &[f64; 7]| 0.5 * hm * (e[4] * e[4] + e[5] * e[5] + e[6] * e[6]) + well.at([e[1], e[2], e[3]]).value;
     let late_reference = paths.late.as_ref().map(|l| &l.2);
     let per_path = |k: usize| -> Option<(bool, f64)> {
         let (mut integral, mut time, mut heat) = (0.0, 0.0, 0.0);
-        let stretches = std::iter::once((&candidate[k], &paths.series[k])).chain(late.get(k).zip(late_reference.and_then(|l| l.get(k))));
-        for (c, r) in stretches {
+        let stretches = std::iter::once((&candidate[k], &paths.series[k], landed.get(k))).chain(late.get(k).zip(late_reference.and_then(|l| l.get(k))).map(|(c, r)| (c, r, landed_late.get(k))));
+        for (c, r, f) in stretches {
+            // The stretch's landing check, its mean over its landings (none read where none).
+            let f = f.map_or(paths::Statistics::NONE, |f| paths::Statistics::within(f, f64::NEG_INFINITY, f64::INFINITY));
             let pairs: Vec<(&paths::Reading, &paths::Reading)> = c.readings.iter().zip(&r.readings).collect();
             let (Some(first), Some(last)) = (pairs.first(), pairs.last()) else { continue };
             if !(last.0.t > first.0.t) {
                 continue;
             }
             let rate = |(x, y): &(&paths::Reading, &paths::Reading)| -> (f64, f64) {
-                let (hx, hy, wx, wy) = (x.heating(hm), y.heating(hm), x.work(hm), y.work(hm));
+                let (hx, hy, wx, wy) = (x.heating_at(hm, f.q[0], f.diffusion[0]), y.heating_at(hm, f.q[1], f.diffusion[1]), x.work(hm), y.work(hm));
                 ((0..3).map(|a| hx[a] - hy[a] + wx[a] - wy[a]).sum(), hy.iter().sum())
             };
             for w in pairs.windows(2) {
@@ -1282,6 +1384,40 @@ pub struct Motion {
     pub temperature: [f64; 3],
 }
 
+/// The energy rates the total T's error reads (module documentation, # The motion): per path the candidate's δP_a and
+/// the reference's H_a over the whole of its stretches past the memory time -- the start's from τ_mem on, the late
+/// segment's from its own τ_mem on --, each window's per-path means weighed by the window's length. A window shorter
+/// than the motion's periods holds the conservative exchange's oscillation (a trap's or a lattice's force against the
+/// atom's swing), which moves no energy over a period and is bounded over any time: read as a rate on one short window
+/// and multiplied by an axis's whole response time, it is noise taken for heating (tilt0's tweezer axis, 15.6 kHz: its
+/// 22 µs windows read δP_x ± 4e-3 /µs² against the 2e-3 of its rates, 108 µK over 1 ms at the window's upper end).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stationary {
+    pub rates: Vec<[f64; 3]>,
+    pub heating: Vec<[f64; 3]>,
+}
+
+impl Stationary {
+    /// The start's windows `windows` and the late segment's `late` (from `late_from`), past the memory time `memory`.
+    pub fn of(windows: &[Window], late: &[Window], memory: f64, late_from: Option<f64>) -> Option<Stationary> {
+        let mut sums: std::collections::BTreeMap<usize, ([f64; 3], [f64; 3], f64)> = std::collections::BTreeMap::new();
+        let forgotten = windows.iter().filter(|w| w.from >= memory).chain(late.iter().filter(|w| late_from.is_some_and(|f| w.from >= f + memory)));
+        for w in forgotten {
+            let span = w.to - w.from;
+            for &(k, rate, heating) in &w.energy_rates {
+                let entry = sums.entry(k).or_insert(([0.0; 3], [0.0; 3], 0.0));
+                for a in 0..3 {
+                    entry.0[a] += span * rate[a];
+                    entry.1[a] += span * heating[a];
+                }
+                entry.2 += span;
+            }
+        }
+        let read: Vec<&([f64; 3], [f64; 3], f64)> = sums.values().filter(|x| x.2 > 0.0).collect();
+        (!read.is_empty()).then(|| Stationary { rates: read.iter().map(|x| x.0.map(|v| v / x.2)).collect(), heating: read.iter().map(|x| x.1.map(|v| v / x.2)).collect() })
+    }
+}
+
 /// A candidate's motion's errors at the course's k-th time (module documentation, # The motion), each at its window's
 /// upper end (`upper`) or its lower: none at t = 0 or of the reference itself (no windows), or where no path reads the
 /// time's windows.
@@ -1295,25 +1431,31 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
     // The loss: x t L̇.
     let slope = course.slope(k, &|i| Some(course.loss[i])).unwrap_or(0.0);
     let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| end(x, *n, upper)) * t * slope.abs();
-    // T per lab axis: δE_a = δP_a (1 − e^{−α t})/α, α = (H_a − Ė_a)/E_a; the total T's, the axes' mean, per path (its
-    // spread the sum's own).
+    // T per lab axis: δE_a = δP_a (1 − e^{−α t})/α, α = (H_a − Ė_a)/E_a, the rates over the paths' forgotten stretches
+    // (`Stationary`, the time's own windows where none is); the total T's, the axes' mean, per path (its spread the sum's
+    // own).
     let (mut temperature, mut temperature_total) = ([0.0; 3], 0.0);
     if let Some(at) = course.temperature[k] {
         let kt = crate::units::KT_PER_UK;
-        let held: [f64; 3] = std::array::from_fn(|a| {
-            let heating = most(&|w| w.heating[a].value);
-            let warming = kt * course.slope(k, &|i| course.temperature[i].map(|x| x[a])).unwrap_or(0.0);
-            let energy = kt * at[a];
-            let alpha = if energy > 0.0 { larger((heating - warming) / energy, 0.0) } else { 0.0 };
-            if alpha * t > 0.0 { -(-alpha * t).exp_m1() / alpha } else { t }
+        let own: Option<Stationary> = judged.stationary.clone().or_else(|| {
+            let w = read.last()?;
+            Some(Stationary { rates: w.energy_rates.iter().map(|x| x.1).collect(), heating: w.energy_rates.iter().map(|x| x.2).collect() })
         });
-        for a in 0..3 {
-            temperature[a] = most(&|w| end(&w.energy_rate[a], w.paths, upper)) * held[a] / kt;
+        if let Some(own) = own {
+            let paths = own.rates.len();
+            let heating: [f64; 3] = std::array::from_fn(|a| own.heating.iter().map(|h| h[a]).sum::<f64>() / paths as f64);
+            let held: [f64; 3] = std::array::from_fn(|a| {
+                let warming = kt * course.slope(k, &|i| course.temperature[i].map(|x| x[a])).unwrap_or(0.0);
+                let energy = kt * at[a];
+                let alpha = if energy > 0.0 { larger((heating[a] - warming) / energy, 0.0) } else { 0.0 };
+                if alpha * t > 0.0 { -(-alpha * t).exp_m1() / alpha } else { t }
+            });
+            for a in 0..3 {
+                temperature[a] = end(&paths::Mean::of(&own.rates.iter().map(|r| r[a]).collect::<Vec<_>>()), paths, upper) * held[a] / kt;
+            }
+            let each: Vec<f64> = own.rates.iter().map(|p| (0..3).map(|a| p[a] * held[a]).sum::<f64>() / (3.0 * kt)).collect();
+            temperature_total = end(&paths::Mean::of(&each), paths, upper);
         }
-        temperature_total = most(&|w| {
-            let each: Vec<f64> = w.energy_rates.iter().map(|p| (0..3).map(|a| p[a] * held[a]).sum::<f64>() / (3.0 * kt)).collect();
-            end(&paths::Mean::of(&each), w.paths, upper)
-        });
     }
     let push: [f64; 3] = std::array::from_fn(|a| hbar_over_mass * most(&|w| end(&w.force[a], w.paths, upper)));
     let velocity = std::array::from_fn(|a| push[a] * if course.frequencies[a] > 0.0 { t.min(1.0 / course.frequencies[a]) } else { t });
