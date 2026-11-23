@@ -2366,6 +2366,15 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let first_rung = ladder
         .first()
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡和光场中势阱的曲率（或者阱频、曲率不是有限数）"))?;
+    // (A measurement's, the profiling build's alone: ATOM_PROF_UP=1 starts the ladder at the rung above its first,
+    // where the run and the edge have it -- what the check makes of one rung up, STEP's "往上试一级".)
+    #[cfg(feature = "prof")]
+    let first_rung = if std::env::var("ATOM_PROF_UP").is_ok_and(|x| x == "1") && 4. * first_rung <= end && stable(2. * first_rung, frequency, kick) && stable(4. * first_rung, frequency, kick) {
+        crate::prof::note(|| format!("ladder up from {first_rung} to {}", 2. * first_rung));
+        2. * first_rung
+    } else {
+        first_rung
+    };
     // Whether the rung above a step is a rung of the ladder (`first_rung`'s test at twice the step): the check then
     // reads that rung on a third level, at 4τ (`settle`): a cell of the Brownian path.
     let above = |tau: f64| 4. * tau <= end && stable(2. * tau, frequency, kick) && stable(4. * tau, frequency, kick);
