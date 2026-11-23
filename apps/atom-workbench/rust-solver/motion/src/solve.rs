@@ -849,6 +849,7 @@ fn pipeline(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution
     match attempted {
         Attempted::Solved(s) => Ok(s),
         Attempted::Scouted(_) => unreachable!("an attempt that makes the choice is no scout"),
+        Attempted::Unturned => unreachable!("`solve_with` attempts an unturned run again"),
         Attempted::RanAway => unreachable!("`piloted` goes up the chain past a model that ran away"),
         Attempted::Chose(choice) => {
             messages.stage(Stage { step: Step::Model, tau: None, batch: None });
@@ -862,7 +863,7 @@ fn pipeline(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution
 fn solved(attempted: Result<Attempted, String>) -> Result<Solution, String> {
     match attempted? {
         Attempted::Solved(s) => Ok(s),
-        Attempted::Chose(_) | Attempted::Scouted(_) | Attempted::RanAway => unreachable!("an attempt on a choice made solves"),
+        Attempted::Chose(_) | Attempted::Scouted(_) | Attempted::RanAway | Attempted::Unturned => unreachable!("an attempt on a choice made solves"),
     }
 }
 
@@ -916,6 +917,9 @@ enum Attempted {
     Chose(std::sync::Arc<Choice>),
     Scouted(f64),
     RanAway,
+    /// The run's turn did not hold on its pilot's nodes (model/selected.rs `Selected::turn_holds`): `solve_with` makes
+    /// the run unturned and attempts it again; no other step sees it.
+    Unturned,
 }
 
 /// The run of a request at the reference populations `reference`: its scene and the selection's cheapest candidate,
@@ -942,7 +946,7 @@ pub(crate) fn chosen(request: &Request, reference: [f64; GROUND]) -> Result<Sele
             let mut messages = Messages { send: &mut send, clock: Instant::now(), last: None, least: 0, stage: None };
             match piloted(request, alone(chief(request)), Choosing::Choose, &mut messages)?.0 {
                 Attempted::Chose(choice) => choice,
-                Attempted::Solved(_) | Attempted::Scouted(_) | Attempted::RanAway => unreachable!("an attempt that chooses stops at its choice"),
+                Attempted::Solved(_) | Attempted::Scouted(_) | Attempted::RanAway | Attempted::Unturned => unreachable!("an attempt that chooses stops at its choice"),
             }
         }
     };
@@ -977,9 +981,14 @@ fn solve_with(request: &Request, run: &Selected, choosing: Choosing, messages: &
     let trap = &wells[chief].trap;
     let reported = reported(run, &reference).ok();
     let setting = Setting { run, trap, ensemble: &ensemble, depth: ensemble.depths()[chief], reported, kick: kick_curvature(run, trap) };
-    let attempted = attempt(request, &setting, messages, choosing);
+    let attempted = attempt(request, &setting, messages, choosing.clone());
     // The run's counts (adapt.rs `tally`), to stderr.
     eprintln!("{}", crate::adapt::counted(true));
+    if let Ok(Attempted::Unturned) = attempted {
+        crate::model::selected::unturn(request);
+        let again = Selected::new(crate::scene::Scene::new(request)?, run.report.clone(), run.reference_populations())?;
+        return solve_with(request, &again, choosing, messages);
+    }
     attempted
 }
 
@@ -1231,6 +1240,16 @@ fn stable(tau: f64, frequency: f64, kick: f64) -> bool {
 fn prior(wave: f64, recoil: f64, hbar_over_mass: f64, temperature: f64, scales: &Scales) -> f64 {
     let speed = (hbar_over_mass * KT_PER_UK * temperature).sqrt();
     (step_bound()[1] * allowance(temperature, semiclassical([1., recoil * recoil], scales))).sqrt() / (wave * speed)
+}
+
+/// The physics prior's step (`prior`) of a run's model at the request's temperature, no trap's zero point in T_sc, at
+/// most half the run: the step its ladder starts at or below, where the model's own decisions weigh a step's work
+/// (model/selected.rs `Selected::turn_parts`).
+pub(crate) fn prior_step(run: &Selected) -> f64 {
+    let hm = run.hbar_over_mass();
+    let scales = Scales { hbar_over_mass: hm, frequencies: [0.; 3] };
+    let end = run.scene.request.times_us.last().copied().unwrap_or(0.);
+    crate::linalg::smaller(prior(run.pattern(), pattern_wave_number(run.light()), hm, run.scene.request.temperature_uk, &scales), 0.5 * end)
 }
 
 /// The ladder's first rung (module documentation, # The step): the largest rung -- the run's length `run` (µs) over an
@@ -2583,6 +2602,12 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         }
         read = pilot_reads(run, &pilot_refs, &scales, Some(&made), &times, &context.fixed.escape);
         choice = Some(made);
+    }
+    // A turned run's turn checked on the nodes its pilot made (model/selected.rs, # The parts turned): where its frame
+    // and remainder as they stand no longer pay, the run is attempted again unturned (`solve_with`).
+    if !run.turn_holds() {
+        eprintln!("  注：先导走过的节点上，拆块（F=1/F=2 按二阶 Schrieffer–Wolff 转动）的参考系与余项按实际最大值记账后不再划算或超出误差预算：改为不拆、从先导重做");
+        return Ok(Attempted::Unturned);
     }
     drop(levels);
     let n = times.len();
@@ -4862,6 +4887,11 @@ struct Fixed {
     /// and the mean velocity's and the push's -- unread until the selection's conversion fills it.
     motion: Vec<MotionError>,
     dropped: Vec<f64>,
+    /// A turned run's frame (model/selected.rs, # The parts turned): per time the trace distance 2 max‖S‖ it puts the
+    /// state at as it is read (none at t = 0), on what is shown alone; and the largest ‖∇S‖ (1/µm), by which it puts
+    /// each atom's momentum, what T, the mean velocity and the push are read on (`frame_motion`).
+    framed: Vec<f64>,
+    gradient: f64,
     /// The times (µs): what the step's part is taken at (`Bound::at`).
     times: Vec<f64>,
     rate: f64,
@@ -4880,9 +4910,25 @@ impl Fixed {
     }
     /// `new` with a distance `once` booked at every time after the start beside the rate's (`Selected::dropped_once`).
     fn booked(model: Vec<[f64; 2]>, times: &[f64], (rate, once): (f64, f64), seen: Option<std::sync::Arc<crate::model::selected::Seen>>, escape: Escape) -> Fixed {
-        let (frame, more) = seen.as_ref().map_or((0., 0.), |s| s.get());
-        let dropped = times.iter().map(|&t| crate::model::classify::distance(rate + more, t) + if t > 0. { once + 2. * frame } else { 0. }).collect();
-        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped, times: times.to_vec(), rate, once, seen, escape }
+        let (frame, more, gradient) = seen.as_ref().map_or((0., 0., 0.), |s| s.get());
+        let dropped = times.iter().map(|&t| crate::model::classify::distance(rate + more, t) + if t > 0. { once } else { 0. }).collect();
+        let framed = times.iter().map(|&t| if t > 0. { 2. * frame } else { 0. }).collect();
+        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped, framed, gradient, times: times.to_vec(), rate, once, seen, escape }
+    }
+    /// The frame's part of what an atom's motion is read on at the k-th time (model/selected.rs, # The parts turned):
+    /// the turned run's state is e^{S(r)} of the whole model's, and the frame moves with the atom, so its momentum is
+    /// the whole model's less ⟨−i∇S⟩ -- by at most g = ‖∇S‖ an atom (ħ/m g in velocity), at every time, not growing:
+    /// the turned dynamics is the whole one in the moving frame, its remainder booked on the rate. The mean velocity
+    /// moves by at most u = (ħ/m)g, the push -- its velocity's change over a window over 2h -- by u/h, and T relative
+    /// by `estimate::frame_temperature`. None at t = 0, none where nothing is turned; T's part unbounded where T is not
+    /// read.
+    fn frame_motion(&self, k: usize, e: &Estimate) -> (f64, f64) {
+        if self.gradient == 0. || self.framed[k] == 0. {
+            return (0., 0.);
+        }
+        let u = self.gradient / (self.escape.mass * KT_PER_UK);
+        let temperature = e.motion.as_ref().map_or(f64::INFINITY, |m| crate::estimate::frame_temperature(m.temperature_total, u, self.escape.mass));
+        (u, temperature)
     }
     /// The model's errors `model` at the times `times`, with this run's bounds (a turned run's nodes' sizes as they
     /// stand now).
@@ -4895,7 +4941,8 @@ impl Fixed {
         let more = bounded(e, self.dropped[k], &self.escape);
         let part = self.motion[k].temperature;
         let motion = if part == 0. { 0. } else { e.motion.as_ref().map_or(f64::INFINITY, |m| part / m.temperature_total) };
-        [self.model[k][0] + more[0], self.model[k][1] + motion + more[1]]
+        let (_, frame) = self.frame_motion(k, e);
+        [self.model[k][0] + more[0] + self.framed[k], self.model[k][1] + motion + more[1] + frame]
     }
     /// The model's error on the mean velocity and the push along each lab axis at its k-th time with the estimate e
     /// there (µm/µs, µm/µs²; estimate.rs, # The push), each window's half width `half` (µs): its measurement and the
@@ -4905,8 +4952,9 @@ impl Fixed {
     fn motion_at(&self, k: usize, e: &Estimate, half: V3) -> [[f64; 3]; 2] {
         let w = crate::linalg::smaller(moved_share(e, self.dropped[k]), 1.);
         let speed = if w == 0. { 0. } else { 2. * self.escape.speed * w };
+        let (frame, _) = self.frame_motion(k, e);
         let m = &self.motion[k];
-        [std::array::from_fn(|a| m.velocity[a] + speed), std::array::from_fn(|a| m.push[a] + if w == 0. { 0. } else { speed / half[a] })]
+        [std::array::from_fn(|a| m.velocity[a] + speed + frame), std::array::from_fn(|a| m.push[a] + if w == 0. { 0. } else { speed / half[a] } + if frame == 0. { 0. } else { frame / half[a] })]
     }
 }
 
@@ -5493,7 +5541,14 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     // What the model's dropped terms add (`bounded`): its largest over the analysis times, weighed by the held share as
     // the accounts weigh T -- an item only where it is more than the rounding (`Ledger::item`), so none where nothing is
     // dropped.
-    let dropped: Vec<[f64; 2]> = reads.iter().zip(&c.fixed.dropped).map(|(e, &d)| bounded(e, d, &c.fixed.escape)).collect();
+    let dropped: Vec<[f64; 2]> = reads
+        .iter()
+        .enumerate()
+        .map(|(k, e)| {
+            let [shown, t] = bounded(e, c.fixed.dropped[k], &c.fixed.escape);
+            [shown + c.fixed.framed[k], t + c.fixed.frame_motion(k, e).1]
+        })
+        .collect();
     for (i, what) in ["布居", "温度"].into_iter().enumerate() {
         let largest = (1..reads.len()).map(|k| if i == 0 { dropped[k][0] } else if reads[k].motion.is_some() { weighed(1. - reads[k].loss, dropped[k][1]) } else { 0. }).fold(0., crate::linalg::larger);
         ledger.item(&format!("模型删去的项（{what}）"), largest, &format!("建模型时按严格界删去的项：它们让状态在迹距离上至多偏离 D(t) = ½(e^{{2Yt}} − 1) ≈ t·Y（Y 是模型给出的增长率上界）；布居上计 D，温度上按束缚原子动能的上限（阱深 U₀ = {:.0} μK）严格计入", c.fixed.escape.kinetic_uk()));

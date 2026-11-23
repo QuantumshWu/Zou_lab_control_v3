@@ -764,6 +764,21 @@ pub fn semiclassical(scattered: [f64; 2], scales: &Scales) -> f64 {
     crate::linalg::larger(SUB_DOPPLER_RECOILS * recoil, zero_point)
 }
 
+/// A frame's part of the total T (model/selected.rs, # The parts turned), relative to T: each atom's velocity moved by at
+/// most u (µm/µs; ħ/m times the frame's ‖∇S‖) at every time moves the sum of the axes' variances Σ_a Var v_a = 3T/(m/k_B)
+/// by at most 2√(Σ Var v)·u + u² (Cauchy–Schwarz on the shifts), so T by (2√(3T k_B/m) u + u²)/(3T k_B/m); `mass` is
+/// m/k_B (µK per (m/s)², `Escape::mass`). Unbounded where T is none.
+pub fn frame_temperature(temperature: f64, u: f64, mass: f64) -> f64 {
+    if u == 0. {
+        return 0.;
+    }
+    if !(temperature > 0.) {
+        return f64::INFINITY;
+    }
+    let spread = 3. * temperature / mass;
+    (2. * spread.sqrt() * u + u * u) / spread
+}
+
 /// T's allowance at a total T (µK) of the semiclassical scale `scale` (µK), relative to T (solve.rs, # T's allowance):
 /// δT/T = √(ε_T² + (T_sc/T)²); unbounded where T is none.
 pub fn allowance(temperature: f64, scale: f64) -> f64 {

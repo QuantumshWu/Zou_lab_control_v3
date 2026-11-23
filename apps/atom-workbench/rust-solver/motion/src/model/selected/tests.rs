@@ -904,6 +904,186 @@ fn the_split_s_walk() {
     }
 }
 
+/// STEP3 item 2: the turn's remainder with the jumps, measured exactly (ignored; run by name). At a point at rest the
+/// atom's internal state follows the node's Lindbladian -- the jumps averaged, every jump in it --, dρ/dt = −i(Gρ − ρG†) +
+/// Σ_c L_c ρ L_c† of its static slot G and its classes' components L_c (a class, an axis and a beat each: one beat's
+/// L ρ L† is still; two beats' cross terms beat on, and the generator's other slots, a few 1e-6 of the static one on
+/// these scenes, are left out of both). The whole model's ρ_w and the turned model's ρ_t
+/// (every pair of parts turned, `FORCE_TURN`) from the chief ground state, ρ_t(0) = e^S ρ₀ e^{−S}, each by its exact
+/// propagator over 1 µs (scaling and squaring), V3E_UNTIL µs (1000): D(t) = ½‖ρ_w − e^{−S}ρ_t e^{S}‖₁ is the turn's
+/// remainder alone, the frame taken off -- against what the node books, ½(e^{2Y₃t} − 1), Y₃ its rate (`Seen`), its
+/// channels' term 4‖S‖²Σ‖L‖² and the same with ‖Σ_c L_c†L_c‖ (the largest decay) in place of Σ‖L‖². Points: the trap's
+/// centre and (0.3, −0.2, 0.4) µm.
+#[test]
+#[ignore]
+fn the_turn_s_remainder_with_jumps() {
+    let until = env("V3E_UNTIL", 1000.0) as usize;
+    let only = std::env::var("V3E_SCENE").ok();
+    for (name, request, keep) in scenes().into_iter().filter(|(n, ..)| ["PGC3D", "TET", "tilt0", "tilt2"].contains(n) && only.as_deref().is_none_or(|o| o == *n)) {
+        let whole = run_of(&request, &keep);
+        crate::model::selected::TURNING.with(|t| t.set(true));
+        crate::model::selected::FORCE_TURN.with(|t| t.set(true));
+        let turned = run_of(&request, &keep);
+        crate::model::selected::FORCE_TURN.with(|t| t.set(false));
+        crate::model::selected::TURNING.with(|t| t.set(false));
+        let n = whole.rs.keep.len();
+        let chief = crate::solve::chief(&request);
+        let c = whole.rs.keep.iter().position(|&s| s == chief).unwrap();
+        for at in [[0.0; 3], [0.3, -0.2, 0.4]] {
+            // The node's static slot and its classes' static components, dense n × n.
+            let lindblad = |node: &Node| -> (Mat, Vec<Mat>, f64) {
+                let g = node.generator.iter().find(|x| x.0 == 0).unwrap().1.clone();
+                let beats = node.generator.iter().filter(|x| x.0 != 0).map(|x| x.1.data.iter().map(|z| z.abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                // Each class's axis's components of one beat summed: their L ρ L† is still (the phase cancels), and the
+                // cross terms of two beats beat on, as the generator's static slot holds Σ L†L's still part alone.
+                let mut ls = Vec::new();
+                for class in &node.classes {
+                    for axis in &class.axes {
+                        let mut by_beat: Vec<(usize, Mat)> = Vec::new();
+                        for jump in axis {
+                            let i = by_beat.iter().position(|(b, _)| *b == jump.beat).unwrap_or_else(|| {
+                                by_beat.push((jump.beat, Mat::zeros(n, n)));
+                                by_beat.len() - 1
+                            });
+                            for e in &jump.elements {
+                                by_beat[i].1.data[e.at] += e.value;
+                            }
+                        }
+                        ls.extend(by_beat.into_iter().map(|(_, l)| l));
+                    }
+                }
+                (g, ls, beats)
+            };
+            let (gw, lw, bw) = lindblad(&whole.node(at, [0.0; 3], false));
+            let (gt, lt, bt) = lindblad(&turned.node(at, [0.0; 3], false));
+            let (frame, rate, gradient) = turned.turn_seen().map_or((0.0, 0.0, 0.0), |s| s.get());
+            eprintln!("TURNREST {name} at {at:?}: the pilot's check on the nodes made so far (`turn_holds`): {}", turned.turn_holds());
+            let (_, s) = turned.unturned_at(at, [0.0; 3]).expect("a turned run");
+            // The superoperator on ρ row by row: ρ ↦ −i(Gρ − ρG†) + Σ L ρ L†, by its columns.
+            let apply = |g: &Mat, ls: &[Mat], rho: &Mat| -> Mat {
+                let gd = g.adjoint();
+                let mut out = Mat::zeros(n, n);
+                let (a, b) = (g.product(rho), rho.product(&gd));
+                for k in 0..n * n {
+                    out.data[k] = C64::new(0.0, -1.0) * (a.data[k] - b.data[k]);
+                }
+                for l in ls {
+                    let x = l.product(rho).product(&l.adjoint());
+                    for k in 0..n * n {
+                        out.data[k] += x.data[k];
+                    }
+                }
+                out
+            };
+            let superop = |g: &Mat, ls: &[Mat]| -> Mat {
+                let m = n * n;
+                let mut big = Mat::zeros(m, m);
+                for j in 0..m {
+                    let mut e = Mat::zeros(n, n);
+                    e.data[j] = C64::ONE;
+                    let col = apply(g, ls, &e);
+                    for i in 0..m {
+                        big.data[i * m + j] = col.data[i];
+                    }
+                }
+                big
+            };
+            // e^{A t} by scaling and squaring of its Taylor series to the round-off.
+            let expm = |a: &Mat, t: f64| -> Mat {
+                let m = a.rows;
+                let norm = (0..m).map(|i| (0..m).map(|j| a.data[i * m + j].abs()).sum::<f64>()).fold(0.0, crate::linalg::larger) * t;
+                let squarings = if norm > 0.5 { (norm / 0.5).log2().ceil() as i32 } else { 0 };
+                let scale = t / 2f64.powi(squarings);
+                let mut x = Mat::zeros(m, m);
+                for k in 0..m * m {
+                    x.data[k] = a.data[k] * scale;
+                }
+                let mut sum = Mat::identity(m);
+                let mut term = Mat::identity(m);
+                for k in 1..30 {
+                    term = term.product(&x);
+                    for z in term.data.iter_mut() {
+                        *z = *z * (1.0 / k as f64);
+                    }
+                    for (s, z) in sum.data.iter_mut().zip(&term.data) {
+                        *s += *z;
+                    }
+                }
+                for _ in 0..squarings {
+                    sum = sum.product(&sum);
+                }
+                sum
+            };
+            let es = {
+                let mut sm = Mat::zeros(n, n);
+                sm.data.copy_from_slice(&s);
+                expm(&sm, 1.0)
+            };
+            let ems = {
+                let mut sm = Mat::zeros(n, n);
+                for k in 0..n * n {
+                    sm.data[k] = -s[k];
+                }
+                expm(&sm, 1.0)
+            };
+            let (pw, pt) = (expm(&superop(&gw, &lw), 1.0), expm(&superop(&gt, &lt), 1.0));
+            let mut rho0 = Mat::zeros(n, n);
+            rho0[(c, c)] = C64::ONE;
+            let mut w: Vec<C64> = rho0.data.clone();
+            let mut tt: Vec<C64> = es.product(&rho0).product(&ems).data;
+            let trace_norm = |d: &Mat| -> f64 {
+                let mut e = crate::linalg::Eigen::default();
+                assert!(e.decompose(d));
+                e.values.iter().map(|z| z.re.abs()).sum::<f64>()
+            };
+            let decay = {
+                let mut lam = Mat::zeros(n, n);
+                for l in &lt {
+                    let x = l.adjoint().product(l);
+                    for k in 0..n * n {
+                        lam.data[k] += x.data[k];
+                    }
+                }
+                let mut e = crate::linalg::Eigen::default();
+                assert!(e.decompose(&lam));
+                e.values.iter().map(|z| z.re).fold(0.0, crate::linalg::larger)
+            };
+            let sn = s.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            eprintln!("TURNREST {name} at {at:?}: frame {frame:.3e}, Y3 {rate:.3e} /µs, ‖∇S‖ {gradient:.3e} /µm, ‖S‖_F {sn:.3e}; channels' term 4‖S‖²Σ‖L‖² {:.3e} /µs, with ‖ΣL†L‖ = {decay:.3e}: {:.3e} /µs; the beats' largest entry {bw:.1e} / {bt:.1e}", 4.0 * sn * sn * channels_size(&turned.node(at, [0.0; 3], false)), 4.0 * sn * sn * decay);
+            let step = |p: &Mat, v: &[C64]| -> Vec<C64> { (0..n * n).map(|i| (0..n * n).map(|j| p.data[i * n * n + j] * v[j]).sum()).collect() };
+            for t in 1..=until {
+                w = step(&pw, &w);
+                tt = step(&pt, &tt);
+                if [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].contains(&t) || t == until {
+                    let mut back = Mat::zeros(n, n);
+                    back.data.copy_from_slice(&tt);
+                    let back = ems.product(&back).product(&es);
+                    let mut d = Mat::zeros(n, n);
+                    let mut plain = Mat::zeros(n, n);
+                    for k in 0..n * n {
+                        d.data[k] = w[k] - back.data[k];
+                        plain.data[k] = w[k] - tt[k];
+                    }
+                    // Hermitian parts (the propagated ρ are, to rounding).
+                    let herm = |m: &Mat| -> Mat {
+                        let a = m.adjoint();
+                        let mut h = Mat::zeros(n, n);
+                        for k in 0..n * n {
+                            h.data[k] = (m.data[k] + a.data[k]) * 0.5;
+                        }
+                        h
+                    };
+                    let (dist, raw) = (0.5 * trace_norm(&herm(&d)), 0.5 * trace_norm(&herm(&plain)));
+                    let trace: f64 = (0..n).map(|i| w[i * n + i].re).sum();
+                    let turned_trace: f64 = (0..n).map(|i| tt[i * n + i].re).sum();
+                    let booked = 0.5 * ((2.0 * rate * t as f64).exp() - 1.0);
+                    eprintln!("TURNREST {name} at {at:?} t {t} µs: remainder D {dist:.3e} ({:.3e} /µs), with the frame {raw:.3e}; booked ½(e^{{2Y3 t}} − 1) {booked:.3e}; tr ρ_w {trace:.6}, 1 − tr ρ_t {:.3e}", dist / t as f64, 1.0 - turned_trace);
+                }
+            }
+        }
+    }
+}
+
 /// The dropped beats' Y alone (the span's taken out): the pairs the judgment dropped.
 fn plain_dropped(run: &Selected) -> f64 {
     run.judgment.pairs.iter().filter(|(slots, _)| slots.iter().all(|&k| run.judgment.tiers[k].1 == crate::model::classify::Tier::Drop)).map(|(_, y)| y).sum()

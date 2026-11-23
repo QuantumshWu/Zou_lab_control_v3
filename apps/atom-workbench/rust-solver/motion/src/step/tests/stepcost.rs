@@ -371,7 +371,16 @@ fn count_parts() {
             }
         };
         let chief = crate::solve::chief(&request);
+        // COUNT_TURN: the run made as the product makes it, its parts turned where its judgment says (the tests' runs
+        // are made unturned).
+        // COUNT_TURN=force: every pair of parts turned whatever its W (`FORCE_TURN`).
+        let turning = std::env::var("COUNT_TURN").is_ok();
+        let forced = std::env::var("COUNT_TURN").is_ok_and(|v| v == "force");
+        crate::model::selected::TURNING.with(|t| t.set(turning));
+        crate::model::selected::FORCE_TURN.with(|t| t.set(forced));
         let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, crate::solve::alone(chief)).unwrap();
+        crate::model::selected::TURNING.with(|t| t.set(false));
+        crate::model::selected::FORCE_TURN.with(|t| t.set(false));
         let ground = {
             let c = run.cluster(0);
             c.ground == c.states.len()
@@ -524,7 +533,7 @@ fn count_parts() {
         }
         let k = taken.max(1) as f64;
         let m = made as f64 / k;
-        let label = format!("{name} {spec}(P{}) split {split} blocks {blocks:?} tau {tau}", keep.len());
+        let label = format!("{name} {spec}(P{}) split {split}{} blocks {blocks:?} tau {tau}", keep.len(), if turning { " turning" } else { "" });
         // The step's parts as its run takes them: the middle with its nodes, the picture, the first stretch's launch,
         // choice, quadrature, forms, the middle's scattered light; the rest the step's less these.
         let within = [1usize, 9, 10, 11, 12, 13, 14];
