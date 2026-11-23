@@ -40,6 +40,18 @@ class Counts:
         return (TunableField(field, 1000, True, ('frequency',)),)
 
 
+class Unconvertible:
+    """A device that reads its knob in its own unit and fails to read it in another."""
+    role = 'flaky'
+
+    def tunable_fields(self):
+        field = AuthoringField('frequency', 'float', 'Frequency', None, minimum=1.0, maximum=1e6, unit='Hz')
+        return (TunableField(field, 1000.0, True, ('frequency',)),)
+
+    def read_tunable_in_unit(self, name, unit=''):
+        raise PluginError('failed', VISA)
+
+
 class Fails:
     role = 'rigol'
 
@@ -177,6 +189,18 @@ class ScanEditorFacts(unittest.TestCase):
         bare = {**REPEATS, 'api_fields': [{key: value for key, value in REPEATS['api_fields'][0].items() if key != 'grid'}]}
         self.assertEqual(api_scan_ports_for(bare)[0].grid, None)
         self.assertEqual(scan_editor_facts({'plan': '', 'api_values': ''}, bare, ())['api']['fields'][0]['kind'], 'number')
+
+    def test_a_device_that_cannot_be_read_in_the_plans_unit_leaves_the_estimate_without_its_knob(self):
+        port = 'device:flaky:frequency'
+        unread = {}
+        self.assertEqual(scan_ports_for_devices({'flaky': Unconvertible()}, units={port: 'kHz'}, unread=unread), ())
+        self.assertEqual(unread, {'flaky': str(PluginError('failed', VISA))}, 'the device says why')
+        with self.assertRaisesRegex(PluginError, 'VI_ERROR_SYSTEM_ERROR'):
+            scan_ports_for_devices({'flaky': Unconvertible()}, units={port: 'kHz'})
+        values = {'plan': json.dumps({'axes': [{'port': port, 'unit': 'kHz', 'values': [1.0, 2.0]}]}), 'api_values': '',
+                  'repeats': 1, 'shots_per_point': 1}
+        estimate = _estimate_run(values, {'tunable:flaky': Unconvertible()}, {SEAMLESS_PULSE_RESOURCE.field_name: REPEATS})
+        self.assertEqual(estimate['status'], 'unknown')
 
 
 if __name__ == '__main__':

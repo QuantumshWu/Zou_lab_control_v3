@@ -330,7 +330,8 @@ def scan_ports_for_devices(
     """Every port the bench's tunable devices offer, from their own words.
 
     A device that cannot answer raises, unless ``unread`` is given: then it
-    offers nothing and that dict says why, by device key.  An editor gives it,
+    offers nothing it cannot read (a field it cannot read in the unit asked
+    included) and that dict says why, by device key.  An editor gives it,
     since one instrument failing a read says nothing about the other knobs; a
     run does not, since it cannot move a knob it cannot read.
 
@@ -373,7 +374,13 @@ def scan_ports_for_devices(
             port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
             selected_unit = (units or {}).get(port) or dict(getattr(device, "units", None) or {}).get(field.name)
             if selected_unit and selected_unit != field.unit:
-                tunable = read_tunable_in_unit(device, field.name, selected_unit)
+                try:
+                    tunable = read_tunable_in_unit(device, field.name, selected_unit)
+                except Exception as error:  # noqa: BLE001 -- the instrument's or its link's, of any type
+                    if unread is None:
+                        raise
+                    unread[key] = str(error)
+                    continue
                 field = tunable.metadata
             if field.derived or field.minimum is None or field.maximum is None:
                 continue
