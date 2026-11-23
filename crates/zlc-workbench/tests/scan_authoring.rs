@@ -324,3 +324,43 @@ fn a_ports_domain_must_be_one() {
         assert!(on_ports(document.clone(), "compile", json!([port])).unwrap_err().contains(problem), "{problem}");
     }
 }
+
+/// A count following a manual knob by a formula -- 0.1 .. 0.5 in five points, x * 10 -- plays the
+/// decimals its formula writes, 1, 2, 3, 4, 5 (the floats of the Range reach 3.0000000000000004),
+/// and the binding layer takes each as the count it is; 0.57 * 100, 56.99999999999999 in floats,
+/// plays 57; a device's int field plays the same whole numbers.
+#[test]
+fn a_linked_whole_number_plays_the_decimal_its_formula_writes() {
+    use zlc_pulse::binding::{pulse_field_value, replace_pulse_field};
+    use zlc_pulse::model::{Binding, Bracket, FieldRef};
+    use zlc_pulse::num::number_for;
+    let document = |port: &str, unit: &str| json!({"axes":[{"port":"manual:power","values":[],
+        "range":{"start":0.1,"stop":0.5,"count":5},"unit":"","mode":"range","value_text":"","link_enabled":true,
+        "links":[{"port":port,"mode":"formula","formula":"x*10","unit":unit}]}]});
+    let bits = |values: Vec<f64>| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+    let whole = |last: u32| bits((1..=last).map(f64::from).collect());
+    assert!(formula_values("x*10", &range_values(0.1, 0.5, 5).unwrap()).unwrap().contains(&3.0000000000000004), "the floats are noisy");
+    assert!(formula_values("x*100", &[0.57]).unwrap() == [56.99999999999999], "and so is 0.57 * 100");
+    let compiled = on_ports(document("api:bracket_count:loop", "count"), "preview", bench()).unwrap();
+    let counts = values(&compiled, 1);
+    assert_eq!((bits(counts.clone()), compiled["axis_facts"][0]["links"][0]["moved"].as_u64()), (whole(5), Some(0)));
+    let hundredfold = json!({"axes":[{"port":"manual:power","values":[0.57],"link_enabled":true,
+        "links":[{"port":"api:bracket_count:loop","mode":"formula","formula":"x*100","unit":"count"}]}]});
+    assert_eq!(bits(values(&on_ports(hundredfold, "compile", bench()).unwrap(), 1)), bits(vec![57.0]));
+    // Each count as the binding layer writes it into a pulse whose bracket count is an API parameter.
+    let template = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../zlc-pulse/tests/pulses/imaging_template.json");
+    let (_path, sequence) = zlc_pulse::run::read_document(&template).unwrap();
+    let field = FieldRef::bracket_count("loop");
+    let sequence = sequence.with(|parts| {
+        parts.brackets.push(Bracket::new("loop", Some("long_before"), Some("long_after"), 2).unwrap());
+        parts.bindings.push(Binding::new(field.clone(), "count", false, "api", "").unwrap());
+    }).unwrap();
+    for count in counts {
+        let written = replace_pulse_field(&sequence, &field, number_for(count), "count", "bracket_count:loop").unwrap();
+        assert_eq!(pulse_field_value(&written, &field, "count").unwrap().to_bits(), count.to_bits(), "{count}");
+    }
+    let mut ports = bench();
+    ports.as_array_mut().unwrap().push(json!({"port":"device:counter:steps","unit":"Hz","lo":0.0,"hi":1e6,"grid":{"step":1.0}}));
+    let compiled = on_ports(document("device:counter:steps", "Hz"), "compile", ports).unwrap();
+    assert_eq!(bits(values(&compiled, 1)), whole(5), "a device's int field");
+}
