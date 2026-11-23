@@ -365,7 +365,7 @@ test('the notes and the chart titles say what the engine computes: the loss, the
   assert.match(notes,/区间按组数取 Student t，组少时比两倍标准误差宽/);
   // The total T's target: its three parts weighed by the held share (solve.rs `temperature_account`, moved out of
   // `accounts` in b2dac752; SPEC §0): the model's and the statistics' here, the step's read so already (estimate.rs `between`).
-  assert.match(source('solve.rs'),/let h = 1\. - e\.loss;\s*Account \{ model: weighed\(h, model\), step: bound\.temperature \* e\.temperature_target, statistics: weighed\(h, interval\) \}/);
+  assert.match(source('solve.rs'),/let h = 1\. - e\.loss;\s*Account \{ model: weighed\(h, model\), step: step \* e\.temperature_target, statistics: weighed\(h, interval\) \}/);
   assert.match(source('estimate.rs'),/T relative to the finer level's and weighed by the\s*\/\/! finer level's held share 1 − L/);
   assert.match(notes,/按仍在光阱中的份额 1 − L 计权后与 10% 比较/);
   // A motion trajectory's sample errors are its total estimates against its own target.
