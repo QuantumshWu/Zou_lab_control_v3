@@ -20,11 +20,11 @@ const choose=(picker,label)=>{
   for(let heading;(heading=list.querySelector('.tree-row.heading:not(.open)'));) up(heading);
   up([...list.querySelectorAll('.tree-row.leaf')].find(row=>row.textContent===label));
 };
-const port={port:'device:rf:level',label:'rf.level',unit:'mVpp',lo:0,hi:1000,current:500,integer:false,display_unit:null,group:'rf',leaf:'level',
+const port={port:'device:rf:level',label:'rf.level',unit:'mVpp',lo:0,hi:1000,current:500,grid:null,display_unit:null,group:'rf',leaf:'level',
   units:[['mVpp',0],['Vpp',3],['dBm',null]],limits:{dBm:[-40,13.010299956639813]},currents:{dBm:7.958800173440752},families:{mVpp:'Vpp',Vpp:'Vpp',dBm:'dBm'}};
 // The knobs a bench offers, as scan/editor.py words them.
 const HZ=[['GHz',9],['MHz',6],['kHz',3],['Hz',0]];
-const knob=(name,more)=>({port:`device:rf:${name}`,label:`rf.${name}`,group:'rf',leaf:name,integer:false,display_unit:null,limits:{},currents:{},...more,
+const knob=(name,more)=>({port:`device:rf:${name}`,label:`rf.${name}`,group:'rf',leaf:name,grid:null,display_unit:null,limits:{},currents:{},...more,
   families:Object.fromEntries((more.units??[]).map(([symbol])=>[symbol,more.family?.[symbol]??more.unit]))});
 const ports={
   carrier:knob('carrier',{unit:'Hz',lo:5e8,hi:8e9,current:6.834e9,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
@@ -36,12 +36,15 @@ const ports={
     units:[['dBm',0],['Vpp',null],['mVpp',null],['mW',null]],limits:{Vpp:[0.02,6.32],mVpp:[20,6320],mW:[0.001,100]},currents:{Vpp:0.5,mVpp:500,mW:0.625},
     family:{dBm:'dBm',Vpp:'Vpp',mVpp:'Vpp',mW:'W'}}),
   unknown:knob('unknown',{unit:'Hz',lo:5e8,hi:8e9,current:null,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
-  hold:{port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,integer:false,display_unit:null,
+  hold:{port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,grid:{step:2e-8,ties:'away'},display_unit:null,
     units:[['s',0],['ms',-3],['µs',-6],['ns',-9]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
-  repeats:{port:'pulse:param:bracket:b1',label:'repeats',group:'pulse',leaf:'bracket:b1',unit:'count',lo:1,hi:65535,current:3,integer:true,display_unit:null,
+  repeats:{port:'pulse:param:bracket:b1',label:'repeats',group:'pulse',leaf:'bracket:b1',unit:'count',lo:1,hi:65535,current:3,grid:{step:1,ties:'even'},display_unit:null,
     units:[],limits:{},currents:{},families:{}},
-  once:{port:'pulse:param:bracket:b2',label:'once',group:'pulse',leaf:'bracket:b2',unit:'count',lo:1,hi:65535,current:1,integer:true,display_unit:null,
+  once:{port:'pulse:param:bracket:b2',label:'once',group:'pulse',leaf:'bracket:b2',unit:'count',lo:1,hi:65535,current:1,grid:{step:1,ties:'even'},display_unit:null,
     units:[],limits:{},currents:{},families:{}},
+  // An output delay on a 20 ns clock, standing at 500 ns.
+  cooling:{port:'api:delay:cooling',label:'cooling.delay',group:'api',leaf:'delay:cooling',unit:'ns',lo:-10000,hi:10000,current:500,
+    grid:{step:20,ties:'away'},display_unit:null,units:[['s',9],['ms',6],['µs',3],['ns',0]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
 };
 const delay=(value,overrides=[])=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},
   description:'delay',minimum:0,maximum:1,authored:0.001,value,unavailable_reason:''}],overrides,parked:[],note:'',tidy:null});
@@ -94,6 +97,13 @@ try {
    equal([axes.b2.unit,rangeOf(axes.b2)],['count',{start:1,stop:2,count:2}],'repeats 1: never below its limit');
    equal(axes.edge.unit,'MHz','at its lower limit');equal(rangeOf(axes.edge),{start:500,stop:500.1,count:5},'clipped to its limit');
    equal([axes.unknown.unit,rangeOf(axes.unknown)],['GHz',{start:0.5,stop:0.5,count:1}],'one point, in the unit its range reads in');
+ });
+ await check('a knob on a grid coarser than the five points of a sweep sweeps one grid point a value',async()=>{
+   const t=setup([],null,[ports.cooling,ports.hold]);
+   t.add();t.add();
+   const axes=Object.fromEntries(t.plan().map(axis=>[axis.port.split(':').at(-1),axis]));
+   equal([axes.cooling.unit,rangeOf(axes.cooling)],['ns',{start:480,stop:520,count:3}],'500 ns on a 20 ns clock: 480, 500, 520 ns');
+   equal([axes.hold.unit,rangeOf(axes.hold)],['ms',{start:9.9,stop:10.1,count:5}],'10 ms on the same clock: five points 0.05 ms apart');
  });
  await check('a unit the operator picks stays until the knob is changed; a new knob starts again',async()=>{
    const t=setup([],null,[ports.drive,ports.carrier]);

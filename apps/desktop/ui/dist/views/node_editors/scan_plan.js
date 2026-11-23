@@ -43,9 +43,18 @@ function inSpelling(port, symbol) {
         return { current: port.current === null ? null : shifted(port.current, -decade), bounds: [shifted(port.lo, -decade), shifted(port.hi, -decade)] };
     return { current: port.currents[symbol] ?? null, bounds: port.limits[symbol] ?? [null, null] };
 }
+/** The knob's grid step read in `symbol` (a decimal shift of its unit), or null: no grid, or a
+ * spelling no shift reaches (a step is a difference; a power read as a level has none). */
+function gridStep(port, symbol) {
+    const decade = symbol === port.unit ? 0 : port.units.find(([name]) => name === symbol)?.[1];
+    return port.grid && typeof decade === "number" ? shifted(port.grid.step, -decade) : null;
+}
+/** How far a first sweep reaches either side of where the knob stands, and in how many points. */
+const SWEEP_SPREAD = 0.1, SWEEP_POINTS = 5;
 /** A knob's first sweep, when an axis is added or its knob changed: in the unit `defaultUnit` picks
  * from where it stands (in the family its owner shows it in), from 0.1 below to 0.1 above that
- * in it -- a whole-number knob 1, one value a point -- in five points, inside its limits.  A knob
+ * in it in five points, inside its limits -- a knob whose grid is coarser than those points one
+ * grid point a value, from one step below to one above (a count 1, a 20 ns clock 20 ns).  A knob
  * that says nowhere it stands is one point, at its lower limit: never its whole range. */
 function firstSweep(port) {
     const family = (symbol) => port.families[symbol] ?? symbol;
@@ -53,18 +62,23 @@ function firstSweep(port) {
     const unit = defaultUnit(own, port.units.filter(([symbol]) => family(symbol) === family(own)).map(([symbol]) => {
         const { current, bounds: [low, high] } = inSpelling(port, symbol);
         return { symbol, value: current, low, high };
-    }), port.integer);
+    }), Boolean(port.grid && Number.isInteger(port.grid.step)));
     const { current, bounds: [low, high] } = inSpelling(port, unit);
     const inside = (value) => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
     if (current === null)
         return { unit, ...rangeBank(low ?? high ?? 0, low ?? high ?? 0, 1) };
-    const step = port.integer ? 1 : 0.1;
-    const from = inside(decimalSum(current, -step)), to = inside(decimalSum(current, step));
+    const step = gridStep(port, unit);
+    if (step !== null && step > 2 * SWEEP_SPREAD / (SWEEP_POINTS - 1)) {
+        const below = decimalSum(current, -step), above = decimalSum(current, step);
+        const from = low !== null && below < low ? current : below, to = high !== null && above > high ? current : above;
+        if (!(from < to))
+            return { unit, ...rangeBank(inside(current), inside(current), 1) };
+        return { unit, ...rangeBank(from, to, Math.round((to - from) / step) + 1) };
+    }
+    const from = inside(decimalSum(current, -SWEEP_SPREAD)), to = inside(decimalSum(current, SWEEP_SPREAD));
     if (!(from < to))
         return { unit, ...rangeBank(inside(current), inside(current), 1) };
-    if (!port.integer)
-        return { unit, ...rangeBank(from, to, 5) };
-    return { unit, ...rangeBank(Math.ceil(from), Math.floor(to), Math.floor(to) - Math.ceil(from) + 1) };
+    return { unit, ...rangeBank(from, to, SWEEP_POINTS) };
 }
 /** A spin box for one end or the count of a Range bank. */
 function rangeSpin(label, step, bounds, commit, decimal = true) {
@@ -508,11 +522,11 @@ export class ScanPlanEditor {
         const port = this.ports.find(port => port.port === view.entry.port);
         const previous = this.axisMemory.get(view.entry.port);
         this.axisMemory.set(view.entry.port, { entry: copyAxis(view.entry), steps: [...view.steps],
-            nativeUnit: port?.unit ?? previous?.nativeUnit ?? null, integer: port?.integer ?? previous?.integer ?? null });
+            nativeUnit: port?.unit ?? previous?.nativeUnit ?? null, grid: port ? port.grid?.step ?? null : previous?.grid ?? null });
     }
     recall(port) {
         const kept = this.axisMemory.get(port), offered = this.ports.find(item => item.port === port);
-        if (!kept || (offered && (kept.nativeUnit !== offered.unit || kept.integer !== offered.integer)))
+        if (!kept || (offered && (kept.nativeUnit !== offered.unit || kept.grid !== (offered.grid?.step ?? null))))
             return undefined;
         return { ...kept, entry: copyAxis(kept.entry), steps: [...kept.steps] };
     }

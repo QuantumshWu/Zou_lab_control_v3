@@ -72,6 +72,29 @@ SCAN_PULSE_CONTRACT = "zlc.pulse/scan-template"
 
 
 @dataclass(frozen=True)
+class PortGrid:
+    """The grid a port's owner puts a value on, in the port's unit: the whole
+    multiples of ``step``, a value halfway between two going away from zero
+    (``ties`` "away", the clock grid's rule) or to the even one ("even", a
+    pulse's DAC code or repeat count)."""
+
+    step: float
+    ties: str = "away"
+
+    @classmethod
+    def of(cls, grid: Mapping[str, object] | None) -> "PortGrid | None":
+        """A grid as its owner states it (pulse_describe's ``grid``), or None."""
+
+        return None if grid is None else cls(float(grid["step"]), str(grid.get("ties", "away")))
+
+    @property
+    def whole(self) -> bool:
+        """Whether every point of it is a whole number."""
+
+        return float(self.step).is_integer()
+
+
+@dataclass(frozen=True)
 class ScanPort:
     """One knob the bench offers a scan, projected from its owner."""
 
@@ -85,16 +108,12 @@ class ScanPort:
     #: reading -- or None when nothing says.  The editor centres an axis's
     #: first sweep on it.
     current: float | None = None
-    #: A whole-number knob (a DAC code, a repeat count, an int field).
-    integer: bool = False
     #: The unit family its owner shows it in by default (AuthoringField.display_unit).
     display_unit: str | None = None
-    #: The grid its owner puts a value on, in ``unit``: ``{"step": s}``, the whole
-    #: multiples of ``s``, halfway going away from zero (the clock grid's rule), or
-    #: with ``"ties": "even"``, halfway going to the even one (a pulse's DAC code or
-    #: repeat count); None: any value from ``lo`` to ``hi``.  The native compiler
-    #: plays every axis value on it (:func:`port_domains`).
-    grid: Mapping[str, object] | None = None
+    #: The grid its owner puts a value on, or None: any value from ``lo`` to
+    #: ``hi``.  The native compiler plays every axis value on it
+    #: (:func:`port_domains`); a whole-number knob is one whose grid is whole.
+    grid: PortGrid | None = None
 
     def __post_init__(self) -> None:
         if not str(self.port):
@@ -231,8 +250,7 @@ def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[S
                 float(column["limit_lo"]),
                 float(column["limit_hi"]),
                 current=float(column["value"]),
-                integer=bool(column.get("is_dac")) or column.get("kind") == "bracket_count",
-                grid=dict(column["grid"]),
+                grid=PortGrid.of(column["grid"]),
             )
         )
     return tuple(ports)
@@ -283,8 +301,8 @@ def unscannable_api_ports(description: Mapping[str, object]) -> dict[str, str]:
 #: Between a device's name and its field's in a device port's label ("Trap RF · CH1 Power").
 DEVICE_LABEL_SEPARATOR = " · "
 
-#: The grid of a device's ``int`` field: whole numbers.
-_WHOLE_NUMBERS = {"step": 1.0}
+#: The grid of a device's ``int`` field, in its own unit: whole numbers.
+_WHOLE_NUMBERS = PortGrid(1.0)
 
 
 def device_port_label(device: str, field: str) -> str:
@@ -361,9 +379,8 @@ def scan_ports_for_devices(
                     float(field.maximum),
                     current=float(reading) if isinstance(reading, Real) and not isinstance(reading, bool)
                     and math.isfinite(reading) else None,
-                    integer=field.value_type == "int",
                     display_unit=field.display_unit,
-                    grid=dict(_WHOLE_NUMBERS) if field.value_type == "int" else None,
+                    grid=_WHOLE_NUMBERS if field.value_type == "int" else None,
                 )
             )
     return tuple(ports)
@@ -593,7 +610,8 @@ def port_domains(ports: Sequence[ScanPort]) -> list[dict[str, object]]:
     """The ports as the native compiler and binding read them: each one's
     unit, bounds and grid, as its owner states them."""
 
-    return [{"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi, "grid": port.grid} for port in ports]
+    return [{"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi,
+             "grid": None if port.grid is None else {"step": port.grid.step, "ties": port.grid.ties}} for port in ports]
 
 
 #: A seamless plan may carry only host axes and play an ordinary fixed Pulse;
@@ -715,10 +733,10 @@ def _range_values(row: Mapping[str, object]) -> tuple[float, ...]:
 
 
 def plan_from_authored(payload: object, ports: Sequence[ScanPort] = ()) -> ScanPlan:
-    """Compile the active bank to the existing immutable execution plan, each
-    axis playing on its port's domain among ``ports`` -- what the bench plays
-    -- and as written where none is given."""
-    return payload if isinstance(payload, ScanPlan) else ScanPlan.from_tree(payload, ports)
+    """Compile the active bank (or a plan's axes) to the existing immutable
+    execution plan, each axis playing on its port's domain among ``ports`` --
+    what the bench plays -- and as written where none is given."""
+    return ScanPlan.from_tree(payload, ports)
 
 
 def _scanned_axes(context: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -902,6 +920,7 @@ __all__ = [
     "DEVICE_PARAM_FAMILY",
     "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
+    "PortGrid",
     "SCAN_PULSE_CONTRACT",
     "SEAMLESS_PULSE_RESOURCE",
     "ScanAxis",

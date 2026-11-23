@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_atom.authoring import AuthoringField, TunableField
-from zlc_atom.nodes.scan.plan import (ScanPlan, api_scan_ports_for, bind_plan, plan_from_authored, plan_input_rows,
+from zlc_atom.nodes.scan.plan import (PortGrid, ScanPlan, api_scan_ports_for, bind_plan, plan_from_authored, plan_input_rows,
                                      scan_ports_for_devices)
 from zlc_atom.nodes.scan.editor import scan_editor_facts
 from zlc_atom.nodes.seamless_scan.logic_node import _editor_facts
@@ -100,7 +100,7 @@ class ScanEditorFacts(unittest.TestCase):
         self.assertIn('3 = 3 points', answer['summary'])
         self.assertEqual(answer['problem'], '')
         ports = api_scan_ports_for(REPEATS)
-        self.assertEqual(ports[0].grid, {'step': 1.0, 'ties': 'even'})
+        self.assertEqual(ports[0].grid, PortGrid(1.0, 'even'))
         played = plan_from_authored(json.dumps(plan), ports)
         self.assertEqual(played.axes[0].values, (1.0, 2.0, 3.0))
         self.assertEqual(bind_plan(played, ports), ports)
