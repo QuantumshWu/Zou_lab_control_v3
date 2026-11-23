@@ -675,6 +675,16 @@ use crate::request::Request;
 /// The runs' seed, the key of every trajectory's streams (random.rs): any fixed value, fixed so that a request gives the
 /// same result every time.
 pub(crate) const SEED: u64 = 0;
+
+/// The run's seed (`SEED`; a measurement's, the profiling build's alone: ATOM_PROF_SEED=n another, the same request's
+/// trajectories drawn again -- the spread of a result between two draws).
+fn seed() -> u64 {
+    #[cfg(feature = "prof")]
+    if let Some(n) = std::env::var("ATOM_PROF_SEED").ok().and_then(|x| x.parse::<u64>().ok()) {
+        return n;
+    }
+    SEED
+}
 /// The output times the distributions are given at (contract §3.4: at most 21, t = 0 and the last among them): the
 /// contract's number, for the display alone -- no estimate reads a distribution.
 const DISTRIBUTION_TIMES: usize = 21;
@@ -2724,7 +2734,7 @@ fn priced(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: bool)
             } else {
                 let states = &pick.state.sample.psi;
                 let ground = (0..GROUND).max_by(|&a, &b| states.get(a).map_or(0., |z| z.norm_sqr()).total_cmp(&states.get(b).map_or(0., |z| z.norm_sqr()))).unwrap_or(0);
-                let mut t = Trajectory::new(model, ground, mine.r, mine.kappa, SEED, mine.index);
+                let mut t = Trajectory::new(model, ground, mine.r, mine.kappa, seed(), mine.index);
                 (t.time, t.threshold, t.jumps) = (mine.time, mine.threshold, mine.jumps);
                 t
             };
@@ -4135,7 +4145,7 @@ impl State {
             scattered: [0.; 2],
             lost: None,
             unresolved: false,
-            seed: SEED,
+            seed: seed(),
             index: self.index,
             work: 0.,
             jumped: 0.,
@@ -4359,13 +4369,13 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let _p = crate::prof::scope(crate::prof::SOLVE_TRAJECTORY);
     let sizes = [plan.times.len(), plan.reads.len()];
-    let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
+    let mut t = Trajectory::new(model, start.state, start.r, start.kappa, seed(), index);
     // The time the run's fold is found not to exist for it (# Exits): at its start where its start lands nowhere.
     let nowhere = std::cell::Cell::new((!t.forms.held.iter().all(|x| x.is_finite()) || !t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite())).then_some(0.));
     let mut scratch = Scratch::default();
     // The trajectory's Brownian path in the plan's cells, its grid the multiples of τ (a cell over a power of two):
     // the same path at every rung and at its companion.
-    let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
+    let mut path = adapt::Path::new(seed(), index, plan.cell, (plan.cell / tau).log2().round() as u32);
     // The outputs' windows and the decisions' (the trajectory's fates with them), taken up by its reads and its path's
     // pieces alike.
     let windows = std::cell::RefCell::new([Windows::new(&plan.times, &plan.halves), Windows::new(&plan.reads, &plan.read_halves)]);
@@ -4699,7 +4709,7 @@ impl Shape {
 /// through the plan (`run`). A function of the index and the step: the same index at another step is the same atom on
 /// the same streams (module documentation, # The step).
 fn trajectory(model: &Selected, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
-    let (start, kinetic) = ensemble.draw_kinetic(SEED, index);
+    let (start, kinetic) = ensemble.draw_kinetic(seed(), index);
     Record { kinetic, ..run(model, domain, start, index, tau, plan, keep) }
 }
 
