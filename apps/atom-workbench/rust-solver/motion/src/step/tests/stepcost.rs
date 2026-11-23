@@ -6,7 +6,8 @@
 //!   and explicit excited states' labels joined by "+"), its step τ (µs); a walk of STEPCOST_STEPS (12) steps from
 //!   trajectory STEPCOST_INDEX (3) of `r1prop::start` (the chief state moving at the thermal speed). Per state of the walk, each the least of
 //!   STEPCOST_REPEAT (5) in the thread's own cycles (another process's share of the core does not enter them), its first
-//!   call not timed: the step on a fresh scratch; a node at the step's middle plain and with the photon forms; an
+//!   call not timed: the step on a fresh scratch; a node at the step's middle plain, with the photon forms, and a jump's
+//!   photon's alone (`Selected::photon_node`, where the build has it); an
 //!   output's readout at the point (`Dynamics::readout`) and on the step's middle (`Middle::readout`, where the model
 //!   reads there). Said: their means over the walk, the jumps and the nodes a step makes, the counted work a step.
 //!   Ignored; run by name, pinned to one performance core by the caller:
@@ -109,8 +110,8 @@ fn stepcost() {
         let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
         let mut t = start(&run, &request, chief, index);
         let domain = Everywhere;
-        // [step, node, node with the photon forms, readout at the point, readout on the middle]
-        let mut sum = [0.0f64; 5];
+        // [step, node, node with the photon forms, readout at the point, readout on the middle, a jump's photon's node]
+        let mut sum = [0.0f64; 6];
         let (mut work, mut jumps, mut made, mut taken, mut middle_reads) = (0.0, 0usize, [0usize; 2], 0usize, 0usize);
         for _ in 0..steps {
             let before = crate::model::selected::MADE.with(|m| *m.borrow());
@@ -129,6 +130,9 @@ fn stepcost() {
             });
             sum[2] += least(&mut || {
                 std::hint::black_box(run.node(at.0, at.1, true));
+            });
+            sum[5] += least(&mut || {
+                std::hint::black_box(run.photon_node(at.0, at.1));
             });
             sum[3] += least(&mut || {
                 std::hint::black_box(run.readout(t.cluster, &t.point(), &t.psi));
@@ -149,11 +153,12 @@ fn stepcost() {
         }
         let k = taken.max(1) as f64;
         eprintln!(
-            "STEPCOST {name} {spec} (P{}) tau {tau}: a step {:.1} µs | a node {:.1} µs, with the photon forms {:.1} µs | an output's readout at the point {:.1} µs, on the middle {} | nodes a step {:.2} plain + {:.2} with photons, jumps a step {:.3}, counted {:.3e} real MA a step over {taken} steps",
+            "STEPCOST {name} {spec} (P{}) tau {tau}: a step {:.1} µs | a node {:.1} µs, with the photon forms {:.1} µs, a jump's photon's {:.1} µs | an output's readout at the point {:.1} µs, on the middle {} | nodes a step {:.2} plain + {:.2} with photons, jumps a step {:.3}, counted {:.3e} real MA a step over {taken} steps",
             keep.len(),
             sum[0] / k,
             sum[1] / k,
             sum[2] / k,
+            sum[5] / k,
             sum[3] / k,
             if middle_reads > 0 { format!("{:.2} µs", sum[4] / middle_reads as f64) } else { "none".to_string() },
             made[0] as f64 / k,
