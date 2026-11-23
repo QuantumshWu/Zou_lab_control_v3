@@ -1834,6 +1834,12 @@ enum Course {
 /// rung buys it (`buys`, at the pilot's position: on the scout the pilot's purchase to come, its work priced into
 /// staying -- the course there is the pilot's to take); else it stands on its own two levels.
 fn course(prices: &Prices, tau: f64, end: f64, holding: Holding, third: Option<Third>) -> Course {
+    // (A measurement's, the profiling build's alone: ATOM_PROF_STAY=1 stands every rung the check stands, no price
+    // weighed -- what the run costs at the rung the price would have left.)
+    #[cfg(feature = "prof")]
+    if std::env::var("ATOM_PROF_STAY").is_ok_and(|x| x == "1") {
+        return Course::Stand;
+    }
     // The two paths from here: verified at τ -- its companions, its third level where it has one to read, each for its
     // read's precision, and its run level to the product --, or at the least rung below (`descending`: its third level
     // this rung's read, lowered).
