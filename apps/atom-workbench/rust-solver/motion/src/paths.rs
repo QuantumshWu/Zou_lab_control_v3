@@ -1702,7 +1702,7 @@ impl Form<'_> {
             }
             let mut eig = Eigen::default();
             if !eig.decompose(&Mat { rows: w, cols: w, data: h[o..o + w * w].to_vec() }) {
-                return Err(format!("H's block {x} at {t} µs has no eigendecomposition"));
+                return Err(format!("{t} µs 处 H 的第 {x} 块做不出本征分解"));
             }
             let (mut a, mut b) = (vec![C64::ZERO; w * w], vec![C64::ZERO; w * w]);
             for i in 0..w {
@@ -2110,7 +2110,7 @@ impl Form<'_> {
             let m = Mat { rows: w, cols: w, data: f.hm[self.h_block[x]..self.h_block[x] + w * w].to_vec() };
             let mut eig = Eigen::default();
             if !eig.decompose(&m) {
-                return Err(format!("H's block {x} at {tm} µs has no eigendecomposition"));
+                return Err(format!("{tm} µs 处 H 的第 {x} 块做不出本征分解"));
             }
             f.condition = larger(f.condition, eig.condition);
             f.work += crate::decide::COMPLEX * eig.work;
