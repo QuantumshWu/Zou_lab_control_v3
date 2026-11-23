@@ -106,7 +106,9 @@
 //! Per output time t, its window's (`paths::window_of`) error of each displayed row, |mean| + q·se over the paths
 //! (`paths::Mean`), q Student's t at the run's confidence (the normal's two-sided tail at `CONFIDENCE`) with the paths
 //! read in the window less one degrees of freedom -- the paths' own statistics, not the normal's z (at four paths z = 2
-//! covers 86 %, the t quantile 95.4 %) --, the largest over the rows, and the scheme's calibration beside it; past L the
+//! covers 86 %, the t quantile 95.4 %) --, read on each of the window's parts (`paths::parts`: halved while its halves'
+//! rows differ beyond their statistics, so that a change inside a long window is not averaged away), the largest over
+//! the parts and the rows, and the scheme's calibration beside it; past L the
 //! larger of the start's last window's and the late segment's last window's, and past the late segment's start the
 //! latter's. Of one path the spread is unknown: its upper end is without bound.
 //!
