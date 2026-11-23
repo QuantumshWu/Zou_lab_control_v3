@@ -2380,37 +2380,45 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         choice = Some(made);
     }
     drop(levels);
-    let n = times.len();
     context.at = times;
     context.fixed = context.fixed.with(read.model.clone(), &context.at).moving(read.motion.clone());
+    // The model's error at every output, booked there (`outputs_model`, `assemble`).
+    let shown_at = match &choice {
+        Some(c) => {
+            let (estimates, at_outputs) = outputs_model(&pilot.iter().collect::<Vec<_>>(), &context.scales, c, &context.plan, &context.fixed);
+            context.fixed = context.fixed.clone().at_outputs(at_outputs);
+            Some(estimates)
+        }
+        None => None,
+    };
     // The optical sector's noise (ledger.rs `optical`), its items; its booking on T is in the model's error the reads
     // made (`pilot_reads`).
     crate::ledger::optical(&mut context.ledger, read.counts.optical);
-    {
-        // The ledger's items: each part of the model's error on what is shown and on T (its largest over the analysis
-        // times, weighed by the pilot's held share as the totals are; a time where the pilot holds no atom weighs nothing).
-        let held: Vec<f64> = read.estimates.iter().map(|e| 1. - e.loss).collect();
-        if let Some(c) = &choice {
-            // Where the paths read no direct part, the held atoms' bound (`model_of`).
-            let direct = (1..n).filter(|&k| held[k] != 0.).map(|k| c.at(context.at[k]).unwrap_or(held[k])).fold(0., crate::linalg::larger);
-            context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
-            for flag in model_flags(c, &read, request) {
-                context.ledger.flag(flag);
-            }
+    if let (Some(c), Some(shown_at)) = (&choice, &shown_at) {
+        // The ledger's items: each part of the model's error on what is shown and on T (its largest over the outputs,
+        // weighed by the pilot's held share as the totals are; a time where the pilot holds no atom weighs nothing).
+        let outputs = &context.plan.times;
+        let held: Vec<f64> = shown_at.iter().map(|e| 1. - e.loss).collect();
+        // Where the paths read no direct part, the held atoms' bound (`model_of`).
+        let direct = (1..outputs.len()).filter(|&k| held[k] != 0.).map(|k| c.at(outputs[k]).unwrap_or(held[k])).fold(0., crate::linalg::larger);
+        context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
+        for flag in model_flags(c, &read, request) {
+            context.ledger.flag(flag);
         }
-        // The motion's part (select.rs, # The motion): its largest over the times, on the loss and on T (by the held share).
-        let course = course_of(&read.estimates, &context.at, &context.scales);
-        let motion = choice.as_ref().map_or(0., |c| {
-            (1..n)
-                .filter(|&k| held[k] != 0.)
-                .filter_map(|k| {
-                    let m = c.motion(&course, k, context.scales.hbar_over_mass)?;
-                    let t = read.estimates[k].motion.filter(|x| x.temperature_total > 0.).map_or(0., |x| m.temperature_total / x.temperature_total);
-                    Some(crate::linalg::larger(m.loss, held[k] * t))
-                })
-                .fold(0., crate::linalg::larger)
-        });
+        // The motion's part (select.rs, # The motion): its largest over the outputs, on the loss and on T (by the held
+        // share).
+        let course = course_of(shown_at, outputs, &context.scales, Some(&context.plan.halves));
+        let motion = (1..outputs.len())
+            .filter(|&k| held[k] != 0.)
+            .filter_map(|k| {
+                let m = c.motion(&course, k, context.scales.hbar_over_mass)?;
+                let t = shown_at[k].motion.filter(|x| x.temperature_total > 0.).map_or(0., |x| m.temperature_total / x.temperature_total);
+                Some(crate::linalg::larger(m.loss, held[k] * t))
+            })
+            .fold(0., crate::linalg::larger);
         context.ledger.item(MODEL_MOTION[0], motion, MODEL_MOTION[1]);
+    } else if choice.is_none() {
+        context.ledger.item(MODEL_MOTION[0], 0., MODEL_MOTION[1]);
     }
 
     // The product (module documentation, # Stopping): on from the pilot's trajectories at the run's step, the run's
@@ -2483,7 +2491,7 @@ fn pilot_reads(pilot: &[&Part], scales: &Scales, choice: Option<&Choice>, times:
     let (estimates, counts) = (summarize(&reads_of(pilot), scales), counts_of(pilot));
     let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
     // On the reference itself (P all 32 states) no model error at any time, as the choice weighed it (`choose_on_the_pilot`).
-    let course = course_of(&estimates, times, scales);
+    let course = course_of(&estimates, times, scales, None);
     let (model, motion) = if choice.is_some_and(|c| c.keep.len() == STATES) { (vec![[0.; 2]; times.len()], vec![NO_MOTION_ERROR; times.len()]) } else { model_of(&|t| choice.map_or(Some(0.), |c| c.at(t)), &|k| choice.and_then(|c| c.motion(&course, k, scales.hbar_over_mass)), &estimates, times, optical, escape) };
     PilotRead { estimates, counts, model, motion }
 }
@@ -2511,13 +2519,31 @@ fn model_of(direct: &dyn Fn(f64) -> Option<f64>, motion: &dyn Fn(usize) -> Optio
         .unzip()
 }
 
+/// The model's error at the request's outputs (`model_of`: the choice's parts on the pilot's course there, T's windows'
+/// half widths with it) with this run's bounds (`fixed`'s): what the product books at each output (`assemble`, `Fixed::
+/// outputs`) -- not the line through the analysis times', which misses what changes between them (R9_PUSH after the step's
+/// prior was freed: its loss's front at 14-34 µs between the analysis times 12.1 and 36.4 µs) --, and the pilot's
+/// estimates there.
+fn outputs_model(pilot: &[&Part], scales: &Scales, choice: &Choice, plan: &Plan, fixed: &Fixed) -> (Vec<Estimate>, Fixed) {
+    let (estimates, counts) = (summarize(&outputs_of(pilot), scales), counts_of(pilot));
+    let optical = crate::ledger::optical(&mut Ledger::default(), counts.optical);
+    let course = course_of(&estimates, &plan.times, scales, Some(&plan.halves));
+    let (model, motion) = if choice.keep.len() == STATES {
+        (vec![[0.; 2]; plan.times.len()], vec![NO_MOTION_ERROR; plan.times.len()])
+    } else {
+        model_of(&|t| choice.at(t), &|k| choice.motion(&course, k, scales.hbar_over_mass), &estimates, &plan.times, optical, &fixed.escape)
+    };
+    let at_outputs = fixed.with(model, &plan.times).moving(motion);
+    (estimates, at_outputs)
+}
+
 /// No model error on the held atoms' motion, read (the 32 states: the reference itself).
 const NO_MOTION_ERROR: MotionError = MotionError { temperature: 0., velocity: [0.; 3], push: [0.; 3] };
 
 /// The pilot's course (select.rs `Course`) of its estimates at the times: its loss, its T per lab axis where it holds
-/// atoms, and the reported trap's frequencies.
-fn course_of(estimates: &[Estimate], times: &[f64], scales: &Scales) -> crate::select::Course {
-    crate::select::Course { times: times.to_vec(), loss: estimates.iter().map(|e| e.loss).collect(), temperature: estimates.iter().map(|e| e.motion.map(|m| m.temperature)).collect(), frequencies: scales.frequencies }
+/// atoms, the reported trap's frequencies, and T's windows' half widths where the times are the outputs.
+fn course_of(estimates: &[Estimate], times: &[f64], scales: &Scales, halves: Option<&[V3]>) -> crate::select::Course {
+    crate::select::Course { times: times.to_vec(), loss: estimates.iter().map(|e| e.loss).collect(), temperature: estimates.iter().map(|e| e.motion.map(|m| m.temperature)).collect(), frequencies: scales.frequencies, halves: halves.map(<[V3]>::to_vec) }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2742,17 +2768,22 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             };
             noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：{memory}；{drift}", pilot.len() as u64 * GROUP));
         }
-        // 3. The candidates.
+        // 3. The candidates, weighed at the request's outputs -- every time it shows, each with its account (E² = A² +
+        // c² + S²) --: the pilot's estimates there (its groups' sums at the outputs), its course there with T's windows'
+        // half widths. (Until 2026-11-23 at the analysis times alone: after the step's prior was freed R9_PUSH's stood at
+        // 0, 12.1, 36.4, ... µs about its loss's front at 14-34 µs, and G was taken complete where its loss is 0.18 off.)
+        let outputs: &[f64] = &context.plan.times;
+        let shown_at = summarize(&outputs_of(pilot), &context.scales);
         // An account: the model's error per time and its error on the held atoms' motion (`model_of`).
         type Booked = (Vec<[f64; 2]>, Vec<MotionError>);
-        let fixed = |(model, motion): Booked| context.fixed.with(model, times).moving(motion);
+        let fixed = |(model, motion): Booked| context.fixed.with(model, outputs).moving(motion);
         // The run's own looks at no model error, the motion's read where an account reads it (its looks are those the
         // account's are: `met`), none read for the least need any candidate can have.
         let base_of = |motion: &[MotionError]| -> Vec<Look> {
             let read_as = motion.iter().map(|m| if m.velocity.iter().chain(&m.push).any(|x| x.is_nan()) { MotionError::UNREAD } else { NO_MOTION_ERROR }).collect();
-            looks(&read.estimates, &fixed((vec![[0.; 2]; times.len()], read_as)), &context.step, &context.scales)
+            looks(&shown_at, &fixed((vec![[0.; 2]; outputs.len()], read_as)), &context.step, &context.scales)
         };
-        let base = base_of(&vec![MotionError::UNREAD; times.len()]);
+        let base = base_of(&vec![MotionError::UNREAD; outputs.len()]);
         let need0 = most_needed(&base);
         let ran = (numbers.len() as u64 * GROUP) as f64;
         // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); the scout's and the
@@ -2772,25 +2803,25 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         };
         let optical = crate::ledger::optical(&mut Ledger::default(), read.counts.optical);
         // The pilot's course the motion's errors are read on (select.rs, # The motion).
-        let course = course_of(&read.estimates, times, &context.scales);
+        let course = course_of(&shown_at, outputs, &context.scales, Some(&context.plan.halves));
         // A candidate's model error per time at its direct part's upper end (the one booked) and at its lower.
         let accounts = |j: &crate::select::Judged| -> [Booked; 2] {
-            [Reach::Upper, Reach::Lower].map(|reach| model_of(&|t| direct_bound_at(j, &paths.windows, t, reach), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, reach), &read.estimates, times, optical, &context.fixed.escape))
+            [Reach::Upper, Reach::Lower].map(|reach| model_of(&|t| direct_bound_at(j, &paths.windows, t, reach), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, reach), &shown_at, outputs, optical, &context.fixed.escape))
         };
         // A candidate's account at its point estimates (the nomination's, select.rs # The candidates), and its misfit there:
-        // its model error over its target, the largest over the times and the two kinds -- what is shown over the
+        // its model error over its target, the largest over the outputs and the two kinds -- what is shown over the
         // population target, T over its allowance there.
-        let point = |j: &crate::select::Judged| -> Booked { model_of(&|t| direct_bound_at(j, &paths.windows, t, Reach::Point), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, Reach::Point), &read.estimates, times, optical, &context.fixed.escape) };
+        let point = |j: &crate::select::Judged| -> Booked { model_of(&|t| direct_bound_at(j, &paths.windows, t, Reach::Point), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, Reach::Point), &shown_at, outputs, optical, &context.fixed.escape) };
         let misfit = |(model, motion): &Booked| -> f64 {
-            let relative = |k: usize| read.estimates[k].motion.filter(|x| x.temperature_total > 0.).map_or(0., |x| motion[k].temperature / x.temperature_total);
-            (1..times.len()).map(|k| crate::linalg::larger(model[k][0] / POPULATION_TARGET, (model[k][1] + relative(k)) / read.estimates[k].temperature_target)).fold(0., crate::linalg::larger)
+            let relative = |k: usize| shown_at[k].motion.filter(|x| x.temperature_total > 0.).map_or(0., |x| motion[k].temperature / x.temperature_total);
+            (1..outputs.len()).map(|k| crate::linalg::larger(model[k][0] / POPULATION_TARGET, (model[k][1] + relative(k)) / shown_at[k].temperature_target)).fold(0., crate::linalg::larger)
         };
         // An account with the states its model cannot step from booked whole (`priced_with`): on what is shown their share,
         // on T the bound set's move of it (# The unresolved atoms).
         let unresolved = |(mut m, motion): Booked, runaway: f64| -> Booked {
             if runaway > 0. {
                 for (k, e) in m.iter_mut().enumerate().skip(1) {
-                    *e = [probability_error(e[0] + runaway), e[1] + read.estimates[k].moved(runaway, &context.fixed.escape)];
+                    *e = [probability_error(e[0] + runaway), e[1] + shown_at[k].moved(runaway, &context.fixed.escape)];
                 }
             }
             (m, motion)
@@ -2800,7 +2831,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // beside where it is not the pilot's model.
         let asks = |m: Booked, price: f64, place: usize| -> ([bool; 2], f64, Option<f64>) {
             let motion = m.1.clone();
-            let own = looks(&read.estimates, &fixed(m), &context.step, &context.scales);
+            let own = looks(&shown_at, &fixed(m), &context.step, &context.scales);
             let (met, need) = (met(&own, &motion), most_needed(&own));
             (met, need, (met == [true; 2]).then(|| need * price * span + again(place, price)))
         };
@@ -2829,13 +2860,13 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // A candidate weighed on its judgment.
         let booked = |place: usize, (judged, price, runaway, seconds): (crate::select::Judged, f64, f64, f64), report: &mut Vec<String>| -> Weighed {
             let exact = judged.keep.len() == STATES;
-            let [model_error, lower] = if exact { std::array::from_fn(|_| (vec![[0.; 2]; times.len()], vec![NO_MOTION_ERROR; times.len()])) } else { accounts(&judged) };
+            let [model_error, lower] = if exact { std::array::from_fn(|_| (vec![[0.; 2]; outputs.len()], vec![NO_MOTION_ERROR; outputs.len()])) } else { accounts(&judged) };
             // The states it cannot step from: unresolved, booked whole.
             let (model_error, lower) = (unresolved(model_error, runaway), unresolved(lower, runaway));
             #[cfg(test)]
             if std::env::var_os("SEL_MOTION").is_some() {
-                for (k, e) in read.estimates.iter().enumerate() {
-                    eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e} (motion {:?}), lower {:.3e} / {:.3e}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), times[k], model_error.0[k][0], model_error.0[k][1], model_error.1[k], lower.0[k][0], lower.0[k][1], e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
+                for (k, e) in shown_at.iter().enumerate() {
+                    eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e} (motion {:?}), lower {:.3e} / {:.3e}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), outputs[k], model_error.0[k][0], model_error.0[k][1], model_error.1[k], lower.0[k][0], lower.0[k][1], e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
                 }
             }
             let (met, need, work) = asks(model_error, price, place);
@@ -3100,17 +3131,17 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let judged = judge(&paths, &model, centre)?;
             let price = price(&model, tau, false).0;
             let model_error = account(&judged);
-            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step, &context.scales);
+            let own = looks(&shown_at, &fixed(model_error.clone()), &context.step, &context.scales);
             let (met, need) = (met(&own, &model_error.1), most_needed(&own));
             weighed.push(Weighed { place: usize::MAX, judged, price, need, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }), open: false, settled_low: f64::INFINITY });
         }
-        // The report: every candidate weighed with its parts at their largest over the times.
+        // The report: every candidate weighed with its parts at their largest over the outputs.
         for w in &weighed {
             // The direct part where the paths read it (where they read none, the held atoms' bound there: `model_of`).
-            let direct = times.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
-            // The motion's parts, each its largest over the times (select.rs, # The motion).
+            let direct = outputs.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
+            // The motion's parts, each its largest over the outputs (select.rs, # The motion).
             let motion_of = |k: usize| crate::select::motion_at(&w.judged, &paths.windows, &course, k, hm, Reach::Upper);
-            let motions: Vec<crate::select::Motion> = (1..times.len()).filter_map(motion_of).collect();
+            let motions: Vec<crate::select::Motion> = (1..outputs.len()).filter_map(motion_of).collect();
             let most = |of: &dyn Fn(&crate::select::Motion) -> f64| motions.iter().map(of).fold(0., crate::linalg::larger);
             let axes = |of: &dyn Fn(&crate::select::Motion, usize) -> f64| format!("[{:.2e}, {:.2e}, {:.2e}]", most(&|m| of(m, 0)), most(&|m| of(m, 1)), most(&|m| of(m, 2)));
             let motion = if motions.is_empty() {
@@ -4866,12 +4897,15 @@ struct Fixed {
     times: Vec<f64>,
     rate: f64,
     escape: Escape,
+    /// The model's error at the request's outputs where a choice gives it (`outputs_model`): what the product's accounts
+    /// book at each output, in place of the line through the analysis times' (`assemble`).
+    outputs: Option<Box<Fixed>>,
 }
 impl Fixed {
     /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`;
     /// of the motion nothing more read (`MotionError::UNREAD`).
     fn new(model: Vec<[f64; 2]>, times: &[f64], rate: f64, escape: Escape) -> Fixed {
-        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), times: times.to_vec(), rate, escape }
+        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), times: times.to_vec(), rate, escape, outputs: None }
     }
     /// The model's errors `model` at the times `times`, with this run's bounds.
     fn with(&self, model: Vec<[f64; 2]>, times: &[f64]) -> Fixed {
@@ -4881,6 +4915,10 @@ impl Fixed {
     fn moving(self, motion: Vec<MotionError>) -> Fixed {
         debug_assert_eq!(motion.len(), self.model.len(), "a motion error a time");
         Fixed { motion, ..self }
+    }
+    /// With the model's error at the request's outputs (`outputs_model`).
+    fn at_outputs(self, outputs: Fixed) -> Fixed {
+        Fixed { outputs: Some(Box::new(outputs)), ..self }
     }
     /// The model's error at its k-th time with the estimate e there: its measurement and its bounds (`bounded`), T's
     /// with the motion's part on it relative to the total T read (`MotionError::temperature`).
@@ -5351,9 +5389,23 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     // statistics, a noisy estimate of the same spread, the largest of a thousand of them above it --, and so do T's
     // allowances. The model's error at the outputs likewise, for what is read of it there.
     let (at_reads, at_temperature) = accounts(reads, &c.fixed, &c.step);
-    let (population, temperature) = accounts_along(&c.at, &at_reads, &at_temperature, times);
+    let (mut population, mut temperature) = accounts_along(&c.at, &at_reads, &at_temperature, times);
+    // The model's part at each output its own where the choice gives it there (`Fixed::outputs`, `outputs_model`): the
+    // line through the analysis times' misses what changes between them. The step's and the statistics' parts stay as the
+    // decisions read them.
+    let at_outputs = c.fixed.outputs.as_deref().map(|o| (accounts(estimates, o, &c.step), motion_accounts(estimates, o, &c.step, &c.scales)));
+    if let Some(((own, own_temperature), _)) = &at_outputs {
+        for (p, o) in population.iter_mut().zip(own) {
+            p.model = o.model;
+        }
+        for (t, o) in temperature.iter_mut().zip(own_temperature) {
+            if let (Some(t), Some(o)) = (t.as_mut(), o) {
+                t.model = o.model;
+            }
+        }
+    }
     let allowed: Vec<f64> = times.iter().map(|&t| bracket(&c.at, t)).map(|(a, b, s)| lerp(reads[a].temperature_target, reads[b].temperature_target, s)).collect();
-    let model = interpolated(&c.at, &c.fixed.model, times);
+    let model = c.fixed.outputs.as_deref().map_or_else(|| interpolated(&c.at, &c.fixed.model, times), |o| o.model.clone());
     // The step's item: the largest it is booked at over the accounts (weighed by the held share as the totals are). And
     // the check in the method's words: the steps compared, the pairs, the resolution, and what is booked -- what the
     // reads the rung stands by do not exclude (`Levels::told`, `checked`).
@@ -5415,7 +5467,18 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     ledger.close(times, &population, &temperature, &allowed);
     // The motion's accounts likewise (`motion_accounts`), at the outputs the line through the analysis times'.
     let at_motion = motion_accounts(reads, &c.fixed, &c.step, &c.scales);
-    let motion = motion_along(&c.at, &at_motion, times);
+    let mut motion = motion_along(&c.at, &at_motion, times);
+    if let Some((_, own)) = &at_outputs {
+        for (m, o) in motion.iter_mut().zip(own) {
+            for (mi, oi) in m.iter_mut().zip(o) {
+                for (x, y) in mi.iter_mut().zip(oi) {
+                    if let (Some((x, _)), Some((y, _))) = (x.as_mut(), y) {
+                        x.model = y.model;
+                    }
+                }
+            }
+        }
+    }
     ledger.close_motion(times, &motion);
     let mut s = Solution {
         populations: Vec::with_capacity(outputs),

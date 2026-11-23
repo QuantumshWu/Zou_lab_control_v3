@@ -125,7 +125,7 @@ fn select_the_motion_by_hand() {
     };
     let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
     let hm = 7.3e-4;
-    let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05] };
+    let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05], halves: None };
     let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
     let e = 10.0 * kt;
     let alpha = 0.01 / e;

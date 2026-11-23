@@ -1230,18 +1230,64 @@ pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: R
     (!read.is_empty()).then(|| read.iter().flat_map(|w| direct(w, reach)).fold(0.0, larger) + judged.calibration.rows)
 }
 
-/// The pilot's course the motion's errors are read on (module documentation, # The motion; `motion_at`): its analysis
-/// times, its loss and its T per lab axis there (none where it holds no atom), and the reported trap's frequencies per
-/// lab axis (rad/µs).
+/// The pilot's course the motion's errors are read on (module documentation, # The motion; `motion_at`): its times --
+/// the request's outputs, where the choice weighs its candidates and the product books their error, or the analysis
+/// times --, its loss and its T per lab axis there (none where it holds no atom), the reported trap's frequencies per
+/// lab axis (rad/µs), and per time and lab axis T's window's half width where the times are the outputs (T read there
+/// is its window's mean: its slope is read across the window, `temperature_slope`).
 #[derive(Clone, Debug, Default)]
 pub struct Course {
     pub times: Vec<f64>,
     pub loss: Vec<f64>,
     pub temperature: Vec<Option<[f64; 3]>>,
     pub frequencies: [f64; 3],
+    pub halves: Option<Vec<[f64; 3]>>,
 }
 
 impl Course {
+    /// The loss at the time t on the line through the times read, past the last on its last interval's line (the
+    /// first order where the course reads nothing), within [0, 1].
+    fn loss_at(&self, t: f64) -> f64 {
+        let n = self.times.len();
+        if n < 2 {
+            return self.loss.first().copied().unwrap_or(0.0);
+        }
+        let b = self.times.iter().position(|&x| x >= t).unwrap_or(n - 1).max(1);
+        let a = b - 1;
+        let s = (t - self.times[a]) / (self.times[b] - self.times[a]);
+        (self.loss[a] + s * (self.loss[b] - self.loss[a])).clamp(0.0, 1.0)
+    }
+
+    /// The loss's change at the k-th time where the run's clock runs 1 + x times as fast (module documentation, # The
+    /// motion: the time-scaling identity itself, L(t(1 + x)) − L(t), not its first order x t L̇ -- the loss's front read
+    /// at the resolution its course is read at, no slope taken of it).
+    fn loss_shifted(&self, k: usize, x: f64) -> f64 {
+        self.loss_at(self.times[k] * (1.0 + x)) - self.loss[k]
+    }
+
+    /// T's slope along the lab axis a at the k-th time (µK/µs): across T's window there where the course has its half
+    /// widths (`halves`: T at an output is its window's mean, the slope of neighbours closer than that the noise's), the
+    /// line through T read at t − h and t + h, each on the line through the times read where it is read; else the
+    /// neighbours' (`slope`).
+    fn temperature_slope(&self, k: usize, a: usize) -> Option<f64> {
+        let value = |i: usize| self.temperature[i].map(|x| x[a]);
+        let Some(h) = self.halves.as_ref().map(|h| h[k][a]).filter(|h| *h > 0.0) else { return self.slope(k, &value) };
+        let at = |t: f64| -> Option<f64> {
+            let b = self.times.iter().position(|&x| x >= t)?;
+            if b == 0 {
+                return value(0);
+            }
+            let (va, vb) = (value(b - 1)?, value(b)?);
+            Some(va + (t - self.times[b - 1]) / (self.times[b] - self.times[b - 1]) * (vb - va))
+        };
+        let t = self.times[k];
+        let (lo, hi) = ((t - h).max(0.0), (t + h).min(*self.times.last()?));
+        match (at(lo), at(hi)) {
+            (Some(x), Some(y)) if hi > lo => Some((y - x) / (hi - lo)),
+            _ => self.slope(k, &value),
+        }
+    }
+
     /// A reading's slope at the k-th time, of its values at the times (`value`, none where not read): the central
     /// difference of the neighbours read, one-sided at an end; none of fewer than two.
     fn slope(&self, k: usize, value: &dyn Fn(usize) -> Option<f64>) -> Option<f64> {
@@ -1321,9 +1367,8 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
         return None;
     }
     let most = |of: &dyn Fn(&Window) -> f64| read.iter().map(|w| of(w)).fold(0.0, larger);
-    // The loss: x t L̇.
-    let slope = course.slope(k, &|i| Some(course.loss[i])).unwrap_or(0.0);
-    let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| end(x, *n, reach)) * t * slope.abs();
+    // The loss: L(t(1 + x)) − L(t), x at its end, of its own sign.
+    let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| course.loss_shifted(k, end(x, *n, reach).copysign(x.value)).abs());
     // T per lab axis: δE_a = δP_a (1 − e^{−α t})/α, α = (H_a − Ė_a)/E_a, the rates over the paths' forgotten stretches
     // (`Stationary`, the time's own windows where none is); the total T's, the axes' mean, per path (its spread the sum's
     // own).
@@ -1339,7 +1384,7 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
             let weight: f64 = own.weights.iter().sum();
             let heating: [f64; 3] = std::array::from_fn(|a| own.heating.iter().zip(&own.weights).map(|(h, w)| w * h[a]).sum::<f64>() / weight);
             let held: [f64; 3] = std::array::from_fn(|a| {
-                let warming = kt * course.slope(k, &|i| course.temperature[i].map(|x| x[a])).unwrap_or(0.0);
+                let warming = kt * course.temperature_slope(k, a).unwrap_or(0.0);
                 let energy = kt * at[a];
                 let alpha = if energy > 0.0 { larger((heating[a] - warming) / energy, 0.0) } else { 0.0 };
                 if alpha * t > 0.0 { -(-alpha * t).exp_m1() / alpha } else { t }
