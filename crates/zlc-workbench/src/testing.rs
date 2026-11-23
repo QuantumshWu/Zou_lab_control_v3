@@ -2654,6 +2654,23 @@ mod tests {
                    (&Value::Null, &json!("RuntimeError: the plan names no port"), &json!(false)));
     }
 
+    /// A Start waits; the operator presses Check meanwhile (nothing asked before it is to stand).
+    /// The answers asked before the Check land: the Start still waits, and goes on the Check's own.
+    #[test]
+    fn a_waiting_start_goes_on_the_answers_of_a_check_made_meanwhile() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("recheck", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        let before_check = flights(&wb, "lanes");
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "lanes"})).unwrap()["phase"], "checking");
+        apply(&mut wb, &mut host, "check_node", json!({"node": "lanes"})).unwrap();
+        for ticket in before_check { event(&mut wb, Event::Answered { ticket, result: Ok(json!({})) }, &mut host); }
+        assert!(calls.borrow().1.is_empty(), "not on answers asked before the Check");
+        assert_eq!(flights(&wb, "lanes").len(), LANES.len(), "the Check's own questions are asked");
+        for ticket in flights(&wb, "lanes") { event(&mut wb, Event::Answered { ticket, result: Ok(json!({})) }, &mut host); }
+        assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());

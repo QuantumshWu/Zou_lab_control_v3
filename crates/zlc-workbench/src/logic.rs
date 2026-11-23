@@ -127,16 +127,16 @@ impl Node {
     /// The draft revision and check its questions are asked for now.
     fn stamp(&self) -> Stamp { (self.revision, self.check) }
 
-    /// Whether `name`'s newest answer stands for this draft, asked at check `from` or after, and it
-    /// is not asked again for the check it stands for (the page: `from` is this check; a Start waits
-    /// for answers asked since its own, so a bench changing at each point of a scan delays it one
-    /// round trip, not for good). The page goes on drawing the newest answers meanwhile (v2
+    /// Whether `name`'s newest answer stands for this draft, asked at check `from` or after (and at
+    /// the operator's last Check or after), and it is not asked again for the check it stands for
+    /// (the page: `from` is this check; a Start waits for answers asked since its own, so a bench
+    /// changing at each point of a scan delays it one round trip, not for good). The page goes on drawing the newest answers meanwhile (v2
     /// answered a draft at once), so a field an edit did not touch keeps its value, its choices
     /// and its words.
     fn checked(&self, name: &str, from: u64) -> bool {
         let Some((stamp, _)) = self.answers.get(name) else { return false };
         let again = self.asks.get(name).is_some_and(|ask| ask.flying.iter().map(|(_, question)| question).chain(&ask.waiting).any(|question| question.stamp == *stamp));
-        stamp.0 == self.revision && stamp.1 >= from && !again
+        stamp.0 == self.revision && stamp.1 >= from.max(self.rechecked) && !again
     }
 }
 
