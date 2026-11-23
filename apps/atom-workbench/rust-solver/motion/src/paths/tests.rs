@@ -96,7 +96,7 @@ fn walks_of(file: &str, state: usize) -> Vec<Walk> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| Walk { index: p["index"].as_u64().unwrap(), start: vec![(state, C64::ONE)], ends: serde_json::from_value(p["samples"].clone()).unwrap() })
+        .map(|p| Walk { index: p["index"].as_u64().unwrap(), start: vec![(state, C64::ONE)], ends: serde_json::from_value(p["samples"].clone()).unwrap(), lost: false })
         .collect()
 }
 
@@ -278,8 +278,8 @@ fn summary(w: &Window, labels: &[String]) -> String {
     let (worst, m) = w.worst;
     let per = w.worst_per_path.iter().sum::<f64>() / w.paths as f64;
     format!(
-        "({:.0},{:.0}] {} paths: F=1 {:+.5} ± {:.5}; worst row {} {:+.5} ± {:.5}; per path worst mean {per:.5} max {:.5}; rate rel {:+.4} ± {:.4}; force rms rel {:.4} ± {:.4}; drive {:.2e} ± {:.1e} /µs²",
-        w.from, w.to, w.paths, f1.value, f1.error, labels[worst], m.value, m.error, w.worst_per_path.iter().copied().fold(0.0, larger), w.rate.value, w.rate.error, w.force_rms.value, w.force_rms.error, w.power.value, w.power.error
+        "({:.0},{:.0}] {} paths: F=1 {:+.5} ± {:.5}; worst row {} {:+.5} ± {:.5}; per path worst mean {per:.5} max {:.5}; rate rel {:+.4} ± {:.4}; force rms rel {:.4} ± {:.4}; energy rate {:.2e} ± {:.1e} /µs²",
+        w.from, w.to, w.paths, f1.value, f1.error, labels[worst], m.value, m.error, w.worst_per_path.iter().copied().fold(0.0, larger), w.rate.value, w.rate.error, w.force_rms.value, w.force_rms.error, w.energy_rate.iter().map(|m| m.value).sum::<f64>(), w.energy_rate.iter().map(|m| m.error * m.error).sum::<f64>().sqrt()
     )
 }
 
@@ -293,7 +293,7 @@ fn window_json(w: &Window) -> serde_json::Value {
         "levels": w.levels.iter().map(|(n, m)| serde_json::json!([n, m.value, m.error])).collect::<Vec<_>>(),
         "worst": [w.worst.0, w.worst.1.value, w.worst.1.error], "worst_per_path": w.worst_per_path,
         "rates": w.rates.iter().map(|(f, m, r)| serde_json::json!([f, m.value, m.error, r])).collect::<Vec<_>>(),
-        "rate": mean_json(&w.rate), "force": w.force.iter().map(mean_json).collect::<Vec<_>>(), "force_rms": mean_json(&w.force_rms), "power": mean_json(&w.power),
+        "rate": mean_json(&w.rate), "force": w.force.iter().map(mean_json).collect::<Vec<_>>(), "force_rms": mean_json(&w.force_rms), "heating": w.heating.iter().map(mean_json).collect::<Vec<_>>(), "energy_rate": w.energy_rate.iter().map(mean_json).collect::<Vec<_>>(),
     })
 }
 
@@ -364,8 +364,8 @@ fn paths_pilot() {
             let (worst, m) = w.worst;
             let mean_worst = w.worst_per_path.iter().sum::<f64>() / w.paths as f64;
             eprintln!(
-                "{spec} − {}: ({:.1}, {:.1}] {} paths: worst row {} {:+.5} ± {:.5} (per path mean {mean_worst:.5}, max {:.5}); rate {:+.4} ± {:.4}; force rms {:.4} ± {:.4}; drive {:.2e}",
-                specs[0], w.from, w.to, w.paths, labels[worst], m.value, m.error, w.worst_per_path.iter().copied().fold(0.0, larger), w.rate.value, w.rate.error, w.force_rms.value, w.force_rms.error, w.power.value
+                "{spec} − {}: ({:.1}, {:.1}] {} paths: worst row {} {:+.5} ± {:.5} (per path mean {mean_worst:.5}, max {:.5}); rate {:+.4} ± {:.4}; force rms {:.4} ± {:.4}; energy rate {:.2e}",
+                specs[0], w.from, w.to, w.paths, labels[worst], m.value, m.error, w.worst_per_path.iter().copied().fold(0.0, larger), w.rate.value, w.rate.error, w.force_rms.value, w.force_rms.error, w.energy_rate.iter().map(|m| m.value).sum::<f64>()
             );
         }
     }
@@ -455,7 +455,7 @@ fn paths_a_family_is_its_members() {
             let t = k as f64 * step;
             [t, c[0] + speed * t, c[1], c[2], speed / hm, 0.0, 0.0]
         });
-        let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect() };
+        let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect(), lost: false };
         let at = |turns: f64, rate: f64, pieces: usize| Scheme::Exponential { turns, rate, pieces, cutoff: f64::INFINITY, read: 1 };
         for pieces in [1, 2] {
             let members = [at(1.0, 8.0, pieces), at(2.0, 8.0, pieces), at(1.0, 16.0, pieces), at(1.0, 8.0, 2 * pieces), at(1.0, 9.0, pieces)];

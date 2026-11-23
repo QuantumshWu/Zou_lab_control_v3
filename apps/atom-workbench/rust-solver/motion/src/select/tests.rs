@@ -68,6 +68,7 @@ fn select_the_direct_part_by_hand() {
         windows: vec![window(0.0, 10.0, 4e-3), window(10.0, 100.0, 1e-3)],
         late: vec![window(900.0, 910.0, 9e-3), window(910.0, 1000.0, 2e-3)],
         calibration: Calibration { rows: 1e-5, rate: 0.0 },
+        escape: None,
         region: Region::NONE,
         seconds: 0.0,
         products: 0,
@@ -87,7 +88,7 @@ fn select_the_direct_part_by_hand() {
 fn select_the_direct_part_at_the_paths_statistics() {
     let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
     let at = |w: Window, upper: bool| {
-        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, region: Region::NONE, seconds: 0.0, products: 0 };
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, region: Region::NONE, seconds: 0.0, products: 0 };
         direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, upper).expect("the window read")
     };
     let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
@@ -98,6 +99,43 @@ fn select_the_direct_part_at_the_paths_statistics() {
     assert!((at(spread(8, 5e-3, 1e-3), true) - (5e-3 + q(7) * 1e-3 + 1e-5)).abs() < 1e-15);
     assert_eq!(at(spread(1, 5e-3, f64::INFINITY), true), f64::INFINITY);
     assert_eq!(at(spread(1, 5e-3, f64::INFINITY), false), 1e-5);
+}
+
+/// The motion's errors by hand (module documentation, # The motion; `motion_at`), every path alike (no spread): one
+/// window to 100 µs, the reference's heating H = 0.01 rad/µs² on every axis and the candidate's energy rate's
+/// difference δP = 0.001 on x alone, the force's difference 2 on z; the escape's x = 0.1; at t = 50 µs a loss rising by
+/// 0.002/µs, T = 10 µK on every axis. An axis at its steady state (Ṫ = 0) relaxes at α = H/E: its δT/T = δP/H = 0.1, so
+/// the total's error is 0.1 × 10/3 µK; an axis heating at H (Ṫ = H/k_B: α = 0) takes δP t/k_B; the loss x t L̇ = 0.01;
+/// the push (ħ/m)·2, the mean velocity that over min(t, 1/ω).
+#[test]
+fn select_the_motion_by_hand() {
+    let kt = crate::units::KT_PER_UK;
+    let even = |x: f64| Mean { value: x, error: 0.0 };
+    let window = Window {
+        from: 0.0,
+        to: 100.0,
+        paths: 4,
+        heating: [even(0.01); 3],
+        energy_rate: [even(1e-3), even(0.0), even(0.0)],
+        energy_rates: vec![[1e-3, 0.0, 0.0]; 4],
+        force: [even(0.0), even(0.0), even(2.0)],
+        ..Window::default()
+    };
+    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), region: Region::NONE, seconds: 0.0, products: 0 };
+    let hm = 7.3e-4;
+    let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05] };
+    let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, true).expect("read");
+    let e = 10.0 * kt;
+    let alpha = 0.01 / e;
+    let expected = 1e-3 * (-(-alpha * 50.0).exp_m1()) / alpha / kt / 3.0;
+    assert!((steady.temperature_total - expected).abs() <= 1e-12 * expected, "{} {expected}", steady.temperature_total);
+    assert!((steady.loss - 0.1 * 50.0 * 0.002).abs() < 1e-15, "{}", steady.loss);
+    assert!((steady.push[2] - hm * 2.0).abs() < 1e-18 && (steady.velocity[2] - hm * 2.0 * 20.0).abs() < 1e-15, "{:?} {:?}", steady.push, steady.velocity);
+    // Heating at H: Ṫ = H/k_B, so α = 0 and the response is δP t/k_B.
+    let heated = motion_at(&judged, &[(0.0, 100.0)], &course(0.01 / kt), 1, hm, true).expect("read");
+    let expected = 1e-3 * 50.0 / kt / 3.0;
+    assert!((heated.temperature_total - expected).abs() <= 1e-9 * expected, "{} {expected}", heated.temperature_total);
+    assert_eq!(motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 0, hm, true), None, "none at t = 0");
 }
 
 /// The flag's question by hand (`decide`): read at the end (|r| > z·se), yes; its upper end within the allowance, no;
@@ -384,6 +422,7 @@ fn select_paths_cost() {
                 index: w["index"].as_u64().unwrap(),
                 start: w["start"].as_array().unwrap().iter().map(|x| (x[0].as_u64().unwrap() as usize, C64::new(x[1].as_f64().unwrap(), x[2].as_f64().unwrap()))).collect(),
                 ends: serde_json::from_value(w["ends"].clone()).unwrap(),
+                lost: false,
             })
             .collect()
     } else {
@@ -425,7 +464,7 @@ fn select_paths_cost() {
         let still: Walk = {
             let w = &walks[k];
             let e0 = w.ends[0];
-            Walk { index: w.index, start: w.start.clone(), ends: w.ends.iter().map(|e| [e[0], e0[1], e0[2], e0[3], 0.0, 0.0, 0.0]).collect() }
+            Walk { index: w.index, start: w.start.clone(), ends: w.ends.iter().map(|e| [e[0], e0[1], e0[2], e0[3], 0.0, 0.0, 0.0]).collect(), lost: false }
         };
         let w = if std::env::var("SELECT_STILL").is_ok() { &still } else { &walks[k] };
         let to = probe.min(w.end());

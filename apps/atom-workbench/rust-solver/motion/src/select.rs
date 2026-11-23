@@ -91,13 +91,38 @@
 //! four, whatever the judgment read: S1_5ms's choice turned between its full-ground model, W 4.1·10¹¹, and the 32
 //! states, W 3.0·10¹⁴, on whether a second of its four walks' atoms was still held in the last window.)
 //!
-//! # The feedback through the motion: zero
-//! The model's internal error moves the atoms, and where they go moves every reading. Its effect is not booked: the
-//! user's of 2026-11-22, "更严格的上界，尝试解决这个问题，如果确实解决不了，那么取消掉反馈这块，直接认为反馈这点等于0" --
-//! the strict bound by the Duhamel identity and the model-only momentum-scaling response (P3-SELECT's first rounds)
-//! read 5–200 times PAIR's truth on PGC3D and R4 and kept every scene off its full-ground model, and FOLDTEMP's third
-//! round found no tighter bound to be had. The temperature and the loss have no model error; the run says so once (the
-//! ledger's item, solve.rs `NO_FEEDBACK`).
+//! # The motion
+//! The model's internal error moves the atoms, and where they go moves the readings the motion makes: the loss, T per
+//! lab axis, the push and the mean velocity. Along the paths the candidate and the reference read beside the rows what
+//! the motion takes of the internal state (paths.rs # The motion's readings): per lab axis the heating H_a (the scattered
+//! light's momentum diffusion) and the force's power F_a v_a, so that a window holds per axis the reference's H_a and the
+//! candidate's energy rate's difference δP_a = δH_a + (δF_a − δF̄_a)(v_a − v̄_a), the bars the cloud's means there
+//! (paths.rs `Window`: the force's covariance with the velocity over the cloud). The readings' errors follow to the first order by the
+//! time-scaling identity (the user's of 2026-11-22, PLAN_UNIFIED §三 4; Study A §2.1.4): the motion and the internal
+//! state's generator 𝓛, a reading O(t) = ⟨μ₀, e^{t𝓛} f⟩; a candidate's 𝓛′ = 𝓛 + x 𝓛_m, the mechanism m scaled by 1 + x,
+//! moves it by δO(t) = x ∫₀ᵗ ⟨μ₀ e^{s𝓛} 𝓛_m e^{(t−s)𝓛} f⟩ ds = x ∂O/∂ln s_m (Duhamel); a reading the mechanism alone
+//! drives moves by x t Ȯ(t), and a steady T = D/α by δT/T = x_D − x_α (`motion_at`):
+//! - **T**, the total's (the axes' mean, the one T's target is held to: the user's of 2026-11-22), of each lab axis's
+//!   response, the axes weighed per path (the sum's spread its own): the energy of the axis E_a = k_B T_a (the trap's
+//!   equipartition) gains H_a + W_a; the candidate's
+//!   by δP_a more. It relaxes at α_a = (H_a − Ė_a)/E_a (the reference's heating less the pilot's own Ė_a, none below
+//!   nought), so δE_a(t) = δP_a (1 − e^{−α_a t})/α_a: δT_a = δP_a t/k_B on an axis that does not cool (α = 0: x t Ṫ of
+//!   the heating's x), δT_a/T_a = δP_a/H_a at the steady state (x_D − x_α: the heating's relative difference less the
+//!   friction's, the work's difference over the friction's power, which is H_a there).
+//! - **The loss**: an atom is lost where its energy reaches the escape value; the energy rate's relative difference x
+//!   moves its time by x of it, δL(t) = x t L̇(t). x is the lost atoms' own: per lost path its mean energy rate's
+//!   difference Σ_a (δH_a + δF_a v_a) over the energy it gained to its loss per µs, (E(loss) −
+//!   E(0))/t_loss on the reference's prepared potential -- the paths' time mean over every atom thins out the trap's rim,
+//!   where an atom about to be lost is (Study A §2.1.4: S2's loss 55–75 % predicted so) --; over every path's heating
+//!   where fewer than two paths' atoms are lost (no spread to read of fewer) (`Judged::escape`).
+//! - **The push and the mean velocity** per lab axis: the force's window mean difference δF_a, the push's error
+//!   (ħ/m)|δF_a| (µm/µs²), and the mean velocity's (ħ/m)|δF_a| min(t, 1/ω_a) (m/s) -- a constant force's response of a
+//!   mean velocity in a harmonic well, (δF/mω) sin ωt, at most that.
+//! Each a window's |mean| + q·se over the paths (Student's t, # The direct part), the window the direct part takes at the
+//! time. Point estimates of the first order, not bounds: the second order is x² (2 % at x = 15 %), and a mechanism mixed
+//! of several is read as their whole energy rate. (Until 2026-11-22 the motion's feedback was set to nought, the user's
+//! of that day while no bound could be had: R9_PUSH's loss 0.18 above the reference, SAT_03's push ×1.30, S2's loss
+//! 0.55 against 0.42 booked nothing.)
 //!
 //! ## T's memory, read on the run's own trajectories
 //! One flag is left of the momentum-scaling response: T's memory not shorter than the run (FOLDTEMP §R2.3, "缩放响应在
@@ -701,7 +726,7 @@ pub fn scan_walks(beyond: &dyn Fn(V3) -> bool, centre: V3, axes: &[V3; 3], speed
                     [t, r[0], r[1], r[2], kappa[0], kappa[1], kappa[2]]
                 })
                 .collect();
-            walks.push(Walk { index: (2 * i + usize::from(sign < 0.0)) as u64, start: start.to_vec(), ends });
+            walks.push(Walk { index: (2 * i + usize::from(sign < 0.0)) as u64, start: start.to_vec(), ends, lost: false });
         }
     }
     walks
@@ -833,7 +858,7 @@ impl<'a> Paths<'a> {
     /// scheme's unmet sum and the openings' bound as its own, and read its windows against themselves: no number where no
     /// path read a window -- R9_PUSH's, every atom pushed out by 45 µs.)
     pub fn itself(&self, keep: Vec<usize>) -> Judged {
-        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), region: Region::NONE, seconds: 0.0, products: 0 }
+        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, region: Region::NONE, seconds: 0.0, products: 0 }
     }
 }
 
@@ -886,6 +911,10 @@ pub struct Judged {
     /// The late segment's windows (their times the run's), none where it has none.
     pub late: Vec<Window>,
     pub calibration: Calibration,
+    /// The loss's energy rate's relative difference x over the paths (module documentation, # The motion): per path its
+    /// mean energy rate's difference over the energy its atom gained to its loss per µs (the lost paths', where at least
+    /// two are; else every path's over its heating), with the paths' count; none where no path read.
+    pub escape: Option<(paths::Mean, usize)>,
     pub region: Region,
     pub seconds: f64,
     pub products: u64,
@@ -945,8 +974,24 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let late_series: Vec<Series> = done.map(|x| x.map(|mut x| x.swap_remove(0))).collect::<Result<_, _>>()?;
     let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
+    let escape = escape_of(paths, &series, &late_series, hm);
     let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm);
     let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm));
+    // The motion's windows, said where a test asks (`SEL_MOTION`).
+    #[cfg(test)]
+    if std::env::var_os("SEL_MOTION").is_some() {
+        let m = |x: &paths::Mean| format!("{:+.3e}±{:.1e}", x.value, x.error);
+        for w in windows.iter().chain(&late) {
+            eprintln!(
+                "    [motion] P{} ({:.2}, {:.2}] {} paths: rate {}; dP_a [{}, {}, {}]; H_a [{:.3e}, {:.3e}, {:.3e}]; dF_a [{}, {}, {}]",
+                model.rs.keep.len(), w.from, w.to, w.paths, m(&w.rate), m(&w.energy_rate[0]), m(&w.energy_rate[1]), m(&w.energy_rate[2]), w.heating[0].value, w.heating[1].value, w.heating[2].value, m(&w.force[0]), m(&w.force[1]), m(&w.force[2])
+            );
+        }
+        eprintln!("    [motion] P{} escape {:?}", model.rs.keep.len(), escape);
+        if let (Some(x), Some(y)) = (series.first().and_then(|s| s.readings.get(3)), paths.series.first().and_then(|s| s.readings.get(3))) {
+            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, kick {:?} {:?}, emitted {:?} / {:?}, heating {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.kick, x.kick2, x.emitted, y.emitted, x.heating(hm), y.heating(hm), x.kappa);
+        }
+    }
     // The calibration: the calibration's walk's own series at the setting along its stretch (the same scheme from the
     // same start) and its refinements, against the reference's.
     let candidate: Vec<&Series> = std::iter::once(&series[longest]).chain(&finer).collect();
@@ -957,7 +1002,59 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     let own = |f: fn(&Series) -> f64| series.iter().chain(&late_series).map(f).fold(0.0, larger);
     calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked) + paths.trace + own(Series::trace_defect);
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
-    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
+    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, region: Region::NONE, seconds: clock.elapsed().as_secs_f64(), products })
+}
+
+/// The loss's x of a candidate (module documentation, # The motion; `Judged::escape`) of its series along the walks'
+/// starts `candidate` and late segments `late` against the reference's: per path the mean over its read stretches of
+/// the energy rate's difference -- per reading Σ_a (δH_a + δF_a v_a) by the trapezoid --, over the energy its atom gained to its loss per µs
+/// on the reference's prepared potential where it was lost, (E(loss) − E(0))/t_loss, else over the reference's heating's
+/// mean there; the lost paths' where at least two are, else every path's.
+fn escape_of(paths: &Paths, candidate: &[Series], late: &[Series], hm: f64) -> Option<(paths::Mean, usize)> {
+    let reference = paths.reference.model;
+    let well = reference.prepared(&crate::solve::alone(crate::solve::chief(&reference.scene.request)));
+    let energy = |e: &[f64; 7]| 0.5 * hm * (e[4] * e[4] + e[5] * e[5] + e[6] * e[6]) + well.at([e[1], e[2], e[3]]).value;
+    let late_reference = paths.late.as_ref().map(|l| &l.2);
+    let per_path = |k: usize| -> Option<(bool, f64)> {
+        let (mut integral, mut time, mut heat) = (0.0, 0.0, 0.0);
+        let stretches = std::iter::once((&candidate[k], &paths.series[k])).chain(late.get(k).zip(late_reference.and_then(|l| l.get(k))));
+        for (c, r) in stretches {
+            let pairs: Vec<(&paths::Reading, &paths::Reading)> = c.readings.iter().zip(&r.readings).collect();
+            let (Some(first), Some(last)) = (pairs.first(), pairs.last()) else { continue };
+            if !(last.0.t > first.0.t) {
+                continue;
+            }
+            let rate = |(x, y): &(&paths::Reading, &paths::Reading)| -> (f64, f64) {
+                let (hx, hy, wx, wy) = (x.heating(hm), y.heating(hm), x.work(hm), y.work(hm));
+                ((0..3).map(|a| hx[a] - hy[a] + wx[a] - wy[a]).sum(), hy.iter().sum())
+            };
+            for w in pairs.windows(2) {
+                let (d0, h0) = rate(&w[0]);
+                let (d1, h1) = rate(&w[1]);
+                let dt = w[1].0.t - w[0].0.t;
+                integral += 0.5 * dt * (d0 + d1);
+                heat += 0.5 * dt * (h0 + h1);
+            }
+            time += last.0.t - first.0.t;
+        }
+        if !(time > 0.0) {
+            return None;
+        }
+        let walk = &paths.walks[k];
+        let gained = match (walk.lost, walk.ends.first(), walk.ends.last()) {
+            (true, Some(a), Some(b)) if b[0] > a[0] => (energy(b) - energy(a)) / (b[0] - a[0]),
+            _ => 0.0,
+        };
+        if walk.lost && gained > 0.0 {
+            Some((true, integral / time / gained))
+        } else {
+            (heat > 0.0).then(|| (false, integral / heat))
+        }
+    };
+    let all: Vec<(bool, f64)> = (0..candidate.len()).filter_map(per_path).collect();
+    let lost: Vec<f64> = all.iter().filter(|x| x.0).map(|x| x.1).collect();
+    let x: Vec<f64> = if lost.len() >= 2 { lost } else { all.iter().map(|x| x.1).collect() };
+    (!x.is_empty()).then(|| (paths::Mean::of(&x), x.len()))
 }
 
 /// The region left out of a candidate (module documentation, # The region left out; `Region`): each scan's scheme
@@ -1093,18 +1190,36 @@ pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
     }
 }
 
-/// The direct part of a window (module documentation, # The direct part): per row |mean| + q·se, or where not `upper` its
-/// lower end |mean| − q·se (none below zero), q Student's t at the run's confidence with the window's paths less one
-/// degrees of freedom; of fewer than two paths q is without bound (the spread unknown).
+/// A path mean's end (module documentation, # The direct part): |mean| + q·se, or where not `upper` |mean| − q·se (none
+/// below zero), q Student's t at the run's confidence with the `paths` read less one degrees of freedom; of fewer than
+/// two paths q is without bound (the spread unknown).
+fn end(m: &paths::Mean, paths: usize, upper: bool) -> f64 {
+    let q = if paths >= 2 { crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(paths as u64 - 1)) } else { f64::INFINITY };
+    let spread = if m.error == 0.0 { 0.0 } else { q * m.error.abs() };
+    if upper { m.value.abs() + spread } else { larger(m.value.abs() - spread, 0.0) }
+}
+
+/// The direct part of a window (module documentation, # The direct part): per row its end (`end`).
 fn direct(w: &Window, upper: bool) -> Vec<f64> {
-    let q = if w.paths >= 2 { crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(w.paths as u64 - 1)) } else { f64::INFINITY };
-    w.rows
-        .iter()
-        .map(|m| {
-            let spread = if m.error == 0.0 { 0.0 } else { q * m.error.abs() };
-            if upper { m.value.abs() + spread } else { larger(m.value.abs() - spread, 0.0) }
-        })
-        .collect()
+    w.rows.iter().map(|m| end(m, w.paths, upper)).collect()
+}
+
+/// The windows a candidate's error at the time t > 0 is read in (module documentation, # The direct part): the time's
+/// window (`paths::window_of` on the start's windows `windows`); past L the start's last and the late segment's last
+/// window, past the late segment's start the latter alone; each one that some path reads. None of the reference itself
+/// (no windows).
+fn windows_at<'a>(judged: &'a Judged, windows: &[(f64, f64)], t: f64) -> Vec<&'a Window> {
+    if judged.windows.is_empty() {
+        return vec![];
+    }
+    let length = windows.last().map_or(0.0, |w| w.1);
+    let at: Vec<&Window> = match (judged.late.first().map(|w| w.from), judged.windows.last(), judged.late.last()) {
+        (Some(from), Some(last), Some(late_last)) if t > length => {
+            if t > from { vec![late_last] } else { vec![last, late_last] }
+        }
+        _ => vec![&judged.windows[paths::window_of(windows, t).unwrap_or(0)]],
+    };
+    at.into_iter().filter(|w| w.paths > 0).collect()
 }
 
 /// A candidate's direct error at the time t (module documentation, # The direct part): the largest row's |mean| + z·se
@@ -1122,23 +1237,87 @@ pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, upper: b
     if t <= 0.0 || judged.windows.is_empty() {
         return Some(0.0);
     }
-    let read = |w: &Window| (w.paths > 0).then(|| direct(w, upper));
-    let length = windows.last().map_or(0.0, |w| w.1);
-    let own = match (judged.late.first().map(|w| w.from), judged.windows.last(), judged.late.last()) {
-        (Some(from), Some(last), Some(late_last)) if t > length => {
-            let (a, b) = (read(last), read(late_last));
-            if t > from {
-                b
-            } else {
-                match (a, b) {
-                    (Some(a), Some(b)) => Some(a.iter().zip(&b).map(|(x, y)| larger(*x, *y)).collect()),
-                    (a, b) => a.or(b),
-                }
-            }
+    let read = windows_at(judged, windows, t);
+    (!read.is_empty()).then(|| read.iter().flat_map(|w| direct(w, upper)).fold(0.0, larger) + judged.calibration.rows)
+}
+
+/// The pilot's course the motion's errors are read on (module documentation, # The motion; `motion_at`): its analysis
+/// times, its loss and its T per lab axis there (none where it holds no atom), and the reported trap's frequencies per
+/// lab axis (rad/µs).
+#[derive(Clone, Debug, Default)]
+pub struct Course {
+    pub times: Vec<f64>,
+    pub loss: Vec<f64>,
+    pub temperature: Vec<Option<[f64; 3]>>,
+    pub frequencies: [f64; 3],
+}
+
+impl Course {
+    /// A reading's slope at the k-th time, of its values at the times (`value`, none where not read): the central
+    /// difference of the neighbours read, one-sided at an end; none of fewer than two.
+    fn slope(&self, k: usize, value: &dyn Fn(usize) -> Option<f64>) -> Option<f64> {
+        let n = self.times.len();
+        let before = (0..k).rev().find(|&i| value(i).is_some());
+        let after = (k + 1..n).find(|&i| value(i).is_some());
+        let (a, b) = match (before, after) {
+            (Some(a), Some(b)) => (a, b),
+            (Some(a), None) => (a, k),
+            (None, Some(b)) => (k, b),
+            (None, None) => return None,
+        };
+        let (va, vb) = (value(a)?, value(b)?);
+        (self.times[b] > self.times[a]).then(|| (vb - va) / (self.times[b] - self.times[a]))
+    }
+}
+
+/// The motion's errors at a time (module documentation, # The motion): on the loss (absolute), on the total T (µK: the
+/// one T's target is held to, the user's of 2026-11-22), on the push per lab axis (µm/µs²) and on the mean velocity per
+/// lab axis (m/s); and T's per lab axis (µK, each axis's own window end: said, not booked).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Motion {
+    pub loss: f64,
+    pub temperature_total: f64,
+    pub push: [f64; 3],
+    pub velocity: [f64; 3],
+    pub temperature: [f64; 3],
+}
+
+/// A candidate's motion's errors at the course's k-th time (module documentation, # The motion), each at its window's
+/// upper end (`upper`) or its lower: none at t = 0 or of the reference itself (no windows), or where no path reads the
+/// time's windows.
+pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: usize, hbar_over_mass: f64, upper: bool) -> Option<Motion> {
+    let t = course.times[k];
+    let read = windows_at(judged, windows, t);
+    if t <= 0.0 || read.is_empty() {
+        return None;
+    }
+    let most = |of: &dyn Fn(&Window) -> f64| read.iter().map(|w| of(w)).fold(0.0, larger);
+    // The loss: x t L̇.
+    let slope = course.slope(k, &|i| Some(course.loss[i])).unwrap_or(0.0);
+    let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| end(x, *n, upper)) * t * slope.abs();
+    // T per lab axis: δE_a = δP_a (1 − e^{−α t})/α, α = (H_a − Ė_a)/E_a; the total T's, the axes' mean, per path (its
+    // spread the sum's own).
+    let (mut temperature, mut temperature_total) = ([0.0; 3], 0.0);
+    if let Some(at) = course.temperature[k] {
+        let kt = crate::units::KT_PER_UK;
+        let held: [f64; 3] = std::array::from_fn(|a| {
+            let heating = most(&|w| w.heating[a].value);
+            let warming = kt * course.slope(k, &|i| course.temperature[i].map(|x| x[a])).unwrap_or(0.0);
+            let energy = kt * at[a];
+            let alpha = if energy > 0.0 { larger((heating - warming) / energy, 0.0) } else { 0.0 };
+            if alpha * t > 0.0 { -(-alpha * t).exp_m1() / alpha } else { t }
+        });
+        for a in 0..3 {
+            temperature[a] = most(&|w| end(&w.energy_rate[a], w.paths, upper)) * held[a] / kt;
         }
-        _ => read(&judged.windows[paths::window_of(windows, t).unwrap_or(0)]),
-    };
-    own.map(|own| own.iter().copied().fold(0.0, larger) + judged.calibration.rows)
+        temperature_total = most(&|w| {
+            let each: Vec<f64> = w.energy_rates.iter().map(|p| (0..3).map(|a| p[a] * held[a]).sum::<f64>() / (3.0 * kt)).collect();
+            end(&paths::Mean::of(&each), w.paths, upper)
+        });
+    }
+    let push: [f64; 3] = std::array::from_fn(|a| hbar_over_mass * most(&|w| end(&w.force[a], w.paths, upper)));
+    let velocity = std::array::from_fn(|a| push[a] * if course.frequencies[a] > 0.0 { t.min(1.0 / course.frequencies[a]) } else { t });
+    Some(Motion { loss, temperature_total, push, velocity, temperature })
 }
 
 /// What the choice made of the chain (solve.rs, # The selection): P, its chain, its judgment, the paths' windows, the
@@ -1157,10 +1336,15 @@ pub struct Choice {
 }
 
 impl Choice {
-    /// P's direct error at the time t (`direct_at`): what is shown; T and the loss have none (module documentation, # The
-    /// feedback through the motion: zero); none where its window reads no path.
+    /// P's direct error at the time t (`direct_at`): on the rows shown (the motion's readings' are `motion`); none where
+    /// its window reads no path.
     pub fn at(&self, t: f64) -> Option<f64> {
         direct_at(&self.judged, &self.windows, t)
+    }
+
+    /// P's motion's errors at the course's k-th time (`motion_at`, at the upper end): on the run's own pilot's course.
+    pub fn motion(&self, course: &Course, k: usize, hbar_over_mass: f64) -> Option<Motion> {
+        motion_at(&self.judged, &self.windows, course, k, hbar_over_mass, true)
     }
 }
 

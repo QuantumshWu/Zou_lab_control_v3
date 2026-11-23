@@ -61,6 +61,27 @@
 //! strict lower bound of the scheme's error in the trace norm, read at no cost, and a part of the setting's error
 //! (select.rs `settle`; the readings over tr ρ_P and the rows' sum hide it).
 //!
+//! # The motion's readings
+//! What the motion takes of the internal state, beside the rows (select.rs # The motion), each over tr ρ_P:
+//! - the heating per lab axis, H_a = (ħ/m)/2 · d⟨κ_a²⟩/dt of the scattered light (`Reading::heating_at`): the emitted
+//!   photons' k_c² λ_c ⟨n_a²⟩ -- the dipole pattern tr G − n·Re(G)·n of a class's Cartesian amplitudes (step.rs
+//!   `Emitted`), whose ⟨n_a²⟩ λ_c = (2/5) tr G − (1/5) G_aa, G_ab = tr(J_{c,a} ρ J_{c,b}†) --, k_c the class's photon wave
+//!   number (its photon forms K = k∘L on a node at the form's point: one class one line); and the absorbed photons'
+//!   λ ((k²)_a − k̄_a²) + λ (1 + Q) k̄_a²: their directed part k̄ counted with the photon count's Fano factor 1 + Q (the
+//!   landing check's, select.rs), the rest as Poisson's. The absorbed photon's k̄ and (k²) are the light's at the place,
+//!   not a model's: each beam l but the tweezer's by its share w_l ∝ (‖X_l‖² + ‖R_l‖²)|a_l(r)|², its coupling's strength
+//!   at its focus times its profile's intensity there -- the same for every model, whose own rate λ scales it. (A
+//!   model's own Σ Re tr(∂J ρ ∂J†) is no such measure: it holds what its folded jumps carry, and an explicit excited
+//!   state carries its absorbed momentum in its force, ⟨∇H⟩, nowhere in its jumps -- SAT_03's 32 states read 0.003 of it
+//!   against the full-ground model's 413 /µm²/µs.)
+//! - the force's power per lab axis F_a v_a, v = (ħ/m)κ the path's -- in a window the force's difference against the
+//!   velocity, each relative to the cloud's mean there, what moves T (`compare`). (Its conservative part, a lattice's or a
+//!   trap's light force against the motion's oscillation, moves no energy over the motion's periods; on a window
+//!   shorter than them it is noise of zero mean, the paths' spread. Taking it out by the models' energies ⟨H⟩ at the
+//!   window's ends, −d⟨H⟩/dt along a dressed eigenstate, was tried and is wrong near resonance: ⟨H⟩ holds the excited
+//!   dressed states' energies by their populations, and R9_PUSH's lost paths read x = −1.2 of it against the +0.11 of
+//!   their rates.)
+//!
 //! # The memory
 //! The path's length is set by the generator's slowest nonzero decay rate λ (`memory`): the sector Liouvillian's
 //! eigenvalues at a point, a rounding zero |μ| ≤ κ_μ γ_d ‖L‖₁ (its first-order perturbation bound, κ_μ its condition)
@@ -189,6 +210,8 @@ pub struct Walk {
     pub start: Vec<(usize, C64)>,
     /// (t, r, κ) at the step ends (µs, µm, 1/µm), the times increasing.
     pub ends: Vec<[f64; 7]>,
+    /// Whether the trajectory lost its atom at its last end (its path ends there; select.rs # The motion).
+    pub lost: bool,
 }
 
 impl Walk {
@@ -315,6 +338,33 @@ pub struct Reading {
     /// The rows' sum before their normalization (P's trace with Q's lifted populations), and tr ρ_P.
     pub total: f64,
     pub trace: f64,
+    /// Per lab axis the rate of ⟨κ_a²⟩ the emitted photons give, Σ_c k_c² ((2/5) λ_c − (1/5) tr(J_{c,a} ρ J_{c,a}†))
+    /// (1/µm²/µs, over tr ρ_P; # The motion's readings).
+    pub emitted: V3,
+    /// The light's absorbed photon at the place per lab axis, the model's none (# The motion's readings): its mean
+    /// Σ_l w_l k_{l,a} (1/µm) and its second moment Σ_l w_l k_{l,a}² (1/µm²), w_l the beams' shares.
+    pub kick: V3,
+    pub kick2: V3,
+}
+
+impl Reading {
+    /// The heating per lab axis (rad/µs², d(E/ħ)/dt; # The motion's readings) at the photon count's Fano factor
+    /// `fano` = 1 + Q: (ħ/m)/2 times the rate of ⟨κ_a²⟩ the scattered light gives -- the emitted photons', and the
+    /// absorbed ones' λ ((k²)_a − k̄_a²) + λ (1 + Q) k̄_a².
+    pub fn heating_at(&self, hbar_over_mass: f64, fano: f64) -> V3 {
+        let lambda: f64 = self.rates.iter().sum();
+        std::array::from_fn(|a| 0.5 * hbar_over_mass * (self.emitted[a] + lambda * (self.kick2[a] - self.kick[a] * self.kick[a] + fano * self.kick[a] * self.kick[a])))
+    }
+
+    /// `heating_at` of Poisson's count (Q = 0).
+    pub fn heating(&self, hbar_over_mass: f64) -> V3 {
+        self.heating_at(hbar_over_mass, 1.0)
+    }
+
+    /// The force's power per lab axis on the path (rad/µs², F_a v_a, v = (ħ/m)κ).
+    pub fn work(&self, hbar_over_mass: f64) -> V3 {
+        std::array::from_fn(|a| self.force[a] * hbar_over_mass * self.kappa[a])
+    }
 }
 
 /// A model's readings along one path, its photon classes' fast indices, the work they took, and its state at the end
@@ -376,6 +426,11 @@ pub struct Form<'a> {
     states: Vec<usize>,
     folds: bool,
     classes: Vec<[i64; 2]>,
+    /// Per class its photon's wave number (1/µm; # The motion's readings).
+    photon: Vec<f64>,
+    /// The beams an atom absorbs from (all but the tweezer's): each its index, its wave vector (1/µm) and its coupling's
+    /// strength at its focus, ‖X_l‖²_F + ‖R_l‖²_F (# The motion's readings).
+    absorbing: Vec<(usize, V3, f64)>,
     hbar_over_mass: f64,
 }
 
@@ -569,6 +624,37 @@ impl<'a> Form<'a> {
             h_block.push(h_slot);
             h_slot += b.len() * b.len();
         }
+        // Each class's photon wave number (# The motion's readings): its photon forms K = k∘L on the node at `at` with
+        // them, Σ Re(L̄ K)/Σ |L|² over its elements (one class one line: its elements' k differ by the hyperfine
+        // splitting over the optical frequency); a class that scatters nothing there, the scene's shortest emitted
+        // wavelength's (the largest k).
+        let request = &model.scene.request;
+        let largest = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| request.emission.iter().any(|c| c[(i, j)] != C64::ZERO)).map(|(i, j)| model.scene.jumps().wave_number[(i, j)].re.abs()).fold(0.0, larger);
+        let photon = model
+            .node(at, [0.0; 3], true)
+            .classes
+            .iter()
+            .map(|c| {
+                let (mut lk, mut ll) = (0.0, 0.0);
+                for e in c.axes.iter().flatten().flat_map(|j| &j.elements) {
+                    lk += (e.value.conj() * e.kick).re;
+                    ll += e.value.norm_sqr();
+                }
+                if ll > 0.0 { lk / ll } else { largest }
+            })
+            .collect();
+        let absorbing = request
+            .beams
+            .iter()
+            .enumerate()
+            .filter(|&(l, _)| l != request.trap_beam)
+            .map(|(l, b)| {
+                let size = crate::linalg::norm3(b.direction);
+                let strength: f64 = b.coupling.data.iter().chain(&b.counter_coupling.data).map(|z| z.norm_sqr()).sum();
+                (l, b.direction.map(|x| b.wave_number * x / size), strength)
+            })
+            .filter(|x| x.2 > 0.0)
+            .collect();
         let form = Form {
             model,
             n,
@@ -592,6 +678,8 @@ impl<'a> Form<'a> {
             folds: !model.rs.folded.is_empty(),
             states,
             classes,
+            photon,
+            absorbing,
             hbar_over_mass: model.hbar_over_mass(),
         };
         assert!(form.beats_known(&node), "a node's beat outside the model's values");
@@ -935,21 +1023,27 @@ impl<'a> Form<'a> {
         // The rates and the force on the node at t: J(t), ∇J(t) by class and axis, ∇H(t).
         let mut rates = vec![0.0; self.classes.len()];
         let mut force = [0.0; 3];
+        let contract = |m: &Mat| -> C64 {
+            let mut s = C64::ZERO;
+            for x in 0..n {
+                for y in 0..n {
+                    s += m.data[x * n + y] * rho[y * n + x];
+                }
+            }
+            s
+        };
         for (beat, g) in &node.gradient {
             let f = self.phase(*beat, t);
             for (axis, m) in g.iter().enumerate() {
-                let mut s = C64::ZERO;
-                for x in 0..n {
-                    for y in 0..n {
-                        s += m.data[x * n + y] * rho[y * n + x];
-                    }
-                }
-                force[axis] -= (f * s).re;
+                force[axis] -= (f * contract(m)).re;
             }
         }
+        let mut emitted = [0.0; 3];
         let mut entries: Vec<(usize, usize, C64, [C64; 3])> = Vec::new();
         for (c, class) in node.classes.iter().enumerate() {
-            for axis in &class.axes {
+            // Per Cartesian axis of the emission its rate tr(J_a ρ J_a†), for the photons' second moment.
+            let mut along = [0.0; 3];
+            for (b, axis) in class.axes.iter().enumerate() {
                 entries.clear();
                 for jump in axis {
                     let f = self.phase(jump.beat, t);
@@ -982,15 +1076,37 @@ impl<'a> Form<'a> {
                     }
                 }
                 rates[c] += rate.re / trace;
+                along[b] = rate.re / trace;
                 for a in 0..3 {
                     force[a] += absorbed[a].im;
                 }
             }
+            // The photons' second moment per lab axis: k_c² λ_c ⟨n_a²⟩, the dipole pattern's ⟨n_a²⟩ λ = (2/5) tr G −
+            // (1/5) G_aa (G_ab = tr(J_a ρ J_b†); # The motion's readings).
+            let k2 = self.photon[c] * self.photon[c];
+            let lambda: f64 = along.iter().sum();
+            for a in 0..3 {
+                emitted[a] += k2 * (0.4 * lambda - 0.2 * along[a]);
+            }
         }
         let force = force.map(|f| f / trace);
+        // The light's absorbed photon at the place (# The motion's readings).
+        let (mut kick, mut kick2, mut weight) = ([0.0; 3], [0.0; 3], 0.0);
+        let light = self.model.light();
+        for &(l, k, strength) in &self.absorbing {
+            let w = strength * light.beams[l].amplitude_to(r, 0).value.norm_sqr();
+            weight += w;
+            for a in 0..3 {
+                kick[a] += w * k[a];
+                kick2[a] += w * k[a] * k[a];
+            }
+        }
+        if weight > 0.0 {
+            (kick, kick2) = (kick.map(|x| x / weight), kick2.map(|x| x / weight));
+        }
         counts.readouts += 1;
         counts.readout_seconds += clock.elapsed().as_secs_f64();
-        Reading { t, r, kappa, rows, rates, force, total, trace }
+        Reading { t, r, kappa, rows, rates, force, total, trace, emitted, kick, kick2 }
     }
 
     /// The model's readings along a path from `from` to `to` from the state `start` (module documentation): its
@@ -2082,7 +2198,7 @@ pub struct Mean {
 impl Mean {
     /// The mean of the paths' values `x` and its standard error, the paths' spread over √P: none to read on one path
     /// (without bound). Of no path nothing is read: its window is unread (`Window::paths`, `select::direct_at`).
-    fn of(x: &[f64]) -> Mean {
+    pub fn of(x: &[f64]) -> Mean {
         let p = x.len() as f64;
         let value = x.iter().sum::<f64>() / p;
         if x.len() < 2 {
@@ -2112,11 +2228,19 @@ pub struct Window {
     /// the total rate's relative difference.
     pub rates: Vec<([i64; 2], Mean, f64)>,
     pub rate: Mean,
-    /// The force's difference per lab axis (rad/µs/µm), the rms difference over the rms force per path, and
-    /// ⅓ Σ_a ⟨|δF_a||v_a|⟩ (rad/µs², the feedback's drive: PATHGAP item 4).
+    /// The force's difference per lab axis (rad/µs/µm), and the rms difference over the rms force per path.
     pub force: [Mean; 3],
     pub force_rms: Mean,
-    pub power: Mean,
+    /// The motion's (# The motion's readings; select.rs # The motion): per lab axis the reference's heating H_a and the
+    /// candidate's thermal energy rate's difference δP_a = δH_a + (δF_a − δF̄_a)(v_a − v̄_a) (rad/µs²), the bars the
+    /// window's means over the paths read in it -- the cloud's own motion, which T is read about (estimate.rs, # The
+    /// cloud's own motion): a force along it, or the same force on every atom, moves the cloud, not its T; the force's
+    /// covariance with the velocity over the cloud is what heats or cools it.
+    pub heating: [Mean; 3],
+    pub energy_rate: [Mean; 3],
+    /// Per path read in the window its δP_a (rad/µs²): the total T's error weighs the axes by each one's response
+    /// (select.rs `motion_at`), its spread over the paths that sum's own.
+    pub energy_rates: Vec<[f64; 3]>,
 }
 
 /// The windows of a path of the length `length` (µs): (0, e₁], (e₁, 2e₁], … doubling up to the length, e₁ the
@@ -2172,8 +2296,21 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             let mut rate = vec![0.0; p];
             let mut force = vec![[0.0; 3]; p];
             let mut force_rms = vec![0.0; p];
-            let mut power = vec![0.0; p];
+            let (mut heating, mut energy_rate) = (vec![[0.0; 3]; p], vec![[0.0; 3]; p]);
             let mut read = vec![false; p];
+            // The cloud's mean velocity and mean force's difference in the window over the paths that read in it (# The
+            // motion's readings).
+            let (mut sum, mut pushed, mut count) = ([0.0; 3], [0.0; 3], 0.0);
+            for (c, r) in candidate.iter().zip(reference) {
+                for (x, y) in c.readings.iter().zip(&r.readings).filter(|(_, y)| y.t > from && y.t <= to) {
+                    for a in 0..3 {
+                        sum[a] += hbar_over_mass * y.kappa[a];
+                        pushed[a] += x.force[a] - y.force[a];
+                    }
+                    count += 1.0;
+                }
+            }
+            let (cloud, push): ([f64; 3], [f64; 3]) = (sum.map(|x| if count > 0.0 { x / count } else { 0.0 }), pushed.map(|x| if count > 0.0 { x / count } else { 0.0 }));
             for (k, (c, r)) in candidate.iter().zip(reference).enumerate() {
                 let pairs: Vec<(&Reading, &Reading)> = c.readings.iter().zip(&r.readings).filter(|(x, _)| x.t > from && x.t <= to).collect();
                 assert!(pairs.iter().all(|(x, y)| x.t == y.t), "the two series read at the same times");
@@ -2181,6 +2318,11 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 read[k] = !pairs.is_empty();
                 let (mut df2, mut f2, mut total_m, mut total_r) = (0.0, 0.0, 0.0, 0.0);
                 for (x, y) in &pairs {
+                    let (hx, hy) = (x.heating(hbar_over_mass), y.heating(hbar_over_mass));
+                    for a in 0..3 {
+                        heating[k][a] += hy[a] / q;
+                        energy_rate[k][a] += ((hx[a] - hy[a]) + (x.force[a] - y.force[a] - push[a]) * (hbar_over_mass * y.kappa[a] - cloud[a])) / q;
+                    }
                     for s in 0..STATES {
                         rows[s][k] += (x.rows[s] - y.rows[s]) / q;
                     }
@@ -2199,7 +2341,6 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                         force[k][a] += d / q;
                         df2 += d * d / q;
                         f2 += y.force[a] * y.force[a] / q;
-                        power[k] += d.abs() * (hbar_over_mass * y.kappa[a]).abs() / (3.0 * q);
                     }
                 }
                 rate[k] = total_m / total_r - 1.0;
@@ -2223,7 +2364,9 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 rate: of(&rate),
                 force: std::array::from_fn(|a| of(&force.iter().map(|f| f[a]).collect::<Vec<_>>())),
                 force_rms: of(&force_rms),
-                power: of(&power),
+                heating: std::array::from_fn(|a| of(&heating.iter().map(|h| h[a]).collect::<Vec<_>>())),
+                energy_rate: std::array::from_fn(|a| of(&energy_rate.iter().map(|h| h[a]).collect::<Vec<_>>())),
+                energy_rates: held.iter().map(|&k| energy_rate[k]).collect(),
             }
         })
         .collect()
