@@ -76,7 +76,8 @@
 //! first piece decides nothing, it only starts the second stage near its end (a setting that meets the tolerance there
 //! is checked there in one round of the refinements, the setting's own run being the path's). The trace is read on
 //! every path, not on the calibration's alone: where another stretch's defect is beyond the tolerance at the setting,
-//! the ladder goes on along that stretch from the setting, and the paths are run again at what it ends at (`Paths::new`);
+//! the ladder goes on along that stretch alone from the setting, and that stretch is run at what it ends at -- its own run
+//! there the stretch's --, every other stretch at its own, every model judged likewise (`Paths::settings`, `judge_on`);
 //! what defect is left at the ladder's top is booked in every candidate's A, the reference's largest over the paths
 //! beside the candidate's own (`Paths::trace`, `judge`). (Until 2026-11-22 the trace was read nowhere: the reference's
 //! fell to 1.6e-5 on SAT_03's first 5 µs and drifted to 0.55 along S1's paths, 1.04 along tilt0's -- Study A §2.6.)
@@ -532,6 +533,10 @@ pub struct Paths<'a> {
     pub windows: Vec<(f64, f64)>,
     pub reference: Form<'a>,
     pub settled: Settled,
+    /// Per stretch -- the walks' starts, then their late segments -- the setting it is run at: the settled one, or where
+    /// its own trace stood beyond the tolerance at it, the one the ladder along that stretch went on to (`Paths::new`);
+    /// every model judged runs each stretch at its own (`judge_on`).
+    pub settings: Vec<Setting>,
     series: Vec<Series>,
     calibration: (usize, f64, Vec<Series>),
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
@@ -629,15 +634,16 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 
 
 /// `settle`'s ladder along the walk's stretch of `piece` µs from `begin` (from the walk's own start state there) from the
-/// setting `from` (raised to its own rate floor).
+/// setting `from` (raised to its own rate floor), its runs keeping their states at the times `keep` (the landing
+/// check's, where the stretch's own run at the setting it ends on is kept as the stretch's: `Paths::new`).
 #[allow(clippy::too_many_arguments)]
-fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting) -> Result<(Settled, Vec<Vec<Series>>), String> {
+fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting, keep: &[f64]) -> Result<(Settled, Vec<Vec<Series>>), String> {
     let clock = Instant::now();
     // A family of settings' runs, each model's (paths.rs `Form::along_family`: each node made once for them all): per
     // setting the models' series.
     let family = |settings: &[Setting]| -> Result<Vec<Vec<Series>>, String> {
         let schemes: Vec<Scheme> = settings.iter().map(|&s| scheme(s, 1)).collect();
-        let made: Vec<Vec<Series>> = forms.par_iter().map(|f| f.along_family(walk, &walk.start, begin, begin + piece, &schemes)).collect::<Result<_, _>>()?;
+        let made: Vec<Vec<Series>> = forms.par_iter().map(|f| f.along_family_keeping(walk, &walk.start, begin, begin + piece, &schemes, keep)).collect::<Result<_, _>>()?;
         let mut made: Vec<std::vec::IntoIter<Series>> = made.into_iter().map(Vec::into_iter).collect();
         Ok(settings.iter().map(|_| made.iter_mut().map(|x| x.next().expect("a member's series")).collect()).collect())
     };
@@ -802,9 +808,9 @@ impl<'a> Paths<'a> {
         };
         // The setting (`settle`): its first stage, then its second beside the other walks at the first stage's setting.
         let piece = CALIBRATION.min(stretch);
-        let (first, at) = ladder(&[&form], &walks[longest], 0.0, piece, step, &starts, COARSEST)?;
+        let (first, at) = ladder(&[&form], &walks[longest], 0.0, piece, step, &starts, COARSEST, &[])?;
         let (mut settled, calibrated, done) = if stretch > piece {
-            let (whole, done) = rayon::join(|| ladder(&[&form], &walks[longest], 0.0, stretch, step, &starts, first.setting), || others(first.setting));
+            let (whole, done) = rayon::join(|| ladder(&[&form], &walks[longest], 0.0, stretch, step, &starts, first.setting, &[]), || others(first.setting));
             let (whole, at) = whole?;
             let done = if whole.setting == first.setting { done } else { others(whole.setting) };
             (whole.after(&first), at, done)
@@ -812,34 +818,38 @@ impl<'a> Paths<'a> {
             let done = others(first.setting);
             (first, at, done)
         };
-        let mut calibrated: Vec<Series> = calibrated.into_iter().map(|mut x| x.swap_remove(0)).collect();
+        let calibrated: Vec<Series> = calibrated.into_iter().map(|mut x| x.swap_remove(0)).collect();
         #[cfg(test)]
         if traced() {
             eprintln!("    [trace] reference jobs: {:.2} s wall on {} threads; freezes' parts (nodes, amplitudes, eigen, weights, R and ΔH) {:.2?} s", pool.elapsed().as_secs_f64(), rayon::current_num_threads(), crate::paths::freeze_parts());
         }
         let mut done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
-        // The trace on every path, not the calibration's alone (module documentation, # The paths): where some other
-        // stretch's defect is beyond the tolerance at the setting, the setting is not converged there -- the ladder goes
-        // on along that stretch from the setting, the calibration's walk is run again at the new setting's refinements and
-        // every other stretch at it, until every stretch's defect is within the tolerance or the ladder stands.
+        // The trace on every path, not the calibration's alone (module documentation, # The paths): a stretch whose defect
+        // is beyond the tolerance at the setting is not converged there -- the ladder goes on along that stretch alone from
+        // the setting, and its own run at the setting the ladder ends on (its landing states kept) is the stretch's; the
+        // other stretches keep theirs, each judged model runs each stretch at its own (`judge_on`). Each such stretch
+        // climbs once, the worst first. (Until 2026-11-23 every stretch and the calibration were run again at the raised
+        // setting: PGC3D's eight, 86 thread seconds, for one late stretch's trace 2.83e-3 at 8 substeps a µs.)
+        let mut settings = vec![settled.setting; jobs.len()];
+        let mut climbed: Vec<usize> = vec![];
         loop {
-            let worst = jobs.iter().zip(&done).map(|(&j, s)| (j, s.trace_defect())).fold((longest, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+            let worst = jobs.iter().zip(&done).filter(|(j, _)| !climbed.contains(j)).map(|(&j, s)| (j, s.trace_defect())).fold((longest, 0.0), |a, b| if b.1 > a.1 { b } else { a });
             if !(worst.1 > TOLERANCE) || worst.0 == longest {
                 break;
             }
-            let (w, from, to) = stretch_of(worst.0);
-            let (again, _) = ladder(&[&form], &walks[w], from, to - from, step, &starts, settled.setting)?;
-            if again.setting == settled.setting {
-                break;
+            let j = worst.0;
+            climbed.push(j);
+            let (w, from, to) = stretch_of(j);
+            let (again, mut runs) = ladder(&[&form], &walks[w], from, to - from, step, &starts, settings[j], &keeps[j])?;
+            (settled.tried, settled.products, settled.work, settled.seconds) = (settled.tried + again.tried, settled.products + again.products, settled.work + again.work, settled.seconds + again.seconds);
+            if again.setting != settings[j] {
+                settings[j] = again.setting;
+                done[j] = runs.swap_remove(0).swap_remove(0);
             }
-            settled = again.after(&settled);
-            let schemes: Vec<Scheme> = settled.runs.iter().map(|&s| scheme(s, 1)).collect();
-            let (made, more) = rayon::join(|| form.along_family(&walks[longest], &walks[longest].start, 0.0, stretch, &schemes), || others(settled.setting));
-            (calibrated, done) = (made?, more.into_iter().collect::<Result<_, _>>()?);
         }
         // The landing check of the reference (module documentation, # The motion): at each kept state the landing after a
-        // jump, and the reference's excess photons and impulse from it.
-        let knobs = (settled.setting.turns, settled.setting.rate, settled.setting.cutoff);
+        // jump, and the reference's excess photons and impulse from it, each stretch at its own setting.
+        let knobs_of = |j: usize| (settings[j].turns, settings[j].rate, settings[j].cutoff);
         let landings: Vec<Vec<Landing>> = match optical {
             None => vec![vec![]; jobs.len()],
             Some((span, decay)) => jobs
@@ -851,7 +861,7 @@ impl<'a> Paths<'a> {
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
                         .map(|(t, v, landed)| {
-                            form.landing(&walks[w], t, &landed, span, decay, knobs, &done[j]).map(|(photons, impulse, spent)| {
+                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j]).map(|(photons, impulse, spent)| {
                                 let (diffusion, solved) = form.diffusion(&walks[w], t, v);
                                 Landing { t, landed, photons, impulse, diffusion, work: spent + solved }
                             })
@@ -869,7 +879,13 @@ impl<'a> Paths<'a> {
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
         let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
+        Ok(Paths { walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
+    }
+
+    /// The stretches run at a setting of their own (`settings`), each with it: their trace beyond the tolerance at the
+    /// settled one.
+    pub fn raised(&self) -> Vec<(usize, Setting)> {
+        self.settings.iter().copied().enumerate().filter(|(_, s)| *s != self.settled.setting).collect()
     }
 
     /// The calibration's stretch (µs): the longest walk's [0, L], where the setting was read.
@@ -941,7 +957,7 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
     let clock = Instant::now();
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
-    let scheme = paths.settled.scheme(1);
+    let scheme = |j: usize| self::scheme(paths.settings[j], 1);
     // The calibration's walk along its stretch: the setting's own run and its refinements, one family (the setting's own
     // the walk's series).
     let family: Vec<Scheme> = paths.settled.runs.iter().map(|&s| self::scheme(s, 1)).collect();
@@ -964,11 +980,11 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
                 j if j < n => {
                     let w = &paths.walks[j];
                     let reach = paths.length.min(w.end());
-                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme, &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme(j), &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
-                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme, &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme(j), &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
             };
             #[cfg(test)]
@@ -995,7 +1011,7 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
     // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
     // photons' Mandel Q = 2 n_ex --, and its force correlation's diffusion at its own state there; the reference's beside
     // (paths.rs `Statistics`). Where either model's frozen generator has no inverse, neither's diffusion is read there.
-    let knobs = (paths.settled.setting.turns, paths.settled.setting.rate, paths.settled.setting.cutoff);
+    let knobs = |j: usize| (paths.settings[j].turns, paths.settings[j].rate, paths.settings[j].cutoff);
     let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
     // The landing checks' counted work, summed on the pool (whole multiply-adds).
     let landing_work = std::sync::atomic::AtomicU64::new(0);
@@ -1013,7 +1029,7 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, _, spent) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own)?;
+                        let (photons, _, spent) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own)?;
                         let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
                         let diffusion = match (mine, l.diffusion) {
                             (Some(c), Some(r)) => [c, r],
