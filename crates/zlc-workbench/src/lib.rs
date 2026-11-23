@@ -119,8 +119,8 @@ pub enum Event {
     Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
     /// A query its plugin's code did not answer: refused before it ran (a full queue, an instance
-    /// still releasing), expired or timed out, its channel lost. A draft query asks again later;
-    /// any other asker takes it as the failure it is.
+    /// still releasing), expired or timed out, its channel lost. A draft query or a region's asks
+    /// again later; any other asker takes it as the failure it is.
     Unanswered { ticket: u64, error: String },
     Log { instance: String, line: String },
     RunStarted { run: String },
@@ -719,14 +719,14 @@ impl Workbench {
         }
     }
 
-    /// A query its plugin's code did not answer: a draft query waits to be asked again; any other
-    /// asker is answered with the failure.
+    /// A query its plugin's code did not answer: a draft query or a region's waits to be asked
+    /// again; any other asker is answered with the failure.
     fn unanswered(&mut self, ticket: u64, error: String, host: &mut dyn Host) {
         match self.tickets.get(&ticket) {
-            Some(Ticket::Query { node, name }) => {
-                let (node, name) = (node.clone(), name.clone());
+            Some(Ticket::Query { node, .. } | Ticket::Selection { node, .. }) => {
+                let node = node.clone();
                 self.tickets.remove(&ticket);
-                self.query_unanswered(&node, ticket, &name);
+                self.query_unanswered(&node, ticket);
             }
             _ => self.take_answer(ticket, Err(error), host),
         }

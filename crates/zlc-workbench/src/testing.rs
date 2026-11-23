@@ -2503,6 +2503,29 @@ mod tests {
         assert_eq!((&told["resources"]["pulse"]["read"], &told["devices"]["sequencer"]["facts"]), (&json!(root.join("pulses").join("b.json")), &trigger_lanes(3)));
     }
 
+    /// A region's question the plugin did not answer waits as a draft query's does: nothing is said,
+    /// it is asked again once the node's plugin answers anything of it, and then sets the draft.
+    #[test]
+    fn a_regions_unanswered_question_is_asked_again() {
+        let mut catalog = catalog();
+        catalog["types"][2]["node"]["selection_mappings"] = json!([{"plot_kind": "image", "selector_kind": "area", "draft_fields": ["frames_per_cycle"]}]);
+        catalog["types"][2]["node"]["queries"] = json!(["estimate_run"]);
+        let (_root, mut wb, calls, mut host) = rig("region-unanswered", catalog);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "camera_measurement"}));
+        wb.panel_selection("p", "@logic/camera_measurement/frames", Some(&json!({"plot_kind": "image", "selector_kind": "area"})), &json!({}));
+        let refused = asked(&calls, "selection_patch");
+        let said = wb.console_report.clone();
+        event(&mut wb, Event::Unanswered { ticket: refused, error: "refused: node/camera_measurement already has 64 queued calls".into() }, &mut host);
+        assert_eq!(wb.console_report, said, "no answer, nothing said");
+        assert_eq!(asked(&calls, "selection_patch"), refused);
+        wb.apply("estimate_node", &json!({"node": "camera_measurement"}), &Origin::Operator, 9, &mut host);
+        event(&mut wb, Event::Answered { ticket: asked(&calls, "estimate_run"), result: Ok(json!({"status": "ok"})) }, &mut host);
+        let again = asked(&calls, "selection_patch");
+        assert_ne!(again, refused);
+        event(&mut wb, Event::Answered { ticket: again, result: Ok(json!({"frames_per_cycle": 3})) }, &mut host);
+        assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 3);
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());

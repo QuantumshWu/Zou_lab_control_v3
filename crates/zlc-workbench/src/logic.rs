@@ -798,15 +798,15 @@ impl Workbench {
         self.start_checked(id, host);
     }
 
-    /// A question its plugin's code did not answer -- refused or expired before it ran, timed out,
-    /// its channel lost: no answer, and the one that stood stands. It waits to be asked again: once
-    /// the node's plugin answers anything of it, a Start waits for it, or its instance opens.
-    pub(crate) fn query_unanswered(&mut self, id: &str, ticket: u64, name: &str) {
+    /// A question (a draft query, a region's) its plugin's code did not answer -- refused or expired
+    /// before it ran, timed out, its channel lost: no answer, and the one that stood stands. It waits
+    /// to be asked again: once the node's plugin answers anything of it, a Start waits for it, or its
+    /// instance opens.
+    pub(crate) fn query_unanswered(&mut self, id: &str, ticket: u64) {
         let Ok(node) = self.node_mut(id) else { return };
-        let stamp = node.stamp();
-        let Some(ask) = node.asks.get_mut(name) else { return };
-        let Some((_, asked)) = ask.flying.take_if(|(flying, _)| *flying == ticket) else { return };
-        if ask.waiting.is_none() && asked.stamp == stamp { ask.waiting = Some(asked); }
+        let Some(ask) = node.asks.values_mut().find(|ask| ask.flying.as_ref().is_some_and(|(flying, _)| *flying == ticket)) else { return };
+        let asked = ask.flying.take().map(|(_, asked)| asked);
+        if ask.waiting.is_none() { ask.waiting = asked; }
     }
 
     /// A Start that waited for the draft check: now it starts, or reports why not.
