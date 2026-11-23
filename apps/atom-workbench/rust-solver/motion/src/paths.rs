@@ -23,41 +23,75 @@
 //! amplitudes G_k, J are the model's at the path's place and momentum (`Selected::node`). The recycling is one map R(t)
 //! from the sector to its ground pairs' entries, made at every time from the jumps' elements.
 //!
-//! # The segments
-//! Between two times the generator is advanced by the commutator-free fourth-order Magnus step of Blanes and Moan
-//! (2006) -- exp(h(α₁L₁ + α₂L₂)) exp(h(α₂L₁ + α₁L₂)), L₁, L₂ at the segment's two Gauss points --, every exponential's
-//! action exact to the double's rounding (`Op::exp`: the truncated Taylor series with scaling of Al-Mohy and Higham
-//! (2011), its degree and scaling from a bound of the operator's 1-norm made from its structure: the series is summed
-//! to the rounding whatever the bound). The internal coherences turn at up to the block's spectral width ω (the static
-//! beat's Hermitian part's eigenvalues' span, widened by every other beat's norm: `Form::amps`): where hω ≫ 1
-//! the step's error does not fall with h (PATHGAP item 3: R4's readings stand on one plateau from h = 1/8 to 1/64 µs,
-//! hω ≈ 200 … 25, and fall only below; a comparison of h and h/2 on the plateau reads "converged"). So a segment is
-//! no longer than one turn of the fastest coherence, hω ≤ 2π (`Scheme::Sparse`'s `turn`), off the plateau on every
-//! scene measured (it begins at hω ≈ 15–25); there the error falls at the step's order and a comparison of h and h/2
-//! reads it (`check`: valid only where the coarser of the two keeps hω ≤ 2π, refused elsewhere).
-//!
 //! # The nodes
 //! The model is made at few nodes and interpolated between them on the blocks (PATHGAP item 3: "segments dense, nodes
 //! sparse"): the path's knots are its step ends -- the trajectory's path is C¹ there, its acceleration jumps --, each
-//! knot interval cut into `nodes` equal parts, the model made at every part's ends (`Selected::node`), and the amplitudes
-//! at a Gauss point the cubic Lagrange interpolant of the four nearest nodes of its own knot interval (never across a
-//! knot); the beats' phases exact at the point's time. The interpolation's error falls as the parts' length to the
-//! fourth; it is read by the same comparison at twice the nodes (`check`). H is interpolated by its beats, R by its
-//! beats' differences (`Amps`): each such amplitude is smooth along the path, the phases are not. Readouts are made at
-//! knots, on the exact node there. (`Scheme::Exact` is ENGFOLD's: uniform segments, the model made at both Gauss
-//! points of each -- the prototype's numbers on its own paths, to the reproduction's test.) `Scheme::Exponential` takes
-//! its nodes at its pieces' ends, the interpolant of degree min(3, pieces) (`lagrange`: linear at one piece a step),
-//! so that its pieces' knob refines the nodes with them -- one Richardson reading for both (select.rs `settle`).
+//! knot interval cut into the scheme's pieces, the model made at every piece's ends (`Selected::node`), and the
+//! amplitudes between them the Lagrange interpolant of degree min(3, pieces) (`lagrange`: linear at one piece a step)
+//! of its own knot interval (never across a knot); the beats' phases exact at the time. H is interpolated by its
+//! beats, R by its beats' differences (`Amps`): each such amplitude is smooth along the path, the phases are not.
+//! Readouts are made at knots, on the exact node there. The pieces' knob refines the nodes with them -- one Richardson
+//! reading for both (select.rs `ladder`).
 //!
 //! # The readings
 //! At a readout, on the node there: the displayed rows -- P's populations with Q's lifted (`Dynamics::readout`, the
 //! engine's one readout: it takes a state vector, so ρ is taken through its eigenvectors, the unnormalized rows being
 //! linear in ρ), over their sum; the photon rate of each class, Σ_a tr(J_{c,a} ρ J_{c,a}†); the force,
 //! −tr(∇H_h ρ) + Σ_{c,a} Im tr(ρ J_{c,a}†∇J_{c,a}) (the Ehrenfest force and the scattered light's absorbed momentum).
-//! The rates and the force are the trajectory's: over tr ρ_P, the state's norm on P, as the integrator takes them; the
+//! The channels are the trajectories' own, one set: J_{c,a} and ∇J_{c,a} are the elements of the model's node
+//! (`Selected::node`, its classes by Cartesian axis) that a trajectory's photons read (model/selected.rs `photons`,
+//! model.rs `Moments::of`: ‖J ψ‖², Im⟨Jψ|∇Jψ⟩, Re⟨∂Jψ|∂Jψ⟩), here in ρ form -- the same sums contracted with ρ, not
+//! applied to ψ (through ρ's eigenvectors, each read as a trajectory's state, the readings took 4.7 times as long,
+//! PGC3D 2026-11-23) --; −tr(∇H_h ρ) is the model's own contraction (`SelectedMiddle::contract`), and the share of
+//! the absorbed mean a jump carries the model's rule (`Moments::new`). The rates and the force are the trajectory's: over tr ρ_P, the state's norm on P, as the integrator takes them; the
 //! rows over their sum as shown. (ENGFOLD's prototype took the rates and the force over the rows' sum too; the two
-//! differ by the lifted Q population. `Reading::total` holds that sum.)
+//! differ by the lifted Q population. `Reading::total` holds that sum.) tr ρ_P itself is kept by every model's exact
+//! flow -- i(H − H†) = Σ J†J --, so its departure from one along a series is the scheme's (`Series::trace_defect`): a
+//! strict lower bound of the scheme's error in the trace norm, read at no cost, and a part of the setting's error
+//! (select.rs `settle`; the readings over tr ρ_P and the rows' sum hide it).
 //!
+//! # The motion's readings
+//! What the motion takes of the internal state, beside the rows (select.rs # The motion), each over tr ρ_P:
+//! - the heating per lab axis, H_a = (ħ/m)/2 · d⟨κ_a²⟩/dt (`Reading::heating_at`), each model's own, in the way its
+//!   trajectories take their momentum: the emitted photons' k_c² λ_c ⟨n_a²⟩ -- the dipole pattern tr G − n·Re(G)·n of a
+//!   class's Cartesian amplitudes (step.rs `Emitted`), whose ⟨n_a²⟩ λ_c = (2/5) tr G − (1/5) G_aa, G_ab = tr(J_{c,a} ρ
+//!   J_{c,b}†) --, k_c the class's photon wave number (its photon forms K = k∘L on a node at the form's point: one class
+//!   one line); what its jumps carry of the absorbed light, Σ Re tr(∂_aJ ρ ∂_aJ†) (model.rs `Moments`: a folded excited
+//!   state's absorption), and Q times the directed part a jump carries; and twice the force's correlation's diffusion
+//!   (# The landing check): an explicit excited state carries its absorbed momentum in its force ⟨∇H⟩, not in its jumps
+//!   (SAT_03's 32 states' jumps read 0.003 /µm²/µs of it, the full-ground model's 413), and a ground state's light shift
+//!   pushes it by its gradient, the dipole force, in both.
+//! - the force's power per lab axis F_a v_a, v = (ħ/m)κ the path's -- in a window the force's difference against the
+//!   velocity, each relative to the cloud's mean there, what moves T (`compare`). (Its conservative part, a lattice's or a
+//!   trap's light force against the motion's oscillation, moves no energy over the motion's periods; on a window
+//!   shorter than them it is noise of zero mean, the paths' spread. Taking it out by the models' energies ⟨H⟩ at the
+//!   window's ends, −d⟨H⟩/dt along a dressed eigenstate, was tried and is wrong near resonance: ⟨H⟩ holds the excited
+//!   dressed states' energies by their populations, and R9_PUSH's lost paths read x = −1.2 of it against the +0.11 of
+//!   their rates.)
+//!
+//! # The landing check
+//! A path's reading starts once, from the walk's start; after every jump the atom lands on the ground states and its
+//! excitation grows from nothing again -- the photons' statistics, which a folded model has not (its emission is
+//! Poisson's) and which a partial level gets wrong between its explicit states and its folded neighbours. So at a
+//! window's last reading that leaves it room, time t, the reference's state ρ is mapped to where a jump lands it, ρ_L =
+//! R(t)ρ / tr R(t)ρ (`landed`: the recycling, Σ_c J_c ρ J_c† over the jump rate), and each model goes on from ρ_L along
+//! the path (`landing`), against its own run there: its excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ (and impulse ∫(F(τ|L) −
+//! F̄)dτ, said). By the regression theorem λ(τ|L) = λ̄ g⁽²⁾(τ), so Mandel's Q = 2 n_ex: the count's Fano factor 1 + Q
+//! of the directed absorbed part a model's jumps carry. The span is the optical memory 2 ln(2/ε)/Γ, Γ the slowest
+//! excited decay (`optical`: the excitation grown to the steady state's to the rounding), the stretch's knots from a
+//! quarter of the fastest decay's time growing by 2^{1/4} a knot to the walk's own spacing -- the transient resolved
+//! where it is --, one piece a knot; the ground states' slower redistribution after the landing is outside the span.
+//!
+//! At the same times each model's force fluctuates about its mean, and the momentum diffuses by D_a = ∫₀^∞ ⟨δF_a(0)
+//! δF_a(τ)⟩ dτ: by the quantum regression theorem, at the generator frozen at the time (the atom at rest there),
+//! D_a = tr(G_a y), L y = −(½(G_a ρ + ρ G_a) − ⟨G_a⟩ρ), G_a the Hermitian part of ∂_aH (`diffusion`). For a resonant
+//! two-level cycle it is the absorbed light's momentum's shot noise with its antibunching (SAT_03's 32 states: 0.49 of
+//! Poisson's k²λ/2 on the push axis, where its Q = −0.53 gives 0.47); in a polarization gradient it is the Sisyphus
+//! heating. A model with several stationary states has no such inverse there: none is read. (The trajectories' own
+//! diffusion is the force between jumps on the state that has not jumped, of which the density matrix's regression
+//! gives the quantum one, the force as an operator: where an explicit excited state's coherence carries the force the
+//! two may differ -- the remaining question, the selection's status file.)
+
 //! # The memory
 //! The path's length is set by the generator's slowest nonzero decay rate λ (`memory`): the sector Liouvillian's
 //! eigenvalues at a point, a rounding zero |μ| ≤ κ_μ γ_d ‖L‖₁ (its first-order perturbation bound, κ_μ its condition)
@@ -65,15 +99,12 @@
 //!
 //! # The budget
 //! Selection needs the model's error A to a small share of the target, not to the rounding: a scheme's discretization
-//! error on the fold error only has to lie well within that share, and is booked as a part of A. `Sparse` is the
-//! converged scheme (its check reads 1e-7 … 1e-5 of the fold error on every scene); its cost is about 4‖L‖₁ products a
-//! µs whatever the segment (a polynomial exponential cannot resolve the coherences turning at ω with fewer than about
-//! ω T products). The cheap schemes take the path's own steps: `Steps` (one exponential a step: the products' count
-//! still about 4‖L‖₁ T), and `Exponential`, which takes H's fast turning exactly in its eigenbasis and leaves to the
-//! substeps only what the readings change by -- its cost set by the substeps, not by ‖L‖ (# The substeps). Their
-//! errors on the fold error are read against `Sparse` on the same paths (tests, `paths_replay`, `py/scheme.py`); the
-//! selection reads the exponential scheme's against its own refinements (select.rs `settle`: `Sparse` follows the
-//! fastest coherence, and on scenes whose 32 states hold levels far off the light's frame it does not end).
+//! error on the fold error only has to lie well within that share, and is booked as a part of A. The exponential
+//! scheme takes H's fast turning exactly in its eigenbasis and leaves to the substeps only what the readings change by
+//! -- its cost set by the substeps, not by ‖L‖ (# The substeps) --; the selection reads its error against its own
+//! refinements (select.rs `ladder`). (The Magnus segments a turn of the fastest coherence each, `Sparse`, the converged
+//! scheme they were read against until 2026-11-22, did not end on scenes whose 32 states hold levels far off the
+//! light's frame, and the product never took them: removed with ENGFOLD's and the one-exponential-a-step schemes.)
 //!
 //! # The substeps
 //! On a piece of `Scheme::Exponential` the sector's state is held in the eigenbasis of H at the piece's middle t_m, σ =
@@ -109,10 +140,15 @@
 //! Unresolved, the scheme stands on a plateau there, where doubling the substeps changes nothing and the Richardson
 //! reading reads "converged": R4 at its start, the reference against the converged scheme 5.2e-3 at 16.9 to 135
 //! substeps a µs, 1.0e-3 at 270, 3.8e-4 at 540 and 1080 (the rest the run's).
-//! - So over the opening the substeps are counted in turns of the fastest coherence the opening resolves, W: `turns`
+//! - So over the opening the substeps are counted in turns of the fastest mode the opening resolves, W: `turns`
 //!   substeps a turn, one at the least -- d·W ≤ 2π, the stages' half-substep sampling at its Nyquist rate --, off the
-//!   plateau, where doubling them reads their error. W is the largest |Im μ| at the stretch's start over the modes the
-//!   start holds above the rounding and the opening outlasts (`Form::opening`): a coherence the start does not hold
+//!   plateau, where doubling them reads their error. W is the largest |μ| -- the turning and the decay together, the
+//!   rate the lemma of the booking below takes -- at the stretch's start over the modes the
+//!   start holds above the rounding and the opening outlasts (`Form::opening`). (Until 2026-11-22 it was |Im μ|, the
+//!   turning alone: SAT_03's resonant, overdamped dressed pair has real μ, so W was nought, its first 5 µs one substep
+//!   at Γd = 190, and the reference's trace fell to 1.6e-5 there -- the recycling R ρ, which feeds back what the decay
+//!   in Λ takes out, integrated by a polynomial over a substep far longer than the decay; doubling the turns changed
+//!   nothing. Study A §2.6.) A coherence the start does not hold
 //!   needs no turn (S1's 32 states hold levels 4.5e7 rad/µs off the light's frame, which its start holds nothing of: W
 //!   140 rad/µs; taken over the whole sector, 0.5 µs of S1 took 148 s), and a mode the opening does not outlast is the
 //!   run's (R5_PUMP's ground hyperfine coherences, 4.4e4 rad/µs, held at 2e-5 and decaying at the pumping rate).
@@ -126,7 +162,7 @@
 //!   at 3.8e-4 whatever the run's rate: with 0.5 µs or more, 2.3e-4 at 8.4 a µs -- the pieces' part -- falling with
 //!   the pieces.
 //! - **Resolve or book** (the model's own judgment, model/classify.rs: zero, drop under a strict bound booked, fold,
-//!   keep): a held mode faster than the setting's `cutoff` is not resolved -- its part of the start, σ₀ⱼ m_j (m_j = v_a
+//!   keep): a held mode faster than the setting's `cutoff` (|μ_j|) is not resolved -- its part of the start, σ₀ⱼ m_j (m_j = v_a
 //!   v_b†, V's columns of the mode's pair of eigenstates), is dropped at the start, and a strict bound of what that does
 //!   to a displayed row is booked; the cutoff is the setting's fourth knob, its part that bound, doubled while it is the
 //!   largest of the parts (select.rs `settle`): a mode is booked where its bound fits the tolerance, resolved where it
@@ -181,6 +217,11 @@ pub struct Walk {
     pub start: Vec<(usize, C64)>,
     /// (t, r, κ) at the step ends (µs, µm, 1/µm), the times increasing.
     pub ends: Vec<[f64; 7]>,
+    /// Whether the trajectory lost its atom at its last end (its path ends there; select.rs # The motion).
+    pub lost: bool,
+    /// Its weight among the paths: its stratum's share of the pilot's trajectories over the stratum's paths (select.rs
+    /// # How many paths; one alike where the paths are not stratified).
+    pub weight: f64,
 }
 
 impl Walk {
@@ -216,36 +257,16 @@ impl Walk {
     }
 }
 
-/// How a path is cut and where the model is made along it (module documentation, # The segments, # The nodes).
+/// How a path is cut and where the model is made along it (module documentation, # The nodes, # The substeps).
 #[derive(Clone, Copy, Debug)]
 pub enum Scheme {
-    /// Knots at the path's step ends, each knot interval in `nodes` (≥ 3) equal parts with the model made at their ends
-    /// and interpolated between; segments of hω ≤ `turn` (rad); a readout at every `read`-th knot and at the end.
-    Sparse { nodes: usize, turn: f64, read: usize },
-    /// ENGFOLD's: segments of the length h from the start, the model made at both Gauss points of each; a readout at
-    /// every `read`-th segment's end and at the start.
-    Exact { h: f64, read: usize },
-    /// One segment a step of the path (its knot interval), the model made where the segment takes it -- at its middle,
-    /// one exponential (`gauss` false: the midpoint rule, second order), or at its two Gauss points (CF4) --, each
-    /// exponential's series summed to the relative tolerance `tol` (the double's rounding where it is no larger); a
-    /// readout at every `read`-th knot and at the end. Its error is not the rounding's: it is read against `Sparse` on
-    /// a piece of the paths and booked (module documentation, # The budget).
-    Steps { gauss: bool, read: usize, tol: f64 },
     /// Each step of the path in `pieces` equal pieces, the model made at the pieces' ends and interpolated between them
     /// (# The nodes): H at a piece's middle integrated exactly in its eigenbasis (block by block), the rest -- H's change
     /// from there, the recycling Σ J ρ J† -- by the exponential Runge–Kutta substeps (# The substeps), over a stretch's
-    /// opening `turns` a turn of the fastest coherence it resolves -- the start's modes up to `cutoff` (rad/µs), the
-    /// faster ones booked by their bound -- and `rate` a µs after it (# The start); a readout at every `read`-th knot and
-    /// at the end. The scheme's error is read by its own refinements and booked (# The budget).
+    /// opening `turns` a turn of the fastest mode it resolves -- the start's modes up to `cutoff` (rad/µs), the faster
+    /// ones booked by their bound -- and `rate` a µs after it (# The start); a readout at every `read`-th knot and at the
+    /// end. The scheme's error is read by its own refinements and booked (# The budget).
     Exponential { turns: f64, rate: f64, pieces: usize, cutoff: f64, read: usize },
-}
-
-impl Scheme {
-    /// The scheme of the path errors (module documentation): a segment within one turn of the fastest coherence, the
-    /// model at `nodes` parts of each step.
-    pub fn sparse(nodes: usize) -> Scheme {
-        Scheme::Sparse { nodes, turn: std::f64::consts::TAU, read: 1 }
-    }
 }
 
 /// The work of advancing models along paths: nodes made, exponentials and their matrix–vector products, segments,
@@ -269,6 +290,12 @@ pub struct Counts {
     pub opening: f64,
     /// The bound of what the start's modes the opening books instead of resolving can do to a displayed row (# The start).
     pub booked: f64,
+    /// The counted work (real multiply-adds, `decide::Work`, the trajectories' price's measure -- select.rs # How many
+    /// paths): every node's making (`Node::work`, as a step's middle counts it) and its amplitudes on the sector (R's
+    /// terms, `Form::amplitudes_work`); each piece's frozen part -- its blocks' eigendecompositions (`Eigen::work`) and
+    /// the substeps' weights -- and its two sandwiches; the substeps' products (`Form::product`); the readings
+    /// (`Form::read`); and beside a series what the landing check takes (`Form::landing`, `Form::diffusion`).
+    pub work: f64,
 }
 
 impl Counts {
@@ -286,6 +313,7 @@ impl Counts {
         self.condition = larger(self.condition, o.condition);
         self.opening = larger(self.opening, o.opening);
         self.booked = larger(self.booked, o.booked);
+        self.work += o.work;
     }
     pub fn seconds(&self) -> f64 {
         self.node_seconds + self.propagation_seconds + self.readout_seconds
@@ -307,6 +335,37 @@ pub struct Reading {
     /// The rows' sum before their normalization (P's trace with Q's lifted populations), and tr ρ_P.
     pub total: f64,
     pub trace: f64,
+    /// Per lab axis the rate of ⟨κ_a²⟩ the emitted photons give, Σ_c k_c² ((2/5) λ_c − (1/5) tr(J_{c,a} ρ J_{c,a}†))
+    /// (1/µm²/µs, over tr ρ_P; # The motion's readings).
+    pub emitted: V3,
+    /// Per lab axis what the model's jumps carry of the absorbed light (# The motion's readings): their second moment's
+    /// rate Σ Re tr(∂_aJ ρ ∂_aJ†) (1/µm²/µs) -- the Kramers–Moyal coefficient of the jumps' kicks and the Brownian path
+    /// together (model.rs `Moments`) --, and the part of their mean Σ_c s_c Im tr(ρ J_c†∂_aJ_c) a jump carries (1/µm/µs;
+    /// s_c = min(1, k_c/|b_c|), `Moments::kick`), both over tr ρ_P.
+    pub absorbed: V3,
+    pub carried: V3,
+}
+
+impl Reading {
+    /// The heating per lab axis (rad/µs², d(E/ħ)/dt; # The motion's readings) at the photon count's Mandel Q `q` and the
+    /// force's correlation's diffusion `diffusion` (1/µm²/µs, `Form::diffusion`): (ħ/m)/2 times the rate of ⟨κ_a²⟩ --
+    /// the emitted photons', the jumps' absorbed second moment, Q times the directed part they carry, (Σ_c s b_c)_a²/λ
+    /// -- and (ħ/m) D_a.
+    pub fn heating_at(&self, hbar_over_mass: f64, q: f64, diffusion: V3) -> V3 {
+        let lambda: f64 = self.rates.iter().sum();
+        let counted = |a: usize| if lambda > 0.0 { q * self.carried[a] * self.carried[a] / lambda } else { 0.0 };
+        std::array::from_fn(|a| 0.5 * hbar_over_mass * (self.emitted[a] + self.absorbed[a] + counted(a)) + hbar_over_mass * diffusion[a])
+    }
+
+    /// `heating_at` of Poisson's count and no force correlation read.
+    pub fn heating(&self, hbar_over_mass: f64) -> V3 {
+        self.heating_at(hbar_over_mass, 0.0, [0.0; 3])
+    }
+
+    /// The force's power per lab axis on the path (rad/µs², F_a v_a, v = (ħ/m)κ).
+    pub fn work(&self, hbar_over_mass: f64) -> V3 {
+        std::array::from_fn(|a| self.force[a] * hbar_over_mass * self.kappa[a])
+    }
 }
 
 /// A model's readings along one path, its photon classes' fast indices, the work they took, and its state at the end
@@ -317,6 +376,18 @@ pub struct Series {
     pub readings: Vec<Reading>,
     pub counts: Counts,
     pub state: Vec<C64>,
+    /// The sector states at the readings a run was asked to keep (`Form::along_keeping`): the landing check's starts
+    /// (# The landing check).
+    pub kept: Vec<(f64, Vec<C64>)>,
+}
+
+impl Series {
+    /// The scheme's trace defect along the series (module documentation, # The readings): the largest |tr ρ_P − 1| over
+    /// its readings -- every model's generator keeps the trace (i(H − H†) = Σ J†J), so the defect is the scheme's own,
+    /// a strict lower bound of its error in the trace norm, ‖ρ_num − ρ‖₁ ≥ |tr ρ_num − 1|; none of no reading.
+    pub fn trace_defect(&self) -> f64 {
+        self.readings.iter().map(|r| (r.trace - 1.0).abs()).fold(0.0, larger)
+    }
 }
 
 /// A model on its sector (module documentation, # The sector, # The generator): the structure every node shares, made
@@ -359,6 +430,12 @@ pub struct Form<'a> {
     states: Vec<usize>,
     folds: bool,
     classes: Vec<[i64; 2]>,
+    /// Per class its photon's wave number (1/µm; # The motion's readings).
+    photon: Vec<f64>,
+    /// A substep's remainder's counted work (real multiply-adds): ΔH's sandwich over the sector's pairs, Σ b_x b_y (b_x +
+    /// b_y) complex multiply-adds, and R's places (`Counts::work`); a sandwich's alone (`sandwich`).
+    product: f64,
+    sandwiched: f64,
     hbar_over_mass: f64,
 }
 
@@ -374,37 +451,6 @@ struct Amps {
     columns: Vec<f64>,
     width: f64,
 }
-
-/// Al-Mohy and Higham's θ_m for the double's rounding (2011, Table 3.1; scipy's `_expm_multiply._theta`): the largest
-/// ‖A‖₁ at which m terms of the Taylor series of e^A reach it.
-const THETA: [(usize, f64); 35] = [
-    (1, 2.29e-16), (2, 2.58e-8), (3, 1.39e-5), (4, 3.4e-4), (5, 2.4e-3), (6, 9.07e-3), (7, 2.38e-2), (8, 5.0e-2), (9, 8.96e-2), (10, 1.44e-1),
-    (11, 2.14e-1), (12, 3.0e-1), (13, 4.0e-1), (14, 5.14e-1), (15, 6.41e-1), (16, 7.81e-1), (17, 9.31e-1), (18, 1.09), (19, 1.26), (20, 1.44),
-    (21, 1.62), (22, 1.82), (23, 2.01), (24, 2.22), (25, 2.43), (26, 2.64), (27, 2.86), (28, 3.08), (29, 3.31), (30, 3.54),
-    (35, 4.7), (40, 6.0), (45, 7.2), (50, 8.5), (55, 9.9),
-];
-
-/// The Taylor degree m and the scaling s for an operator of the 1-norm `norm` (Al-Mohy and Higham's fragment 3.1 for a
-/// known norm): m·⌈norm/θ_m⌉ least.
-fn degree(norm: f64) -> (usize, usize) {
-    if norm == 0.0 {
-        return (0, 1);
-    }
-    let mut best = (usize::MAX, 1, 1);
-    for &(m, theta) in &THETA {
-        let s = (norm / theta).ceil().max(1.0) as usize;
-        if m * s < best.0 {
-            best = (m * s, m, s);
-        }
-    }
-    (best.1, best.2)
-}
-
-/// The commutator-free Magnus step's weights (Blanes and Moan 2006): α₁ = (3 − 2√3)/12, α₂ = (3 + 2√3)/12, and the
-/// Gauss points ½ ∓ √3/6.
-const SQRT3: f64 = 1.732_050_807_568_877_2;
-const ALPHA: [f64; 2] = [(3.0 - 2.0 * SQRT3) / 12.0, (3.0 + 2.0 * SQRT3) / 12.0];
-const GAUSS: [f64; 2] = [0.5 - SQRT3 / 6.0, 0.5 + SQRT3 / 6.0];
 
 impl<'a> Form<'a> {
     /// The model's form (module documentation): its sector from its blocks and its jumps' structure, read on the node at
@@ -552,6 +598,27 @@ impl<'a> Form<'a> {
             h_block.push(h_slot);
             h_slot += b.len() * b.len();
         }
+        // Each class's photon wave number (# The motion's readings): its photon forms K = k∘L on the node at `at` with
+        // them, Σ Re(L̄ K)/Σ |L|² over its elements (one class one line: its elements' k differ by the hyperfine
+        // splitting over the optical frequency); a class that scatters nothing there, the scene's shortest emitted
+        // wavelength's (the largest k).
+        let request = &model.scene.request;
+        let largest = (0..STATES).flat_map(|i| (0..STATES).map(move |j| (i, j))).filter(|&(i, j)| request.emission.iter().any(|c| c[(i, j)] != C64::ZERO)).map(|(i, j)| model.scene.jumps().wave_number[(i, j)].re.abs()).fold(0.0, larger);
+        let photon = model
+            .node(at, [0.0; 3], true)
+            .classes
+            .iter()
+            .map(|c| {
+                let (mut lk, mut ll) = (0.0, 0.0);
+                for e in c.axes.iter().flatten().flat_map(|j| &j.elements) {
+                    lk += (e.value.conj() * e.kick).re;
+                    ll += e.value.norm_sqr();
+                }
+                if ll > 0.0 { lk / ll } else { largest }
+            })
+            .collect();
+        let sandwiched = crate::decide::COMPLEX * pairs.iter().map(|&(x, y)| (blocks[x].len() * blocks[y].len() * (blocks[x].len() + blocks[y].len())) as f64).sum::<f64>();
+        let product = sandwiched + crate::decide::COMPLEX * r_places.len() as f64;
         let form = Form {
             model,
             n,
@@ -575,10 +642,19 @@ impl<'a> Form<'a> {
             folds: !model.rs.folded.is_empty(),
             states,
             classes,
+            photon,
+            product,
+            sandwiched,
             hbar_over_mass: model.hbar_over_mass(),
         };
         assert!(form.beats_known(&node), "a node's beat outside the model's values");
         form
+    }
+
+    /// A node's amplitudes' counted work (`amps`; real multiply-adds): R's terms, one complex multiply-add each, and H's
+    /// slots copied.
+    fn amplitudes_work(&self) -> f64 {
+        crate::decide::COMPLEX * self.terms.len() as f64 + (self.h_beats.len() * self.h_slot) as f64
     }
 
     /// The form's sizes (the measurements' line): P's states, the blocks, the sector, H's slots, R and its groups, the
@@ -807,38 +883,18 @@ impl<'a> Form<'a> {
         op.norm = norm;
     }
 
-    /// The exponential's action e^{hL} v on the sector vector of the generator of `of` (`op_into`), in place
-    /// (`Op::exp`).
-    fn exp(&self, of: &[(&Amps, f64, f64)], h: f64, v: &mut [C64], work: &mut Work, counts: &mut Counts) {
-        let mut op = std::mem::take(&mut work.op);
-        self.op_into(of, h, &mut op);
-        counts.products += op.exp(self, v, work) as u64;
-        counts.exponentials += 1;
-        work.op = op;
-    }
 
-    /// One segment of the length h (# The segments): CF4 on the generators at its Gauss points, each given as its
-    /// time and its nodes' amplitudes with their interpolation weights.
-    fn segment(&self, at: [(f64, &[(&Amps, f64)]); 2], h: f64, v: &mut [C64], work: &mut Work, counts: &mut Counts) {
-        let mut of: Vec<(&Amps, f64, f64)> = Vec::with_capacity(at[0].1.len() + at[1].1.len());
-        for c in [[ALPHA[1], ALPHA[0]], [ALPHA[0], ALPHA[1]]] {
-            of.clear();
-            for (k, (t, nodes)) in at.iter().enumerate() {
-                of.extend(nodes.iter().map(|&(a, w)| (a, c[k] * w, *t)));
-            }
-            self.exp(&of, h, v, work, counts);
-        }
-        counts.segments += 1;
-    }
 
-    /// The sector vector of a state (normalized), by the request's states; Err where a state of it is not in the sector.
-    fn initial(&self, start: &[(usize, C64)]) -> Result<Vec<C64>, String> {
+    /// The sector vector of a state (normalized), by the request's states. A start is a state of the pilot's model's
+    /// cluster -- a ground state with its dressing -- and every model judged holds the pilot's model's states (select.rs
+    /// # The candidates), a dressed state in the block of the ground state it dresses: so each start's state is in P and
+    /// in a ground-holding block, an invariant asserted (no request reaches it: an initial excited population is refused
+    /// with the request, request.rs).
+    fn initial(&self, start: &[(usize, C64)]) -> Vec<C64> {
         let mut psi = vec![C64::ZERO; self.n];
         for &(s, z) in start {
-            let p = self.states.iter().position(|&x| x == s).ok_or_else(|| format!("state {s} is not in P"))?;
-            if self.block_of[p].0 == usize::MAX {
-                return Err(format!("state {s} lies in no ground-holding block"));
-            }
+            let p = self.states.iter().position(|&x| x == s).unwrap_or_else(|| panic!("a start's state {s} outside P: every model judged holds the pilot's model's states"));
+            assert!(self.block_of[p].0 != usize::MAX, "a start's state {s} in no ground-holding block: a dressed state is in its ground state's block");
             psi[p] = z;
         }
         let norm: f64 = psi.iter().map(|z| z.norm_sqr()).sum();
@@ -850,7 +906,7 @@ impl<'a> Form<'a> {
                 }
             }
         }
-        Ok(v)
+        v
     }
 
     /// The sector place of the element (a, b) of ρ (places in P), None off the sector.
@@ -915,24 +971,19 @@ impl<'a> Form<'a> {
         }
         let total: f64 = rows.iter().sum();
         let rows = rows.map(|x| x / total);
-        // The rates and the force on the node at t: J(t), ∇J(t) by class and axis, ∇H(t).
+        // The rates and the force on the node at t: J(t), ∇J(t) by class and axis; H_eff's gradient on ρ the model's own
+        // contraction (model/selected.rs `SelectedMiddle::contract`, every beat at its phase).
         let mut rates = vec![0.0; self.classes.len()];
-        let mut force = [0.0; 3];
-        for (beat, g) in &node.gradient {
-            let f = self.phase(*beat, t);
-            for (axis, m) in g.iter().enumerate() {
-                let mut s = C64::ZERO;
-                for x in 0..n {
-                    for y in 0..n {
-                        s += m.data[x * n + y] * rho[y * n + x];
-                    }
-                }
-                force[axis] -= (f * s).re;
-            }
-        }
+        let mut force = crate::model::selected::SelectedMiddle::contract(node, |beat| Some(self.phase(beat, t)), &rho).map(|z| -z.re);
+        let (mut emitted, mut jumps_second, mut carried, mut mean) = ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
+        // The entries' pairs read (`Counts::work`: seven complex multiply-adds each -- the rate, the absorbed mean and the
+        // jumps' second moment on three axes).
+        let mut matched = 0usize;
         let mut entries: Vec<(usize, usize, C64, [C64; 3])> = Vec::new();
         for (c, class) in node.classes.iter().enumerate() {
-            for axis in &class.axes {
+            // Per Cartesian axis of the emission its rate tr(J_a ρ J_a†), for the photons' second moment.
+            let mut along = [0.0; 3];
+            for (b, axis) in class.axes.iter().enumerate() {
                 entries.clear();
                 for jump in axis {
                     let f = self.phase(jump.beat, t);
@@ -950,30 +1001,58 @@ impl<'a> Form<'a> {
                         }
                     }
                 }
-                // tr(J ρ J†) = Σ J[g,u] ρ[u,s] conj(J[g,s]); Im tr(ρ J†∇J) = Im Σ conj(J[g,u]) ∇J[g,s] ρ[s,u].
+                // tr(J ρ J†) = Σ J[g,u] ρ[u,s] conj(J[g,s]); Im tr(ρ J†∇J) = Im Σ conj(J[g,u]) ∇J[g,s] ρ[s,u];
+                // tr(∂_aJ ρ ∂_aJ†) = Σ ∂_aJ[g,u] ρ[u,s] conj(∂_aJ[g,s]) -- the model's photons' moments (model.rs
+                // `Moments::of`) on ρ, read on ρ itself: through ρ's eigenvectors, each a trajectory's state read by the
+                // model's own photons, the readings took 4.7 times as long (PGC3D's paths 2026-11-23: 25.6 → 119.5 thread
+                // seconds of 282, the numbers the same).
                 let mut rate = C64::ZERO;
                 let mut absorbed = [C64::ZERO; 3];
-                for &(g, u, z, _) in entries.iter() {
+                let mut second = [C64::ZERO; 3];
+                for &(g, u, z, du) in entries.iter() {
                     for &(g2, s, w, d) in entries.iter() {
                         if g2 != g {
                             continue;
                         }
+                        matched += 1;
                         rate += z * rho[u * n + s] * w.conj();
                         for a in 0..3 {
                             absorbed[a] += z.conj() * d[a] * rho[s * n + u];
+                            second[a] += du[a] * rho[u * n + s] * d[a].conj();
                         }
                     }
                 }
                 rates[c] += rate.re / trace;
+                along[b] = rate.re / trace;
                 for a in 0..3 {
                     force[a] += absorbed[a].im;
+                    mean[a] += absorbed[a].im / trace;
+                    jumps_second[a] += second[a].re / trace;
                 }
+            }
+            // The part of the class's absorbed mean a jump carries: the model's rule (`Moments::new`: s = min(1, k_c/|b|),
+            // b = mean/W).
+            let share = crate::model::Moments::new(along.iter().sum(), mean, [[0.0; 3]; 3], class.absorbed, n).share;
+            for a in 0..3 {
+                carried[a] += share * mean[a];
+            }
+            mean = [0.0; 3];
+            // The photons' second moment per lab axis: k_c² λ_c ⟨n_a²⟩, the dipole pattern's ⟨n_a²⟩ λ = (2/5) tr G −
+            // (1/5) G_aa (G_ab = tr(J_a ρ J_b†); # The motion's readings).
+            let k2 = self.photon[c] * self.photon[c];
+            let lambda: f64 = along.iter().sum();
+            for a in 0..3 {
+                emitted[a] += k2 * (0.4 * lambda - 0.2 * along[a]);
             }
         }
         let force = force.map(|f| f / trace);
+        // The reading's counted work: ρ on P, the rows (through ρ's eigenvectors where the model folds: its decomposition
+        // and a readout a vector), the gradient's contractions and the entries' pairs.
+        let support = if self.folds { (0..n).filter(|&a| self.block_of[a].0 != usize::MAX).count() } else { 0 };
+        counts.work += crate::decide::COMPLEX * ((n * n) as f64 + (support * support * support) as f64 + (support * n * n) as f64 + (3 * node.gradient.len() * n * n) as f64 + 7.0 * matched as f64);
         counts.readouts += 1;
         counts.readout_seconds += clock.elapsed().as_secs_f64();
-        Reading { t, r, kappa, rows, rates, force, total, trace }
+        Reading { t, r, kappa, rows, rates, force, total, trace, emitted, absorbed: jumps_second, carried }
     }
 
     /// The model's readings along a path from `from` to `to` from the state `start` (module documentation): its
@@ -981,147 +1060,234 @@ impl<'a> Form<'a> {
     /// What the opening of a stretch from the state `start` at `from` books at the pieces a step `pieces` and the cutoff
     /// `cutoff` (# The start), without the stretch: the bound alone.
     pub fn booked_at(&self, walk: &Walk, start: &[(usize, C64)], from: f64, pieces: usize, cutoff: f64) -> Result<f64, String> {
-        let v = self.initial(start)?;
+        let v = self.initial(start);
         let knots = walk.knots(from, walk.end().max(from + f64::MIN_POSITIVE));
         let (first, next) = (self.amps_with(&self.node_at(walk, from), false), self.amps_with(&self.node_at(walk, knots[1]), false));
         Ok(self.opening(&first, &next, from, knots[1], pieces, &v, cutoff)?.2)
     }
 
     pub fn along(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
-        self.along_from(walk, self.initial(start)?, from, to, scheme)
+        self.along_from(walk, self.initial(start), from, to, scheme)
+    }
+
+    /// `along` at an exponential scheme, its states kept at the readings at the times `keep` (`Series::kept`).
+    pub fn along_keeping(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme, keep: &[f64]) -> Result<Series, String> {
+        Ok(self.family(walk, self.initial(start), from, to, &[scheme], keep)?.swap_remove(0))
+    }
+
+    /// `along_family`, each member's states kept at the readings at the times `keep` (`Series::kept`).
+    pub fn along_family_keeping(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, members: &[Scheme], keep: &[f64]) -> Result<Vec<Series>, String> {
+        self.family(walk, self.initial(start), from, to, members, keep)
     }
 
     /// `along` at several exponential schemes from one start, a family (module documentation, # The nodes): per scheme
     /// its series, each the same as its run alone to the bit, each node made once for them all.
     pub fn along_family(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, members: &[Scheme]) -> Result<Vec<Series>, String> {
-        self.family(walk, self.initial(start)?, from, to, members)
+        self.family(walk, self.initial(start), from, to, members, &[])
     }
 
     /// `along` from a sector state at `from` (a series' end state: the same path gone on, its knots and nodes the
     /// same as in one stretch where `from` is a knot).
     pub fn along_from(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
-        if let Scheme::Exponential { .. } = scheme {
-            return Ok(self.family(walk, state, from, to, &[scheme])?.swap_remove(0));
+        Ok(self.family(walk, state, from, to, &[scheme], &[])?.swap_remove(0))
+    }
+
+    /// The form's excited states' decays at its point (# The landing check): the optical memory 2 ln(2/ε)/Γ_min, Γ_min the
+    /// slowest decay −2 Im H_ee of P's excited states on the node there -- the time a ground state's optical coherences
+    /// take to grow to the steady state's from nothing, to the rounding --, and the fastest decay Γ_max (1/µs); none of a
+    /// model without excited states.
+    pub fn optical(&self, at: V3) -> Option<(f64, f64)> {
+        let node = self.model.node(at, [0.0; 3], false);
+        let n = self.n;
+        let decays: Vec<f64> = node.generator.iter().filter(|(beat, _)| self.values[*beat] == 0.0).flat_map(|(_, g)| (0..n).filter(|&a| self.states[a] >= GROUND).map(move |a| -2.0 * g.data[a * n + a].im)).filter(|g| *g > 0.0).collect();
+        let (slowest, fastest) = (decays.iter().copied().fold(f64::INFINITY, crate::linalg::smaller), decays.iter().copied().fold(0.0, larger));
+        slowest.is_finite().then(|| (2.0 * (2.0 / f64::EPSILON).ln() / slowest, fastest))
+    }
+
+    /// The landing state after a jump at the time t from the sector state v (# The landing check): R(t)v, the
+    /// recycling's image, as the ground density matrix by the request's ground states over its trace (the jump rate on
+    /// v), and that trace; none where no jump is made there.
+    pub fn landed(&self, walk: &Walk, t: f64, v: &[C64]) -> Option<([[C64; GROUND]; GROUND], f64)> {
+        let node = self.node_at(walk, t);
+        let amps = self.amps_with(&node, false);
+        let mut rt = vec![C64::ZERO; self.cols.len() * self.rows.len()];
+        self.r_at(&[(&amps, 1.0)], t, &mut rt);
+        let gathered: Vec<C64> = self.cols.iter().map(|&c| v[c]).collect();
+        let mut product = vec![C64::ZERO; self.rows.len()];
+        fused_product(&gathered, &rt, (1, self.cols.len(), self.rows.len()), &mut product);
+        let mut x = vec![C64::ZERO; self.dim];
+        for (p, &r) in product.iter().zip(&self.rows) {
+            x[r] += *p;
         }
-        let mut v = state;
-        if v.len() != self.dim {
-            return Err(format!("a state of {} numbers for a sector of {}", v.len(), self.dim));
+        let rho = self.density(&x);
+        let n = self.n;
+        let mut out = [[C64::ZERO; GROUND]; GROUND];
+        let mut trace = 0.0;
+        for a in 0..n {
+            for b in 0..n {
+                let (sa, sb) = (self.states[a], self.states[b]);
+                if sa < GROUND && sb < GROUND {
+                    out[sa][sb] = rho[a * n + b];
+                    if a == b {
+                        trace += rho[a * n + a].re;
+                    }
+                }
+            }
         }
-        if !(to > from) {
-            return Err(format!("an empty stretch of the path: [{from}, {to}]"));
+        (trace > 0.0).then(|| (out.map(|row| row.map(|z| z * (1.0 / trace))), trace))
+    }
+
+    /// A ground density matrix (by the request's ground states) as a sector state of the form.
+    pub fn from_ground(&self, g: &[[C64; GROUND]; GROUND]) -> Vec<C64> {
+        let mut v = vec![C64::ZERO; self.dim];
+        for a in 0..self.n {
+            for b in 0..self.n {
+                let (sa, sb) = (self.states[a], self.states[b]);
+                if sa < GROUND && sb < GROUND {
+                    if let Some(p) = self.place(a, b) {
+                        v[p] = g[sa][sb];
+                    }
+                }
+            }
         }
-        let mut counts = Counts::default();
-        let mut work = Work::new(self);
-        let mut readings = Vec::new();
-        let made = |t: f64, counts: &mut Counts| -> Node {
-            let clock = std::time::Instant::now();
-            let node = self.node_at(walk, t);
-            counts.nodes += 1;
-            counts.node_seconds += clock.elapsed().as_secs_f64();
-            node
+        v
+    }
+
+    /// The force's correlation's momentum diffusion of the sector state v at the time t (# The landing check): per lab
+    /// axis D_a = ∫₀^∞ ⟨δF_a(0) δF_a(τ)⟩ dτ (1/µm²/µs) by the quantum regression at the generator frozen there --
+    /// D_a = tr(G_a y), L y = −X₀, X₀ = ½(G_a ρ + ρ G_a) − tr(G_a ρ) ρ, G_a the Hermitian part of ∂_aH(t) and ρ = v/tr v
+    /// --, solved on the trace-free part as (L + ρ tr) y = −X₀ (tr L y = 0, so tr y = −tr X₀ = 0). The model's own: an
+    /// explicit excited state's absorbed momentum fluctuates in its force ⟨∇H⟩, a folded one's in its jumps (`Reading::
+    /// absorbed`), and a ground state's light shift's gradient (the dipole force) in both. None where the frozen
+    /// generator has no such inverse (a stationary state more than one). With its counted work (real multiply-adds,
+    /// `Counts::work`): the node and its amplitudes, the dense generator column by column (a remainder's work each), its
+    /// LU (d³/3 complex multiply-adds) and per axis the two products and the solve.
+    pub fn diffusion(&self, walk: &Walk, t: f64, v: &[C64]) -> (Option<V3>, f64) {
+        let work = {
+            let (d, n) = (self.dim as f64, self.n as f64);
+            let node = self.model.node(walk.at(self.hbar_over_mass, t).0, walk.at(self.hbar_over_mass, t).1, false).work;
+            node + self.amplitudes_work() + d * self.product + crate::decide::COMPLEX * (d * d * d / 3.0 + 3.0 * (2.0 * n * n * n + 2.0 * d * d))
         };
-        match scheme {
-            Scheme::Steps { gauss, read, tol } => {
-                work.tol = tol;
-                let knots = walk.knots(from, to);
-                let node = made(from, &mut counts);
-                readings.push(self.read(&node, walk, from, &v, &mut counts));
-                for (i, w) in knots.windows(2).enumerate() {
-                    let (a, b) = (w[0], w[1]);
-                    let h = b - a;
-                    let times: Vec<f64> = if gauss { GAUSS.iter().map(|c| a + c * h).collect() } else { vec![a + 0.5 * h] };
-                    let amps: Vec<Amps> = times
-                        .iter()
-                        .map(|&t| {
-                            let node = made(t, &mut counts);
-                            let clock = std::time::Instant::now();
-                            let x = self.amps(&node);
-                            counts.node_seconds += clock.elapsed().as_secs_f64();
-                            x
-                        })
-                        .collect();
-                    let clock = std::time::Instant::now();
-                    if gauss {
-                        self.segment([(times[0], &[(&amps[0], 1.0)]), (times[1], &[(&amps[1], 1.0)])], h, &mut v, &mut work, &mut counts);
-                    } else {
-                        self.exp(&[(&amps[0], 1.0, times[0])], h, &mut v, &mut work, &mut counts);
-                        counts.segments += 1;
-                    }
-                    counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    if (i + 1) % read == 0 || i + 2 == knots.len() {
-                        let node = made(b, &mut counts);
-                        readings.push(self.read(&node, walk, b, &v, &mut counts));
-                    }
+        (self.diffusion_of(walk, t, v), work)
+    }
+
+    /// `diffusion`'s number alone.
+    fn diffusion_of(&self, walk: &Walk, t: f64, v: &[C64]) -> Option<V3> {
+        let (r, kappa) = walk.at(self.hbar_over_mass, t);
+        let n = self.n;
+        let d = self.dim;
+        let raw = self.density(v);
+        let trace: f64 = (0..n).map(|a| raw[a * n + a].re).sum();
+        if !(trace > 0.0) {
+            return None;
+        }
+        let rho: Vec<C64> = raw.iter().map(|z| *z * (1.0 / trace)).collect();
+        let mut on_sector = vec![C64::ZERO; d];
+        for a in 0..n {
+            for b in 0..n {
+                if let Some(p) = self.place(a, b) {
+                    on_sector[p] = rho[a * n + b];
                 }
             }
-            Scheme::Exponential { .. } => unreachable!("an exponential scheme is a family's"),
-            Scheme::Exact { h, read } => {
-                let segments = ((to - from) / h).round() as usize;
-                for k in 0..=segments {
-                    let t = from + k as f64 * h;
-                    if k % read == 0 {
-                        let node = made(t, &mut counts);
-                        readings.push(self.read(&node, walk, t, &v, &mut counts));
-                    }
-                    if k < segments {
-                        let times = GAUSS.map(|c| from + (k as f64 + c) * h);
-                        let amps = times.map(|tg| {
-                            let node = made(tg, &mut counts);
-                            let clock = std::time::Instant::now();
-                            let a = self.amps(&node);
-                            counts.node_seconds += clock.elapsed().as_secs_f64();
-                            a
-                        });
-                        let clock = std::time::Instant::now();
-                        self.segment([(times[0], &[(&amps[0], 1.0)]), (times[1], &[(&amps[1], 1.0)])], h, &mut v, &mut work, &mut counts);
-                        counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    }
+        }
+        let mut l = self.liouvillian(r, kappa, t);
+        for a in 0..n {
+            if let Some(p) = self.place(a, a) {
+                for i in 0..d {
+                    l[(i, p)] += on_sector[i];
                 }
             }
-            Scheme::Sparse { nodes, turn, read } => {
-                assert!(nodes >= 3, "a cubic interpolant takes four nodes a knot interval");
-                let knots = walk.knots(from, to);
-                let mut first = made(from, &mut counts);
-                readings.push(self.read(&first, walk, from, &v, &mut counts));
-                let mut grid: Vec<Amps> = vec![self.amps(&first)];
-                for (i, w) in knots.windows(2).enumerate() {
-                    let (a, b) = (w[0], w[1]);
-                    let part = (b - a) / nodes as f64;
-                    grid.truncate(1);
-                    for j in 1..=nodes {
-                        let t = if j == nodes { b } else { a + j as f64 * part };
-                        let node = made(t, &mut counts);
-                        let clock = std::time::Instant::now();
-                        grid.push(self.amps(&node));
-                        counts.node_seconds += clock.elapsed().as_secs_f64();
-                        if j == nodes {
-                            first = node;
+        }
+        let lu = crate::linalg::Lu::new(&l)?;
+        let node = self.model.node(r, kappa, false);
+        let product = |x: &[C64], y: &[C64]| -> Vec<C64> {
+            let mut out = vec![C64::ZERO; n * n];
+            for i in 0..n {
+                for k in 0..n {
+                    let z = x[i * n + k];
+                    if z != C64::ZERO {
+                        for j in 0..n {
+                            out[i * n + j] += z * y[k * n + j];
                         }
                     }
-                    let width = grid.iter().map(|x| x.width).fold(0.0, larger);
-                    let count = ((b - a) * width / turn).ceil().max(1.0) as usize;
-                    let h = (b - a) / count as f64;
-                    let clock = std::time::Instant::now();
-                    for s in 0..count {
-                        let t0 = a + s as f64 * h;
-                        let times = GAUSS.map(|c| t0 + c * h);
-                        let of = times.map(|tg| {
-                            let (start, weights) = stencil(nodes, (tg - a) / part);
-                            let of: [(&Amps, f64); 4] = std::array::from_fn(|q| (&grid[start + q], weights[q]));
-                            of
-                        });
-                        self.segment([(times[0], &of[0]), (times[1], &of[1])], h, &mut v, &mut work, &mut counts);
-                    }
-                    counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    grid.swap(0, nodes);
-                    if (i + 1) % read == 0 || i + 2 == knots.len() {
-                        readings.push(self.read(&first, walk, b, &v, &mut counts));
+                }
+            }
+            out
+        };
+        let mut out = [0.0; 3];
+        for (axis, o) in out.iter_mut().enumerate() {
+            let mut g = vec![C64::ZERO; n * n];
+            for (beat, m) in &node.gradient {
+                let f = self.phase(*beat, t);
+                for (x, y) in g.iter_mut().zip(&m[axis].data) {
+                    *x += f * *y;
+                }
+            }
+            let g: Vec<C64> = (0..n * n).map(|k| (g[k] + g[(k % n) * n + k / n].conj()) * 0.5).collect();
+            let (gr, rg) = (product(&g, &rho), product(&rho, &g));
+            let mean: f64 = (0..n).map(|a| gr[a * n + a].re).sum();
+            let mut x = vec![C64::ZERO; d];
+            for a in 0..n {
+                for b in 0..n {
+                    if let Some(p) = self.place(a, b) {
+                        x[p] = -((gr[a * n + b] + rg[a * n + b]) * 0.5 - rho[a * n + b] * mean);
                     }
                 }
             }
+            lu.solve(&mut x);
+            let y = self.density(&x);
+            *o = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).map(|(a, b)| (g[a * n + b] * y[b * n + a]).re).sum();
         }
-        counts.time = to - from;
-        Ok(Series { classes: self.classes.clone(), readings, counts, state: v })
+        out.iter().all(|x| x.is_finite()).then_some(out)
+    }
+
+    /// The landing check of one landing (# The landing check): from the landed ground state `landed` at the time t, the
+    /// form along the walk for `span` µs at the exponential scheme's knobs `knobs` (one piece a knot), on knots that grow
+    /// from a quarter of the fastest excited decay's time 1/Γ (`decay`) by 2^{1/4} a knot -- the transient resolved
+    /// where it is, its tail at the walk's own spacing --; against its own run `own` along the walk (its readings
+    /// interpolated linearly between the walk's knots): the excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and the excess impulse
+    /// ∫(F(τ|L) − F̄)dτ (1/µm) by the trapezoid, and the stretch's counted work (`Counts::work`). Err where the state is
+    /// not the form's.
+    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3, f64), String> {
+        let hm = self.hbar_over_mass;
+        let step = walk.ends.windows(2).find(|w| w[1][0] > t).map_or(span, |w| w[1][0] - w[0][0]).min(span);
+        let mut times = vec![t];
+        let mut d = 0.25 / decay;
+        while *times.last().unwrap() < t + span {
+            let next = (times.last().unwrap() + d.min(step)).min(t + span);
+            times.push(next);
+            d *= 2f64.powf(0.25);
+        }
+        let ends = times.iter().map(|&u| {
+            let (r, k) = walk.at(hm, u);
+            [u, r[0], r[1], r[2], k[0], k[1], k[2]]
+        });
+        let dense = Walk { index: walk.index, start: walk.start.clone(), ends: ends.collect(), lost: false, weight: walk.weight };
+        let (turns, rate, cutoff) = knobs;
+        let series = self.along_from(&dense, self.from_ground(landed), t, t + span, Scheme::Exponential { turns, rate, pieces: 1, cutoff, read: 1 })?;
+        // The own run's readings at a time, linearly between its knots.
+        let own_at = |u: f64| -> (f64, V3) {
+            let r = &own.readings;
+            let i = r.partition_point(|x| x.t <= u).clamp(1, r.len().max(2) - 1);
+            let (a, b) = (&r[(i - 1).min(r.len() - 1)], &r[i.min(r.len() - 1)]);
+            let s = if b.t > a.t { ((u - a.t) / (b.t - a.t)).clamp(0.0, 1.0) } else { 0.0 };
+            let (la, lb) = (a.rates.iter().sum::<f64>(), b.rates.iter().sum::<f64>());
+            (la + s * (lb - la), std::array::from_fn(|k| a.force[k] + s * (b.force[k] - a.force[k])))
+        };
+        let excess = |x: &Reading| -> (f64, V3) {
+            let (l, f) = own_at(x.t);
+            (x.rates.iter().sum::<f64>() - l, std::array::from_fn(|k| x.force[k] - f[k]))
+        };
+        let (mut photons, mut impulse) = (0.0, [0.0; 3]);
+        for w in series.readings.windows(2) {
+            let ((p0, f0), (p1, f1)) = (excess(&w[0]), excess(&w[1]));
+            let dt = w[1].t - w[0].t;
+            photons += 0.5 * dt * (p0 + p1);
+            for k in 0..3 {
+                impulse[k] += 0.5 * dt * (f0[k] + f1[k]);
+            }
+        }
+        Ok((photons, impulse, series.counts.work))
     }
 
     /// The sector's Liouvillian at the point and time, dense (d × d), column by column through the operator.
@@ -1149,15 +1315,6 @@ impl<'a> Form<'a> {
     }
 }
 
-/// The cubic Lagrange stencil at u (in parts of the knot interval, 0 … m, m ≥ 3 parts): the first of the four nearest
-/// nodes of the interval's own and their weights.
-fn stencil(m: usize, u: f64) -> (usize, [f64; 4]) {
-    let j = (u.floor().max(0.0) as usize).min(m - 1);
-    let start = j.saturating_sub(1).min(m - 3);
-    let x: [f64; 4] = std::array::from_fn(|k| (start + k) as f64);
-    (start, std::array::from_fn(|k| (0..4).filter(|&l| l != k).map(|l| (u - x[l]) / (x[k] - x[l])).product()))
-}
-
 /// The exact vector of a beat difference Ω_a − Ω_b (model/selected.rs `Exact`): the fast integers' and the slow
 /// ratios' differences, the ratios to the longer's length and its trailing zeros cut (one difference, one vector).
 fn difference(a: &Exact, b: &Exact) -> Exact {
@@ -1175,32 +1332,15 @@ fn difference(a: &Exact, b: &Exact) -> Exact {
     (n, p)
 }
 
-/// The scratch of the operator's products: the gathered columns and R's product, the Taylor series' vectors, the
-/// operator.
+/// The scratch of the operator's products: the gathered columns and R's product.
 struct Work {
-    /// The series' relative tolerance (`Scheme::Steps`; the double's rounding elsewhere).
-    tol: f64,
     gathered: Vec<C64>,
     product: Vec<C64>,
-    b: Vec<C64>,
-    f: Vec<C64>,
-    next: Vec<C64>,
-    op: Op,
 }
 
 impl Work {
     fn new(form: &Form) -> Work {
-        let mut op = Op::default();
-        op.fit(form);
-        Work {
-            tol: 0.0,
-            gathered: vec![C64::ZERO; form.cols.len()],
-            product: vec![C64::ZERO; form.rows.len()],
-            b: vec![C64::ZERO; form.dim],
-            f: vec![C64::ZERO; form.dim],
-            next: vec![C64::ZERO; form.dim],
-            op,
-        }
+        Work { gathered: vec![C64::ZERO; form.cols.len()], product: vec![C64::ZERO; form.rows.len()] }
     }
 }
 
@@ -1257,46 +1397,6 @@ impl Op {
         }
     }
 
-    /// e^{hL} v in place (Al-Mohy and Higham 2011, Algorithm 3.2, for the norm's bound): s stages of the Taylor series
-    /// of e^{hL′/s} to the double's rounding, each times e^{2 Im(c) h/s}; the count of products made.
-    fn exp(&self, form: &Form, v: &mut [C64], work: &mut Work) -> usize {
-        let (m, s) = degree(self.norm);
-        let vmax = |z: &[C64]| z.iter().map(|x| larger(x.re.abs(), x.im.abs())).fold(0.0, larger);
-        let tol = larger(work.tol, 2f64.powi(-53) / 2f64.sqrt());
-        let eta = self.eta.powf(1.0 / s as f64);
-        let mut count = 0;
-        let mut b = std::mem::take(&mut work.b);
-        let mut f = std::mem::take(&mut work.f);
-        let mut next = std::mem::take(&mut work.next);
-        f.copy_from_slice(v);
-        b.copy_from_slice(v);
-        for _ in 0..s {
-            let mut c1 = vmax(&b);
-            for j in 0..m {
-                self.apply(form, &b, &mut next, work);
-                count += 1;
-                let scale = 1.0 / (s * (j + 1)) as f64;
-                for (x, y) in b.iter_mut().zip(&next) {
-                    *x = *y * scale;
-                }
-                let c2 = vmax(&b);
-                for (x, y) in f.iter_mut().zip(&b) {
-                    *x += *y;
-                }
-                if c1 + c2 <= tol * vmax(&f) {
-                    break;
-                }
-                c1 = c2;
-            }
-            for x in f.iter_mut() {
-                *x *= eta;
-            }
-            b.copy_from_slice(&f);
-        }
-        v.copy_from_slice(&f);
-        (work.b, work.f, work.next) = (b, f, next);
-        count
-    }
 }
 
 /// The memory a path's chunk of frozen pieces may hold (bytes; `Form::along_from`): 64 MB, a few chunks' at once on
@@ -1338,6 +1438,8 @@ struct Frozen {
     weights: Vec<Vec<C64>>,
     condition: f64,
     seconds: f64,
+    /// Its counted work (real multiply-adds): the blocks' decompositions and the weights (`Counts::work`).
+    work: f64,
 }
 
 impl Frozen {
@@ -1520,7 +1622,7 @@ impl Form<'_> {
     /// Γ the slowest decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited states are
     /// all folded holds no such coherence); of the modes the start holds, |σ₀ⱼ| above u of the largest, that the opening
     /// outlasts, |σ₀ⱼ| e^{Re μ_j t_open} at most that (a mode it does not outlast goes on into the run, which takes it as
-    /// it takes every mode then), the fastest |Im μ_j| up to the cutoff (resolved), the sum of the others' bounds
+    /// it takes every mode then), the fastest |μ_j| -- its turning and its decay together -- up to the cutoff (resolved), the sum of the others' bounds
     /// (`booked`; # The start), and the start with those others' parts dropped. Err where an eigendecomposition fails.
     #[allow(clippy::too_many_arguments)]
     fn opening(&self, amps: &Amps, next: &Amps, t: f64, t1: f64, pieces: usize, v: &[C64], cutoff: f64) -> Result<(f64, f64, f64, Vec<C64>), String> {
@@ -1560,8 +1662,10 @@ impl Form<'_> {
         self.sandwich(&vinv, &vinvadj, v, &mut sigma, &mut tmp);
         let floor = 0.5 * f64::EPSILON * sigma.iter().map(|z| z.abs()).fold(0.0, larger);
         let held: Vec<usize> = (0..self.dim).filter(|&j| sigma[j].abs() > floor && sigma[j].abs() * (mus[j].re * length).exp() <= floor).collect();
-        let fastest = held.iter().filter(|&&j| mus[j].im.abs() <= cutoff).map(|&j| mus[j].im.abs()).fold(0.0, larger);
-        let faster: Vec<usize> = held.iter().copied().filter(|&j| mus[j].im.abs() > cutoff).collect();
+        // Each mode by its whole rate |μ_j|, the turning and the decay together (# The start): the remainder follows a
+        // decaying mode as fast as a turning one.
+        let fastest = held.iter().filter(|&&j| mus[j].abs() <= cutoff).map(|&j| mus[j].abs()).fold(0.0, larger);
+        let faster: Vec<usize> = held.iter().copied().filter(|&j| mus[j].abs() > cutoff).collect();
         if faster.is_empty() {
             return Ok((length, fastest, 0.0, v.to_vec()));
         }
@@ -1658,11 +1762,11 @@ impl Form<'_> {
     /// (`freeze_family`), each state propagated once for a class of members -- at the start those of one opening, split
     /// where their pieces part (`advance`) --; per member its series, the same as its run alone to the bit, the shared
     /// work counted on the first member that takes it (the members' work summed is the family's).
-    fn family(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, members: &[Scheme]) -> Result<Vec<Series>, String> {
+    fn family(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, members: &[Scheme], keep: &[f64]) -> Result<Vec<Series>, String> {
         let mut knobs: Vec<(f64, f64, usize, f64)> = Vec::with_capacity(members.len());
         let mut read = 0;
         for s in members {
-            let Scheme::Exponential { turns, rate, pieces, cutoff, read: r } = *s else { return Err("a family of exponential schemes".into()) };
+            let Scheme::Exponential { turns, rate, pieces, cutoff, read: r } = *s;
             if read != 0 && r != read {
                 return Err("a family read alike".into());
             }
@@ -1688,7 +1792,7 @@ impl Form<'_> {
         let clock = std::time::Instant::now();
         let node = self.node_at(walk, from);
         let at_knot = self.node_at(walk, knots[1]);
-        (counts[0].nodes, counts[0].node_seconds) = (2, clock.elapsed().as_secs_f64());
+        (counts[0].nodes, counts[0].node_seconds, counts[0].work) = (2, clock.elapsed().as_secs_f64(), node.work + at_knot.work + 2.0 * self.amplitudes_work());
         let mut c = Counts::default();
         let reading = self.read(&node, walk, from, &state, &mut c);
         counts[0].add(&c);
@@ -1723,6 +1827,7 @@ impl Form<'_> {
         // The classes: the members of one state, each with it -- at the start those of one opening.
         let mut classes: Vec<(Vec<usize>, Vec<C64>)> = (0..openings.len()).map(|o| ((0..m).filter(|&q| of[q] == o).collect(), openings[o].1 .3.clone())).collect();
         let mut readings: Vec<Vec<Reading>> = vec![vec![reading]; m];
+        let mut kept: Vec<Vec<(f64, Vec<C64>)>> = vec![vec![]; m];
         let mut condition = vec![0.0_f64; m];
         // A chunk of intervals frozen on the pool while the one before is propagated; its readings on the pool after it.
         // The chunk: what `FROZEN_BYTES` holds of an interval's nodes and the members' pieces, at most four per thread.
@@ -1763,9 +1868,13 @@ impl Form<'_> {
                     (r, c)
                 })
                 .collect();
-            for ((r, c), (_, members, _)) in read.into_iter().zip(&states) {
+            for ((r, c), (_, members, state)) in read.into_iter().zip(&states) {
                 counts[members[0]].add(&Counts { time: 0.0, ..c });
+                let keeping = keep.contains(&r.t);
                 for &q in members {
+                    if keeping {
+                        kept[q].push((r.t, state.clone()));
+                    }
                     readings[q].push(r.clone());
                 }
             }
@@ -1776,7 +1885,7 @@ impl Form<'_> {
             for &q in &members {
                 let mut c = counts[q];
                 (c.time, c.condition) = (to - from, condition[q]);
-                out[q] = Some(Series { classes: self.classes.clone(), readings: std::mem::take(&mut readings[q]), counts: c, state: state.clone() });
+                out[q] = Some(Series { classes: self.classes.clone(), readings: std::mem::take(&mut readings[q]), counts: c, state: state.clone(), kept: std::mem::take(&mut kept[q]) });
             }
         }
         Ok(out.into_iter().map(|s| s.expect("every member in a class")).collect())
@@ -1832,7 +1941,7 @@ impl Form<'_> {
     #[allow(clippy::type_complexity)]
     fn freeze_family(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, knobs: &[(f64, f64, usize, f64)], finest: usize, substeps: &(dyn Fn(usize, f64, f64) -> usize + Sync)) -> Result<(Vec<Vec<std::sync::Arc<Frozen>>>, Vec<Option<(f64, Node)>>, std::sync::Arc<Amps>, Counts), String> {
         let jobs: Vec<(usize, usize)> = (0..intervals.len()).flat_map(|i| (1..=finest).map(move |j| (i, j))).collect();
-        let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64)> = jobs
+        let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64, f64)> = jobs
             .par_iter()
             .map(|&(i, j)| {
                 let clock = std::time::Instant::now();
@@ -1846,10 +1955,11 @@ impl Form<'_> {
                 let amps = self.amps_with(&node, false);
                 #[cfg(test)]
                 traced(1, part);
-                (std::sync::Arc::new(amps), (j == finest && read).then_some(node), clock.elapsed().as_secs_f64())
+                let work = node.work + self.amplitudes_work();
+                (std::sync::Arc::new(amps), (j == finest && read).then_some(node), clock.elapsed().as_secs_f64(), work)
             })
             .collect();
-        let mut counts = Counts { nodes: nodes.len() as u64, node_seconds: nodes.iter().map(|x| x.2).sum(), ..Counts::default() };
+        let mut counts = Counts { nodes: nodes.len() as u64, node_seconds: nodes.iter().map(|x| x.2).sum(), work: nodes.iter().map(|x| x.3).sum(), ..Counts::default() };
         // The distinct pieces -- (pieces a step, interval, place, substeps) -- and each member's among them.
         let mut keys: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut index: std::collections::HashMap<(usize, usize, usize, usize), usize> = std::collections::HashMap::new();
@@ -1879,6 +1989,7 @@ impl Form<'_> {
         };
         for f in &frozen {
             counts.node_seconds += f.seconds;
+            counts.work += f.work;
         }
         let reads = intervals.iter().enumerate().map(|(i, iv)| nodes[(i + 1) * finest - 1].1.take().map(|node| (iv.1, node))).collect();
         let last = nodes.last().map_or(before, |x| x.0.clone());
@@ -1895,7 +2006,7 @@ impl Form<'_> {
         let part = (b - a) / pieces as f64;
         let p0 = a + j as f64 * part;
         let tm = p0 + 0.5 * part;
-        let mut f = Frozen { grid, a, part, p0, d: 0.0, n: 0, hm: vec![C64::ZERO; self.h_slot], v: vec![], vinv: vec![], vadj: vec![], vinvadj: vec![], weights: vec![], condition: 0.0, seconds: 0.0 };
+        let mut f = Frozen { grid, a, part, p0, d: 0.0, n: 0, hm: vec![C64::ZERO; self.h_slot], v: vec![], vinv: vec![], vadj: vec![], vinvadj: vec![], weights: vec![], condition: 0.0, seconds: 0.0, work: 0.0 };
         let mut hm = std::mem::take(&mut f.hm);
         self.h_at(&f.of(tm), tm, &mut hm);
         f.hm = hm;
@@ -1908,6 +2019,7 @@ impl Form<'_> {
                 return Err(format!("H's block {x} at {tm} µs has no eigendecomposition"));
             }
             f.condition = larger(f.condition, eig.condition);
+            f.work += crate::decide::COMPLEX * eig.work;
             let (mut e, mut ei, mut ea, mut eia) = (vec![C64::ZERO; w * w], vec![C64::ZERO; w * w], vec![C64::ZERO; w * w], vec![C64::ZERO; w * w]);
             for i in 0..w {
                 for k in 0..w {
@@ -1932,6 +2044,8 @@ impl Form<'_> {
         let mus = self.rates_of(&values);
         f.n = substeps(p0, part);
         f.d = part / f.n as f64;
+        // The weights: φ₀ … φ₃ of each sector entry's rate (`phis`: at most its series' 24 terms) and the ten weights.
+        f.work += crate::decide::COMPLEX * (self.dim * (24 + ETD_WEIGHTS)) as f64;
         f.weights = vec![vec![C64::ZERO; self.dim]; ETD_WEIGHTS];
         for (at, &mu) in mus.iter().enumerate() {
             for (w, x) in f.weights.iter_mut().zip(etd_weights(mu, f.d)) {
@@ -1993,6 +2107,7 @@ impl Form<'_> {
                 sigma[i] = e[i] * sigma[i] + (b1[i] * k[0][i] + b23[i] * (k[1][i] + k[2][i]) + b4[i] * k[3][i]) * d;
             }
             counts.products += 4;
+            counts.work += 4.0 * self.product;
             counts.segments += 1;
         }
         // ρ = V σ V†.
@@ -2003,6 +2118,7 @@ impl Form<'_> {
         lw.r = r;
         (lw.s[0], lw.s[1]) = (sigma, u);
         counts.exponentials += 1;
+        counts.work += 2.0 * self.sandwiched;
     }
 }
 
@@ -2018,10 +2134,6 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// A path's length for a run of the length `run` (µs): min(T_run, 5 τ_mem).
-    pub fn length(&self, run: f64) -> f64 {
-        run.min(5.0 * self.time)
-    }
 }
 
 /// The memory of a model at the point r, κ and the time t (`Memory`): None where the sector's Liouvillian does not
@@ -2063,14 +2175,22 @@ pub struct Mean {
 impl Mean {
     /// The mean of the paths' values `x` and its standard error, the paths' spread over √P: none to read on one path
     /// (without bound). Of no path nothing is read: its window is unread (`Window::paths`, `select::direct_at`).
-    fn of(x: &[f64]) -> Mean {
+    pub fn of(x: &[f64]) -> Mean {
+        Mean::weighted(x, &vec![1.0; x.len()])
+    }
+
+    /// The weighted mean of the paths' values `x` by their weights `w` (their strata's, `Walk::weight`) and its standard
+    /// error, n/(n − 1) Σ w²(x − m)² / (Σ w)² -- the paths' spread over √P where the weights are alike; none to read on
+    /// one path.
+    pub fn weighted(x: &[f64], w: &[f64]) -> Mean {
         let p = x.len() as f64;
-        let value = x.iter().sum::<f64>() / p;
+        let sum: f64 = w.iter().sum();
+        let value = x.iter().zip(w).map(|(x, w)| x * w).sum::<f64>() / sum;
         if x.len() < 2 {
             return Mean { value, error: f64::INFINITY };
         }
-        let var = x.iter().map(|y| (y - value) * (y - value)).sum::<f64>() / (p - 1.0);
-        Mean { value, error: (var / p).sqrt() }
+        let var = x.iter().zip(w).map(|(x, w)| w * w * (x - value) * (x - value)).sum::<f64>() / (sum * sum) * p / (p - 1.0);
+        Mean { value, error: var.sqrt() }
     }
 }
 
@@ -2093,11 +2213,56 @@ pub struct Window {
     /// the total rate's relative difference.
     pub rates: Vec<([i64; 2], Mean, f64)>,
     pub rate: Mean,
-    /// The force's difference per lab axis (rad/µs/µm), the rms difference over the rms force per path, and
-    /// ⅓ Σ_a ⟨|δF_a||v_a|⟩ (rad/µs², the feedback's drive: PATHGAP item 4).
+    /// The force's difference per lab axis (rad/µs/µm), and the rms difference over the rms force per path.
     pub force: [Mean; 3],
     pub force_rms: Mean,
-    pub power: Mean,
+    /// The motion's (# The motion's readings; select.rs # The motion): per lab axis the reference's heating H_a and the
+    /// candidate's thermal energy rate's difference δP_a = δH_a + (δF_a − δF̄_a)(v_a − v̄_a) (rad/µs²), the bars the
+    /// window's means over the paths read in it -- the cloud's own motion, which T is read about (estimate.rs, # The
+    /// cloud's own motion): a force along it, or the same force on every atom, moves the cloud, not its T; the force's
+    /// covariance with the velocity over the cloud is what heats or cools it.
+    pub heating: [Mean; 3],
+    pub energy_rate: [Mean; 3],
+    /// Per path read in the window (its place among the paths) its δP_a, the reference's H_a and the candidate's own H_a
+    /// (rad/µs²; the heating alone, the work apart): the total T's error weighs the axes by each one's response -- its
+    /// relaxation the energy balance of the model the pilot runs, select.rs `motion_at` --, and reads its rates over the
+    /// paths' whole forgotten stretches (select.rs `Stationary`), its spread over the paths that sum's own.
+    pub energy_rates: Vec<(usize, [f64; 3], [f64; 3], [f64; 3])>,
+    /// Per path read in the window its mean force difference δF_a and the reference's own mean force F_a there (1/µm/µs):
+    /// the push's error is read on their regression (select.rs `motion_at`, # The push's error).
+    pub forces: Vec<(f64, [f64; 3], [f64; 3])>,
+}
+
+/// A landing check's numbers at a time of a path (# The landing check), the candidate's first and the reference's:
+/// each one's Mandel Q of its photons from the reference's landing, and its force correlation's diffusion per lab axis
+/// at its own state (`Form::diffusion`; none read: nought).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Statistics {
+    pub t: f64,
+    pub q: [f64; 2],
+    pub diffusion: [V3; 2],
+}
+
+impl Statistics {
+    /// Nothing read: Poisson's count, no force correlation.
+    pub const NONE: Statistics = Statistics { t: 0.0, q: [0.0; 2], diffusion: [[0.0; 3]; 2] };
+
+    /// A path's landing check over the window (from, to]: the mean of its landings there, else its nearest one's; none
+    /// read of no landing.
+    pub fn within(landings: &[Statistics], from: f64, to: f64) -> Statistics {
+        let inside: Vec<&Statistics> = landings.iter().filter(|x| x.t > from && x.t <= to).collect();
+        let near = |x: &&Statistics| (x.t - from).abs().min((x.t - to).abs());
+        let at: Vec<&Statistics> = if inside.is_empty() { landings.iter().min_by(|a, b| near(a).total_cmp(&near(b))).into_iter().collect() } else { inside };
+        if at.is_empty() {
+            return Statistics::NONE;
+        }
+        let k = at.len() as f64;
+        Statistics {
+            t: at.iter().map(|x| x.t).sum::<f64>() / k,
+            q: std::array::from_fn(|m| at.iter().map(|x| x.q[m]).sum::<f64>() / k),
+            diffusion: std::array::from_fn(|m| std::array::from_fn(|a| at.iter().map(|x| x.diffusion[m][a]).sum::<f64>() / k)),
+        }
+    }
 }
 
 /// The windows of a path of the length `length` (µs): (0, e₁], (e₁, 2e₁], … doubling up to the length, e₁ the
@@ -2131,7 +2296,7 @@ pub fn window_of(windows: &[(f64, f64)], t: f64) -> Option<usize> {
 /// The candidate's direct errors against the reference on the same paths (`Window` per window `(from, to]`):
 /// `candidate[p]` and `reference[p]` read along path p at the same times; `labels` the request's states. A window's
 /// statistics are over the paths read in it.
-pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)], labels: &[String], hbar_over_mass: f64) -> Vec<Window> {
+pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)], labels: &[String], hbar_over_mass: f64, landings: &[Vec<Statistics>], weights: &[f64]) -> Vec<Window> {
     let mut levels: Vec<(String, Vec<usize>)> = Vec::new();
     for (s, l) in labels.iter().enumerate() {
         let level = l.rsplit_once('-').map_or(l.as_str(), |x| x.0).trim_end_matches('-').to_string();
@@ -2152,16 +2317,39 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             let mut rate_ref = vec![0.0; classes.len()];
             let mut rate = vec![0.0; p];
             let mut force = vec![[0.0; 3]; p];
+            let mut own_force = vec![[0.0; 3]; p];
             let mut force_rms = vec![0.0; p];
-            let mut power = vec![0.0; p];
+            let (mut heating, mut energy_rate, mut own_heating) = (vec![[0.0; 3]; p], vec![[0.0; 3]; p], vec![[0.0; 3]; p]);
             let mut read = vec![false; p];
+            // The cloud's mean velocity and mean force's difference in the window over the paths that read in it (# The
+            // motion's readings).
+            let (mut sum, mut pushed, mut count) = ([0.0; 3], [0.0; 3], 0.0);
+            for (c, r) in candidate.iter().zip(reference) {
+                for (x, y) in c.readings.iter().zip(&r.readings).filter(|(_, y)| y.t > from && y.t <= to) {
+                    for a in 0..3 {
+                        sum[a] += hbar_over_mass * y.kappa[a];
+                        pushed[a] += x.force[a] - y.force[a];
+                    }
+                    count += 1.0;
+                }
+            }
+            let (cloud, push): ([f64; 3], [f64; 3]) = (sum.map(|x| if count > 0.0 { x / count } else { 0.0 }), pushed.map(|x| if count > 0.0 { x / count } else { 0.0 }));
             for (k, (c, r)) in candidate.iter().zip(reference).enumerate() {
                 let pairs: Vec<(&Reading, &Reading)> = c.readings.iter().zip(&r.readings).filter(|(x, _)| x.t > from && x.t <= to).collect();
                 assert!(pairs.iter().all(|(x, y)| x.t == y.t), "the two series read at the same times");
                 let q = pairs.len() as f64;
                 read[k] = !pairs.is_empty();
+                // The path's landing check in the window (# The landing check): its landings' there, else its nearest one's;
+                // none read where it has none.
+                let at = landings.get(k).map_or(Statistics::NONE, |l| Statistics::within(l, from, to));
                 let (mut df2, mut f2, mut total_m, mut total_r) = (0.0, 0.0, 0.0, 0.0);
                 for (x, y) in &pairs {
+                    let (hx, hy) = (x.heating_at(hbar_over_mass, at.q[0], at.diffusion[0]), y.heating_at(hbar_over_mass, at.q[1], at.diffusion[1]));
+                    for a in 0..3 {
+                        heating[k][a] += hy[a] / q;
+                        own_heating[k][a] += hx[a] / q;
+                        energy_rate[k][a] += ((hx[a] - hy[a]) + (x.force[a] - y.force[a] - push[a]) * (hbar_over_mass * y.kappa[a] - cloud[a])) / q;
+                    }
                     for s in 0..STATES {
                         rows[s][k] += (x.rows[s] - y.rows[s]) / q;
                     }
@@ -2178,9 +2366,9 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                     for a in 0..3 {
                         let d = x.force[a] - y.force[a];
                         force[k][a] += d / q;
+                        own_force[k][a] += y.force[a] / q;
                         df2 += d * d / q;
                         f2 += y.force[a] * y.force[a] / q;
-                        power[k] += d.abs() * (hbar_over_mass * y.kappa[a]).abs() / (3.0 * q);
                     }
                 }
                 rate[k] = total_m / total_r - 1.0;
@@ -2188,7 +2376,8 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
             }
             // The paths read in the window (a lost atom's path ends early).
             let held: Vec<usize> = (0..p).filter(|&k| read[k]).collect();
-            let of = |x: &[f64]| Mean::of(&held.iter().map(|&k| x[k]).collect::<Vec<_>>());
+            let weight = |k: usize| weights.get(k).copied().unwrap_or(1.0);
+            let of = |x: &[f64]| Mean::weighted(&held.iter().map(|&k| x[k]).collect::<Vec<_>>(), &held.iter().map(|&k| weight(k)).collect::<Vec<_>>());
             let row_means: Vec<Mean> = rows.iter().map(|x| of(x)).collect();
             let worst_row = (0..STATES).max_by(|&a, &b| row_means[a].value.abs().total_cmp(&row_means[b].value.abs())).unwrap();
             let worst_per_path = held.iter().map(|&k| rows.iter().map(|x| x[k].abs()).fold(0.0, larger)).collect();
@@ -2204,68 +2393,17 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 rate: of(&rate),
                 force: std::array::from_fn(|a| of(&force.iter().map(|f| f[a]).collect::<Vec<_>>())),
                 force_rms: of(&force_rms),
-                power: of(&power),
+                heating: std::array::from_fn(|a| of(&heating.iter().map(|h| h[a]).collect::<Vec<_>>())),
+                energy_rate: std::array::from_fn(|a| of(&energy_rate.iter().map(|h| h[a]).collect::<Vec<_>>())),
+                energy_rates: held.iter().map(|&k| (k, energy_rate[k], heating[k], own_heating[k])).collect(),
+                forces: held.iter().map(|&k| (weight(k), force[k], own_force[k])).collect(),
             }
         })
         .collect()
 }
 
-/// The direct errors of candidate models along the same paths (module documentation; PIPELINE_V3_FINAL B.8): every
-/// model -- the reference first -- advanced along every path from its start state on [from, to] by one scheme, on the
-/// pool (the dearest jobs first); per candidate its windows (`compare`) and per model its series.
-pub struct PathErrors {
-    pub series: Vec<Vec<Series>>,
-    pub windows: Vec<Vec<Window>>,
-}
 
-/// The path errors (`PathErrors`) of `candidates` against `reference` on the walks, each from `start(walk)` over
-/// [from, to]; Err where a model does not hold a walk's start.
-#[allow(clippy::too_many_arguments)]
-pub fn path_errors(reference: &Form, candidates: &[&Form], walks: &[Walk], start: &(dyn Fn(&Walk) -> Vec<(usize, C64)> + Sync), from: f64, to: f64, windows: &[(f64, f64)], scheme: Scheme) -> Result<PathErrors, String> {
-    let models: Vec<&Form> = std::iter::once(reference).chain(candidates.iter().copied()).collect();
-    let mut jobs: Vec<(usize, usize)> = (0..models.len()).flat_map(|m| (0..walks.len()).map(move |w| (m, w))).collect();
-    jobs.sort_by(|a, b| models[b.0].dim.cmp(&models[a.0].dim));
-    let done: Vec<((usize, usize), Result<Series, String>)> = jobs.par_iter().map(|&(m, w)| ((m, w), models[m].along(&walks[w], &start(&walks[w]), from, to.min(walks[w].end()), scheme))).collect();
-    let mut series: Vec<Vec<Series>> = vec![vec![Series::default(); walks.len()]; models.len()];
-    for ((m, w), s) in done {
-        series[m][w] = s?;
-    }
-    let labels = &reference.model.scene.request.states;
-    let hm = reference.hbar_over_mass;
-    let windows = (1..models.len()).map(|m| compare(&series[m], &series[0], windows, labels, hm)).collect();
-    Ok(PathErrors { series, windows })
-}
 
-/// The h-against-h/2 check of a scheme on one path piece (module documentation, # The segments, # The budget): the
-/// candidate's difference to the reference read at the scheme and at its halves -- `Sparse`: twice the nodes and half
-/// the turn; `Exponential`: twice the pieces and the substeps --, the largest change of a row's, a rate's (relative to the
-/// reference's) and the force's (relative to the reference's rms) over the readings; None for `Sparse` where the coarser
-/// scheme's segments may leave the plateau's side (turn > 2π) -- the comparison reads nothing there -- and for the
-/// fixed schemes.
-pub fn check(candidate: &Form, reference: &Form, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Option<Result<[f64; 3], String>> {
-    let halves = match scheme {
-        Scheme::Sparse { nodes, turn, read } if turn <= std::f64::consts::TAU => Scheme::Sparse { nodes: 2 * nodes, turn: 0.5 * turn, read },
-        Scheme::Exponential { turns, rate, pieces, cutoff, read } => Scheme::Exponential { turns: 2.0 * turns, rate: 2.0 * rate, pieces: 2 * pieces, cutoff: 2.0 * cutoff, read },
-        _ => return None,
-    };
-    let run = |s: Scheme| -> Result<(Series, Series), String> { Ok((candidate.along(walk, start, from, to, s)?, reference.along(walk, start, from, to, s)?)) };
-    Some((|| {
-        let (c1, r1) = run(scheme)?;
-        let (c2, r2) = run(halves)?;
-        let mut most = [0.0_f64; 3];
-        let f2: f64 = r2.readings.iter().map(|x| x.force.iter().map(|f| f * f).sum::<f64>()).sum::<f64>() / r2.readings.len() as f64;
-        for (((a, b), c), d) in c1.readings.iter().zip(&r1.readings).zip(&c2.readings).zip(&r2.readings) {
-            for s in 0..STATES {
-                most[0] = most[0].max(((a.rows[s] - b.rows[s]) - (c.rows[s] - d.rows[s])).abs());
-            }
-            let (ra, rb, rc, rd) = (a.rates.iter().sum::<f64>(), b.rates.iter().sum::<f64>(), c.rates.iter().sum::<f64>(), d.rates.iter().sum::<f64>());
-            most[1] = most[1].max(((ra - rb) - (rc - rd)).abs() / rd);
-            let df: f64 = (0..3).map(|x| ((a.force[x] - b.force[x]) - (c.force[x] - d.force[x])).powi(2)).sum::<f64>();
-            most[2] = most[2].max((df / f2).sqrt());
-        }
-        Ok(most)
-    })())
-}
 
 /// The freezes' parts' nanoseconds over every thread (the measurements' trace, select.rs `traced`): the nodes, their
 /// amplitudes, the eigendecompositions, the substeps' weights, R and ΔH at the stages.
