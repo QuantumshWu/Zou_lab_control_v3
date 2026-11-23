@@ -688,6 +688,13 @@ pub trait Dynamics {
         (cluster, landed, forms)
     }
 
+    /// The model's version a trajectory started now runs on through its life (`Trajectory::version`): its checkpoints and
+    /// what is made again of them run on it too (`on_version`), whatever the model has become since. A model that never
+    /// changes how it makes its numbers has one (none: 0). (model/selected.rs, # The tables.)
+    fn version(&self) -> u32 {
+        0
+    }
+
     /// The counted real multiply-adds of one jump's photons (`Dynamics::emit`), made once per run: `jump` adds it to the
     /// trajectory's work. The one count of a step's run that is not counted where it is made (`Price`): the model makes
     /// the photon (`Dynamics::emit`) and does not hand its count on; so it is priced at the dearest class's of every
@@ -803,6 +810,17 @@ pub trait Middle {
     /// step stands (adapt.rs, # The reads); none where the model reads it at the point instead (`Dynamics::readout`).
     fn readout(&self, _path: &Self::Path, _s: f64, _psi: &[C64]) -> Option<[f64; STATES]> {
         None
+    }
+
+    /// Whether the step reads any time on this middle (`readout`): told before its nodes are made, so that what only
+    /// a reading takes of the model is made where one is (model/selected.rs, # The readings on the middle).
+    fn reading(&self, _reads: bool) {}
+
+    /// The largest relative error of the rates and of the friction the nodes made on this middle carry against the
+    /// model's own (model/selected.rs, # The tables' budget): what the step adds to its trajectory's
+    /// `Trajectory::deviated`; none for a model whose nodes are its own.
+    fn deviation(&self) -> [f64; 2] {
+        [0.0; 2]
     }
 
     /// The cluster's optical sector on the path (# The optical sector's noise; model/optical.rs): None where the
@@ -1039,6 +1057,38 @@ pub struct Trajectory {
     /// Its state's held forms where the model last evaluated it (module documentation, # The path's momentum): its next
     /// step's path momentum.
     pub forms: Forms,
+    /// The model's version it runs on, the model's when it started (`Dynamics::version`, `on_version`).
+    pub version: u32,
+    /// ∫ x dt from its start (µs) of its steps' nodes' relative errors x against the model's own, [the rates', the
+    /// friction's] (`Middle::deviation`: each step's largest over its nodes, over the step's length): what its run
+    /// books of them (solve.rs, # The tables' deviation).
+    pub deviated: [f64; 2],
+}
+
+thread_local! {
+    /// The version of the model the trajectory this thread is making runs on (`on_version`); none outside one.
+    static VERSION: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// f with the thread's trajectory on the model's version `version` (`Dynamics::version`): every middle and node the
+/// model makes meanwhile on this thread is that version's (model/selected.rs, # The tables). The one way a trajectory's
+/// version reaches the model: its start (`Trajectory::new`), its steps (`Midway::new`, `Midway::attempt`) and so every
+/// jump and every replay of its checkpoints.
+pub fn on_version<R>(version: u32, f: impl FnOnce() -> R) -> R {
+    let before = VERSION.with(|v| v.replace(Some(version)));
+    struct Restore(Option<u32>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            VERSION.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(before);
+    f()
+}
+
+/// The model's version of the trajectory this thread is making (`on_version`), none outside one.
+pub fn version() -> Option<u32> {
+    VERSION.with(|v| v.get())
 }
 
 impl Trajectory {
@@ -1048,6 +1098,12 @@ impl Trajectory {
     /// (`Dynamics::started`); at its threshold already, the jump at once, as after a jump (`jump`), and the held forms of
     /// the state it lands in.
     pub fn new<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64) -> Trajectory {
+        let version = model.version();
+        on_version(version, || Trajectory::started(model, state, r, kappa, seed, index, version))
+    }
+
+    /// `new` on the model's version `version`.
+    fn started<D: Dynamics>(model: &D, state: usize, r: [f64; 3], kappa: [f64; 3], seed: u64, index: u64, version: u32) -> Trajectory {
         let bare = |cluster: usize| -> Internal {
             let states = &model.cluster(cluster).states;
             let at = states.iter().position(|&s| s == state).expect("a ground state lies on its cluster");
@@ -1076,6 +1132,8 @@ impl Trajectory {
             pending: [[0.0; 3]; 3],
             booked: [0.0; 3],
             forms,
+            version,
+            deviated: [0.0; 2],
         };
         if !on {
             // Its jump at once; where the model has no photon to give, or its landing does not exist, the start is nowhere
@@ -3584,6 +3642,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// The middle of the step of τ (negative: the reverse step) from a trajectory's position, momentum, cluster and
     /// time: the reference's fixed point (`middle`; refused where it is not one) and the model's generator there.
     pub fn new(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
+        on_version(from.version, || Midway::made(model, from, tau))
+    }
+
+    /// `new` on the trajectory's version.
+    fn made(model: &'a D, from: &Trajectory, tau: f64) -> Result<Midway<'a, D>, Refused> {
         let _p = crate::prof::scope(crate::prof::STEP_NEW);
         let half = 0.5 * tau;
         let (flow, reached) = middle(model, from.r, from.kappa, half)?;
@@ -3604,6 +3667,11 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// trajectory's. A jump the model gives no photon is refused (`jump`); so is a stretch whose first state scatters
     /// beyond every state of the atom (`Domain::runaway`; module documentation, # The domain).
     pub fn attempt(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
+        on_version(from.version, || self.attempted(from, brownian, reads, scratch, domain))
+    }
+
+    /// `attempt` on the trajectory's version.
+    fn attempted(&self, from: &Trajectory, brownian: &Brownian, reads: &[f64], scratch: &mut Scratch, domain: &dyn Domain) -> Result<Step, Refused> {
         let _p = crate::prof::scope(crate::prof::ATTEMPT);
         let (tau, hm, n) = (self.tau, self.hbar_over_mass, from.psi.len());
         let h = 0.5 * tau;
@@ -3616,10 +3684,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
+        // The largest relative error of the step's nodes against the model's own (`Middle::deviation`).
+        let mut deviation = [0.0f64; 2];
         loop {
             // A refused stretch: the attempt's count as far as it went, on the scratch (`Scratch::refused`).
             let generator = landed.as_ref().unwrap_or(&self.generator);
             let (done, next) = self.stretch(generator, kappa_m, from.time, reads, &mut march, scratch, domain).inspect_err(|_| scratch.refused += march.work + unfinished(generator, &march.progress, scratch))?;
+            let d = generator.deviation();
+            deviation = [deviation[0].max(d[0]), deviation[1].max(d[1])];
+            if let Some(next) = &next {
+                let d = next.deviation();
+                deviation = [deviation[0].max(d[0]), deviation[1].max(d[1])];
+            }
             if done {
                 break;
             }
@@ -3682,6 +3758,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             return Err(Refused::Overflow);
         }
         (end.r, end.kappa, end.time) = (r1, kappa1, from.time + tau);
+        for (x, d) in end.deviated.iter_mut().zip(deviation) {
+            *x += tau.abs() * d;
+        }
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() }, rows: ended }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);
@@ -3735,6 +3814,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let (tau, hm) = (self.tau, self.hbar_over_mass);
         let h = 0.5 * tau;
         let velocity = kappa_m.map(|k| hm * k);
+        generator.reading(!reads.is_empty());
         let along = Along::new(generator, kappa_m, velocity);
         let (n, cluster) = (along.n, march.state.cluster);
         // Whether the step takes its generator at the middle alone (# One node a step): where it is still, or where the

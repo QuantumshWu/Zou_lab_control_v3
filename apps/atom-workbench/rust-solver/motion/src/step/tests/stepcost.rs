@@ -564,3 +564,267 @@ fn count_parts() {
         }
     }
 }
+
+/// STEP4 item 2 ("(b) 接入节点"): a step's parts on the run's tables against the fold's own, paired. Per scene of
+/// STEPCOST (names of `SCENES`, their ground states; default PGC3D, TET, tilt0, tilt2) a walk of STEPCOST_STEPS (12)
+/// steps from trajectory STEPCOST_INDEX (3) of `r1prop::start` on the fold's own nodes; the run's tables bought on [the
+/// walk's least s, 1] (`Selected::buy_tables_now`: their time, memory, pieces and counted work); then per state of the
+/// walk, version 0 (the fold's own) and version 1 (the tables) in turn -- each repeat the other first --, each the least
+/// of STEPCOST_REPEAT (5) in the thread's own cycles after one call untimed: the step on a fresh scratch with no read and
+/// with one read at its middle (the lift made where a step reads, `step::Middle::reading`), a node at the step's middle
+/// and a jump's photon node there (each on its version, `step::on_version`), and the counted work of the step and of the
+/// node. Said: "TABLED-STEP <scene>", the means over the walk of both versions and their ratios, and how many of the
+/// steps' points the tables read. Ignored; run by name, pinned to one performance core by the caller.
+#[test]
+#[ignore]
+fn tabled_step_parts() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (steps, repeat, index) = (env("STEPCOST_STEPS", 12), env("STEPCOST_REPEAT", 5), env("STEPCOST_INDEX", 3) as u64);
+    let ghz: f64 = (0..5)
+        .map(|_| {
+            let (c0, clock) = (thread_cycles(), Instant::now());
+            let mut x = 0u64;
+            while clock.elapsed().as_millis() < 50 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            (thread_cycles() - c0) as f64 / clock.elapsed().as_nanos() as f64
+        })
+        .fold(0.0, crate::linalg::larger);
+    let timed = |f: &mut dyn FnMut()| -> f64 {
+        let c0 = thread_cycles();
+        f();
+        (thread_cycles() - c0) as f64 / (ghz * 1e3)
+    };
+    let list = std::env::var("STEPCOST").unwrap_or_else(|_| "PGC3D,TET,tilt0,tilt2".to_string());
+    for entry in list.split(',') {
+        let found = SCENES.split(',').find(|e| e.starts_with(&format!("{entry}="))).unwrap_or_else(|| panic!("no default for {entry}"));
+        let (spec, tau) = found.split_once('=').unwrap().1.split_once('@').unwrap();
+        let (name, tau): (String, f64) = (entry.to_string(), tau.parse().unwrap());
+        assert_eq!(spec, "ground", "the tables' scenes are their ground states");
+        let request = request_of(&name);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: (0..GROUND).collect(), ..selection }, crate::solve::alone(chief)).unwrap();
+        let domain = Everywhere;
+        // The walk on the fold's own nodes, and its least s.
+        let mut t = start(&run, &request, chief, index);
+        let mut walk = Vec::new();
+        for _ in 0..steps {
+            let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)) else { break };
+            walk.push(t.clone());
+            t = step.end;
+        }
+        let values = |r: [f64; 3], kappa: [f64; 3]| -> crate::model::rs::fold::Values {
+            let mut point = crate::scene::Point::default();
+            run.scene.point_into(r, kappa, &mut point);
+            run.rs.tweezer().values(&run.scene, &point)
+        };
+        let low = walk.iter().map(|t| crate::model::rs::fold::tabled::Tables::intensity(run.rs.plan(), &values(t.r, t.kappa))).fold(1.0, crate::linalg::smaller) * 0.999;
+        let clock = Instant::now();
+        let any = run.buy_tables_now(low);
+        let bought = clock.elapsed().as_secs_f64();
+        let Some(tables) = run.bought() else {
+            eprintln!("TABLED-BUY {name}: none kept ({any}): no kind of node costs less off them");
+            continue;
+        };
+        eprintln!(
+            "TABLED-BUY {name}: for the kinds [node, with the lift, photon, with the photon forms] {:?}; {} pieces on [{low:.4}, 1], {:.2} MB, {:.3} s (its own clock {:.3} s), counted {:.3e} real MA",
+            run.bought_for().unwrap(),
+            tables.pieces.len(),
+            tables.bytes as f64 / 1e6,
+            bought,
+            tables.build_seconds,
+            crate::decide::COMPLEX * tables.work
+        );
+        // [version][step, step with a read, node, photon node, node warm]; counted [version][step, node].
+        let (mut sum, mut counted) = ([[0.0f64; 5]; 2], [[0.0f64; 3]; 2]);
+        let (mut taken, mut read_off, mut points) = (0usize, 0usize, 0usize);
+        let mut deviation = [0.0f64; 2];
+        for from in &walk {
+            let midway = Midway::new(&run, from, tau).unwrap();
+            let at = midway.reached;
+            let read = [from.time + 0.5 * tau];
+            let mut least = [[f64::INFINITY; 5]; 2];
+            let versions = [crate::step::Trajectory { version: 0, ..from.clone() }, crate::step::Trajectory { version: 1, ..from.clone() }];
+            for (v, t) in versions.iter().enumerate() {
+                let step = Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).unwrap();
+                counted[v][0] += step.work;
+                let node = crate::step::on_version(v as u32, || run.node(at.0, at.1, false));
+                counted[v][1] += node.work;
+                deviation = [deviation[0].max(node.deviation[0]), deviation[1].max(node.deviation[1])];
+                counted[v][2] += Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &read, &mut Scratch::default(), &domain)).unwrap().work;
+                std::hint::black_box(crate::step::on_version(v as u32, || run.photon_node(at.0, at.1)));
+            }
+            for k in 0..repeat {
+                let order: [usize; 2] = if k % 2 == 0 { [0, 1] } else { [1, 0] };
+                for &v in &order {
+                    let t = &versions[v];
+                    least[v][0] = least[v][0].min(timed(&mut || {
+                        std::hint::black_box(Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).is_ok());
+                    }));
+                    least[v][1] = least[v][1].min(timed(&mut || {
+                        std::hint::black_box(Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &read, &mut Scratch::default(), &domain)).is_ok());
+                    }));
+                    least[v][2] = least[v][2].min(timed(&mut || {
+                        std::hint::black_box(crate::step::on_version(v as u32, || run.node(at.0, at.1, false)));
+                    }));
+                    least[v][3] = least[v][3].min(timed(&mut || {
+                        std::hint::black_box(crate::step::on_version(v as u32, || run.photon_node(at.0, at.1)));
+                    }));
+                }
+            }
+            // The node warm: its version's calls one after another, nothing else between them.
+            for v in 0..2 {
+                for _ in 0..repeat {
+                    least[v][4] = least[v][4].min(timed(&mut || {
+                        std::hint::black_box(crate::step::on_version(v as u32, || run.node(at.0, at.1, false)));
+                    }));
+                }
+            }
+            for v in 0..2 {
+                for p in 0..5 {
+                    sum[v][p] += least[v][p];
+                }
+            }
+            // Whether the tables read the step's three points.
+            for s in [-0.5 * tau, 0.0, 0.5 * tau] {
+                let r: [f64; 3] = std::array::from_fn(|a| at.0[a] + run.hbar_over_mass() * at.1[a] * s);
+                points += 1;
+                read_off += usize::from(run.tables_read(r, at.1));
+            }
+            taken += 1;
+        }
+        let k = taken.max(1) as f64;
+        let m = |v: usize, p: usize| sum[v][p] / k;
+        eprintln!(
+            "TABLED-STEP {name} tau {tau}: the fold's / the tables' (ratio) -- a step {:.1} / {:.1} µs ({:.3}), with a read {:.1} / {:.1} ({:.3}), a node {:.1} / {:.1} ({:.3}), a jump's photon node {:.1} / {:.1} ({:.3}), a node warm (its calls one after another) {:.1} / {:.1} ({:.3}); counted a step {:.3e} / {:.3e} ({:.3}), with a read {:.3e} / {:.3e} ({:.3}), a node {:.3e} / {:.3e} ({:.3}); the tables read {read_off} of {points} points; the nodes' deviation at the most {deviation:?}; over {taken} states, each the least of {repeat}",
+            m(0, 0),
+            m(1, 0),
+            m(1, 0) / m(0, 0),
+            m(0, 1),
+            m(1, 1),
+            m(1, 1) / m(0, 1),
+            m(0, 2),
+            m(1, 2),
+            m(1, 2) / m(0, 2),
+            m(0, 3),
+            m(1, 3),
+            m(1, 3) / m(0, 3),
+            m(0, 4),
+            m(1, 4),
+            m(1, 4) / m(0, 4),
+            counted[0][0] / k,
+            counted[1][0] / k,
+            counted[1][0] / counted[0][0],
+            counted[0][2] / k,
+            counted[1][2] / k,
+            counted[1][2] / counted[0][2],
+            counted[0][1] / k,
+            counted[1][1] / k,
+            counted[1][1] / counted[0][1],
+        );
+    }
+}
+
+/// STEP4, the coordinator's question: a step's thread time on the fold's version and on the tables' at one thread and at
+/// the machine's concurrency, paired in one process. Per scene of STEPCOST (names of `SCENES`, their ground states;
+/// default PGC3D, TET) each of STEPCOST_THREADS threads (every core) its own walk of STEPCOST_STEPS (24) steps
+/// (trajectory i of `r1prop::start`) on the fold's nodes; the tables bought on [the walks' least s, 1]; then
+/// STEPCOST_ROUNDS (3) rounds, each version in turn (the other first every other round), at one thread (the first
+/// walk's) and at all of them at once: each thread its walk's states once untimed and once timed in its own cycles, on
+/// one scratch as a trajectory carries it. Said: "TABLED-THREADS <scene>", per version and concurrency the mean thread
+/// time a step (µs) at its least over the rounds, and the round's wall time. Ignored; run by name, not pinned.
+#[test]
+#[ignore]
+fn tabled_step_threads() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let (steps, rounds, threads) = (env("STEPCOST_STEPS", 24), env("STEPCOST_ROUNDS", 3), env("STEPCOST_THREADS", cores));
+    let ghz: f64 = (0..5)
+        .map(|_| {
+            let (c0, clock) = (thread_cycles(), Instant::now());
+            let mut x = 0u64;
+            while clock.elapsed().as_millis() < 50 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            (thread_cycles() - c0) as f64 / clock.elapsed().as_nanos() as f64
+        })
+        .fold(0.0, crate::linalg::larger);
+    let list = std::env::var("STEPCOST").unwrap_or_else(|_| "PGC3D,TET".to_string());
+    for entry in list.split(',') {
+        let found = SCENES.split(',').find(|e| e.starts_with(&format!("{entry}="))).unwrap_or_else(|| panic!("no default for {entry}"));
+        let tau: f64 = found.split_once('@').unwrap().1.parse().unwrap();
+        let request = request_of(entry);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: (0..GROUND).collect(), ..selection }, crate::solve::alone(chief)).unwrap();
+        let domain = Everywhere;
+        let walks: Vec<Vec<crate::step::Trajectory>> = (0..threads)
+            .map(|i| {
+                let mut t = start(&run, &request, chief, i as u64);
+                let mut walk = Vec::new();
+                for _ in 0..steps {
+                    let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)) else { break };
+                    walk.push(t.clone());
+                    t = step.end;
+                }
+                walk
+            })
+            .collect();
+        let low = walks
+            .iter()
+            .flatten()
+            .map(|t| {
+                let mut point = crate::scene::Point::default();
+                run.scene.point_into(t.r, t.kappa, &mut point);
+                crate::model::rs::fold::tabled::Tables::intensity(run.rs.plan(), &run.rs.tweezer().values(&run.scene, &point))
+            })
+            .fold(1.0, crate::linalg::smaller)
+            * 0.999;
+        assert!(run.buy_tables_now(low), "{entry}: no tables");
+        // One thread's walk on the version v: once untimed, once timed; its thread time a step (µs).
+        let walked = |walk: &[crate::step::Trajectory], v: u32| -> f64 {
+            let mut scratch = Scratch::default();
+            let mut go = || {
+                for from in walk {
+                    let t = crate::step::Trajectory { version: v, ..from.clone() };
+                    std::hint::black_box(Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &domain)).is_ok());
+                }
+            };
+            go();
+            let c0 = thread_cycles();
+            go();
+            (thread_cycles() - c0) as f64 / (ghz * 1e3) / walk.len().max(1) as f64
+        };
+        // [version][one thread, all threads]: the least over the rounds of the threads' mean; and the walls.
+        let (mut least, mut wall) = ([[f64::INFINITY; 2]; 2], [[f64::INFINITY; 2]; 2]);
+        for round in 0..rounds {
+            let order: [u32; 2] = if round % 2 == 0 { [0, 1] } else { [1, 0] };
+            for &v in &order {
+                for (c, n) in [1, threads].into_iter().enumerate() {
+                    let clock = Instant::now();
+                    let per: Vec<f64> = std::thread::scope(|s| {
+                        let handles: Vec<_> = walks[..n].iter().map(|walk| s.spawn(move || walked(walk, v))).collect();
+                        handles.into_iter().map(|h| h.join().unwrap()).collect()
+                    });
+                    let mean = per.iter().sum::<f64>() / per.len() as f64;
+                    least[v as usize][c] = least[v as usize][c].min(mean);
+                    wall[v as usize][c] = wall[v as usize][c].min(clock.elapsed().as_secs_f64());
+                }
+            }
+        }
+        eprintln!(
+            "TABLED-THREADS {entry} tau {tau}: a step's thread time, the fold's / the tables' (ratio) -- one thread {:.1} / {:.1} µs ({:.3}); {threads} threads at once {:.1} / {:.1} µs ({:.3}); the walls of {threads} threads {:.2} / {:.2} s; {steps} steps a thread, the least of {rounds} rounds",
+            least[0][0],
+            least[1][0],
+            least[1][0] / least[0][0],
+            least[0][1],
+            least[1][1],
+            least[1][1] / least[0][1],
+            wall[0][1],
+            wall[1][1]
+        );
+    }
+}

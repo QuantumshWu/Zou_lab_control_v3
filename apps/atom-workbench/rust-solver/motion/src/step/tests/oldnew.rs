@@ -193,10 +193,6 @@ fn oldnew_solve() {
     if std::env::var("OLDNEW_SPLIT_PARTS").is_ok() {
         crate::model::selected::SPLIT_PARTS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    // And the folded blocks' Doppler series truncated (rs/fold.rs `DOPPLER_ORDERS`).
-    if let Ok(x) = std::env::var("OLDNEW_DOPPLER_ORDERS") {
-        crate::model::rs::fold::DOPPLER_ORDERS.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);
-    }
     // And the runs' streams under another seed (random.rs `RUN_SEED`).
     if let Ok(x) = std::env::var("OLDNEW_SEED") {
         crate::random::RUN_SEED.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);

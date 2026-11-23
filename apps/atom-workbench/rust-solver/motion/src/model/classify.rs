@@ -202,6 +202,7 @@ impl Account {
             temperature_target: crate::units::TEMPERATURE_TARGET,
             unresolved: 0.0,
             scale: self.floor,
+            deviated: [0.0; 2],
         };
         at.moved(if d < 1.0 { d / (1.0 - d) } else { 1.0 }, &self.escape)
     }

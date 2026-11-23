@@ -621,9 +621,10 @@ fn student_tail(q: f64, nu: u64) -> f64 {
 /// output's window (1/µm, 1/µm²) and its window's shape, its means of κ P_ℓ, ℓ = 1…`SHAPE` (`shape`, module
 /// documentation, # The cloud's own motion; 1/µm), and its push, the mean of dκ/dt over the window's part it is held
 /// for -- the window's polynomials' ends' difference over the part's length, 2Σ_{ℓ odd}(2ℓ + 1)c_ℓ/length (1/µm/µs;
-/// none at an instant: # The push) --; and whether it is `unresolved` -- a step of its trajectory, at the output or
-/// before it, scattered beyond every state of the atom, and it stopped there (step.rs `Trajectory::unresolved`;
-/// solve.rs, # The unresolved atoms).
+/// none at an instant: # The push) --; its trajectory's ∫x dt to the output of its nodes' relative errors against the
+/// model's own, [the rates', the friction's] (step.rs `Trajectory::deviated`; solve.rs, # The tables' deviation); and
+/// whether it is `unresolved` -- a step of its trajectory, at the output or before it, scattered beyond every state of
+/// the atom, and it stopped there (step.rs `Trajectory::unresolved`; solve.rs, # The unresolved atoms).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
@@ -631,6 +632,7 @@ pub struct Held {
     pub kappa2: [f64; 3],
     pub shape: [[f64; SHAPE]; 3],
     pub push: [f64; 3],
+    pub deviated: [f64; 2],
     pub unresolved: bool,
 }
 
@@ -676,11 +678,12 @@ pub struct Sums {
     pub shape: [[f64; SHAPE]; 3],
     pub shape_squared: [f64; 3],
     pub push: [f64; 3],
+    pub deviated: [f64; 2],
     pub unresolved: f64,
 }
 
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, shape_squared: [0.; 3], push: [0.; 3], unresolved: 0. };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, shape_squared: [0.; 3], push: [0.; 3], deviated: [0.; 2], unresolved: 0. };
     #[cfg(test)]
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
@@ -710,6 +713,9 @@ impl Sums {
                 self.shape_squared[a] += w * weighed(&h.shape[a]);
                 self.push[a] += w * h.push[a];
             }
+            for (s, d) in self.deviated.iter_mut().zip(&h.deviated) {
+                *s += w * d;
+            }
             if h.unresolved {
                 self.unresolved += w;
             }
@@ -733,6 +739,9 @@ impl Sums {
             }
             self.shape_squared[a] += sign * o.shape_squared[a];
             self.push[a] += sign * o.push[a];
+        }
+        for (s, d) in self.deviated.iter_mut().zip(&o.deviated) {
+            *s += sign * d;
         }
         self.unresolved += sign * o.unresolved;
     }
@@ -878,6 +887,9 @@ pub struct Estimate {
     /// T's semiclassical scale T_sc (µK; `semiclassical`): what T's allowance and the velocity's and the push's targets
     /// are floored by (`velocity_target`, `push_target`).
     pub scale: f64,
+    /// The held atoms' mean ∫x dt to the output (µs) of their nodes' relative errors against the model's own, [the
+    /// rates', the friction's] (`Held::deviated`; solve.rs, # The tables' deviation).
+    pub deviated: [f64; 2],
 }
 /// The held atoms' motion at an output where at least two are held: T per lab axis (µK), T_total = (T_x + T_y + T_z)/3
 /// with its own jackknife (the axes' correlations in it), n̄, the mean velocity (m/s = µm/µs) and the push, the mean
@@ -1154,6 +1166,7 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 loss_error: j.every(|m| loss(&m[0])),
                 shown_errors: std::array::from_fn(|s| j.every(|m| shown(&m[0], s))),
                 populations: if n != 0. { all.rows.map(|r| r / n) } else { [0.; STATES] },
+                deviated: if n != 0. { all.deviated.map(|d| d / n) } else { [0.; 2] },
                 motion,
                 failed: all.failed,
                 uncounted: if all.trajectories != 0. { all.failed / (all.trajectories + all.failed) } else { 1. },
@@ -1802,7 +1815,7 @@ mod tests {
     fn atom(state: usize, x: f64, y: f64) -> Held {
         let mut rows = [0.; STATES];
         rows[state] = 1.;
-        Held { rows, kappa: [x; 3], kappa2: [y; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false }
+        Held { rows, kappa: [x; 3], kappa2: [y; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false }
     }
     fn group(atoms: Vec<Option<Held>>) -> Group {
         let mut g = Group::new(1);
@@ -2029,7 +2042,7 @@ mod tests {
     fn held_at(temperature: [f64; 3], mean: [f64; 3]) -> Estimate {
         let exact = Spread { error: 0., groups: f64::INFINITY };
         let motion = Motion { temperature, temperature_errors: [exact; 3], temperature_total: temperature.iter().sum::<f64>() / 3., temperature_total_error: exact, occupation: [0.; 3], mean_velocity: mean, mean_velocity_errors: [Spread::UNREAD; 3], push: [0.; 3], push_errors: [Spread::UNREAD; 3], mean_speed: mean.map(f64::abs) };
-        Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: 0., scale: 0. }
+        Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: 0., scale: 0., deviated: [0.; 2] }
     }
 
     /// A share w of the held atoms moved anywhere in the bound set moves the total T by no more than `Estimate::moved`
