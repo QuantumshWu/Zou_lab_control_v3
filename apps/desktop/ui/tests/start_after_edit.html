@@ -186,6 +186,17 @@ try {
    equal(host.step().error,undefined,'taken');
    done();
  });
+ await check('the Plot switch is a draft edit: a Restart clicked with it on its way waits for it',()=>{
+   const {host,page,done}=consoleWindow();
+   page.querySelector('.row-switch').click();
+   assert(log.some(entry=>entry.action==='edit_node'&&'auto_preview' in entry),'the Plot switch sent');
+   startButton(page).click();
+   equal(starts(),[],'waits for it');
+   host.step();
+   equal(starts().map(entry=>entry.expected_draft_revision),[1],'no revision of its own');
+   equal(host.step().error,undefined,'taken');
+   done();
+ });
  await check('the Figure Viewer\'s node page waits the same way, and a Stop there cancels it',()=>{
    {
      const {host,page,done}=viewerWindow();

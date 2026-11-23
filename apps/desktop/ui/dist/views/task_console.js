@@ -352,7 +352,7 @@ export class TaskConsoleView {
                 this.drawStart(id);
             this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`);
         },
-        preview: (id, on) => this.send({ action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
+        preview: (id, on) => this.starts.edit(id, { action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
         rename: (id, name) => this.send({ action: "rename_node", node: id, name }, "Renaming…"),
         editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),
         revert: id => this.starts.edit(id, { action: "revert_node", node: id }, "Reverting…"),
