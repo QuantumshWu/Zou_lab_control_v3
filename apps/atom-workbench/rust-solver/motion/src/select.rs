@@ -1356,9 +1356,6 @@ pub struct Choice {
     pub memory: f64,
     pub length: f64,
     pub report: Vec<String>,
-    /// Whether some candidate's fate stayed open with every one of its pilot's trajectories a path (solve.rs # The
-    /// selection: the scout's choice so left is made again on the pilot's).
-    pub undecided: bool,
 }
 
 impl Choice {

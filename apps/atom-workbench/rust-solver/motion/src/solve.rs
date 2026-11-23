@@ -15,9 +15,8 @@
 //!    run's list (`product`). It checks the step -- on two levels, a third above and a rung below where they pay, and on
 //!    further pairs where they pay (# The step) --, every read at the analysis times, not at the outputs (# The analysis
 //!    times). Its trajectories at the run's step stay in the result: they are trajectories of the run and its step.
-//!    On G, where no choice is kept, the scout's trajectories choose P before the pilot runs, and the pilot's where the
-//!    scout's leave a candidate's fate open (# The selection): G chosen, the attempt goes on; another, the attempt is
-//!    made again on it, its scout and pilot its own.
+//!    On G, where no choice is kept, the pilot's trajectories then choose P (# The selection): G chosen, the product goes
+//!    on from them; another, the attempt is made again on it, its scout and pilot its own.
 //! 3. The product: batches of whole groups at the settled step, one level, every trajectory run to the run's end and
 //!    read at the pilot's analysis times beside the outputs, until every held quantity's total lies within its target
 //!    there (# Stopping) or the trajectories reach `MOST_TRAJECTORIES`.
@@ -436,12 +435,7 @@
 //!
 //! # The selection (PIPELINE_V3_FINAL §二 B.7–B.11; select.rs)
 //! Where no choice is kept for the scene (select.rs `kept`: the request without its times), the attempt on G chooses P
-//! once its scout stands, on the scout's trajectories (`choose_on_the_pilot`): the paths are theirs, at the scout's rung,
-//! and the pilot runs on the model chosen alone (PLAN_UNIFIED §三 3: R4's choice is not G, and a whole pilot of G was run
-//! for nothing). Where the scout's statistics leave some candidate's fate open with every one of its trajectories a path
-//! (`Choice::undecided`; the scout is a pilot group's first member each, eleven where the pilot is 88), the choice is made
-//! again once the pilot stands, on its trajectories (R4: every candidate open on the scout's eleven, its choice there
-//! P26 at W 4.5e13 against the pilot's P10 at 4.3e12). Where G's fold scatters beyond every state of the atom at every one of
+//! once its pilot stands (`choose_on_the_pilot`). Where G's fold scatters beyond every state of the atom at every one of
 //! its pilot's paths' starts (step.rs, # The domain: the runaway, which no step's length helps; SAT_3's resonant
 //! D2-3-3, its first-order excitation 1.5), no path goes past its start and nothing can be chosen on them: the attempt
 //! is made on the structural chain's next model, and so on up (`piloted`; the top folds nothing), and the choice is made
@@ -594,10 +588,9 @@
 //! one; `attempt`: the scout and the pilot; `choose_on_the_pilot`: the selection; `product`: every batch, with its
 //! trajectories, the number it brings the run to and how far its looks stand from their targets) and as the step's
 //! check moves to another rung (`check`) -- when it changes, never otherwise. The order (the app's, src/solve-progress.ts):
-//! - a new selection: Model (the structural chain and G's model are the model's making) → Scout (G's) → Select (along
-//!   the scout's paths; a candidate's short scout is part of it and says nothing of its own) → where the choice is not
-//!   G, Model → Scout → Pilot → Product; where it is G, Pilot → Product; where the scout's leaves it open, Pilot →
-//!   Select (the pilot's paths) → as before;
+//! - a new selection: Model (the structural chain and G's model are the model's making) → Scout (G's) → Pilot →
+//!   Select (along the pilot's paths; a candidate's short scout is part of it and says nothing of its own) → where the
+//!   choice is not G, Model → Scout → Pilot → Product; where it is G, Product;
 //! - the choice kept for the scene: Select (at once) → Model → Scout → Pilot → Product.
 //! Select and Model have no rung (`Stage::tau` none: the app takes a step there for no progress); the scout, the pilot
 //! and the product are at theirs.
@@ -2112,30 +2105,6 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     if matches!(choosing, Choosing::Scout) {
         return Ok(Attempted::Scouted(context.tau));
     }
-    // The choice (module documentation, # The selection), where this attempt makes it: first on the scout's trajectories,
-    // before the pilot -- the pilot then runs on the model chosen alone --; where their statistics leave a candidate's fate
-    // open with every scout's trajectory a path, again on the pilot's (below).
-    if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
-        let scout: Vec<&Part> = levels.fine.iter().collect();
-        if integrated(&scout) {
-            let at = analysed_alone(&scout);
-            let states = parts_at(run, &domain, context.tau, &context.plan, &scout, &at);
-            let refs: Vec<&Part> = states.iter().collect();
-            let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
-            let read = pilot_reads(&refs, &scales, None, &times, &context.fixed.escape);
-            let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &refs, &read, &numbers, &times, messages)? else {
-                return Ok(Attempted::RanAway);
-            };
-            if made.undecided {
-                eprintln!("  选态：侦察的 {} 条轨迹上候选的去留定不下来，在完整先导上重选", scout.len());
-            } else {
-                match adopt(request, run, made, &choosing, &mut context, &clean) {
-                    Ok(chose) => return Ok(Attempted::Chose(chose)),
-                    Err(made) => choice = Some(made),
-                }
-            }
-        }
-    }
     // The scout's states where its check is priced (`Settled::Pending`): its prices, and the pilot's levels' hand-out's
     // order after them (`foretold`).
     let here = matches!(scouting, Settled::Pending).then(|| {
@@ -2233,20 +2202,37 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     context.plan.read_at(times.clone());
     // The choice (module documentation, # The selection), where this pilot makes it: G chosen, the product goes on
     // from here with the model's error booked from it; another, the attempt ends with it.
-    // The choice the scout's statistics left undecided, made on the pilot's.
     let mut read = read;
     if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
         let pilot_refs: Vec<&Part> = pilot.iter().collect();
         let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
             return Ok(Attempted::RanAway);
         };
-        match adopt(request, run, made, &choosing, &mut context, &clean) {
-            Ok(chose) => return Ok(Attempted::Chose(chose)),
-            Err(made) => {
-                read = pilot_reads(&pilot_refs, &scales, Some(&made), &times, &context.fixed.escape);
-                choice = Some(made);
+        let made = std::sync::Arc::new(made);
+        crate::select::keep(request, made.clone());
+        let stop = {
+            #[cfg(test)]
+            {
+                matches!(choosing, Choosing::Choose)
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        if stop || made.keep != run.rs.keep {
+            return Ok(Attempted::Chose(made));
+        }
+        eprint!("{}", made.report.iter().map(|l| format!("  注：{l}\n")).collect::<String>());
+        // The ledger as it was but the flag of an error not measured, with what the pilot's check flagged since.
+        let flagged = std::mem::replace(&mut context.ledger, clean).flagged;
+        if let Some(f) = flagged {
+            for part in f.split('；').filter(|p| *p != unmeasured()) {
+                context.ledger.flag(part.to_string());
             }
         }
+        read = pilot_reads(&pilot_refs, &scales, Some(&made), &times, &context.fixed.escape);
+        choice = Some(made);
     }
     drop(levels);
     let n = times.len();
@@ -2308,37 +2294,6 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         context.ledger.flag("初态的势在所取的阱底之外还有更深的地方：初始系综只取到该阱底的阱深为止".into());
     }
     Ok(Attempted::Solved(assemble(&context, &e, &reads, &l, &c, parts.len() as u64 * GROUP)))
-}
-
-/// What an attempt does with the choice it made (`attempt`): kept for the scene; where it is another model than the
-/// attempt's (or a test stops at the choice), the attempt ends with it (`Ok`); else it is the attempt's own, its error
-/// booked from here on: the report said, and the ledger as it was but the flag of an error not measured, with what the
-/// check flagged since (`Err`, the choice to book from).
-fn adopt(request: &Request, run: &Selected, made: Choice, choosing: &Choosing, context: &mut Context, clean: &Ledger) -> Result<std::sync::Arc<Choice>, std::sync::Arc<Choice>> {
-    let made = std::sync::Arc::new(made);
-    crate::select::keep(request, made.clone());
-    let stop = {
-        #[cfg(test)]
-        {
-            matches!(choosing, Choosing::Choose)
-        }
-        #[cfg(not(test))]
-        {
-            let _ = choosing;
-            false
-        }
-    };
-    if stop || made.keep != run.rs.keep {
-        return Ok(made);
-    }
-    eprint!("{}", made.report.iter().map(|l| format!("  注：{l}\n")).collect::<String>());
-    let flagged = std::mem::replace(&mut context.ledger, clean.clone()).flagged;
-    if let Some(f) = flagged {
-        for part in f.split('；').filter(|p| *p != unmeasured()) {
-            context.ledger.flag(part.to_string());
-        }
-    }
-    Err(made)
 }
 
 /// The flag of a model whose error is not measured (module documentation, # The model): G's before its pilot chooses,
@@ -2624,11 +2579,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let need0 = most_needed(&base);
         let rated = one_each(pilot);
         let ran = (numbers.len() as u64 * GROUP) as f64;
-        // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); beside the product's,
-        // the pilot's companion level on the scout's own model (at most half the run level's work; its run level's
-        // trajectories are the product's), and the scout's and the pilot's both on another (two levels).
+        // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); the scout's and the
+        // pilot's again on a model not G (two levels, the companion's at most half the run level's work).
         let span = context.plan.end;
-        let again = |place: usize, price: f64| if place == 0 { 0.5 * ran * price * span } else { 1.5 * ran * price * span };
+        let again = |place: usize, price: f64| if place == 0 { 0. } else { 1.5 * ran * price * span };
         let met = |looks: &[Look]| -> [bool; 2] {
             let mut met = [true; 2];
             for (b, l) in base.iter().zip(looks) {
@@ -2828,7 +2782,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // weighed candidate's work on them again, as much more as the paths are (`paths::Counts::work`). Doubled where some
         // open candidate's saving is more than that; else its upper end stands, said.
         let open: Vec<&Weighed> = weighed.iter().filter(|w| w.open).collect();
-        let undecided = !open.is_empty();
         if !open.is_empty() {
             let names = open.iter().map(|w| format!("P{}", w.judged.keep.len())).collect::<Vec<_>>().join("、");
             let next = (2 * count).min(available);
@@ -2947,7 +2900,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         }
         noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
         let w = weighed.swap_remove(chosen);
-        return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report, undecided }));
+        return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
     }
 }
 
