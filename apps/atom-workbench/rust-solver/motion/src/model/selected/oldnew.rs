@@ -248,6 +248,118 @@ fn oldnew_pairs() {
             let mut node = run.template.clone();
             fill_t += least(&mut || run.fill(&mut node, &work.out, (kicked, true), &mut work.jumps));
         }
+        // The coordinator's follow-up (OLDNEW_QUAD): what a step reads of the channels off their quadratic forms'
+        // tables (rs/fold_pairs.rs `Quad`), against the node's channels' own; and a jump's photon node off the tables.
+        if std::env::var("OLDNEW_QUAD").is_ok() {
+            let mut quad = pairs.quad(plan, &run.lab);
+            eprintln!(
+                "OLDNEW-QUAD {name}: built in {:.3} s, {:.2} MB, {} pairs of contributions, {} table elements (4 tables a pair) at degree {}; against the channel pairs' {} table elements a Doppler order (H's {})",
+                quad.build_seconds,
+                quad.bytes as f64 / 1e6,
+                quad.pairs_len(),
+                quad.elements,
+                2 * degree,
+                kinds[2].1 + if pairs.noside { 0 } else { kinds[3].1 },
+                kinds[0].1 + if pairs.noside { 0 } else { kinds[1].1 }
+            );
+            let n = plan.n;
+            let mut worst = vec![[0.0f64; 3]; orders];
+            let (mut t_channels, mut t_quad, mut t_fill, mut t_h) = (vec![0.0; orders], vec![0.0; orders], 0.0, vec![0.0; orders]);
+            let (mut t_photon_exact, mut t_photon_table) = (0.0, vec![0.0; orders]);
+            let mut counted = vec![0.0; orders];
+            let mut taken = 0usize;
+            for i in 0..count {
+                let u = i as f64;
+                let (th, ph) = (0.9 * u + 0.3, 1.7 * u);
+                let v = if i % 2 == 0 { 1.0 } else { 3.0 } * speed;
+                let (r, kappa) = if walk.is_empty() {
+                    ([0.3 * (1.3 * u).sin(), 0.3 * (2.1 * u + 0.4).cos(), 1.0 * (0.7 * u + 1.1).sin()], [v * th.sin() * ph.cos(), v * th.sin() * ph.sin(), v * th.cos()])
+                } else {
+                    walk[i]
+                };
+                run.scene.point_into(r, kappa, &mut work.point);
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local, making);
+                work.out.contract(plan, &run.lab, &work.local, None, making);
+                let values = work.local.values.clone();
+                if !pairs.covers(plan, &values) {
+                    continue;
+                }
+                taken += 1;
+                let (ed, ea, eb) = crate::model::rs::fold::pairs::quadratic_of(&work.out, &run.lab, &quad.classes, n);
+                let top = |x: &[Vec<C64>]| x.iter().flat_map(|m| m.iter().map(|z| z.abs())).fold(0.0, f64::max);
+                let (td, ta, tb) = (top(&ed), top(&ea.iter().flatten().cloned().collect::<Vec<_>>()), top(&eb.iter().flatten().cloned().collect::<Vec<_>>()));
+                for o in 1..=orders {
+                    pairs.channels_off = true;
+                    pairs.contract(plan, &run.lab, &values, &mut table_out, making, o);
+                    quad.contract(&pairs, plan, &values, o);
+                    pairs.channels_off = false;
+                    let diff = |x: &[Vec<C64>], y: &[Vec<C64>]| x.iter().zip(y).flat_map(|(p, q)| p.iter().zip(q).map(|(a, b)| (*a - *b).abs())).fold(0.0, f64::max);
+                    let fa: Vec<Vec<C64>> = quad.a.iter().flatten().cloned().collect();
+                    let fb: Vec<Vec<C64>> = quad.b.iter().flatten().cloned().collect();
+                    let w = [diff(&quad.d, &ed) / td.max(1e-300), diff(&fa, &ea.iter().flatten().cloned().collect::<Vec<_>>()) / ta.max(1e-300), diff(&fb, &eb.iter().flatten().cloned().collect::<Vec<_>>()) / tb.max(1e-300)];
+                    for (x, y) in worst[o - 1].iter_mut().zip(w) {
+                        *x = x.max(y);
+                    }
+                    counted[o - 1] += quad.work;
+                    // Times: H alone, H + the channels (the node's route), H + the quadratic forms.
+                    t_h[o - 1] += least(&mut || {
+                        let mut vals = Values::default();
+                        run.scene.point_into(r, kappa, &mut work.point);
+                        run.rs.tweezer().values_into(&run.scene, &work.point, &mut vals);
+                        pairs.channels_off = true;
+                        pairs.contract(plan, &run.lab, &vals, &mut table_out, making, o);
+                        pairs.channels_off = false;
+                    });
+                    t_quad[o - 1] += least(&mut || {
+                        let mut vals = Values::default();
+                        run.scene.point_into(r, kappa, &mut work.point);
+                        run.rs.tweezer().values_into(&run.scene, &work.point, &mut vals);
+                        pairs.channels_off = true;
+                        pairs.contract(plan, &run.lab, &vals, &mut table_out, making, o);
+                        pairs.channels_off = false;
+                        quad.contract(&pairs, plan, &vals, o);
+                    });
+                    t_channels[o - 1] += least(&mut || {
+                        let mut vals = Values::default();
+                        run.scene.point_into(r, kappa, &mut work.point);
+                        run.rs.tweezer().values_into(&run.scene, &work.point, &mut vals);
+                        pairs.contract(plan, &run.lab, &vals, &mut table_out, making, o);
+                    });
+                    // A jump's photon node off the tables: the channels with their photon forms alone.
+                    t_photon_table[o - 1] += least(&mut || {
+                        let mut vals = Values::default();
+                        run.scene.point_into(r, kappa, &mut work.point);
+                        run.rs.tweezer().values_into(&run.scene, &work.point, &mut vals);
+                        pairs.contract(plan, &run.lab, &vals, &mut table_out, Making::PHOTONS, o);
+                    });
+                }
+                t_photon_exact += least(&mut || {
+                    run.scene.point_into(r, kappa, &mut work.point);
+                    run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making::PHOTONS);
+                    work.out.contract(plan, &run.lab, &work.local, None, Making::PHOTONS);
+                });
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local, making);
+                work.out.contract(plan, &run.lab, &work.local, None, making);
+                let mut node = run.template.clone();
+                t_fill += least(&mut || run.fill(&mut node, &work.out, (kicked, true), &mut work.jumps));
+            }
+            let k = taken.max(1) as f64;
+            eprintln!("OLDNEW-QUADT {name}: fill (the decay from the channels, the layout) {:.1} µs; a jump's photon node: the fold's {:.1} µs", t_fill / k, t_photon_exact / k);
+            for o in 0..orders {
+                eprintln!(
+                    "OLDNEW-QUADO {name} {} terms: H alone {:.1} µs; H + channels {:.1} µs; H + quadratic forms {:.1} µs ({:.3e} CMA counted); photon node off the tables {:.1} µs; quadratic forms against the node's channels' (over each kind's largest): D {:.2e}, A {:.2e}, B {:.2e}",
+                    o + 1,
+                    t_h[o] / k,
+                    t_channels[o] / k,
+                    t_quad[o] / k,
+                    counted[o] / k,
+                    t_photon_table[o] / k,
+                    worst[o][0],
+                    worst[o][1],
+                    worst[o][2]
+                );
+            }
+        }
         let k = inside.max(1) as f64;
         eprintln!("OLDNEW-COVER {name}: {inside} points within the tables' s, {outside} below them (their node the fold's own)");
         let calls = (inside * orders * (repeat + 1)).max(1) as f64;
@@ -287,13 +399,15 @@ fn oldnew_pairs() {
 fn split_by_parts(run: &mut Selected) -> Vec<Vec<usize>> {
     let n = run.rs.keep.len();
     let parts = run.rs.plan().parts().to_vec();
+    // Within the run's own exact blocks (tilt0's Δm parity): a state's block its old block and its fast part.
     let mut blocks: Vec<Vec<usize>> = Vec::new();
-    let mut seen: Vec<[i64; 2]> = Vec::new();
+    let mut seen: Vec<(usize, [i64; 2])> = Vec::new();
     for a in 0..n {
-        match seen.iter().position(|p| *p == parts[a]) {
+        let key = (run.block_of[a], parts[a]);
+        match seen.iter().position(|p| *p == key) {
             Some(i) => blocks[i].push(a),
             None => {
-                seen.push(parts[a]);
+                seen.push(key);
                 blocks.push(vec![a]);
             }
         }
@@ -425,5 +539,106 @@ fn oldnew_split() {
             work_w / k,
             work_s / k
         );
+    }
+}
+
+/// OLDNEW's budget check (the coordinator's 11-23 follow-up): the step with the quadrature's rule, the quotient's
+/// bandwidth and the cuts laid to a tolerance ε in place of the round-off (step.rs `QUAD_TOL`, tests alone). Per scene of
+/// OLDNEW_TOL_SCENES (`name=model@tau`) and model (whole, and split by K's fast parts where OLDNEW_TOL_SPLIT), a walk of
+/// OLDNEW_STEPS (80) steps at the round-off; per state and ε of OLDNEW_TOLS the step (the least of OLDNEW_REPEAT, 5) and its
+/// end against the round-off's: |Δκ|, |Δψ| over its norm, |Δ ln‖ψ‖²| (the survival), beside the step's own error (one step
+/// against its two halves, at the round-off).
+#[test]
+#[ignore]
+fn oldnew_tol() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (steps, repeat) = (env("OLDNEW_STEPS", 80), env("OLDNEW_REPEAT", 5));
+    let list = std::env::var("OLDNEW_TOL_SCENES").unwrap_or_else(|_| "PGC3D=ground@0.4741346189956611".to_string());
+    let tols: Vec<f64> = std::env::var("OLDNEW_TOLS").unwrap_or_else(|_| "1e-12,1e-9,1e-6,1e-4".to_string()).split(',').map(|x| x.parse().unwrap()).collect();
+    let set = |x: f64| crate::step::QUAD_TOL.store(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    let least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..repeat)
+            .map(|_| {
+                let clock = std::time::Instant::now();
+                f();
+                clock.elapsed().as_secs_f64() * 1e6
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for entry in list.split(',') {
+        let (name, rest) = entry.split_once('=').unwrap();
+        let (_, tau) = rest.split_once('@').unwrap();
+        let tau: f64 = tau.parse().unwrap();
+        let request = request_of(name);
+        let keep: Vec<usize> = (0..crate::request::GROUND).collect();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let reference = crate::solve::alone(crate::solve::chief(&request));
+        let mut run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let split = std::env::var("OLDNEW_TOL_SPLIT").is_ok();
+        if split {
+            split_by_parts(&mut run);
+        }
+        let chief = crate::solve::chief(&request);
+        let speed = (crate::units::KT_PER_UK * request.temperature_uk / run.hbar_over_mass()).sqrt();
+        let attempt = |t: &Trajectory, tau: f64| Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &Anywhere));
+        set(0.0);
+        let mut states = Vec::new();
+        let mut t = Trajectory::new(&run, chief, [0.1, 0.2, 0.3], [-speed, 0.7 * speed, -1.2 * speed], 7, 203);
+        for _ in 0..steps {
+            states.push(t.clone());
+            let Ok(s) = attempt(&t, tau) else { break };
+            t = s.end;
+        }
+        let norm_psi = |psi: &[C64]| norm_sqr(psi).sqrt();
+        let dpsi = |x: &Trajectory, y: &Trajectory| {
+            let (nx, ny) = (norm_psi(&x.psi), norm_psi(&y.psi));
+            x.psi.iter().zip(y.psi.iter()).map(|(u, v)| (*u * (1.0 / nx) - *v * (1.0 / ny)).norm_sqr()).sum::<f64>().sqrt()
+        };
+        let dk = |x: &Trajectory, y: &Trajectory| (0..3).map(|c| (x.kappa[c] - y.kappa[c]).powi(2)).sum::<f64>().sqrt();
+        let dn = |x: &Trajectory, y: &Trajectory| ((norm_sqr(&x.psi)).ln() - (norm_sqr(&y.psi)).ln()).abs();
+        // The round-off's: its time, its ends, the step's own error.
+        let (mut t0, mut ek, mut ep) = (0.0, 0.0f64, 0.0f64);
+        let mut ends = Vec::new();
+        for s in &states {
+            let a = attempt(s, tau).unwrap();
+            t0 += least(&mut || {
+                std::hint::black_box(attempt(s, tau).is_ok());
+            });
+            if a.made.iter().all(|m| m.kick.is_none()) {
+                if let Ok(h1) = attempt(s, 0.5 * tau) {
+                    if let Ok(h2) = attempt(&h1.end, 0.5 * tau) {
+                        if h1.made.iter().chain(&h2.made).all(|m| m.kick.is_none()) {
+                            ek = ek.max(dk(&a.end, &h2.end));
+                            ep = ep.max(dpsi(&a.end, &h2.end));
+                        }
+                    }
+                }
+            }
+            ends.push(a);
+        }
+        let k = states.len().max(1) as f64;
+        eprintln!("OLDNEW-TOL {name}{} tau {tau}: at the round-off a step {:.1} µs; the step's own error κ {ek:.2e}, ψ {ep:.2e}; over {} states", if split { " split" } else { "" }, t0 / k, states.len());
+        for &eps in &tols {
+            set(eps);
+            let (mut te, mut mk, mut mp, mut mn, mut moved) = (0.0, 0.0f64, 0.0f64, 0.0f64, 0usize);
+            for (s, a0) in states.iter().zip(&ends) {
+                let Ok(a) = attempt(s, tau) else { continue };
+                te += least(&mut || {
+                    std::hint::black_box(attempt(s, tau).is_ok());
+                });
+                // The same jumps both ways: the ends compare.
+                if a.made.iter().filter(|m| m.kick.is_some()).count() == a0.made.iter().filter(|m| m.kick.is_some()).count() {
+                    mk = mk.max(dk(&a.end, &a0.end));
+                    mp = mp.max(dpsi(&a.end, &a0.end));
+                    mn = mn.max(dn(&a.end, &a0.end));
+                } else {
+                    moved += 1;
+                }
+            }
+            eprintln!("OLDNEW-TOL {name}{} ε {eps:.0e}: a step {:.1} µs ({:.2} of the round-off's); against the round-off's end κ {mk:.2e}, ψ {mp:.2e}, ln N {mn:.2e}; {moved} steps whose jumps moved", if split { " split" } else { "" }, te / k, te / t0);
+        }
+        set(0.0);
     }
 }

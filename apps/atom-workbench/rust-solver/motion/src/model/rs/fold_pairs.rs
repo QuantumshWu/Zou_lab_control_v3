@@ -82,6 +82,9 @@ pub(crate) struct Pairs {
     /// The direct entries spanned per output, and the switch that takes them instead of the entries one by one.
     directs: Vec<Direct>,
     pub spanned: bool,
+    /// A check's switch: no channel (their pairs and direct entries) made -- what the step reads of them taken off the
+    /// quadratic forms' tables instead (`Quad`).
+    pub channels_off: bool,
     zs: Vec<Basis>,
     ws: Vec<Basis>,
     pairs: Vec<PairTable>,
@@ -576,7 +579,7 @@ impl Pairs {
                 Direct { h, out, places, atoms: keys.iter().zip(coords).map(|(&(piece, term, coefficient), coords)| Atom { piece, term, coefficient, coords }).collect(), basis, which }
             })
             .collect();
-        Pairs { parts: [0.0; 3], degree, orders, pieces, dropped, split: false, noside: false, directs, spanned: false, zs, ws, pairs, gaps, untabled, build_seconds: clock.elapsed().as_secs_f64(), bytes, sizes, e_rest: e0, e_slope, kinds, phi, psi, de: Vec::new(), work: 0.0 }
+        Pairs { parts: [0.0; 3], degree, orders, pieces, dropped, split: false, noside: false, directs, spanned: false, channels_off: false, zs, ws, pairs, gaps, untabled, build_seconds: clock.elapsed().as_secs_f64(), bytes, sizes, e_rest: e0, e_slope, kinds, phi, psi, de: Vec::new(), work: 0.0 }
     }
 
     /// Whether a point's intensity lies within the tables (else its node is the fold's own, `Local::evaluate`).
@@ -732,6 +735,9 @@ impl Pairs {
             if pt.h && !(making.model && making.effective) {
                 continue;
             }
+            if !pt.h && self.channels_off {
+                continue;
+            }
             // (A check's: the pairs on K's sideband blocks left out, their share read against the node.)
             if self.noside && plan.blocks[grouping.zs[pt.z].block].sideband.is_some() {
                 continue;
@@ -829,7 +835,7 @@ impl Pairs {
         };
         if self.spanned {
             for d in &self.directs {
-                if (d.h && !(making.model && making.effective)) || (!d.h && (!making.model || (d.which == 1 && !making.kicks))) {
+                if (d.h && !(making.model && making.effective)) || (!d.h && (self.channels_off || !making.model || (d.which == 1 && !making.kicks))) {
                     continue;
                 }
                 let mut c = vec![(C64::ZERO, [C64::ZERO; 3]); d.basis.len()];
@@ -951,4 +957,371 @@ impl Plan {
     pub(crate) fn parts(&self) -> &[[i64; 2]] {
         &self.parts
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// OLDNEW follow-up (the coordinator's 11-23 question): what a step reads of the channels -- the decay ΣL†L, the hazard
+// ⟨ψ|ΣL†L|ψ⟩ and the scattering moments Σ Im⟨u|∇u⟩, Σ Re⟨∇u|∇u⟩ -- are quadratic forms of the channels, so they can be
+// tabled as pairs of the channels' own tables, the single channels then made at a jump alone. Per photon class (a
+// channel output's fast index, its `which` 0) and emission axis, its contributions: each channel pair's tables (k′, k, J)
+// and each spanned direct basis vector; per ordered pair (p, q) of one class and axis with rows in common, four tables
+// Q = T_p†T_q, Q^s = T_p†T_q′, Q^t = T_p′†T_q, Q^ss = T_p′†T_q′ over those rows, on cols_p × cols_q, per piece of s at
+// twice the linear tables' degree (the products of two of their pieces, exactly). At a point, per class
+//   D = Σ c_p* c_q Q,   A_i = Σ c_p* (∂_i c_q Q + c_q ∂_i s Q^s),
+//   B_ij = Σ ∂_i c_p* ∂_j c_q Q + ∂_i c_p* c_q ∂_j s Q^s + c_p* ∂_j c_q ∂_i s Q^t + c_p* c_q ∂_i s ∂_j s Q^ss,
+// so that the decay is −(i/2) Σ_class D, the class's weight ψ†Dψ, its mean Im ψ†A_iψ, its second moment Re ψ†B_ijψ.
+
+/// A contribution to a class's channel on one axis (above).
+#[derive(Clone, Debug)]
+enum Source {
+    Table { pair: usize, kp: usize, k: usize, jj: usize },
+    Direct { d: usize, k: usize, values: Vec<C64> },
+}
+
+#[derive(Clone, Debug)]
+struct Contribution {
+    source: Source,
+    class: usize,
+    axis: usize,
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+}
+
+/// An ordered pair of contributions (above): the rows in common (their places in each), and the four tables' Chebyshev
+/// coefficients [piece][table][d][j1·|cols_q| + j2].
+#[derive(Clone, Debug)]
+struct QuadPair {
+    p: usize,
+    q: usize,
+    coef: Vec<C64>,
+}
+
+/// The quadratic forms' tables (above), and at a point per class D, A_i, B_ij (n × n each).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Quad {
+    contributions: Vec<Contribution>,
+    pub classes: Vec<[i64; 2]>,
+    pairs: Vec<QuadPair>,
+    degree: usize,
+    pub bytes: usize,
+    pub elements: usize,
+    pub build_seconds: f64,
+    pub d: Vec<Vec<C64>>,
+    pub a: Vec<[Vec<C64>; 3]>,
+    pub b: Vec<[Vec<C64>; 6]>,
+    pub work: f64,
+}
+
+/// The six (i ≤ j) pairs of axes.
+pub(crate) const PAIRS6: [(usize, usize); 6] = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
+
+impl Pairs {
+    /// A table contribution's value and slope at x ∈ [−1, 1] of a piece (rows × cols, contiguous).
+    fn table_at(&self, pair: usize, kp: usize, k: usize, jj: usize, at: usize, x: f64, out: &mut Vec<C64>, slope: &mut Vec<C64>) {
+        let pt = &self.pairs[pair];
+        let (rw, rz, per, m) = (self.ws[pt.w].rank, self.zs[pt.z].rank, pt.rows * pt.cols, self.degree + 1);
+        let [pa, pb] = self.pieces[at];
+        let (mut t, mut dt) = (Vec::new(), Vec::new());
+        chebyshev(0.5 * (x + 1.0), self.degree, &mut t, &mut dt);
+        let base = (((at * rw + kp) * rz + k) * self.orders + jj) * m * per;
+        out.clear();
+        out.resize(per, C64::ZERO);
+        slope.clear();
+        slope.resize(per, C64::ZERO);
+        for d in 0..m {
+            for e in 0..per {
+                let z = pt.coef[base + d * per + e];
+                out[e] += z * t[d];
+                slope[e] += z * (dt[d] / (pb - pa));
+            }
+        }
+    }
+
+    /// The quadratic forms' tables of these tables (above).
+    pub(crate) fn quad(&self, plan: &Plan, grouping: &Grouping) -> Quad {
+        let clock = std::time::Instant::now();
+        let n = plan.n;
+        let mut classes: Vec<[i64; 2]> = Vec::new();
+        let mut class_of = |fast: [i64; 2]| -> usize {
+            classes.iter().position(|c| *c == fast).unwrap_or_else(|| {
+                classes.push(fast);
+                classes.len() - 1
+            })
+        };
+        let mut contributions: Vec<Contribution> = Vec::new();
+        for (pi, pt) in self.pairs.iter().enumerate() {
+            if pt.h {
+                continue;
+            }
+            let pair = &grouping.j_pairs[pt.at];
+            let (emission, fast, which, _, _) = &grouping.channel_outputs[pair.out];
+            if *which != 0 || (self.noside && plan.blocks[grouping.zs[pt.z].block].sideband.is_some()) {
+                continue;
+            }
+            let class = class_of(*fast);
+            let (rw, rz) = (self.ws[pt.w].rank, self.zs[pt.z].rank);
+            for kp in 0..rw {
+                for k in 0..rz {
+                    for jj in 0..self.orders {
+                        contributions.push(Contribution { source: Source::Table { pair: pi, kp, k, jj }, class, axis: *emission, rows: grouping.ws[pt.w].index.clone(), cols: grouping.zs[pt.z].index.clone() });
+                    }
+                }
+            }
+        }
+        for (di, d) in self.directs.iter().enumerate() {
+            if d.h || d.which != 0 {
+                continue;
+            }
+            let (emission, fast, _, _, _) = &grouping.channel_outputs[d.out];
+            let class = class_of(*fast);
+            let list = &grouping.channel_lists[d.out];
+            let mut rows: Vec<usize> = d.places.iter().map(|&p| list[p] as usize / n).collect();
+            let mut cols: Vec<usize> = d.places.iter().map(|&p| list[p] as usize % n).collect();
+            rows.sort_unstable();
+            rows.dedup();
+            cols.sort_unstable();
+            cols.dedup();
+            for (k, b) in d.basis.iter().enumerate() {
+                let mut values = vec![C64::ZERO; rows.len() * cols.len()];
+                for (&p, z) in d.places.iter().zip(b) {
+                    let x = list[p] as usize;
+                    let (i, j) = (rows.binary_search(&(x / n)).unwrap(), cols.binary_search(&(x % n)).unwrap());
+                    values[i * cols.len() + j] += *z;
+                }
+                contributions.push(Contribution { source: Source::Direct { d: di, k, values }, class, axis: *emission, rows: rows.clone(), cols: cols.clone() });
+            }
+        }
+        // The ordered pairs of one class and axis with rows in common, and their tables piece by piece.
+        let degree = 2 * self.degree;
+        let m = degree + 1;
+        let xs: Vec<f64> = (0..m).map(|i| (std::f64::consts::PI * (i as f64 + 0.5) / m as f64).cos()).collect();
+        let mut pairs = Vec::new();
+        let (mut tp, mut sp, mut tq, mut sq) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let value = |c: &Contribution, at: usize, x: f64, out: &mut Vec<C64>, slope: &mut Vec<C64>| match &c.source {
+            Source::Table { pair, kp, k, jj } => self.table_at(*pair, *kp, *k, *jj, at, x, out, slope),
+            Source::Direct { values, .. } => {
+                out.clear();
+                out.extend_from_slice(values);
+                slope.clear();
+                slope.resize(values.len(), C64::ZERO);
+            }
+        };
+        for (p, cp) in contributions.iter().enumerate() {
+            for (q, cq) in contributions.iter().enumerate() {
+                if cp.class != cq.class || cp.axis != cq.axis {
+                    continue;
+                }
+                let common: Vec<(usize, usize)> = cp.rows.iter().enumerate().filter_map(|(i, r)| cq.rows.iter().position(|x| x == r).map(|j| (i, j))).collect();
+                if common.is_empty() {
+                    continue;
+                }
+                let (c1, c2) = (cp.cols.len(), cq.cols.len());
+                let per = c1 * c2;
+                let mut coef = vec![C64::ZERO; self.pieces.len() * 4 * m * per];
+                for at in 0..self.pieces.len() {
+                    let mut samples = vec![C64::ZERO; 4 * m * per];
+                    for (ni, &x) in xs.iter().enumerate() {
+                        value(cp, at, x, &mut tp, &mut sp);
+                        value(cq, at, x, &mut tq, &mut sq);
+                        for j1 in 0..c1 {
+                            for j2 in 0..c2 {
+                                let mut acc = [C64::ZERO; 4];
+                                for &(i1, i2) in &common {
+                                    let (a, a1) = (tp[i1 * c1 + j1].conj(), sp[i1 * c1 + j1].conj());
+                                    let (b, b1) = (tq[i2 * c2 + j2], sq[i2 * c2 + j2]);
+                                    acc[0] += a * b;
+                                    acc[1] += a * b1;
+                                    acc[2] += a1 * b;
+                                    acc[3] += a1 * b1;
+                                }
+                                for (kind, v) in acc.iter().enumerate() {
+                                    samples[(kind * m + ni) * per + j1 * c2 + j2] = *v;
+                                }
+                            }
+                        }
+                    }
+                    for kind in 0..4 {
+                        for d in 0..m {
+                            let scale = if d == 0 { 1.0 / m as f64 } else { 2.0 / m as f64 };
+                            for (ni, x) in xs.iter().enumerate() {
+                                let c = (d as f64 * x.acos()).cos() * scale;
+                                for e in 0..per {
+                                    coef[((at * 4 + kind) * m + d) * per + e] += samples[(kind * m + ni) * per + e] * c;
+                                }
+                            }
+                        }
+                    }
+                }
+                pairs.push(QuadPair { p, q, coef });
+            }
+        }
+        let elements = pairs.iter().map(|x| 4 * contributions[x.p].cols.len() * contributions[x.q].cols.len()).sum();
+        let bytes = pairs.iter().map(|x| x.coef.len() * 16).sum();
+        let nc = classes.len();
+        Quad {
+            contributions,
+            classes,
+            pairs,
+            degree,
+            bytes,
+            elements,
+            build_seconds: clock.elapsed().as_secs_f64(),
+            d: vec![vec![C64::ZERO; n * n]; nc],
+            a: (0..nc).map(|_| std::array::from_fn(|_| vec![C64::ZERO; n * n])).collect(),
+            b: (0..nc).map(|_| std::array::from_fn(|_| vec![C64::ZERO; n * n])).collect(),
+            work: 0.0,
+        }
+    }
+}
+
+impl Quad {
+    /// Its pairs of contributions.
+    pub(crate) fn pairs_len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// Per class D, A_i, B_ij at the point the tables' coordinates were last made at (`Pairs::contract` just before,
+    /// with the same values `v`): the contributions' coefficients per column, then every pair's four tables at s.
+    pub(crate) fn contract(&mut self, pairs: &Pairs, plan: &Plan, v: &Values, orders: usize) {
+        let n = plan.n;
+        let mut work = 0.0;
+        for x in self.d.iter_mut().chain(self.a.iter_mut().flatten()).chain(self.b.iter_mut().flatten()) {
+            x.fill(C64::ZERO);
+        }
+        let s = plan.intensity.first().map_or(0.0, |&f| v.factors[f].0.re);
+        let ds: [f64; 3] = plan.intensity.first().map_or([0.0; 3], |&f| v.factors[f].1.map(|d| d.re));
+        let at = pairs.piece_of(s);
+        let [pa, pb] = pairs.pieces[at];
+        let x = (2.0 * s - pa - pb) / (pb - pa);
+        let (mut t, mut dt) = (Vec::new(), Vec::new());
+        chebyshev(0.5 * (x + 1.0), self.degree, &mut t, &mut dt);
+        let m = self.degree + 1;
+        // The coefficients per contribution and column (and their gradients); None where its order is not taken.
+        let factor = |p: usize, term: usize| -> (C64, [C64; 3]) {
+            let (f, sc) = plan.terms[p][term];
+            let (x, g) = v.factors[f];
+            (x * sc, g.map(|d| d * sc))
+        };
+        let coeffs: Vec<Option<Vec<(C64, [C64; 3])>>> = self
+            .contributions
+            .iter()
+            .map(|c| match &c.source {
+                Source::Table { pair, kp, k, jj } => {
+                    if *jj >= orders {
+                        return None;
+                    }
+                    let pt = &pairs.pairs[*pair];
+                    let a = pairs.phi[pt.w][*kp];
+                    Some(pairs.psi[pt.z][*jj][*k].iter().map(|b| (a.0 * b.0, std::array::from_fn(|i| a.1[i] * b.0 + a.0 * b.1[i]))).collect())
+                }
+                Source::Direct { d, k, .. } => {
+                    let cols = c.cols.len();
+                    let dir = &pairs.directs[*d];
+                    let mut acc = (C64::ZERO, [C64::ZERO; 3]);
+                    for at in &dir.atoms {
+                        let kk = v.coefficients[at.coefficient];
+                        if kk == 0.0 {
+                            continue;
+                        }
+                        let (x, dx) = factor(at.piece, at.term);
+                        acc.0 += at.coords[*k] * x * kk;
+                        for i in 0..3 {
+                            acc.1[i] += at.coords[*k] * dx[i] * kk;
+                        }
+                    }
+                    Some(vec![acc; cols])
+                }
+            })
+            .collect();
+        let mut q4: [Vec<C64>; 4] = Default::default();
+        for pr in &self.pairs {
+            let (Some(cp), Some(cq)) = (&coeffs[pr.p], &coeffs[pr.q]) else { continue };
+            let (ap, aq) = (&self.contributions[pr.p], &self.contributions[pr.q]);
+            let (c1, c2) = (ap.cols.len(), aq.cols.len());
+            let per = c1 * c2;
+            for (kind, q) in q4.iter_mut().enumerate() {
+                q.clear();
+                q.resize(per, C64::ZERO);
+                let base = (at * 4 + kind) * m * per;
+                for d in 0..m {
+                    let td = t[d];
+                    for (o, z) in q.iter_mut().zip(&pr.coef[base + d * per..base + (d + 1) * per]) {
+                        *o += *z * td;
+                    }
+                }
+            }
+            work += (4 * m * per) as f64 * 0.5;
+            let cls = ap.class;
+            for j1 in 0..c1 {
+                let (u, du) = (cp[j1].0.conj(), cp[j1].1.map(C64::conj));
+                for j2 in 0..c2 {
+                    let (w, dw) = cq[j2];
+                    let e = j1 * c2 + j2;
+                    let (q0, qs, qt, qss) = (q4[0][e], q4[1][e], q4[2][e], q4[3][e]);
+                    let place = ap.cols[j1] * n + aq.cols[j2];
+                    self.d[cls][place] += u * w * q0;
+                    for i in 0..3 {
+                        self.a[cls][i][place] += u * (dw[i] * q0 + w * qs * ds[i]);
+                    }
+                    for (r, &(i, j)) in PAIRS6.iter().enumerate() {
+                        self.b[cls][r][place] += du[i] * dw[j] * q0 + du[i] * w * qs * ds[j] + u * dw[j] * qt * ds[i] + u * w * qss * (ds[i] * ds[j]);
+                    }
+                    work += 20.0;
+                }
+            }
+        }
+        self.work = work;
+    }
+}
+
+/// Per class (the order of `Quad::classes`) D, A_i, B_ij from a contraction's channel outputs (its `which` 0): each
+/// class's channels summed over their keys per emission axis, then Σ_axis L†L, L†∂_iL, ∂_iL†∂_jL.
+pub(crate) fn quadratic_of(out: &Out, grouping: &Grouping, classes: &[[i64; 2]], n: usize) -> (Vec<Vec<C64>>, Vec<[Vec<C64>; 3]>, Vec<[Vec<C64>; 6]>) {
+    let nc = classes.len();
+    assert!(grouping.channel_outputs.iter().all(|o| o.0 < 3), "three emission axes");
+    let mut l: Vec<[[Vec<C64>; 4]; 3]> = (0..nc).map(|_| std::array::from_fn(|_| std::array::from_fn(|_| vec![C64::ZERO; n * n]))).collect();
+    for (o, c) in out.channels.iter().enumerate() {
+        let (emission, fast, which, _, _) = &grouping.channel_outputs[o];
+        if *which != 0 {
+            continue;
+        }
+        let Some(cls) = classes.iter().position(|x| x == fast) else { continue };
+        for (k, &x) in grouping.channel_lists[o].iter().enumerate() {
+            let x = x as usize;
+            l[cls][*emission][0][x] += c.value[k];
+            for i in 0..3 {
+                l[cls][*emission][i + 1][x] += c.gradient[i][k];
+            }
+        }
+    }
+    let mut d = vec![vec![C64::ZERO; n * n]; nc];
+    let mut a: Vec<[Vec<C64>; 3]> = (0..nc).map(|_| std::array::from_fn(|_| vec![C64::ZERO; n * n])).collect();
+    let mut b: Vec<[Vec<C64>; 6]> = (0..nc).map(|_| std::array::from_fn(|_| vec![C64::ZERO; n * n])).collect();
+    // (X†Y)[j1, j2] = Σ_i X[i, j1]* Y[i, j2].
+    let product = |x: &[C64], y: &[C64], out: &mut [C64]| {
+        for i in 0..n {
+            for j1 in 0..n {
+                let u = x[i * n + j1].conj();
+                if u == C64::ZERO {
+                    continue;
+                }
+                for j2 in 0..n {
+                    out[j1 * n + j2] += u * y[i * n + j2];
+                }
+            }
+        }
+    };
+    for cls in 0..nc {
+        for ax in 0..3 {
+            let m = &l[cls][ax];
+            product(&m[0], &m[0], &mut d[cls]);
+            for i in 0..3 {
+                product(&m[0], &m[i + 1], &mut a[cls][i]);
+            }
+            for (r, &(i, j)) in PAIRS6.iter().enumerate() {
+                product(&m[i + 1], &m[j + 1], &mut b[cls][r]);
+            }
+        }
+    }
+    (d, a, b)
 }
