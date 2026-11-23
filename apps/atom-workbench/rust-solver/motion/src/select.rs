@@ -1417,8 +1417,12 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
     // The loss: L(t(1 + x)) − L(t), x at its end, of its own sign.
     let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| course.loss_shifted(k, end(x, *n, reach).copysign(x.value)).abs());
     // T per lab axis: δE_a = δP_a (1 − e^{−α t})/α, α = (H_a − Ė_a)/E_a, the rates over the paths' forgotten stretches
-    // (`Stationary`, the time's own windows where none is); the total T's, the axes' mean, per path (its spread the sum's
-    // own).
+    // (`Stationary`, the time's own windows where none is); δT_a = 2 δE_a/k_B, E_a = k_B T_a/2 the axis's kinetic energy
+    // (one degree of freedom: ⟨m v_a²/2⟩ = k_B T_a/2; H_a and δP_a are its rates, d(E_a/ħ)/dt); the total T's, the axes'
+    // mean, per path (its spread the sum's own). (Until 2026-11-23 E_a was taken as k_B T_a: δT half what the energy
+    // rates make it where the axis is not yet at its steady state -- SAT_03's G 0.16 µK at 20 µs, its pilot's own T_z
+    // rising 0.65 µK there where its paths' heating made 0.30, the analytic reference's 0.24-0.27 µK where they made
+    // 0.14; at the steady state δT/T = δP/H, which the factor leaves alone.)
     let (mut temperature, mut temperature_total) = ([0.0; 3], 0.0);
     if let Some(at) = course.temperature[k] {
         let kt = crate::units::KT_PER_UK;
@@ -1431,15 +1435,15 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
             let weight: f64 = own.weights.iter().sum();
             let heating: [f64; 3] = std::array::from_fn(|a| own.heating.iter().zip(&own.weights).map(|(h, w)| w * h[a]).sum::<f64>() / weight);
             let held: [f64; 3] = std::array::from_fn(|a| {
-                let warming = kt * course.temperature_slope(k, a).unwrap_or(0.0);
-                let energy = kt * at[a];
+                let warming = 0.5 * kt * course.temperature_slope(k, a).unwrap_or(0.0);
+                let energy = 0.5 * kt * at[a];
                 let alpha = if energy > 0.0 { larger((heating[a] - warming) / energy, 0.0) } else { 0.0 };
                 if alpha * t > 0.0 { -(-alpha * t).exp_m1() / alpha } else { t }
             });
             for a in 0..3 {
-                temperature[a] = end(&paths::Mean::weighted(&own.rates.iter().map(|r| r[a]).collect::<Vec<_>>(), &own.weights), paths, reach) * held[a] / kt;
+                temperature[a] = end(&paths::Mean::weighted(&own.rates.iter().map(|r| r[a]).collect::<Vec<_>>(), &own.weights), paths, reach) * held[a] * 2.0 / kt;
             }
-            let each: Vec<f64> = own.rates.iter().map(|p| (0..3).map(|a| p[a] * held[a]).sum::<f64>() / (3.0 * kt)).collect();
+            let each: Vec<f64> = own.rates.iter().map(|p| (0..3).map(|a| p[a] * held[a]).sum::<f64>() * 2.0 / (3.0 * kt)).collect();
             temperature_total = end(&paths::Mean::weighted(&each, &own.weights), paths, reach);
         }
     }

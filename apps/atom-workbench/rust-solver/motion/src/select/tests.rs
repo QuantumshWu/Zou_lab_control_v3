@@ -106,9 +106,10 @@ fn select_the_direct_part_at_the_paths_statistics() {
 /// The motion's errors by hand (module documentation, # The motion; `motion_at`), every path alike (no spread): one
 /// window to 100 µs, the reference's heating H = 0.01 rad/µs² on every axis and the candidate's energy rate's
 /// difference δP = 0.001 on x alone, the force's difference 2 on z; the escape's x = 0.1; at t = 50 µs a loss rising by
-/// 0.002/µs, T = 10 µK on every axis. An axis at its steady state (Ṫ = 0) relaxes at α = H/E: its δT/T = δP/H = 0.1, so
-/// the total's error is 0.1 × 10/3 µK; an axis heating at H (Ṫ = H/k_B: α = 0) takes δP t/k_B; the loss x t L̇ = 0.01;
-/// the push (ħ/m)·2, the mean velocity that over min(t, 1/ω).
+/// 0.002/µs, T = 10 µK on every axis. An axis's kinetic energy is E = k_B T/2 (one degree of freedom); one at its steady
+/// state (Ṫ = 0) relaxes at α = H/E: its δT/T = δP/H = 0.1 at long times, so the total's error is 0.1 × 10/3 µK there; an
+/// axis heating at H (Ṫ = 2H/k_B: α = 0) takes δT = 2 δP t/k_B; the loss L(t(1 + x)) − L(t) = 0.01 on the course's
+/// line; the push (ħ/m)·2, the mean velocity that over min(t, 1/ω).
 #[test]
 fn select_the_motion_by_hand() {
     let kt = crate::units::KT_PER_UK;
@@ -127,15 +128,15 @@ fn select_the_motion_by_hand() {
     let hm = 7.3e-4;
     let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05], halves: None, push: vec![] };
     let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
-    let e = 10.0 * kt;
+    let e = 0.5 * 10.0 * kt;
     let alpha = 0.01 / e;
-    let expected = 1e-3 * (-(-alpha * 50.0).exp_m1()) / alpha / kt / 3.0;
+    let expected = 1e-3 * (-(-alpha * 50.0).exp_m1()) / alpha * 2.0 / kt / 3.0;
     assert!((steady.temperature_total - expected).abs() <= 1e-12 * expected, "{} {expected}", steady.temperature_total);
     assert!((steady.loss - 0.1 * 50.0 * 0.002).abs() < 1e-15, "{}", steady.loss);
     assert!((steady.push[2] - hm * 2.0).abs() < 1e-18 && (steady.velocity[2] - hm * 2.0 * 20.0).abs() < 1e-15, "{:?} {:?}", steady.push, steady.velocity);
-    // Heating at H: Ṫ = H/k_B, so α = 0 and the response is δP t/k_B.
-    let heated = motion_at(&judged, &[(0.0, 100.0)], &course(0.01 / kt), 1, hm, Reach::Upper).expect("read");
-    let expected = 1e-3 * 50.0 / kt / 3.0;
+    // Heating at H: Ṫ = 2H/k_B, so α = 0 and the response is 2 δP t/k_B.
+    let heated = motion_at(&judged, &[(0.0, 100.0)], &course(0.02 / kt), 1, hm, Reach::Upper).expect("read");
+    let expected = 1e-3 * 50.0 * 2.0 / kt / 3.0;
     assert!((heated.temperature_total - expected).abs() <= 1e-9 * expected, "{} {expected}", heated.temperature_total);
     assert_eq!(motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 0, hm, Reach::Upper), None, "none at t = 0");
 }
