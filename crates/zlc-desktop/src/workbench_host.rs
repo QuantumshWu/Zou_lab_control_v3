@@ -285,6 +285,15 @@ fn origin(text: &str) -> Origin { if text == "operator" || text.is_empty() { Ori
 
 fn refused(message: String) -> zlc_plugin_host::CallError { zlc_plugin_host::CallError::new(zlc_plugin_host::ErrorKind::Refused, message) }
 
+/// A draft query its plugin's code did not answer: its failure is of a kind only its host gives a
+/// query -- refused, timeout, lost, cancelled: its lane full or its instance releasing, expired,
+/// its channel gone (PLUGIN_PROTOCOL §7: a query's own code's go out as failed) -- or the host no
+/// longer holds its instance (`held`: lost, and not said yet). Any other failure is its code's answer.
+fn unanswered(error: &zlc_plugin_host::CallError, held: bool) -> bool {
+    use zlc_plugin_host::ErrorKind::{Cancelled, Lost, Refused, Timeout};
+    !held || matches!(error.kind, Refused | Timeout | Lost | Cancelled)
+}
+
 /// `run.figure` (PLUGIN_PROTOCOL §5): the run's figure archive, and its image
 /// when asked, written inside its run directory; `{archive, image}`.
 /// A path a run names, inside its run directory (relative ones are taken from it).
@@ -731,8 +740,11 @@ impl Plugins for Builtin {
             }
         }
         let instance = instance.to_owned();
-        let started = self.spawn("query", move |host| Event::Answered { ticket,
-            result: host.call(&instance, "query", params, CALL).map(|reply| reply.value).map_err(|error| error.to_string()) });
+        let started = self.spawn("query", move |host| match host.call(&instance, "query", params, CALL) {
+            Ok(reply) => Event::Answered { ticket, result: Ok(reply.value) },
+            Err(error) if unanswered(&error, host.descriptor(&instance).is_some()) => Event::Unanswered { ticket, error: error.to_string() },
+            Err(error) => Event::Answered { ticket, result: Err(error.to_string()) },
+        });
         if let Err(error) = started { self.0.borrow_mut().events.push(Event::Answered { ticket, result: Err(error) }); }
     }
     fn call(&mut self, instance: &str, ticket: u64, op: &str, params: &Value) {
@@ -981,3 +993,20 @@ pub fn stop_camera(workbench: &mut Workbench, builtin: &Builtin, origin: &Origin
 #[cfg(test)]
 #[path = "workbench_host_fit_path.rs"]
 mod fit_path;
+
+#[cfg(test)]
+mod tests {
+    /// A draft query is not answered by a failure of its host's kinds, and by any failure once the
+    /// host no longer holds its instance; every other kind is its code's answer.
+    #[test]
+    fn a_query_is_unanswered_by_its_hosts_kinds_or_a_lost_instance() {
+        let kinds = [("refused", true), ("timeout", true), ("lost", true), ("cancelled", true), ("invalid", false), ("failed", false),
+                     ("stale_run", false), ("unknown_op", false), ("not_claimed", false)];
+        for (kind, not_answered) in kinds {
+            let error = zlc_plugin_host::CallError::from_wire(&serde_json::json!({"kind": kind, "message": "m"}));
+            assert_eq!(error.kind.name(), kind);
+            assert_eq!(super::unanswered(&error, true), not_answered, "{kind}");
+            assert!(super::unanswered(&error, false), "{kind}: its instance is no longer held");
+        }
+    }
+}

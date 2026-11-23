@@ -166,7 +166,7 @@ impl Workbench {
         self.settling = Some(Settling::Restart { device: id.to_owned(), port: port.to_owned() });
         self.settling_since = Some(std::time::Instant::now());
         self.settle();
-        self.bench_changed();
+        self.bench_changed(host);
         true
     }
 }

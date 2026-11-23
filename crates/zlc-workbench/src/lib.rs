@@ -50,7 +50,10 @@ pub trait Plugins {
     /// Open a device instance (`context.simulation` for shared-world types) or a node instance.
     fn open(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value);
     fn close(&mut self, instance: &str);
-    /// A pure draft query answered by the node's own process (`declare_outputs`, `admit_source`, ...).
+    /// A pure draft query answered by the node's own process (`declare_outputs`, `admit_source`, ...):
+    /// its code's answer, or failure, completes as [`Event::Answered`]; a query its code did not
+    /// answer (refused, expired, timed out, lost, cancelled, or its instance no longer held by the
+    /// plugin host) as [`Event::Unanswered`].
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value);
     /// A standard device op (`fields`, `values`, `tune`, `snapshot`) on an open instance. `snapshot`
     /// is answered within [`SNAPSHOT_WAIT`]: a device that has not answered by then is answered as
@@ -113,9 +116,14 @@ pub enum Event {
     /// port that would not open on its way (PLUGIN_PROTOCOL §7 `serial_faults`; [`Event::met_serial_faults`]).
     SerialFaults { instance: String, faults: Vec<SerialFault>, event: Box<Event> },
     /// What an open device states of itself changed (its trigger lanes, what it holds): the drafts
-    /// that name devices are asked again.
+    /// that name devices are checked again.
     Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
+    /// A query its plugin's code did not answer: refused before it ran (a full queue, an instance
+    /// still releasing), expired or timed out, its channel lost or closing, or its instance no
+    /// longer held by the plugin host. A draft query or a region's asks again later; any other
+    /// asker takes it as the failure it is.
+    Unanswered { ticket: u64, error: String },
     Log { instance: String, line: String },
     RunStarted { run: String },
     /// A Task's run directory was made (with its `start.json`) by the start, off the owner turn.
@@ -147,6 +155,7 @@ impl Event {
             }
             Event::Facts { instance, facts } => json!({"fact": "device_facts", "instance": instance, "facts": facts}),
             Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
+            Event::Unanswered { ticket, error } => json!({"fact": "answered", "ticket": ticket, "error": error}),
             Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
             Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
             Event::RunDirectory { run, directory } => json!({"fact": "run_directory", "run": run, "directory": directory}),
@@ -242,8 +251,9 @@ pub type DiagnosticData = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 pub(crate) enum Ticket {
     Prepare { node: String, frozen: logic::Frozen, origin: String, acquisition: Option<(String, u64, String)> },
     Discard,
-    Query { node: String, revision: u64, name: String },
-    Estimate { request: u64 },
+    /// One of a node's questions of its kind `name` (`logic::Ask`): what it asked is its flight's.
+    Query { node: String, name: String },
+    Estimate { node: String, request: u64 },
     Fields { device: String, request: Option<u64> },
     Tune { device: String, request: u64 },
     Command { request: u64 },
@@ -273,6 +283,18 @@ pub(crate) enum Ticket {
     DraftFiles { node: String, key: Value, start: bool },
     /// The device node owning a serial port a row met refused, restarted (`restart_serial_port`).
     Restart { device: String, port: String, request: u64 },
+}
+
+impl Ticket {
+    /// The node whose plugin answers it as a query (a draft query, a region's, its preparation, an
+    /// estimate): a failure of one its code did not answer comes back as `Event::Unanswered`. (A
+    /// discard is a call, whose failures all come back as answers; nothing waits for its reply.)
+    fn node(&self) -> Option<&str> {
+        match self {
+            Ticket::Prepare { node, .. } | Ticket::Query { node, .. } | Ticket::Estimate { node, .. } | Ticket::Selection { node, .. } => Some(node),
+            _ => None,
+        }
+    }
 }
 
 pub struct Workbench {
@@ -595,8 +617,9 @@ impl Workbench {
             Event::Opened { instance, working_point } => self.instance_opened(&instance, working_point, host),
             Event::Failed { instance, error } => self.instance_failed(&instance, error, host),
             Event::Closed { instance, error } => self.instance_closed(&instance, error, host),
-            Event::Facts { instance, facts } => self.device_facts(&instance, facts),
+            Event::Facts { instance, facts } => self.device_facts(&instance, facts, host),
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
+            Event::Unanswered { ticket, error } => self.unanswered(ticket, error, host),
             Event::Lifecycle { current, revision, event } => {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
                 return;
@@ -650,13 +673,21 @@ impl Workbench {
         log
     }
 
+    /// An answer: what it was for takes it. An answer of a node's plugin to a query moves its queue:
+    /// what waits to be asked of the node goes.
     fn answered(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
+        let lane = self.tickets.get(&ticket).and_then(Ticket::node).map(str::to_owned);
+        self.take_answer(ticket, result, host);
+        if let Some(node) = lane { self.resume_asks(&node); }
+    }
+
+    fn take_answer(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
         let Some(purpose) = self.tickets.remove(&ticket) else { return };
         match purpose {
             Ticket::Prepare { node, frozen, origin, acquisition } => self.prepared(&node, ticket, frozen, origin, acquisition, result, host),
             Ticket::Discard => {},
-            Ticket::Query { node, revision, name } => self.query_answered(&node, revision, &name, result, host),
-            Ticket::Estimate { request } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
+            Ticket::Query { node, name } => self.query_answered(&node, ticket, &name, result, host),
+            Ticket::Estimate { request, .. } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
             Ticket::Fields { device, request } => {
                 if self.devices.get(&device).is_none_or(|live| live.fields_ticket != Some(ticket)) {
                     if let Some(request) = request { self.replies.push((request, Err("This device reading was superseded; read the current device again.".into()))); }
@@ -671,7 +702,7 @@ impl Workbench {
             Ticket::Discover { type_id } => self.discovered(&type_id, result),
             Ticket::Resolve { device } => self.resolved(ticket, &device, result),
             Ticket::Publish { device, published, request } => self.published(&device, published, request, result),
-            Ticket::Selection { node, panel, selection } => self.selection_patched(&node, &panel, &selection, result),
+            Ticket::Selection { node, panel, selection } => self.selection_patched(&node, ticket, &panel, &selection, result),
             Ticket::Snapshot { run, device } => self.bench_answered(&run, &device, ticket, result),
             Ticket::ApparatusRead { path, request: Some(request) } => { let loaded = self.apparatus_read(&path, result); self.replies.push((request, loaded)); }
             Ticket::ApparatusRead { path, request: None } => self.apparatus_reread(&path, result),
@@ -688,6 +719,19 @@ impl Workbench {
                 self.replies.push((request, reply));
                 if result.is_ok() { let _ = self.read_device(&device, None, false, None); }
             }
+        }
+    }
+
+    /// A query its plugin's code did not answer: a draft query or a region's waits to be asked
+    /// again; any other asker is answered with the failure.
+    fn unanswered(&mut self, ticket: u64, error: String, host: &mut dyn Host) {
+        match self.tickets.get(&ticket) {
+            Some(Ticket::Query { node, .. } | Ticket::Selection { node, .. }) => {
+                let node = node.clone();
+                self.tickets.remove(&ticket);
+                self.query_unanswered(&node, ticket);
+            }
+            _ => self.take_answer(ticket, Err(error), host),
         }
     }
 

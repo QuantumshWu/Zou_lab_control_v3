@@ -1026,7 +1026,7 @@ impl Workbench {
         self.settling = Some(kind);
         self.settling_since = Some(std::time::Instant::now());
         self.settle();
-        self.bench_changed();
+        self.bench_changed(host);
         Ok(json!({"opening": opened, "closing": closing.iter().map(|(id, _)| id).collect::<Vec<_>>(), "stopping": stopped}))
     }
 

@@ -133,7 +133,8 @@ draft values, resolved devices (as proxies) and resources; they never start work
 Every node also answers `admit(values, resources, artifacts)` (the SDK, v2
 `finalize_logic_draft`): the draft projected by its schema with the cross-field
 validator, the type's `admit_resources`, and each artifact file decoded; its answers,
-like any draft query that fails, are the draft's issues and Start waits for it.
+like any draft query whose own code fails, are the draft's issues and Start waits for it
+(a query its host did not get answered is asked again, section 7).
 `editor_facts(values, resources, devices, source)` answers the model of a node's own
 editor, `{editor: kind, manages: [field, ...], ...}`: the UI's editor of that kind
 draws it in place of the fields it manages and writes them back with `edit_node`; it
@@ -847,6 +848,14 @@ outcome distinctions:
 | `lost` | The process exited or stopped answering | unknown |
 | `cancelled` | Stopped by `run.stop` | as reported |
 | `stale_run`, `unknown_op`, `not_claimed` | Protocol/authority refusals | known old |
+
+A `query`'s reply carries `refused`, `timeout`, `lost` or `cancelled` only of its host:
+the query was not answered (its instance's lane full or the instance releasing an
+overdue call, expired before it ran or before it was written, its channel lost or
+closing). The core keeps the answer it had and asks the query again. An error of one
+of those kinds raised by the query's own code (a `Refused`, a `DeviceHeld`, a device
+read inside it that timed out) goes out as `failed`: it is the query's answer, a draft
+issue.
 
 An open the device's SDK refuses because another client has the device open
 raises `zlc_plugin.DeviceHeld` (kind `refused`). The core then names, once, the
