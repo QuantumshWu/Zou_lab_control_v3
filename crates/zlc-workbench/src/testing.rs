@@ -1171,9 +1171,8 @@ mod tests {
     }
 
     /// A layout loads its nodes with their devices named before the devices open: what a node
-    /// asked then (its camera not yet open) is asked again once the camera opens, so a Start reads
-    /// the bench as it is now, not as it was while loading. Its failure changes nothing the node is
-    /// told: nothing is asked, and the draft says itself that the camera is gone.
+    /// asked then (its camera not yet open) is asked again once the camera opens, and again when
+    /// it fails, so a Start reads the bench as it is now, not as it was while loading.
     #[test]
     fn a_node_asks_again_when_its_device_opens_or_fails() {
         let root = scratch("bench_changed");
@@ -1202,9 +1201,32 @@ mod tests {
         assert!(workbench.state(&host)["logic"][0]["issues"].to_string().find("not open").is_none());
         event(&mut workbench, Event::Answered { ticket: opened, result: Ok(json!({})) }, &mut host);
         event(&mut workbench, Event::Failed { instance: "mot_camera".into(), error: "lost".into() }, &mut host);
-        assert_eq!(last(&calls).1, opened, "what the node is told did not change");
-        let issues = workbench.state(&host)["logic"][0]["issues"].to_string();
-        assert!(issues.contains("camera.adapter") && !issues.contains("Checking"), "{issues}");
+        assert!(last(&calls).1 > opened, "and again when it failed");
+    }
+
+    /// A device opening and the same device open can be told alike (it has said nothing of what it
+    /// reads or tunes): a query reads it live, so what it was asked while the camera opened is asked
+    /// again once the camera is open, told the same.
+    #[test]
+    fn a_question_is_asked_again_when_its_device_opens_though_told_the_same() {
+        let root = scratch("opened-same");
+        std::fs::write(root.join("apparatus.json"), RIG).unwrap();
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "camera_check", "kind": "node", "label": "Camera check", "parameters": [],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": ["resolve_device_claims"],
+                     "devices": [{"capability": "camera.adapter", "argument": "camera", "protected_fields": []}]}}));
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut workbench = Workbench::new(&root, Box::new(FakePlugins { calls: calls.clone(), catalog })).unwrap();
+        let mut host = FakeHost::default();
+        apply(&mut workbench, &mut host, "apply_devices", json!({})).unwrap();
+        add_open_node(&mut workbench, &mut host, json!({"type_id": "camera_check", "device_keys": {"camera": "mot_camera"}}));
+        let last = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().rev().find(|(query, ..)| query == "resolve_device_claims").cloned().unwrap();
+        let (_, opening, told) = last(&calls);
+        event(&mut workbench, Event::Answered { ticket: opening, result: Ok(json!({})) }, &mut host);
+        event(&mut workbench, Event::Opened { instance: "mot_camera".into(), working_point: json!({}) }, &mut host);
+        let (_, open, again) = last(&calls);
+        assert_eq!(again, told, "told the same");
+        assert!(open > opening, "asked again once the camera is open");
     }
 
     /// A device a node only reads (a camera watching the sequencer that triggers it) is its argument

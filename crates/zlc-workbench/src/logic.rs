@@ -90,9 +90,15 @@ const SELECTION: &str = "selection_patch";
 pub(crate) type Stamp = (u64, u64);
 
 /// A question to a node's plugin: the draft and check it is asked for, the query, what it is
-/// told, and what its ticket is for.
+/// told, the state of each device that names (not told: a query reads a device live through its
+/// proxy, and one opening may be told what one open is), and what its ticket is for.
 #[derive(Clone, Debug)]
-pub(crate) struct Question { stamp: Stamp, query: String, facts: Value, purpose: Ticket }
+pub(crate) struct Question { stamp: Stamp, query: String, facts: Value, states: BTreeMap<String, crate::apparatus::LiveState>, purpose: Ticket }
+
+impl Question {
+    /// Whether it asks what `other` asks: told the same, of devices in the same states.
+    fn same(&self, other: &Question) -> bool { self.facts == other.facts && self.states == other.states }
+}
 
 /// One kind of question of a node's plugin. One is in flight at a time: one asked meanwhile
 /// waits for it to land, the newest only, so its plugin never holds more of a node's questions
@@ -104,8 +110,8 @@ pub(crate) struct Ask {
     /// To ask once the one in flight lands; or not answered (refused, expired, lost), asked again
     /// once the node's plugin answers anything of it, a Start waits for it, or its instance opens.
     waiting: Option<Question>,
-    /// The check the newest answer was asked in, and what it was told.
-    told: Option<(u64, Value)>,
+    /// The question the newest answer answered.
+    told: Option<Question>,
 }
 
 impl Node {
@@ -552,8 +558,8 @@ impl Workbench {
                 json!({"values": args["values"], "output_name": output, "source": source, "devices": args["devices"]})));
         }
         for (name, query, facts) in questions {
-            let purpose = Ticket::Query { node: id.to_owned(), name: name.clone() };
-            self.ask(id, &name, Question { stamp, query, facts, purpose });
+            let (states, purpose) = (self.device_states(&facts), Ticket::Query { node: id.to_owned(), name: name.clone() });
+            self.ask(id, &name, Question { stamp, query, facts, states, purpose });
         }
     }
 
@@ -574,7 +580,7 @@ impl Workbench {
         let rechecked = node.rechecked;
         let Some(ask) = node.asks.get_mut(name) else { return };
         let Some(question) = ask.waiting.take() else { return };
-        let told = ask.told.as_ref().is_some_and(|(check, facts)| *check >= rechecked && *facts == question.facts);
+        let told = ask.told.as_ref().is_some_and(|told| told.stamp.1 >= rechecked && told.same(&question));
         if let Some(answer) = node.answers.get_mut(name).filter(|(_, answer)| told && answer.is_ok()) {
             answer.0 = question.stamp;
             return;
@@ -751,6 +757,12 @@ impl Workbench {
         }
     }
 
+    /// The state of each device a question's facts name (its `devices`).
+    fn device_states(&self, facts: &Value) -> BTreeMap<String, crate::apparatus::LiveState> {
+        facts["devices"].as_object().into_iter().flatten().filter_map(|(_, info)| info["instance"].as_str())
+            .filter_map(|key| self.devices.get(key).map(|live| (key.to_owned(), live.state))).collect()
+    }
+
     /// Selected devices as the plugin's device proxies are described.
     fn device_infos(&self, keys: &BTreeMap<String, String>) -> Value {
         // `tunable`: the proxy reads and tunes its knobs (the SDK's tunable quartet);
@@ -776,10 +788,10 @@ impl Workbench {
                 // The newest answer, for the draft and check it was asked for; for what was asked since
                 // too, when that was told the same and it is no failure.
                 let stands = match ask.waiting.take() {
-                    Some(waiting) if result.is_ok() && waiting.facts == asked.facts && asked.stamp.1 >= rechecked => waiting.stamp,
+                    Some(waiting) if result.is_ok() && waiting.same(&asked) && asked.stamp.1 >= rechecked => waiting.stamp,
                     waiting => { ask.waiting = waiting; asked.stamp }
                 };
-                ask.told = Some((asked.stamp.1, asked.facts));
+                ask.told = Some(asked);
                 let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
                 let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
                 let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
@@ -975,8 +987,8 @@ impl Workbench {
             if owned == &node.id && owner == panel { drawn_over.insert(field.clone(), before.clone()); }
         }
         let (id, stamp, facts) = (node.id.clone(), node.stamp(), json!({"selection": selection, "draft": Value::Object(drawn_over), "context": context}));
-        let purpose = Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() };
-        self.ask(&id, SELECTION, Question { stamp, query: SELECTION.to_owned(), facts, purpose });
+        let (states, purpose) = (self.device_states(&facts), Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() });
+        self.ask(&id, SELECTION, Question { stamp, query: SELECTION.to_owned(), facts, states, purpose });
         false
     }
 
