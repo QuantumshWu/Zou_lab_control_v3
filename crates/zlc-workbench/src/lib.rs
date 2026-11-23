@@ -52,7 +52,8 @@ pub trait Plugins {
     fn close(&mut self, instance: &str);
     /// A pure draft query answered by the node's own process (`declare_outputs`, `admit_source`, ...):
     /// its code's answer, or failure, completes as [`Event::Answered`]; a query its code did not
-    /// answer (refused, expired, timed out, lost) as [`Event::Unanswered`].
+    /// answer (refused, expired, timed out, lost, cancelled, or its instance no longer held by the
+    /// plugin host) as [`Event::Unanswered`].
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value);
     /// A standard device op (`fields`, `values`, `tune`, `snapshot`) on an open instance. `snapshot`
     /// is answered within [`SNAPSHOT_WAIT`]: a device that has not answered by then is answered as
@@ -119,8 +120,9 @@ pub enum Event {
     Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
     /// A query its plugin's code did not answer: refused before it ran (a full queue, an instance
-    /// still releasing), expired or timed out, its channel lost. A draft query or a region's asks
-    /// again later; any other asker takes it as the failure it is.
+    /// still releasing), expired or timed out, its channel lost or closing, or its instance no
+    /// longer held by the plugin host. A draft query or a region's asks again later; any other
+    /// asker takes it as the failure it is.
     Unanswered { ticket: u64, error: String },
     Log { instance: String, line: String },
     RunStarted { run: String },

@@ -90,8 +90,8 @@ const SELECTION: &str = "selection_patch";
 pub(crate) type Stamp = (u64, u64);
 
 /// A question to a node's plugin: the draft and check it is asked for, the query, what it is
-/// told, the state of each device that names (not told: a query reads a device live through its
-/// proxy, and one opening may be told what one open is), and what its ticket is for.
+/// told, the state of each device its facts name (not told: a query reads a device live through
+/// its proxy, and one opening may be told what one open is), and what its ticket is for.
 #[derive(Clone, Debug)]
 pub(crate) struct Question { stamp: Stamp, query: String, facts: Value, states: BTreeMap<String, crate::apparatus::LiveState>, purpose: Ticket }
 
