@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Editor fallback regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. A node's page draws the fields its editor manages with the editor (views/logic.ts): a
+// draft whose model cannot be had keeps the node's last model drawn, its error said under the form; a node that never
+// had one shows those fields as plain rows. A Revert keeps the node; an accepted replacement is another node.
+import {LogicEditorView,projectRow} from '../dist/views/logic.js';
+import {scanFacts} from './scan_facts.js';
+const assert=(condition,message)=>{if(!condition)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+const families={pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'};
+const PLAN=JSON.stringify({axes:[]});
+const model=scanFacts({editor:'scan_plan',manages:['plan','api_values'],families,host_advanced:['api:','device:','manual:'],ports:[],withheld:{},unoffered:{},
+  summary:'',problem:'',api:null},[],PLAN);
+const base={node_id:'scan',name:'Scan',type_id:'task.seamless_scan',node_kind:'task',draft_revision:1,values:{plan:PLAN,api_values:''},
+  controls:[{name:'plan',label:'Plan',kind:'text',value:PLAN},{name:'api_values',label:'API values',kind:'text',value:''}],
+  source_signal:null,source_label:null,source_choices:[],device_keys:{},device_choices:{},device_labels:{},artifact_inputs:{},artifact_specs:[],
+  auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:false,preview_offered:false,edited:false,state:'idle',status:'',phase:'idle',run:null};
+const GOOD={editor_facts:model,editor_facts_error:null};
+const FAILED={editor_facts:null,editor_facts_error:'the plugin raised'};
+const SAID='The editor cannot be drawn: the plugin raised';
+let serial=0;
+const intents={start(){},stop(){},remove(){},preview(){},rename:()=>++serial,editDraft:()=>++serial,revert:()=>++serial,check(){},choose:async()=>null};
+const page=()=>{const view=new LogicEditorView('scan',intents);document.body.append(view.root);return view};
+const show=(view,patch,request,failed=false)=>{const row={...base,...patch};view.update(row,projectRow(row),{active:false,owns:false},request,failed)};
+const editor=view=>view.root.querySelector('.node-editor.scan-plan');
+/** The managed fields drawn as plain rows. */
+const plain=view=>[...view.root.querySelectorAll('.field-label')].map(node=>node.textContent.replace(/ \*$/,'')).filter(label=>['Plan','API values'].includes(label));
+const error=view=>{const node=view.root.querySelector('.editor-error');return node.hidden?'':node.textContent};
+try {
+ await check('a node that never had a model shows the fields it manages as plain rows',()=>{
+   const view=page();
+   show(view,{editor_facts:null});
+   assert(!editor(view),'no editor before a model');equal(plain(view),['Plan','API values'],'plain rows');equal(error(view),'','no error');
+   show(view,FAILED);
+   assert(!editor(view),'no editor');equal(plain(view),['Plan','API values'],'plain rows');equal(error(view),SAID,'the error');
+   view.root.remove();
+ });
+ await check('a draft whose model cannot be had keeps the last one drawn, its error said',()=>{
+   const view=page();
+   show(view,GOOD);
+   const drawn=editor(view);assert(drawn,'the editor');equal(plain(view),[],'no plain rows');equal(error(view),'','no error');
+   show(view,{...FAILED,draft_revision:2});
+   assert(editor(view)===drawn,'the same editor, from the last model');equal(plain(view),[],'no plain rows');equal(error(view),SAID,'the error');
+   show(view,{...GOOD,draft_revision:2});
+   assert(editor(view)===drawn,'the same editor');equal(error(view),'','the error gone');
+   view.root.remove();
+ });
+ await check('a Revert keeps the node\'s last model; an accepted replacement is another node',()=>{
+   const view=page();
+   show(view,{...GOOD,edited:true});
+   [...view.root.querySelectorAll('button')].find(button=>button.textContent==='Revert').click();
+   show(view,{...FAILED,draft_revision:2},serial);
+   assert(editor(view),'reverted: the editor stays');equal(plain(view),[],'reverted: no plain rows');equal(error(view),SAID,'reverted: the error');
+   view.resetLocalState();
+   show(view,{...FAILED,draft_revision:1});
+   assert(!editor(view),'replaced: no editor');equal(plain(view),['Plan','API values'],'replaced: plain rows');equal(error(view),SAID,'replaced: the error');
+   view.root.remove();
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+document.title='done';
+</script>

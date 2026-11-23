@@ -133,6 +133,8 @@ export class LogicEditorView {
     editors;
     /** Why the node's editor model could not be had for this draft (`editor_facts_error`). */
     editorError = element("p", "field-error editor-error");
+    /** The node's last editor model: drawn while a draft's cannot be had (its error said under the form). */
+    editorFacts = null;
     artifactFields = new Map();
     revertRequest = null;
     constructor(id, intents) {
@@ -181,15 +183,17 @@ export class LogicEditorView {
         shareLabelColumn(this.body, this.editors.labelFloor());
     }
     labelsQueued = false;
-    /** Only a successful explicit replacement discards per-axis editor memory. */
-    resetLocalState() { this.editors.reset(); }
+    /** A successful explicit replacement: the node is another one (Load/New/Clear may reuse
+     * its ID), so the per-axis editor memory and its last editor model go. */
+    resetLocalState() { this.editors.reset(); this.editorFacts = null; }
     /** The node's page from its workbench row; `projection` is the row's
      * drawn words, `takeover` the console-wide Task gate. */
     update(row, projection, takeover, request, failed = false) {
         if (request === this.revertRequest) {
             this.revertRequest = null;
+            // A successful Revert discards per-axis editor memory; the node and its last model stay.
             if (!failed)
-                this.resetLocalState();
+                this.editors.reset();
         }
         this.row = row;
         this.projection = projection;
@@ -229,8 +233,10 @@ export class LogicEditorView {
                 specs.push(item);
         }
         // The node's own editors (one model, or a stack of them) draw the fields
-        // and files their models say they manage.
-        const order = this.editors.reconcile(editorModels(row.editor_facts));
+        // and files their models say they manage: the draft's model, else the
+        // node's last one (a node that never had one shows plain rows).
+        this.editorFacts = row.editor_facts ?? this.editorFacts;
+        const order = this.editors.reconcile(editorModels(this.editorFacts));
         // The editors stand after the form and its error, in their models' order.
         const placed = [...this.body.children].slice(2);
         if (placed.length !== order.length || placed.some((node, index) => node !== order[index]))
