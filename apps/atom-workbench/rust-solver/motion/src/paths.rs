@@ -2234,6 +2234,10 @@ pub struct Window {
     pub paths: usize,
     /// Every displayed row; each level's sum (its states' labels without the last part); the worst row of the means.
     pub rows: Vec<Mean>,
+    /// The window's rows by its parts (`parts`): the window halved while its two halves' rows differ beyond their
+    /// statistics -- the direct part reads each part's (select.rs `direct`), so that a change inside a long window is
+    /// not averaged away.
+    pub parts: Vec<Part>,
     pub levels: Vec<(String, Mean)>,
     pub worst: (usize, Mean),
     /// Per path its worst row's window mean |Δ| (for the distribution and the account).
@@ -2260,6 +2264,73 @@ pub struct Window {
     /// Per path read in the window its mean force difference δF_a and the reference's own mean force F_a there (1/µm/µs):
     /// the push's error is read on their regression (select.rs `motion_at`, # The push's error).
     pub forces: Vec<(f64, [f64; 3], [f64; 3])>,
+}
+
+/// A part of a window (`parts`): its span (from, to], the paths read in it and every displayed row's mean difference
+/// over them.
+#[derive(Clone, Debug, Default)]
+pub struct Part {
+    pub from: f64,
+    pub to: f64,
+    pub paths: usize,
+    pub rows: Vec<Mean>,
+}
+
+/// A window's parts (select.rs, # The direct part): (from, to] halved while its two halves' rows differ -- on the paths
+/// that read both, each path's difference of its two halves' means of a row, their mean beyond Student's t at the run's
+/// confidence among the rows times its standard error (`Mean::weighted`, paired: what a path's place makes of both
+/// halves cancels) --, each half again; a part ends where no two paths read both its halves (a part of one reading a
+/// path is not halved). Per part its rows' means over the paths read in it, by the paths' `weights`. The windows grow
+/// as the memory's octaves (`windows`): a change inside a long one -- R9_PUSH's loss front at 14-34 µs inside (12, 25]
+/// and (25, 50] -- read by its mean alone is averaged away, the direct part taking the window's mean (until 2026-11-23).
+fn parts(candidate: &[Series], reference: &[Series], from: f64, to: f64, weights: &[f64]) -> Vec<Part> {
+    // Per path read in (a, b], its place and its rows' mean difference there (the two series read at the same times).
+    let rows_in = |a: f64, b: f64| -> Vec<(usize, [f64; STATES])> {
+        candidate
+            .iter()
+            .zip(reference)
+            .enumerate()
+            .filter_map(|(k, (c, r))| {
+                let (lo, hi) = (r.readings.partition_point(|y| y.t <= a), r.readings.partition_point(|y| y.t <= b));
+                let hi = hi.min(c.readings.len());
+                (lo < hi).then(|| {
+                    let mut sum = [0.0; STATES];
+                    for (x, y) in c.readings[lo..hi].iter().zip(&r.readings[lo..hi]) {
+                        for s in 0..STATES {
+                            sum[s] += x.rows[s] - y.rows[s];
+                        }
+                    }
+                    (k, sum.map(|v| v / (hi - lo) as f64))
+                })
+            })
+            .collect()
+    };
+    let weight = |k: usize| weights.get(k).copied().unwrap_or(1.0);
+    let mean_of = |x: &[(usize, f64)]| Mean::weighted(&x.iter().map(|p| p.1).collect::<Vec<_>>(), &x.iter().map(|p| weight(p.0)).collect::<Vec<_>>());
+    let q_rows = |paths: usize| crate::estimate::quantile(crate::estimate::tail_among(STATES as f64), Some(paths as u64 - 1));
+    let mut out = vec![];
+    let mut open = vec![(from, to)];
+    while let Some((a, b)) = open.pop() {
+        let m = 0.5 * (a + b);
+        let (first, second) = (rows_in(a, m), rows_in(m, b));
+        let both: Vec<(usize, [f64; STATES], [f64; STATES])> = first.iter().filter_map(|(k, x)| second.iter().find(|(j, _)| j == k).map(|(_, y)| (*k, *x, *y))).collect();
+        let split = both.len() >= 2 && {
+            let q = q_rows(both.len());
+            (0..STATES).any(|s| {
+                let d = mean_of(&both.iter().map(|(k, x, y)| (*k, x[s] - y[s])).collect::<Vec<_>>());
+                d.error.is_finite() && d.value.abs() > q * d.error
+            })
+        };
+        if split {
+            // The later half first on the stack: the parts come out in time's order.
+            open.push((m, b));
+            open.push((a, m));
+            continue;
+        }
+        let read = rows_in(a, b);
+        out.push(Part { from: a, to: b, paths: read.len(), rows: (0..STATES).map(|s| mean_of(&read.iter().map(|(k, x)| (*k, x[s])).collect::<Vec<_>>())).collect() });
+    }
+    out
 }
 
 /// A landing check's numbers at a time of a path (# The landing check), the candidate's first and the reference's:
@@ -2427,6 +2498,7 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 paths: held.len(),
                 worst: (worst_row, row_means[worst_row]),
                 rows: row_means,
+                parts: parts(candidate, reference, from, to, weights),
                 levels: levels.iter().zip(&lv).map(|((name, _), x)| (name.clone(), of(x))).collect(),
                 worst_per_path,
                 rates: classes.iter().zip(&rates).zip(&rate_ref).map(|((f, x), r)| (*f, of(x), *r * p as f64 / held.len() as f64)).collect(),

@@ -55,7 +55,8 @@ fn select_the_middle_point_leaves_a_node() {
 
 /// A window of every row's error `row` (no spread over the paths).
 fn window(from: f64, to: f64, row: f64) -> Window {
-    Window { from, to, paths: 4, rows: vec![Mean { value: row, error: 0.0 }; STATES], ..Window::default() }
+    let rows = vec![Mean { value: row, error: 0.0 }; STATES];
+    Window { from, to, paths: 4, parts: vec![crate::paths::Part { from, to, paths: 4, rows: rows.clone() }], rows, ..Window::default() }
 }
 
 /// The direct part by hand (module documentation, # The direct part): the start's windows to L = 100 µs, a late segment
@@ -88,7 +89,10 @@ fn select_the_direct_part_by_hand() {
 /// one path's spread is unknown: its upper end without bound, its lower nothing; the calibration beside both ends.
 #[test]
 fn select_the_direct_part_at_the_paths_statistics() {
-    let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
+    let spread = |paths: usize, value: f64, error: f64| {
+        let rows = vec![Mean { value, error }; STATES];
+        Window { from: 0.0, to: 10.0, paths, parts: vec![crate::paths::Part { from: 0.0, to: 10.0, paths, rows: rows.clone() }], rows, ..Window::default() }
+    };
     let at = |w: Window, upper: bool| {
         let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
         direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, if upper { Reach::Upper } else { Reach::Lower }).expect("the window read")

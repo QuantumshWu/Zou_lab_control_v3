@@ -3088,8 +3088,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let pilot_all = &weighed[0].judged;
             let below = |delta: &crate::select::Judged| -> Booked {
                 let direct = |t: f64| -> Option<f64> {
-                    let g = direct_bound_at(pilot_all, &paths.windows, t, Reach::Upper)? - pilot_all.calibration.rows;
-                    Some(crate::linalg::larger(g - direct_bound_at(delta, &paths.windows, t, Reach::Upper).unwrap_or(0.), 0.))
+                    let g = crate::select::whole_bound_at(pilot_all, &paths.windows, t, Reach::Upper)? - pilot_all.calibration.rows;
+                    Some(crate::linalg::larger(g - crate::select::whole_bound_at(delta, &paths.windows, t, Reach::Upper).unwrap_or(0.), 0.))
                 };
                 let motion = |k: usize| -> Option<crate::select::Motion> {
                     let g = crate::select::motion_at(pilot_all, &paths.windows, &course, k, hm, Reach::Upper)?;

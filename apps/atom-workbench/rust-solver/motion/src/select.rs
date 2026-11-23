@@ -1109,6 +1109,8 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 "    [motion] P{} ({:.2}, {:.2}] {} paths: rate {}; dP_a [{}, {}, {}]; H_a [{:.3e}, {:.3e}, {:.3e}]; dF_a [{}, {}, {}]",
                 model.rs.keep.len(), w.from, w.to, w.paths, m(&w.rate), m(&w.energy_rate[0]), m(&w.energy_rate[1]), m(&w.energy_rate[2]), w.heating[0].value, w.heating[1].value, w.heating[2].value, m(&w.force[0]), m(&w.force[1]), m(&w.force[2])
             );
+            let worst = |rows: &[paths::Mean], n: usize| rows.iter().map(|x| end(x, n, Reach::Upper)).fold(0.0, larger);
+            eprintln!("    [parts] P{} ({:.2}, {:.2}]: whole {:.3e}; {} parts {:?}", model.rs.keep.len(), w.from, w.to, worst(&w.rows, w.paths), w.parts.len(), w.parts.iter().map(|p| (p.from, p.to, p.paths, worst(&p.rows, p.paths))).collect::<Vec<_>>());
         }
         eprintln!("    [motion] P{} escape {:?}", model.rs.keep.len(), escape);
         if let (Some(x), Some(y)) = (series.first().and_then(|s| s.readings.get(3)), paths.series.first().and_then(|s| s.readings.get(3))) {
@@ -1275,8 +1277,18 @@ fn end(m: &paths::Mean, paths: usize, reach: Reach) -> f64 {
     }
 }
 
-/// The direct part of a window (module documentation, # The direct part): per row its end (`end`).
+/// The direct part of a window (module documentation, # The direct part): per part (paths.rs `parts`) and row its end
+/// (`end`).
 fn direct(w: &Window, reach: Reach) -> Vec<f64> {
+    w.parts.iter().flat_map(|p| p.rows.iter().map(move |m| end(m, p.paths, reach))).collect()
+}
+
+/// The direct part of a window read on the window whole (its rows' means over it): no more than its parts' largest
+/// (`direct`) -- a path's mean over the window is its parts' weighed by their readings, so its mean's |m| and its
+/// spread over the paths are no more than the parts' weighed alike (the triangle) -- up to the paths read in a part.
+/// The nomination's bound reads it (solve.rs `choose_on_the_pilot`): a single's account on every path is no less than
+/// its account on the windows whole, and that no less than the pilot's model's there less the contribution's.
+fn whole(w: &Window, reach: Reach) -> Vec<f64> {
     w.rows.iter().map(|m| end(m, w.paths, reach)).collect()
 }
 
@@ -1310,11 +1322,21 @@ pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> Option<f64>
 /// `direct_at` at an end (`Reach`) of each row, the calibration beside it (# How many paths: a fate decided at both ends
 /// is the paths' statistics').
 pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach) -> Option<f64> {
+    bound_at(judged, windows, t, reach, direct)
+}
+
+/// `direct_bound_at` on the windows whole (`whole`): the nomination's bound.
+pub fn whole_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach) -> Option<f64> {
+    bound_at(judged, windows, t, reach, whole)
+}
+
+/// `direct_bound_at` of a window's direct part `of`.
+fn bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach, of: fn(&Window, Reach) -> Vec<f64>) -> Option<f64> {
     if t <= 0.0 || judged.windows.is_empty() {
         return Some(0.0);
     }
     let read = windows_at(judged, windows, t);
-    (!read.is_empty()).then(|| read.iter().flat_map(|w| direct(w, reach)).fold(0.0, larger) + judged.calibration.rows)
+    (!read.is_empty()).then(|| read.iter().flat_map(|w| of(w, reach)).fold(0.0, larger) + judged.calibration.rows)
 }
 
 /// The pilot's course the motion's errors are read on (module documentation, # The motion; `motion_at`): its times --
