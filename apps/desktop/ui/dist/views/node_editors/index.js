@@ -21,6 +21,37 @@ export function nodeEditor(kind, host) {
 export function editorModels(facts) {
     return facts?.editor === "stack" ? facts.editors ?? [] : facts ? [facts] : [];
 }
+/** Each node's last model its plugin answered for the draft as it then stood (by node ID), kept
+ * across the pages that draw the node (its Edit tab closed and opened again, Panel Edit's
+ * producer) while the UI runs; never written anywhere. */
+const answered = new Map();
+/** The draft a node's model is answered from, as its row says it: values, devices, source, files. */
+const draftOf = (row) => JSON.stringify([row.values, row.device_keys, row.source_signal, row.artifact_inputs]);
+/** Why a kept model's editors write nothing (nodeModel). */
+export const KEPT_LOCK = "Shown from the last editor model of this same draft: read only until the node's plugin answers again";
+/** The model a node's editors draw from its row: the row's own; where it has none (its plugin
+ * could not answer), the node's last one while the draft is still the one it was answered for
+ * (`kept`: drawn locked, KEPT_LOCK, so a model that may be stale never writes); else none, and
+ * the fields it would manage are plain rows.  A node of another type under the ID is another
+ * node: its last model goes. */
+export function nodeModel(row) {
+    // A model of an older draft (the draft's own still asked) is not the one kept for this draft.
+    if (row.editor_facts && !row.editor_facts_pending)
+        answered.set(row.node_id, { type: row.type_id, draft: draftOf(row), facts: row.editor_facts });
+    if (row.editor_facts)
+        return { facts: row.editor_facts, kept: false };
+    const last = answered.get(row.node_id);
+    if (last && last.type !== row.type_id)
+        answered.delete(row.node_id);
+    const kept = last?.type === row.type_id && last.draft === draftOf(row);
+    return { facts: kept ? last.facts : null, kept };
+}
+/** An accepted replacement: the node under `node` is another one, and its last model goes. */
+export function forgetModel(node) { answered.delete(node); }
+/** Why the node's editor model could not be had for this draft (`editor_facts_error`), as its pages say it. */
+export function editorProblem(row) {
+    return row.editor_facts_error ? `The editor cannot be drawn: ${row.editor_facts_error}` : "";
+}
 /** The editors a page draws for a node's models: one per model, kept while its
  * kind stays.  The Logic Edit page draws them for editing, the Panel Edit's
  * Direct producer read only (READ_ONLY) -- one implementation of each. */
@@ -60,13 +91,13 @@ export class NodeEditors {
     }
     /** Each editor handed the row.  A state push that changes nothing an editor draws costs it
      * nothing: its model, the lock, the node's name and the fields it manages (an edit of another
-     * field leaves it as it is).  A model still of an older draft draws nothing where the editor
-     * already stands: it would put back what the operator has just changed until the answer comes.
-     * True when any editor drew anew. */
+     * field leaves it as it is).  The row's model still of an older draft draws nothing where the
+     * editor already stands: it would put back what the operator has just changed until the answer
+     * comes (a kept model is of this draft: nodeModel).  True when any editor drew anew. */
     update(row, locked) {
         let drew = false;
         for (const editor of this.drawn) {
-            if (row.editor_facts_pending && editor.key)
+            if (row.editor_facts && row.editor_facts_pending && editor.key)
                 continue;
             const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
             const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);

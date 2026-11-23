@@ -2,7 +2,7 @@
 // LogicEditorView).  Both draw one node's projection and send its intents;
 // admission, follow intent, restarts and claims are the workbench's.
 import { Field, Legend, Readout, StatusLine, assign, command, element, fieldKind, form, heldNote, row as formRow, sectionTitle, setChecked, setState, setTitle, shareLabelColumn, showHeld, switchButton, } from "../fluent/index.js";
-import { NodeEditors, editorModels } from "./node_editors/index.js";
+import { KEPT_LOCK, NodeEditors, editorModels, editorProblem, forgetModel, nodeModel } from "./node_editors/index.js";
 /** The held note's lines: the Task gate, then each reason several rows share. */
 const NEWLINE = "\n";
 /** Every word the Start slot can say, on the row and on its Edit page. */
@@ -133,8 +133,6 @@ export class LogicEditorView {
     editors;
     /** Why the node's editor model could not be had for this draft (`editor_facts_error`). */
     editorError = element("p", "field-error editor-error");
-    /** The node's last editor model: drawn while a draft's cannot be had (its error said under the form). */
-    editorFacts = null;
     artifactFields = new Map();
     revertRequest = null;
     constructor(id, intents) {
@@ -185,7 +183,7 @@ export class LogicEditorView {
     labelsQueued = false;
     /** A successful explicit replacement: the node is another one (Load/New/Clear may reuse
      * its ID), so the per-axis editor memory and its last editor model go. */
-    resetLocalState() { this.editors.reset(); this.editorFacts = null; }
+    resetLocalState() { this.editors.reset(); forgetModel(this.id); }
     /** The node's page from its workbench row; `projection` is the row's
      * drawn words, `takeover` the console-wide Task gate. */
     update(row, projection, takeover, request, failed = false) {
@@ -233,10 +231,10 @@ export class LogicEditorView {
                 specs.push(item);
         }
         // The node's own editors (one model, or a stack of them) draw the fields
-        // and files their models say they manage: the draft's model, else the
-        // node's last one (a node that never had one shows plain rows).
-        this.editorFacts = row.editor_facts ?? this.editorFacts;
-        const order = this.editors.reconcile(editorModels(this.editorFacts));
+        // and files their models say they manage: the draft's model, else the node's
+        // last one of this same draft, locked (nodeModel).
+        const model = nodeModel(row);
+        const order = this.editors.reconcile(editorModels(model.facts));
         // The editors stand after the form and its error, in their models' order.
         const placed = [...this.body.children].slice(2);
         if (placed.length !== order.length || placed.some((node, index) => node !== order[index]))
@@ -335,12 +333,12 @@ export class LogicEditorView {
             cursor.remove();
             cursor = next;
         }
-        const problem = row.editor_facts_error ? `The editor cannot be drawn: ${row.editor_facts_error}` : "";
+        const problem = editorProblem(row);
         if (this.editorError.textContent !== problem)
             this.editorError.textContent = problem;
         assign(this.editorError, "hidden", !problem);
         if (this.editors.length) {
-            if (this.editors.update(row, locked))
+            if (this.editors.update(row, locked || (model.kept ? KEPT_LOCK : "")))
                 this.shareLabels();
         }
         else

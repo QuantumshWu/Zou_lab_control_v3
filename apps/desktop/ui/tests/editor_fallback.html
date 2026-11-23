@@ -4,64 +4,164 @@
 <link rel="stylesheet" href="../style.css">
 <script src="../dist/scale.js"></script>
 <pre id="result">pending</pre>
+<div id="host" style="width:1100px"></div>
 <script type="module">
-// Run with tools/test_ui.ps1. A node's page draws the fields its editor manages with the editor (views/logic.ts): a
-// draft whose model cannot be had keeps the node's last model drawn, its error said under the form; a node that never
-// had one shows those fields as plain rows. A Revert keeps the node; an accepted replacement is another node.
+// Run with tools/test_ui.ps1. A node's pages draw the fields its editor manages with the editor (node_editors/index.ts
+// nodeModel): a draft whose model cannot be had keeps the node's last model while the draft is still the one it was
+// answered for, drawn locked, its error said; a draft changed since (by its editor, another writer, a Revert, another
+// pulse) shows its fields as plain rows with their true values; a node that never had one does too. The model is the
+// node's: its Edit tab closed and opened again keeps it, a node of another type or an accepted replacement drops it,
+// and Panel Edit's producer draws it the same way. No draft edit is written from a kept model: every one is recorded.
 import {LogicEditorView,projectRow} from '../dist/views/logic.js';
+import {TaskConsoleView} from '../dist/views/task_console.js';
+import {PanelBoard} from '../dist/views/board.js';
+import {PanelEditView} from '../dist/views/panel_edit.js';
 import {scanFacts} from './scan_facts.js';
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
 const results=[];
 const check=async(name,test)=>{await test();results.push(name)};
+const settle=()=>new Promise(resolve=>setTimeout(resolve));
 const families={pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'};
-const PLAN=JSON.stringify({axes:[]});
-const model=scanFacts({editor:'scan_plan',manages:['plan','api_values'],families,host_advanced:['api:','device:','manual:'],ports:[],withheld:{},unoffered:{},
-  summary:'',problem:'',api:null},[],PLAN);
-const base={node_id:'scan',name:'Scan',type_id:'task.seamless_scan',node_kind:'task',draft_revision:1,values:{plan:PLAN,api_values:''},
-  controls:[{name:'plan',label:'Plan',kind:'text',value:PLAN},{name:'api_values',label:'API values',kind:'text',value:''}],
+const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:0,hi:1e10,current:120e6,integer:false,display_unit:null,
+  units:[['Hz',0],['MHz',6]],limits:{},currents:{},families:{Hz:'Hz',MHz:'Hz'}};
+const duration={port:'pulse:param:duration:hold',label:'hold duration',group:'pulse',leaf:'duration:hold',unit:'s',lo:0,hi:10,current:.01,integer:false,display_unit:null,
+  units:[['s',0],['ms',-3],['µs',-6]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s'}};
+const AXIS_F={port:freq.port,unit:'MHz',values:[120,125,130],mode:'range',value_text:''};
+const AXIS_D={port:duration.port,unit:'ms',values:[9,10,11],mode:'range',value_text:''};
+const RUNNING=JSON.stringify({axes:[AXIS_F,AXIS_D]});                         // what a Revert puts back
+const PLAN=JSON.stringify({axes:[AXIS_F]});                                   // the draft
+const ELSEWHERE=JSON.stringify({axes:[{...AXIS_F,values:[200,205,210]}]});    // the draft as another writer left it
+const api=(tidy=null)=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},description:'delay',
+  minimum:0,maximum:1,authored:0.001,value:0.001,unavailable_reason:''}],overrides:[],parked:[],note:'',tidy});
+const model=(text,apiPart=api())=>scanFacts({editor:'scan_plan',manages:['plan','api_values'],families,host_advanced:['api:','device:','manual:'],
+  ports:[freq,duration],withheld:{},unoffered:{},summary:'what the plan amounts to',problem:'',api:apiPart},JSON.parse(text).axes,text);
+const rowOf=(node,text,patch={})=>({node_id:node,name:node,type_id:'task.seamless_scan',node_kind:'task',draft_revision:1,
+  values:{plan:text,api_values:'',pulse_template:'pulse-a.json'},
+  controls:[{name:'plan',label:'Plan',kind:'text',value:text},{name:'api_values',label:'API values',kind:'text',value:''}],
   source_signal:null,source_label:null,source_choices:[],device_keys:{},device_choices:{},device_labels:{},artifact_inputs:{},artifact_specs:[],
-  auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:false,preview_offered:false,edited:false,state:'idle',status:'',phase:'idle',run:null};
-const GOOD={editor_facts:model,editor_facts_error:null};
-const FAILED={editor_facts:null,editor_facts_error:'the plugin raised'};
-const SAID='The editor cannot be drawn: the plugin raised';
-let serial=0;
-const intents={start(){},stop(){},remove(){},preview(){},rename:()=>++serial,editDraft:()=>++serial,revert:()=>++serial,check(){},choose:async()=>null};
-const page=()=>{const view=new LogicEditorView('scan',intents);document.body.append(view.root);return view};
-const show=(view,patch,request,failed=false)=>{const row={...base,...patch};view.update(row,projectRow(row),{active:false,owns:false},request,failed)};
-const editor=view=>view.root.querySelector('.node-editor.scan-plan');
-/** The managed fields drawn as plain rows. */
-const plain=view=>[...view.root.querySelectorAll('.field-label')].map(node=>node.textContent.replace(/ \*$/,'')).filter(label=>['Plan','API values'].includes(label));
-const error=view=>{const node=view.root.querySelector('.editor-error');return node.hidden?'':node.textContent};
+  auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:false,preview_offered:false,edited:false,state:'idle',status:'',phase:'idle',run:null,
+  editor_facts:null,editor_facts_error:null,editor_facts_pending:false,...patch});
+const FAILED={editor_facts:null,editor_facts_error:'node/seamless_scan already has 64 queued calls'};
+const SAID='The editor cannot be drawn: node/seamless_scan already has 64 queued calls';
+let serial=0;const edits=[];
+const intents={start(){},stop(){},remove(){},preview(){},rename:()=>++serial,editDraft:(id,change)=>{edits.push(change);return ++serial},revert:()=>++serial,
+  check(){},choose:async()=>null};
+const page=node=>{const view=new LogicEditorView(node,intents);document.body.append(view.root);return view};
+const show=(view,row,request,failed=false)=>view.update(row,projectRow(row),{active:false,owns:false},request,failed);
+const editor=root=>root.querySelector('.node-editor.scan-plan');
+/** The managed fields drawn as plain rows, with the values they show. */
+const plain=root=>Object.fromEntries([...root.querySelectorAll('.field')].map(field=>[field.querySelector('.field-label')?.textContent.replace(/ \*$/,''),
+  field.querySelector('input, textarea')?.value]).filter(([label])=>['Plan','API values'].includes(label)));
+const error=root=>{const node=root.querySelector('.editor-error');return !node||node.hidden?'':node.textContent};
+const button=(root,words)=>[...root.querySelectorAll('button')].find(node=>node.textContent===words);
+/** The editor's own controls the operator could use (a box's face is its select's): none while its model is kept. */
+const open=root=>[...editor(root).querySelectorAll('input, select, textarea, button')].filter(node=>!(node.closest('select')??node).disabled&&!node.closest('[hidden]'))
+  .map(node=>node.getAttribute('aria-label')||node.textContent||node.className);
 try {
  await check('a node that never had a model shows the fields it manages as plain rows',()=>{
-   const view=page();
-   show(view,{editor_facts:null});
-   assert(!editor(view),'no editor before a model');equal(plain(view),['Plan','API values'],'plain rows');equal(error(view),'','no error');
-   show(view,FAILED);
-   assert(!editor(view),'no editor');equal(plain(view),['Plan','API values'],'plain rows');equal(error(view),SAID,'the error');
+   const view=page('fresh');
+   show(view,rowOf('fresh',PLAN));
+   assert(!editor(view.root),'no editor before a model');equal(plain(view.root),{Plan:PLAN,'API values':''},'plain rows');equal(error(view.root),'','no error');
+   show(view,rowOf('fresh',PLAN,FAILED));
+   assert(!editor(view.root),'no editor');equal(plain(view.root),{Plan:PLAN,'API values':''},'plain rows');equal(error(view.root),SAID,'the error');
    view.root.remove();
  });
- await check('a draft whose model cannot be had keeps the last one drawn, its error said',()=>{
-   const view=page();
-   show(view,GOOD);
-   const drawn=editor(view);assert(drawn,'the editor');equal(plain(view),[],'no plain rows');equal(error(view),'','no error');
-   show(view,{...FAILED,draft_revision:2});
-   assert(editor(view)===drawn,'the same editor, from the last model');equal(plain(view),[],'no plain rows');equal(error(view),SAID,'the error');
-   show(view,{...GOOD,draft_revision:2});
-   assert(editor(view)===drawn,'the same editor');equal(error(view),'','the error gone');
+ await check('a model that cannot be had for the same draft keeps the last one drawn, locked, its error said; a new one opens it again',()=>{
+   const view=page('same');edits.length=0;
+   show(view,rowOf('same',PLAN,{editor_facts:model(PLAN)}));
+   const drawn=editor(view.root);assert(drawn,'the editor');assert(open(view.root).includes('Add axis'),'the editor open');
+   // The bench changed and the draft was asked again: the plugin could not answer.
+   show(view,rowOf('same',PLAN,{draft_revision:2,...FAILED}));
+   assert(editor(view.root)===drawn,'the same editor, from the last model');equal(plain(view.root),{},'no plain rows');equal(error(view.root),SAID,'the error');
+   equal(open(view.root),[],'every control of the kept model locked');
+   button(view.root,'Add axis').click();
+   equal(edits,[],'nothing written from the kept model');
+   show(view,rowOf('same',PLAN,{draft_revision:2,editor_facts:model(PLAN)}));
+   assert(editor(view.root)===drawn,'the same editor');equal(error(view.root),'','the error gone');assert(open(view.root).includes('Add axis'),'open again');
    view.root.remove();
  });
- await check('a Revert keeps the node\'s last model; an accepted replacement is another node',()=>{
-   const view=page();
-   show(view,{...GOOD,edited:true});
-   [...view.root.querySelectorAll('button')].find(button=>button.textContent==='Revert').click();
-   show(view,{...FAILED,draft_revision:2},serial);
-   assert(editor(view),'reverted: the editor stays');equal(plain(view),[],'reverted: no plain rows');equal(error(view),SAID,'reverted: the error');
-   view.resetLocalState();
-   show(view,{...FAILED,draft_revision:1});
-   assert(!editor(view),'replaced: no editor');equal(plain(view),['Plan','API values'],'replaced: plain rows');equal(error(view),SAID,'replaced: the error');
+ await check('a draft changed elsewhere whose model cannot be had shows its true plan as a plain row, and writes nothing',()=>{
+   const view=page('elsewhere');edits.length=0;
+   show(view,rowOf('elsewhere',PLAN,{editor_facts:model(PLAN)}));
+   show(view,rowOf('elsewhere',ELSEWHERE,{draft_revision:2,...FAILED}));
+   assert(!editor(view.root),'no editor drawn from the older draft\'s model');equal(plain(view.root).Plan,ELSEWHERE,'the true plan');equal(error(view.root),SAID,'the error');
+   equal(edits,[],'nothing written');
    view.root.remove();
+ });
+ await check('a Revert whose draft\'s model cannot be had shows the reverted plan as a plain row, and writes nothing',()=>{
+   const view=page('reverted');edits.length=0;
+   show(view,rowOf('reverted',PLAN,{draft_revision:2,edited:true,editor_facts:model(PLAN)}));
+   button(view.root,'Revert').click();
+   // The row right after it: the older draft's model while the reverted one's is asked, then the plugin's error.
+   show(view,rowOf('reverted',RUNNING,{draft_revision:3,editor_facts:model(PLAN),editor_facts_pending:true}),serial);
+   show(view,rowOf('reverted',RUNNING,{draft_revision:3,...FAILED}));
+   assert(!editor(view.root),'no editor');equal(plain(view.root).Plan,RUNNING,'the reverted plan');assert(!button(view.root,'Add axis'),'no Add axis');
+   equal(edits,[],'nothing written');
+   view.root.remove();
+ });
+ await check('another pulse whose model cannot be had shows plain rows: no API value of the old pulse, nothing written, nor its re-read again',()=>{
+   const view=page('pulse');edits.length=0;
+   // The model re-reads the API values (tidy): written once, as the draft's own model asks.
+   show(view,rowOf('pulse',PLAN,{editor_facts:model(PLAN,api('delay = 0.002'))}));
+   equal(edits,[{values:{api_values:'delay = 0.002'}}],'the re-read written once');edits.length=0;
+   const pulse=(revision,apiValues,template)=>rowOf('pulse',PLAN,{draft_revision:revision,values:{plan:PLAN,api_values:apiValues,pulse_template:template},...FAILED});
+   show(view,pulse(2,'delay = 0.002','pulse-a.json'));
+   show(view,pulse(3,'','pulse-b.json'));
+   assert(!editor(view.root),'no editor of the old pulse');assert(!view.root.querySelector('.api-values .field'),'no API value of the old pulse');
+   equal(plain(view.root),{Plan:PLAN,'API values':''},'plain rows');equal(edits,[],'nothing written');
+   view.root.remove();
+ });
+ await check('the Edit tab closed and opened again keeps the node\'s last model',()=>{
+   const first=page('reopened');show(first,rowOf('reopened',PLAN,{editor_facts:model(PLAN)}));first.root.remove();
+   const second=page('reopened');edits.length=0;
+   show(second,rowOf('reopened',PLAN,{draft_revision:2,...FAILED}));
+   assert(editor(second.root),'the editor, from the last model');equal(plain(second.root),{},'no plain rows');equal(open(second.root),[],'locked');
+   equal(error(second.root),SAID,'the error');equal(edits,[],'nothing written');
+   second.root.remove();
+ });
+ await check('a node of another type under the ID drops the last model',()=>{
+   const view=page('typed');
+   show(view,rowOf('typed',PLAN,{editor_facts:model(PLAN)}));
+   show(view,rowOf('typed',PLAN,{type_id:'another.type',...FAILED}));
+   assert(!editor(view.root),'another type: no editor');
+   show(view,rowOf('typed',PLAN,FAILED));
+   assert(!editor(view.root),'the type back: the model is gone');equal(plain(view.root),{Plan:PLAN,'API values':''},'plain rows');
+   view.root.remove();
+ });
+ await check('an accepted replacement through the Task Console drops the last model',()=>{
+   const view=page('replaced');
+   let row=rowOf('replaced',PLAN,{editor_facts:model(PLAN)});
+   show(view,row);
+   const transport={pending:new Map(),lastError:'',notice:null,busyText(){return ''},send(){return 1},post(){},report(error){throw error}};
+   const board=new PanelBoard(transport);
+   const ctx={transport,latest:{type:'state',logic:[row],board:{panels:[],paused:false,selectors:true,active_task:null,frozen:{}},panels:[]},show(){}};
+   const consoleView=new TaskConsoleView(ctx,board);document.body.append(consoleView.root);consoleView.editors.set('replaced',view);
+   // The same ID, the same draft, a new node: its plugin has not answered.
+   row=rowOf('replaced',PLAN,FAILED);ctx.latest.logic=[row];
+   consoleView.update({type:'state',result:{replaced:true},error:null});
+   show(view,row);
+   assert(!editor(view.root),'replaced: no editor');equal(plain(view.root),{Plan:PLAN,'API values':''},'replaced: plain rows');
+   consoleView.root.remove();view.root.remove();
+ });
+ await check('Panel Edit\'s producer draws the node\'s kept model read only, says the error, and shows a changed plan as a plain row',async()=>{
+   const sent=[];
+   const transport={request:()=>Promise.resolve(null),note:()=>{},choosePath:()=>Promise.resolve(null)};
+   const edit=new PanelEditView('edit-panel-1','panel-1',{views:new Map(),signals:[]},command=>{sent.push(command);return sent.length},()=>{},transport);
+   document.getElementById('host').append(edit.root);
+   const card=()=>[...edit.root.querySelectorAll('.panel-edit-card')].find(node=>node.querySelector('.section-title')?.textContent==='Direct producer');
+   const panel={id:'edit-panel-1',kind:'curve',frame:{width:12,height:8,sequence:1},controls:[],binding:{signal:'@logic/producer/counts'},
+     edit:{panel:'panel-1',at_ms:0,revision:3,advanced:false,shape:[2,3],status:'frozen and ready to save'}};
+   const producer=(text,patch)=>({...rowOf('producer',text,patch),selector_fields:['plan']});
+   const update=row=>edit.update(panel,'Scan counts',[row],'C:\\data');
+   update(producer(PLAN,{editor_facts:model(PLAN)}));await settle();
+   assert(editor(card()),'the editor');equal(error(card()),'','no error');
+   update(producer(PLAN,{draft_revision:2,...FAILED}));await settle();
+   assert(editor(card()),'the kept model\'s editor');equal(plain(card()),{},'no plain row');equal(error(card()),SAID,'the error');
+   update(producer(ELSEWHERE,{draft_revision:3,...FAILED}));await settle();
+   assert(!editor(card()),'no editor of the older draft');equal(plain(card()).Plan,ELSEWHERE,'the true plan');equal(error(card()),SAID,'the error');
+   equal(sent,[],'nothing sent');
+   edit.root.remove();
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
