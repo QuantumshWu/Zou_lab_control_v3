@@ -816,6 +816,13 @@ pub trait Middle {
     /// a reading takes of the model is made where one is (model/selected.rs, # The readings on the middle).
     fn reading(&self, _reads: bool) {}
 
+    /// The largest relative error of the rates and of the friction the nodes made on this middle carry against the
+    /// model's own (model/selected.rs, # The tables' budget): what the step adds to its trajectory's
+    /// `Trajectory::deviated`; none for a model whose nodes are its own.
+    fn deviation(&self) -> [f64; 2] {
+        [0.0; 2]
+    }
+
     /// The cluster's optical sector on the path (# The optical sector's noise; model/optical.rs): None where the
     /// cluster has no explicit excited state.
     fn optical(&self, _path: &Self::Path) -> Option<Optical> {
@@ -1052,6 +1059,10 @@ pub struct Trajectory {
     pub forms: Forms,
     /// The model's version it runs on, the model's when it started (`Dynamics::version`, `on_version`).
     pub version: u32,
+    /// ∫ x dt from its start (µs) of its steps' nodes' relative errors x against the model's own, [the rates', the
+    /// friction's] (`Middle::deviation`: each step's largest over its nodes, over the step's length): what its run
+    /// books of them (solve.rs, # The tables' deviation).
+    pub deviated: [f64; 2],
 }
 
 thread_local! {
@@ -1122,6 +1133,7 @@ impl Trajectory {
             booked: [0.0; 3],
             forms,
             version,
+            deviated: [0.0; 2],
         };
         if !on {
             // Its jump at once; where the model has no photon to give, or its landing does not exist, the start is nowhere
@@ -3672,10 +3684,18 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         scratch.weights.fill(0.0);
         // Cluster by cluster: the start's generator, then that of every cluster a jump lands in, at the same middle.
         let mut landed: Option<D::Middle<'a>> = None;
+        // The largest relative error of the step's nodes against the model's own (`Middle::deviation`).
+        let mut deviation = [0.0f64; 2];
         loop {
             // A refused stretch: the attempt's count as far as it went, on the scratch (`Scratch::refused`).
             let generator = landed.as_ref().unwrap_or(&self.generator);
             let (done, next) = self.stretch(generator, kappa_m, from.time, reads, &mut march, scratch, domain).inspect_err(|_| scratch.refused += march.work + unfinished(generator, &march.progress, scratch))?;
+            let d = generator.deviation();
+            deviation = [deviation[0].max(d[0]), deviation[1].max(d[1])];
+            if let Some(next) = &next {
+                let d = next.deviation();
+                deviation = [deviation[0].max(d[0]), deviation[1].max(d[1])];
+            }
             if done {
                 break;
             }
@@ -3738,6 +3758,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             return Err(Refused::Overflow);
         }
         (end.r, end.kappa, end.time) = (r1, kappa1, from.time + tau);
+        for (x, d) in end.deviated.iter_mut().zip(deviation) {
+            *x += tau.abs() * d;
+        }
         // A time read at the step's end is the end itself.
         made.extend(reads[read..].iter().map(|&time| Made { kick: None, state: Trajectory { time, ..end.clone() }, rows: ended }));
         let segment = Segment::new(from.time, tau, flow, (from.r, from.kappa), kick, spread);

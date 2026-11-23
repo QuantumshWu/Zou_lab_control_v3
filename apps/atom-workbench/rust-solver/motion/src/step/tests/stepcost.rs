@@ -640,6 +640,7 @@ fn tabled_step_parts() {
         // [version][step, step with a read, node, photon node, node warm]; counted [version][step, node].
         let (mut sum, mut counted) = ([[0.0f64; 5]; 2], [[0.0f64; 3]; 2]);
         let (mut taken, mut read_off, mut points) = (0usize, 0usize, 0usize);
+        let mut deviation = [0.0f64; 2];
         for from in &walk {
             let midway = Midway::new(&run, from, tau).unwrap();
             let at = midway.reached;
@@ -649,7 +650,9 @@ fn tabled_step_parts() {
             for (v, t) in versions.iter().enumerate() {
                 let step = Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).unwrap();
                 counted[v][0] += step.work;
-                counted[v][1] += crate::step::on_version(v as u32, || run.node(at.0, at.1, false)).work;
+                let node = crate::step::on_version(v as u32, || run.node(at.0, at.1, false));
+                counted[v][1] += node.work;
+                deviation = [deviation[0].max(node.deviation[0]), deviation[1].max(node.deviation[1])];
                 counted[v][2] += Midway::new(&run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &read, &mut Scratch::default(), &domain)).unwrap().work;
                 std::hint::black_box(crate::step::on_version(v as u32, || run.photon_node(at.0, at.1)));
             }
@@ -695,7 +698,7 @@ fn tabled_step_parts() {
         let k = taken.max(1) as f64;
         let m = |v: usize, p: usize| sum[v][p] / k;
         eprintln!(
-            "TABLED-STEP {name} tau {tau}: the fold's / the tables' (ratio) -- a step {:.1} / {:.1} µs ({:.3}), with a read {:.1} / {:.1} ({:.3}), a node {:.1} / {:.1} ({:.3}), a jump's photon node {:.1} / {:.1} ({:.3}), a node warm (its calls one after another) {:.1} / {:.1} ({:.3}); counted a step {:.3e} / {:.3e} ({:.3}), with a read {:.3e} / {:.3e} ({:.3}), a node {:.3e} / {:.3e} ({:.3}); the tables read {read_off} of {points} points; over {taken} states, each the least of {repeat}",
+            "TABLED-STEP {name} tau {tau}: the fold's / the tables' (ratio) -- a step {:.1} / {:.1} µs ({:.3}), with a read {:.1} / {:.1} ({:.3}), a node {:.1} / {:.1} ({:.3}), a jump's photon node {:.1} / {:.1} ({:.3}), a node warm (its calls one after another) {:.1} / {:.1} ({:.3}); counted a step {:.3e} / {:.3e} ({:.3}), with a read {:.3e} / {:.3e} ({:.3}), a node {:.3e} / {:.3e} ({:.3}); the tables read {read_off} of {points} points; the nodes' deviation at the most {deviation:?}; over {taken} states, each the least of {repeat}",
             m(0, 0),
             m(1, 0),
             m(1, 0) / m(0, 0),

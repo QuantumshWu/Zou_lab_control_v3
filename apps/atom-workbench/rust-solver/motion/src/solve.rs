@@ -520,6 +520,18 @@
 //! atom lost after such a step is no held atom's: as every model error's, it is in what the held atoms' errors are
 //! weighed by (the held share, `accounts`), and not booked apart.
 //!
+//! # The tables' deviation
+//! A node read off the run's tables (model/selected.rs, # The tables) differs from the model's own by a relative error of
+//! its rates x_pop and of its friction x_T, strictly bounded at the node (`Node::deviation`: its Doppler series' tail at
+//! the terms it took, its interpolation's, ΔG's and the spans' parts). Each step adds its nodes' largest, times its
+//! length, to its trajectory's ∫x dt (step.rs `Trajectory::deviated`), which every time read takes (estimate.rs
+//! `Held::deviated`) and the estimate means over the held atoms (`Estimate::deviated`). The account books it with the
+//! model's error A, as the selection books a rate's (`deviation_at`): a rate off by x shifts what it drives in time by
+//! ∫x dt, so what is shown moves by X̄_pop(t)·|dO/dt| -- X̄_pop the held atoms' mean ∫x_pop dt to t, |dO/dt| the largest
+//! of what is shown and of the loss by its neighbours' estimates --; and T, the steady ratio of the diffusion to the
+//! friction, by x̄_T·T, x̄_T the window's own mean of x_T between the time and the one before (the step's check's
+//! windows). Nothing where the nodes are the model's own; nothing persisted.
+//!
 //! # Exits
 //! Two exits, each said where it is met, none carried on as a number (unify2 §7):
 //! - the request's (refused before a trajectory runs, with its reason): the run's construction (scene.rs `Scene::new`,
@@ -4371,6 +4383,7 @@ impl State {
             booked: [0.; 3],
             forms: self.forms.clone(),
             version,
+            deviated: [0.; 2],
         }
     }
 }
@@ -4626,7 +4639,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
         let held = match nowhere.get() {
             Some(_) if t.time > 0. => Fate::Failed,
-            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), shape: NO_SHAPE, push: [0.; 3], unresolved: t.unresolved }),
+            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), shape: NO_SHAPE, push: [0.; 3], deviated: t.deviated, unresolved: t.unresolved }),
         };
         let mut windows = windows.borrow_mut();
         if let Some(k) = places[0] {
@@ -5297,7 +5310,7 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: &Bound, scales: &Scales) -
             let shown = Look { target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true };
             let held = (e.held != 0.).then(|| {
                 let read = Some(e.temperature_interval()).filter(|i| i.is_finite());
-                let account = temperature[k].unwrap_or_else(|| temperature_account(e, fixed.at(k, e)[1], step.at(fixed.times[k])[1], read.unwrap_or(CONFIDENCE * (2. / (n * h)).sqrt())));
+                let account = temperature[k].unwrap_or_else(|| temperature_account(e, fixed.at(k, e)[1] + deviation_at(estimates, &fixed.times, k)[1], step.at(fixed.times[k])[1], read.unwrap_or(CONFIDENCE * (2. / (n * h)).sqrt())));
                 Look { target: e.temperature_target, account, interval: account.statistics, trajectories: n, shown: false }
             });
             // The motion's looks where they have accounts (`motion_accounts`): a look whose model's error is unread has
@@ -5364,11 +5377,30 @@ fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &Bound) -> (Vec<Account
                 return (Account::default(), temperature.statistics.is_finite().then_some(temperature));
             }
             let (a, [shown, temperature]) = (fixed.at(k, e), step.at(fixed.times[k]));
+            let d = deviation_at(estimates, &fixed.times, k);
+            let a = [a[0] + d[0], a[1] + d[1]];
             let population = Account { model: probability_error(a[0]), step: shown, statistics: e.shown_statistics() };
             let temperature = temperature_account(e, a[1], temperature, e.temperature_interval());
             (population, (temperature.model.is_finite() && temperature.step.is_finite() && temperature.statistics.is_finite()).then_some(temperature))
         })
         .unzip()
+}
+
+/// The tables' deviation booked at the k-th time of `estimates` at `times` (module documentation, # The tables'
+/// deviation): [on what is shown X̄_pop·|dO/dt|, on T relative x̄_T] -- |dO/dt| the largest of each shown row's
+/// (1 − L)p and of the loss L by its neighbours' estimates (one-sided at the last time), x̄_T the held atoms' mean
+/// ∫x_T dt over the window from the time before, over its length. None at t = 0.
+fn deviation_at(estimates: &[Estimate], times: &[f64], k: usize) -> [f64; 2] {
+    if k == 0 || estimates[k].deviated == [0.; 2] {
+        return [0.; 2];
+    }
+    let (a, b) = (k - 1, (k + 1).min(estimates.len() - 1));
+    let shown = |e: &Estimate| -> Vec<f64> { e.populations.iter().map(|p| (1. - e.loss) * p).chain(std::iter::once(e.loss)).collect() };
+    let span = times[b] - times[a];
+    let slope = if span > 0. { shown(&estimates[b]).iter().zip(shown(&estimates[a])).map(|(x, y)| (x - y).abs()).fold(0., crate::linalg::larger) / span } else { 0. };
+    let window = times[k] - times[k - 1];
+    let friction = if window > 0. { crate::linalg::larger(estimates[k].deviated[1] - estimates[k - 1].deviated[1], 0.) / window } else { 0. };
+    [estimates[k].deviated[0] * slope, friction]
 }
 
 /// T's account at a time (`accounts`) from its estimate, the model's error on T there `model` (with its bounds,
@@ -5773,6 +5805,13 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         *LAST_ERRORS.lock().unwrap() = e.shown_errors.iter().map(|x| x.error).chain([e.loss_error.error, e.loss_error.groups]).collect();
     }
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
+    // (A measurement's, the profiling build's: the tables' deviation booked at the outputs at its largest, # The tables'
+    // deviation.)
+    crate::prof::note(|| {
+        let most = (1..outputs).map(|k| deviation_at(estimates, times, k)).fold([0.; 2], |m, d| [crate::linalg::larger(m[0], d[0]), crate::linalg::larger(m[1], d[1])]);
+        let last = estimates.last().map_or([0.; 2], |e| e.deviated);
+        format!("the tables' deviation booked at the outputs at its largest: {:.3e} on what is shown, {:.3e} of T; the held atoms' mean ∫x dt at the end {last:?} µs", most[0], most[1])
+    });
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;
     let classical = |t: &V3| -> [bool; 3] { std::array::from_fn(|a| classical(t[a], w[a])) };
@@ -6263,7 +6302,7 @@ mod tests {
         let record = |h: f64, out: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * if h > 3. * tau { out } else { 1. };
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
             Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         for members in [1, GROUP] {
@@ -6548,7 +6587,7 @@ mod tests {
         let record = |h: f64, f: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * (1. - f * (1. - 0.5_f64.powi(ORDER)));
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
             let halved = adapt::Halved { steps: 1, time: 4. * f, shortfall: 4. * f * (1. - 0.5_f64.powi(ORDER)) };
             Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
@@ -6921,6 +6960,7 @@ mod tests {
             unresolved: 0.,
             temperature_target: TEMPERATURE_TARGET,
             scale: 0.,
+            deviated: [0.; 2],
         }
     }
 
@@ -6941,7 +6981,7 @@ mod tests {
         let groups: Vec<Group> = (0..4)
             .map(|g| {
                 let mut group = Group::new(4);
-                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
                 group.add(&[held.clone(), held.clone(), Fate::Failed, Fate::Failed]);
                 group.add(&[held.clone(), held.clone(), held, Fate::Failed]);
                 group
@@ -6991,7 +7031,7 @@ mod tests {
     /// one atom at 30 μs, none at 40 μs.
     #[test]
     fn a_t_carried_keeps_its_judgement_and_a_t_unread_is_its_own() {
-        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
         let groups: Vec<Group> = (0..5)
             .map(|g| {
                 let mut group = Group::new(5);
@@ -7050,7 +7090,7 @@ mod tests {
         let kinds = 11;
         let held = |g: usize, m: usize, scale: f64, still: bool, unresolved: bool| {
             let y = if still { 0. } else { scale * (1. + (g * 4 + m) as f64) };
-            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], shape: NO_SHAPE, push: [0.; 3], unresolved })
+            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved })
         };
         let level = |scale: f64| -> Vec<Group> {
             (0..5)
@@ -7266,7 +7306,7 @@ mod tests {
                     let mut group = Group::new(2);
                     for m in 0..4 {
                         let kappa2 = t * hotter * (1. + 0.01 * (4 * g + m) as f64);
-                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
                         group.add(&[held.clone(), held]);
                     }
                     group
@@ -7456,7 +7496,7 @@ mod tests {
                 break;
             }
         }
-        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
         let span = 2. * plan.halves.iter().flatten().copied().fold(0., crate::linalg::larger);
         for stop in [plan.end, 17.6] {
             let mut windows = Windows::new(&plan.times, &plan.halves);
@@ -7589,7 +7629,7 @@ mod tests {
                 };
                 let along = |from: f64, at: f64| Integrals::of(from, nodes(from, at));
                 let mut windows = Windows::new(&plan.times, &plan.halves);
-                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, push: [0.; 3], unresolved: i % 7 == 3 });
+                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: i % 7 == 3 });
                 windows.record(0, at(0.));
                 let mut next = 1;
                 for piece in cuts.windows(2) {
@@ -7710,7 +7750,7 @@ mod tests {
         };
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
-            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false };
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false };
             Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
@@ -7820,7 +7860,7 @@ mod tests {
             method: String::new(),
         };
         let shape = Shape::of(&context.plan, false);
-        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
         let nowhere = |i: u64| Record {
             outputs: vec![held(i), Fate::Failed],
             reads: vec![held(i), Fate::Failed],
@@ -8153,7 +8193,7 @@ mod tests {
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false };
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
             Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
@@ -8562,7 +8602,7 @@ mod tests {
     fn the_reads_are_no_farther_apart_than_a_quarter_of_t_s_shortest_window() {
         let candidates = grid(1000., 0.5);
         assert!(candidates.len() == 1001 && candidates[1000] == 1000. && candidates.windows(2).all(|w| (w[1] - w[0] - 1.).abs() < 1e-12));
-        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
+        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false });
         let groups: Vec<Group> = (0..11)
             .map(|_| {
                 let mut g = Group::new(candidates.len());
@@ -8711,7 +8751,7 @@ mod tests {
             let mut fate = || {
                 let kappa: V3 = std::array::from_fn(|_| 3. * (uniform() - 0.5));
                 let kappa2: V3 = std::array::from_fn(|a| kappa[a] * kappa[a] * (1. + uniform()));
-                Fate::Held(Held { rows: state(0), kappa, kappa2, shape: NO_SHAPE, push: [0.; 3], unresolved: false })
+                Fate::Held(Held { rows: state(0), kappa, kappa2, shape: NO_SHAPE, push: [0.; 3], deviated: [0.; 2], unresolved: false })
             };
             let parts: Vec<Group> = (0..groups)
                 .map(|_| {
