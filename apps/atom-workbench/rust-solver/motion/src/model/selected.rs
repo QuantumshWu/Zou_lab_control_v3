@@ -109,11 +109,14 @@
 //! strict bounds of what it differs by from the fold's own) instead of folding at the point. The run buys them as it
 //! rents (`Selected::buy_tables`): its trajectories' nodes off the fold count their work (the rent) and the least s they
 //! meet; at a point no node is being made at -- before every hand-out of trajectories (solve.rs) -- where the rent has
-//! reached what the tables were last priced at, their layout on [that s, 1] is made and priced exactly
-//! (`Tables::layout`: the decompositions alone), each piece kept where the rent paid at its own s covers its own fill
-//! (`Selected::rented`, the rent by bins of s), and they are filled where the rent covers the layout and the pieces
-//! kept, else the price is kept for the next time; a point in a piece not kept is folded. (Until 2026-11-23 the whole
-//! of [the least s met, 1]: an atom of tilt2's scout escaping to s = 0.06 took the tables to 165 pieces, 103 MB.) Bought, they are read for the kinds of node they cost less for by count (`kind`, `KINDS`:
+//! reached what the tables were last priced at, their layout on [that s, 1] to the run's budget is made and priced
+//! exactly (`Tables::layout`: the decompositions alone, # The tables' budget), each piece kept where the rent paid at
+//! its own s covers its own fill (`Selected::rented`, the rent by bins of s), and they are filled where the rent covers
+//! the layout and the pieces kept, else the price is kept for the next time; a point in a piece not kept is folded.
+//! (Until 2026-11-23 the whole of [the least s met, 1], laid to the reach's tail: an atom of tilt2's scout escaping to
+//! s = 0.06 took the tables to 165 pieces, 103 MB. A piece's fill is some ten nodes of the fold, so its rent alone
+//! spared few: 182 of 310 bought, 114 MB; laid to the budget, 53 of 56, 33 MB.) Bought, they are read for the kinds of
+//! node they cost less for by count (`kind`, `KINDS`:
 //! a step's node, the middle's with the lift, a jump's photon's, a whole one with the photon forms; `tables_pay`, at the
 //! structure's point), each up to the most Doppler terms it costs less at (`Bought::caps`: a fast atom's node that needs
 //! more is folded -- until 2026-11-23 it took the terms whatever they cost, PGC3D's step on a 300-step walk 1.05 of the
@@ -137,9 +140,9 @@
 //! ratio of a member's shift to its gap, rs/fold_tabled.rs # The bounds); where none does, the fold's own. The budget is
 //! weighed when the tables are bought (`Selected::budget`), as the drop tier weighs: of J = 1 … 4 terms at the run's
 //! thermal speed, x(J) = [ρ^J, ρ^{J−1}]/(1 − ρ), the J of least W -- the node's counted work at J terms times the
-//! account's factor with x(J) beside its errors --, its x the budget; the tables are laid and filled again to it where
-//! a piece of their first layout (to the reach's tail) is beyond it (rs/fold_tabled.rs, # The pieces: the values to the
-//! rates' budget, the slopes to the friction's). Each node's own errors -- the tail at its terms,
+//! account's factor with x(J) beside its errors --, its x the budget, weighed on the piece of the tables that holds
+//! s = 1, laid to the reach's tail and filled alone; every piece is then laid to it (rs/fold_tabled.rs, # The pieces:
+//! the values to the rates' budget, the slopes to the friction's). Each node's own errors -- the tail at its terms,
 //! its interpolation's relative bound, ΔG's and the spans' parts (`Node::deviation`) -- are what its run books
 //! (solve.rs, # The tables' deviation). One term leaves the friction out (x_T = 1/(1 − ρ): no factor bounds it); the
 //! rule takes two on PGC3D, TET, tilt0 and tilt2 (ρ 3.1e-3 … 4.6e-3 thermal: x = 1e-5 … 2e-5 on the rates, 3e-3 …
@@ -2365,10 +2368,11 @@ impl Selected {
 
     /// The run's tables bought where their price is paid (module documentation, # The tables), at a point no node of the
     /// run is being made at (solve.rs: before every hand-out of trajectories): where its trajectories' nodes off the fold
-    /// have taken at least what the tables were last priced at, the layout on [the least s they met, 1] (rs/fold_tabled.rs
-    /// `Tables::layout`, priced exactly before it is filled), and the tables filled where that layout's work and its fill's
-    /// are within what they took; else the price kept for the next time. Once bought -- or found to be none for the plan
-    /// -- never again.
+    /// have taken at least what the tables were last priced at, the layout on [the least s they met, 1] to the run's budget
+    /// (rs/fold_tabled.rs `Tables::layout`, # The pieces: weighed by `budget` on the top piece filled alone; priced
+    /// exactly before it is filled), and the tables filled where that layout's work and its fill's are within what they
+    /// took; else the price kept for the next time. Once bought -- or found to be none for the plan or its budget --
+    /// never again.
     pub(crate) fn buy_tables(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         let tabling = &self.tabling;
@@ -2389,8 +2393,14 @@ impl Selected {
         self.scene.point_into([0.0; 3], [0.0; 3], &mut point);
         let rest = self.rs.tweezer().values(&self.scene, &point);
         let plan = self.rs.plan();
-        let Some(mut layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, None) else {
-            crate::prof::note(|| "tables: none for the plan".to_string());
+        let weighed = std::cell::Cell::new(None);
+        let weigh = |t: &PairTables| {
+            let budget = self.budget(t)?;
+            weighed.set(Some(budget));
+            Some(budget.0)
+        };
+        let Some(mut layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, Some(&weigh)) else {
+            crate::prof::note(|| "tables: none for the plan or its budget".to_string());
             let _ = tabling.tables.set(None);
             return;
         };
@@ -2409,21 +2419,9 @@ impl Selected {
             tabling.price.store(price.to_bits(), Relaxed);
             return;
         }
-        // Filled, their budget weighed (`budget`) -- laid and filled again to it where a piece is beyond it (rs/
-        // fold_tabled.rs, # The pieces) --, and kept for the kinds of node they cost less for at its terms; none where
-        // no kind does.
-        let tables = layout.fill(plan, &self.lab, &rest).and_then(|t| {
-            let (budget, orders) = self.budget(&t)?;
-            let t = if t.pieces.iter().all(|p| p.worst[0] <= budget[0] && p.worst[1] <= budget[1]) {
-                t
-            } else {
-                let mut again = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, Some(budget))?;
-                let laid = again.pieces.len();
-                self.rented(&mut again);
-                crate::prof::note(|| format!("tables laid again to the budget {budget:?}: {} of {laid} pieces rented, priced {:.4e}", again.pieces.len(), COMPLEX * (again.work + again.price)));
-                again.fill(plan, &self.lab, &rest)?
-            };
-            // Kept where some kind costs less off them at the budget's terms.
+        // Filled, and kept for the kinds of node they cost less for at the budget's terms; none where no kind does.
+        let tables = weighed.get().and_then(|(budget, orders)| {
+            let t = layout.fill(plan, &self.lab, &rest)?;
             let caps = self.tables_pay(&t).filter(|caps| caps.iter().any(|&c| c >= orders))?;
             Some(Bought { tables: Arc::new(t), caps, budget })
         });

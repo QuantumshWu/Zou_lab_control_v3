@@ -73,10 +73,18 @@
 //! # The pieces
 //! A piece [a, b] of s holds where its strict bound (`Piece::worst`: per table and term its value's bound over its
 //! entries' own bound c ‖D‖^p, and its slope's over theirs c p ‖D‖^p ‖K‖, the J-th weighed by the reach's ratio
-//! ρ_reach^J) is within the target: the run's budget where it is known (model/selected.rs, # The tables' budget: the
-//! rates' relative error on the values, the friction's on the slopes -- the interpolation never adds more to a node
-//! than the series' tail it is held to), else the Doppler series' tail at the tables' terms at the reach (the largest
-//! ratio of the members' shifts there to the sums' gaps at s = 1) and at one term fewer. Else it is halved, but where
+//! ρ_reach^J) is within the target: the run's budget (model/selected.rs, # The tables' budget: the rates' relative
+//! error on the values, the friction's on the slopes -- the interpolation never adds more to a node than the series'
+//! tail it is held to). The budget is weighed on the tables at s = 1: the piece that holds it is laid first, alone, to
+//! the Doppler series' tail at the tables' terms at the reach (the largest ratio of the members' shifts there to the
+//! sums' gaps at s = 1) and at one term fewer, and filled; then every piece, that one too, is laid to the budget
+//! (without a budget, the tests', every piece to the reach's tail). (Until 2026-11-23 every piece was laid to the
+//! reach's tail first, and laid again to the budget only where one was beyond it: tilt2's run on [0.06, 1] 310 pieces,
+//! 182 bought by their rent, 114 MB, 2.1 s, against 56, 53, 33 MB, 0.4 s; the walks' tables of PGC3D, TET and tilt2 8,
+//! 8, 16 pieces, 12.3, 7.0, 10.0 MB against 4, 4, 6 pieces, 6.2, 3.5, 3.8 MB, a step's time the same. A node's booked
+//! deviation on the rates is then up to ten times the budget -- PGC3D's walk 6.6e-5 against 6.5e-6, 6.1e-6 before: the
+//! pieces' bound is over each entry's own, the node's over its output's largest --, booked as it is.) Else it is
+//! halved, but where
 //! the halves' bounds no longer fall by half -- the samples' rounding reached -- the piece is taken at its bound; one
 //! s's round-off cannot halve is taken at its bound too, and where that is none no node reads it. (Until 2026-11-23 the
 //! slopes held to nothing: R4's G, ρ 0.08 thermal, laid to the reach's tail in 16 pieces, booked 14.5 % of T at its
@@ -459,9 +467,10 @@ impl Tables {
     /// decompositions alone -- what filling them takes is then known (`Layout::price`) before it is done. `rest` the
     /// values at a point at rest (the members' frequencies f₀), `reach` the run's (`Rs::reach`: the pieces' Doppler
     /// shifts at its momentum, the coefficients' largest), `orders` the Doppler series' terms kept, `degree` the pieces'
-    /// Chebyshev degree. None where a block a sum is on is not tabled (its generator varies by another factor than the
-    /// intensities), the plan has no intensity, or a block does not decompose.
-    pub(crate) fn layout(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Reach, orders: usize, degree: usize, low: f64, target: Option<[f64; 2]>) -> Option<Layout> {
+    /// Chebyshev degree, `budget` the run's (# The pieces: weighed on the top piece filled alone; none, every piece to
+    /// the reach's tail). None where a block a sum is on is not tabled (its generator varies by another factor than the
+    /// intensities), the plan has no intensity, a block does not decompose, or `budget` weighs none.
+    pub(crate) fn layout(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Reach, orders: usize, degree: usize, low: f64, budget: Option<&dyn Fn(&Tables) -> Option<[f64; 2]>>) -> Option<Layout> {
         let clock = std::time::Instant::now();
         if plan.intensity.is_empty() || !(low < 1.0) {
             return None;
@@ -598,9 +607,8 @@ impl Tables {
                 })
             })
             .fold(0.0, f64::max);
-        // Where the run's budget is known, it (# The pieces).
         let tail = |o: i32| if reach_rho < 1.0 { reach_rho.powi(o) / (1.0 - reach_rho) } else { 0.0 };
-        let target = target.unwrap_or([tail(orders as i32), tail(orders as i32 - 1)]);
+        let reach_target = [tail(orders as i32), tail(orders as i32 - 1)];
         // A sample element's rounding: γ_n of the moduli of the terms it is the sum of, n the operations behind it and
         // its transform.
         let floor = {
@@ -706,31 +714,6 @@ impl Tables {
             let room = moves.iter().map(|k| 1.0 / (k * half)).fold(f64::INFINITY, f64::min);
             Some((Piece { range: [a, b], gaps, kappa, worst, bounds, room }, work))
         };
-        // The pieces: halved until their strict bound is within the target, or no longer falls by half (the samples'
-        // rounding reached: # The pieces); one s's round-off cannot halve is taken at its bound.
-        let first = bounded(low, 1.0)?;
-        work += first.1;
-        let mut todo = vec![first.0];
-        let mut pieces: Vec<Piece> = Vec::new();
-        while let Some(piece) = todo.pop() {
-            let [a, b] = piece.range;
-            let c = 0.5 * (a + b);
-            if (piece.worst[0] <= target[0] && piece.worst[1] <= target[1]) || !(c > a && c < b) {
-                pieces.push(piece);
-                continue;
-            }
-            let (left, right) = (bounded(a, c)?, bounded(c, b)?);
-            work += left.1 + right.1;
-            // Halving helps where every part beyond its target falls by half.
-            let falls = (0..2).all(|k| piece.worst[k] <= target[k] || left.0.worst[k].max(right.0.worst[k]) <= 0.5 * piece.worst[k]);
-            if !falls {
-                pieces.push(piece);
-            } else {
-                todo.push(right.0);
-                todo.push(left.0);
-            }
-        }
-        pieces.sort_by(|x, y| x.range[0].total_cmp(&y.range[0]));
         // What filling takes (`fill`, complex multiply-adds): per piece and sample the decompositions -- each counted as
         // its first sample's --, LV per leg sum and V⁻¹U per amplitude sum, per table its products (per element and
         // basis pair |B| terms of the series' `orders` powers, the reciprocal, the product); per piece and table its
@@ -754,6 +737,57 @@ impl Tables {
             + tables.iter().map(|t| (t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * t.rows * t.cols * plan.blocks[grouping.zs[t.z].block].rows.len() * (orders + 2)) as f64).sum::<f64>();
         let transform: f64 = tables.iter().map(|t| (t.w.map_or(1, |w| ws[w].rank) * zs[t.z].rank * orders * m * m * t.rows * t.cols) as f64).sum();
         let per_piece = m as f64 * per_sample + transform;
+        // The pieces: halved until their strict bound is within the target, or no longer falls by half (the samples'
+        // rounding reached: # The pieces); one s's round-off cannot halve is taken at its bound. With `top`, the piece
+        // that holds s = 1 alone, the others left as they were halved off (the second list).
+        let lay = |mut todo: Vec<Piece>, target: [f64; 2], top: bool| -> Option<(Vec<Piece>, Vec<Piece>, f64)> {
+            let (mut pieces, mut left_off, mut work) = (Vec::new(), Vec::new(), 0.0);
+            while let Some(piece) = todo.pop() {
+                let [a, b] = piece.range;
+                let c = 0.5 * (a + b);
+                if (piece.worst[0] <= target[0] && piece.worst[1] <= target[1]) || !(c > a && c < b) {
+                    pieces.push(piece);
+                    continue;
+                }
+                let (left, right) = (bounded(a, c)?, bounded(c, b)?);
+                work += left.1 + right.1;
+                // Halving helps where every part beyond its target falls by half.
+                let falls = (0..2).all(|k| piece.worst[k] <= target[k] || left.0.worst[k].max(right.0.worst[k]) <= 0.5 * piece.worst[k]);
+                if !falls {
+                    pieces.push(piece);
+                } else {
+                    todo.push(right.0);
+                    if top {
+                        left_off.push(left.0);
+                    } else {
+                        todo.push(left.0);
+                    }
+                }
+            }
+            Some((pieces, left_off, work))
+        };
+        let first = bounded(low, 1.0)?;
+        work += first.1;
+        let mut pieces = match budget {
+            None => {
+                let (pieces, _, w) = lay(vec![first.0], reach_target, false)?;
+                work += w;
+                pieces
+            }
+            // The top piece to the reach's tail, filled alone: the budget weighed on it, every piece laid to that.
+            Some(budget) => {
+                let (top, left_off, w) = lay(vec![first.0], reach_target, true)?;
+                work += w;
+                let alone = Layout { degree, orders, pieces: top.clone(), dropped, zs: zs.clone(), ws: ws.clone(), z_vectors: z_vectors.clone(), w_vectors: w_vectors.clone(), tables: tables.clone(), e_rest: e0.clone(), e_slope: e_slope.clone(), used: used.clone(), s_mats: s_mats.clone(), work: 0.0, price: per_piece, per_piece, seconds: 0.0 };
+                let filled = alone.fill(plan, grouping, rest)?;
+                work += filled.work;
+                let target = budget(&filled)?;
+                let (pieces, _, w) = lay(left_off.into_iter().chain(top).collect(), target, false)?;
+                work += w;
+                pieces
+            }
+        };
+        pieces.sort_by(|x, y| x.range[0].total_cmp(&y.range[0]));
         let price = pieces.len() as f64 * per_piece;
         Some(Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, tables, e_rest: e0, e_slope, used, s_mats, work, price, per_piece, seconds: clock.elapsed().as_secs_f64() })
     }
