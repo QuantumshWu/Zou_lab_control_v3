@@ -46,6 +46,7 @@ pub const QUADRATURE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * 
 
 /// √a for a ≥ 0 in a constant (f64::sqrt is not const): Heron's iteration x ← (x + a/x)/2 from max(a, 1) ≥ √a, which
 /// decreases monotonically to √a and is stopped by the floating-point format, where a step no longer decreases x.
+#[inline]
 const fn square_root(a: f64) -> f64 {
     let mut x = if a > 1.0 { a } else { 1.0 };
     loop {
@@ -109,6 +110,7 @@ pub const RAD_PER_US_PER_MHZ: f64 = TAU;
 
 /// ħ/m (µm²/µs) of a mass m (kg): (J s/kg = m²/s) × 10¹² µm²/m² × 10⁻⁶ s/µs. The kinetic energy (rad/µs) of the
 /// wave number κ is (ħ/m) κ²/2, the velocity (µm/µs) (ħ/m) κ.
+#[inline]
 pub fn hbar_over_mass(mass_kg: f64) -> f64 {
     HBAR / mass_kg * 1e6
 }
@@ -122,6 +124,7 @@ pub const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
 /// Higham's γ_n = n u/(1 − n u) (Accuracy and Stability of Numerical Algorithms, §3.1): the bound of the relative
 /// rounding error of n successive operations -- a sum of n + 1 terms errs by at most γ_n Σ|term|, an inner product of
 /// length n by γ_n Σ|x_i y_i|. A quantity within this bound of its operands' scale is that computation's rounding.
+#[inline]
 pub fn rounding(n: usize) -> f64 {
     let nu = n as f64 * UNIT_ROUNDOFF;
     nu / (1.0 - nu)
