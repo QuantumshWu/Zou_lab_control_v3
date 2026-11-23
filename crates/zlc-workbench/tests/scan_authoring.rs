@@ -277,9 +277,9 @@ fn points_the_grid_makes_one_are_played_once() {
     assert_eq!(compiled["axis_facts"][0]["played"], json!({"first":2.0,"last":2.0,"count":2,"written":4,"moved":2,"distinct":1}));
 }
 
-/// What lies on a port's grid as written, and every value of a knob without one, plays as written
-/// and is not moved, whatever binary noise a Range's arithmetic or a unit's conversion carries:
-/// a point is moved only where the decimal written is not on the grid.
+/// What lies on a port's grid as written, and every value of a knob without one, plays as the
+/// decimal written and is not moved, whatever binary noise a Range's arithmetic or a unit's
+/// conversion carries: a point is moved only where the decimal written is not on the grid.
 #[test]
 fn a_value_on_the_grid_or_a_knob_without_one_plays_as_written() {
     let range = |port: &str, unit: &str, start: f64, stop: f64, count: usize| json!({"axes":[{"port":port,"values":[],
@@ -293,6 +293,15 @@ fn a_value_on_the_grid_or_a_knob_without_one_plays_as_written() {
             document["axes"][0]["range"]["count"].clone()), "{document}");
         assert_eq!(values(&compiled, 0), values(&compile(document.clone(), "compile").unwrap(), 0), "as written: {document}");
     }
+    // Each the float of its decimal, bit for bit: 0.1, 0.2, ... 1 us on the clock, 6.734 ... 6.934 GHz
+    // on a gridless knob -- not the Range's arithmetic, which reaches 0.30000000000000004.
+    let bits = |values: Vec<f64>| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+    let tenths: Vec<f64> = (1..=10).map(|tenth| f64::from(tenth) / 10.0).collect();
+    assert_ne!(bits(range_values(0.1, 1.0, 10).unwrap()), bits(tenths.clone()), "the Range's own arithmetic is noisy");
+    let compiled = on_ports(range("api:duration:hold", "us", 0.1, 1.0, 10), "compile", bench()).unwrap();
+    assert_eq!(bits(values(&compiled, 0)), bits(tenths));
+    let compiled = on_ports(range("device:rf:carrier", "GHz", 6.734, 6.934, 11), "compile", bench()).unwrap();
+    assert_eq!(bits(values(&compiled, 0)), bits((0..=10).map(|step| f64::from(6734 + 20 * step) / 1000.0).collect()));
 }
 
 /// A point the grid did not move plays wherever it stands; one it moved onto another's value is

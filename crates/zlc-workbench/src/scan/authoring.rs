@@ -304,15 +304,19 @@ fn ports(args: &Value) -> Result<HashMap<String, Port>> {
 /// conversion, is not read as a value of its own.
 fn written(value: f64) -> String { format!("{value:.*e}", f64::DIGITS as usize - 1) }
 
+/// The number a value's written decimal is: what an axis plays where its port leaves the value
+/// as it is (0.30000000000000004 plays 0.3).
+fn decimal(value: f64) -> f64 { written(value).parse().expect("a written decimal is a float") }
+
 /// Where a point stands, as points are told apart: the number its written decimal is.
-fn point_key(value: f64) -> u64 { number_key(written(value).parse().expect("a written decimal is a float")) }
+fn point_key(value: f64) -> u64 { number_key(decimal(value)) }
 
 /// How an axis's values reach its port's grid, read once for the axis: the port's domain as
 /// exact decimals, and the axis's unit and the port's as the registry reads them (None: one unit).
 struct Reading { places: Places, units: Option<(Arc<Unit>, Arc<Unit>)> }
 
-/// None where every value plays as written: a port without a grid, or a unit the registry
-/// cannot read (the binding refuses that by name).
+/// None where every value plays as the decimal written: a port without a grid, or a unit the
+/// registry cannot read (the binding refuses that by name).
 fn reading(port: &Port, unit: &str) -> Option<Reading> {
     port.domain.grid?;
     let unit = if unit.is_empty() { port.unit.as_str() } else { unit };
@@ -331,31 +335,32 @@ impl Reading {
     }
 
     /// `value` as the port plays it, in the axis's unit, and whether the port moved it: the
-    /// grid point of the decimal written, or the value as written where that is on the grid
-    /// already. A value outside the port's bounds stays as written: the binding refuses it.
+    /// grid point of the decimal written, or that decimal where it is on the grid already. A
+    /// value outside the port's bounds stays the decimal written: the binding refuses it.
     fn on_port(&self, value: f64) -> (f64, bool) {
-        let Some(native) = self.convert(&written(value), false).and_then(|text| Exact::parse(&text)) else { return (value, false) };
-        if !self.places.holds(&native) { return (value, false); }
+        let Some(native) = self.convert(&written(value), false).and_then(|text| Exact::parse(&text)) else { return (decimal(value), false) };
+        if !self.places.holds(&native) { return (decimal(value), false); }
         let placed = self.places.place(&native);
-        if placed == native { return (value, false); }
+        if placed == native { return (decimal(value), false); }
         let text = format!("{}{}e{}", if placed.negative { "-" } else { "" }, placed.mantissa.to_decimal(), placed.exponent);
-        match self.convert(&text, true).and_then(|text| text.parse::<f64>().ok()) { Some(back) => (back, true), None => (value, false) }
+        match self.convert(&text, true).and_then(|text| text.parse::<f64>().ok()) { Some(back) => (back, true), None => (decimal(value), false) }
     }
 }
 
-/// One axis as it plays: the values it plays (`spec.values`), each on its port's domain, and
-/// for each of them where it stands (`point_key`), where it stood as written and whether the
-/// domain moved it; `points` were written, `moves` of them moved.
+/// One axis as it plays: the values it plays (`spec.values`) -- each the decimal written, on its
+/// port's domain where it has one -- and for each of them where it stands (`point_key`), where it
+/// stood as written and whether the domain moved it; `points` were written, `moves` of them moved.
 struct Played { spec: AxisSpec, keys: Vec<u64>, written: Vec<u64>, moved: Vec<bool>, points: usize, moves: usize }
 
 fn played(row: &Value, written: Vec<f64>, parent: Option<String>, ports: &HashMap<String, Port>) -> Result<Played> {
     let reading = ports.get(row["port"].as_str().unwrap()).and_then(|port| reading(port, row["unit"].as_str().unwrap().trim()));
     let (values, moved): (Vec<f64>, Vec<bool>) = match &reading {
         Some(reading) => written.iter().map(|value| reading.on_port(*value)).unzip(),
-        None => (written.clone(), vec![false; written.len()]),
+        None => (written.iter().map(|value| decimal(*value)).collect(), vec![false; written.len()]),
     };
     let moves = moved.iter().filter(|moved| **moved).count();
-    let keys = values.iter().map(|value| point_key(*value)).collect();
+    // Each value played is its decimal already.
+    let keys = values.iter().map(|value| number_key(*value)).collect();
     Ok(Played { spec: axis(row, values, parent)?, keys, written: written.iter().map(|value| point_key(*value)).collect(), moved,
                 points: written.len(), moves })
 }

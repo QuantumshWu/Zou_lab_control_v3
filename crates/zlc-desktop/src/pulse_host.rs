@@ -2196,7 +2196,9 @@ mod tests {
     /// The Seamless Scan's build sweeping a bracket's repeat count, an API parameter, from 1 to 3
     /// in five points (1, 1.5, 2, 2.5, 3 as written) on the virtual board: it runs, the counts
     /// played are whole (1, 2, 3; the points the count's grid made one play once), the editor says
-    /// so, and the dataset's coordinates and the run record are those counts.
+    /// so, and the dataset's coordinates and the run record are those counts. A duration linked to
+    /// the count by x * 0.1 ms (0.30000000000000004 at 3 in floats) is recorded, bit for bit, as
+    /// the duration the binding layer wrote into the pulse each point played.
     #[test]
     fn a_repeat_count_swept_through_fractions_plays_and_records_whole_counts() {
         use zlc_core::{DType,OwnedBuffer};
@@ -2230,19 +2232,21 @@ mod tests {
         let source=runtime.begin("camera",vec![Declaration {signal:"source".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
         plugins.open("scan","native_scan",json!({}),json!({})).unwrap();
         let shots=2;
-        let plan=json!({"axes":[{"port":"api:bracket_count:loop","unit":"count","values":[],"range":{"start":1,"stop":3,"count":5},"mode":"range","value_text":""}]});
+        let plan=json!({"axes":[{"port":"api:bracket_count:loop","unit":"count","values":[],"range":{"start":1,"stop":3,"count":5},"mode":"range","value_text":"",
+            "link_enabled":true,"links":[{"port":"api:duration:short","mode":"formula","formula":"x * 0.1","unit":"ms"}]}]});
         let spec=json!({"pulse_path":document,"draft":{"plan":plan.to_string(),"api_values":"","repeats":1,"shots_per_point":shots}});
         let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),device_units:Default::default(),devices:Default::default(),shared: Default::default(), reads: Default::default(),
             values:json!({"spec":spec.to_string(),"mode":"authored","configure_first":true,"effective_inner":""}),origin:Origin::Operator,
             resources:json!({}),source_signal:Some("source".into()),run_directory:None,outputs:[("scan".into(),"output".into())].into(),record_devices:false}).unwrap();
         // Each FIRE is followed by its shots, as a camera it triggers would deliver them; the count each played.
-        let (mut seen,mut ordinal,mut played)=(None,0,Vec::new());
+        let (mut seen,mut ordinal,mut played,mut short)=(None,0,Vec::new(),Vec::new());
         let (outcome,result,error)=loop {
             let fired=board(&pulse).last_fire().map(|(command,_)|command);
             if fired.is_some() && fired!=seen {
                 seen=fired;
                 let held=board(&pulse).applied().unwrap().unwrap().source.unwrap();
                 played.push(held.brackets.iter().find(|bracket|bracket.bracket_id=="loop").unwrap().count);
+                short.push(zlc_pulse::binding::pulse_field_value(&held,&zlc_pulse::model::FieldRef::duration("short"),"ms").unwrap());
                 for _ in 0..shots {
                     let data=DataBlock::new(schema.clone(),OwnedBuffer::from_vec(vec![ordinal as u16]).into(),Validity::Uniform(true),None).unwrap();
                     runtime.commit(&source,&Bundle {inputs:vec![Input::Event {signal:"source".into(),ordinal,data,origin:None,shot_time:None}],
@@ -2268,6 +2272,14 @@ mod tests {
         assert_eq!((0..3).map(|index|axis.coordinate(index)).collect::<Vec<_>>(),[1.0,2.0,3.0].map(|count|Some(Coordinate::Real(count))),
             "the coordinates are the counts played");
         assert_eq!(latest.run().metadata["plan"]["axes"][0]["values"],json!([1.0,2.0,3.0]),"and so is the run record's plan");
+        // The linked duration: what the binding layer wrote, the dataset's coordinate and the run record's value, bit for bit.
+        let bits=|values: &[f64]| values.iter().map(|value|value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&short),bits(&[0.1,0.2,0.3]),"the durations the board played, in ms");
+        let linked=stored.schema().domain(DomainRole::Point).axis("scan.duration:short").unwrap();
+        let recorded: Vec<f64>=(0..3).map(|index|match linked.coordinate(index) { Some(Coordinate::Real(value))=>value, other=>panic!("{other:?}") }).collect();
+        assert_eq!(bits(&recorded),bits(&short),"the coordinates are the durations played");
+        let planned: Vec<f64>=latest.run().metadata["plan"]["axes"][1]["values"].as_array().unwrap().iter().map(|value|value.as_f64().unwrap()).collect();
+        assert_eq!(bits(&planned),bits(&short),"and so are the run record's");
         plugins.shutdown(); let mut pulse=pulse; pulse.shutdown();
     }
 
