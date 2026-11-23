@@ -195,6 +195,27 @@
 //! (2/K')^{1/4} √t σ -- the same at one stretch, K'^{1/4} more at many; the mean's noise is the noise's slowest mode,
 //! which the mean square weighs as one mode among K'.
 //!
+//! # The push
+//! Beside T the held atoms' motion is read by two means along each lab axis, each held to a target as T is (the user,
+//! 2026-11-22: a push the model makes 30 % wrong is wrong whatever the loss and T say -- SAT_03's G against its 32
+//! states, motion3d_status/rewrite/study/A.report.md): the mean velocity v̄ = (ħ/m)E[A⟨κ⟩]/E[A] over T's window, and the
+//! push, the window's mean of the held atoms' acceleration, ā = (ħ/m)E[A⟨dκ/dt⟩]/E[A]. An atom's ⟨dκ/dt⟩ over its window
+//! is the window's ends' difference over its length, read on its path's polynomials (# The cloud's own motion): with
+//! x = (t′ − t)/h, κ(x) = Σ_ℓ (2ℓ + 1)c_ℓ P_ℓ(x) and P_ℓ(±1) = (±1)^ℓ, κ(1) − κ(−1) = 2Σ_{ℓ odd}(2ℓ + 1)c_ℓ, over 2h
+//! (`push_of`; over its held part where it is lost inside the window, its components that part's). The degree's tail is
+//! what it is of T's: the cloud's own motion beyond the degree, which no atom's spread holds, within the unit round-off
+//! of its mean square; an atom's own fast motion beyond it is its own and averages out of the mean. The instant t = 0
+//! has no window and no push. Both are means over the held atoms, each with its delete-one-group jackknife, and both
+//! are what the step checks (`between`) and the accounts hold, per axis.
+//!
+//! Their targets are T's in form: T's relative target ε_T over a floor of the semiclassical scale (`velocity_target`,
+//! `push_target`). The velocity's floor is the speed of T's floor, v_sc = √(k_B T_sc/m) -- below it the semiclassical
+//! motion resolves nothing of a temperature, nor of a velocity spread's mean. The push's is the push that moves the
+//! velocity by v_sc over the window's half width h: the push is read as (v̄(t + h) − v̄(t − h))/2h, so velocity errors
+//! of v_sc at the window's two ends make at most 2v_sc/2h = v_sc/h of it -- a push error below v_sc/h changes no velocity
+//! the velocity's own target holds. h is T's window's (`half_window`: half a trap period of the axis, cut at t = 0),
+//! the one the push is read over.
+//!
 //! # Many looks
 //! A decision that acts where any of m reads lies beyond its interval (decide.rs) takes the largest of m noisy reads: at
 //! one look's tail p = P(|N| > z) each, some read of m independent ones lies beyond by chance with probability
@@ -538,16 +559,26 @@ fn student_tail(q: f64, nu: u64) -> f64 {
 
 /// An atom held at an output: its readout's populations (SPEC §1.7), per lab axis its means of κ and κ² over the
 /// output's window (1/µm, 1/µm²) and its window's shape, its means of κ P_ℓ, ℓ = 1…`SHAPE` (`shape`, module
-/// documentation, # The cloud's own motion; 1/µm); and whether it is `unresolved` -- a step of its trajectory, at the
-/// output or before it, scattered beyond every state of the atom, and it stopped there (step.rs
-/// `Trajectory::unresolved`; solve.rs, # The unresolved atoms).
+/// documentation, # The cloud's own motion; 1/µm), and its push, the mean of dκ/dt over the window's part it is held
+/// for -- the window's polynomials' ends' difference over the part's length, 2Σ_{ℓ odd}(2ℓ + 1)c_ℓ/length (1/µm/µs;
+/// none at an instant: # The push) --; and whether it is `unresolved` -- a step of its trajectory, at the output or
+/// before it, scattered beyond every state of the atom, and it stopped there (step.rs `Trajectory::unresolved`;
+/// solve.rs, # The unresolved atoms).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Held {
     pub rows: [f64; STATES],
     pub kappa: [f64; 3],
     pub kappa2: [f64; 3],
     pub shape: [[f64; SHAPE]; 3],
+    pub push: [f64; 3],
     pub unresolved: bool,
+}
+
+/// An atom's push over its window's held part of the length `length` (µs) from its shape there (`Held::push`, # The
+/// push): the ends' difference of its path on the window's polynomials over the length, 2Σ_{ℓ odd}(2ℓ + 1)c_ℓ/length;
+/// none over no length.
+pub fn push_of(shape: &[f64; SHAPE], length: f64) -> f64 {
+    if length > 0. { 2. * shape.iter().enumerate().filter(|(i, _)| i % 2 == 0).map(|(i, &c)| (2 * i + 3) as f64 * c).sum::<f64>() / length } else { 0. }
 }
 
 /// One trajectory at one output, what became of it by then: its atom is held; it was lost (SPEC §1.7); or it ended
@@ -569,7 +600,8 @@ pub enum Fate {
 
 /// One output's sums over a group's trajectories: the number counted and of the others (`Fate::Failed`), the atoms held, and over the held
 /// atoms Σρ_s, Σ⟨κ⟩, Σ⟨κ⟩² (for the U-statistic, module documentation) and Σ⟨κ²⟩ per lab axis, and of the windows'
-/// shapes Σc_ℓ and Σ_ℓ (2ℓ + 1)Σc_ℓ² (# The cloud's own motion); of the held atoms the number unresolved (`Held`).
+/// shapes Σc_ℓ and Σ_ℓ (2ℓ + 1)Σc_ℓ² (# The cloud's own motion), and Σ of the pushes (# The push); of the held atoms the
+/// number unresolved (`Held`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sums {
     pub trajectories: f64,
@@ -583,11 +615,12 @@ pub struct Sums {
     pub kappa2: [f64; 3],
     pub shape: [[f64; SHAPE]; 3],
     pub shape_squared: [f64; 3],
+    pub push: [f64; 3],
     pub unresolved: f64,
 }
 
 impl Sums {
-    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, shape_squared: [0.; 3], unresolved: 0. };
+    pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, shape_squared: [0.; 3], push: [0.; 3], unresolved: 0. };
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         self.add_weighted(fate, 1.);
@@ -614,6 +647,7 @@ impl Sums {
                     *s += w * c;
                 }
                 self.shape_squared[a] += w * weighed(&h.shape[a]);
+                self.push[a] += w * h.push[a];
             }
             if h.unresolved {
                 self.unresolved += w;
@@ -637,6 +671,7 @@ impl Sums {
                 *s += sign * c;
             }
             self.shape_squared[a] += sign * o.shape_squared[a];
+            self.push[a] += sign * o.push[a];
         }
         self.unresolved += sign * o.unresolved;
     }
@@ -764,11 +799,16 @@ pub struct Estimate {
     /// Of the held atoms the unresolved ones' share (`Held`): what they carry of what is shown, and of the held atoms
     /// whose state is unknown on T (`Estimate::moved`; solve.rs `bounded`).
     pub unresolved: f64,
+    /// T's semiclassical scale T_sc (µK; `semiclassical`): what T's allowance and the velocity's and the push's targets
+    /// are floored by (`velocity_target`, `push_target`).
+    pub scale: f64,
 }
 /// The held atoms' motion at an output where at least two are held: T per lab axis (µK), T_total = (T_x + T_y + T_z)/3
-/// with its own jackknife (the axes' correlations in it), n̄ and the mean velocity (m/s); and the window's rms of the
-/// mean velocity on the window's polynomials, √(Σ_ℓ (2ℓ + 1) c̄_ℓ²) ħ/m (m/s; module documentation, # A share of the held
-/// atoms moved): what bounds the cloud's path, which T is read about, where the mean bounds it no more.
+/// with its own jackknife (the axes' correlations in it), n̄, the mean velocity (m/s = µm/µs) and the push, the mean
+/// acceleration over the window (µm/µs²; # The push; none at an instant), each per lab axis with its jackknife; and the
+/// window's rms of the mean velocity on the window's polynomials, √(Σ_ℓ (2ℓ + 1) c̄_ℓ²) ħ/m (m/s; module documentation,
+/// # A share of the held atoms moved): what bounds the cloud's path, which T is read about, where the mean bounds it no
+/// more.
 #[derive(Clone, Copy, Debug)]
 pub struct Motion {
     pub temperature: [f64; 3],
@@ -777,7 +817,47 @@ pub struct Motion {
     pub temperature_total_error: Spread,
     pub occupation: [f64; 3],
     pub mean_velocity: [f64; 3],
+    pub mean_velocity_errors: [Spread; 3],
+    pub push: [f64; 3],
+    pub push_errors: [Spread; 3],
     pub mean_speed: [f64; 3],
+}
+
+/// The model's error on the held atoms' motion at one time, absolute, each in its reading's unit (the selection's
+/// time-scaling conversion fills it, select.rs `Choice::motion`; solve.rs `Fixed::motion`; ledger.rs: the accounts' A):
+/// on the total T (µK) beside its direct part (solve.rs `Fixed::model`), on the mean velocity (µm/µs = m/s) and on the
+/// push (µm/µs²) along each lab axis (# The push). Unread (no number) where nothing has estimated it: its account says
+/// so and is not chased (solve.rs `looks`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotionError {
+    pub temperature: f64,
+    pub velocity: [f64; 3],
+    pub push: [f64; 3],
+}
+
+impl MotionError {
+    /// Nothing estimated of the velocity and the push; the total T's as its direct part leaves it (until the
+    /// selection's conversion fills it: motion3d_status/rewrite/impl/STEP.status.md).
+    pub const UNREAD: MotionError = MotionError { temperature: 0., velocity: [f64::NAN; 3], push: [f64::NAN; 3] };
+}
+
+/// The semiclassical scale of a velocity, v_sc = √(k_B T_sc/m) (µm/µs = m/s) of T's semiclassical scale T_sc (µK;
+/// `semiclassical`): the speed whose kinetic temperature is T's floor -- the velocity's target's floor (# The push).
+pub fn speed_scale(scale: f64, hbar_over_mass: f64) -> f64 {
+    (hbar_over_mass * KT_PER_UK * scale).sqrt()
+}
+
+/// A mean velocity's target (µm/µs; # The push): √((ε_T v)² + v_sc²), the velocity held to T's relative target over
+/// T's semiclassical scale's speed (`speed_scale`).
+pub fn velocity_target(velocity: f64, scale: f64, hbar_over_mass: f64) -> f64 {
+    (TEMPERATURE_TARGET * velocity).hypot(speed_scale(scale, hbar_over_mass))
+}
+
+/// A push's target (µm/µs²; # The push): √((ε_T a)² + (v_sc/h)²), the push held to T's relative target over the push
+/// that changes the velocity by its floor v_sc over its window's half width h (µs; `half_window`); unbounded at h = 0,
+/// an instant's, where there is no push.
+pub fn push_target(push: f64, scale: f64, hbar_over_mass: f64, half: f64) -> f64 {
+    if half > 0. { (TEMPERATURE_TARGET * push).hypot(speed_scale(scale, hbar_over_mass) / half) } else { f64::INFINITY }
 }
 impl Estimate {
     /// The jackknife interval of what is shown of the atom at the confidence z (module documentation): the largest of the
@@ -826,6 +906,8 @@ impl Estimate {
 struct Moments {
     shown: Option<(f64, [f64; STATES])>,
     temperature: Option<[f64; 3]>,
+    /// The mean velocity (µm/µs) and the push (µm/µs²) per lab axis where T is read (two atoms held at least).
+    motion: Option<[[f64; 3]; 2]>,
 }
 /// T per lab axis (µK) of held-atom sums (module documentation, # Estimators): the held atoms' mean of ⟨κ²⟩ less the
 /// cloud's own path over the window, its mean and its shape, each component's square as its U-statistic -- the shape's
@@ -848,7 +930,9 @@ fn weighed(shape: &[f64; SHAPE]) -> f64 {
 }
 fn moments(s: &Sums, hbar_over_mass: f64) -> Moments {
     let n = s.trajectories;
-    Moments { shown: (n != 0.).then(|| (1. - s.held / n, s.rows.map(|r| r / n))), temperature: temperature(s, hbar_over_mass) }
+    let held = s.held;
+    let motion = (held >= 2.).then(|| [s.kappa.map(|k| hbar_over_mass * k / held), s.push.map(|f| hbar_over_mass * f / held)]);
+    Moments { shown: (n != 0.).then(|| (1. - s.held / n, s.rows.map(|r| r / n))), temperature: temperature(s, hbar_over_mass), motion }
 }
 /// The jackknife's standard error of the values with each group left out (module documentation, # Errors), read on
 /// `groups`.
@@ -913,7 +997,12 @@ impl Jackknife {
     /// A quantity of the levels' temperatures spread over the groups holding an atom: unread where a group left out
     /// leaves some level fewer than two atoms.
     fn held(&self, f: impl Fn(&[[f64; 3]]) -> f64) -> Spread {
-        let left: Option<Vec<Vec<[f64; 3]>>> = self.leave.iter().map(|m| m.iter().map(|x| x.temperature).collect()).collect();
+        self.held_of(|m| m.temperature, f)
+    }
+    /// A quantity of the levels' moments of the held atoms (`get`: none below two held) spread over the groups holding
+    /// an atom: unread where a group left out leaves some level fewer than two atoms.
+    fn held_of<T>(&self, get: impl Fn(&Moments) -> Option<T>, f: impl Fn(&[T]) -> f64) -> Spread {
+        let left: Option<Vec<Vec<T>>> = self.leave.iter().map(|m| m.iter().map(&get).collect()).collect();
         match left {
             Some(l) if !l.is_empty() => spread(l.iter().map(|t| f(t)), self.holding),
             _ => Spread::UNREAD,
@@ -935,15 +1024,19 @@ fn shown(m: &Moments, s: usize) -> f64 {
 }
 
 /// The held atoms' motion of one output's jackknife (`summarize`), where at least two are held.
-fn motion(j: &Jackknife, scales: &Scales) -> Option<Motion> {
+fn motion(j: &Jackknife, scales: &Scales, instant: bool) -> Option<Motion> {
     let (all, hm) = (&j.all[0], scales.hbar_over_mass);
+    let [velocity, push] = j.full[0].motion.unwrap_or([[f64::NAN; 3]; 2]);
     j.full[0].temperature.map(|t| Motion {
         temperature: t,
         temperature_errors: std::array::from_fn(|a| j.held(|x| x[0][a])),
         temperature_total: t.iter().sum::<f64>() / 3.,
         temperature_total_error: j.held(|x| x[0].iter().sum::<f64>() / 3.),
         occupation: std::array::from_fn(|a| occupation(hm * all.kappa2[a], all.held, scales.frequencies[a])),
-        mean_velocity: std::array::from_fn(|a| hm * all.kappa[a] / all.held),
+        mean_velocity: velocity,
+        mean_velocity_errors: std::array::from_fn(|a| j.held_of(|m| m.motion, |x| x[0][0][a])),
+        push: if instant { [f64::NAN; 3] } else { push },
+        push_errors: std::array::from_fn(|a| if instant { Spread::UNREAD } else { j.held_of(|m| m.motion, |x| x[0][1][a]) }),
         mean_speed: std::array::from_fn(|a| {
             let mean = all.kappa[a] / all.held;
             hm * (mean * mean + weighed(&all.shape[a].map(|c| c / all.held))).sqrt()
@@ -963,7 +1056,8 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
             let j = jackknife(&[groups], k, hm);
             let (all, full) = (&j.all[0], &j.full[0]);
             let n = all.held;
-            let motion = motion(&j, scales);
+            // The first output is t = 0, an instant: no push is read there (# The push).
+            let motion = motion(&j, scales, k == 0);
             let estimate = Estimate {
                 unresolved: if n != 0. { all.unresolved / n } else { 0. },
                 trajectories: all.trajectories,
@@ -976,6 +1070,7 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
                 failed: all.failed,
                 uncounted: if all.trajectories != 0. { all.failed / (all.trajectories + all.failed) } else { 1. },
                 temperature_target: motion.map_or(TEMPERATURE_TARGET, |m| allowance(m.temperature_total, scale)),
+                scale,
             };
             (full.shown.map(|(loss, _)| loss), estimate)
         })
@@ -1005,12 +1100,15 @@ pub struct Between {
 }
 
 /// A quantity whose step error `between` reads (module documentation, # The step's error), in its order (`STEPPED`):
-/// the loss, each row as shown, the total T.
+/// the loss, each row as shown, the total T, the held atoms' mean velocity along each lab axis and their push (# The
+/// push).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quantity {
     Loss,
     Shown(usize),
     Temperature,
+    Velocity(usize),
+    Push(usize),
 }
 
 impl Quantity {
@@ -1019,26 +1117,39 @@ impl Quantity {
         match q {
             0 => Quantity::Loss,
             q if q <= STATES => Quantity::Shown(q - 1),
-            _ => Quantity::Temperature,
+            q if q == STATES + 1 => Quantity::Temperature,
+            q if q < STATES + 5 => Quantity::Velocity(q - STATES - 2),
+            q => Quantity::Push(q - STATES - 5),
         }
     }
     /// Whether it is a probability of what is shown -- the loss or a row as shown, held to its absolute target --, or a
-    /// share of T's allowance.
+    /// share of its target held to T's relative one (T's allowance, the velocity's and the push's targets).
     pub fn shown(&self) -> bool {
-        !matches!(self, Quantity::Temperature)
+        matches!(self, Quantity::Loss | Quantity::Shown(_))
+    }
+    /// Its place in `between`'s order.
+    pub fn place(&self) -> usize {
+        match *self {
+            Quantity::Loss => 0,
+            Quantity::Shown(s) => 1 + s,
+            Quantity::Temperature => 1 + STATES,
+            Quantity::Velocity(a) => STATES + 2 + a,
+            Quantity::Push(a) => STATES + 5 + a,
+        }
     }
 }
 
 /// The quantities whose step error `between` reads, in its order (`Quantity`): the loss, each row as shown, the total
-/// T.
-pub const STEPPED: usize = STATES + 2;
+/// T, the mean velocity and the push along each lab axis.
+pub const STEPPED: usize = STATES + 8;
 
 impl Between {
-    /// A read of one window over the run [0, 1] (tests'): the loss's, each row's and T's (none: unread).
+    /// A read of one window over the run [0, 1] (tests'): the loss's, each row's and T's (none: unread), the velocity
+    /// and the push unread.
     #[cfg(test)]
     pub fn single(loss: Read, shown: [Read; STATES], temperature: Option<Read>) -> Between {
         let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
-        let reads = std::iter::once(loss).chain(shown).chain([temperature.unwrap_or(unread)]).map(|r| vec![r]).collect();
+        let reads = std::iter::once(loss).chain(shown).chain([temperature.unwrap_or(unread)]).chain([unread; 6]).map(|r| vec![r]).collect();
         Between { windows: vec![[0., 1.]], reads }
     }
     /// A quantity's read in the first window (tests').
@@ -1049,12 +1160,7 @@ impl Between {
     /// A quantity's read in the first window set to `read` (tests').
     #[cfg(test)]
     pub fn set(&mut self, quantity: Quantity, read: Read) {
-        let q = match quantity {
-            Quantity::Loss => 0,
-            Quantity::Shown(s) => 1 + s,
-            Quantity::Temperature => 1 + STATES,
-        };
-        self.reads[q][0] = read;
+        self.reads[quantity.place()][0] = read;
     }
     /// This read with a quantity's first window set to `read` (tests').
     #[cfg(test)]
@@ -1065,12 +1171,7 @@ impl Between {
     }
     /// The reads of a quantity, window by window.
     pub fn of(&self, quantity: Quantity) -> &[Read] {
-        let q = match quantity {
-            Quantity::Loss => 0,
-            Quantity::Shown(s) => 1 + s,
-            Quantity::Temperature => 1 + STATES,
-        };
-        &self.reads[q]
+        &self.reads[quantity.place()]
     }
     /// Every read with its quantity: the read's looks (solve.rs `judged`).
     pub fn looks(&self) -> impl Iterator<Item = (Quantity, &Read)> {
@@ -1104,10 +1205,13 @@ impl Between {
 /// at the place q). One definition for the step's read and for the analysis times' (`readings`).
 fn step_error(m: &[Moments], q: usize) -> f64 {
     let share = richardson(0.5, ORDER as f64) - 1.;
+    let motion = |m: &Moments, i: usize, a: usize| m.motion.map_or(f64::NAN, |x| x[i][a]);
     match Quantity::of(q) {
         Quantity::Loss => share * (loss(&m[1]) - loss(&m[0])),
         Quantity::Shown(s) => share * (shown(&m[1], s) - shown(&m[0], s)),
         Quantity::Temperature => share * (1. - loss(&m[0])) * (total(&m[1]) / total(&m[0]) - 1.),
+        Quantity::Velocity(a) => share * (1. - loss(&m[0])) * (motion(&m[1], 0, a) - motion(&m[0], 0, a)),
+        Quantity::Push(a) => share * (1. - loss(&m[0])) * (motion(&m[1], 1, a) - motion(&m[0], 1, a)),
     }
 }
 
@@ -1117,9 +1221,15 @@ fn total(m: &Moments) -> f64 {
 }
 
 /// Whether a time's moments read a quantity of `step_error` at every level: the loss and the rows where every level
-/// counts a trajectory, T where every level's total T is a positive number besides.
+/// counts a trajectory, T where every level's total T is a positive number besides, the velocity and the push where
+/// every level holds two atoms.
 fn stepped(m: &[Moments], q: usize) -> bool {
-    counted(m) && (Quantity::of(q).shown() || m.iter().all(|x| !(total(x) <= 0.)))
+    counted(m)
+        && match Quantity::of(q) {
+            Quantity::Loss | Quantity::Shown(_) => true,
+            Quantity::Temperature => m.iter().all(|x| !(total(x) <= 0.)),
+            Quantity::Velocity(_) | Quantity::Push(_) => m.iter().all(|x| x.motion.is_some()),
+        }
 }
 
 /// The signed difference of a rung's two estimates of its own step error from three levels at h, 2h and 4h (`ordered`;
@@ -1201,7 +1311,17 @@ fn mean_squares<G: Borrow<Group> + Sync>(levels: &[&[G]], scales: &Scales, times
     // window; the same without each group, spread over the groups. Each time's values over its `unit`: a quantity held
     // to a target that differs between the times, its own.
     let size = |q: usize, &[a, b]: &[usize; 2]| -> Read {
-        let unit = |j: &Jackknife| if Quantity::of(q).shown() { 1. } else { allowance(total(&j.full[0]) / 3., scale) };
+        // The quantity's target at the time, of the finer level: T's allowance; the velocity's and the push's targets
+        // (`velocity_target`, `push_target`: the push's over its window's half width there).
+        let unit = |j: &Jackknife, t: f64| {
+            let motion = |i: usize, a: usize| j.full[0].motion.map_or(f64::NAN, |x| x[i][a]);
+            match Quantity::of(q) {
+                Quantity::Loss | Quantity::Shown(_) => 1.,
+                Quantity::Temperature => allowance(total(&j.full[0]) / 3., scale),
+                Quantity::Velocity(a) => velocity_target(motion(0, a), scale, hm),
+                Quantity::Push(a) => push_target(motion(1, a), scale, hm, half_window(scales.frequencies[a], t)),
+            }
+        };
         let (mut whole, mut without, mut own, mut weight, mut holding) = (0., vec![0.; groups], vec![0.; groups], 0., f64::INFINITY);
         for k in (a..=b).filter(|&k| k > 0) {
             let j = &each[k];
@@ -1209,7 +1329,7 @@ fn mean_squares<G: Borrow<Group> + Sync>(levels: &[&[G]], scales: &Scales, times
                 continue;
             }
             let w = 0.5 * (times[(k + 1).min(b)] - times[k.saturating_sub(1).max(a)]);
-            let u = unit(j);
+            let u = unit(j, times[k]);
             let full = value(&j.full, q) / u;
             own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * value(rest, q) / u);
             let (sum, squares) = own.iter().fold((0., 0.), |(s, q), x| (s + x, q + x * x));
@@ -1245,6 +1365,10 @@ pub fn readings<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], k: usize, sca
     let own = jackknife(&[fine], k, scales.hbar_over_mass);
     let mut out: Vec<Reading> = (0..1 + STATES).map(|q| reading(&own, &counted, &|m| if q == 0 { loss(&m[0]) } else { shown(&m[0], q - 1) })).collect();
     out.extend((0..3).map(|a| reading(&own, &|m| m[0].temperature.is_some(), &|m| m[0].temperature.map_or(f64::NAN, |t| t[a]))));
+    // The mean velocity and the push along each axis, of the held atoms; no push at the instant t = 0 (place 0).
+    for i in 0..2 {
+        out.extend((0..3).map(|a| if i == 1 && k == 0 { unread() } else { reading(&own, &|m| m[0].motion.is_some(), &|m| m[0].motion.map_or(f64::NAN, |x| x[i][a])) }));
+    }
     if !coarse.is_empty() {
         let both = jackknife(&[fine, coarse], k, scales.hbar_over_mass);
         out.extend((0..STEPPED).map(|q| reading(&both, &|m| stepped(m, q), &|m| step_error(m, q))));
@@ -1556,7 +1680,7 @@ mod tests {
     fn atom(state: usize, x: f64, y: f64) -> Held {
         let mut rows = [0.; STATES];
         rows[state] = 1.;
-        Held { rows, kappa: [x; 3], kappa2: [y; 3], shape: NO_SHAPE, unresolved: false }
+        Held { rows, kappa: [x; 3], kappa2: [y; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false }
     }
     fn group(atoms: Vec<Option<Held>>) -> Group {
         let mut g = Group::new(1);
@@ -1670,6 +1794,36 @@ mod tests {
         assert!(summarize(&[group(vec![Some(atom(0, 1., 3.)), None])], &scales)[0].motion.is_none());
     }
 
+    /// The push (module documentation, # The push): an atom's is its window's path's ends' difference over the length,
+    /// its odd components alone -- κ(x) = x (c₁ = 1/3) over 4 µs pushes by 2/4, an even component adds nothing, c₃ adds
+    /// 2·7c₃/4 --; none over no length. The held atoms' push is their mean, ħ/m times it, with its jackknife over the
+    /// groups holding atoms; none at t = 0, the first output (an instant). The targets are T's in form: the velocity's
+    /// √((ε_T v)² + v_sc²), v_sc = √(k_B T_sc/m) at the scale T_sc; the push's √((ε_T a)² + (v_sc/h)²), unbounded at h = 0.
+    #[test]
+    fn the_push_is_the_window_s_ends_difference_and_its_targets_t_s_in_form() {
+        let mut shape = [0.; SHAPE];
+        shape[0] = 1. / 3.;
+        assert!((push_of(&shape, 4.) - 0.5).abs() < 1e-15 && push_of(&shape, 0.) == 0.);
+        shape[1] = 0.7;
+        assert!((push_of(&shape, 4.) - 0.5).abs() < 1e-15);
+        shape[2] = 0.1;
+        assert!((push_of(&shape, 4.) - (0.5 + 2. * 7. * 0.1 / 4.)).abs() < 1e-15);
+        let scales = Scales { hbar_over_mass: 2., frequencies: [4.; 3] };
+        let pushed = |f: f64| Some(Held { push: [f; 3], ..atom(0, 1., 3.) });
+        let groups = vec![group(vec![pushed(1.), pushed(3.)]), group(vec![pushed(5.), pushed(7.)]), group(vec![pushed(2.), pushed(6.)])];
+        let (later, instant) = (summarize(&groups.iter().map(|g| Group { sums: vec![g.sums[0].clone(), g.sums[0].clone()], scattered: g.scattered }).collect::<Vec<_>>(), &scales), summarize(&groups, &scales));
+        let m = later[1].motion.unwrap();
+        // The mean 4 times ħ/m, and the jackknife of the means with each group left out.
+        let leave: [f64; 3] = [(5. + 7. + 2. + 6.) / 4., (1. + 3. + 2. + 6.) / 4., (1. + 3. + 5. + 7.) / 4.].map(|x| 2. * x);
+        assert!((m.push[0] - 8.).abs() < 1e-14 && (m.push_errors[0].error - spread(leave.into_iter(), 3.).error).abs() < 1e-14, "{m:?}");
+        assert!(instant[0].motion.unwrap().push[0].is_nan() && !instant[0].motion.unwrap().push_errors[0].read());
+        let (hm, scale) = (2., 11.);
+        let speed = speed_scale(scale, hm);
+        assert!((speed - (hm * KT_PER_UK * scale).sqrt()).abs() < 1e-15 && velocity_target(0., scale, hm) == speed);
+        assert!((velocity_target(3. * speed, scale, hm) - speed * (1. + 0.09_f64).sqrt()).abs() < 1e-12 * speed);
+        assert!((push_target(0., scale, hm, 4.) - speed / 4.).abs() < 1e-15 && push_target(1., scale, hm, 0.) == f64::INFINITY);
+    }
+
     /// The unresolved atoms at an output (`Estimate::unresolved`): of three held atoms, the second and the third
     /// unresolved, they are two thirds of the atoms -- whatever their energies and the groups they come in, and a lost
     /// atom is none of them. (Their T is the bound's at their share, solve.rs `bounded`; the share of the kinetic energy
@@ -1752,8 +1906,8 @@ mod tests {
     /// spreads exact.
     fn held_at(temperature: [f64; 3], mean: [f64; 3]) -> Estimate {
         let exact = Spread { error: 0., groups: f64::INFINITY };
-        let motion = Motion { temperature, temperature_errors: [exact; 3], temperature_total: temperature.iter().sum::<f64>() / 3., temperature_total_error: exact, occupation: [0.; 3], mean_velocity: mean, mean_speed: mean.map(f64::abs) };
-        Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: 0. }
+        let motion = Motion { temperature, temperature_errors: [exact; 3], temperature_total: temperature.iter().sum::<f64>() / 3., temperature_total_error: exact, occupation: [0.; 3], mean_velocity: mean, mean_velocity_errors: [Spread::UNREAD; 3], push: [0.; 3], push_errors: [Spread::UNREAD; 3], mean_speed: mean.map(f64::abs) };
+        Estimate { trajectories: 1., held: 1., loss: 0., loss_error: exact, shown_errors: [exact; STATES], populations: [0.; STATES], motion: Some(motion), failed: 0., uncounted: 0., temperature_target: TEMPERATURE_TARGET, unresolved: 0., scale: 0. }
     }
 
     /// A share w of the held atoms moved anywhere in the bound set moves the total T by no more than `Estimate::moved`

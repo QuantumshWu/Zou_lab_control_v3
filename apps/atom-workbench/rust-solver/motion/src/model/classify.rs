@@ -185,7 +185,7 @@ impl Account {
     fn temperature_moved(&self, d: f64) -> f64 {
         use crate::estimate::{Estimate, Motion, Spread};
         let unread = Spread::UNREAD;
-        let motion = Motion { temperature: [self.floor; 3], temperature_errors: [unread; 3], temperature_total: self.floor, temperature_total_error: unread, occupation: [0.0; 3], mean_velocity: [0.0; 3], mean_speed: [0.0; 3] };
+        let motion = Motion { temperature: [self.floor; 3], temperature_errors: [unread; 3], temperature_total: self.floor, temperature_total_error: unread, occupation: [0.0; 3], mean_velocity: [0.0; 3], mean_velocity_errors: [unread; 3], push: [0.0; 3], push_errors: [unread; 3], mean_speed: [0.0; 3] };
         let at = Estimate {
             trajectories: 0.0,
             held: 1.0,
@@ -198,6 +198,7 @@ impl Account {
             uncounted: 0.0,
             temperature_target: crate::units::TEMPERATURE_TARGET,
             unresolved: 0.0,
+            scale: self.floor,
         };
         at.moved(if d < 1.0 { d / (1.0 - d) } else { 1.0 }, &self.escape)
     }

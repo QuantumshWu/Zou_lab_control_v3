@@ -29,7 +29,7 @@ fn with_error(r: &crate::analysis::Reading) -> (f64, f64) {
 /// own read), and the worst window over the share's square b, its error and its span: what a windowed read of the same
 /// pairs says where the error is confined to a stretch of the run.
 fn windowed(times: &[f64], fine: &[&Part], coarse: &[&Part], scales: &Scales, tau: f64, double: f64) {
-    let index = 1 + crate::request::STATES + 3;
+    let index = 1 + crate::request::STATES + 9;
     let (f, c) = (reads_of(fine), reads_of(coarse));
     let weights = crate::estimate::trapezoid(times);
     // Per time k ≥ 1: its weight, the groups' pseudo-values' sum, and the pseudo-values.
@@ -198,7 +198,7 @@ fn t2step2_scan() {
         let r = crate::estimate::readings(&reads_of(fine), &reads_of(coarse), k, &scales);
         // The step error of the loss, d/(2^p − 1) (estimate.rs `step_error`), after the loss, the rows and T's three
         // axes; d itself.
-        let (e, s) = with_error(&r[1 + crate::request::STATES + 3]);
+        let (e, s) = with_error(&r[1 + crate::request::STATES + 9]);
         let share = crate::decide::richardson(0.5, ORDER as f64) - 1.;
         (e / share, s / share)
     };

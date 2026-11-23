@@ -48,11 +48,14 @@ pub struct Total {
     pub target: f64,
 }
 
-/// The populations' total (absolute) and T's (relative).
+/// The populations' total (absolute), T's (relative), and the held atoms' mean velocity's and push's (absolute, µm/µs
+/// and µm/µs²; estimate.rs, # The push), each over the lab axes and the outputs where it takes most of its target.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Totals {
     pub population: Total,
     pub temperature: Total,
+    pub velocity: Total,
+    pub push: Total,
 }
 
 /// One output's error against its target in its three parts A, b, S (module documentation, # The total error).
@@ -104,6 +107,47 @@ impl Ledger {
             None => reason,
         });
     }
+    /// The held atoms' mean velocity's and push's accounts at the outputs at `times` (µs), per lab axis where it has one
+    /// with its target there (estimate.rs `velocity_target`, `push_target`): their totals, at the axis and the output
+    /// where the a-priori part takes most of its target, and a flag for each axis and quantity where some output's total
+    /// lies beyond its target (or is no number), its largest and its parts as shares of its target there. After
+    /// `close`.
+    pub fn close_motion(&mut self, times: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]]) {
+        for (i, what) in ["平均速度", "推力"].into_iter().enumerate() {
+            let mut most: Option<(f64, Total)> = None;
+            for a in 0..3 {
+                for k in 0..times.len() {
+                    if let Some((account, target)) = motion[k][i][a] {
+                        let share = account.a_priori() / target;
+                        if most.is_none_or(|m| share > m.0) {
+                            most = Some((share, Total { error: account.a_priori(), target }));
+                        }
+                    }
+                }
+                let beyond: Vec<usize> = (0..times.len()).filter(|&k| motion[k][i][a].is_some_and(|(account, target)| !(account.total() <= target))).collect();
+                let over = |k: usize| motion[k][i][a].map_or(0., |(account, target)| account.total() / target);
+                if let Some(&worst) = beyond.iter().max_by(|&&x, &&y| over(x).total_cmp(&over(y))) {
+                    let (account, target) = motion[worst][i][a].expect("an account beyond its target");
+                    let of = |x: f64| significant(x / target, 2);
+                    self.flag(format!(
+                        "{}：{} 轴{what}的估计误差超出目标，最大为目标的 {} 倍（模型近似 {}、时间步长 {}、统计 {} 倍）",
+                        span(&beyond, times),
+                        ["x", "y", "z"][a],
+                        of(account.total()),
+                        of(account.model),
+                        of(account.step),
+                        of(account.statistics)
+                    ));
+                }
+            }
+            let total = most.map_or(Total::default(), |m| m.1);
+            if i == 0 {
+                self.totals.velocity = total;
+            } else {
+                self.totals.push = total;
+            }
+        }
+    }
     /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
     /// accounts at every output and the total T's (the mean over the lab axes: what T's target is on, SPEC §4) where it
     /// has one, against T's allowance at each output, `allowed` (relative; solve.rs, # T's allowance).
@@ -111,7 +155,7 @@ impl Ledger {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
         let fixed = vec![POPULATION_TARGET; times.len()];
-        self.totals = Totals { population: largest(&populations, &fixed), temperature: largest(temperature, allowed) };
+        self.totals = Totals { population: largest(&populations, &fixed), temperature: largest(temperature, allowed), ..self.totals };
         for (accounts, targets, what) in [(&populations[..], &fixed[..], "布居与丢失"), (temperature, allowed, "总温度")] {
             // Not within the target: beyond it, or no number. The worst: of the most of its target.
             let beyond: Vec<usize> =

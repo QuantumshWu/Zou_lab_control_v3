@@ -628,7 +628,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Local, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
+use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -701,6 +701,14 @@ pub struct Solution {
     /// The mean velocity (m/s) and n̄ per lab axis, n̄ relative to `trap_frequency_khz`.
     pub mean_velocity_mps: Vec<[f64; 3]>,
     pub mean_occupation: Vec<[f64; 3]>,
+    /// Per output and lab axis the mean velocity's standard error (m/s) and its target (estimate.rs `velocity_target`),
+    /// and the push (µm/µs², estimate.rs # The push) with its standard error and its target (`push_target`); none where
+    /// fewer than two atoms or groups read it, and no push at t = 0.
+    pub mean_velocity_errors_mps: Vec<[Option<f64>; 3]>,
+    pub mean_velocity_targets_mps: Vec<[Option<f64>; 3]>,
+    pub push: Vec<[Option<f64>; 3]>,
+    pub push_errors: Vec<[Option<f64>; 3]>,
+    pub push_targets: Vec<[Option<f64>; 3]>,
     /// ω/2π (kHz) along each lab axis at the bottom of the reference state's trap.
     pub trap_frequency_khz: [f64; 3],
     /// The probability that the atom is lost by each output, never decreasing.
@@ -1914,6 +1922,9 @@ struct Bound {
     windows: Vec<[f64; 2]>,
     shown: Vec<f64>,
     temperature: Vec<f64>,
+    /// On the mean velocity and the push along each lab axis, a share of each one's target there (estimate.rs, # The
+    /// push), as T's of its allowance.
+    motion: Vec<[[f64; 3]; 2]>,
 }
 impl Bound {
     /// The step's share of each target (`step_bound`), at every time.
@@ -1921,9 +1932,16 @@ impl Bound {
         let [shown, temperature] = step_bound();
         Bound::flat(shown, temperature)
     }
-    /// One part on what is shown and one on T at every time.
+    /// One part on what is shown and one on T -- and the motion's, a share of its targets as T's -- at every time.
     fn flat(shown: f64, temperature: f64) -> Bound {
-        Bound { windows: vec![[f64::NEG_INFINITY, f64::INFINITY]], shown: vec![shown], temperature: vec![temperature] }
+        Bound { windows: vec![[f64::NEG_INFINITY, f64::INFINITY]], shown: vec![shown], temperature: vec![temperature], motion: vec![[[temperature; 3]; 2]] }
+    }
+    /// Its parts on the motion at the time t (µs), as `at`.
+    fn motion_at(&self, t: f64) -> [[f64; 3]; 2] {
+        self.windows.iter().zip(&self.motion).filter(|(w, _)| w[0] <= t && t <= w[1]).fold(None, |most: Option<[[f64; 3]; 2]>, (_, m)| {
+            Some(most.map_or(*m, |x| std::array::from_fn(|i| std::array::from_fn(|a| crate::linalg::larger(x[i][a], m[i][a])))))
+        })
+        .unwrap_or([[f64::INFINITY; 3]; 2])
     }
     /// Its parts at the time t (µs): of the window that holds it, the larger of two where t is their common end;
     /// unbounded at a time no window holds.
@@ -1942,7 +1960,9 @@ impl Bound {
     fn of(read: &Between, size: &dyn Fn(&Read) -> f64) -> Bound {
         let windows = read.windows.len();
         let shown = (0..windows).map(|w| probability_error(read.looks().filter(|(q, _)| q.shown()).skip(w).step_by(windows).map(|(_, r)| size(r)).fold(0., crate::linalg::larger))).collect();
-        Bound { windows: read.windows.clone(), shown, temperature: read.of(Quantity::Temperature).iter().map(size).collect() }
+        let axes = |of: &dyn Fn(usize) -> Quantity, w: usize| std::array::from_fn(|a| size(&read.of(of(a))[w]));
+        let motion = (0..windows).map(|w| [axes(&Quantity::Velocity, w), axes(&Quantity::Push, w)]).collect();
+        Bound { windows: read.windows.clone(), shown, temperature: read.of(Quantity::Temperature).iter().map(size).collect(), motion }
     }
 }
 
@@ -1992,6 +2012,7 @@ fn standing(read: &Between) -> Bound {
     let ([shown, temperature], mut read) = (step_bound(), estimated(read));
     read.shown.iter_mut().for_each(|x| *x = crate::linalg::smaller(*x, shown));
     read.temperature.iter_mut().for_each(|x| *x = crate::linalg::smaller(*x, temperature));
+    read.motion.iter_mut().flatten().flatten().for_each(|x| *x = crate::linalg::smaller(*x, temperature));
     read
 }
 
@@ -2348,7 +2369,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
         let read = pilot_reads(run, &refs, &scales, choice.as_deref(), &times, &context.fixed.escape);
         let fixed = context.fixed.with(read.model, &times);
-        let need = most_needed(&looks(&read.estimates, &fixed, &Bound::share()));
+        let need = most_needed(&looks(&read.estimates, &fixed, &Bound::share(), &scales));
         let halving = |t: f64| priced(t)[1];
         check(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1, &above, Some(&Prices { work: &work, halving: &halving, product: need }), messages);
     }
@@ -2394,7 +2415,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
             let (own, third, _, _) = levels.told(&candidates, window, &scales);
             standing(&worse(&own, third.as_ref(), false))
         };
-        let product = most_needed(&looks(&read.estimates, &context.fixed.with(read.model.clone(), &at.iter().map(|&k| candidates[k]).collect::<Vec<_>>()), &step));
+        let product = most_needed(&looks(&read.estimates, &context.fixed.with(read.model.clone(), &at.iter().map(|&k| candidates[k]).collect::<Vec<_>>()), &step, &context.scales));
         let (_, _, pilot, _) = &*made.insert((tau, at, pilot, read));
         let rated = one_each(&pilot.iter().collect::<Vec<_>>());
         let priced = work_at(run, domain.widest, &rated);
@@ -2787,7 +2808,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         }
         // 3. The candidates.
         let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
-        let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), &context.step);
+        let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), &context.step, &context.scales);
         let need0 = most_needed(&base);
         let rated = one_each(pilot);
         let ran = (numbers.len() as u64 * GROUP) as f64;
@@ -2827,10 +2848,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let exact = chain[place].len() == STATES;
             let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
             let [model_error, lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
-            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step);
+            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step, &context.scales);
             // Complete at the direct part's lower end as well where it is not at its upper: its fate open at the paths'
             // statistics (select.rs, # How many paths).
-            let at_least = met(&looks(&read.estimates, &fixed(lower), &context.step));
+            let at_least = met(&looks(&read.estimates, &fixed(lower), &context.step, &context.scales));
             let met = met(&own);
             let open = met != [true; 2] && at_least == [true; 2];
             let need = most_needed(&own);
@@ -2990,7 +3011,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let judged = judge(&paths, &model, centre)?;
             let price = priced(&model, domain.widest, &rated, tau, false);
             let model_error = account(&judged);
-            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step);
+            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step, &context.scales);
             let (met, need) = (met(&own), most_needed(&own));
             weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }), open: false });
         }
@@ -3817,7 +3838,7 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
         let n = all.len() as u64 * GROUP;
         // The estimates at the analysis times: what the looks and the decisions read (# The analysis times).
         let e = summarize(&reads_of(&all), &context.scales);
-        let chased: Vec<Look> = looks(&e, &context.fixed, &context.step).into_iter().filter(Look::fits).collect();
+        let chased: Vec<Look> = looks(&e, &context.fixed, &context.step, &context.scales).into_iter().filter(Look::fits).collect();
         if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
             let (shown, l, c) = pooled(&all, &context.scales);
             return (shown, l, c, e);
@@ -4177,9 +4198,10 @@ impl<'a> Windows<'a> {
 }
 
 /// An atom held at a time after t = 0 as its window reads it, its window's two ends per lab axis `ends` and its shape
-/// moments there: its κ and κ² are the window's means and its shape the window's (estimate.rs `shape`) -- over its held
-/// part, which is no empty stretch after t = 0 (estimate.rs `half_window`); a window of no length is the instant's own
-/// κ and κ², and no shape.
+/// moments there: its κ and κ² are the window's means, its shape the window's (estimate.rs `shape`) and its push the
+/// shape's ends' difference over the part's length (estimate.rs `push_of`, # The push) -- over its held part, which is no
+/// empty stretch after t = 0 (estimate.rs `half_window`); a window of no length is the instant's own κ and κ², and no
+/// shape and no push.
 fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3], shape: &ShapeEnds, shapes: &[Shapes; 3]) {
     if let Fate::Held(h) = fate {
         let w: [[f64; 3]; 3] = std::array::from_fn(|a| std::array::from_fn(|i| ends[a][1][i] - ends[a][0][i]));
@@ -4187,6 +4209,7 @@ fn mean(fate: &mut Fate, ends: &[[[f64; 3]; 2]; 3], shape: &ShapeEnds, shapes: &
             (h.kappa[a], h.kappa2[a]) = (w[a][1] / w[a][0], w[a][2] / w[a][0]);
             if let [Some((q, low)), Some((_, high))] = &shape[a] {
                 h.shape[a] = estimate::shape(shapes[a].spacing(), *q, ends[a][0][0], ends[a][1][0], low, high);
+                h.push[a] = estimate::push_of(&h.shape[a], w[a][0]);
             }
         }
     }
@@ -4265,7 +4288,7 @@ fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f
         }
         let held = match nowhere.get() {
             Some(_) if t.time > 0. => Fate::Failed,
-            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), shape: NO_SHAPE, unresolved: t.unresolved }),
+            _ => Fate::Held(Held { rows, kappa: t.kappa, kappa2: t.kappa.map(|x| x * x), shape: NO_SHAPE, push: [0.; 3], unresolved: t.unresolved }),
         };
         let mut windows = windows.borrow_mut();
         if let Some(k) = places[0] {
@@ -4716,6 +4739,9 @@ fn run_groups(levels: &[Hand], shown: usize, messages: &mut Messages, progress: 
 #[derive(Clone)]
 struct Fixed {
     model: Vec<[f64; 2]>,
+    /// The model's error on the held atoms' motion per time (estimate.rs `MotionError`): its T's part beside `model`'s,
+    /// and the mean velocity's and the push's -- unread until the selection's conversion fills it.
+    motion: Vec<MotionError>,
     dropped: Vec<f64>,
     /// The times (µs): what the step's part is taken at (`Bound::at`).
     times: Vec<f64>,
@@ -4723,18 +4749,33 @@ struct Fixed {
     escape: Escape,
 }
 impl Fixed {
-    /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`.
+    /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`;
+    /// of the motion nothing more read (`MotionError::UNREAD`).
     fn new(model: Vec<[f64; 2]>, times: &[f64], rate: f64, escape: Escape) -> Fixed {
-        Fixed { model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), times: times.to_vec(), rate, escape }
+        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), times: times.to_vec(), rate, escape }
     }
     /// The model's errors `model` at the times `times`, with this run's bounds.
     fn with(&self, model: Vec<[f64; 2]>, times: &[f64]) -> Fixed {
         Fixed::new(model, times, self.rate, self.escape)
     }
-    /// The model's error at its k-th time with the estimate e there: its measurement and its bounds (`bounded`).
+    /// The model's error at its k-th time with the estimate e there: its measurement and its bounds (`bounded`), T's
+    /// with the motion's part on it relative to the total T read (`MotionError::temperature`).
     fn at(&self, k: usize, e: &Estimate) -> [f64; 2] {
         let more = bounded(e, self.dropped[k], &self.escape);
-        [self.model[k][0] + more[0], self.model[k][1] + more[1]]
+        let part = self.motion[k].temperature;
+        let motion = if part == 0. { 0. } else { e.motion.as_ref().map_or(f64::INFINITY, |m| part / m.temperature_total) };
+        [self.model[k][0] + more[0], self.model[k][1] + motion + more[1]]
+    }
+    /// The model's error on the mean velocity and the push along each lab axis at its k-th time with the estimate e
+    /// there (µm/µs, µm/µs²; estimate.rs, # The push), each window's half width `half` (µs): its measurement and the
+    /// bound of the held atoms of unknown state and of the dropped terms' share w (`moved_share`, as T's): a held atom's
+    /// speed along an axis is at most the escape speed a = √(2K_max/m) (estimate.rs `Escape`), so the mean moves by 2aw at
+    /// most, and its push -- its velocity's change over the window over 2h -- by 2aw/h; none where w is.
+    fn motion_at(&self, k: usize, e: &Estimate, half: V3) -> [[f64; 3]; 2] {
+        let w = crate::linalg::smaller(moved_share(e, self.dropped[k]), 1.);
+        let speed = if w == 0. { 0. } else { 2. * self.escape.speed * w };
+        let m = &self.motion[k];
+        [std::array::from_fn(|a| m.velocity[a] + speed), std::array::from_fn(|a| m.push[a] + if w == 0. { 0. } else { speed / half[a] })]
     }
 }
 
@@ -4753,9 +4794,16 @@ impl Fixed {
 /// dropped, to the bit.
 fn bounded(e: &Estimate, dropped: f64, escape: &Escape) -> [f64; 2] {
     let held = 1. - e.loss;
+    [e.uncounted + held * e.unresolved + dropped, e.moved(moved_share(e, dropped), escape)]
+}
+
+/// The share of the held atoms whose distribution the run does not know, as `bounded` takes it on T: the unresolved and
+/// the uncounted, (U + F)/(H + F), and the dropped terms' D/(n − D) -- the shares added (the triangle inequality).
+fn moved_share(e: &Estimate, dropped: f64) -> f64 {
+    let held = 1. - e.loss;
     let unknown = if e.held + e.failed > 0. { (e.unresolved * e.held + e.failed) / (e.held + e.failed) } else { 0. };
     let moved = if dropped == 0. { 0. } else if held > dropped { dropped / (held - dropped) } else { 1. };
-    [e.uncounted + held * e.unresolved + dropped, e.moved(unknown + moved, escape)]
+    unknown + moved
 }
 
 /// The step's share of the targets (SPEC §2.2, §4): on what is shown s·ε, and on T s itself -- of T's allowance at each
@@ -4837,8 +4885,9 @@ impl Look {
 /// 293 batches, from 568 trajectories to 2912.) Where no atom is held there is no T, and no look of it: N h = 0 would
 /// ask that interval of nothing. The times' looks are made on the pool, each time's by itself, and come in the
 /// times' order.
-fn looks(estimates: &[Estimate], fixed: &Fixed, step: &Bound) -> Vec<Look> {
+fn looks(estimates: &[Estimate], fixed: &Fixed, step: &Bound, scales: &Scales) -> Vec<Look> {
     let (population, temperature) = accounts(estimates, fixed, step);
+    let motion = motion_accounts(estimates, fixed, step, scales);
     estimates
         .par_iter()
         .enumerate()
@@ -4851,7 +4900,39 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: &Bound) -> Vec<Look> {
                 let account = temperature[k].unwrap_or_else(|| temperature_account(e, fixed.at(k, e)[1], step.at(fixed.times[k])[1], read.unwrap_or(CONFIDENCE * (2. / (n * h)).sqrt())));
                 Look { target: e.temperature_target, account, interval: account.statistics, trajectories: n, shown: false }
             });
-            std::iter::once(shown).chain(held)
+            // The motion's looks where they have accounts (`motion_accounts`): a look whose model's error is unread has
+            // none, and is not chased.
+            let moving = motion[k].into_iter().flatten().flatten().map(move |(account, target)| Look { target, account, interval: account.statistics, trajectories: n, shown: false });
+            std::iter::once(shown).chain(held).chain(moving)
+        })
+        .collect()
+}
+
+/// Each time's accounts of the held atoms' mean velocity and push along each lab axis (ledger.rs `Account`; estimate.rs,
+/// # The push), each with its target there (`velocity_target`, `push_target` over T's window's half width at the time):
+/// the model's error (`Fixed::motion_at`: its measurement and its bounds) and the statistics' jackknife interval
+/// weighed by the held share as T's are, and the step's part, a share of the target as read (`Bound::motion_at`;
+/// estimate.rs `between`: weighed so already), times the target. An account where its every part is read; none at
+/// t = 0 (no push), nor where fewer than two atoms are held.
+fn motion_accounts(estimates: &[Estimate], fixed: &Fixed, step: &Bound, scales: &Scales) -> Vec<[[Option<(Account, f64)>; 3]; 2]> {
+    let hm = scales.hbar_over_mass;
+    estimates
+        .par_iter()
+        .enumerate()
+        .map(|(k, e)| {
+            let (Some(m), true) = (e.motion.as_ref(), k > 0) else { return [[None; 3]; 2] };
+            let t = fixed.times[k];
+            let half: V3 = scales.frequencies.map(|w| half_window(w, t));
+            let (model, part, held) = (fixed.motion_at(k, e, half), step.motion_at(t), 1. - e.loss);
+            let values = [m.mean_velocity, m.push];
+            let errors = [m.mean_velocity_errors, m.push_errors];
+            std::array::from_fn(|i| {
+                std::array::from_fn(|a| {
+                    let target = if i == 0 { velocity_target(values[i][a], e.scale, hm) } else { push_target(values[i][a], e.scale, hm, half[a]) };
+                    let account = Account { model: weighed(held, model[i][a]), step: part[i][a] * target, statistics: weighed(held, errors[i][a].interval()) };
+                    (account.model.is_finite() && account.step.is_finite() && account.statistics.is_finite() && target.is_finite()).then_some((account, target))
+                })
+            })
         })
         .collect()
 }
@@ -5154,6 +5235,26 @@ fn accounts_along(at: &[f64], population: &[Account], temperature: &[Option<Acco
         .unzip()
 }
 
+/// The motion's accounts at the analysis times `at` (`motion_accounts`) at the times `times`: the line through them
+/// (`bracket`), each where it is at both its ends, as T's are (`accounts_along`).
+fn motion_along(at: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]], times: &[f64]) -> Vec<[[Option<(Account, f64)>; 3]; 2]> {
+    let mix = |x: &Account, y: &Account, s: f64| Account { model: lerp(x.model, y.model, s), step: lerp(x.step, y.step, s), statistics: lerp(x.statistics, y.statistics, s) };
+    times
+        .iter()
+        .map(|&t| {
+            let (a, b, s) = bracket(at, t);
+            std::array::from_fn(|i| {
+                std::array::from_fn(|q| match (motion[a][i][q], motion[b][i][q]) {
+                    (Some((x, tx)), Some((y, ty))) => Some((mix(&x, &y, s), lerp(tx, ty, s))),
+                    (x, _) if s == 0. => x,
+                    (_, y) if s == 1. => y,
+                    _ => None,
+                })
+            })
+        })
+        .collect()
+}
+
 /// The trajectories that ended with no outcome (`Counts`; module documentation, # Exits), by why, in the result's words:
 /// each cause met, how many and from when; `booked`, with what that leaves in a result (their share booked whole on
 /// what is shown) -- else the cause alone, as the request's exit says it (`nothing_integrated`).
@@ -5267,6 +5368,10 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         ledger.item(&format!("模型删去的项（{what}）"), largest, &format!("建模型时按严格界删去的项：它们让状态在迹距离上至多偏离 D(t) = ½(e^{{2Yt}} − 1) ≈ t·Y（Y 是模型给出的增长率上界）；布居上计 D，温度上按束缚原子动能的上限（阱深 U₀ = {:.0} μK）严格计入", c.fixed.escape.kinetic_uk()));
     }
     ledger.close(times, &population, &temperature, &allowed);
+    // The motion's accounts likewise (`motion_accounts`), at the outputs the line through the analysis times'.
+    let at_motion = motion_accounts(reads, &c.fixed, &c.step, &c.scales);
+    let motion = motion_along(&c.at, &at_motion, times);
+    ledger.close_motion(times, &motion);
     let mut s = Solution {
         populations: Vec::with_capacity(outputs),
         estimated_errors: population.iter().map(Account::total).collect(),
@@ -5276,6 +5381,11 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         temperature_total_errors_uk: Vec::with_capacity(outputs),
         mean_velocity_mps: Vec::with_capacity(outputs),
         mean_occupation: Vec::with_capacity(outputs),
+        mean_velocity_errors_mps: Vec::with_capacity(outputs),
+        mean_velocity_targets_mps: Vec::with_capacity(outputs),
+        push: Vec::with_capacity(outputs),
+        push_errors: Vec::with_capacity(outputs),
+        push_targets: Vec::with_capacity(outputs),
         trap_frequency_khz: w.map(|x| x / TAU * 1e3),
         loss_probability: estimates.iter().map(|e| e.loss).collect(),
         velocity: std::array::from_fn(|a| histograms(listed, &c.plan.listed, &|x| x.1[a] * hm)),
@@ -5307,6 +5417,13 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
                 s.temperature_total_errors_uk.push(read(&m.temperature_total_error));
                 s.mean_velocity_mps.push(m.mean_velocity);
                 s.mean_occupation.push(m.occupation);
+                let finite = |x: f64| x.is_finite().then_some(x);
+                let half: V3 = w.map(|w| half_window(w, times[k]));
+                s.mean_velocity_errors_mps.push(m.mean_velocity_errors.each_ref().map(read));
+                s.mean_velocity_targets_mps.push(std::array::from_fn(|a| finite(velocity_target(m.mean_velocity[a], e.scale, hm))));
+                s.push.push(m.push.map(finite));
+                s.push_errors.push(m.push_errors.each_ref().map(read));
+                s.push_targets.push(std::array::from_fn(|a| finite(m.push[a]).and_then(|x| finite(push_target(x, e.scale, hm, half[a])))));
                 s.classical.push(classical(&m.temperature));
                 if m.temperature_errors.iter().any(|x| !x.read()) && e.held != 0. {
                     unread.push(k);
@@ -5321,6 +5438,12 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
                 s.temperature_total_errors_uk.push(None);
                 s.mean_velocity_mps.push(v);
                 s.mean_occupation.push(n);
+                let (p, vt, pt) = (s.push[last], s.mean_velocity_targets_mps[last], s.push_targets[last]);
+                s.mean_velocity_errors_mps.push([None; 3]);
+                s.mean_velocity_targets_mps.push(vt);
+                s.push.push(p);
+                s.push_errors.push([None; 3]);
+                s.push_targets.push(pt);
                 s.classical.push(s.classical[last]);
                 if e.held != 0. {
                     carried.push(k);
@@ -5343,6 +5466,12 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         .collect();
     if !unbooked.is_empty() {
         s.approximations.flag(format!("{}：这些时刻仍在光阱中的原子太少，无法估计模型近似或时间步长给温度带来的误差", span(&unbooked, times)));
+    }
+    // The mean velocity and the push shown where some part of their accounts is unread -- their model error, until the
+    // selection's conversion gives it (estimate.rs `MotionError::UNREAD`), or their step's or their statistics'.
+    let unaccounted: Vec<usize> = (1..outputs).filter(|&k| estimates[k].motion.is_some() && motion[k].iter().flatten().any(Option::is_none)).collect();
+    if !unaccounted.is_empty() {
+        s.approximations.flag(format!("{}：平均速度与推力的误差账不全（模型近似的误差尚未估计，或原子太少），这两个读数只给统计误差", span(&unaccounted, times)));
     }
     // The trajectories that ended with no outcome, by why (`Counts`), and what that leaves (estimate.rs, # What is
     // counted).
@@ -5392,6 +5521,9 @@ mod tests {
 
     /// The model's errors `model` booked at as many times (`Fixed`), with nothing dropped and a held atom's kinetic
     /// energy bounded at a millikelvin (ħ/m = k_B/ħ: a velocity's square is its temperature).
+    /// The scales a test's looks take where nothing of the motion is read (`looks`).
+    const TEST_SCALES: Scales = Scales { hbar_over_mass: 1., frequencies: [1.; 3] };
+
     fn fixed_of(model: Vec<[f64; 2]>) -> Fixed {
         let times = vec![0.; model.len()];
         Fixed::new(model, &times, 0., Escape::new(KT_PER_UK * 1000., KT_PER_UK))
@@ -5616,7 +5748,7 @@ mod tests {
         let record = |h: f64, out: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * if h > 3. * tau { out } else { 1. };
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
             Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         for members in [1, GROUP] {
@@ -5899,7 +6031,7 @@ mod tests {
         let record = |h: f64, f: f64, i: u64| {
             let mut rows = [0.; STATES];
             rows[0] = 0.4 + 0.01 * (i % 7) as f64 + (0.002 + 0.0007 * (i % 5) as f64) * h * h * (1. - f * (1. - 0.5_f64.powi(ORDER)));
-            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
+            let held = Fate::Held(Held { rows, kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
             let halved = adapt::Halved { steps: 1, time: 4. * f, shortfall: 4. * f * (1. - 0.5_f64.powi(ORDER)) };
             Record { outputs: vec![held.clone(); 2], listed: vec![], reads: vec![held; times.len()], trail: vec![], lost: None, counts: Counts { time: 4., halved, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
@@ -6262,12 +6394,16 @@ mod tests {
                 temperature_total_error: Spread { error, groups: f64::INFINITY },
                 occupation: [0.; 3],
                 mean_velocity: [0.; 3],
+                mean_velocity_errors: [Spread::UNREAD; 3],
+                push: [0.; 3],
+                push_errors: [Spread::UNREAD; 3],
                 mean_speed: [0.; 3],
             }),
             failed: 0.,
             uncounted: 0.,
             unresolved: 0.,
             temperature_target: TEMPERATURE_TARGET,
+            scale: 0.,
         }
     }
 
@@ -6288,7 +6424,7 @@ mod tests {
         let groups: Vec<Group> = (0..4)
             .map(|g| {
                 let mut group = Group::new(4);
-                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], shape: NO_SHAPE, unresolved: false });
+                let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [1. + g as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
                 group.add(&[held.clone(), held.clone(), Fate::Failed, Fate::Failed]);
                 group.add(&[held.clone(), held.clone(), held, Fate::Failed]);
                 group
@@ -6303,7 +6439,7 @@ mod tests {
         assert!((population[2].model - 0.51).abs() < 1e-15 && temperature[2].is_some_and(|t| (t.model - bound).abs() < 1e-14 * bound), "{temperature:?} against {bound}");
         assert!((estimates[2].moved(0.5, &fixed.escape) - 0.5 * 2000. * 4. / estimates[2].motion.unwrap().temperature_total).abs() < 1e-12 * bound, "at rest, w = 1/2: w (2a)² m/k_B over T");
         assert!((population[3].model, population[3].statistics) == (1., 1.) && temperature[3].is_none());
-        assert_eq!(looks(&estimates, &fixed, &step).iter().map(|l| l.room() > 0.).collect::<Vec<_>>(), [true, true, false, false, false]);
+        assert_eq!(looks(&estimates, &fixed, &step, &TEST_SCALES).iter().map(|l| l.room() > 0.).collect::<Vec<_>>(), [true, true, false, false, false]);
         let plan = Plan::new(&[0., 10., 20., 30.], [1.; 3]);
         let listed = vec![vec![]; plan.listed.len()];
         let context = Context {
@@ -6338,7 +6474,7 @@ mod tests {
     /// one atom at 30 μs, none at 40 μs.
     #[test]
     fn a_t_carried_keeps_its_judgement_and_a_t_unread_is_its_own() {
-        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], shape: NO_SHAPE, unresolved: false });
+        let held = |g: usize, m: usize| Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [100. + (4 * g + m) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
         let groups: Vec<Group> = (0..5)
             .map(|g| {
                 let mut group = Group::new(5);
@@ -6397,7 +6533,7 @@ mod tests {
         let kinds = 11;
         let held = |g: usize, m: usize, scale: f64, still: bool, unresolved: bool| {
             let y = if still { 0. } else { scale * (1. + (g * 4 + m) as f64) };
-            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], shape: NO_SHAPE, unresolved })
+            Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == (g + m) % 8))), kappa: [if still { 0. } else { 0.1 * m as f64 }; 3], kappa2: [y; 3], shape: NO_SHAPE, push: [0.; 3], unresolved })
         };
         let level = |scale: f64| -> Vec<Group> {
             (0..5)
@@ -6441,7 +6577,7 @@ mod tests {
                 let (population, temperature) = accounts(&estimates, &fixed, &step);
                 assert!(population.iter().all(|a| number(a.total()) && a.total() <= 3f64.sqrt()), "{booked:?}: {population:?}");
                 assert!(temperature.iter().flatten().all(|a| number(a.total())), "{booked:?}: {temperature:?}");
-                for l in looks(&estimates, &fixed, &step) {
+                for l in looks(&estimates, &fixed, &step, &TEST_SCALES) {
                     assert!(number_or_unbounded(l.need()) && batch(l.need(), 88) >= 96 && batch(l.need(), 88) <= 176, "{booked:?}: {l:?} needs {}", l.need());
                 }
             }
@@ -6490,20 +6626,20 @@ mod tests {
         let quiet = estimate([25., 6., 10.], 0.005 * total, n);
         let run = [quiet.clone(), quiet];
         let crowded = |all: &[Look]| all.iter().filter(|l| !(l.room() > 0.)).count();
-        let all = looks(&run, &fixed, &step);
+        let all = looks(&run, &fixed, &step, &TEST_SCALES);
         assert_eq!(all.iter().map(|l| l.shown).collect::<Vec<_>>(), [true, false]);
         assert!(all[0].account.step == 0. && (all[1].account.step - 0.02).abs() < 1e-17);
         assert!(all.iter().all(|l| l.met() && l.need() < n) && crowded(&all) == 0);
         let noisy = estimate([25., 6., 10.], 0.075 * total, n);
         let run = [noisy.clone(), noisy];
-        let t = looks(&run, &fixed, &step)[1];
+        let t = looks(&run, &fixed, &step, &TEST_SCALES)[1];
         let need = n * (CONFIDENCE * 0.075 / room(TEMPERATURE_TARGET, 0.03, 0.02)).powi(2);
         assert!(!t.met() && (t.need() - need).abs() < 1e-9 * need, "{} against {need}", t.need());
         let wide = Bound::flat(0., 4.);
-        assert!(!looks(&run, &fixed, &wide)[1].fits() && crowded(&looks(&run, &fixed, &wide)) == 1);
+        assert!(!looks(&run, &fixed, &wide, &TEST_SCALES)[1].fits() && crowded(&looks(&run, &fixed, &wide, &TEST_SCALES)) == 1);
         let mut full = fixed_of(fixed.model.clone());
         full.model[1][1] = 0.11;
-        assert!(crowded(&looks(&run, &full, &step)) == 1);
+        assert!(crowded(&looks(&run, &full, &step, &TEST_SCALES)) == 1);
         let account = accounts(&run, &fixed, &step).1[1].unwrap();
         assert!(account.model == 0.03 && (account.step - 0.02).abs() < 1e-17 && (account.statistics - CONFIDENCE * 0.075).abs() < 1e-14, "{account:?}");
     }
@@ -6577,7 +6713,7 @@ mod tests {
             let mut e = estimate([20.; 3], 1., n);
             e.loss = 1. - held;
             e.motion.as_mut().unwrap().temperature_total_error = Spread::UNREAD;
-            looks(&[e.clone(), e], &fixed, &Bound::share())[1]
+            looks(&[e.clone(), e], &fixed, &Bound::share(), &TEST_SCALES)[1]
         };
         let (faint, full) = (unread(3e-4, 568.), unread(1., 100.));
         assert!(!faint.shown && faint.met() && faint.need() <= 568., "{faint:?}");
@@ -6613,7 +6749,7 @@ mod tests {
                     let mut group = Group::new(2);
                     for m in 0..4 {
                         let kappa2 = t * hotter * (1. + 0.01 * (4 * g + m) as f64);
-                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], shape: NO_SHAPE, unresolved: false });
+                        let held = Fate::Held(Held { rows: std::array::from_fn(|s| f64::from(u8::from(s == 0))), kappa: [0.; 3], kappa2: [kappa2; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
                         group.add(&[held.clone(), held]);
                     }
                     group
@@ -6626,8 +6762,8 @@ mod tests {
             let mut e = estimate([t; 3], 0.075 * t / CONFIDENCE, 800.);
             e.temperature_target = allowance(t, scale);
             let fixed = fixed_of(vec![[0.; 2], [0., 0.03]]);
-            let need = looks(&[e.clone(), e.clone()], &fixed, &Bound::share())[1].need();
-            let crowded = !(looks(&[e.clone(), e], &fixed_of(vec![[0.; 2], [0., 0.3]]), &Bound::share())[1].room() > 0.);
+            let need = looks(&[e.clone(), e.clone()], &fixed, &Bound::share(), &TEST_SCALES)[1].need();
+            let crowded = !(looks(&[e.clone(), e], &fixed_of(vec![[0.; 2], [0., 0.3]]), &Bound::share(), &TEST_SCALES)[1].room() > 0.);
             (read, need, crowded)
         };
         let mut last = at(ts[0]);
@@ -6896,7 +7032,7 @@ mod tests {
                 break;
             }
         }
-        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, unresolved: false });
+        let atom = Fate::Held(Held { rows: [0.; STATES], kappa: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
         let span = 2. * plan.halves.iter().flatten().copied().fold(0., crate::linalg::larger);
         for stop in [plan.end, 17.6] {
             let mut windows = Windows::new(&plan.times, &plan.halves);
@@ -7029,7 +7165,7 @@ mod tests {
                 };
                 let along = |from: f64, at: f64| Integrals::of(from, nodes(from, at));
                 let mut windows = Windows::new(&plan.times, &plan.halves);
-                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, unresolved: i % 7 == 3 });
+                let at = |t: f64| Fate::Held(Held { rows: [0.; STATES], kappa: kappa(t), kappa2: kappa(t).map(|k| k * k), shape: NO_SHAPE, push: [0.; 3], unresolved: i % 7 == 3 });
                 windows.record(0, at(0.));
                 let mut next = 1;
                 for piece in cuts.windows(2) {
@@ -7150,7 +7286,7 @@ mod tests {
         };
         let shape = Shape::of(&context.plan, false);
         let record = |i: u64| {
-            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false };
+            let held = Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false };
             Record { outputs: vec![Fate::Held(held.clone()), Fate::Held(held.clone())], reads: vec![Fate::Held(held.clone()), Fate::Held(held)], listed: vec![Some(([0.; 3], [i as f64; 3])); shape.listed], trail: vec![], lost: None, counts: Counts::default(), scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
         let whole = [folded(&shape, (0..GROUP).map(record)), folded(&shape, (GROUP..2 * GROUP).map(record))];
@@ -7260,7 +7396,7 @@ mod tests {
             method: String::new(),
         };
         let shape = Shape::of(&context.plan, false);
-        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false });
+        let held = |i: u64| Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
         let nowhere = |i: u64| Record {
             outputs: vec![held(i), Fate::Failed],
             reads: vec![held(i), Fate::Failed],
@@ -7593,7 +7729,7 @@ mod tests {
         let record = |i: u64| {
             let mut rows = [0.; STATES];
             rows[(i % STATES as u64) as usize] = 1.;
-            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, unresolved: false };
+            let held = Held { rows, kappa: [i as f64; 3], kappa2: [(i * i) as f64; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false };
             let outputs = vec![Fate::Held(held.clone()), if i % 3 > 0 { Fate::Held(held) } else { Fate::Lost }];
             Record { reads: outputs.clone(), outputs, listed: vec![Some(([i as f64; 3], [0.; 3]))], trail: vec![], lost: None, counts: Counts { steps: i, ..Counts::default() }, scattered: [0.; 2], kinetic: 0., end: (0, 0., 0.) }
         };
@@ -7953,7 +8089,7 @@ mod tests {
     fn the_reads_are_no_farther_apart_than_a_quarter_of_t_s_shortest_window() {
         let candidates = grid(1000., 0.5);
         assert!(candidates.len() == 1001 && candidates[1000] == 1000. && candidates.windows(2).all(|w| (w[1] - w[0] - 1.).abs() < 1e-12));
-        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], shape: NO_SHAPE, unresolved: false });
+        let held = Fate::Held(Held { rows: std::array::from_fn(|s| if s == 0 { 1. } else { 0. }), kappa: [0.; 3], kappa2: [1.; 3], shape: NO_SHAPE, push: [0.; 3], unresolved: false });
         let groups: Vec<Group> = (0..11)
             .map(|_| {
                 let mut g = Group::new(candidates.len());
@@ -8097,7 +8233,7 @@ mod tests {
         let means = measured.means(outputs, &estimates);
         assert!((means[4][0][0] - 0.4).abs() < 1e-15 && means[4][0][1] == 0., "{:?}", means[4]);
         let fixed = fixed_of(model_error(&measured.combined(outputs, &estimates)));
-        let looks = looks(&estimates, &fixed, &Bound::share());
+        let looks = looks(&estimates, &fixed, &Bound::share(), &TEST_SCALES);
         assert!(!(looks.iter().filter(|l| l.shown).nth(3).unwrap().room() > 0.), "output 4's look on what is shown");
     }
 
@@ -8153,7 +8289,7 @@ mod tests {
         assert!((room(POPULATION_TARGET, 0., share.shown[0]) - 0.04472).abs() < 1e-5 && (room(POPULATION_TARGET, 0., low.shown[0]) - 0.04995).abs() < 1e-5);
         let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
         let fixed = fixed_of(vec![[0.; 2], [0.0480, 0.]]);
-        assert!(!(looks(&estimates, &fixed, &share)[0].room() > 0.) && looks(&estimates, &fixed, &low)[0].room() > 0.);
+        assert!(!(looks(&estimates, &fixed, &share, &TEST_SCALES)[0].room() > 0.) && looks(&estimates, &fixed, &low, &TEST_SCALES)[0].room() > 0.);
     }
 
     /// t = 0 is read as every output is (module documentation, # Outputs and windows): the result's T per axis, the
@@ -8178,7 +8314,7 @@ mod tests {
             let mut fate = || {
                 let kappa: V3 = std::array::from_fn(|_| 3. * (uniform() - 0.5));
                 let kappa2: V3 = std::array::from_fn(|a| kappa[a] * kappa[a] * (1. + uniform()));
-                Fate::Held(Held { rows: state(0), kappa, kappa2, shape: NO_SHAPE, unresolved: false })
+                Fate::Held(Held { rows: state(0), kappa, kappa2, shape: NO_SHAPE, push: [0.; 3], unresolved: false })
             };
             let parts: Vec<Group> = (0..groups)
                 .map(|_| {
