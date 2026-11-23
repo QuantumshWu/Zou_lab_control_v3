@@ -9,7 +9,7 @@ from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.nodes.scan.plan import (PortGrid, ScanPlan, api_scan_ports_for, bind_plan, plan_from_authored, plan_input_rows,
                                      scan_ports_for_devices)
 from zlc_atom.nodes.scan.editor import scan_editor_facts
-from zlc_atom.nodes.seamless_scan.logic_node import SEAMLESS_SCAN_SCHEMA, _admit_resources, _editor_facts, _estimate_run
+from zlc_atom.nodes.seamless_scan.logic_node import SEAMLESS_SCAN_SCHEMA, _admit_resources, _build, _editor_facts, _estimate_run
 from zlc_atom.nodes.scan.plan import SEAMLESS_PULSE_RESOURCE
 from zlc_plugin import PluginError
 
@@ -201,6 +201,22 @@ class ScanEditorFacts(unittest.TestCase):
                   'repeats': 1, 'shots_per_point': 1}
         estimate = _estimate_run(values, {'tunable:flaky': Unconvertible()}, {SEAMLESS_PULSE_RESOURCE.field_name: REPEATS})
         self.assertEqual(estimate['status'], 'unknown')
+
+    def test_a_fraction_kept_for_a_count_the_plan_sweeps_refuses_nothing_until_its_axis_goes(self):
+        resources = {SEAMLESS_PULSE_RESOURCE.field_name: REPEATS}
+        draft = {'api_values': 'bracket_count:loop = 2.5', 'repeats': 1, 'shots_per_point': 1}
+        swept = json.dumps({'axes': [{'port': 'api:bracket_count:loop', 'unit': 'count', 'values': [1.0, 2.0]}]})
+        self.assertEqual(_admit_resources({**draft, 'plan': swept}, resources), (), 'swept: the fixed value plays nowhere')
+        field, = scan_editor_facts({**draft, 'plan': swept}, REPEATS, ())['api']['fields']
+        self.assertEqual((field['value'], field['problem']), (2.5, ''), 'kept as written, nothing said wrong')
+        self.assertIn('kept for when its axis is taken out', field['unavailable_reason'])
+        measurement = _build(source_signal='camera/source', pulse_resource=REPEATS, plan=swept, api_values=draft['api_values'])
+        self.assertEqual(measurement.api_values['bracket_count:loop'], (2.5, 'count'), 'Start: kept, each point overriding it')
+        self.assertEqual(measurement.plan.axes[0].values, (1.0, 2.0))
+        fixed = json.dumps({'axes': [{'port': 'manual:power', 'values': [1.0]}]})
+        problem = "API value 'bracket_count:loop' is 2.5: bracket_count:loop takes whole numbers"
+        self.assertEqual(_admit_resources({**draft, 'plan': fixed}, resources), (problem,), 'its axis gone: said again')
+        self.assertEqual(scan_editor_facts({**draft, 'plan': fixed}, REPEATS, ())['api']['fields'][0]['problem'], problem)
 
 
 if __name__ == '__main__':
