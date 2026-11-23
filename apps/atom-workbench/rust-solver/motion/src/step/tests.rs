@@ -1305,6 +1305,46 @@ fn a_step_past_its_light_s_resolution_is_inaccurate_not_unstable() {
     }
 }
 
+/// A jump's root is the survival's own (step.rs, # Jumps; `root`): on three reference scenes that jump inside their
+/// steps -- R9_PUSH's ground states with D2-3-3 at 1.41 µs (a travelling wave on an explicit state, three nodes a
+/// step), SAT_3's three-point choice at 1.25 µs (its ground states, one node, nine jumps a step), R4_LIN_4's ground
+/// states with D2-2-1 at 0.237 µs (a lattice) --, along a walk of 24 steps from
+/// `r1prop::start`'s trajectory 3, every root's ln N by one span of its own from its panel's start (`rooted`, its own
+/// quadrature) is ln θ within three of the root's floor: the root's own ln N within the floor, and each span's
+/// quadrature within its rounding, which the floor bounds. Said per scene: the jumps and the largest |ln N − ln θ| over
+/// the floor.
+#[test]
+fn a_jump_s_root_is_the_survival_s_own_to_its_rounding() {
+    use crate::model::selected::Selected;
+    use crate::request::GROUND;
+    for (name, spec, tau) in [("R9_PUSH", "D2-3-3", 1.4096011357420966), ("SAT_3", "P", 1.25), ("R4_LIN_4", "D2-2-1", 0.23696682464454977)] {
+        let request = crate::model::testing::scene(name);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let keep: Vec<usize> = if spec == "P" {
+            selection.keep.clone()
+        } else {
+            let mut keep: Vec<usize> = (0..GROUND).collect();
+            keep.push(request.states.iter().position(|s| s == spec).unwrap());
+            keep
+        };
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep, ..selection }, crate::solve::alone(chief)).unwrap();
+        let mut t = r1prop::start(&run, &request, chief, 3);
+        step::ROOTS.with(|r| *r.borrow_mut() = Some(Vec::new()));
+        let mut scratch = step::Scratch::default();
+        for _ in 0..24 {
+            let next = step::Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &step::Brownian::STILL, &[], &mut scratch, &Everywhere));
+            t = next.unwrap_or_else(|e| panic!("{name}: refused, {e:?}")).end;
+        }
+        let roots = step::ROOTS.with(|r| r.borrow_mut().take()).unwrap();
+        let worst = roots.iter().map(|(left, floor)| left.abs() / floor).fold(0.0, f64::max);
+        eprintln!("{name} P{} at {tau} µs: {} jumps, the largest |ln N − ln θ| at the root {worst:.3} of its floor", run.cluster(0).states.len(), roots.len());
+        assert!(!roots.is_empty(), "{name}: no jump");
+        assert!(worst <= 3.0, "{name}: a root's ln N {worst} floors from ln θ");
+    }
+}
+
 /// The waiting times (SPEC §1.6): a ground state of constant hazard γ, ‖ψ‖² = e^{−γt} between jumps, jumps at the roots
 /// ln(1/θ_j)/γ of the thresholds its streams draw (θ₀ from jump 0's, θ_j the first draw of jump j's). A constant
 /// hazard's norm is one curve along a step of any length, so the step tried at the last step's rate ends at the

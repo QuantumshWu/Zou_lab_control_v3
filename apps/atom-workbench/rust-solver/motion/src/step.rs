@@ -152,7 +152,7 @@
 //! of the eigenvectors' overlaps, their weights the launched state's and their frequencies added, cut by Chernoff's
 //! bound on the series where what lies beyond weighs within the round-off --, over each piece of the step as many equal
 //! Gauss–Legendre panels as leave the fewest nodes to take (`count`: one where no jump's root lies in the piece, more
-//! where one does and the root's panel is taken again), each of the fewest nodes to the round-off (`fewest`), every
+//! where one does and the root's panel is taken by the root's spans alone), each of the fewest nodes to the round-off (`fewest`), every
 //! rule made in O(m) to the round-off once for the process (`special::gauss_legendre`, `rule`). Measured against brute
 //! force on the six scenes' plain pieces, the pieces after a jump and the bare starts at τ = 0.3256 and 0.948 µs
 //! (step/tests/r1prop.rs `r1prop_quadrature`; tilt2 at 0.3256): the sums, the hazard, the kick and the hazard to a time
@@ -326,17 +326,23 @@
 //!   below zero between the nodes by its own third-order error; no scene's does.)
 //! - N reaches the trajectory's threshold θ first in the first panel whose end is at θ or below (N is monotone); a jump
 //!   is made there, at the root u* of ln N(u) = ln θ to ln N's rounding, ln N inside the panel its start less ∫h over
-//!   spans of it by their own quadratures on the propagation's states (`Picture::at`), stepped from below at the
-//!   hazard's rate (`root`): the spans below the root are the kick's part of the panel as far as the root, so that the
-//!   root costs the panel's nodes before it and a few more, as laying them again did. The states kept inside that
-//!   panel -- the middle, a time read -- stand where they lie before the root; the others are met again after the
-//!   jump.
+//!   spans of it by their own quadratures on the propagation's states (`Picture::at`): a span from the panel's start to
+//!   a first try, then Newton's steps on the law itself at the hazard there, each a short span added going forward and
+//!   taken back going back (`root`; the quadrature is linear). The spans are the kick's part of the panel as far as the
+//!   root. The states kept inside that panel -- the middle, a time read -- stand where they lie before the root; the
+//!   others are met again after the jump.
 //! - Where to look is the propagation's norm's to tell: it is the survival to the propagation's accuracy and costs n a
-//!   stop. Once it is at θ at a stop, the panel's nodes past it are not taken and the root is sought from the panel's
-//!   start with that stop's time as its first try -- the step does not finish a panel it jumps in, nor lay its nodes
-//!   again; where the survival does not reach θ in the panel after all (a norm that fell too fast), the root's spans
-//!   are the panel's kick to its end, and the step goes on. A crossing the norm misses (a norm that rose) the panel's
-//!   end reads, as above: the survival alone decides.
+//!   state. At a panel's start the step reads the norm at its end, its drift from the law at the start taken out; where
+//!   it has fallen to θ there, its crossing inside the panel by the Illinois rule on the propagation's states
+//!   (`crossing`, a few states) is the root's first try, and none of the panel's nodes is taken -- the step neither
+//!   finishes a panel it jumps in nor lays its nodes again; where the survival does not reach θ in the panel after all
+//!   (a norm that fell too fast), the root's spans are the panel's kick to its end, and the step goes on. A crossing the
+//!   norm misses (a norm that rose) the panel's end reads, as above, the root's first try the law's linear crossing
+//!   between the panel's ends: the survival alone decides. The norm and the law cross 10⁻¹¹ to 1.3·10⁻⁵ µs apart
+//!   (R9_PUSH's P9): the propagation's own error, so the norm only guesses. (Until 2026-11-23 the norm was read at the
+//!   panel's nodes as they were taken, its crossing the latest node before it, and the root stepped from the panel's
+//!   start from below; the same root to its rounding -- the jumps' times within 1.3·10⁻¹¹ µs on R9_PUSH, SAT_3, R4 and
+//!   p5d5, motion3d_status/rewrite/impl/EXPL.report.md --, R9_PUSH's step 25–32 % dearer.)
 //!
 //! The jump is made from the state at the root, √θ times the propagation's direction x̂(u*) there, and **at the path's
 //! own point there** -- the position r_h + v_m u*, the momentum κ_m the
@@ -1390,13 +1396,13 @@ fn resolved_by_recurrence(nu: f64, width: f64, least: usize, degree: usize, inte
 /// sums (`Midway::stretch`). The rules are made once for the process (`rule`): their making is no part of a piece's
 /// cost. On n equal panels of m = m(νw/n) nodes each (m(κ) ≈ κ/2 and the Bessel tail's few, the tail each panel's own):
 /// - a piece the survival does not end in takes them all: C(n) = n m;
-/// - a piece a jump's root lies in takes the panels before the root's, the root's panel's nodes as far as the norm's
-///   crossing -- which the root takes again, by its span from the panel's start (`root`, `fallen`) -- and that span,
-///   and no node past the root. Over the root's place -- uniform in the piece on the trajectories' thresholds, which are
-///   uniform in the survival, the survival taken linear between the piece's ends --, (n − 1)/2 panels before it, half
-///   the root's panel's nodes (a rule's nodes lie symmetric in its panel: the share before a uniform point is ½ on the
-///   mean) and the span at its mean, half the panel: C(n) = (n/2) m + m(νw/(2n)) -- the tail n times against what the
-///   root takes again, a panel's.
+/// - a piece a jump's root lies in takes the panels before the root's, none of the root's panel's nodes -- the norm's
+///   crossing is known at the panel's start (`crossing`) --, the root's span from the panel's start to it (`root`,
+///   `fallen`) and Newton's short spans after it, and no node past the root. Over the root's place -- uniform in the
+///   piece on the trajectories' thresholds, which are uniform in the survival, the survival taken linear between the
+///   piece's ends --, (n − 1)/2 panels before it and the span at its mean, half the panel: C(n) = ((n − 1)/2) m +
+///   m(νw/(2n)) -- the tail n times against the root's span's, a panel's (Newton's spans the same at every n). (Until
+///   2026-11-23 the root's panel took its nodes as far as the norm's crossing, which the root took again: (n/2) m.)
 /// Which one a piece is, `ends` tells (the propagation's norm at the piece's end at the trajectory's threshold or below:
 /// the survival to the propagation's accuracy, a stop's cost), asked only where the root's n is not one. n is the first
 /// past which C does not fall (each part of C is monotone in n, but for the node counts' steps of one). Returns n and
@@ -1432,7 +1438,7 @@ fn arranged(width: f64, rule: impl Fn(f64) -> usize, cost: impl Fn(usize) -> f64
             (n, best) = (n + 1, next);
         }
     };
-    let rooted = least(&mut m, &|n, m| 0.5 * n as f64 * cost(m(n)) + cost(m(2 * n)));
+    let rooted = least(&mut m, &|n, m| 0.5 * (n - 1) as f64 * cost(m(n)) + cost(m(2 * n)));
     let (n, total) = if rooted.0 > 1 && ends() { rooted } else { least(&mut m, &|n, m| n as f64 * cost(m(n))) };
     (n, m(n), total)
 }
@@ -3082,16 +3088,6 @@ fn fallen(picture: &mut Picture, groups: &mut Groups, still: bool, h: f64, (from
     (hazard(decay, part, n), nodes)
 }
 
-/// A span's sums (`fallen`) into the kick's: the densities' and the weights'.
-fn taken(part: &[f64], spanned: &[f64], sums: &mut [f64], weights: &mut [f64]) {
-    for (sum, p) in sums.iter_mut().zip(part) {
-        *sum += p;
-    }
-    for (sum, w) in weights.iter_mut().zip(spanned) {
-        *sum += w;
-    }
-}
-
 /// What the kick's and the survival's sums hold (`accumulate`). Where the step takes one node (`still`; # One node a
 /// step): the static group's one, each node's weight, and two of each exact tone of the step, its weight times cos νu
 /// and sin νu -- the density's sum at e^{iνu} the first + i the second --, the generator at the middle and each tone at
@@ -3224,71 +3220,139 @@ fn looked(picture: &mut Picture, reads: &[f64], mut read: usize, (start, h): (f6
     read
 }
 
-/// The root in the panel [a, b] of ln N(u) = ln θ (`target`; # Jumps) from the panel's start, ln N(a) = `log`, and
-/// with it the kick's part of the panel as far as the root: from the panel's start on, spans of the panel (`fallen`),
-/// each from the latest time below the root -- a span that stays below it stands, and its sums are the kick's (`taken`,
-/// onto `sums` and `weights` as they stood at the panel's start). `past` is a time known at or past the root with its
-/// ∫h from the panel's start -- the panel's end, where its survival read the crossing there --, or none where the
-/// crossing is the propagation's norm's (`Midway::stretch`) and the panel's end was not read; `guess` the first time
-/// tried (none: the first step's). A step goes from the latest time below to where what is left to fall, ln N − ln θ
-/// there, is fallen at the larger of two rates: the hazard there (`hazard_at`) and its mean over what is left of the
-/// bracket. At the larger rate a step falls short of the root rather than past it where the hazard does not rise, so
-/// that the spans mostly stand; the steps are Newton's from below where it falls -- quadratic -- and the secant's where
-/// the mean is the larger; a time outside the bracket is its middle (without a far end, the panel's end), and after
-/// `ROUNDS` steps every step is. Ends where ln N is within its rounding of ln θ -- `floor` -- or where the bracket has
-/// closed to neighbouring times. The root is then the latest time below and what is left, within that rounding, at the
-/// bracket's mean rate -- not the latest time below itself, which lies on the one side of the root: over a run's
-/// thousands of jumps that side's rounding adds up --, and the kick's sums are the panel's as far as the latest time
-/// below, the sliver past it within the rounding. Without a far end the spans may reach the panel's end below ln θ: the
-/// panel holds no root, and its sums are the spans'. Returns the root (none in the panel), ∫h from the panel's start to
-/// the latest time below, the nodes taken and the hazard's traces.
-#[allow(clippy::too_many_arguments)]
-fn root(picture: &mut Picture, groups: &mut Groups, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64]), (a, b): (f64, f64), log: f64, mut past: Option<(f64, f64)>, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
-    let _p = crate::prof::scope(crate::prof::ROOT);
-    let after = |u: f64, v: f64| (v - u) * (b - a) > 0.0;
-    // (time, ∫h from the panel's start) at the latest time below the root.
-    let (mut below, mut nodes, mut traces) = ((a, 0.0), 0, 0);
-    for round in 0.. {
-        let left = log - below.1 - target;
-        if !(left > floor) {
+/// Where the propagation's norm reaches the trajectory's threshold in the panel [a, b] (# Jumps): the time at which
+/// ln ‖x(u)‖² has fallen from its value at the panel's start by what the survival has left there, log − ln θ (the
+/// norm's drift from the law at the panel's start taken out), where it has by the panel's end -- the norm is monotone
+/// to the propagation's accuracy --; none where it has not. Found on the propagation's states alone (`Picture::at`,
+/// n a state) by the Illinois rule between the panel's ends, to ln's rounding or until the bracket closes to
+/// neighbouring times: what the root (`root`) tries first.
+fn crossing(picture: &mut Picture, (a, b): (f64, f64), log: f64, target: f64) -> Option<f64> {
+    if !(log > target) {
+        return None;
+    }
+    let n = picture.states();
+    let mut y = [C64::ZERO; STATES];
+    let mut fallen = |u: f64| -> f64 {
+        picture.at(u, &mut y[..n]);
+        norm_sqr(&y[..n]).ln()
+    };
+    let want = fallen(a) + (target - log);
+    let (mut lo, mut low, mut hi, mut high) = (a, log - target, b, fallen(b) - want);
+    if !(high <= 0.0) {
+        return None;
+    }
+    let floor = rounding(4) * (1.0 + want.abs());
+    // Illinois: the false position, the end that stays halved where it stays twice.
+    let mut side = 0;
+    for _ in 0..ROUNDS {
+        let u = (lo * high - hi * low) / (high - low);
+        if !((u - lo) * (hi - u) > 0.0) {
             break;
         }
-        let next = if round == 0 && guess.is_finite() {
-            guess
-        } else if round < ROUNDS {
-            let mean = past.map_or(0.0, |(time, fell)| (fell - below.1) / (time - below.0));
-            let rate = linalg::larger(hazard_at(picture, still, h, below.0, decay, part), mean);
-            (nodes, traces) = (nodes + 1, traces + 1);
-            below.0 + left / rate
-        } else {
-            f64::NAN
-        };
-        let u = match past {
-            Some((far, _)) if after(below.0, next) && after(next, far) => next,
-            Some((far, _)) => 0.5 * (below.0 + far),
-            None if after(below.0, next) && after(next, b) => next,
-            None => b,
-        };
-        if !(after(below.0, u) && past.is_none_or(|(far, _)| after(u, far))) {
-            break;
-        }
-        let mut spanned = vec![0.0; weights.len()];
-        let (fell, taken_nodes) = fallen(picture, groups, still, h, (below.0, u), bandwidth, decay, part, &mut spanned);
-        (nodes, traces) = (nodes + taken_nodes, traces + 1);
-        // A span that ends within ln N's rounding past the root ends at it: a step aimed at the root lands there within
-        // that rounding either way, and is taken.
-        if log - (below.1 + fell) > target - floor {
-            below = (u, below.1 + fell);
-            taken(part, &spanned, sums, weights);
-            if u == b && past.is_none() && log - below.1 - target > floor {
-                return (None, below.1, nodes, traces);
+        let g = fallen(u) - want;
+        if g > 0.0 {
+            (lo, low) = (u, g);
+            if side == -1 {
+                high *= 0.5;
             }
+            side = -1;
         } else {
-            past = Some((u, below.1 + fell));
+            (hi, high) = (u, g);
+            if side == 1 {
+                low *= 0.5;
+            }
+            side = 1;
+        }
+        if g.abs() <= floor {
+            break;
         }
     }
-    let root = past.map_or(below.0, |(far, fell)| below.0 + (log - below.1 - target) * (far - below.0) / (fell - below.1));
-    (Some(if after(below.0, root) && past.is_none_or(|(far, _)| after(root, far)) { root } else { below.0 }), below.1, nodes, traces)
+    Some(if low.abs() < high.abs() { lo } else { hi })
+}
+
+/// The root in the panel [a, b] of ln N(u) = ln θ (`target`; # Jumps) from the panel's start, ln N(a) = `log`, and
+/// with it the kick's part of the panel as far as the root: ln N by spans of the panel on the propagation's states
+/// (`fallen`), the first from the panel's start to `guess` (the norm's crossing, `crossing`, or where none the law's
+/// own between the panel's ends; none: the panel's end), then Newton's steps on the law itself, u_{k+1} = u_k +
+/// (ln N(u_k) − ln θ)/h(u_k) at the hazard there (`hazard_at`), each a span [u_k, u_{k+1}] whose sums are added onto
+/// `sums` and `weights` where it goes forward and taken back where it goes back -- the quadrature is linear, so the
+/// sums are the panel's as far as the last time to their rounding. A step that would leave the bracket of the latest
+/// time known below the root and the earliest known past it (without one, the panel's end) goes to its middle (without
+/// a far end, to the panel's end), and so does every step after `ROUNDS`. Ends where ln N is within its rounding of
+/// ln θ -- `floor` -- at the last time, which is the root: the root of the law, to its rounding, from either side; or
+/// where the bracket has closed to neighbouring times, at the last. A panel whose end the law does not take to ln θ
+/// holds no root: its sums are the spans' to its end. Returns the root (none in the panel), ∫h from the panel's start
+/// to the last time, the nodes taken and the hazard's traces. (Until 2026-11-23 the spans went from the panel's start
+/// in steps from below at the larger of the hazard and the bracket's mean, the first try the norm's crossing as the
+/// panel's nodes met it, and the panel's nodes before that crossing were taken and then taken again: a jump of
+/// R9_PUSH's P9 83 nodes, 120 µs of its 241, motion3d_status/rewrite/impl/EXPL.report.md §1.1.)
+#[allow(clippy::too_many_arguments)]
+fn root(picture: &mut Picture, groups: &mut Groups, (still, h, bandwidth): (bool, f64, f64), (decay, part): (&[f64], &mut [f64]), (sums, weights): (&mut [f64], &mut [f64]), (a, b): (f64, f64), log: f64, guess: f64, target: f64, floor: f64) -> (Option<f64>, f64, usize, usize) {
+    let _p = crate::prof::scope(crate::prof::ROOT);
+    let after = |u: f64, v: f64| (v - u) * (b - a) > 0.0;
+    let mut spanned = vec![0.0; weights.len()];
+    let (mut nodes, mut traces) = (0, 0);
+    // (time, ∫h from the panel's start): the last, the latest known below the root and the earliest known past it.
+    let (mut at, mut below, mut past): ((f64, f64), (f64, f64), Option<(f64, f64)>) = ((a, 0.0), (a, 0.0), None);
+    let mut next = if guess.is_finite() && after(a, guess) && !after(b, guess) { guess } else { b };
+    for round in 1.. {
+        let (from, to, sign) = if after(at.0, next) { (at.0, next, 1.0) } else { (next, at.0, -1.0) };
+        spanned.fill(0.0);
+        let (fell, taken_nodes) = fallen(picture, groups, still, h, (from, to), bandwidth, decay, part, &mut spanned);
+        (nodes, traces) = (nodes + taken_nodes, traces + 1);
+        for (sum, p) in sums.iter_mut().zip(part.iter()) {
+            *sum += sign * p;
+        }
+        for (sum, w) in weights.iter_mut().zip(&spanned) {
+            *sum += sign * w;
+        }
+        at = (next, at.1 + sign * fell);
+        let left = log - at.1 - target;
+        if left.abs() <= floor {
+            #[cfg(test)]
+            rooted(picture, groups, (still, h, bandwidth), decay, (sums.len(), weights.len()), (a, at.0), log, target, floor);
+            return (Some(at.0), at.1, nodes, traces);
+        }
+        if left > 0.0 {
+            below = at;
+            if at.0 == b {
+                return (None, at.1, nodes, traces);
+            }
+        } else {
+            past = Some(at);
+        }
+        let within = |v: f64| after(below.0, v) && past.map_or(!after(b, v), |(far, _)| after(v, far));
+        let rate = hazard_at(picture, still, h, at.0, decay, part);
+        (nodes, traces) = (nodes + 1, traces + 1);
+        let newton = at.0 + left / rate;
+        next = if round < ROUNDS && rate > 0.0 && within(newton) { newton } else { past.map_or(b, |(far, _)| 0.5 * (below.0 + far)) };
+        if !within(next) || next == at.0 {
+            break;
+        }
+    }
+    #[cfg(test)]
+    rooted(picture, groups, (still, h, bandwidth), decay, (sums.len(), weights.len()), (a, at.0), log, target, floor);
+    (Some(at.0), at.1, nodes, traces)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A check's (tests alone, the thread's): where on, each root's ln N by one span of its own from the panel's
+    /// start (`rooted`) against ln θ, with the root's floor.
+    pub(crate) static ROOTS: std::cell::RefCell<Option<Vec<(f64, f64)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A root's check (tests alone, `ROOTS`): ln N at the root u* by one span [a, u*] of its own (`fallen`, its own
+/// quadrature) less ln θ, and the root's floor.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn rooted(picture: &mut Picture, groups: &mut Groups, (still, h, bandwidth): (bool, f64, f64), decay: &[f64], (size, slots): (usize, usize), (a, u): (f64, f64), log: f64, target: f64, floor: f64) {
+    if ROOTS.with(|r| r.borrow().is_none()) {
+        return;
+    }
+    let (mut part, mut spanned) = (vec![0.0; size], vec![0.0; slots]);
+    let (fell, _) = fallen(picture, groups, still, h, (a, u), bandwidth, decay, &mut part, &mut spanned);
+    ROOTS.with(|r| r.borrow_mut().as_mut().expect("on").push((log - fell - target, floor)));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3693,11 +3757,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 kept.copy_from_slice(weights);
                 // Where a node's series does not hold (`Groups::gather`), the panel is taken again from its start.
                 let (passed_at, read_at, mut held) = (passed, read, true);
-                // The latest time taken and, once the propagation's norm is at the threshold, that time: the crossing
-                // the norm predicts lies past it (the norm is the survival to the propagation's accuracy, and costs n a
-                // stop). From then on the panel's nodes are not taken -- its kick's part is the root's spans --, its kept
-                // stops still are.
-                let (mut last, mut predicted) = (a, None);
+                // Where the propagation's norm reaches the threshold inside the panel (`crossing`: the norm is the
+                // survival to the propagation's accuracy, and costs n a state), none of the panel's nodes is taken --
+                // its kick's part is the root's spans, the first to that crossing --, its kept stops still are.
+                let predicted = crossing(picture, (a, b), log, target);
                 loop {
                     // The next stop of the panel: a node, the next kept stop within it -- the middle, then the end -- or
                     // both at once. A time read is no stop (`looked`).
@@ -3721,24 +3784,19 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         (None, None) => break,
                     };
                     // The state there: a node's parts by groups (its state itself where a stop is there too), or the
-                    // state; and its norm.
-                    let norm = {
+                    // state.
+                    {
                         let _p = crate::prof::scope(crate::prof::AT_NODES);
                         if grouped && weight.is_some() {
-                            let norm = groups.parts(picture, u);
+                            groups.parts(picture, u);
                             if keep.is_some() {
                                 groups.state(u, &mut x[..n]);
                             }
-                            norm
                         } else {
                             picture.at(u, &mut x[..n]);
-                            norm_sqr(&x[..n])
                         }
-                    };
-                    read = looked(picture, reads, read, (start, h), u, met);
-                    if predicted.is_none() && norm <= march.state.threshold {
-                        predicted = Some(last);
                     }
+                    read = looked(picture, reads, read, (start, h), u, met);
                     if let (Some((w, k)), None) = (weight, predicted) {
                         march.progress.counted += 1;
                         let _p = crate::prof::scope(crate::prof::GATHER);
@@ -3751,7 +3809,6 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                             Sums { still, h, tones: &picture.beats }.gather(u, w, &x[..n], Some(&mut *weights), sums);
                         }
                     }
-                    last = u;
                     if let Some(kind) = keep {
                         met.push((kind, u, x));
                         match kind {
@@ -3772,24 +3829,25 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                     continue;
                 }
                 read = looked(picture, reads, read, (start, h), b, met);
-                // The panel's end: where the norm predicted a crossing, the root from the panel's start (`root`); else ln N
-                // there by the sums, and where it is at the threshold the root inside the panel. The kick's part of the
-                // panel as far as the root comes with it; a predicted crossing the survival does not reach in the panel
-                // leaves the panel's whole part, ln N at its end (`end`).
+                // The panel's end: where the norm crossed inside it, the root from the panel's start (`root`) with that
+                // crossing as its first try; else ln N there by the sums, and where it is at the threshold the root
+                // inside the panel, its first try the law's linear crossing between the panel's ends. The kick's part of
+                // the panel as far as the root comes with it; a crossing of the norm the survival does not reach in the
+                // panel leaves the panel's whole part, ln N at its end (`end`).
                 let mut end = f64::NAN;
                 let search = match predicted {
-                    Some(guess) => Some((None, guess)),
+                    Some(guess) => Some(guess),
                     None => {
                         end = first - (hazard(decay, sums, n) - before);
                         march.progress.traces += 1;
-                        (end <= target).then_some((Some((b, log - end)), f64::NAN))
+                        (end <= target).then(|| a + (log - target) / (log - end) * (b - a))
                     }
                 };
-                let root = search.and_then(|(past, guess)| {
+                let root = search.and_then(|guess| {
                     let floor = rounding(2 * march.progress.counted + size + n + 10) * 1.25 * scale * tau.abs() + 2.0 * UNIT_ROUNDOFF * target.abs();
                     sums.copy_from_slice(saved);
                     weights.copy_from_slice(kept);
-                    let (crossed, fell, nodes, spans) = root(picture, groups, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, past, guess, target, floor);
+                    let (crossed, fell, nodes, spans) = root(picture, groups, (still, h, bandwidth), (decay, part), (sums, &mut *weights), (a, b), log, guess, target, floor);
                     (march.progress.counted, march.progress.traces) = (march.progress.counted + nodes, march.progress.traces + spans);
                     match crossed {
                         Some(crossed) => picture.at(crossed, &mut x[..n]),
