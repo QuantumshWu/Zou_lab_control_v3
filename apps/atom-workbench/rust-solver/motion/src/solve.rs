@@ -439,7 +439,10 @@
 //! D2-3-3, its first-order excitation 1.5), no path goes past its start and nothing can be chosen on them: the attempt
 //! is made on the structural chain's next model, and so on up (`piloted`; the top folds nothing), and the choice is made
 //! on that pilot among the chain's models above it (G and the others below it ran away where the atoms start).
-//! 1. The paths: `select::WALKS` of the pilot's trajectories at the run's step (`walks`), cut at L = min(T, 5 τ_mem),
+//! 1. The paths: `select::WALKS` of the pilot's trajectories at the run's step (`walks`) -- twice as many, and so on up
+//!    to all of them, while a candidate weighed is complete at its direct part's lower end and not at its upper (its
+//!    fate open at the paths' statistics, Student's t at the paths less one; select.rs, # How many paths), every
+//!    candidate judged again on them before any is scouted --, cut at L = min(T, 5 τ_mem),
 //!    τ_mem the full-ground model's memory time, the longest over their starts; the 32-state reference along them, at
 //!    the setting read along the longest of them, and along the scans of the trap's axes (select.rs `Paths`).
 //! 2. T's memory is not read here: the flag of its being no shorter than the run is the product's, on the run's own
@@ -2603,6 +2606,9 @@ struct Weighed {
     need: f64,
     work: Option<f64>,
     fate: String,
+    /// Whether its fate is open at the paths' statistics: complete at its direct part's lower end and not at its upper
+    /// (select.rs, # How many paths).
+    open: bool,
 }
 
 /// The choice of P on the pilot of the attempt's model -- G, or the chain's first whose pilot went past its start
@@ -2615,7 +2621,7 @@ struct Weighed {
 /// every state of the atom there (a pilot's trajectory ran away at t = 0, step.rs # The domain): nothing to choose on.
 #[allow(clippy::too_many_arguments)]
 fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
-    use crate::select::{direct_at, judge, Paths, WALKS};
+    use crate::select::{direct_at, direct_bound_at, judge, Paths, WALKS};
     let clock = Instant::now();
     let run = setting.run;
     let trap = setting.trap;
@@ -2657,265 +2663,293 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             times.len(), run.rs.keep.len(), if run.rs.keep.len() == GROUND { "（G）" } else { "（G 的折叠在先导起点失控，链上第一个走得动的）" }, places.len(), chain.len(), chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" "), started.elapsed().as_secs_f64()
         ),
     );
-    // 1. The paths: the pilot's first trajectories' starts, the memory time there (the longest), the walks to L.
+    // 1. The paths: the pilot's first trajectories' starts, the memory time there (the longest), the walks to L -- as
+    // many as the judgment's statistics ask (select.rs, # How many paths): from `WALKS`, doubled while a candidate's fate
+    // is open, up to the pilot's trajectories, every candidate judged again on them.
     let fine_refs: Vec<&Part> = fine.iter().collect();
-    let firsts: Vec<&Checkpoint> = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).take(WALKS).collect();
-    let form = crate::paths::Form::new(run, centre);
-    let memory = firsts.iter().filter_map(|c| crate::paths::memory(&form, c.trajectory.r, c.trajectory.kappa, c.trajectory.time)).map(|m| m.time).fold(0., crate::linalg::larger);
-    let memory = if memory > 0. { memory } else { length };
-    drop(form);
-    let walks = walks(run, &domain, tau, context.plan.end, &fine_refs, WALKS, length);
-    // No path past its start, the model's fold beyond every state of the atom where a pilot's atom started: the chain's
-    // next model is the pilot's (`piloted`). (No path past its start otherwise -- every atom lost at its first step --
-    // is said by `Paths::new`.)
-    if walks.iter().all(|w| !(w.end() > 0.)) && read.counts.runaway.since == Some(0.) {
-        return Ok(None);
-    }
+    let available = fine.iter().flat_map(|p| p.trails.iter()).filter(|t| !t.is_empty()).count();
     let full = Selected::new(crate::scene::Scene::new(request)?, Selection { keep: (0..STATES).collect(), ..run.report.clone() }, reference)?;
-    let paths = Paths::new(&full, centre, walks, memory, length, tau, light)?;
-    let settled = &paths.settled;
-    noted(
-        &mut report,
-        format!(
-            "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快相干每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每步 {} 段（按误差定：最长一条路径全长 {:.1} µs 上参照的误差（先在前 {} µs 上爬梯） 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
-            paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
-            settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, paths.calibrated_over(), crate::select::CALIBRATION, settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], crate::select::TOLERANCE,
-            settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
-        ),
-    );
-    messages.alive();
-    // 2. T's memory on the pilot's own trajectories, said beside the choice (the run's flag is the product's).
-    {
-        let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
-        let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
-        let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
-        let drift = match held[..] {
-            [.., (a, ea), (b, eb)] if ea.hypot(eb).is_finite() => format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }),
-            [.., (a, _), (b, _)] => format!("末两个分析时刻 T 差 {:.2} µK、误差棒无读数：定不下来", b - a),
-            _ => "末段无 T".to_string(),
-        };
-        // At the run's end no atom held: no T there, its memory unread.
-        let memory = if end.is_finite() && r.is_finite() && se.is_finite() {
-            format!("运行末 m = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}", match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" })
-        } else {
-            "运行末没有被抱住的原子，T 无读数".to_string()
-        };
-        noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：{memory}；{drift}", pilot.len() as u64 * GROUP));
-    }
-    // 3. The candidates.
-    let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
-    let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), context.step);
-    let need0 = most_needed(&base);
-    let rated = one_each(pilot);
-    let ran = (numbers.len() as u64 * GROUP) as f64;
-    // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); the scout's and the
-    // pilot's again on a model not G (two levels, the companion's at most half the run level's work).
-    let span = context.plan.end;
-    let again = |place: usize, price: f64| if place == 0 { 0. } else { 1.5 * ran * price * span };
-    let met = |looks: &[Look]| -> [bool; 2] {
-        let mut met = [true; 2];
-        for (b, l) in base.iter().zip(looks) {
-            if b.fits() && !l.fits() {
-                met[usize::from(!l.shown)] = false;
-            }
+    let (head, mut doubled, mut count) = (report, Vec::<String>::new(), WALKS.min(available));
+    loop {
+        let mut report = head.clone();
+        report.extend(doubled.iter().cloned());
+        let firsts: Vec<&Checkpoint> = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).take(count).collect();
+        let form = crate::paths::Form::new(run, centre);
+        let memory = firsts.iter().filter_map(|c| crate::paths::memory(&form, c.trajectory.r, c.trajectory.kappa, c.trajectory.time)).map(|m| m.time).fold(0., crate::linalg::larger);
+        let memory = if memory > 0. { memory } else { length };
+        drop(form);
+        let walked = walks(run, &domain, tau, context.plan.end, &fine_refs, count, length);
+        // No path past its start, the model's fold beyond every state of the atom where a pilot's atom started: the chain's
+        // next model is the pilot's (`piloted`). (No path past its start otherwise -- every atom lost at its first step --
+        // is said by `Paths::new`.)
+        if walked.iter().all(|w| !(w.end() > 0.)) && read.counts.runaway.since == Some(0.) {
+            return Ok(None);
         }
-        met
-    };
-    let optical = crate::ledger::optical(&mut Ledger::default(), read.counts.optical);
-    let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> {
-        let sampled = sampled(run, pilot, &j.region);
-        model_of(&|t| direct_at(j, &paths.windows, t), &sampled, &read.estimates, times, optical, &context.fixed.escape)
-    };
-    let mut models: Vec<Option<Selected>> = (0..chain.len()).map(|_| None).collect();
-    let mut weighed: Vec<Weighed> = vec![];
-    // A candidate of the chain judged and weighed (its model made where it is not G).
-    let weigh = |place: usize, models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
-        let started = Instant::now();
-        if place > 0 && models[place].is_none() {
-            models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
-        }
-        let model = models[place].as_ref().unwrap_or(run);
-        let price = priced(model, domain.widest, &rated, tau, place == 0);
-        // The chain's top is the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
-        // (`base`) -- complete by construction, whatever its atoms do (the invariant the choice stands on).
-        let exact = chain[place].len() == STATES;
-        let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
-        let model_error = if exact { vec![[0.; 2]; times.len()] } else { account(&judged) };
-        let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
-        let met = met(&own);
-        let need = most_needed(&own);
-        debug_assert!(!exact || met == [true; 2], "the reference itself meets every look the run's own does");
-        // Its fate in words: complete where every look the run's own meets (no model error, `base`) is still met at its
-        // model error -- the room that error leaves the statistics filled within the trajectories' cap (`Look::fits`) --,
-        // else the first kind of look it leaves unmet, what is shown (the populations and the loss) before T.
-        let (work, fate) = match met {
-            [true, true] => (Some(need * price * span + again(place, price)), "模型误差留给统计的余量够用".to_string()),
-            [true, false] => (None, "温度：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
-            _ => (None, "显示量（布居、丢失）：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
-        };
-        noted(report, format!("候选 P{}：每 µs 代价 {:.3e}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
-        Ok(Weighed { place, judged, price, model: model_error, need, work, fate })
-    };
-    weighed.push(weigh(0, &mut models, &mut report)?);
-    messages.alive();
-    // The least complete candidate (the anchor, its place among the weighed `anchored`), by bisection where G is not
-    // complete; the top (all 32) is complete by construction (`weigh`: the reference itself), so the bisection's upper
-    // end is complete at every turn -- weighed at last where no candidate below it is.
-    let top = chain.len() - 1;
-    let anchored = if weighed[0].work.is_some() {
-        0
-    } else {
-        let (mut lo, mut hi) = (0, top);
-        let mut at_hi: Option<usize> = None;
-        while hi - lo > 1 {
-            let mid = (lo + hi) / 2;
-            let w = weigh(mid, &mut models, &mut report)?;
-            messages.alive();
-            let complete = w.work.is_some();
-            weighed.push(w);
-            if complete {
-                (hi, at_hi) = (mid, Some(weighed.len() - 1));
-            } else {
-                lo = mid;
-            }
-        }
-        match at_hi {
-            Some(a) => a,
-            None => {
-                weighed.push(weigh(hi, &mut models, &mut report)?);
-                weighed.len() - 1
-            }
-        }
-    };
-    debug_assert!(weighed[anchored].work.is_some(), "the anchor is complete: the chain's top is the reference itself");
-    let anchor = weighed[anchored].place;
-    // Above the anchor a candidate is chosen only where it works less than the least W found: its least -- at no model
-    // error (the run's own need), at the ladder's first rung's step (the longest its scout may stand at), its pilot
-    // again -- bounds it from below, and grows with its states (the chain's work does), so the chain is searched up from
-    // the anchor, each candidate judged and weighed, until one's least W is no lower than the least found.
-    let mut found = weighed.iter().filter_map(|w| w.work).fold(f64::INFINITY, crate::linalg::smaller);
-    for place in anchor + 1..=top {
-        if models[place].is_none() {
-            models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
-        }
-        let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
-        let lower = need0 * price * span + again(place, price);
-        if !(lower < found) {
-            noted(&mut report, format!("链上 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不搜", chain[place].len()));
-            break;
-        }
-        if !weighed.iter().any(|w| w.place == place) {
-            let w = weigh(place, &mut models, &mut report)?;
-            messages.alive();
-            found = found.min(w.work.unwrap_or(f64::INFINITY));
-            weighed.push(w);
-        }
-    }
-    // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
-    // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
-    // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, down
-    // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), its work a µs at the rung the scout stands at, and its W again
-    // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
-    // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
-    // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
-    // (G's at its own step where G is complete, the scouted ones' at theirs); the rest keep their W at G's step, which is
-    // no less than their least.
-    let scout_of = |price: f64| 1.5 * numbers.len() as f64 * price * span;
-    let mut order: Vec<(usize, f64)> = (0..weighed.len())
-        .filter(|&i| weighed[i].work.is_some() && weighed[i].place != 0 && weighed[i].place != usize::MAX)
-        .map(|i| {
-            let w = &weighed[i];
-            let price = priced(models[w.place].as_ref().expect("a candidate's model"), domain.widest, &rated, first, false);
-            (i, w.need * price * span + again(w.place, price) + scout_of(price))
-        })
-        .collect();
-    order.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let mut best = weighed.iter().find(|w| w.place == 0).and_then(|w| w.work).unwrap_or(f64::INFINITY);
-    for (i, least) in order {
-        if !(least < best) {
-            weighed[i].fate += &format!("；第一级步长 {first:.4} µs 上的最小 W {least:.3e} 已不低于最小的 W {best:.3e}，不侦察");
-            continue;
-        }
-        let clock = Instant::now();
-        let model = models[weighed[i].place].as_ref().expect("a candidate's model");
-        let rung = match solve_with(request, model, Choosing::Scout, messages)? {
-            Attempted::Scouted(t) => t,
-            _ => unreachable!("a scout's attempt stops at its rung"),
-        };
-        messages.stage(Stage { step: Step::Select, tau: None, batch: None });
-        let price = priced(model, domain.widest, &rated, rung, false);
-        let scout = scout_of(price);
-        let entry = &mut weighed[i];
-        let w = entry.need * price * span + again(entry.place, price) + scout;
-        best = crate::linalg::smaller(best, w);
-        entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
-        (entry.price, entry.work) = (price, Some(w));
-        noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
-        messages.alive();
-    }
-    // P: the complete candidate of least W (the first of them where several are) -- the anchor among them, complete by
-    // construction; no candidate's W is ever taken back (a scout's replaces it).
-    let w = |i: usize| weighed[i].work.unwrap_or(f64::INFINITY);
-    let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).fold(anchored, |best, i| if w(i).total_cmp(&w(best)).then(i.cmp(&best)).is_lt() { i } else { best });
-    // Its region (`select::scan`): the scans of the trap's axes at the pilot's last T's thermal speed.
-    let last = read.estimates.last().and_then(|e| e.motion).map_or(request.temperature_uk, |m| m.temperature_total);
-    let speed = (KT_PER_UK * last * hm).sqrt();
-    // Each scan to the pilot's most energetic held atom's turning point on the reference state's prepared potential, to
-    // the distance an atom reaches within the request, or to the trap region's edge, whichever is nearest (select.rs, #
-    // The region left out): the reach R₀ + v T, R₀ the farthest of the pilot's atoms from the centre at t = 0, v the
-    // speed of that energy at the potential's least, at the centre.
-    let prepared = run.prepared(&reference);
-    let energy = pilot.iter().flat_map(|p| p.samples.iter().flatten()).map(|s| 0.5 * hm * s.sample.at.kappa.iter().map(|k| k * k).sum::<f64>() + prepared.at(s.sample.at.r).value).fold(f64::NEG_INFINITY, crate::linalg::larger);
-    let away = |r: V3| crate::linalg::norm3(std::array::from_fn(|k| r[k] - centre[k]));
-    let fastest = (2. * hm * (energy - prepared.at(centre).value).max(0.)).sqrt();
-    let reach = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).map(|c| away(c.trajectory.r)).fold(0., crate::linalg::larger) + fastest * length;
-    let beyond = |r: V3| crate::select::intensity(light, r) <= crate::units::REGION_INTENSITY || prepared.at(r).value >= energy || away(r) >= reach;
-    let scans = crate::select::scan_walks(&beyond, centre, &trap.axes, speed, crate::select::SCAN_READ * tau, hm, &[(chief(request), crate::linalg::C64::ONE)]);
-    let chosen_model = models[weighed[chosen].place].as_ref().unwrap_or(run);
-    if chosen_model.rs.keep.len() < STATES {
-        let (region, settings, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light)?;
-        weighed[chosen].judged.region = region;
-        weighed[chosen].model = account(&weighed[chosen].judged);
-        let lines = scans.iter().zip(&settings).map(|(w, s)| format!("{:.0} µs（每转 {}、每 µs {:.1}、每读 {} 段）", w.end(), s.turns, s.rate, s.pieces)).collect::<Vec<_>>().join("、");
-        noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点、请求时长内可达的距离 {reach:.1} µm（起点最远 + 最快 {fastest:.3} µm/µs × {length} µs）或光镊区域边缘中最近者，{speed:.3} µm/µs；各条长与格式按自己的误差定：{lines}）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,
-            if region.intensity > f64::NEG_INFINITY { format!("标出 s ≤ {:.3e}，误差 {:.2e}", region.intensity, region.error) } else { format!("无标记（最大误差 {:.1e}）", region.largest) }, region.edge));
-    }
-    // The tests' candidates beside the chain (select.rs `ALSO`): judged and weighed for comparison, never chosen.
-    #[cfg(test)]
-    for keep in crate::select::ALSO.with(|a| a.borrow().clone()) {
-        let model = Selected::new(crate::scene::Scene::new(request)?, Selection { keep, ..run.report.clone() }, reference)?;
-        let judged = judge(&paths, &model, centre)?;
-        let price = priced(&model, domain.widest, &rated, tau, false);
-        let model_error = account(&judged);
-        let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
-        let (met, need) = (met(&own), most_needed(&own));
-        weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }) });
-    }
-    // The report: every candidate weighed with its parts at their largest over the times.
-    for w in &weighed {
-        // The direct part where the paths read it; the rest of the shown error, its region's (and where the paths read
-        // no direct part, the held atoms' bound there: `model_of`).
-        let direct = times.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
-        let region = (1..times.len()).map(|k| w.model[k][0] - direct_at(&w.judged, &paths.windows, times[k]).unwrap_or(0.)).fold(0., crate::linalg::larger);
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, light)?;
+        let settled = &paths.settled;
         noted(
             &mut report,
             format!(
-                "P{}{}：直接 {:.2e}（校准 {:.1e}，率 {:.1e}）、少去区域 {:.1e}；need {:.0}、W {}；{}",
-                w.judged.keep.len(),
-                if w.place == weighed[chosen].place { "（选中）" } else { "" },
-                direct,
-                w.judged.calibration.rows,
-                w.judged.calibration.rate,
-                region,
-                w.need,
-                w.work.map_or("—".to_string(), |x| format!("{x:.3e}")),
-                w.fate
+                "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快相干每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每步 {} 段（按误差定：最长一条路径全长 {:.1} µs 上参照的误差（先在前 {} µs 上爬梯） 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e}，容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照 32 态 {:.1} s",
+                paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
+                settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, paths.calibrated_over(), crate::select::CALIBRATION, settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], crate::select::TOLERANCE,
+                settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
             ),
         );
+        messages.alive();
+        // 2. T's memory on the pilot's own trajectories, said beside the choice (the run's flag is the product's).
+        {
+            let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
+            let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
+            let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
+            let drift = match held[..] {
+                [.., (a, ea), (b, eb)] if ea.hypot(eb).is_finite() => format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }),
+                [.., (a, _), (b, _)] => format!("末两个分析时刻 T 差 {:.2} µK、误差棒无读数：定不下来", b - a),
+                _ => "末段无 T".to_string(),
+            };
+            // At the run's end no atom held: no T there, its memory unread.
+            let memory = if end.is_finite() && r.is_finite() && se.is_finite() {
+                format!("运行末 m = {r:.2} ± {se:.2} µK，允许量 {end:.2} µK：{}", match decided { Some(true) => "塌掉", Some(false) => "没塌掉", None => "定不下来" })
+            } else {
+                "运行末没有被抱住的原子，T 无读数".to_string()
+            };
+            noted(&mut report, format!("先导自己 {} 条轨迹上的 T 记忆（初态动能倾斜的似然比，只作对照；旗标在正式运行末读）：{memory}；{drift}", pilot.len() as u64 * GROUP));
+        }
+        // 3. The candidates.
+        let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
+        let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), context.step);
+        let need0 = most_needed(&base);
+        let rated = one_each(pilot);
+        let ran = (numbers.len() as u64 * GROUP) as f64;
+        // The run's work over a trajectory's time (µs: the plan's end, every trajectory runs to it); the scout's and the
+        // pilot's again on a model not G (two levels, the companion's at most half the run level's work).
+        let span = context.plan.end;
+        let again = |place: usize, price: f64| if place == 0 { 0. } else { 1.5 * ran * price * span };
+        let met = |looks: &[Look]| -> [bool; 2] {
+            let mut met = [true; 2];
+            for (b, l) in base.iter().zip(looks) {
+                if b.fits() && !l.fits() {
+                    met[usize::from(!l.shown)] = false;
+                }
+            }
+            met
+        };
+        let optical = crate::ledger::optical(&mut Ledger::default(), read.counts.optical);
+        // A candidate's model error per time at its direct part's upper end (the one booked) and at its lower, on one
+        // reading of its region at the pilot's states.
+        let accounts = |j: &crate::select::Judged| -> [Vec<[f64; 2]>; 2] {
+            let sampled = sampled(run, pilot, &j.region);
+            [true, false].map(|upper| model_of(&|t| direct_bound_at(j, &paths.windows, t, upper), &sampled, &read.estimates, times, optical, &context.fixed.escape))
+        };
+        let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> { accounts(j).into_iter().next().expect("the upper end") };
+        let mut models: Vec<Option<Selected>> = (0..chain.len()).map(|_| None).collect();
+        let mut weighed: Vec<Weighed> = vec![];
+        // A candidate of the chain judged and weighed (its model made where it is not G).
+        let weigh = |place: usize, models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
+            let started = Instant::now();
+            if place > 0 && models[place].is_none() {
+                models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+            }
+            let model = models[place].as_ref().unwrap_or(run);
+            let price = priced(model, domain.widest, &rated, tau, place == 0);
+            // The chain's top is the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
+            // (`base`) -- complete by construction, whatever its atoms do (the invariant the choice stands on).
+            let exact = chain[place].len() == STATES;
+            let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
+            let [model_error, lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
+            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            // Complete at the direct part's lower end as well where it is not at its upper: its fate open at the paths'
+            // statistics (select.rs, # How many paths).
+            let at_least = met(&looks(&read.estimates, &fixed(lower), context.step));
+            let met = met(&own);
+            let open = met != [true; 2] && at_least == [true; 2];
+            let need = most_needed(&own);
+            debug_assert!(!exact || met == [true; 2], "the reference itself meets every look the run's own does");
+            // Its fate in words: complete where every look the run's own meets (no model error, `base`) is still met at its
+            // model error -- the room that error leaves the statistics filled within the trajectories' cap (`Look::fits`) --,
+            // else the first kind of look it leaves unmet, what is shown (the populations and the loss) before T.
+            let (work, fate) = match met {
+                [true, true] => (Some(need * price * span + again(place, price)), "模型误差留给统计的余量够用".to_string()),
+                [true, false] => (None, "温度：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
+                _ => (None, "显示量（布居、丢失）：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
+            };
+            noted(report, format!("候选 P{}：每 µs 代价 {:.3e}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
+            Ok(Weighed { place, judged, price, model: model_error, need, work, fate, open })
+        };
+        weighed.push(weigh(0, &mut models, &mut report)?);
+        messages.alive();
+        // The least complete candidate (the anchor, its place among the weighed `anchored`), by bisection where G is not
+        // complete; the top (all 32) is complete by construction (`weigh`: the reference itself), so the bisection's upper
+        // end is complete at every turn -- weighed at last where no candidate below it is.
+        let top = chain.len() - 1;
+        let anchored = if weighed[0].work.is_some() {
+            0
+        } else {
+            let (mut lo, mut hi) = (0, top);
+            let mut at_hi: Option<usize> = None;
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                let w = weigh(mid, &mut models, &mut report)?;
+                messages.alive();
+                let complete = w.work.is_some();
+                weighed.push(w);
+                if complete {
+                    (hi, at_hi) = (mid, Some(weighed.len() - 1));
+                } else {
+                    lo = mid;
+                }
+            }
+            match at_hi {
+                Some(a) => a,
+                None => {
+                    weighed.push(weigh(hi, &mut models, &mut report)?);
+                    weighed.len() - 1
+                }
+            }
+        };
+        debug_assert!(weighed[anchored].work.is_some(), "the anchor is complete: the chain's top is the reference itself");
+        let anchor = weighed[anchored].place;
+        // Above the anchor a candidate is chosen only where it works less than the least W found: its least -- at no model
+        // error (the run's own need), at the ladder's first rung's step (the longest its scout may stand at), its pilot
+        // again -- bounds it from below, and grows with its states (the chain's work does), so the chain is searched up from
+        // the anchor, each candidate judged and weighed, until one's least W is no lower than the least found.
+        let mut found = weighed.iter().filter_map(|w| w.work).fold(f64::INFINITY, crate::linalg::smaller);
+        for place in anchor + 1..=top {
+            if models[place].is_none() {
+                models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+            }
+            let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
+            let lower = need0 * price * span + again(place, price);
+            if !(lower < found) {
+                noted(&mut report, format!("链上 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不搜", chain[place].len()));
+                break;
+            }
+            if !weighed.iter().any(|w| w.place == place) {
+                let w = weigh(place, &mut models, &mut report)?;
+                messages.alive();
+                found = found.min(w.work.unwrap_or(f64::INFINITY));
+                weighed.push(w);
+            }
+        }
+        // A fate open at the paths' statistics (select.rs, # How many paths): the paths doubled, up to the pilot's
+        // trajectories, and every candidate judged again on them -- before any is scouted. At all of them, its upper end
+        // stands, said.
+        let open: Vec<String> = weighed.iter().filter(|w| w.open).map(|w| format!("P{}", w.judged.keep.len())).collect();
+        if !open.is_empty() {
+            if count < available {
+                let next = (2 * count).min(available);
+                doubled.push(format!("{count} 条路径上 {} 够用与否在路径的统计（t 分布，自由度为窗内路径数减一）下定不下来：路径加倍到 {next} 条，候选重判", open.join("、")));
+                count = next;
+                continue;
+            }
+            noted(&mut report, format!("已用先导的全部 {count} 条路径，{} 够用与否仍定不下来：按直接部分的上端记", open.join("、")));
+        }
+        // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
+        // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
+        // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, down
+        // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), its work a µs at the rung the scout stands at, and its W again
+        // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
+        // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
+        // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
+        // (G's at its own step where G is complete, the scouted ones' at theirs); the rest keep their W at G's step, which is
+        // no less than their least.
+        let scout_of = |price: f64| 1.5 * numbers.len() as f64 * price * span;
+        let mut order: Vec<(usize, f64)> = (0..weighed.len())
+            .filter(|&i| weighed[i].work.is_some() && weighed[i].place != 0 && weighed[i].place != usize::MAX)
+            .map(|i| {
+                let w = &weighed[i];
+                let price = priced(models[w.place].as_ref().expect("a candidate's model"), domain.widest, &rated, first, false);
+                (i, w.need * price * span + again(w.place, price) + scout_of(price))
+            })
+            .collect();
+        order.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut best = weighed.iter().find(|w| w.place == 0).and_then(|w| w.work).unwrap_or(f64::INFINITY);
+        for (i, least) in order {
+            if !(least < best) {
+                weighed[i].fate += &format!("；第一级步长 {first:.4} µs 上的最小 W {least:.3e} 已不低于最小的 W {best:.3e}，不侦察");
+                continue;
+            }
+            let clock = Instant::now();
+            let model = models[weighed[i].place].as_ref().expect("a candidate's model");
+            let rung = match solve_with(request, model, Choosing::Scout, messages)? {
+                Attempted::Scouted(t) => t,
+                _ => unreachable!("a scout's attempt stops at its rung"),
+            };
+            messages.stage(Stage { step: Step::Select, tau: None, batch: None });
+            let price = priced(model, domain.widest, &rated, rung, false);
+            let scout = scout_of(price);
+            let entry = &mut weighed[i];
+            let w = entry.need * price * span + again(entry.place, price) + scout;
+            best = crate::linalg::smaller(best, w);
+            entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
+            (entry.price, entry.work) = (price, Some(w));
+            noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
+            messages.alive();
+        }
+        // P: the complete candidate of least W (the first of them where several are) -- the anchor among them, complete by
+        // construction; no candidate's W is ever taken back (a scout's replaces it).
+        let w = |i: usize| weighed[i].work.unwrap_or(f64::INFINITY);
+        let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).fold(anchored, |best, i| if w(i).total_cmp(&w(best)).then(i.cmp(&best)).is_lt() { i } else { best });
+        // Its region (`select::scan`): the scans of the trap's axes at the pilot's last T's thermal speed.
+        let last = read.estimates.last().and_then(|e| e.motion).map_or(request.temperature_uk, |m| m.temperature_total);
+        let speed = (KT_PER_UK * last * hm).sqrt();
+        // Each scan to the pilot's most energetic held atom's turning point on the reference state's prepared potential, to
+        // the distance an atom reaches within the request, or to the trap region's edge, whichever is nearest (select.rs, #
+        // The region left out): the reach R₀ + v T, R₀ the farthest of the pilot's atoms from the centre at t = 0, v the
+        // speed of that energy at the potential's least, at the centre.
+        let prepared = run.prepared(&reference);
+        let energy = pilot.iter().flat_map(|p| p.samples.iter().flatten()).map(|s| 0.5 * hm * s.sample.at.kappa.iter().map(|k| k * k).sum::<f64>() + prepared.at(s.sample.at.r).value).fold(f64::NEG_INFINITY, crate::linalg::larger);
+        let away = |r: V3| crate::linalg::norm3(std::array::from_fn(|k| r[k] - centre[k]));
+        let fastest = (2. * hm * (energy - prepared.at(centre).value).max(0.)).sqrt();
+        let reach = fine.iter().flat_map(|p| p.trails.iter()).filter_map(|t| t.first()).map(|c| away(c.trajectory.r)).fold(0., crate::linalg::larger) + fastest * length;
+        let beyond = |r: V3| crate::select::intensity(light, r) <= crate::units::REGION_INTENSITY || prepared.at(r).value >= energy || away(r) >= reach;
+        let scans = crate::select::scan_walks(&beyond, centre, &trap.axes, speed, crate::select::SCAN_READ * tau, hm, &[(chief(request), crate::linalg::C64::ONE)]);
+        let chosen_model = models[weighed[chosen].place].as_ref().unwrap_or(run);
+        if chosen_model.rs.keep.len() < STATES {
+            let (region, settings, seconds) = crate::select::scan(&full, chosen_model, centre, &scans, paths.least, light)?;
+            weighed[chosen].judged.region = region;
+            weighed[chosen].model = account(&weighed[chosen].judged);
+            let lines = scans.iter().zip(&settings).map(|(w, s)| format!("{:.0} µs（每转 {}、每 µs {:.1}、每读 {} 段）", w.end(), s.turns, s.rate, s.pieces)).collect::<Vec<_>>().join("、");
+            noted(&mut report, format!("P{} 的轴向扫描（6 条，到先导最高能量的束缚原子的拐点、请求时长内可达的距离 {reach:.1} µm（起点最远 + 最快 {fastest:.3} µm/µs × {length} µs）或光镊区域边缘中最近者，{speed:.3} µm/µs；各条长与格式按自己的误差定：{lines}）：路径到过的最小光强 {:.3} 以下{}；扫描到的最小光强 {:.3e} 以下不知（整份）；{seconds:.1} s", weighed[chosen].judged.keep.len(), paths.least,
+                if region.intensity > f64::NEG_INFINITY { format!("标出 s ≤ {:.3e}，误差 {:.2e}", region.intensity, region.error) } else { format!("无标记（最大误差 {:.1e}）", region.largest) }, region.edge));
+        }
+        // The tests' candidates beside the chain (select.rs `ALSO`): judged and weighed for comparison, never chosen.
+        #[cfg(test)]
+        for keep in crate::select::ALSO.with(|a| a.borrow().clone()) {
+            let model = Selected::new(crate::scene::Scene::new(request)?, Selection { keep, ..run.report.clone() }, reference)?;
+            let judged = judge(&paths, &model, centre)?;
+            let price = priced(&model, domain.widest, &rated, tau, false);
+            let model_error = account(&judged);
+            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            let (met, need) = (met(&own), most_needed(&own));
+            weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }), open: false });
+        }
+        // The report: every candidate weighed with its parts at their largest over the times.
+        for w in &weighed {
+            // The direct part where the paths read it; the rest of the shown error, its region's (and where the paths read
+            // no direct part, the held atoms' bound there: `model_of`).
+            let direct = times.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
+            let region = (1..times.len()).map(|k| w.model[k][0] - direct_at(&w.judged, &paths.windows, times[k]).unwrap_or(0.)).fold(0., crate::linalg::larger);
+            noted(
+                &mut report,
+                format!(
+                    "P{}{}：直接 {:.2e}（校准 {:.1e}，率 {:.1e}）、少去区域 {:.1e}；need {:.0}、W {}；{}",
+                    w.judged.keep.len(),
+                    if w.place == weighed[chosen].place { "（选中）" } else { "" },
+                    direct,
+                    w.judged.calibration.rows,
+                    w.judged.calibration.rate,
+                    region,
+                    w.need,
+                    w.work.map_or("—".to_string(), |x| format!("{x:.3e}")),
+                    w.fate
+                ),
+            );
+        }
+        noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
+        let w = weighed.swap_remove(chosen);
+        return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
     }
-    noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
-    let w = weighed.swap_remove(chosen);
-    Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }))
 }
 
 /// The flag of a step whose error lies clearly beyond what it may take at the steps' cap (module documentation, # The

@@ -68,10 +68,20 @@
 //! than the base's (P1 R2.3), and with it nothing remains of a base's own error to check request by request.
 //!
 //! # The direct part
-//! Per output time t, its window's (`paths::window_of`) error of each displayed row, |mean| + z·se over the paths
-//! (`paths::Mean`; z the run's `CONFIDENCE`), the largest over the rows, and the scheme's calibration beside it; past L
-//! the larger of the start's last window's and the late segment's last window's, and past the late segment's start the
-//! latter's.
+//! Per output time t, its window's (`paths::window_of`) error of each displayed row, |mean| + q·se over the paths
+//! (`paths::Mean`), q Student's t at the run's confidence (the normal's two-sided tail at `CONFIDENCE`) with the paths
+//! read in the window less one degrees of freedom -- the paths' own statistics, not the normal's z (at four paths z = 2
+//! covers 86 %, the t quantile 95.4 %) --, the largest over the rows, and the scheme's calibration beside it; past L the
+//! larger of the start's last window's and the late segment's last window's, and past the late segment's start the
+//! latter's. Of one path the spread is unknown: its upper end is without bound.
+//!
+//! # How many paths
+//! As many as the judgment's own statistics ask (solve.rs `choose_on_the_pilot`): from `WALKS`, and where some
+//! candidate weighed is complete at its direct part's lower end, |mean| − q·se (none below zero), and not at its upper
+//! end -- its fate not decided at the paths' statistics, as where a window holds fewer than two paths --, twice as many
+//! of the pilot's trajectories, and so on up to all of them; the candidates are judged again on them. (Until 2026-11-22
+//! four, whatever the judgment read: S1_5ms's choice turned between its full-ground model, W 4.1·10¹¹, and the 32
+//! states, W 3.0·10¹⁴, on whether a second of its four walks' atoms was still held in the last window.)
 //!
 //! # The feedback through the motion: zero
 //! The model's internal error moves the atoms, and where they go moves every reading. Its effect is not booked: the
@@ -151,8 +161,9 @@ use std::time::Instant;
 /// documentation, # The candidates).
 pub const POINTS: usize = 3;
 
-/// The pilot's paths a candidate is judged on (BRIEF_P3_SELECT item 2: P1-PATHS's path-to-path spread is at most 2e-3,
-/// one or two paths reach a quarter of the target, four cover the start's draws).
+/// The pilot's paths a candidate is first judged on (BRIEF_P3_SELECT item 2: P1-PATHS's path-to-path spread is at most
+/// 2e-3, one or two paths reach a quarter of the target, four cover the start's draws), doubled where the judgment asks
+/// (module documentation, # How many paths).
 pub const WALKS: usize = 4;
 
 /// The paths' scheme's tolerance (module documentation, # The paths): the largest error of a displayed row the
@@ -1035,9 +1046,18 @@ pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
     }
 }
 
-/// The direct part of a window: per row |mean| + z·se.
-fn direct(w: &Window) -> Vec<f64> {
-    w.rows.iter().map(|m| m.value.abs() + CONFIDENCE * m.error.abs()).collect()
+/// The direct part of a window (module documentation, # The direct part): per row |mean| + q·se, or where not `upper` its
+/// lower end |mean| − q·se (none below zero), q Student's t at the run's confidence with the window's paths less one
+/// degrees of freedom; of fewer than two paths q is without bound (the spread unknown).
+fn direct(w: &Window, upper: bool) -> Vec<f64> {
+    let q = if w.paths >= 2 { crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(w.paths as u64 - 1)) } else { f64::INFINITY };
+    w.rows
+        .iter()
+        .map(|m| {
+            let spread = if m.error == 0.0 { 0.0 } else { q * m.error.abs() };
+            if upper { m.value.abs() + spread } else { larger(m.value.abs() - spread, 0.0) }
+        })
+        .collect()
 }
 
 /// A candidate's direct error at the time t (module documentation, # The direct part): the largest row's |mean| + z·se
@@ -1046,10 +1066,16 @@ fn direct(w: &Window) -> Vec<f64> {
 /// beside it. Zero at t = 0, where every model starts in the same state; none where the window it takes no path reads
 /// (`paths::Window::paths`: every path's atom lost before it) -- nothing held there on the paths to err on, no number.
 pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> Option<f64> {
+    direct_bound_at(judged, windows, t, true)
+}
+
+/// `direct_at` at its upper end (`upper`), or its lower, each row's |mean| − q·se with the calibration beside it (# How
+/// many paths: a fate decided at both ends is the paths' statistics').
+pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, upper: bool) -> Option<f64> {
     if t <= 0.0 || judged.windows.is_empty() {
         return Some(0.0);
     }
-    let read = |w: &Window| (w.paths > 0).then(|| direct(w));
+    let read = |w: &Window| (w.paths > 0).then(|| direct(w, upper));
     let length = windows.last().map_or(0.0, |w| w.1);
     let own = match (judged.late.first().map(|w| w.from), judged.windows.last(), judged.late.last()) {
         (Some(from), Some(last), Some(late_last)) if t > length => {

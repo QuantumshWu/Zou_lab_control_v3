@@ -79,6 +79,27 @@ fn select_the_direct_part_by_hand() {
     assert!((at(500.0) - 2.01e-3).abs() < 1e-15 && (at(950.0) - 2.01e-3).abs() < 1e-15, "{} {}", at(500.0), at(950.0));
 }
 
+/// The direct part at the paths' own statistics by hand (module documentation, # The direct part, # How many paths): a
+/// window of four paths reads |mean| ± q·se, q Student's t at three degrees of freedom at the run's confidence (95.4 %
+/// two-sided: 3.31, where the normal's z is 2), its lower end none below zero; eight paths take seven degrees (2.43);
+/// one path's spread is unknown: its upper end without bound, its lower nothing; the calibration beside both ends.
+#[test]
+fn select_the_direct_part_at_the_paths_statistics() {
+    let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
+    let at = |w: Window, upper: bool| {
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, region: Region::NONE, seconds: 0.0, products: 0 };
+        direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, upper).expect("the window read")
+    };
+    let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
+    assert!((q(3) - 3.31).abs() < 0.01 && (q(7) - 2.43).abs() < 0.01, "{} {}", q(3), q(7));
+    assert!((at(spread(4, -2e-3, 1e-3), true) - (2e-3 + q(3) * 1e-3 + 1e-5)).abs() < 1e-15);
+    assert!((at(spread(4, -2e-3, 1e-3), false) - 1e-5).abs() < 1e-15, "the lower end none below zero");
+    assert!((at(spread(4, -5e-3, 1e-3), false) - (5e-3 - q(3) * 1e-3 + 1e-5)).abs() < 1e-15);
+    assert!((at(spread(8, 5e-3, 1e-3), true) - (5e-3 + q(7) * 1e-3 + 1e-5)).abs() < 1e-15);
+    assert_eq!(at(spread(1, 5e-3, f64::INFINITY), true), f64::INFINITY);
+    assert_eq!(at(spread(1, 5e-3, f64::INFINITY), false), 1e-5);
+}
+
 /// The flag's question by hand (`decide`): read at the end (|r| > z·se), yes; its upper end within the allowance, no;
 /// else not told; a number that is none tells nothing.
 #[test]
