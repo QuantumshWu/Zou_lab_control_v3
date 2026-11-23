@@ -70,9 +70,9 @@ pub struct Node {
     pub resource_issues: Vec<String>,
     /// The artifact inputs (paths as written) that were not there when the draft's files were read.
     pub missing_artifacts: Vec<String>,
-    /// The draft's files being read off the owner turn: the ticket, and the draft queries to ask
-    /// once they are (None: every one).
-    pub reading: Option<(u64, Option<Vec<String>>)>,
+    /// The draft's files being read off the owner turn (its ticket): every draft query is asked once
+    /// they are.
+    pub reading: Option<u64>,
     /// A Start's read of the files its configuration names: in flight, then its answer (what was read, the files).
     pub start_reading: Option<u64>,
     pub start_read: Option<(Value, Value)>,
@@ -445,29 +445,28 @@ impl Workbench {
 
     fn has_source(descriptor: &TypeDescriptor) -> bool { !descriptor.node().inputs.is_empty() }
 
-    /// Ask the node's process every draft query its type answers, for this revision and check.
-    fn send_queries(&mut self, id: &str) { self.ask_queries(id, None) }
-
-    /// Ask the draft queries (`only`: just those) for the node's current draft, once the files it
-    /// names are read (v2 reads them at a draft's boundaries: a change, Refresh, Start), off the turn.
-    fn ask_queries(&mut self, id: &str, only: Option<&[&str]>) {
+    /// Ask the node's process every draft query its type answers for its current draft, for this
+    /// revision and check, once the files it names are read (v2 reads them at a draft's boundaries:
+    /// a change, Refresh, Start; and its plugin opening), off the turn. A read still in flight is
+    /// replaced.
+    fn send_queries(&mut self, id: &str) {
         let Some(node) = self.node(id) else { return };
         let (key, files) = self.draft_files(node, &node.draft.values);
         let Some(files) = files else {
             let node = self.node_mut(id).unwrap();
             node.resources.clear(); node.resource_issues.clear(); node.missing_artifacts.clear(); node.reading = None;
-            return self.send_draft_queries(id, only);
-        };
-        // A read still in flight is replaced: this one asks what both asked.
-        let only = only.map(|only| only.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>());
-        let wanted = match node.reading.as_ref().map(|(_, wanted)| wanted.clone()) {
-            None => only,
-            Some(None) => None,
-            Some(Some(earlier)) => only.map(|only| earlier.into_iter().chain(only).collect::<BTreeSet<_>>().into_iter().collect()),
+            return self.send_draft_queries(id, None);
         };
         let ticket = self.ticket(Ticket::DraftFiles { node: id.to_owned(), key, start: false });
-        self.node_mut(id).unwrap().reading = Some((ticket, wanted));
+        self.node_mut(id).unwrap().reading = Some(ticket);
         self.plugins.work(ticket, crate::Lane::Files, Box::new(move || Ok(files.read())));
+    }
+
+    /// Ask the draft queries (`only`: just those) again for the draft as its files were last read:
+    /// a bench change, or an answer other queries are told (frames, defaults, a bundle), is no
+    /// boundary of the draft. A read in flight asks every one when it lands.
+    fn ask_again(&mut self, id: &str, only: Option<&[&str]>) {
+        if self.node(id).is_some_and(|node| node.reading.is_none()) { self.send_draft_queries(id, only); }
     }
 
     /// The files a draft with `values` names (its enabled workspace resources, its artifact inputs),
@@ -498,13 +497,12 @@ impl Workbench {
             node.start_read = Some((key, read));
             return self.start_checked(id, host);
         }
-        if node.reading.as_ref().is_none_or(|(asked, _)| *asked != ticket) { return; }
-        let (_, wanted) = node.reading.take().unwrap();
+        if node.reading != Some(ticket) { return; }
+        node.reading = None;
         node.resources = read["resolved"].as_object().cloned().unwrap_or_default();
         node.resource_issues = read["issues"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
         node.missing_artifacts = read["missing"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-        let wanted: Option<Vec<&str>> = wanted.as_ref().map(|names| names.iter().map(String::as_str).collect());
-        self.send_draft_queries(id, wanted.as_deref());
+        self.send_draft_queries(id, None);
         self.start_checked(id, host);
     }
 
@@ -652,7 +650,7 @@ impl Workbench {
             }).collect();
             let same = known.is_some_and(|known| known.members.iter().map(|(_, member)| member).eq(members.iter().map(|(_, member)| member)));
             self.bundles.insert(id.clone(), SourceBundle { built, members });
-            if !same { self.ask_queries(&id, Some(&[EDITOR_FACTS, ADMIT_SOURCE])); }
+            if !same { self.ask_again(&id, Some(&[EDITOR_FACTS, ADMIT_SOURCE])); }
         }
     }
 
@@ -706,7 +704,7 @@ impl Workbench {
             .map(|node| node.id.clone()).collect();
         for id in asking {
             if let Ok(node) = self.node_mut(&id) { node.check += 1; }
-            self.send_queries(&id);
+            self.ask_again(&id, None);
         }
         let waiting: Vec<String> = self.nodes.iter().filter(|node| node.start_after_check.is_some()).map(|node| node.id.clone()).collect();
         for node in waiting { self.start_checked(&node, host); }
@@ -794,9 +792,9 @@ impl Workbench {
         // New frames of an output: the nodes reading it ask again with their new source.
         if let Some(signal) = changed {
             let readers: Vec<String> = self.nodes.iter().filter(|node| node.draft.source_signal == signal).map(|node| node.id.clone()).collect();
-            for reader in readers { self.send_queries(&reader); }
+            for reader in readers { self.ask_again(&reader, None); }
         }
-        if readmit { self.ask_queries(id, Some(&[ADMIT])); }
+        if readmit { self.ask_again(id, Some(&[ADMIT])); }
         self.start_checked(id, host);
     }
 

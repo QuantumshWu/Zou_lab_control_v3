@@ -2459,6 +2459,50 @@ mod tests {
         assert_eq!(wb.node_row(wb.node("lanes").unwrap(), &[])["phase"], "stopping");
     }
 
+    /// A bench change is no boundary of the draft: the file it names is not read again, its row can
+    /// start meanwhile, and its queries are told what was last read. One while an edit's read is in
+    /// flight is asked when that read lands.
+    #[test]
+    fn a_bench_change_asks_with_the_files_last_read() {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "player", "kind": "node", "label": "Player",
+            "parameters": [{"name": "pulse", "type": "str", "label": "Pulse", "default": ""}],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": ["resolve_defaults", "editor_facts"],
+                     "devices": [{"capability": "sequencer.streamer", "argument": "sequencer", "protected_fields": []}],
+                     "workspace_resources": [{"field": "pulse", "contract": "zlc.pulse/1", "directory": "pulses", "suffixes": [".json"], "argument": "description"}]}}));
+        let (root, mut wb, calls, mut host) = rig("bench-files", catalog);
+        for name in ["a.json", "b.json"] { std::fs::write(root.join("pulses").join(name), b"{}").unwrap(); }
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = reads.clone();
+        wb.add_resource_resolver("zlc.pulse/", std::sync::Arc::new(move |path: &std::path::Path| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"read": path}))
+        }));
+        let read = || reads.load(std::sync::atomic::Ordering::SeqCst);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "player", "values": {"pulse": "a.json"}}));
+        for kind in ["resolve_defaults", "editor_facts"] { answer_asked(&mut wb, &mut host, &calls, "player", kind, |_| Ok(json!({}))); }
+        assert_eq!(read(), 1);
+        let row = |wb: &Workbench| wb.node_row(wb.node("player").unwrap(), &[]);
+        let before = calls.borrow().2.len();
+        wb.on_event(Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(2) }, &mut host);
+        assert!(handed().0.is_empty(), "nothing is read");
+        assert_eq!(row(&wb)["can_start"], true, "{}", row(&wb)["issues"]);
+        assert_eq!(asked_since(&calls, before), ["resolve_defaults", "editor_facts"]);
+        assert_eq!(calls.borrow().2.last().unwrap().2["resources"]["pulse"]["read"], json!(root.join("pulses").join("a.json")));
+        for kind in ["resolve_defaults", "editor_facts"] { answer_asked(&mut wb, &mut host, &calls, "player", kind, |_| Ok(json!({}))); }
+        // An edit reads the file again; a bench change meanwhile is asked when that read lands.
+        wb.apply("edit_node", &json!({"node": "player", "values": {"pulse": "b.json"}}), &Origin::Operator, 5, &mut host);
+        wb.on_event(Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(3) }, &mut host);
+        let (works, _) = handed();
+        assert_eq!(works.len(), 1, "the edit's read only");
+        let before = calls.borrow().2.len();
+        for (ticket, _, work) in works { wb.on_event(Event::Answered { ticket, result: work() }, &mut host); }
+        assert_eq!(read(), 2);
+        assert_eq!(asked_since(&calls, before), ["resolve_defaults", "editor_facts"]);
+        let told = calls.borrow().2.last().unwrap().2.clone();
+        assert_eq!((&told["resources"]["pulse"]["read"], &told["devices"]["sequencer"]["facts"]), (&json!(root.join("pulses").join("b.json")), &trigger_lanes(3)));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());
