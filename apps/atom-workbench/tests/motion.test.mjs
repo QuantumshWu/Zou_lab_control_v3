@@ -29,8 +29,8 @@ import {LOSS_CURVE,recommendedCurves,withPopulationGroups} from '../dist/js/atom
 import {TEMPERATURE_WINDOW,TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart,velocitySeries} from '../dist/js/atom-workbench/src/motion-chart.js';
 import {MOTION_DIAGNOSTICS,motionBlock,motionResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
-import {readFileSync,readdirSync} from 'node:fs';
-import {chinese,english,filled,rustLiterals} from './rust-sentences.mjs';
+import {existsSync,readFileSync} from 'node:fs';
+import {chinese,english,filled,rustLiterals,rustModules} from './rust-sentences.mjs';
 
 const N=32,C=299792458;
 const axis=name=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
@@ -492,12 +492,34 @@ test('the motion engine\'s sentences are shown in Chinese',()=>{
   const shown=text=>chinese(text)||solverText(filled(text,'10'))!==filled(text,'10');
   // The engine (rust-solver/motion/src) and its adapter: every sentence of the shipped code -- a refusal, the method,
   // the ledger's items, a flag, a note -- is shown. What an assertion says goes with a fault in the program, to no user.
+  // No user meets either of these, so neither is read:
+  // - the tests' own code: the engine's files are those its root (lib.rs) reaches by the modules its shipped code
+  //   declares (rust-sentences.mjs `rustModules`) -- a module declared under #[cfg(test)], and every file declared from
+  //   one (tests.rs, step/tests/, model/selected/tests.rs's #[path] modules, model/testing.rs, ...), is compiled in the
+  //   tests alone, as the items under #[cfg(test)] within a file are (`rustLiterals`);
+  // - the profiling feature's (prof.rs, off in every released build): its items under #[cfg(feature = "prof")]
+  //   (the regions' names, `rustLiterals`) and the text of `prof::note`, which only that feature prints.
   const ASSERTED=['assert!','assert_eq!','assert_ne!','debug_assert!','debug_assert_eq!','debug_assert_ne!','expect','unreachable!','panic!','compile_error!'];
-  const files=['src/motion_adapter.rs',...readdirSync(new URL('motion/src/',solver),{recursive:true}).map(name=>`motion/src/${name.replaceAll('\\','/')}`)
-    .filter(path=>path.endsWith('.rs')&&!path.endsWith('/tests.rs')&&path!=='motion/src/request.rs')];
-  assert.ok(files.length>20,`${files.length} files`);
+  const PROFILED=['note'];
+  const reached=[],open=['motion/src/lib.rs'];
+  while(open.length){
+    const file=open.pop();reached.push(file);
+    // A module's file: its #[path] beside the declaring file; else name.rs or name/mod.rs in the declaring file's own
+    // folder where it is lib.rs or mod.rs, in the folder of its name otherwise.
+    const dir=file.slice(0,file.lastIndexOf('/')+1),own=/\/(lib|mod)\.rs$/.test(file)?dir:file.slice(0,-3)+'/';
+    for(const {name,path} of rustModules(source(file))){
+      const found=path!==undefined?[dir+path]:[own+name+'.rs',own+name+'/mod.rs'];
+      const hit=found.find(f=>existsSync(new URL(f,solver)));
+      assert.ok(hit,`${file}: mod ${name} at ${found}`);
+      open.push(hit);
+    }
+  }
+  const files=['src/motion_adapter.rs',...reached.filter(path=>path!=='motion/src/request.rs')];
+  assert.ok(!files.some(path=>/\/tests(\.rs|\/)/.test(path)),`a test module shipped: ${files}`);
+  assert.ok(files.length>20&&files.includes('motion/src/model/rs/fold_table.rs'),`${files.length} files`);
   let sentences=0;
   for(const file of files)for(const {text,within} of rustLiterals(source(file))){
+    if(within.some(name=>PROFILED.includes(name)))continue;
     if(!chinese(text)&&!(english(text)&&!within.some(name=>ASSERTED.includes(name))))continue;
     sentences++;assert.ok(shown(text),`${file}: ${text}`);
   }

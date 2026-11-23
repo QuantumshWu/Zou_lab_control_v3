@@ -1186,6 +1186,20 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
         .collect()
 }
 
+/// The total T's change from output `from` to output `to` of the same groups (µK), with its own spread: the jackknife
+/// of the change itself, each group left out of both outputs at once (module documentation, # Errors), so that what
+/// the two outputs share -- the same atoms, as long as their energy remembers -- is in it, not the two spreads together
+/// as if independent. Read on the groups holding an atom at both. None where either output holds fewer than two atoms
+/// (solve.rs `drift`: T's drift at the run's end).
+pub fn temperature_change<G: Borrow<Group>>(groups: &[G], from: usize, to: usize, hbar_over_mass: f64) -> Option<(f64, Spread)> {
+    let total = |m: &Moments| m.temperature.map(|t| t.iter().sum::<f64>() / 3.);
+    let (a, b) = (jackknife(&[groups], from, hbar_over_mass), jackknife(&[groups], to, hbar_over_mass));
+    let change = total(&b.full[0])? - total(&a.full[0])?;
+    let leave: Option<Vec<f64>> = a.leave.iter().zip(&b.leave).map(|(x, y)| Some(total(&y[0])? - total(&x[0])?)).collect();
+    let holding = groups.iter().map(|g| g.borrow()).filter(|g: &&Group| g.sums[from].held != 0. && g.sums[to].held != 0.).count() as f64;
+    Some((change, leave.filter(|l| !l.is_empty()).map_or(Spread::UNREAD, |l| spread(l.into_iter(), holding))))
+}
+
 /// The size of the step's error as two ensembles measure it, window by window (module documentation, # The step's
 /// error): per window of the run its span (µs) and per quantity (`Quantity`) the read of its mean square over the
 /// window's times after t = 0 -- the loss's and each row's as shown (absolute, squared), and the total T's (the mean

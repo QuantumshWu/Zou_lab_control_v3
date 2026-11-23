@@ -1,6 +1,8 @@
 // The string literals of a Rust source's shipped code, for the tests that read what the solver can say
-// (motion.test.mjs): comments and every item under #[cfg(test)] left out, each literal with the calls
-// and macros it stands in, innermost last (`Err`, `format!`, `expect`, …).
+// (motion.test.mjs): comments and every item under #[cfg(test)] or #[cfg(feature = "prof")] left out (the
+// tests' and the profiling feature's, prof.rs: no released build has either), each literal with the calls
+// and macros it stands in, innermost last (`Err`, `format!`, `expect`, …); and the modules the shipped code
+// declares, so that a crate's shipped files are those its root reaches (`rustModules`).
 const CHAR=/^'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^'\\])'/;
 const OPEN='([{',CLOSE=')]}';
 
@@ -24,14 +26,17 @@ function tokens(source){
   return out;
 }
 
-/** Every string literal of the shipped code: `text`, and `within`, the names of the calls and macros around it. */
-export function rustLiterals(source){
-  const list=tokens(source),out=[],stack=[];
+/** The source's tokens of its shipped code: every item under #[cfg(test)] or #[cfg(feature = "prof")] left out -- to
+ * its `;`, or through its block. */
+function shipped(source){
+  const list=tokens(source),out=[];
   for(let i=0;i<list.length;i++){
     const t=list[i];
-    // #[cfg(test)]: the item it marks is no shipped code -- to its `;`, or through its block.
-    if(t.mark==='#'&&list[i+1]?.mark==='['&&list[i+2]?.word==='cfg'&&list[i+3]?.mark==='('&&list[i+4]?.word==='test'&&list[i+5]?.mark===')'&&list[i+6]?.mark===']'){
-      let depth=0;i+=7;
+    const cfg=t.mark==='#'&&list[i+1]?.mark==='['&&list[i+2]?.word==='cfg'&&list[i+3]?.mark==='(';
+    const marks=cfg&&list[i+4]?.word==='test'&&list[i+5]?.mark===')'&&list[i+6]?.mark===']'?7
+      :cfg&&list[i+4]?.word==='feature'&&list[i+5]?.mark==='='&&list[i+6]?.string==='prof'&&list[i+7]?.mark===')'&&list[i+8]?.mark===']'?9:0;
+    if(marks){
+      let depth=0;i+=marks;
       for(;i<list.length;i++){
         const mark=list[i].mark;if(!mark)continue;
         if(mark==='{'&&depth===0){for(let braces=1;braces>0;){const m=list[++i].mark;if(m==='{')braces++;else if(m==='}')braces--;}break;}
@@ -39,6 +44,31 @@ export function rustLiterals(source){
       }
       continue;
     }
+    out.push(t);
+  }
+  return out;
+}
+
+/** The modules the shipped code declares from their own files (`mod name;`): `name`, and `path`, its #[path = "…"]
+ * where it has one. */
+export function rustModules(source){
+  const list=shipped(source),out=[];
+  for(let i=0;i<list.length;i++){
+    if(list[i].word!=='mod'||!list[i+1]?.word||list[i+2]?.mark!==';')continue;
+    // Back over `pub`, `pub(crate)` to the attribute before it, if any.
+    let j=i-1;
+    if(list[j]?.mark===')'&&list[j-2]?.mark==='('&&list[j-3]?.word==='pub')j-=4;else if(list[j]?.word==='pub')j--;
+    const path=list[j]?.mark===']'&&list[j-1]?.string!==undefined&&list[j-2]?.mark==='='&&list[j-3]?.word==='path'&&list[j-4]?.mark==='['&&list[j-5]?.mark==='#'?list[j-1].string:undefined;
+    out.push({name:list[i+1].word,path});
+  }
+  return out;
+}
+
+/** Every string literal of the shipped code: `text`, and `within`, the names of the calls and macros around it. */
+export function rustLiterals(source){
+  const list=shipped(source),out=[],stack=[];
+  for(let i=0;i<list.length;i++){
+    const t=list[i];
     if(t.mark&&OPEN.includes(t.mark)){
       // What is called: `name(`, `name!(`, `.name(`.
       const before=list[i-1],name=before?.word??(before?.mark==='!'&&list[i-2]?.word?list[i-2].word+'!':undefined);

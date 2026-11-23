@@ -106,7 +106,9 @@
 //! Per output time t, its window's (`paths::window_of`) error of each displayed row, |mean| + q·se over the paths
 //! (`paths::Mean`), q Student's t at the run's confidence (the normal's two-sided tail at `CONFIDENCE`) with the paths
 //! read in the window less one degrees of freedom -- the paths' own statistics, not the normal's z (at four paths z = 2
-//! covers 86 %, the t quantile 95.4 %) --, the largest over the rows, and the scheme's calibration beside it; past L the
+//! covers 86 %, the t quantile 95.4 %) --, read on each of the window's parts (`paths::parts`: halved while its halves'
+//! rows differ beyond their statistics, so that a change inside a long window is not averaged away), the largest over
+//! the parts and the rows, and the scheme's calibration beside it; past L the
 //! larger of the start's last window's and the late segment's last window's, and past the late segment's start the
 //! latter's. Of one path the spread is unknown: its upper end is without bound.
 //!
@@ -152,12 +154,26 @@
 //!   nought), so δE_a(t) = δP_a (1 − e^{−α_a t})/α_a: δT_a = δP_a t/k_B on an axis that does not cool (α = 0: x t Ṫ of
 //!   the heating's x), δT_a/T_a = δP_a/H_a at the steady state (x_D − x_α: the heating's relative difference less the
 //!   friction's, the work's difference over the friction's power, which is H_a there).
-//! - **The photons' statistics and the force's fluctuations** (paths.rs # The landing check): at each window's last
-//!   reading that leaves it room, the reference's state mapped to its landing after a jump, each model on from there --
-//!   its Mandel Q, of the directed absorbed part its jumps carry --, and each model's force correlation's diffusion at
-//!   its own state there, in its heating (`Paths::landings`, `judge`: SAT_03's resonant two-level cycle, the reference's
-//!   Q = −0.53, the full-ground model's 0; the latter heats the push axis 2.1 times as much, Study A's prediction 2.10
-//!   of the measured 1.80 ± 0.5).
+//! - **The photons' statistics** (paths.rs # The landing check): at each window's last reading that leaves it room,
+//!   the reference's state mapped to its landing after a jump, each model on from there -- its Mandel Q, the Fano factor
+//!   1 + Q of the absorbed light's directed part in its heating (`Paths::landings`, `judge`: SAT_03's resonant
+//!   two-level cycle, the reference's Q = −0.53, the full-ground model's 0; the latter heats the push axis 2.19 times as
+//!   much, Study A's prediction 2.10 of the measured 1.80 ± 0.5).
+//! - **What the account leaves out: the dipole force's fluctuation by the jumps.** A trajectory's force between its jumps
+//!   is ⟨ψ|∇H|ψ⟩ of its own state; after a jump it is the landed state's, and the difference it makes until it is
+//!   forgotten -- per jump channel c its impulse I_c = ∫(F(τ|L_c) − F̄)dτ along the walk -- diffuses the momentum by the
+//!   jumps' statistics (Σ_c λ_c I_c² with the recoils' cross term, and where the impulses of successive jumps overlap,
+//!   the conditional states' own correlation). This is the polarization gradient's Sisyphus heating as the trajectories
+//!   have it, and two models differ in it where they fold differently the states it runs through. It is not read, in
+//!   neither model's heating: the quantum regression's diffusion stood here until 2026-11-23 and is no measure of it
+//!   (paths.rs # The landing check). Its size between models, measured on their own trajectories (Study A, forced
+//!   solves): tilt0's G+D2-3±3 against the whole D2-3 explicit, the cooling axis's T 20 % low on both seeds; R4's
+//!   G+D2-3±3 8 % low; PGC3D's G against P20 −0.03 of T's allowance. Two consequences: such a partial model's T error
+//!   on its cooling axis is not booked (the selection's status file, item 3's open question), and the heating H_a that
+//!   sets an axis's relaxation α_a = (H_a − Ė_a)/E_a lacks that part -- α reads low where the Sisyphus heating leads,
+//!   the response 1/α long, the T account's statistical end wide (R4's G open at its upper end on 88 paths, P10 chosen
+//!   where with the regression's diffusion in H the full-ground model was, 2026-11-23). Read by its own impulses per
+//!   jump channel, the next round's (with the paths' adjoint sweep).
 //! - T's rates are each path's over its whole stretches past the memory time (`Stationary`): a window shorter than the
 //!   motion's periods holds the conservative exchange, bounded over any time, which a short window's rate times an
 //!   axis's whole response would take for heating.
@@ -349,18 +365,14 @@ pub struct Selection {
     pub keep: Vec<usize>,
     /// The chain from the full-ground model G (first) up to the 32 states (last), each sorted.
     pub chain: Vec<Vec<usize>>,
-    /// Per state its structural amplitude (zero on the ground states).
+    /// Per state its structural amplitude (zero on the ground states; the tests').
+    #[cfg(test)]
     pub amplitudes: [f64; STATES],
     pub seconds: f64,
     pub choice: Option<std::sync::Arc<Choice>>,
 }
 
 impl Selection {
-    /// The full-ground model's states: the chain's first, the model the scout and the pilot run.
-    pub fn ground(&self) -> &[usize] {
-        &self.chain[0]
-    }
-
     /// What the report says beside the numbers (Chinese): the chain, and the choice where it was made.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = vec![format!("结构链 {} 档：{}", self.chain.len(), self.chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" → "))];
@@ -377,7 +389,14 @@ pub fn choose(scene: &Scene) -> Result<Selection, String> {
     let clock = Instant::now();
     let amplitudes = amplitudes(scene);
     let chain = chain(&amplitudes);
-    Ok(Selection { keep: chain[0].clone(), chain, amplitudes, seconds: clock.elapsed().as_secs_f64(), choice: None })
+    Ok(Selection {
+        keep: chain[0].clone(),
+        chain,
+        #[cfg(test)]
+        amplitudes,
+        seconds: clock.elapsed().as_secs_f64(),
+        choice: None,
+    })
 }
 
 /// The chain (module documentation, # The candidates) by the states' structural amplitudes: from the ground states up,
@@ -541,11 +560,6 @@ pub fn importance(scene: &Scene, places: &[(V3, [f64; GROUND])]) -> [f64; STATES
 // ---------------------------------------------------------------------------------------------------------------------
 // The paths and the candidates' judgment.
 
-/// The tweezer's intensity at a place, relative to its peak (s = |a_tw(r)|²).
-pub fn intensity(light: &Light, r: V3) -> f64 {
-    light.beams[light.frequencies[light.trap].beams[0]].amplitude_to(r, 0).value.norm_sqr()
-}
-
 //// What every candidate is judged against (module documentation, # The paths): the walks cut at L, their windows, the
 /// reference's form, the scheme's setting (`settle`), the reference's series along the walks at it, the calibration --
 /// the walk it was read along (the longest), its length and the reference's series there at the setting's runs --, the
@@ -569,34 +583,29 @@ pub struct Paths<'a> {
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
     /// none where the run is no longer than twice L.
     late: Option<(f64, Vec<(f64, f64)>, Vec<Series>)>,
-    pub least: f64,
     /// The largest bound the reference's openings book over its stretches (paths.rs, # The start).
     pub booked: f64,
     /// The reference's largest trace defect over its stretches at the setting (paths.rs `Series::trace_defect`).
     pub trace: f64,
     /// The landing check (module documentation, # The motion): per stretch -- the walks' starts, then their late
-    /// segments -- its landings with the reference's excess photons and impulse; and the check's span and the fastest
+    /// segments -- its landings with the reference's excess photons; and the check's span and the fastest
     /// excited decay (paths.rs `Form::optical`; none of a reference without excited states).
     pub landings: Vec<Vec<Landing>>,
     pub optical: Option<(f64, f64)>,
     /// The reference's counted work along its paths (paths.rs `Counts::work`; # How many paths).
     pub work: f64,
     pub seconds: f64,
-    pub products: u64,
 }
 
 /// A landing of the landing check (module documentation, # The motion): its time, the reference's landed ground state
-/// (by the request's ground states, its trace one), the reference's excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and impulse
-/// ∫(F(τ|L) − F̄)dτ (1/µm) from it (paths.rs `Form::landing`), and the reference's force correlation's diffusion at
-/// its own state there (paths.rs `Form::diffusion`; none where its frozen generator has no inverse there).
+/// (by the request's ground states, its trace one) and the reference's excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ from it
+/// (paths.rs `Form::landing`).
 #[derive(Clone, Debug)]
 pub struct Landing {
     pub t: f64,
     pub landed: [[C64; GROUND]; GROUND],
     pub photons: f64,
-    pub impulse: V3,
-    pub diffusion: Option<V3>,
-    /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch and the diffusion's solve.
+    /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch.
     pub work: f64,
     /// The excess photons' last doubling's change (paths.rs `Form::landing`): booked, not left unconverged.
     pub photons_error: f64,
@@ -631,11 +640,6 @@ impl Settled {
         let sum: f64 = self.errors.iter().sum::<f64>();
         // The trace's part decides with the knobs' and is booked on its own, over every path (`Paths::trace`).
         (sum + self.trace > TOLERANCE).then_some(sum)
-    }
-
-    /// The scheme at the setting, read at every `read`-th knot.
-    pub fn scheme(&self, read: usize) -> Scheme {
-        scheme(self.setting, read)
     }
 
     /// The ladder's second stage after its first (`settle`): the second's setting and parts, the two's work together.
@@ -774,7 +778,7 @@ impl<'a> Paths<'a> {
     /// the scheme's setting along the longest walk's [0, L] (`settle`; the first such where several are), and the
     /// reference along the walks at it -- the other walks' on the pool beside the setting's second stage, at the first
     /// stage's setting, and again where the second stage moved it.
-    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light, landing_budget: f64) -> Result<Paths<'a>, String> {
+    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, landing_budget: f64) -> Result<Paths<'a>, String> {
         let clock = Instant::now();
         let form = Form::new(reference, at);
         let length = run.min(5.0 * memory);
@@ -788,7 +792,7 @@ impl<'a> Paths<'a> {
         let longest = (0..walks.len()).fold(0, |best, k| if reach(&walks[k]) > reach(&walks[best]) { k } else { best });
         let stretch = reach(&walks[longest]);
         if !(stretch > 0.0) {
-            return Err("no path of the pilot's goes past its start (every one's atom lost or its trajectory ended at its first step)".into());
+            return Err("先导的路径都没走出起点（每条的原子都已丢失，或轨迹在第一步就结束）".into());
         }
         #[cfg(test)]
         if traced() {
@@ -883,7 +887,7 @@ impl<'a> Paths<'a> {
             }
         }
         // The landing check of the reference (module documentation, # The motion): at each kept state the landing after a
-        // jump, and the reference's excess photons and impulse from it, each stretch at its own setting.
+        // jump, and the reference's excess photons from it, each stretch at its own setting.
         let knobs_of = |j: usize| (settings[j].turns, settings[j].rate, settings[j].cutoff);
         let landings: Vec<Vec<Landing>> = match optical {
             None => vec![vec![]; jobs.len()],
@@ -894,11 +898,8 @@ impl<'a> Paths<'a> {
                     done[j]
                         .kept
                         .iter()
-                        .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
-                        .map(|(t, v, landed)| {
-                            let (diffusion, solved) = form.diffusion(&walks[w], t, v);
-                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], diffusion, landing_budget).map(|(photons, impulse, spent, photons_error)| Landing { t, landed, photons, impulse, diffusion, work: spent + solved, photons_error })
-                        })
+                        .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, landed)))
+                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], landing_budget).map(|(photons, spent, photons_error)| Landing { t, landed, photons, work: spent, photons_error }))
                         .collect()
                 })
                 .collect::<Result<_, _>>()?,
@@ -907,12 +908,10 @@ impl<'a> Paths<'a> {
         let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect();
         let late_series: Vec<Series> = done.collect();
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
-        let least = walks.iter().flat_map(|w| w.ends.iter().map(|e| intensity(light, [e[1], e[2], e[3]]))).fold(f64::INFINITY, crate::linalg::smaller);
-        let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.products).sum::<u64>() + settled.products;
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
         let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
+        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64() })
     }
 
     /// The stretches run at a setting of their own (`settings`), each with it: their trace beyond the tolerance at the
@@ -938,7 +937,7 @@ impl<'a> Paths<'a> {
     /// scheme's unmet sum and the openings' bound as its own, and read its windows against themselves: no number where no
     /// path read a window -- R9_PUSH's, every atom pushed out by 45 µs.)
     pub fn itself(&self, keep: Vec<usize>) -> Judged {
-        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 }
+        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, statistics: None, stationary: None, work: 0.0 }
     }
 }
 
@@ -972,8 +971,6 @@ pub struct Judged {
     pub statistics: Option<[f64; 2]>,
     /// The energy rates T's error reads (`Stationary`); none where no path read past its memory time.
     pub stationary: Option<Stationary>,
-    pub seconds: f64,
-    pub products: u64,
     /// Its paths' counted work (paths.rs `Counts::work`): what more paths cost (# How many paths).
     pub work: f64,
 }
@@ -1000,7 +997,6 @@ pub struct Walked {
 
 /// `judge_on`, its walks' own kept (`Walked`).
 pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<(Judged, Walked), String> {
-    let clock = Instant::now();
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
     let scheme = |j: usize| self::scheme(paths.settings[j], 1);
@@ -1010,8 +1006,6 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let n = paths.walks.len();
     let run = paths.late.as_ref().map_or(0.0, |(from, ..)| from + paths.length);
     let jobs: Vec<usize> = (0..n * (1 + usize::from(paths.late.is_some()))).collect();
-    // Each stretch's states kept at the reference's landings (the candidate's own force correlation there).
-    let keep = |j: usize| -> Vec<f64> { paths.landings.get(j).map_or(vec![], |l| l.iter().map(|x| x.t).collect()) };
     let done: Vec<Result<Vec<Series>, String>> = jobs
         .par_iter()
         .map(|&j| {
@@ -1021,16 +1015,16 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 j if j % n >= walks => Ok(vec![Series::default()]),
                 j if j == longest => {
                     let w = &paths.walks[j];
-                    form.along_family_keeping(w, &w.start, 0.0, stretch, &family, &keep(j))
+                    form.along_family_keeping(w, &w.start, 0.0, stretch, &family, &[])
                 }
                 j if j < n => {
                     let w = &paths.walks[j];
                     let reach = paths.length.min(w.end());
-                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme(j), &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme(j), &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
-                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme(j), &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme(j), &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
             };
             #[cfg(test)]
@@ -1052,11 +1046,9 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
         series.push(made.swap_remove(0));
     }
     let late_series: Vec<Series> = done.map(|x| x.map(|mut x| x.swap_remove(0))).collect::<Result<_, _>>()?;
-    let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
-    // photons' Mandel Q = 2 n_ex --, and its force correlation's diffusion at its own state there; the reference's beside
-    // (paths.rs `Statistics`). Where either model's frozen generator has no inverse, neither's diffusion is read there.
+    // photons' Mandel Q = 2 n_ex --, the reference's beside (paths.rs `Statistics`).
     let knobs = |j: usize| (paths.settings[j].turns, paths.settings[j].rate, paths.settings[j].cutoff);
     let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
     // The landing checks' counted work, summed on the pool (whole multiply-adds).
@@ -1075,13 +1067,8 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 }
                 list.iter()
                     .map(|l| {
-                        let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
-                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, mine, paths.landing_budget)?;
-                        let diffusion = match (mine, l.diffusion) {
-                            (Some(c), Some(r)) => [c, r],
-                            _ => [[0.0; 3]; 2],
-                        };
-                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion, q_error: [2.0 * error, 2.0 * l.photons_error] }, spent + solved))
+                        let (photons, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, paths.landing_budget)?;
+                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], q_error: [2.0 * error, 2.0 * l.photons_error] }, spent))
                     })
                     .collect::<Result<Vec<_>, String>>()
                     .map(|x| x.into_iter().unzip::<_, _, Vec<_>, Vec<f64>>())
@@ -1092,8 +1079,8 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let (landed_start, landed_late) = landed.split_at(n.min(landed.len()));
     let escape = escape_of(paths, &series, &late_series, landed_start, landed_late, hm);
     let weights: Vec<f64> = paths.walks.iter().map(|w| w.weight).collect();
-    let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm, landed_start, &weights);
-    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm, landed_late, &weights));
+    let windows = paths::compare(&series, &paths.series, &paths.windows, hm, landed_start, &weights);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, hm, landed_late, &weights));
     let statistics = {
         let all: Vec<&paths::Statistics> = landed.iter().flatten().collect();
         (!all.is_empty()).then(|| [0, 1].map(|m| all.iter().map(|x| x.q[m]).sum::<f64>() / all.len() as f64))
@@ -1102,16 +1089,18 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     #[cfg(test)]
     if std::env::var_os("SEL_MOTION").is_some() {
         let m = |x: &paths::Mean| format!("{:+.3e}±{:.1e}", x.value, x.error);
-        eprintln!("    [motion] P{} landing Q (candidate, reference) mean {:?}; per stretch (t, Q, D_c, D_r) {:?}", model.rs.keep.len(), statistics, landed.iter().map(|l| l.iter().map(|x| (x.t, x.q, x.diffusion)).collect::<Vec<_>>()).collect::<Vec<_>>());
+        eprintln!("    [motion] P{} landing Q (candidate, reference) mean {:?}; per stretch (t, Q) {:?}", model.rs.keep.len(), statistics, landed.iter().map(|l| l.iter().map(|x| (x.t, x.q)).collect::<Vec<_>>()).collect::<Vec<_>>());
         for w in windows.iter().chain(&late) {
             eprintln!(
                 "    [motion] P{} ({:.2}, {:.2}] {} paths: rate {}; dP_a [{}, {}, {}]; H_a [{:.3e}, {:.3e}, {:.3e}]; dF_a [{}, {}, {}]",
                 model.rs.keep.len(), w.from, w.to, w.paths, m(&w.rate), m(&w.energy_rate[0]), m(&w.energy_rate[1]), m(&w.energy_rate[2]), w.heating[0].value, w.heating[1].value, w.heating[2].value, m(&w.force[0]), m(&w.force[1]), m(&w.force[2])
             );
+            let worst = |rows: &[paths::Mean], n: usize| rows.iter().map(|x| end(x, n, Reach::Upper)).fold(0.0, larger);
+            eprintln!("    [parts] P{} ({:.2}, {:.2}]: whole {:.3e}; {} parts {:?}", model.rs.keep.len(), w.from, w.to, worst(&w.rows, w.paths), w.parts.len(), w.parts.iter().map(|p| (p.from, p.to, p.paths, worst(&p.rows, p.paths))).collect::<Vec<_>>());
         }
         eprintln!("    [motion] P{} escape {:?}", model.rs.keep.len(), escape);
         if let (Some(x), Some(y)) = (series.first().and_then(|s| s.readings.get(3)), paths.series.first().and_then(|s| s.readings.get(3))) {
-            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, absorbed {:?} / {:?}, carried {:?} / {:?}, emitted {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.absorbed, y.absorbed, x.carried, y.carried, x.emitted, y.emitted, x.kappa);
+            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, kick {:?} / {:?}, kick² {:?} / {:?}, emitted {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.kick, y.kick, x.kick2, y.kick2, x.emitted, y.emitted, x.kappa);
         }
     }
     // The calibration: the calibration's walk's own series at the setting along its stretch (the same scheme from the
@@ -1123,34 +1112,32 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     // error read where no refinement ran).
     let own = |f: fn(&Series) -> f64| series.iter().chain(&late_series).map(f).fold(0.0, larger);
     calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked) + paths.trace + own(Series::trace_defect);
-    let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
     let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum::<f64>() + landing_work.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work };
+    let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, work };
     Ok((judged, Walked { series, late: late_series, landed }))
 }
 
 /// A candidate's contribution against another model of the chain (the nomination's, module documentation # The
 /// candidates): its walks' paired difference to the other's (`of`, `against`: both judged on the same walks,
 /// `judge_walked`), read as a judgment is -- per window and row the paths' mean difference and its standard error, the
-/// energy rates' difference per path and its stationary part, each landing check's Q and diffusion the two models' own
+/// energy rates' difference per path and its stationary part, each landing check's Q the two models' own
 /// --; no calibration, no escape (neither is a difference of the paths' readings).
 pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walked) -> Judged {
-    let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     let weights: Vec<f64> = paths.walks.iter().map(|w| w.weight).collect();
     let paired: Vec<Vec<paths::Statistics>> = of
         .landed
         .iter()
         .zip(&against.landed)
-        .map(|(x, y)| x.iter().zip(y).map(|(x, y)| paths::Statistics { t: x.t, q: [x.q[0], y.q[0]], diffusion: [x.diffusion[0], y.diffusion[0]], q_error: [x.q_error[0], y.q_error[0]] }).collect())
+        .map(|(x, y)| x.iter().zip(y).map(|(x, y)| paths::Statistics { t: x.t, q: [x.q[0], y.q[0]], q_error: [x.q_error[0], y.q_error[0]] }).collect())
         .collect();
     let n = paths.walks.len();
     let (landed_start, landed_late) = paired.split_at(n.min(paired.len()));
-    let windows = paths::compare(&of.series, &against.series, &paths.windows, labels, hm, landed_start, &weights);
-    let late = paths.late.as_ref().map_or(vec![], |(_, w, _)| paths::compare(&of.late, &against.late, w, labels, hm, landed_late, &weights));
+    let windows = paths::compare(&of.series, &against.series, &paths.windows, hm, landed_start, &weights);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, _)| paths::compare(&of.late, &against.late, w, hm, landed_late, &weights));
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
-    Judged { keep: model.rs.keep.clone(), windows, late, calibration: Calibration::default(), escape: None, statistics: None, stationary, seconds: 0.0, products: 0, work: 0.0 }
+    Judged { keep: model.rs.keep.clone(), windows, late, calibration: Calibration::default(), escape: None, statistics: None, stationary, work: 0.0 }
 }
 
 /// The loss's x of a candidate (module documentation, # The motion; `Judged::escape`) of its series along the walks'
@@ -1175,7 +1162,7 @@ fn escape_of(paths: &Paths, candidate: &[Series], late: &[Series], landed: &[Vec
                 continue;
             }
             let rate = |(x, y): &(&paths::Reading, &paths::Reading)| -> (f64, f64) {
-                let (hx, hy, wx, wy) = (x.heating_at(hm, f.q[0], f.diffusion[0]), y.heating_at(hm, f.q[1], f.diffusion[1]), x.work(hm), y.work(hm));
+                let (hx, hy, wx, wy) = (x.heating_at(hm, f.q[0]), y.heating_at(hm, f.q[1]), x.work(hm), y.work(hm));
                 ((0..3).map(|a| hx[a] - hy[a] + wx[a] - wy[a]).sum(), hy.iter().sum())
             };
             for w in pairs.windows(2) {
@@ -1274,8 +1261,18 @@ fn end(m: &paths::Mean, paths: usize, reach: Reach) -> f64 {
     }
 }
 
-/// The direct part of a window (module documentation, # The direct part): per row its end (`end`).
+/// The direct part of a window (module documentation, # The direct part): per part (paths.rs `parts`) and row its end
+/// (`end`).
 fn direct(w: &Window, reach: Reach) -> Vec<f64> {
+    w.parts.iter().flat_map(|p| p.rows.iter().map(move |m| end(m, p.paths, reach))).collect()
+}
+
+/// The direct part of a window read on the window whole (its rows' means over it): no more than its parts' largest
+/// (`direct`) -- a path's mean over the window is its parts' weighed by their readings, so its mean's |m| and its
+/// spread over the paths are no more than the parts' weighed alike (the triangle) -- up to the paths read in a part.
+/// The nomination's bound reads it (solve.rs `choose_on_the_pilot`): a single's account on every path is no less than
+/// its account on the windows whole, and that no less than the pilot's model's there less the contribution's.
+fn whole(w: &Window, reach: Reach) -> Vec<f64> {
     w.rows.iter().map(|m| end(m, w.paths, reach)).collect()
 }
 
@@ -1309,11 +1306,21 @@ pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> Option<f64>
 /// `direct_at` at an end (`Reach`) of each row, the calibration beside it (# How many paths: a fate decided at both ends
 /// is the paths' statistics').
 pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach) -> Option<f64> {
+    bound_at(judged, windows, t, reach, direct)
+}
+
+/// `direct_bound_at` on the windows whole (`whole`): the nomination's bound.
+pub fn whole_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach) -> Option<f64> {
+    bound_at(judged, windows, t, reach, whole)
+}
+
+/// `direct_bound_at` of a window's direct part `of`.
+fn bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach, of: fn(&Window, Reach) -> Vec<f64>) -> Option<f64> {
     if t <= 0.0 || judged.windows.is_empty() {
         return Some(0.0);
     }
     let read = windows_at(judged, windows, t);
-    (!read.is_empty()).then(|| read.iter().flat_map(|w| direct(w, reach)).fold(0.0, larger) + judged.calibration.rows)
+    (!read.is_empty()).then(|| read.iter().flat_map(|w| of(w, reach)).fold(0.0, larger) + judged.calibration.rows)
 }
 
 /// The pilot's course the motion's errors are read on (module documentation, # The motion; `motion_at`): its times --
@@ -1436,7 +1443,7 @@ pub struct Motion {
 pub struct Stationary {
     pub rates: Vec<[f64; 3]>,
     pub heating: Vec<[f64; 3]>,
-    /// Per path the candidate's own heating (its photons', its jumps' and its force correlation's; no work).
+    /// Per path the candidate's own heating (its photons' emitted and absorbed, the latter at its Fano factor; no work).
     pub own: Vec<[f64; 3]>,
     /// Each path's weight (`paths::Walk::weight`).
     pub weights: Vec<f64>,
@@ -1585,11 +1592,11 @@ fn pushed(w: &Window, course: &Course, a: usize, hbar_over_mass: f64) -> Option<
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub keep: Vec<usize>,
-    /// The chain the choice was made on: by the importance at the pilot's states (`importance`).
-    pub chain: Vec<Vec<usize>>,
     pub judged: Judged,
     pub windows: Vec<(f64, f64)>,
     pub memory: f64,
+    /// The paths' length L (the tests' report, `select_on_the_scenes`).
+    #[cfg(test)]
     pub length: f64,
     pub report: Vec<String>,
 }
