@@ -7,7 +7,7 @@ import { boardKinds } from "../protocol.js";
 import { queueStatus, saveImage } from "../shell.js";
 import { DiagnosticsPopup } from "./diagnostics.js";
 import { forgetModels } from "./node_editors/index.js";
-import { LogicEditorView, LogicRowView, PublisherEditorView, projectRow } from "./logic.js";
+import { LogicEditorView, LogicRowView, NodeStarts, PublisherEditorView, projectRow } from "./logic.js";
 import { PanelEditView } from "./panel_edit.js";
 const ADD_WORDS = { plot: "Add panel", logic: "Add node" };
 /** A node type in the chooser: its layer, then its name (v2 "Processor: occupancy"). */
@@ -56,6 +56,7 @@ export class TaskConsoleView {
     constructor(ctx, board) {
         this.ctx = ctx;
         this.board = board;
+        this.starts = new NodeStarts(ctx.transport, () => this.nodeRows());
         const header = element("header", "card header");
         const identity = element("div", "identity");
         // v2: the dot and the word a dot gap apart (the strip's), the summary a row gap after them.
@@ -143,6 +144,7 @@ export class TaskConsoleView {
     }
     hidden() { this.onScreen = false; this.board.hidden(); }
     update(state) {
+        this.starts.settle(state);
         // Load/New/Clear and recipe replacement may reuse the same node IDs.
         // The accepted response is the boundary; cancelled/failed dialogs are not.
         if (!state.error && state.result?.replaced === true) {
@@ -256,8 +258,11 @@ export class TaskConsoleView {
             };
         });
     }
-    project(row) { return projectRow(row); }
+    /** A row as drawn: "Starting…" while its Start waits for this window's edits (NodeStarts). */
+    project(row) { return { ...projectRow(row), ...(this.starts.waits(row.node_id) ? { pending: true } : {}) }; }
     status() {
+        // A refusal answers an edit too.
+        this.starts.settle();
         // v2: the strip keeps the console's newest line (a command's outcome, a note, the running
         // Task's status), said once by the workbench; a picture being presented says nothing.
         const report = this.boardState()?.report;
@@ -331,11 +336,11 @@ export class TaskConsoleView {
         this.send({ action: "load_layout", ...(running ? { stop_running: true } : {}) }, "Opening a layout…");
     }
     // ---------------------------------------------------------------- rows
+    starts;
     intents = {
-        start: id => {
-            const row = this.logic()?.find(item => item.node_id === id);
-            this.send({ action: "start_node", node: id, ...(row ? { expected_draft_revision: row.draft_revision } : {}) }, `Starting ${row?.name ?? id}…`);
-        },
+        // A Start that waits for this window's edits says so at once.
+        start: id => { if (this.starts.start(id))
+            this.update({ type: "state" }); },
         stop: id => {
             this.send({ action: "stop_node", node: id }, `Stopping ${this.nameOf(id)}…`);
         },
@@ -343,10 +348,8 @@ export class TaskConsoleView {
         remove: id => this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`),
         preview: (id, on) => this.send({ action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
         rename: (id, name) => this.send({ action: "rename_node", node: id, name }, "Renaming…"),
-        editDraft: (id, change, label) => {
-            return this.send({ action: "edit_node", node: id, ...change }, `Updating ${label}…`);
-        },
-        revert: id => this.send({ action: "revert_node", node: id }, "Reverting…"),
+        editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),
+        revert: id => this.starts.edit(id, { action: "revert_node", node: id }, "Reverting…"),
         check: id => this.send({ action: "check_node", node: id }, "Checking files…"),
         choose: ask => this.ctx.transport.choosePath(ask),
     };

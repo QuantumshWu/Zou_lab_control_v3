@@ -61,6 +61,7 @@ export function editorProblem(row) {
  * Direct producer read only (READ_ONLY) -- one implementation of each. */
 export class NodeEditors {
     host;
+    /** Each editor, its model, and the key and the lock it was last drawn with. */
     drawn = [];
     constructor(host) {
         this.host = host;
@@ -85,7 +86,7 @@ export class NodeEditors {
             }
             const view = nodeEditor(model.editor, this.host);
             if (view)
-                kept.push({ kind: model.editor, view, facts: model, key: "" });
+                kept.push({ kind: model.editor, view, facts: model, key: "", locked: "" });
         });
         for (const editor of this.drawn)
             if (!kept.includes(editor))
@@ -96,19 +97,23 @@ export class NodeEditors {
     /** Each editor handed the row.  A state push that changes nothing an editor draws costs it
      * nothing: its model, the lock, the node's name and the fields it manages (an edit of another
      * field leaves it as it is).  A model still of an older draft draws nothing where the editor
-     * already stands: it would put back what the operator has just changed until the answer comes.
-     * `kept`: the models are the node's kept ones, of this same draft (nodeModel), and draw at once.
-     * True when any editor drew anew. */
+     * already stands: it would put back what the operator has just changed until the answer comes;
+     * standing, it still takes no input under a lock it was not drawn with (a Task taking the console
+     * over), and once drawn its own lock takes over.  `kept`: the models are the node's kept ones, of
+     * this same draft (nodeModel), and draw at once.  True when any editor drew anew. */
     update(row, locked, kept = false) {
         let drew = false;
         for (const editor of this.drawn) {
-            if (row.editor_facts_pending && !kept && editor.key)
+            const stands = Boolean(row.editor_facts_pending && !kept && editor.key);
+            editor.view.root.inert = stands && Boolean(locked) && locked !== editor.locked;
+            if (stands)
                 continue;
             const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
             const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);
             if (key === editor.key)
                 continue;
             editor.key = key;
+            editor.locked = locked;
             editor.view.update(row, editor.facts, locked);
             drew = true;
         }

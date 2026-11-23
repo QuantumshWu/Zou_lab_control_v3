@@ -12,11 +12,13 @@
 // pulse) shows its fields as plain rows with their true values; a node that never had one does too. The model is the
 // node's: its Edit tab closed and opened again keeps it; a node of another type, a draft revision gone back or an
 // accepted replacement (every node's) drops it; Panel Edit's producer draws it the same way. No draft edit is
-// written from a kept model: every one is recorded.
+// written from a kept model: every one is recorded. An editor standing on a model of an older draft takes a new lock
+// at once, never drawn from that model.
 import {LogicEditorView,projectRow} from '../dist/views/logic.js';
 import {TaskConsoleView} from '../dist/views/task_console.js';
 import {PanelBoard} from '../dist/views/board.js';
 import {PanelEditView} from '../dist/views/panel_edit.js';
+import {NodeEditors} from '../dist/views/node_editors/index.js';
 import {scanFacts} from './scan_facts.js';
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
@@ -178,6 +180,25 @@ try {
    assert(!editor(card()),'no editor of the older draft');equal(plain(card()).Plan,ELSEWHERE,'the true plan');equal(error(card()),SAID,'the error');
    equal(sent,[],'nothing sent');
    edit.root.remove();
+ });
+ await check('a standing editor takes a lock that comes while it stands, and is not drawn from its older model',()=>{
+   const editors=new NodeEditors({edit:()=>0,editArtifacts:()=>0,choose:async()=>null});
+   const old={editor:'pair_matrix',manages:['x']};
+   editors.reconcile([old]);
+   const drawn=[],root=document.createElement('div');
+   editors.drawn[0].view={root,update:(row,facts,locked)=>drawn.push([row.values.x,locked])};
+   const row=(x,pending)=>({values:{x},controls:[],node_id:'n',type_id:'t',name:'n',editor_facts:old,editor_facts_pending:pending});
+   const TASK='A running task owns the console: editing is locked until it ends';
+   assert(editors.update(row(1,false),''),'drawn');
+   // The operator's edit is being asked again (its model of the older draft) and a Task takes the console over.
+   assert(!editors.update(row(2,true),TASK),'not drawn from the older model');
+   assert(root.inert,'locked while it stands');
+   // The Task ends while it still stands: as it was drawn.
+   editors.update(row(2,true),'');assert(!root.inert,'open again as it was drawn');
+   // Its answer: drawn under the lock of the moment, its own.
+   editors.update(row(2,true),TASK);
+   assert(editors.update(row(2,false),TASK),'its answer draws');assert(!root.inert,'its own lock now');
+   equal(drawn,[[1,''],[2,TASK]],'drawn twice: never from the older model while it stood');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}

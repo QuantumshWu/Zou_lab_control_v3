@@ -105,7 +105,8 @@ export function editorProblem(row: LogicRow): string {
  * kind stays.  The Logic Edit page draws them for editing, the Panel Edit's
  * Direct producer read only (READ_ONLY) -- one implementation of each. */
 export class NodeEditors {
-  private drawn: { kind: string; view: NodeEditor; facts: EditorFacts; key: string }[] = [];
+  /** Each editor, its model, and the key and the lock it was last drawn with. */
+  private drawn: { kind: string; view: NodeEditor; facts: EditorFacts; key: string; locked: string }[] = [];
 
   constructor(private host: EditorHost) {}
 
@@ -123,7 +124,7 @@ export class NodeEditors {
       const editor = this.drawn[index];
       if (editor && editor.kind === model.editor) { editor.facts = model; kept.push(editor); return; }
       const view = nodeEditor(model.editor, this.host);
-      if (view) kept.push({ kind: model.editor, view, facts: model, key: "" });
+      if (view) kept.push({ kind: model.editor, view, facts: model, key: "", locked: "" });
     });
     for (const editor of this.drawn) if (!kept.includes(editor)) editor.view.root.remove();
     this.drawn = kept;
@@ -133,17 +134,21 @@ export class NodeEditors {
   /** Each editor handed the row.  A state push that changes nothing an editor draws costs it
    * nothing: its model, the lock, the node's name and the fields it manages (an edit of another
    * field leaves it as it is).  A model still of an older draft draws nothing where the editor
-   * already stands: it would put back what the operator has just changed until the answer comes.
-   * `kept`: the models are the node's kept ones, of this same draft (nodeModel), and draw at once.
-   * True when any editor drew anew. */
+   * already stands: it would put back what the operator has just changed until the answer comes;
+   * standing, it still takes no input under a lock it was not drawn with (a Task taking the console
+   * over), and once drawn its own lock takes over.  `kept`: the models are the node's kept ones, of
+   * this same draft (nodeModel), and draw at once.  True when any editor drew anew. */
   update(row: LogicRow, locked: string, kept = false): boolean {
     let drew = false;
     for (const editor of this.drawn) {
-      if (row.editor_facts_pending && !kept && editor.key) continue;
+      const stands = Boolean(row.editor_facts_pending && !kept && editor.key);
+      editor.view.root.inert = stands && Boolean(locked) && locked !== editor.locked;
+      if (stands) continue;
       const fields = editor.facts.manages.map(name => [row.values[name], row.controls.find(control => control.name === name)]);
       const key = JSON.stringify([editor.facts, locked, row.node_id, row.type_id, row.name, fields, editor.view.contextKey?.(row)]);
       if (key === editor.key) continue;
       editor.key = key;
+      editor.locked = locked;
       editor.view.update(row, editor.facts, locked);
       drew = true;
     }

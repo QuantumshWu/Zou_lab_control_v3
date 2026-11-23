@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Start after an edit regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. A Start (or Restart) clicked while an edit of its node sent from this window is
+// unanswered -- a field committed by the blur of that very click -- waits, saying "Starting…", and goes once the
+// edit is answered, with the draft revision it left (views/logic.ts NodeStarts): the operator's edit is part of
+// what they start. An edit from elsewhere still has the host refuse it. The host here is a fake one that bumps
+// the revision on an edit and refuses a Start of another revision, as the workbench does.
+import {TaskConsoleView} from '../dist/views/task_console.js';
+import {FigureViewerView} from '../dist/views/figure_viewer.js';
+import {PanelBoard} from '../dist/views/board.js';
+const assert=(condition,message)=>{if(!condition)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+/** This window's transport: what it sends, in order, with what was answered between. */
+const log=[];let next=0;
+const transport={pending:new Map(),lastError:'',notice:null,busyText(){return [...this.pending.values()].at(-1)??''},
+  send(command,feedback){const id=++next;log.push({sent:id,...command});if(feedback)this.pending.set(id,feedback);return id},
+  post(){},report(error){throw error},choosePath(){return Promise.resolve(null)}};
+const nodeRow=(node,fields={})=>({node_id:node,name:node,type_id:'calibration',node_kind:'task',draft_revision:1,values:{label:'a'},
+  controls:[{name:'label',label:'Label',kind:'text',value:'a'}],source_signal:null,source_label:null,source_choices:[],device_keys:{},device_choices:{},
+  device_labels:{},artifact_inputs:{},artifact_specs:[],auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:true,preview_offered:false,
+  edited:false,state:'running',status:'running',phase:'running',run:null,editor_facts:null,...fields});
+/** The host: an edit bumps the draft revision; a Start of another revision is refused, as start_node does. */
+function host(rows,command){
+  const row=rows.find(item=>item.node_id===command.node);
+  if(command.action==='edit_node'){
+    if(command.refuse)return {error:'the edit is refused'};
+    row.values={...row.values,...command.values};row.controls=row.controls.map(control=>({...control,value:row.values[control.name]}));row.draft_revision++;
+    return {result:{node:row.node_id,draft_revision:row.draft_revision}};
+  }
+  if(command.action==='start_node'){
+    if(command.expected_draft_revision!==row.draft_revision)return {error:`${row.name} changed (draft revision ${row.draft_revision} is not ${command.expected_draft_revision}); read it again`};
+    return {result:{node:row.node_id}};
+  }
+  return {result:null};
+}
+const starts=()=>log.filter(entry=>entry.action==='start_node');
+const field=(root,label)=>[...root.querySelectorAll('.field')].find(node=>node.querySelector('.field-label')?.textContent.replace(/ \*$/,'')===label).querySelector('input');
+/** A text field committed by its blur: typed, then left. */
+const type=(input,text)=>{input.value=text;input.dispatchEvent(new InputEvent('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}))};
+/** What a command button says now (its current word). */
+const said=button=>(button.querySelector('.words .current')??button).textContent.trim();
+const startButton=root=>[...root.querySelectorAll('.logic-editor-actions button')].find(node=>/^(Start|Restart|Starting…)\*?$/.test(said(node)));
+/** A page and its fake host: `answer` answers one of this window's commands, as the host's reply state does. */
+function console_(){
+  const rows=[nodeRow('scan')];
+  const board=new PanelBoard(transport);
+  const ctx={transport,latest:{type:'state',logic:structuredClone(rows),board:{panels:[],paused:false,selectors:true,active_task:null,frozen:{}},panels:[]},show(){}};
+  const view=new TaskConsoleView(ctx,board);document.body.append(view.root);
+  view.update({type:'state'});
+  view.intents.edit('scan');
+  const answer=(id,edit=command=>command)=>{
+    const command=edit(log.find(entry=>entry.sent===id));const {result,error}=host(rows,command);
+    log.push({answered:id,...(error?{error}:{})});transport.pending.delete(id);
+    ctx.latest.logic=structuredClone(rows);view.update({type:'state',request:id,result,error});return error;
+  };
+  return {rows,view,page:view.editors.get('scan').root,answer};
+}
+try {
+ await check('a Restart clicked as an edit of its node is sent waits for the edit\'s answer, says "Starting…", and goes once with the edited revision',()=>{
+   log.length=0;
+   const {view,page,answer}=console_();
+   type(field(page,'Label'),'b');
+   const edit=log.find(entry=>entry.action==='edit_node');assert(edit,'the edit sent');
+   startButton(page).click();
+   equal(starts(),[],'no Start before the edit is answered');
+   assert(said(startButton(page))==='Starting…'&&startButton(page).disabled,'the page says "Starting…" and takes no second click');
+   assert([...view.root.querySelectorAll('button')].filter(node=>said(node)==='Starting…').length>=2,'its row says it too');
+   equal(answer(edit.sent),undefined,'the edit taken');
+   equal(starts().map(entry=>entry.expected_draft_revision),[2],'one Start, with the edited revision');
+   assert(log.findIndex(entry=>entry.answered===edit.sent)<log.findIndex(entry=>entry.action==='start_node'),'sent after the edit\'s answer');
+   equal(answer(starts()[0].sent),undefined,'the Start taken');
+   view.root.remove();
+ });
+ await check('an edit refused: the waiting Start goes with the revision as it stands',()=>{
+   log.length=0;
+   const {view,page,answer}=console_();
+   type(field(page,'Label'),'c');
+   const edit=log.find(entry=>entry.action==='edit_node');
+   startButton(page).click();
+   equal(starts(),[],'waits');
+   assert(answer(edit.sent,command=>({...command,refuse:true})),'the edit refused');
+   equal(starts().map(entry=>entry.expected_draft_revision),[1],'one Start, with the revision as it stands');
+   equal(answer(starts()[0].sent),undefined,'the Start taken');
+   view.root.remove();
+ });
+ await check('with no edit of its own unanswered a Start goes at once, and an edit from elsewhere still has it refused',()=>{
+   log.length=0;
+   const {rows,view,page,answer}=console_();
+   // Another window's edit: the host's revision moves on before this window hears of it.
+   rows[0].draft_revision=5;
+   startButton(page).click();
+   equal(starts().map(entry=>entry.expected_draft_revision),[1],'sent at once, with the revision this window read');
+   assert(/changed \(draft revision 5 is not 1\)/.test(answer(starts()[0].sent)??''),'refused: read it again');
+   view.root.remove();
+ });
+ await check('the Figure Viewer\'s node page waits the same way',()=>{
+   log.length=0;
+   const rows=[nodeRow('figure-1-derive',{node_kind:'processor'})];
+   const ctx={transport,latest:{type:'state',viewer:{document:{path:'C:\\d\\a.npz'},panels:[],signals:[],plot_kinds:[],processor_types:[],logic:structuredClone(rows)}},show(){}};
+   const viewer=new FigureViewerView(ctx,{root:document.createElement('div'),size:0,presenting:false});document.body.append(viewer.root);
+   viewer.update({type:'state'});
+   const page=viewer.root.querySelector('.logic-editor');assert(page,'its page');
+   type(field(page,'Label'),'b');
+   const edit=log.find(entry=>entry.action==='edit_node');assert(edit,'the edit sent');
+   startButton(page).click();
+   equal(starts(),[],'no Start before the edit is answered');
+   assert(said(startButton(page))==='Starting…','the page says "Starting…"');
+   const {result,error}=host(rows,edit);log.push({answered:edit.sent});transport.pending.delete(edit.sent);
+   ctx.latest.viewer.logic=structuredClone(rows);viewer.update({type:'state',request:edit.sent,result,error});
+   equal(starts().map(entry=>entry.expected_draft_revision),[2],'one Start, with the edited revision');
+   equal(host(rows,starts()[0]).error,undefined,'the Start taken');
+   viewer.root.remove();
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+document.title='done';
+</script>
