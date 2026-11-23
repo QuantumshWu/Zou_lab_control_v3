@@ -201,6 +201,10 @@ fn oldnew_solve() {
     if let Ok(x) = std::env::var("OLDNEW_DOPPLER_ORDERS") {
         crate::model::rs::fold::DOPPLER_ORDERS.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);
     }
+    // And the runs' streams under another seed (random.rs `RUN_SEED`).
+    if let Ok(x) = std::env::var("OLDNEW_SEED") {
+        crate::random::RUN_SEED.store(x.parse().unwrap(), std::sync::atomic::Ordering::Relaxed);
+    }
     if let Ok(x) = std::env::var("OLDNEW_QUAD_TOL") {
         crate::step::QUAD_TOL.store(x.parse::<f64>().unwrap().to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
