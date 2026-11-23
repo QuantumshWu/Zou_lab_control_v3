@@ -581,8 +581,13 @@ fn the_candidates_keys_sum_as_their_beats() {
 
 /// The readout is the lift (module documentation, # The rest of the model): `Selected::rows` on the thread's buffers,
 /// against the same populations from the model by components (`Selected::at` making the lift, each part's elements by
-/// fast index at their slow beats' phases, `rs::lifted`), on the six scenes at the centre at rest and at a moving point,
-/// a spread state, three times: the same numbers to the bit.
+/// fast index at their slow beats' phases, `rs::lifted`: (M ρ M†)_kk of the density), on the six scenes at the centre
+/// at rest and at a moving point, a spread state, three times: the same numbers within the two computations' own
+/// rounding. The readout takes |(M ψ)_k|² of the pure state (`Selected::lifted`), the other M ρ M† (Higham: a computed
+/// sum of K terms errs by γ_K times the sum of their moduli; units.rs `rounding`): per fast index and row k of Q, both
+/// within γ_{2n+6} S_k² of the exact, S_k = Σ_a |M_ka| |ψ_a| / ‖ψ‖ (each element at its phase one product more, the
+/// state over its norm one), P's rows within γ_4 |ψ_a|²/‖ψ‖²; over their sum, each row's own and its share of the sum's.
+/// (Until 2026-11-23 the readout was the density's to the bit.)
 #[test]
 fn the_readout_is_the_lift_by_fast_index() {
     for (name, request, keep) in scenes() {
@@ -619,19 +624,65 @@ fn the_readout_is_the_lift_by_fast_index() {
                         by_fast[i].1.data[x] += z * C64::cis(-slow * t);
                     }
                 }
-                for (_, m) in by_fast {
-                    let lifted = crate::model::rs::lifted(&model.states, &model.folded, &m, &rho);
+                for (_, m) in &by_fast {
+                    let lifted = crate::model::rs::lifted(&model.states, &model.folded, m, &rho);
                     for &s in &model.folded {
                         expected[s] += lifted[s];
                     }
                 }
+                // Each row's rounding before the sum (the two computations' together), and the sum's.
+                let norm = norm_sqr(&psi);
+                let mut bound = [0.0; STATES];
+                for (a, &s) in model.states.iter().enumerate() {
+                    bound[s] = 2.0 * crate::units::rounding(4) * psi[a].norm_sqr() / norm;
+                }
+                for (_, m) in &by_fast {
+                    for (k, &s) in model.folded.iter().enumerate() {
+                        let size: f64 = (0..n).map(|a| m.data[k * n + a].abs() * psi[a].abs()).sum::<f64>();
+                        bound[s] += 2.0 * crate::units::rounding(2 * n + 6) * size * size / norm;
+                    }
+                }
                 let total: f64 = expected.iter().sum();
-                let expected = expected.map(|x| x / total);
+                let spread: f64 = bound.iter().sum();
                 let rows = run.rows(&crate::model::Point { r, kappa, t }, &psi);
-                assert!(rows.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "{name} r {r:?} t {t}: {rows:?} against {expected:?}");
+                for s in 0..STATES {
+                    let x = expected[s] / total;
+                    let allowed = (bound[s] + x * spread) / total + 2.0 * crate::units::UNIT_ROUNDOFF * x;
+                    assert!((rows[s] - x).abs() <= allowed, "{name} r {r:?} t {t} row {s}: {} against {x}, apart {:e} beyond {allowed:e}", rows[s], (rows[s] - x).abs());
+                }
             }
         }
-        eprintln!("{name}: the readout is the lift to the bit");
+        eprintln!("{name}: the readout is the lift within its rounding");
+    }
+}
+
+/// The readings on the middle (module documentation, # The readings on the middle): `SelectedMiddle::readout` at the
+/// middle is the fold's readout at the point (`Selected::rows`, `READOUT`) to rounding; along the path, on a moving atom
+/// at its momentum, it differs from the fold's readout at the path's point by the second order: from s to s/2 the
+/// largest row's difference falls by 3–5 (four the second order's), on the six scenes, a spread state, both signs.
+#[test]
+fn the_readings_on_the_middle_are_the_points_to_the_second_order() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let psi = spread(run.rs.keep.len());
+        let (r, kappa) = POINTS[1];
+        let t = 0.37;
+        let velocity = kappa.map(|k| run.hbar_over_mass() * k);
+        let middle = run.middle(0, r, t);
+        let path = middle.path(kappa, velocity);
+        let apart = |s: f64| -> f64 {
+            let on = middle.readout(&path, s, &psi).expect("a middle reads its rows");
+            let at = run.rows(&crate::model::Point { r: std::array::from_fn(|i| r[i] + velocity[i] * s), kappa, t: t + s }, &psi);
+            on.iter().zip(&at).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max)
+        };
+        let zero = apart(0.0);
+        assert!(zero < 1e-14, "{name}: at the middle {zero:e} apart");
+        for s in [0.2, -0.2] {
+            let (whole, half) = (apart(s), apart(0.5 * s));
+            let ratio = whole / half;
+            eprintln!("{name}: s {s} apart {whole:.3e}, s/2 {half:.3e}, ratio {ratio:.2}");
+            assert!((3.0..=5.0).contains(&ratio) || whole < 1e-13, "{name} s {s}: {whole:e} against {half:e}");
+        }
     }
 }
 
