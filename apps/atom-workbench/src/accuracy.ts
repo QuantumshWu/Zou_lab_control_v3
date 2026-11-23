@@ -1,7 +1,8 @@
 // Where a computed result misses the population tolerance ε (ui-design.md §6.16). Every computed
 // result is shown; the samples whose estimated error exceeds ε are marked, never withheld.
 import {POPULATION_TOLERANCE,type DurationUnit} from './types.js';
-import {formatNumber} from './format.js';
+import {formatNumber,withUnit} from './format.js';
+import type {ApproximationLedger,LedgerTotal} from './solver-types.js';
 import {timeDisplayUnit} from './duration.js';
 
 /** A population error (an absolute probability) as a percentage: "0.61%". */
@@ -58,4 +59,15 @@ export function partialSentence(timesUs:readonly number[],errors:readonly number
  * 1.2%"; several runs only by their number ("2 段时刻误差最大 1.8%"), the chart's band shows where. */
 export function partialShort(timesUs:readonly number[],errors:readonly number[],unit?:DurationUnit,tolerance=POPULATION_TOLERANCE):string{
   const s=partialSummary(timesUs,errors,unit,tolerance);return s?`${s.runs>1?`${s.runs} 段时刻`:`${s.where} `}误差最大 ${errorPercent(s.worst)}`:'';
+}
+
+/** A motion ledger's a-priori totals (ui-design.md §6.20) as the details' 近似误差 line writes them: the populations' and
+ * T's (fractions, as percentages), the mean velocity's (m/s) and the push's (m/s²; no account where the engine gives
+ * {0, 0}), each against its target, and whether an output's total estimated error exceeds a target (`flagged`, its
+ * reason on a line below). */
+export function approximationTotal(ledger:ApproximationLedger):string{
+  const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
+  // No account (the engine's {0, 0}: the model's part not yet estimated, or too few atoms): said, not written as a zero.
+  const absolute=(name:string,t:LedgerTotal,unit:string)=>t.error===0&&t.target===0?`${name}无账`:`${name} ${withUnit(t.error,unit,{digits:2})}（目标 ${withUnit(t.target,unit,{digits:2})}）`;
+  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}，${absolute('平均速度',ledger.totals.velocity,'m/s')}，${absolute('推力',ledger.totals.push,'m/s²')}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }

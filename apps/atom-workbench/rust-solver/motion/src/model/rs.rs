@@ -513,6 +513,11 @@ impl Folding {
         &self.keys
     }
 
+    /// The fold's outputs by their exact keys, each with its structural elements (model/selected.rs `Selected::pattern`).
+    pub fn by_key(&self) -> &fold::Grouping {
+        &self.by_key
+    }
+
     /// The fold at the values (`At`).
     pub fn at(&self, values: &Values) -> At<'_> {
         let mut local = fold::Local::default();
@@ -566,12 +571,12 @@ impl At<'_> {
     /// The model's value at the time t (the trajectory's): one group, each component at its phase e^{−if_c t}: H_eff(t)
     /// with its gradient, each channel's L(t) with its gradient, and the lift M(t) on Q (|Q| × n).
     pub fn now(&self, t: f64) -> Now {
-        Now::of(self.at_time(t, Making { model: true, kicks: false, lift: true, gradients: true }))
+        Now::of(self.at_time(t, Making { model: true, effective: true, kicks: false, lift: true, gradients: true }))
     }
 
     /// The channels' photons' forms at the time t (`now`'s channels' kicks: k∘L per element, folded alike).
     pub fn kicks(&self, t: f64) -> Vec<Moment> {
-        moments(&self.at_time(t, Making { model: true, kicks: true, lift: false, gradients: true }), true)
+        moments(&self.at_time(t, Making { model: true, effective: true, kicks: true, lift: false, gradients: true }), true)
     }
 }
 

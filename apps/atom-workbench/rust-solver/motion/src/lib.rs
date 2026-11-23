@@ -1,5 +1,6 @@
-//! atom-motion: the 3D semiclassical motion solver (CPU). The specification is SPEC.md beside this crate;
-//! every quantity and decision here maps to one section of it.
+//! atom-motion: the 3D semiclassical motion solver (CPU). The specification is each module's own documentation;
+//! SPEC.md beside this crate is its index, by the sections the code cites ("SPEC §x"), with the principles, what is
+//! not done and the known limits.
 
 pub mod units;
 pub mod linalg;
@@ -9,7 +10,6 @@ pub mod request;
 pub mod field;
 pub mod scene;
 pub mod floquet;
-pub mod krylov;
 pub mod select;
 pub mod model;
 pub mod spectral;
