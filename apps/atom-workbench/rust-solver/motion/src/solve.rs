@@ -2841,7 +2841,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             };
             let saving = open.iter().map(|w| found.min(top) - w.settled_low).fold(f64::NEG_INFINITY, crate::linalg::larger);
             if count < available && pinned.is_none() && saving > more {
-                doubled.push(format!("{count} 条路径上 {names} 够用与否在路径的统计（t 分布，自由度为窗内路径数减一）下定不下来，判清可省 W {saving:.3e}，多测 {next} 条路径的功 {more:.3e}：路径加倍，候选重判"));
+                let line = format!("{count} 条路径上 {names} 够用与否在路径的统计（t 分布，自由度为窗内路径数减一）下定不下来，判清可省 W {saving:.3e}，多测 {next} 条路径的功 {more:.3e}：路径加倍，候选重判");
+                eprintln!("  选态：{line}");
+                doubled.push(line);
                 count = next;
                 continue;
             }

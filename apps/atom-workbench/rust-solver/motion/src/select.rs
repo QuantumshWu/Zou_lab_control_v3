@@ -558,6 +558,8 @@ pub struct Landing {
     pub photons: f64,
     pub impulse: V3,
     pub diffusion: Option<V3>,
+    /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch and the diffusion's solve.
+    pub work: f64,
 }
 
 /// The paths' scheme as settled (`settle`; module documentation, # The paths): its setting, the calibration's opening (µs), the
@@ -576,6 +578,8 @@ pub struct Settled {
     pub pairs: [(usize, usize); KNOBS],
     pub tried: usize,
     pub products: u64,
+    /// The ladder's runs' counted work (`paths::Counts::work`).
+    pub work: f64,
     pub seconds: f64,
 }
 
@@ -596,7 +600,7 @@ impl Settled {
 
     /// The ladder's second stage after its first (`settle`): the second's setting and parts, the two's work together.
     fn after(self, first: &Settled) -> Settled {
-        Settled { tried: self.tried + first.tried, products: self.products + first.products, seconds: self.seconds + first.seconds, ..self }
+        Settled { tried: self.tried + first.tried, products: self.products + first.products, work: self.work + first.work, seconds: self.seconds + first.seconds, ..self }
     }
 }
 
@@ -642,12 +646,13 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
     // The setting's own runs where they are in hand (the refinement it was), else made in its refinements' family.
     let mut at: Option<Vec<Series>> = None;
     let work = |x: &[Series]| x.iter().map(|s| s.counts.products).sum::<u64>();
-    let (mut tried, mut products) = (0, 0);
+    let (mut tried, mut products, mut counted) = (0, 0, 0.0);
     loop {
         let (runs, pairs) = refinements(setting, &own);
         let made = family(if at.is_some() { &runs[1..] } else { &runs[..] })?;
         tried += made.len();
         products += made.iter().map(|s| work(s)).sum::<u64>();
+        counted += made.iter().flatten().map(|s| s.counts.work).sum::<f64>();
         let series: Vec<Vec<Series>> = at.take().into_iter().chain(made).collect();
         let mut errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
         // The cutoff's part: what the setting's openings book.
@@ -663,7 +668,7 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
         let open: [bool; KNOBS] = std::array::from_fn(|k| setting.open(k));
         if errors.iter().sum::<f64>() + trace <= TOLERANCE || !open.iter().any(|&o| o) {
             let opening = series[0][0].counts.opening;
-            return Ok((Settled { setting, opening, errors, trace, runs, pairs, tried, products, seconds: clock.elapsed().as_secs_f64() }, series));
+            return Ok((Settled { setting, opening, errors, trace, runs, pairs, tried, products, work: counted, seconds: clock.elapsed().as_secs_f64() }, series));
         }
         // The knob of the largest part; where the trace's is the largest, the run's knob whose doubling lowers it most.
         let largest = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| errors[a].total_cmp(&errors[b])).expect("an open knob");
@@ -832,7 +837,12 @@ impl<'a> Paths<'a> {
                         .kept
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
-                        .map(|(t, v, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs, &done[j]).map(|(photons, impulse)| Landing { t, landed, photons, impulse, diffusion: form.diffusion(&walks[w], t, v) }))
+                        .map(|(t, v, landed)| {
+                            form.landing(&walks[w], t, &landed, span, decay, knobs, &done[j]).map(|(photons, impulse, spent)| {
+                                let (diffusion, solved) = form.diffusion(&walks[w], t, v);
+                                Landing { t, landed, photons, impulse, diffusion, work: spent + solved }
+                            })
+                        })
                         .collect()
                 })
                 .collect::<Result<_, _>>()?,
@@ -845,7 +855,7 @@ impl<'a> Paths<'a> {
         let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.products).sum::<u64>() + settled.products;
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
-        let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum();
+        let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
         Ok(Paths { walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
     }
 
@@ -974,6 +984,8 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
     // (paths.rs `Statistics`). Where either model's frozen generator has no inverse, neither's diffusion is read there.
     let knobs = (paths.settled.setting.turns, paths.settled.setting.rate, paths.settled.setting.cutoff);
     let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
+    // The landing checks' counted work, summed on the pool (whole multiply-adds).
+    let landing_work = std::sync::atomic::AtomicU64::new(0);
     let landed: Vec<Vec<paths::Statistics>> = match paths.optical {
         None => vec![vec![]; paths.landings.len()],
         Some((span, decay)) => paths
@@ -988,15 +1000,17 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, _) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own)?;
-                        let mine = own.kept.iter().find(|x| x.0 == l.t).and_then(|(t, v)| form.diffusion(walk, *t, v));
+                        let (photons, _, spent) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own)?;
+                        let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
                         let diffusion = match (mine, l.diffusion) {
                             (Some(c), Some(r)) => [c, r],
                             _ => [[0.0; 3]; 2],
                         };
-                        Ok(paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion })
+                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion }, spent + solved))
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>, String>>()
+                    .map(|x| x.into_iter().unzip::<_, _, Vec<_>, Vec<f64>>())
+                    .map(|(stats, works)| { landing_work.fetch_add((works.iter().sum::<f64>()) as u64, std::sync::atomic::Ordering::Relaxed); stats })
             })
             .collect::<Result<_, _>>()?,
     };
@@ -1036,7 +1050,7 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
     calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked) + paths.trace + own(Series::trace_defect);
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
-    let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum();
+    let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum::<f64>() + landing_work.load(std::sync::atomic::Ordering::Relaxed) as f64;
     Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work })
 }
 

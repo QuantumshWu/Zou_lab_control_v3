@@ -285,8 +285,11 @@ pub struct Counts {
     pub opening: f64,
     /// The bound of what the start's modes the opening books instead of resolving can do to a displayed row (# The start).
     pub booked: f64,
-    /// The counted work (real multiply-adds, `decide::Work`): the nodes' own (`Node::work`) and the substeps' products
-    /// (`Form::product`) -- the trajectories' price's measure, for what more paths cost (select.rs # How many paths).
+    /// The counted work (real multiply-adds, `decide::Work`, the trajectories' price's measure -- select.rs # How many
+    /// paths): every node's making (`Node::work`, as a step's middle counts it) and its amplitudes on the sector (R's
+    /// terms, `Form::amplitudes_work`); each piece's frozen part -- its blocks' eigendecompositions (`Eigen::work`) and
+    /// the substeps' weights -- and its two sandwiches; the substeps' products (`Form::product`); the readings
+    /// (`Form::read`); and beside a series what the landing check takes (`Form::landing`, `Form::diffusion`).
     pub work: f64,
 }
 
@@ -425,8 +428,9 @@ pub struct Form<'a> {
     /// Per class its photon's wave number (1/µm; # The motion's readings).
     photon: Vec<f64>,
     /// A substep's remainder's counted work (real multiply-adds): ΔH's sandwich over the sector's pairs, Σ b_x b_y (b_x +
-    /// b_y) complex multiply-adds, and R's places (`Counts::work`).
+    /// b_y) complex multiply-adds, and R's places (`Counts::work`); a sandwich's alone (`sandwich`).
     product: f64,
+    sandwiched: f64,
     hbar_over_mass: f64,
 }
 
@@ -608,7 +612,8 @@ impl<'a> Form<'a> {
                 if ll > 0.0 { lk / ll } else { largest }
             })
             .collect();
-        let product = crate::decide::COMPLEX * (pairs.iter().map(|&(x, y)| (blocks[x].len() * blocks[y].len() * (blocks[x].len() + blocks[y].len())) as f64).sum::<f64>() + r_places.len() as f64);
+        let sandwiched = crate::decide::COMPLEX * pairs.iter().map(|&(x, y)| (blocks[x].len() * blocks[y].len() * (blocks[x].len() + blocks[y].len())) as f64).sum::<f64>();
+        let product = sandwiched + crate::decide::COMPLEX * r_places.len() as f64;
         let form = Form {
             model,
             n,
@@ -634,10 +639,17 @@ impl<'a> Form<'a> {
             classes,
             photon,
             product,
+            sandwiched,
             hbar_over_mass: model.hbar_over_mass(),
         };
         assert!(form.beats_known(&node), "a node's beat outside the model's values");
         form
+    }
+
+    /// A node's amplitudes' counted work (`amps`; real multiply-adds): R's terms, one complex multiply-add each, and H's
+    /// slots copied.
+    fn amplitudes_work(&self) -> f64 {
+        crate::decide::COMPLEX * self.terms.len() as f64 + (self.h_beats.len() * self.h_slot) as f64
     }
 
     /// The form's sizes (the measurements' line): P's states, the blocks, the sector, H's slots, R and its groups, the
@@ -973,6 +985,9 @@ impl<'a> Form<'a> {
             }
         }
         let (mut emitted, mut jumps_second, mut carried, mut mean) = ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
+        // The entries' pairs read (`Counts::work`: seven complex multiply-adds each -- the rate, the absorbed mean and the
+        // jumps' second moment on three axes).
+        let mut matched = 0usize;
         let mut entries: Vec<(usize, usize, C64, [C64; 3])> = Vec::new();
         for (c, class) in node.classes.iter().enumerate() {
             // Per Cartesian axis of the emission its rate tr(J_a ρ J_a†), for the photons' second moment.
@@ -1005,6 +1020,7 @@ impl<'a> Form<'a> {
                         if g2 != g {
                             continue;
                         }
+                        matched += 1;
                         rate += z * rho[u * n + s] * w.conj();
                         for a in 0..3 {
                             absorbed[a] += z.conj() * d[a] * rho[s * n + u];
@@ -1037,6 +1053,10 @@ impl<'a> Form<'a> {
             }
         }
         let force = force.map(|f| f / trace);
+        // The reading's counted work: ρ on P, the rows (through ρ's eigenvectors where the model folds: its decomposition
+        // and a readout a vector), the gradient's contractions and the entries' pairs.
+        let support = if self.folds { (0..n).filter(|&a| self.block_of[a].0 != usize::MAX).count() } else { 0 };
+        counts.work += crate::decide::COMPLEX * ((n * n) as f64 + (support * support * support) as f64 + (support * n * n) as f64 + (3 * node.gradient.len() * n * n) as f64 + 7.0 * matched as f64);
         counts.readouts += 1;
         counts.readout_seconds += clock.elapsed().as_secs_f64();
         Reading { t, r, kappa, rows, rates, force, total, trace, emitted, absorbed: jumps_second, carried }
@@ -1146,8 +1166,20 @@ impl<'a> Form<'a> {
     /// --, solved on the trace-free part as (L + ρ tr) y = −X₀ (tr L y = 0, so tr y = −tr X₀ = 0). The model's own: an
     /// explicit excited state's absorbed momentum fluctuates in its force ⟨∇H⟩, a folded one's in its jumps (`Reading::
     /// absorbed`), and a ground state's light shift's gradient (the dipole force) in both. None where the frozen
-    /// generator has no such inverse (a stationary state more than one).
-    pub fn diffusion(&self, walk: &Walk, t: f64, v: &[C64]) -> Option<V3> {
+    /// generator has no such inverse (a stationary state more than one). With its counted work (real multiply-adds,
+    /// `Counts::work`): the node and its amplitudes, the dense generator column by column (a remainder's work each), its
+    /// LU (d³/3 complex multiply-adds) and per axis the two products and the solve.
+    pub fn diffusion(&self, walk: &Walk, t: f64, v: &[C64]) -> (Option<V3>, f64) {
+        let work = {
+            let (d, n) = (self.dim as f64, self.n as f64);
+            let node = self.model.node(walk.at(self.hbar_over_mass, t).0, walk.at(self.hbar_over_mass, t).1, false).work;
+            node + self.amplitudes_work() + d * self.product + crate::decide::COMPLEX * (d * d * d / 3.0 + 3.0 * (2.0 * n * n * n + 2.0 * d * d))
+        };
+        (self.diffusion_of(walk, t, v), work)
+    }
+
+    /// `diffusion`'s number alone.
+    fn diffusion_of(&self, walk: &Walk, t: f64, v: &[C64]) -> Option<V3> {
         let (r, kappa) = walk.at(self.hbar_over_mass, t);
         let n = self.n;
         let d = self.dim;
@@ -1221,8 +1253,9 @@ impl<'a> Form<'a> {
     /// from a quarter of the fastest excited decay's time 1/Γ (`decay`) by 2^{1/4} a knot -- the transient resolved
     /// where it is, its tail at the walk's own spacing --; against its own run `own` along the walk (its readings
     /// interpolated linearly between the walk's knots): the excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and the excess impulse
-    /// ∫(F(τ|L) − F̄)dτ (1/µm) by the trapezoid. Err where the state is not the form's.
-    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3), String> {
+    /// ∫(F(τ|L) − F̄)dτ (1/µm) by the trapezoid, and the stretch's counted work (`Counts::work`). Err where the state is
+    /// not the form's.
+    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3, f64), String> {
         let hm = self.hbar_over_mass;
         let step = walk.ends.windows(2).find(|w| w[1][0] > t).map_or(span, |w| w[1][0] - w[0][0]).min(span);
         let mut times = vec![t];
@@ -1261,7 +1294,7 @@ impl<'a> Form<'a> {
                 impulse[k] += 0.5 * dt * (f0[k] + f1[k]);
             }
         }
-        Ok((photons, impulse))
+        Ok((photons, impulse, series.counts.work))
     }
 
     /// The sector's Liouvillian at the point and time, dense (d × d), column by column through the operator.
@@ -1412,6 +1445,8 @@ struct Frozen {
     weights: Vec<Vec<C64>>,
     condition: f64,
     seconds: f64,
+    /// Its counted work (real multiply-adds): the blocks' decompositions and the weights (`Counts::work`).
+    work: f64,
 }
 
 impl Frozen {
@@ -1764,7 +1799,7 @@ impl Form<'_> {
         let clock = std::time::Instant::now();
         let node = self.node_at(walk, from);
         let at_knot = self.node_at(walk, knots[1]);
-        (counts[0].nodes, counts[0].node_seconds, counts[0].work) = (2, clock.elapsed().as_secs_f64(), node.work + at_knot.work);
+        (counts[0].nodes, counts[0].node_seconds, counts[0].work) = (2, clock.elapsed().as_secs_f64(), node.work + at_knot.work + 2.0 * self.amplitudes_work());
         let mut c = Counts::default();
         let reading = self.read(&node, walk, from, &state, &mut c);
         counts[0].add(&c);
@@ -1927,7 +1962,7 @@ impl Form<'_> {
                 let amps = self.amps_with(&node, false);
                 #[cfg(test)]
                 traced(1, part);
-                let work = node.work;
+                let work = node.work + self.amplitudes_work();
                 (std::sync::Arc::new(amps), (j == finest && read).then_some(node), clock.elapsed().as_secs_f64(), work)
             })
             .collect();
@@ -1961,6 +1996,7 @@ impl Form<'_> {
         };
         for f in &frozen {
             counts.node_seconds += f.seconds;
+            counts.work += f.work;
         }
         let reads = intervals.iter().enumerate().map(|(i, iv)| nodes[(i + 1) * finest - 1].1.take().map(|node| (iv.1, node))).collect();
         let last = nodes.last().map_or(before, |x| x.0.clone());
@@ -1977,7 +2013,7 @@ impl Form<'_> {
         let part = (b - a) / pieces as f64;
         let p0 = a + j as f64 * part;
         let tm = p0 + 0.5 * part;
-        let mut f = Frozen { grid, a, part, p0, d: 0.0, n: 0, hm: vec![C64::ZERO; self.h_slot], v: vec![], vinv: vec![], vadj: vec![], vinvadj: vec![], weights: vec![], condition: 0.0, seconds: 0.0 };
+        let mut f = Frozen { grid, a, part, p0, d: 0.0, n: 0, hm: vec![C64::ZERO; self.h_slot], v: vec![], vinv: vec![], vadj: vec![], vinvadj: vec![], weights: vec![], condition: 0.0, seconds: 0.0, work: 0.0 };
         let mut hm = std::mem::take(&mut f.hm);
         self.h_at(&f.of(tm), tm, &mut hm);
         f.hm = hm;
@@ -1990,6 +2026,7 @@ impl Form<'_> {
                 return Err(format!("H's block {x} at {tm} µs has no eigendecomposition"));
             }
             f.condition = larger(f.condition, eig.condition);
+            f.work += crate::decide::COMPLEX * eig.work;
             let (mut e, mut ei, mut ea, mut eia) = (vec![C64::ZERO; w * w], vec![C64::ZERO; w * w], vec![C64::ZERO; w * w], vec![C64::ZERO; w * w]);
             for i in 0..w {
                 for k in 0..w {
@@ -2014,6 +2051,8 @@ impl Form<'_> {
         let mus = self.rates_of(&values);
         f.n = substeps(p0, part);
         f.d = part / f.n as f64;
+        // The weights: φ₀ … φ₃ of each sector entry's rate (`phis`: at most its series' 24 terms) and the ten weights.
+        f.work += crate::decide::COMPLEX * (self.dim * (24 + ETD_WEIGHTS)) as f64;
         f.weights = vec![vec![C64::ZERO; self.dim]; ETD_WEIGHTS];
         for (at, &mu) in mus.iter().enumerate() {
             for (w, x) in f.weights.iter_mut().zip(etd_weights(mu, f.d)) {
@@ -2086,6 +2125,7 @@ impl Form<'_> {
         lw.r = r;
         (lw.s[0], lw.s[1]) = (sigma, u);
         counts.exponentials += 1;
+        counts.work += 2.0 * self.sandwiched;
     }
 }
 
