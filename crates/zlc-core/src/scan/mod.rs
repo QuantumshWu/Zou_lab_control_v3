@@ -71,7 +71,7 @@ fn group_key(axis: &AxisSpec) -> &str { axis.coordinate_of.as_deref().unwrap_or(
 
 /// Python floating-coordinate equality, including signed zero. NaN is refused
 /// at admission, so the bit representation is otherwise a valid hash key.
-fn number_key(value: f64) -> u64 { if value == 0.0 { 0 } else { value.to_bits() } }
+pub fn number_key(value: f64) -> u64 { if value == 0.0 { 0 } else { value.to_bits() } }
 
 impl Plan {
     pub fn new(mut spec: PlanSpec) -> Result<Self> {
@@ -139,7 +139,7 @@ impl Plan {
                 if !tuples.insert(tuple.clone()) { continue; }
                 for ((seen, key), member) in coordinates.iter_mut().zip(tuple).zip(&group.members) {
                     if !seen.insert(key) {
-                        return Err(format!("linked axis {:?} repeats a coordinate in different linked tuples; alternative coordinates must be unique", spec.axes[*member].port));
+                        return Err(format!("axis {:?} of a linked group repeats a coordinate under different points; alternative coordinates must be unique", spec.axes[*member].port));
                     }
                 }
             }

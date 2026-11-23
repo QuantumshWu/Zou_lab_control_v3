@@ -35,6 +35,7 @@ from numbers import Real
 from zlc_data.units import DEFAULT_UNITS, VoltageIntoLoad, format_quantity
 from zlc_durable import strict_json_loads
 from zlc_plugin.services import call as native
+from zlc_plugin.tunable import convert_step
 
 from zlc_atom.authoring import TunableField, read_tunable_in_unit
 from zlc_atom.nodes._framework.descriptor import (
@@ -72,6 +73,40 @@ SCAN_PULSE_CONTRACT = "zlc.pulse/scan-template"
 
 
 @dataclass(frozen=True)
+class PortGrid:
+    """The grid a port's owner puts a value on, in the port's unit: the whole
+    multiples of ``step``, a value halfway between two going away from zero
+    (``ties`` "away", the clock grid's rule) or to the even one ("even", a
+    pulse's DAC code or repeat count)."""
+
+    step: float
+    ties: str = "away"
+    #: Its points are the whole numbers a knob takes by kind -- a DAC code, a
+    #: repeat count, a device's int field in its own unit -- not a clock's
+    #: ticks, however whole a tick reads in some unit.
+    whole: bool = False
+
+    @classmethod
+    def of(cls, grid: Mapping[str, object] | None) -> "PortGrid | None":
+        """A grid as pulse_describe states it, or None (a description without one
+        offers no grid).  A code's or a count's is the whole numbers, halves to
+        even; a clock's goes away from zero, whatever its step."""
+
+        if grid is None:
+            return None
+        step, ties = float(grid["step"]), str(grid.get("ties", "away"))
+        return cls(step, ties, whole=step == 1.0 and ties == "even")
+
+
+def takes_whole_numbers(field: Mapping[str, object]) -> bool:
+    """Whether a field pulse_describe states takes whole numbers by kind (a DAC
+    code, a repeat count): an integer box, refusing a fraction."""
+
+    grid = PortGrid.of(field.get("grid"))
+    return grid is not None and grid.whole
+
+
+@dataclass(frozen=True)
 class ScanPort:
     """One knob the bench offers a scan, projected from its owner."""
 
@@ -85,10 +120,12 @@ class ScanPort:
     #: reading -- or None when nothing says.  The editor centres an axis's
     #: first sweep on it.
     current: float | None = None
-    #: A whole-number knob (a DAC code, a repeat count, an int field).
-    integer: bool = False
     #: The unit family its owner shows it in by default (AuthoringField.display_unit).
     display_unit: str | None = None
+    #: The grid its owner puts a value on, or None: any value from ``lo`` to
+    #: ``hi``.  The native compiler plays every axis value on it
+    #: (:func:`port_domains`); a whole-number knob is one whose grid is whole.
+    grid: PortGrid | None = None
 
     def __post_init__(self) -> None:
         if not str(self.port):
@@ -207,8 +244,9 @@ def scan_axis_ids(labels: Sequence[str]) -> tuple[str, ...]:
 
 def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[ScanPort, ...]:
     """One port per column of the description (``field_id, label, kind, unit,
-    value, is_dac, limit_lo, limit_hi``): the range a plan may play is the
-    column's limit, and it stands at the field's value in the pulse."""
+    value, is_dac, limit_lo, limit_hi, grid``): the range a plan may play is the
+    column's limit, on the grid the pulse puts the field's values on, and it
+    stands at the field's value in the pulse."""
 
     ports = []
     for column in columns:
@@ -224,7 +262,7 @@ def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[S
                 float(column["limit_lo"]),
                 float(column["limit_hi"]),
                 current=float(column["value"]),
-                integer=bool(column.get("is_dac")) or column.get("kind") == "bracket_count",
+                grid=PortGrid.of(column.get("grid")),
             )
         )
     return tuple(ports)
@@ -292,7 +330,8 @@ def scan_ports_for_devices(
     """Every port the bench's tunable devices offer, from their own words.
 
     A device that cannot answer raises, unless ``unread`` is given: then it
-    offers nothing and that dict says why, by device key.  An editor gives it,
+    offers nothing it cannot read (a field it cannot read in the unit asked
+    included) and that dict says why, by device key.  An editor gives it,
     since one instrument failing a read says nothing about the other knobs; a
     run does not, since it cannot move a knob it cannot read.
 
@@ -310,7 +349,10 @@ def scan_ports_for_devices(
     ``units``, picked in Device Control), else the field's own declared
     unit -- an RF frequency axis publishes hertz; its label names the device
     by its ``role`` and the knob by its label; it stands at the device's
-    reading, in that unit.
+    reading, in that unit.  An ``int`` field takes whole numbers of its own
+    unit, its grid one of them read in the port's unit (none where a level
+    reads as a power); any other takes any value within its bounds (a field's
+    ``step`` is how far a stepper moves it, not a grid its values lie on).
     """
 
     ports: list[ScanPort] = []
@@ -327,10 +369,18 @@ def scan_ports_for_devices(
             if not isinstance(tunable, TunableField):
                 raise TypeError("device tunable_fields must contain TunableField values")
             field = tunable.metadata
+            # An int field takes whole numbers of its own unit: one of them is its grid's step.
+            whole, own_unit = field.value_type == "int", field.unit or ""
             port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
             selected_unit = (units or {}).get(port) or dict(getattr(device, "units", None) or {}).get(field.name)
             if selected_unit and selected_unit != field.unit:
-                tunable = read_tunable_in_unit(device, field.name, selected_unit)
+                try:
+                    tunable = read_tunable_in_unit(device, field.name, selected_unit)
+                except Exception as error:  # noqa: BLE001 -- the instrument's or its link's, of any type
+                    if unread is None:
+                        raise
+                    unread[key] = str(error)
+                    continue
                 field = tunable.metadata
             if field.derived or field.minimum is None or field.maximum is None:
                 continue
@@ -339,6 +389,7 @@ def scan_ports_for_devices(
             if not tunable.live_write or tunable.dependency_group != (field.name,):
                 continue
             reading = tunable.current
+            step = convert_step(1.0, own_unit, field.unit or "") if whole else None
             ports.append(
                 ScanPort(
                     port,
@@ -348,8 +399,8 @@ def scan_ports_for_devices(
                     float(field.maximum),
                     current=float(reading) if isinstance(reading, Real) and not isinstance(reading, bool)
                     and math.isfinite(reading) else None,
-                    integer=field.value_type == "int",
                     display_unit=field.display_unit,
+                    grid=None if step is None else PortGrid(step, whole=own_unit == (field.unit or "")),
                 )
             )
     return tuple(ports)
@@ -484,10 +535,12 @@ class ScanPlan:
         }
 
     @classmethod
-    def from_tree(cls, tree: object) -> "ScanPlan":
-        """Compile authored banks through the canonical native authority."""
+    def from_tree(cls, tree: object, ports: Sequence[ScanPort] = ()) -> "ScanPlan":
+        """Compile authored banks through the canonical native authority, each
+        value on the domain of its port among ``ports`` (:func:`port_domains`)."""
 
-        compiled = native("scan.compile", document=tree.to_tree() if isinstance(tree, cls) else tree, mode="compile")
+        compiled = native("scan.compile", document=tree.to_tree() if isinstance(tree, cls) else tree, mode="compile",
+                          ports=port_domains(ports))
         result = object.__new__(cls)
         object.__setattr__(result, "axes", tuple(
             ScanAxis(axis["port"], tuple(axis["values"]), axis["unit"], axis.get("coordinate_of"))
@@ -569,10 +622,16 @@ def bind_plan(
     by_name = {port.port: port for port in ports}
     answer = native("scan.bind", axes=[
         {"port": axis.port, "values": list(axis.values), "unit": axis.unit, "coordinate_of": axis.coordinate_of}
-        for axis in plan.axes], ports=[
-        {"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi}
-        for port in ports], withheld=dict(withheld or {}))
+        for axis in plan.axes], ports=port_domains(ports), withheld=dict(withheld or {}))
     return tuple(by_name[name] for name in answer["ports"])
+
+
+def port_domains(ports: Sequence[ScanPort]) -> list[dict[str, object]]:
+    """The ports as the native compiler and binding read them: each one's
+    unit, bounds and grid, as its owner states them."""
+
+    return [{"port": port.port, "unit": port.unit, "lo": port.lo, "hi": port.hi,
+             "grid": None if port.grid is None else {"step": port.grid.step, "ties": port.grid.ties}} for port in ports]
 
 
 #: A seamless plan may carry only host axes and play an ordinary fixed Pulse;
@@ -626,7 +685,8 @@ def resolve_api_overrides(
     declare.
 
     A name may be a field id or a label one field answers to; a label two
-    fields answer to is refused (:func:`ambiguous_api_value`).  A name the
+    fields answer to is refused (:func:`ambiguous_api_value`), and so is a
+    value that is not whole for a field that takes whole numbers.  A name the
     pulse does not declare -- a value kept from another pulse, or for a field
     its Subpulse file no longer offers -- is parked: applied to nothing and
     returned, so the run record names it as not applied, as the editor shows
@@ -635,6 +695,8 @@ def resolve_api_overrides(
 
     fields = pulse_description(description)["api_fields"]
     declared = {field["field_id"]: str(field["unit"]) for field in fields}
+    # A field whose grid is whole (a count, a DAC code) takes a whole number.
+    whole = {field["field_id"] for field in fields if takes_whole_numbers(field)}
     labelled: dict[str, list[str]] = {}
     for field in fields:
         labelled.setdefault(str(field["label"]), []).append(field["field_id"])
@@ -650,8 +712,18 @@ def resolve_api_overrides(
         else:
             unapplied[name] = float(value)
             continue
+        if field_id in whole and not float(value).is_integer():
+            raise ValueError(not_whole_api_value(name, value, field_id))
         applied[field_id] = (float(value), declared[field_id])
     return applied, unapplied
+
+
+def not_whole_api_value(name: str, value: float, field_id: str) -> str:
+    """Why an API value that is not whole cannot be applied to a field that takes
+    whole numbers: the sentence the draft and the build refuse it with, and the
+    one the Scan editor writes under its box."""
+
+    return f"API value {name!r} is {float(value):g}: {field_id} takes whole numbers"
 
 
 def ambiguous_api_value(name: str, field_ids: Sequence[str]) -> str:
@@ -693,9 +765,11 @@ def _range_values(row: Mapping[str, object]) -> tuple[float, ...]:
     return tuple(native("scan.range", **descriptor)["values"] if descriptor is not None else row["values"])
 
 
-def plan_from_authored(payload: object) -> ScanPlan:
-    """Compile the active bank to the existing immutable execution plan."""
-    return payload if isinstance(payload, ScanPlan) else ScanPlan.from_tree(payload)
+def plan_from_authored(payload: object, ports: Sequence[ScanPort] = ()) -> ScanPlan:
+    """Compile the active bank (or a plan's axes) to the existing immutable
+    execution plan, each axis playing on its port's domain among ``ports`` --
+    what the bench plays -- and as written where none is given."""
+    return ScanPlan.from_tree(payload, ports)
 
 
 def _scanned_axes(context: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -879,17 +953,21 @@ __all__ = [
     "DEVICE_PARAM_FAMILY",
     "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
+    "PortGrid",
+    "takes_whole_numbers",
     "SCAN_PULSE_CONTRACT",
     "SEAMLESS_PULSE_RESOURCE",
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
     "ambiguous_api_value",
+    "not_whole_api_value",
     "bind_plan",
     "device_port_label",
     "device_port_parts",
     "hardware_scan_ports_for",
     "plan_from_authored",
+    "port_domains",
     "DeviceKnob",
     "resolve_api_overrides",
     "plan_input_rows",

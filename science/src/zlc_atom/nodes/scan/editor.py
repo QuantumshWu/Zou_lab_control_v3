@@ -32,8 +32,11 @@ from .plan import (
     device_port_parts,
     hardware_scan_ports_for,
     host_advanced_port,
+    port_domains,
     port_group,
+    not_whole_api_value,
     port_leaf,
+    takes_whole_numbers,
     unscannable_api_ports,
 )
 
@@ -239,17 +242,24 @@ def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> 
         if name in scanned:
             continue
         code = bool(field.get("is_dac"))
+        # A field that takes whole numbers by kind (a count, a DAC code) is a whole-number box.
+        whole = takes_whole_numbers(field)
+        number_of = int if whole else float
         low, high = field["limit_lo"], field["limit_hi"]
         number = overrides.get(name, authored[name][0])
+        # A value the draft holds that its field cannot take is shown as it is, with why:
+        # never as a whole number it is not, which an edit of another box would write back.
+        refused = whole and not float(number).is_integer()
         shown.append({
-            "name": name, "label": labels[name], "kind": "integer" if code else "number",
+            "name": name, "label": labels[name], "kind": "integer" if whole else "number",
             "unit": "" if code else authored[name][1], "units": [] if code else _ladder(authored[name][1]),
             "families": {} if code else _families(symbol for symbol, _decade in _ladder(authored[name][1])),
             "description": name,
-            "minimum": int(low) if code else float(low),
-            "maximum": int(high) if code else float(high),
-            "authored": int(authored[name][0]) if code else authored[name][0],
-            "value": int(number) if code else number,
+            "minimum": number_of(low),
+            "maximum": number_of(high),
+            "authored": number_of(authored[name][0]),
+            "value": float(number) if refused else number_of(number),
+            "problem": not_whole_api_value(name, number, name) if refused else "",
             "unavailable_reason": (
                 "swept by the scan plan; the value shown is kept for when its axis is taken out of the plan"
                 if name in walked and name in overrides
@@ -309,7 +319,9 @@ def scan_editor_facts(values: Mapping[str, object], pulse: Mapping[str, object] 
     ports.extend(device_ports)
     document = values.get("plan")
     try:
-        preview = native("scan.compile", document=document if str(document or "").strip() else {"axes": []}, mode="preview")
+        # What plays: every axis on its knob's domain, as a Start would play it.
+        preview = native("scan.compile", document=document if str(document or "").strip() else {"axes": []}, mode="preview",
+                         ports=port_domains(ports))
         summary, problem = _summary(document, preview)
     except (TypeError, ValueError) as error:
         preview = {"rows": [], "axis_facts": []}

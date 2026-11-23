@@ -120,15 +120,25 @@ def _pulse_ports(pulse: object) -> tuple:
     return (*hardware_scan_ports_for(pulse), *api_scan_ports_for(pulse))
 
 
+def _offered(pulse: object, tunables, plan: object, unread: dict[str, str] | None = None) -> tuple:
+    """The knobs a Start plays the plan on and binds it to: the pulse's slots and
+    API parameters, then the claimed devices' fields read in the units the plan
+    writes them in (``unread``: a device that cannot be read offers nothing)."""
+
+    units = {axis.port: axis.unit for axis in plan_from_authored(plan).axes}
+    return (*_pulse_ports(pulse), *scan_ports_for_devices(tunables, units=units, unread=unread))
+
+
 def _admit_resources(values, resources, installation=None) -> tuple[str, ...]:
     """The API values and the pulse axes against what the chosen pulse
     offers, so an API value the pulse cannot take (a label two of its fields
     answer to) or an axis on a port it does not offer is a draft issue the
-    Edit page says and Start waits on.  A device axis on a device that is not
-    open is the core's to refuse: it cannot claim it."""
+    Edit page says and Start waits on.  The plan is read as a Start plays it,
+    on the pulse's knobs, so a coordinate their grid makes repeat is said here
+    (a device's knobs are Start's to read).  A device axis on a device that is
+    not open is the core's to refuse: it cannot claim it."""
 
     del installation
-    plan = plan_from_authored(values["plan"])
     issues = []
     try:
         pulse = pulse_description((resources or {}).get(SEAMLESS_PULSE_RESOURCE.field_name))
@@ -138,6 +148,10 @@ def _admit_resources(values, resources, installation=None) -> tuple[str, ...]:
         resolve_api_overrides(pulse, api_overrides_from_authored(values.get("api_values")))
     except ValueError as error:
         issues.append(str(error))
+    try:
+        plan = plan_from_authored(values["plan"], _offered(pulse, {}, values["plan"]))
+    except ValueError as error:
+        return (*issues, str(error))
     pulse_axes = tuple(axis for axis in plan.axes if axis.port.startswith((PULSE_PARAM_FAMILY, API_PARAM_FAMILY)))
     if pulse_axes:
         try:
@@ -172,8 +186,10 @@ def _build(
     # not declare is kept in the draft and named in the run record as not
     # applied.
     applied, unapplied = resolve_api_overrides(pulse, api_overrides_from_authored(api_values))
-    parsed = plan_from_authored(plan)
     tunables = _tunables(devices)
+    # The plan as the knobs play it: every value on its knob's domain.
+    offered = _offered(pulse, tunables, plan)
+    parsed = plan_from_authored(plan, offered)
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to a claimed knob the HOST moves between
     # fires, and an API axis to a parameter of the pulse the host plays with
@@ -181,12 +197,7 @@ def _build(
     # the board plays, if there are board axes.  A host-only plan plays a
     # fixed Pulse.
     bindable = tuple(axis for axis in parsed.axes if not axis.port.startswith(MANUAL_PARAM_FAMILY))
-    ports = bind_plan(
-        ScanPlan(bindable),
-        (*_pulse_ports(pulse),
-         *scan_ports_for_devices(tunables, units={axis.port: axis.unit for axis in parsed.axes})),
-        withheld=unscannable_api_ports(pulse),
-    ) if bindable else ()
+    ports = bind_plan(ScanPlan(bindable), offered, withheld=unscannable_api_ports(pulse)) if bindable else ()
     return SeamlessScanMeasurement(
         pulse=pulse,
         plan=parsed,
@@ -203,14 +214,19 @@ def _build(
 
 
 def _estimate_run(values, devices, resources):
-    """This Scan's workload from its draft and pulse description; never Load/Fire."""
+    """This Scan's workload from its draft and pulse description, its plan on the
+    knobs a Start plays it on; never Load/Fire."""
 
-    del devices
     resource = (resources or {}).get(SEAMLESS_PULSE_RESOURCE.field_name)
     if resource is None:
         return {"status": "unknown", "reason": "Choose a resolvable Pulse template first."}
+    authored = values.get("plan", "")
+    try:
+        plan = plan_from_authored(authored, _offered(pulse_description(resource), _tunables(devices), authored, unread={}))
+    except ValueError as error:
+        return {"status": "unknown", "reason": str(error)}
     result = estimate_scan_time(
-        resource, plan_from_authored(values.get("plan", "")),
+        resource, plan,
         api_values=values.get("api_values", ""),
         repeats=values.get("repeats", 1),
         shots_per_point=values.get("shots_per_point", 1),

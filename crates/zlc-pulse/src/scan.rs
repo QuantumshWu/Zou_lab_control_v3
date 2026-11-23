@@ -5,14 +5,15 @@ use std::collections::BTreeMap;
 
 use zlc_core::pyfmt::format_g;
 
-use crate::binding::{field_label, normalize_binding_values, pulse_field_value, replace_pulse_field, resolve_subpulse_sources, ticks_per};
+use crate::binding::{field_label, normalize_binding_values, pulse_field_value, replace_pulse_field, resolve_subpulse_sources, tick_in, ticks_per};
+use crate::domain::{Grid, Ties, WHOLE};
 use crate::error::{Error, Kind, Result, value_error};
-use crate::model::{FieldKind, FieldRef, MAXIMUM_REPEAT_COUNT, Sequence, Source};
+use crate::model::{FieldKind, FieldRef, MAXIMUM_REPEAT_COUNT, MINIMUM_BRACKET_COUNT, Sequence, Source};
 use crate::num::Num;
 use crate::wire::StreamerParams;
 
 /// One column: its variable name, a starting range that suits its kind, the
-/// limits the board accepts and its wire conversion.
+/// limits the board accepts, the grid its values lie on and its wire conversion.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScanColumnSpec {
     pub name: String,
@@ -22,6 +23,7 @@ pub struct ScanColumnSpec {
     pub unit: String,
     pub limit_lo: f64,
     pub limit_hi: f64,
+    pub grid: Grid,
     pub wire_scale: f64,
     pub wire_offset: f64,
     pub label: String,
@@ -29,12 +31,13 @@ pub struct ScanColumnSpec {
 
 impl ScanColumnSpec {
     #[allow(clippy::too_many_arguments)]
-    fn new(name: &str, lo: f64, hi: f64, is_dac: bool, unit: &str, limit_lo: f64, limit_hi: f64, wire_scale: f64, wire_offset: f64,
-           label: &str) -> Result<ScanColumnSpec> {
+    fn new(name: &str, lo: f64, hi: f64, is_dac: bool, unit: &str, limit_lo: f64, limit_hi: f64, grid: Grid, wire_scale: f64,
+           wire_offset: f64, label: &str) -> Result<ScanColumnSpec> {
         if name.trim().is_empty() { return value_error("scan column name must be non-empty"); }
         if label.trim().is_empty() { return value_error("scan column label must be non-empty text"); }
         if hi <= lo { return value_error(format!("scan column {name} needs hi > lo")); }
-        Ok(ScanColumnSpec { name: name.into(), lo, hi, is_dac, unit: unit.into(), limit_lo, limit_hi, wire_scale, wire_offset, label: label.into() })
+        Ok(ScanColumnSpec { name: name.into(), lo, hi, is_dac, unit: unit.into(), limit_lo, limit_hi, grid, wire_scale, wire_offset,
+                            label: label.into() })
     }
 }
 
@@ -46,27 +49,30 @@ fn column_for_field(sequence: &Sequence, name: &str, reference: &FieldRef, unit:
     match reference.kind {
         FieldKind::BracketCount => {
             let nominal = pulse_field_value(sequence, reference, unit)?;
-            let maximum = MAXIMUM_REPEAT_COUNT as f64;
-            ScanColumnSpec::new(name, py_max(1.0, nominal - 1.0), py_min(maximum, nominal + 1.0), false, "count", 1.0, maximum, 1.0, 0.0, &label)
+            let (least, maximum) = (MINIMUM_BRACKET_COUNT as f64, MAXIMUM_REPEAT_COUNT as f64);
+            ScanColumnSpec::new(name, py_max(least, nominal - 1.0), py_min(maximum, nominal + 1.0), false, "count", least, maximum, WHOLE,
+                                1.0, 0.0, &label)
         }
         FieldKind::Dac => {
             let (low, high) = sequence.target.port(reference.port.as_deref().unwrap_or("")).and_then(|port| port.signed_range()).expect("a DAC");
-            ScanColumnSpec::new(name, low as f64, high as f64, true, "DAC code (0 = 0 V)", low as f64, high as f64, 1.0, -(low as f64), &label)
+            ScanColumnSpec::new(name, low as f64, high as f64, true, "DAC code (0 = 0 V)", low as f64, high as f64, WHOLE, 1.0, -(low as f64), &label)
         }
         _ => {
             let per = ticks_per(sequence, unit)?;
             let quantum = 1.0 / per;
+            // The clock grid, as the binding layer aligns a duration or a delay to it.
+            let clock = Grid { step: tick_in(sequence, unit)?, ties: Ties::Away };
             if api && reference.kind == FieldKind::Delay {
                 let nominal = pulse_field_value(sequence, reference, unit)?;
                 let longest = geometry.ttl_delay_max_ticks as f64 / per;
                 let span = py_max(quantum, nominal.abs() * 0.5);
                 return ScanColumnSpec::new(name, py_max(-longest, nominal - span), py_min(longest, nominal + span), false, unit, -longest, longest,
-                                           per, 0.0, &label);
+                                           clock, per, 0.0, &label);
             }
             let nominal = pulse_field_value(sequence, reference, unit)?.abs();
             let longest = ((1u128 << geometry.tick_width) - 1) as f64 / per;
             ScanColumnSpec::new(name, py_max(quantum, nominal * 0.5), py_min(longest, py_max(2.0 * quantum, nominal * 1.5)), false, unit,
-                                quantum, longest, per, 0.0, &label)
+                                quantum, longest, clock, per, 0.0, &label)
         }
     }
 }
@@ -157,7 +163,7 @@ pub fn validate_scan_table(rows: &[Vec<f64>], columns: &[ScanColumnSpec]) -> Res
                                        format_g(spec.limit_lo, 6), format_g(spec.limit_hi, 6), format_g(least, 6), format_g(most, 6)));
         }
     }
-    Ok(rows.iter().map(|row| row.iter().zip(columns).map(|(value, spec)| if spec.is_dac { value.round_ties_even() } else { *value }).collect()).collect())
+    Ok(rows.iter().map(|row| row.iter().zip(columns).map(|(value, spec)| if spec.is_dac { WHOLE.nearest(*value) } else { *value }).collect()).collect())
 }
 
 /// `prepare_scan_application(sequence, rows, params=)`: the table as the board

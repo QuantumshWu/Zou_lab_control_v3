@@ -24,9 +24,9 @@ document.getElementById('host').append(view.root);
 const card=()=>[...view.root.querySelectorAll('.panel-edit-card')].find(node=>node.querySelector('.section-title')?.textContent==='Direct producer');
 const shown=node=>Boolean(node&&node.offsetParent);
 // A seamless scan as the workbench rows it: its plan a text field, the scan_plan editor's model managing it.
-const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:1e6,hi:6e9,current:1e8,integer:false,display_unit:null,
+const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:1e6,hi:6e9,current:1e8,grid:null,display_unit:null,
   units:[['GHz',9],['MHz',6],['kHz',3],['Hz',0]],limits:{},currents:{},families:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}};
-const hold={port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,integer:false,display_unit:null,
+const hold={port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,grid:{step:2e-8,ties:'away',whole:false},display_unit:null,
   units:[['s',0],['ms',-3],['µs',-6]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s'}};
 const api={fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},description:'delay',minimum:0,maximum:1,
   authored:0.001,value:0.001,unavailable_reason:''}],overrides:[],parked:[{name:'gone',text:'gone = 3 (not in this pulse)',problem:false}],note:'API note',tidy:'delay = 0.002'};
@@ -61,7 +61,7 @@ try {
    assert(!shown(banks[1]),'the values axis shows its range bank');
    equal([...editor.querySelectorAll('.axis-list')][1].value,'9.9, 10.1','the values axis: its list');
    equal([...editor.querySelectorAll('.axis-unit .unit-picker')].map(picker=>picker.value),['MHz','ms'],'each axis in its unit');
-   equal(editor.querySelector('.note.wrap').textContent,'2 × 3 points','what the plan is, under the rows');
+   equal(editor.querySelector(':scope > .note.wrap').textContent,'2 × 3 points','what the plan is, under the rows');
  });
  await check('nothing in it is offered: Add axis, the API values and the parked lines are left out, every control disabled',async()=>{
    const editor=card().querySelector('.scan-plan');

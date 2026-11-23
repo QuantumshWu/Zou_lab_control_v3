@@ -2193,6 +2193,96 @@ mod tests {
         plugins.shutdown(); let mut pulse=pulse; pulse.shutdown();
     }
 
+    /// The Seamless Scan's build sweeping a bracket's repeat count, an API parameter, from 1 to 3
+    /// in five points (1, 1.5, 2, 2.5, 3 as written) on the virtual board: it runs, the counts
+    /// played are whole (1, 2, 3; the points the count's grid made one play once), the editor says
+    /// so, and the dataset's coordinates and the run record are those counts. A duration linked to
+    /// the count by x * 0.1 ms (0.30000000000000004 at 3 in floats) is recorded, bit for bit, as
+    /// the duration the binding layer wrote into the pulse each point played.
+    #[test]
+    fn a_repeat_count_swept_through_fractions_plays_and_records_whole_counts() {
+        use zlc_core::{DType,OwnedBuffer};
+        use zlc_core::control::Origin;
+        use zlc_core::dataset::{DataBlock,Validity};
+        use zlc_core::runtime::{Bundle,Declaration,Input,Runtime,Storage};
+        use zlc_core::schema::{Axis,Coordinate,Coordinates,DatasetSchema,Domain,DomainRole,ValueSchema,ValidityContract};
+        use zlc_plugin_host::{HostConfig,RunRequest};
+        let Some(python)=std::env::var_os("ZLC_PLUGIN_PYTHON") else { return };
+        let (pulse,_events,document)=host("repeat_count_scan");
+        // The template with a bracket over its middle periods, its count an API parameter.
+        let mut file: Value=serde_json::from_str(&std::fs::read_to_string(&document).unwrap()).unwrap();
+        file["brackets"]=json!([{"bracket_id":"loop","start_period_id":"long_before","end_period_id":"long_after","count":2,"name":"Loop"}]);
+        file["bindings"].as_array_mut().unwrap().push(json!({"field_ref":{"kind":"bracket_count","period_id":null,"port":null,"bracket_id":"loop"},
+            "unit":"count","scan":false,"source":"api","config_key":""}));
+        std::fs::write(&document,serde_json::to_string_pretty(&file).unwrap()).unwrap();
+        claim(&pulse,&["scan"]);
+        let root=PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let runtime=Runtime::new();
+        let (sender,plugin_events)=channel(); let sender=Mutex::new(sender);
+        let desk=pulse.desk.clone();
+        let plugins=PluginHost::new(HostConfig {python:python.into(),python_path:vec![root.join("../../science/src"),root.join("../zlc-plugin-host/tests/plugins")],
+            packages:vec!["zlc_test_plugins".into()],memory_limit_mib:Some(3072)},runtime.clone(),SafeActions::new(),
+            move|event|{if let Some(event)=desk.hears(event){let _=sender.lock().unwrap().send(event);}}).unwrap();
+        crate::plugin_services::install(&plugins).unwrap();
+        pulse.desk.set_plugins(Some(plugins.clone()));
+        let singleton=Domain::new(vec![1],vec![],vec![]).unwrap();
+        let site=Axis::new("site".into(),"site".into(),"coordinate".into(),Coordinates::Index {origin:0,len:1},None,None,None,None).unwrap();
+        let schema=DatasetSchema::new(singleton.clone(),singleton,Domain::dense(vec![1],vec![site]).unwrap(),
+            ValueSchema::new(DType::U16,None,None,ValidityContract::Value).unwrap()).unwrap();
+        let source=runtime.begin("camera",vec![Declaration {signal:"source".into(),schema:schema.clone(),storage:Storage::Latest}],json!({})).unwrap();
+        plugins.open("scan","native_scan",json!({}),json!({})).unwrap();
+        let shots=2;
+        let plan=json!({"axes":[{"port":"api:bracket_count:loop","unit":"count","values":[],"range":{"start":1,"stop":3,"count":5},"mode":"range","value_text":"",
+            "link_enabled":true,"links":[{"port":"api:duration:short","mode":"formula","formula":"x * 0.1","unit":"ms"}]}]});
+        let spec=json!({"pulse_path":document,"draft":{"plan":plan.to_string(),"api_values":"","repeats":1,"shots_per_point":shots}});
+        let run=plugins.start_run("scan",RunRequest {prepared:None,device_labels:Default::default(),device_units:Default::default(),devices:Default::default(),shared: Default::default(), reads: Default::default(),
+            values:json!({"spec":spec.to_string(),"mode":"authored","configure_first":true,"effective_inner":""}),origin:Origin::Operator,
+            resources:json!({}),source_signal:Some("source".into()),run_directory:None,outputs:[("scan".into(),"output".into())].into(),record_devices:false}).unwrap();
+        // Each FIRE is followed by its shots, as a camera it triggers would deliver them; the count each played.
+        let (mut seen,mut ordinal,mut played,mut short)=(None,0,Vec::new(),Vec::new());
+        let (outcome,result,error)=loop {
+            let fired=board(&pulse).last_fire().map(|(command,_)|command);
+            if fired.is_some() && fired!=seen {
+                seen=fired;
+                let held=board(&pulse).applied().unwrap().unwrap().source.unwrap();
+                played.push(held.brackets.iter().find(|bracket|bracket.bracket_id=="loop").unwrap().count);
+                short.push(zlc_pulse::binding::pulse_field_value(&held,&zlc_pulse::model::FieldRef::duration("short"),"ms").unwrap());
+                for _ in 0..shots {
+                    let data=DataBlock::new(schema.clone(),OwnedBuffer::from_vec(vec![ordinal as u16]).into(),Validity::Uniform(true),None).unwrap();
+                    runtime.commit(&source,&Bundle {inputs:vec![Input::Event {signal:"source".into(),ordinal,data,origin:None,shot_time:None}],
+                        metadata:json!({}),parents:vec![]}).unwrap();
+                    ordinal+=1;
+                }
+            }
+            match plugin_events.recv_timeout(Duration::from_millis(20)) {
+                Ok(HostEvent::RunFinished {run:id,outcome,result,error,..}) if id==run=>break(outcome,result,error),
+                Ok(HostEvent::Request {op,params,..}) => panic!("the window was asked {op} {params}: the desk answers the board's commands"),
+                Ok(HostEvent::Failed {reason,..})=>panic!("plugin failed: {reason}"),
+                _=>{},
+            }
+        };
+        assert_eq!(outcome,"completed","{error:?}");
+        assert_eq!(played,[1,2,3],"the counts the board played");
+        assert_eq!((&result["points"],&result["shots"],&result["values"]),(&json!(3),&json!(6),&json!([1.0,2.0,3.0])),"{result}");
+        assert_eq!(result["played"],json!({"first":1.0,"last":3.0,"count":3,"written":5,"moved":2,"distinct":3}),"the editor says what plays");
+        let output=runtime.signals().into_iter().find(|signal|&*signal.signal=="output").unwrap();
+        let latest=runtime.read_latest(&output.generation,"output").unwrap();
+        let stored=latest.canonical().unwrap();
+        let axis=stored.schema().domain(DomainRole::Point).axis("scan.bracket_count:loop").unwrap();
+        assert_eq!((0..3).map(|index|axis.coordinate(index)).collect::<Vec<_>>(),[1.0,2.0,3.0].map(|count|Some(Coordinate::Real(count))),
+            "the coordinates are the counts played");
+        assert_eq!(latest.run().metadata["plan"]["axes"][0]["values"],json!([1.0,2.0,3.0]),"and so is the run record's plan");
+        // The linked duration: what the binding layer wrote, the dataset's coordinate and the run record's value, bit for bit.
+        let bits=|values: &[f64]| values.iter().map(|value|value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&short),bits(&[0.1,0.2,0.3]),"the durations the board played, in ms");
+        let linked=stored.schema().domain(DomainRole::Point).axis("scan.duration:short").unwrap();
+        let recorded: Vec<f64>=(0..3).map(|index|match linked.coordinate(index) { Some(Coordinate::Real(value))=>value, other=>panic!("{other:?}") }).collect();
+        assert_eq!(bits(&recorded),bits(&short),"the coordinates are the durations played");
+        let planned: Vec<f64>=latest.run().metadata["plan"]["axes"][1]["values"].as_array().unwrap().iter().map(|value|value.as_f64().unwrap()).collect();
+        assert_eq!(bits(&planned),bits(&short),"and so are the run record's");
+        plugins.shutdown(); let mut pulse=pulse; pulse.shutdown();
+    }
+
     /// A plugin host for a test of runs that watch the board, its events (as the window would hear
     /// them, past the desk) in a channel.
     fn watching_host(pulse: &PulseHost, python: std::ffi::OsString) -> (PluginHost, Receiver<HostEvent>) {

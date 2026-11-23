@@ -3,7 +3,8 @@
 // axis's name), then its values as an independent Range bank (from, to,
 // points) or Values list, their unit, which of the two it plays, and its ×.
 // Every row is a line of one column set, so from, to, points, the unit,
-// Range|Values and × stand at one x on every row.  Under the rows, what the
+// Range|Values and × stand at one x on every row; under a row, what its knob
+// plays where its grid moves what was written.  Under the rows, what the
 // plan is or why it cannot be read; then the pulse's API values this run
 // sets.  The model (scan/editor.py) offers the knobs, says what the plan
 // amounts to and words the API values; this editor writes `plan` (the axes
@@ -26,13 +27,16 @@ import type { DraftEdit, NodeEditor } from "./index.js";
  * it (a device knob's dBm and mW) -- `limits` and `currents` are the port's
  * limits and reading in those, as the device converts them (empty: only its own). */
 type Port = { port: string; label: string; unit: string; lo: number; hi: number; group: string; leaf: string;
-  /** Where the knob stands, in its unit (null: nothing says); a whole-number knob; the family its owner shows it in. */
-  current: number | null; integer: boolean; display_unit: string | null;
+  /** Where the knob stands, in its unit (null: nothing says); the grid its owner puts a value on, in its unit
+   * (null: any value; the native compiler plays every value on it; `whole`: the whole numbers a code, a count
+   * or an int field takes); the family its owner shows it in. */
+  current: number | null; grid: { step: number; ties: string; whole: boolean } | null; display_unit: string | null;
   units: [symbol: string, decade: number | null][]; limits: Record<string, [number, number]>; currents: Record<string, number>;
   /** The family each spelling belongs to (its unit picker's trunks). */
   families: Record<string, string> };
+/** `problem`: why the value the draft holds cannot be applied (a fraction for a count), shown under its box. */
 type ApiField = { name: string; label: string; kind: "integer" | "number"; unit: string; units: [symbol: string, decade: number][]; families: Record<string, string>;
-  description: string; minimum: number | null; maximum: number | null; authored: number; value: number; unavailable_reason: string };
+  description: string; minimum: number | null; maximum: number | null; authored: number; value: number; unavailable_reason: string; problem: string };
 type Facts = EditorFacts & {
   families: { pulse: string; api: string; device: string; manual: string };
   host_advanced: string[];
@@ -55,13 +59,16 @@ type Facts = EditorFacts & {
 type Range = { start: number; stop: number; count: number };
 /** What plays, as its ends and count (the native preview's facts, never the whole bank). */
 type Ends = { first: number | null; last: number | null; count: number };
-/** A linked parameter's formula evaluated on its axis, or why it cannot be. */
-type LinkFacts = Ends & { port: string; problem: string };
+/** What an axis plays on its knob's domain: its ends and count; of the points written, how many
+ * the knob moved (onto its grid, or back within its bounds); how many distinct values play. */
+type Played = Ends & { written: number; moved: number; distinct: number };
+/** A linked parameter's formula evaluated on what its axis plays, or why it cannot be. */
+type LinkFacts = Played & { port: string; problem: string };
 type AxisFacts = { port: string; range_uniform: boolean; mode: string; value_text: string; active_bounds: [number, number] | null; values_bounds: [number, number] | null;
-  played?: Ends | null; links?: LinkFacts[] };
+  played?: Played | null; links?: LinkFacts[] };
 type Linked = { port: string; values: number[]; unit: string; mode: "formula"; value_text: string; formula: string };
 type Axis = { port: string; values: number[]; range?: Range; coordinate_of?: string | null; unit: string; mode: "range" | "values"; value_text: string; link_enabled?: boolean; links?: Linked[] };
-type AxisMemory = { entry: Axis; steps: [number | null, number | null, number | null]; nativeUnit: string | null; integer: boolean | null };
+type AxisMemory = { entry: Axis; steps: [number | null, number | null, number | null]; nativeUnit: string | null; grid: number | null };
 const copyAxis = (entry: Axis): Axis => ({ ...entry, values: [...entry.values], ...(entry.range ? { range: { ...entry.range } } : {}), ...(entry.links ? { links: entry.links.map(link => ({ ...link, values: [...link.values] })) } : {}) });
 
 /** The word a manual axis carries in the label column: a hand moves it. */
@@ -74,13 +81,21 @@ function rangeBank(start: number, stop: number, count: number): Pick<Axis, "valu
 
 /** `value` + `step` in decimal, each as its shortest spelling: 80 − 0.1 is 79.9, never 79.90000000000001. */
 function decimalSum(value: number, step: number): number {
-  const parts = (number: number): [bigint, number] => {
-    const [mantissa = "0", exponent = "0"] = String(number).split("e");
-    const [whole = "0", fraction = ""] = mantissa.split(".");
-    return [BigInt(whole + fraction), Number(exponent) - fraction.length];
-  };
-  const [a, at] = parts(value), [b, bt] = parts(step), last = Math.min(at, bt);
+  const [a, at] = decimalParts(value), [b, bt] = decimalParts(step), last = Math.min(at, bt);
   return Number(`${a * 10n ** BigInt(at - last) + b * 10n ** BigInt(bt - last)}e${last}`);
+}
+
+/** A number's shortest spelling as whole digits and a power of ten: 0.02 is 2 and -2. */
+function decimalParts(number: number): [bigint, number] {
+  const [mantissa = "0", exponent = "0"] = String(number).split("e");
+  const [whole = "0", fraction = ""] = mantissa.split(".");
+  return [BigInt(whole + fraction), Number(exponent) - fraction.length];
+}
+
+/** `value` times a whole `count`, in decimal: 3 times 0.02 is 0.06. */
+function decimalTimes(value: number, count: number): number {
+  const [digits, exponent] = decimalParts(value);
+  return Number(`${digits * BigInt(count)}e${exponent}`);
 }
 
 /** The port's reading and limits in `symbol`: a decimal shift on its ladder, else the device's conversion. */
@@ -90,25 +105,48 @@ function inSpelling(port: Port, symbol: string): { current: number | null; bound
   return { current: port.currents[symbol] ?? null, bounds: port.limits[symbol] ?? [null, null] };
 }
 
+/** The knob's grid step read in `symbol` (a decimal shift of its unit), or null: no grid, or a
+ * spelling no shift reaches (a step is a difference; a power read as a level has none). */
+function gridStep(port: Port, symbol: string): number | null {
+  const decade = symbol === port.unit ? 0 : port.units.find(([name]) => name === symbol)?.[1];
+  return port.grid && typeof decade === "number" ? shifted(port.grid.step, -decade) : null;
+}
+
+/** How far a first sweep reaches either side of where the knob stands, and in how many points. */
+const SWEEP_SPREAD = 0.1, SWEEP_POINTS = 5;
+
 /** A knob's first sweep, when an axis is added or its knob changed: in the unit `defaultUnit` picks
  * from where it stands (in the family its owner shows it in), from 0.1 below to 0.1 above that
- * in it -- a whole-number knob 1, one value a point -- in five points, inside its limits.  A knob
- * that says nowhere it stands is one point, at its lower limit: never its whole range. */
+ * in it in five points, inside its limits.  On a grid its points stand a whole number of grid
+ * steps apart, the nearest to those five points' spacing, so none is moved (10 µs on a 20 ns clock:
+ * 9.88 … 10.12 µs, 60 ns apart); a grid coarser than that spacing sweeps one grid point a value,
+ * one step below to one above (a count 1, a 20 ns clock in ns 20 ns).  A knob that says nowhere it
+ * stands is one point, at its lower limit: never its whole range. */
 function firstSweep(port: Port): Pick<Axis, "unit" | "values" | "range"> {
   const family = (symbol: string): string => port.families[symbol] ?? symbol;
   const own = port.display_unit && port.units.some(([symbol]) => symbol === port.display_unit) ? port.display_unit : port.unit;
   const unit = defaultUnit(own, port.units.filter(([symbol]) => family(symbol) === family(own)).map(([symbol]) => {
     const { current, bounds: [low, high] } = inSpelling(port, symbol);
     return { symbol, value: current, low, high };
-  }), port.integer);
+  }), Boolean(port.grid?.whole));
   const { current, bounds: [low, high] } = inSpelling(port, unit);
   const inside = (value: number): number => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
   if (current === null) return { unit, ...rangeBank(low ?? high ?? 0, low ?? high ?? 0, 1) };
-  const step = port.integer ? 1 : 0.1;
-  const from = inside(decimalSum(current, -step)), to = inside(decimalSum(current, step));
+  const step = gridStep(port, unit), spacing = 2 * SWEEP_SPREAD / (SWEEP_POINTS - 1);
+  if (step !== null) {
+    const apart = decimalTimes(step, Math.max(1, Math.round(spacing / step)));
+    const reach = step > spacing ? 1 : (SWEEP_POINTS - 1) / 2;
+    const points: number[] = [];
+    for (let offset = -reach; offset <= reach; offset++) {
+      const value = decimalSum(current, decimalTimes(apart, offset));
+      if ((low === null || value >= low) && (high === null || value <= high)) points.push(value);
+    }
+    if (points.length < 2) return { unit, ...rangeBank(inside(current), inside(current), 1) };
+    return { unit, ...rangeBank(points[0]!, points[points.length - 1]!, points.length) };
+  }
+  const from = inside(decimalSum(current, -SWEEP_SPREAD)), to = inside(decimalSum(current, SWEEP_SPREAD));
   if (!(from < to)) return { unit, ...rangeBank(inside(current), inside(current), 1) };
-  if (!port.integer) return { unit, ...rangeBank(from, to, 5) };
-  return { unit, ...rangeBank(Math.ceil(from), Math.floor(to), Math.floor(to) - Math.ceil(from) + 1) };
+  return { unit, ...rangeBank(from, to, SWEEP_POINTS) };
 }
 
 /** A spin box for one end or the count of a Range bank. */
@@ -138,6 +176,18 @@ function endsText(ends: Ends, unit: string): [span: string, count: string] {
   const suffix = unit && unit !== "1" ? ` ${unit}` : "";
   return ends.count === 1 ? [`${spoken(ends.first)}${suffix}`, "1 point"] : [`${spoken(ends.first)} … ${spoken(ends.last)}${suffix}`, `${ends.count} points`];
 }
+/** How the knob changed what was written, or "" where it plays as written: points its group's grid
+ * made one are played once, "5 points written, 3 distinct values played: 1 … 3" ("1 distinct value
+ * played: 2"); values moved onto it, "Plays 1 … 10 (5 points): 3 moved onto the knob's grid". The one
+ * wording of an axis's note and a linked parameter's preview; shown, never written back. */
+function playedText(played: Played, unit: string): string {
+  const [span, count] = endsText(played, unit);
+  if (played.count < played.written) {
+    const values = played.distinct === 1 ? endsText({ ...played, count: 1 }, unit)[0] : span;
+    return `${played.written} points written, ${played.distinct} distinct value${played.distinct === 1 ? "" : "s"} played: ${values}`;
+  }
+  return played.moved ? `Plays ${span} (${count}): ${played.moved} moved onto the knob's grid` : "";
+}
 /** How many colours link groups take in turn (--link-group-0 … in tokens.css). */
 const LINK_COLOURS = 4;
 
@@ -155,6 +205,8 @@ class AxisRowView {
   readonly remove = button("×", () => this.owner.removeRow(this), "destructive glyph square");
   readonly notes = element("div", "axis-notes");
   private custom = element("p", "note");
+  /** What the knob plays, where that is not what was written (playedText). */
+  private played = element("p", "note wrap axis-played");
   private combo: TreeCombo | null = null;
   private name: HTMLInputElement | null = null;
   private start: SpinBox;
@@ -210,7 +262,8 @@ class AxisRowView {
     this.mode.root.title = "Scan a from/to/points range, or the values written";
     this.remove.title = "Remove this axis";
     this.custom.hidden = true;
-    this.notes.append(this.custom);
+    this.played.hidden = true;
+    this.notes.append(this.custom, this.played);
   }
 
   get cells(): HTMLElement[] {
@@ -256,14 +309,14 @@ class AxisRowView {
       unit.setTree(unitTree((port?.units.length ? port.units : [[link.unit, 0] as const]).map(([symbol]) => ({ value: symbol, label: symbol || "1", group: port?.families[symbol] })), link.unit), link.unit);
       const add = button("+", () => this.addLink(), "quiet glyph square linked-add"); add.title = "Add linked parameter"; add.setAttribute("aria-label", add.title);
       const remove = button("×", () => { this.entry.links!.splice(index, 1); if (!this.entry.links!.length) this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove"); remove.title = "Remove linked parameter"; remove.setAttribute("aria-label", remove.title);
-      const preview = element("p", "note linked-preview");
+      const preview = element("p", "note wrap linked-preview");
       const update = (): void => {
         if (document.activeElement !== input) input.value = link.formula ?? "";
         chip.title = `x is ${this.axisLabel()}`;
-        const fact = this.owner.axisFacts(this.entry.port)?.links?.[index];
+        const fact = this.owner.currentFacts(this.entry.port)?.links?.[index];
         const known = fact?.port === link.port ? fact : undefined;
         const [span, count] = known ? endsText(known, link.unit) : ["", ""];
-        setText(preview, known ? known.problem || `${span} (${count})` : "");
+        setText(preview, known ? known.problem || playedText(known, link.unit) || `${span} (${count})` : "");
         preview.classList.toggle("problem", Boolean(known?.problem));
       };
       update(); this.linkedUpdates.push(update);
@@ -273,6 +326,15 @@ class AxisRowView {
     for (const control of this.linkControls) if ("disabled" in control) (control as HTMLInputElement).disabled = this.linkLocked;
     this.linkedCells = [toggle, ...cells.slice(8)];
     return cells;
+  }
+
+  /** What the knob plays, from the facts of the plan as written now: between an edit and its
+   * preview nothing is said (the facts are of the plan before it). */
+  showPlayed(): void {
+    const played = this.owner.currentFacts(this.entry.port)?.played;
+    setText(this.played, played ? playedText(played, this.entry.unit) : "");
+    this.played.hidden = !this.played.textContent;
+    this.linkedUpdates.forEach(update => update());
   }
 
   /** The knob as its picker names it (a manual axis: its name). */
@@ -344,6 +406,7 @@ class AxisRowView {
     if (document.activeElement !== this.list) this.list.value = entry.value_text;
     const fact = this.owner.axisFacts(entry.port);
     this.flag(this.list, fact?.value_text === entry.value_text ? fact.values_bounds ?? [] : [], LIST_TIP);
+    this.showPlayed();
     // A unit with other spellings is a picker; one without is a word.
     const port = this.port();
     const offered = port?.units.some(([symbol]) => symbol === entry.unit) ? port.units : [];
@@ -496,12 +559,12 @@ export class ScanPlanEditor implements NodeEditor {
     const port = this.ports.find(port => port.port === view.entry.port);
     const previous = this.axisMemory.get(view.entry.port);
     this.axisMemory.set(view.entry.port, { entry: copyAxis(view.entry), steps: [...view.steps],
-      nativeUnit: port?.unit ?? previous?.nativeUnit ?? null, integer: port?.integer ?? previous?.integer ?? null });
+      nativeUnit: port?.unit ?? previous?.nativeUnit ?? null, grid: port ? port.grid?.step ?? null : previous?.grid ?? null });
   }
 
   recall(port: string): AxisMemory | undefined {
     const kept = this.axisMemory.get(port), offered = this.ports.find(item => item.port === port);
-    if (!kept || (offered && (kept.nativeUnit !== offered.unit || kept.integer !== offered.integer))) return undefined;
+    if (!kept || (offered && (kept.nativeUnit !== offered.unit || kept.grid !== (offered.grid?.step ?? null)))) return undefined;
     return { ...kept, entry: copyAxis(kept.entry), steps: [...kept.steps] };
   }
 
@@ -554,6 +617,8 @@ export class ScanPlanEditor implements NodeEditor {
   }
 
   axisFacts(port: string): AxisFacts | undefined { return this.facts?.axis_facts.find(axis => axis.port === port); }
+  /** An axis's facts while they are of the plan as written now (none between an edit and its preview). */
+  currentFacts(port: string): AxisFacts | undefined { return this.facts?.plan_source === this.planText ? this.axisFacts(port) : undefined; }
   unofferedLeaf(port: string): string | undefined { return this.facts?.unoffered[port]?.leaf; }
   /** A linked axis's place among the plan's linked axes: its group's colour. */
   linkGroup(view: AxisRowView): number { return this.rows.filter(row => row.entry.link_enabled && row.entry.links?.length).indexOf(view); }
@@ -627,6 +692,7 @@ export class ScanPlanEditor implements NodeEditor {
     this.axes.classList.toggle("has-manual", this.rows.some(view => view.manual));
     this.axes.classList.toggle("has-links", this.rows.some(view => view.entry.link_enabled));
     this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, ...(axis.range ? { range: axis.range } : {}), ...(axis.coordinate_of !== undefined ? { coordinate_of: axis.coordinate_of } : {}), mode: axis.mode, value_text: axis.value_text, ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: axis.links ?? [] } : {}) })) });
+    for (const view of this.rows) view.showPlayed();
     this.edit({ plan: this.planText }, "Scan plan");
   }
 
@@ -652,7 +718,7 @@ export class ScanPlanEditor implements NodeEditor {
       const spec: FieldSpec = { name: item.name, label: item.label, kind: item.kind, value: shown(item.value), required: false, allow_none: false,
         unit: symbol, units: item.units.map(([value]) => ({ value, label: value, group: item.families[value] })),
         minimum: shown(item.minimum), maximum: shown(item.maximum), description: item.description,
-        unavailable_reason: item.unavailable_reason, held: this.locked, inexact: true };
+        unavailable_reason: item.unavailable_reason, problem: item.problem, held: this.locked, inexact: true };
       let field = this.apiFields.get(item.name);
       if (!field) {
         field = new Field(`${row.node_id}-api`, spec, {

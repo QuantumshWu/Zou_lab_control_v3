@@ -35,12 +35,19 @@ pub fn read_document(path: &Path) -> Result<(PathBuf, Sequence)> {
 }
 
 // ------------------------------------------------------------ describe
-fn facts(column: &ScanColumnSpec) -> [(&'static str, Json); 3] {
-    [("is_dac", Json::Bool(column.is_dac)), ("limit_lo", Json::Float(column.limit_lo)), ("limit_hi", Json::Float(column.limit_hi))]
+fn facts(column: &ScanColumnSpec) -> [(&'static str, Json); 4] {
+    let grid = Json::object(vec![("step", Json::Float(column.grid.step)), ("ties", Json::str(column.grid.ties.name()))]);
+    [("is_dac", Json::Bool(column.is_dac)), ("limit_lo", Json::Float(column.limit_lo)), ("limit_hi", Json::Float(column.limit_hi)),
+     ("grid", grid)]
 }
 
 /// What a node reads of a pulse: its API fields in the order it plays them
-/// (own unit, authored value, column facts), its scan slots in slot order
+/// (own unit, authored value, column facts: limits, and the grid in the
+/// column's unit a scan plan's values are put on -- scan.compile with the
+/// ports' domains, through the quantizer the binding layer aligns a duration,
+/// a delay or a DAC code with (a count it takes only whole); the board's wire
+/// conversion of a scan slot leaves a value on that grid as it is, and rounds
+/// one off it by its own rule), its scan slots in slot order
 /// (with the value each holds in the pulse, where a plan's default sweep is
 /// centred), the API fields it offers no plan (an empty bracket's count) and
 /// its periods.

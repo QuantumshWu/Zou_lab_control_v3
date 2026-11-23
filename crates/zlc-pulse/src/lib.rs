@@ -7,6 +7,7 @@ pub mod exact;
 pub mod json;
 pub mod num;
 pub mod units;
+pub mod domain;
 pub mod canonical;
 pub mod model;
 pub mod loops;

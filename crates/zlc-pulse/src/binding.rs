@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::codec::{ConfigValues, read_subpulse};
+use crate::domain::WHOLE;
 use crate::error::{Error, Kind, Result, repr, value_error};
 use crate::exact::{Decimal, Ratio};
 use crate::model::{Binding, Bracket, FieldKind, FieldRef, OutputDelay, Sequence, Source, align_to_grid, available_id,
@@ -104,7 +105,7 @@ pub fn replace_pulse_fields(sequence: &Sequence, fields: &[FieldWrite], remove_a
                 let Some(at) = period.analog_steps.iter().position(|step| step.port == port) else {
                     return value_error(format!("{} names no DAC step in period {}", repr(field_name), repr(id)));
                 };
-                let authored = value.to_f64().round_ties_even() as i64;
+                let authored = WHOLE.nearest(value.to_f64()) as i64;
                 let steps = period_steps.entry(id.to_owned()).or_insert_with(|| period.analog_steps.clone());
                 if authored != steps[at].value { steps[at].value = authored; }
             }

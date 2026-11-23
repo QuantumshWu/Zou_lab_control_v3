@@ -150,7 +150,7 @@ fn linked_tuple_dedup_and_existing_coordinate_uniqueness_are_preserved() {
     // violate Axis uniqueness, as in the existing Python data model.
     second.values = vec![4.0, 3.0, 5.0];
     let invalid = Plan::new(PlanSpec { axes: vec![axis("a", &[2.0, 1.0, 2.0], false), second], scan_repeats: 1, run_repeats: 1 });
-    assert!(invalid.unwrap_err().contains("different linked tuples"));
+    assert!(invalid.unwrap_err().contains("of a linked group repeats a coordinate under different points"));
     let mut second = axis("b", &[4.0, 4.0], false); second.coordinate_of = Some("a".into());
     assert!(Plan::new(PlanSpec { axes: vec![axis("a", &[1.0, 2.0], false), second], scan_repeats: 1, run_repeats: 1 }).is_err());
 }

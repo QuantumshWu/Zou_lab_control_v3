@@ -29,6 +29,18 @@ class NativeScanFixture:
 
         context.next_input = forbidden
         context.commit_live = forbidden
+        if self.mode == "authored":
+            # The Seamless Scan node's own build of a draft (`spec["draft"]`), over its pulse as
+            # the core describes it, and what its editor says the plan plays.
+            from zlc_atom.nodes.scan.editor import scan_editor_facts
+            from zlc_atom.nodes.seamless_scan.logic_node import _build
+
+            draft = self.spec["draft"]
+            description = context.core("pulse_describe", document=self.spec["pulse_path"])
+            played = scan_editor_facts(draft, description, ())["axis_facts"][0]["played"]
+            measurement = _build(source_signal=self.source_signal, pulse_resource=description, **draft)
+            result = measurement.execute(context)
+            return {**result, "played": played, "values": list(measurement.plan.axes[0].values)}
         if self.mode == "seamless":
             from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, ScanPort
             from zlc_atom.nodes.scan.seamless import SeamlessScanMeasurement
