@@ -440,11 +440,15 @@
 //! - What stands on them: the step's mean square (estimate.rs `between`, each time by its share of the run); the
 //!   pilot's states there, the model's error and the looks'; the product's looks, batches and unresolved atoms; the prices at one state of every
 //!   trajectory among them (`one_each`).
-//! - What the result shows at an output: its own estimates and their standard errors; its accounts -- the model's
-//!   error, the step's part, the statistics and T's allowance -- on the line through the accounts at the analysis
-//!   times (`assemble`, `accounts_along`), so that the ledger flags where the stop reads, whatever the outputs. (Judged
-//!   on its own statistics, a noisy estimate of the same spread, the pgc3d example stopped at the analysis times was
-//!   flagged at 11 of 1000 outputs, at most 5.4 % with 5.1 % of statistics, and 2 of 100, its reason "not finished".)
+//! - What the result shows at an output: its own estimates and their standard errors, and its accounts (`assemble`,
+//!   `at_outputs`): the statistics its own, read off the trajectories at the output, with T's allowance; the step's
+//!   part of the check's window that holds the output (`Bound::at`: the larger of two at their common end); the model's
+//!   error on the line through its accounts at the analysis times, where it is measured. No statistics or step's part
+//!   is drawn on a line between the analysis times: they are as sparse as the step is long, and a line passes over what
+//!   changes between them -- the class of R9_PUSH's loss, read at the analysis times only (selcost.status.md). (Until
+//!   2026-11-23 every part was on that line, so that the ledger flagged where the stop reads: judged on its own
+//!   statistics, a noisy estimate of the same spread, the pgc3d example stopped at the analysis times was flagged at 11
+//!   of 1000 outputs, at most 5.4 % with 5.1 % of statistics, and 2 of 100, its reason "not finished".)
 //!
 //! # The model (SPEC §5.2)
 //! An attempt's model is one object, made before its trajectories run (RUSTPLAN §3.2; model/selected.rs `Selected`),
@@ -552,6 +556,18 @@
 //! N^{−1/2}; on what is shown they are no less than the unseen share at N (estimate.rs `unseen`, `draws_for`). A batch
 //! brings the trajectories to the number the looks predict, at most to twice the number the prediction rests on
 //! (`batch`).
+//!
+//! ## The outputs' looks
+//! Every displayed output is held to its target, not only the analysis times: between two of them, as sparse as the step
+//! is long, a reading's statistics may peak where no analysis time reads it (R9_PUSH: the loss passes one half between
+//! two of them, and its outputs there read 14 % of statistics against the 5 % target, which the stop at the analysis
+//! times did not see: OLDNEW.report.md §11.5). So the product reads each output's own estimates too, each with its own
+//! accounts (`at_outputs`, `motion_at_outputs`), and chases an output where the evidence of all of them together puts
+//! its true total beyond its target: its total with the statistics at their least among the family of every output
+//! after t = 0 and every quantity held to a target there (`Evidence`; estimate.rs, # Evidence) -- not where the largest
+//! of the outputs' noisy estimates of the same spread lies beyond (the pgc3d example's 11 of 1000 and PGC3D's 16 of 100,
+//! at most 6.1 %, its statistics 5.7 %). A look beyond is chased as one at an analysis time is, its need on its interval
+//! as read; the ledger flags by the same evidence, so that what is flagged is what is chased and could not be met.
 //!
 //! # T's target is on the total temperature
 //! The user's target on T, 10 % relative at the confidence z, is on the total temperature: the mean of the three lab
@@ -4111,22 +4127,32 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
     loop {
         let all: Vec<&Part> = parts.iter().collect();
         let n = all.len() as u64 * GROUP;
-        // The estimates at the analysis times: what the looks and the decisions read (# The analysis times).
+        // The estimates at the analysis times: what the looks and the decisions read (# The analysis times). And the
+        // outputs' own, where the evidence of them all puts a look beyond its target (## The outputs' looks).
         let e = summarize(&reads_of(&all), &context.scales);
         let chased: Vec<Look> = looks(&e, &context.fixed, &context.step, &context.scales).into_iter().filter(Look::fits).collect();
-        if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
-            let (shown, l, c) = pooled(&all, &context.scales);
+        #[cfg(test)]
+        let clock = Instant::now();
+        let (shown, l, c) = pooled(&all, &context.scales);
+        let beyond: Vec<Look> = Evidence::of(context, &shown, &e).beyond(&shown).into_iter().filter(Look::fits).collect();
+        #[cfg(test)]
+        {
+            let mut x = OUTPUT_LOOKS.lock().unwrap();
+            *x = (x.0 + clock.elapsed().as_secs_f64(), x.1 + 1, x.2 + beyond.len());
+        }
+        if (chased.iter().all(Look::met) && beyond.is_empty()) || n >= MOST_TRAJECTORIES {
+            #[cfg(test)]
+            {
+                *LAST_GROUPS.lock().unwrap() = all.iter().filter_map(|p| p.sums.sums.last().cloned()).collect();
+            }
             return (shown, l, c, e);
         }
-        let want = batch(most_needed(&chased), n);
+        let want = batch(crate::linalg::larger(most_needed(&chased), most_needed(&beyond)), n);
         // The batch begun (# Steps): its trajectories, and how far its looks stand from their targets.
         batches += 1;
-        let worst = chased.iter().map(Look::over).fold(0., crate::linalg::larger);
+        let worst = chased.iter().chain(&beyond).map(Look::over).fold(0., crate::linalg::larger);
         messages.stage(Stage { step: Step::Product, tau: Some(context.tau), batch: Some(Batch { number: batches, trajectories: n, want, worst: worst.is_finite().then_some(worst) }) });
-        messages.result(all.len(), n, integrated(&all), left(n, want), || {
-            let (shown, l, c) = pooled(&all, &context.scales);
-            assemble(context, &shown, &e, &l, &c, n)
-        });
+        messages.result(all.len(), n, integrated(&all), left(n, want), || assemble(context, &shown, &e, &l, &c, n));
         let numbers: Vec<u64> = (n / GROUP..want / GROUP).map(number).collect();
         let new = level(run, ensemble, domain, &context.plan, context.tau, &numbers, 0..GROUP, false, messages, &mut |prefix, messages| {
             let all: Vec<&Part> = parts.iter().chain(prefix.iter().copied()).collect();
@@ -5438,43 +5464,160 @@ fn interpolated(at: &[f64], values: &[[f64; 2]], times: &[f64]) -> Vec<[f64; 2]>
         .collect()
 }
 
-/// Accounts at the analysis times `at` at the times `times` (`bracket`): each part on the line through them; a T with no
-/// account on a side has none between.
-fn accounts_along(at: &[f64], population: &[Account], temperature: &[Option<Account>], times: &[f64]) -> (Vec<Account>, Vec<Option<Account>>) {
-    let mix = |x: &Account, y: &Account, s: f64| Account { model: lerp(x.model, y.model, s), step: lerp(x.step, y.step, s), statistics: lerp(x.statistics, y.statistics, s) };
-    times
-        .iter()
-        .map(|&t| {
-            let (a, b, s) = bracket(at, t);
-            let temperature = match (temperature[a], temperature[b]) {
-                (Some(x), Some(y)) => Some(mix(&x, &y, s)),
-                (x, _) if s == 0. => x,
-                (_, y) if s == 1. => y,
-                _ => None,
-            };
-            (mix(&population[a], &population[b], s), temperature)
+/// The model's part of an account at the time t on the line through its parts at the analysis times `at` (`bracket`;
+/// `model(k)` the k-th time's, none where it has no account): none where a side has none, but at that side's own time.
+fn model_along(at: &[f64], model: impl Fn(usize) -> Option<f64>, t: f64) -> Option<f64> {
+    let (a, b, s) = bracket(at, t);
+    match (model(a), model(b)) {
+        (Some(x), Some(y)) => Some(lerp(x, y, s)),
+        (Some(x), _) if s == 0. => Some(x),
+        (_, Some(y)) if s == 1. => Some(y),
+        _ => None,
+    }
+}
+
+/// The accounts at the outputs (module documentation, # The analysis times): of the output's estimate `estimates[k]` at
+/// `times[k]`, the statistics its own (`accounts`' rule: on what is shown the jackknife interval with the unseen share,
+/// on T its relative interval weighed by the held share) and the step's part of the check's window that holds it, the
+/// larger of two at their common end (`Bound::at`), times T's allowance there on T; the model's error on the line through
+/// its accounts at the analysis times `at` (`model_along`) -- what is measured of it is measured there. t = 0's as
+/// `accounts` books it. T has an account where its every part is read, as at the analysis times. With `looks` the
+/// statistics are their least at the evidence of that many reads together (estimate.rs, # Evidence;
+/// `Estimate::shown_statistics_low`, `temperature_interval_low`): what the outputs' looks and the ledger's flags judge by
+/// (`Evidence`), the rest as it is.
+fn at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], (population, temperature): (&[Account], &[Option<Account>]), step: &Bound, looks: Option<f64>) -> (Vec<Account>, Vec<Option<Account>>) {
+    estimates
+        .par_iter()
+        .zip(times)
+        .enumerate()
+        .map(|(k, (e, &t))| {
+            if k == 0 {
+                let temperature = temperature_account(e, 0., 0., e.temperature_interval());
+                return (Account::default(), temperature.statistics.is_finite().then_some(temperature));
+            }
+            let [part, part_t] = step.at(t);
+            let model = model_along(at, |k| Some(population[k].model), t).expect("what is shown has an account at every analysis time");
+            let (shown, interval) = looks.map_or_else(|| (e.shown_statistics(), e.temperature_interval()), |m| (e.shown_statistics_low(m), e.temperature_interval_low(m)));
+            let population = Account { model, step: part, statistics: shown };
+            let temperature = model_along(at, |k| temperature[k].map(|a| a.model), t)
+                .map(|model| Account { model, step: part_t * e.temperature_target, statistics: weighed(1. - e.loss, interval) })
+                .filter(|a| a.model.is_finite() && a.step.is_finite() && a.statistics.is_finite());
+            (population, temperature)
         })
         .unzip()
 }
 
-/// The motion's accounts at the analysis times `at` (`motion_accounts`) at the times `times`: the line through them
-/// (`bracket`), each where it is at both its ends, as T's are (`accounts_along`).
-fn motion_along(at: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]], times: &[f64]) -> Vec<[[Option<(Account, f64)>; 3]; 2]> {
-    let mix = |x: &Account, y: &Account, s: f64| Account { model: lerp(x.model, y.model, s), step: lerp(x.step, y.step, s), statistics: lerp(x.statistics, y.statistics, s) };
-    times
-        .iter()
-        .map(|&t| {
-            let (a, b, s) = bracket(at, t);
+/// The motion's accounts at the outputs (`motion_accounts` read as `at_outputs` reads T's): per lab axis of the mean
+/// velocity and the push, of the output's estimate, the statistics' jackknife interval weighed by the held share and the
+/// step's part of the window that holds it (`Bound::motion_at`) times the target there (`velocity_target`,
+/// `push_target`); the model's error on the line through its accounts at the analysis times `at` (`model_along`). None at
+/// t = 0 (no push), nor where fewer than two atoms are held, nor where a part is unread. With `looks` the statistics'
+/// least at that evidence (`Spread::interval_low`), as `at_outputs` takes it.
+fn motion_at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]], step: &Bound, scales: &Scales, looks: Option<f64>) -> Vec<[[Option<(Account, f64)>; 3]; 2]> {
+    let hm = scales.hbar_over_mass;
+    estimates
+        .par_iter()
+        .zip(times)
+        .enumerate()
+        .map(|(k, (e, &t))| {
+            let (Some(m), true) = (e.motion.as_ref(), k > 0) else { return [[None; 3]; 2] };
+            let half: V3 = scales.frequencies.map(|w| half_window(w, t));
+            let (part, held) = (step.motion_at(t), 1. - e.loss);
+            let values = [m.mean_velocity, m.push];
+            let errors = [m.mean_velocity_errors, m.push_errors];
             std::array::from_fn(|i| {
-                std::array::from_fn(|q| match (motion[a][i][q], motion[b][i][q]) {
-                    (Some((x, tx)), Some((y, ty))) => Some((mix(&x, &y, s), lerp(tx, ty, s))),
-                    (x, _) if s == 0. => x,
-                    (_, y) if s == 1. => y,
-                    _ => None,
+                std::array::from_fn(|a| {
+                    let model = model_along(at, |k| motion[k][i][a].map(|(account, _)| account.model), t)?;
+                    let target = if i == 0 { velocity_target(values[i][a], e.scale, hm) } else { push_target(values[i][a], e.scale, hm, half[a]) };
+                    let interval = looks.map_or_else(|| errors[i][a].interval(), |m| errors[i][a].interval_low(m));
+                    let account = Account { model, step: part[i][a] * target, statistics: weighed(held, interval) };
+                    (account.model.is_finite() && account.step.is_finite() && account.statistics.is_finite() && target.is_finite()).then_some((account, target))
                 })
             })
         })
         .collect()
+}
+
+/// The quantities held to a target at an output (module documentation, # Stopping): what is shown, the total T, and
+/// per lab axis the mean velocity and the push.
+const OUTPUT_QUANTITIES: usize = 8;
+
+/// The outputs' accounts as they read and as the evidence reads them (module documentation, # Stopping, ## The outputs'
+/// looks): each output's own (`at_outputs`, `motion_at_outputs`), and the same with the statistics at their least among
+/// the family of every output after t = 0 and every quantity held to a target there (estimate.rs, # Evidence) -- what
+/// the product chases and the ledger flags by.
+struct Evidence {
+    shown: (Vec<Account>, Vec<Option<Account>>),
+    least: (Vec<Account>, Vec<Option<Account>>),
+    motion: Vec<[[Option<(Account, f64)>; 3]; 2]>,
+    motion_least: Vec<[[Option<(Account, f64)>; 3]; 2]>,
+}
+impl Evidence {
+    /// Of the estimates at the outputs `estimates` and at the analysis times `reads` (the model's error is read there,
+    /// and at each output its own where the choice gives it there: `Fixed::outputs`, `outputs_model` -- the line through
+    /// the analysis times' misses what changes between them; the stop and the ledger read the same).
+    fn of(c: &Context, estimates: &[Estimate], reads: &[Estimate]) -> Evidence {
+        let times = &c.plan.times;
+        let looks = (OUTPUT_QUANTITIES * times.len().saturating_sub(1)).max(1) as f64;
+        let (population, temperature) = accounts(reads, &c.fixed, &c.step);
+        let at_motion = motion_accounts(reads, &c.fixed, &c.step, &c.scales);
+        let of = |looks: Option<f64>| at_outputs(estimates, times, &c.at, (&population, &temperature), &c.step, looks);
+        let motion = |looks: Option<f64>| motion_at_outputs(estimates, times, &c.at, &at_motion, &c.step, &c.scales, looks);
+        let mut e = Evidence { shown: of(None), least: of(Some(looks)), motion: motion(None), motion_least: motion(Some(looks)) };
+        if let Some(o) = c.fixed.outputs.as_deref() {
+            let (own, own_temperature) = accounts(estimates, o, &c.step);
+            let own_motion = motion_accounts(estimates, o, &c.step, &c.scales);
+            for (population, temperature) in [&mut e.shown, &mut e.least] {
+                for (p, o) in population.iter_mut().zip(&own) {
+                    p.model = o.model;
+                }
+                for (t, o) in temperature.iter_mut().zip(&own_temperature) {
+                    if let (Some(t), Some(o)) = (t.as_mut(), o) {
+                        t.model = o.model;
+                    }
+                }
+            }
+            for motion in [&mut e.motion, &mut e.motion_least] {
+                for (m, o) in motion.iter_mut().zip(&own_motion) {
+                    for (mi, oi) in m.iter_mut().zip(o) {
+                        for (x, y) in mi.iter_mut().zip(oi) {
+                            if let (Some((x, _)), Some((y, _))) = (x.as_mut(), y) {
+                                x.model = y.model;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        e
+    }
+    /// The outputs' looks the evidence puts beyond their targets (`Look`, as `looks` makes them at the analysis times):
+    /// where the total with the statistics at their least is beyond the target -- the true error is, at the family's
+    /// confidence --, each with its account and interval as they read, which its need is predicted on.
+    fn beyond(&self, estimates: &[Estimate]) -> Vec<Look> {
+        let mut out = vec![];
+        for (k, e) in estimates.iter().enumerate().skip(1) {
+            let n = e.trajectories;
+            if !(self.least.0[k].total() <= POPULATION_TARGET) {
+                out.push(Look { target: POPULATION_TARGET, account: self.shown.0[k], interval: e.shown_interval(), trajectories: n, shown: true });
+            }
+            if let (Some(account), Some(least)) = (self.shown.1[k], self.least.1[k]) {
+                if !(least.total() <= e.temperature_target) {
+                    out.push(Look { target: e.temperature_target, account, interval: account.statistics, trajectories: n, shown: false });
+                }
+            }
+            for (row, least) in self.motion[k].iter().zip(&self.motion_least[k]) {
+                for (x, y) in row.iter().zip(least) {
+                    if let (Some((account, target)), Some((least, _))) = (x, y) {
+                        if !(least.total() <= *target) {
+                            out.push(Look { target: *target, account: *account, interval: account.statistics, trajectories: n, shown: false });
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// The trajectories that ended with no outcome (`Counts`; module documentation, # Exits), by why, in the result's words:
@@ -5512,38 +5655,42 @@ fn step_reading(run: f64, step: f64) -> String {
     significant(step, count.to_string().len() as i32 + 1).to_string()
 }
 
+/// (Tests alone: the outputs' looks' cost in a solve's product -- the wall time of the outputs' estimates and their
+/// evidence a batch (s), the batches, the looks put beyond -- OLDNEW's measurement.)
+#[cfg(test)]
+pub(crate) static OUTPUT_LOOKS: std::sync::Mutex<(f64, usize, usize)> = std::sync::Mutex::new((0., 0, 0));
+
+/// (Tests alone: the product's groups' sums at the last output, in the order the product holds them -- the pilot's, its
+/// further pairs', the batches' -- OLDNEW's check of the statistics.)
+#[cfg(test)]
+pub(crate) static LAST_GROUPS: std::sync::Mutex<Vec<crate::estimate::Sums>> = std::sync::Mutex::new(Vec::new());
+
+/// (Tests alone: the last output's standard errors of a solve's last result, its rows as shown and its loss, and its
+/// groups -- OLDNEW's seeds check of the statistics.)
+#[cfg(test)]
+pub(crate) static LAST_ERRORS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
 /// The result of the estimates of `trajectories` trajectories (contract §2.2): what is shown at t = 0 the request's
 /// initial state, the motion there the initial atoms' as at every output (module documentation, # Outputs and windows);
 /// an output with no atom held carries the last one's populations, one with fewer than two atoms the last T read with
 /// its judgement of the validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
 /// jackknife reads no error (some group's removal leaves fewer than two atoms) says so; each flagged, apart.
 fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
+    #[cfg(test)]
+    if let Some(e) = estimates.last() {
+        *LAST_ERRORS.lock().unwrap() = e.shown_errors.iter().map(|x| x.error).chain([e.loss_error.error, e.loss_error.groups]).collect();
+    }
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;
     let classical = |t: &V3| -> [bool; 3] { std::array::from_fn(|a| classical(t[a], w[a])) };
     let mut ledger = c.ledger.clone();
-    // The accounts the run's decisions and its stop stand on, at the analysis times of the estimates `reads`, and at the
-    // outputs the line through them (# The analysis times): the ledger flags where the stop reads -- not an output's own
-    // statistics, a noisy estimate of the same spread, the largest of a thousand of them above it --, and so do T's
-    // allowances. The model's error at the outputs likewise, for what is read of it there.
-    let (at_reads, at_temperature) = accounts(reads, &c.fixed, &c.step);
-    let (mut population, mut temperature) = accounts_along(&c.at, &at_reads, &at_temperature, times);
-    // The model's part at each output its own where the choice gives it there (`Fixed::outputs`, `outputs_model`): the
-    // line through the analysis times' misses what changes between them. The step's and the statistics' parts stay as the
-    // decisions read them.
-    let at_outputs = c.fixed.outputs.as_deref().map(|o| (accounts(estimates, o, &c.step), motion_accounts(estimates, o, &c.step, &c.scales)));
-    if let Some(((own, own_temperature), _)) = &at_outputs {
-        for (p, o) in population.iter_mut().zip(own) {
-            p.model = o.model;
-        }
-        for (t, o) in temperature.iter_mut().zip(own_temperature) {
-            if let (Some(t), Some(o)) = (t.as_mut(), o) {
-                t.model = o.model;
-            }
-        }
-    }
-    let allowed: Vec<f64> = times.iter().map(|&t| bracket(&c.at, t)).map(|(a, b, s)| lerp(reads[a].temperature_target, reads[b].temperature_target, s)).collect();
+    // The accounts at the outputs (# The analysis times, `at_outputs`, `Evidence`): each output's statistics and T's
+    // allowance its own, the step's part its window's, the model's error its own where the choice gives it there
+    // (`Fixed::outputs`), else on the line through the accounts at the analysis times of the estimates `reads`.
+    let evidence = Evidence::of(c, estimates, reads);
+    let (population, temperature) = evidence.shown.clone();
+    let allowed: Vec<f64> = estimates.iter().map(|e| e.temperature_target).collect();
     let model = c.fixed.outputs.as_deref().map_or_else(|| interpolated(&c.at, &c.fixed.model, times), |o| o.model.clone());
     // The step's item: the largest it is booked at over the accounts (weighed by the held share as the totals are). And
     // the check in the method's words: the steps compared, the pairs, the resolution, and what is booked -- what the
@@ -5603,22 +5750,9 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
         let largest = (1..reads.len()).map(|k| if i == 0 { dropped[k][0] } else if reads[k].motion.is_some() { weighed(1. - reads[k].loss, dropped[k][1]) } else { 0. }).fold(0., crate::linalg::larger);
         ledger.item(&format!("模型删去的项（{what}）"), largest, &format!("建模型时按严格界删去的项：它们让状态在迹距离上至多偏离 D(t) = ½(e^{{2Yt}} − 1) ≈ t·Y（Y 是模型给出的增长率上界）；布居上计 D，温度上按束缚原子动能的上限（阱深 U₀ = {:.0} μK）严格计入", c.fixed.escape.kinetic_uk()));
     }
-    ledger.close(times, &population, &temperature, &allowed);
-    // The motion's accounts likewise (`motion_accounts`), at the outputs the line through the analysis times'.
-    let at_motion = motion_accounts(reads, &c.fixed, &c.step, &c.scales);
-    let mut motion = motion_along(&c.at, &at_motion, times);
-    if let Some((_, own)) = &at_outputs {
-        for (m, o) in motion.iter_mut().zip(own) {
-            for (mi, oi) in m.iter_mut().zip(o) {
-                for (x, y) in mi.iter_mut().zip(oi) {
-                    if let (Some((x, _)), Some((y, _))) = (x.as_mut(), y) {
-                        x.model = y.model;
-                    }
-                }
-            }
-        }
-    }
-    ledger.close_motion(times, &motion);
+    ledger.close(times, (&population, &temperature), (&evidence.least.0, &evidence.least.1), &allowed);
+    // The motion's accounts likewise (`motion_at_outputs`): the model's error on the line through the analysis times'.
+    ledger.close_motion(times, &evidence.motion, &evidence.motion_least);
     let mut s = Solution {
         populations: Vec::with_capacity(outputs),
         estimated_errors: population.iter().map(Account::total).collect(),
@@ -5716,7 +5850,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     }
     // The mean velocity and the push shown where some part of their accounts is unread -- their model error, until the
     // selection's conversion gives it (estimate.rs `MotionError::UNREAD`), or their step's or their statistics'.
-    let unaccounted: Vec<usize> = (1..outputs).filter(|&k| estimates[k].motion.is_some() && motion[k].iter().flatten().any(Option::is_none)).collect();
+    let unaccounted: Vec<usize> = (1..outputs).filter(|&k| estimates[k].motion.is_some() && evidence.motion[k].iter().flatten().any(Option::is_none)).collect();
     if !unaccounted.is_empty() {
         s.approximations.flag(format!("{}：平均速度与推力的误差账不全（模型近似的误差尚未估计，或原子太少），这两个读数只给统计误差", span(&unaccounted, times)));
     }
@@ -8307,7 +8441,8 @@ mod tests {
 
     /// The model's error at the outputs is the line through its values at the analysis times (`interpolated`): held at
     /// the first one after t = 0 before it and at the last after it, t = 0's own at t = 0, unbounded on a side
-    /// unbounded; with the run's two ends alone, the end's value at every output after t = 0.
+    /// unbounded; with the run's two ends alone, the end's value at every output after t = 0. And an output's accounts
+    /// (`at_outputs`): the model's part on that line, the statistics and the step's part its own.
     #[test]
     fn the_outputs_read_the_line_through_the_analysis_times() {
         let (at, values) = ([0., 1., 3.], [[0., 0.], [0.1, 1.], [0.3, f64::INFINITY]]);
@@ -8315,13 +8450,23 @@ mod tests {
         assert_eq!(got[..3], [[0., 0.], [0.1, 1.], [0.1, 1.]]);
         assert!((got[3][0] - 0.2).abs() < 1e-15 && got[3][1] == f64::INFINITY && got[4] == [0.3, f64::INFINITY] && got[5] == [0.3, f64::INFINITY], "{got:?}");
         assert_eq!(interpolated(&[0., 2.], &[[0.; 2], [0.05, 0.1]], &[0., 0.7, 2.]), [[0.; 2], [0.05, 0.1], [0.05, 0.1]]);
-        // The accounts likewise, part by part: the ledger's at an output are the stop's at the analysis times about it;
-        // a T with no account on a side has none between, and its own at an analysis time.
+        // The accounts at the outputs (`at_outputs`): the model's part on that line, a T with no account on a side none
+        // between, and its own at an analysis time; the statistics each output's own estimate's; the step's part its
+        // window's, the larger of two at their common end -- none of them on a line.
         let account = |x: f64| Account { model: x, step: 0.02, statistics: 2. * x };
-        let (population, temperature) = accounts_along(&at, &[Account::default(), account(0.01), account(0.03)], &[Some(account(0.)), Some(account(0.01)), None], &[0., 0.5, 2., 3.]);
-        assert_eq!((population[1], population[3]), (account(0.01), account(0.03)));
-        assert!((population[2].model - 0.02).abs() < 1e-15 && (population[2].statistics - 0.04).abs() < 1e-15 && population[2].step == 0.02, "{population:?}");
-        assert_eq!(temperature, [Some(account(0.)), Some(account(0.01)), None, None]);
+        let step = Bound { windows: vec![[0., 1.], [1., 3.]], shown: vec![0.01, 0.03], temperature: vec![0.2, 0.1], motion: vec![[[0.; 3]; 2]; 2] };
+        let times = [0., 0.5, 1., 2., 3.];
+        let estimates: Vec<Estimate> = times.iter().map(|&t| estimate([10.; 3], 0.1 + 0.1 * t, 88.)).collect();
+        let (population, temperature) = at_outputs(&estimates, &times, &at, (&[Account::default(), account(0.01), account(0.03)], &[Some(account(0.)), Some(account(0.01)), None]), &step, None);
+        assert_eq!(population[0], Account::default());
+        assert_eq!(population.iter().skip(1).map(|a| a.step).collect::<Vec<_>>(), [0.01, 0.03, 0.03, 0.03]);
+        assert!((population[3].model - 0.02).abs() < 1e-15 && population[1].model == 0.01 && population[4].model == 0.03, "{population:?}");
+        assert!(population.iter().zip(&estimates).all(|(a, e)| a.statistics == e.shown_statistics() || a == &population[0]), "{population:?}");
+        assert!(temperature[3].is_none() && temperature[4].is_none(), "{temperature:?}");
+        for k in 1..3 {
+            let (a, e) = (temperature[k].expect("T read between two accounts"), &estimates[k]);
+            assert_eq!((a.model, a.step, a.statistics), (0.01, step.at(times[k])[1] * e.temperature_target, e.temperature_interval()), "{k}: {a:?}");
+        }
     }
 
     /// The guard's class test's step (µs).

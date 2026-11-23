@@ -223,6 +223,18 @@
 //! keeps that probability at p -- exactly for independent reads, and at most p for the correlated reads of outputs that
 //! share their trajectories (Šidák's inequality for the centred multivariate normal).
 //!
+//! # Evidence
+//! Whether a quantity's true error is beyond what its target leaves the statistics is read on its interval, itself an
+//! estimate: its standard error s, read on ν = g − 1 degrees of freedom, scatters about σ as ν s²/σ² ~ χ²_ν for normal
+//! group means (the assumption Student's t makes), by √(1/(2ν)) relative -- 15 % at twenty groups. Among the m reads of
+//! a family (every output and every quantity held to a target there: solve.rs, # Stopping) the largest estimate stands
+//! above its σ by chance, and the evidence that some σ is larger than a bound is its least, s √(ν/q) at the χ²_ν
+//! quantile q above which Šidák's tail among the m lies (`Spread::interval_low`): a σ within the bound reads beyond it
+//! at some read of the family with a chance of at most p = P(|N| > z), exactly for independent reads and at most that
+//! for the outputs' correlated ones (Šidák's inequality). (The largest of PGC3D's 100 outputs' own estimates read the
+//! shown error 6.1 % against the target 5 %, its statistics 5.7 %, on 22 groups where the stop's reads at the analysis
+//! times stood within: measured, OLDNEW.report.md §11.5.)
+//!
 //! # What no trajectory saw
 //! A share that n of N independent draws met is bounded at the confidence z by the far end of Wilson's score interval
 //! (`wilson`); at a count of zero, z²/(N + z²) (`unseen`): one function for every such share -- an output's statistics,
@@ -480,6 +492,23 @@ impl Spread {
     /// Its interval at the confidence z among `looks` reads, one at least (module documentation, # Many looks): the
     /// quantile at Šidák's tail of Student's t at the groups that read it less one, the normal's on unlimited groups, times
     /// its standard error; unbounded when unread.
+    /// The least its interval at one look can be, at the evidence of `looks` reads together (module documentation,
+    /// # Evidence): its standard error s is read on ν = g − 1 degrees of freedom, and ν s²/σ² is χ²_ν for normal group
+    /// means (as Student's t takes them, `interval_over`), so the true σ is at least s √(ν/q), q the χ²_ν quantile above
+    /// which Šidák's tail among the looks lies (`tail_among`, `chi_square_quantile`): σ below that at some look of the
+    /// family has a chance of at most p = P(|N| > z). The interval at one look times √(ν/q); none where it is unread or
+    /// none -- no evidence of anything.
+    pub fn interval_low(&self, looks: f64) -> f64 {
+        if !self.read() || self.error == 0. {
+            return 0.;
+        }
+        // Unlimited groups: the error is known, its interval its least.
+        if self.groups == f64::INFINITY {
+            return self.interval();
+        }
+        let freedom = (self.groups.floor() - 1.) as u64;
+        self.interval() * (freedom as f64 / chi_square_quantile(tail_among(looks), freedom)).sqrt()
+    }
     pub fn interval_over(&self, looks: f64) -> f64 {
         if !self.read() {
             return f64::INFINITY;
@@ -505,6 +534,36 @@ pub(crate) fn quantile(tail: f64, freedom: Option<u64>) -> f64 {
     KEPT.with(|kept| {
         *kept.borrow_mut().entry((tail.to_bits(), freedom)).or_insert_with(|| {
             let (mut low, mut high) = (0., 1.);
+            while beyond(high) > tail {
+                low = high;
+                high *= 2.;
+            }
+            loop {
+                let m = 0.5 * (low + high);
+                if !(m > low && m < high) {
+                    break high;
+                }
+                if beyond(m) > tail {
+                    low = m;
+                } else {
+                    high = m;
+                }
+            }
+        })
+    })
+}
+
+/// The q with P(χ²_ν > q) = `tail` at ν ≥ 1 degrees of freedom, P(χ²_ν > q) = Q(ν/2, q/2) (special.rs `upper`), by bisection
+/// on the tail to the last bit; kept per thread, a pure function of both.
+pub(crate) fn chi_square_quantile(tail: f64, freedom: u64) -> f64 {
+    thread_local! {
+        static KEPT: std::cell::RefCell<std::collections::HashMap<(u64, u64), f64>> = Default::default();
+    }
+    let s = 0.5 * freedom as f64;
+    let beyond = |q: f64| upper(s, 0.5 * q);
+    KEPT.with(|kept| {
+        *kept.borrow_mut().entry((tail.to_bits(), freedom)).or_insert_with(|| {
+            let (mut low, mut high) = (0., freedom as f64 + 1.);
             while beyond(high) > tail {
                 low = high;
                 high *= 2.;
@@ -872,6 +931,18 @@ impl Estimate {
     pub fn shown_statistics(&self) -> f64 {
         let interval = crate::linalg::larger(self.shown_interval(), unseen(self.trajectories));
         if interval.is_nan() { 1. } else { crate::linalg::smaller(interval, 1.) }
+    }
+    /// The least the statistics' error of what is shown can be at the evidence of `looks` reads together (module
+    /// documentation, # Evidence; `shown_statistics` with each row's and the loss's least interval, `Spread::interval_low`):
+    /// at least what the trajectories leave unseen, which is no estimate, and at most one.
+    pub fn shown_statistics_low(&self, looks: f64) -> f64 {
+        let least = self.shown_errors.iter().map(|s| s.interval_low(looks)).fold(self.loss_error.interval_low(looks), crate::linalg::larger);
+        crate::linalg::smaller(crate::linalg::larger(least, unseen(self.trajectories)), 1.)
+    }
+    /// The least the total T's interval can be at the evidence of `looks` reads together, relative to it
+    /// (`temperature_interval`, `Spread::interval_low`); none where T is not read.
+    pub fn temperature_interval_low(&self, looks: f64) -> f64 {
+        self.motion.as_ref().filter(|m| !(m.temperature_total <= 0.)).map_or(0., |m| m.temperature_total_error.interval_low(looks) / m.temperature_total)
     }
     /// The interval of the total T (the mean over the lab axes) at the confidence z, relative to it; unbounded where T
     /// is not read, or is none (atoms that do not move: no error is relative to it).
@@ -1610,6 +1681,25 @@ mod tests {
         let far = quantile(2e-300, None);
         assert!(normal_tail(far) <= 2e-300 && normal_tail(far.next_down()) > 2e-300, "{far}");
         assert_eq!(quantile(1., None), f64::from_bits(1));
+    }
+
+    /// The χ² quantile (`chi_square_quantile`) against the tables -- ν = 10 at the tail 0.05, 18.307; ν = 1000, where
+    /// Γ(ν/2) leaves the format (special.rs `upper` in logarithms), 1074.68 -- and its tail's inverse to the last bit; the
+    /// evidence's least interval (`Spread::interval_low`): ν s²/q of the interval squared, none unread, z's own on
+    /// unlimited groups, and lower at more looks.
+    #[test]
+    fn the_evidence_reads_the_chi_square_tail() {
+        assert!((chi_square_quantile(0.05, 10) - 18.307038).abs() < 1e-5, "{}", chi_square_quantile(0.05, 10));
+        assert!((chi_square_quantile(0.05, 1000) - 1074.679).abs() < 1e-2, "{}", chi_square_quantile(0.05, 1000));
+        for (tail, nu) in [(0.5, 1), (0.05, 21), (1e-4, 21), (1e-6, 2047)] {
+            let q = chi_square_quantile(tail, nu);
+            let beyond = |q: f64| upper(0.5 * nu as f64, 0.5 * q);
+            assert!(beyond(q) <= tail && beyond(q.next_down()) > tail, "{nu} at {tail}: {q}");
+        }
+        let s = Spread { error: 1., groups: 22. };
+        let q = chi_square_quantile(tail_among(800.), 21);
+        assert!((s.interval_low(800.) - s.interval() * (21. / q).sqrt()).abs() < 1e-15 && s.interval_low(800.) < s.interval_low(8.) && s.interval_low(8.) < s.interval());
+        assert_eq!((Spread::UNREAD.interval_low(800.), Spread { error: 1., groups: f64::INFINITY }.interval_low(800.)), (0., CONFIDENCE));
     }
 
     /// The interval over many looks (Šidák): one look reads z itself on unlimited groups; m looks read the quantile q

@@ -25,6 +25,16 @@ pub fn gamma(s: f64) -> f64 {
     g
 }
 
+/// ln Γ(s) at a positive multiple of ½, as `gamma` makes Γ(s), its factors' logarithms summed: finite at every s.
+pub fn ln_gamma(s: f64) -> f64 {
+    let (mut g, mut t) = if (2. * s) as i64 % 2 == 0 { (0., 1.) } else { (0.5 * PI.ln(), 0.5) };
+    while t < s {
+        g += t.ln();
+        t += 1.;
+    }
+    g
+}
+
 /// Whether the lower function's series is the expansion to take at x (module documentation): below s + 1.
 #[inline]
 pub fn by_series(s: f64, x: f64) -> bool {
@@ -77,11 +87,17 @@ fn fraction(s: f64, x: f64) -> f64 {
 }
 
 /// Q(s, x), the regularized upper incomplete gamma function, for x ≥ 0 and s a positive multiple of ½ (`gamma`): one less
-/// the lower one by its series below s + 1, by its continued fraction from there on.
+/// the lower one by its series below s + 1, by its continued fraction from there on. Beyond s = 170, where Γ(s) leaves
+/// the format, the leading factor x^s e^{−x}/Γ(s) is taken in logarithms (`ln_gamma`): the χ² tails of many groups'
+/// variances (estimate.rs `Spread::interval_low`); below it the product as it always was, to the bit.
 #[inline]
 pub fn upper(s: f64, x: f64) -> f64 {
     if !(x > 0.) {
         return 1.;
+    }
+    if s > 170. {
+        let power = s * x.ln() - x;
+        return if by_series(s, x) { 1. - (power - ln_gamma(s + 1.)).exp() * (1. + series(s, x)) } else { (power - ln_gamma(s)).exp() * fraction(s, x) };
     }
     let power = (s * x.ln() - x).exp();
     if by_series(s, x) {

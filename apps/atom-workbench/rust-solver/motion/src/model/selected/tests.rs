@@ -1224,6 +1224,10 @@ mod drops;
 #[path = "steps.rs"]
 mod steps;
 
+// OLDNEW item C: the node off tables of pair products against the node (ignored, by name).
+#[path = "oldnew.rs"]
+mod oldnew;
+
 /// The selection's report (`Selected::report`): P state by state, the states folded, and the selection's notes -- the
 /// structural chain, its candidates' sizes from G up (`Selection::notes`) -- on R10_NODE, G's run.
 #[test]

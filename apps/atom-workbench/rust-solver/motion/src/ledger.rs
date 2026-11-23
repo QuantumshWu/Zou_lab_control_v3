@@ -110,9 +110,9 @@ impl Ledger {
     /// The held atoms' mean velocity's and push's accounts at the outputs at `times` (µs), per lab axis where it has one
     /// with its target there (estimate.rs `velocity_target`, `push_target`): their totals, at the axis and the output
     /// where the a-priori part takes most of its target, and a flag for each axis and quantity where some output's total
-    /// lies beyond its target (or is no number), its largest and its parts as shares of its target there. After
-    /// `close`.
-    pub fn close_motion(&mut self, times: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]]) {
+    /// lies beyond its target (or is no number) by the evidence -- its account with the statistics at their least,
+    /// `least` (solve.rs `Evidence`) --, its largest and its parts as shares of its target there. After `close`.
+    pub fn close_motion(&mut self, times: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]], least: &[[[Option<(Account, f64)>; 3]; 2]]) {
         for (i, what) in ["平均速度", "推力"].into_iter().enumerate() {
             let mut most: Option<(f64, Total)> = None;
             for a in 0..3 {
@@ -124,13 +124,13 @@ impl Ledger {
                         }
                     }
                 }
-                let beyond: Vec<usize> = (0..times.len()).filter(|&k| motion[k][i][a].is_some_and(|(account, target)| !(account.total() <= target))).collect();
+                let beyond: Vec<usize> = (0..times.len()).filter(|&k| motion[k][i][a].is_some() && least[k][i][a].is_some_and(|(account, target)| !(account.total() <= target))).collect();
                 let over = |k: usize| motion[k][i][a].map_or(0., |(account, target)| account.total() / target);
                 if let Some(&worst) = beyond.iter().max_by(|&&x, &&y| over(x).total_cmp(&over(y))) {
                     let (account, target) = motion[worst][i][a].expect("an account beyond its target");
                     let of = |x: f64| significant(x / target, 2);
                     self.flag(format!(
-                        "{}：{} 轴{what}的估计误差超出目标，最大为目标的 {} 倍（模型近似 {}、时间步长 {}、统计 {} 倍）",
+                        "{}：{} 轴{what}的误差超出目标（统计按全部输出一起的证据），估计最大为目标的 {} 倍（模型近似 {}、时间步长 {}、统计 {} 倍）",
                         span(&beyond, times),
                         ["x", "y", "z"][a],
                         of(account.total()),
@@ -150,20 +150,23 @@ impl Ledger {
     }
     /// The items from the largest estimate down, the totals and the flags of the outputs at `times` (µs): the populations'
     /// accounts at every output and the total T's (the mean over the lab axes: what T's target is on, SPEC §4) where it
-    /// has one, against T's allowance at each output, `allowed` (relative; solve.rs, # T's allowance).
-    pub fn close(&mut self, times: &[f64], population: &[Account], temperature: &[Option<Account>], allowed: &[f64]) {
+    /// has one, against T's allowance at each output, `allowed` (relative; solve.rs, # T's allowance). An output is
+    /// flagged where the evidence puts it beyond its target: its account with the statistics at their least, `least`
+    /// (solve.rs `Evidence`; estimate.rs, # Evidence) -- the outputs the product chases --, its parts said as they read.
+    pub fn close(&mut self, times: &[f64], (population, temperature): (&[Account], &[Option<Account>]), least: (&[Account], &[Option<Account>]), allowed: &[f64]) {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
         let fixed = vec![POPULATION_TARGET; times.len()];
         self.totals = Totals { population: largest(&populations, &fixed), temperature: largest(temperature, allowed), ..self.totals };
-        for (accounts, targets, what) in [(&populations[..], &fixed[..], "布居与丢失"), (temperature, allowed, "总温度")] {
-            // Not within the target: beyond it, or no number. The worst: of the most of its target.
+        let least_populations: Vec<Option<Account>> = least.0.iter().map(|&a| Some(a)).collect();
+        for (accounts, evidence, targets, what) in [(&populations[..], &least_populations[..], &fixed[..], "布居与丢失"), (temperature, least.1, allowed, "总温度")] {
+            // Not within the target by the evidence: beyond it, or no number. The worst: of the most of its target as read.
             let beyond: Vec<usize> =
-                (0..times.len()).filter(|&k| accounts[k].is_some_and(|a| !(a.total() <= targets[k]))).collect();
+                (0..times.len()).filter(|&k| accounts[k].is_some() && evidence[k].is_some_and(|a| !(a.total() <= targets[k]))).collect();
             if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| (accounts[i].unwrap().total() / targets[i]).total_cmp(&(accounts[j].unwrap().total() / targets[j]))) {
                 let a = accounts[worst].unwrap();
                 self.flag(format!(
-                    "{}：{what}的估计误差超出目标，最大 {}（目标 {}；模型近似 {}、时间步长 {}、统计 {}）",
+                    "{}：{what}的误差超出目标（统计按全部输出一起的证据），估计最大 {}（目标 {}；模型近似 {}、时间步长 {}、统计 {}）",
                     span(&beyond, times),
                     percent(a.total()),
                     percent(targets[worst]),
@@ -282,7 +285,7 @@ mod tests {
         let within = vec![account(0.01, 0.0224, 0.03); 6];
         let read = vec![Some(account(0.01, 0.0447, 0.05)); 6];
         let mut quiet = Ledger::default();
-        quiet.close(&times, &within, &read, &[TEMPERATURE_TARGET; 6]);
+        quiet.close(&times, (&within, &read), (&within, &read), &[TEMPERATURE_TARGET; 6]);
         assert_eq!((quiet.flagged.as_ref(), quiet.note.as_ref()), (None, None));
         assert!((quiet.totals.population.error - within[0].a_priori()).abs() < 1e-16 && quiet.totals.population.target == POPULATION_TARGET);
 
@@ -294,12 +297,18 @@ mod tests {
         temperature[4] = Some(account(0.06, 0.0447, 0.02));
         temperature[5] = None;
         let mut l = Ledger::default();
-        l.close(&times, &population, &temperature, &[TEMPERATURE_TARGET; 6]);
+        l.close(&times, (&population, &temperature), (&population, &temperature), &[TEMPERATURE_TARGET; 6]);
         assert!((l.totals.population.error - population[3].a_priori()).abs() < 1e-16);
         assert_eq!(l.totals.temperature.error, temperature[4].unwrap().a_priori(), "the statistics take no part");
         let flagged = l.flagged.unwrap();
-        assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与丢失的估计误差超出目标，最大 6.5%（目标 5%；模型近似 1%、时间步长 2.2%、统计 6%）"), "{flagged}");
-        assert!(flagged.ends_with("；500 μs：总温度的估计误差超出目标，最大 20%（目标 10%；模型近似 0%、时间步长 4.5%、统计 20%）"), "{flagged}");
+        assert!(flagged.starts_with("750 μs 至 1.25 ms 之间 2 个时刻：布居与丢失的误差超出目标（统计按全部输出一起的证据），估计最大 6.5%（目标 5%；模型近似 1%、时间步长 2.2%、统计 6%）"), "{flagged}");
+        assert!(flagged.ends_with("；500 μs：总温度的误差超出目标（统计按全部输出一起的证据），估计最大 20%（目标 10%；模型近似 0%、时间步长 4.5%、统计 20%）"), "{flagged}");
+        // Beyond as read, within by the evidence (the statistics at their least, here two thirds): no flag.
+        let least = |a: &Account| Account { statistics: a.statistics * 2. / 3., ..*a };
+        let mut e = Ledger::default();
+        let (p, t): (Vec<Account>, Vec<Option<Account>>) = (population.iter().map(least).collect(), temperature.iter().map(|a| a.as_ref().map(least)).collect());
+        e.close(&times, (&population, &temperature), (&p, &t), &[TEMPERATURE_TARGET; 6]);
+        assert_eq!(e.flagged.as_deref().map(|f| f.contains("布居与丢失")), Some(false), "{:?}", e.flagged);
     }
 
     /// An item below u·ε is none, the others have their places; the items come out largest first.
@@ -307,7 +316,7 @@ mod tests {
     fn items_are_the_approximations_that_count() {
         let mut l = Ledger::default();
         assert_eq!((l.item("small", 1e-3, ""), l.item("nothing", 1e-32, ""), l.item("step", 0.022, "")), (Some(0), None, Some(1)));
-        l.close(&[0., 1.], &[Account::default(); 2], &[None; 2], &[TEMPERATURE_TARGET; 2]);
+        l.close(&[0., 1.], (&[Account::default(); 2], &[None; 2]), (&[Account::default(); 2], &[None; 2]), &[TEMPERATURE_TARGET; 2]);
         assert_eq!(l.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["step", "small"]);
     }
 

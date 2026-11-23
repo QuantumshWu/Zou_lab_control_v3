@@ -34,6 +34,20 @@ use crate::floquet::Sectors;
 /// The folded blocks tabled in the tweezer's intensity (fold_table.rs).
 #[path = "fold_table.rs"]
 pub(crate) mod table;
+/// OLDNEW's budget check (tests alone): where above zero, every folded block's denominators taken as their Doppler
+/// series' first DOPPLER_ORDERS terms about the pieces' frequencies at rest (`REST`, put in by `Rs::evaluate`) in place
+/// of the exact reciprocal -- the series a table of pair products would hold, its tail what the budget books.
+#[cfg(test)]
+pub(crate) static DOPPLER_ORDERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REST: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// OLDNEW's prototype: the contraction off tables of pair products (tests alone).
+#[cfg(test)]
+#[path = "fold_pairs.rs"]
+pub(crate) mod pairs;
 use crate::linalg::{self, C64, Mat};
 use crate::scene::Key;
 use crate::units::UNIT_ROUNDOFF;
@@ -1157,6 +1171,31 @@ impl Local {
             zc.extend(z.iter().map(|&x| C64::real(x)));
             for k in 0..size {
                 linalg::reciprocals(zc, s.centre[k], s.values[k], &mut d[k * total..(k + 1) * total]);
+            }
+            #[cfg(test)]
+            {
+                let orders = DOPPLER_ORDERS.load(std::sync::atomic::Ordering::Relaxed);
+                if orders > 0 {
+                    REST.with(|rest| {
+                        let rest = rest.borrow();
+                        for (&i, &(off, _)) in batch.amplitudes.iter().zip(&batch.offsets) {
+                            let r = &plan.amplitudes[i];
+                            let (f, f0) = (v.frequencies[r.piece], rest[r.piece]);
+                            for (j, &a) in r.cols.iter().enumerate() {
+                                let z0 = C64::real(energies[a] + f0);
+                                for k in 0..size {
+                                    let g = (z0 - C64::real(s.centre[k]) - s.values[k]).recip();
+                                    let (mut term, mut sum) = (g, g);
+                                    for _ in 1..orders {
+                                        term = term * g * (-(f - f0));
+                                        sum += term;
+                                    }
+                                    d[k * total + off + j] = sum;
+                                }
+                            }
+                        }
+                    });
+                }
             }
             for (&i, &(off, xoff)) in batch.amplitudes.iter().zip(&batch.offsets) {
                 let r = &plan.amplitudes[i];
