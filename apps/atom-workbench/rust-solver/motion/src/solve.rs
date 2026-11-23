@@ -3950,6 +3950,10 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
         let chased: Vec<Look> = looks(&e, &context.fixed, &context.step, &context.scales).into_iter().filter(Look::fits).collect();
         if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
             let (shown, l, c) = pooled(&all, &context.scales);
+            #[cfg(test)]
+            {
+                *LAST_GROUPS.lock().unwrap() = all.iter().filter_map(|p| p.sums.sums.last().cloned()).collect();
+            }
             return (shown, l, c, e);
         }
         let want = batch(most_needed(&chased), n);
@@ -5399,12 +5403,26 @@ fn step_reading(run: f64, step: f64) -> String {
     significant(step, count.to_string().len() as i32 + 1).to_string()
 }
 
+/// (Tests alone: the product's groups' sums at the last output, in the order the product holds them -- the pilot's, its
+/// further pairs', the batches' -- OLDNEW's check of the statistics.)
+#[cfg(test)]
+pub(crate) static LAST_GROUPS: std::sync::Mutex<Vec<crate::estimate::Sums>> = std::sync::Mutex::new(Vec::new());
+
+/// (Tests alone: the last output's standard errors of a solve's last result, its rows as shown and its loss, and its
+/// groups -- OLDNEW's seeds check of the statistics.)
+#[cfg(test)]
+pub(crate) static LAST_ERRORS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
 /// The result of the estimates of `trajectories` trajectories (contract §2.2): what is shown at t = 0 the request's
 /// initial state, the motion there the initial atoms' as at every output (module documentation, # Outputs and windows);
 /// an output with no atom held carries the last one's populations, one with fewer than two atoms the last T read with
 /// its judgement of the validated regime (`classical`: a statement about that T) and n̄, their error unknown; one whose T is its own but whose
 /// jackknife reads no error (some group's removal leaves fewer than two atoms) says so; each flagged, apart.
 fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[Vec<(V3, V3)>], counts: &Counts, trajectories: u64) -> Solution {
+    #[cfg(test)]
+    if let Some(e) = estimates.last() {
+        *LAST_ERRORS.lock().unwrap() = e.shown_errors.iter().map(|x| x.error).chain([e.loss_error.error, e.loss_error.groups]).collect();
+    }
     let (times, outputs) = (&c.plan.times, c.plan.times.len());
     let hm = c.scales.hbar_over_mass;
     let w = c.scales.frequencies;

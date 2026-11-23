@@ -234,6 +234,53 @@ fn oldnew_solve() {
         solution.temperature_total_errors_uk[end].unwrap_or(f64::NAN),
         solution.approximations.totals
     );
+    // The last output's statistics for the seeds check: T per axis and total with their standard errors, the rows as
+    // shown (here the held populations, no loss) and the loss with theirs (solve.rs `LAST_ERRORS`), the groups.
+    let errors = crate::solve::LAST_ERRORS.lock().unwrap().clone();
+    let te = &solution.temperature_errors_uk[end];
+    eprintln!(
+        "OLDNEW-STAT {name} seed {}: T {:?} ± {:?} total {:.4} ± {:.4}; rows {:?} ± {:?}; loss {:.4e} ± {:.3e}; groups {}; trajectories {}; tau {:.5}",
+        std::env::var("OLDNEW_SEED").unwrap_or_else(|_| "0".into()),
+        solution.temperature_uk[end].map(|x| (x * 1e4).round() / 1e4),
+        te.map(|x| x.map(|y| (y * 1e4).round() / 1e4)),
+        solution.temperature_total_uk[end],
+        solution.temperature_total_errors_uk[end].unwrap_or(f64::NAN),
+        p.iter().take(crate::request::GROUND).map(|x| (x * 1e5).round() / 1e5).collect::<Vec<_>>(),
+        errors.iter().take(crate::request::GROUND).map(|x| (x * 1e5).round() / 1e5).collect::<Vec<_>>(),
+        solution.loss_probability[end],
+        errors.get(crate::request::STATES).copied().unwrap_or(f64::NAN),
+        errors.last().copied().unwrap_or(f64::NAN),
+        solution.trajectories,
+        solution.time_step_us
+    );
+    // The product's groups' sums at the last output (solve.rs `LAST_GROUPS`), one JSON line a group, to OLDNEW_GROUPS.
+    if let Ok(path) = std::env::var("OLDNEW_GROUPS") {
+        use std::io::Write;
+        let groups = crate::solve::LAST_GROUPS.lock().unwrap().clone();
+        let mut f = std::fs::File::create(&path).unwrap();
+        for g in &groups {
+            let line = serde_json::json!({
+                "trajectories": g.trajectories, "failed": g.failed, "held": g.held, "rows": &g.rows[..crate::request::GROUND],
+                "kappa": g.kappa, "kappa_squared": g.kappa_squared, "kappa2": g.kappa2,
+                "shape": g.shape.iter().map(|x| x.to_vec()).collect::<Vec<_>>(), "shape_squared": g.shape_squared
+            });
+            writeln!(f, "{line}").unwrap();
+        }
+        eprintln!("OLDNEW-GROUPS {name}: {} groups to {path}", groups.len());
+    }
+    // The ledger as the result says it: its items, what it flags, its note.
+    let ledger = &solution.approximations;
+    for item in &ledger.items {
+        eprintln!("OLDNEW-ITEM {name}: {} = {:.4e}", item.label, item.estimate);
+    }
+    eprintln!("OLDNEW-FLAG {name}: {}", ledger.flagged.as_deref().unwrap_or("(none)"));
+    eprintln!(
+        "OLDNEW-ERRORS {name}: the shown error at the outputs, its largest {:.4e} at output {}, mean {:.4e}; T's error bars at the end {:?}",
+        solution.estimated_errors.iter().copied().fold(0.0, f64::max),
+        solution.estimated_errors.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |x| x.0),
+        solution.estimated_errors.iter().sum::<f64>() / solution.estimated_errors.len() as f64,
+        solution.temperature_total_errors_uk[end]
+    );
     eprintln!(
         "OLDNEW-SOLVE {name}: wall {wall:.2} s, CPU {cpu:.2} s, threads {}, {} trajectories, tau {:.5} µs; T at the end {:?} µK, total {:.2}; loss {:.3e}",
         rayon::current_num_threads(),
