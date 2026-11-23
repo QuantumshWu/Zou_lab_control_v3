@@ -80,7 +80,7 @@
 //! sums' gaps at s = 1) and at one term fewer, and filled; then every piece, that one too, is laid to the budget
 //! (without a budget, the tests', every piece to the reach's tail). (Until 2026-11-23 every piece was laid to the
 //! reach's tail first, and laid again to the budget only where one was beyond it: tilt2's run on [0.06, 1] 310 pieces,
-//! 182 bought by their rent, 114 MB, 2.1 s, against 56, 53, 33 MB, 0.4 s; the walks' tables of PGC3D, TET and tilt2 8,
+//! 182 of them bought by the rent paid at their s, 114 MB, 2.1 s, against 56 pieces, 35 MB, 0.47 s; the walks' tables of PGC3D, TET and tilt2 8,
 //! 8, 16 pieces, 12.3, 7.0, 10.0 MB against 4, 4, 6 pieces, 6.2, 3.5, 3.8 MB, a step's time the same. A node's booked
 //! deviation on the rates is then up to ten times the budget -- PGC3D's walk 6.6e-5 against 6.5e-6, 6.1e-6 before: the
 //! pieces' bound is over each entry's own, the node's over its output's largest --, booked as it is.) Else it is
@@ -195,8 +195,6 @@ pub(crate) struct Layout {
     s_mats: Vec<Option<Mat>>,
     pub work: f64,
     pub price: f64,
-    /// What filling one piece takes (`price` over the pieces).
-    pub per_piece: f64,
     seconds: f64,
 }
 
@@ -778,7 +776,7 @@ impl Tables {
             Some(budget) => {
                 let (top, left_off, w) = lay(vec![first.0], reach_target, true)?;
                 work += w;
-                let alone = Layout { degree, orders, pieces: top.clone(), dropped, zs: zs.clone(), ws: ws.clone(), z_vectors: z_vectors.clone(), w_vectors: w_vectors.clone(), tables: tables.clone(), e_rest: e0.clone(), e_slope: e_slope.clone(), used: used.clone(), s_mats: s_mats.clone(), work: 0.0, price: per_piece, per_piece, seconds: 0.0 };
+                let alone = Layout { degree, orders, pieces: top.clone(), dropped, zs: zs.clone(), ws: ws.clone(), z_vectors: z_vectors.clone(), w_vectors: w_vectors.clone(), tables: tables.clone(), e_rest: e0.clone(), e_slope: e_slope.clone(), used: used.clone(), s_mats: s_mats.clone(), work: 0.0, price: per_piece, seconds: 0.0 };
                 let filled = alone.fill(plan, grouping, rest)?;
                 work += filled.work;
                 let target = budget(&filled)?;
@@ -789,18 +787,11 @@ impl Tables {
         };
         pieces.sort_by(|x, y| x.range[0].total_cmp(&y.range[0]));
         let price = pieces.len() as f64 * per_piece;
-        Some(Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, tables, e_rest: e0, e_slope, used, s_mats, work, price, per_piece, seconds: clock.elapsed().as_secs_f64() })
+        Some(Layout { degree, orders, pieces, dropped, zs, ws, z_vectors, w_vectors, tables, e_rest: e0, e_slope, used, s_mats, work, price, seconds: clock.elapsed().as_secs_f64() })
     }
 }
 
 impl Layout {
-    /// The layout with the pieces `keep` takes alone (model/selected.rs `Selected::buy_tables`: each piece bought where
-    /// its own rent covers it), its price theirs; the others no node reads (`Tables::read`: no piece holds their s).
-    pub(crate) fn keep(&mut self, keep: &dyn Fn(&Piece) -> bool) {
-        self.pieces.retain(|p| keep(p));
-        self.price = self.pieces.len() as f64 * self.per_piece;
-    }
-
     /// The tables of a layout (`Tables::layout`): per piece the samples at its m Chebyshev points -- each table's
     /// entries Σ_q (LV)_iq (V⁻¹U)_qj (z₀ − λ_q)^{−(J+1)} for J < `orders` -- and their Chebyshev coefficients. None
     /// where a block does not decompose.

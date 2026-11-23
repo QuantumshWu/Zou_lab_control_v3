@@ -110,12 +110,13 @@
 //! rents (`Selected::buy_tables`): its trajectories' nodes off the fold count their work (the rent) and the least s they
 //! meet; at a point no node is being made at -- before every hand-out of trajectories (solve.rs) -- where the rent has
 //! reached what the tables were last priced at, their layout on [that s, 1] to the run's budget is made and priced
-//! exactly (`Tables::layout`: the decompositions alone, # The tables' budget), each piece kept where the rent paid at
-//! its own s covers its own fill (`Selected::rented`, the rent by bins of s), and they are filled where the rent covers
-//! the layout and the pieces kept, else the price is kept for the next time; a point in a piece not kept is folded.
-//! (Until 2026-11-23 the whole of [the least s met, 1], laid to the reach's tail: an atom of tilt2's scout escaping to
-//! s = 0.06 took the tables to 165 pieces, 103 MB. A piece's fill is some ten nodes of the fold, so its rent alone
-//! spared few: 182 of 310 bought, 114 MB; laid to the budget, 53 of 56, 33 MB.) Bought, they are read for the kinds of
+//! exactly (`Tables::layout`: the decompositions alone, # The tables' budget), and they are filled where the rent covers
+//! the layout and its fill, else the price is kept for the next time. (Until 2026-11-23 laid to the reach's tail: an
+//! atom of tilt2's scout escaping to s = 0.06 took the tables to 165 pieces, 103 MB. Each piece bought by the rent paid
+//! at its own s spared few -- a piece's fill is some ten nodes of the fold: 182 of 310, 114 MB; laid to the budget 53
+//! of 56 -- and was taken out: one rent, one price.) The tables' memory is not in the price: laid to the budget they
+//! take 3.5 to 33 MB (TET's walk to tilt2's run down to s = 0.06), beside the run's own; a bound on it would be a
+//! number of its own, none needed at these sizes. Bought, they are read for the kinds of
 //! node they cost less for by count (`kind`, `KINDS`:
 //! a step's node, the middle's with the lift, a jump's photon's, a whole one with the photon forms; `tables_pay`, at the
 //! structure's point), each up to the most Doppler terms it costs less at (`Bought::caps`: a fast atom's node that needs
@@ -449,13 +450,7 @@ struct Tabling {
     low: std::sync::atomic::AtomicU64,
     price: std::sync::atomic::AtomicU64,
     tables: std::sync::OnceLock<Option<Bought>>,
-    /// The rent by the s it was paid at: per bin of s in [0, 1] (`RENT_BINS`), whole numbers (the same in any order).
-    rents: Vec<std::sync::atomic::AtomicU64>,
 }
-
-/// The rent's resolution in s (`Tabling::rents`): bins of 1/4096, below any piece the layouts lay (their narrowest
-/// seen 1/700): a piece's rent is its bins'.
-const RENT_BINS: usize = 4096;
 
 /// A run's tables as bought (`Tabling`): the tables, the kinds of node they are read for, and the Doppler series'
 /// budget a node off them is held to -- [its rates', its friction's] relative error (# The tables' budget).
@@ -487,7 +482,7 @@ const MAKINGS: [Making; KINDS] = [Making::node(false), Making { lift: true, ..Ma
 
 impl Default for Tabling {
     fn default() -> Tabling {
-        Tabling { rent: Default::default(), low: f64::INFINITY.to_bits().into(), price: 0f64.to_bits().into(), tables: std::sync::OnceLock::new(), rents: (0..RENT_BINS).map(|_| Default::default()).collect() }
+        Tabling { rent: Default::default(), low: f64::INFINITY.to_bits().into(), price: 0f64.to_bits().into(), tables: std::sync::OnceLock::new() }
     }
 }
 
@@ -2399,22 +2394,13 @@ impl Selected {
             weighed.set(Some(budget));
             Some(budget.0)
         };
-        let Some(mut layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, Some(&weigh)) else {
+        let Some(layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, Some(&weigh)) else {
             crate::prof::note(|| "tables: none for the plan or its budget".to_string());
             let _ = tabling.tables.set(None);
             return;
         };
-        // Piece by piece: each where the rent paid at its s covers its own fill (`rented`), the others folded. The top
-        // piece (s = 1, where the budget and the kinds are weighed) not yet rented: no tables yet, the price one piece's.
-        let laid = layout.pieces.len();
-        let price_whole = COMPLEX * layout.price;
-        self.rented(&mut layout);
         let price = COMPLEX * (layout.work + layout.price);
-        crate::prof::note(|| format!("tables: rent {rent:.4e}, price {price:.4e} (layout {:.3e}, fill {:.3e}, of every piece's {price_whole:.3e}), {} of {laid} pieces rented on [{low:.4}, 1]", COMPLEX * layout.work, COMPLEX * layout.price, layout.pieces.len()));
-        if !layout.pieces.iter().any(|p| p.range[1] >= 1.0) {
-            tabling.price.store((COMPLEX * (layout.work + layout.per_piece)).to_bits(), Relaxed);
-            return;
-        }
+        crate::prof::note(|| format!("tables: rent {rent:.4e}, price {price:.4e} (layout {:.3e}, fill {:.3e}), {} pieces on [{low:.4}, 1]", COMPLEX * layout.work, COMPLEX * layout.price, layout.pieces.len()));
         if rent < price {
             tabling.price.store(price.to_bits(), Relaxed);
             return;
@@ -2427,19 +2413,6 @@ impl Selected {
         });
         crate::prof::note(|| tables.as_ref().map_or("tables: none kept".to_string(), |b| format!("tables bought: {} pieces, {:.2} MB, {:.3} s, counted {:.4e}, for the kinds {:?}, budget {:?}", b.tables.pieces.len(), b.tables.bytes as f64 / 1e6, b.tables.build_seconds, COMPLEX * b.tables.work, b.caps, b.budget)));
         let _ = tabling.tables.set(tables);
-    }
-
-    /// A layout's pieces each kept where the rent its trajectories' nodes paid at its s (`Tabling::rents`, the bins whose
-    /// middles it holds) covers its own fill (`Layout::per_piece`): the rent-buy rule a piece at a time.
-    fn rented(&self, layout: &mut crate::model::rs::fold::tabled::Layout) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let fill = COMPLEX * layout.per_piece;
-        let rents = &self.tabling.rents;
-        let middle = |k: usize| (k as f64 + 0.5) / RENT_BINS as f64;
-        layout.keep(&|p| {
-            let rent: u64 = rents.iter().enumerate().filter(|(k, _)| middle(*k) >= p.range[0] && middle(*k) <= p.range[1]).map(|(_, r)| r.load(Relaxed)).sum();
-            rent as f64 >= fill
-        });
     }
 
     /// The tables' budget (module documentation, # The tables' budget): of the Doppler series' terms J = 1 … the tables'
@@ -2505,9 +2478,6 @@ impl Selected {
         use std::sync::atomic::Ordering::Relaxed;
         self.tabling.rent.store(u64::MAX >> 1, Relaxed);
         self.tabling.low.store(low.to_bits(), Relaxed);
-        for r in &self.tabling.rents {
-            r.store(u64::MAX >> 16, Relaxed);
-        }
         self.buy_tables();
         self.bought().is_some()
     }
@@ -2628,7 +2598,6 @@ impl Selected {
                 self.tabling.rent.fetch_add(node.work as u64, Relaxed);
                 if let Some(s) = PairTables::intensity_of(plan, &work.local.values) {
                     self.tabling.low.fetch_min(s.max(0.0).to_bits(), Relaxed);
-                    self.tabling.rents[((s.clamp(0.0, 1.0) * RENT_BINS as f64) as usize).min(RENT_BINS - 1)].fetch_add(node.work as u64, Relaxed);
                 }
             }
             node.lift.truncate(if lifted { work.out.lift.len() } else { 0 });
