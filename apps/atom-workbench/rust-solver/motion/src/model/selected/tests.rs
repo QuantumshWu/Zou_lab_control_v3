@@ -1110,8 +1110,10 @@ fn the_blocks_change_a_step_by_rounding() {
 }
 
 /// An element between two blocks of more than the rounding joins them, and the readings move with it, not at it
-/// (R1-CLEAN item 3): R4_LIN_1's request with its first beam's coupling between a ground state of F = 2 in one block and
-/// an explicit excited state of F′ = 3 in the other -- the cooling transition, near resonance -- set to δ (H0 is
+/// (R1-CLEAN item 3): R4_LIN_1's request on R4's P20 (`explicit`; the selection's chain takes G for it since P is chosen
+/// on the pilot's paths, 429c36cd of 2026-11-22, and G's blocks hold no excited state) with its first beam's coupling
+/// between a ground state of F = 2 in one block and
+/// an explicit excited state of F′ = 3 in another -- the cooling transition, near resonance -- set to δ (H0 is
 /// diagonal in the model's basis: a coupling is a beam's), δ of
 /// 10⁻², 10², 10⁴ and 10⁸ times ε times the coupling's largest entry -- the first below the rounding (of the element's
 /// beat in the node and of its first-order amplitude at the fold's input alike), the others above it: below the rounding
@@ -1123,14 +1125,16 @@ fn the_blocks_change_a_step_by_rounding() {
 fn a_cross_block_element_joins_the_blocks() {
     let (atoms, count, tau) = (env("V3E_ATOMS", 4.0) as u64, env("V3E_STEPS", 12.0) as usize, env("V3E_TAU", 0.05));
     let request = reference("R4_LIN_1");
-    let run = made(&request, true);
+    let p20 = explicit("R4", &request).expect("R4's P20");
+    let run = made_split(&request, &p20, true);
     assert!(run.blocks().len() > 1, "R4_LIN_1 in blocks");
     let keep = &run.rs.keep;
-    let (g, e) = run.blocks()[0]
-        .iter()
-        .flat_map(|&g| run.blocks()[1].iter().map(move |&e| (g, e)))
+    let blocks = run.blocks();
+    let (g, e) = (0..blocks.len())
+        .flat_map(|i| (0..blocks.len()).filter(move |&j| j != i).map(move |j| (i, j)))
+        .flat_map(|(i, j)| blocks[i].iter().flat_map(move |&g| blocks[j].iter().map(move |&e| (g, e))))
         .find(|&(g, e)| request.states[keep[g]].starts_with("ground-2-") && request.states[keep[e]].starts_with("D2-3-"))
-        .expect("a ground state of F = 2 in one block and an excited state of F′ = 3 in the other");
+        .unwrap_or_else(|| panic!("a ground state of F = 2 in one block and an excited state of F′ = 3 in the other: blocks {}", said(&request, &run)));
     let top = request.beams[0].coupling.max_abs();
     eprintln!("R4_LIN_1: blocks {}; δ between {} and {} on {}; the coupling's largest {top:.4e}", said(&request, &run), request.states[keep[g]], request.states[keep[e]], request.beams[0].id);
     let from: Vec<_> = starts(&run, request.temperature_uk, atoms).into_iter().map(|(r, kappa, psi, _)| (r, kappa, psi, f64::MIN_POSITIVE)).collect();
@@ -1140,7 +1144,7 @@ fn a_cross_block_element_joins_the_blocks() {
         let delta = factor * f64::EPSILON * top;
         let mut perturbed = request.clone();
         perturbed.beams[0].coupling[(keep[e], keep[g])] += C64::real(delta);
-        let other = made(&perturbed, true);
+        let other = made_split(&perturbed, &p20, true);
         assert_eq!(&other.rs.keep, keep, "one P");
         let (ends, _) = through(&other, &from, tau, count);
         let (d, jumps) = ends_apart(&ends, &base);
