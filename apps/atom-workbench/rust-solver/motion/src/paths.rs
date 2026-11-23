@@ -56,7 +56,10 @@
 //! −tr(∇H_h ρ) + Σ_{c,a} Im tr(ρ J_{c,a}†∇J_{c,a}) (the Ehrenfest force and the scattered light's absorbed momentum).
 //! The rates and the force are the trajectory's: over tr ρ_P, the state's norm on P, as the integrator takes them; the
 //! rows over their sum as shown. (ENGFOLD's prototype took the rates and the force over the rows' sum too; the two
-//! differ by the lifted Q population. `Reading::total` holds that sum.)
+//! differ by the lifted Q population. `Reading::total` holds that sum.) tr ρ_P itself is kept by every model's exact
+//! flow -- i(H − H†) = Σ J†J --, so its departure from one along a series is the scheme's (`Series::trace_defect`): a
+//! strict lower bound of the scheme's error in the trace norm, read at no cost, and a part of the setting's error
+//! (select.rs `settle`; the readings over tr ρ_P and the rows' sum hide it).
 //!
 //! # The memory
 //! The path's length is set by the generator's slowest nonzero decay rate λ (`memory`): the sector Liouvillian's
@@ -109,10 +112,15 @@
 //! Unresolved, the scheme stands on a plateau there, where doubling the substeps changes nothing and the Richardson
 //! reading reads "converged": R4 at its start, the reference against the converged scheme 5.2e-3 at 16.9 to 135
 //! substeps a µs, 1.0e-3 at 270, 3.8e-4 at 540 and 1080 (the rest the run's).
-//! - So over the opening the substeps are counted in turns of the fastest coherence the opening resolves, W: `turns`
+//! - So over the opening the substeps are counted in turns of the fastest mode the opening resolves, W: `turns`
 //!   substeps a turn, one at the least -- d·W ≤ 2π, the stages' half-substep sampling at its Nyquist rate --, off the
-//!   plateau, where doubling them reads their error. W is the largest |Im μ| at the stretch's start over the modes the
-//!   start holds above the rounding and the opening outlasts (`Form::opening`): a coherence the start does not hold
+//!   plateau, where doubling them reads their error. W is the largest |μ| -- the turning and the decay together, the
+//!   rate the lemma of the booking below takes -- at the stretch's start over the modes the
+//!   start holds above the rounding and the opening outlasts (`Form::opening`). (Until 2026-11-22 it was |Im μ|, the
+//!   turning alone: SAT_03's resonant, overdamped dressed pair has real μ, so W was nought, its first 5 µs one substep
+//!   at Γd = 190, and the reference's trace fell to 1.6e-5 there -- the recycling R ρ, which feeds back what the decay
+//!   in Λ takes out, integrated by a polynomial over a substep far longer than the decay; doubling the turns changed
+//!   nothing. Study A §2.6.) A coherence the start does not hold
 //!   needs no turn (S1's 32 states hold levels 4.5e7 rad/µs off the light's frame, which its start holds nothing of: W
 //!   140 rad/µs; taken over the whole sector, 0.5 µs of S1 took 148 s), and a mode the opening does not outlast is the
 //!   run's (R5_PUMP's ground hyperfine coherences, 4.4e4 rad/µs, held at 2e-5 and decaying at the pumping rate).
@@ -126,7 +134,7 @@
 //!   at 3.8e-4 whatever the run's rate: with 0.5 µs or more, 2.3e-4 at 8.4 a µs -- the pieces' part -- falling with
 //!   the pieces.
 //! - **Resolve or book** (the model's own judgment, model/classify.rs: zero, drop under a strict bound booked, fold,
-//!   keep): a held mode faster than the setting's `cutoff` is not resolved -- its part of the start, σ₀ⱼ m_j (m_j = v_a
+//!   keep): a held mode faster than the setting's `cutoff` (|μ_j|) is not resolved -- its part of the start, σ₀ⱼ m_j (m_j = v_a
 //!   v_b†, V's columns of the mode's pair of eigenstates), is dropped at the start, and a strict bound of what that does
 //!   to a displayed row is booked; the cutoff is the setting's fourth knob, its part that bound, doubled while it is the
 //!   largest of the parts (select.rs `settle`): a mode is booked where its bound fits the tolerance, resolved where it
@@ -317,6 +325,15 @@ pub struct Series {
     pub readings: Vec<Reading>,
     pub counts: Counts,
     pub state: Vec<C64>,
+}
+
+impl Series {
+    /// The scheme's trace defect along the series (module documentation, # The readings): the largest |tr ρ_P − 1| over
+    /// its readings -- every model's generator keeps the trace (i(H − H†) = Σ J†J), so the defect is the scheme's own,
+    /// a strict lower bound of its error in the trace norm, ‖ρ_num − ρ‖₁ ≥ |tr ρ_num − 1|; none of no reading.
+    pub fn trace_defect(&self) -> f64 {
+        self.readings.iter().map(|r| (r.trace - 1.0).abs()).fold(0.0, larger)
+    }
 }
 
 /// A model on its sector (module documentation, # The sector, # The generator): the structure every node shares, made
@@ -1520,7 +1537,7 @@ impl Form<'_> {
     /// Γ the slowest decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited states are
     /// all folded holds no such coherence); of the modes the start holds, |σ₀ⱼ| above u of the largest, that the opening
     /// outlasts, |σ₀ⱼ| e^{Re μ_j t_open} at most that (a mode it does not outlast goes on into the run, which takes it as
-    /// it takes every mode then), the fastest |Im μ_j| up to the cutoff (resolved), the sum of the others' bounds
+    /// it takes every mode then), the fastest |μ_j| -- its turning and its decay together -- up to the cutoff (resolved), the sum of the others' bounds
     /// (`booked`; # The start), and the start with those others' parts dropped. Err where an eigendecomposition fails.
     #[allow(clippy::too_many_arguments)]
     fn opening(&self, amps: &Amps, next: &Amps, t: f64, t1: f64, pieces: usize, v: &[C64], cutoff: f64) -> Result<(f64, f64, f64, Vec<C64>), String> {
@@ -1560,8 +1577,10 @@ impl Form<'_> {
         self.sandwich(&vinv, &vinvadj, v, &mut sigma, &mut tmp);
         let floor = 0.5 * f64::EPSILON * sigma.iter().map(|z| z.abs()).fold(0.0, larger);
         let held: Vec<usize> = (0..self.dim).filter(|&j| sigma[j].abs() > floor && sigma[j].abs() * (mus[j].re * length).exp() <= floor).collect();
-        let fastest = held.iter().filter(|&&j| mus[j].im.abs() <= cutoff).map(|&j| mus[j].im.abs()).fold(0.0, larger);
-        let faster: Vec<usize> = held.iter().copied().filter(|&j| mus[j].im.abs() > cutoff).collect();
+        // Each mode by its whole rate |μ_j|, the turning and the decay together (# The start): the remainder follows a
+        // decaying mode as fast as a turning one.
+        let fastest = held.iter().filter(|&&j| mus[j].abs() <= cutoff).map(|&j| mus[j].abs()).fold(0.0, larger);
+        let faster: Vec<usize> = held.iter().copied().filter(|&j| mus[j].abs() > cutoff).collect();
         if faster.is_empty() {
             return Ok((length, fastest, 0.0, v.to_vec()));
         }
