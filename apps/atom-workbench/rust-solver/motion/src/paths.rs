@@ -1248,13 +1248,49 @@ impl<'a> Form<'a> {
     /// interpolated linearly between the walk's knots): the excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and the excess impulse
     /// ∫(F(τ|L) − F̄)dτ (1/µm) by the trapezoid, and the stretch's counted work (`Counts::work`). Err where the state is
     /// not the form's.
-    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3, f64), String> {
+    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3, f64, f64), String> {
         let hm = self.hbar_over_mass;
-        let step = walk.ends.windows(2).find(|w| w[1][0] > t).map_or(span, |w| w[1][0] - w[0][0]).min(span);
-        let mut times = vec![t];
-        let mut d = 0.25 / decay;
-        while *times.last().unwrap() < t + span {
-            let next = (times.last().unwrap() + d.min(step)).min(t + span);
+        // The Q term's share of the heating per photon of n_ex there (`Reading::heating_at`: ½ (ħ/m) Q (s b)²/λ against
+        // the heating at Poisson's count), the largest over the axes: what a change of n_ex moves in T's account.
+        let weight = own.readings.iter().min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs())).map_or(0.0, |x| {
+            let lambda: f64 = x.rates.iter().sum();
+            let h = x.heating(hm);
+            (0..3).map(|a| if lambda > 0.0 && h[a] > 0.0 { hm * x.carried[a] * x.carried[a] / lambda / h[a] } else { 0.0 }).fold(0.0, larger)
+        });
+        let end = own.readings.last().map_or(t + span, |x| x.t);
+        let (mut counted, mut work, mut state) = ((0.0, [0.0; 3]), 0.0, self.from_ground(landed));
+        let (mut from, mut length, mut change) = (t, span, f64::INFINITY);
+        loop {
+            let to = (from + length).min(end);
+            let (part, impulse, spent, last) = self.landing_part(walk, t, from, to, state, decay, knobs, own)?;
+            (state, work) = (last, work + spent);
+            let more = part;
+            counted = (counted.0 + more, std::array::from_fn(|k| counted.1[k] + impulse[k]));
+            // Doubled while the last doubling moved the Q term by more than its share of the heating (select.rs
+            // `TOLERANCE`) and the own run reads further; the last doubling's change is booked (`Landing::photons_error`).
+            let stands = from > t && 2.0 * more.abs() * weight <= crate::select::TOLERANCE;
+            change = if from > t { more.abs() } else { change };
+            if stands || !(to < end) {
+                break;
+            }
+            (from, length) = (to, to - t);
+        }
+        Ok((counted.0, counted.1, work, if change.is_finite() { change } else { 0.0 }))
+    }
+
+    /// A part [from, to] of a landing's stretch from t (`landing`): from the state `state` there, its excess photons and
+    /// impulse over the own run, its counted work and its last state.
+    #[allow(clippy::too_many_arguments)]
+    fn landing_part(&self, walk: &Walk, t: f64, from: f64, to: f64, state: Vec<C64>, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3, f64, Vec<C64>), String> {
+        let hm = self.hbar_over_mass;
+        let span = to - from;
+        let step = walk.ends.windows(2).find(|w| w[1][0] > from).map_or(span, |w| w[1][0] - w[0][0]).min(span);
+        let mut times = vec![from];
+        // From the landing the transient's knots, a quarter of the fastest decay's time growing by 2^{1/4}; a later part
+        // at the walk's own spacing (the transient long past).
+        let mut d = if from == t { 0.25 / decay } else { step };
+        while *times.last().unwrap() < to {
+            let next = (times.last().unwrap() + d.min(step)).min(to);
             times.push(next);
             d *= 2f64.powf(0.25);
         }
@@ -1264,7 +1300,7 @@ impl<'a> Form<'a> {
         });
         let dense = Walk { index: walk.index, start: walk.start.clone(), ends: ends.collect(), lost: false, weight: walk.weight };
         let (turns, rate, cutoff) = knobs;
-        let series = self.along_from(&dense, self.from_ground(landed), t, t + span, Scheme::Exponential { turns, rate, pieces: 1, cutoff, read: 1 })?;
+        let series = self.along_from(&dense, state, from, to, Scheme::Exponential { turns, rate, pieces: 1, cutoff, read: 1 })?;
         // The own run's readings at a time, linearly between its knots.
         let own_at = |u: f64| -> (f64, V3) {
             let r = &own.readings;
@@ -1287,7 +1323,7 @@ impl<'a> Form<'a> {
                 impulse[k] += 0.5 * dt * (f0[k] + f1[k]);
             }
         }
-        Ok((photons, impulse, series.counts.work))
+        Ok((photons, impulse, series.counts.work, series.state))
     }
 
     /// The sector's Liouvillian at the point and time, dense (d × d), column by column through the operator.
@@ -2241,11 +2277,13 @@ pub struct Statistics {
     pub t: f64,
     pub q: [f64; 2],
     pub diffusion: [V3; 2],
+    /// Each model's Q's last doubling's change (`Form::landing`), booked beside its Q (`compare`).
+    pub q_error: [f64; 2],
 }
 
 impl Statistics {
     /// Nothing read: Poisson's count, no force correlation.
-    pub const NONE: Statistics = Statistics { t: 0.0, q: [0.0; 2], diffusion: [[0.0; 3]; 2] };
+    pub const NONE: Statistics = Statistics { t: 0.0, q: [0.0; 2], diffusion: [[0.0; 3]; 2], q_error: [0.0; 2] };
 
     /// A path's landing check over the window (from, to]: the mean of its landings there, else its nearest one's; none
     /// read of no landing.
@@ -2261,6 +2299,7 @@ impl Statistics {
             t: at.iter().map(|x| x.t).sum::<f64>() / k,
             q: std::array::from_fn(|m| at.iter().map(|x| x.q[m]).sum::<f64>() / k),
             diffusion: std::array::from_fn(|m| std::array::from_fn(|a| at.iter().map(|x| x.diffusion[m][a]).sum::<f64>() / k)),
+            q_error: std::array::from_fn(|m| at.iter().map(|x| x.q_error[m]).sum::<f64>() / k),
         }
     }
 }
@@ -2343,8 +2382,15 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 // none read where it has none.
                 let at = landings.get(k).map_or(Statistics::NONE, |l| Statistics::within(l, from, to));
                 let (mut df2, mut f2, mut total_m, mut total_r) = (0.0, 0.0, 0.0, 0.0);
+                let mut booked = [0.0; 3];
                 for (x, y) in &pairs {
                     let (hx, hy) = (x.heating_at(hbar_over_mass, at.q[0], at.diffusion[0]), y.heating_at(hbar_over_mass, at.q[1], at.diffusion[1]));
+                    // What Q's booked change moves in each model's heating (`Statistics::q_error`).
+                    let (bx, by) = (x.heating_at(hbar_over_mass, at.q_error[0], [0.0; 3]), y.heating_at(hbar_over_mass, at.q_error[1], [0.0; 3]));
+                    let (px, py) = (x.heating(hbar_over_mass), y.heating(hbar_over_mass));
+                    for a in 0..3 {
+                        booked[a] += ((bx[a] - px[a]).abs() + (by[a] - py[a]).abs()) / q;
+                    }
                     for a in 0..3 {
                         heating[k][a] += hy[a] / q;
                         own_heating[k][a] += hx[a] / q;
@@ -2370,6 +2416,10 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                         df2 += d * d / q;
                         f2 += y.force[a] * y.force[a] / q;
                     }
+                }
+                // Q's booked change, away from nought (the bound the landing's stretch leaves).
+                for a in 0..3 {
+                    energy_rate[k][a] += booked[a].copysign(energy_rate[k][a]);
                 }
                 rate[k] = total_m / total_r - 1.0;
                 force_rms[k] = (df2 / f2).sqrt();

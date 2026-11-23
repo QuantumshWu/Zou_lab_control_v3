@@ -583,6 +583,8 @@ pub struct Landing {
     pub diffusion: Option<V3>,
     /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch and the diffusion's solve.
     pub work: f64,
+    /// The excess photons' last doubling's change (paths.rs `Form::landing`): booked, not left unconverged.
+    pub photons_error: f64,
 }
 
 /// The paths' scheme as settled (`settle`; module documentation, # The paths): its setting, the calibration's opening (µs), the
@@ -873,9 +875,9 @@ impl<'a> Paths<'a> {
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
                         .map(|(t, v, landed)| {
-                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j]).map(|(photons, impulse, spent)| {
+                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j]).map(|(photons, impulse, spent, photons_error)| {
                                 let (diffusion, solved) = form.diffusion(&walks[w], t, v);
-                                Landing { t, landed, photons, impulse, diffusion, work: spent + solved }
+                                Landing { t, landed, photons, impulse, diffusion, work: spent + solved, photons_error }
                             })
                         })
                         .collect()
@@ -1041,13 +1043,13 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, _, spent) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own)?;
+                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own)?;
                         let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
                         let diffusion = match (mine, l.diffusion) {
                             (Some(c), Some(r)) => [c, r],
                             _ => [[0.0; 3]; 2],
                         };
-                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion }, spent + solved))
+                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion, q_error: [2.0 * error, 2.0 * l.photons_error] }, spent + solved))
                     })
                     .collect::<Result<Vec<_>, String>>()
                     .map(|x| x.into_iter().unzip::<_, _, Vec<_>, Vec<f64>>())
