@@ -966,24 +966,10 @@ impl<'a> Form<'a> {
         }
         let total: f64 = rows.iter().sum();
         let rows = rows.map(|x| x / total);
-        // The rates and the force on the node at t: J(t), ∇J(t) by class and axis, ∇H(t).
+        // The rates and the force on the node at t: J(t), ∇J(t) by class and axis; H_eff's gradient on ρ the model's own
+        // contraction (model/selected.rs `SelectedMiddle::contract`, every beat at its phase).
         let mut rates = vec![0.0; self.classes.len()];
-        let mut force = [0.0; 3];
-        let contract = |m: &Mat| -> C64 {
-            let mut s = C64::ZERO;
-            for x in 0..n {
-                for y in 0..n {
-                    s += m.data[x * n + y] * rho[y * n + x];
-                }
-            }
-            s
-        };
-        for (beat, g) in &node.gradient {
-            let f = self.phase(*beat, t);
-            for (axis, m) in g.iter().enumerate() {
-                force[axis] -= (f * contract(m)).re;
-            }
-        }
+        let mut force = crate::model::selected::SelectedMiddle::contract(node, |beat| Some(self.phase(beat, t)), &rho).map(|z| -z.re);
         let (mut emitted, mut jumps_second, mut carried, mut mean) = ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
         // The entries' pairs read (`Counts::work`: seven complex multiply-adds each -- the rate, the absorbed mean and the
         // jumps' second moment on three axes).
@@ -1011,7 +997,10 @@ impl<'a> Form<'a> {
                     }
                 }
                 // tr(J ρ J†) = Σ J[g,u] ρ[u,s] conj(J[g,s]); Im tr(ρ J†∇J) = Im Σ conj(J[g,u]) ∇J[g,s] ρ[s,u];
-                // tr(∂_aJ ρ ∂_aJ†) = Σ ∂_aJ[g,u] ρ[u,s] conj(∂_aJ[g,s]).
+                // tr(∂_aJ ρ ∂_aJ†) = Σ ∂_aJ[g,u] ρ[u,s] conj(∂_aJ[g,s]) -- the model's photons' moments (model.rs
+                // `Moments::of`) on ρ, read on ρ itself: through ρ's eigenvectors, each a trajectory's state read by the
+                // model's own photons, the readings took 4.7 times as long (PGC3D's paths 2026-11-23: 25.6 → 119.5 thread
+                // seconds of 282, the numbers the same).
                 let mut rate = C64::ZERO;
                 let mut absorbed = [C64::ZERO; 3];
                 let mut second = [C64::ZERO; 3];
@@ -1036,10 +1025,9 @@ impl<'a> Form<'a> {
                     jumps_second[a] += second[a].re / trace;
                 }
             }
-            // The part of the class's absorbed mean a jump carries (`Moments::new`: s = min(1, k_c/|b|), b = mean/W).
-            let w: f64 = along.iter().sum();
-            let b: f64 = if w > 0.0 { (mean[0] * mean[0] + mean[1] * mean[1] + mean[2] * mean[2]).sqrt() / w } else { 0.0 };
-            let share = if b > class.absorbed { class.absorbed / b } else { 1.0 };
+            // The part of the class's absorbed mean a jump carries: the model's rule (`Moments::new`: s = min(1, k_c/|b|),
+            // b = mean/W).
+            let share = crate::model::Moments::new(along.iter().sum(), mean, [[0.0; 3]; 3], class.absorbed, n).share;
             for a in 0..3 {
                 carried[a] += share * mean[a];
             }

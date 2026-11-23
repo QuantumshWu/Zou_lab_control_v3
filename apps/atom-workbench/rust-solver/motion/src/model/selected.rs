@@ -1544,8 +1544,9 @@ impl SelectedMiddle<'_> {
         if self.nodes.borrow().iter().any(|x| x.kappa == path.kappa) { &self.model.candidates } else { &[] }
     }
 
-    /// tr(Ĝ_a σ) per axis of H_eff's gradient components at a node, each beat by its factor (none: left out).
-    fn contract(node: &Node, each: impl Fn(usize) -> Option<C64>, rho: &[C64]) -> [C64; 3] {
+    /// tr(Ĝ_a σ) per axis of H_eff's gradient components at a node, each beat by its factor (none: left out). The paths'
+    /// force reads it too (paths.rs `Form::read`).
+    pub(crate) fn contract(node: &Node, each: impl Fn(usize) -> Option<C64>, rho: &[C64]) -> [C64; 3] {
         let mut out = [C64::ZERO; 3];
         for (beat, g) in &node.gradient {
             if let Some(f) = each(*beat) {
