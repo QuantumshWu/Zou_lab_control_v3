@@ -243,14 +243,24 @@
 //!   The rung below is taken where some rung below is expected to cost less than staying (`course`): a smaller step is
 //!   the more accurate one, and the rung below stands only on its own reads, as every rung does, so no error enters
 //!   the choice -- it is the work's alone. Its third level above is this rung's read, lowered (`carried`).
-//! - Two paths from a rung its reads stand (`course`): verified there -- its companions and, where it has one to read,
-//!   its third level, each at its work for its read's precision (`read_cost`: the pairs its noise needs, lifted and
-//!   taken back as its pair is, at its levels' work with the refused attempts in it), and its run level to the product
-//!   --, or verified at the least rung below, whose third level is this rung's read, inherited and lowered, for
+//! - Two paths from a rung its reads stand (`course`): verified there -- its companions and its run level to the
+//!   product --, or verified at the least rung below, whose third level is this rung's read, inherited and lowered, for
 //!   nothing. The rung takes the cheaper, on the scout before the pilot is bought and again after every stretch the check
-//!   runs, at what is held then (what is spent is no part of either path). A rung with no third level to be had (a
-//!   ladder's top with no level below to read) stands on its own two levels: the QuTiP-like path. At the ladder's bottom,
-//!   with no rung below, it reads the third wherever there is one. (Before, a third dearer than the rung below added
+//!   runs, at what is held then (what is spent is no part of either path). Staying, it reads its third level where that
+//!   is worth its price -- its work for its read's precision (`read_cost`: the pairs its noise needs, lifted and taken
+//!   back as its pair is, at its levels' work with the refused attempts in it) no more than what the rung below would
+//!   add (`buys`) --, else it stands on its own two levels, as a rung with no third level to be had does (a ladder's top
+//!   with no level below to read): the QuTiP-like path. A third level is a purchase, never a toll on staying: a check
+//!   dearer than the run it checks is not taken (the user's rule: no costly strict proof, none dearer than the run). A
+//!   third level above held off the pilot's own pairs -- the scout's, or the rung's the ladder left above -- is one read
+//!   whatever brought it: the rung's third only in the order's range of its own read (`in_range`). At the ladder's
+//!   bottom, with no rung below, it reads the third wherever there is one. (Until 2026-11-23 the third level the rung
+//!   would read was added to staying, and only the scout's held third was tested for the range: a first rung with no
+//!   third above to be had -- R5_PUMP's above the trap's edge, GMD1C's out of the range -- priced its side below at 16
+//!   times its own pairs, 1.8·10⁸ and 1.3·10¹⁰ against staying's 8.3·10⁶ and 3.3·10⁸, and went down where staying cost
+//!   2.5 times less; and GMD1C stood 0.948 µs where the ladder came down to it from 1.897 µs, the same read untested.
+//!   Measured at the rung left: R5_PUMP's trajectories 22 % and GMD1C's 45 % less thread time, every account within its
+//!   target; motion3d_status/rewrite/impl/STEP.status.md.) (Before, a third dearer than the rung below added
 //!   left the rung on its own two levels, and a third's price was its plain work: PGC3D's scout stayed at 0.948 µs for a
 //!   third at 3.79 µs priced 1.2e9 -- its read's precision there 3.7e9, out of the order's range, unable to see -- and went
 //!   down only after 190 s.)
@@ -651,6 +661,16 @@ use crate::request::Request;
 /// The runs' seed, the key of every trajectory's streams (random.rs): any fixed value, fixed so that a request gives the
 /// same result every time.
 pub(crate) const SEED: u64 = 0;
+
+/// The run's seed (`SEED`; a measurement's, the profiling build's alone: ATOM_PROF_SEED=n another, the same request's
+/// trajectories drawn again -- the spread of a result between two draws).
+fn seed() -> u64 {
+    #[cfg(feature = "prof")]
+    if let Some(n) = std::env::var("ATOM_PROF_SEED").ok().and_then(|x| x.parse::<u64>().ok()) {
+        return n;
+    }
+    SEED
+}
 /// The output times the distributions are given at (contract §3.4: at most 21, t = 0 and the last among them): the
 /// contract's number, for the display alone -- no estimate reads a distribution.
 const DISTRIBUTION_TIMES: usize = 21;
@@ -1813,16 +1833,28 @@ enum Course {
 /// expected work from here (module documentation, ## The ladder), at the run's length `end` and what the run holds of
 /// the rung's levels (`holding`); `third`: the third level the rung would read, where it has none yet (`third_of`). The
 /// rung below where some rung below costs less than staying (`descending`, `staying`); else its third level where the
-/// rung buys it (`buys`, at the pilot's position: on the scout the pilot's purchase to come, its work priced into
-/// staying -- the course there is the pilot's to take); else it stands on its own two levels.
+/// rung buys it (`buys`, at the pilot's position: on the scout the pilot's purchase to come -- the course there is the
+/// pilot's to take); else it stands on its own two levels, as a rung that has no third level to be had does. A third
+/// level is a purchase the rung makes where it is worth it, never a toll on staying: a check dearer than the run it
+/// checks is not taken (the user's rule, no costly strict proof, none dearer than the run). (Until 2026-11-23 a third
+/// level the rung would read was added to staying: a first rung with no third level above to be had -- R5_PUMP's
+/// above the trap's edge, GMD1C's out of the order's range -- read its side below at 16 times its own pairs, 1.8·10⁸ and
+/// 1.3·10¹⁰ against staying's 8.3·10⁶ and 3.3·10⁸, and went down where staying cost 2.5 times less: measured at the rung
+/// left, R5_PUMP's trajectories 22 % and GMD1C's 45 % less thread time, every account within its target,
+/// motion3d_status/rewrite/impl/STEP.status.md.)
 fn course(prices: &Prices, tau: f64, end: f64, holding: Holding, third: Option<Third>) -> Course {
-    // The two paths from here: verified at τ -- its companions, its third level where it has one to read, each for its
-    // read's precision, and its run level to the product --, or at the least rung below (`descending`: its third level
-    // this rung's read, lowered).
-    let stay = staying(prices, tau, holding) + third.map_or(0., |third| third.cost(prices, holding.pilot, holding.raw));
-    if descending(prices, tau, end, holding) < stay {
+    // (A measurement's, the profiling build's alone: ATOM_PROF_STAY=1 stands every rung the check stands, no price
+    // weighed -- what the run costs at the rung the price would have left.)
+    #[cfg(feature = "prof")]
+    if std::env::var("ATOM_PROF_STAY").is_ok_and(|x| x == "1") {
+        return Course::Stand;
+    }
+    // The two paths from here: verified at τ -- its companions and its run level to the product --, or at the least
+    // rung below (`descending`: its third level this rung's read, lowered); and at τ its third level where it is worth
+    // its price (`buys`).
+    if descending(prices, tau, end, holding) < staying(prices, tau, holding) {
         Course::Below
-    } else if third.is_some() {
+    } else if third.is_some_and(|third| buys(prices, tau, end, holding, third)) {
         Course::Third
     } else {
         Course::Stand
@@ -2206,6 +2238,19 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let first_rung = ladder
         .first()
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡和光场中势阱的曲率（或者阱频、曲率不是有限数）"))?;
+    // (A measurement's, the profiling build's alone: ATOM_PROF_UP=1 starts the ladder at the rung above its first,
+    // where the run and the edge have it -- what the check makes of one rung up, STEP's "往上试一级".)
+    #[cfg(feature = "prof")]
+    let first_rung = if std::env::var("ATOM_PROF_UP").is_ok_and(|x| x == "1") && 4. * first_rung <= end && stable(2. * first_rung, frequency, kick) && stable(4. * first_rung, frequency, kick) {
+        crate::prof::note(|| format!("ladder up from {first_rung} to {}", 2. * first_rung));
+        2. * first_rung
+    } else {
+        first_rung
+    };
+    // (A measurement's, the profiling build's alone: ATOM_PROF_TAU=x starts the ladder at the step x -- with
+    // ATOM_PROF_FORCE=1 the check stands it whatever it reads.)
+    #[cfg(feature = "prof")]
+    let first_rung = std::env::var("ATOM_PROF_TAU").ok().and_then(|x| x.parse::<f64>().ok()).map_or(first_rung, |x| end / (2. * (end / (2. * x)).round()));
     // Whether the rung above a step is a rung of the ladder (`first_rung`'s test at twice the step): the check then
     // reads that rung on a third level, at 4τ (`settle`): a cell of the Brownian path.
     let above = |tau: f64| 4. * tau <= end && stable(2. * tau, frequency, kick) && stable(4. * tau, frequency, kick);
@@ -2567,7 +2612,7 @@ fn priced_with(model: &Selected, widest: Widest, rated: &[Pick], tau: f64, own: 
             } else {
                 let states = &pick.state.sample.psi;
                 let ground = (0..GROUND).max_by(|&a, &b| states.get(a).map_or(0., |z| z.norm_sqr()).total_cmp(&states.get(b).map_or(0., |z| z.norm_sqr()))).unwrap_or(0);
-                let mut t = Trajectory::new(model, ground, mine.r, mine.kappa, SEED, mine.index);
+                let mut t = Trajectory::new(model, ground, mine.r, mine.kappa, seed(), mine.index);
                 (t.time, t.threshold, t.jumps) = (mine.time, mine.threshold, mine.jumps);
                 t
             };
@@ -3542,11 +3587,27 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         let upward = !levels.above_pilot && sides.iter().any(|&side| side);
         let ordered = levels.ordered(tau, members, times, window, &context.scales);
         let verdict = verdict(&read, levels.above.as_ref(), ordered, pilot, upward);
+        #[cfg(feature = "prof")]
+        let verdict = if std::env::var("ATOM_PROF_FORCE").is_ok_and(|x| x == "1") && verdict != Verdict::Unread { Verdict::Stands } else { verdict };
         crate::prof::note(|| {
             let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
             let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
             let halved = |level: &[Part]| level.iter().fold((0, 0.), |(n, f), p| (n + p.counts.halved.steps, f + p.counts.halved.time / level.iter().map(|q| q.counts.time).sum::<f64>()));
             format!("ladder tau {} pilot {pilot} members {members} groups {} companion {:?} verdict {verdict:?} ordered {ordered:?} screen {} halved (steps, share of time) {:?} / {:?} factor {:.5} looks [{}] above [{}]", context.tau, numbers.len(), levels.companion, screen(&read), halved(&levels.fine), halved(&levels.coarse), { let (fine, coarse) = levels.paired(); amplified(if levels.companion == Companion::Double { coarse } else { fine }) }, looks.join(" "), above.join(" "))
+        });
+        // (The profiling build's: the worst looks of the own read and of the third, each by its quantity and window.)
+        crate::prof::note(|| {
+            let [sp, st] = step_bound();
+            let worst = |b: &Between| -> String {
+                let mut all: Vec<(f64, String)> = b.reads.iter().enumerate().flat_map(|(q, reads)| reads.iter().enumerate().map(move |(w, r)| (q, w, r))).filter(|(_, _, r)| r.value.is_finite()).map(|(q, w, r)| {
+                    let quantity = Quantity::of(q);
+                    let bound = if quantity.shown() { sp * sp } else { st * st };
+                    (r.value / bound, format!("{quantity:?} [{:.1}, {:.1}] {:.2} ± {:.2}", b.windows[w][0], b.windows[w][1], r.value / bound, r.spread.error / bound))
+                }).collect();
+                all.sort_by(|a, b| b.0.total_cmp(&a.0));
+                all.iter().take(4).map(|x| x.1.clone()).collect::<Vec<_>>().join("; ")
+            };
+            format!("ladder worst tau {} members {members}: own {} | above {}", context.tau, worst(&read), levels.above.as_ref().map_or(String::new(), |a| worst(a)))
         });
         // A read of which no look reads decides nothing and prices nothing (`Verdict::Unread`): the check ends unable to
         // see where it is.
@@ -3589,13 +3650,20 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
             let asks = if in_range(&read, above) { blind(above).map(|factor| factor * levels.above_pairs as f64) } else { Some(f64::INFINITY) };
             asks.map(|pairs| Third { step: scouted.step, held: scouted.ran(), factor: 1., beside: levels.above_steps[0], lift: 1., measured: Some(pairs) })
         });
+        // A third level above held off the pilot's own pairs is one read whatever brought it -- the scout's, or the
+        // rung's the ladder left above (`check`'s descent) --, and it is the rung's third level only in the order's range of the
+        // rung's own read (`in_range`): out of it, the rung holds none. (Until 2026-11-23 the rung left above's read was
+        // taken as it was, the scout's tested: GMD1C's (1.897, 3.79 µs) read stood 0.948 µs where the ladder came down
+        // to it, and sent it down where the ladder began there.)
+        let out_of_range = levels.above.as_ref().is_some_and(|above| !levels.above_pilot && !in_range(&read, above));
         // The third level the rung would read on the pilot's pairs, where it has none yet: the side of the less cost for
         // its read's precision (`third_of`). Where the scout read it above, the side of the less cost by that read --
         // the side below as foretold where it is cheaper --, and the side above as read where neither is to be had: the
-        // path at the rung costs what that read asks, without bound where no pairs make it the rung's.
+        // path at the rung costs what that read asks, without bound where no pairs make it the rung's. Bought where it is
+        // worth it (`course`), else the rung stands on its own two levels.
         let third = match (prices, scouted) {
             (Some(prices), Some(_)) => scouted_up.map(|up| third_of(prices, tau, holding, sides, Some(up)).unwrap_or(up)),
-            (prices, _) => prices.and_then(|prices| third_of(prices, tau, holding, sides, None)).filter(|_| upward && levels.above.is_none()),
+            (prices, _) => prices.and_then(|prices| third_of(prices, tau, holding, sides, None)).filter(|_| upward && (levels.above.is_none() || out_of_range)),
         };
         // On the scout, where its rung stands and the path at it is the cheaper with its third level above as foretold
         // (module documentation, ## The ladder): that level on the scout's own pairs first (`third_on_the_scout`), and
@@ -4173,7 +4241,7 @@ impl State {
             scattered: [0.; 2],
             lost: None,
             unresolved: false,
-            seed: SEED,
+            seed: seed(),
             index: self.index,
             work: 0.,
             jumped: 0.,
@@ -4397,13 +4465,13 @@ fn merged(first: &[f64], second: &[f64]) -> Vec<(f64, [Option<usize>; 2])> {
 fn run<D: Dynamics>(model: &D, domain: &Domain, start: Start, index: u64, tau: f64, plan: &Plan, keep: bool) -> Record {
     let _p = crate::prof::scope(crate::prof::SOLVE_TRAJECTORY);
     let sizes = [plan.times.len(), plan.reads.len()];
-    let mut t = Trajectory::new(model, start.state, start.r, start.kappa, SEED, index);
+    let mut t = Trajectory::new(model, start.state, start.r, start.kappa, seed(), index);
     // The time the run's fold is found not to exist for it (# Exits): at its start where its start lands nowhere.
     let nowhere = std::cell::Cell::new((!t.forms.held.iter().all(|x| x.is_finite()) || !t.psi.iter().all(|z| z.re.is_finite() && z.im.is_finite())).then_some(0.));
     let mut scratch = Scratch::default();
     // The trajectory's Brownian path in the plan's cells, its grid the multiples of τ (a cell over a power of two):
     // the same path at every rung and at its companion.
-    let mut path = adapt::Path::new(SEED, index, plan.cell, (plan.cell / tau).log2().round() as u32);
+    let mut path = adapt::Path::new(seed(), index, plan.cell, (plan.cell / tau).log2().round() as u32);
     // The outputs' windows and the decisions' (the trajectory's fates with them), taken up by its reads and its path's
     // pieces alike.
     let windows = std::cell::RefCell::new([Windows::new(&plan.times, &plan.halves), Windows::new(&plan.reads, &plan.read_halves)]);
@@ -4751,7 +4819,7 @@ impl Shape {
 /// through the plan (`run`). A function of the index and the step: the same index at another step is the same atom on
 /// the same streams (module documentation, # The step).
 fn trajectory(model: &Selected, ensemble: &Ensemble, domain: &Domain, tau: f64, plan: &Plan, keep: bool, index: u64) -> Record {
-    let (start, kinetic) = ensemble.draw_kinetic(SEED, index);
+    let (start, kinetic) = ensemble.draw_kinetic(seed(), index);
     Record { kinetic, ..run(model, domain, start, index, tau, plan, keep) }
 }
 
@@ -5890,8 +5958,10 @@ mod tests {
     /// error at one look, on the scout's eleven pairs as on the pilot's 88 -- out of the order's range. Priced (a flat
     /// price, the pilot's 88 pairs), the side above as read costs the pairs it asks beyond the eleven held at 4τ and the
     /// pilot's at 2τ, in whole groups of the pilot's, three at the least (`Third::pairs`); out of the range no pairs make
-    /// it the rung's: the side below, as foretold, where it is to be had, and else the path at the rung is without bound
-    /// -- the rung below.
+    /// it the rung's: the side below, as foretold, where it is to be had, and else none -- unpriced, it is not bought,
+    /// and the rung stands on its own two levels where the rung below costs more than staying (`course`: a third level
+    /// is a purchase, never a toll on staying; until 2026-11-23 the path at the rung was then without bound, the rung
+    /// below).
     #[test]
     fn the_scout_s_third_level_prices_the_path_at_its_rung_by_what_it_reads() {
         let (tau, times, scales) = (0.95, [0., 1., 2., 3., 4.], Scales { hbar_over_mass: 1., frequencies: [1.; 3] });
@@ -5931,7 +6001,7 @@ mod tests {
         let out = scouted(f64::INFINITY);
         assert_eq!(third_of(&prices, tau, pilot, [true, false], Some(out)), None);
         assert_eq!(third_of(&prices, tau, pilot, [true, true], Some(out)).map(|third| third.step), Some(0.5 * tau));
-        assert_eq!(course(&prices, tau, 1000., pilot, Some(out)), Course::Below);
+        assert_eq!(course(&prices, tau, 1000., pilot, Some(out)), Course::Stand);
     }
 
     /// The side a rung reads its third level at (`third_of`; module documentation, ## Two levels, three levels): the one
@@ -6137,16 +6207,18 @@ mod tests {
         }
     }
 
-    /// A rung verified where it stands -- its third level read with its two -- or at the rung below, whichever path costs
-    /// the run the less (`course`; module documentation, ## The ladder): the pilot's 88 pairs at 0.95 µs of a 1 ms run, a
-    /// product of 287 trajectories, a flat price but the third level's steps dearer by a factor f: the rung below adds
-    /// (N + P)/τ to staying's (N − P)/τ, so the third level -- the pairs its read asks, here none beyond its least three
-    /// groups, 24 f/(4τ) (`Third::pairs`) -- is read up to f = 4(N + P)/24 = 62.5, and beyond it the rung below is the
-    /// cheaper path -- one flip. At the ladder's bottom (no rung below) it is read whatever its price. On the scout's
-    /// position the pilot's purchase to come is priced into staying: the rung below adds 336.5/τ to the scout's staying
-    /// (its companions at 2τ not yet run), so from f = 336.5/6 = 56.1 on the scout goes down. (Until R2-LADDER a third
-    /// dearer than that left the rung to stand on its own two levels; the path at the rung is now verified with its third
-    /// wherever one is to be had. Until SELCOST the third was the pilot's 88 trajectories whatever its read asked: the
+    /// A rung verified where it stands, its third level read with its two where that is worth its price, or at the rung
+    /// below, whichever path costs the run the less (`course`, `buys`; module documentation, ## The ladder): the pilot's
+    /// 88 pairs at 0.95 µs of a 1 ms run, a product of 287 trajectories, a flat price but the third level's steps dearer
+    /// by a factor f: the rung below adds (N + P)/τ to staying's (N − P)/τ, so the third level -- the pairs its read
+    /// asks, here none beyond its least three groups, 24 f/(4τ) (`Third::pairs`) -- is read up to f = 4(N + P)/24 =
+    /// 62.5, and beyond it the rung stands on its own two levels, the rung below still the dearer path -- one flip. At the
+    /// ladder's bottom (no rung below) it is read whatever its price. On the scout's position the rung below adds 336.5/τ
+    /// to the scout's staying (its companions at 2τ not yet run), so from f = 336.5/6 = 56.1 on the scout stands on its
+    /// two. (Until R2-LADDER a third dearer than that left the rung to stand on its own two levels; from then until
+    /// 2026-11-23 the path at the rung was verified with its third wherever one was to be had, so beyond the flip the
+    /// rung went down -- the third a toll on staying, GMD1C's and R5_PUMP's rungs left for runs 1.8 and 1.3 times dearer;
+    /// a third is a purchase again. Until SELCOST the third was the pilot's 88 trajectories whatever its read asked: the
     /// flips at 17.05 and 15.3.)
     #[test]
     fn a_third_level_dearer_than_a_rung_below_is_not_read() {
@@ -6160,12 +6232,12 @@ mod tests {
         let courses: Vec<Course> = factors.iter().map(|&f| priced(f, tau, pilot)).collect();
         let flips = courses.windows(2).filter(|w| w[0] != w[1]).count();
         let flip = 4. * (product + 88.) / (THIRD_GROUPS * GROUP) as f64;
-        assert!(courses[0] == Course::Third && courses[1000] == Course::Below && flips == 1, "{courses:?}");
+        assert!(courses[0] == Course::Third && courses[1000] == Course::Stand && flips == 1, "{courses:?}");
         // The flip on the grid itself (62.5) goes either way to the rounding.
-        assert!(factors.iter().zip(&courses).all(|(&f, &c)| (f - flip).abs() < 1e-9 || c == if f <= flip { Course::Third } else { Course::Below }), "{flip}");
+        assert!(factors.iter().zip(&courses).all(|(&f, &c)| (f - flip).abs() < 1e-9 || c == if f <= flip { Course::Third } else { Course::Stand }), "{flip}");
         let bottom = end / MOST_STEPS as f64 * 1.5;
         assert!(end / (0.5 * bottom) > MOST_STEPS as f64 && priced(1e6, bottom, pilot) == Course::Third);
-        assert_eq!([1., 56., 56.2, 62.4, 62.6, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Below, Course::Below, Course::Below, Course::Below]);
+        assert_eq!([1., 56., 56.2, 62.4, 62.6, 1e6].map(|f| priced(f, tau, scout)), [Course::Third, Course::Third, Course::Stand, Course::Stand, Course::Stand, Course::Stand]);
     }
 
     /// A rung read against τ/2 reads e(τ) as one read against 2τ does (module documentation, ## A companion at τ/2;

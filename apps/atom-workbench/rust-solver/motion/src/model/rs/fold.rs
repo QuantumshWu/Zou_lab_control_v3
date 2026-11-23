@@ -156,6 +156,8 @@ struct Block {
     /// puts in, the others.
     fixed: Vec<C64>,
     rest: Vec<Entry>,
+    /// A sideband part of K left out (`Plan::drop_sideband`): its spectrum, amplitudes and pairs not made.
+    dropped: bool,
 }
 
 /// The fold's structure for a kept set K (module documentation, # Structure once).
@@ -264,7 +266,7 @@ impl Plan {
             for (r, &i) in members.iter().enumerate() {
                 q_of[i] = (blocks.len(), r);
             }
-            blocks.push(Block { rows: members, sideband: None, generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new() });
+            blocks.push(Block { rows: members, sideband: None, generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new(), dropped: false });
         }
         let piece_classes: Vec<[i64; 2]> = classes[..hamiltonian].to_vec();
         let mut by_part: BTreeMap<[i64; 2], Vec<usize>> = BTreeMap::new();
@@ -282,7 +284,7 @@ impl Plan {
                 for (r, &a) in sub.iter().enumerate() {
                     s_of[a] = (blocks.len(), r);
                 }
-                blocks.push(Block { rows: sub, sideband: Some(*s), generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new() });
+                blocks.push(Block { rows: sub, sideband: Some(*s), generator: Vec::new(), varying: Vec::new(), fixed: Vec::new(), rest: Vec::new(), dropped: false });
             }
         }
         // The generator's entries by block, and K's diagonal.
@@ -443,6 +445,31 @@ impl Plan {
         self.blocks.iter().map(|b| (b.rows.len(), b.sideband.is_none())).collect()
     }
 
+    /// K's sideband parts (`Block::sideband`): their blocks' indices.
+    pub(crate) fn sidebands(&self) -> Vec<usize> {
+        (0..self.blocks.len()).filter(|&b| self.blocks[b].sideband.is_some()).collect()
+    }
+
+    /// K's sideband part `b` left out of the fold (`out`) or put back: what it adds -- its pairs into H_eff and the
+    /// channels, values, gradients and photon forms -- is then not made (`Local::evaluate`, `Out::contract`), nor
+    /// bounded (`Out::bounds`); its caller books it (model/selected.rs, # The sideband parts dropped).
+    pub(crate) fn drop_sideband(&mut self, b: usize, out: bool) {
+        assert!(self.blocks[b].sideband.is_some(), "only K's sideband parts are left out");
+        self.blocks[b].dropped = out;
+    }
+
+    /// Whether K's sideband part `b` is left out (`drop_sideband`; the tests').
+    #[cfg(test)]
+    pub(crate) fn dropped(&self, b: usize) -> bool {
+        self.blocks[b].dropped
+    }
+
+    /// Whether the block `b` is made where `model` (K's sideband parts only where a model is made, and not left out).
+    fn made(&self, b: usize, model: bool) -> bool {
+        let block = &self.blocks[b];
+        block.sideband.is_none() || (model && !block.dropped)
+    }
+
     /// The count of pieces (H's and the jumps').
     pub fn pieces(&self) -> usize {
         self.keys.len()
@@ -551,6 +578,32 @@ pub struct Grouping {
     /// first column there.
     layout: Vec<(Vec<usize>, usize)>,
     z_offset: Vec<usize>,
+    /// The direct entries spanned per output (`Grouping::spanned`), taken in place of the entries one by one where there
+    /// are any.
+    pub(crate) spans: Vec<Span>,
+}
+
+/// One output's direct entries spanned (`Grouping::spanned`): H's output (`h`) or a channel's (`which` its value 0 or its
+/// photon form 1), its index, its places; per atom -- a piece's term at a coefficient, the fixed vector of its entries
+/// over the places -- its coordinates on the basis; the basis.
+#[derive(Clone, Debug)]
+pub(crate) struct Span {
+    pub h: bool,
+    pub out: usize,
+    pub which: usize,
+    pub places: Vec<usize>,
+    pub atoms: Vec<(usize, usize, usize, Vec<C64>)>,
+    pub basis: Vec<Vec<C64>>,
+}
+
+/// A span of the direct entries (`Grouping::spanned`): per output its span, and per output (H's or a channel's, its
+/// index) the bound of what it leaves out over the reach -- Σ ‖r‖₂ b over the atoms whose residual r was left, b the
+/// atom's point coefficient's bound: the dropped entries' Frobenius norm, which bounds their sup norm --; its counted work at a node (complex multiply-adds: the coordinates and the basis, values and gradients)
+/// against the entries' one by one.
+pub(crate) struct Spanned {
+    pub spans: Vec<Span>,
+    pub dropped: Vec<(bool, usize, f64)>,
+    pub work: [f64; 2],
 }
 
 /// An H pair (`Grouping`): its sums, its output and its conjugate's, and per element (i, j) of W Z its place in each.
@@ -805,7 +858,7 @@ impl Grouping {
             l.0.push(zi);
             l.1 += z.index.len();
         }
-        Grouping { labels, of, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset }
+        Grouping { labels, of, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset, spans: Vec::new() }
     }
 
     /// Each piece's group.
@@ -938,7 +991,7 @@ impl Local {
         let table = (mode == 0).then(|| plan.table(v));
         let s = plan.intensity.first().map_or(0.0, |&f| v.factors[f].0.re);
         for (b, block) in plan.blocks.iter().enumerate() {
-            if block.sideband.is_some() && !making.model {
+            if !plan.made(b, making.model) {
                 continue;
             }
             if let Some(tabled) = table.and_then(|t| t.blocks[b].as_deref()) {
@@ -1046,7 +1099,7 @@ impl Local {
         dms.resize_with(nb, Mat::default);
         for (b, batch) in plan.batches.iter().enumerate() {
             let block = &plan.blocks[b];
-            if block.sideband.is_some() && !making.model {
+            if !plan.made(b, making.model) {
                 continue;
             }
             let size = block.rows.len();
@@ -1176,6 +1229,10 @@ impl Local {
             let size = block.rows.len();
             let (total, wide) = (batch.total, batch.wide);
             let (m, dm) = (&self.m[b], &self.dm[b]);
+            if !plan.made(b, true) {
+                out.push((Vec::new(), Vec::new()));
+                continue;
+            }
             if batch.amplitudes.is_empty() {
                 out.push((m.data.iter().map(|z| z.abs()).collect(), dm.data.iter().map(|z| z.abs()).collect()));
                 continue;
@@ -1551,6 +1608,8 @@ pub struct Out {
     pd: Mat,
     /// A piece's terms' factors at the point with their scales and weight, and whether each moves.
     tf: Vec<(C64, [C64; 3], bool)>,
+    /// A spanned output's coordinates at the point, values and gradients (`Grouping::spanned`).
+    span: Vec<(C64, [C64; 3])>,
     made: usize,
     pub work: f64,
     /// The moduli `scales` reads: a leg sum's |X| and |∂X| (4|rows| × |B|), its block's |M| and |∂M|, their products.
@@ -1601,7 +1660,7 @@ impl Out {
             list.resize_with(nb, Default::default);
         }
         for (b, (list, width)) in grouping.layout.iter().enumerate() {
-            if plan.blocks[b].sideband.is_some() && !making.model {
+            if !plan.made(b, making.model) {
                 continue;
             }
             let (size, width) = (plan.blocks[b].rows.len(), *width);
@@ -1655,9 +1714,45 @@ impl Out {
                 (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
             }));
         };
+        // The direct entries spanned (`Grouping::spanned`): per output its coordinates at the point -- each atom's factor,
+        // scale, weight and coefficient on its coordinates --, then the basis at them.
+        for d in &grouping.spans {
+            if (d.h && !(making.model && making.effective)) || (!d.h && (!making.model || (d.which == 1 && !making.kicks))) {
+                continue;
+            }
+            self.span.clear();
+            self.span.resize(d.basis.len(), (C64::ZERO, [C64::ZERO; 3]));
+            for (piece, term, coefficient, coords) in &d.atoms {
+                let k = v.coefficients[*coefficient];
+                if k == 0.0 {
+                    continue;
+                }
+                let (f, scale) = plan.terms[*piece][*term];
+                let (x, g) = v.factors[f];
+                let c = scale * weight(*piece) * k;
+                let (x, dx) = (x * c, g.map(|d| d * c));
+                for (sum, z) in self.span.iter_mut().zip(coords) {
+                    sum.0 += *z * x;
+                    for a in 0..3 {
+                        sum.1[a] += *z * dx[a];
+                    }
+                }
+            }
+            let o = if d.h { &mut self.h[d.out] } else { &mut self.channels[d.out] };
+            for (sum, b) in self.span.iter().zip(&d.basis) {
+                for (&place, z) in d.places.iter().zip(b) {
+                    o.value[place] += sum.0 * *z;
+                    for a in 0..3 {
+                        o.gradient[a][place] += sum.1[a] * *z;
+                    }
+                }
+            }
+            work += (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
+        }
+        let spanned = !grouping.spans.is_empty();
         if making.model && making.effective {
             // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
-            for p in 0..plan.hamiltonian {
+            for p in (0..plan.hamiltonian).filter(|_| !spanned) {
                 factors(&mut self.tf, p);
                 let o = &mut self.h[grouping.h_direct[p]];
                 for ((e, _), &k) in plan.direct[p].iter().zip(&grouping.h_direct_places[p]) {
@@ -1673,6 +1768,9 @@ impl Out {
                 }
             }
             for pair in &grouping.h_pairs {
+                if !plan.made(grouping.ws[pair.w].block, true) {
+                    continue;
+                }
                 if self.made != pair.w {
                     self.legs(plan, grouping, v, &weight, pair.w);
                     work += self.product(grouping, pair.w);
@@ -1707,6 +1805,9 @@ impl Out {
                 if which == 1 && !making.kicks {
                     continue;
                 }
+                if spanned && which == 0 {
+                    continue;
+                }
                 factors(&mut self.tf, p);
                 for ((e, _), &(o, k)) in plan.direct[p].iter().zip(&grouping.j_direct[p - plan.hamiltonian]) {
                     let (x, dx, moving) = self.tf[e.term as usize];
@@ -1721,7 +1822,7 @@ impl Out {
                 }
             }
             for pair in &grouping.j_pairs {
-                if grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks {
+                if (grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks) || !plan.made(grouping.ws[pair.w].block, true) {
                     continue;
                 }
                 if self.made != pair.w {
@@ -1875,6 +1976,10 @@ impl Out {
         for (b, (list, width)) in grouping.layout.iter().enumerate() {
             let (size, width) = (plan.blocks[b].rows.len(), *width);
             let (mut zv, mut zd) = (vec![0.0; size * width], vec![0.0; size * 3 * width]);
+            if !plan.made(b, true) {
+                blocks.push((zv, zd));
+                continue;
+            }
             for &zi in list {
                 let (s, o) = (&grouping.zs[zi], grouping.z_offset[zi]);
                 for (member, map) in &s.members {
@@ -1955,6 +2060,9 @@ impl Out {
                 (p.w, p.z, true)
             };
             let s = &grouping.ws[wi];
+            if !plan.made(s.block, true) {
+                continue;
+            }
             let (rows, size, width) = (s.index.len(), plan.blocks[s.block].rows.len(), grouping.layout[s.block].1);
             if made != wi {
                 // |X| and |∂X| (4 rows × |B|): each member's entry's modulus.
@@ -2286,6 +2394,11 @@ impl Out {
     /// entry |x c|; a pair ½ Σ_q |X_iq| M̄_qj (a jump's pair without the ½). The weights are one (the lab's grouping).
     /// Per H output and per channel output (the photon forms' outputs left at zero), on their structural elements.
     pub fn bounds(plan: &Plan, grouping: &Grouping, moduli: &[Vec<f64>], coefficients: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        Out::bounds_of(plan, grouping, moduli, coefficients, &|b| b.is_none_or(|b| plan.made(b, true)))
+    }
+
+    /// `bounds` of the parts `take` takes: the direct entries (None), the pairs of a block (Some(b)).
+    pub fn bounds_of(plan: &Plan, grouping: &Grouping, moduli: &[Vec<f64>], coefficients: &[f64], take: &dyn Fn(Option<usize>) -> bool) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
         let coefficient = |c: u32| -> f64 { if c == 0 { 1.0 } else { coefficients[c as usize] } };
         let mut h: Vec<Vec<f64>> = grouping.lists.iter().map(|l| vec![0.0; l.len()]).collect();
         let mut channels: Vec<Vec<f64>> = grouping.channel_lists.iter().map(|l| vec![0.0; l.len()]).collect();
@@ -2309,7 +2422,7 @@ impl Out {
             sums.push(z);
         }
         // The direct entries.
-        for p in 0..plan.keys.len() {
+        for p in (0..plan.keys.len()).filter(|_| take(None)) {
             let terms = &plan.terms[p];
             if p >= plan.hamiltonian && plan.jump[p].is_some_and(|(_, which)| which == 1) {
                 continue;
@@ -2337,7 +2450,7 @@ impl Out {
                 (p.w, p.z, true)
             };
             let s = &grouping.ws[wi];
-            if s.jump.is_some_and(|(_, which)| which == 1) {
+            if s.jump.is_some_and(|(_, which)| which == 1) || !take(Some(s.block)) {
                 continue;
             }
             let (rows, size, width) = (s.index.len(), plan.blocks[s.block].rows.len(), grouping.layout[s.block].1);
@@ -2380,6 +2493,106 @@ impl Out {
 }
 
 impl Grouping {
+    /// The direct entries spanned per output (model/selected.rs, # The direct entries spanned): per output -- H's, a
+    /// channel's value or photon form -- its atoms, each a piece's term at a coefficient with the fixed vector of its
+    /// entries over the output's places and the bound b of its point coefficient (`bound`: |scale| times the
+    /// coefficient's largest over the reach `coefficients`, every factor at most one), orthonormalized in the order of
+    /// ‖v‖b (two passes of Gram–Schmidt): an atom's residual r is a new direction where ‖r‖b exceeds `tolerance` times
+    /// its kind's largest ‖v‖b (channels, H), else left out, its ‖r‖b booked. Returns the spans, what each output
+    /// leaves out, and the work.
+    pub(crate) fn spanned(&self, plan: &Plan, coefficients: &[f64], tolerance: f64) -> Spanned {
+        let bound = |p: usize, t: usize, c: usize| plan.terms[p][t].1.abs() * if c == 0 { 1.0 } else { coefficients[c] };
+        // The outputs' entries: per output its places and per atom its entries (place, value).
+        let mut outs: Vec<(bool, usize, usize, Vec<usize>, Vec<(usize, usize, usize)>, Vec<Vec<(usize, C64)>>)> = Vec::new();
+        let mut plain = 0.0;
+        for p in 0..plan.keys.len() {
+            // The photon forms' (a jump's kick) are taken one by one: their error is the kick's, not the model's.
+            let which = plan.jump[p].map_or(0, |x| x.1);
+            if which == 1 {
+                continue;
+            }
+            for (i, (e, _)) in plan.direct[p].iter().enumerate() {
+                let (h, o, k) = if p < plan.hamiltonian { (true, self.h_direct[p], self.h_direct_places[p][i] as usize) } else { (false, self.j_direct[p - plan.hamiltonian][i].0, self.j_direct[p - plan.hamiltonian][i].1 as usize) };
+                plain += 4.0;
+                let g = outs.iter().position(|x| x.0 == h && x.1 == o && x.2 == which).unwrap_or_else(|| {
+                    outs.push((h, o, which, Vec::new(), Vec::new(), Vec::new()));
+                    outs.len() - 1
+                });
+                let out = &mut outs[g];
+                let place = out.3.iter().position(|&x| x == k).unwrap_or_else(|| {
+                    out.3.push(k);
+                    out.3.len() - 1
+                });
+                let key = (p, e.term as usize, e.coefficient as usize);
+                let a = out.4.iter().position(|x| *x == key).unwrap_or_else(|| {
+                    out.4.push(key);
+                    out.5.push(Vec::new());
+                    out.4.len() - 1
+                });
+                out.5[a].push((place, e.value));
+            }
+        }
+        let dot = |a: &[C64], b: &[C64]| a.iter().zip(b).fold(C64::ZERO, |s, (x, y)| s + x.conj() * *y);
+        // Each kind's largest atom (H's outputs and the channels' are apart by orders).
+        let mut top = [0.0_f64; 2];
+        for (h, _, _, places, keys, entries) in &outs {
+            for (&(p, t, c), e) in keys.iter().zip(entries) {
+                let mut v = vec![C64::ZERO; places.len()];
+                for &(i, x) in e {
+                    v[i] += x;
+                }
+                top[usize::from(*h)] = top[usize::from(*h)].max(dot(&v, &v).re.sqrt() * bound(p, t, c));
+            }
+        }
+        let (mut spans, mut dropped, mut work) = (Vec::new(), Vec::new(), 0.0);
+        for (h, out, which, places, keys, entries) in outs {
+            let vectors: Vec<Vec<C64>> = entries
+                .iter()
+                .map(|e| {
+                    let mut v = vec![C64::ZERO; places.len()];
+                    for &(i, x) in e {
+                        v[i] += x;
+                    }
+                    v
+                })
+                .collect();
+            let bounds: Vec<f64> = keys.iter().map(|&(p, t, c)| bound(p, t, c)).collect();
+            let size: Vec<f64> = vectors.iter().zip(&bounds).map(|(v, b)| dot(v, v).re.sqrt() * b).collect();
+            let mut order: Vec<usize> = (0..vectors.len()).collect();
+            order.sort_by(|&a, &b| size[b].total_cmp(&size[a]));
+            let (mut basis, mut coords, mut left): (Vec<Vec<C64>>, Vec<Vec<C64>>, f64) = (Vec::new(), vec![Vec::new(); vectors.len()], 0.0);
+            for &t in &order {
+                let mut r = vectors[t].clone();
+                let mut cs = vec![C64::ZERO; basis.len()];
+                for _ in 0..2 {
+                    for (k, u) in basis.iter().enumerate() {
+                        let q = dot(u, &r);
+                        cs[k] += q;
+                        for (x, y) in r.iter_mut().zip(u) {
+                            *x -= q * *y;
+                        }
+                    }
+                }
+                let rest = dot(&r, &r).re.sqrt();
+                if rest * bounds[t] > tolerance * top[usize::from(h)] {
+                    let inverse = 1.0 / rest;
+                    basis.push(r.iter().map(|x| *x * inverse).collect());
+                    cs.push(C64::real(rest));
+                } else {
+                    left += rest * bounds[t];
+                }
+                coords[t] = cs;
+            }
+            for c in coords.iter_mut() {
+                c.resize(basis.len(), C64::ZERO);
+            }
+            work += 4.0 * (keys.len() * basis.len() + basis.len() * places.len()) as f64;
+            dropped.push((h, out, left));
+            spans.push(Span { h, out, which, places, atoms: keys.into_iter().zip(coords).map(|((p, t, c), cs)| (p, t, c, cs)).collect(), basis });
+        }
+        Spanned { spans, dropped, work: [plain, work] }
+    }
+
     /// The structure's sizes (a measurement's): Z sums, W sums, H pairs, jump pairs, and their products' summed
     /// rows × |B| × cols.
     pub fn sizes(&self, plan: &Plan) -> [usize; 6] {

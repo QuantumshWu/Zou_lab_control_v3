@@ -88,6 +88,32 @@
 //! took M ρ M†: 48 µs a read on PGC3D's G pinned, against a step's 310 (GMD1C's 1001 outputs 15 % of its
 //! trajectories' work, R5_PUMP's 40 %, study C §2.5); on the middle 7 µs.
 //!
+//! # The direct entries spanned
+//! A node's direct entries -- each piece's K × K entries of H_eff and of the channels, a term's factor at the point
+//! times a fixed vector over an output's places -- are a sum over atoms (piece, term, coefficient) whose fixed vectors
+//! span few directions: six beams of one frequency are three field components. The lab's grouping holds them spanned
+//! (rs/fold.rs `Grouping::spanned`): per output an orthonormal basis of its atoms' vectors in the order of their size
+//! over the reach (‖v‖ times |scale| times the coefficient's largest, every factor at most one), each atom's
+//! coordinates on it, a residual left out where it is at most a tolerance of its kind's largest atom (H's outputs, the
+//! channels'); the photon forms' entries one by one. What a span leaves out is a bound of the generator's change over
+//! the reach -- an H output's left residuals' Σ ‖r‖b (its Frobenius norm, above its sup norm), a channel's (its
+//! outputs' summed over its beats) 2‖L‖ times it and its square, `Selected::rate` -- booked with the dropped beats' Y
+//! (`Judgment::dropped`, model/classify.rs # The drop tier: the solve books ½(e^{2YT} − 1)). Which tolerance is the
+//! drop tier's rule (`Selected::span_directs`): of none and of 10⁻ᵏ (k = 2 … 16), the least W -- the node's counted
+//! work times the account's factor at Y --, so the budget decides and a span that costs more than it saves is not
+//! taken. (Until 2026-11-23 the entries one by one: PGC3D's 4134
+//! direct entries, 13.5 µs of its 141 µs node; OLDNEW, motion3d_status/rewrite/impl/OLDNEW.report.md §3.1.)
+//!
+//! # The sideband parts dropped
+//! K's sideband parts (rs/fold.rs `Block::sideband`: K's states by fast part, where a class has a fast element into
+//! them) fold the fast elements within K; their pairs add to H_eff and to the channels what those elements make at
+//! second order, on PGC3D and TET about 10⁻¹⁰ (OLDNEW §3.1), each a spectrum and its products a node. The drop tier
+//! weighs them as it weighs beats (`Selected::drop_sidebands`): each part's Y -- its pairs' bounds over the reach
+//! (`Out::bounds_of`), H's outputs and the channels' as a span's (`Selected::rate`) --; the parts in the order of their
+//! Y, of every first few (none among them) the one of least W -- the node's counted work without them times the
+//! account's factor at the dropped beats' Y and theirs --, left out of the fold (`Plan::drop_sideband`: its spectrum,
+//! amplitudes and pairs, values, gradients and photon forms, not made), their Y booked with the dropped beats'.
+//!
 //! # Exact blocks
 //! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
 //! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis. They are the run's judgment's
@@ -202,8 +228,10 @@ pub struct Selected {
     lifts: Vec<(usize, Vec<(usize, f64)>)>,
 }
 
-/// Which beats a model drops (`Selected::made`): those its judgment drops (model/classify.rs, # The drop tier), or (a
-/// check's) exactly the candidate pairs of the listed |Ω| (rad/µs, to 10⁻⁹ of it), none of an empty list.
+/// Which beats a model drops (`Selected::made`): those its judgment drops (model/classify.rs, # The drop tier), its
+/// direct entries spanned where that is the cheaper (# The direct entries spanned), or (a check's) exactly the candidate
+/// pairs of the listed |Ω| (rad/µs, to 10⁻⁹ of it), none of an empty list, and nothing else left out: the direct
+/// entries one by one.
 #[derive(Clone, Debug)]
 pub(crate) enum Drops {
     Judged,
@@ -995,10 +1023,155 @@ impl Selected {
                 }
             }
         }
+        // K's sideband parts left out and the direct entries spanned where that costs the run the less (module
+        // documentation, # The sideband parts dropped, # The direct entries spanned), what they leave out booked with
+        // the dropped beats.
+        if matches!(drops, Drops::Judged) {
+            let (_, account, _) = self.drop_sizes(&node, &[], spherical);
+            judgment.dropped += self.drop_sidebands(&account, judgment.dropped);
+            let nodes = self.counted_node();
+            judgment.dropped += self.span_directs(&account, nodes, judgment.dropped);
+        }
         self.judgment = judgment;
         self.decay_terms();
         // The pooled nodes were made on the layout before.
         POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
+    }
+
+    /// The direct entries spanned (module documentation, # The direct entries spanned): of the lab's grouping's spans
+    /// at the tolerances 10⁻ᵏ of each kind's largest atom (k = 2 … 16) and of none, the one of least W -- the drop
+    /// tier's rule, the node's counted work (complex multiply-adds, three nodes a step, the direct part as each does it:
+    /// value and gradients) times the account's factor at the dropped beats' Y and the span's (`Account::factor`) --,
+    /// set on the grouping. The span's Y: what it leaves out of each output bounded (`Selected::rate`). Returns it.
+    fn span_directs(&mut self, account: &Account, nodes: f64, base: f64) -> f64 {
+        let (_, coefficients, norms) = self.reach_bounds();
+        let plan = self.rs.plan();
+        let rate = |spanned: &crate::model::rs::fold::Spanned| -> f64 {
+            let (mut h, mut channels) = (vec![0.0; self.lab.outputs.len()], vec![0.0; self.lab.channel_outputs.len()]);
+            for &(is_h, o, d) in &spanned.dropped {
+                if is_h {
+                    h[o] += d;
+                } else {
+                    channels[o] += d;
+                }
+            }
+            self.rate(&h, &channels, &norms)
+        };
+        // The candidates: none (the entries one by one, nothing left out), then the spans at 10⁻ᵏ.
+        let plain = self.lab.spanned(plan, &coefficients, 0.0).work[0];
+        let mut least = (nodes + 3.0 * plain) * account.factor(base);
+        crate::prof::note(|| format!("span none: work {plain} W {least:.6e} (nodes {nodes:.0}, factor {:.6e})", account.factor(base)));
+        let mut best: Option<(f64, crate::model::rs::fold::Spanned)> = None;
+        for k in 2..=16 {
+            let spanned = self.lab.spanned(plan, &coefficients, 10f64.powi(-k));
+            let y = rate(&spanned);
+            let w = (nodes + 3.0 * spanned.work[1]) * account.factor(base + y);
+            crate::prof::note(|| format!("span 1e-{k}: directions {} work {} Y {y:.3e} W {w:.6e} (factor {:.6e})", spanned.spans.iter().map(|d| d.basis.len()).sum::<usize>(), spanned.work[1], account.factor(base + y)));
+            if w < least {
+                least = w;
+                best = Some((y, spanned));
+            }
+        }
+        match best {
+            Some((y, spanned)) => {
+                self.lab.spans = spanned.spans;
+                y
+            }
+            None => {
+                self.lab.spans.clear();
+                0.0
+            }
+        }
+    }
+
+    /// K's sideband parts left out (module documentation, # The sideband parts dropped): each part's Y, its pairs' bounds
+    /// over the reach (`Out::bounds_of`, the part's pairs alone) booked by `rate`; the parts in the order of their Y, of
+    /// none and every first few the one of least W (`counted_node` without them times `Account::factor` at `base` plus
+    /// their Y), left out of the fold (`Plan::drop_sideband`). Returns their Y.
+    fn drop_sidebands(&mut self, account: &Account, base: f64) -> f64 {
+        let sidebands = self.rs.plan().sidebands();
+        if sidebands.is_empty() {
+            return 0.0;
+        }
+        let (moduli, coefficients, norms) = self.reach_bounds();
+        let frobenius = |b: &Vec<f64>| b.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let mut parts: Vec<(usize, f64)> = sidebands
+            .iter()
+            .map(|&b| {
+                let (h, channels) = Out::bounds_of(self.rs.plan(), &self.lab, &moduli, &coefficients, &|x| x == Some(b));
+                (b, self.rate(&h.iter().map(frobenius).collect::<Vec<_>>(), &channels.iter().map(frobenius).collect::<Vec<_>>(), &norms))
+            })
+            .collect();
+        parts.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let sizes = self.rs.plan().blocks();
+        let mut least = (0, self.counted_node() * account.factor(base));
+        crate::prof::note(|| format!("sidebands none: W {:.6e}; parts (block, size, Y) {:?}", least.1, parts.iter().map(|&(b, y)| (b, sizes[b].0, y)).collect::<Vec<_>>()));
+        let mut y = 0.0;
+        for k in 0..parts.len() {
+            self.rs.folding.plan.drop_sideband(parts[k].0, true);
+            y += parts[k].1;
+            let w = self.counted_node() * account.factor(base + y);
+            crate::prof::note(|| format!("sidebands the first {}: Y {y:.3e} W {w:.6e} (factor {:.6e})", k + 1, account.factor(base + y)));
+            if w < least.1 {
+                least = (k + 1, w);
+            }
+        }
+        for (k, &(b, _)) in parts.iter().enumerate() {
+            self.rs.folding.plan.drop_sideband(b, k < least.0);
+        }
+        parts[..least.0].iter().map(|p| p.1).sum()
+    }
+
+    /// A node's counted work at the structure's point (complex multiply-adds, three a step: the fold and its contraction
+    /// by the lab's grouping, `drop_sizes`').
+    fn counted_node(&self) -> f64 {
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
+        3.0 * (work.local.work + work.out.work)
+    }
+
+    /// The reach's bounds the judgment's later parts weigh (# The direct entries spanned): the folded blocks' amplitudes
+    /// over the reach (`Plan::reach`, the structure's point's frequencies), the reach's coefficients' largest, and per
+    /// channel output its channel's ‖L‖ bounded -- the channel (emission axis, fast index) its value outputs' Frobenius
+    /// bounds summed over its beats (rs/fold.rs `Out::bounds`).
+    fn reach_bounds(&self) -> (Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
+        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
+        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
+        let reach = self.rs.reach(&self.scene, self.hbar_over_mass, (2.0 * depth / self.hbar_over_mass).sqrt());
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        let plan = self.rs.plan();
+        let moduli = plan.reach(&work.local.values, &reach);
+        let (_, channels) = Out::bounds(plan, &self.lab, &moduli, &reach.coefficients);
+        let outputs = &self.lab.channel_outputs;
+        let mut whole: HashMap<(usize, [i64; 2]), f64> = HashMap::new();
+        for (o, (q, fast, which, ..)) in outputs.iter().enumerate() {
+            if *which == 0 {
+                *whole.entry((*q, *fast)).or_insert(0.0) += channels[o].iter().map(|x| x * x).sum::<f64>().sqrt();
+            }
+        }
+        let norms = outputs.iter().map(|(q, fast, ..)| whole.get(&(*q, *fast)).copied().unwrap_or(0.0)).collect();
+        (moduli, reach.coefficients, norms)
+    }
+
+    /// The rate Y of a change of the node's outputs by at most `h` (per H output, a bound of its Frobenius norm) and
+    /// `channels` (per channel output, likewise), the drop tier's (model/classify.rs, # The drop tier:
+    /// ‖(𝓛′ − 𝓛)ρ‖₁ ≤ 2Y‖ρ‖₁): ‖δH_eff‖ at most Σ h over the outputs (one a beat); per channel (emission axis, fast index)
+    /// δ its value outputs' sum and ‖L‖ its bound (`reach_bounds`), LρL† and ½{L†L, ρ} each moved by at most
+    /// (2‖L‖δ + δ²)‖ρ‖₁. The photon forms' outputs add none: what a jump reads off them is the state's, which D bounds.
+    fn rate(&self, h: &[f64], channels: &[f64], norms: &[f64]) -> f64 {
+        let outputs = &self.lab.channel_outputs;
+        let mut per: HashMap<(usize, [i64; 2]), (f64, f64)> = HashMap::new();
+        for (o, (q, fast, which, ..)) in outputs.iter().enumerate() {
+            if *which == 0 && channels[o] > 0.0 {
+                let e = per.entry((*q, *fast)).or_insert((0.0, norms[o]));
+                e.0 += channels[o];
+            }
+        }
+        h.iter().sum::<f64>() + per.values().map(|&(d, l)| 2.0 * l * d + d * d).sum::<f64>()
     }
 
     /// The run's judgment of its node's beats (model/classify.rs): per slot of the structure's node, before the beats
@@ -1157,6 +1330,31 @@ impl Selected {
         let mut node = self.template.clone();
         self.node_into(&mut node, at, kappa, (kicked, true), false);
         node
+    }
+
+    /// The run with its direct entries one by one (the tests'): its spans taken off (# The direct entries spanned).
+    #[cfg(test)]
+    pub(crate) fn unspanned(&mut self) {
+        self.lab.spans.clear();
+    }
+
+    /// The run with nothing left out but its dropped beats (the tests'): its spans taken off and K's sideband parts put
+    /// back (# The direct entries spanned, # The sideband parts dropped); whether any part was left out.
+    #[cfg(test)]
+    pub(crate) fn whole(&mut self) -> bool {
+        self.lab.spans.clear();
+        self.sidebands_in()
+    }
+
+    /// The run with K's sideband parts put back (the tests', # The sideband parts dropped); whether any was left out.
+    #[cfg(test)]
+    pub(crate) fn sidebands_in(&mut self) -> bool {
+        let parts = self.rs.plan().sidebands();
+        let left = parts.iter().filter(|&&b| self.rs.plan().dropped(b)).count();
+        for b in parts {
+            self.rs.folding.plan.drop_sideband(b, false);
+        }
+        left > 0
     }
 
     /// A jump's photon's node at a point (`SelectedMiddle::photon`, the tests'): the photon classes alone.
@@ -1740,10 +1938,20 @@ impl SelectedMiddle<'_> {
         let emitted = READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { photons: list, rates, .. } = &mut *r;
-            let classes = self.model.read(|b| photons(&node, &b.value, self.t + s, psi, list));
+            // Every class's rate on its amplitudes alone; the photon of the class drawn whole (`class_photons`: the
+            // same numbers as every class's whole, `photons`, to the bit).
+            let norm = norm_sqr(psi);
+            if list.len() < node.classes.len() {
+                list.resize_with(node.classes.len(), Photons::default);
+            }
             rates.clear();
-            rates.extend(classes.iter().map(|p| p.moments.weight));
+            self.model.read(|b| {
+                for (class, p) in node.classes.iter().zip(list.iter_mut()) {
+                    rates.push(class_photons(class, node.kicked, (&b.value, self.t + s), psi, norm, p, false));
+                }
+            });
             let k = draw(rates)?;
+            self.model.read(|b| class_photons(&node.classes[k], node.kicked, (&b.value, self.t + s), psi, norm, &mut list[k], true));
             let p = &list[k];
             let n = psi.len();
             let amplitudes = p.u.each_ref().map(|u| u.iter().copied().collect::<Internal>());
@@ -1789,44 +1997,57 @@ impl Default for Photons {
 /// Every class's photons of the state ψ at the time t on a node (module documentation, # The photons), into `list`
 /// (as long as it needs, never shorter): the node's classes' in their order.
 fn photons<'a>(node: &Node, values: &[f64], t: f64, psi: &[C64], list: &'a mut Vec<Photons>) -> &'a [Photons] {
-    let n = psi.len();
     let norm = norm_sqr(psi);
     if list.len() < node.classes.len() {
         list.resize_with(node.classes.len(), Photons::default);
     }
     for (class, p) in node.classes.iter().zip(list.iter_mut()) {
-        let Photons { u, du, ku, .. } = &mut *p;
-        for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
-            v.clear();
-            v.resize(n, C64::ZERO);
-        }
-        {
-            for (a, axis) in class.axes.iter().enumerate() {
-                for jump in axis {
-                    let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
-                    // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
-                    let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
-                        for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
-                            let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
-                            out[row[0].at / n] += f * z;
-                        }
-                    };
-                    apply(&|e| e.value, &mut u[a]);
-                    if node.kicked {
-                        apply(&|e| e.kick, &mut ku[a]);
-                    }
-                    for (i, d) in du.iter_mut().enumerate() {
-                        apply(&|e| e.gradient[i], &mut d[a]);
-                    }
-                }
-            }
-            let moments = Moments::of(u, du, class.absorbed);
-            let weight = moments.weight;
-            p.wave_number = node.kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
-            p.moments = moments.over(norm);
-        }
+        class_photons(class, node.kicked, (values, t), psi, norm, p, true);
     }
     &list[..node.classes.len()]
+}
+
+/// A class's photons of the state ψ at the time t (`photons`): where `whole`, u_a, ∇u_a, the photon forms' K u_a where
+/// the node holds them, its moments over ‖ψ‖² = `norm` and its wave number; else u_a alone. Returns its rate W/‖ψ‖²,
+/// the moments' weight (`Moments::of`, then `over`: the same operations either way).
+fn class_photons(class: &Class, kicked: bool, (values, t): (&[f64], f64), psi: &[C64], norm: f64, p: &mut Photons, whole: bool) -> f64 {
+    let n = psi.len();
+    let Photons { u, du, ku, .. } = &mut *p;
+    for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
+        v.clear();
+        v.resize(n, C64::ZERO);
+    }
+    for (a, axis) in class.axes.iter().enumerate() {
+        for jump in axis {
+            let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
+            // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
+            let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
+                for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
+                    let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
+                    out[row[0].at / n] += f * z;
+                }
+            };
+            apply(&|e| e.value, &mut u[a]);
+            if !whole {
+                continue;
+            }
+            if kicked {
+                apply(&|e| e.kick, &mut ku[a]);
+            }
+            for (i, d) in du.iter_mut().enumerate() {
+                apply(&|e| e.gradient[i], &mut d[a]);
+            }
+        }
+    }
+    if !whole {
+        let weight: f64 = (0..3).map(|a| norm_sqr(&u[a])).sum();
+        return weight / norm;
+    }
+    let moments = Moments::of(u, du, class.absorbed);
+    let weight = moments.weight;
+    p.wave_number = kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
+    p.moments = moments.over(norm);
+    p.moments.weight
 }
 
 #[cfg(test)]
