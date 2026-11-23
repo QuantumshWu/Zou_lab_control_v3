@@ -944,7 +944,7 @@ impl Workbench {
             self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
             self.send_queries(id);
         }
-        Ok(json!({"node": id}))
+        Ok(json!({"node": id, "draft_revision": self.node(id).map(|node| node.revision)}))
     }
 
     /// Admission: every reason the draft cannot start now, in v2's order.
