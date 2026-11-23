@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / 'science' / 'src'))
 from zlc_plugin import host
+from zlc_plugin.wire import PluginError, Refused, error_payload
 
 class Owner:
     _request = host.Process._request
@@ -26,6 +27,10 @@ class Owner:
         self._request({'id':identity,'op':op,'p':{'instance':name}})
     def wait(self, identity):
         return self.events.setdefault(identity, threading.Event()).wait(2)
+    def kind(self, identity):
+        """The kind of the error an answer carries on the wire."""
+        _, kwargs = self.answers[identity]
+        return error_payload(kwargs["error"], kind=kwargs.get("kind"))["kind"]
     def cleanup(self):
         for instance in list(self.instances.values()):
             instance.lane.put(None)
@@ -93,6 +98,7 @@ class Lifecycle(unittest.TestCase):
                 owner._request({"id": 2, "op": "spi", "deadline_ms": 0, "p": {"instance": "stage", "value": 5}})
                 release.set(); self.assertTrue(owner.wait(2))
                 self.assertIn("expired", str(owner.answers[2][1]["error"]))
+                self.assertEqual(owner.kind(2), "timeout")
                 self.assertEqual(writes, [])
             finally: release.set(); owner.cleanup()
 
@@ -106,11 +112,28 @@ class Lifecycle(unittest.TestCase):
                 owner.send(1, "spi", "stage"); self.assertTrue(entered.wait(2))
                 owner.send(2, "spi", "stage"); owner.send(3, "spi", "stage"); owner.send(4, "spi", "stage")
                 self.assertIn("queued", str(owner.answers[4][1]["error"]))
+                self.assertEqual(owner.kind(4), "refused")
                 instance.abandon()
                 release.set(); instance._thread.join(2)
                 self.assertFalse(instance._thread.is_alive())
                 self.assertNotIn("stage", owner.instances)
             finally: release.set(); owner.cleanup()
+
+    def test_a_query_handlers_own_refusal_expiry_or_loss_is_its_answer(self):
+        owner = Owner()
+        raised = {1: PluginError("refused", "the board refused"), 2: Refused("not this way"), 3: PluginError("timeout", "a read timed out"),
+                  4: PluginError("lost", "the camera went"), 5: ValueError("bad plan")}
+        def query(instance, params): raise raised[params["n"]]
+        def spi(instance, params): raise Refused("not now")
+        with patch.dict(host._HANDLERS, {"query": query, "spi": spi}):
+            instance = host.Instance(owner, "stage"); owner.instances["stage"] = instance
+            try:
+                for n in raised: owner._request({"id": n, "op": "query", "p": {"instance": "stage", "n": n}})
+                owner._request({"id": 6, "op": "spi", "p": {"instance": "stage"}})
+                for identity in range(1, 7): self.assertTrue(owner.wait(identity))
+                self.assertEqual([owner.kind(n) for n in raised], ["failed"] * len(raised), "a query's own errors are its answers")
+                self.assertEqual(owner.kind(6), "refused", "any other call's refusal keeps its kind")
+            finally: owner.cleanup()
 
     def test_concurrent_call_admission_is_bounded(self):
         owner = Owner(); entered = threading.Event(); release = threading.Event()

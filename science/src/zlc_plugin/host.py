@@ -38,6 +38,11 @@ from .wire import (PROTOCOL, Channel, Decoder, Encoder, PluginError, error_paylo
 #: Where the bench's device code narrates (v2 _ServerLogBuffer.SOURCES).
 _LOG_SOURCES = ("zlc_pulse.remote", "zlc_atom.devices")
 _LANE_REQUESTS = 64
+#: The kinds a query's reply carries only of this host's own: it was not answered (refused at a full
+#: lane or while its instance releases, expired, its channel lost or closing), and the core asks it
+#: again. A query handler's own error of one of them is its answer: it goes out as ``failed``
+#: (PLUGIN_PROTOCOL §7).
+_UNANSWERED = frozenset({"refused", "timeout", "lost", "cancelled"})
 _CONCURRENT_CALLS = 8
 _EMERGENCY_CALLS = 2
 
@@ -600,6 +605,7 @@ class Instance:
 
         identity = int(message["id"])
         op = str(message.get("op"))
+        answering = False
         try:
             params = _decode_frame(self.process, message)
             if time.monotonic() >= message.get("_expires_at", float("inf")):
@@ -620,6 +626,7 @@ class Instance:
             if handler is None:
                 self.process.reply(identity, error=PluginError("unknown_op", f"unknown operation {op!r}"))
                 return True
+            answering = True
             if _changes(op, params):
                 with self.description.changing():
                     result = handler(self, params)
@@ -638,7 +645,10 @@ class Instance:
                     keep = False
             # A failed Close keeps its adapter, closer and lane. A subsequent
             # Close or Init can finish cleanup instead of opening it twice.
-            self.process.reply(identity, error=cause, kind="invalid" if isinstance(error, _Invalid) else None)
+            kind = "invalid" if isinstance(error, _Invalid) else None
+            if answering and op == "query" and kind is None and error_payload(cause)["kind"] in _UNANSWERED:
+                kind = "failed"
+            self.process.reply(identity, error=cause, kind=kind)
             return keep
         if op == "close":
             # An acknowledgement is a lifecycle barrier: its recipient may
