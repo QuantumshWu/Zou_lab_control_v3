@@ -157,7 +157,7 @@ fn paths_cost() {
         let node = model.node(at, [0.0; 3], false);
         let amps = form.amps(&node);
         let active = (0..form.h_beats.len()).filter(|&k| amps.h[k * form.h_slot..(k + 1) * form.h_slot].iter().any(|z| *z != C64::ZERO)).count();
-        eprintln!("{spec}: H slots {} ({active} with a sector entry at the centre), slot {} entries; jumps {} channels, {} elements, R {} × {} by {} beat groups, {} terms; width {:.0} rad/µs", form.h_beats.len(), form.h_slot, 3 * node.classes.len(), form.elements, form.rows.len(), form.cols.len(), form.beats_r.len(), form.terms.len(), amps.width);
+        eprintln!("{spec}: H slots {} ({active} with a sector entry at the centre), slot {} entries; jumps {} channels, {} elements, R {} × {} by {} beat groups, {} terms", form.h_beats.len(), form.h_slot, 3 * node.classes.len(), form.elements, form.rows.len(), form.cols.len(), form.beats_r.len(), form.terms.len());
         let mut best: Option<Counts> = None;
         for _ in 0..5 {
             let s = form.along(&walks[path], &[(7, C64::ONE)], from, to, scheme).unwrap();

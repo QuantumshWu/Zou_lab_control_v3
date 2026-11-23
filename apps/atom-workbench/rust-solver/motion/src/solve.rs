@@ -653,7 +653,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
+use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, temperature_change, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -886,7 +886,7 @@ fn piloted(request: &Request, reference: [f64; GROUND], choosing: Choosing, mess
                 selection.chain[place].len(),
                 selection.chain[place + 1].len()
             ),
-            Attempted::RanAway => return Err("the chain's top ran away at its pilot's every start (it folds nothing: no state of it can)".into()),
+            Attempted::RanAway => return Err("结构链最顶端的模型在先导每条路径的起点上也失控（它已不折叠任何态，没有态走得动）".into()),
             attempted => return Ok((attempted, selection)),
         }
     }
@@ -2435,12 +2435,15 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
             return Ok(Attempted::Chose(made));
         }
         eprint!("{}", made.report.iter().map(|l| format!("  注：{l}\n")).collect::<String>());
-        // The ledger as it was but the flag of an error not measured, with what the pilot's check flagged since.
-        let flagged = std::mem::replace(&mut context.ledger, clean).flagged;
-        if let Some(f) = flagged {
-            for part in f.split('；').filter(|p| *p != unmeasured()) {
-                context.ledger.flag(part.to_string());
-            }
+        // The ledger as it was but the flag of an error not measured, with what the pilot's check flagged since: the
+        // flags past the clean ledger's own, that one taken out whole. (`Ledger::flag` joins flags with '；', and that
+        // flag's own text holds one: until 2026-11-23 the flags were split there and each compared with it, which never
+        // matched -- every product whose pilot chose G kept "模型误差尚未测得", and the clean ledger's own flags twice.)
+        let flagged = std::mem::replace(&mut context.ledger, clean).flagged.unwrap_or_default();
+        let own = context.ledger.flagged.clone().unwrap_or_default();
+        let since = flagged.strip_prefix(own.as_str()).unwrap_or(&flagged).replacen(&unmeasured(), "", 1);
+        for part in since.split('；').filter(|p| !p.is_empty()) {
+            context.ledger.flag(part.to_string());
         }
         read = pilot_reads(&pilot_refs, &scales, Some(&made), &times, &context.fixed.escape);
         choice = Some(made);
@@ -2468,7 +2471,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         // Where the paths read no direct part, the held atoms' bound (`model_of`).
         let direct = (1..outputs.len()).filter(|&k| held[k] != 0.).map(|k| c.at(outputs[k]).unwrap_or(held[k])).fold(0., crate::linalg::larger);
         context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
-        for flag in model_flags(c, &read, request) {
+        for flag in model_flags(c, &context.at, &outputs_of(&pilot.iter().collect::<Vec<_>>()), shown_at, outputs, context.scales.hbar_over_mass, request) {
             context.ledger.flag(flag);
         }
         // The motion's part (select.rs, # The motion): its largest over the outputs, on the loss and on T (by the held
@@ -2524,20 +2527,64 @@ fn unmeasured() -> String {
 /// What the choice says of itself that a result is less for (module documentation, # The selection; PIPELINE_V3_FINAL
 /// C.15): T still drifting at the run's end, the paths run through the whole request (the memory of the dark states longer than a fifth of it), and
 /// nothing more.
-fn model_flags(choice: &Choice, read: &PilotRead, request: &Request) -> Vec<String> {
+fn model_flags(choice: &Choice, analysis: &[f64], groups: &[&Group], outputs: &[Estimate], times: &[f64], hbar_over_mass: f64, request: &Request) -> Vec<String> {
     let mut flags = vec![];
-    // T still drifting at the end: its last two analysis times apart by more than their intervals together.
-    let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
-    if let [.., (a, ea), (b, eb)] = held[..] {
-        if (b - a).abs() > ea.hypot(eb) {
-            flags.push(format!("温度在运行末段仍在漂移：最后两个分析时刻差 {:.2} µK，超过它们的误差棒 {:.2} µK", b - a, ea.hypot(eb)));
-        }
+    // T still drifting at the end (`drift`): read at every output of the run's last stretch.
+    if let Some(d) = drift(groups, outputs, times, analysis, hbar_over_mass).filter(|d| d.beyond) {
+        flags.push(format!("温度在运行末段仍在漂移：{}", d.said()));
     }
     let length = request.times_us.last().copied().unwrap_or(0.);
     if 5. * choice.memory >= length {
         flags.push(format!("暗态的长记忆：内态记忆时间 {:.3} µs，路径跑满整个请求（{length} µs）", choice.memory));
     }
     flags
+}
+
+/// T's drift at the run's end (`drift`): the change of the last output's total T from an earlier one's over the run's
+/// last stretch, the most beyond its interval, the time of that output, the change's own interval, the stretch, the
+/// comparisons' count, and whether any change is beyond its interval.
+struct Drift {
+    difference: f64,
+    at: f64,
+    bar: f64,
+    from: f64,
+    to: f64,
+    comparisons: usize,
+    beyond: bool,
+}
+
+impl Drift {
+    fn said(&self) -> String {
+        format!(
+            "{:.0}–{:.0} µs 的 {} 个输出时刻上，T 与末一个输出最多差 {:+.2} µK（{:.0} µs），这一差自己的误差棒 {:.2} µK（逐组刀切，{} 次比较的 Šidák 尾）",
+            self.from, self.to, self.comparisons + 1, self.difference, self.at, self.bar, self.comparisons
+        )
+    }
+}
+
+/// T's drift at the run's end (the flag `model_flags`; said beside the choice): over the outputs from the last analysis
+/// time (`analysis`) before the last output where T is read to that output (`outputs`, the pilot's estimates at the
+/// plan's outputs `times`, of its `groups`) -- the run's last stretch on the analysis times' grid, which doubles --,
+/// each output's total T against the last's, beyond where the change is beyond its own interval at Šidák's tail among
+/// the comparisons -- every output of the stretch read, not its two ends alone (until 2026-11-23 the last two analysis
+/// times', which a change between them passes by). The change's interval is its own jackknife over the groups
+/// (estimate.rs `temperature_change`): the two outputs share their atoms, and their intervals together, as if
+/// independent, held R4's pilot's +14.3 µK rise over 199-400 µs within 15.2 µK. The change of the largest excess over
+/// its bar; none where fewer than two outputs read T there. The stretch is bounded by the outputs, not by the analysis
+/// times: the plan reads T past the request's end (R4's analysis times run to 800 µs on a 400 µs request), where no
+/// output is.
+fn drift(groups: &[&Group], outputs: &[Estimate], times: &[f64], analysis: &[f64], hbar_over_mass: f64) -> Option<Drift> {
+    let read_at = |e: &Estimate| e.motion.is_some_and(|m| m.temperature_total_error.read());
+    let end = times.iter().zip(outputs).filter(|(_, e)| read_at(e)).map(|(t, _)| *t).last()?;
+    let from = analysis.iter().copied().filter(|t| *t < end).last().unwrap_or(0.);
+    let held: Vec<(usize, f64)> = times.iter().zip(outputs).enumerate().filter(|(_, (t, e))| **t >= from && read_at(e)).map(|(k, (t, _))| (k, *t)).collect();
+    let ((last, to), earlier) = held.split_last()?;
+    let comparisons = earlier.len();
+    let looks = comparisons as f64;
+    // Per earlier output: its time, the change from it to the last, and the change's bar.
+    let changes: Vec<(f64, f64, f64)> = earlier.iter().filter_map(|&(k, t)| temperature_change(groups, k, *last, hbar_over_mass).map(|(c, s)| (t, c, s.interval_over(looks)))).collect();
+    let &(at, difference, bar) = changes.iter().max_by(|a, b| (a.1.abs() - a.2).total_cmp(&(b.1.abs() - b.2)))?;
+    Some(Drift { difference, at, bar, from, to: *to, comparisons, beyond: difference.abs() > bar })
 }
 
 /// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, and the model's
@@ -2729,7 +2776,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let carried = if scouted_at > 0. && tau > 0. { tau / scouted_at } else { 1. };
     let first = first * carried;
     let domain = Domain { widest: Widest::of(request) };
-    let light = run.light();
     let centre = trap.centre;
     messages.stage(Stage { step: Step::Select, tau: None, batch: None });
     let reference = alone(chief(request));
@@ -2819,7 +2865,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // share's convention, units.rs `STEP_SHARE`); the tightest possible, 0.1, where no T is read.
         let tightest = read.estimates.iter().filter(|e| e.motion.is_some()).map(|e| e.temperature_target).fold(f64::INFINITY, crate::linalg::smaller);
         let landing_budget = 0.5 * STEP_SHARE.powi(4) * if tightest.is_finite() { tightest } else { 0.1 };
-        let paths = Paths::new(&full, centre, walked, memory, length, tau, light, landing_budget)?;
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, landing_budget)?;
         let settled = &paths.settled;
         noted(
             &mut report,
@@ -2836,15 +2882,16 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 paths.seconds
             ),
         );
+        // The pilot's estimates at the request's outputs (T's drift at the end below; the candidates weighed there, 3.).
+        let outputs: &[f64] = &context.plan.times;
+        let shown_at = summarize(&outputs_of(pilot), &context.scales);
         // 2. T's memory on the pilot's own trajectories, said beside the choice (the run's flag is the product's).
         {
             let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
             let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
-            let held: Vec<(f64, f64)> = read.estimates.iter().filter_map(|e| e.motion.map(|m| (m.temperature_total, m.temperature_total_error.interval()))).collect();
-            let drift = match held[..] {
-                [.., (a, ea), (b, eb)] if ea.hypot(eb).is_finite() => format!("末两个分析时刻 T 差 {:.2} µK、误差棒 {:.2} µK：{}", b - a, ea.hypot(eb), if (b - a).abs() > ea.hypot(eb) { "漂移（出旗标）" } else { "不漂移" }),
-                [.., (a, _), (b, _)] => format!("末两个分析时刻 T 差 {:.2} µK、误差棒无读数：定不下来", b - a),
-                _ => "末段无 T".to_string(),
+            let drift = match drift(&outputs_of(pilot), &shown_at, outputs, times, context.scales.hbar_over_mass) {
+                Some(d) => format!("末段 {}：{}", d.said(), if d.beyond { "漂移（出旗标）" } else { "不漂移" }),
+                None => "末段的输出时刻上 T 读不到两个，定不下来".to_string(),
             };
             // At the run's end no atom held: no T there, its memory unread.
             let memory = if end.is_finite() && r.is_finite() && se.is_finite() {
@@ -2858,8 +2905,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // c² + S²) --: the pilot's estimates there (its groups' sums at the outputs), its course there with T's windows'
         // half widths. (Until 2026-11-23 at the analysis times alone: after the step's prior was freed R9_PUSH's stood at
         // 0, 12.1, 36.4, ... µs about its loss's front at 14-34 µs, and G was taken complete where its loss is 0.18 off.)
-        let outputs: &[f64] = &context.plan.times;
-        let shown_at = summarize(&outputs_of(pilot), &context.scales);
         // An account: the model's error per time and its error on the held atoms' motion (`model_of`).
         type Booked = (Vec<[f64; 2]>, Vec<MotionError>);
         let fixed = |(model, motion): Booked| context.fixed.with(model, outputs).moving(motion);
@@ -2928,6 +2973,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 _ => format!("P{}", keep.len()),
             }
         };
+        // A candidate's account at its upper end (the tests' candidates beside the chain, `ALSO`).
+        #[cfg(test)]
         let account = |j: &crate::select::Judged| -> Booked { accounts(j).into_iter().next().expect("the upper end") };
         // The candidates (select.rs # The candidates): the pilot's model first (place 0), the nominees above it.
         let mut chain: Vec<Vec<usize>> = vec![own.clone()];
@@ -2951,8 +2998,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let (model_error, lower) = (unresolved(model_error, runaway), unresolved(lower, runaway));
             #[cfg(test)]
             if std::env::var_os("SEL_MOTION").is_some() {
+                let at_point = if exact { None } else { Some(point(&judged)) };
                 for (k, e) in shown_at.iter().enumerate() {
-                    eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e} (motion {:?}), lower {:.3e} / {:.3e}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), outputs[k], model_error.0[k][0], model_error.0[k][1], model_error.1[k], lower.0[k][0], lower.0[k][1], e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
+                    eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e} (motion {:?}), lower {:.3e} / {:.3e} (T {:.3e}), point T {:?}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), outputs[k], model_error.0[k][0], model_error.0[k][1], model_error.1[k], lower.0[k][0], lower.0[k][1], lower.1[k].temperature, at_point.as_ref().map(|p| p.1[k].temperature), e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
                 }
             }
             let (met, need, work) = asks(model_error, price, place);
@@ -3039,8 +3087,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let pilot_all = &weighed[0].judged;
             let below = |delta: &crate::select::Judged| -> Booked {
                 let direct = |t: f64| -> Option<f64> {
-                    let g = direct_bound_at(pilot_all, &paths.windows, t, Reach::Upper)? - pilot_all.calibration.rows;
-                    Some(crate::linalg::larger(g - direct_bound_at(delta, &paths.windows, t, Reach::Upper).unwrap_or(0.), 0.))
+                    let g = crate::select::whole_bound_at(pilot_all, &paths.windows, t, Reach::Upper)? - pilot_all.calibration.rows;
+                    Some(crate::linalg::larger(g - crate::select::whole_bound_at(delta, &paths.windows, t, Reach::Upper).unwrap_or(0.), 0.))
                 };
                 let motion = |k: usize| -> Option<crate::select::Motion> {
                     let g = crate::select::motion_at(pilot_all, &paths.windows, &course, k, hm, Reach::Upper)?;
@@ -3310,10 +3358,18 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         #[cfg(test)]
         if crate::select::traced() {
             let c: Vec<u64> = crate::paths::CHECKS.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
-            eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, diffusion {:.2} s {} (its LU {:.2} s), landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[2] as f64 * 1e-9, c[3], c[4] as f64 * 1e-9, c[6] as f64 * 1e-9, c[7]);
+            eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[6] as f64 * 1e-9, c[7]);
         }
         let w = weighed.swap_remove(chosen);
-        return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
+        return Ok(Some(Choice {
+            keep: w.judged.keep.clone(),
+            judged: w.judged,
+            windows: paths.windows.clone(),
+            memory,
+            #[cfg(test)]
+            length: paths.length,
+            report,
+        }));
     }
 }
 
