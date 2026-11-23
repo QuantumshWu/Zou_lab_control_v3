@@ -2548,6 +2548,90 @@ mod tests {
         assert_eq!(wb.node("camera_measurement").unwrap().draft.values["frames_per_cycle"], 3);
     }
 
+    /// The node's question of `kind` in flight, if any.
+    fn flight_of(wb: &Workbench, id: &str, kind: &str) -> Option<u64> {
+        wb.tickets.iter().find_map(|(ticket, purpose)| matches!(purpose, crate::Ticket::Query { node, name } if node == id && name == kind).then_some(*ticket))
+    }
+
+    /// What the question asked as `ticket` was told.
+    fn told_to(calls: &Rc<RefCell<Calls>>, ticket: u64) -> Value { calls.borrow().2.iter().find(|(_, asked, _)| *asked == ticket).unwrap().2.clone() }
+
+    /// The plugin admits any plan but `odd`.
+    fn admit_plan(facts: &Value) -> Result<Value, String> { Ok(if facts["values"]["plan"] == "odd" { json!(["plan odd is not admitted"]) } else { json!([]) }) }
+
+    /// A Start waits while a scan runs (the board's facts change at each point) and the node's defaults
+    /// follow the board, so `admit` is asked again at each point. Its answer for point 1's defaults
+    /// lands after point 2's: superseded, its issue does not refuse the Start, which goes once `admit`
+    /// is answered for the defaults the draft now has.
+    #[test]
+    fn a_superseded_answers_issue_does_not_refuse_a_waiting_start() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("stale-issue", json!(["resolve_defaults", "admit"]));
+        answer_asked(&mut wb, &mut host, &calls, "lanes", "resolve_defaults", |_| Ok(json!({"plan": "even"})));
+        answer_asked(&mut wb, &mut host, &calls, "lanes", "admit", admit_plan);
+        let revision = wb.node("lanes").unwrap().revision;
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap()["phase"], "checking");
+        let defaults = flight_of(&wb, "lanes", "resolve_defaults").unwrap();
+        event(&mut wb, Event::Answered { ticket: defaults, result: Ok(json!({"plan": "odd"})) }, &mut host);
+        let admit_odd = flight_of(&wb, "lanes", "admit").unwrap();
+        assert_eq!(told_to(&calls, admit_odd)["values"]["plan"], "odd");
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(2) }, &mut host);
+        let defaults = flight_of(&wb, "lanes", "resolve_defaults").unwrap();
+        event(&mut wb, Event::Answered { ticket: defaults, result: Ok(json!({"plan": "even"})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: admit_odd, result: admit_plan(&told_to(&calls, admit_odd)) }, &mut host);
+        let node = wb.node("lanes").unwrap();
+        assert!(node.start_after_check.is_some() && node.error.is_none() && calls.borrow().1.is_empty(), "it still waits: {:?}", node.error);
+        let current = flight_of(&wb, "lanes", "admit").unwrap();
+        assert_eq!(told_to(&calls, current)["values"]["plan"], "even");
+        event(&mut wb, Event::Answered { ticket: current, result: admit_plan(&told_to(&calls, current)) }, &mut host);
+        let run = calls.borrow().1.last().cloned().expect("one click");
+        assert_eq!((run.run.as_str(), &run.values["plan"]), ("lanes#1", &json!("even")));
+    }
+
+    /// The same order, the superseded `admit` clean: the Start does not go on an admission told
+    /// other defaults than the draft now has, but on the one told them.
+    #[test]
+    fn a_waiting_start_goes_only_on_an_admit_told_the_defaults_it_freezes() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("stale-clean", json!(["resolve_defaults", "admit"]));
+        answer_asked(&mut wb, &mut host, &calls, "lanes", "resolve_defaults", |_| Ok(json!({"plan": "a"})));
+        answer_asked(&mut wb, &mut host, &calls, "lanes", "admit", admit_plan);
+        let revision = wb.node("lanes").unwrap().revision;
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap()["phase"], "checking");
+        let defaults = flight_of(&wb, "lanes", "resolve_defaults").unwrap();
+        event(&mut wb, Event::Answered { ticket: defaults, result: Ok(json!({"plan": "b"})) }, &mut host);
+        let admit_b = flight_of(&wb, "lanes", "admit").unwrap();
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(2) }, &mut host);
+        let defaults = flight_of(&wb, "lanes", "resolve_defaults").unwrap();
+        event(&mut wb, Event::Answered { ticket: defaults, result: Ok(json!({"plan": "c"})) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: admit_b, result: admit_plan(&told_to(&calls, admit_b)) }, &mut host);
+        assert!(calls.borrow().1.is_empty(), "not on an admission told b");
+        let current = flight_of(&wb, "lanes", "admit").unwrap();
+        assert_eq!(told_to(&calls, current)["values"]["plan"], "c");
+        event(&mut wb, Event::Answered { ticket: current, result: admit_plan(&told_to(&calls, current)) }, &mut host);
+        assert_eq!(calls.borrow().1.last().map(|run| run.values["plan"].clone()), Some(json!("c")));
+    }
+
+    /// Defaults that follow the board change at each point of a scan, and `admit` is asked again
+    /// within each check for them: a waiting Start still goes within a point or two.
+    #[test]
+    fn defaults_changing_at_each_point_do_not_starve_a_waiting_start() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("defaults-storm", json!(["resolve_defaults", "admit"]));
+        answer_asked(&mut wb, &mut host, &calls, "lanes", "resolve_defaults", |_| Ok(json!({"plan": "p0"})));
+        answer_asked(&mut wb, &mut host, &calls, "lanes", "admit", |_| Ok(json!([])));
+        let revision = wb.node("lanes").unwrap().revision;
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap()["phase"], "checking");
+        let mut went = None;
+        for point in 2..=12u64 {
+            event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(point) }, &mut host);
+            if let Some(ticket) = flight_of(&wb, "lanes", "resolve_defaults") { event(&mut wb, Event::Answered { ticket, result: Ok(json!({"plan": format!("p{point}")})) }, &mut host); }
+            if let Some(ticket) = flight_of(&wb, "lanes", "admit") { event(&mut wb, Event::Answered { ticket, result: Ok(json!([])) }, &mut host); }
+            if !calls.borrow().1.is_empty() { went = Some(point); break; }
+        }
+        assert!(went.is_some_and(|point| point <= 3), "{went:?}");
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());

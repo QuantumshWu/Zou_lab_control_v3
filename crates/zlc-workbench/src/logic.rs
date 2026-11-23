@@ -540,7 +540,7 @@ impl Workbench {
         let editor = json!({"values": args["values"], "devices": self.device_infos(&bench), "resources": args["resources"], "source": source,
             "bundle": bundle, "artifacts": self.artifact_facts(node)});
         let admit = json!({"values": args["values"], "bundle": bundle});
-        let admitted = json!({"values": Value::Object(self.draft_values(node)), "resources": args["resources"], "artifacts": self.artifact_facts(node)});
+        let admitted = self.admitted_facts(node);
         // Each output's frames, from the frames of this node's own source (v2 describe_output_frames).
         let frames: Vec<String> = if descriptor.node().queries.iter().any(|name| name == FRAMES_QUERY) {
             self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| output.to_owned())).collect()
@@ -596,6 +596,26 @@ impl Workbench {
         let Some(node) = self.node(id) else { return };
         let waiting: Vec<String> = node.asks.iter().filter(|(_, ask)| ask.flying.is_none() && ask.waiting.is_some()).map(|(name, _)| name.clone()).collect();
         for name in waiting { self.send_waiting(id, &name); }
+    }
+
+    /// What `admit` is told: the draft's values as they take effect (its defaults filled in), the
+    /// files it read.
+    fn admitted_facts(&self, node: &Node) -> Value {
+        json!({"values": Value::Object(self.draft_values(node)), "resources": node.resources, "artifacts": self.artifact_facts(node)})
+    }
+
+    /// What a Start reads of draft query `name`: its newest answer when that stands for the draft
+    /// as checked since check `from` (`Node::checked`), is no failure or issue a newer question of
+    /// its kind supersedes, and -- `admit` -- was told the values the draft now takes effect with
+    /// (the defaults it freezes); none while it is still being checked.
+    fn standing<'a>(&self, node: &'a Node, name: &str, from: u64) -> Option<&'a Result<Value, String>> {
+        if !node.checked(name, from) { return None; }
+        let (_, answer) = node.answers.get(name)?;
+        let ask = node.asks.get(name);
+        let newer = ask.is_some_and(|ask| ask.flying.is_some() || ask.waiting.is_some());
+        let issue = match answer { Err(_) => true, Ok(Value::Array(found)) => [ADMIT, ADMIT_SOURCE].contains(&name) && !found.is_empty(), Ok(_) => false };
+        let told_other = name == ADMIT && ask.and_then(|ask| ask.told.as_ref()).is_some_and(|told| told.facts != self.admitted_facts(node));
+        (!(newer && issue) && !told_other).then_some(answer)
     }
 
     /// The node's source frames `[axis_name, [labels...]]` (PLUGIN_PROTOCOL §2): what its
@@ -826,7 +846,7 @@ impl Workbench {
         let Some(node) = self.node(id) else { return };
         let Some((origin, acquisition, from)) = node.start_after_check.clone() else { return };
         let signals = host.signals();
-        if self.issues_from(node, &signals, from).iter().any(|issue| waiting(issue)) { return; }
+        if self.issues_from(node, &signals, Some(from)).iter().any(|issue| waiting(issue)) { return; }
         if let Ok(node) = self.node_mut(id) { node.start_after_check = None; }
         let parent = acquisition.clone();
         if let Err(error) = self.start_from(id, None, &origin, acquisition, from, host) {
@@ -1063,10 +1083,11 @@ impl Workbench {
     }
 
     /// Admission: every reason the draft cannot start now, in v2's order.
-    pub(crate) fn issues(&self, node: &Node, signals: &[SignalInfo]) -> Vec<String> { self.issues_from(node, signals, node.check) }
+    pub(crate) fn issues(&self, node: &Node, signals: &[SignalInfo]) -> Vec<String> { self.issues_from(node, signals, None) }
 
-    /// The issues of the draft as checked since check `from` (a Start's: answers asked since its click).
-    fn issues_from(&self, node: &Node, signals: &[SignalInfo], from: u64) -> Vec<String> {
+    /// The issues of the draft as the page reads them (the newest answers, checked at this check),
+    /// or as a Start does (`start`: its click's check; the answers `standing` since).
+    fn issues_from(&self, node: &Node, signals: &[SignalInfo], start: Option<u64>) -> Vec<String> {
         let Some(descriptor) = self.catalog.get(&node.type_id) else { return vec![format!("{} is not installed", node.type_id)] };
         let spec = descriptor.node();
         let mut issues = Vec::new();
@@ -1078,10 +1099,10 @@ impl Workbench {
         if node.reading.is_some() || node.start_reading.is_some() { issues.push(READING.into()); }
         issues.extend(node.resource_issues.iter().cloned());
         issues.extend(fields::completeness_issue(&descriptor.parameters, &self.draft_values(node)));
-        let answer = |name: &str| node.answers.get(name).map(|(_, answer)| answer);
+        let answer = |name: &str| match start { None => node.answers.get(name).map(|(_, answer)| answer), Some(from) => self.standing(node, name, from) };
         let outstanding = spec.queries.iter().filter(|name| DRAFT_QUERIES.contains(&name.as_str()))
             .filter(|name| name.as_str() != ADMIT_SOURCE || self.bundle_complete(&node.id))
-            .any(|name| !node.checked(name, from));
+            .any(|name| match start { None => !node.checked(name, node.check), Some(_) => answer(name).is_none() });
         // What the variables cannot compute from what the source published (v2: draft issues).
         if let Some(Ok(Value::Array(found))) = answer(ADMIT_SOURCE).filter(|_| self.bundle_complete(&node.id)) {
             issues.extend(found.iter().filter_map(Value::as_str).map(str::to_owned));
@@ -1240,7 +1261,7 @@ impl Workbench {
         let signals = host.signals();
         let running = acquisition.as_ref().and(node.running.clone());
         if running.is_none() || reopened {
-            let issues = self.issues_from(node, &signals, from);
+            let issues = self.issues_from(node, &signals, Some(from));
             // The plugin has not answered for this draft yet: Start once it has.
             if !issues.is_empty() && issues.iter().all(|issue| waiting(issue)) {
                 self.cancel_start(id, "superseded by another Start");
