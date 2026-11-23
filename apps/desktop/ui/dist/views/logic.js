@@ -106,15 +106,16 @@ export class LogicRowView {
     get state() { return this.projection ? STATE_WORDS[this.projection.state] : "idle"; }
 }
 /** A node's Start (start_node) and this window's edits of its draft (edit_node, revert_node), for
- * every page that starts nodes.  A Start waits while an edit of its node sent from here is
- * unanswered -- the node says "Starting…" (`waits`) -- then goes with the draft revision the
- * last of them left (its reply's draft_revision, else the row's after it): the operator's own
- * edits are part of what they start, while an edit from elsewhere still has the host refuse it
- * (expected_draft_revision). */
+ * every page that starts nodes.  A Start clicked while an edit of its node sent from here is
+ * unanswered waits -- the node says "Starting…" (`waits`) -- and goes once they are answered,
+ * with the revision read at the click chained through their replies: the operator's own edits
+ * are part of what they start, while a change from elsewhere, before or after them, still has the
+ * host refuse it (expected_draft_revision).  A Stop or a Remove of the node cancels it (`cancel`):
+ * the operator's last action wins. */
 export class NodeStarts {
     transport;
     rows;
-    /** Per node: its edits sent from here and unanswered, the revision the answered ones left, and whether a Start waits. */
+    /** Per node: its edits sent from here and unanswered, in order, and the revision a waiting Start goes with (null: none waits). */
     nodes = new Map();
     constructor(transport, rows) {
         this.transport = transport;
@@ -123,41 +124,63 @@ export class NodeStarts {
     /** An edit of node `id`'s draft, sent now. */
     edit(id, command, feedback) {
         const request = this.transport.send(command, feedback);
-        this.node(id).edits.add(request);
+        this.node(id).edits.push(request);
         return request;
     }
-    /** The operator's Start: sent now, or once the node's edits are answered (true: it waits). */
+    /** The operator's Start: sent now with the revision this window read, or, an edit of its own still
+     * on its way, once they are answered (true: it waits). */
     start(id) {
-        this.node(id).waiting = true;
-        this.settle();
-        return this.waits(id);
+        if (this.waits(id))
+            return true;
+        const revision = this.row(id)?.draft_revision;
+        if (revision === undefined || !this.nodes.get(id)?.edits.some(request => this.transport.pending.has(request))) {
+            this.send(id, revision);
+            return false;
+        }
+        this.node(id).start = revision;
+        return true;
     }
-    waits(id) { return this.nodes.get(id)?.waiting ?? false; }
-    /** After each state (`state`, which may answer an edit) and each refusal: an answered edit notes
-     * the revision it left; a waiting Start whose node has no edit left goes.  A node with neither is forgotten. */
+    /** A Stop or a Remove of the node: its waiting Start no longer goes (true: one waited). */
+    cancel(id) {
+        const node = this.nodes.get(id);
+        if (!node || node.start === null)
+            return false;
+        node.start = null;
+        return true;
+    }
+    waits(id) { return (this.nodes.get(id)?.start ?? null) !== null; }
+    /** After each state (`state`, which may answer an edit) and each refusal: an answered edit of a
+     * node whose Start waits moves its revision on by one where its reply's draft_revision is not the
+     * revision so far -- one more than it, the edit's own change; further on, a change from elsewhere
+     * too, which the one step leaves for the host to refuse -- and a refused edit leaves it; once none
+     * is left the Start goes.  Edits sent after the click ride along and put the Start off until they
+     * are answered (a Revert after it restarts the reverted draft): taking the draft as it stood at the
+     * click would bring back the refusal of the first click. */
     settle(state) {
         for (const [id, node] of this.nodes) {
-            for (const request of node.edits) {
+            for (const request of [...node.edits]) {
                 if (this.transport.pending.has(request))
                     continue;
-                node.edits.delete(request);
+                node.edits.splice(node.edits.indexOf(request), 1);
                 const reply = state?.request === request && !state.error ? state.result?.draft_revision : undefined;
-                node.revision = reply ?? this.row(id)?.draft_revision;
+                if (node.start !== null && typeof reply === "number" && reply !== node.start)
+                    node.start += 1;
             }
-            if (node.edits.size)
+            if (node.edits.length)
                 continue;
             this.nodes.delete(id);
-            if (!node.waiting)
-                continue;
-            const row = this.row(id), revision = node.revision ?? row?.draft_revision;
-            this.transport.send({ action: "start_node", node: id, ...(revision === undefined ? {} : { expected_draft_revision: revision }) }, `Starting ${row?.name ?? id}…`);
+            if (node.start !== null)
+                this.send(id, node.start);
         }
+    }
+    send(id, revision) {
+        this.transport.send({ action: "start_node", node: id, ...(revision === undefined ? {} : { expected_draft_revision: revision }) }, `Starting ${this.row(id)?.name ?? id}…`);
     }
     row(id) { return this.rows().find(row => row.node_id === id); }
     node(id) {
         let node = this.nodes.get(id);
         if (!node)
-            this.nodes.set(id, node = { edits: new Set(), waiting: false });
+            this.nodes.set(id, node = { edits: [], start: null });
         return node;
     }
 }

@@ -1092,7 +1092,7 @@ impl Workbench {
             self.release_selections(id, &moved);
             self.send_queries(id);
         }
-        Ok(json!({"node": id}))
+        Ok(json!({"node": id, "draft_revision": self.node(id).map(|node| node.revision)}))
     }
 
     /// Admission: every reason the draft cannot start now, in v2's order.

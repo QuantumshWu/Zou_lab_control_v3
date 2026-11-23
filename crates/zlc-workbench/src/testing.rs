@@ -1092,8 +1092,9 @@ mod tests {
         assert!(row["status"].as_str().unwrap().contains("Restart refused:"));
         assert_eq!(row["run"]["state"], "running", "the refused restart leaves the old run running");
         assert_eq!(calls.borrow().1.len(), 1);
-        apply(&mut workbench, &mut host, "revert_node", json!({"node": "camera_measurement"})).unwrap();
+        let reverted = apply(&mut workbench, &mut host, "revert_node", json!({"node": "camera_measurement"})).unwrap();
         let row = workbench.node_row(workbench.node("camera_measurement").unwrap(), &[]);
+        assert_eq!(reverted["draft_revision"], row["draft_revision"], "a revert says the revision it left, as an edit does");
         assert_eq!(row["state"], "running");
         assert!(!row["status"].as_str().unwrap().contains("Restart refused:"));
     }

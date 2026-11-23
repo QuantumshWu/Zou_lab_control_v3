@@ -317,20 +317,33 @@ export class TaskConsoleView implements View {
   // ---------------------------------------------------------------- rows
   private readonly starts: NodeStarts;
   private readonly intents: EditorIntents = {
-    // A Start that waits for this window's edits says so at once.
-    start: id => { if (this.starts.start(id)) this.update({ type: "state" }); },
+    // A Start that waits for this window's edits says so at once; a Stop or a Remove cancels it.
+    start: id => { if (this.starts.start(id)) this.drawStart(id); },
     stop: id => {
+      if (this.starts.cancel(id)) this.drawStart(id);
       this.send({ action: "stop_node", node: id }, `Stopping ${this.nameOf(id)}…`);
     },
     edit: id => id.startsWith("panel:") ? this.editPublisher(id) : this.edit(id),
-    remove: id => this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`),
-    preview: (id, on) => this.send({ action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
+    remove: id => {
+      if (this.starts.cancel(id)) this.drawStart(id);
+      this.send({ action: "remove_node", node: id }, `Removing ${this.nameOf(id)}…`);
+    },
+    preview: (id, on) => this.starts.edit(id, { action: "edit_node", node: id, auto_preview: on }, "Updating Plot…"),
     rename: (id, name) => this.send({ action: "rename_node", node: id, name }, "Renaming…"),
     editDraft: (id, change, label) => this.starts.edit(id, { action: "edit_node", node: id, ...change }, `Updating ${label}…`),
     revert: id => this.starts.edit(id, { action: "revert_node", node: id }, "Reverting…"),
     check: id => this.send({ action: "check_node", node: id }, "Checking files…"),
     choose: ask => this.ctx.transport.choosePath(ask),
   };
+
+  /** A node's row and Edit page drawn again as its Start waits or no longer does (NodeStarts). */
+  private drawStart(id: string): void {
+    const row = this.nodeRows().find(item => item.node_id === id);
+    if (!row) return;
+    const takeover = this.boardState()?.active_task ?? null, gate = { active: Boolean(takeover), owns: takeover === id }, projection = this.project(row);
+    this.rows.get(id)?.update(projection, gate);
+    this.editors.get(id)?.update(row, projection, gate);
+  }
 
   private nameOf(id: string): string { return this.nodeRows().find(row => row.node_id === id)?.name ?? id; }
 
