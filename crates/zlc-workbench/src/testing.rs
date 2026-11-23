@@ -2632,6 +2632,28 @@ mod tests {
         assert!(went.is_some_and(|point| point <= 3), "{went:?}");
     }
 
+    /// A question asked at one point lands a failure of the plugin's code while the next point's
+    /// waits: the editor keeps the model it drew, being updated, no error shown; the next one's
+    /// answer is what it then draws, a failure too.
+    #[test]
+    fn a_superseded_failure_does_not_replace_the_model_drawn() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("stale-failure", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({"marker": "first"}))); }
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        let stale = flight_of(&wb, "lanes", "editor_facts").unwrap();
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(2) }, &mut host);
+        event(&mut wb, Event::Answered { ticket: stale, result: Err("RuntimeError: the board is between points".into()) }, &mut host);
+        let row = |wb: &Workbench| wb.node_row(wb.node("lanes").unwrap(), &[]);
+        let shown = row(&wb);
+        assert_eq!((&shown["editor_facts"]["marker"], &shown["editor_facts_error"], &shown["editor_facts_pending"]), (&json!("first"), &Value::Null, &json!(true)));
+        let fresh = flight_of(&wb, "lanes", "editor_facts").unwrap();
+        assert_eq!(told_to(&calls, fresh)["devices"]["sequencer"]["facts"], trigger_lanes(2));
+        event(&mut wb, Event::Answered { ticket: fresh, result: Err("RuntimeError: the plan names no port".into()) }, &mut host);
+        let shown = row(&wb);
+        assert_eq!((&shown["editor_facts"], &shown["editor_facts_error"], &shown["editor_facts_pending"]),
+                   (&Value::Null, &json!("RuntimeError: the plan names no port"), &json!(false)));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());

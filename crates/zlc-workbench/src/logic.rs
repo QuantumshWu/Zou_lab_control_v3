@@ -811,14 +811,18 @@ impl Workbench {
                     Some(waiting) if result.is_ok() && waiting.same(&asked) && asked.stamp.1 >= rechecked => waiting.stamp,
                     waiting => { ask.waiting = waiting; asked.stamp }
                 };
-                ask.told = Some(asked);
-                let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
-                let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
-                let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
-                // Its readers are told the frames, not the check: the same frames under a new one tell them nothing.
-                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
-                // Defaults the node fills in change what its schema admits: ask that again.
-                readmit = name == "resolve_defaults" && fresh;
+                // A failure a newer question supersedes is not kept: the answer that stood is drawn,
+                // being checked, until the newer one lands.
+                if result.is_ok() || ask.waiting.is_none() {
+                    ask.told = Some(asked);
+                    let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
+                    let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
+                    let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
+                    // Its readers are told the frames, not the check: the same frames under a new one tell them nothing.
+                    changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
+                    // Defaults the node fills in change what its schema admits: ask that again.
+                    readmit = name == "resolve_defaults" && fresh;
+                }
             }
         }
         // New frames of an output: the nodes reading it ask again with their new source.
