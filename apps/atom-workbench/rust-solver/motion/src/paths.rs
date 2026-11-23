@@ -23,31 +23,15 @@
 //! amplitudes G_k, J are the model's at the path's place and momentum (`Selected::node`). The recycling is one map R(t)
 //! from the sector to its ground pairs' entries, made at every time from the jumps' elements.
 //!
-//! # The segments
-//! Between two times the generator is advanced by the commutator-free fourth-order Magnus step of Blanes and Moan
-//! (2006) -- exp(h(α₁L₁ + α₂L₂)) exp(h(α₂L₁ + α₁L₂)), L₁, L₂ at the segment's two Gauss points --, every exponential's
-//! action exact to the double's rounding (`Op::exp`: the truncated Taylor series with scaling of Al-Mohy and Higham
-//! (2011), its degree and scaling from a bound of the operator's 1-norm made from its structure: the series is summed
-//! to the rounding whatever the bound). The internal coherences turn at up to the block's spectral width ω (the static
-//! beat's Hermitian part's eigenvalues' span, widened by every other beat's norm: `Form::amps`): where hω ≫ 1
-//! the step's error does not fall with h (PATHGAP item 3: R4's readings stand on one plateau from h = 1/8 to 1/64 µs,
-//! hω ≈ 200 … 25, and fall only below; a comparison of h and h/2 on the plateau reads "converged"). So a segment is
-//! no longer than one turn of the fastest coherence, hω ≤ 2π (`Scheme::Sparse`'s `turn`), off the plateau on every
-//! scene measured (it begins at hω ≈ 15–25); there the error falls at the step's order and a comparison of h and h/2
-//! reads it (`check`: valid only where the coarser of the two keeps hω ≤ 2π, refused elsewhere).
-//!
 //! # The nodes
 //! The model is made at few nodes and interpolated between them on the blocks (PATHGAP item 3: "segments dense, nodes
 //! sparse"): the path's knots are its step ends -- the trajectory's path is C¹ there, its acceleration jumps --, each
-//! knot interval cut into `nodes` equal parts, the model made at every part's ends (`Selected::node`), and the amplitudes
-//! at a Gauss point the cubic Lagrange interpolant of the four nearest nodes of its own knot interval (never across a
-//! knot); the beats' phases exact at the point's time. The interpolation's error falls as the parts' length to the
-//! fourth; it is read by the same comparison at twice the nodes (`check`). H is interpolated by its beats, R by its
-//! beats' differences (`Amps`): each such amplitude is smooth along the path, the phases are not. Readouts are made at
-//! knots, on the exact node there. (`Scheme::Exact` is ENGFOLD's: uniform segments, the model made at both Gauss
-//! points of each -- the prototype's numbers on its own paths, to the reproduction's test.) `Scheme::Exponential` takes
-//! its nodes at its pieces' ends, the interpolant of degree min(3, pieces) (`lagrange`: linear at one piece a step),
-//! so that its pieces' knob refines the nodes with them -- one Richardson reading for both (select.rs `settle`).
+//! knot interval cut into the scheme's pieces, the model made at every piece's ends (`Selected::node`), and the
+//! amplitudes between them the Lagrange interpolant of degree min(3, pieces) (`lagrange`: linear at one piece a step)
+//! of its own knot interval (never across a knot); the beats' phases exact at the time. H is interpolated by its
+//! beats, R by its beats' differences (`Amps`): each such amplitude is smooth along the path, the phases are not.
+//! Readouts are made at knots, on the exact node there. The pieces' knob refines the nodes with them -- one Richardson
+//! reading for both (select.rs `ladder`).
 //!
 //! # The readings
 //! At a readout, on the node there: the displayed rows -- P's populations with Q's lifted (`Dynamics::readout`, the
@@ -110,15 +94,12 @@
 //!
 //! # The budget
 //! Selection needs the model's error A to a small share of the target, not to the rounding: a scheme's discretization
-//! error on the fold error only has to lie well within that share, and is booked as a part of A. `Sparse` is the
-//! converged scheme (its check reads 1e-7 … 1e-5 of the fold error on every scene); its cost is about 4‖L‖₁ products a
-//! µs whatever the segment (a polynomial exponential cannot resolve the coherences turning at ω with fewer than about
-//! ω T products). The cheap schemes take the path's own steps: `Steps` (one exponential a step: the products' count
-//! still about 4‖L‖₁ T), and `Exponential`, which takes H's fast turning exactly in its eigenbasis and leaves to the
-//! substeps only what the readings change by -- its cost set by the substeps, not by ‖L‖ (# The substeps). Their
-//! errors on the fold error are read against `Sparse` on the same paths (tests, `paths_replay`, `py/scheme.py`); the
-//! selection reads the exponential scheme's against its own refinements (select.rs `settle`: `Sparse` follows the
-//! fastest coherence, and on scenes whose 32 states hold levels far off the light's frame it does not end).
+//! error on the fold error only has to lie well within that share, and is booked as a part of A. The exponential
+//! scheme takes H's fast turning exactly in its eigenbasis and leaves to the substeps only what the readings change by
+//! -- its cost set by the substeps, not by ‖L‖ (# The substeps) --; the selection reads its error against its own
+//! refinements (select.rs `ladder`). (The Magnus segments a turn of the fastest coherence each, `Sparse`, the converged
+//! scheme they were read against until 2026-11-22, did not end on scenes whose 32 states hold levels far off the
+//! light's frame, and the product never took them: removed with ENGFOLD's and the one-exponential-a-step schemes.)
 //!
 //! # The substeps
 //! On a piece of `Scheme::Exponential` the sector's state is held in the eigenbasis of H at the piece's middle t_m, σ =
@@ -271,36 +252,16 @@ impl Walk {
     }
 }
 
-/// How a path is cut and where the model is made along it (module documentation, # The segments, # The nodes).
+/// How a path is cut and where the model is made along it (module documentation, # The nodes, # The substeps).
 #[derive(Clone, Copy, Debug)]
 pub enum Scheme {
-    /// Knots at the path's step ends, each knot interval in `nodes` (≥ 3) equal parts with the model made at their ends
-    /// and interpolated between; segments of hω ≤ `turn` (rad); a readout at every `read`-th knot and at the end.
-    Sparse { nodes: usize, turn: f64, read: usize },
-    /// ENGFOLD's: segments of the length h from the start, the model made at both Gauss points of each; a readout at
-    /// every `read`-th segment's end and at the start.
-    Exact { h: f64, read: usize },
-    /// One segment a step of the path (its knot interval), the model made where the segment takes it -- at its middle,
-    /// one exponential (`gauss` false: the midpoint rule, second order), or at its two Gauss points (CF4) --, each
-    /// exponential's series summed to the relative tolerance `tol` (the double's rounding where it is no larger); a
-    /// readout at every `read`-th knot and at the end. Its error is not the rounding's: it is read against `Sparse` on
-    /// a piece of the paths and booked (module documentation, # The budget).
-    Steps { gauss: bool, read: usize, tol: f64 },
     /// Each step of the path in `pieces` equal pieces, the model made at the pieces' ends and interpolated between them
     /// (# The nodes): H at a piece's middle integrated exactly in its eigenbasis (block by block), the rest -- H's change
     /// from there, the recycling Σ J ρ J† -- by the exponential Runge–Kutta substeps (# The substeps), over a stretch's
-    /// opening `turns` a turn of the fastest coherence it resolves -- the start's modes up to `cutoff` (rad/µs), the
-    /// faster ones booked by their bound -- and `rate` a µs after it (# The start); a readout at every `read`-th knot and
-    /// at the end. The scheme's error is read by its own refinements and booked (# The budget).
+    /// opening `turns` a turn of the fastest mode it resolves -- the start's modes up to `cutoff` (rad/µs), the faster
+    /// ones booked by their bound -- and `rate` a µs after it (# The start); a readout at every `read`-th knot and at the
+    /// end. The scheme's error is read by its own refinements and booked (# The budget).
     Exponential { turns: f64, rate: f64, pieces: usize, cutoff: f64, read: usize },
-}
-
-impl Scheme {
-    /// The scheme of the path errors (module documentation): a segment within one turn of the fastest coherence, the
-    /// model at `nodes` parts of each step.
-    pub fn sparse(nodes: usize) -> Scheme {
-        Scheme::Sparse { nodes, turn: std::f64::consts::TAU, read: 1 }
-    }
 }
 
 /// The work of advancing models along paths: nodes made, exponentials and their matrix–vector products, segments,
@@ -481,37 +442,6 @@ struct Amps {
     columns: Vec<f64>,
     width: f64,
 }
-
-/// Al-Mohy and Higham's θ_m for the double's rounding (2011, Table 3.1; scipy's `_expm_multiply._theta`): the largest
-/// ‖A‖₁ at which m terms of the Taylor series of e^A reach it.
-const THETA: [(usize, f64); 35] = [
-    (1, 2.29e-16), (2, 2.58e-8), (3, 1.39e-5), (4, 3.4e-4), (5, 2.4e-3), (6, 9.07e-3), (7, 2.38e-2), (8, 5.0e-2), (9, 8.96e-2), (10, 1.44e-1),
-    (11, 2.14e-1), (12, 3.0e-1), (13, 4.0e-1), (14, 5.14e-1), (15, 6.41e-1), (16, 7.81e-1), (17, 9.31e-1), (18, 1.09), (19, 1.26), (20, 1.44),
-    (21, 1.62), (22, 1.82), (23, 2.01), (24, 2.22), (25, 2.43), (26, 2.64), (27, 2.86), (28, 3.08), (29, 3.31), (30, 3.54),
-    (35, 4.7), (40, 6.0), (45, 7.2), (50, 8.5), (55, 9.9),
-];
-
-/// The Taylor degree m and the scaling s for an operator of the 1-norm `norm` (Al-Mohy and Higham's fragment 3.1 for a
-/// known norm): m·⌈norm/θ_m⌉ least.
-fn degree(norm: f64) -> (usize, usize) {
-    if norm == 0.0 {
-        return (0, 1);
-    }
-    let mut best = (usize::MAX, 1, 1);
-    for &(m, theta) in &THETA {
-        let s = (norm / theta).ceil().max(1.0) as usize;
-        if m * s < best.0 {
-            best = (m * s, m, s);
-        }
-    }
-    (best.1, best.2)
-}
-
-/// The commutator-free Magnus step's weights (Blanes and Moan 2006): α₁ = (3 − 2√3)/12, α₂ = (3 + 2√3)/12, and the
-/// Gauss points ½ ∓ √3/6.
-const SQRT3: f64 = 1.732_050_807_568_877_2;
-const ALPHA: [f64; 2] = [(3.0 - 2.0 * SQRT3) / 12.0, (3.0 + 2.0 * SQRT3) / 12.0];
-const GAUSS: [f64; 2] = [0.5 - SQRT3 / 6.0, 0.5 + SQRT3 / 6.0];
 
 impl<'a> Form<'a> {
     /// The model's form (module documentation): its sector from its blocks and its jumps' structure, read on the node at
@@ -936,29 +866,7 @@ impl<'a> Form<'a> {
         op.norm = norm;
     }
 
-    /// The exponential's action e^{hL} v on the sector vector of the generator of `of` (`op_into`), in place
-    /// (`Op::exp`).
-    fn exp(&self, of: &[(&Amps, f64, f64)], h: f64, v: &mut [C64], work: &mut Work, counts: &mut Counts) {
-        let mut op = std::mem::take(&mut work.op);
-        self.op_into(of, h, &mut op);
-        counts.products += op.exp(self, v, work) as u64;
-        counts.exponentials += 1;
-        work.op = op;
-    }
 
-    /// One segment of the length h (# The segments): CF4 on the generators at its Gauss points, each given as its
-    /// time and its nodes' amplitudes with their interpolation weights.
-    fn segment(&self, at: [(f64, &[(&Amps, f64)]); 2], h: f64, v: &mut [C64], work: &mut Work, counts: &mut Counts) {
-        let mut of: Vec<(&Amps, f64, f64)> = Vec::with_capacity(at[0].1.len() + at[1].1.len());
-        for c in [[ALPHA[1], ALPHA[0]], [ALPHA[0], ALPHA[1]]] {
-            of.clear();
-            for (k, (t, nodes)) in at.iter().enumerate() {
-                of.extend(nodes.iter().map(|&(a, w)| (a, c[k] * w, *t)));
-            }
-            self.exp(&of, h, v, work, counts);
-        }
-        counts.segments += 1;
-    }
 
     /// The sector vector of a state (normalized), by the request's states. A start is a state of the pilot's model's
     /// cluster -- a ground state with its dressing -- and every model judged holds the pilot's model's states (select.rs
@@ -1168,128 +1076,7 @@ impl<'a> Form<'a> {
     /// `along` from a sector state at `from` (a series' end state: the same path gone on, its knots and nodes the
     /// same as in one stretch where `from` is a knot).
     pub fn along_from(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
-        if let Scheme::Exponential { .. } = scheme {
-            return Ok(self.family(walk, state, from, to, &[scheme], &[])?.swap_remove(0));
-        }
-        let mut v = state;
-        if v.len() != self.dim {
-            return Err(format!("a state of {} numbers for a sector of {}", v.len(), self.dim));
-        }
-        if !(to > from) {
-            return Err(format!("an empty stretch of the path: [{from}, {to}]"));
-        }
-        let mut counts = Counts::default();
-        let mut work = Work::new(self);
-        let mut readings = Vec::new();
-        let made = |t: f64, counts: &mut Counts| -> Node {
-            let clock = std::time::Instant::now();
-            let node = self.node_at(walk, t);
-            counts.nodes += 1;
-            counts.node_seconds += clock.elapsed().as_secs_f64();
-            node
-        };
-        match scheme {
-            Scheme::Steps { gauss, read, tol } => {
-                work.tol = tol;
-                let knots = walk.knots(from, to);
-                let node = made(from, &mut counts);
-                readings.push(self.read(&node, walk, from, &v, &mut counts));
-                for (i, w) in knots.windows(2).enumerate() {
-                    let (a, b) = (w[0], w[1]);
-                    let h = b - a;
-                    let times: Vec<f64> = if gauss { GAUSS.iter().map(|c| a + c * h).collect() } else { vec![a + 0.5 * h] };
-                    let amps: Vec<Amps> = times
-                        .iter()
-                        .map(|&t| {
-                            let node = made(t, &mut counts);
-                            let clock = std::time::Instant::now();
-                            let x = self.amps(&node);
-                            counts.node_seconds += clock.elapsed().as_secs_f64();
-                            x
-                        })
-                        .collect();
-                    let clock = std::time::Instant::now();
-                    if gauss {
-                        self.segment([(times[0], &[(&amps[0], 1.0)]), (times[1], &[(&amps[1], 1.0)])], h, &mut v, &mut work, &mut counts);
-                    } else {
-                        self.exp(&[(&amps[0], 1.0, times[0])], h, &mut v, &mut work, &mut counts);
-                        counts.segments += 1;
-                    }
-                    counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    if (i + 1) % read == 0 || i + 2 == knots.len() {
-                        let node = made(b, &mut counts);
-                        readings.push(self.read(&node, walk, b, &v, &mut counts));
-                    }
-                }
-            }
-            Scheme::Exponential { .. } => unreachable!("an exponential scheme is a family's"),
-            Scheme::Exact { h, read } => {
-                let segments = ((to - from) / h).round() as usize;
-                for k in 0..=segments {
-                    let t = from + k as f64 * h;
-                    if k % read == 0 {
-                        let node = made(t, &mut counts);
-                        readings.push(self.read(&node, walk, t, &v, &mut counts));
-                    }
-                    if k < segments {
-                        let times = GAUSS.map(|c| from + (k as f64 + c) * h);
-                        let amps = times.map(|tg| {
-                            let node = made(tg, &mut counts);
-                            let clock = std::time::Instant::now();
-                            let a = self.amps(&node);
-                            counts.node_seconds += clock.elapsed().as_secs_f64();
-                            a
-                        });
-                        let clock = std::time::Instant::now();
-                        self.segment([(times[0], &[(&amps[0], 1.0)]), (times[1], &[(&amps[1], 1.0)])], h, &mut v, &mut work, &mut counts);
-                        counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    }
-                }
-            }
-            Scheme::Sparse { nodes, turn, read } => {
-                assert!(nodes >= 3, "a cubic interpolant takes four nodes a knot interval");
-                let knots = walk.knots(from, to);
-                let mut first = made(from, &mut counts);
-                readings.push(self.read(&first, walk, from, &v, &mut counts));
-                let mut grid: Vec<Amps> = vec![self.amps(&first)];
-                for (i, w) in knots.windows(2).enumerate() {
-                    let (a, b) = (w[0], w[1]);
-                    let part = (b - a) / nodes as f64;
-                    grid.truncate(1);
-                    for j in 1..=nodes {
-                        let t = if j == nodes { b } else { a + j as f64 * part };
-                        let node = made(t, &mut counts);
-                        let clock = std::time::Instant::now();
-                        grid.push(self.amps(&node));
-                        counts.node_seconds += clock.elapsed().as_secs_f64();
-                        if j == nodes {
-                            first = node;
-                        }
-                    }
-                    let width = grid.iter().map(|x| x.width).fold(0.0, larger);
-                    let count = ((b - a) * width / turn).ceil().max(1.0) as usize;
-                    let h = (b - a) / count as f64;
-                    let clock = std::time::Instant::now();
-                    for s in 0..count {
-                        let t0 = a + s as f64 * h;
-                        let times = GAUSS.map(|c| t0 + c * h);
-                        let of = times.map(|tg| {
-                            let (start, weights) = stencil(nodes, (tg - a) / part);
-                            let of: [(&Amps, f64); 4] = std::array::from_fn(|q| (&grid[start + q], weights[q]));
-                            of
-                        });
-                        self.segment([(times[0], &of[0]), (times[1], &of[1])], h, &mut v, &mut work, &mut counts);
-                    }
-                    counts.propagation_seconds += clock.elapsed().as_secs_f64();
-                    grid.swap(0, nodes);
-                    if (i + 1) % read == 0 || i + 2 == knots.len() {
-                        readings.push(self.read(&first, walk, b, &v, &mut counts));
-                    }
-                }
-            }
-        }
-        counts.time = to - from;
-        Ok(Series { classes: self.classes.clone(), readings, counts, state: v, kept: vec![] })
+        Ok(self.family(walk, state, from, to, &[scheme], &[])?.swap_remove(0))
     }
 
     /// The form's excited states' decays at its point (# The landing check): the optical memory 2 ln(2/ε)/Γ_min, Γ_min the
@@ -1502,15 +1289,6 @@ impl<'a> Form<'a> {
     }
 }
 
-/// The cubic Lagrange stencil at u (in parts of the knot interval, 0 … m, m ≥ 3 parts): the first of the four nearest
-/// nodes of the interval's own and their weights.
-fn stencil(m: usize, u: f64) -> (usize, [f64; 4]) {
-    let j = (u.floor().max(0.0) as usize).min(m - 1);
-    let start = j.saturating_sub(1).min(m - 3);
-    let x: [f64; 4] = std::array::from_fn(|k| (start + k) as f64);
-    (start, std::array::from_fn(|k| (0..4).filter(|&l| l != k).map(|l| (u - x[l]) / (x[k] - x[l])).product()))
-}
-
 /// The exact vector of a beat difference Ω_a − Ω_b (model/selected.rs `Exact`): the fast integers' and the slow
 /// ratios' differences, the ratios to the longer's length and its trailing zeros cut (one difference, one vector).
 fn difference(a: &Exact, b: &Exact) -> Exact {
@@ -1528,32 +1306,15 @@ fn difference(a: &Exact, b: &Exact) -> Exact {
     (n, p)
 }
 
-/// The scratch of the operator's products: the gathered columns and R's product, the Taylor series' vectors, the
-/// operator.
+/// The scratch of the operator's products: the gathered columns and R's product.
 struct Work {
-    /// The series' relative tolerance (`Scheme::Steps`; the double's rounding elsewhere).
-    tol: f64,
     gathered: Vec<C64>,
     product: Vec<C64>,
-    b: Vec<C64>,
-    f: Vec<C64>,
-    next: Vec<C64>,
-    op: Op,
 }
 
 impl Work {
     fn new(form: &Form) -> Work {
-        let mut op = Op::default();
-        op.fit(form);
-        Work {
-            tol: 0.0,
-            gathered: vec![C64::ZERO; form.cols.len()],
-            product: vec![C64::ZERO; form.rows.len()],
-            b: vec![C64::ZERO; form.dim],
-            f: vec![C64::ZERO; form.dim],
-            next: vec![C64::ZERO; form.dim],
-            op,
-        }
+        Work { gathered: vec![C64::ZERO; form.cols.len()], product: vec![C64::ZERO; form.rows.len()] }
     }
 }
 
@@ -1610,46 +1371,6 @@ impl Op {
         }
     }
 
-    /// e^{hL} v in place (Al-Mohy and Higham 2011, Algorithm 3.2, for the norm's bound): s stages of the Taylor series
-    /// of e^{hL′/s} to the double's rounding, each times e^{2 Im(c) h/s}; the count of products made.
-    fn exp(&self, form: &Form, v: &mut [C64], work: &mut Work) -> usize {
-        let (m, s) = degree(self.norm);
-        let vmax = |z: &[C64]| z.iter().map(|x| larger(x.re.abs(), x.im.abs())).fold(0.0, larger);
-        let tol = larger(work.tol, 2f64.powi(-53) / 2f64.sqrt());
-        let eta = self.eta.powf(1.0 / s as f64);
-        let mut count = 0;
-        let mut b = std::mem::take(&mut work.b);
-        let mut f = std::mem::take(&mut work.f);
-        let mut next = std::mem::take(&mut work.next);
-        f.copy_from_slice(v);
-        b.copy_from_slice(v);
-        for _ in 0..s {
-            let mut c1 = vmax(&b);
-            for j in 0..m {
-                self.apply(form, &b, &mut next, work);
-                count += 1;
-                let scale = 1.0 / (s * (j + 1)) as f64;
-                for (x, y) in b.iter_mut().zip(&next) {
-                    *x = *y * scale;
-                }
-                let c2 = vmax(&b);
-                for (x, y) in f.iter_mut().zip(&b) {
-                    *x += *y;
-                }
-                if c1 + c2 <= tol * vmax(&f) {
-                    break;
-                }
-                c1 = c2;
-            }
-            for x in f.iter_mut() {
-                *x *= eta;
-            }
-            b.copy_from_slice(&f);
-        }
-        v.copy_from_slice(&f);
-        (work.b, work.f, work.next) = (b, f, next);
-        count
-    }
 }
 
 /// The memory a path's chunk of frozen pieces may hold (bytes; `Form::along_from`): 64 MB, a few chunks' at once on
@@ -2017,7 +1738,7 @@ impl Form<'_> {
         let mut knobs: Vec<(f64, f64, usize, f64)> = Vec::with_capacity(members.len());
         let mut read = 0;
         for s in members {
-            let Scheme::Exponential { turns, rate, pieces, cutoff, read: r } = *s else { return Err("a family of exponential schemes".into()) };
+            let Scheme::Exponential { turns, rate, pieces, cutoff, read: r } = *s;
             if read != 0 && r != read {
                 return Err("a family read alike".into());
             }
@@ -2380,10 +2101,6 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// A path's length for a run of the length `run` (µs): min(T_run, 5 τ_mem).
-    pub fn length(&self, run: f64) -> f64 {
-        run.min(5.0 * self.time)
-    }
 }
 
 /// The memory of a model at the point r, κ and the time t (`Memory`): None where the sector's Liouvillian does not
@@ -2644,62 +2361,8 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
         .collect()
 }
 
-/// The direct errors of candidate models along the same paths (module documentation; PIPELINE_V3_FINAL B.8): every
-/// model -- the reference first -- advanced along every path from its start state on [from, to] by one scheme, on the
-/// pool (the dearest jobs first); per candidate its windows (`compare`) and per model its series.
-pub struct PathErrors {
-    pub series: Vec<Vec<Series>>,
-    pub windows: Vec<Vec<Window>>,
-}
 
-/// The path errors (`PathErrors`) of `candidates` against `reference` on the walks, each from `start(walk)` over
-/// [from, to]; Err where a model does not hold a walk's start.
-#[allow(clippy::too_many_arguments)]
-pub fn path_errors(reference: &Form, candidates: &[&Form], walks: &[Walk], start: &(dyn Fn(&Walk) -> Vec<(usize, C64)> + Sync), from: f64, to: f64, windows: &[(f64, f64)], scheme: Scheme) -> Result<PathErrors, String> {
-    let models: Vec<&Form> = std::iter::once(reference).chain(candidates.iter().copied()).collect();
-    let mut jobs: Vec<(usize, usize)> = (0..models.len()).flat_map(|m| (0..walks.len()).map(move |w| (m, w))).collect();
-    jobs.sort_by(|a, b| models[b.0].dim.cmp(&models[a.0].dim));
-    let done: Vec<((usize, usize), Result<Series, String>)> = jobs.par_iter().map(|&(m, w)| ((m, w), models[m].along(&walks[w], &start(&walks[w]), from, to.min(walks[w].end()), scheme))).collect();
-    let mut series: Vec<Vec<Series>> = vec![vec![Series::default(); walks.len()]; models.len()];
-    for ((m, w), s) in done {
-        series[m][w] = s?;
-    }
-    let labels = &reference.model.scene.request.states;
-    let hm = reference.hbar_over_mass;
-    let windows = (1..models.len()).map(|m| compare(&series[m], &series[0], windows, labels, hm, &[], &[])).collect();
-    Ok(PathErrors { series, windows })
-}
 
-/// The h-against-h/2 check of a scheme on one path piece (module documentation, # The segments, # The budget): the
-/// candidate's difference to the reference read at the scheme and at its halves -- `Sparse`: twice the nodes and half
-/// the turn; `Exponential`: twice the pieces and the substeps --, the largest change of a row's, a rate's (relative to the
-/// reference's) and the force's (relative to the reference's rms) over the readings; None for `Sparse` where the coarser
-/// scheme's segments may leave the plateau's side (turn > 2π) -- the comparison reads nothing there -- and for the
-/// fixed schemes.
-pub fn check(candidate: &Form, reference: &Form, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Option<Result<[f64; 3], String>> {
-    let halves = match scheme {
-        Scheme::Sparse { nodes, turn, read } if turn <= std::f64::consts::TAU => Scheme::Sparse { nodes: 2 * nodes, turn: 0.5 * turn, read },
-        Scheme::Exponential { turns, rate, pieces, cutoff, read } => Scheme::Exponential { turns: 2.0 * turns, rate: 2.0 * rate, pieces: 2 * pieces, cutoff: 2.0 * cutoff, read },
-        _ => return None,
-    };
-    let run = |s: Scheme| -> Result<(Series, Series), String> { Ok((candidate.along(walk, start, from, to, s)?, reference.along(walk, start, from, to, s)?)) };
-    Some((|| {
-        let (c1, r1) = run(scheme)?;
-        let (c2, r2) = run(halves)?;
-        let mut most = [0.0_f64; 3];
-        let f2: f64 = r2.readings.iter().map(|x| x.force.iter().map(|f| f * f).sum::<f64>()).sum::<f64>() / r2.readings.len() as f64;
-        for (((a, b), c), d) in c1.readings.iter().zip(&r1.readings).zip(&c2.readings).zip(&r2.readings) {
-            for s in 0..STATES {
-                most[0] = most[0].max(((a.rows[s] - b.rows[s]) - (c.rows[s] - d.rows[s])).abs());
-            }
-            let (ra, rb, rc, rd) = (a.rates.iter().sum::<f64>(), b.rates.iter().sum::<f64>(), c.rates.iter().sum::<f64>(), d.rates.iter().sum::<f64>());
-            most[1] = most[1].max(((ra - rb) - (rc - rd)).abs() / rd);
-            let df: f64 = (0..3).map(|x| ((a.force[x] - b.force[x]) - (c.force[x] - d.force[x])).powi(2)).sum::<f64>();
-            most[2] = most[2].max((df / f2).sqrt());
-        }
-        Ok(most)
-    })())
-}
 
 /// The freezes' parts' nanoseconds over every thread (the measurements' trace, select.rs `traced`): the nodes, their
 /// amplitudes, the eigendecompositions, the substeps' weights, R and ΔH at the stages.
