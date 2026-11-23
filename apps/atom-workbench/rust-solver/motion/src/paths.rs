@@ -38,7 +38,12 @@
 //! engine's one readout: it takes a state vector, so ρ is taken through its eigenvectors, the unnormalized rows being
 //! linear in ρ), over their sum; the photon rate of each class, Σ_a tr(J_{c,a} ρ J_{c,a}†); the force,
 //! −tr(∇H_h ρ) + Σ_{c,a} Im tr(ρ J_{c,a}†∇J_{c,a}) (the Ehrenfest force and the scattered light's absorbed momentum).
-//! The rates and the force are the trajectory's: over tr ρ_P, the state's norm on P, as the integrator takes them; the
+//! The channels are the trajectories' own, one set: J_{c,a} and ∇J_{c,a} are the elements of the model's node
+//! (`Selected::node`, its classes by Cartesian axis) that a trajectory's photons read (model/selected.rs `photons`,
+//! model.rs `Moments::of`: ‖J ψ‖², Im⟨Jψ|∇Jψ⟩, Re⟨∂Jψ|∂Jψ⟩), here in ρ form -- the same sums contracted with ρ, not
+//! applied to ψ (through ρ's eigenvectors, each read as a trajectory's state, the readings took 4.7 times as long,
+//! PGC3D 2026-11-23) --; −tr(∇H_h ρ) is the model's own contraction (`SelectedMiddle::contract`), and the share of
+//! the absorbed mean a jump carries the model's rule (`Moments::new`). The rates and the force are the trajectory's: over tr ρ_P, the state's norm on P, as the integrator takes them; the
 //! rows over their sum as shown. (ENGFOLD's prototype took the rates and the force over the rows' sum too; the two
 //! differ by the lifted Q population. `Reading::total` holds that sum.) tr ρ_P itself is kept by every model's exact
 //! flow -- i(H − H†) = Σ J†J --, so its departure from one along a series is the scheme's (`Series::trace_defect`): a
