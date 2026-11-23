@@ -221,14 +221,16 @@ export class TreeCombo {
    * keeps its top, as tall as its rows up to the room, and scrolls the mark back to A; above it
    * the list keeps its bottom (B) and grows up no further than keeps the mark at A (B + o - A),
    * the rest scrolling.  Its height is the layout's (its rows up to the cap), never measured
-   * with the cap lifted. */
+   * with the cap lifted.  A side that leaves less than one row (its box carried to the window's
+   * edge) closes the list: opened again, it chooses its side afresh. */
   private hold(marks: readonly Mark[]): void {
-    const list = this.list, frame = list.getBoundingClientRect();
+    const list = this.list, css = getComputedStyle(list), room = dropRoom(list, this.root, this.up);
+    const edges = [css.borderTopWidth, css.borderBottomWidth, css.paddingTop, css.paddingBottom].reduce((sum, length) => sum + parseFloat(length), 0);
+    if (room < edges + (list.firstElementChild?.getBoundingClientRect().height ?? 0)) { hidePopup(list); return; }
+    const frame = list.getBoundingClientRect();
     const mark = marks.find(item => item.id === null || this.node(item.id))!;
     const node = this.node(mark.id);
     const offset = node ? node.getBoundingClientRect().top - frame.top + list.scrollTop : 0;
-    // A box carried past the window's edge leaves that side no room (a negative cap would lift it).
-    const room = Math.max(0, dropRoom(list, this.root, this.up));
     list.style.setProperty("--drop-room", `${this.up ? Math.min(room, frame.bottom + offset - mark.top) : room}px`);
     list.scrollTop = list.getBoundingClientRect().top + offset - mark.top;
   }

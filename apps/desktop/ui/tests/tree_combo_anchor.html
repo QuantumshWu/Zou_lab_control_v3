@@ -9,7 +9,8 @@
 // → / ←, a new tree while it is open -- keeps the side it opened on and the room the window leaves it there, and the
 // row the change turns on (the heading; on a new tree the cursor's row where it is in sight, else the first row in
 // sight) stands within a device pixel of where it stood, in sight in a list that shows rows (fluent/tree_combo.ts
-// hold): below the box or above it, scrolled or not, and after the box has moved while the list is open.
+// hold): below the box or above it, scrolled or not, and after the box has moved while the list is open; a side
+// left less than one row closes it.
 import {TreeCombo} from '../dist/fluent/tree_combo.js';
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const results=[];
@@ -174,6 +175,17 @@ try {
      const heading=middle();
      holds(heading,()=>click(heading),`${place.name}, moved, first click`);placed(place.up,`${place.name}, moved, first click`);
      holds(heading,()=>click(heading),`${place.name}, moved, second click`);placed(place.up,`${place.name}, moved, second click`);
+     done();
+   }
+ });
+ await check('the box carried to the window\'s edge on its side: a change of rows closes the list, and it opens again where it fits',async()=>{
+   for(const [place,move,again] of [[CASES[2],'top:0px',false],[CASES[0],'bottom:0px',true]]){
+     const {combo,host,done}=await opened(place);
+     host.style.top=host.style.bottom='';host.style.cssText+=`;${move}`;await settle();
+     click('Alpha');
+     assert(!list(),`${place.name}, no room left: closed`);
+     press(combo,'ArrowDown');await settle();
+     assert(list(),`${place.name}: opened again`);placed(again,`${place.name}, opened again`);shows(`${place.name}, opened again`);
      done();
    }
  });
