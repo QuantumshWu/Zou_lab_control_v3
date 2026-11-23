@@ -241,7 +241,8 @@ fn a_lone_tweezer_s_node_is_its_two_photon_classes() {
 /// −1.9 µs. The two are one set of sums taken in two
 /// orders (by beats, one group): they differ by rounding alone, bounded as `now_is_the_components_at_their_phases`
 /// bounds it -- per component 64u(1 + |F_c t| + 2 max|θ t|) max|X⁽ᶜ⁾| summed over the quantity's components, and κ(V)u
-/// relative to its largest entry (10⁻¹⁰).
+/// relative to its largest entry (10⁻¹⁰). The node with its direct entries one by one: what their span leaves out is
+/// booked, not rounding, and read by its own test (`the_direct_entries_spanned_are_the_entries_within_what_the_span_books`).
 #[test]
 fn the_node_is_the_model_now_in_its_frame() {
     use crate::floquet::frame::FrameKey;
@@ -249,7 +250,8 @@ fn the_node_is_the_model_now_in_its_frame() {
     use crate::units::UNIT_ROUNDOFF;
     let mut worst = 0.0_f64;
     for (name, request, keep) in scenes() {
-        let run = run_of(&request, &keep);
+        let mut run = run_of(&request, &keep);
+        run.lab.spans.clear();
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         let n = keep.len();
@@ -362,11 +364,14 @@ fn apart(a: &Mat, b: &Mat) -> f64 {
 /// −Re tr(Ĝρ) of the middle (`Middle::force`) with every class's absorbed momentum Σ_a Im⟨u_a|∇u_a⟩ -- what the jumps
 /// and the step's scattering carry between them -- at the centre and at a moving point, on a state of P with every
 /// amplitude set, to the rounding of the traces: the run's with nothing dropped (model/classify.rs, # The drop tier),
-/// and the run's as the solve makes it apart from that by its dropped beats' −Re tr(Ĝ_k ρ) alone (tilt2's ±3ν … ±6ν).
+/// and the run's as the solve makes it apart from that by its dropped beats' −Re tr(Ĝ_k ρ) alone (tilt2's ±3ν … ±6ν),
+/// its direct entries one by one (what their span leaves out is booked, not a beat: its own test reads it,
+/// `the_direct_entries_spanned_are_the_entries_within_what_the_span_books`).
 #[test]
 fn the_selected_force_at_time_zero_is_the_model_s() {
     for (name, request, keep) in scenes() {
-        let dropping = run_of(&request, &keep);
+        let mut dropping = run_of(&request, &keep);
+        dropping.lab.spans.clear();
         let run = made_with(&request, &Drops::Only(Vec::new()));
         let dropped: Vec<usize> = dropping.judgment().tiers.iter().filter(|t| t.1 == crate::model::classify::Tier::Drop).map(|t| t.0).collect();
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
@@ -678,6 +683,42 @@ fn a_jump_s_photon_node_is_the_whole_node_s_classes() {
             assert!(photon.work < whole.work, "{name}");
         }
     }
+}
+
+/// The direct entries spanned (module documentation, # The direct entries spanned): on the six scenes at the centre at
+/// rest and at a moving point, the node with the run's spans against the node with the entries one by one, entry by
+/// entry of every slot of the generator and of its gradient: apart by no more than the span's booked Y
+/// (`Selected::span_directs`, every output's left part summed) and the two computations' rounding of the entry; said
+/// per scene: the spans' outputs, atoms and directions, Y, the largest difference.
+#[test]
+fn the_direct_entries_spanned_are_the_entries_within_what_the_span_books() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let mut plain = run_of(&request, &keep);
+        let spans = (run.lab.spans.len(), run.lab.spans.iter().map(|d| d.atoms.len()).sum::<usize>(), run.lab.spans.iter().map(|d| d.basis.len()).sum::<usize>());
+        plain.lab.spans.clear();
+        let booked = run.judgment.dropped - plain_dropped(&run);
+        let (node, scales) = run.structure();
+        let rounded = |k: usize, x: usize| crate::units::rounding(scales.generator[k].1[x] + 64) * scales.generator[k].0[x];
+        let mut worst: f64 = 0.0;
+        for (r, kappa) in POINTS {
+            let (a, b) = (run.node(r, kappa, false), plain.node(r, kappa, false));
+            for (k, ((_, x), (_, y))) in a.generator.iter().zip(&b.generator).enumerate() {
+                for (i, (u, v)) in x.data.iter().zip(&y.data).enumerate() {
+                    let d = (*u - *v).abs();
+                    worst = worst.max(d);
+                    assert!(d <= booked + rounded(k.min(scales.generator.len() - 1), i).max(1e-15 * u.abs()), "{name} slot {k} place {i}: {d:e} apart, booked {booked:e}");
+                }
+            }
+        }
+        let _ = node;
+        eprintln!("{name}: spans (outputs, atoms, directions) {spans:?}, booked Y {booked:.3e} rad/µs, the largest difference {worst:.3e}");
+    }
+}
+
+/// The dropped beats' Y alone (the span's taken out): the pairs the judgment dropped.
+fn plain_dropped(run: &Selected) -> f64 {
+    run.judgment.pairs.iter().filter(|(slots, _)| slots.iter().all(|&k| run.judgment.tiers[k].1 == crate::model::classify::Tier::Drop)).map(|(_, y)| y).sum()
 }
 
 /// The readings on the middle (module documentation, # The readings on the middle): `SelectedMiddle::readout` at the
