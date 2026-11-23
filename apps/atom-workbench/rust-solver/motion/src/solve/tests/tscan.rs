@@ -130,7 +130,7 @@ fn t2step2_scan() {
     let kinetic = kinetic_uk(trap, request.temperature_uk).iter().sum::<f64>() / 3.;
     let (frequency, end) = (trap.frequencies.iter().copied().fold(0., crate::linalg::larger), plan.end);
     let kick = kick_curvature(&run, trap);
-    let first_rung = Ladder { run: end, prior: prior(pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick }.first().unwrap();
+    let first_rung = Ladder { run: end, prior: prior(run.pattern(), pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick }.first().unwrap();
     let top: f64 = var("T2S2_TOP", 4. * first_rung);
     let top = end / (2. * (end / (2. * top)).round());
     let levels: usize = var("T2S2_LEVELS", 8);
@@ -212,8 +212,8 @@ fn t2step2_scan() {
             "T2S2 pair ({:.5}, {:.5}): the check's read as it is: loss {:+.4} ± {:.4} b, T {:+.4} ± {:.4} b",
             taus[j + 1],
             taus[j],
-            read.loss.value / b,
-            read.loss.spread.error / b,
+            read.of(Quantity::Loss).iter().map(|r| r.value).fold(f64::NEG_INFINITY, f64::max) / b,
+            read.of(Quantity::Loss).iter().map(|r| r.spread.error).fold(0., f64::max) / b,
             t.0.value / t.1,
             t.0.spread.error / t.1
         );

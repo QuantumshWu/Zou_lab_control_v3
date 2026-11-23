@@ -46,9 +46,10 @@
 //! below the edge with its double (`first_rung`) -- the largest the run may take, not the one it takes: the scout's
 //! states price the rungs from there down, and the pilot runs at the one of the least expected work (## The ladder) --;
 //! and the prior,
-//! the old engine's first step (`prior`): T's step error goes as the square of the phase k_max v_T τ the light's
+//! the old engine's first step (`prior`): T's step error goes as the square of the phase k v_T τ the light's
 //! pattern advances in a step at the initial ensemble's kinetic temperature -- one temperature for every speed the
-//! first rung is taken at --, and the step may take its share of T's allowance -- so the
+//! first rung is taken at; k the pattern's largest wave number the trajectory model's Doppler frame leaves (none of a
+//! running wave, whose phase the frame takes exactly) --, and the step may take its share of T's allowance -- so the
 //! ladder does not begin at an edge's rung the check then leaves (PGC3D: 1.425 µs, left on the pilot for 0.7125 µs,
 //! 11.2 CPU-s). The ladder begins at its first rung, and goes down only on its own τ/2τ reads and its states' prices.
 //! The first rung is a rung of the ladder, whose bottom is the step of
@@ -60,11 +61,17 @@
 //! τ/2) (`Levels`), both read at the same instants: the analysis times' candidates, the
 //! companion's step ends (# The analysis times), where both levels' states are their steps' own ends. Of two levels at
 //! h and 2h a quantity's difference at a time is d(h) = Q(2h) − Q(h); a read (estimate.rs `between`) takes
-//! d/(2^p − 1) over the run -- its mean square M over the run, by the trapezoid over the two levels' own analysis times
-//! (`read_step`: each time weighed by half its neighbours' interval), estimated without the noise's floor, with the
-//! delete-one-group jackknife of that estimate --: one read for the loss, for each row as shown and for the total T,
-//! each carried by the dynamics itself. An error that changes its sign in time counts by its size. (Over the outputs,
-//! as it was, the read changed with their number: a mean over 100 or over 1000 of them.)
+//! d/(2^p − 1) window by window -- its mean square M_w over each interval between two of the two levels' own analysis
+//! times (`read_step`, estimate.rs `leaves`: on each, every reading and its step error lie on their line within the
+//! noise), by the trapezoid there, estimated without the noise's floor, with the delete-one-group jackknife of that
+//! estimate --: per window one read for the loss, for each row as shown and for the total T, each carried by the
+//! dynamics itself, the windows times the quantities one family of looks (`judged`). An error that changes its sign in
+//! time counts by its size. The account is per time (E(t)² = A² + c(t)² + S(t)², ledger.rs), and so is the read: a
+//! mean square over the whole run reads an error confined to a stretch of it low by the run's length over the
+//! stretch's -- R9_PUSH's loss error, confined to some 12 µs of 364, 28 to 31 times low in the mean square
+//! (motion3d_status/rewrite/study/B.report.md §2.1) -- and the worst window is the one a rung stands or falls by.
+//! (Until 2026-11-22 one window, the whole run; over the outputs, as it was before that, the read changed with their
+//! number: a mean over 100 or over 1000 of them.)
 //!
 //! ## Two levels, three levels
 //! A difference is an error only by what is known of the coarser level. With e(h) = Q(h) − Q(0), d(h) = e(2h) − e(h),
@@ -82,7 +89,13 @@
 //!   where the rung above's read, lowered to it, is 2.0 b: the order is not shown, and the check goes down (to
 //!   0.098 µs, the loss at 600 µs 0.717).
 //! The order is a property of three levels: e ∝ h^p across them makes the successive differences shrink by 2^p at
-//! every output, d(2h) = 2^p d(h). It is the observed-order test that grid-convergence studies hold Richardson's
+//! every output, d(2h) = 2^p d(h) -- the two estimates of e(h), e₁ = d(h)/(2^p − 1) and e₂ = d(2h)/(2^p(2^p − 1)),
+//! one number of one sign. Their sizes are compared (`in_range`), and their signed difference is read as their mean
+//! squares are, on the same groups (`Levels::ordered`, estimate.rs `ordered`): where it lies clearly above the
+//! estimate itself -- d₂/d₁ outside [0, 2^{p+1}], a change of sign from one pair to the next at once, which the sizes do
+//! not see --, the order is refuted and the rung is left, as for a third level clearly beyond (`verdict`; measured, the
+//! window's momentum error of tilt0's G at 0.326, 0.652 and 1.304 µs d₁ = +0.63, d₂ = −2.57 %, sizes in range;
+//! R9_PUSH's at 0.71 µs on the end state's forms, d₁ = +0.056, d₂ = −0.217: B.report.md §2.1). It is the observed-order test that grid-convergence studies hold Richardson's
 //! extrapolation to (Roache's grid convergence index takes a level's error from two grids only with a safety factor
 //! of three, from three whose observed order is the scheme's with 1.25), and the guard of multilevel Monte Carlo
 //! (Giles), which takes the larger of the finest difference and the next one lowered by the order, so that a
@@ -330,13 +343,13 @@
 //!   rung's double is below the step's edge for every atom (`stable`); what it leaves of the light is the
 //!   comparison's to read.
 //!
-//! What enters a quantity's account, at every time alike, is what the reads the rung stands by say (`checked`); it
-//! is fixed after the pilot, and the product runs one level and reads no step. The check's resolution -- √(t·SE) of that
+//! What enters a quantity's account, at each time the window it lies in, is what the reads the rung stands by say
+//! there (`checked`, `Bound`); it is fixed after the pilot, and the product runs one level and reads no step. The check's resolution -- √(t·SE) of that
 //! read, the rms error the pairs cannot tell from none -- is said in the result's method line beside the steps compared
 //! and the number of pairs (`Checked`).
 //!
-//! It is a check of the order, not a bound: an error confined to a short stretch of the run is diluted by the run's
-//! length in the mean square. A bound per output was built and measured (the product at
+//! It is a check of the order, not a bound: an error confined to a stretch shorter than its window is diluted by the
+//! window's length in the mean square, a window being the shortest stretch the readings resolve. A bound per output was built and measured (the product at
 //! both levels, a60231dd): the pairs part within 100 µs in six beams' cooling whatever the noise they share, so the
 //! difference's error at the late outputs is two independent ensembles', and the measurement cost 30 to 240 % of a run
 //! on top of it; pooling it over the outputs books less than the truth where the error grows in time (SPEC §2.2).
@@ -615,7 +628,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{self, allowance, between, draws_for, half_window, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Local, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
+use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, readings, semiclassical, summarize, Between, Escape, Estimate, Fate, Group, Held, Local, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -1091,8 +1104,8 @@ fn kinetic_uk(trap: &Trap, temperature: f64) -> V3 {
     })
 }
 
-/// The largest wave number of the beams of every frequency but the trap's (1/µm): the light's pattern an atom crosses
-/// at its speed -- the trap's own frequency holds the atom, its pattern the trap's -- (`prior`). None, zero.
+/// The largest wave number of the beams of every frequency but the trap's (1/µm): the recoil of a photon of the light
+/// that cools and heats the atom -- the trap's own frequency holds it -- (`prior`'s T_sc). None, zero.
 fn pattern_wave_number(light: &Light) -> f64 {
     light.frequencies.iter().enumerate().filter(|(w, _)| *w != light.trap).flat_map(|(_, f)| f.beams.iter().map(|&l| light.beams[l].wave_number)).fold(0., crate::linalg::larger)
 }
@@ -1121,16 +1134,19 @@ fn stable(tau: f64, frequency: f64, kick: f64) -> bool {
 /// The step the physics prior allows (module documentation, # The step; the old engine's first step), µs: T's step
 /// error, relative, goes as the square of the phase the light's pattern advances along an atom's path in a step,
 /// (k v τ)², and the step may take its share of T's allowance (`step_bound`, # T's allowance), k_max v_T τ = √(s δT/T)
-/// -- at the pattern's largest wave number `wave` (1/µm; `pattern_wave_number`), the rms speed along an axis at the
+/// -- at the pattern's largest wave number `wave` (1/µm) the trajectory model's Doppler frame leaves to the step's nodes
+/// (model/selected.rs `Selected::pattern`: none of a running wave, whose phase the frame takes away exactly; every beam
+/// of a standing wave or six beams' cooling, whose pattern no frame removes), the rms speed along an axis at the
 /// temperature `temperature` (µK), v_T = √(k_BT/m) -- the initial ensemble's mean kinetic temperature in its trap
 /// (`kinetic_uk`), as the old engine's at the initial temperature: a run whose atoms heat past it is the check's to
-/// take down the ladder --, and T's allowance there at the
-/// scale T_sc of that light's recoil (estimate.rs `semiclassical`: one photon of k_max). No bound where the light has no
-/// pattern or the atoms no speed. (PGC3D, Rb87 at 30 µK on D2: k_max v_T = 0.43 rad/µs, T_sc = 10.9 µK, δT/T = 0.375:
-/// τ ≤ 0.95 µs, where the ladder's top by the edges alone, 1.425 µs, was left on the pilot and 0.7125 µs stood.)
-fn prior(wave: f64, hbar_over_mass: f64, temperature: f64, scales: &Scales) -> f64 {
+/// take down the ladder --, and T's allowance there at the scale T_sc of the light's recoil `recoil` (1/µm; estimate.rs
+/// `semiclassical`: one photon of k_max, `pattern_wave_number`). No bound where the light has no pattern in the frame
+/// or the atoms no speed. (PGC3D, Rb87 at 30 µK on D2: k_max v_T = 0.43 rad/µs, T_sc = 10.9 µK, δT/T = 0.375:
+/// τ ≤ 0.95 µs, where the ladder's top by the edges alone, 1.425 µs, was left on the pilot and 0.7125 µs stood. Until
+/// 2026-11-22 the pattern was k_max whatever the frame, none having been taken.)
+fn prior(wave: f64, recoil: f64, hbar_over_mass: f64, temperature: f64, scales: &Scales) -> f64 {
     let speed = (hbar_over_mass * KT_PER_UK * temperature).sqrt();
-    (step_bound()[1] * allowance(temperature, semiclassical([1., wave * wave], scales))).sqrt() / (wave * speed)
+    (step_bound()[1] * allowance(temperature, semiclassical([1., recoil * recoil], scales))).sqrt() / (wave * speed)
 }
 
 /// The ladder's first rung (module documentation, # The step): the largest rung -- the run's length `run` (µs) over an
@@ -1222,15 +1238,14 @@ fn dropped_rate(run: &Selected) -> f64 {
     run.dropped()
 }
 
-/// The reads a step is judged by (module documentation, # The step): the mean squares over the run of the step's
-/// error on the loss, on every row as shown and on the total T, each with the square of the step's share of its
-/// target. One family: what is clear of one of them is clear among them all.
+/// The reads a step is judged by (module documentation, # The step): per window of the run the mean squares of the
+/// step's error on the loss, on every row as shown and on T along each lab axis, each with the square of the step's
+/// share of its target. One family -- the windows times the quantities: what is clear of one of them is clear among
+/// them all.
 fn judged(read: &Between) -> Vec<(Read, f64)> {
     let [sp, st] = step_bound();
-    let mut looks = vec![(read.loss, sp * sp)];
-    looks.extend(read.shown.iter().map(|x| (*x, sp * sp)));
-    looks.extend(read.temperature.map(|t| (t, st * st)));
-    looks
+    // A T no time of a window reads is no look there (no atoms held at both levels), as a loss or a row that is no number is.
+    read.looks().filter(|(q, r)| q.shown() || r.value.is_finite() || r.spread.read()).map(|(q, r)| (*r, if q.shown() { sp * sp } else { st * st })).collect()
 }
 
 /// The looks of the family (`judged`) that read: a look no time reads at both levels -- none counts a trajectory
@@ -1260,8 +1275,7 @@ fn carried(read: &Between, ratio: f64) -> Between {
 
 /// A read of mean squares times a factor, each look's value and spread (`carried`, `read_step`).
 fn scaled(read: &Between, factor: f64) -> Between {
-    let carry = |r: &Read| Read { value: factor * r.value, spread: Spread { error: factor * r.spread.error, ..r.spread } };
-    Between { loss: carry(&read.loss), shown: read.shown.each_ref().map(carry), temperature: read.temperature.as_ref().map(carry) }
+    read.map(|_, r| Read { value: factor * r.value, spread: Spread { error: factor * r.spread.error, ..r.spread } })
 }
 
 /// The factor a read of two levels takes for its coarser level's halved steps, of that level's groups `coarser` (module
@@ -1361,7 +1375,10 @@ enum Verdict {
 }
 
 /// What the check makes of a rung (module documentation, # The step; `settle`) on its own `read` and its third level
-/// above carried to its step, `above` (none where it has none); `pilot`: whether the read is the pilot's, the last word
+/// above carried to its step, `above` (none where it has none) -- and, where the three levels are held on the same
+/// trajectories, whether the order holds across them (`ordered`: its two estimates of the rung's error of one sign and
+/// apart by no more than the estimate, `Levels::ordered`; a rung across whose levels it clearly does not is left, as
+/// one whose third level is clearly beyond) --; `pilot`: whether the read is the pilot's, the last word
 /// on the step (the scout's leaves only on what is clearly beyond -- its own read, or its third level's: a rung whose
 /// third level is clearly beyond is left on the scout as on the pilot, and no pairs at the rung can bring that read
 /// within); `upward`: whether a third level above on the pilot's own pairs is to be had (the ladder has the rung above,
@@ -1378,10 +1395,10 @@ enum Verdict {
 /// pairs at 0.474 and 0.948 µs lowered, read 3.36 ± 3.59 and 8.78 ± 5.44 (10⁻⁴, the share's square 5·10⁻⁴) on a row
 /// in two runs that differ in nothing the step resolves -- 0.8σ apart, one rung apart: 0.237 against 0.118 µs, 90
 /// against 196 CPU-s.)
-fn verdict(read: &Between, above: Option<&Between>, pilot: bool, upward: bool) -> Verdict {
+fn verdict(read: &Between, above: Option<&Between>, ordered: Option<bool>, pilot: bool, upward: bool) -> Verdict {
     if read_looks(read).is_empty() {
         Verdict::Unread
-    } else if screen(read) || above.is_some_and(screen) {
+    } else if screen(read) || above.is_some_and(screen) || ordered == Some(false) {
         Verdict::Left
     } else if !pilot {
         Verdict::Stands
@@ -1396,19 +1413,19 @@ fn verdict(read: &Between, above: Option<&Between>, pilot: bool, upward: bool) -
     }
 }
 
-/// What a rung's reads say together (module documentation, # The step): per look, of its own read and its third
-/// level's carried to its step, the read of the larger estimate -- each is the rung's mean square where the order
-/// holds, and the larger is the one the rung stands by --, or of the larger far end where the check could not see
-/// (`far`). A T the rung's own levels do not read stays unread.
+/// What a rung's reads say together (module documentation, # The step): per look -- each quantity on each window both
+/// are read on (`Between::common`) --, of its own read and its third level's carried to its step, the read of the larger
+/// estimate -- each is the rung's mean square where the order holds, and the larger is the one the rung stands by --,
+/// or of the larger far end where the check could not see (`far`). A T the rung's own levels do not read stays unread.
 fn worse(own: &Between, third: Option<&Between>, far: bool) -> Between {
     let Some(third) = third else { return own.clone() };
+    let windows = own.common(third);
+    let (own, third) = (own.on(&windows), third.on(&windows));
     let size = |r: &Read| if far { r.most(1.) } else if r.value.is_nan() { f64::INFINITY } else { r.value };
-    let larger = |a: &Read, b: &Read| if size(b) > size(a) { *b } else { *a };
-    Between {
-        loss: larger(&own.loss, &third.loss),
-        shown: std::array::from_fn(|s| larger(&own.shown[s], &third.shown[s])),
-        temperature: own.temperature.map(|a| third.temperature.map_or(a, |b| larger(&a, &b))),
-    }
+    // A look the own read does not read stays unread; of T, one the third does not read is the own one's.
+    let unread = |r: &Read| r.value.is_nan() && !r.spread.read();
+    let larger = |q: Quantity, a: &Read, b: &Read| if unread(a) || (!q.shown() && unread(b)) { *a } else if size(b) > size(a) { *b } else { *a };
+    Between { windows, reads: own.reads.iter().zip(&third.reads).enumerate().map(|(q, (a, b))| a.iter().zip(b).map(|(a, b)| larger(Quantity::of(q), a, b)).collect()).collect() }
 }
 
 /// Whether a read excludes something on every look (module documentation, # The step): each far end a number. A look
@@ -1446,14 +1463,17 @@ fn asks([far, near]: [f64; 2], bound: f64) -> f64 {
 
 /// Whether a rung's third level, carried to its step, stands in the order's range of its own read (module
 /// documentation, ## The ladder; `Scouted`): under the order the two are of one mean square, the third's the own one's
-/// times (d₂/d₁)²/2^{2p}; on no look the near end of one above the far end of the other (`ends`, each read with its own
-/// statistical error, at one look). A look either does not read excludes nothing.
+/// times (d₂/d₁)²/2^{2p}; on no look -- each quantity on each window both are read on (`Between::common`) -- the near
+/// end of one above the far end of the other (`ends`, each read with its own statistical error, at one look). A look
+/// either does not read excludes nothing.
 fn in_range(own: &Between, third: &Between) -> bool {
     let apart = |a: &Read, b: &Read| {
         let ([far_a, near_a], [far_b, near_b]) = (ends(a), ends(b));
         near_b > far_a || near_a > far_b
     };
-    !(apart(&own.loss, &third.loss) || own.shown.iter().zip(&third.shown).any(|(a, b)| apart(a, b)) || own.temperature.zip(third.temperature).is_some_and(|(a, b)| apart(&a, &b)))
+    let windows = own.common(third);
+    let (own, third) = (own.on(&windows), third.on(&windows));
+    !own.reads.iter().flatten().zip(third.reads.iter().flatten()).any(|(a, b)| apart(a, b))
 }
 
 /// The pairs a rung's own read could see on at the best (`blind`), where a run's trajectories can take them: none past
@@ -1481,12 +1501,16 @@ fn foreseen(own: &Between, half: &Between, rung: &Between) -> Option<f64> {
         let below = [lowered * near + if far > near { ratio * (far - near) } else { 0. }, lowered * near];
         (!(below[0] <= bound)).then(|| asks(below, bound))
     };
-    let ratio = |h: &Read, at: &Read| (h.spread.error / at.spread.error).clamp(lowered, 1.);
+    let ratio = |h: &Read, at: &Read| if h.value.is_nan() || at.value.is_nan() { f64::NAN } else { (h.spread.error / at.spread.error).clamp(lowered, 1.) };
     let [sp, st] = step_bound();
-    let mut looks = vec![look(&own.loss, ratio(&half.loss, &rung.loss), sp * sp)];
-    looks.extend((0..STATES).map(|s| look(&own.shown[s], ratio(&half.shown[s], &rung.shown[s]), sp * sp)));
-    looks.extend(own.temperature.map(|t| look(&t, half.temperature.zip(rung.temperature).map_or(f64::NAN, |(h, at)| ratio(&h, &at)), st * st)));
-    looks.into_iter().flatten().reduce(crate::linalg::larger)
+    // Each look on the windows all three are read on (`Between::common`).
+    let windows = own.common(&half.on(&half.common(rung)));
+    let (own, half, rung) = (own.on(&windows), half.on(&windows), rung.on(&windows));
+    own.looks()
+        .zip(half.looks().zip(rung.looks()))
+        .filter(|((_, read), _)| !read.value.is_nan())
+        .filter_map(|((q, read), ((_, h), (_, at)))| look(read, ratio(h, at), if q.shown() { sp * sp } else { st * st }))
+        .reduce(crate::linalg::larger)
 }
 
 /// What the step's check weighs its courses by (`course`, `remedy`; module documentation, ## The ladder): `work`, a
@@ -1877,22 +1901,48 @@ enum Remedy {
     Pairs(u64),
 }
 
-/// The step's part of an output's accounts (module documentation, # The step): on what is shown -- the largest of the
-/// rows' and the loss's, a probability's error at most 1 -- and on the total T (relative, weighed by the held share, over
-/// T's allowance at the output: the check reads T's error so, estimate.rs `between`, and the account takes it times the
-/// output's allowance, `accounts`). The step's share until the
-/// pilot's levels are read; then what the reads the rung stands by do not exclude, the rms over the run (`checked`,
-/// `Levels::told`), the same at every output, unbounded on T where no output reads it at both levels.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The step's part of an output's accounts (module documentation, # The step), window by window of the run (the
+/// windows its reads were read on, estimate.rs `Between`): on what is shown -- the largest of the rows' and the loss's,
+/// a probability's error at most 1 -- and on the total T (relative, weighed by the held share, over T's allowance at the
+/// output: the check reads T's error so, estimate.rs `between`, and the account takes it times the output's allowance,
+/// `accounts`). The step's share until the pilot's levels are read, one window over the whole run; then what the reads
+/// the rung stands by do not exclude in each window, the rms over it (`checked`, `Levels::told`), unbounded on T in a
+/// window where no time reads it at both levels. An output takes the window it lies in, the larger of two at their
+/// common end (`at`).
+#[derive(Clone, Debug, PartialEq)]
 struct Bound {
-    shown: f64,
-    temperature: f64,
+    windows: Vec<[f64; 2]>,
+    shown: Vec<f64>,
+    temperature: Vec<f64>,
 }
 impl Bound {
-    /// The step's share of each target (`step_bound`).
+    /// The step's share of each target (`step_bound`), at every time.
     fn share() -> Bound {
         let [shown, temperature] = step_bound();
-        Bound { shown, temperature }
+        Bound::flat(shown, temperature)
+    }
+    /// One part on what is shown and one on T at every time.
+    fn flat(shown: f64, temperature: f64) -> Bound {
+        Bound { windows: vec![[f64::NEG_INFINITY, f64::INFINITY]], shown: vec![shown], temperature: vec![temperature] }
+    }
+    /// Its parts at the time t (µs): of the window that holds it, the larger of two where t is their common end;
+    /// unbounded at a time no window holds.
+    fn at(&self, t: f64) -> [f64; 2] {
+        self.windows.iter().zip(self.shown.iter().zip(&self.temperature)).filter(|(w, _)| w[0] <= t && t <= w[1]).fold(None, |most: Option<[f64; 2]>, (_, (&s, &temperature))| {
+            Some(most.map_or([s, temperature], |m| [crate::linalg::larger(m[0], s), crate::linalg::larger(m[1], temperature)]))
+        })
+        .unwrap_or([f64::INFINITY; 2])
+    }
+    /// Its largest parts over the run (the step's note).
+    fn largest(&self) -> [f64; 2] {
+        [self.shown.iter().copied().fold(0., crate::linalg::larger), self.temperature.iter().copied().fold(0., crate::linalg::larger)]
+    }
+    /// The parts of a read window by window, each window's of the larger over what is shown -- a probability's error at
+    /// most 1 -- and of T (`size`).
+    fn of(read: &Between, size: &dyn Fn(&Read) -> f64) -> Bound {
+        let windows = read.windows.len();
+        let shown = (0..windows).map(|w| probability_error(read.looks().filter(|(q, _)| q.shown()).skip(w).step_by(windows).map(|(_, r)| size(r)).fold(0., crate::linalg::larger))).collect();
+        Bound { windows: read.windows.clone(), shown, temperature: read.of(Quantity::Temperature).iter().map(size).collect() }
     }
 }
 
@@ -1923,15 +1973,15 @@ struct Checked {
 fn checked(own: &Between, third: Option<&Between>, saw: bool) -> (Bound, [f64; 2]) {
     let read = worse(own, third, !saw);
     let resolution = |read: &Read| read.spread.interval().sqrt();
-    let shown = read.shown.iter().map(resolution).fold(resolution(&read.loss), crate::linalg::larger);
-    (if saw { estimated(&read) } else { unexcluded(&read) }, [shown, read.temperature.map_or(f64::INFINITY, |t| resolution(&t))])
+    let shown = read.looks().filter(|(q, _)| q.shown()).map(|(_, r)| resolution(r)).fold(0., crate::linalg::larger);
+    let temperature = read.of(Quantity::Temperature).iter().filter(|r| !r.value.is_nan()).map(resolution).reduce(crate::linalg::larger).unwrap_or(f64::INFINITY);
+    (if saw { estimated(&read) } else { unexcluded(&read) }, [shown, temperature])
 }
 
-/// What a read estimates: each quantity's √max(M̂, 0), the rms of its step error as read, the largest on what is shown,
-/// and the total T's; unbounded where a read is no number.
+/// What a read estimates: each quantity's √max(M̂, 0) in each window, the rms of its step error there as read, the
+/// largest on what is shown, and the total T's; unbounded where a read is no number.
 fn estimated(read: &Between) -> Bound {
-    let size = |read: &Read| if read.value.is_nan() { f64::INFINITY } else { crate::linalg::larger(read.value, 0.).sqrt() };
-    Bound { shown: probability_error(read.shown.iter().map(size).fold(size(&read.loss), crate::linalg::larger)), temperature: read.temperature.map_or(f64::INFINITY, |t| size(&t)) }
+    Bound::of(read, &|read: &Read| if read.value.is_nan() { f64::INFINITY } else { crate::linalg::larger(read.value, 0.).sqrt() })
 }
 
 /// The step's part of the accounts as far as a rung's reads hold it (`attempt`: the product's need the check is priced at): per
@@ -1939,16 +1989,17 @@ fn estimated(read: &Between) -> Bound {
 /// its share on its estimates (`verdict`) -- a rung beyond is left, and the run stands at a rung below --, so the share
 /// bounds the step's part the run will book, and a read below it is that part as read.
 fn standing(read: &Between) -> Bound {
-    let (read, share) = (estimated(read), Bound::share());
-    Bound { shown: crate::linalg::smaller(read.shown, share.shown), temperature: crate::linalg::smaller(read.temperature, share.temperature) }
+    let ([shown, temperature], mut read) = (step_bound(), estimated(read));
+    read.shown.iter_mut().for_each(|x| *x = crate::linalg::smaller(*x, shown));
+    read.temperature.iter_mut().for_each(|x| *x = crate::linalg::smaller(*x, temperature));
+    read
 }
 
 /// What a read does not exclude (decide.rs `Read::most`): each quantity's far end, the rms it leaves open,
 /// √(max(M̂, 0) + t·SE) at one look's interval -- the number `blind` holds against the step's share --, the largest on
 /// what is shown, and the total T's; unbounded where a read excludes nothing.
 fn unexcluded(read: &Between) -> Bound {
-    let far = |read: &Read| read.most(1.).sqrt();
-    Bound { shown: probability_error(read.shown.iter().map(far).fold(far(&read.loss), crate::linalg::larger)), temperature: read.temperature.map_or(f64::INFINITY, |t| far(&t)) }
+    Bound::of(read, &|read: &Read| read.most(1.).sqrt())
 }
 
 /// What is shown of some groups: the estimates at the outputs, the listed outputs' atoms and the counts.
@@ -2027,12 +2078,28 @@ fn read_step(times: &[f64], window: f64, fine: &[&Part], coarse: &[&Part], scale
 }
 
 /// `read_step`'s read before its coarser level's halved steps are taken into it: `between` of the two levels as they
-/// are.
+/// are, window by window of their analysis times (`leaves`: on each interval that stands every reading and its step
+/// error lie on their line within the noise, so that the interval is the shortest stretch the error is read on whole;
+/// module documentation, # The step).
 fn read_as_it_is(times: &[f64], window: f64, fine: &[&Part], coarse: &[&Part], scales: &Scales) -> Between {
     let (fine, coarse) = (reads_of(fine), reads_of(coarse));
     let at = analysed(times, window, &fine, &coarse, scales);
     let there = |groups: &[&Group]| -> Vec<Group> { groups.iter().map(|g| g.at(&at)).collect() };
-    between(&there(&fine), &there(&coarse), scales, &at.iter().map(|&k| times[k]).collect::<Vec<_>>())
+    let times: Vec<f64> = at.iter().map(|&k| times[k]).collect();
+    between(&there(&fine), &there(&coarse), scales, &times, &leaves(&times))
+}
+
+/// Whether the order holds across three levels of the same groups (estimate.rs `ordered`), `levels` at h, 2h and 4h
+/// from the finest, at the analysis times of its two pairs together among the candidates `times`, window by window.
+fn read_order(times: &[f64], window: f64, levels: [&[&Part]; 3], scales: &Scales) -> bool {
+    let [a, b, c] = levels.map(reads_of);
+    let mut at = analysed(times, window, &a, &b, scales);
+    at.extend(analysed(times, window, &b, &c, scales));
+    at.sort_unstable();
+    at.dedup();
+    let there = |groups: &[&Group]| -> Vec<Group> { groups.iter().map(|g| g.at(&at)).collect() };
+    let times: Vec<f64> = at.iter().map(|&k| times[k]).collect();
+    ordered([&there(&a), &there(&b), &there(&c)], scales, &times, &leaves(&times))
 }
 
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
@@ -2218,7 +2285,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     // temperature in the reference state's trap (`kinetic_uk`), and below the step's edge.
     let kinetic = kinetic_uk(trap, request.temperature_uk).iter().sum::<f64>() / 3.;
     let (frequency, end) = (trap.frequencies.iter().copied().fold(0., crate::linalg::larger), plan.end);
-    let ladder = Ladder { run: end, prior: prior(pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick };
+    let ladder = Ladder { run: end, prior: prior(run.pattern(), pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick };
     let first_rung = ladder
         .first()
         .ok_or_else(|| format!("找不到可用的时间步长：在每条轨迹的步数上限（{MOST_STEPS} 步）之内，没有步长能分辨阱中的振荡和光场中势阱的曲率（或者阱频、曲率不是有限数）"))?;
@@ -2281,7 +2348,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         let times: Vec<f64> = at.iter().map(|&k| candidates[k]).collect();
         let read = pilot_reads(run, &refs, &scales, choice.as_deref(), &times, &context.fixed.escape);
         let fixed = context.fixed.with(read.model, &times);
-        let need = most_needed(&looks(&read.estimates, &fixed, Bound::share()));
+        let need = most_needed(&looks(&read.estimates, &fixed, &Bound::share()));
         let halving = |t: f64| priced(t)[1];
         check(run, ensemble, &domain, &mut context, &mut levels, &numbers, 1, &above, Some(&Prices { work: &work, halving: &halving, product: need }), messages);
     }
@@ -2327,7 +2394,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
             let (own, third, _, _) = levels.told(&candidates, window, &scales);
             standing(&worse(&own, third.as_ref(), false))
         };
-        let product = most_needed(&looks(&read.estimates, &context.fixed.with(read.model.clone(), &at.iter().map(|&k| candidates[k]).collect::<Vec<_>>()), step));
+        let product = most_needed(&looks(&read.estimates, &context.fixed.with(read.model.clone(), &at.iter().map(|&k| candidates[k]).collect::<Vec<_>>()), &step));
         let (_, _, pilot, _) = &*made.insert((tau, at, pilot, read));
         let rated = one_each(&pilot.iter().collect::<Vec<_>>());
         let priced = work_at(run, domain.widest, &rated);
@@ -2353,8 +2420,8 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     // accounts, their resolution into the result's words (`Levels::told`, `checked`).
     let (own, third, step_of_third, pairs) = levels.told(&candidates, window, &scales);
     let (step, resolution) = checked(&own, third.as_ref(), saw);
+    crate::prof::note(|| format!("ladder settled tau {tau} companion {:?} saw {saw} third {step_of_third:?} pairs {pairs}: the step's part booked at most {:.3e} on what is shown, {:.3e} of T's allowance, over {} windows; resolution {resolution:?}", levels.companion, step.largest()[0], step.largest()[1], step.windows.len()));
     (context.step, context.checked) = (step, Some(Checked { third: step_of_third, pairs, resolution, saw, companion: levels.companion }));
-    crate::prof::note(|| format!("ladder settled tau {tau} companion {:?} saw {saw} third {step_of_third:?} pairs {pairs}: the step's part booked {:.3e} on what is shown, {:.3e} of T's allowance; resolution {resolution:?}", levels.companion, step.shown, step.temperature));
     // The decisions stand on the pilot's analysis times from here on: the product reads its trajectories there, and
     // the run's model error is the pilot's there (# The analysis times). The levels' checkpoints are read no more;
     // the further pairs' groups are the product's, at the same times.
@@ -2720,7 +2787,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         }
         // 3. The candidates.
         let fixed = |model: Vec<[f64; 2]>| context.fixed.with(model, times);
-        let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), context.step);
+        let base = looks(&read.estimates, &fixed(vec![[0.; 2]; times.len()]), &context.step);
         let need0 = most_needed(&base);
         let rated = one_each(pilot);
         let ran = (numbers.len() as u64 * GROUP) as f64;
@@ -2760,10 +2827,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let exact = chain[place].len() == STATES;
             let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
             let [model_error, lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
-            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step);
             // Complete at the direct part's lower end as well where it is not at its upper: its fate open at the paths'
             // statistics (select.rs, # How many paths).
-            let at_least = met(&looks(&read.estimates, &fixed(lower), context.step));
+            let at_least = met(&looks(&read.estimates, &fixed(lower), &context.step));
             let met = met(&own);
             let open = met != [true; 2] && at_least == [true; 2];
             let need = most_needed(&own);
@@ -2923,7 +2990,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let judged = judge(&paths, &model, centre)?;
             let price = priced(&model, domain.widest, &rated, tau, false);
             let model_error = account(&judged);
-            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            let own = looks(&read.estimates, &fixed(model_error.clone()), &context.step);
             let (met, need) = (met(&own), most_needed(&own));
             weighed.push(Weighed { place: usize::MAX, judged, price, model: model_error, need, work: None, fate: format!("对照，不参与选（显示量{}、温度{}）", if met[0] { "够" } else { "不够" }, if met[1] { "够" } else { "不够" }), open: false });
         }
@@ -3040,6 +3107,10 @@ struct Levels {
     /// (`third_on_the_pilot`: their first members, `extra_members` of each), kept for the groups it goes on to.
     extra_first: Vec<Part>,
     extra_members: u64,
+    /// The rung left above's companion -- this rung's 4τ, of the groups of its levels, their reads alone --, where the
+    /// rung's third level above is that rung's read (`check`): the third of the levels the order is checked across
+    /// (`Levels::ordered`).
+    upper: Vec<Part>,
 }
 
 /// The rung's third level above as the scout read it on its own pairs (module documentation, ## The ladder; `check`,
@@ -3123,6 +3194,34 @@ impl Levels {
     /// stands on its two levels' analysis times among the candidates `times` (`read_step`).
     fn told(&self, times: &[f64], window: f64, scales: &Scales) -> (Between, Option<Between>, Option<([f64; 2], u64)>, u64) {
         (self.own(times, window, scales), self.above.clone(), self.above.as_ref().map(|_| (self.above_steps, self.above_pairs)), self.paired().0.len() as u64 * GROUP)
+    }
+
+    /// Whether the order holds across the rung's two levels and its third (module documentation, ## Two levels, three
+    /// levels; `read_order`), where it holds the three on the same trajectories -- the rung at τ with `members` members
+    /// of each group --: the third read on the pilot's trajectories (`extra`), on the scout's (`scouted`, where the
+    /// rung's levels hold the scout's members alone), or the rung left above's companion (`upper`); each on the
+    /// groups all three hold, the further pairs apart. None where no third is held so, or the three are no steps h, 2h
+    /// and 4h. At the analysis times' candidates `times`.
+    fn ordered(&self, tau: f64, members: u64, times: &[f64], window: f64, scales: &Scales) -> Option<bool> {
+        let rung = (tau, &self.fine);
+        let companion = (self.companion.step(tau), &self.coarse);
+        let third: (f64, &Vec<Part>) = if self.above_pilot && !self.extra.is_empty() {
+            (self.extra_step, &self.extra)
+        } else if let Some(scouted) = self.scouted.as_ref().filter(|scouted| scouted.tau == tau && !self.above_pilot && scouted.members == members && !scouted.level.is_empty()) {
+            (scouted.step, &scouted.level)
+        } else if !self.upper.is_empty() && self.above.is_some() {
+            (4. * tau, &self.upper)
+        } else {
+            return None;
+        };
+        let mut levels = [rung, companion, third];
+        levels.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let groups = levels.iter().map(|l| l.1.len()).min().unwrap_or(0);
+        if !(levels[1].0 == 2. * levels[0].0 && levels[2].0 == 2. * levels[1].0) || groups < 3 {
+            return None;
+        }
+        let parts = levels.map(|(_, level)| level.iter().take(groups).collect::<Vec<&Part>>());
+        Some(read_order(times, window, [&parts[0], &parts[1], &parts[2]], scales))
     }
 }
 
@@ -3273,12 +3372,13 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         };
         let sides = [up && !levels.third_none[0], down && !levels.third_none[1]];
         let upward = !levels.above_pilot && sides.iter().any(|&side| side);
-        let verdict = verdict(&read, levels.above.as_ref(), pilot, upward);
+        let ordered = levels.ordered(tau, members, times, window, &context.scales);
+        let verdict = verdict(&read, levels.above.as_ref(), ordered, pilot, upward);
         crate::prof::note(|| {
             let looks: Vec<String> = judged(&read).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect();
             let above: Vec<String> = levels.above.as_ref().map_or(vec![], |a| judged(a).iter().map(|(r, b)| format!("{:.3e}±{:.2e}/{:.3e}", r.value, r.spread.error, b)).collect());
             let halved = |level: &[Part]| level.iter().fold((0, 0.), |(n, f), p| (n + p.counts.halved.steps, f + p.counts.halved.time / level.iter().map(|q| q.counts.time).sum::<f64>()));
-            format!("ladder tau {} pilot {pilot} members {members} groups {} companion {:?} verdict {verdict:?} screen {} halved (steps, share of time) {:?} / {:?} factor {:.5} looks [{}] above [{}]", context.tau, numbers.len(), levels.companion, screen(&read), halved(&levels.fine), halved(&levels.coarse), { let (fine, coarse) = levels.paired(); amplified(if levels.companion == Companion::Double { coarse } else { fine }) }, looks.join(" "), above.join(" "))
+            format!("ladder tau {} pilot {pilot} members {members} groups {} companion {:?} verdict {verdict:?} ordered {ordered:?} screen {} halved (steps, share of time) {:?} / {:?} factor {:.5} looks [{}] above [{}]", context.tau, numbers.len(), levels.companion, screen(&read), halved(&levels.fine), halved(&levels.coarse), { let (fine, coarse) = levels.paired(); amplified(if levels.companion == Companion::Double { coarse } else { fine }) }, looks.join(" "), above.join(" "))
         });
         // A read of which no look reads decides nothing and prices nothing (`Verdict::Unread`): the check ends unable to
         // see where it is.
@@ -3465,6 +3565,9 @@ fn check(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut Con
         // below's own level or its companion's, its states kept: kept for it, run no more.
         let extra = (levels.extra_step < tau).then(|| std::mem::take(&mut levels.extra)).filter(|extra| !extra.is_empty());
         (levels.extra, levels.further, levels.scouted, levels.extra_first) = Default::default();
+        // The companion at 2τ is the rung below's third level's coarser one: kept, its reads alone, for the order across
+        // the three (`Levels::ordered`).
+        levels.upper = if halved_companion { Vec::new() } else { std::mem::take(&mut levels.coarse) };
         if halved_companion {
             // The companion at τ/2 is the rung below's own level, its states kept. A foresight at τ/4 is its companion's
             // first members, where it is read against τ/4 (`halve_companion`), and a third held at τ/4 its whole.
@@ -3714,7 +3817,7 @@ fn product(run: &Selected, ensemble: &Ensemble, domain: &Domain, context: &mut C
         let n = all.len() as u64 * GROUP;
         // The estimates at the analysis times: what the looks and the decisions read (# The analysis times).
         let e = summarize(&reads_of(&all), &context.scales);
-        let chased: Vec<Look> = looks(&e, &context.fixed, context.step).into_iter().filter(Look::fits).collect();
+        let chased: Vec<Look> = looks(&e, &context.fixed, &context.step).into_iter().filter(Look::fits).collect();
         if chased.iter().all(Look::met) || n >= MOST_TRAJECTORIES {
             let (shown, l, c) = pooled(&all, &context.scales);
             return (shown, l, c, e);
@@ -4614,13 +4717,15 @@ fn run_groups(levels: &[Hand], shown: usize, messages: &mut Messages, progress: 
 struct Fixed {
     model: Vec<[f64; 2]>,
     dropped: Vec<f64>,
+    /// The times (µs): what the step's part is taken at (`Bound::at`).
+    times: Vec<f64>,
     rate: f64,
     escape: Escape,
 }
 impl Fixed {
     /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`.
     fn new(model: Vec<[f64; 2]>, times: &[f64], rate: f64, escape: Escape) -> Fixed {
-        Fixed { model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), rate, escape }
+        Fixed { model, dropped: times.iter().map(|&t| crate::model::classify::distance(rate, t)).collect(), times: times.to_vec(), rate, escape }
     }
     /// The model's errors `model` at the times `times`, with this run's bounds.
     fn with(&self, model: Vec<[f64; 2]>, times: &[f64]) -> Fixed {
@@ -4732,7 +4837,7 @@ impl Look {
 /// 293 batches, from 568 trajectories to 2912.) Where no atom is held there is no T, and no look of it: N h = 0 would
 /// ask that interval of nothing. The times' looks are made on the pool, each time's by itself, and come in the
 /// times' order.
-fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
+fn looks(estimates: &[Estimate], fixed: &Fixed, step: &Bound) -> Vec<Look> {
     let (population, temperature) = accounts(estimates, fixed, step);
     estimates
         .par_iter()
@@ -4743,7 +4848,7 @@ fn looks(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> Vec<Look> {
             let shown = Look { target: POPULATION_TARGET, account: population[k], interval: e.shown_interval(), trajectories: n, shown: true };
             let held = (e.held != 0.).then(|| {
                 let read = Some(e.temperature_interval()).filter(|i| i.is_finite());
-                let account = temperature[k].unwrap_or_else(|| temperature_account(e, fixed.at(k, e)[1], &step, read.unwrap_or(CONFIDENCE * (2. / (n * h)).sqrt())));
+                let account = temperature[k].unwrap_or_else(|| temperature_account(e, fixed.at(k, e)[1], step.at(fixed.times[k])[1], read.unwrap_or(CONFIDENCE * (2. / (n * h)).sqrt())));
                 Look { target: e.temperature_target, account, interval: account.statistics, trajectories: n, shown: false }
             });
             std::iter::once(shown).chain(held)
@@ -4767,31 +4872,31 @@ fn most_needed(looks: &[Look]) -> f64 {
 /// model's error on what is shown is at most 1, a probability's. T has an account where its
 /// statistics, the model's error and its step error are all read. The times' accounts are made on the pool, each
 /// time's by itself.
-fn accounts(estimates: &[Estimate], fixed: &Fixed, step: Bound) -> (Vec<Account>, Vec<Option<Account>>) {
+fn accounts(estimates: &[Estimate], fixed: &Fixed, step: &Bound) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
         .par_iter()
         .zip(&fixed.model)
         .enumerate()
         .map(|(k, (e, _))| {
             if k == 0 {
-                let temperature = temperature_account(e, 0., &Bound { shown: 0., temperature: 0. }, e.temperature_interval());
+                let temperature = temperature_account(e, 0., 0., e.temperature_interval());
                 return (Account::default(), temperature.statistics.is_finite().then_some(temperature));
             }
-            let a = fixed.at(k, e);
-            let population = Account { model: probability_error(a[0]), step: step.shown, statistics: e.shown_statistics() };
-            let temperature = temperature_account(e, a[1], &step, e.temperature_interval());
+            let (a, [shown, temperature]) = (fixed.at(k, e), step.at(fixed.times[k]));
+            let population = Account { model: probability_error(a[0]), step: shown, statistics: e.shown_statistics() };
+            let temperature = temperature_account(e, a[1], temperature, e.temperature_interval());
             (population, (temperature.model.is_finite() && temperature.step.is_finite() && temperature.statistics.is_finite()).then_some(temperature))
         })
         .unzip()
 }
 
 /// T's account at a time (`accounts`) from its estimate, the model's error on T there `model` (with its bounds,
-/// `Fixed::at`), the step's part `bound` (a share of T's allowance) and the statistics' relative interval `interval`:
-/// the model's part and the statistics' weighed by the held share, the step's read so already (estimate.rs
-/// `between`), times the allowance.
-fn temperature_account(e: &Estimate, model: f64, bound: &Bound, interval: f64) -> Account {
+/// `Fixed::at`), the step's part `step` there (a share of T's allowance, `Bound::at`) and the statistics' relative
+/// interval `interval`: the model's part and the statistics' weighed by the held share, the step's read so already
+/// (estimate.rs `between`), times the allowance.
+fn temperature_account(e: &Estimate, model: f64, step: f64, interval: f64) -> Account {
     let h = 1. - e.loss;
-    Account { model: weighed(h, model), step: bound.temperature * e.temperature_target, statistics: weighed(h, interval) }
+    Account { model: weighed(h, model), step: step * e.temperature_target, statistics: weighed(h, interval) }
 }
 
 /// An error of the held atoms weighed by their share h, as an account weighs it: unbounded stays so at any share -- h
@@ -5099,7 +5204,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     // outputs the line through them (# The analysis times): the ledger flags where the stop reads -- not an output's own
     // statistics, a noisy estimate of the same spread, the largest of a thousand of them above it --, and so do T's
     // allowances. The model's error at the outputs likewise, for what is read of it there.
-    let (at_reads, at_temperature) = accounts(reads, &c.fixed, c.step);
+    let (at_reads, at_temperature) = accounts(reads, &c.fixed, &c.step);
     let (population, temperature) = accounts_along(&c.at, &at_reads, &at_temperature, times);
     let allowed: Vec<f64> = times.iter().map(|&t| bracket(&c.at, t)).map(|(a, b, s)| lerp(reads[a].temperature_target, reads[b].temperature_target, s)).collect();
     let model = interpolated(&c.at, &c.fixed.model, times);
@@ -5234,7 +5339,7 @@ fn assemble(c: &Context, estimates: &[Estimate], reads: &[Estimate], listed: &[V
     }
     // T shown with its statistics where its model error or its step error is unread.
     let unbooked: Vec<usize> = (1..outputs)
-        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(model[k][1].is_finite() && c.step.temperature.is_finite()))
+        .filter(|&k| estimates[k].motion.as_ref().is_some_and(|m| m.temperature_errors.iter().all(Spread::read)) && !(model[k][1].is_finite() && c.step.at(times[k])[1].is_finite()))
         .collect();
     if !unbooked.is_empty() {
         s.approximations.flag(format!("{}：这些时刻仍在光阱中的原子太少，无法估计模型近似或时间步长给温度带来的误差", span(&unbooked, times)));
@@ -5368,15 +5473,15 @@ mod tests {
         let pgc = Scales { hbar_over_mass: hm, frequencies: [khz(100.), khz(100.), khz(19.)] };
         let (k, t) = (8.0528, 30.);
         assert!((semiclassical([0.; 2], &pgc) - 1.75).abs() < 0.01 && (semiclassical([1., k * k], &pgc) - 10.86).abs() < 0.01);
-        let tau = prior(k, hm, t, &pgc);
+        let tau = prior(k, k, hm, t, &pgc);
         assert!((allowance(t, semiclassical([1., k * k], &pgc)) - 0.3755).abs() < 1e-4 && (tau - 0.950).abs() < 1e-3, "{tau}");
         for (k, t, frequencies) in [(8.0528, 30., pgc.frequencies), (7.3699, 1.5, [khz(150.); 3]), (8.0528, 300., [khz(20.), khz(80.), khz(5.)]), (16.1, 0.2, [khz(400.), khz(400.), khz(90.)])] {
             let scales = Scales { hbar_over_mass: hm, frequencies };
-            let phase = k * (hm * KT_PER_UK * t).sqrt() * prior(k, hm, t, &scales);
+            let phase = k * (hm * KT_PER_UK * t).sqrt() * prior(k, k, hm, t, &scales);
             let share = step_bound()[1] * allowance(t, semiclassical([1., k * k], &scales));
             assert!((phase * phase / share - 1.).abs() < 1e-12, "{k} {t}: {phase} {share}");
         }
-        assert_eq!(prior(0., hm, t, &pgc), f64::INFINITY);
+        assert_eq!(prior(0., k, hm, t, &pgc), f64::INFINITY);
         let both = |tau: f64, w: f64, kick: f64| stable(tau, w, kick) && stable(2. * tau, w, kick);
         for (run, w, kick) in [(1026.3, khz(100.), 0.), (10., khz(74.65), 0.), (100., khz(20.), 0.35 * 0.35), (100., khz(910.7), 0.), (5000., khz(1.), 0.)] {
             let edges = first_rung(run, f64::INFINITY, w, kick).unwrap();
@@ -5404,7 +5509,7 @@ mod tests {
     }
     /// The reads between two levels with nothing on the loss and the rows, and `t` on the total T.
     fn at(t: Option<Read>) -> Between {
-        Between { loss: read(0., 0.), shown: [read(0., 0.); STATES], temperature: t }
+        Between::single(read(0., 0.), [read(0., 0.); STATES], t)
     }
 
     /// The screen's outcomes on the mean squares between two levels, each against the square b of the step's share.
@@ -5425,9 +5530,9 @@ mod tests {
         assert!(halved(&at(Some(read(4. * bt, 0.01 * bt)))));
         assert!(!halved(&at(Some(read(-4. * bt, 0.01 * bt)))));
         assert!(!halved(&at(None)));
-        let lost = Between { loss: read(2. * bp, 0.01 * bp), ..at(None) };
+        let lost = at(None).with(Quantity::Loss, read(2. * bp, 0.01 * bp));
         let mut row = at(None);
-        row.shown[3] = read(2. * bp, 0.01 * bp);
+        row.set(Quantity::Shown(3), read(2. * bp, 0.01 * bp));
         assert!(halved(&lost) && halved(&row));
         assert_eq!(judged(&at(Some(pilot(50. * bt, 5. * bt)))).len(), 1 + STATES + 1);
         assert!(halved(&at(Some(pilot(50. * bt, 5. * bt)))) && !halved(&at(Some(pilot(50. * bt, 15. * bt)))) && pilot(50. * bt, 15. * bt).least(1.) > bt);
@@ -5454,11 +5559,11 @@ mod tests {
         assert_eq!((asks(read(3. * b, 0.5 * b)), asks(read(1.5 * b, 0.2 * b))), (Some(f64::INFINITY), Some(f64::INFINITY)));
         let bp = step_bound()[0].powi(2);
         let mut row = at(Some(read(0., b)));
-        row.shown[1] = read(0.5 * bp, bp);
+        row.set(Quantity::Shown(1), read(0.5 * bp, bp));
         assert!(close(blind(&row), 2.5) && readable(&row));
-        row.shown[1] = Read { value: 0.3, spread: Spread::UNREAD };
+        row.set(Quantity::Shown(1), Read { value: 0.3, spread: Spread::UNREAD });
         assert!(blind(&row) == Some(f64::INFINITY) && !readable(&row));
-        row.shown[1] = read(f64::NAN, 0.);
+        row.set(Quantity::Shown(1), read(f64::NAN, 0.));
         assert!(close(blind(&row), 2.) && !readable(&row) && readable(&at(None)));
     }
 
@@ -5521,11 +5626,11 @@ mod tests {
             for (out, range) in [(1., true), (3., false)] {
                 let extra = level(4. * tau, out);
                 let (third, steps, pairs) = levels.third_at(tau, 4. * tau, &extra.iter().collect::<Vec<_>>(), 0, members, &times, f64::INFINITY, &scales);
-                eprintln!("{members} a group, 4τ's error {out} times the order's: third {:.4e} ± {:.2e}, own {:.4e} ± {:.2e}", third.shown[0].value, third.shown[0].spread.error, own.shown[0].value, own.shown[0].spread.error);
+                eprintln!("{members} a group, 4τ's error {out} times the order's: third {:.4e} ± {:.2e}, own {:.4e} ± {:.2e}", third.first(Quantity::Shown(0)).value, third.first(Quantity::Shown(0)).spread.error, own.first(Quantity::Shown(0)).value, own.first(Quantity::Shown(0)).spread.error);
                 assert_eq!((steps, pairs), ([2. * tau, 4. * tau], 11 * members));
                 assert_eq!(in_range(&own, &third), range);
                 if range {
-                    assert!((third.shown[0].value - own.shown[0].value).abs() <= 1e-9 * own.shown[0].value);
+                    assert!((third.first(Quantity::Shown(0)).value - own.first(Quantity::Shown(0)).value).abs() <= 1e-9 * own.first(Quantity::Shown(0)).value);
                 }
             }
         }
@@ -5669,7 +5774,7 @@ mod tests {
         let own = at(Some(read(3.975 * b, 1.9875 * b)));
         let near = at(Some(read(1.04 * b, 0.025 * b)));
         for r in [&own, &near] {
-            assert!(verdict(r, None, true, true) == Verdict::Unseeing && !screen(r));
+            assert!(verdict(r, None, None, true, true) == Verdict::Unseeing && !screen(r));
         }
         assert_eq!((asks(&own, &together, 143.), asks(&own, &parted, 143.), asks(&near, &parted, 143.)), (None, Some(176), None));
         let choices: Vec<bool> = (0..=99).map(|k| asks(&at(Some(read(1.05 * b, (0.525 - 0.005 * k as f64) * b))), &parted, 300.).is_some()).collect();
@@ -5806,16 +5911,16 @@ mod tests {
         // To the rounding: a level's difference rounds by u q/(C τ²) ~ 10⁻¹⁴ of itself, and the spread is a jackknife of group
         // values a hundredth apart, so much the less exact.
         let close = |a: f64, b: f64, by: f64| (a - b).abs() <= by * a.abs().max(b.abs());
-        let (d, h) = (against_double.shown[0], against_half.shown[0]);
+        let (d, h) = (against_double.first(Quantity::Shown(0)), against_half.first(Quantity::Shown(0)));
         eprintln!("against 2τ {:.6e} ± {:.3e}, against τ/2 {:.6e} ± {:.3e}", d.value, d.spread.error, h.value, h.spread.error);
         assert!(d.value > 0. && close(d.value, h.value, 1e-12) && close(d.spread.error, h.spread.error, 1e-10), "{d:?} {h:?}");
         let finer = read_step(&times, f64::INFINITY, &half.coarse.iter().collect::<Vec<_>>(), &half.fine.iter().collect::<Vec<_>>(), &scales);
-        assert_eq!(against_half.shown[0].value, carried(&finer, 2.).shown[0].value);
+        assert_eq!(against_half.first(Quantity::Shown(0)).value, carried(&finer, 2.).first(Quantity::Shown(0)).value);
         let (told, third, _, pairs) = half.told(&times, f64::INFINITY, &scales);
-        assert_eq!((told.shown[0].value, third.is_none(), pairs), (h.value, true, 88));
+        assert_eq!((told.first(Quantity::Shown(0)).value, third.is_none(), pairs), (h.value, true, 88));
         let taken = Levels { fine: level(tau), coarse: halved(2. * tau, 0.3), ..Levels::default() };
         let (fine, coarse) = taken.paired();
-        let (back, raw) = (taken.own(&times, f64::INFINITY, &scales).shown[0], read_as_it_is(&times, f64::INFINITY, &fine, &coarse, &scales).shown[0]);
+        let (back, raw) = (taken.own(&times, f64::INFINITY, &scales).first(Quantity::Shown(0)), read_as_it_is(&times, f64::INFINITY, &fine, &coarse, &scales).first(Quantity::Shown(0)));
         eprintln!("against 2τ halved: as it is {:.6e}, taken back {:.6e}", raw.value, back.value);
         assert!(close(raw.value, 0.49 * d.value, 1e-12) && close(back.value, d.value, 1e-12) && close(back.spread.error, d.spread.error, 1e-10), "{raw:?} {back:?}");
     }
@@ -5976,14 +6081,14 @@ mod tests {
         let b = step_bound()[1].powi(2);
         let own = at(Some(logged(-0.055, 0.83, 11., b)));
         assert!(blind(&own).is_none() && !screen(&own) && within(&own));
-        assert_eq!((verdict(&own, None, false, false), verdict(&own, None, true, true), verdict(&own, None, true, false)), (Verdict::Stands, Verdict::Above, Verdict::Stands));
+        assert_eq!((verdict(&own, None, None, false, false), verdict(&own, None, None, true, true), verdict(&own, None, None, true, false)), (Verdict::Stands, Verdict::Above, Verdict::Stands));
         let coarser = carried(&at(Some(pilot(32. * b, b))), 0.5);
-        assert!(screen(&coarser) && verdict(&own, Some(&coarser), true, false) == Verdict::Left);
-        assert_eq!(verdict(&own, Some(&coarser), false, false), Verdict::Left);
+        assert!(screen(&coarser) && verdict(&own, Some(&coarser), None, true, false) == Verdict::Left);
+        assert_eq!(verdict(&own, Some(&coarser), None, false, false), Verdict::Left);
         let quiet = carried(&at(Some(pilot(4. * b, b))), 0.5);
-        assert_eq!(verdict(&own, Some(&quiet), true, false), Verdict::Stands);
+        assert_eq!(verdict(&own, Some(&quiet), None, true, false), Verdict::Stands);
         let beyond = at(Some(pilot(4. * b, 0.1 * b)));
-        assert_eq!((verdict(&beyond, None, false, false), verdict(&beyond, Some(&quiet), true, false)), (Verdict::Left, Verdict::Left));
+        assert_eq!((verdict(&beyond, None, None, false, false), verdict(&beyond, Some(&quiet), None, true, false)), (Verdict::Left, Verdict::Left));
     }
 
     /// A read that cannot see buys its pairs, and an upper level that shows the error leaves the rung (`verdict`,
@@ -6000,16 +6105,16 @@ mod tests {
         let [sp, _] = step_bound();
         let bp = sp * sp;
         let (mut own, mut above) = (at(None), at(None));
-        (own.loss, above.loss) = (logged(1.952, 7.702, 11., bp), logged(32.045, 49.088, 11., bp));
+        (own, above) = (own.with(Quantity::Loss, logged(1.952, 7.702, 11., bp)), above.with(Quantity::Loss, logged(32.045, 49.088, 11., bp)));
         let above = carried(&above, 0.5);
-        assert!(!screen(&above) && verdict(&own, Some(&above), true, false) == Verdict::Unseeing);
+        assert!(!screen(&above) && verdict(&own, Some(&above), None, true, false) == Verdict::Unseeing);
         assert!(blind(&own).is_some_and(|factor| (factor - 7.702).abs() < 1e-9), "{:?}", blind(&own));
         let ((open, _), (estimate, _)) = (checked(&own, Some(&above), false), checked(&own, Some(&above), true));
-        assert!((open.shown - (7.702 * bp).sqrt()).abs() < 1e-12 && open.shown > sp, "{open:?}");
-        assert!((estimate.shown - (32.045 / 16. * bp).sqrt()).abs() < 1e-12, "{estimate:?}");
+        assert!((open.shown[0] - (7.702 * bp).sqrt()).abs() < 1e-12 && open.shown[0] > sp, "{open:?}");
+        assert!((estimate.shown[0] - (32.045 / 16. * bp).sqrt()).abs() < 1e-12, "{estimate:?}");
         let mut more = at(None);
-        more.loss = logged(0.69, 1.3, 44., bp);
-        assert_eq!(verdict(&more, Some(&above), true, false), Verdict::Unseeing);
+        more.set(Quantity::Loss, logged(0.69, 1.3, 44., bp));
+        assert_eq!(verdict(&more, Some(&above), None, true, false), Verdict::Unseeing);
         // Its third level, 2.0 b and not clearly (near end 0.94 b, far end 3.07 b), asks (3.07 − 0.94)/(1 − 0.94) = 35
         // times its pairs at 2τ and 4τ beside those at τ; the rung below, foreseen within on the pilot's pairs, costs
         // its run level: the rung is left (m20 is caught by its upper level, priced).
@@ -6043,7 +6148,7 @@ mod tests {
         let prices = Prices { halving: &|_: f64| 1., work: &work, product: 785.5 };
         let row = |r: Read| {
             let mut between = at(None);
-            between.shown[7] = r;
+            between.set(Quantity::Shown(7), r);
             between
         };
         let own = row(Read { value: -1.495e-4, spread: Spread { error: 2.95e-4, groups: 88. } });
@@ -6051,11 +6156,11 @@ mod tests {
         let (before, after) = (row(pilot(3.357e-4, 3.59e-4)), row(pilot(8.775e-4, 5.44e-4)));
         let below = Some(below_of(None, 0, tau));
         let scout = |third: &Between| remedy(&own, Some(Upper { read: third, pairs: 11, held: false, buys: true, ran: 0, step: 4. * tau }), holding(88., 88., 88., 0.), below, &prices, tau, 1000., None);
-        assert_eq!((verdict(&own, Some(&before), true, true), verdict(&own, Some(&after), true, true)), (Verdict::Stands, Verdict::Unseeing));
+        assert_eq!((verdict(&own, Some(&before), None, true, true), verdict(&own, Some(&after), None, true, true)), (Verdict::Stands, Verdict::Unseeing));
         assert_eq!(scout(&after), Some(Remedy::Upper));
         for k in 0..=100 {
             let third = row(pilot((0.5 + 0.01 * k as f64) * b, 5.44e-4));
-            let verdict = verdict(&own, Some(&third), true, true);
+            let verdict = verdict(&own, Some(&third), None, true, true);
             assert!(verdict == Verdict::Stands || (verdict == Verdict::Unseeing && scout(&third) == Some(Remedy::Upper)), "{k}: {verdict:?}");
         }
         // Where the rung above is no rung, or its read on the pilot's trajectories was unread, no pairs see it: the
@@ -6064,14 +6169,14 @@ mod tests {
         // On the pilot's own 88 pairs at 4τ, held.
         let held = |third: &Between| remedy(&own, Some(Upper { read: third, pairs: 88, held: true, buys: false, ran: 0, step: 4. * tau }), holding(88., 88., 88., 0.), below, &prices, tau, 1000., None);
         let still = row(Read { value: 5.5e-4, spread: Spread { error: 1.9e-4, groups: 88. } });
-        assert_eq!((verdict(&own, Some(&still), true, false), held(&still)), (Verdict::Unseeing, Some(Remedy::Pairs(176))));
+        assert_eq!((verdict(&own, Some(&still), None, true, false), held(&still)), (Verdict::Unseeing, Some(Remedy::Pairs(176))));
         let near = row(read(1.04 * b, 0.025 * b));
-        assert_eq!((verdict(&own, Some(&near), true, false), held(&near)), (Verdict::Unseeing, None));
-        assert_eq!(verdict(&own, Some(&row(read(4. * b, 0.1 * b))), true, false), Verdict::Left);
+        assert_eq!((verdict(&own, Some(&near), None, true, false), held(&near)), (Verdict::Unseeing, None));
+        assert_eq!(verdict(&own, Some(&row(read(4. * b, 0.1 * b))), None, true, false), Verdict::Left);
         // The rung's own read beyond and not clearly, its third level within: as before, its pairs or the rung below.
         let blind_own = row(read(1.5 * b, 0.5 * b));
         let quiet = row(pilot(0.2 * b, 0.1 * b));
-        assert_eq!(verdict(&blind_own, Some(&quiet), true, false), Verdict::Unseeing);
+        assert_eq!(verdict(&blind_own, Some(&quiet), None, true, false), Verdict::Unseeing);
         assert_eq!(remedy(&blind_own, Some(Upper { read: &quiet, pairs: 11, held: false, buys: true, ran: 0, step: 4. * tau }), holding(88., 88., 88., 0.), below, &prices, tau, 1000., None), remedy(&blind_own, None, holding(88., 88., 88., 0.), below, &prices, tau, 1000., None));
     }
 
@@ -6084,18 +6189,18 @@ mod tests {
     fn a_rung_that_stands_books_the_larger_estimate() {
         let b = step_bound()[1].powi(2);
         let (own, third) = (at(Some(read(0.2 * b, 0.1 * b))), at(Some(read(0.15 * b, 0.02 * b))));
-        assert_eq!(verdict(&own, Some(&third), true, true), Verdict::Stands);
+        assert_eq!(verdict(&own, Some(&third), None, true, true), Verdict::Stands);
         let (step, resolution) = checked(&own, Some(&third), true);
-        assert!((step.temperature - (0.2 * b).sqrt()).abs() < 1e-15 && step.temperature < step_bound()[1] && step.shown == 0., "{step:?}");
-        assert!((checked(&own, Some(&third), false).0.temperature - (0.4 * b).sqrt()).abs() < 1e-15);
+        assert!((step.temperature[0] - (0.2 * b).sqrt()).abs() < 1e-15 && step.temperature[0] < step_bound()[1] && step.shown[0] == 0., "{step:?}");
+        assert!((checked(&own, Some(&third), false).0.temperature[0] - (0.4 * b).sqrt()).abs() < 1e-15);
         assert!((resolution[1] - (0.2 * b).sqrt()).abs() < 1e-15 && resolution[0] == 0., "{resolution:?}");
-        assert_eq!((verdict(&own, Some(&at(None)), true, false), verdict(&at(None), Some(&third), true, false)), (Verdict::Stands, Verdict::Stands));
+        assert_eq!((verdict(&own, Some(&at(None)), None, true, false), verdict(&at(None), Some(&third), None, true, false)), (Verdict::Stands, Verdict::Stands));
         let mut wide = third.clone();
-        wide.shown[4] = read(1e-4, 1e-4);
+        wide.set(Quantity::Shown(4), read(1e-4, 1e-4));
         let ((step, _), (open, _)) = (checked(&own, Some(&wide), true), checked(&own, Some(&wide), false));
-        assert!((step.shown - 1e-4f64.sqrt()).abs() < 1e-15 && (open.shown - 3e-4f64.sqrt()).abs() < 1e-15, "{step:?} {open:?}");
-        let none = Between { loss: Read { value: f64::NAN, spread: Spread::UNREAD }, ..own.clone() };
-        assert_eq!((checked(&none, Some(&third), true).0.shown, unexcluded(&at(None)).temperature, estimated(&at(None)).temperature), (1., f64::INFINITY, f64::INFINITY));
+        assert!((step.shown[0] - 1e-4f64.sqrt()).abs() < 1e-15 && (open.shown[0] - 3e-4f64.sqrt()).abs() < 1e-15, "{step:?} {open:?}");
+        let none = own.with(Quantity::Loss, Read { value: f64::NAN, spread: Spread::UNREAD });
+        assert_eq!((checked(&none, Some(&third), true).0.shown[0], unexcluded(&at(None)).temperature[0], estimated(&at(None)).temperature[0]), (1., f64::INFINITY, f64::INFINITY));
     }
 
     /// The reads a rung is told and booked by (`Levels::told`): its own on all its pairs -- the pilot's and the further
@@ -6113,7 +6218,7 @@ mod tests {
         let lowered = carried(&at(Some(pilot(0.8 * b, 0.1 * b))), 0.5);
         (levels.above, levels.above_steps, levels.above_pairs) = (Some(lowered.clone()), [2. * tau, 4. * tau], 11);
         let (_, third, step, _) = levels.told(&times, f64::INFINITY, &scales);
-        assert_eq!((third.unwrap().temperature, step), (lowered.temperature, Some(([2. * tau, 4. * tau], 11))));
+        assert_eq!((third.unwrap().first(Quantity::Temperature), step), (lowered.first(Quantity::Temperature), Some(([2. * tau, 4. * tau], 11))));
     }
 
     /// A look on T at 800 trajectories: the model's error, what the step's check leaves open, the statistics' interval (each
@@ -6192,13 +6297,13 @@ mod tests {
         let scales = Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] };
         let estimates = summarize(&groups, &scales);
         let (fixed, step) = (fixed_of(vec![[0.01, 0.02]; 4]), Bound::share());
-        let (population, temperature) = accounts(&estimates, &fixed, step);
+        let (population, temperature) = accounts(&estimates, &fixed, &step);
         assert!((population[1].model - 0.01).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - 0.02).abs() < 1e-15), "{population:?} {temperature:?}");
         let bound = 0.02 + estimates[2].moved(0.5, &fixed.escape);
         assert!((population[2].model - 0.51).abs() < 1e-15 && temperature[2].is_some_and(|t| (t.model - bound).abs() < 1e-14 * bound), "{temperature:?} against {bound}");
         assert!((estimates[2].moved(0.5, &fixed.escape) - 0.5 * 2000. * 4. / estimates[2].motion.unwrap().temperature_total).abs() < 1e-12 * bound, "at rest, w = 1/2: w (2a)² m/k_B over T");
         assert!((population[3].model, population[3].statistics) == (1., 1.) && temperature[3].is_none());
-        assert_eq!(looks(&estimates, &fixed, step).iter().map(|l| l.room() > 0.).collect::<Vec<_>>(), [true, true, false, false, false]);
+        assert_eq!(looks(&estimates, &fixed, &step).iter().map(|l| l.room() > 0.).collect::<Vec<_>>(), [true, true, false, false, false]);
         let plan = Plan::new(&[0., 10., 20., 30.], [1.; 3]);
         let listed = vec![vec![]; plan.listed.len()];
         let context = Context {
@@ -6333,10 +6438,10 @@ mod tests {
             for booked in [[0.01, 0.02], [1., f64::INFINITY], [f64::NAN; 2]] {
                 let fixed = fixed_of(vec![booked; kinds + 1]);
                 let step = Bound::share();
-                let (population, temperature) = accounts(&estimates, &fixed, step);
+                let (population, temperature) = accounts(&estimates, &fixed, &step);
                 assert!(population.iter().all(|a| number(a.total()) && a.total() <= 3f64.sqrt()), "{booked:?}: {population:?}");
                 assert!(temperature.iter().flatten().all(|a| number(a.total())), "{booked:?}: {temperature:?}");
-                for l in looks(&estimates, &fixed, step) {
+                for l in looks(&estimates, &fixed, &step) {
                     assert!(number_or_unbounded(l.need()) && batch(l.need(), 88) >= 96 && batch(l.need(), 88) <= 176, "{booked:?}: {l:?} needs {}", l.need());
                 }
             }
@@ -6356,15 +6461,16 @@ mod tests {
             let flagged = s.approximations.flagged.expect("flagged");
             assert!(flagged.contains("30 μs") && flagged.contains("70 μs：没有一条轨迹计入估计") && !flagged.contains("温度的误差无法估计"), "{flagged}");
         }
-        let read = between(&fine, &coarse, &scales, &(0..=kinds).map(|k| 10. * k as f64).collect::<Vec<_>>());
-        let reads: Vec<&Read> = std::iter::once(&read.loss).chain(&read.shown).chain(read.temperature.iter()).collect();
+        let times: Vec<f64> = (0..=kinds).map(|k| 10. * k as f64).collect();
+        let read = between(&fine, &coarse, &scales, &times, &[[0, kinds]]);
+        let reads: Vec<&Read> = read.looks().map(|(_, r)| r).collect();
         assert!(reads.iter().all(|r| (number(r.value) && (number(r.spread.error) || !r.spread.read())) || (r.value.is_nan() && !r.spread.read())), "{read:?}");
-        let none = Between { loss: Read { value: f64::NAN, spread: Spread::UNREAD }, ..read.clone() };
+        let none = read.with(Quantity::Loss, Read { value: f64::NAN, spread: Spread::UNREAD });
         for b in [checked(&read, None, true).0, checked(&none, Some(&read), false).0, unexcluded(&read), unexcluded(&none), estimated(&read), estimated(&none)] {
-            assert!(number(b.shown) && b.shown <= 1. && number_or_unbounded(b.temperature), "{b:?}");
+            assert!(number(b.shown[0]) && b.shown[0] <= 1. && number_or_unbounded(b.temperature[0]), "{b:?}");
         }
-        assert_eq!(checked(&none, None, true).0.shown, 1., "a read that is no number excludes nothing: the whole");
-        assert_eq!(blind(&none), blind(&Between { loss: Read { value: 0., spread: Spread { error: 0., groups: f64::INFINITY } }, ..read.clone() }), "a look no time reads asks for nothing");
+        assert_eq!(checked(&none, None, true).0.shown[0], 1., "a read that is no number excludes nothing: the whole");
+        assert_eq!(blind(&none), blind(&read.with(Quantity::Loss, Read { value: 0., spread: Spread { error: 0., groups: f64::INFINITY } })), "a look no time reads asks for nothing");
         assert_eq!(batch(f64::NAN, 88), 176);
         assert_eq!((probability_error(f64::NAN), probability_error(2.), probability_error(0.3)), (1., 1., 0.3));
     }
@@ -6379,26 +6485,26 @@ mod tests {
     #[test]
     fn the_looks_and_the_accounts_are_of_the_total_temperature() {
         let fixed = fixed_of(vec![[0.; 2], [0., 0.03]]);
-        let step = Bound { shown: 0., temperature: 0.02 / TEMPERATURE_TARGET };
+        let step = Bound::flat(0., 0.02 / TEMPERATURE_TARGET);
         let (n, total) = (800., (25. + 6. + 10.) / 3.);
         let quiet = estimate([25., 6., 10.], 0.005 * total, n);
         let run = [quiet.clone(), quiet];
         let crowded = |all: &[Look]| all.iter().filter(|l| !(l.room() > 0.)).count();
-        let all = looks(&run, &fixed, step);
+        let all = looks(&run, &fixed, &step);
         assert_eq!(all.iter().map(|l| l.shown).collect::<Vec<_>>(), [true, false]);
         assert!(all[0].account.step == 0. && (all[1].account.step - 0.02).abs() < 1e-17);
         assert!(all.iter().all(|l| l.met() && l.need() < n) && crowded(&all) == 0);
         let noisy = estimate([25., 6., 10.], 0.075 * total, n);
         let run = [noisy.clone(), noisy];
-        let t = looks(&run, &fixed, step)[1];
+        let t = looks(&run, &fixed, &step)[1];
         let need = n * (CONFIDENCE * 0.075 / room(TEMPERATURE_TARGET, 0.03, 0.02)).powi(2);
         assert!(!t.met() && (t.need() - need).abs() < 1e-9 * need, "{} against {need}", t.need());
-        let wide = Bound { shown: 0., temperature: 4. };
-        assert!(!looks(&run, &fixed, wide)[1].fits() && crowded(&looks(&run, &fixed, wide)) == 1);
+        let wide = Bound::flat(0., 4.);
+        assert!(!looks(&run, &fixed, &wide)[1].fits() && crowded(&looks(&run, &fixed, &wide)) == 1);
         let mut full = fixed_of(fixed.model.clone());
         full.model[1][1] = 0.11;
-        assert!(crowded(&looks(&run, &full, step)) == 1);
-        let account = accounts(&run, &fixed, step).1[1].unwrap();
+        assert!(crowded(&looks(&run, &full, &step)) == 1);
+        let account = accounts(&run, &fixed, &step).1[1].unwrap();
         assert!(account.model == 0.03 && (account.step - 0.02).abs() < 1e-17 && (account.statistics - CONFIDENCE * 0.075).abs() < 1e-14, "{account:?}");
     }
 
@@ -6416,7 +6522,7 @@ mod tests {
         let model = vec![[0.; 2], [0.01, 0.03]];
         let step = Bound::share();
         let dropped = Fixed::new(model.clone(), &[0., 100.], 1e-4, escape);
-        let (population, temperature) = accounts(&run, &dropped, step);
+        let (population, temperature) = accounts(&run, &dropped, &step);
         let d = crate::model::classify::distance(1e-4, 100.);
         assert!((d - 0.5 * 0.02_f64.exp_m1()).abs() < 1e-17 && d > 0.01, "{d}");
         let w = d / (1. - d);
@@ -6424,11 +6530,11 @@ mod tests {
         assert!((population[1].model - (0.01 + d)).abs() < 1e-15 && temperature[1].is_some_and(|t| (t.model - expected).abs() < 1e-14 * expected), "{population:?} {temperature:?} against {expected}");
         assert!(e.moved(w, &escape) > 1., "a millikelvin's bound on 13.7 µK: {}", e.moved(w, &escape));
         let none = Fixed::new(model.clone(), &[0., 100.], 0., escape);
-        assert_eq!(format!("{:?}", accounts(&run, &none, step)), format!("{:?}", accounts(&run, &fixed_of(model), step)));
+        assert_eq!(format!("{:?}", accounts(&run, &none, &step)), format!("{:?}", accounts(&run, &fixed_of(model), &step)));
         let items = |fixed: Fixed| {
             let plan = Plan::new(&[0., 100.], [1.; 3]);
             let listed = vec![vec![]; plan.listed.len()];
-            let context = Context { at: vec![0., 100.], plan, tau: 1., scales: Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] }, initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))), fixed, step, checked: None, ledger: Ledger::default(), method: String::new() };
+            let context = Context { at: vec![0., 100.], plan, tau: 1., scales: Scales { hbar_over_mass: KT_PER_UK, frequencies: [1.; 3] }, initial: std::array::from_fn(|s| f64::from(u8::from(s == 0))), fixed, step: step.clone(), checked: None, ledger: Ledger::default(), method: String::new() };
             assemble(&context, &run, &run, &listed, &Counts::default(), 800).approximations.items
         };
         let made = items(dropped);
@@ -6449,7 +6555,7 @@ mod tests {
         (e.unresolved, e.failed, e.uncounted) = (0.01, 8., 8. / 808.);
         let fixed = Fixed::new(vec![[0.; 2], [0.01, 0.03]], &[0., 100.], 1e-4, escape);
         let run = [e.clone(), e.clone()];
-        let (population, temperature) = accounts(&run, &fixed, Bound::share());
+        let (population, temperature) = accounts(&run, &fixed, &Bound::share());
         let d = crate::model::classify::distance(1e-4, 100.);
         let (unknown, dropped) = (16. / 808., d / (1. - d));
         let expected = [0.01 + (8. / 808. + 0.01 + d), 0.03 + e.moved(unknown + dropped, &escape)];
@@ -6471,7 +6577,7 @@ mod tests {
             let mut e = estimate([20.; 3], 1., n);
             e.loss = 1. - held;
             e.motion.as_mut().unwrap().temperature_total_error = Spread::UNREAD;
-            looks(&[e.clone(), e], &fixed, Bound::share())[1]
+            looks(&[e.clone(), e], &fixed, &Bound::share())[1]
         };
         let (faint, full) = (unread(3e-4, 568.), unread(1., 100.));
         assert!(!faint.shown && faint.met() && faint.need() <= 568., "{faint:?}");
@@ -6516,12 +6622,12 @@ mod tests {
         };
         let at = |t: f64| {
             let fine = level(t, 1.);
-            let read = between(&fine, &level(t, 1.05), &scales, &[0., 1.]).temperature.expect("T read at both levels").value;
+            let read = between(&fine, &level(t, 1.05), &scales, &[0., 1.], &[[0, 1]]).first(Quantity::Temperature).value;
             let mut e = estimate([t; 3], 0.075 * t / CONFIDENCE, 800.);
             e.temperature_target = allowance(t, scale);
             let fixed = fixed_of(vec![[0.; 2], [0., 0.03]]);
-            let need = looks(&[e.clone(), e.clone()], &fixed, Bound::share())[1].need();
-            let crowded = !(looks(&[e.clone(), e], &fixed_of(vec![[0.; 2], [0., 0.3]]), Bound::share())[1].room() > 0.);
+            let need = looks(&[e.clone(), e.clone()], &fixed, &Bound::share())[1].need();
+            let crowded = !(looks(&[e.clone(), e], &fixed_of(vec![[0.; 2], [0., 0.3]]), &Bound::share())[1].room() > 0.);
             (read, need, crowded)
         };
         let mut last = at(ts[0]);
@@ -7185,14 +7291,14 @@ mod tests {
         assert_eq!(sent, [2 * GROUP + 1]);
         // The step's reads.
         let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
-        let nothing = Between { loss: unread, shown: [unread; STATES], temperature: Some(unread) };
+        let nothing = Between::single(unread, [unread; STATES], Some(unread));
         assert!(read_looks(&nothing).is_empty() && blind(&nothing).is_none() && !screen(&nothing));
         for (pilot, upward) in [(false, false), (true, false), (true, true)] {
-            assert_eq!(verdict(&nothing, None, pilot, upward), Verdict::Unread);
+            assert_eq!(verdict(&nothing, None, None, pilot, upward), Verdict::Unread);
         }
         let b = step_bound()[1].powi(2);
-        assert_eq!(verdict(&at(Some(unread)), Some(&at(Some(read(0.1 * b, 0.01 * b)))), true, false), Verdict::Stands);
-        assert_eq!(verdict(&at(Some(unread)), None, true, true), Verdict::Above);
+        assert_eq!(verdict(&at(Some(unread)), Some(&at(Some(read(0.1 * b, 0.01 * b)))), None, true, false), Verdict::Stands);
+        assert_eq!(verdict(&at(Some(unread)), None, None, true, true), Verdict::Above);
     }
 
     /// A message that falls due inside a hand-out is made while the trajectories run: its loops run on the pool
@@ -7386,7 +7492,7 @@ mod tests {
             let kinetic = kinetic_uk(trap, request.temperature_uk).iter().sum::<f64>() / 3.;
             let (frequency, end) = (trap.frequencies.iter().copied().fold(0., crate::linalg::larger), plan.end);
             let kick = kick_curvature(&run, trap);
-            let first_rung = Ladder { run: end, prior: prior(pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick }.first().unwrap();
+            let first_rung = Ladder { run: end, prior: prior(run.pattern(), pattern_wave_number(run.light()), hm, kinetic, &scales), frequency, kick }.first().unwrap();
             let above = 4. * first_rung <= end && stable(2. * first_rung, frequency, kick) && stable(4. * first_rung, frequency, kick);
             let domain = Domain { widest: Widest::of(&request) };
             let candidates = grid(end, first_rung);
@@ -7991,7 +8097,7 @@ mod tests {
         let means = measured.means(outputs, &estimates);
         assert!((means[4][0][0] - 0.4).abs() < 1e-15 && means[4][0][1] == 0., "{:?}", means[4]);
         let fixed = fixed_of(model_error(&measured.combined(outputs, &estimates)));
-        let looks = looks(&estimates, &fixed, Bound::share());
+        let looks = looks(&estimates, &fixed, &Bound::share());
         assert!(!(looks.iter().filter(|l| l.shown).nth(3).unwrap().room() > 0.), "output 4's look on what is shown");
     }
 
@@ -8039,15 +8145,15 @@ mod tests {
     #[test]
     fn the_room_the_check_prices_at_is_what_the_step_as_read_leaves() {
         let b = step_bound()[0].powi(2);
-        let below = Between { loss: read(0.0022f64.powi(2), 1e-7), shown: std::array::from_fn(|_| read(0.0022f64.powi(2), 1e-7)), temperature: Some(read(0.01, 1e-4)) };
-        let above = Between { loss: read(1.5 * b, 0.5 * b), ..below.clone() };
+        let below = Between::single(read(0.0022f64.powi(2), 1e-7), std::array::from_fn(|_| read(0.0022f64.powi(2), 1e-7)), Some(read(0.01, 1e-4)));
+        let above = below.with(Quantity::Loss, read(1.5 * b, 0.5 * b));
         let (low, high, share) = (standing(&below), standing(&above), Bound::share());
-        assert!((low.shown - 0.0022).abs() < 1e-12 && (low.temperature - 0.1).abs() < 1e-12, "{low:?}");
-        assert_eq!(high, Bound { shown: share.shown, temperature: 0.1 });
-        assert!((room(POPULATION_TARGET, 0., share.shown) - 0.04472).abs() < 1e-5 && (room(POPULATION_TARGET, 0., low.shown) - 0.04995).abs() < 1e-5);
+        assert!((low.shown[0] - 0.0022).abs() < 1e-12 && (low.temperature[0] - 0.1).abs() < 1e-12, "{low:?}");
+        assert_eq!((high.shown[0], high.temperature[0]), (share.shown[0], 0.1));
+        assert!((room(POPULATION_TARGET, 0., share.shown[0]) - 0.04472).abs() < 1e-5 && (room(POPULATION_TARGET, 0., low.shown[0]) - 0.04995).abs() < 1e-5);
         let estimates = vec![estimate([10.; 3], 0., 88.), estimate([10.; 3], 0., 88.)];
         let fixed = fixed_of(vec![[0.; 2], [0.0480, 0.]]);
-        assert!(!(looks(&estimates, &fixed, share)[0].room() > 0.) && looks(&estimates, &fixed, low)[0].room() > 0.);
+        assert!(!(looks(&estimates, &fixed, &share)[0].room() > 0.) && looks(&estimates, &fixed, &low)[0].room() > 0.);
     }
 
     /// t = 0 is read as every output is (module documentation, # Outputs and windows): the result's T per axis, the
@@ -8107,7 +8213,7 @@ mod tests {
             assert!(s.populations[0] == state(0) && s.populations[2] == state(0) && s.loss_probability[0] == 0., "{s:?}");
             let e = &estimates[0];
             let interval = e.temperature_interval();
-            let account = accounts(&estimates, &context.fixed, context.step).1[0];
+            let account = accounts(&estimates, &context.fixed, &context.step).1[0];
             if interval.is_finite() {
                 let a = account.expect("T read at t = 0 has an account");
                 assert!(a.model == 0. && a.step == 0. && a.statistics == interval, "{a:?} against {interval}");

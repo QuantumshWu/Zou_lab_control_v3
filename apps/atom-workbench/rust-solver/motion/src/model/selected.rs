@@ -155,6 +155,8 @@ pub struct Selected {
     optical: Option<f64>,
     /// The non-tweezer beams' wave vectors (the light pattern's beats along a path).
     waves: Vec<V3>,
+    /// The light's pattern the Doppler frame leaves to the step's nodes (`Selected::pattern`, 1/µm).
+    pattern: f64,
     /// The fold's grouping by the lab's frequencies (`Selected::at`), and the node's structure on it (`layout`).
     lab: Grouping,
     template: Node,
@@ -478,6 +480,35 @@ impl Selected {
                 k
             })
             .collect();
+        // The light's pattern the frame leaves (`Selected::pattern`): per structural element a ← b of the generator, of
+        // the key c, its turn along the path in the frame, the spatial twin of c − θ_a + θ_b over the non-tweezer beams;
+        // where that is no rounding zero (the sum's own, units.rs `rounding`), the beams it turns with -- those of
+        // the twin's nonzero coordinates -- by their wave numbers, the largest of them over every element.
+        let pattern = {
+            let grouping = rs.folding.by_key();
+            let mut most = 0.0_f64;
+            for (key, list) in grouping.outputs.iter().map(|o| &o.0).zip(&grouping.lists) {
+                for &x in list {
+                    let (a, b) = (rs.keep[x as usize / n], rs.keep[x as usize % n]);
+                    let (mut q, mut size, mut carried) = ([0.0; 3], 0.0, 0.0_f64);
+                    for &(g, l) in &beams {
+                        let r = key.get(g).map_or(0, |&k| i64::from(k)) - frame.theta[a][g] + frame.theta[b][g];
+                        if r != 0 {
+                            let k = scene.geometry[l].wave_vector();
+                            for i in 0..3 {
+                                q[i] += r as f64 * k[i];
+                            }
+                            size += (r as f64).abs() * scene.geometry[l].wave_number;
+                            carried = larger(carried, scene.geometry[l].wave_number);
+                        }
+                    }
+                    if (0..3).map(|i| q[i] * q[i]).sum::<f64>().sqrt() > rounding(3 * beams.len()) * size {
+                        most = larger(most, carried);
+                    }
+                }
+            }
+            most
+        };
         let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: doppler, waves_exact: exact.into_iter().map(Beat::whole).collect(), states: rs.keep.clone() };
         // The tweezer's unit fold's static part (`Tweezer::still`): its ground diagonal `Scene::trap_potential`'s depth, the
         // whole the other lights' smooth shifts' (`Scene::smooth`, the reported trap's).
@@ -541,6 +572,7 @@ impl Selected {
             branching,
             optical,
             waves,
+            pattern,
             lab,
             template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 },
             tables: Tables::default(),
@@ -592,6 +624,16 @@ impl Selected {
     }
 
     /// The run's light (the region, the beams' geometries).
+    /// The largest wave number of the light's pattern the Doppler frame leaves to the step's nodes (1/µm; module
+    /// documentation, # One cluster, one frame): of the non-tweezer beams that some element of the generator still turns
+    /// with along a path in the frame -- the beams of the spatial twin of its slow remainder, where that twin is no rounding
+    /// zero. None where the frame takes every plane wave away (a running wave's: R9_PUSH's push); every beam of a
+    /// standing wave, a lattice and six beams' cooling, whose pattern no frame removes. What the step's prior asks the
+    /// step to resolve (solve.rs `prior`).
+    pub fn pattern(&self) -> f64 {
+        self.pattern
+    }
+
     pub fn light(&self) -> &Light {
         &self.light
     }

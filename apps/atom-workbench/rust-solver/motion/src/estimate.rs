@@ -157,17 +157,23 @@
 //! (measured, S2Q at 0.44 µs: T's read on 5 to 9 of its groups at far ends of 2 to 21 times the bound, from 88 to 5632
 //! pairs alike).
 //!
-//! What it reads of a quantity is the error's size over the run: its mean square over the run, M = (1/T)∫e² dt, at the
-//! times after t = 0 the two levels are read at (solve.rs: their analysis times, on whose line every reading and its
-//! step error lie within the noise) by the trapezoid, M = Σ_k w_k e_k² / Σ_k w_k with w_k half the interval between
-//! the time's neighbours (`trapezoid`) -- the square of the mean error plus the error's variance over the run, so an
-//! error that changes its sign in time (an oscillating population's) counts by its size, where its signed mean reads
-//! nothing.
+//! What it reads of a quantity is the error's size window by window: its mean square over each window of the run,
+//! M_w = (1/|w|)∫_w e² dt, at the times after t = 0 the two levels are read at in it (solve.rs: their analysis times, on
+//! whose line every reading and its step error lie within the noise; a window is an interval between two of them,
+//! `leaves`, the shortest stretch on which the error is read whole) by the trapezoid within the window, M_w =
+//! Σ_k w_k e_k² / Σ_k w_k with w_k half the interval to the time's neighbours there -- the square of the mean error plus
+//! the error's variance over the window, so an error that changes its sign in time (an oscillating population's)
+//! counts by its size, where its signed mean reads nothing. The account is per time (ledger.rs: E(t)² = A² + c(t)² +
+//! S(t)² ≤ ε² at every output), and so is the read: over the whole run the mean square M = (1/T)∫e² dt reads √(T/T_eff)
+//! times low where e(t)² > M, T_eff = ∫e²/max e² -- R9_PUSH's error confined to some 12 µs of 364 µs read 28 to 31
+//! times low in the mean square (motion3d_status/rewrite/study/B.report.md §2.1). A window takes no number of its own:
+//! the analysis times are where the readings ask for them; its noise is its own times', larger than the whole run's,
+//! and the looks are the windows times the quantities (# Many looks). (Until 2026-11-22 one window: the whole run.)
 //! The square of an estimate holds the estimate's own variance, a floor that no error is needed for. The groups are
 //! independent, and a product of two different groups' values holds none: with x_ik group i's own value of e_k,
 //!   M̂ = Σ_k w_k [(Σ_i x_ik)² − Σ_i x_ik²]/(G(G − 1)) / Σ_k w_k,
-//! the mean over the run of the mean product of two different groups (per time the estimate's square less its
-//! squared standard error), is M in the mean whatever the noise, and lies on either side of zero where there is no
+//! the mean over the window of the mean product of two different groups (per time the estimate's square less its
+//! squared standard error), is M_w in the mean whatever the noise, and lies on either side of zero where there is no
 //! error. A group's own value is the jackknife's, G times the whole ensemble's e_k less G − 1 times the e_k without the
 //! group: the group's own difference where the quantity is a mean over the trajectories (the loss, a row as shown),
 //! and for T, a ratio, its linear part about the pooled levels. The error of M̂ is its delete-one-group jackknife --
@@ -181,8 +187,10 @@
 //! (2(G − 1)/(G − 2) times: Efron and Stein), so it is high where there is no error, and never low.
 //!
 //! Nothing is assumed of how an error is carried from a step to an output: the two ensembles are carried by the
-//! dynamics itself. What the mean square does not single out: an error confined to a short stretch of the run, which
-//! the run's length dilutes. Against the signed mean, for an error constant in time: where the noise has K' independent
+//! dynamics itself. Three levels test the order the read stands on (`ordered`: solve.rs, ## Two levels, three levels):
+//! the rung's two estimates of its own error, of the pairs (h, 2h) and (2h, 4h) carried to h, are of one sign and apart
+//! by no more than the estimate wherever the order holds -- a sign that changes from one pair to the next, which the
+//! sizes alone do not see, refutes it. Against the signed mean, for an error constant in time: where the noise has K' independent
 //! stretches over the run and σ at an output, the mean resolves t σ/√K' and the mean square's rms √(t·SE) about
 //! (2/K')^{1/4} √t σ -- the same at one stretch, K'^{1/4} more at many; the mean's noise is the noise's slowest mode,
 //! which the mean square weighs as one mode among K'.
@@ -982,41 +990,144 @@ pub fn summarize<G: Borrow<Group> + Sync>(groups: &[G], scales: &Scales) -> Vec<
         .collect()
 }
 
-/// The size of the step's error over the run as two ensembles measure it (module documentation, # The step's error):
-/// per quantity the read of its mean square over the times after t = 0 -- the loss's and each row's as shown
-/// (absolute, squared), and the total T's (the mean over the three lab axes, the T the target is on) relative to it and
-/// weighed by the held share, as its account is, over T's allowance at the time (`allowance`: a share of the
-/// allowance, the same at every time, is the step's share of T's target) -- none where no time reads it at both
-/// levels. A read is of the mean square itself, unbiased, so it lies about zero, on either side, where there is no
-/// error.
+/// The size of the step's error as two ensembles measure it, window by window (module documentation, # The step's
+/// error): per window of the run its span (µs) and per quantity (`Quantity`) the read of its mean square over the
+/// window's times after t = 0 -- the loss's and each row's as shown (absolute, squared), and the total T's (the mean
+/// over the three lab axes, the T the target is on) relative to it and weighed by the held share, as its account is,
+/// over T's allowance at the time (`allowance`: a share of the allowance, the same at every time, is the step's share
+/// of T's target) -- of no number where no time of the window reads it at both levels. A read is of the mean square itself, unbiased, so it lies about
+/// zero, on either side, where there is no error.
 #[derive(Clone, Debug)]
 pub struct Between {
-    pub loss: Read,
-    pub shown: [Read; STATES],
-    pub temperature: Option<Read>,
+    pub windows: Vec<[f64; 2]>,
+    /// Per quantity in `Quantity`'s order, its read in each window.
+    pub reads: Vec<Vec<Read>>,
 }
 
-/// The quantities whose step error `between` reads, in its order: the loss, each row as shown, the total T.
-const STEPPED: usize = STATES + 2;
+/// A quantity whose step error `between` reads (module documentation, # The step's error), in its order (`STEPPED`):
+/// the loss, each row as shown, the total T.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quantity {
+    Loss,
+    Shown(usize),
+    Temperature,
+}
+
+impl Quantity {
+    /// The quantity at the place q of `between`'s order.
+    pub fn of(q: usize) -> Quantity {
+        match q {
+            0 => Quantity::Loss,
+            q if q <= STATES => Quantity::Shown(q - 1),
+            _ => Quantity::Temperature,
+        }
+    }
+    /// Whether it is a probability of what is shown -- the loss or a row as shown, held to its absolute target --, or a
+    /// share of T's allowance.
+    pub fn shown(&self) -> bool {
+        !matches!(self, Quantity::Temperature)
+    }
+}
+
+/// The quantities whose step error `between` reads, in its order (`Quantity`): the loss, each row as shown, the total
+/// T.
+pub const STEPPED: usize = STATES + 2;
+
+impl Between {
+    /// A read of one window over the run [0, 1] (tests'): the loss's, each row's and T's (none: unread).
+    #[cfg(test)]
+    pub fn single(loss: Read, shown: [Read; STATES], temperature: Option<Read>) -> Between {
+        let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
+        let reads = std::iter::once(loss).chain(shown).chain([temperature.unwrap_or(unread)]).map(|r| vec![r]).collect();
+        Between { windows: vec![[0., 1.]], reads }
+    }
+    /// A quantity's read in the first window (tests').
+    #[cfg(test)]
+    pub fn first(&self, quantity: Quantity) -> Read {
+        self.of(quantity)[0]
+    }
+    /// A quantity's read in the first window set to `read` (tests').
+    #[cfg(test)]
+    pub fn set(&mut self, quantity: Quantity, read: Read) {
+        let q = match quantity {
+            Quantity::Loss => 0,
+            Quantity::Shown(s) => 1 + s,
+            Quantity::Temperature => 1 + STATES,
+        };
+        self.reads[q][0] = read;
+    }
+    /// This read with a quantity's first window set to `read` (tests').
+    #[cfg(test)]
+    pub fn with(&self, quantity: Quantity, read: Read) -> Between {
+        let mut out = self.clone();
+        out.set(quantity, read);
+        out
+    }
+    /// The reads of a quantity, window by window.
+    pub fn of(&self, quantity: Quantity) -> &[Read] {
+        let q = match quantity {
+            Quantity::Loss => 0,
+            Quantity::Shown(s) => 1 + s,
+            Quantity::Temperature => 1 + STATES,
+        };
+        &self.reads[q]
+    }
+    /// Every read with its quantity: the read's looks (solve.rs `judged`).
+    pub fn looks(&self) -> impl Iterator<Item = (Quantity, &Read)> {
+        self.reads.iter().enumerate().flat_map(|(q, reads)| reads.iter().map(move |r| (Quantity::of(q), r)))
+    }
+    /// Each read mapped, the windows kept.
+    pub fn map(&self, f: impl Fn(Quantity, &Read) -> Read) -> Between {
+        Between { windows: self.windows.clone(), reads: self.reads.iter().enumerate().map(|(q, reads)| reads.iter().map(|r| f(Quantity::of(q), r)).collect()).collect() }
+    }
+    /// The read on the windows `windows` (spans, each within one of its own: their ends among its windows' ends or
+    /// inside them): each window's read its own window's that holds it -- a window is a stretch on which the reading
+    /// and its step error lie on their line within the noise (solve.rs, # The analysis times), so what it reads holds
+    /// for each part of it to that line.
+    pub fn on(&self, windows: &[[f64; 2]]) -> Between {
+        let holding = |w: &[f64; 2]| self.windows.iter().position(|own| own[0] <= w[0] && w[1] <= own[1]).expect("a window within the read's own");
+        let at: Vec<usize> = windows.iter().map(holding).collect();
+        Between { windows: windows.to_vec(), reads: self.reads.iter().map(|reads| at.iter().map(|&i| reads[i]).collect()).collect() }
+    }
+    /// The windows two reads of the same run are both read on (`on`): every end of either's.
+    pub fn common(&self, other: &Between) -> Vec<[f64; 2]> {
+        let mut ends: Vec<f64> = self.windows.iter().chain(&other.windows).flat_map(|w| *w).collect();
+        ends.sort_by(f64::total_cmp);
+        ends.dedup();
+        ends.windows(2).map(|w| [w[0], w[1]]).collect()
+    }
+}
 
 /// A quantity's step error at a time, of the finer and the coarser level's moments `m` (module documentation, # The
-/// step's error): e = [Q(2τ) − Q(τ)]/(2^p − 1) of the loss (q = 0) and of each row as shown (q = 1 + s), and of the
-/// total T (q = 1 + STATES) relative to the finer level's and weighed by its held share -- over T's allowance there
-/// where `between` reads it. One definition for the step's read and for the analysis times' (`readings`).
+/// step's error): e = [Q(2τ) − Q(τ)]/(2^p − 1) of the loss and of each row as shown, and of the total T relative to
+/// the finer level's and weighed by its held share -- over T's allowance there where `between` reads it (`Quantity`,
+/// at the place q). One definition for the step's read and for the analysis times' (`readings`).
 fn step_error(m: &[Moments], q: usize) -> f64 {
     let share = richardson(0.5, ORDER as f64) - 1.;
-    let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
-    match q {
-        0 => share * (loss(&m[1]) - loss(&m[0])),
-        q if q <= STATES => share * (shown(&m[1], q - 1) - shown(&m[0], q - 1)),
-        _ => share * (1. - loss(&m[0])) * (total(&m[1]) / total(&m[0]) - 1.),
+    match Quantity::of(q) {
+        Quantity::Loss => share * (loss(&m[1]) - loss(&m[0])),
+        Quantity::Shown(s) => share * (shown(&m[1], s) - shown(&m[0], s)),
+        Quantity::Temperature => share * (1. - loss(&m[0])) * (total(&m[1]) / total(&m[0]) - 1.),
     }
+}
+
+/// The sum of a level's T over the three lab axes (three times the total T; `step_error`), no number where none.
+fn total(m: &Moments) -> f64 {
+    m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>())
 }
 
 /// Whether a time's moments read a quantity of `step_error` at every level: the loss and the rows where every level
 /// counts a trajectory, T where every level's total T is a positive number besides.
 fn stepped(m: &[Moments], q: usize) -> bool {
-    counted(m) && (q <= STATES || m.iter().all(|x| x.temperature.is_some_and(|t| !(t.iter().sum::<f64>() <= 0.))))
+    counted(m) && (Quantity::of(q).shown() || m.iter().all(|x| !(total(x) <= 0.)))
+}
+
+/// The signed difference of a rung's two estimates of its own step error from three levels at h, 2h and 4h (`ordered`;
+/// solve.rs, ## Two levels, three levels): e₁ = [Q(2h) − Q(h)]/(2^p − 1) and e₂ = [Q(4h) − Q(2h)]/(2^p (2^p − 1)), the
+/// pair above's read carried to h by the order -- one e(h) where the order holds across the three --, e₁ − e₂, each
+/// as `step_error` makes it (T's relative to its own finer level's: the two differ by the error's second order).
+fn order_difference(m: &[Moments], q: usize) -> f64 {
+    step_error(&m[..2], q) - step_error(&m[1..], q) / 2_f64.powi(ORDER)
 }
 
 /// Each time's share of the run in a mean over the times `times` (increasing, from t = 0): half the interval to each
@@ -1029,61 +1140,94 @@ pub fn trapezoid(times: &[f64]) -> Vec<f64> {
 
 /// The step's error of the level `fine`, from it and the level `coarse` at twice its step on the same trajectories,
 /// group by group in the same order, both at the times `times` (module documentation, # The step's error; increasing,
-/// from t = 0): each quantity's mean square over the times after t = 0 -- the loss's and the rows' over the times
-/// where both levels, and both without any one group, count a trajectory (module documentation, # What is counted),
-/// T's over those where they hold two atoms at least --, each time weighed by its share of the run (`trapezoid`: the
-/// trapezoid's, so that the mean is the run's whatever the times' spacing). No number on a single group, or where no
-/// time reads it; no spread on fewer than three groups (a mean square without a group needs two more).
-pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales, times: &[f64]) -> Between {
+/// from t = 0), window by window: each window `windows` a run of the times by their places, first and last
+/// (`leaves`: every two neighbours, the analysis times' intervals; `[[0, last]]`: the run whole), and per quantity
+/// its mean square over the window's times after t = 0 -- the loss's and the rows' over the times where both levels,
+/// and both without any one group, count a trajectory (module documentation, # What is counted), T's over those where
+/// they hold two atoms at least --, each time weighed by its share of the window (the trapezoid's within it: half the
+/// interval to each neighbour there, so that the mean is the window's whatever the times' spacing). No number on a
+/// single group, or where no time of the window reads it; no spread on fewer than three groups (a mean square without
+/// a group needs two more).
+pub fn between<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], scales: &Scales, times: &[f64], windows: &[[usize; 2]]) -> Between {
     assert_eq!(fine.len(), coarse.len(), "the two levels hold the same groups");
-    let outputs = fine.first().map_or(0, |g| g.borrow().sums.len());
-    let (hm, groups) = (scales.hbar_over_mass, fine.len());
+    mean_squares(&[fine, coarse], scales, times, windows, &step_error)
+}
+
+/// The windows of every two neighbouring times of `times` (their places): the analysis times' intervals, on each of
+/// which every reading and its step error lie on their line within the noise (solve.rs, # The analysis times).
+pub fn leaves(times: &[f64]) -> Vec<[usize; 2]> {
+    (1..times.len()).map(|k| [k - 1, k]).collect()
+}
+
+/// Whether the order holds across three levels of the same groups at h, 2h and 4h, `levels` the three from the finest
+/// (solve.rs, ## Two levels, three levels): the rung's two estimates of its own error, e₁ of the pair (h, 2h) and e₂
+/// of the pair (2h, 4h) carried to h, are one where the order holds, so their signed difference is no larger than the
+/// estimate itself -- d₂/d₁ ∈ [0, 2^{p+1}] of the two differences, a change of sign out at once (`order_difference`).
+/// Per window and quantity, on the windows `windows` of the times `times` (`between`): the mean square of e₁ − e₂ and
+/// of e₁ by the same estimator on the same groups, and the order is not shown where on some look the first's near
+/// end lies above the second's far end among all the looks that read -- each with its own statistical error, no
+/// threshold of its own. A look either does not read excludes nothing.
+pub fn ordered<G: Borrow<Group> + Sync>(levels: [&[G]; 3], scales: &Scales, times: &[f64], windows: &[[usize; 2]]) -> bool {
+    assert!(levels[0].len() == levels[1].len() && levels[1].len() == levels[2].len(), "the three levels hold the same groups");
+    let own = mean_squares(&levels[..2], scales, times, windows, &step_error);
+    let apart = mean_squares(&levels, scales, times, windows, &order_difference);
+    let pairs: Vec<(&Read, &Read)> = own.reads.iter().flatten().zip(apart.reads.iter().flatten()).filter(|(a, b)| !a.value.is_nan() && !b.value.is_nan()).collect();
+    let looks = pairs.len() as f64;
+    pairs.iter().all(|(own, apart)| !(apart.least(looks) > own.most(looks)))
+}
+
+/// The mean squares of a per-time quantity of some levels of the same groups (`between`, `ordered`): `value` of the
+/// levels' moments at a time, read where `stepped` says every level reads it.
+fn mean_squares<G: Borrow<Group> + Sync>(levels: &[&[G]], scales: &Scales, times: &[f64], windows: &[[usize; 2]], value: &(dyn Fn(&[Moments], usize) -> f64 + Sync)) -> Between {
+    let outputs = levels[0].first().map_or(0, |g| g.borrow().sums.len());
+    let (hm, groups) = (scales.hbar_over_mass, levels[0].len());
     let g = groups as f64;
-    let weights = trapezoid(times);
-    let each: Vec<(f64, Jackknife)> = (1..outputs).into_par_iter().map(|k| (weights[k], jackknife(&[fine, coarse], k, hm))).collect();
-    // A quantity's mean square over some times: at each, the groups' own values of it (g times the whole less g − 1
-    // times the rest) and the mean of their products two by two, weighed by the time's share; the same without each
-    // group, spread over the groups. Each time's values over its `over`: a quantity held to a target that differs
-    // between the times, its own.
-    let size = |q: usize, over: &dyn Fn(&Jackknife) -> f64| -> Option<Read> {
-        let at: Vec<&(f64, Jackknife)> = each.iter().filter(|(_, j)| stepped(&j.full, q) && j.leave.iter().all(|l| stepped(l, q))).collect();
-        if at.is_empty() {
-            return None;
-        }
-        let (mut whole, mut without, mut own, mut weight) = (0., vec![0.; groups], vec![0.; groups], 0.);
-        for (w, j) in &at {
-            let unit = over(j);
-            let full = step_error(&j.full, q) / unit;
-            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * step_error(rest, q) / unit);
-            let (sum, squares) = own.iter().fold((0., 0.), |(s, q), x| (s + x, q + x * x));
-            whole += w * (sum * sum - squares);
-            without.iter_mut().zip(&own).for_each(|(o, x)| *o += w * ((sum - x).powi(2) - (squares - x * x)));
-            weight += w;
-        }
-        let read = if q <= STATES { g } else { at.iter().map(|(_, j)| j.holding).fold(f64::INFINITY, crate::linalg::smaller) };
-        Some(Read {
-            value: if groups >= 2 { whole / (weight * g * (g - 1.)) } else { f64::NAN },
-            spread: if groups >= 3 { spread(without.iter().map(|w| w / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
-        })
-    };
+    let each: Vec<Jackknife> = (0..outputs).into_par_iter().map(|k| jackknife(levels, k, hm)).collect();
+    let spans: Vec<[f64; 2]> = windows.iter().map(|&[a, b]| [times[a], times[b]]).collect();
     // A trajectory of either level that its steps ended by a time (`Fate::Refused`: its state or its reference's flow no
     // number at the step's length) is an unbounded difference between the levels: every quantity's step error reads
     // beyond any bound, clearly (the rung is left, as an adaptive integrator leaves a step it could not take). One the
     // model ended (`Fate::Failed`) no shorter step cures: it is not counted, at either level, as at an output.
-    if each.iter().any(|(_, j)| j.all.iter().any(|s| s.refused > 0.)) {
+    if each.iter().skip(1).any(|j| j.all.iter().any(|s| s.refused > 0.)) {
         let unbounded = Read { value: f64::INFINITY, spread: Spread { error: 0., groups: g } };
-        return Between { loss: unbounded, shown: [unbounded; STATES], temperature: Some(unbounded) };
+        return Between { windows: spans, reads: vec![vec![unbounded; windows.len()]; STEPPED] };
     }
     let unread = Read { value: f64::NAN, spread: Spread::UNREAD };
-    let total = |m: &Moments| m.temperature.map_or(f64::NAN, |t| t.iter().sum::<f64>());
     // T's error is relative to the finer level's T and weighed by its held share, as T's account is, over T's allowance
     // at the time -- the finer level's (`allowance`, of the finer level's photons).
-    let scale = semiclassical(scattered(fine), scales);
-    Between {
-        loss: size(0, &|_| 1.).unwrap_or(unread),
-        shown: std::array::from_fn(|s| size(1 + s, &|_| 1.).unwrap_or(unread)),
-        temperature: size(1 + STATES, &|j| allowance(total(&j.full[0]) / 3., scale)),
-    }
+    let scale = semiclassical(scattered(levels[0]), scales);
+    // A quantity's mean square over a window: at each of its times after t = 0, the groups' own values of it (g times the
+    // whole less g − 1 times the rest) and the mean of their products two by two, weighed by the time's share of the
+    // window; the same without each group, spread over the groups. Each time's values over its `unit`: a quantity held
+    // to a target that differs between the times, its own.
+    let size = |q: usize, &[a, b]: &[usize; 2]| -> Read {
+        let unit = |j: &Jackknife| if Quantity::of(q).shown() { 1. } else { allowance(total(&j.full[0]) / 3., scale) };
+        let (mut whole, mut without, mut own, mut weight, mut holding) = (0., vec![0.; groups], vec![0.; groups], 0., f64::INFINITY);
+        for k in (a..=b).filter(|&k| k > 0) {
+            let j = &each[k];
+            if !(stepped(&j.full, q) && j.leave.iter().all(|l| stepped(l, q))) {
+                continue;
+            }
+            let w = 0.5 * (times[(k + 1).min(b)] - times[k.saturating_sub(1).max(a)]);
+            let u = unit(j);
+            let full = value(&j.full, q) / u;
+            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * value(rest, q) / u);
+            let (sum, squares) = own.iter().fold((0., 0.), |(s, q), x| (s + x, q + x * x));
+            whole += w * (sum * sum - squares);
+            without.iter_mut().zip(&own).for_each(|(o, x)| *o += w * ((sum - x).powi(2) - (squares - x * x)));
+            weight += w;
+            holding = crate::linalg::smaller(holding, j.holding);
+        }
+        if weight == 0. {
+            return unread;
+        }
+        let read = if Quantity::of(q).shown() { g } else { holding };
+        Read {
+            value: if groups >= 2 { whole / (weight * g * (g - 1.)) } else { f64::NAN },
+            spread: if groups >= 3 { spread(without.iter().map(|w| w / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
+        }
+    };
+    Between { windows: spans, reads: (0..STEPPED).map(|q| windows.iter().map(|w| size(q, w)).collect()).collect() }
 }
 
 /// What the analysis times are read on at the place k of the groups' sums (analysis.rs `Reading`): of the level
@@ -1142,27 +1286,52 @@ mod tests {
     /// other two; its spread is the jackknife of those. The other row is the first's mirror; the loss has none. T is 7
     /// at the finer level and 4 and 6 at the coarser on every atom: the groups agree, and its mean square is the mean of
     /// (4/7 − 1)²/9 and (6/7 − 1)²/9 by the same shares with no spread, over T's allowance at 7 µK squared.
-    /// Two groups read a value and no spread; one reads none.
+    /// Two groups read a value and no spread; one reads none. Read window by window (`leaves`), the window
+    /// [0, 1] holds the first output alone and [1, 2] both outputs at half each: the same estimator on each, the
+    /// whole the windows' mean by their lengths.
     #[test]
     fn the_step_s_size_is_the_mean_product_of_two_groups_errors() {
         let level = |counts: [[usize; 2]; 3], energy: [f64; 2]| -> Vec<Group> { counts.iter().map(|c| showing(c, &energy)).collect() };
         let (fine, coarse) = (level([[4, 4], [4, 4], [4, 4]], [7., 7.]), level([[7, 6], [3, 6], [5, 6]], [4., 6.]));
         let times = [0., 1., 2.];
-        let read = between(&fine, &coarse, &UNIT, &times);
+        let read = between(&fine, &coarse, &UNIT, &times, &[[0, 2]]);
         let pairs = |x: [f64; 3]| [x[1] * x[2], x[0] * x[2], x[0] * x[1]];
         let (first, second) = (pairs([3., -1., 1.]), pairs([2., 2., 2.]));
         let without: Vec<f64> = (0..3).map(|i| (first[i] + 0.5 * second[i]) / 1.5 / 576.).collect();
         let whole = without.iter().sum::<f64>() / 3.;
-        assert!(first.iter().sum::<f64>() < 0. && (read.shown[0].value - whole).abs() < 1e-17 && (read.shown[1].value - whole).abs() < 1e-17, "{:?} against {whole}", read.shown[0]);
+        let (row, mirror) = (read.of(Quantity::Shown(0))[0], read.of(Quantity::Shown(1))[0]);
+        assert!(first.iter().sum::<f64>() < 0. && (row.value - whole).abs() < 1e-17 && (mirror.value - whole).abs() < 1e-17, "{row:?} against {whole}");
         let expected = spread(without.iter().copied(), 3.);
-        assert!((read.shown[0].spread.error - expected.error).abs() < 1e-17 && read.shown[0].spread.groups == 3., "{:?} against {expected:?}", read.shown[0].spread);
-        assert!(read.loss.value == 0. && read.loss.spread.error == 0.);
-        let t = read.temperature.expect("T is read at both levels");
+        assert!((row.spread.error - expected.error).abs() < 1e-17 && row.spread.groups == 3., "{:?} against {expected:?}", row.spread);
+        let loss = read.of(Quantity::Loss)[0];
+        assert!(loss.value == 0. && loss.spread.error == 0.);
         let allowed = allowance(7., semiclassical([0.; 2], &UNIT));
+        let t = read.of(Quantity::Temperature)[0];
         assert!((t.value - ((4. / 7. - 1.0f64).powi(2) + 0.5 * (6. / 7. - 1.0f64).powi(2)) / 1.5 / 9. / (allowed * allowed)).abs() < 1e-15 && t.spread.error < 1e-15, "{t:?}");
-        let two = between(&fine[..2], &coarse[..2], &UNIT, &times).shown[0];
+        let two = between(&fine[..2], &coarse[..2], &UNIT, &times, &[[0, 2]]).of(Quantity::Shown(0))[0];
         assert!((two.value - (-3. + 0.5 * 4.) / 1.5 / 576.).abs() < 1e-17 && !two.spread.read(), "{two:?}");
-        assert!(between(&fine[..1], &coarse[..1], &UNIT, &times).shown[0].value.is_nan());
+        assert!(between(&fine[..1], &coarse[..1], &UNIT, &times, &[[0, 2]]).of(Quantity::Shown(0))[0].value.is_nan());
+        // Window by window: [0, 1] the first output's products alone, [1, 2] both outputs' at equal shares.
+        let windows = between(&fine, &coarse, &UNIT, &times, &leaves(&times));
+        assert_eq!(windows.windows, vec![[0., 1.], [1., 2.]]);
+        let rows = windows.of(Quantity::Shown(0));
+        let firsts = first.iter().sum::<f64>() / 3. / 576.;
+        let both = (first.iter().sum::<f64>() + second.iter().sum::<f64>()) / 3. / 576. / 2.;
+        assert!((rows[0].value - firsts).abs() < 1e-17 && (rows[1].value - both).abs() < 1e-17, "{rows:?} against {firsts} and {both}");
+    }
+
+    /// The order across three levels (`ordered`): three groups of 8 atoms, two outputs after t = 0, a row shown by 3, 4
+    /// and c of them at h, 2h and 4h on every group (so that no group differs: every read exact). With c = 8 the
+    /// differences are one atom and four, d₂/d₁ = 2^p: the two estimates of the rung's error are one, and the order
+    /// holds. With c = 0 the second difference changes its sign, d₂/d₁ = −4: e₂ = −e₁, apart by twice the estimate --
+    /// not ordered. With c = 6 (d₂/d₁ = 2: two levels saturating) the difference is half the estimate: the
+    /// order is not refuted -- what three levels cannot tell (solve.rs, ## Two levels, three levels).
+    #[test]
+    fn the_order_across_three_levels_is_refuted_by_a_change_of_sign() {
+        let level = |c: usize| -> Vec<Group> { (0..3).map(|_| showing(&[c, c], &[1., 1.])).collect() };
+        let times = [0., 1., 2.];
+        let read = |c: usize| ordered([&level(3), &level(4), &level(c)], &UNIT, &times, &leaves(&times));
+        assert_eq!((read(8), read(0), read(6)), (true, false, true));
     }
 
     /// The step's size (`between`) against synthetic levels: 11 groups of 8 atoms, 8 outputs after t = 0; at each an
@@ -1201,7 +1370,7 @@ mod tests {
                         .collect()
                 };
                 let (fine, coarse) = (level(0.), level(3. * bias));
-                let read = between(&fine, &coarse, &UNIT, &(0..=outputs).map(|k| k as f64).collect::<Vec<_>>()).shown[0];
+                let read = between(&fine, &coarse, &UNIT, &(0..=outputs).map(|k| k as f64).collect::<Vec<_>>(), &[[0, outputs]]).of(Quantity::Shown(0))[0];
                 let (f, c) = (summarize(&fine, &UNIT), summarize(&coarse, &UNIT));
                 let shown = |e: &Estimate| e.populations[0] * (1. - e.loss);
                 let mean = (1..=outputs).map(|k| (shown(&c[k]) - shown(&f[k])) / 3.).sum::<f64>() / outputs as f64;
@@ -1261,7 +1430,7 @@ mod tests {
                     fine.push(group(energies.iter().map(|&(e, _)| Some(atom(0, 0., e))).collect()));
                     coarse.push(group(energies.iter().map(|&(e, other)| Some(atom(0, 0., (1. + 3. * bias) * (rho * e + (1. - rho) * other)))).collect()));
                 }
-                let read = between(&twice(&fine), &twice(&coarse), &free, &[0., 1.]).temperature.unwrap();
+                let read = between(&twice(&fine), &twice(&coarse), &free, &[0., 1.], &[[0, 1]]).of(Quantity::Temperature)[0];
                 sum += read.value;
                 squares += read.value * read.value;
             }
@@ -1547,11 +1716,13 @@ mod tests {
         assert!((e[2].trajectories, e[2].held, e[2].failed) == (4., 4., 4.) && e[2].populations[0] == 1. && e[2].loss_error.read() && e[2].motion.is_some_and(|m| m.temperature_errors[0].read()));
         assert!((e[3].trajectories, e[3].held, e[3].failed) == (0., 0., 8.) && e[3].motion.is_none() && !e[3].loss_error.read() && e[3].shown_errors.iter().all(|s| !s.read()));
         assert_eq!((e[3].shown_interval(), e[3].shown_statistics()), (f64::INFINITY, 1.));
-        let read = between(&groups, &made(), &UNIT, &[0., 1., 2., 3.]);
-        assert!(read.loss.value == 0. && read.shown[0].value == 0. && read.loss.spread.read() && read.temperature.is_some_and(|t| t.value == 0.), "{read:?}");
+        let read = between(&groups, &made(), &UNIT, &[0., 1., 2., 3.], &[[0, 3]]);
+        let first = |q: Quantity| read.of(q)[0];
+        assert!(first(Quantity::Loss).value == 0. && first(Quantity::Shown(0)).value == 0. && first(Quantity::Loss).spread.read() && first(Quantity::Temperature).value == 0., "{read:?}");
         let late: Vec<Group> = groups.iter().map(|g| Group { sums: vec![g.sums[0].clone(), g.sums[3].clone()], scattered: g.scattered }).collect();
-        let none = between(&late, &late, &UNIT, &[0., 3.]);
-        assert!(none.loss.value.is_nan() && !none.loss.spread.read() && none.temperature.is_none(), "{none:?}");
+        let none = between(&late, &late, &UNIT, &[0., 3.], &[[0, 1]]);
+        let loss = none.of(Quantity::Loss)[0];
+        assert!(loss.value.is_nan() && !loss.spread.read() && none.of(Quantity::Temperature)[0].value.is_nan(), "{none:?}");
         // The same trajectories ended by their steps at the coarser level: beyond any bound, clearly.
         let refused: Vec<Group> = (0..4)
             .map(|g| {
@@ -1562,9 +1733,9 @@ mod tests {
                 group
             })
             .collect();
-        let read = between(&groups, &refused, &UNIT, &[0., 1., 2., 3.]);
+        let read = between(&groups, &refused, &UNIT, &[0., 1., 2., 3.], &leaves(&[0., 1., 2., 3.]));
         let beyond = |r: &Read| r.outcome(1e300, 1e6) == crate::decide::Outcome::Beyond;
-        assert!(beyond(&read.loss) && read.shown.iter().all(beyond) && read.temperature.as_ref().is_some_and(beyond), "{read:?}");
+        assert!(read.looks().all(|(_, r)| beyond(r)), "{read:?}");
         let lost: Vec<Group> = (0..4)
             .map(|_| {
                 let mut g = Group::new(3);

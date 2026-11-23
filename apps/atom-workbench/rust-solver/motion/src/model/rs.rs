@@ -513,6 +513,11 @@ impl Folding {
         &self.keys
     }
 
+    /// The fold's outputs by their exact keys, each with its structural elements (model/selected.rs `Selected::pattern`).
+    pub fn by_key(&self) -> &fold::Grouping {
+        &self.by_key
+    }
+
     /// The fold at the values (`At`).
     pub fn at(&self, values: &Values) -> At<'_> {
         let mut local = fold::Local::default();
