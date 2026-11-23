@@ -368,6 +368,11 @@ fn select_on_the_scenes() {
         if std::env::var("SELECT_SOLVE").is_ok() {
             let solved = crate::solve::solve(&request, &mut |_| {});
             eprintln!("{name}: solved in {:.1} s: {}", clock.elapsed().as_secs_f64(), if solved.is_ok() { "ok" } else { "an error" });
+            // The product's totals (ledger.rs `Totals`): the mean velocity's and the push's an account where the model's
+            // error on them is booked (the selection's `Motion`), none ({0, 0}) where it is not.
+            if let Ok(s) = &solved {
+                eprintln!("{name}: totals {:?}", s.approximations.totals);
+            }
             continue;
         }
         let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).unwrap();
