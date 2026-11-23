@@ -163,7 +163,7 @@ pub fn validate_scan_table(rows: &[Vec<f64>], columns: &[ScanColumnSpec]) -> Res
                                        format_g(spec.limit_lo, 6), format_g(spec.limit_hi, 6), format_g(least, 6), format_g(most, 6)));
         }
     }
-    Ok(rows.iter().map(|row| row.iter().zip(columns).map(|(value, spec)| if spec.is_dac { value.round_ties_even() } else { *value }).collect()).collect())
+    Ok(rows.iter().map(|row| row.iter().zip(columns).map(|(value, spec)| if spec.is_dac { WHOLE.nearest(*value) } else { *value }).collect()).collect())
 }
 
 /// `prepare_scan_application(sequence, rows, params=)`: the table as the board
