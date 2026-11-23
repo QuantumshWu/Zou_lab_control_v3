@@ -3351,6 +3351,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             );
         }
         noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
+        // (Tests alone, the selection's trace: the landing check's parts, thread seconds and calls, `paths::CHECKS`.)
+        #[cfg(test)]
+        if crate::select::traced() {
+            let c: Vec<u64> = crate::paths::CHECKS.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, diffusion {:.2} s {} (its LU {:.2} s), landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[2] as f64 * 1e-9, c[3], c[4] as f64 * 1e-9, c[6] as f64 * 1e-9, c[7]);
+        }
         let w = weighed.swap_remove(chosen);
         return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
     }
@@ -5524,13 +5530,14 @@ fn model_along(at: &[f64], model: impl Fn(usize) -> Option<f64>, t: f64) -> Opti
 /// The accounts at the outputs (module documentation, # The analysis times): of the output's estimate `estimates[k]` at
 /// `times[k]`, the statistics its own (`accounts`' rule: on what is shown the jackknife interval with the unseen share,
 /// on T its relative interval weighed by the held share) and the step's part of the check's window that holds it, the
-/// larger of two at their common end (`Bound::at`), times T's allowance there on T; the model's error on the line through
-/// its accounts at the analysis times `at` (`model_along`) -- what is measured of it is measured there. t = 0's as
-/// `accounts` books it. T has an account where its every part is read, as at the analysis times. With `looks` the
+/// larger of two at their common end (`Bound::at`), times T's allowance there on T; the model's error `model` at the
+/// output k at its time t (`Models`: each output's own where the choice gives it there, else the line through the
+/// analysis times' accounts) -- none on T where it has none. t = 0's as `accounts` books it. T has an account where its
+/// every part is read, as at the analysis times. With `looks` the
 /// statistics are their least at the evidence of that many reads together (estimate.rs, # Evidence;
 /// `Estimate::shown_statistics_low`, `temperature_interval_low`): what the outputs' looks and the ledger's flags judge by
 /// (`Evidence`), the rest as it is.
-fn at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], (population, temperature): (&[Account], &[Option<Account>]), step: &Bound, looks: Option<f64>) -> (Vec<Account>, Vec<Option<Account>>) {
+fn at_outputs(estimates: &[Estimate], times: &[f64], model: &Models, step: &Bound, looks: Option<f64>) -> (Vec<Account>, Vec<Option<Account>>) {
     estimates
         .par_iter()
         .zip(times)
@@ -5541,10 +5548,10 @@ fn at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], (population, te
                 return (Account::default(), temperature.statistics.is_finite().then_some(temperature));
             }
             let [part, part_t] = step.at(t);
-            let model = model_along(at, |k| Some(population[k].model), t).expect("what is shown has an account at every analysis time");
             let (shown, interval) = looks.map_or_else(|| (e.shown_statistics(), e.temperature_interval()), |m| (e.shown_statistics_low(m), e.temperature_interval_low(m)));
-            let population = Account { model, step: part, statistics: shown };
-            let temperature = model_along(at, |k| temperature[k].map(|a| a.model), t)
+            let population = Account { model: model.shown(k, t), step: part, statistics: shown };
+            let temperature = model
+                .temperature(k, t)
                 .map(|model| Account { model, step: part_t * e.temperature_target, statistics: weighed(1. - e.loss, interval) })
                 .filter(|a| a.model.is_finite() && a.step.is_finite() && a.statistics.is_finite());
             (population, temperature)
@@ -5555,10 +5562,10 @@ fn at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], (population, te
 /// The motion's accounts at the outputs (`motion_accounts` read as `at_outputs` reads T's): per lab axis of the mean
 /// velocity and the push, of the output's estimate, the statistics' jackknife interval weighed by the held share and the
 /// step's part of the window that holds it (`Bound::motion_at`) times the target there (`velocity_target`,
-/// `push_target`); the model's error on the line through its accounts at the analysis times `at` (`model_along`). None at
+/// `push_target`); the model's error `model` there (`Models`, as `at_outputs` takes it). None at
 /// t = 0 (no push), nor where fewer than two atoms are held, nor where a part is unread. With `looks` the statistics'
 /// least at that evidence (`Spread::interval_low`), as `at_outputs` takes it.
-fn motion_at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], motion: &[[[Option<(Account, f64)>; 3]; 2]], step: &Bound, scales: &Scales, looks: Option<f64>) -> Vec<[[Option<(Account, f64)>; 3]; 2]> {
+fn motion_at_outputs(estimates: &[Estimate], times: &[f64], model: &Models, step: &Bound, scales: &Scales, looks: Option<f64>) -> Vec<[[Option<(Account, f64)>; 3]; 2]> {
     let hm = scales.hbar_over_mass;
     estimates
         .par_iter()
@@ -5572,7 +5579,7 @@ fn motion_at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], motion: 
             let errors = [m.mean_velocity_errors, m.push_errors];
             std::array::from_fn(|i| {
                 std::array::from_fn(|a| {
-                    let model = model_along(at, |k| motion[k][i][a].map(|(account, _)| account.model), t)?;
+                    let model = model.motion(k, i, a, t)?;
                     let target = if i == 0 { velocity_target(values[i][a], e.scale, hm) } else { push_target(values[i][a], e.scale, hm, half[a]) };
                     let interval = looks.map_or_else(|| errors[i][a].interval(), |m| errors[i][a].interval_low(m));
                     let account = Account { model, step: part[i][a] * target, statistics: weighed(held, interval) };
@@ -5581,6 +5588,51 @@ fn motion_at_outputs(estimates: &[Estimate], times: &[f64], at: &[f64], motion: 
             })
         })
         .collect()
+}
+
+/// The model's error at the outputs (`at_outputs`, `motion_at_outputs`): each output's own where the choice gives it there
+/// (`Fixed::outputs`, `outputs_model`: its accounts at the outputs' estimates, `accounts`, `motion_accounts`) -- none
+/// where its own has none, whatever the line has --, else the line through the accounts at the analysis times `at`
+/// (`model_along`).
+enum Models<'a> {
+    Line { at: &'a [f64], shown: Vec<Account>, temperature: Vec<Option<Account>>, motion: Vec<[[Option<(Account, f64)>; 3]; 2]> },
+    Own { shown: Vec<Account>, temperature: Vec<Option<Account>>, motion: Vec<[[Option<(Account, f64)>; 3]; 2]> },
+}
+impl Models<'_> {
+    /// Of a context's estimates at the analysis times `reads` and at the outputs `estimates`.
+    fn of<'a>(c: &'a Context, estimates: &[Estimate], reads: &[Estimate]) -> Models<'a> {
+        match c.fixed.outputs.as_deref() {
+            Some(o) => {
+                let (shown, temperature) = accounts(estimates, o, &c.step);
+                Models::Own { shown, temperature, motion: motion_accounts(estimates, o, &c.step, &c.scales) }
+            }
+            None => {
+                let (shown, temperature) = accounts(reads, &c.fixed, &c.step);
+                Models::Line { at: &c.at, shown, temperature, motion: motion_accounts(reads, &c.fixed, &c.step, &c.scales) }
+            }
+        }
+    }
+    /// On what is shown at the output k, at the time t.
+    fn shown(&self, k: usize, t: f64) -> f64 {
+        match self {
+            Models::Own { shown, .. } => shown[k].model,
+            Models::Line { at, shown, .. } => model_along(at, |j| Some(shown[j].model), t).expect("what is shown has an account at every analysis time"),
+        }
+    }
+    /// On the total T at the output k, at the time t.
+    fn temperature(&self, k: usize, t: f64) -> Option<f64> {
+        match self {
+            Models::Own { temperature, .. } => temperature[k].map(|a| a.model),
+            Models::Line { at, temperature, .. } => model_along(at, |j| temperature[j].map(|a| a.model), t),
+        }
+    }
+    /// On the motion's quantity i (the mean velocity, the push) along the lab axis a at the output k, at the time t.
+    fn motion(&self, k: usize, i: usize, a: usize, t: f64) -> Option<f64> {
+        match self {
+            Models::Own { motion, .. } => motion[k][i][a].map(|(x, _)| x.model),
+            Models::Line { at, motion, .. } => model_along(at, |j| motion[j][i][a].map(|(x, _)| x.model), t),
+        }
+    }
 }
 
 /// The quantities held to a target at an output (module documentation, # Stopping): what is shown, the total T, and
@@ -5604,37 +5656,10 @@ impl Evidence {
     fn of(c: &Context, estimates: &[Estimate], reads: &[Estimate]) -> Evidence {
         let times = &c.plan.times;
         let looks = (OUTPUT_QUANTITIES * times.len().saturating_sub(1)).max(1) as f64;
-        let (population, temperature) = accounts(reads, &c.fixed, &c.step);
-        let at_motion = motion_accounts(reads, &c.fixed, &c.step, &c.scales);
-        let of = |looks: Option<f64>| at_outputs(estimates, times, &c.at, (&population, &temperature), &c.step, looks);
-        let motion = |looks: Option<f64>| motion_at_outputs(estimates, times, &c.at, &at_motion, &c.step, &c.scales, looks);
-        let mut e = Evidence { shown: of(None), least: of(Some(looks)), motion: motion(None), motion_least: motion(Some(looks)) };
-        if let Some(o) = c.fixed.outputs.as_deref() {
-            let (own, own_temperature) = accounts(estimates, o, &c.step);
-            let own_motion = motion_accounts(estimates, o, &c.step, &c.scales);
-            for (population, temperature) in [&mut e.shown, &mut e.least] {
-                for (p, o) in population.iter_mut().zip(&own) {
-                    p.model = o.model;
-                }
-                for (t, o) in temperature.iter_mut().zip(&own_temperature) {
-                    if let (Some(t), Some(o)) = (t.as_mut(), o) {
-                        t.model = o.model;
-                    }
-                }
-            }
-            for motion in [&mut e.motion, &mut e.motion_least] {
-                for (m, o) in motion.iter_mut().zip(&own_motion) {
-                    for (mi, oi) in m.iter_mut().zip(o) {
-                        for (x, y) in mi.iter_mut().zip(oi) {
-                            if let (Some((x, _)), Some((y, _))) = (x.as_mut(), y) {
-                                x.model = y.model;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        e
+        let model = Models::of(c, estimates, reads);
+        let of = |looks: Option<f64>| at_outputs(estimates, times, &model, &c.step, looks);
+        let motion = |looks: Option<f64>| motion_at_outputs(estimates, times, &model, &c.step, &c.scales, looks);
+        Evidence { shown: of(None), least: of(Some(looks)), motion: motion(None), motion_least: motion(Some(looks)) }
     }
     /// The outputs' looks the evidence puts beyond their targets (`Look`, as `looks` makes them at the analysis times):
     /// where the total with the statistics at their least is beyond the target -- the true error is, at the family's
@@ -8502,7 +8527,8 @@ mod tests {
         let step = Bound { windows: vec![[0., 1.], [1., 3.]], shown: vec![0.01, 0.03], temperature: vec![0.2, 0.1], motion: vec![[[0.; 3]; 2]; 2] };
         let times = [0., 0.5, 1., 2., 3.];
         let estimates: Vec<Estimate> = times.iter().map(|&t| estimate([10.; 3], 0.1 + 0.1 * t, 88.)).collect();
-        let (population, temperature) = at_outputs(&estimates, &times, &at, (&[Account::default(), account(0.01), account(0.03)], &[Some(account(0.)), Some(account(0.01)), None]), &step, None);
+        let line = Models::Line { at: &at, shown: vec![Account::default(), account(0.01), account(0.03)], temperature: vec![Some(account(0.)), Some(account(0.01)), None], motion: vec![] };
+        let (population, temperature) = at_outputs(&estimates, &times, &line, &step, None);
         assert_eq!(population[0], Account::default());
         assert_eq!(population.iter().skip(1).map(|a| a.step).collect::<Vec<_>>(), [0.01, 0.03, 0.03, 0.03]);
         assert!((population[3].model - 0.02).abs() < 1e-15 && population[1].model == 0.01 && population[4].model == 0.03, "{population:?}");

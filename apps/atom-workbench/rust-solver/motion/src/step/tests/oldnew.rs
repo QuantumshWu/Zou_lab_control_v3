@@ -23,8 +23,6 @@ use super::Everywhere;
 extern "system" {
     fn GetCurrentThread() -> *mut std::ffi::c_void;
     fn QueryThreadCycleTime(thread: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
-    fn GetCurrentProcess() -> *mut std::ffi::c_void;
-    fn GetProcessTimes(process: *mut std::ffi::c_void, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
 }
 
 fn thread_cycles() -> u64 {
@@ -35,12 +33,10 @@ fn thread_cycles() -> u64 {
     c
 }
 
-/// The process's CPU time so far (s), its threads' user and kernel time.
+/// The process's CPU time so far (s), its threads' user and kernel time (t2step.rs `process_seconds`, the one
+/// declaration of `GetProcessTimes`).
 fn process_cpu() -> f64 {
-    let (mut a, mut b, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
-    // SAFETY: the current process's pseudo handle and four u64 to write.
-    unsafe { GetProcessTimes(GetCurrentProcess(), &mut a, &mut b, &mut k, &mut u) };
-    (k + u) as f64 * 1e-7
+    super::t2step::process_seconds()
 }
 
 /// The cycles' rate (cycles a ns): the most over 200 busy spins of 2 ms (a short spin is seldom shared with another

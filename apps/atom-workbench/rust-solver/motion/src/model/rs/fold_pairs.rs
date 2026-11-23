@@ -35,8 +35,6 @@ struct Basis {
     f0: f64,
     /// The basis (dense on the sum's layout: an amplitude sum |B| × cols, a leg sum rows × |B|), kept for the build.
     vectors: Vec<Vec<C64>>,
-    /// The span's dropped bound (`span`), relative to the sum's largest atom.
-    dropped: f64,
 }
 
 /// A pair's tables: H (true) or a jump's, its index in the grouping's pairs, its sums, sizes, the Chebyshev coefficients
@@ -109,11 +107,6 @@ pub(crate) struct Pairs {
     pub work: f64,
     /// The last contractions' time by part (µs, summed until read): the coordinates, the pairs, the direct entries.
     pub parts: [f64; 3],
-}
-
-/// The Chebyshev points on [0, 1] (Gauss: x_n = cos(π(n + ½)/(D + 1)), s = (1 + x)/2).
-fn points(degree: usize) -> Vec<f64> {
-    (0..=degree).map(|n| 0.5 * (1.0 + (std::f64::consts::PI * (n as f64 + 0.5) / (degree + 1) as f64).cos())).collect()
 }
 
 /// T_d(x) and dT_d/ds (x = 2s − 1) for d = 0..=D.
@@ -231,7 +224,6 @@ impl Pairs {
     /// frequencies f₀), `reach` at a point at the reach's speed (the atoms' point coefficients' bounds), `orders` the
     /// Doppler series' terms kept (J + 1), `degree` the pieces' Chebyshev degree in s on [`low`, 1].
     pub(crate) fn new(plan: &Plan, grouping: &Grouping, rest: &Values, reach: &Values, orders: usize, degree: usize, low: f64) -> Pairs {
-        const SPAN_TOL: f64 = 1e-13;
         const S_TOL: f64 = 1e-14;
         let clock = std::time::Instant::now();
         // The blocks whose G₀ varies by another factor than the intensities.
@@ -328,7 +320,7 @@ impl Pairs {
             if std::env::var("OLDNEW_ATOMS").is_ok() {
                 eprintln!("OLDNEW-SPAN {label}: {} atoms, rank {}, dropped {d:.1e}, kept residuals {:?}", keys.len(), vectors.len(), RESIDUALS.with(|r| r.borrow().iter().map(|x| format!("{x:.1e}")).collect::<Vec<_>>()));
             }
-            Basis { atoms: keys.iter().zip(coords).map(|(&(piece, term, coefficient), coords)| Atom { piece, term, coefficient, coords }).collect(), rank: vectors.len(), f0, vectors, dropped: d }
+            Basis { atoms: keys.iter().zip(coords).map(|(&(piece, term, coefficient), coords)| Atom { piece, term, coefficient, coords }).collect(), rank: vectors.len(), f0, vectors }
         };
         let mut zs: Vec<Basis> = Vec::new();
         for (zi, (s, atoms)) in grouping.zs.iter().zip(z_atoms).enumerate() {

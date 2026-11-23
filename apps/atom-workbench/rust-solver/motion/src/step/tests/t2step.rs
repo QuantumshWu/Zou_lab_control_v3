@@ -455,8 +455,8 @@ fn t2step_walk() {
     }
 }
 
-/// The process's CPU time so far, user and kernel (s): Windows' `GetProcessTimes`.
-fn process_seconds() -> f64 {
+/// The process's CPU time so far, user and kernel (s): Windows' `GetProcessTimes` (oldnew.rs's too).
+pub(super) fn process_seconds() -> f64 {
     #[repr(C)]
     struct FileTime {
         low: u32,
