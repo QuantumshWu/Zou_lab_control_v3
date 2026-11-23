@@ -1653,6 +1653,11 @@ impl Groups {
         (self.groups, self.cut) = (1, None);
     }
 
+    /// A step's beginning: nothing of the last step's tables kept (`legendre`).
+    fn fresh(&mut self) {
+        self.legendre.clear();
+    }
+
     /// The piece's rule from the last launch at `from` to the step's end h, its sums the step's (`Sums`: one where it
     /// takes one node, `still`; else the three nodes' and six a tone's, `tones` of them): the cut of its eigencomponents
     /// of the least cost, and its panels' count and nodes (`arranged`). The plain rule's cost is its nodes' at the
@@ -2091,9 +2096,12 @@ impl Groups {
 
     /// The rule of m nodes' Legendre table, node k by row, l < m: T_kl = w_k (2l + 1) P_l(t_k) -- an interpolant's moments
     /// ∫₋₁¹ L_k(t) e^{iκt} dt = Σ_l T_kl iˡ j_l(κ), L_k's Legendre coefficients w_k (2l + 1)/2 P_l(t_k) by the rule's
-    /// exactness to the degree 2m − 1 and ∫₋₁¹ P_l e^{iκt} = 2 iˡ j_l(κ). Kept for the panels' m alone, made again where it
-    /// changes (a trajectory's pieces at one step and bandwidth lay the same m; the rules are made where asked, `rule`):
-    /// its making's m² recurrence's terms are counted.
+    /// exactness to the degree 2m − 1 and ∫₋₁¹ P_l e^{iκt} = 2 iˡ j_l(κ). Kept for the panels' m alone within a step, made
+    /// again where it changes (a step's pieces at its bandwidth lay the same m; the rules are made where asked, `rule`):
+    /// its making's m² recurrence's terms are counted. Made anew at every step (`fresh`): a step's count is its inputs'
+    /// alone, as its state is. (Until 2026-11-22 kept from step to step: a trajectory taken up again with a fresh scratch
+    /// went on to the bit but counted every table again, 441 to 1024 more a step that met it, PGC3D_1ms's ground states;
+    /// step/tests.rs `a_trajectory_stopped_and_taken_up_with_a_fresh_scratch_is_the_one_run_through`.)
     fn legendre(&mut self, m: usize) {
         if self.legendre.len() == m * m {
             return;
@@ -3466,6 +3474,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let h = 0.5 * tau;
         let (flow, (r_h, kappa_h), reference) = (self.flow, self.reached, self.reference);
         scratch.fit(n, SUMS);
+        scratch.groups.fresh();
         let kappa_m = predicted(&from.forms, kappa_h, tau, from.time + h);
         let mut march = March { u: -h, state: from.clone(), read: 0, passed: false, impulse: [0.0; 3], scattered: None, optical: None, work: 0.0, prices: Vec::new(), made: Vec::new(), ended: None, progress: Progress::default() };
         // The three nodes' weights' sums over the step, its stretches' together.
