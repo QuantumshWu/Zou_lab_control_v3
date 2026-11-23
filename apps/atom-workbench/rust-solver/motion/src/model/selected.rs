@@ -191,6 +191,11 @@ pub(crate) enum Drops {
 /// The runs' numbers (`Selected::id`).
 static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// The nodes every run has made so far (`Selected::node_into`): the model at a point, which every trajectory's step,
+/// every path of the selection and its reference, every scan makes -- the work counter the solve's supervisor reads
+/// to tell a long computation from a stuck one (solve.rs `supervise`). Counted, never read by any result.
+pub(crate) static NODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The places of a contraction's outputs in a node (`Selected::layout`): per H output its elements (place, generator's
 /// slot, gradient's slot); per channel output its elements (place, class, axis, component, element); the decay's
 /// products.
@@ -1122,6 +1127,7 @@ impl Selected {
 
     /// The node at a point (`node`) into one of the run's layout.
     fn node_into(&self, node: &mut Node, at: V3, kappa: V3, kicked: bool) {
+        NODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = self.id;
         WORK.with(|w| {
             let mut w = w.borrow_mut();

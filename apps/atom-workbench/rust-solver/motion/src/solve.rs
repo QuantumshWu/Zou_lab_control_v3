@@ -607,7 +607,18 @@
 //! product's batches each total is a message: in a solve shorter than `CHECKPOINT` the first message is the product's
 //! first total, after the pilot (SPEC §9). A message is made by loops that run on the trajectories' own pool, between
 //! two trajectories of a thread (`run_groups`). What runs no trajectories sends no result and looks at no clock: the
-//! run's construction, the model's error at the states, the prices.
+//! run's construction, the model's error at the states, the prices, the selection's paths.
+//!
+//! The app's wait is for any message (contract §2.5: 120 s from the last checkpoint or stage), and a stage that runs no
+//! trajectories may compute for longer than that (p5d5's selection: 131.7 s without a message in its doubling of a
+//! candidate's paths, motion3d_status/rewrite/study/B.report.md §2.4). So the pipeline runs on a worker thread and its
+//! messages go to the caller's thread through a channel (`solve`, `supervise`), the one thread that hands them on:
+//! where `CHECKPOINT` passes with none, the stage the pipeline stands at goes out again -- where the models' work has
+//! grown since (`selected::NODES`, every model's node at a point counted: a trajectory's step, a path, a reference, a
+//! scan), never where it has not, so that a stuck worker is still met by the app's wait. No stage of the selection
+//! asks for a message of its own. (Until 2026-11-22 the selection's stages sent one between them, `Messages::alive`,
+//! and none inside.) A stage sent again is the same stage: the app's course of a solve takes it as one (src/
+//! solve-progress.ts).
 //!
 //! # Steps
 //! Beside the results, the solve says where its pipeline stands (`Stage`, `Messages::stage`) -- what no result can say
@@ -742,6 +753,65 @@ pub struct Solution {
 /// before a trajectory runs.
 pub fn solve(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
     request.validate()?;
+    let (sender, received) = mpsc::channel::<Sent>();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            let mut forward = |message: Message| {
+                // The caller's thread hands it on while the worker goes on; a caller gone takes nothing.
+                let _ = sender.send(Sent::of(&message));
+            };
+            pipeline(request, &mut forward)
+        });
+        supervise(&received, send, CHECKPOINT, &|| crate::model::selected::NODES.load(Ordering::Relaxed));
+        // A panic of the pipeline is the request's, on the caller's thread as it was (src/main.rs: the defect).
+        worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// A message of the pipeline's worker for the caller's thread (`supervise`): what `Message` lends, owned.
+enum Sent {
+    Checkpoint(Box<Solution>, Option<f64>),
+    Stage(Stage),
+}
+
+impl Sent {
+    fn of(message: &Message) -> Sent {
+        match message {
+            Message::Checkpoint(s, left) => Sent::Checkpoint(Box::new((*s).clone()), *left),
+            Message::Stage(stage) => Sent::Stage((*stage).clone()),
+        }
+    }
+}
+
+/// The caller's thread while the pipeline runs (module documentation, # Checkpoints): every message of the worker
+/// handed on to `send` as it comes; where `every` (`CHECKPOINT`) passes with none and the work counted by `work`
+/// (`selected::NODES`) has grown since the last message or look, the last stage again -- a computation that sends
+/// nothing of its own is heard from, a stuck one is not. Until the worker has ended (its sender gone).
+fn supervise(received: &mpsc::Receiver<Sent>, send: &mut dyn FnMut(Message), every: Duration, work: &dyn Fn() -> u64) {
+    let (mut stage, mut seen): (Option<Stage>, u64) = (None, work());
+    loop {
+        match received.recv_timeout(every) {
+            Ok(Sent::Checkpoint(s, left)) => send(Message::Checkpoint(&s, left)),
+            Ok(Sent::Stage(s)) => {
+                send(Message::Stage(&s));
+                stage = Some(s);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = work();
+                if let (true, Some(s)) = (now > seen, &stage) {
+                    send(Message::Stage(s));
+                }
+                seen = now;
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        seen = work();
+    }
+}
+
+/// The pipeline of a request (`solve`), on the worker's thread: its messages to `send`.
+fn pipeline(request: &Request, send: &mut dyn FnMut(Message)) -> Result<Solution, String> {
     let mut messages = Messages { send, clock: Instant::now(), last: None, least: 0, stage: None };
     let reference = alone(chief(request));
     // The choice kept for the scene (# Steps: Select at once, then the model).
@@ -1011,20 +1081,6 @@ impl Messages<'_> {
     /// The time until the next message is due.
     fn due(&self) -> Duration {
         CHECKPOINT.saturating_sub(self.clock.elapsed())
-    }
-    /// Between the selection's stages that run no trajectory (# The selection): where a message is due, the last
-    /// result again, or with none yet the stage the pipeline stands at again -- the app hears from the worker within its
-    /// wait (`CHECKPOINT`).
-    fn alive(&mut self) {
-        if !self.due().is_zero() {
-            return;
-        }
-        if self.last.is_some() {
-            self.again();
-        } else if let Some(stage) = &self.stage {
-            (self.send)(Message::Stage(stage));
-            self.clock = Instant::now();
-        }
     }
 }
 
@@ -2787,7 +2843,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各份误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.seconds
             ),
         );
-        messages.alive();
         // 2. T's memory on the pilot's own trajectories, said beside the choice (the run's flag is the product's).
         {
             let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
@@ -2868,7 +2923,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             Ok(Weighed { place, judged, price, model: model_error, need, work, fate, open })
         };
         weighed.push(weigh(0, &mut models, &mut report)?);
-        messages.alive();
         // The least complete candidate (the anchor, its place among the weighed `anchored`), by bisection where G is not
         // complete; the top (all 32) is complete by construction (`weigh`: the reference itself), so the bisection's upper
         // end is complete at every turn -- weighed at last where no candidate below it is.
@@ -2881,7 +2935,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             while hi - lo > 1 {
                 let mid = (lo + hi) / 2;
                 let w = weigh(mid, &mut models, &mut report)?;
-                messages.alive();
                 let complete = w.work.is_some();
                 weighed.push(w);
                 if complete {
@@ -2917,7 +2970,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             }
             if !weighed.iter().any(|w| w.place == place) {
                 let w = weigh(place, &mut models, &mut report)?;
-                messages.alive();
                 found = found.min(w.work.unwrap_or(f64::INFINITY));
                 weighed.push(w);
             }
@@ -2975,7 +3027,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
             (entry.price, entry.work) = (price, Some(w));
             noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
-            messages.alive();
         }
         // P: the complete candidate of least W (the first of them where several are) -- the anchor among them, complete by
         // construction; no candidate's W is ever taken back (a scout's replaces it).
@@ -5521,6 +5572,43 @@ mod tests {
 
     /// The model's errors `model` booked at as many times (`Fixed`), with nothing dropped and a held atom's kinetic
     /// energy bounded at a millikelvin (ħ/m = k_B/ħ: a velocity's square is its temperature).
+    /// The supervisor (`supervise`, module documentation, # Checkpoints) at an interval of 40 ms: a worker that sends
+    /// its stage and then computes for 400 ms without a message, its work growing, is heard from again -- its stage
+    /// sent again at least four times --; for 400 ms more with its work standing, it is not: no stage again, whatever the
+    /// wait; and a message it sends is handed on as it comes. The supervisor returns when the worker's sender is gone.
+    #[test]
+    fn a_stage_goes_out_again_where_the_work_grows_and_never_where_it_stands() {
+        use std::sync::atomic::AtomicU64;
+        let (sender, received) = mpsc::channel::<Sent>();
+        let work = AtomicU64::new(0);
+        let every = Duration::from_millis(40);
+        let stages = std::sync::Mutex::new(Vec::<(Duration, Step)>::new());
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            let work = &work;
+            scope.spawn(move || {
+                sender.send(Sent::Stage(Stage { step: Step::Select, tau: None, batch: None })).unwrap();
+                while started.elapsed() < 10 * every {
+                    work.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(10 * every);
+                sender.send(Sent::Stage(Stage { step: Step::Product, tau: Some(1.), batch: None })).unwrap();
+            });
+            let mut send = |m: Message| {
+                if let Message::Stage(s) = m {
+                    stages.lock().unwrap().push((started.elapsed(), s.step));
+                }
+            };
+            supervise(&received, &mut send, every, &|| work.load(Ordering::Relaxed));
+        });
+        let stages = stages.into_inner().unwrap();
+        let again = |from: Duration, to: Duration| stages.iter().filter(|(t, step)| *step == Step::Select && *t > from && *t <= to).count();
+        assert!(again(Duration::ZERO, 11 * every) >= 5, "{stages:?}");
+        assert_eq!(again(12 * every, 30 * every), 0, "{stages:?}");
+        assert_eq!(stages.last().map(|s| s.1), Some(Step::Product), "{stages:?}");
+    }
+
     /// The scales a test's looks take where nothing of the motion is read (`looks`).
     const TEST_SCALES: Scales = Scales { hbar_over_mass: 1., frequencies: [1.; 3] };
 
