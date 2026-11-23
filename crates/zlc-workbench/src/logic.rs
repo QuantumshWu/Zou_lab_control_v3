@@ -2154,8 +2154,9 @@ impl Workbench {
             "device_keys": node.draft.device_keys,
             "device_choices": device_choices,
             "editor_facts_error": editor_facts.and_then(|answer| answer.as_ref().err()),
-            // The newest answer is not this draft's and check's, and its process is asked for theirs.
-            "editor_facts_pending": node.instance == Instance::Open && node.answers.contains_key(EDITOR_FACTS) && !node.checked(EDITOR_FACTS, node.check),
+            // `editor_facts` is not the answer for this draft and check (none yet; its type's for a new
+            // node, its plugin still opening; an older draft's, its plugin failed), or is asked again.
+            "editor_facts_pending": descriptor.is_some_and(|item| item.node().queries.iter().any(|name| name == EDITOR_FACTS)) && !node.checked(EDITOR_FACTS, node.check),
             "artifact_inputs": node.draft.artifact_inputs,
             "artifact_specs": descriptor.map(|item| item.node().artifact_inputs.iter().map(|spec| json!({"name": spec.name, "label": spec.label,
                 "file_filter": spec.file_filter, "required": spec.required.unwrap_or(true), "frame_claims": spec.frame_claims})).collect::<Vec<_>>()).unwrap_or_default(),

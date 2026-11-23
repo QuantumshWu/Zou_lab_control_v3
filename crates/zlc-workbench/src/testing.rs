@@ -2704,6 +2704,44 @@ mod tests {
         assert_eq!((run.run.as_str(), &run.values["plan"]), ("player#2", &json!("x")));
     }
 
+    /// A node with an editor whose type answers its default draft in the catalogue (`sketch`).
+    fn sketch_catalog() -> Value {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "sketch", "kind": "node", "label": "Sketch",
+            "parameters": [{"name": "plan", "type": "text", "label": "Plan", "default": ""}],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": ["editor_facts"], "answers": {"editor_facts": {"marker": "catalogue"}}}}));
+        catalog
+    }
+
+    /// A node just added (a board loading builds its nodes the same way) is drawn from its type's
+    /// model while its plugin opens: that is no answer for its draft, so the row says the model is
+    /// being updated until its own answer lands.
+    #[test]
+    fn a_node_whose_plugin_is_opening_says_its_editor_model_is_not_its_drafts() {
+        let (_root, mut wb, calls, mut host) = rig("opening-pending", sketch_catalog());
+        apply(&mut wb, &mut host, "add_node", json!({"type_id": "sketch"})).unwrap();
+        let row = |wb: &Workbench| wb.node_row(wb.node("sketch").unwrap(), &[]);
+        assert_eq!((&row(&wb)["editor_facts"]["marker"], &row(&wb)["editor_facts_pending"]), (&json!("catalogue"), &json!(true)));
+        event(&mut wb, Event::Opened { instance: node_instance("sketch"), working_point: Value::Null }, &mut host);
+        assert_eq!(row(&wb)["editor_facts_pending"], true);
+        answer_asked(&mut wb, &mut host, &calls, "sketch", "editor_facts", |_| Ok(json!({"marker": "own"})));
+        assert_eq!((&row(&wb)["editor_facts"]["marker"], &row(&wb)["editor_facts_pending"]), (&json!("own"), &json!(false)));
+    }
+
+    /// A node whose plugin failed keeps the model of its last answer: still its draft's until the
+    /// draft is edited, then no longer, though nothing can be asked.
+    #[test]
+    fn a_failed_node_edited_since_its_last_answer_says_its_editor_model_is_not_its_drafts() {
+        let (_root, mut wb, calls, mut host) = rig("failed-pending", sketch_catalog());
+        add_open_node(&mut wb, &mut host, json!({"type_id": "sketch"}));
+        answer_asked(&mut wb, &mut host, &calls, "sketch", "editor_facts", |_| Ok(json!({"marker": "own"})));
+        let row = |wb: &Workbench| wb.node_row(wb.node("sketch").unwrap(), &[]);
+        event(&mut wb, Event::Failed { instance: node_instance("sketch"), error: "the plugin process exited".into() }, &mut host);
+        assert_eq!(row(&wb)["editor_facts_pending"], false, "still the answer for its draft");
+        apply(&mut wb, &mut host, "edit_node", json!({"node": "sketch", "values": {"plan": "x"}})).unwrap();
+        assert_eq!((&row(&wb)["editor_facts"]["marker"], &row(&wb)["editor_facts_pending"]), (&json!("own"), &json!(true)));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());
