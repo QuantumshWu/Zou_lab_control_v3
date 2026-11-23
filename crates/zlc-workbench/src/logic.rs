@@ -108,7 +108,7 @@ pub(crate) struct Ask {
     /// In flight: its ticket and question.
     flying: Option<(u64, Question)>,
     /// To ask once the one in flight lands; or not answered (refused, expired, lost), asked again
-    /// once the node's plugin answers anything of it, a Start waits for it, or its instance opens.
+    /// once the node's plugin answers a query of it, a Start waits for it, or its instance opens.
     waiting: Option<Question>,
     /// The question the newest answer answered.
     told: Option<Question>,
@@ -590,7 +590,7 @@ impl Workbench {
         if let Ok(node) = self.node_mut(id) { node.asks.entry(name.to_owned()).or_default().flying = Some((ticket, question)); }
     }
 
-    /// What waits to be asked of the node goes: its plugin answered something of it (its queue
+    /// What waits to be asked of the node goes: its plugin answered a query of it (its queue
     /// moves), or a Start waits for it.
     pub(crate) fn resume_asks(&mut self, id: &str) {
         let Some(node) = self.node(id) else { return };
@@ -836,7 +836,7 @@ impl Workbench {
 
     /// A question (a draft query, a region's) its plugin's code did not answer -- refused or expired
     /// before it ran, timed out, its channel lost: no answer, and the one that stood stands. It waits
-    /// to be asked again: once the node's plugin answers anything of it, a Start waits for it, or its
+    /// to be asked again: once the node's plugin answers a query of it, a Start waits for it, or its
     /// instance opens.
     pub(crate) fn query_unanswered(&mut self, id: &str, ticket: u64) {
         let Ok(node) = self.node_mut(id) else { return };
@@ -1367,7 +1367,7 @@ impl Workbench {
     }
 
     fn discard_prepared(&mut self, id: &str, prepared: &str) {
-        let ticket = self.ticket(Ticket::Discard { node: id.to_owned() });
+        let ticket = self.ticket(Ticket::Discard);
         self.plugins.call(&node_instance(id), ticket, "run.discard", &json!({"prepared": prepared}));
     }
 

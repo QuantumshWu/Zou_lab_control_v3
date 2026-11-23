@@ -248,7 +248,7 @@ pub type DiagnosticData = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 #[derive(Clone, Debug)]
 pub(crate) enum Ticket {
     Prepare { node: String, frozen: logic::Frozen, origin: String, acquisition: Option<(String, u64, String)> },
-    Discard { node: String },
+    Discard,
     /// One of a node's questions of its kind `name` (`logic::Ask`): what it asked is its flight's.
     Query { node: String, name: String },
     Estimate { node: String, request: u64 },
@@ -284,11 +284,12 @@ pub(crate) enum Ticket {
 }
 
 impl Ticket {
-    /// The node whose plugin answers it.
+    /// The node whose plugin answers it as a query (a draft query, a region's, its preparation, an
+    /// estimate): a failure of one its code did not answer comes back as `Event::Unanswered`. (A
+    /// discard is a call, whose failures all come back as answers; nothing waits for its reply.)
     fn node(&self) -> Option<&str> {
         match self {
-            Ticket::Prepare { node, .. } | Ticket::Discard { node } | Ticket::Query { node, .. } | Ticket::Estimate { node, .. }
-                | Ticket::Selection { node, .. } => Some(node),
+            Ticket::Prepare { node, .. } | Ticket::Query { node, .. } | Ticket::Estimate { node, .. } | Ticket::Selection { node, .. } => Some(node),
             _ => None,
         }
     }
@@ -670,8 +671,8 @@ impl Workbench {
         log
     }
 
-    /// An answer: what it was for takes it. One of a node's plugin moves its queue: what waits to
-    /// be asked of the node goes.
+    /// An answer: what it was for takes it. An answer of a node's plugin to a query moves its queue:
+    /// what waits to be asked of the node goes.
     fn answered(&mut self, ticket: u64, result: Result<Value, String>, host: &mut dyn Host) {
         let lane = self.tickets.get(&ticket).and_then(Ticket::node).map(str::to_owned);
         self.take_answer(ticket, result, host);
@@ -682,7 +683,7 @@ impl Workbench {
         let Some(purpose) = self.tickets.remove(&ticket) else { return };
         match purpose {
             Ticket::Prepare { node, frozen, origin, acquisition } => self.prepared(&node, ticket, frozen, origin, acquisition, result, host),
-            Ticket::Discard { .. } => {},
+            Ticket::Discard => {},
             Ticket::Query { node, name } => self.query_answered(&node, ticket, &name, result, host),
             Ticket::Estimate { request, .. } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
             Ticket::Fields { device, request } => {

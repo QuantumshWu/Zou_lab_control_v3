@@ -2295,7 +2295,7 @@ mod tests {
 
     /// The plugin refuses the editor's question (`refused`: its queue is full): that is no answer.
     /// The editor keeps the model it last drew, says no error and that it is updating; the question
-    /// is asked again once the plugin answers anything.
+    /// is asked again once the plugin answers a query of the node.
     #[test]
     fn a_refused_editor_question_keeps_the_model_it_had() {
         let (_root, mut wb, calls, mut host) = lanes_rig("refused-editor", json!(LANES));
@@ -2398,7 +2398,7 @@ mod tests {
         assert_eq!(calls.borrow().1.last().map(|run| run.run.as_str()), Some("lanes#1"));
     }
 
-    /// What the plugin refused is asked again once the node's plugin answers anything of it -- here
+    /// What the plugin refused is asked again once the node's plugin answers a query of it -- here
     /// an estimate: its queue moves.
     #[test]
     fn any_answer_of_the_nodes_plugin_asks_again_what_it_refused() {
@@ -2526,7 +2526,7 @@ mod tests {
     }
 
     /// A region's question the plugin did not answer waits as a draft query's does: nothing is said,
-    /// it is asked again once the node's plugin answers anything of it, and then sets the draft.
+    /// it is asked again once the node's plugin answers a query of it, and then sets the draft.
     #[test]
     fn a_regions_unanswered_question_is_asked_again() {
         let mut catalog = catalog();
@@ -2740,6 +2740,20 @@ mod tests {
         assert_eq!(row(&wb)["editor_facts_pending"], false, "still the answer for its draft");
         apply(&mut wb, &mut host, "edit_node", json!({"node": "sketch", "values": {"plan": "x"}})).unwrap();
         assert_eq!((&row(&wb)["editor_facts"]["marker"], &row(&wb)["editor_facts_pending"]), (&json!("own"), &json!(true)));
+    }
+
+    /// A discard is a call: every failure of it comes back as an answer, a refusal or a loss too,
+    /// and nothing waits for its reply. Its reply asks nothing again; a query's answer does.
+    #[test]
+    fn a_discards_reply_asks_nothing_again() {
+        let (_root, mut wb, calls, mut host) = lanes_rig("discard-reply", json!(LANES));
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
+        event(&mut wb, Event::Facts { instance: "mot_camera".into(), facts: json!({"temperature": 21}) }, &mut host);
+        let refused = asked(&calls, "editor_facts");
+        event(&mut wb, Event::Unanswered { ticket: refused, error: "refused: the plugin has too many pending calls".into() }, &mut host);
+        let discard = wb.ticket(crate::Ticket::Discard);
+        event(&mut wb, Event::Answered { ticket: discard, result: Err("refused: node/lanes already has 64 queued calls".into()) }, &mut host);
+        assert_eq!(asked(&calls, "editor_facts"), refused);
     }
 
     #[test]
