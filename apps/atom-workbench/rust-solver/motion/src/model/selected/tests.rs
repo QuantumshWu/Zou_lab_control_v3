@@ -1119,6 +1119,10 @@ fn a_cross_block_element_joins_the_blocks() {
 #[path = "golden.rs"]
 mod golden;
 
+// STEP item 8: the Doppler series' census (ignored, by name).
+#[path = "doppler.rs"]
+mod doppler;
+
 #[path = "drops.rs"]
 mod drops;
 
