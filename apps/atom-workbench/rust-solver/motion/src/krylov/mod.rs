@@ -1,5 +1,6 @@
-//! The static Floquet–Liouville reference solver of the two-point check (RUSTPLAN §1.1; FASTREF.md, the prototype
-//! `fastref\fr.py` `fr.solve` with the zero-norm root fix of `vlat\frx.py`): the bordered steady-state system
+//! The static Floquet–Liouville steady-state solver: a reference of the tests alone, compiled with them only (lib.rs),
+//! as the assembly it solves (floquet/mod.rs); the old two-point check's (RUSTPLAN §1.1; FASTREF.md, the prototype
+//! `fastref\fr.py` `fr.solve` with the zero-norm root fix of `vlat\frx.py`). The bordered steady-state system
 //!
 //! ```text
 //!     Bd [ρ; μ] = [0; 1],    Bd = [[KK, τ*], [τᵀ, 0]],

@@ -31,15 +31,17 @@ pub const CONFIDENCE: f64 = 2.0;
 /// given accuracy gives the step b/E = √(1/(1 + 2p)) of the target.
 pub const STEP_SHARE: f64 = square_root(1.0 / (1.0 + 2.0 * ORDER as f64));
 
-/// The numerical share inside a step (SPEC §2.2), the old engine's `QUADRATURE`. No truncation inside a step is made at
-/// it (step.rs, # The quadrature's tolerance: until 2026-11-17 the kick's quadrature was laid at it; until 2026-11-20 a
-/// step took the strides where their Magnus part was within it, spectral.rs, # Where the decomposition does not take
-/// the step): the tests hold what a step leaves of their analytic references to it.
+/// The numerical share inside a step (SPEC §2.2), the old engine's `QUADRATURE`: a tolerance of the tests alone, which
+/// hold what a step leaves of their analytic references to it (compiled with them only). No truncation inside a step is
+/// made at it (step.rs, # The quadrature's tolerance: until 2026-11-17 the kick's quadrature was laid at it; until
+/// 2026-11-20 a step took the strides where their Magnus part was within it, spectral.rs, # Where the decomposition does
+/// not take the step).
 ///
 /// Derivation: the numerical tolerances inside a step take the square of the step's share of the square, (1/(1 + 2p))²
 /// = s⁴, of their target -- their work grows with the logarithm of the tolerance (a Gauss rule's nodes) or as a small
 /// root of it (a fourth-order method's sub-steps), so their least work beside the step's lies at a few per cent of it -- and the
 /// impulse's target is T's, relative: s⁴ × `TEMPERATURE_TARGET`, 4·10⁻³ at p = 2.
+#[cfg(test)]
 pub const QUADRATURE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * TEMPERATURE_TARGET;
 
 /// √a for a ≥ 0 in a constant (f64::sqrt is not const): Heron's iteration x ← (x + a/x)/2 from max(a, 1) ≥ √a, which
@@ -110,10 +112,6 @@ pub const RAD_PER_US_PER_MHZ: f64 = TAU;
 pub fn hbar_over_mass(mass_kg: f64) -> f64 {
     HBAR / mass_kg * 1e6
 }
-/// The wave number k = 2πν/c (rad/µm) of light of frequency ν (MHz = 1/µs): c in µm/µs.
-pub fn wave_number(frequency_mhz: f64) -> f64 {
-    TAU * frequency_mhz / SPEED_OF_LIGHT
-}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The floating-point format.
@@ -134,14 +132,13 @@ mod tests {
     use super::*;
 
     /// The derived values: s = √(1/(1 + 2p)) = √(1/5) to round-off, the quadrature's share s⁴ × 0.1 = 4·10⁻³; k_B/ħ = 0.130920… rad/µs per µK; ħ/m of Rb87 (1.4432e-25 kg)
-    /// 7.3072e-4 µm²/µs; the D2 line's wave number 2π·384230.484 GHz/c = 8.0528 rad/µm; γ_n against n u.
+    /// 7.3072e-4 µm²/µs; γ_n against n u.
     #[test]
     fn the_derived_values_are_their_formulas() {
         assert!((STEP_SHARE - 0.2_f64.sqrt()).abs() <= f64::EPSILON * STEP_SHARE, "{STEP_SHARE}");
         assert!((QUADRATURE - 4e-3).abs() <= 1e-15, "{QUADRATURE}");
         assert!((KT_PER_UK - 0.130_920_3).abs() <= 1e-7, "{KT_PER_UK}");
         assert!((hbar_over_mass(1.4432e-25) - 7.307_2e-4).abs() <= 1e-8);
-        assert!((wave_number(384_230_484.468_5) - 8.052_8).abs() <= 1e-4);
         assert!(rounding(0) == 0.0 && (rounding(10) / (10.0 * UNIT_ROUNDOFF) - 1.0).abs() <= 1e-14);
     }
 }

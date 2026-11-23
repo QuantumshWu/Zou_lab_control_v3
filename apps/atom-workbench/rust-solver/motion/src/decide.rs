@@ -1,4 +1,4 @@
-//! A read, its three outcomes, pays, counted work (SPEC §5).
+//! A read, its three outcomes, counted work (SPEC §5).
 //!
 //! # A decision
 //! Every decision is made of four things (SPEC §5.1): the current level, a more exact one, the output the two are
@@ -29,11 +29,6 @@
 //! than one look would). Within is `Read::outcome` at one look, each read's own interval: every read has to lie within
 //! its bound by itself, whatever the others are. A family neither beyond nor within is unreadable: a read that is not
 //! within at one look, a read that is no number among them, is what the decision cannot see.
-//!
-//! # pays
-//! A spend W for a predicted saving ΔC pays where ΔC − t·SE(ΔC) > W (`pays`; the left side is `assured`, by which savings
-//! are ranked): only a saving the read tells from nothing moves the work, its error the jackknife of the difference of the
-//! two levels' costs.
 //!
 //! # Work
 //! Work is counted, not timed (SPEC §5.1): the real multiply-adds of the engine's algorithms (`Work`), each counted where
@@ -92,17 +87,6 @@ impl Read {
     }
 }
 
-/// What a predicted saving is at the least at the confidence z, saving − t·SE (module documentation, # pays): negative
-/// for one that may be a loss, no number for a read that is none.
-pub fn assured(saving: Read) -> f64 {
-    saving.value - saving.spread.interval()
-}
-
-/// Whether spending `spend` for the predicted `saving` pays (module documentation, # pays): saving − t·SE > spend.
-pub fn pays(spend: Work, saving: Read) -> bool {
-    assured(saving) > spend
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,13 +119,6 @@ mod tests {
     #[test]
     fn the_level_s_error_follows_its_order() {
         assert_eq!((richardson(0.5, 2.), richardson(0.5, 4.), richardson(0., 1.)), (4. / 3., 16. / 15., 1.));
-    }
-
-    /// A spend pays only for a saving beyond it and the saving's interval; a saving that is not a number pays nothing.
-    #[test]
-    fn a_spend_pays_beyond_the_saving_s_interval() {
-        assert!(pays(2., read(3., 0.4)) && !pays(2., read(3., 0.6)));
-        assert!(pays(0., read(1., 0.)) && !pays(0., read(0., 0.)) && !pays(1., read(f64::NAN, 0.)));
     }
 
     /// Over m looks of pure noise against a zero bound, some read lies beyond by chance no more often than one look

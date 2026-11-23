@@ -2,18 +2,28 @@
 //! reference from `Scene`, or the RS model from `model::rs`), its frame and slow lattice (`frame`), the rounding rule's
 //! elements (`select`), and the one Liouville assembly with its readouts (`assemble`). The full reference and the model
 //! go through the same functions.
+//!
+//! The product reads the frame alone (the fold's sectors, the trajectory model's frame vectors); the lattice, the
+//! elements, the assembly and its steady state (krylov) are the tests' static reference, compiled with them only (until
+//! 2026-11-22 in the product, where the old two-point check had solved them).
 
 pub mod frame;
+#[cfg(test)]
 pub mod select;
+#[cfg(test)]
 pub mod assemble;
 #[cfg(test)]
 mod tests;
 
-use crate::linalg::{C64, Mat};
+use crate::linalg::Mat;
 use crate::scene::{Components, Key, Scene};
 
+#[cfg(test)]
 pub use assemble::{assemble, readouts, Liouville, Readouts, System};
-pub use frame::{Frame, Lattice, Sectors};
+#[cfg(test)]
+pub use frame::Lattice;
+pub use frame::{Frame, Sectors};
+#[cfg(test)]
 pub use select::select;
 
 /// One frequency component of an operator of a Hilbert model: `value` e^{−i f t}, f the key's frequency.
@@ -53,6 +63,7 @@ pub struct Lift {
 
 /// An element of the lattice: slow coordinates m (over the lattice basis), fast n = (n_φ, n_tw, n_ν), and the Liouville
 /// index x = a·n + b of ρ_ab.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Element {
     pub m: Vec<i64>,
@@ -62,6 +73,7 @@ pub struct Element {
 
 /// The elements the rounding rule admits, in the order the rule took them (best first); `amplitudes[i]` the first-order
 /// amplitude of `order[i]`.
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Elements {
     pub order: Vec<Element>,
@@ -69,6 +81,7 @@ pub struct Elements {
 }
 
 /// A sparse complex matrix in compressed rows.
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sparse {
     pub rows: usize,
@@ -76,7 +89,7 @@ pub struct Sparse {
     /// Row i holds entries indptr[i]..indptr[i + 1] of `indices` (columns) and `values`.
     pub indptr: Vec<usize>,
     pub indices: Vec<usize>,
-    pub values: Vec<C64>,
+    pub values: Vec<crate::linalg::C64>,
 }
 
 impl Hilbert {

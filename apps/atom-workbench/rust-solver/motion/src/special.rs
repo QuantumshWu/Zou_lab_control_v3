@@ -1,8 +1,8 @@
 //! The special functions more than one module takes, each written once: the incomplete gamma function's two expansions
 //! (Abramowitz & Stegun 6.5.29 and 6.5.31; Numerical Recipes §6.2, gser and gcf), each summed to the format's round-off,
 //! for the normal's tail (estimate.rs) and the lowered isothermal's momenta (ensemble.rs); and Gauss–Legendre's nodes and
-//! weights (`gauss_legendre`, O(n) to the round-off), for the ensemble's integrals over the trap (ensemble.rs), the
-//! level's share (ensemble.rs `Ensemble::beyond`) and the step's quadrature of an entire integrand (step.rs).
+//! weights (`gauss_legendre`, O(n) to the round-off), for the step's quadrature of an entire integrand (step.rs) and the
+//! tests' integrals over the trap (ensemble.rs).
 //!
 //! With P(s, x) = γ(s, x)/Γ(s) the regularized lower function and Q = 1 − P the upper one, for x > 0:
 //! - the lower one's series, e^x x^{−s} Γ(s + 1) P(s, x) = 1 + Σ_{n ≥ 1} x^n/((s + 1)…(s + n)) -- `series` is the sum from
