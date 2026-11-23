@@ -208,6 +208,7 @@ fn oldnew_solve() {
     if let Ok(x) = std::env::var("OLDNEW_QUAD_TOL") {
         crate::step::QUAD_TOL.store(x.parse::<f64>().unwrap().to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
+    *crate::solve::OUTPUT_LOOKS.lock().unwrap() = (0., 0, 0);
     let (clock, cpu0) = (Instant::now(), process_cpu());
     let mut last = String::new();
     let solution = crate::solve::solve(&request, &mut |m| {
@@ -268,6 +269,9 @@ fn oldnew_solve() {
         }
         eprintln!("OLDNEW-GROUPS {name}: {} groups to {path}", groups.len());
     }
+    // The outputs' looks in the product (solve.rs `OUTPUT_LOOKS`): their wall time, the batches, the looks put beyond.
+    let (seconds, batches, beyond) = *crate::solve::OUTPUT_LOOKS.lock().unwrap();
+    eprintln!("OLDNEW-OUTPUTS {name}: the outputs' looks {seconds:.3} s wall over {batches} reads of the product, {beyond} looks put beyond in all");
     // The ledger as the result says it: its items, what it flags, its note.
     let ledger = &solution.approximations;
     for item in &ledger.items {
