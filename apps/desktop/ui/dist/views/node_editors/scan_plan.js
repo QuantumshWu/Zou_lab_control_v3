@@ -107,16 +107,17 @@ function endsText(ends, unit) {
     const suffix = unit && unit !== "1" ? ` ${unit}` : "";
     return ends.count === 1 ? [`${spoken(ends.first)}${suffix}`, "1 point"] : [`${spoken(ends.first)} … ${spoken(ends.last)}${suffix}`, `${ends.count} points`];
 }
-/** How the knob changed what was written, or "" where it plays as written: "Plays 1 … 10 (5 points):
- * 3 moved onto the knob's grid"; points it made one are played once, "5 points written, 3 distinct
- * values played: 1 … 3". What plays is shown, never written back. */
+/** How the knob changed what was written, or "" where it plays as written: points its group's grid
+ * made one are played once, "5 points written, 3 distinct values played: 1 … 3" ("1 distinct value
+ * played: 2"); values moved onto it, "Plays 1 … 10 (5 points): 3 moved onto the knob's grid". The one
+ * wording of an axis's note and a linked parameter's preview; shown, never written back. */
 function playedText(played, unit) {
-    if (!played.moved)
-        return "";
     const [span, count] = endsText(played, unit);
-    if (played.count < played.written)
-        return `${played.written} points written, ${played.distinct} distinct values played: ${span}`;
-    return `Plays ${span} (${count}): ${played.moved} moved onto the knob's grid`;
+    if (played.count < played.written) {
+        const values = played.distinct === 1 ? endsText({ ...played, count: 1 }, unit)[0] : span;
+        return `${played.written} points written, ${played.distinct} distinct value${played.distinct === 1 ? "" : "s"} played: ${values}`;
+    }
+    return played.moved ? `Plays ${span} (${count}): ${played.moved} moved onto the knob's grid` : "";
 }
 /** How many colours link groups take in turn (--link-group-0 … in tokens.css). */
 const LINK_COLOURS = 4;
@@ -257,16 +258,15 @@ class AxisRowView {
                     this.entry.link_enabled = false; this.owner.emitPlan(); }, "destructive glyph square linked-remove");
                 remove.title = "Remove linked parameter";
                 remove.setAttribute("aria-label", remove.title);
-                const preview = element("p", "note linked-preview");
+                const preview = element("p", "note wrap linked-preview");
                 const update = () => {
                     if (document.activeElement !== input)
                         input.value = link.formula ?? "";
                     chip.title = `x is ${this.axisLabel()}`;
-                    const fact = this.owner.axisFacts(this.entry.port)?.links?.[index];
+                    const fact = this.owner.currentFacts(this.entry.port)?.links?.[index];
                     const known = fact?.port === link.port ? fact : undefined;
                     const [span, count] = known ? endsText(known, link.unit) : ["", ""];
-                    const moved = known?.moved ? `: ${known.moved} moved onto the knob's grid` : "";
-                    setText(preview, known ? known.problem || `${span} (${count})${moved}` : "");
+                    setText(preview, known ? known.problem || playedText(known, link.unit) || `${span} (${count})` : "");
                     preview.classList.toggle("problem", Boolean(known?.problem));
                 };
                 update();
@@ -279,6 +279,14 @@ class AxisRowView {
                 control.disabled = this.linkLocked;
         this.linkedCells = [toggle, ...cells.slice(8)];
         return cells;
+    }
+    /** What the knob plays, from the facts of the plan as written now: between an edit and its
+     * preview nothing is said (the facts are of the plan before it). */
+    showPlayed() {
+        const played = this.owner.currentFacts(this.entry.port)?.played;
+        setText(this.played, played ? playedText(played, this.entry.unit) : "");
+        this.played.hidden = !this.played.textContent;
+        this.linkedUpdates.forEach(update => update());
     }
     /** The knob as its picker names it (a manual axis: its name). */
     axisLabel() {
@@ -366,8 +374,7 @@ class AxisRowView {
             this.list.value = entry.value_text;
         const fact = this.owner.axisFacts(entry.port);
         this.flag(this.list, fact?.value_text === entry.value_text ? fact.values_bounds ?? [] : [], LIST_TIP);
-        setText(this.played, fact?.played ? playedText(fact.played, entry.unit) : "");
-        this.played.hidden = !this.played.textContent;
+        this.showPlayed();
         // A unit with other spellings is a picker; one without is a word.
         const port = this.port();
         const offered = port?.units.some(([symbol]) => symbol === entry.unit) ? port.units : [];
@@ -586,6 +593,8 @@ export class ScanPlanEditor {
         return choiceTree(entries, current, "ports");
     }
     axisFacts(port) { return this.facts?.axis_facts.find(axis => axis.port === port); }
+    /** An axis's facts while they are of the plan as written now (none between an edit and its preview). */
+    currentFacts(port) { return this.facts?.plan_source === this.planText ? this.axisFacts(port) : undefined; }
     unofferedLeaf(port) { return this.facts?.unoffered[port]?.leaf; }
     /** A linked axis's place among the plan's linked axes: its group's colour. */
     linkGroup(view) { return this.rows.filter(row => row.entry.link_enabled && row.entry.links?.length).indexOf(view); }
@@ -662,6 +671,8 @@ export class ScanPlanEditor {
         this.axes.classList.toggle("has-manual", this.rows.some(view => view.manual));
         this.axes.classList.toggle("has-links", this.rows.some(view => view.entry.link_enabled));
         this.planText = JSON.stringify({ axes: order.map(axis => ({ port: axis.port, unit: axis.unit, values: axis.values, ...(axis.range ? { range: axis.range } : {}), ...(axis.coordinate_of !== undefined ? { coordinate_of: axis.coordinate_of } : {}), mode: axis.mode, value_text: axis.value_text, ...(axis.links || axis.link_enabled ? { link_enabled: axis.link_enabled === true, links: axis.links ?? [] } : {}) })) });
+        for (const view of this.rows)
+            view.showPlayed();
         this.edit({ plan: this.planText }, "Scan plan");
     }
     // ---------------------------------------------------------- API values

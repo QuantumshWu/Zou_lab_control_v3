@@ -149,22 +149,38 @@ try {
  await check('a row says what its knob plays where its grid moved what was written, merged points plainly, and writes nothing back',async()=>{
    const range={start:1,stop:10,count:5};
    const axis={port:ports.repeats.port,unit:'count',values:[],range,mode:'range',value_text:'',link_enabled:true,
-     links:[{port:ports.hold.port,unit:'µs',mode:'formula',formula:'x / 50',values:[],value_text:''}]};
+     links:[{port:ports.hold.port,unit:'µs',mode:'formula',formula:'x * 0.03',values:[],value_text:''}]};
    const shown=t=>[...t.editor.root.querySelectorAll('.axis-played, .linked-preview')].filter(node=>!node.hidden&&node.textContent).map(node=>node.textContent);
    const written=t=>[...t.editor.root.querySelectorAll('.range-bank input')].map(input=>input.value);
-   const link={first:0.02,last:0.2,count:5,written:5,moved:0,distinct:5};
-   const plain=setup([axis],null,[ports.repeats,ports.hold],{link_facts:{[ports.hold.port]:link}});
-   equal(shown(plain),['0.02 … 0.2 µs (5 points)'],"as written: only the link's preview");
-   // 1, 3.25, 5.5, 7.75, 10 on a whole-number knob play 1, 3, 6, 8, 10; two of the link's durations fall between clock ticks.
+   // As written, on no knob's domain: 1, 3.25, 5.5, 7.75, 10 and 0.03 … 0.3 µs.
+   const plain=setup([axis],null,[ports.repeats,ports.hold],{link_facts:{[ports.hold.port]:{first:0.03,last:0.3,count:5,written:5,moved:0,distinct:5}}});
+   equal(shown(plain),['0.03 … 0.3 µs (5 points)'],"as written: only the link's preview");
+   // On a whole-number knob they play 1, 3, 6, 8, 10; x * 0.03 of those is 0.03, 0.09, 0.18, 0.24, 0.3 µs,
+   // the first two between 20 ns ticks: 0.04 and 0.1 µs.
    const moved=setup([axis],null,[ports.repeats,ports.hold],{played_facts:{[axis.port]:{first:1,last:10,count:5,written:5,moved:3,distinct:5}},
-     link_facts:{[ports.hold.port]:{...link,moved:2}}});
-   equal(shown(moved),["Plays 1 … 10 count (5 points): 3 moved onto the knob's grid","0.02 … 0.2 µs (5 points): 2 moved onto the knob's grid"],'moved');
+     link_facts:{[ports.hold.port]:{first:0.04,last:0.3,count:5,written:5,moved:2,distinct:5}}});
+   equal(shown(moved),["Plays 1 … 10 count (5 points): 3 moved onto the knob's grid","Plays 0.04 … 0.3 µs (5 points): 2 moved onto the knob's grid"],'moved');
    equal(written(moved),['1','10','5'],'the spins keep what was written');
-   // 1 to 3 in five points on a whole-number knob: 1, 2, 2, 2, 3 play as 1, 2, 3.
-   const merged=setup([{...axis,range:{start:1,stop:3,count:5},link_enabled:false,links:[]}],null,[ports.repeats],
-     {played_facts:{[axis.port]:{first:1,last:3,count:3,written:5,moved:2,distinct:3}}});
-   equal(shown(merged),['5 points written, 3 distinct values played: 1 … 3 count'],'merged');
-   for(const t of [plain,moved,merged]) equal(t.edits.filter(edit=>'plan' in edit),[],'what plays is not written back');
+   // 1 to 3 in five points on a whole-number knob: 1, 2, 2, 2, 3 play as 1, 2, 3; the link's points go with them.
+   const merged=setup([{...axis,range:{start:1,stop:3,count:5}}],null,[ports.repeats,ports.hold],
+     {played_facts:{[axis.port]:{first:1,last:3,count:3,written:5,moved:2,distinct:3}},link_facts:{[ports.hold.port]:{first:0.04,last:0.1,count:3,written:5,moved:2,distinct:3}}});
+   equal(shown(merged),['5 points written, 3 distinct values played: 1 … 3 count','5 points written, 3 distinct values played: 0.04 … 0.1 µs'],'merged, the link too');
+   // Values 2, 2.4, 2, 1.6: one distinct value, said as one.
+   const one=setup([{port:ports.repeats.port,unit:'count',values:[],mode:'values',value_text:'2, 2.4, 2, 1.6'}],null,[ports.repeats],
+     {played_facts:{[ports.repeats.port]:{first:2,last:2,count:2,written:4,moved:2,distinct:1}}});
+   equal(shown(one),['4 points written, 1 distinct value played: 2 count'],'one distinct value');
+   // A row whose point went with another row's merge (coordinate_of): nothing of its own moved, a point is gone.
+   const along=setup([{port:ports.once.port,unit:'count',values:[5,6,7],mode:'range',value_text:'',coordinate_of:ports.repeats.port}],null,[ports.repeats,ports.once],
+     {played_facts:{[ports.once.port]:{first:5,last:7,count:2,written:3,moved:0,distinct:2}}});
+   equal(shown(along),['3 points written, 2 distinct values played: 5 … 7 count'],'merged by its group');
+   for(const t of [plain,moved,merged,one,along]) equal(t.edits.filter(edit=>'plan' in edit),[],'what plays is not written back');
+   // An edit leaves the note unsaid until its own preview: the facts at hand are of the plan before it.
+   const spin=moved.editor.root.querySelector('.range-bank input');
+   spin.value='2';spin.dispatchEvent(new Event('change'));
+   equal(shown(moved),[],'nothing said between an edit and its preview');
+   moved.again([ports.repeats,ports.hold]);
+   equal(shown(moved),["Plays 1 … 10 count (5 points): 3 moved onto the knob's grid","Plays 0.04 … 0.3 µs (5 points): 2 moved onto the knob's grid"],
+     'said again once the preview of the plan as written is in');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
