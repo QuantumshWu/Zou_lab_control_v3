@@ -1,7 +1,8 @@
 // The window's own entry (dist/main.js) on a fake native host -- window.ipc out, chrome.webview's messages in --
 // so every state goes the way the desktop's does: transport.attach's handler runs board.accept (whose changed()
 // asks the status line) and then shell.accept. The host takes the window's commands in the order sent, as the
-// workbench does: an edit moves the draft revision on and says it; a Start of another revision is refused. `viewer`: the Figure Viewer's window, else the Task Console's.
+// workbench does: an edit moves the draft revision on and says the revision it started from and the one it left;
+// a Start of another revision is refused. `viewer`: the Figure Viewer's window, else the Task Console's.
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function startAfterEdit(viewer) {
@@ -26,8 +27,9 @@ export async function startAfterEdit(viewer) {
     const row = rows[0];
     let result = null, error = null;
     if (command.action === 'edit_node') {
+      const before = row.draft_revision;
       if (command.values) { row.values = { ...row.values, ...command.values }; row.controls = row.controls.map(control => ({ ...control, value: row.values[control.name] })); row.draft_revision++; }
-      result = { node, draft_revision: row.draft_revision };
+      result = { node, draft_revision: row.draft_revision, draft_revision_before: before };
     }
     if (command.action === 'start_node') {
       if (command.expected_draft_revision !== undefined && command.expected_draft_revision !== row.draft_revision) {

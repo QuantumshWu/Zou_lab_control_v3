@@ -195,19 +195,19 @@ export class NodeStarts {
 
   /** Each state the page takes: only the one that is an edit's reply (`state.request`) settles that
    * edit -- what else reads the answer before it (the board, the status line) has no reply to read.
-   * Of a node whose Start waits, the reply moves its revision on by one where its draft_revision is
-   * not the revision so far -- one more than it, the edit's own change; further on, a change from
-   * elsewhere too, which the one step leaves for the host to refuse -- and a refusal leaves it; once
-   * its node has no edit left the Start goes.  Edits sent after the click ride along and put the
-   * Start off until they are answered (a Revert after it restarts the reverted draft): taking the
-   * draft as it stood at the click would bring back the refusal of the first click. */
+   * Of a node whose Start waits, the reply takes its revision on to the one the edit left only where
+   * the edit started from it (draft_revision_before): something changed elsewhere before the edit
+   * leaves it, for the host to refuse, and so does a refusal; once its node has no edit left the
+   * Start goes.  Edits sent after the click ride along and put the Start off until they are
+   * answered (a Revert after it restarts the reverted draft): taking the draft as it stood at the
+   * click would bring back the refusal of the first click. */
   settle(state: State): void {
     for (const [id, node] of this.nodes) {
       const at = state.request === undefined ? -1 : node.edits.indexOf(state.request);
       if (at < 0) continue;
       node.edits.splice(at, 1);
-      const reply = state.error ? undefined : (state.result as { draft_revision?: unknown } | null | undefined)?.draft_revision;
-      if (node.start !== null && typeof reply === "number" && reply !== node.start) node.start += 1;
+      const reply = state.error ? undefined : state.result as { draft_revision?: unknown; draft_revision_before?: unknown } | null | undefined;
+      if (node.start !== null && reply?.draft_revision_before === node.start && typeof reply.draft_revision === "number") node.start = reply.draft_revision;
       if (node.edits.length) return;
       this.nodes.delete(id);
       if (node.start !== null) this.send(id, node.start);
