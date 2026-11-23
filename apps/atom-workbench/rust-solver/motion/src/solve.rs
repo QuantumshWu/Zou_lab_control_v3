@@ -653,7 +653,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
+use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, temperature_change, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -2468,7 +2468,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         // Where the paths read no direct part, the held atoms' bound (`model_of`).
         let direct = (1..outputs.len()).filter(|&k| held[k] != 0.).map(|k| c.at(outputs[k]).unwrap_or(held[k])).fold(0., crate::linalg::larger);
         context.ledger.item("模型误差：路径实测的直接部分", direct, MODEL_DIRECT);
-        for flag in model_flags(c, &read, &context.at, shown_at, outputs, request) {
+        for flag in model_flags(c, &context.at, &outputs_of(&pilot.iter().collect::<Vec<_>>()), shown_at, outputs, context.scales.hbar_over_mass, request) {
             context.ledger.flag(flag);
         }
         // The motion's part (select.rs, # The motion): its largest over the outputs, on the loss and on T (by the held
@@ -2524,10 +2524,10 @@ fn unmeasured() -> String {
 /// What the choice says of itself that a result is less for (module documentation, # The selection; PIPELINE_V3_FINAL
 /// C.15): T still drifting at the run's end, the paths run through the whole request (the memory of the dark states longer than a fifth of it), and
 /// nothing more.
-fn model_flags(choice: &Choice, read: &PilotRead, analysis: &[f64], outputs: &[Estimate], times: &[f64], request: &Request) -> Vec<String> {
+fn model_flags(choice: &Choice, analysis: &[f64], groups: &[&Group], outputs: &[Estimate], times: &[f64], hbar_over_mass: f64, request: &Request) -> Vec<String> {
     let mut flags = vec![];
     // T still drifting at the end (`drift`): read at every output of the run's last stretch.
-    if let Some(d) = drift(outputs, times, &read.estimates, analysis).filter(|d| d.beyond) {
+    if let Some(d) = drift(groups, outputs, times, analysis, hbar_over_mass).filter(|d| d.beyond) {
         flags.push(format!("温度在运行末段仍在漂移：{}", d.said()));
     }
     let length = request.times_us.last().copied().unwrap_or(0.);
@@ -2537,9 +2537,9 @@ fn model_flags(choice: &Choice, read: &PilotRead, analysis: &[f64], outputs: &[E
     flags
 }
 
-/// T's drift at the run's end (`drift`): the largest difference of an output's total T from the last output's over the
-/// run's last stretch, the time of that output, their intervals together there, the comparisons' count, and whether
-/// any difference is beyond its intervals.
+/// T's drift at the run's end (`drift`): the change of the last output's total T from an earlier one's over the run's
+/// last stretch, the most beyond its interval, the time of that output, the change's own interval, the stretch, the
+/// comparisons' count, and whether any change is beyond its interval.
 struct Drift {
     difference: f64,
     at: f64,
@@ -2553,29 +2553,35 @@ struct Drift {
 impl Drift {
     fn said(&self) -> String {
         format!(
-            "{:.0}–{:.0} µs 的 {} 个输出时刻上，T 与末一个输出最多差 {:+.2} µK（{:.0} µs），两者的误差棒合 {:.2} µK（{} 次比较的 Šidák 尾）",
+            "{:.0}–{:.0} µs 的 {} 个输出时刻上，T 与末一个输出最多差 {:+.2} µK（{:.0} µs），这一差自己的误差棒 {:.2} µK（逐组刀切，{} 次比较的 Šidák 尾）",
             self.from, self.to, self.comparisons + 1, self.difference, self.at, self.bar, self.comparisons
         )
     }
 }
 
 /// T's drift at the run's end (the flag `model_flags`; said beside the choice): over the outputs from the last analysis
-/// time but one where T is read (`analysis`, the estimates there `reads`) to the last output where it is (`outputs`,
-/// the pilot's estimates at the plan's outputs `times`), each output's total T against the last's, beyond where they
-/// are apart by more than their intervals together, each at Šidák's tail among the comparisons -- every output of the
-/// stretch read, not its two ends alone (until 2026-11-23 the last two analysis times', which a change between them
-/// passes by). The difference of the largest excess over its bar; none where fewer than two outputs read T there.
-fn drift(outputs: &[Estimate], times: &[f64], reads: &[Estimate], analysis: &[f64]) -> Option<Drift> {
-    let read_at = |e: &Estimate| e.motion.filter(|m| m.temperature_total_error.read()).map(|m| (m.temperature_total, m.temperature_total_error));
-    let from = analysis.iter().zip(reads).filter(|(_, e)| read_at(e).is_some()).map(|(t, _)| *t).rev().nth(1).unwrap_or(0.);
-    let held: Vec<(f64, (f64, Spread))> = times.iter().zip(outputs).filter(|(t, _)| **t >= from).filter_map(|(t, e)| read_at(e).map(|x| (*t, x))).collect();
-    let ((to, (last, last_error)), earlier) = held.split_last()?;
+/// time (`analysis`) before the last output where T is read to that output (`outputs`, the pilot's estimates at the
+/// plan's outputs `times`, of its `groups`) -- the run's last stretch on the analysis times' grid, which doubles --,
+/// each output's total T against the last's, beyond where the change is beyond its own interval at Šidák's tail among
+/// the comparisons -- every output of the stretch read, not its two ends alone (until 2026-11-23 the last two analysis
+/// times', which a change between them passes by). The change's interval is its own jackknife over the groups
+/// (estimate.rs `temperature_change`): the two outputs share their atoms, and their intervals together, as if
+/// independent, held R4's pilot's +14.3 µK rise over 199-400 µs within 15.2 µK. The change of the largest excess over
+/// its bar; none where fewer than two outputs read T there. The stretch is bounded by the outputs, not by the analysis
+/// times: the plan reads T past the request's end (R4's analysis times run to 800 µs on a 400 µs request), where no
+/// output is.
+fn drift(groups: &[&Group], outputs: &[Estimate], times: &[f64], analysis: &[f64], hbar_over_mass: f64) -> Option<Drift> {
+    let read_at = |e: &Estimate| e.motion.is_some_and(|m| m.temperature_total_error.read());
+    let end = times.iter().zip(outputs).filter(|(_, e)| read_at(e)).map(|(t, _)| *t).last()?;
+    let from = analysis.iter().copied().filter(|t| *t < end).last().unwrap_or(0.);
+    let held: Vec<(usize, f64)> = times.iter().zip(outputs).enumerate().filter(|(_, (t, e))| **t >= from && read_at(e)).map(|(k, (t, _))| (k, *t)).collect();
+    let ((last, to), earlier) = held.split_last()?;
     let comparisons = earlier.len();
     let looks = comparisons as f64;
-    let bar = |error: &Spread| last_error.interval_over(looks).hypot(error.interval_over(looks));
-    let worst = earlier.iter().max_by(|a, b| ((last - a.1 .0).abs() - bar(&a.1 .1)).total_cmp(&((last - b.1 .0).abs() - bar(&b.1 .1))))?;
-    let (difference, at_bar) = (last - worst.1 .0, bar(&worst.1 .1));
-    Some(Drift { difference, at: worst.0, bar: at_bar, from, to: *to, comparisons, beyond: difference.abs() > at_bar })
+    // Per earlier output: its time, the change from it to the last, and the change's bar.
+    let changes: Vec<(f64, f64, f64)> = earlier.iter().filter_map(|&(k, t)| temperature_change(groups, k, *last, hbar_over_mass).map(|(c, s)| (t, c, s.interval_over(looks)))).collect();
+    let &(at, difference, bar) = changes.iter().max_by(|a, b| (a.1.abs() - a.2).total_cmp(&(b.1.abs() - b.2)))?;
+    Some(Drift { difference, at, bar, from, to: *to, comparisons, beyond: difference.abs() > bar })
 }
 
 /// The pilot's reads at the rung it stands at (`attempt`, `pilot_reads`): its estimates and counts, and the model's
@@ -2881,7 +2887,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         {
             let end = read.estimates.last().and_then(|e| e.motion.map(|m| m.temperature_total * e.temperature_target)).unwrap_or(f64::NAN);
             let (r, se, decided) = memory_at_the_end(pilot, &context.scales, end);
-            let drift = match drift(&shown_at, outputs, &read.estimates, times) {
+            let drift = match drift(&outputs_of(pilot), &shown_at, outputs, times, context.scales.hbar_over_mass) {
                 Some(d) => format!("末段 {}：{}", d.said(), if d.beyond { "漂移（出旗标）" } else { "不漂移" }),
                 None => "末段的输出时刻上 T 读不到两个，定不下来".to_string(),
             };
