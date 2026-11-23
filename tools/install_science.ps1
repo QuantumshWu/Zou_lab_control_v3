@@ -210,7 +210,7 @@ if ($DryRun) {
     if ($needed.Count) { Write-Host "  `"$python`" -m pip install --constraint `"$constraints`" $($requirements -join ' ')" }
     if ($runs -eq $python) { Write-Host "  `"$python`" -m pip check$(if ($inherit -or -not $needed.Count) { ' (a warning only)' })" }
     Write-Host "  `"$runs`" -m compileall -q -j 0 $($compiled -join ' ')"
-    Write-Host ('  the plugin check (python -m zlc_plugin describe zlc_atom' + $(if ($Group -eq 'slm-gpu') { ', a GPU dot product and FFT), then tools\warm_slm_gpu.ps1' } else { ')' }))
+    Write-Host ('  the plugin check (the catalogue of zlc_atom, zlc_plugin.describe' + $(if ($Group -eq 'slm-gpu') { ', a GPU dot product and FFT), then tools\warm_slm_gpu.ps1' } else { ')' }))
     return
 }
 
@@ -253,8 +253,16 @@ if ($LASTEXITCODE -ne 0) { Write-Host '  (a warning only: Python compiles the fi
 Write-Host '[5/5] Checking the plugins in the environment they run in ...'
 Invoke-ZlcPluginEnvironment {
     param($interpreter)
-    $catalog = (& $interpreter -m zlc_plugin describe zlc_atom) -join "`n" | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0 -or -not $catalog.types) { throw 'python -m zlc_plugin describe zlc_atom failed.' }
+    # The catalogue the plugin host answers its describe request with (zlc_plugin.describe), as JSON
+    # on stdout; whatever the plugins print while they import goes to stderr.
+    $describe = @'
+import json, sys
+channel, sys.stdout = sys.stdout, sys.stderr
+from zlc_plugin.describe import describe
+channel.write(json.dumps(describe(['zlc_atom']), allow_nan=False))
+'@
+    $catalog = (& $interpreter -c $describe) -join "`n" | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or -not $catalog.types) { throw 'The plugin catalogue (zlc_plugin.describe of zlc_atom) failed.' }
     foreach ($failure in @($catalog.errors)) { Write-Host ($failure | ConvertTo-Json -Depth 4) }
     if (@($catalog.errors).Count) { throw "$(@($catalog.errors).Count) plugin module(s) do not import (above)." }
     Write-Host "  $(@($catalog.types).Count) plugin types import."
