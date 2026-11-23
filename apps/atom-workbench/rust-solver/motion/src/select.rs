@@ -24,7 +24,13 @@
 //!   to the pilot's model, judged on the first `NOMINATION_WALKS` paths (`judge_on`) at its point estimates (`Reach::Point`):
 //!   its contribution the misfit it takes away -- the model error over its target, the largest over the times and the
 //!   readings -- per work it adds a µs, and whether it meets every look there;
-//! - each single that does is judged alone on every path and weighed, a candidate: where a single state is enough, the
+//! - each single that does and whose bound leaves it cheaper than the least found is judged alone on every path and
+//!   weighed, a candidate -- the bound on its booked account on every path the pilot's model's own there less the single's
+//!   contribution against it (`contribution`: their paired difference on those paths, which on the same paths is a row's
+//!   mean exactly and bounds its standard error by the seminorm's triangle) at its upper end there, Student's t on their
+//!   one degree of freedom, its calibration, its loss and its push left out (tilt0 2026-11-23: its 14 singles' bounds 559
+//!   to 914 trajectories, on every path 589 to 2889; none below the pilot's model's W, none judged alone); where a single
+//!   state is enough, the
 //!   singles' needs at their point estimates are the run's own statistics' (R4 2026-11-23: 771 to 794 trajectories each,
 //!   the pilot's own 780), and what tells their W apart is their direct part's spread over the paths, which two paths do
 //!   not see -- on every path 833 to 3133 trajectories; the one first by its misfit on two paths was 13th of 24 by its W,
@@ -53,11 +59,13 @@
 //! memory is the longer: R4's atoms heat through the run).
 //!
 //! The scheme's setting (`Setting`) -- the substeps a turn of the fastest coherence over a stretch's opening (the
-//! start's transient, paths.rs # The start), the substeps a µs after it, and the pieces a step -- is settled by its own
+//! start's transient, paths.rs # The start), the substeps a µs after it, and the pieces a µs (each step's interval in
+//! the least power of two of them that keeps a piece no longer than the knob's, paths.rs `pieces_in`: the ladder's start
+//! the same piece whatever the run's step) -- is settled by its own
 //! error, not fixed
 //! (`settle`): along a stretch the reference is advanced at the setting and at each knob
 //! doubled, each knob's part of the setting's error the largest change of a displayed row from doubling it alone
-//! (Richardson's 2^p/(2^p − 1), p = 2: the amplitudes' linear interpolation at one piece a step, R's at the substep's
+//! (Richardson's 2^p/(2^p − 1), p = 2: the amplitudes' linear interpolation at one piece an interval, R's at the substep's
 //! middle -- paths.rs # The nodes, # The substeps; a rate no lower than one substep a piece, so
 //! that where twice the pieces raise a rate to that floor the pieces' part is read at the raised rates,
 //! `refinements`), and beside them the trace's part, the setting's own run's trace defect (paths.rs
@@ -241,12 +249,13 @@ pub const WALKS: usize = 4;
 pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * POPULATION_TARGET;
 
 /// A setting of the paths' scheme (module documentation, # The paths): the substeps a turn of the fastest coherence over
-/// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a step.
+/// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a µs (each knot interval in
+/// the least power of two of them that keeps a piece no longer than 1/pieces, paths.rs `pieces_in`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Setting {
     pub turns: f64,
     pub rate: f64,
-    pub pieces: usize,
+    pub pieces: f64,
     /// The opening's cutoff (rad/µs): the start's modes up to it resolved, the faster ones booked by their bound
     /// (paths.rs, # The start).
     pub cutoff: f64,
@@ -266,7 +275,7 @@ impl Setting {
         match k {
             0 => s.turns *= 2.0,
             1 => s.rate *= 2.0,
-            2 => s.pieces *= 2,
+            2 => s.pieces *= 2.0,
             _ => s.cutoff *= 2.0,
         }
         s
@@ -284,18 +293,21 @@ impl Setting {
 }
 
 /// The setting the paths' scheme starts from (module documentation, # The paths): a substep a turn of the fastest
-/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a step, the opening
-/// resolving the start's modes up to what those 8 a µs resolve (2π × 8 rad/µs) -- each knob doubled from there as its
-/// error asks.
-pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1, cutoff: std::f64::consts::TAU * 8.0 };
+/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a µs -- eight of
+/// those substeps a piece; at a step shorter than a µs one piece a step, the floor (`ladder`) --, the opening resolving
+/// the start's modes up to what those 8 a µs resolve (2π × 8 rad/µs) -- each knob doubled from there as its error asks.
+/// Like the rate's, the pieces' start is a bound on the work, not a measure of accuracy, and the run's step moves it
+/// only where a piece would be longer than its step.
+pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1.0, cutoff: std::f64::consts::TAU * 8.0 };
 
-/// The finest setting (module documentation, # The paths): 64 substeps a turn, 4096 a µs (32 times P1-PATHS's 128), 64
-/// pieces a step -- a bound on the work, never a measure of accuracy: a setting settled there short of `TOLERANCE` is
-/// said ("到顶未收敛") and its reference's error parts booked whole in every candidate's A (`Settled::unmet`).
-pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 64, cutoff: f64::INFINITY };
+/// The finest setting (module documentation, # The paths): 64 substeps a turn, 4096 a µs (32 times P1-PATHS's 128), 512
+/// pieces a µs (the rate's nine doublings from its start, the pieces' alike) -- a bound on the work, never a measure of
+/// accuracy: a setting settled there short of `TOLERANCE` is said ("到顶未收敛") and its reference's error parts booked
+/// whole in every candidate's A (`Settled::unmet`).
+pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 512.0, cutoff: f64::INFINITY };
 
 /// A refinement's change read as the coarser setting's error (module documentation, # The paths): Richardson's
-/// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- the amplitudes' linear interpolation at one piece a step, the
+/// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- the amplitudes' linear interpolation at one piece an interval, the
 /// recycling's amplitudes at the substep's middle (the cubic interpolation and the exponential Runge–Kutta err at order
 /// 3 or more).
 const RICHARDSON: f64 = 4.0 / 3.0;
@@ -549,6 +561,9 @@ pub struct Paths<'a> {
     /// its own trace stood beyond the tolerance at it, the one the ladder along that stretch went on to (`Paths::new`);
     /// every model judged runs each stretch at its own (`judge_on`).
     pub settings: Vec<Setting>,
+    /// The landing check's budget (paths.rs `Form::landing`): the share of the total T's relative target a landing's
+    /// truncated stretch may move.
+    pub landing_budget: f64,
     series: Vec<Series>,
     calibration: (usize, f64, Vec<Series>),
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
@@ -583,6 +598,8 @@ pub struct Landing {
     pub diffusion: Option<V3>,
     /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch and the diffusion's solve.
     pub work: f64,
+    /// The excess photons' last doubling's change (paths.rs `Form::landing`): booked, not left unconverged.
+    pub photons_error: f64,
 }
 
 /// The paths' scheme as settled (`settle`; module documentation, # The paths): its setting, the calibration's opening (µs), the
@@ -646,7 +663,7 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 
 
 /// `settle`'s ladder along the walk's stretch of `piece` µs from `begin` (from the walk's own start state there) from the
-/// setting `from` (raised to its own rate floor), its runs keeping their states at the times `keep` (the landing
+/// setting `from` (raised to its own floors: one piece a step, one substep a piece), its runs keeping their states at the times `keep` (the landing
 /// check's, where the stretch's own run at the setting it ends on is kept as the stretch's: `Paths::new`).
 #[allow(clippy::too_many_arguments)]
 fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting, keep: &[f64]) -> Result<(Settled, Vec<Vec<Series>>), String> {
@@ -659,7 +676,13 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
         let mut made: Vec<std::vec::IntoIter<Series>> = made.into_iter().map(Vec::into_iter).collect();
         Ok(settings.iter().map(|_| made.iter_mut().map(|x| x.next().expect("a member's series")).collect()).collect())
     };
-    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
+    // A setting's own: a piece no longer than the step (below one piece a step the knob would cut nothing: its doubling
+    // changes no run, and its part reads nought), and a rate of one substep a piece at the least (the pieces of a step's
+    // interval, paths.rs `pieces_in`).
+    let own = |s: Setting| {
+        let pieces = larger(s.pieces, 1.0 / step);
+        Setting { rate: larger(s.rate, crate::paths::pieces_in(0.0, step, pieces) as f64 / step), pieces, ..s }
+    };
     // The cutoff's part: the largest over the stretches the setting takes (`starts`: each from its walk's own start) of
     // what their openings book, the models' together.
     let booked = |s: Setting| -> Result<f64, String> {
@@ -751,7 +774,7 @@ impl<'a> Paths<'a> {
     /// the scheme's setting along the longest walk's [0, L] (`settle`; the first such where several are), and the
     /// reference along the walks at it -- the other walks' on the pool beside the setting's second stage, at the first
     /// stage's setting, and again where the second stage moved it.
-    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light) -> Result<Paths<'a>, String> {
+    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light, landing_budget: f64) -> Result<Paths<'a>, String> {
         let clock = Instant::now();
         let form = Form::new(reference, at);
         let length = run.min(5.0 * memory);
@@ -873,10 +896,8 @@ impl<'a> Paths<'a> {
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
                         .map(|(t, v, landed)| {
-                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j]).map(|(photons, impulse, spent)| {
-                                let (diffusion, solved) = form.diffusion(&walks[w], t, v);
-                                Landing { t, landed, photons, impulse, diffusion, work: spent + solved }
-                            })
+                            let (diffusion, solved) = form.diffusion(&walks[w], t, v);
+                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], diffusion, landing_budget).map(|(photons, impulse, spent, photons_error)| Landing { t, landed, photons, impulse, diffusion, work: spent + solved, photons_error })
                         })
                         .collect()
                 })
@@ -891,7 +912,7 @@ impl<'a> Paths<'a> {
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
         let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
+        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
     }
 
     /// The stretches run at a setting of their own (`settings`), each with it: their trace beyond the tolerance at the
@@ -966,6 +987,19 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
 /// `judge` on the paths' first `walks` walks alone (the nomination's, # The candidates): the others' series none, read in
 /// no window; the calibration where its walk is among them.
 pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<Judged, String> {
+    judge_walked(paths, model, at, walks).map(|x| x.0)
+}
+
+/// A candidate's own along the walks (`judge_walked`): its series along the starts and the late segments, and its
+/// landing checks per stretch -- what its contribution against another model is read on (`contribution`).
+pub struct Walked {
+    series: Vec<Series>,
+    late: Vec<Series>,
+    landed: Vec<Vec<paths::Statistics>>,
+}
+
+/// `judge_on`, its walks' own kept (`Walked`).
+pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<(Judged, Walked), String> {
     let clock = Instant::now();
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
@@ -1041,13 +1075,13 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, _, spent) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own)?;
                         let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
+                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, mine, paths.landing_budget)?;
                         let diffusion = match (mine, l.diffusion) {
                             (Some(c), Some(r)) => [c, r],
                             _ => [[0.0; 3]; 2],
                         };
-                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion }, spent + solved))
+                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion, q_error: [2.0 * error, 2.0 * l.photons_error] }, spent + solved))
                     })
                     .collect::<Result<Vec<_>, String>>()
                     .map(|x| x.into_iter().unzip::<_, _, Vec<_>, Vec<f64>>())
@@ -1092,7 +1126,31 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
     let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
     let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum::<f64>() + landing_work.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    Ok(Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work })
+    let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work };
+    Ok((judged, Walked { series, late: late_series, landed }))
+}
+
+/// A candidate's contribution against another model of the chain (the nomination's, module documentation # The
+/// candidates): its walks' paired difference to the other's (`of`, `against`: both judged on the same walks,
+/// `judge_walked`), read as a judgment is -- per window and row the paths' mean difference and its standard error, the
+/// energy rates' difference per path and its stationary part, each landing check's Q and diffusion the two models' own
+/// --; no calibration, no escape (neither is a difference of the paths' readings).
+pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walked) -> Judged {
+    let labels = &model.scene.request.states;
+    let hm = model.hbar_over_mass();
+    let weights: Vec<f64> = paths.walks.iter().map(|w| w.weight).collect();
+    let paired: Vec<Vec<paths::Statistics>> = of
+        .landed
+        .iter()
+        .zip(&against.landed)
+        .map(|(x, y)| x.iter().zip(y).map(|(x, y)| paths::Statistics { t: x.t, q: [x.q[0], y.q[0]], diffusion: [x.diffusion[0], y.diffusion[0]], q_error: [x.q_error[0], y.q_error[0]] }).collect())
+        .collect();
+    let n = paths.walks.len();
+    let (landed_start, landed_late) = paired.split_at(n.min(paired.len()));
+    let windows = paths::compare(&of.series, &against.series, &paths.windows, labels, hm, landed_start, &weights);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, _)| paths::compare(&of.late, &against.late, w, labels, hm, landed_late, &weights));
+    let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
+    Judged { keep: model.rs.keep.clone(), windows, late, calibration: Calibration::default(), escape: None, statistics: None, stationary, seconds: 0.0, products: 0, work: 0.0 }
 }
 
 /// The loss's x of a candidate (module documentation, # The motion; `Judged::escape`) of its series along the walks'

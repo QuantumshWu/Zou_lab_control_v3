@@ -476,8 +476,10 @@
 //!    looks they leave (`looks`); a candidate whose looks that the exact model's would meet are met by its account is
 //!    complete, its work W the product's trajectories its looks need times its work over the run, and -- not the
 //!    pilot's -- the scout's and the pilot's again on it. Where a model with more states could work less, each addable
-//!    state's addition alone is judged on two paths; those that meet every look there are judged alone on every path and
-//!    weighed (what tells their W apart is the paths' spread, which two paths do not see); the nominees are the prefixes
+//!    state's addition alone is judged on two paths; those that meet every look there, and whose W's bound -- the pilot's
+//!    model's account on every path less the single's paired contribution on the two at its upper end -- stands below
+//!    the least found, are judged alone on every path and weighed (what tells their W apart is the paths' spread, which
+//!    two paths do not see); the nominees are the prefixes
 //!    of the states' order -- those singles by their W, then the others by the misfit each takes away per work it adds
 //!    --, and from the first predicted to fit each is judged on every path until one is complete, above it while its
 //!    least W -- at no model error, at the ladder's first rung's step, its pilot again -- stands below the least found.
@@ -2289,6 +2291,9 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
     }
     let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, None, messages);
+    // Where the scout stood, before the pilot's ladder moved it: the choice carries every candidate's own scout by the same
+    // correction (`choose_on_the_pilot`).
+    let scouted_at = context.tau;
     // A candidate's short scout (`Choosing::Scout`): the rung its own two levels stand on (`settle`: down the ladder
     // to the first rung whose own read is in and not clearly beyond), the check's priced course not taken -- a scout
     // with it took PGC3D's P20 34-68 s, R4's P26 87 s.
@@ -2395,7 +2400,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let mut read = read;
     if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
         let pilot_refs: Vec<&Part> = pilot.iter().collect();
-        let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
+        let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, scouted_at, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
             return Ok(Attempted::RanAway);
         };
         let made = std::sync::Arc::new(made);
@@ -2691,13 +2696,22 @@ struct Weighed {
 /// of least W. None where no path went past its start because the model's fold scattered beyond
 /// every state of the atom there (a pilot's trajectory ran away at t = 0, step.rs # The domain): nothing to choose on.
 #[allow(clippy::too_many_arguments)]
-fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
+fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, scouted_at: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
     use crate::select::{direct_at, direct_bound_at, judge, Paths, Reach, WALKS};
     let clock = Instant::now();
     let run = setting.run;
     let trap = setting.trap;
     let hm = run.hbar_over_mass();
     let tau = context.tau;
+    // Every model's step the same way (one method, one quantity): a scout stands at its rung, and the pilot's ladder -- the
+    // same check, on more trajectories, at two levels and priced -- takes the run on from there; G's took it from its scout's
+    // `scouted_at` to τ, and a candidate's own takes it alike (R4 2026-11-23: G's scout 0.9479 µs, its pilot's ladder 0.1185;
+    // P9 (+D1-2--2)'s scout 0.9479, its own pilot's ladder 0.1185). So a candidate's step is its own scout's rung carried by
+    // that correction, τ/`scouted_at`, and the longest a run may stand at is the ladder's first rung carried so. (Until
+    // 2026-11-23 a candidate's W was read at its scout's rung and G's at its pilot's: G + an idle D1 state looked 2.7 times
+    // the cheaper for its step alone.)
+    let carried = if scouted_at > 0. && tau > 0. { tau / scouted_at } else { 1. };
+    let first = first * carried;
     let domain = Domain { widest: Widest::of(request) };
     let light = run.light();
     let centre = trap.centre;
@@ -2784,19 +2798,24 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         if walked.iter().all(|w| !(w.end() > 0.)) && read.counts.runaway.since == Some(0.) {
             return Ok(None);
         }
-        let paths = Paths::new(&full, centre, walked, memory, length, tau, light)?;
+        // The landing check's budget (paths.rs `Form::landing`): what it may move of the total T, relative, s⁴/2 of the
+        // tightest relative target over the outputs -- the need, ∝ 1/(target − A)², then grows by s⁴ at most (the step's
+        // share's convention, units.rs `STEP_SHARE`); the tightest possible, 0.1, where no T is read.
+        let tightest = read.estimates.iter().filter(|e| e.motion.is_some()).map(|e| e.temperature_target).fold(f64::INFINITY, crate::linalg::smaller);
+        let landing_budget = 0.5 * STEP_SHARE.powi(4) * if tightest.is_finite() { tightest } else { 0.1 };
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, light, landing_budget)?;
         let settled = &paths.settled;
         noted(
             &mut report,
             format!(
-                "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快的模（转动加衰减）每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每步 {} 段（按误差定：参照的误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e} + 迹偏差 {:.1e}（最长一条路径全长 {:.1} µs 上，先在前 {} µs 上爬梯；迹偏差每条路径都查），容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照沿全部路径的最大迹偏差 {:.1e}（记进每个候选的 A）{}；参照 32 态 {:.1} s",
+                "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快的模（转动加衰减）每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每 µs {:.1} 段（每步 {} 段；按误差定：参照的误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e} + 迹偏差 {:.1e}（最长一条路径全长 {:.1} µs 上，先在前 {} µs 上爬梯；迹偏差每条路径都查），容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照沿全部路径的最大迹偏差 {:.1e}（记进每个候选的 A）{}；参照 32 态 {:.1} s",
                 paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
-                settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], settled.trace, paths.calibrated_over(), crate::select::CALIBRATION, crate::select::TOLERANCE,
+                settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, crate::paths::pieces_in(0.0, tau, settled.setting.pieces), settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], settled.trace, paths.calibrated_over(), crate::select::CALIBRATION, crate::select::TOLERANCE,
                 settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各旋钮误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.trace,
                 {
                     let raised = paths.raised();
                     let n = paths.walks.len();
-                    if raised.is_empty() { String::new() } else { format!("；{} 段在定下的设置上迹偏差超容差，各沿自己那段再爬梯、按自己的设置跑（{}），别的段不重跑", raised.len(), raised.iter().map(|(j, s)| format!("路径 {} {}：其后每 µs {:.1} 个、每步 {} 段", j % n, if *j < n { "起点段" } else { "运行末段" }, s.rate, s.pieces)).collect::<Vec<_>>().join("；")) }
+                    if raised.is_empty() { String::new() } else { format!("；{} 段在定下的设置上迹偏差超容差，各沿自己那段再爬梯、按自己的设置跑（{}），别的段不重跑", raised.len(), raised.iter().map(|(j, s)| format!("路径 {} {}：其后每 µs {:.1} 个、每 µs {:.1} 段", j % n, if *j < n { "起点段" } else { "运行末段" }, s.rate, s.pieces)).collect::<Vec<_>>().join("；")) }
                 },
                 paths.seconds
             ),
@@ -2979,18 +2998,41 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let price_tau = price(run, tau, true).0;
             // A single whose least W -- at no model error, at the ladder's first rung, its pilot again -- is no lower than
             // the least found, and every nominee holding it, can cost no less: it is not judged, and nominated last.
-            let made: Vec<(usize, std::sync::Arc<Selected>, bool)> = addable
+            let made: Vec<(usize, std::sync::Arc<Selected>, f64, bool)> = addable
                 .par_iter()
-                .map(|&e| -> Result<(usize, std::sync::Arc<Selected>, bool), String> {
+                .map(|&e| -> Result<(usize, std::sync::Arc<Selected>, f64, bool), String> {
                     let mut keep = own.clone();
                     keep.push(e);
                     keep.sort_unstable();
                     let model = make(&keep)?;
                     let least = price(&model, first, false).0;
-                    Ok((e, model, need0 * least * span + again(1, least) < found))
+                    Ok((e, model, least, need0 * least * span + again(1, least) < found))
                 })
                 .collect::<Result<_, _>>()?;
-            let mine = if made.iter().any(|x| x.2) { misfit(&point(&crate::select::judge_on(&paths, run, centre, few)?)) } else { f64::NAN };
+            // The pilot's model on those paths, its walks kept: each single's contribution is read against them.
+            let pilot_few = if made.iter().any(|x| x.3) { Some(crate::select::judge_walked(&paths, run, centre, few)?) } else { None };
+            let mine = pilot_few.as_ref().map_or(f64::NAN, |(j, _)| misfit(&point(j)));
+            // A single's booked account on every path is no less than the pilot's model's there less the single's
+            // contribution against it -- on the same paths a row's mean is the two's sum and its standard error no less than
+            // the difference of theirs (a seminorm's triangle), so |m_s| + q·se_s ≥ |m_G| + q·se_G − (|m_δ| + q·se_δ), the
+            // largest row's and T's alike --, the contribution read on the nomination's paths, paired, at its upper end
+            // there (Student's t on their one degree of freedom, 14 at the run's confidence: its spread term q·se/√2 is
+            // some six times what the same contribution's reads on four paths and more, so the bound errs low and judges
+            // more). Its calibration, its loss and its push, each no less than nought, are left out of the bound. (tilt0
+            // 2026-11-23: its 14 singles' bounds 559 to 914 trajectories, on every path 589 to 2889, each below.)
+            let pilot_all = &weighed[0].judged;
+            let below = |delta: &crate::select::Judged| -> Booked {
+                let direct = |t: f64| -> Option<f64> {
+                    let g = direct_bound_at(pilot_all, &paths.windows, t, Reach::Upper)? - pilot_all.calibration.rows;
+                    Some(crate::linalg::larger(g - direct_bound_at(delta, &paths.windows, t, Reach::Upper).unwrap_or(0.), 0.))
+                };
+                let motion = |k: usize| -> Option<crate::select::Motion> {
+                    let g = crate::select::motion_at(pilot_all, &paths.windows, &course, k, hm, Reach::Upper)?;
+                    let d = crate::select::motion_at(delta, &paths.windows, &course, k, hm, Reach::Upper).map_or(0., |m| m.temperature_total);
+                    Some(crate::select::Motion { loss: 0., temperature_total: crate::linalg::larger(g.temperature_total - d, 0.), push: [f64::NAN; 3], velocity: [f64::NAN; 3], temperature: [0.; 3] })
+                };
+                model_of(&direct, &motion, &shown_at, outputs, optical, &context.fixed.escape)
+            };
             let with = |e: usize| -> Vec<usize> {
                 let mut keep = own.clone();
                 keep.push(e);
@@ -2999,17 +3041,26 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             };
             // Per single: its state, the misfit it takes away, the work it adds a µs, whether it meets every look at its point
             // estimates on those paths (its unresolved states booked whole, `asks`), and its model.
-            let singles: Vec<(usize, f64, f64, bool, std::sync::Arc<Selected>)> = made
+            // Per single also whether its bound (`below`) leaves it cheaper than the least found.
+            let singles: Vec<(usize, f64, f64, bool, std::sync::Arc<Selected>, bool)> = made
                 .into_par_iter()
-                .map(|(e, model, open)| -> Result<(usize, f64, f64, bool, std::sync::Arc<Selected>), String> {
+                .map(|(e, model, least, open)| -> Result<(usize, f64, f64, bool, std::sync::Arc<Selected>, bool), String> {
                     if !open {
-                        return Ok((e, f64::NAN, f64::INFINITY, false, model));
+                        return Ok((e, f64::NAN, f64::INFINITY, false, model, false));
                     }
                     let (price, runaway) = price(&model, tau, false);
-                    let at = point(&crate::select::judge_on(&paths, &model, centre, few)?);
+                    let (judged, walked) = crate::select::judge_walked(&paths, &model, centre, few)?;
+                    let at = point(&judged);
                     let taken = mine - misfit(&at);
                     let (met, _, _) = asks(unresolved(at, runaway), price, 1);
-                    Ok((e, taken, price - price_tau, met == [true; 2], model))
+                    let pilot_walked = &pilot_few.as_ref().expect("the pilot's model on the nomination's paths").1;
+                    let (_, need_below, _) = asks(below(&crate::select::contribution(&paths, &model, &walked, pilot_walked)), least, 1);
+                    let cheaper = need_below * least * span + again(1, least) < found;
+                    #[cfg(test)]
+                    if std::env::var_os("SEL_BOUND").is_some() {
+                        eprintln!("    [bound] +{}: met {met:?}, need below {need_below:.0} (W {:.3e}), found {found:.3e}: {}", labels[e], need_below * least * span + again(1, least), if cheaper { "judged" } else { "pruned" });
+                    }
+                    Ok((e, taken, price - price_tau, met == [true; 2], model, cheaper))
                 })
                 .collect::<Result<_, _>>()?;
             let mut order: Vec<usize> = (0..singles.len()).collect();
@@ -3019,7 +3070,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             // (R4 2026-11-23: 771 to 794 trajectories each, the pilot's 780), and what tells their W apart is the paths'
             // spread, which two paths do not see (on every path 833 to 3133; the one first by misfit on two paths 7th of ten by
             // its W). Each is judged on every path, together, and weighed alone.
-            let alone: Vec<usize> = order.iter().copied().filter(|&i| singles[i].3).collect();
+            let alone: Vec<usize> = order.iter().copied().filter(|&i| singles[i].3 && singles[i].5).collect();
+            // Those whose bound leaves them no cheaper: neither judged alone nor the chain's first prefix (a single).
+            let bounded: Vec<usize> = (0..singles.len()).filter(|&i| singles[i].3 && !singles[i].5).collect();
+            let pruned = bounded.len();
             let clock_alone = Instant::now();
             let judged_alone: Vec<_> = alone.par_iter().map(|&i| judgment(1, &with(singles[i].0), &singles[i].4)).collect::<Result<_, _>>()?;
             let info: Vec<(usize, f64)> = singles.iter().map(|s| (s.0, s.1)).collect();
@@ -3031,6 +3085,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 models.push(singles[i].take());
                 predicted.push(mine - info[i].1);
                 let w = booked(place, j, &mut report);
+                #[cfg(test)]
+                if std::env::var_os("SEL_BOUND").is_some() {
+                    eprintln!("    [bound] +{}: on every path need {:.0}, W {:?}", labels[info[i].0], w.need, w.work);
+                }
                 found = found.min(w.work.unwrap_or(f64::INFINITY));
                 settle |= w.open && more_paths;
                 alone_work.push((i, w.work.unwrap_or(f64::INFINITY)));
@@ -3050,8 +3108,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 if taken > 0. {
                     left -= taken;
                 }
-                // The first prefix is a single: weighed alone already, or the nominee with the single's own model.
-                if k == 0 && alone.contains(&i) {
+                // The first prefix is a single: weighed alone already, no cheaper by its bound, or the nominee with the
+                // single's own model.
+                if k == 0 && (alone.contains(&i) || bounded.contains(&i)) {
                     continue;
                 }
                 chain.push(keep.clone());
@@ -3067,7 +3126,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 format!("提名：每个可加回的激发态单独加进先导的模型，最小 W 都不低于已找到的 {found:.3e}，都不判；{:.1} s", clock.elapsed().as_secs_f64())
             } else {
                 format!(
-                    "提名（每个可加回的激发态单独加进先导的模型，在 {few} 条路径上按点估计判：去掉的失配 / 每 µs 多出的代价，最小 W 不低于已找到的不判；点估计下显示量与温度都够的 {} 个单独在全部路径上判、按 W 排在前面，{:.1} s）：先导模型的失配 {mine:.3}；{}；{:.1} s",
+                    "提名（每个可加回的激发态单独加进先导的模型，在 {few} 条路径上按点估计判：去掉的失配 / 每 µs 多出的代价，最小 W 不低于已找到的不判；点估计下显示量与温度都够的 {} 个单独在全部路径上判、按 W 排在前面，{:.1} s；另有 {pruned} 个按它对先导模型的配对贡献的上端，W 的下界已不低于已找到的，不单独判）：先导模型的失配 {mine:.3}；{}；{:.1} s",
                     alone.len(),
                     clock_alone.elapsed().as_secs_f64(),
                     ordered.iter().map(|&i| alone_work.iter().find(|a| a.0 == i).map_or(format!("{}", labels[info[i].0]), |a| format!("{}（W {}）", labels[info[i].0], if a.1.is_finite() { format!("{:.2e}", a.1) } else { "不够".to_string() }))).collect::<Vec<_>>().join(" → "),
@@ -3135,10 +3194,11 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             noted(&mut report, format!("{count} 条路径上 {names} 够用与否定不下来；判清可省 W {saving:.3e}，加倍到 {next} 条的功 {more:.3e}{}：按直接部分的上端记", if count < available { "，不划算" } else { "（已用先导的全部路径）" }));
         }
         // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
-        // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
+        // stand at a longer one (the 2026-11-21 P20 at 0.474 µs where G stood at 0.1185). Each one's scout alone on its own
         // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, down
-        // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), its work a µs at the rung the scout stands at, and its W again
-        // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
+        // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), carried
+        // as G's was (`carried`), its work a µs there, and its W again there with the scout's work beside -- one member of
+        // each pilot group at two levels, the companion's at most half.
         // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
         // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
         // (G's at its own step where G is complete, the scouted ones' at theirs); the rest keep their W at G's step, which is
@@ -3166,12 +3226,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 _ => unreachable!("a scout's attempt stops at its rung"),
             };
             messages.stage(Stage { step: Step::Select, tau: None, batch: None });
-            let price = price(model, rung, false).0;
-            let scout = scout_of(price);
+            let step = rung * carried;
+            let (price, scout) = (price(model, step, false).0, scout_of(price(model, rung, false).0));
             let entry = &mut weighed[i];
             let w = entry.need * price * span + again(entry.place, price) + scout;
             best = crate::linalg::smaller(best, w);
-            entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
+            entry.fate += &format!("；自己的侦察立定于 {rung:.4} µs，按先导阶梯对 G 的侦察的同一修正（{scouted_at:.4} → {tau:.4} µs）记为 τ = {step:.4} µs：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
             (entry.price, entry.work) = (price, Some(w));
             noted(&mut report, format!("{}：{}", named(&entry.judged.keep), entry.fate));
         }

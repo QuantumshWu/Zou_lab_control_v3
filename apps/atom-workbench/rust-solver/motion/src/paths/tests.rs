@@ -100,8 +100,8 @@ fn walks_of(file: &str, state: usize) -> Vec<Walk> {
         .collect()
 }
 
-/// The scheme of PATHS_SCHEME: "exponential:<substeps a µs>[:<pieces a step>[:<read>[:<the opening's substeps a
-/// turn>]]]".
+/// The scheme of PATHS_SCHEME: "exponential:<substeps a µs>[:<pieces a µs, none one a knot interval>[:<read>[:<the
+/// opening's substeps a turn>]]]".
 fn scheme_of(text: &str) -> Scheme {
     let p: Vec<&str> = text.split(':').collect();
     assert_eq!(p[0], "exponential", "the paths' one scheme");
@@ -109,7 +109,7 @@ fn scheme_of(text: &str) -> Scheme {
         cutoff: f64::INFINITY,
         turns: p.get(4).map_or(1.0, |x| x.parse().unwrap()),
         rate: p[1].parse().unwrap(),
-        pieces: p.get(2).map_or(1, |x| x.parse().unwrap()),
+        pieces: p.get(2).map_or(0.0, |x| x.parse().unwrap()),
         read: p.get(3).map_or(1, |x| x.parse().unwrap()),
     }
 }
@@ -179,7 +179,8 @@ fn paths_cost() {
 /// states along a slow line through the trap's centre, a setting and its refinements -- the opening's substeps, the
 /// rate, the pieces and a partner's rate doubled or raised alone, at one and at two pieces a step --, every reading's
 /// time, rows and rates, the opening, its bound, the condition and the end state the same as each run's alone; its
-/// nodes and products fewer.
+/// nodes and products fewer; and knobs that are not powers of two of one another a family alike (their pieces are,
+/// interval by interval: `pieces_in`).
 #[test]
 #[ignore]
 fn paths_a_family_is_its_members() {
@@ -194,9 +195,9 @@ fn paths_a_family_is_its_members() {
             [t, c[0] + speed * t, c[1], c[2], speed / hm, 0.0, 0.0]
         });
         let walk = Walk { index: 0, start: vec![(7, C64::ONE)], ends: ends.collect(), lost: false, weight: 1.0 };
-        let at = |turns: f64, rate: f64, pieces: usize| Scheme::Exponential { turns, rate, pieces, cutoff: f64::INFINITY, read: 1 };
-        for pieces in [1, 2] {
-            let members = [at(1.0, 8.0, pieces), at(2.0, 8.0, pieces), at(1.0, 16.0, pieces), at(1.0, 8.0, 2 * pieces), at(1.0, 9.0, pieces)];
+        let at = |turns: f64, rate: f64, pieces: f64| Scheme::Exponential { turns, rate, pieces, cutoff: f64::INFINITY, read: 1 };
+        for pieces in [1.0 / step, 2.0 / step] {
+            let members = [at(1.0, 8.0, pieces), at(2.0, 8.0, pieces), at(1.0, 16.0, pieces), at(1.0, 8.0, 2.0 * pieces), at(1.0, 9.0, pieces)];
             let family = form.along_family(&walk, &walk.start, 0.0, walk.end(), &members).unwrap();
             let alone: Vec<Series> = members.iter().map(|&s| form.along(&walk, &walk.start, 0.0, walk.end(), s).unwrap()).collect();
             let same = |a: &Series, b: &Series| a.readings.len() == b.readings.len() && a.readings.iter().zip(&b.readings).all(|(x, y)| x.t == y.t && x.rows == y.rows && x.rates == y.rates) && a.state == b.state;
@@ -216,6 +217,11 @@ fn paths_a_family_is_its_members() {
             assert!(!same(&family[0], &family[2]), "{scene} pieces {pieces}: the rate changes nothing");
             assert!(sum(&family, &|c| c.nodes) < sum(&alone, &|c| c.nodes) && sum(&family, &|c| c.products) < sum(&alone, &|c| c.products));
         }
-        assert!(form.along_family(&walk, &walk.start, 0.0, walk.end(), &[at(1.0, 8.0, 3), at(1.0, 8.0, 2)]).is_err(), "pieces not powers of two of one another refused");
+        let odd = [at(1.0, 8.0, 3.0 / step), at(1.0, 8.0, 2.0 / step)];
+        let family = form.along_family(&walk, &walk.start, 0.0, walk.end(), &odd).unwrap();
+        for (k, (f, &s)) in family.iter().zip(&odd).enumerate() {
+            let alone = form.along(&walk, &walk.start, 0.0, walk.end(), s).unwrap();
+            assert!(f.readings.len() == alone.readings.len() && f.readings.iter().zip(&alone.readings).all(|(x, y)| x.t == y.t && x.rows == y.rows && x.rates == y.rates) && f.state == alone.state, "{scene}: the odd family's member {k} is not its run alone");
+        }
     }
 }
