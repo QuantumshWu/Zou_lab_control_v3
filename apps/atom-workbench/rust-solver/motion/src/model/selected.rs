@@ -6,9 +6,19 @@
 //! # One cluster, one frame
 //! The trajectory's states are P, all of them one cluster (the ground states first: `Rs::keep` is sorted), in the frame
 //! θ of floquet/frame.rs chosen at the checkpoint's centre at rest: ψ_a = e^{−iθ_a t} x_a with θ_a an exact vector over
-//! the generators (the beams, the carrier) and α. No Doppler frame (K_s = 0, as onefold): at the step's outer nodes the
-//! model is taken at the path's own points, so the beams' plane waves turn with the path there and the classical
-//! centre of mass gives each key its K·v; its time phases are each beam's frequency at rest with its recoil,
+//! the generators (the beams, the carrier) and α. At the step's outer nodes the model is taken at the path's own points,
+//! so the beams' plane waves turn with the path there and the classical centre of mass gives each key its K·v; and the
+//! states are in the Doppler frame that is the time frame's spatial twin, ψ_a = e^{iK_a·v s} x_a on the path s from the
+//! middle, K_a = Σ_l (θ_a − θ_0)[l] k_l over the non-tweezer beams (the first state's K a phase of the whole state, which
+//! nothing reads; model.rs `Cluster::waves`): an element a ← b of key c turns along the path at (q_c − K_a + K_b)·v, the
+//! spatial twin of its slow remainder c − θ_a + θ_b, so that what is static in time is still along the path -- a running
+//! wave's coupling of the frame's own beam --, and only the light's pattern, two beams' (k_l − k_m)·v, is left to the
+//! nodes. The middle gives every matrix in the frame (`turns`: entry a ← b of the lab's times e^{−i(K_a − K_b)·v s},
+//! the generator with diag(K_a·v)) and reads every density of it as the lab's there (step.rs, # The kick). Until
+//! 2026-11-22 none (K = 0, as onefold): a running wave's phase along the path was the three nodes' parabola, which a step
+//! of R9_PUSH's push turned by 3.3 rad over a half step -- with the end state's held forms (step.rs, # The path's
+//! momentum) the window's momentum error 4.0 % at 2.84 µs; in the frame alone 0.45 %, with the mean state's forms
+//! 0.018 ± 0.014 % (motion3d_status/rewrite/study/B.report.md §2.1). Its time phases are each beam's frequency at rest with its recoil,
 //! f_g = ω_g − ħ|k_g|²/2m (`Scene::doppler` at κ = 0, the one Doppler shift per beam, model/rs.rs # The frequencies: the
 //! frame is made at those, its lattice holding each laser's recoil exactly), so that a node at κ = 0 is `now(t)` at
 //! every time. An element a ← b of a component of key c then holds e^{−iΩt}, Ω = (c − θ_a + θ_b)·(f, α)
@@ -253,6 +263,8 @@ struct Reads {
     phases: Vec<C64>,
     sigma: Vec<C64>,
     dagger: Vec<C64>,
+    /// A density of the frame as the lab's (`SelectedMiddle::unframed`).
+    lab: Vec<C64>,
     minus: [Vec<C64>; 3],
     turned: [Vec<C64>; 3],
     photons: Vec<Photons>,
@@ -448,7 +460,25 @@ impl Selected {
         }
         let theta = rs.keep.iter().map(|&s| frame.theta[s].iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum()).collect();
         let n = rs.keep.len();
-        let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: vec![[0.0; 3]; n], waves_exact: vec![Beat::whole(vec![]); n], states: rs.keep.clone() };
+        // The Doppler frame (module documentation, # One cluster, one frame): each state's K_a = Σ_l (θ_a − θ_0)[l] k_l
+        // over the non-tweezer beams' generators l of its time frame, against P's first state's (a common K is a phase
+        // of the whole state, which nothing reads); exactly, as integers on the beams, and their wave vectors.
+        let beams: Vec<(usize, usize)> = scene.generators.iter().enumerate().filter_map(|(g, generator)| generator.beam.filter(|&l| l != scene.tweezer()).map(|l| (g, l))).collect();
+        let exact: Vec<Vec<i64>> = rs.keep.iter().map(|&s| beams.iter().map(|&(g, _)| frame.theta[s][g] - frame.theta[rs.keep[0]][g]).collect()).collect();
+        let doppler: Vec<V3> = exact
+            .iter()
+            .map(|on| {
+                let mut k = [0.0; 3];
+                for (&c, &(_, l)) in on.iter().zip(&beams).filter(|(c, _)| **c != 0) {
+                    let q = scene.geometry[l].wave_vector();
+                    for a in 0..3 {
+                        k[a] += c as f64 * q[a];
+                    }
+                }
+                k
+            })
+            .collect();
+        let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: doppler, waves_exact: exact.into_iter().map(Beat::whole).collect(), states: rs.keep.clone() };
         // The tweezer's unit fold's static part (`Tweezer::still`): its ground diagonal `Scene::trap_potential`'s depth, the
         // whole the other lights' smooth shifts' (`Scene::smooth`, the reported trap's).
         let unit = rs.tweezer().still();
@@ -1529,6 +1559,39 @@ impl SelectedMiddle<'_> {
         node
     }
 
+    /// The Doppler frame's turn at the time s from the middle along the path (module documentation, # One cluster, one
+    /// frame): p_a = e^{−iK_a·v s} per state, an element a ← b of the lab's matrices the frame's times p_a p_b*; none
+    /// where nothing turns -- at the middle, or where every K is zero.
+    fn turns(&self, path: &Path, s: f64) -> Option<[C64; STATES]> {
+        let waves = &self.model.cluster.waves;
+        if s == 0.0 || waves.iter().all(|k| *k == [0.0; 3]) {
+            return None;
+        }
+        let mut p = [C64::ONE; STATES];
+        for (p, k) in p.iter_mut().zip(waves) {
+            *p = C64::cis(-(0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>() * s);
+        }
+        Some(p)
+    }
+
+    /// A matrix of the lab at a time into the frame there (`turns`): entry a ← b times p_a p_b*.
+    fn framed(p: &[C64], m: &mut [C64]) {
+        let n = m.len().isqrt();
+        for a in 0..n {
+            for b in 0..n {
+                m[a * n + b] *= p[a] * p[b].conj();
+            }
+        }
+    }
+
+    /// A density of the frame at a time as the lab's there (`turns`), for the lab's matrices: tr(Ĝ_frame ρ) = Σ_ab
+    /// G_ab p_a p_b* ρ_ba, so ρ_ab times p_a* p_b.
+    fn unframed(p: &[C64], rho: &[C64], out: &mut Vec<C64>) {
+        let n = rho.len().isqrt();
+        out.clear();
+        out.extend((0..n * n).map(|i| rho[i] * p[i / n].conj() * p[i % n]));
+    }
+
     /// e^{−iΩ (t_m + s)} of a beat.
     fn phase(&self, values: &[f64], beat: usize, s: f64) -> C64 {
         if beat == 0 {
@@ -1668,11 +1731,15 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         Path { kappa, velocity }
     }
 
-    fn gauge(&self, _: &Path, rates: &mut [f64]) {
-        rates.fill(0.0);
+    /// K_a·v of each state's Doppler frame (module documentation, # One cluster, one frame).
+    fn gauge(&self, path: &Path, rates: &mut [f64]) {
+        for (rate, k) in rates.iter_mut().zip(&self.model.cluster.waves) {
+            *rate = (0..3).map(|a| k[a] * path.velocity[a]).sum();
+        }
     }
 
-    /// Ĥ(s) = Σ_k G_k(s) e^{−iΩ_k(t_m + s)} (module documentation, # The generator by beats).
+    /// Ĥ(s) = Σ_k G_k(s) e^{−iΩ_k(t_m + s)} (module documentation, # The generator by beats), in the Doppler frame with
+    /// its diag(K_a·v).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
         let node = self.node(path, s, false);
         h.data.fill(C64::ZERO);
@@ -1684,6 +1751,13 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                 }
             }
         });
+        if let Some(p) = self.turns(path, s) {
+            SelectedMiddle::framed(&p, &mut h.data);
+        }
+        let n = self.states();
+        for (a, k) in self.model.cluster.waves.iter().enumerate() {
+            h.data[a * n + a] += C64::real((0..3).map(|i| k[i] * path.velocity[i]).sum::<f64>());
+        }
     }
 
     /// Each candidate's ν and its key (module documentation, # The generator by beats): the exact vector of the beat
@@ -1711,6 +1785,9 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                         *z = f * *x;
                     }
                 }
+                if let Some(p) = self.turns(path, s) {
+                    SelectedMiddle::framed(&p, &mut out.data);
+                }
             }
         });
     }
@@ -1724,11 +1801,18 @@ impl crate::step::Middle for SelectedMiddle<'_> {
             let node = self.node(path, s, false);
             let forms = READS.with(|r| {
                 let mut r = r.borrow_mut();
-                let Reads { sigma, dagger, .. } = &mut *r;
+                let Reads { sigma, dagger, lab, .. } = &mut *r;
                 sigma.clear();
                 sigma.extend(re.iter().zip(im).map(|(r, i)| *r + C64::I * *i));
                 dagger.clear();
                 dagger.extend((0..n * n).map(|x| sigma[(x % n) * n + x / n].conj()));
+                // The frame's sums as the lab's at the node (`turns`).
+                if let Some(p) = self.turns(path, s) {
+                    for m in [&mut *sigma, &mut *dagger] {
+                        SelectedMiddle::unframed(&p, m, lab);
+                        std::mem::swap(m, lab);
+                    }
+                }
                 self.model.read(|b| {
                     let mut f = [C64::ZERO; 3];
                     for (member, rho) in [(c.plus, &*sigma), (c.minus, &*dagger)] {
@@ -1754,10 +1838,18 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         [2.0 * n * n, 6.0 * n * n]
     }
 
-    /// Re tr(Ĝ(s) ρ): H_eff's gradient at the time s, every beat at its phase.
+    /// Re tr(Ĝ(s) ρ): H_eff's gradient at the time s, every beat at its phase, on the frame's ρ there.
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
         let node = self.node(path, s, false);
-        let f = self.model.read(|b| SelectedMiddle::contract(&node, |beat| Some(self.phase(&b.value, beat, s)), rho));
+        let contract = |rho: &[C64]| self.model.read(|b| SelectedMiddle::contract(&node, |beat| Some(self.phase(&b.value, beat, s)), rho));
+        let f = match self.turns(path, s) {
+            Some(p) => READS.with(|r| {
+                let lab = &mut r.borrow_mut().lab;
+                SelectedMiddle::unframed(&p, rho, lab);
+                contract(lab)
+            }),
+            None => contract(rho),
+        };
         f.map(|z| z.re)
     }
 
@@ -1798,8 +1890,9 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         self.made.get()
     }
 
-    /// Ĝ_a(s) as matrices, and where asked their slope along the path at the middle: the envelopes' chord through the
-    /// outer nodes ±h of the step it is asked with and each beat's phase's derivative −iΩ.
+    /// Ĝ_a(s) as matrices in the frame, and where asked their slope along the path at the middle: the envelopes' chord
+    /// through the outer nodes ±h of the step it is asked with, each end in the frame there, and each beat's phase's
+    /// derivative −iΩ.
     fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64 {
         assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
         let n = self.states();
@@ -1831,11 +1924,20 @@ impl crate::step::Middle for SelectedMiddle<'_> {
             let mut r = r.borrow_mut();
             let Reads { phases, minus, turned, .. } = &mut *r;
             at(&node, s, false, phases, g);
+            if let Some(p) = self.turns(path, s) {
+                g.iter_mut().for_each(|x| SelectedMiddle::framed(&p, x));
+            }
             let mut counted = 3.0 * node.gradient.len() as f64 * (n * n) as f64;
             if let (Some((h, slope)), Some(before), Some(after)) = (slope, before, after) {
-                // The envelopes' chord at the middle's phases, and the phases' turn on the middle's envelopes.
+                // The envelopes' chord at the middle's phases, each end in the frame there, and the phases' turn on the
+                // middle's envelopes.
                 at(&before, 0.0, false, phases, minus);
                 at(&after, 0.0, false, phases, slope);
+                for (side, m) in [(-h, &mut *minus), (h, &mut *slope)] {
+                    if let Some(p) = self.turns(path, side) {
+                        m.iter_mut().for_each(|x| SelectedMiddle::framed(&p, x));
+                    }
+                }
                 for (p, m) in slope.iter_mut().zip(minus.iter()) {
                     p.iter_mut().zip(m).for_each(|(p, m)| *p = (*p - *m) / (2.0 * h));
                 }

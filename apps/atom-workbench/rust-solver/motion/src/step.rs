@@ -20,7 +20,7 @@
 //!
 //! # The kick (B)
 //! The position stays at r_h; the internal state goes along the straight path r_h + v_m(t − t_m), the path's phases
-//! exact: with ψ_s = e^{iK_s·v(t − t_m)} x_s in the cluster's Doppler frame (`Plan::waves`) x evolves under Ĥ(t), the
+//! exact: with ψ_s = e^{iK_s·v(t − t_m)} x_s in the cluster's Doppler frame (model.rs `Cluster::waves`) x evolves under Ĥ(t), the
 //! generator on the path in that frame with the frame's diag(K_s·v). The model gives it by its fields, not by a list of
 //! beating matrices (`Middle`): at the middle point, once a step, everything that depends on neither the momentum nor the
 //! time; per momentum the beams' Doppler weights and path rates (`Middle::path`); and at a time s from the middle Ĥ(s)
@@ -261,32 +261,40 @@
 //! reference's own flow is exact, the kick takes the rest), read at a middle point, where the model's generator and the
 //! reference's expansion are at one point by construction -- whatever a model holds of its potential along a path (a
 //! model may hold a trap the reference takes exactly as it is at the middle over the whole step: the kick integrates it
-//! to the same τ∇V_ref(r_h) either way). The forms are those of the end state ψ₁ at the last step's middle r_h, its
-//! density contracted with the step's own kick (`Middle::nodes`: one more density, its static form and each tone's
-//! complex amplitude), less the step's τ∇V_ref(r_h); at the trajectory's start the model's at its own point
-//! (`Dynamics::started`, the same contraction there); after a jump at a step's end into
-//! another cluster, that cluster's at the jump's point (`Dynamics::forms`).
+//! to the same τ∇V_ref(r_h) either way). The forms are those of the step's mean state at the last step's middle r_h --
+//! ρ̄ = ∫ρ du/(its span), the density's mean over the stretch that reaches the step's end in its cluster (its static
+//! sums by its length, in the frame: the state the kick is decomposed about, # The kick) --, contracted with the step's
+//! own kick (`Middle::nodes`: one more density, its static form and each tone's complex amplitude), less the step's
+//! τ∇V_ref(r_h); at the trajectory's start the model's at its own point (`Dynamics::started`, the same contraction
+//! there, on the start state); after a jump at a step's end into another cluster, that cluster's at the jump's point
+//! (`Dynamics::forms`, on the jumped state). Until 2026-11-22 they were the end state's, ψ₁'s own: a state a jump has
+//! just left rings at its Rabi frequency for 1/Γ, its dipole force some 190 times the step's mean on R9_PUSH's atoms
+//! with D2-3-3 explicit, so that κ_m came out wrong by (τ/2)ΔF -- 781 per µm against some 11 at 1.42 µs -- and the step
+//! after every such jump went along the wrong path: the window's error of the momentum 4.0 % at 2.84 µs and 4.5 % at
+//! 1.42 µs, as large at either, which the companion read as converged (motion3d_status/rewrite/study/B.report.md §2.1).
+//! The mean holds the ringing by its share of the step, 1/(Γτ).
 //! - The forms against the force the next step needs, its own average over its path about r_h′ = r_h + v_m τ + O(τ²):
-//!   the state is the trajectory's own at t₁, the position O(τ) from r_h′, and the generator is taken at κ_m of the last
-//!   step, O(τ) from the state's momentum: P_E = P(z₁) − τv·∇P − (τ/2)κ̇·∂_κP + O(τ²) against P(z₁) + (τ′/2)Ṗ + O(τ²).
-//!   κ_m errs by O(τ²), the kick's sensitivity to it, (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick and the state err by O(τ³),
-//!   the scheme's own local order (r11.status.md §2(a); the pilot's companion at twice the step reads it with the rest of
-//!   the step's error: each level carries its own forms). A tone is carried by its amplitude, so the next step weighs
-//!   it by its own beat over its own width: the force at one time alone would put κ_m off by (τ/2)|F_tone| at ντ ≳ 1.
-//!   What is read at one point against a reference at another holds the reference's own force between them, K·δr: a
-//!   model's force at the end node against the next middle's reference put κ_m off by (τ/2)K·v_mτ, (ωτ)²/2 of κ in a
-//!   trap of ω, which no step resolves (wire.status.md, wire4 item 1).
+//!   the mean state is the step's at its middle to O(τ²) where the state is resolved, the position O(τ) from r_h′, and
+//!   the generator is taken at κ_m of the last step, O(τ) from the state's momentum: P(ρ̄) = P(z_m) + O(τ²) against
+//!   P(z_m) + τṖ + O(τ²). κ_m errs by O(τ²), the kick's sensitivity to it, (τ/2)|∂Δκ/∂κ_m|, is O(τ), so the kick and
+//!   the state err by O(τ³), the scheme's own local order (r11.status.md §2(a); the pilot's companion at twice the step
+//!   reads it with the rest of the step's error: each level carries its own forms). A tone is carried by its amplitude,
+//!   so the next step weighs it by its own beat over its own width: the force at one time alone would put κ_m off by
+//!   (τ/2)|F_tone| at ντ ≳ 1. What is read at one point against a reference at another holds the reference's own force
+//!   between them, K·δr: a model's force at the end node against the next middle's reference put κ_m off by
+//!   (τ/2)K·v_mτ, (ωτ)²/2 of κ in a trap of ω, which no step resolves (wire.status.md, wire4 item 1).
 //! - The reverse step takes the forms the forward step left, at its own middle (a step and its reverse share r_h): its
-//!   path's momentum is κ_h + Δκ − (τ/2)P_E(z₁) against the step's κ_h + (τ/2)P_E(z₀). They differ by the forms'
-//!   trapezoid against the kick and by the start's forms' position, O(τ²), and by (τ²/2)κ̇∂_κP, the force's dependence
-//!   on the velocity; the kick takes v_m by its path's odd moments: a step and its reverse miss the start beyond the
-//!   scheme's order (tests: from a dressed state 2.6e-6, 3.0e-7, 2.1e-8 at τ = 0.2, 0.1, 0.05 µs), and by nothing where
-//!   the kick does not depend on the path (one internal state: a conservative trap's step is its own inverse to
+//!   path's momentum is κ_h + Δκ − (τ/2)P(ρ̄₁) against the step's κ_h + (τ/2)P(ρ̄₀), the two steps' means. They differ
+//!   by the two means, (τ²/2)Ṗ, and by (τ²/2)κ̇∂_κP, the force's dependence on the velocity; the kick takes v_m by its
+//!   path's odd moments: a step and its reverse miss the start at the scheme's own local order, O(τ³) (tests: from a
+//!   dressed state 1.5·10⁻⁷ to 2.5·10⁻⁹ at τ = 0.2 to 0.05 µs, four orders below the step's doubling; the end state's
+//!   forms, a trapezoid of the kick, missed it beyond that order but rang after every jump, above), and by nothing
+//!   where the kick does not depend on the path (one internal state: a conservative trap's step is its own inverse to
 //!   round-off).
 //! - Where the step does not resolve the internal state (a jump's bare state relaxing in 1/Γ ≪ τ) the force changes by
-//!   O(1) over the step and the path's velocity errs in first order over that step; the companion reads that too. A
-//!   jump inside a step: the step's κ_m was predicted from the state before it, as it was from the start state; the next
-//!   step's forms are the jumped state's at the end.
+//!   O(1) over the step: the mean takes the transient by its share, and what it leaves of the path's velocity the
+//!   companion reads. A jump inside a step: the step's κ_m was predicted from the forms before it; the next step's
+//!   forms are the mean's over the stretch, the jump in it.
 //!
 //! # Jumps (SPEC §1.6)
 //! Between jumps ‖ψ‖² is the probability N that no jump happened, and the exact flow only lowers it, at the rate of the
@@ -772,7 +780,7 @@ pub trait Middle {
 
     /// The step's three nodes' forms at once (`Midway::stretch`): Re tr(Ĝ(s_j) ρ_j) per lab axis at s = −h, 0, h (`force` at
     /// each), the middle's with the fixed point's tones on a held state at their weights where one is held (`centre`); what
-    /// the step takes is their sum, node by node. And where `end` is given -- the end state's density, and the path at
+    /// the step takes is their sum, node by node. And where `end` is given -- the step's mean state's density, and the path at
     /// rest through the middle (its fixed point's tones) -- its forms at the middle (`Forms`, its time the middle's, 0;
     /// the model's, the integrator takes the reference's gradient from them; module documentation, # The path's
     /// momentum). One call, so that a model whose forms are one derivative of its step contracts them at once (and gives
@@ -2839,9 +2847,11 @@ mod count {
         let per = if still { 2 + 2 * tones } else { 4 + (1 + super::TONE) * tones };
         COMPLEX * (nodes * per * n * (n + 1) / 2) as f64
     }
-    /// The end state's held forms (# The path's momentum): its density and one more node's forms with its tones'.
-    pub fn end(n: usize, model: [f64; 3], tones: f64) -> f64 {
-        COMPLEX * ((n * n) as f64 + model[1] + tones)
+    /// The held forms a step leaves (# The path's momentum): its mean state's density -- its `sums` static sums added and
+    /// scaled, one where the static group does not change, the three nodes' else -- and one more node's forms with its
+    /// tones'.
+    pub fn end(n: usize, sums: usize, model: [f64; 3], tones: f64) -> f64 {
+        COMPLEX * ((sums * n * n) as f64 + model[1] + tones)
     }
     /// The survival's hazard (# Jumps): the generator's decay laid on the sums -- at the step's nodes, one or three, and
     /// each of the `tones` exact tones' two or six (`super::Sums`) -- once, and `traces` of it on the sums, each over the
@@ -2959,7 +2969,7 @@ fn pictured<M: Middle>(along: &Along<M>, scratch: &mut Scratch, tau: f64, start:
 /// (`Price`, `count`): the middle's making (`Price::middle`); where its picture made the generator at the nodes, those
 /// (a refusal in the picture comes after all of them), the tones' envelopes where they were separated, the picture's own
 /// count where its preparation began (the decay laid with it, and the hazard's traces taken); the nodes gathered; the
-/// scattered light where the stretch passed the middle. Not the middle's forms, the end state's held forms nor the
+/// scattered light where the stretch passed the middle. Not the middle's forms, the held forms the step leaves nor the
 /// optical sector: each is made past the last place a stretch is refused before it.
 fn unfinished<M: Middle>(generator: &M, progress: &Progress, scratch: &Scratch) -> f64 {
     let (n, still, held, picture) = (progress.states, progress.still, progress.held, &scratch.picture);
@@ -3444,7 +3454,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
     /// any internal state of the cluster --, with its jumps (module documentation, # Jumps) and the readings at the
     /// times `reads` (increasing, after the step's start and no later than its end; no part of the step, `looked`):
     /// the path's momentum predicted from the state's held forms (`predicted`); the propagation at it and on its path,
-    /// the end state's held forms with its kick (# The path's momentum), cluster by
+    /// the held forms of the step's mean state with its kick (# The path's momentum), cluster by
     /// cluster as the jumps land (`stretch`); the kick -- the propagation's impulse, the reference's τ∇V_ref(r_h), the
     /// scattered light's force and its diffusion's part of the Brownian path `brownian` (module documentation, # The
     /// absorbed light's momentum), and each jump's own where it is made -- and the second half flow. `scratch` is the
@@ -3831,18 +3841,15 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                 break false;
             }
         };
-        // The end state's held forms (module documentation, # The path's momentum): where the stretch reaches the step's end
-        // in its own cluster, its density at the middle (the frame's there is the lab's), with the kick's forms, less the
-        // step's reference gradient; where a jump at the end left it in another, that cluster's at the jump's point.
+        // The held forms the step leaves (module documentation, # The path's momentum): where the stretch reaches the step's
+        // end in its own cluster, those of its mean state over its span -- ∫ρ du over what it took, by its length, in the
+        // frame -- at the middle, with the kick's forms, less the step's reference gradient; where a jump at the end left
+        // it in another, that cluster's at the jump's point.
         let ended = done && march.state.cluster == cluster;
         if ended && march.read < reads.len() {
             march.ended = along.middle.readout(&along.path, h, &march.state.psi);
         }
-        let end: Option<Vec<C64>> = ended.then(|| {
-            let mut rho = vec![C64::ZERO; n * n];
-            density(&march.state.psi, &mut rho);
-            rho
-        });
+        let span = h - begun;
         if done && !ended {
             let state = &march.state;
             let forms = self.model.forms(state.cluster, &state.point(), &state.psi);
@@ -3855,9 +3862,10 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         let part = if still {
             let sum = &mut sum[..n * n];
             whole(sums, 0, n, sum);
-            if let Some(rho) = &end {
+            if ended {
                 let fixed = along.middle.path(kappa_m, [0.0; 3]);
-                march.state.forms = Forms { time: t_m, ..forms_at(along.middle, &fixed, rho) }.less(self.reference);
+                let mean: Vec<C64> = sum.iter().map(|z| *z * (1.0 / span)).collect();
+                march.state.forms = Forms { time: t_m, ..forms_at(along.middle, &fixed, &mean) }.less(self.reference);
             }
             // The middle's forms: the static group's and every tone's at the middle on the static sum; each tone's sums
             // at its beat, σ = ∫e^{iνu}ρ, less that sum, by its own forms (`Middle::tone_force`) -- the tone at its exact
@@ -3880,6 +3888,17 @@ impl<'a, D: Dynamics> Midway<'a, D> {
         } else {
             let mut out = [0.0; 3];
             let size = n * n;
+            // The stretch's mean state for the held forms it leaves (above): its three nodes' sums added (Σ_j ℓ_j = 1).
+            let mean: Option<Vec<C64>> = ended.then(|| {
+                let mut mean = vec![C64::ZERO; size];
+                for j in 0..SUMS {
+                    whole(sums, j, n, &mut sum[..size]);
+                    for (m, q) in mean.iter_mut().zip(&sum[..size]) {
+                        *m += *q * (1.0 / span);
+                    }
+                }
+                mean
+            });
             if middle.is_some() {
                 // The state the kick is decomposed about (module documentation, # The kick): the stretch's mean density,
                 // ∫ρ du over what of the step it took by its length -- its three nodes' sums and weights added, Σ_j ℓ_j =
@@ -3950,7 +3969,7 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             }
             let (s0, rest) = sum.split_at(size);
             let (s1, s2) = rest.split_at(size);
-            let fixed = end.as_ref().map(|_| along.middle.path(kappa_m, [0.0; 3]));
+            let fixed = mean.as_ref().map(|_| along.middle.path(kappa_m, [0.0; 3]));
             let _pn = crate::prof::scope(crate::prof::NODES_CALL);
             let (forms, forms_end) = if single {
                 // The held generator's forms at the three nodes from the middle's node alone (# One node a step): at
@@ -3979,9 +3998,9 @@ impl<'a, D: Dynamics> Midway<'a, D> {
                         }
                     }
                 }
-                (forms, end.as_deref().zip(fixed.as_ref()).map(|(rho, fixed)| forms_at(along.middle, fixed, rho)))
+                (forms, mean.as_deref().zip(fixed.as_ref()).map(|(rho, fixed)| forms_at(along.middle, fixed, rho)))
             } else {
-                along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64)), end.as_deref().zip(fixed.as_ref()))
+                along.middle.nodes(&along.path, h, [s0, s1, &s2[..size]], middle.is_some().then_some((&held[..], &shear as &dyn Fn(f64) -> f64)), mean.as_deref().zip(fixed.as_ref()))
             };
             for form in forms {
                 for a in 0..3 {
@@ -4150,7 +4169,7 @@ impl Brownian {
 /// roots read: `spectral::Picture::launch`, `at`); the kick's nodes and the tones their states were
 /// summed with (`nodes`, `tones`); the survival's traces (`traces`); where the stretch holds the step's middle
 /// (`centred`) the middle's form there and the optical sector's make (`sector`: its ground states and the make's count);
-/// the end state's held forms on the stretch that reaches the step's end (`ended`); and the model's own: the middle's
+/// the held forms the step leaves on the stretch that reaches the step's end (`ended`); and the model's own: the middle's
 /// making (`Middle::made`) and the light scattered at the middle
 /// (`Middle::scattering`). A stretch after a jump to another cluster is that cluster's (`Step::prices`). (Priced without
 /// taking the step instead -- the picture prepared on the middle at the trap's centre, its stops at the quadrature's
@@ -4184,7 +4203,7 @@ pub struct Price {
     pub tones: usize,
     pub toned: [f64; 2],
     /// Whether the stretch holds the step's middle (its form and its scattering there), and whether it reaches the step's
-    /// end in its cluster (the end state's held forms).
+    /// end in its cluster (the held forms it leaves, of its mean state).
     pub centred: bool,
     pub ended: bool,
     /// The middle's making and the scattered light's (real multiply-adds); the model's counts at a node it was counted with
@@ -4206,11 +4225,11 @@ impl Price {
 
     /// The integrator's part with the model's calls at the nodes: the propagation, the kick's sums and forms, the
     /// survival's hazard, the optical sector (`optical_work`: its make, the gradient's matrices and one `within`'s
-    /// forms), and on the stretch that reaches the step's end the end state's held forms.
+    /// forms), and on the stretch that reaches the step's end the held forms it leaves.
     pub fn stepped(&self, costs: [f64; 3]) -> f64 {
         let (n, still) = (self.states, self.still);
         let optical = self.sector.map_or(0.0, |(_, make)| optical_work(n, make));
-        let end = if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 };
+        let end = if self.ended { count::end(n, if still { 1 } else { SUMS }, costs, self.toned[1]) } else { 0.0 };
         count::propagation(costs, still || self.held, self.made + self.stops, self.toned[0]) + count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + count::hazard(n, self.traces, still, self.tones) + optical + end + COMPLEX * self.grouped
     }
 
@@ -4229,7 +4248,7 @@ impl Price {
             count::impulse(n, costs, self.nodes, still, self.centred, self.tones, self.toned[1]) + COMPLEX * self.grouped,
             count::hazard(n, self.traces, still, self.tones),
             self.sector.map_or(0.0, |(_, make)| optical_work(n, make)),
-            if self.ended { count::end(n, costs, self.toned[1]) } else { 0.0 },
+            if self.ended { count::end(n, if still { 1 } else { SUMS }, costs, self.toned[1]) } else { 0.0 },
             self.modelled(),
         ]
     }
