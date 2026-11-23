@@ -163,20 +163,37 @@ fn select_the_ladder_top_by_hand() {
     assert_eq!(settled([0.25 * TOLERANCE, 0.25 * TOLERANCE, 0.0, 0.0], 0.25 * TOLERANCE).unmet(), None);
 }
 
-/// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 substeps a µs a piece a step): off the
-/// floor the pieces' part is read against the setting itself; where twice the pieces raise the run's rate to its floor
-/// at twice the setting's, against the twice-substepped run; where they raise it to less than twice, against the
-/// setting's pieces at the raised rate, one run more.
+/// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 a µs, one a step; a rate's, one
+/// substep a piece of the step's pieces): off the floor the pieces' part is read against the setting itself; where
+/// twice the pieces raise the run's rate to its floor at twice the setting's, against the twice-substepped run; where
+/// they raise it to less than twice, against the setting's pieces at the raised rate, one run more.
 #[test]
 fn select_the_refinements_by_hand() {
-    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / 0.5), ..s };
-    let at = |o: f64, r: f64, p: usize| Setting { turns: o, rate: r, pieces: p, cutoff: 50.0 };
-    let (runs, pairs) = refinements(at(32.0, 16.0, 2), &own);
-    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3), (0, 0)]));
-    let (runs, pairs) = refinements(at(32.0, 8.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3), (0, 0)]));
-    let (runs, pairs) = refinements(at(1.0, 10.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 4), at(2.0, 10.0, 4), at(1.0, 20.0, 4), at(1.0, 16.0, 8), at(1.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3), (0, 0)]));
+    let own = |s: Setting| {
+        let pieces = larger(s.pieces, 1.0 / 0.5);
+        Setting { rate: larger(s.rate, crate::paths::pieces_in(0.0, 0.5, pieces) as f64 / 0.5), pieces, ..s }
+    };
+    let at = |o: f64, r: f64, p: f64| Setting { turns: o, rate: r, pieces: p, cutoff: 50.0 };
+    let (runs, pairs) = refinements(at(32.0, 16.0, 4.0), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 4.0), at(64.0, 16.0, 4.0), at(32.0, 32.0, 4.0), at(32.0, 16.0, 8.0)], [(0, 1), (0, 2), (0, 3), (0, 0)]));
+    let (runs, pairs) = refinements(at(32.0, 8.0, 8.0), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 8.0), at(64.0, 8.0, 8.0), at(32.0, 16.0, 8.0), at(32.0, 16.0, 16.0)], [(0, 1), (0, 2), (2, 3), (0, 0)]));
+    let (runs, pairs) = refinements(at(1.0, 10.0, 8.0), &own);
+    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 8.0), at(2.0, 10.0, 8.0), at(1.0, 20.0, 8.0), at(1.0, 16.0, 16.0), at(1.0, 16.0, 8.0)], [(0, 1), (0, 2), (4, 3), (0, 0)]));
+    // Below the floor the knob is the floor (one piece a step), and a piece's count is the least power of two keeping
+    // it within the knob's length, whatever the step -- a step's interval late in a run the step to its ends' rounding
+    // (PGC3D's at 1000 µs: one step past the ends' sum read 2e-13 of the step over it).
+    assert_eq!(own(at(1.0, 8.0, 1.0)), at(1.0, 8.0, 2.0));
+    let p = crate::paths::pieces_in;
+    assert_eq!([p(0.0, 0.5, 2.0), p(0.0, 6.06, 1.0), p(0.0, 0.1185, 1.0), p(0.0, 0.3, 0.0), p(0.0, 0.5, 4.0 + 1e-9)], [1, 8, 1, 1, 4]);
+    let tau = 0.4741346189956611;
+    let ends: Vec<f64> = (0..=2110).scan(0.0, |t, k| {
+        let now = *t;
+        *t += tau;
+        Some(if k == 0 { 0.0 } else { now })
+    }).collect();
+    assert!(ends.windows(2).any(|w| w[1] - w[0] > tau), "some interval read past the step");
+    assert!(ends.windows(2).all(|w| p(w[0], w[1], 2.0 / tau) == 2), "every step's interval two pieces at two a step");
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json

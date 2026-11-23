@@ -59,11 +59,13 @@
 //! memory is the longer: R4's atoms heat through the run).
 //!
 //! The scheme's setting (`Setting`) -- the substeps a turn of the fastest coherence over a stretch's opening (the
-//! start's transient, paths.rs # The start), the substeps a µs after it, and the pieces a step -- is settled by its own
+//! start's transient, paths.rs # The start), the substeps a µs after it, and the pieces a µs (each step's interval in
+//! the least power of two of them that keeps a piece no longer than the knob's, paths.rs `pieces_in`: the ladder's start
+//! the same piece whatever the run's step) -- is settled by its own
 //! error, not fixed
 //! (`settle`): along a stretch the reference is advanced at the setting and at each knob
 //! doubled, each knob's part of the setting's error the largest change of a displayed row from doubling it alone
-//! (Richardson's 2^p/(2^p − 1), p = 2: the amplitudes' linear interpolation at one piece a step, R's at the substep's
+//! (Richardson's 2^p/(2^p − 1), p = 2: the amplitudes' linear interpolation at one piece an interval, R's at the substep's
 //! middle -- paths.rs # The nodes, # The substeps; a rate no lower than one substep a piece, so
 //! that where twice the pieces raise a rate to that floor the pieces' part is read at the raised rates,
 //! `refinements`), and beside them the trace's part, the setting's own run's trace defect (paths.rs
@@ -247,12 +249,13 @@ pub const WALKS: usize = 4;
 pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * POPULATION_TARGET;
 
 /// A setting of the paths' scheme (module documentation, # The paths): the substeps a turn of the fastest coherence over
-/// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a step.
+/// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a µs (each knot interval in
+/// the least power of two of them that keeps a piece no longer than 1/pieces, paths.rs `pieces_in`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Setting {
     pub turns: f64,
     pub rate: f64,
-    pub pieces: usize,
+    pub pieces: f64,
     /// The opening's cutoff (rad/µs): the start's modes up to it resolved, the faster ones booked by their bound
     /// (paths.rs, # The start).
     pub cutoff: f64,
@@ -272,7 +275,7 @@ impl Setting {
         match k {
             0 => s.turns *= 2.0,
             1 => s.rate *= 2.0,
-            2 => s.pieces *= 2,
+            2 => s.pieces *= 2.0,
             _ => s.cutoff *= 2.0,
         }
         s
@@ -290,18 +293,21 @@ impl Setting {
 }
 
 /// The setting the paths' scheme starts from (module documentation, # The paths): a substep a turn of the fastest
-/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a step, the opening
-/// resolving the start's modes up to what those 8 a µs resolve (2π × 8 rad/µs) -- each knob doubled from there as its
-/// error asks.
-pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1, cutoff: std::f64::consts::TAU * 8.0 };
+/// coherence over the opening (its Nyquist rate, paths.rs # The start), 8 a µs after it, one piece a µs -- eight of
+/// those substeps a piece; at a step shorter than a µs one piece a step, the floor (`ladder`) --, the opening resolving
+/// the start's modes up to what those 8 a µs resolve (2π × 8 rad/µs) -- each knob doubled from there as its error asks.
+/// Like the rate's, the pieces' start is a bound on the work, not a measure of accuracy, and the run's step moves it
+/// only where a piece would be longer than its step.
+pub const COARSEST: Setting = Setting { turns: 1.0, rate: 8.0, pieces: 1.0, cutoff: std::f64::consts::TAU * 8.0 };
 
-/// The finest setting (module documentation, # The paths): 64 substeps a turn, 4096 a µs (32 times P1-PATHS's 128), 64
-/// pieces a step -- a bound on the work, never a measure of accuracy: a setting settled there short of `TOLERANCE` is
-/// said ("到顶未收敛") and its reference's error parts booked whole in every candidate's A (`Settled::unmet`).
-pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 64, cutoff: f64::INFINITY };
+/// The finest setting (module documentation, # The paths): 64 substeps a turn, 4096 a µs (32 times P1-PATHS's 128), 512
+/// pieces a µs (the rate's nine doublings from its start, the pieces' alike) -- a bound on the work, never a measure of
+/// accuracy: a setting settled there short of `TOLERANCE` is said ("到顶未收敛") and its reference's error parts booked
+/// whole in every candidate's A (`Settled::unmet`).
+pub const FINEST: Setting = Setting { turns: 64.0, rate: 4096.0, pieces: 512.0, cutoff: f64::INFINITY };
 
 /// A refinement's change read as the coarser setting's error (module documentation, # The paths): Richardson's
-/// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- the amplitudes' linear interpolation at one piece a step, the
+/// 2^p/(2^p − 1) at the scheme's lowest order p = 2 -- the amplitudes' linear interpolation at one piece an interval, the
 /// recycling's amplitudes at the substep's middle (the cubic interpolation and the exponential Runge–Kutta err at order
 /// 3 or more).
 const RICHARDSON: f64 = 4.0 / 3.0;
@@ -657,7 +663,7 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 
 
 /// `settle`'s ladder along the walk's stretch of `piece` µs from `begin` (from the walk's own start state there) from the
-/// setting `from` (raised to its own rate floor), its runs keeping their states at the times `keep` (the landing
+/// setting `from` (raised to its own floors: one piece a step, one substep a piece), its runs keeping their states at the times `keep` (the landing
 /// check's, where the stretch's own run at the setting it ends on is kept as the stretch's: `Paths::new`).
 #[allow(clippy::too_many_arguments)]
 fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting, keep: &[f64]) -> Result<(Settled, Vec<Vec<Series>>), String> {
@@ -670,7 +676,13 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
         let mut made: Vec<std::vec::IntoIter<Series>> = made.into_iter().map(Vec::into_iter).collect();
         Ok(settings.iter().map(|_| made.iter_mut().map(|x| x.next().expect("a member's series")).collect()).collect())
     };
-    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / step), ..s };
+    // A setting's own: a piece no longer than the step (below one piece a step the knob would cut nothing: its doubling
+    // changes no run, and its part reads nought), and a rate of one substep a piece at the least (the pieces of a step's
+    // interval, paths.rs `pieces_in`).
+    let own = |s: Setting| {
+        let pieces = larger(s.pieces, 1.0 / step);
+        Setting { rate: larger(s.rate, crate::paths::pieces_in(0.0, step, pieces) as f64 / step), pieces, ..s }
+    };
     // The cutoff's part: the largest over the stretches the setting takes (`starts`: each from its walk's own start) of
     // what their openings book, the models' together.
     let booked = |s: Setting| -> Result<f64, String> {

@@ -26,8 +26,9 @@
 //! # The nodes
 //! The model is made at few nodes and interpolated between them on the blocks (PATHGAP item 3: "segments dense, nodes
 //! sparse"): the path's knots are its step ends -- the trajectory's path is C¹ there, its acceleration jumps --, each
-//! knot interval cut into the scheme's pieces, the model made at every piece's ends (`Selected::node`), and the
-//! amplitudes between them the Lagrange interpolant of degree min(3, pieces) (`lagrange`: linear at one piece a step)
+//! knot interval cut into the scheme's pieces (`pieces_in`: the least power of two that keeps a piece no longer than the
+//! knob's length), the model made at every piece's ends (`Selected::node`), and the
+//! amplitudes between them the Lagrange interpolant of degree min(3, pieces) (`lagrange`: linear at one piece an interval)
 //! of its own knot interval (never across a knot); the beats' phases exact at the time. H is interpolated by its
 //! beats, R by its beats' differences (`Amps`): each such amplitude is smooth along the path, the phases are not.
 //! Readouts are made at knots, on the exact node there. The pieces' knob refines the nodes with them -- one Richardson
@@ -185,8 +186,8 @@
 //!
 //! A family of runs along one stretch from one state -- a setting and its refinements, each knob doubled alone (select.rs
 //! `settle`) -- samples one path: a node is the path's at its time, the same for every scheme that takes it there. So a
-//! family makes each node once (`Form::along_family`): its members' pieces a step are powers of two of one another, and
-//! every member's nodes are the finest member's at the same times to the bit; a piece is frozen once for the members of
+//! family makes each node once (`Form::along_family`): on each knot interval its members' pieces are powers of two of one
+//! another (`pieces_in`), and every member's nodes are the interval's finest member's at the same times to the bit; a piece is frozen once for the members of
 //! the same pieces and substeps there, and a state propagated once for the members whose pieces have all been the same
 //! so far -- up to the opening's end the runs that differ only in the rate, whose opening is the same --, parted where
 //! their pieces part. Each member's series is its run alone, to the bit (paths/tests.rs `paths_a_family_is_its_members`).
@@ -260,13 +261,28 @@ impl Walk {
 /// How a path is cut and where the model is made along it (module documentation, # The nodes, # The substeps).
 #[derive(Clone, Copy, Debug)]
 pub enum Scheme {
-    /// Each step of the path in `pieces` equal pieces, the model made at the pieces' ends and interpolated between them
-    /// (# The nodes): H at a piece's middle integrated exactly in its eigenbasis (block by block), the rest -- H's change
+    /// Each knot interval of the path in equal pieces, `pieces` a µs (`pieces_in`: the least power of two that keeps a
+    /// piece no longer than 1/`pieces`; one, the interval whole, at none), the model made at the pieces' ends and
+    /// interpolated between them (# The nodes): H at a piece's middle integrated exactly in its eigenbasis (block by block), the rest -- H's change
     /// from there, the recycling Σ J ρ J† -- by the exponential Runge–Kutta substeps (# The substeps), over a stretch's
     /// opening `turns` a turn of the fastest mode it resolves -- the start's modes up to `cutoff` (rad/µs), the faster
     /// ones booked by their bound -- and `rate` a µs after it (# The start); a readout at every `read`-th knot and at the
     /// end. The scheme's error is read by its own refinements and booked (# The budget).
-    Exponential { turns: f64, rate: f64, pieces: usize, cutoff: f64, read: usize },
+    Exponential { turns: f64, rate: f64, pieces: f64, cutoff: f64, read: usize },
+}
+
+/// The knot interval [`from`, `to`]'s pieces at `pieces` a µs (`Scheme::Exponential`, # The nodes): the least power of
+/// two that keeps a piece no longer than 1/`pieces` -- one at least, the interval whole --; so on one interval two
+/// schemes' pieces are powers of two of one another whatever their knobs (a family's nodes shared,
+/// `Form::along_family`), and a piece's length is the knob's, not the run's step's. The interval's length is read to
+/// its ends' rounding (each end a time rounded once, ε|t|; the product's own, 4ε): a step's interval late in a run is
+/// the step to that, not beyond it -- PGC3D's at 1000 µs, 2e-13 of its 0.47 µs over it, took twice the pieces where
+/// the knob stood at a power of two a step. (Until 2026-11-23 the knob was the pieces a step: a step twice as long took
+/// the ladder one doubling more, over the whole stretch, to the same piece -- R9_PUSH's at 6.06 µs.)
+pub fn pieces_in(from: f64, to: f64, pieces: f64) -> usize {
+    let x = (to - from) * pieces;
+    let rounding = (from.abs() + to.abs()) * f64::EPSILON * pieces + 4.0 * f64::EPSILON * x;
+    ((x - rounding).ceil().max(1.0) as usize).next_power_of_two()
 }
 
 /// The work of advancing models along paths: nodes made, exponentials and their matrix–vector products, segments,
@@ -1057,13 +1073,13 @@ impl<'a> Form<'a> {
 
     /// The model's readings along a path from `from` to `to` from the state `start` (module documentation): its
     /// series, and Err where the state is not the model's.
-    /// What the opening of a stretch from the state `start` at `from` books at the pieces a step `pieces` and the cutoff
+    /// What the opening of a stretch from the state `start` at `from` books at `pieces` a µs (`pieces_in`) and the cutoff
     /// `cutoff` (# The start), without the stretch: the bound alone.
-    pub fn booked_at(&self, walk: &Walk, start: &[(usize, C64)], from: f64, pieces: usize, cutoff: f64) -> Result<f64, String> {
+    pub fn booked_at(&self, walk: &Walk, start: &[(usize, C64)], from: f64, pieces: f64, cutoff: f64) -> Result<f64, String> {
         let v = self.initial(start);
         let knots = walk.knots(from, walk.end().max(from + f64::MIN_POSITIVE));
         let (first, next) = (self.amps_with(&self.node_at(walk, from), false), self.amps_with(&self.node_at(walk, knots[1]), false));
-        Ok(self.opening(&first, &next, from, knots[1], pieces, &v, cutoff)?.2)
+        Ok(self.opening(&first, &next, from, knots[1], pieces_in(from, knots[1], pieces), &v, cutoff)?.2)
     }
 
     pub fn along(&self, walk: &Walk, start: &[(usize, C64)], from: f64, to: f64, scheme: Scheme) -> Result<Series, String> {
@@ -1310,7 +1326,8 @@ impl<'a> Form<'a> {
         });
         let dense = Walk { index: walk.index, start: walk.start.clone(), ends: ends.collect(), lost: false, weight: walk.weight };
         let (turns, rate, cutoff) = knobs;
-        let series = self.along_from(&dense, state, from, to, Scheme::Exponential { turns, rate, pieces: 1, cutoff, read: 1 })?;
+        // One piece a knot interval: the transient's own knots (none a µs, `pieces_in`).
+        let series = self.along_from(&dense, state, from, to, Scheme::Exponential { turns, rate, pieces: 0.0, cutoff, read: 1 })?;
         // The own run's readings at a time, linearly between its knots.
         let own_at = |u: f64| -> (f64, V3) {
             let r = &own.readings;
@@ -1663,7 +1680,7 @@ impl Form<'_> {
     }
 
     /// A stretch's opening (module documentation, # The start) from the state `v` at the time `t`, the amplitudes there
-    /// `amps` and at the path's first knot `t1` after it `next`, the step's `pieces`, the cutoff `cutoff` (rad/µs): its
+    /// `amps` and at the path's first knot `t1` after it `next`, the first interval's `pieces`, the cutoff `cutoff` (rad/µs): its
     /// length (µs), the time the start's optical coherences take to decay to the double's unit rounding u, 2 ln(1/u)/Γ,
     /// Γ the slowest decay −2 Im H_ee of P's excited states in the sector (none, none: a model whose excited states are
     /// all folded holds no such coherence); of the modes the start holds, |σ₀ⱼ| above u of the largest, that the opening
@@ -1803,13 +1820,14 @@ impl Form<'_> {
     }
 
     /// Exponential runs along one stretch from the sector state `state`, a family (module documentation, # The nodes):
-    /// the schemes `members`, read alike, their pieces a step powers of two of one another. Each node made once on the
-    /// finest member's pieces, each piece frozen once for the members of the same pieces and substeps there
+    /// the schemes `members`, read alike (on each knot interval their pieces powers of two of one another, `pieces_in`).
+    /// Each node made once on the interval's finest member's pieces, each piece frozen once for the members of the same
+    /// pieces and substeps there
     /// (`freeze_family`), each state propagated once for a class of members -- at the start those of one opening, split
     /// where their pieces part (`advance`) --; per member its series, the same as its run alone to the bit, the shared
     /// work counted on the first member that takes it (the members' work summed is the family's).
     fn family(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, members: &[Scheme], keep: &[f64]) -> Result<Vec<Series>, String> {
-        let mut knobs: Vec<(f64, f64, usize, f64)> = Vec::with_capacity(members.len());
+        let mut knobs: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(members.len());
         let mut read = 0;
         for s in members {
             let Scheme::Exponential { turns, rate, pieces, cutoff, read: r } = *s;
@@ -1820,9 +1838,11 @@ impl Form<'_> {
             knobs.push((turns, rate, pieces, cutoff));
         }
         let m = knobs.len();
-        let finest = knobs.iter().map(|k| k.2).max().ok_or("an empty family")?;
-        if knobs.iter().any(|k| k.2 == 0 || finest % k.2 != 0 || !(finest / k.2).is_power_of_two()) {
-            return Err("a family's pieces a step powers of two of one another".into());
+        if m == 0 {
+            return Err("an empty family".into());
+        }
+        if knobs.iter().any(|k| !(k.2 >= 0.0 && k.2.is_finite())) {
+            return Err("a family's pieces a µs a number, none below nought".into());
         }
         if state.len() != self.dim {
             return Err(format!("a state of {} numbers for a sector of {}", state.len(), self.dim));
@@ -1848,13 +1868,13 @@ impl Form<'_> {
         drop(at_knot);
         // Each member's opening (# The start), one for the members of the same pieces and cutoff: its length, the fastest
         // coherence it resolves, its bound, and the start with the booked modes dropped (the reading at the start is made).
-        let mut openings: Vec<((usize, f64), (f64, f64, f64, Vec<C64>))> = Vec::new();
+        let mut openings: Vec<((f64, f64), (f64, f64, f64, Vec<C64>))> = Vec::new();
         let mut of: Vec<usize> = Vec::with_capacity(m);
         for (q, k) in knobs.iter().enumerate() {
             let at = match openings.iter().position(|o| o.0 == (k.2, k.3)) {
                 Some(at) => at,
                 None => {
-                    openings.push(((k.2, k.3), self.opening(&first, &next, from, knots[1], k.2, &state, k.3)?));
+                    openings.push(((k.2, k.3), self.opening(&first, &next, from, knots[1], pieces_in(from, knots[1], k.2), &state, k.3)?));
                     openings.len() - 1
                 }
             };
@@ -1877,15 +1897,17 @@ impl Form<'_> {
         let mut condition = vec![0.0_f64; m];
         // A chunk of intervals frozen on the pool while the one before is propagated; its readings on the pool after it.
         // The chunk: what `FROZEN_BYTES` holds of an interval's nodes and the members' pieces, at most four per thread.
-        let pieces: usize = knobs.iter().map(|k| k.2).sum();
+        let most = |pieces: f64| intervals.iter().map(|iv| pieces_in(iv.0, iv.1, pieces)).max().unwrap_or(1);
+        let finest = knobs.iter().map(|k| most(k.2)).max().unwrap_or(1);
+        let pieces: usize = knobs.iter().map(|k| most(k.2)).sum();
         let bytes = 16 * (finest * (self.h_beats.len() * self.h_slot + self.r_places.len()) + pieces * (5 * self.h_slot + ETD_WEIGHTS * self.dim));
         let chunk = (FROZEN_BYTES / (bytes + 1)).clamp(1, 4 * rayon::current_num_threads());
-        let freeze = |range: std::ops::Range<usize>, before: std::sync::Arc<Amps>| self.freeze_family(walk, &intervals[range], before, &knobs, finest, &substeps);
+        let freeze = |range: std::ops::Range<usize>, before: std::sync::Arc<Amps>| self.freeze_family(walk, &intervals[range], before, &knobs, &substeps);
         let freeze = &freeze;
         let mut ahead = Some(freeze(0..chunk.min(intervals.len()), first));
         let mut start = 0;
         while let Some(frozen) = ahead.take() {
-            let (taken, reads, last, made) = frozen?;
+            let (taken, reads, last, made, ends) = frozen?;
             counts[0].add(&made);
             for q in 0..m {
                 condition[q] = taken[q].iter().map(|f| f.condition).fold(condition[q], larger);
@@ -1894,7 +1916,7 @@ impl Form<'_> {
             let following = (end < intervals.len()).then(|| end..(end + chunk).min(intervals.len()));
             let read_at: Vec<bool> = reads.iter().map(Option::is_some).collect();
             let now = std::mem::take(&mut classes);
-            let (next, moved) = rayon::join(move || following.map(|range| freeze(range, last)), || now.into_par_iter().map(|class| self.advance(class, &taken, &knobs, &read_at)).collect::<Vec<_>>());
+            let (next, moved) = rayon::join(move || following.map(|range| freeze(range, last)), || now.into_par_iter().map(|class| self.advance(class, &taken, &ends, &read_at)).collect::<Vec<_>>());
             // The states read at the intervals' ends, in each member's order of time.
             let mut states = Vec::new();
             for (kept, read, work) in moved {
@@ -1938,24 +1960,27 @@ impl Form<'_> {
     }
 
     /// A class of a family's members along a chunk (`family`): its state through the members' pieces `pieces` (per
-    /// member, in order) while they are the same pieces, split into classes where they part; the classes at the chunk's
+    /// member, in order; `ends` per member where each interval's end among them) while they are the same pieces, split
+    /// into classes where they part; the classes at the chunk's
     /// end, the states at its intervals' ends where they are read (`read`: the interval, the class's members, the state),
     /// and the work, on each class's first member.
     #[allow(clippy::type_complexity)]
-    fn advance(&self, (members, state): (Vec<usize>, Vec<C64>), pieces: &[Vec<std::sync::Arc<Frozen>>], knobs: &[(f64, f64, usize, f64)], read: &[bool]) -> (Vec<(Vec<usize>, Vec<C64>)>, Vec<(usize, Vec<usize>, Vec<C64>)>, Vec<(usize, Counts)>) {
+    fn advance(&self, (members, state): (Vec<usize>, Vec<C64>), pieces: &[Vec<std::sync::Arc<Frozen>>], ends: &[Vec<usize>], read: &[bool]) -> (Vec<(Vec<usize>, Vec<C64>)>, Vec<(usize, Vec<usize>, Vec<C64>)>, Vec<(usize, Counts)>) {
         let mut lw = Stages::new(self);
         let (mut kept, mut states, mut work) = (Vec::new(), Vec::new(), Vec::new());
         let mut todo = vec![(members, state, 0usize)];
         while let Some((members, mut state, mut k)) = todo.pop() {
             let lead = members[0];
-            let (per, total) = (knobs[lead].2, pieces[lead].len());
+            let (bounds, total) = (&ends[lead], pieces[lead].len());
             let mut c = Counts::default();
             let clock = std::time::Instant::now();
             while k < total && members.iter().all(|&q| std::sync::Arc::ptr_eq(&pieces[q][k], &pieces[lead][k])) {
                 self.piece_run(&pieces[lead][k], &mut state, &mut lw, &mut c);
                 k += 1;
-                if k % per == 0 && read[k / per - 1] {
-                    states.push((k / per - 1, members.clone(), state.clone()));
+                if let Ok(i) = bounds.binary_search(&k) {
+                    if read[i] {
+                        states.push((i, members.clone(), state.clone()));
+                    }
                 }
             }
             c.propagation_seconds += clock.elapsed().as_secs_f64();
@@ -1979,20 +2004,32 @@ impl Form<'_> {
     }
 
     /// A chunk of knot intervals frozen for a family (module documentation, # The nodes; `family`): each interval's
-    /// nodes at the finest member's pieces' ends (`finest` a step), one job each on the pool -- the node before the
-    /// chunk's first `before` --; then the pieces (`freeze`), each member's on its own nodes among them (every
-    /// (`finest` / its pieces)-th), one job a piece of the same pieces, place and substeps (`substeps`: of the member, the
-    /// piece's start and length), shared by the members that take it. Per member its pieces in order, per interval its
-    /// end's node where it is read there, the chunk's last node, and the work.
+    /// nodes at its finest member's pieces' ends (`pieces_in` of each member's pieces a µs), one job each on the pool --
+    /// the node before the chunk's first `before` --; then the pieces (`freeze`), each member's on its own nodes among
+    /// them (every (finest / its pieces)-th), one job a piece of the same pieces, place and substeps (`substeps`: of the
+    /// member, the piece's start and length), shared by the members that take it. Per member its pieces in order, per
+    /// interval its end's node where it is read there, the chunk's last node, the work, and per member where each
+    /// interval ends among its pieces.
     #[allow(clippy::type_complexity)]
-    fn freeze_family(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, knobs: &[(f64, f64, usize, f64)], finest: usize, substeps: &(dyn Fn(usize, f64, f64) -> usize + Sync)) -> Result<(Vec<Vec<std::sync::Arc<Frozen>>>, Vec<Option<(f64, Node)>>, std::sync::Arc<Amps>, Counts), String> {
-        let jobs: Vec<(usize, usize)> = (0..intervals.len()).flat_map(|i| (1..=finest).map(move |j| (i, j))).collect();
+    fn freeze_family(&self, walk: &Walk, intervals: &[(f64, f64, bool)], before: std::sync::Arc<Amps>, knobs: &[(f64, f64, f64, f64)], substeps: &(dyn Fn(usize, f64, f64) -> usize + Sync)) -> Result<(Vec<Vec<std::sync::Arc<Frozen>>>, Vec<Option<(f64, Node)>>, std::sync::Arc<Amps>, Counts, Vec<Vec<usize>>), String> {
+        // Per member and interval its pieces; per interval the finest member's, and where its nodes start among the chunk's.
+        let each: Vec<Vec<usize>> = knobs.iter().map(|k| intervals.iter().map(|iv| pieces_in(iv.0, iv.1, k.2)).collect()).collect();
+        let finest: Vec<usize> = (0..intervals.len()).map(|i| each.iter().map(|e| e[i]).max().unwrap_or(1)).collect();
+        let offset: Vec<usize> = finest
+            .iter()
+            .scan(0, |sum, &f| {
+                *sum += f;
+                Some(*sum - f)
+            })
+            .collect();
+        let jobs: Vec<(usize, usize)> = (0..intervals.len()).flat_map(|i| (1..=finest[i]).map(move |j| (i, j))).collect();
         let mut nodes: Vec<(std::sync::Arc<Amps>, Option<Node>, f64, f64)> = jobs
             .par_iter()
             .map(|&(i, j)| {
                 let clock = std::time::Instant::now();
                 let (a, b, read) = intervals[i];
-                let t = if j == finest { b } else { a + j as f64 * (b - a) / finest as f64 };
+                let f = finest[i];
+                let t = if j == f { b } else { a + j as f64 * (b - a) / f as f64 };
                 let node = self.node_at(walk, t);
                 #[cfg(test)]
                 traced(0, clock);
@@ -2002,18 +2039,18 @@ impl Form<'_> {
                 #[cfg(test)]
                 traced(1, part);
                 let work = node.work + self.amplitudes_work();
-                (std::sync::Arc::new(amps), (j == finest && read).then_some(node), clock.elapsed().as_secs_f64(), work)
+                (std::sync::Arc::new(amps), (j == f && read).then_some(node), clock.elapsed().as_secs_f64(), work)
             })
             .collect();
         let mut counts = Counts { nodes: nodes.len() as u64, node_seconds: nodes.iter().map(|x| x.2).sum(), work: nodes.iter().map(|x| x.3).sum(), ..Counts::default() };
-        // The distinct pieces -- (pieces a step, interval, place, substeps) -- and each member's among them.
+        // The distinct pieces -- (the interval's pieces, interval, place, substeps) -- and each member's among them.
         let mut keys: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut index: std::collections::HashMap<(usize, usize, usize, usize), usize> = std::collections::HashMap::new();
         let mut places: Vec<Vec<usize>> = Vec::with_capacity(knobs.len());
-        for (q, k) in knobs.iter().enumerate() {
-            let pieces = k.2;
-            let mut own = Vec::with_capacity(intervals.len() * pieces);
+        for q in 0..knobs.len() {
+            let mut own = Vec::with_capacity(each[q].iter().sum());
             for (i, &(a, b, _)) in intervals.iter().enumerate() {
+                let pieces = each[q][i];
                 let part = (b - a) / pieces as f64;
                 for j in 0..pieces {
                     let key = (pieces, i, j, substeps(q, a + j as f64 * part, part));
@@ -2028,8 +2065,8 @@ impl Form<'_> {
         // A member's grid on the interval i: the node before it, then its own nodes among the finest's.
         let frozen: Vec<std::sync::Arc<Frozen>> = {
             let grid = |i: usize, pieces: usize| -> Vec<std::sync::Arc<Amps>> {
-                let s = finest / pieces;
-                std::iter::once(if i == 0 { before.clone() } else { nodes[i * finest - 1].0.clone() }).chain((1..=pieces).map(|j| nodes[i * finest + j * s - 1].0.clone())).collect()
+                let s = finest[i] / pieces;
+                std::iter::once(if i == 0 { before.clone() } else { nodes[offset[i] - 1].0.clone() }).chain((1..=pieces).map(|j| nodes[offset[i] + j * s - 1].0.clone())).collect()
             };
             keys.par_iter().map(|&(pieces, i, j, n)| self.freeze(grid(i, pieces), intervals[i].0, intervals[i].1, j, &|_, _| n).map(std::sync::Arc::new)).collect::<Result<_, _>>()?
         };
@@ -2037,10 +2074,21 @@ impl Form<'_> {
             counts.node_seconds += f.seconds;
             counts.work += f.work;
         }
-        let reads = intervals.iter().enumerate().map(|(i, iv)| nodes[(i + 1) * finest - 1].1.take().map(|node| (iv.1, node))).collect();
+        let reads = intervals.iter().enumerate().map(|(i, iv)| nodes[offset[i] + finest[i] - 1].1.take().map(|node| (iv.1, node))).collect();
         let last = nodes.last().map_or(before, |x| x.0.clone());
         let taken = places.into_iter().map(|own| own.into_iter().map(|p| frozen[p].clone()).collect()).collect();
-        Ok((taken, reads, last, counts))
+        let ends = each
+            .iter()
+            .map(|e| {
+                e.iter()
+                    .scan(0, |sum, &n| {
+                        *sum += n;
+                        Some(*sum)
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok((taken, reads, last, counts, ends))
     }
 
     /// A piece frozen (`Frozen`): the `j`-th of the knot interval [a, b] cut in as many pieces as its nodes `grid` at the
