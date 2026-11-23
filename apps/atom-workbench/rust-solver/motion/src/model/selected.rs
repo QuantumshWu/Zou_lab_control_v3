@@ -113,8 +113,10 @@
 //! (`Tables::layout`: the decompositions alone), and they are filled where the rent covers that price, else the price
 //! is kept for the next time. Bought, they are read for the kinds of node they cost less for by count (`kind`, `KINDS`:
 //! a step's node, the middle's with the lift, a jump's photon's, a whole one with the photon forms; `tables_pay`, at the
-//! structure's point), and for none where none does -- then no tables at all. A point the tables do not read (its s
-//! below them, a gap they cannot bound) is folded as before.
+//! structure's point), each up to the most Doppler terms it costs less at (`Bought::caps`: a fast atom's node that needs
+//! more is folded -- until 2026-11-23 it took the terms whatever they cost, PGC3D's step on a 300-step walk 1.05 of the
+//! fold's), and for none where none does at the budget's terms -- then no tables at all. A point the tables do not read
+//! (its s below them, a gap they cannot bound) is folded as before.
 //!
 //! The switch is a version of the model (step.rs `Dynamics::version`): a trajectory runs on the version it started on
 //! through its life -- its checkpoints carry it, and whatever is made again of them (solve.rs `replay`, the selection's
@@ -449,7 +451,8 @@ struct Tabling {
 #[derive(Debug)]
 struct Bought {
     tables: Arc<PairTables>,
-    uses: [bool; KINDS],
+    /// Per kind of node the most Doppler terms at which it costs less off the tables than off the fold (0: none).
+    caps: [usize; KINDS],
     budget: [f64; 2],
 }
 
@@ -2317,33 +2320,39 @@ impl Selected {
     }
 
     /// The tables a node of the making `making` is read off where it is `tabled` (# The tables): the run's, where they
-    /// are bought for its kind.
-    fn tables_for(&self, making: Making, tabled: bool) -> Option<&Bought> {
+    /// are bought for its kind at some terms (`Bought::caps`), with the most terms it may take there.
+    fn tables_for(&self, making: Making, tabled: bool) -> Option<(&Bought, usize)> {
         if !tabled {
             return None;
         }
-        self.tabling.tables.get().and_then(|t| t.as_ref()).filter(|b| b.uses[kind(making)])
+        self.tabling.tables.get().and_then(|t| t.as_ref()).map(|b| (b, b.caps[kind(making)])).filter(|(_, cap)| *cap > 0)
     }
 
-    /// Per kind of node (`KINDS`) whether it costs less off the tables `t` than off the fold: the counted work of its
-    /// fold and contraction (`Local::work`, `Out::work`) against the tables' reading and contraction (`Reading::work`,
-    /// `Tables::contract`) at the structure's point (the trap's centre at rest, s = 1: in the tables) -- the rest of a
-    /// node (the point, the source's values, the filling) the same either way. None where the tables do not read it.
-    fn tables_pay(&self, t: &PairTables, orders: usize) -> Option<[bool; KINDS]> {
+    /// Per kind of node (`KINDS`) the most Doppler terms at which it costs less off the tables `t` than off the fold
+    /// (0: none): the counted work of its fold and contraction (`Local::work`, `Out::work`) against the tables' reading
+    /// and contraction at each number of terms (`Reading::work`, `Tables::contract`) at the structure's point (the trap's
+    /// centre at rest, s = 1: in the tables) -- the rest of a node (the point, the source's values, the filling) the same
+    /// either way. A node that needs more terms than its kind's is folded (`node_into`). None where the tables do not
+    /// read the point.
+    fn tables_pay(&self, t: &PairTables) -> Option<[usize; KINDS]> {
         let plan = self.rs.plan();
         let mut work = Work::default();
         self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
-        let mut uses = [false; KINDS];
+        let mut caps = [0; KINDS];
         for (k, &making) in MAKINGS.iter().enumerate() {
             self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
             work.out.contract(plan, &self.lab, &work.local, None, making);
             let fold = work.local.work + work.out.work;
             let reading = t.read(plan, &self.lab, &work.local.values, &mut work.pairs)?;
-            let tables = reading.work + t.contract(plan, &self.lab, &work.local.values, &reading, orders, making, &mut work.out, &mut work.pairs);
-            crate::prof::note(|| format!("tables: kind {k} counted {:.4e} off the fold, {:.4e} off the tables", COMPLEX * fold, COMPLEX * tables));
-            uses[k] = tables < fold;
+            for orders in 1..=t.orders {
+                let tables = reading.work + t.contract(plan, &self.lab, &work.local.values, &reading, orders, making, &mut work.out, &mut work.pairs);
+                crate::prof::note(|| format!("tables: kind {k} at {orders} terms counted {:.4e} off the fold, {:.4e} off the tables", COMPLEX * fold, COMPLEX * tables));
+                if tables < fold {
+                    caps[k] = orders;
+                }
+            }
         }
-        Some(uses)
+        Some(caps)
     }
 
     /// The run's tables bought where their price is paid (module documentation, # The tables), at a point no node of the
@@ -2395,10 +2404,11 @@ impl Selected {
                 crate::prof::note(|| format!("tables laid again to the budget {budget:?}: {} pieces, priced {:.4e}", again.pieces.len(), COMPLEX * (again.work + again.price)));
                 again.fill(plan, &self.lab, &rest)?
             };
-            let uses = self.tables_pay(&t, orders).filter(|uses| uses.iter().any(|&u| u))?;
-            Some(Bought { tables: Arc::new(t), uses, budget })
+            // Kept where some kind costs less off them at the budget's terms.
+            let caps = self.tables_pay(&t).filter(|caps| caps.iter().any(|&c| c >= orders))?;
+            Some(Bought { tables: Arc::new(t), caps, budget })
         });
-        crate::prof::note(|| tables.as_ref().map_or("tables: none kept".to_string(), |b| format!("tables bought: {} pieces, {:.2} MB, {:.3} s, counted {:.4e}, for the kinds {:?}, budget {:?}", b.tables.pieces.len(), b.tables.bytes as f64 / 1e6, b.tables.build_seconds, COMPLEX * b.tables.work, b.uses, b.budget)));
+        crate::prof::note(|| tables.as_ref().map_or("tables: none kept".to_string(), |b| format!("tables bought: {} pieces, {:.2} MB, {:.3} s, counted {:.4e}, for the kinds {:?}, budget {:?}", b.tables.pieces.len(), b.tables.bytes as f64 / 1e6, b.tables.build_seconds, COMPLEX * b.tables.work, b.caps, b.budget)));
         let _ = tabling.tables.set(tables);
     }
 
@@ -2446,7 +2456,7 @@ impl Selected {
     /// The kinds of node the run's tables are read for and their budget (the tests').
     #[cfg(test)]
     pub(crate) fn bought_for(&self) -> Option<([bool; KINDS], [f64; 2])> {
-        self.tabling.tables.get().and_then(|t| t.as_ref()).map(|b| (b.uses, b.budget))
+        self.tabling.tables.get().and_then(|t| t.as_ref()).map(|b| (b.caps.map(|c| c > 0), b.budget))
     }
 
     /// Whether the run's tables read the point (the tests').
@@ -2556,12 +2566,12 @@ impl Selected {
             // Off the tables where they read the point: the source's values there, the reading, the contraction.
             let mut read = None;
             node.deviation = [0.0; 2];
-            if let Some(Bought { tables: t, budget, .. }) = tables {
+            if let Some((Bought { tables: t, budget, .. }, cap)) = tables {
                 self.rs.tweezer().values_into(&self.scene, &work.point, &mut work.local.values);
                 // The fewest of the series' terms that hold the node within the budget (# The tables' budget), none where
-                // the tables' do not: the fold's own then.
+                // more than the kind costs less at (`Bought::caps`) would: the fold's own then.
                 let reading = t.read(plan, &self.lab, &work.local.values, &mut work.pairs);
-                if let Some((reading, orders)) = reading.and_then(|r| (1..=t.orders).find(|&o| r.tail(o) <= budget[0] && r.tail(o - 1) <= budget[1]).map(|o| (r, o))) {
+                if let Some((reading, orders)) = reading.and_then(|r| (1..=cap).find(|&o| r.tail(o) <= budget[0] && r.tail(o - 1) <= budget[1]).map(|o| (r, o))) {
                     let contracted = t.contract(plan, &self.lab, &work.local.values, &reading, orders, making, &mut work.out, &mut work.pairs);
                     let relative = work.pairs.interpolated.relative;
                     let whole = reading.moved + t.dropped;

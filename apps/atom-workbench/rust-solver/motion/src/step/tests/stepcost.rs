@@ -726,3 +726,105 @@ fn tabled_step_parts() {
         );
     }
 }
+
+/// STEP4, the coordinator's question: a step's thread time on the fold's version and on the tables' at one thread and at
+/// the machine's concurrency, paired in one process. Per scene of STEPCOST (names of `SCENES`, their ground states;
+/// default PGC3D, TET) each of STEPCOST_THREADS threads (every core) its own walk of STEPCOST_STEPS (24) steps
+/// (trajectory i of `r1prop::start`) on the fold's nodes; the tables bought on [the walks' least s, 1]; then
+/// STEPCOST_ROUNDS (3) rounds, each version in turn (the other first every other round), at one thread (the first
+/// walk's) and at all of them at once: each thread its walk's states once untimed and once timed in its own cycles, on
+/// one scratch as a trajectory carries it. Said: "TABLED-THREADS <scene>", per version and concurrency the mean thread
+/// time a step (µs) at its least over the rounds, and the round's wall time. Ignored; run by name, not pinned.
+#[test]
+#[ignore]
+fn tabled_step_threads() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let (steps, rounds, threads) = (env("STEPCOST_STEPS", 24), env("STEPCOST_ROUNDS", 3), env("STEPCOST_THREADS", cores));
+    let ghz: f64 = (0..5)
+        .map(|_| {
+            let (c0, clock) = (thread_cycles(), Instant::now());
+            let mut x = 0u64;
+            while clock.elapsed().as_millis() < 50 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            (thread_cycles() - c0) as f64 / clock.elapsed().as_nanos() as f64
+        })
+        .fold(0.0, crate::linalg::larger);
+    let list = std::env::var("STEPCOST").unwrap_or_else(|_| "PGC3D,TET".to_string());
+    for entry in list.split(',') {
+        let found = SCENES.split(',').find(|e| e.starts_with(&format!("{entry}="))).unwrap_or_else(|| panic!("no default for {entry}"));
+        let tau: f64 = found.split_once('@').unwrap().1.parse().unwrap();
+        let request = request_of(entry);
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: (0..GROUND).collect(), ..selection }, crate::solve::alone(chief)).unwrap();
+        let domain = Everywhere;
+        let walks: Vec<Vec<crate::step::Trajectory>> = (0..threads)
+            .map(|i| {
+                let mut t = start(&run, &request, chief, i as u64);
+                let mut walk = Vec::new();
+                for _ in 0..steps {
+                    let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)) else { break };
+                    walk.push(t.clone());
+                    t = step.end;
+                }
+                walk
+            })
+            .collect();
+        let low = walks
+            .iter()
+            .flatten()
+            .map(|t| {
+                let mut point = crate::scene::Point::default();
+                run.scene.point_into(t.r, t.kappa, &mut point);
+                crate::model::rs::fold::tabled::Tables::intensity(run.rs.plan(), &run.rs.tweezer().values(&run.scene, &point))
+            })
+            .fold(1.0, crate::linalg::smaller)
+            * 0.999;
+        assert!(run.buy_tables_now(low), "{entry}: no tables");
+        // One thread's walk on the version v: once untimed, once timed; its thread time a step (µs).
+        let walked = |walk: &[crate::step::Trajectory], v: u32| -> f64 {
+            let mut scratch = Scratch::default();
+            let mut go = || {
+                for from in walk {
+                    let t = crate::step::Trajectory { version: v, ..from.clone() };
+                    std::hint::black_box(Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &domain)).is_ok());
+                }
+            };
+            go();
+            let c0 = thread_cycles();
+            go();
+            (thread_cycles() - c0) as f64 / (ghz * 1e3) / walk.len().max(1) as f64
+        };
+        // [version][one thread, all threads]: the least over the rounds of the threads' mean; and the walls.
+        let (mut least, mut wall) = ([[f64::INFINITY; 2]; 2], [[f64::INFINITY; 2]; 2]);
+        for round in 0..rounds {
+            let order: [u32; 2] = if round % 2 == 0 { [0, 1] } else { [1, 0] };
+            for &v in &order {
+                for (c, n) in [1, threads].into_iter().enumerate() {
+                    let clock = Instant::now();
+                    let per: Vec<f64> = std::thread::scope(|s| {
+                        let handles: Vec<_> = walks[..n].iter().map(|walk| s.spawn(move || walked(walk, v))).collect();
+                        handles.into_iter().map(|h| h.join().unwrap()).collect()
+                    });
+                    let mean = per.iter().sum::<f64>() / per.len() as f64;
+                    least[v as usize][c] = least[v as usize][c].min(mean);
+                    wall[v as usize][c] = wall[v as usize][c].min(clock.elapsed().as_secs_f64());
+                }
+            }
+        }
+        eprintln!(
+            "TABLED-THREADS {entry} tau {tau}: a step's thread time, the fold's / the tables' (ratio) -- one thread {:.1} / {:.1} µs ({:.3}); {threads} threads at once {:.1} / {:.1} µs ({:.3}); the walls of {threads} threads {:.2} / {:.2} s; {steps} steps a thread, the least of {rounds} rounds",
+            least[0][0],
+            least[1][0],
+            least[1][0] / least[0][0],
+            least[0][1],
+            least[1][1],
+            least[1][1] / least[0][1],
+            wall[0][1],
+            wall[1][1]
+        );
+    }
+}
