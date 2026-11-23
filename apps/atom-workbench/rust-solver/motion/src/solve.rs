@@ -453,10 +453,11 @@
 //!    looks they leave (`looks`); a candidate whose looks that the exact model's would meet are met by its account is
 //!    complete, its work W the product's trajectories its looks need times its work over the run, and -- not the
 //!    pilot's -- the scout's and the pilot's again on it. Where a model with more states could work less, each addable
-//!    state's addition alone is judged on two paths, the nominees are the prefixes of their order by the misfit each
-//!    takes away per work it adds, and from the first predicted to fit each is judged on every path until one is
-//!    complete, above it while its least W -- at no model error, at the ladder's first rung's step, its pilot again --
-//!    stands below the least found.
+//!    state's addition alone is judged on two paths; those that meet every look there are judged alone on every path and
+//!    weighed (what tells their W apart is the paths' spread, which two paths do not see); the nominees are the prefixes
+//!    of the states' order -- those singles by their W, then the others by the misfit each takes away per work it adds
+//!    --, and from the first predicted to fit each is judged on every path until one is complete, above it while its
+//!    least W -- at no model error, at the ladder's first rung's step, its pilot again -- stands below the least found.
 //! 4. The complete ones but the pilot's are scouted at their own step in the order of their least W while it stands
 //!    below the least found; P is the complete candidate of least W. The choice is kept for the scene, and said (stderr
 //!    and the ledger's items): every candidate's parts, work and fate, the stages' times.
@@ -2599,12 +2600,35 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let accounts = |j: &crate::select::Judged| -> [Vec<[f64; 2]>; 2] {
             [Reach::Upper, Reach::Lower].map(|reach| model_of(&|t| direct_bound_at(j, &paths.windows, t, reach), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, reach), &read.estimates, times, optical, &context.fixed.escape))
         };
-        // A candidate's misfit at its point estimates (the nomination's, select.rs # The candidates): its model error over
-        // its target, the largest over the times and the two kinds -- what is shown over the population target, T over its
-        // allowance there.
-        let misfit = |j: &crate::select::Judged| -> f64 {
-            let point = model_of(&|t| direct_bound_at(j, &paths.windows, t, Reach::Point), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, Reach::Point), &read.estimates, times, optical, &context.fixed.escape);
-            (1..times.len()).map(|k| crate::linalg::larger(point[k][0] / POPULATION_TARGET, point[k][1] / read.estimates[k].temperature_target)).fold(0., crate::linalg::larger)
+        // A candidate's account at its point estimates (the nomination's, select.rs # The candidates), and its misfit there:
+        // its model error over its target, the largest over the times and the two kinds -- what is shown over the
+        // population target, T over its allowance there.
+        let point = |j: &crate::select::Judged| -> Vec<[f64; 2]> { model_of(&|t| direct_bound_at(j, &paths.windows, t, Reach::Point), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, Reach::Point), &read.estimates, times, optical, &context.fixed.escape) };
+        let misfit = |point: &[[f64; 2]]| -> f64 { (1..times.len()).map(|k| crate::linalg::larger(point[k][0] / POPULATION_TARGET, point[k][1] / read.estimates[k].temperature_target)).fold(0., crate::linalg::larger) };
+        // An account with the states its model cannot step from booked whole (`priced_with`): on what is shown their share,
+        // on T the bound set's move of it (# The unresolved atoms).
+        let unresolved = |mut m: Vec<[f64; 2]>, runaway: f64| -> Vec<[f64; 2]> {
+            if runaway > 0. {
+                for (k, e) in m.iter_mut().enumerate().skip(1) {
+                    *e = [probability_error(e[0] + runaway), e[1] + read.estimates[k].moved(runaway, &context.fixed.escape)];
+                }
+            }
+            m
+        };
+        // What an account asks of the run: the kinds of look it meets of those the run's own meets (`met`), the trajectories
+        // its looks need, and its W where it meets them all -- that need at its price a µs over the run, the pilot's again
+        // beside where it is not the pilot's model.
+        let asks = |m: Vec<[f64; 2]>, price: f64, place: usize| -> ([bool; 2], f64, Option<f64>) {
+            let own = looks(&read.estimates, &fixed(m), context.step);
+            let (met, need) = (met(&own), most_needed(&own));
+            (met, need, (met == [true; 2]).then(|| need * price * span + again(place, price)))
+        };
+        // A candidate's name: its states' count, and the excited state it adds where it adds one to the pilot's model.
+        let named = |keep: &[usize]| -> String {
+            match keep.iter().find(|s| !own.contains(s)) {
+                Some(&e) if keep.len() == own.len() + 1 => format!("P{}（+{}）", keep.len(), labels[e]),
+                _ => format!("P{}", keep.len()),
+            }
         };
         let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> { accounts(j).into_iter().next().expect("the upper end") };
         let make = |keep: &[usize]| -> Result<Selected, String> { Selected::new(crate::scene::Scene::new(request)?, Selection { keep: keep.to_vec(), ..run.report.clone() }, reference) };
@@ -2612,55 +2636,54 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let mut chain: Vec<Vec<usize>> = vec![own.clone()];
         let mut models: Vec<Option<Selected>> = vec![None];
         let mut weighed: Vec<Weighed> = vec![];
-        // A candidate judged and weighed (its model made where it is not the pilot's).
-        let weigh = |place: usize, keep: &[usize], models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
+        // A candidate judged on every path, its price a µs and the share of the pilot's states it cannot step from
+        // (`priced_with`), and the seconds it took. The 32 states are the reference itself: no model error at any time
+        // (`Paths::itself`), its looks the run's own (`base`) -- complete by construction, whatever its atoms do (the
+        // invariant the choice stands on).
+        let judgment = |place: usize, keep: &[usize], model: &Selected| -> Result<(crate::select::Judged, f64, f64, f64), String> {
             let started = Instant::now();
-            if place > 0 && models[place].is_none() {
-                models[place] = Some(make(keep)?);
-            }
-            let model = models[place].as_ref().unwrap_or(run);
             let (price, runaway) = priced_with(model, domain.widest, &rated, tau, place == 0);
-            // The 32 states are the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
-            // (`base`) -- complete by construction, whatever its atoms do (the invariant the choice stands on).
-            let exact = keep.len() == STATES;
-            let judged = if exact { paths.itself(keep.to_vec()) } else { judge(&paths, model, centre)? };
-            let [mut model_error, mut lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
-            // The states it cannot step from (`priced_with`): unresolved, booked whole -- on what is shown their share, on T
-            // the bound set's move of it (# The unresolved atoms).
-            if runaway > 0. {
-                for m in [&mut model_error, &mut lower] {
-                    for (k, e) in m.iter_mut().enumerate().skip(1) {
-                        *e = [probability_error(e[0] + runaway), e[1] + read.estimates[k].moved(runaway, &context.fixed.escape)];
-                    }
-                }
-            }
+            let judged = if keep.len() == STATES { paths.itself(keep.to_vec()) } else { judge(&paths, model, centre)? };
+            Ok((judged, price, runaway, started.elapsed().as_secs_f64()))
+        };
+        // A candidate weighed on its judgment.
+        let booked = |place: usize, (judged, price, runaway, seconds): (crate::select::Judged, f64, f64, f64), report: &mut Vec<String>| -> Weighed {
+            let exact = judged.keep.len() == STATES;
+            let [model_error, lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
+            // The states it cannot step from: unresolved, booked whole.
+            let (model_error, lower) = (unresolved(model_error, runaway), unresolved(lower, runaway));
             #[cfg(test)]
             if std::env::var_os("SEL_MOTION").is_some() {
                 for (k, e) in read.estimates.iter().enumerate() {
                     eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e}, lower {:.3e} / {:.3e}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), times[k], model_error[k][0], model_error[k][1], lower[k][0], lower[k][1], e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
                 }
             }
-            let own = looks(&read.estimates, &fixed(model_error.clone()), context.step);
+            let (met, need, work) = asks(model_error, price, place);
             // Complete at the direct part's lower end as well where it is not at its upper: its fate open at the paths'
-            // statistics (select.rs, # How many paths).
-            let at_least = met(&looks(&read.estimates, &fixed(lower.clone()), context.step));
-            let met = met(&own);
+            // statistics (select.rs, # How many paths); what it would cost were its fate decided complete, its need there.
+            let (at_least, need_low, _) = asks(lower, price, place);
             let open = met != [true; 2] && at_least == [true; 2];
-            let need = most_needed(&own);
+            let settled_low = need_low * price * span + again(place, price);
             debug_assert!(!exact || met == [true; 2], "the reference itself meets every look the run's own does");
             // Its fate in words: complete where every look the run's own meets (no model error, `base`) is still met at its
             // model error -- the room that error leaves the statistics filled within the trajectories' cap (`Look::fits`) --,
             // else the first kind of look it leaves unmet, what is shown (the populations and the loss) before T.
-            let (work, fate) = match met {
-                [true, true] => (Some(need * price * span + again(place, price)), "模型误差留给统计的余量够用".to_string()),
-                [true, false] => (None, "温度：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
-                _ => (None, "显示量（布居、丢失）：模型误差留给统计的余量在轨迹上限内不够，不选".to_string()),
-            };
+            let fate = match met {
+                [true, true] => "模型误差留给统计的余量够用",
+                [true, false] => "温度：模型误差留给统计的余量在轨迹上限内不够，不选",
+                _ => "显示量（布居、丢失）：模型误差留给统计的余量在轨迹上限内不够，不选",
+            }
+            .to_string();
             let runaway_said = if runaway > 0. { format!("（先导的状态里有 {} 走不了一步，按未解决整份记账）", percent(runaway)) } else { String::new() };
-            noted(report, format!("候选 P{}：每 µs 代价 {:.3e}{runaway_said}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
-            // What it would cost were its fate decided complete: its need at its account's lower end.
-            let settled_low = most_needed(&looks(&read.estimates, &fixed(lower.clone()), context.step)) * price * span + again(place, price);
-            Ok(Weighed { place, judged, price, need, work, fate, open, settled_low })
+            noted(report, format!("候选 {}：每 µs 代价 {price:.3e}{runaway_said}，{fate}，{seconds:.1} s", named(&judged.keep)));
+            Weighed { place, judged, price, need, work, fate, open, settled_low }
+        };
+        // A candidate judged and weighed (its model made where it is not the pilot's).
+        let weigh = |place: usize, keep: &[usize], models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
+            if place > 0 && models[place].is_none() {
+                models[place] = Some(make(keep)?);
+            }
+            Ok(booked(place, judgment(place, keep, models[place].as_ref().unwrap_or(run))?, report))
         };
         weighed.push(weigh(0, own, &mut models, &mut report)?);
         messages.alive();
@@ -2675,11 +2698,16 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         let price_own = priced(run, domain.widest, &rated, first, true);
         let floor = need0 * price_own * span + again(1, price_own);
         let mut predicted: Vec<f64> = vec![f64::NAN];
+        // The chain's first prefix of the nomination (after the singles weighed alone), and whether a fate open at the paths'
+        // statistics waits for more paths before any nominee is judged.
+        let mut prefixes = 1;
+        let mut settle = settle_first;
         if floor < found && !addable.is_empty() && !settle_first {
             // The nomination (select.rs # The candidates): each addable state alone added to the pilot's model, judged on the
-            // first `NOMINATION_WALKS` paths at its point estimates; its contribution the misfit it takes away per work it adds
-            // a µs; the states in the order of that, those that take none away after them by their excitation; the nominees
-            // the order's prefixes, the 32 states last.
+            // first `NOMINATION_WALKS` paths at its point estimates -- the misfit it takes away per work it adds a µs, and
+            // whether it meets every look there --; those that do judged alone on every path and weighed; the states in the
+            // order of those singles' W, the least first, then the others' misfit taken away per work, those that take none
+            // away after them by their excitation; the nominees the order's prefixes, the 32 states last.
             let clock = Instant::now();
             let few = crate::select::NOMINATION_WALKS.min(paths.walks.len());
             let price_tau = priced(run, domain.widest, &rated, tau, true);
@@ -2696,34 +2724,72 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                     Ok((e, model, need0 * least * span + again(1, least) < found))
                 })
                 .collect::<Result<_, _>>()?;
-            let mine = if made.iter().any(|x| x.2) { misfit(&crate::select::judge_on(&paths, run, centre, few)?) } else { f64::NAN };
-            let singles: Vec<(usize, f64, f64, Selected)> = made
+            let mine = if made.iter().any(|x| x.2) { misfit(&point(&crate::select::judge_on(&paths, run, centre, few)?)) } else { f64::NAN };
+            let with = |e: usize| -> Vec<usize> {
+                let mut keep = own.clone();
+                keep.push(e);
+                keep.sort_unstable();
+                keep
+            };
+            // Per single: its state, the misfit it takes away, the work it adds a µs, whether it meets every look at its point
+            // estimates on those paths (its unresolved states booked whole, `asks`), and its model.
+            let singles: Vec<(usize, f64, f64, bool, Selected)> = made
                 .into_par_iter()
-                .map(|(e, model, open)| -> Result<(usize, f64, f64, Selected), String> {
+                .map(|(e, model, open)| -> Result<(usize, f64, f64, bool, Selected), String> {
                     if !open {
-                        return Ok((e, f64::NAN, f64::INFINITY, model));
+                        return Ok((e, f64::NAN, f64::INFINITY, false, model));
                     }
-                    let price = priced(&model, domain.widest, &rated, tau, false);
-                    let taken = mine - misfit(&crate::select::judge_on(&paths, &model, centre, few)?);
-                    Ok((e, taken, price - price_tau, model))
+                    let (price, runaway) = priced_with(&model, domain.widest, &rated, tau, false);
+                    let at = point(&crate::select::judge_on(&paths, &model, centre, few)?);
+                    let taken = mine - misfit(&at);
+                    let (met, _, _) = asks(unresolved(at, runaway), price, 1);
+                    Ok((e, taken, price - price_tau, met == [true; 2], model))
                 })
                 .collect::<Result<_, _>>()?;
             let mut order: Vec<usize> = (0..singles.len()).collect();
             let score = |i: usize| if singles[i].1 > 0. { singles[i].1 / singles[i].2.max(f64::MIN_POSITIVE) } else { f64::NEG_INFINITY };
             order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(amplitudes[singles[b].0].total_cmp(&amplitudes[singles[a].0])).then(singles[a].0.cmp(&singles[b].0)));
-            let mut singles: Vec<Option<(usize, f64, f64, Selected)>> = singles.into_iter().map(Some).collect();
+            // The singles that meet every look at their point estimates there: their need there is the run's own statistics'
+            // (R4 2026-11-23: 771 to 794 trajectories each, the pilot's 780), and what tells their W apart is the paths'
+            // spread, which two paths do not see (on every path 833 to 3133; the one first by misfit on two paths 7th of ten by
+            // its W). Each is judged on every path, together, and weighed alone.
+            let alone: Vec<usize> = order.iter().copied().filter(|&i| singles[i].3).collect();
+            let clock_alone = Instant::now();
+            let judged_alone: Vec<_> = alone.par_iter().map(|&i| judgment(1, &with(singles[i].0), &singles[i].4)).collect::<Result<_, _>>()?;
+            let info: Vec<(usize, f64)> = singles.iter().map(|s| (s.0, s.1)).collect();
+            let mut singles: Vec<Option<Selected>> = singles.into_iter().map(|s| Some(s.4)).collect();
+            let mut alone_work: Vec<(usize, f64)> = vec![];
+            for (&i, j) in alone.iter().zip(judged_alone) {
+                let place = chain.len();
+                chain.push(with(info[i].0));
+                models.push(singles[i].take());
+                predicted.push(mine - info[i].1);
+                let w = booked(place, j, &mut report);
+                found = found.min(w.work.unwrap_or(f64::INFINITY));
+                settle |= w.open && more_paths;
+                alone_work.push((i, w.work.unwrap_or(f64::INFINITY)));
+                weighed.push(w);
+            }
+            // The order the prefixes are made in: the singles weighed alone by their W (the least first; those not complete
+            // after them as they were), then the others as they were.
+            alone_work.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let ordered: Vec<usize> = alone_work.iter().map(|a| a.0).chain(order.iter().copied().filter(|i| !alone.contains(i))).collect();
+            prefixes = chain.len();
             let mut keep = own.clone();
             let mut left = mine;
-            for (k, &i) in order.iter().enumerate() {
-                let (e, taken, _, model) = singles[i].take().expect("each single once");
+            for (k, &i) in ordered.iter().enumerate() {
+                let (e, taken) = info[i];
                 keep.push(e);
                 keep.sort_unstable();
                 if taken > 0. {
                     left -= taken;
                 }
+                // The first prefix is a single: weighed alone already, or the nominee with the single's own model.
+                if k == 0 && alone.contains(&i) {
+                    continue;
+                }
                 chain.push(keep.clone());
-                // The first nominee's model is the single's own.
-                models.push(if k == 0 { Some(model) } else { None });
+                models.push(if k == 0 { singles[i].take() } else { None });
                 predicted.push(left);
             }
             if chain.last().map(|c| c.len()) != Some(STATES) {
@@ -2735,8 +2801,10 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 format!("提名：每个可加回的激发态单独加进先导的模型，最小 W 都不低于已找到的 {found:.3e}，都不判；{:.1} s", clock.elapsed().as_secs_f64())
             } else {
                 format!(
-                    "提名（每个可加回的激发态单独加进先导的模型，在 {few} 条路径上按点估计判：去掉的失配 / 每 µs 多出的代价；最小 W 不低于已找到的不判，排在后面）：先导模型的失配 {mine:.3}；{}；{:.1} s",
-                    order.iter().map(|&i| format!("{}", labels[addable[i]])).collect::<Vec<_>>().join(" → "),
+                    "提名（每个可加回的激发态单独加进先导的模型，在 {few} 条路径上按点估计判：去掉的失配 / 每 µs 多出的代价，最小 W 不低于已找到的不判；点估计下显示量与温度都够的 {} 个单独在全部路径上判、按 W 排在前面，{:.1} s）：先导模型的失配 {mine:.3}；{}；{:.1} s",
+                    alone.len(),
+                    clock_alone.elapsed().as_secs_f64(),
+                    ordered.iter().map(|&i| alone_work.iter().find(|a| a.0 == i).map_or(format!("{}", labels[info[i].0]), |a| format!("{}（W {}）", labels[info[i].0], if a.1.is_finite() { format!("{:.2e}", a.1) } else { "不够".to_string() }))).collect::<Vec<_>>().join(" → "),
                     clock.elapsed().as_secs_f64()
                 )
             };
@@ -2749,18 +2817,18 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             models.push(None);
             predicted.push(0.);
         }
-        // The nominees from the first one predicted to fit (its misfit, the pilot's less what its states took away alone,
+        // The prefixes from the first one predicted to fit (its misfit, the pilot's less what its states took away alone,
         // below one), each judged on every path, until one is complete; above it, while a nominee's least W stands below the
         // least found (its states more, its least W no less).
-        let start = (1..chain.len()).find(|&p| predicted[p] < 1.).unwrap_or(chain.len().saturating_sub(1)).max(1);
-        for place in if settle_first { chain.len()..chain.len() } else { start..chain.len() } {
+        let start = (prefixes..chain.len()).find(|&p| predicted[p] < 1.).unwrap_or(chain.len().saturating_sub(1)).max(prefixes);
+        for place in if settle { chain.len()..chain.len() } else { start..chain.len() } {
             if models[place].is_none() {
                 models[place] = Some(make(&chain[place])?);
             }
             let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
             let lower = need0 * price * span + again(place, price);
             if !(lower < found) {
-                noted(&mut report, format!("提名的 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不判", chain[place].len()));
+                noted(&mut report, format!("提名的 {} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不判", named(&chain[place])));
                 break;
             }
             let keep = chain[place].clone();
@@ -2783,7 +2851,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // open candidate's saving is more than that; else its upper end stands, said.
         let open: Vec<&Weighed> = weighed.iter().filter(|w| w.open).collect();
         if !open.is_empty() {
-            let names = open.iter().map(|w| format!("P{}", w.judged.keep.len())).collect::<Vec<_>>().join("、");
+            let names = open.iter().map(|w| named(&w.judged.keep)).collect::<Vec<_>>().join("、");
             let next = (2 * count).min(available);
             let spent = paths.work + weighed.iter().map(|w| w.judged.work).sum::<f64>();
             let more = spent * (next - count) as f64 / count as f64;
@@ -2841,7 +2909,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             best = crate::linalg::smaller(best, w);
             entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
             (entry.price, entry.work) = (price, Some(w));
-            noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
+            noted(&mut report, format!("{}：{}", named(&entry.judged.keep), entry.fate));
             messages.alive();
         }
         // P: the complete candidate of least W (the first of them where several are) -- one is complete at least, the 32 states by
@@ -2886,8 +2954,8 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             noted(
                 &mut report,
                 format!(
-                    "P{}{}：直接 {:.2e}（校准 {:.1e}，率 {:.1e}）{motion}；need {:.0}、W {}；{}",
-                    w.judged.keep.len(),
+                    "{}{}：直接 {:.2e}（校准 {:.1e}，率 {:.1e}）{motion}；need {:.0}、W {}；{}",
+                    named(&w.judged.keep),
                     if w.place == weighed[chosen].place { "（选中）" } else { "" },
                     direct,
                     w.judged.calibration.rows,

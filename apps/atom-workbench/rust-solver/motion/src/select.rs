@@ -23,11 +23,16 @@
 //! - each addable state -- one the light excites where the pilot's atoms were, its importance above nought -- alone added
 //!   to the pilot's model, judged on the first `NOMINATION_WALKS` paths (`judge_on`) at its point estimates (`Reach::Point`):
 //!   its contribution the misfit it takes away -- the model error over its target, the largest over the times and the
-//!   readings -- per work it adds a µs;
-//! - the states in the order of that (those taking none away after them, by their importance), the nominees the order's
-//!   prefixes, the 32 states last: a group is a prefix, whatever its states (no chain by structure, no bisection, no rule
-//!   of mirror pairs or of whole levels);
-//! - each nominee from the first one predicted to fit -- the pilot's misfit less what its states took away alone, below
+//!   readings -- per work it adds a µs, and whether it meets every look there;
+//! - each single that does is judged alone on every path and weighed, a candidate: where a single state is enough, the
+//!   singles' needs at their point estimates are the run's own statistics' (R4 2026-11-23: 771 to 794 trajectories each,
+//!   the pilot's own 780), and what tells their W apart is their direct part's spread over the paths, which two paths do
+//!   not see -- on every path 833 to 3133 trajectories; the one first by its misfit on two paths was 13th of 24 by its W,
+//!   and the cheapest took none away there (its contribution is where other atoms went: the lattice's polarization);
+//! - the states in the order of those singles' W (the least first), then the others' contribution (those taking none
+//!   away after them, by their importance), the nominees the order's prefixes, the 32 states last: a group is a prefix,
+//!   whatever its states (no chain by structure, no bisection, no rule of mirror pairs or of whole levels);
+//! - each prefix from the first one predicted to fit -- the pilot's misfit less what its states took away alone, below
 //!   one (the rates and the forces add over single states to 0.1–1 percentage points, the rows not: Study A §2.2) -- is
 //!   judged on every path, the next where it is not complete; above a complete one while a nominee's least W stands
 //!   below the least found.
@@ -208,7 +213,8 @@ pub const POINTS: usize = 3;
 
 /// The paths a single state's addition is judged on for its nomination (module documentation, # The candidates): two,
 /// the fewest whose mean is one over paths -- the nomination reads point estimates (the rates and the forces add over
-/// single states to 0.1–1 percentage points on two paths, Study A §2.2), and every nominee is judged again on every path.
+/// single states to 0.1–1 percentage points on two paths, Study A §2.2), and every nominee is judged again on every path,
+/// every single that meets every look on these alone.
 pub const NOMINATION_WALKS: usize = 2;
 
 /// The pilot's paths a candidate is first judged on (BRIEF_P3_SELECT item 2: P1-PATHS's path-to-path spread is at most
