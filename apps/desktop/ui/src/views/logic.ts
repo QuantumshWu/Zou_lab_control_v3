@@ -161,15 +161,15 @@ export type EditorIntents = NodeIntents & {
  * host refuse it (expected_draft_revision).  A Stop or a Remove of the node cancels it (`cancel`):
  * the operator's last action wins. */
 export class NodeStarts {
-  /** Per node: its edits sent from here and unanswered, in order, and the revision a waiting Start goes with (null: none waits). */
+  /** Per node: its edits sent from here whose replies have not come, in order, and the revision a waiting Start goes with (null: none waits). */
   private nodes = new Map<string, { edits: number[]; start: number | null }>();
 
   constructor(private transport: Transport, private rows: () => LogicRow[]) {}
 
-  /** An edit of node `id`'s draft, sent now. */
+  /** An edit of node `id`'s draft, sent now; one the host will answer (not a shared view's) is awaited. */
   edit(id: string, command: HostCommand, feedback: string): number {
     const request = this.transport.send(command, feedback);
-    this.node(id).edits.push(request);
+    if (this.transport.pending.has(request)) this.node(id).edits.push(request);
     return request;
   }
 
@@ -178,7 +178,7 @@ export class NodeStarts {
   start(id: string): boolean {
     if (this.waits(id)) return true;
     const revision = this.row(id)?.draft_revision;
-    if (revision === undefined || !this.nodes.get(id)?.edits.some(request => this.transport.pending.has(request))) { this.send(id, revision); return false; }
+    if (revision === undefined || !this.nodes.get(id)?.edits.length) { this.send(id, revision); return false; }
     this.node(id).start = revision;
     return true;
   }
@@ -193,24 +193,25 @@ export class NodeStarts {
 
   waits(id: string): boolean { return (this.nodes.get(id)?.start ?? null) !== null; }
 
-  /** After each state (`state`, which may answer an edit) and each refusal: an answered edit of a
-   * node whose Start waits moves its revision on by one where its reply's draft_revision is not the
-   * revision so far -- one more than it, the edit's own change; further on, a change from elsewhere
-   * too, which the one step leaves for the host to refuse -- and a refused edit leaves it; once none
-   * is left the Start goes.  Edits sent after the click ride along and put the Start off until they
-   * are answered (a Revert after it restarts the reverted draft): taking the draft as it stood at the
-   * click would bring back the refusal of the first click. */
-  settle(state?: State): void {
+  /** Each state the page takes: only the one that is an edit's reply (`state.request`) settles that
+   * edit -- what else reads the answer before it (the board, the status line) has no reply to read.
+   * Of a node whose Start waits, the reply moves its revision on by one where its draft_revision is
+   * not the revision so far -- one more than it, the edit's own change; further on, a change from
+   * elsewhere too, which the one step leaves for the host to refuse -- and a refusal leaves it; once
+   * its node has no edit left the Start goes.  Edits sent after the click ride along and put the
+   * Start off until they are answered (a Revert after it restarts the reverted draft): taking the
+   * draft as it stood at the click would bring back the refusal of the first click. */
+  settle(state: State): void {
     for (const [id, node] of this.nodes) {
-      for (const request of [...node.edits]) {
-        if (this.transport.pending.has(request)) continue;
-        node.edits.splice(node.edits.indexOf(request), 1);
-        const reply = state?.request === request && !state.error ? (state.result as { draft_revision?: unknown } | null | undefined)?.draft_revision : undefined;
-        if (node.start !== null && typeof reply === "number" && reply !== node.start) node.start += 1;
-      }
-      if (node.edits.length) continue;
+      const at = state.request === undefined ? -1 : node.edits.indexOf(state.request);
+      if (at < 0) continue;
+      node.edits.splice(at, 1);
+      const reply = state.error ? undefined : (state.result as { draft_revision?: unknown } | null | undefined)?.draft_revision;
+      if (node.start !== null && typeof reply === "number" && reply !== node.start) node.start += 1;
+      if (node.edits.length) return;
       this.nodes.delete(id);
       if (node.start !== null) this.send(id, node.start);
+      return;
     }
   }
 

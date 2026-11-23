@@ -342,8 +342,6 @@ export class FigureViewerView implements View {
   }
 
   status(): void {
-    // A refusal answers an edit too.
-    this.starts.settle();
     // v2 viewer: "opening <file>…" until the opened Figure is on the board, then "showing <its
     // first panel's data>" once, or what the viewer said last; "no figure open" before one is.
     const doc = this.ctx.latest.viewer?.document;
