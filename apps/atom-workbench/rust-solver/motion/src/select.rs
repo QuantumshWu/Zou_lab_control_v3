@@ -802,7 +802,7 @@ impl<'a> Paths<'a> {
         let longest = (0..walks.len()).fold(0, |best, k| if reach(&walks[k]) > reach(&walks[best]) { k } else { best });
         let stretch = reach(&walks[longest]);
         if !(stretch > 0.0) {
-            return Err("no path of the pilot's goes past its start (every one's atom lost or its trajectory ended at its first step)".into());
+            return Err("先导的路径都没走出起点（每条的原子都已丢失，或轨迹在第一步就结束）".into());
         }
         #[cfg(test)]
         if traced() {

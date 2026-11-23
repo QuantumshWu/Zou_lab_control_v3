@@ -886,7 +886,7 @@ fn piloted(request: &Request, reference: [f64; GROUND], choosing: Choosing, mess
                 selection.chain[place].len(),
                 selection.chain[place + 1].len()
             ),
-            Attempted::RanAway => return Err("the chain's top ran away at its pilot's every start (it folds nothing: no state of it can)".into()),
+            Attempted::RanAway => return Err("结构链最顶端的模型在先导每条路径的起点上也失控（它已不折叠任何态，没有态走得动）".into()),
             attempted => return Ok((attempted, selection)),
         }
     }

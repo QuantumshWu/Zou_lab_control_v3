@@ -229,7 +229,7 @@ impl Scene {
         let beams = &request.beams;
         if tweezer_axis(request).is_none() && beams.len() > 1 {
             let id = &beams[request.trap_beam].id;
-            return Err(format!("The tweezer {id} needs a frequency axis of its own beside the other light (its beats with that light are told by it)"));
+            return Err(format!("光镊 {id} 需要一条与其他光分开的频率轴（它与那些光的拍频靠这条轴区分）"));
         }
         let carrier: Vec<i32> = (0..axes).map(|i| (i + 1 == axes) as i32).collect();
         let generators = beams
@@ -606,7 +606,7 @@ mod tests {
         };
         for (tweezer, other) in [([0, 0], [1, 0]), ([1, 0], [2, 0]), ([0, 1], [1, 0])] {
             let e = Scene::new(&with(tweezer, Some(other))).err().expect("refused");
-            assert!(e.contains("axis of its own"), "{e}");
+            assert!(e.contains("分开的频率轴"), "{e}");
         }
         assert_eq!(tweezer_axis(&with([-4, 0], Some([0, 0]))), Some(0));
         assert!(Scene::new(&with([-4, 0], Some([0, 0]))).is_ok());

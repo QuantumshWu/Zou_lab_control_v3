@@ -1762,29 +1762,21 @@ impl Form<'_> {
     /// where their pieces part (`advance`) --; per member its series, the same as its run alone to the bit, the shared
     /// work counted on the first member that takes it (the members' work summed is the family's).
     fn family(&self, walk: &Walk, state: Vec<C64>, from: f64, to: f64, members: &[Scheme], keep: &[f64]) -> Result<Vec<Series>, String> {
+        // The family's own terms, every caller's (`along_from`, `along_family_keeping`, the ladder's families): a fault of
+        // the program where one fails, asserted -- no refusal a user meets.
         let mut knobs: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(members.len());
         let mut read = 0;
         for s in members {
             let Scheme::Exponential { turns, rate, pieces, cutoff, read: r } = *s;
-            if read != 0 && r != read {
-                return Err("a family read alike".into());
-            }
+            assert!(read == 0 || r == read, "a family read alike");
             read = r;
             knobs.push((turns, rate, pieces, cutoff));
         }
         let m = knobs.len();
-        if m == 0 {
-            return Err("an empty family".into());
-        }
-        if knobs.iter().any(|k| !(k.2 >= 0.0 && k.2.is_finite())) {
-            return Err("a family's pieces a µs a number, none below nought".into());
-        }
-        if state.len() != self.dim {
-            return Err(format!("a state of {} numbers for a sector of {}", state.len(), self.dim));
-        }
-        if !(to > from) {
-            return Err(format!("an empty stretch of the path: [{from}, {to}]"));
-        }
+        assert!(m > 0, "an empty family");
+        assert!(knobs.iter().all(|k| k.2 >= 0.0 && k.2.is_finite()), "a family's pieces a µs a number, none below nought: {knobs:?}");
+        assert_eq!(state.len(), self.dim, "a state of the form's sector");
+        assert!(to > from, "an empty stretch of the path: [{from}, {to}]");
         let mut counts = vec![Counts::default(); m];
         let knots = walk.knots(from, to);
         // The knot intervals, each with whether a reading is made at its end.
