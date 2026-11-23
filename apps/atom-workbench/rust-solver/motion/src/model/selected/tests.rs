@@ -241,7 +241,8 @@ fn a_lone_tweezer_s_node_is_its_two_photon_classes() {
 /// −1.9 µs. The two are one set of sums taken in two
 /// orders (by beats, one group): they differ by rounding alone, bounded as `now_is_the_components_at_their_phases`
 /// bounds it -- per component 64u(1 + |F_c t| + 2 max|θ t|) max|X⁽ᶜ⁾| summed over the quantity's components, and κ(V)u
-/// relative to its largest entry (10⁻¹⁰).
+/// relative to its largest entry (10⁻¹⁰). The node with its direct entries one by one: what their span leaves out is
+/// booked, not rounding, and read by its own test (`the_direct_entries_spanned_are_the_entries_within_what_the_span_books`).
 #[test]
 fn the_node_is_the_model_now_in_its_frame() {
     use crate::floquet::frame::FrameKey;
@@ -249,7 +250,8 @@ fn the_node_is_the_model_now_in_its_frame() {
     use crate::units::UNIT_ROUNDOFF;
     let mut worst = 0.0_f64;
     for (name, request, keep) in scenes() {
-        let run = run_of(&request, &keep);
+        let mut run = run_of(&request, &keep);
+        run.lab.spans.clear();
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         let n = keep.len();
@@ -362,11 +364,14 @@ fn apart(a: &Mat, b: &Mat) -> f64 {
 /// −Re tr(Ĝρ) of the middle (`Middle::force`) with every class's absorbed momentum Σ_a Im⟨u_a|∇u_a⟩ -- what the jumps
 /// and the step's scattering carry between them -- at the centre and at a moving point, on a state of P with every
 /// amplitude set, to the rounding of the traces: the run's with nothing dropped (model/classify.rs, # The drop tier),
-/// and the run's as the solve makes it apart from that by its dropped beats' −Re tr(Ĝ_k ρ) alone (tilt2's ±3ν … ±6ν).
+/// and the run's as the solve makes it apart from that by its dropped beats' −Re tr(Ĝ_k ρ) alone (tilt2's ±3ν … ±6ν),
+/// its direct entries one by one and K's sideband parts in (what their span and the parts' leaving leave out is booked,
+/// not a beat: their own test reads it, `the_direct_entries_spanned_are_the_entries_within_what_the_span_books`).
 #[test]
 fn the_selected_force_at_time_zero_is_the_model_s() {
     for (name, request, keep) in scenes() {
-        let dropping = run_of(&request, &keep);
+        let mut dropping = run_of(&request, &keep);
+        dropping.whole();
         let run = made_with(&request, &Drops::Only(Vec::new()));
         let dropped: Vec<usize> = dropping.judgment().tiers.iter().filter(|t| t.1 == crate::model::classify::Tier::Drop).map(|t| t.0).collect();
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
@@ -678,6 +683,92 @@ fn a_jump_s_photon_node_is_the_whole_node_s_classes() {
             assert!(photon.work < whole.work, "{name}");
         }
     }
+}
+
+/// The direct entries spanned and K's sideband parts dropped (module documentation, # The direct entries spanned, # The
+/// sideband parts dropped): on the six scenes at the centre at rest and at a moving point, the run's node against the
+/// node with the entries one by one and every sideband part in (`Selected::whole`), entry by entry of every slot of the
+/// generator and of its gradient: apart by no more than the two's booked Y (`Selected::span_directs`,
+/// `Selected::drop_sidebands`) and the two computations' rounding of the entry; said per scene: the spans' outputs,
+/// atoms and directions, whether parts were dropped, Y, the largest difference.
+#[test]
+fn the_direct_entries_spanned_are_the_entries_within_what_the_span_books() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let mut plain = run_of(&request, &keep);
+        let spans = (run.lab.spans.len(), run.lab.spans.iter().map(|d| d.atoms.len()).sum::<usize>(), run.lab.spans.iter().map(|d| d.basis.len()).sum::<usize>());
+        let parts = plain.whole();
+        let booked = run.judgment.dropped - plain_dropped(&run);
+        let (node, scales) = run.structure();
+        let rounded = |k: usize, x: usize| crate::units::rounding(scales.generator[k].1[x] + 64) * scales.generator[k].0[x];
+        let mut worst: f64 = 0.0;
+        for (r, kappa) in POINTS {
+            let (a, b) = (run.node(r, kappa, false), plain.node(r, kappa, false));
+            for (k, ((_, x), (_, y))) in a.generator.iter().zip(&b.generator).enumerate() {
+                for (i, (u, v)) in x.data.iter().zip(&y.data).enumerate() {
+                    let d = (*u - *v).abs();
+                    worst = worst.max(d);
+                    assert!(d <= booked + rounded(k.min(scales.generator.len() - 1), i).max(1e-15 * u.abs()), "{name} slot {k} place {i}: {d:e} apart, booked {booked:e}");
+                }
+            }
+        }
+        let _ = node;
+        eprintln!("{name}: spans (outputs, atoms, directions) {spans:?}, sideband parts dropped {parts}, booked Y {booked:.3e} rad/µs, the largest difference {worst:.3e}");
+    }
+}
+
+/// How a model's change by its span's booked Y moves a run's trajectories (STEP, the coordinator's of 2026-11-23: a solve
+/// spanned took 184 trajectories where the one by one took 240, TET): on PGC3D and TET (V3E_SCENE one of them),
+/// V3E_ATOMS atoms (8) of `starts`, each with one noise on the run spanned and on it one by one (`Selected::unspanned`),
+/// each on its own model throughout, steps of τ = V3E_TAU µs (0.474) to 1 ms: every 100 µs the largest |Δr| (µm) and
+/// |Δκ| (1/µm) over the atoms, the atoms whose jumps differ, and the jumps. A measurement (ignored, by name).
+#[test]
+#[ignore]
+fn the_span_s_trajectories_part() {
+    let (atoms, tau) = (env("V3E_ATOMS", 8.0) as u64, env("V3E_TAU", 0.4741346189956611));
+    for (name, request, keep) in scenes().into_iter().filter(|(n, ..)| ["PGC3D", "TET"].contains(n)) {
+        let run = run_of(&request, &keep);
+        let mut plain = run_of(&request, &keep);
+        plain.unspanned();
+        let from = starts(&run, request.temperature_uk, atoms);
+        let mut pairs: Vec<[Trajectory; 2]> = from
+            .iter()
+            .enumerate()
+            .map(|(i, (r, kappa, psi, threshold))| {
+                [&run, &plain].map(|m| {
+                    let mut t = Trajectory::new(m, m.cluster(0).states[0], *r, *kappa, 97, i as u64);
+                    t.psi = psi.iter().copied().collect();
+                    t.forms = m.forms(t.cluster, &t.point(), &t.psi);
+                    t.threshold = *threshold;
+                    t
+                })
+            })
+            .collect();
+        let mut noises: Vec<_> = (0..atoms).map(|i| crate::random::Stream::brownian(97, i, 0, 0)).collect();
+        let mut scratch: Vec<[Scratch; 2]> = (0..atoms).map(|_| Default::default()).collect();
+        let count = (1000.0 / tau).round() as usize;
+        let every = (100.0 / tau).round() as usize;
+        for k in 1..=count {
+            for (i, pair) in pairs.iter_mut().enumerate() {
+                let brownian = Brownian::over(tau, &[noises[i].normals(), noises[i].normals()]);
+                for (j, m) in [&run, &plain].into_iter().enumerate() {
+                    pair[j] = Midway::new(m, &pair[j], tau).and_then(|s| s.attempt(&pair[j], &brownian, &[], &mut scratch[i][j], &Anywhere)).expect("a step").end;
+                }
+            }
+            if k % every == 0 || k == count {
+                let dr = pairs.iter().map(|p| (0..3).map(|a| (p[0].r[a] - p[1].r[a]).abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                let dk = pairs.iter().map(|p| (0..3).map(|a| (p[0].kappa[a] - p[1].kappa[a]).abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                let apart = pairs.iter().filter(|p| p[0].jumps != p[1].jumps).count();
+                let jumps: u32 = pairs.iter().map(|p| p[0].jumps).sum();
+                eprintln!("SPANPART {name} t {:.1} µs: |Δr| {dr:.3e} µm, |Δκ| {dk:.3e} /µm, atoms whose jumps differ {apart} of {atoms}, jumps {jumps}", pairs[0][0].time);
+            }
+        }
+    }
+}
+
+/// The dropped beats' Y alone (the span's taken out): the pairs the judgment dropped.
+fn plain_dropped(run: &Selected) -> f64 {
+    run.judgment.pairs.iter().filter(|(slots, _)| slots.iter().all(|&k| run.judgment.tiers[k].1 == crate::model::classify::Tier::Drop)).map(|(_, y)| y).sum()
 }
 
 /// The readings on the middle (module documentation, # The readings on the middle): `SelectedMiddle::readout` at the
@@ -1069,8 +1160,10 @@ fn the_blocks_change_a_step_by_rounding() {
 }
 
 /// An element between two blocks of more than the rounding joins them, and the readings move with it, not at it
-/// (R1-CLEAN item 3): R4_LIN_1's request with its first beam's coupling between a ground state of F = 2 in one block and
-/// an explicit excited state of F′ = 3 in the other -- the cooling transition, near resonance -- set to δ (H0 is
+/// (R1-CLEAN item 3): R4_LIN_1's request on R4's P20 (`explicit`; the selection's chain takes G for it since P is chosen
+/// on the pilot's paths, 429c36cd of 2026-11-22, and G's blocks hold no excited state) with its first beam's coupling
+/// between a ground state of F = 2 in one block and
+/// an explicit excited state of F′ = 3 in another -- the cooling transition, near resonance -- set to δ (H0 is
 /// diagonal in the model's basis: a coupling is a beam's), δ of
 /// 10⁻², 10², 10⁴ and 10⁸ times ε times the coupling's largest entry -- the first below the rounding (of the element's
 /// beat in the node and of its first-order amplitude at the fold's input alike), the others above it: below the rounding
@@ -1082,14 +1175,16 @@ fn the_blocks_change_a_step_by_rounding() {
 fn a_cross_block_element_joins_the_blocks() {
     let (atoms, count, tau) = (env("V3E_ATOMS", 4.0) as u64, env("V3E_STEPS", 12.0) as usize, env("V3E_TAU", 0.05));
     let request = reference("R4_LIN_1");
-    let run = made(&request, true);
+    let p20 = explicit("R4", &request).expect("R4's P20");
+    let run = made_split(&request, &p20, true);
     assert!(run.blocks().len() > 1, "R4_LIN_1 in blocks");
     let keep = &run.rs.keep;
-    let (g, e) = run.blocks()[0]
-        .iter()
-        .flat_map(|&g| run.blocks()[1].iter().map(move |&e| (g, e)))
+    let blocks = run.blocks();
+    let (g, e) = (0..blocks.len())
+        .flat_map(|i| (0..blocks.len()).filter(move |&j| j != i).map(move |j| (i, j)))
+        .flat_map(|(i, j)| blocks[i].iter().flat_map(move |&g| blocks[j].iter().map(move |&e| (g, e))))
         .find(|&(g, e)| request.states[keep[g]].starts_with("ground-2-") && request.states[keep[e]].starts_with("D2-3-"))
-        .expect("a ground state of F = 2 in one block and an excited state of F′ = 3 in the other");
+        .unwrap_or_else(|| panic!("a ground state of F = 2 in one block and an excited state of F′ = 3 in the other: blocks {}", said(&request, &run)));
     let top = request.beams[0].coupling.max_abs();
     eprintln!("R4_LIN_1: blocks {}; δ between {} and {} on {}; the coupling's largest {top:.4e}", said(&request, &run), request.states[keep[g]], request.states[keep[e]], request.beams[0].id);
     let from: Vec<_> = starts(&run, request.temperature_uk, atoms).into_iter().map(|(r, kappa, psi, _)| (r, kappa, psi, f64::MIN_POSITIVE)).collect();
@@ -1099,7 +1194,7 @@ fn a_cross_block_element_joins_the_blocks() {
         let delta = factor * f64::EPSILON * top;
         let mut perturbed = request.clone();
         perturbed.beams[0].coupling[(keep[e], keep[g])] += C64::real(delta);
-        let other = made(&perturbed, true);
+        let other = made_split(&perturbed, &p20, true);
         assert_eq!(&other.rs.keep, keep, "one P");
         let (ends, _) = through(&other, &from, tau, count);
         let (d, jumps) = ends_apart(&ends, &base);
