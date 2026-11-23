@@ -110,7 +110,7 @@ class ScanEditorFacts(unittest.TestCase):
         self.assertIn('3 = 3 points', answer['summary'])
         self.assertEqual(answer['problem'], '')
         ports = api_scan_ports_for(REPEATS)
-        self.assertEqual(ports[0].grid, PortGrid(1.0, 'even'))
+        self.assertEqual(ports[0].grid, PortGrid(1.0, 'even', whole=True))
         played = plan_from_authored(json.dumps(plan), ports)
         self.assertEqual(played.axes[0].values, (1.0, 2.0, 3.0))
         self.assertEqual(bind_plan(played, ports), ports)
@@ -121,7 +121,7 @@ class ScanEditorFacts(unittest.TestCase):
         port = 'device:counter:frequency'
         own, = scan_ports_for_devices({'counter': Counts()})
         start, = scan_ports_for_devices({'counter': Counts()}, units={port: 'kHz'})
-        self.assertEqual((own.unit, own.grid), ('Hz', PortGrid(1.0)))
+        self.assertEqual((own.unit, own.grid), ('Hz', PortGrid(1.0, whole=True)))
         self.assertEqual((start.unit, start.grid), ('kHz', PortGrid(0.001)), 'one hertz, read in kHz')
         plan = json.dumps({'axes': [{'port': port, 'unit': 'kHz', 'mode': 'values', 'value_text': '1.0004, 2.5', 'values': []}]})
         # The editor reads the knob in its own unit, a Start in the plan's: both play 1 kHz and 2.5 kHz.
@@ -155,6 +155,22 @@ class ScanEditorFacts(unittest.TestCase):
                                ('bracket_count:loop = 3', None)):
             issues = _admit_resources({**draft, 'api_values': written}, resources)
             self.assertEqual(issues, () if issue is None else (issue,), written)
+
+    def test_a_clock_grid_is_no_whole_number_box_however_whole_its_tick_reads(self):
+        # An output delay in ns on a 20 ns clock: its step reads 20, a whole number, and it is still a time.
+        delay = {'field_id': 'delay:cooling', 'label': 'cooling.delay', 'kind': 'delay', 'unit': 'ns', 'value': 0.0,
+                 'is_dac': False, 'limit_lo': -100000.0, 'limit_hi': 100000.0, 'grid': {'step': 20.0, 'ties': 'away'}}
+        delayed = {**REPEATS, 'api_fields': [*REPEATS['api_fields'], delay]}
+        fields = {field['name']: field for field in scan_editor_facts({'plan': '', 'api_values': ''}, delayed, ())['api']['fields']}
+        self.assertEqual((fields['delay:cooling']['kind'], fields['bracket_count:loop']['kind']), ('number', 'integer'))
+        self.assertEqual(fields['delay:cooling']['units'][-1][0], 'ns', 'read in any of its spellings')
+        draft = {'plan': json.dumps({'axes': [{'port': 'manual:power', 'values': [1.0]}]}), 'repeats': 1, 'shots_per_point': 1,
+                 'api_values': 'delay:cooling = 30.5'}
+        self.assertEqual(_admit_resources(draft, {SEAMLESS_PULSE_RESOURCE.field_name: delayed}), (), 'the binding layer aligns a delay')
+        # A description that states no grid offers none: no whole-number box, no refusal.
+        bare = {**REPEATS, 'api_fields': [{key: value for key, value in REPEATS['api_fields'][0].items() if key != 'grid'}]}
+        self.assertEqual(api_scan_ports_for(bare)[0].grid, None)
+        self.assertEqual(scan_editor_facts({'plan': '', 'api_values': ''}, bare, ())['api']['fields'][0]['kind'], 'number')
 
 
 if __name__ == '__main__':

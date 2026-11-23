@@ -28,8 +28,9 @@ import type { DraftEdit, NodeEditor } from "./index.js";
  * limits and reading in those, as the device converts them (empty: only its own). */
 type Port = { port: string; label: string; unit: string; lo: number; hi: number; group: string; leaf: string;
   /** Where the knob stands, in its unit (null: nothing says); the grid its owner puts a value on, in its unit
-   * (null: any value; the native compiler plays every value on it); the family its owner shows it in. */
-  current: number | null; grid: { step: number; ties: string } | null; display_unit: string | null;
+   * (null: any value; the native compiler plays every value on it; `whole`: the whole numbers a code, a count
+   * or an int field takes); the family its owner shows it in. */
+  current: number | null; grid: { step: number; ties: string; whole: boolean } | null; display_unit: string | null;
   units: [symbol: string, decade: number | null][]; limits: Record<string, [number, number]>; currents: Record<string, number>;
   /** The family each spelling belongs to (its unit picker's trunks). */
   families: Record<string, string> };
@@ -116,7 +117,7 @@ function firstSweep(port: Port): Pick<Axis, "unit" | "values" | "range"> {
   const unit = defaultUnit(own, port.units.filter(([symbol]) => family(symbol) === family(own)).map(([symbol]) => {
     const { current, bounds: [low, high] } = inSpelling(port, symbol);
     return { symbol, value: current, low, high };
-  }), Boolean(port.grid && Number.isInteger(port.grid.step)));
+  }), Boolean(port.grid?.whole));
   const { current, bounds: [low, high] } = inSpelling(port, unit);
   const inside = (value: number): number => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
   if (current === null) return { unit, ...rangeBank(low ?? high ?? 0, low ?? high ?? 0, 1) };

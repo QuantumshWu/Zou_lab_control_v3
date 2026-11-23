@@ -24,7 +24,6 @@ from .plan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
-    PortGrid,
     ScanPort,
     ambiguous_api_value,
     api_overrides_from_authored,
@@ -36,6 +35,7 @@ from .plan import (
     port_domains,
     port_group,
     port_leaf,
+    takes_whole_numbers,
     unscannable_api_ports,
 )
 
@@ -241,8 +241,8 @@ def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> 
         if name in scanned:
             continue
         code = bool(field.get("is_dac"))
-        # A field whose grid is whole (a count, a DAC code) is a whole-number box.
-        whole = PortGrid.of(field["grid"]).whole
+        # A field that takes whole numbers by kind (a count, a DAC code) is a whole-number box.
+        whole = takes_whole_numbers(field)
         number_of = int if whole else float
         low, high = field["limit_lo"], field["limit_hi"]
         number = overrides.get(name, authored[name][0])

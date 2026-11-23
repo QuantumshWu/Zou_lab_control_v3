@@ -81,18 +81,29 @@ class PortGrid:
 
     step: float
     ties: str = "away"
+    #: Its points are the whole numbers a knob takes by kind -- a DAC code, a
+    #: repeat count, a device's int field in its own unit -- not a clock's
+    #: ticks, however whole a tick reads in some unit.
+    whole: bool = False
 
     @classmethod
     def of(cls, grid: Mapping[str, object] | None) -> "PortGrid | None":
-        """A grid as its owner states it (pulse_describe's ``grid``), or None."""
+        """A grid as pulse_describe states it, or None (a description without one
+        offers no grid).  A code's or a count's is the whole numbers, halves to
+        even; a clock's goes away from zero, whatever its step."""
 
-        return None if grid is None else cls(float(grid["step"]), str(grid.get("ties", "away")))
+        if grid is None:
+            return None
+        step, ties = float(grid["step"]), str(grid.get("ties", "away"))
+        return cls(step, ties, whole=step == 1.0 and ties == "even")
 
-    @property
-    def whole(self) -> bool:
-        """Whether every point of it is a whole number."""
 
-        return float(self.step).is_integer()
+def takes_whole_numbers(field: Mapping[str, object]) -> bool:
+    """Whether a field pulse_describe states takes whole numbers by kind (a DAC
+    code, a repeat count): an integer box, refusing a fraction."""
+
+    grid = PortGrid.of(field.get("grid"))
+    return grid is not None and grid.whole
 
 
 @dataclass(frozen=True)
@@ -251,7 +262,7 @@ def _ports_from_columns(columns, *, family: str = PULSE_PARAM_FAMILY) -> tuple[S
                 float(column["limit_lo"]),
                 float(column["limit_hi"]),
                 current=float(column["value"]),
-                grid=PortGrid.of(column["grid"]),
+                grid=PortGrid.of(column.get("grid")),
             )
         )
     return tuple(ports)
@@ -382,7 +393,7 @@ def scan_ports_for_devices(
                     current=float(reading) if isinstance(reading, Real) and not isinstance(reading, bool)
                     and math.isfinite(reading) else None,
                     display_unit=field.display_unit,
-                    grid=None if step is None else PortGrid(step),
+                    grid=None if step is None else PortGrid(step, whole=own_unit == (field.unit or "")),
                 )
             )
     return tuple(ports)
@@ -678,7 +689,7 @@ def resolve_api_overrides(
     fields = pulse_description(description)["api_fields"]
     declared = {field["field_id"]: str(field["unit"]) for field in fields}
     # A field whose grid is whole (a count, a DAC code) takes a whole number.
-    whole = {field["field_id"] for field in fields if PortGrid.of(field["grid"]).whole}
+    whole = {field["field_id"] for field in fields if takes_whole_numbers(field)}
     labelled: dict[str, list[str]] = {}
     for field in fields:
         labelled.setdefault(str(field["label"]), []).append(field["field_id"])
@@ -928,6 +939,7 @@ __all__ = [
     "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
     "PortGrid",
+    "takes_whole_numbers",
     "SCAN_PULSE_CONTRACT",
     "SEAMLESS_PULSE_RESOURCE",
     "ScanAxis",

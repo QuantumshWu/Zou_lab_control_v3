@@ -36,15 +36,15 @@ const ports={
     units:[['dBm',0],['Vpp',null],['mVpp',null],['mW',null]],limits:{Vpp:[0.02,6.32],mVpp:[20,6320],mW:[0.001,100]},currents:{Vpp:0.5,mVpp:500,mW:0.625},
     family:{dBm:'dBm',Vpp:'Vpp',mVpp:'Vpp',mW:'W'}}),
   unknown:knob('unknown',{unit:'Hz',lo:5e8,hi:8e9,current:null,units:HZ,family:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}}),
-  hold:{port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,grid:{step:2e-8,ties:'away'},display_unit:null,
+  hold:{port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,grid:{step:2e-8,ties:'away',whole:false},display_unit:null,
     units:[['s',0],['ms',-3],['µs',-6],['ns',-9]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
-  repeats:{port:'pulse:param:bracket:b1',label:'repeats',group:'pulse',leaf:'bracket:b1',unit:'count',lo:1,hi:65535,current:3,grid:{step:1,ties:'even'},display_unit:null,
+  repeats:{port:'pulse:param:bracket:b1',label:'repeats',group:'pulse',leaf:'bracket:b1',unit:'count',lo:1,hi:65535,current:3,grid:{step:1,ties:'even',whole:true},display_unit:null,
     units:[],limits:{},currents:{},families:{}},
-  once:{port:'pulse:param:bracket:b2',label:'once',group:'pulse',leaf:'bracket:b2',unit:'count',lo:1,hi:65535,current:1,grid:{step:1,ties:'even'},display_unit:null,
+  once:{port:'pulse:param:bracket:b2',label:'once',group:'pulse',leaf:'bracket:b2',unit:'count',lo:1,hi:65535,current:1,grid:{step:1,ties:'even',whole:true},display_unit:null,
     units:[],limits:{},currents:{},families:{}},
   // An output delay on a 20 ns clock, standing at 500 ns.
   cooling:{port:'api:delay:cooling',label:'cooling.delay',group:'api',leaf:'delay:cooling',unit:'ns',lo:-10000,hi:10000,current:500,
-    grid:{step:20,ties:'away'},display_unit:null,units:[['s',9],['ms',6],['µs',3],['ns',0]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
+    grid:{step:20,ties:'away',whole:false},display_unit:null,units:[['s',9],['ms',6],['µs',3],['ns',0]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s',ns:'s'}},
 };
 const delay=(value,overrides=[])=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},
   description:'delay',minimum:0,maximum:1,authored:0.001,value,unavailable_reason:''}],overrides,parked:[],note:'',tidy:null});

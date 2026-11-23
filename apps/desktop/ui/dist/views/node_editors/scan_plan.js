@@ -62,7 +62,7 @@ function firstSweep(port) {
     const unit = defaultUnit(own, port.units.filter(([symbol]) => family(symbol) === family(own)).map(([symbol]) => {
         const { current, bounds: [low, high] } = inSpelling(port, symbol);
         return { symbol, value: current, low, high };
-    }), Boolean(port.grid && Number.isInteger(port.grid.step)));
+    }), Boolean(port.grid?.whole));
     const { current, bounds: [low, high] } = inSpelling(port, unit);
     const inside = (value) => Math.min(high ?? Infinity, Math.max(low ?? -Infinity, value));
     if (current === null)

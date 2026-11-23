@@ -17,7 +17,7 @@ const settle=()=>new Promise(resolve=>setTimeout(resolve,0));
 const families={pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'};
 const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:0,hi:1e10,current:120e6,grid:null,display_unit:null,
  units:[['Hz',0],['MHz',6]],limits:{},currents:{},families:{Hz:'Hz',MHz:'Hz'}};
-const duration={port:'pulse:param:duration:hold',label:'hold duration',group:'pulse',leaf:'duration:hold',unit:'s',lo:0,hi:10,current:.01,grid:{step:2e-8,ties:'away'},display_unit:null,
+const duration={port:'pulse:param:duration:hold',label:'hold duration',group:'pulse',leaf:'duration:hold',unit:'s',lo:0,hi:10,current:.01,grid:{step:2e-8,ties:'away',whole:false},display_unit:null,
  units:[['s',0],['ms',-3],['µs',-6]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s'}};
 const other={...freq,port:'device:other_rf:frequency',group:'other RF',current:800e6};
 const initial={port:freq.port,unit:'MHz',values:[120,125,130],mode:'range',value_text:'121, 127'};

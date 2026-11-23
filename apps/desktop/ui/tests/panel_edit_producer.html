@@ -26,7 +26,7 @@ const shown=node=>Boolean(node&&node.offsetParent);
 // A seamless scan as the workbench rows it: its plan a text field, the scan_plan editor's model managing it.
 const freq={port:'device:rf:frequency',label:'rf.frequency',group:'rf',leaf:'frequency',unit:'Hz',lo:1e6,hi:6e9,current:1e8,grid:null,display_unit:null,
   units:[['GHz',9],['MHz',6],['kHz',3],['Hz',0]],limits:{},currents:{},families:{GHz:'Hz',MHz:'Hz',kHz:'Hz',Hz:'Hz'}};
-const hold={port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,grid:{step:2e-8,ties:'away'},display_unit:null,
+const hold={port:'pulse:param:duration:hold',label:'hold',group:'pulse',leaf:'duration:hold',unit:'s',lo:2e-8,hi:85,current:0.01,grid:{step:2e-8,ties:'away',whole:false},display_unit:null,
   units:[['s',0],['ms',-3],['µs',-6]],limits:{},currents:{},families:{s:'s',ms:'s',µs:'s'}};
 const api={fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},description:'delay',minimum:0,maximum:1,
   authored:0.001,value:0.001,unavailable_reason:''}],overrides:[],parked:[{name:'gone',text:'gone = 3 (not in this pulse)',problem:false}],note:'API note',tidy:'delay = 0.002'};
