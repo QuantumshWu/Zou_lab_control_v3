@@ -45,12 +45,12 @@ const ports={
 };
 const delay=(value,overrides=[])=>({fields:[{name:'delay',label:'Delay',kind:'number',unit:'s',units:[['s',0],['ms',-3]],families:{s:'s',ms:'s'},
   description:'delay',minimum:0,maximum:1,authored:0.001,value,unavailable_reason:''}],overrides,parked:[],note:'',tidy:null});
-function setup(axes,api=null,offered=[port]) {
+function setup(axes,api=null,offered=[port],more={}) {
   const edits=[];
   const editor=new ScanPlanEditor(values=>{edits.push(values);return edits.length});
   document.body.append(editor.root);
   const facts={editor:'scan_plan',manages:['plan','api_values'],families:{pulse:'pulse:param:',api:'api:',device:'device:',manual:'manual:'},
-    host_advanced:['api:','device:','manual:'],ports:offered,withheld:{},unoffered:{},summary:'',problem:'',api};
+    host_advanced:['api:','device:','manual:'],ports:offered,withheld:{},unoffered:{},summary:'',problem:'',api,...more};
   editor.update({node_id:'scan',values:{plan:JSON.stringify({axes}),api_values:''}},scanFacts(facts,axes),'');
   const plan=()=>JSON.parse(edits.filter(edit=>'plan' in edit).at(-1).plan).axes;
   const add=()=>[...editor.root.querySelectorAll('button')].find(item=>item.textContent==='Add axis').click();
@@ -135,6 +135,26 @@ try {
    t.editor.update(row,scanFacts({...facts,unoffered:{},unread:''},[axis]),'');
    equal(error(),[],'it reads again');
    equal(t.edits.filter(edit=>'plan' in edit),[],'the plan was not written');
+ });
+ await check('a row says what its knob plays where its grid moved what was written, merged points plainly, and writes nothing back',async()=>{
+   const range={start:1,stop:10,count:5};
+   const axis={port:ports.repeats.port,unit:'count',values:[],range,mode:'range',value_text:'',link_enabled:true,
+     links:[{port:ports.hold.port,unit:'µs',mode:'formula',formula:'x / 50',values:[],value_text:''}]};
+   const shown=t=>[...t.editor.root.querySelectorAll('.axis-played, .linked-preview')].filter(node=>!node.hidden&&node.textContent).map(node=>node.textContent);
+   const written=t=>[...t.editor.root.querySelectorAll('.range-bank input')].map(input=>input.value);
+   const link={first:0.02,last:0.2,count:5,written:5,moved:0,distinct:5};
+   const plain=setup([axis],null,[ports.repeats,ports.hold],{link_facts:{[ports.hold.port]:link}});
+   equal(shown(plain),['0.02 … 0.2 µs (5 points)'],"as written: only the link's preview");
+   // 1, 3.25, 5.5, 7.75, 10 on a whole-number knob play 1, 3, 6, 8, 10; two of the link's durations fall between clock ticks.
+   const moved=setup([axis],null,[ports.repeats,ports.hold],{played_facts:{[axis.port]:{first:1,last:10,count:5,written:5,moved:3,distinct:5}},
+     link_facts:{[ports.hold.port]:{...link,moved:2}}});
+   equal(shown(moved),["Plays 1 … 10 count (5 points): 3 moved onto the knob's grid","0.02 … 0.2 µs (5 points): 2 moved onto the knob's grid"],'moved');
+   equal(written(moved),['1','10','5'],'the spins keep what was written');
+   // 1 to 3 in five points on a whole-number knob: 1, 2, 2, 2, 3 play as 1, 2, 3.
+   const merged=setup([{...axis,range:{start:1,stop:3,count:5},link_enabled:false,links:[]}],null,[ports.repeats],
+     {played_facts:{[axis.port]:{first:1,last:3,count:3,written:5,moved:2,distinct:3}}});
+   equal(shown(merged),['5 points written, 3 distinct values played: 1 … 3 count'],'merged');
+   for(const t of [plain,moved,merged]) equal(t.edits.filter(edit=>'plan' in edit),[],'what plays is not written back');
  });
  document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
 } catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}

@@ -3,7 +3,8 @@
 // axis's name), then its values as an independent Range bank (from, to,
 // points) or Values list, their unit, which of the two it plays, and its ×.
 // Every row is a line of one column set, so from, to, points, the unit,
-// Range|Values and × stand at one x on every row.  Under the rows, what the
+// Range|Values and × stand at one x on every row; under a row, what its knob
+// plays where its grid moves what was written.  Under the rows, what the
 // plan is or why it cannot be read; then the pulse's API values this run
 // sets.  The model (scan/editor.py) offers the knobs, says what the plan
 // amounts to and words the API values; this editor writes `plan` (the axes
@@ -92,6 +93,17 @@ function endsText(ends, unit) {
     const suffix = unit && unit !== "1" ? ` ${unit}` : "";
     return ends.count === 1 ? [`${spoken(ends.first)}${suffix}`, "1 point"] : [`${spoken(ends.first)} … ${spoken(ends.last)}${suffix}`, `${ends.count} points`];
 }
+/** How the knob changed what was written, or "" where it plays as written: "Plays 1 … 10 (5 points):
+ * 3 moved onto the knob's grid"; points it made one are played once, "5 points written, 3 distinct
+ * values played: 1 … 3". What plays is shown, never written back. */
+function playedText(played, unit) {
+    if (!played.moved)
+        return "";
+    const [span, count] = endsText(played, unit);
+    if (played.count < played.written)
+        return `${played.written} points written, ${played.distinct} distinct values played: ${span}`;
+    return `Plays ${span} (${count}): ${played.moved} moved onto the knob's grid`;
+}
 /** How many colours link groups take in turn (--link-group-0 … in tokens.css). */
 const LINK_COLOURS = 4;
 /** The Values list's tooltip: what it is. */
@@ -109,6 +121,8 @@ class AxisRowView {
     remove = button("×", () => this.owner.removeRow(this), "destructive glyph square");
     notes = element("div", "axis-notes");
     custom = element("p", "note");
+    /** What the knob plays, where that is not what was written (playedText). */
+    played = element("p", "note wrap axis-played");
     combo = null;
     name = null;
     start;
@@ -165,7 +179,8 @@ class AxisRowView {
         this.mode.root.title = "Scan a from/to/points range, or the values written";
         this.remove.title = "Remove this axis";
         this.custom.hidden = true;
-        this.notes.append(this.custom);
+        this.played.hidden = true;
+        this.notes.append(this.custom, this.played);
     }
     get cells() {
         const signature = JSON.stringify([this.entry.link_enabled, (this.entry.links ?? []).map(link => [link.port, link.unit, this.owner.portTree(link.port), this.owner.ports.find(port => port.port === link.port)?.units])]);
@@ -236,7 +251,8 @@ class AxisRowView {
                     const fact = this.owner.axisFacts(this.entry.port)?.links?.[index];
                     const known = fact?.port === link.port ? fact : undefined;
                     const [span, count] = known ? endsText(known, link.unit) : ["", ""];
-                    setText(preview, known ? known.problem || `${span} (${count})` : "");
+                    const moved = known?.moved ? `: ${known.moved} moved onto the knob's grid` : "";
+                    setText(preview, known ? known.problem || `${span} (${count})${moved}` : "");
                     preview.classList.toggle("problem", Boolean(known?.problem));
                 };
                 update();
@@ -336,6 +352,8 @@ class AxisRowView {
             this.list.value = entry.value_text;
         const fact = this.owner.axisFacts(entry.port);
         this.flag(this.list, fact?.value_text === entry.value_text ? fact.values_bounds ?? [] : [], LIST_TIP);
+        setText(this.played, fact?.played ? playedText(fact.played, entry.unit) : "");
+        this.played.hidden = !this.played.textContent;
         // A unit with other spellings is a picker; one without is a word.
         const port = this.port();
         const offered = port?.units.some(([symbol]) => symbol === entry.unit) ? port.units : [];
