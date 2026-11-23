@@ -2289,6 +2289,9 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
         messages.stage(Stage { step: Step::Scout, tau: Some(context.tau), batch: None });
     }
     let scouting = settle(run, ensemble, &domain, &mut context, &mut levels, &numbers, 0..1, &above, None, messages);
+    // Where the scout stood, before the pilot's ladder moved it: the choice carries every candidate's own scout by the same
+    // correction (`choose_on_the_pilot`).
+    let scouted_at = context.tau;
     // A candidate's short scout (`Choosing::Scout`): the rung its own two levels stand on (`settle`: down the ladder
     // to the first rung whose own read is in and not clearly beyond), the check's priced course not taken -- a scout
     // with it took PGC3D's P20 34-68 s, R4's P26 87 s.
@@ -2395,7 +2398,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let mut read = read;
     if choice.is_none() && !matches!(choosing, Choosing::Made(_)) {
         let pilot_refs: Vec<&Part> = pilot.iter().collect();
-        let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
+        let Some(made) = choose_on_the_pilot(request, setting, &context, first_rung, scouted_at, &levels.fine, &pilot_refs, &read, &numbers, &times, messages)? else {
             return Ok(Attempted::RanAway);
         };
         let made = std::sync::Arc::new(made);
@@ -2691,13 +2694,22 @@ struct Weighed {
 /// of least W. None where no path went past its start because the model's fold scattered beyond
 /// every state of the atom there (a pilot's trajectory ran away at t = 0, step.rs # The domain): nothing to choose on.
 #[allow(clippy::too_many_arguments)]
-fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
+fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, scouted_at: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
     use crate::select::{direct_at, direct_bound_at, judge, Paths, Reach, WALKS};
     let clock = Instant::now();
     let run = setting.run;
     let trap = setting.trap;
     let hm = run.hbar_over_mass();
     let tau = context.tau;
+    // Every model's step the same way (one method, one quantity): a scout stands at its rung, and the pilot's ladder -- the
+    // same check, on more trajectories, at two levels and priced -- takes the run on from there; G's took it from its scout's
+    // `scouted_at` to τ, and a candidate's own takes it alike (R4 2026-11-23: G's scout 0.9479 µs, its pilot's ladder 0.1185;
+    // P9 (+D1-2--2)'s scout 0.9479, its own pilot's ladder 0.1185). So a candidate's step is its own scout's rung carried by
+    // that correction, τ/`scouted_at`, and the longest a run may stand at is the ladder's first rung carried so. (Until
+    // 2026-11-23 a candidate's W was read at its scout's rung and G's at its pilot's: G + an idle D1 state looked 2.7 times
+    // the cheaper for its step alone.)
+    let carried = if scouted_at > 0. && tau > 0. { tau / scouted_at } else { 1. };
+    let first = first * carried;
     let domain = Domain { widest: Widest::of(request) };
     let light = run.light();
     let centre = trap.centre;
@@ -3135,10 +3147,11 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             noted(&mut report, format!("{count} 条路径上 {names} 够用与否定不下来；判清可省 W {saving:.3e}，加倍到 {next} 条的功 {more:.3e}{}：按直接部分的上端记", if count < available { "，不划算" } else { "（已用先导的全部路径）" }));
         }
         // The complete candidates but G at their own step: G's is G's own, and a model with explicit excited states may
-        // stand at a longer one (R4: G stands at 0.1185 µs, the 2026-11-21 P20 at 0.474). Each one's scout alone on its own
+        // stand at a longer one (the 2026-11-21 P20 at 0.474 µs where G stood at 0.1185). Each one's scout alone on its own
         // model (`Choosing::Scout`: the first member of every pilot group at its ladder's first rung and the companion, down
-        // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), its work a µs at the rung the scout stands at, and its W again
-        // there with the scout's work beside -- one member of each pilot group at two levels, the companion's at most half.
+        // the ladder to the first rung its own reads stand on, as the attempt's scout, the priced course not taken), carried
+        // as G's was (`carried`), its work a µs there, and its W again there with the scout's work beside -- one member of
+        // each pilot group at two levels, the companion's at most half.
         // A scout is dear (R4's P26: 87 s), so they are taken in the order of each one's least W -- its work a µs at the
         // ladder's first rung `first`, the longest step its scout may stand at -- while that stands below the least W found
         // (G's at its own step where G is complete, the scouted ones' at theirs); the rest keep their W at G's step, which is
@@ -3166,12 +3179,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 _ => unreachable!("a scout's attempt stops at its rung"),
             };
             messages.stage(Stage { step: Step::Select, tau: None, batch: None });
-            let price = price(model, rung, false).0;
-            let scout = scout_of(price);
+            let step = rung * carried;
+            let (price, scout) = (price(model, step, false).0, scout_of(price(model, rung, false).0));
             let entry = &mut weighed[i];
             let w = entry.need * price * span + again(entry.place, price) + scout;
             best = crate::linalg::smaller(best, w);
-            entry.fate += &format!("；自己的侦察立定于 τ = {rung:.4} µs（先导 {tau:.4}）：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
+            entry.fate += &format!("；自己的侦察立定于 {rung:.4} µs，按先导阶梯对 G 的侦察的同一修正（{scouted_at:.4} → {tau:.4} µs）记为 τ = {step:.4} µs：每 µs 代价 {:.3e} → {price:.3e}，W {:.3e} → {w:.3e}（含侦察 {scout:.3e}），{:.1} s", entry.price, entry.work.unwrap_or(f64::NAN), clock.elapsed().as_secs_f64());
             (entry.price, entry.work) = (price, Some(w));
             noted(&mut report, format!("{}：{}", named(&entry.judged.keep), entry.fate));
         }
