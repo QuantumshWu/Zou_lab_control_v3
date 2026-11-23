@@ -771,6 +771,29 @@ fn made(request: &Request, split: bool) -> Selected {
     Selected::made(scene, selection, reference, split, &Drops::Judged).unwrap()
 }
 
+/// The explicit model a scene's blocks were accepted on (`the_exact_blocks_hold_at_every_point`), by its states' labels:
+/// R4's P20 -- the ground states, D2-1--1, D2-2 but m = 0, D2-3 -- and tilt0's P19 -- the ground states, D2-2 but
+/// m = −2, D2-3 -- (the three-point check's, printed in the gate's logs at 24ce4deb); none of another scene.
+fn explicit(name: &str, request: &Request) -> Option<Vec<usize>> {
+    let excited: &[&str] = match name {
+        "R4" => &["D2-1--1", "D2-2--2", "D2-2--1", "D2-2-1", "D2-2-2", "D2-3--3", "D2-3--2", "D2-3--1", "D2-3-0", "D2-3-1", "D2-3-2", "D2-3-3"],
+        "tilt0" => &["D2-2--1", "D2-2-0", "D2-2-1", "D2-2-2", "D2-3--3", "D2-3--2", "D2-3--1", "D2-3-0", "D2-3-1", "D2-3-2", "D2-3-3"],
+        _ => return None,
+    };
+    let mut keep: Vec<usize> = (0..GROUND).collect();
+    keep.extend(excited.iter().map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+    keep.sort_unstable();
+    Some(keep)
+}
+
+/// A request's run on the states `keep` (`made`'s, P replaced), its states in their blocks or (`split` false) one.
+fn made_split(request: &Request, keep: &[usize], split: bool) -> Selected {
+    let reference = crate::solve::alone(crate::solve::chief(request));
+    let scene = crate::scene::Scene::new(request).unwrap();
+    let selection = crate::select::choose(&scene).unwrap();
+    Selected::made(scene, Selection { keep: keep.to_vec(), ..selection }, reference, split, &Drops::Judged).unwrap()
+}
+
 /// A run's blocks said: each its ground and other states and its states' labels.
 fn said(request: &Request, run: &Selected) -> String {
     run.blocks()
@@ -826,12 +849,19 @@ fn the_structure_s_scales_bound_its_entries() {
 /// a moving point off it (`POINTS`) and at a point farther out at another speed: the model's node with the photon forms
 /// there, its every beat's H_eff and gradient, has between two blocks no element beyond the rounding of its matrix (said
 /// in units of ε times the matrix's largest entry), and the blocked node is the whole one's with those places zero, bit
-/// for bit. The blocks said per scene: R4 (R4_LIN_4) 9 + 11, tilt0 11 + 8 (the decision history's acceptance).
+/// for bit. The blocks said per scene: R4 (R4_LIN_4) 9 + 11, tilt0 11 + 8 (the decision history's acceptance), each on
+/// the explicit model the acceptance was made on, named by its states (`explicit`): the three-point check's P20 of R4
+/// and P19 of tilt0, the selection's run models until 429c36cd -- since then the selection gives the solve the full
+/// ground model G to run its pilot on (select.rs `choose`, the chain's first), one block or the ground states' own, and
+/// a test of its blocks would read nothing of the excited states' (as solve.rs `a_state_s_price_is_its_step_s_count`).
 #[test]
 fn the_exact_blocks_hold_at_every_point() {
     let points = [POINTS[0], POINTS[1], ([1.3, -0.7, 2.1], [-9.0, 4.0, 6.0])];
     for (name, request) in blocked_scenes() {
-        let (run, whole) = (made(&request, true), made(&request, false));
+        let (run, whole) = match explicit(&name, &request) {
+            Some(keep) => (made_split(&request, &keep, true), made_split(&request, &keep, false)),
+            None => (made(&request, true), made(&request, false)),
+        };
         assert_eq!(run.rs.keep, whole.rs.keep, "{name}: one P");
         let n = run.rs.keep.len();
         eprintln!("{name}: P {n}, {} blocks: {}", run.blocks().len(), said(&request, &run));
