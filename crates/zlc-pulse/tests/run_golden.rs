@@ -47,15 +47,16 @@ fn error_json(error: &Error) -> Json {
 }
 
 /// A description as both sides are compared: v3 states each scan slot's `value`
-/// (where a plan's default sweep is centred) and seeds no sweep, so neither
-/// that nor v2's column `lo`/`hi` is compared; the rest is v2's to the digit.
+/// (where a plan's default sweep is centred) and each field's `grid` (where a
+/// plan's points are put) and seeds no sweep, so neither those nor v2's column
+/// `lo`/`hi` is compared; the rest is v2's to the digit.
 fn comparable(answer: &Json) -> Json {
     let Some(Json::Object(items)) = answer.get("ok") else { return answer.clone() };
     let strip = |fields: &Json, keys: &[&str]| Json::Array(fields.as_array().unwrap().iter().map(|field| Json::Object(
         field.as_object().unwrap().iter().filter(|(key, _)| !keys.contains(&key.as_str())).cloned().collect())).collect());
     let items = items.iter().map(|(key, value)| (key.clone(), match key.as_str() {
-        "api_fields" => strip(value, &["lo", "hi"]),
-        "scan_fields" => strip(value, &["lo", "hi", "value"]),
+        "api_fields" => strip(value, &["lo", "hi", "grid"]),
+        "scan_fields" => strip(value, &["lo", "hi", "value", "grid"]),
         _ => value.clone(),
     })).collect();
     Json::object(vec![("ok", Json::Object(items))])

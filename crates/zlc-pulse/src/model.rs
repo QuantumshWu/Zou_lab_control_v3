@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::domain::{Grid, Ties};
 use crate::error::{Error, Kind, Result, is_identifier, repr, repr_tuple, type_error, value_error};
 use crate::exact::{BigUint, Decimal, Ratio};
 use crate::json::Json;
@@ -64,8 +65,9 @@ pub fn exact_ticks(value: Num, unit: &str, time_step_ns: f64, field_name: &str, 
 /// `align_to_grid(value, unit, time_step_ns, field_name, minimum=)`: the
 /// nearest value on the clock grid, in the unit it arrived in.
 pub fn align_to_grid(value: Num, unit: &str, time_step_ns: f64, field_name: &str, minimum: Option<i128>) -> Result<f64> {
-    let (negative, ratio) = tick_ratio(value, unit, time_step_ns)?;
-    let rounded = ratio.round_half_up();
+    if time_step_ns <= 0.0 { return value_error("time_step_ns must be positive"); }
+    let clock = Grid { step: time_step_ns, ties: Ties::Away };
+    let (negative, rounded) = clock.steps(&value.decimal().scale10(nanoseconds_exponent(unit)?));
     let mut ticks = ticks_from(negative, &rounded, field_name)?;
     if let Some(minimum) = minimum { if ticks < minimum { ticks = minimum; } }
     let nanoseconds = Decimal::from_i128(ticks).mul(&Decimal::from_f64(time_step_ns));

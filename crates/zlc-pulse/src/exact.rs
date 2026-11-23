@@ -325,6 +325,16 @@ impl Ratio {
         self.numerator.shl(1).add(&self.denominator).divrem(&self.denominator.shl(1)).0
     }
 
+    /// `round(ratio)`: the nearest integer, halves to the even one.
+    pub fn round_half_even(&self) -> BigUint {
+        let (quotient, remainder) = self.numerator.divrem(&self.denominator);
+        match remainder.shl(1).cmp(&self.denominator) {
+            Ordering::Less => quotient,
+            Ordering::Equal if !quotient.bit(0) => quotient,
+            _ => quotient.add(&BigUint::from_u128(1)),
+        }
+    }
+
     pub fn to_f64(&self) -> f64 { ratio_to_f64(&self.numerator, &self.denominator) }
 }
 
