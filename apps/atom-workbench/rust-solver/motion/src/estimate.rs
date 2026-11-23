@@ -271,6 +271,7 @@ pub fn draws_for(share: f64) -> f64 {
 /// binomial's upper tail, 1 − Σ_{k < n} C(N, k) p^k (1 − p)^{N − k}, its terms one from the one before
 /// (× (N − k)/(k + 1) · p/(1 − p)) -- exact at any count, where a normal's or Wilson's interval is not at a count of
 /// one or two. A claim that a share is at most p is refuted by a count whose tail is below the test's (`tail_among`).
+#[cfg(test)]
 pub fn at_least(count: f64, draws: f64, share: f64) -> f64 {
     if share >= 1. {
         return 1.;
@@ -680,6 +681,7 @@ pub struct Sums {
 
 impl Sums {
     pub const ZERO: Sums = Sums { trajectories: 0., failed: 0., refused: 0., held: 0., rows: [0.; STATES], kappa: [0.; 3], kappa_squared: [0.; 3], kappa2: [0.; 3], shape: NO_SHAPE, shape_squared: [0.; 3], push: [0.; 3], unresolved: 0. };
+    #[cfg(test)]
     /// One trajectory at the output.
     pub fn add(&mut self, fate: &Fate) {
         self.add_weighted(fate, 1.);
@@ -821,6 +823,21 @@ pub fn semiclassical(scattered: [f64; 2], scales: &Scales) -> f64 {
     let recoil = if scattered[0] != 0. { scales.hbar_over_mass * scattered[1] / scattered[0] / KT_PER_UK } else { 0. };
     let zero_point = scales.frequencies.iter().sum::<f64>() / (6. * KT_PER_UK);
     crate::linalg::larger(SUB_DOPPLER_RECOILS * recoil, zero_point)
+}
+
+/// A frame's part of the total T (model/selected.rs, # The parts turned), relative to T: each atom's velocity moved by at
+/// most u (µm/µs; ħ/m times the frame's ‖∇S‖) at every time moves the sum of the axes' variances Σ_a Var v_a = 3T/(m/k_B)
+/// by at most 2√(Σ Var v)·u + u² (Cauchy–Schwarz on the shifts), so T by (2√(3T k_B/m) u + u²)/(3T k_B/m); `mass` is
+/// m/k_B (µK per (m/s)², `Escape::mass`). Unbounded where T is none.
+pub fn frame_temperature(temperature: f64, u: f64, mass: f64) -> f64 {
+    if u == 0. {
+        return 0.;
+    }
+    if !(temperature > 0.) {
+        return f64::INFINITY;
+    }
+    let spread = 3. * temperature / mass;
+    (2. * spread.sqrt() * u + u * u) / spread
 }
 
 /// T's allowance at a total T (µK) of the semiclassical scale `scale` (µK), relative to T (solve.rs, # T's allowance):
@@ -1328,6 +1345,7 @@ fn order_difference(m: &[Moments], q: usize) -> f64 {
 /// Each time's share of the run in a mean over the times `times` (increasing, from t = 0): half the interval to each
 /// neighbour, the last time's half its own -- the trapezoid's weights, the mean of a quantity the line through the
 /// times holds (analysis.rs) over the run.
+#[cfg(test)]
 pub fn trapezoid(times: &[f64]) -> Vec<f64> {
     let last = times.len().saturating_sub(1);
     (0..times.len()).map(|k| 0.5 * (times[(k + 1).min(last)] - times[k.saturating_sub(1)])).collect()

@@ -34,6 +34,11 @@ use crate::floquet::Sectors;
 /// The folded blocks tabled in the tweezer's intensity (fold_table.rs).
 #[path = "fold_table.rs"]
 pub(crate) mod table;
+/// The node's contraction off tables of pair products (fold_tabled.rs): built and checked element by element against
+/// the node (model/selected/tabled.rs); no node of a run reads it yet (BRIEF_STEP3 item 4 (b)).
+#[cfg(test)]
+#[path = "fold_tabled.rs"]
+pub(crate) mod tabled;
 /// OLDNEW's budget check (tests alone): where above zero, every folded block's denominators taken as their Doppler
 /// series' first DOPPLER_ORDERS terms about the pieces' frequencies at rest (`REST`, put in by `Rs::evaluate`) in place
 /// of the exact reciprocal -- the series a table of pair products would hold, its tail what the budget books.
@@ -51,6 +56,13 @@ pub(crate) mod pairs;
 use crate::linalg::{self, C64, Mat};
 use crate::scene::Key;
 use crate::units::UNIT_ROUNDOFF;
+
+/// A complex number moved, zeroed or added into another, and a real number's operation, in complex multiply-adds
+/// (decide.rs, # Work): the fold's and the contraction's element-wise loops are counted in them.
+const MOVED: f64 = crate::decide::MOVED / crate::decide::COMPLEX;
+const REAL: f64 = 1. / crate::decide::COMPLEX;
+/// A complex reciprocal 1/(z − w − κ) (`linalg::reciprocals`): the two differences, |z|², its division, the two products.
+const RECIPROCAL: f64 = (7. + crate::decide::DIVISION) / crate::decide::COMPLEX;
 
 /// A term: `scale` × factor × Σ coefficient · matrix (each matrix's adjoint where `adjoint`).
 #[derive(Clone, Debug, PartialEq)]
@@ -179,8 +191,12 @@ struct Block {
 pub struct Plan {
     pub n: usize,
     pub nq: usize,
+    /// K, Q and the levels over the 32 (a test's model, rs.rs `model_of`).
+    #[cfg(test)]
     pub keep: Vec<usize>,
+    #[cfg(test)]
     pub folded: Vec<usize>,
+    #[cfg(test)]
     pub groups: Vec<Vec<usize>>,
     parts: Vec<[i64; 2]>,
     /// Per piece (`Source::pieces`' order): its key, its class (fast index of its key), its terms' factors and scales,
@@ -221,7 +237,7 @@ fn element(class: [i64; 2], row: [i64; 2], col: [i64; 2]) -> [i64; 2] {
 impl Plan {
     /// The structure of `source`'s fold keeping `keep` (sorted) by `sectors` on the fast coordinates `axes`, Q the rest;
     /// `splits` the library's fixed matrices split for this K and Q (rs.rs `Split::all`).
-    pub fn new(splits: &[super::Split], keep: &[usize], folded: &[usize], source: &Source, sectors: &Sectors, axes: [bool; 2], groups: &[Vec<usize>]) -> Plan {
+    pub fn new(splits: &[super::Split], keep: &[usize], folded: &[usize], source: &Source, sectors: &Sectors, axes: [bool; 2], #[cfg_attr(not(test), allow(unused_variables))] groups: &[Vec<usize>]) -> Plan {
         let (n, nq) = (keep.len(), folded.len());
         let parts: Vec<[i64; 2]> = keep.iter().map(|&s| sectors.state(s, axes)).collect();
         let mut keys = Vec::new();
@@ -451,12 +467,26 @@ impl Plan {
             }
             batch.fixed = fixed;
         }
-        Plan { n, nq, keep: keep.to_vec(), folded: folded.to_vec(), groups: groups.to_vec(), parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct, intensity: source.intensity.clone(), own: source.own.clone(), table: std::sync::OnceLock::new() }
+        Plan {
+            n,
+            nq,
+            #[cfg(test)]
+            keep: keep.to_vec(),
+            #[cfg(test)]
+            folded: folded.to_vec(),
+            #[cfg(test)]
+            groups: groups.to_vec(),
+            parts, keys, classes, terms, jump, channels, hamiltonian, generator_terms, varying: source.varying.clone(), offsets, blocks, diagonal, amplitudes, batches, place, legs, direct, intensity: source.intensity.clone(), own: source.own.clone(), table: std::sync::OnceLock::new() }
     }
 
     /// The folded blocks' sizes and which are Q's.
     pub fn blocks(&self) -> Vec<(usize, bool)> {
         self.blocks.iter().map(|b| (b.rows.len(), b.sideband.is_none())).collect()
+    }
+
+    /// K's states' fast parts (`Sectors::state` on the folding coordinates), in K's order.
+    pub(crate) fn parts(&self) -> &[[i64; 2]] {
+        &self.parts
     }
 
     /// K's sideband parts (`Block::sideband`): their blocks' indices.
@@ -484,6 +514,7 @@ impl Plan {
         block.sideband.is_none() || (model && !block.dropped)
     }
 
+    #[cfg(test)]
     /// The count of pieces (H's and the jumps').
     pub fn pieces(&self) -> usize {
         self.keys.len()
@@ -566,7 +597,6 @@ struct Sum {
 pub struct Grouping {
     /// Per group its label (a key) and the piece whose frequency it carries.
     pub labels: Vec<(Key, usize)>,
-    of: Vec<usize>,
     zs: Vec<Sum>,
     ws: Vec<Sum>,
     /// H's pairs and the jumps'.
@@ -872,12 +902,7 @@ impl Grouping {
             l.0.push(zi);
             l.1 += z.index.len();
         }
-        Grouping { labels, of, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset, spans: Vec::new() }
-    }
-
-    /// Each piece's group.
-    pub fn group_of(&self, piece: usize) -> usize {
-        self.of[piece]
+        Grouping { labels, zs, ws, h_pairs, j_pairs, outputs, channel_outputs, h_direct, h_direct_places, j_direct, lists, channel_lists, lift, wmaps, layout, z_offset, spans: Vec::new() }
     }
 }
 
@@ -991,6 +1016,8 @@ impl Local {
         gen.extend(plan.generator_terms.iter().map(|&(f, s)| factor(f, s)));
         terms.clear();
         terms.extend(plan.terms.iter().flat_map(|ts| ts.iter().map(|&(f, s)| factor(f, s))));
+        // Each term's factor and its three gradients times its scale.
+        work += 4.0 * (gen.len() + terms.len()) as f64;
         let nb = plan.blocks.len();
         spectra.resize_with(nb, Spectrum::default);
         g.resize_with(nb, Mat::default);
@@ -1041,7 +1068,7 @@ impl Local {
                             product(&sp.inverse, t, &mut hats[b][used].1);
                             hats[b][used].0 = *f;
                             used += 1;
-                            work += 2.0 * (size * size * size) as f64;
+                            work += 2.0 * (size * size * size) as f64 + MOVED * (size * size) as f64 + entries.len() as f64;
                         }
                     }
                     hats[b].truncate(used);
@@ -1057,6 +1084,7 @@ impl Local {
                 let c = e.value * v.coefficients[e.coefficient as usize];
                 g[b].data[e.row as usize * size + e.col as usize] += s * c;
             }
+            work += MOVED * (size * size) as f64 + block.rest.len() as f64;
             // (A check's: mode 2 moves every entry of G₀ by one unit round-off, its sign by the entry's place -- the
             // rounding's floor of what follows.)
             if mode == 2 {
@@ -1088,7 +1116,7 @@ impl Local {
                 product(&s.inverse, t, &mut hats[b][used].1);
                 hats[b][used].0 = *f;
                 used += 1;
-                work += 2.0 * (size * size * size) as f64;
+                work += 2.0 * (size * size * size) as f64 + MOVED * (size * size) as f64 + entries.len() as f64;
             }
             hats[b].truncate(used);
         }
@@ -1107,6 +1135,8 @@ impl Local {
                 sl[e.row as usize] += (dd * c).re;
             }
         }
+        // The energies and slopes zeroed; per entry four real parts of a product, each two multiply-adds.
+        work += REAL * (4 * plan.n) as f64 + 2.0 * plan.diagonal.len() as f64;
         // The amplitudes, block by block, all of a block's in one batch (`Plan::batches`): X of every component side by
         // side, one product V⁻¹X, the gradients likewise.
         ms.resize_with(nb, Mat::default);
@@ -1123,6 +1153,7 @@ impl Local {
             if making.gradients {
                 sized(dm, size, 3 * total);
             }
+            work += MOVED * (size * total * if making.gradients { 4 } else { 1 }) as f64;
             if batch.amplitudes.is_empty() {
                 continue;
             }
@@ -1160,7 +1191,12 @@ impl Local {
                         }
                     }
                 }
+                // Its columns' z, its entries (a factor's: the value and, where the gradients are made, three more).
+                let per = if r.single.is_some() { MOVED } else if making.gradients { 4.0 } else { 1.0 };
+                work += REAL * count as f64 + per * r.rest.len() as f64;
             }
+            // X's fixed part copied.
+            work += MOVED * (size * wide) as f64;
             let s = &spectra[b];
             product(&s.inverse, x, y);
             work += (size * size * wide) as f64;
@@ -1172,6 +1208,11 @@ impl Local {
             for k in 0..size {
                 linalg::reciprocals(zc, s.centre[k], s.values[k], &mut d[k * total..(k + 1) * total]);
             }
+            // D zeroed and made, a reciprocal an entry; then per entry of M̂ its product and its place, a single
+            // component's factor on X̂ and its three gradients, and the three gradients ∂X̂ − M̂∂E in their places.
+            let per = 1.0 + MOVED + if making.gradients { 3.0 + 3.0 * MOVED } else { 0.0 };
+            let singles: usize = batch.amplitudes.iter().filter(|&&i| plan.amplitudes[i].single.is_some()).map(|&i| plan.amplitudes[i].cols.len()).sum();
+            work += (MOVED + RECIPROCAL + per) * (size * total) as f64 + MOVED * total as f64 + 4.0 * (size * singles) as f64;
             #[cfg(test)]
             {
                 let orders = DOPPLER_ORDERS.load(std::sync::atomic::Ordering::Relaxed);
@@ -1235,6 +1276,7 @@ impl Local {
                         }
                     }
                 }
+                work += (ds.iter().filter(|d| **d != C64::ZERO).count() * size * total) as f64;
             }
             for k in 0..size {
                 let dk = &d[k * total..(k + 1) * total];
@@ -1244,6 +1286,7 @@ impl Local {
                     }
                 }
             }
+            work += (3 * size * total) as f64;
         }
         self.work = work;
     }
@@ -1580,6 +1623,7 @@ pub struct Making {
 }
 
 impl Making {
+    #[cfg(test)]
     pub const ALL: Making = Making { model: true, effective: true, kicks: true, lift: true, gradients: true };
     /// A node's: the model with its gradients, the photon forms where `kicks`.
     pub const fn node(kicks: bool) -> Making {
@@ -1612,6 +1656,7 @@ impl Compact {
         }
     }
 
+    #[cfg(test)]
     /// The output as dense n × n matrices on its places.
     pub fn dense(&self, list: &[u32], n: usize) -> (Mat, [Mat; 3]) {
         let mut value = Mat::zeros(n, n);
@@ -1663,6 +1708,12 @@ fn zero(m: &mut Mat, rows: usize, cols: usize) {
     sized(m, rows, cols);
 }
 
+/// A piece's direct entries' counted complex multiply-adds (`Out::contract`): its terms' factors with their scales and
+/// weight (a value and three gradients each), and per entry its value and, where its factor moves, three gradients.
+fn direct_work(factors: &[(C64, [C64; 3], bool)], entries: &[(Entry, [i64; 2])]) -> f64 {
+    4.0 * factors.len() as f64 + entries.iter().map(|(e, _)| if factors[e.term as usize].2 { 4.0 } else { 1.0 }).sum::<f64>()
+}
+
 /// out (r × c) = a b by `Mat::product`'s own operations (each row a's entries' multiples of b's rows in turn, the
 /// product rounded and then the sum), on out's memory.
 fn plain_product(a: &Mat, b: &Mat, out: &mut Mat) {
@@ -1682,16 +1733,8 @@ impl Out {
     pub fn contract(&mut self, plan: &Plan, grouping: &Grouping, local: &Local, weights: Option<&[C64]>, making: Making) {
         let n = plan.n;
         let weight = |p: usize| weights.map_or(C64::ONE, |w| w[p]);
-        let mut work = 0.0;
-        self.h.resize_with(grouping.outputs.len(), Default::default);
-        self.channels.resize_with(grouping.channel_outputs.len(), Default::default);
-        self.lift.resize_with(grouping.labels.len(), Default::default);
-        for (c, list) in self.h.iter_mut().zip(&grouping.lists) {
-            c.zeroed(list.len());
-        }
-        for (c, list) in self.channels.iter_mut().zip(&grouping.channel_lists) {
-            c.zeroed(list.len());
-        }
+        let v = &local.values;
+        let mut work = self.direct(plan, grouping, v, &weight, making);
         self.made = usize::MAX;
         // The amplitudes' sums, block by block side by side, then M = V Ẑ: two products a block.
         let nb = plan.blocks.len();
@@ -1708,6 +1751,8 @@ impl Out {
             if making.gradients {
                 zero(zd, size, 3 * width);
             }
+            let sides = if making.gradients { 4 } else { 1 };
+            work += MOVED * (sides * size * width) as f64;
             if list.is_empty() {
                 continue;
             }
@@ -1732,6 +1777,8 @@ impl Out {
                             }
                         }
                     }
+                    // Each of its columns' weight on a row and, with the gradients, on three more.
+                    work += (sides * size * map.len()) as f64;
                 }
             }
             let vectors = &local.spectra[b].vectors;
@@ -1742,7 +1789,172 @@ impl Out {
                 work += (size * size * 3 * width) as f64;
             }
         }
-        let v = &local.values;
+        if making.model && making.effective {
+            // H_eff's pairs, ½ and the conjugate.
+            for pair in &grouping.h_pairs {
+                if !plan.made(grouping.ws[pair.w].block, true) {
+                    continue;
+                }
+                if self.made != pair.w {
+                    work += self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.product(grouping, pair.w);
+                    self.made = pair.w;
+                }
+                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
+                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
+                // Per element: its gradients' two parts added where the leg sum moves, the half of it and its gradients,
+                // and its value and gradients into two outputs (the conjugate's).
+                work += (rows * cols) as f64 * (if self.moving { 3.0 * MOVED } else { 0.0 } + 2.0 + 8.0 * MOVED);
+                for i in 0..rows {
+                    let (places, conjugates) = (&pair.places[i * cols..(i + 1) * cols], &pair.conjugate_places[i * cols..(i + 1) * cols]);
+                    for (j, (&k, &kc)) in places.iter().zip(conjugates).enumerate() {
+                        let (x, dx) = products.element(i, j);
+                        let (x, dx) = (x * 0.5, dx.map(|d| d * 0.5));
+                        let (k, kc) = (k as usize, kc as usize);
+                        let out = &mut self.h[pair.out];
+                        out.value[k] += x;
+                        for a in 0..3 {
+                            out.gradient[a][k] += dx[a];
+                        }
+                        let out = &mut self.h[pair.conjugate];
+                        out.value[kc] += x.conj();
+                        for a in 0..3 {
+                            out.gradient[a][kc] += dx[a].conj();
+                        }
+                    }
+                }
+            }
+        }
+        if making.model {
+            // The jumps' pairs, each whole in its channel.
+            for pair in &grouping.j_pairs {
+                if (grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks) || !plan.made(grouping.ws[pair.w].block, true) {
+                    continue;
+                }
+                if self.made != pair.w {
+                    work += self.legs(plan, grouping, v, &weight, pair.w);
+                    work += self.product(grouping, pair.w);
+                    self.made = pair.w;
+                }
+                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
+                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
+                // Per element: its gradients' two parts added where the leg sum moves, its value and gradients added out.
+                work += (rows * cols) as f64 * (if self.moving { 3.0 * MOVED } else { 0.0 } + 4.0 * MOVED);
+                let out = &mut self.channels[pair.out];
+                for i in 0..rows {
+                    for (j, &k) in pair.places[i * cols..(i + 1) * cols].iter().enumerate() {
+                        let (x, dx) = products.element(i, j);
+                        let k = k as usize;
+                        out.value[k] += x;
+                        for a in 0..3 {
+                            out.gradient[a][k] += dx[a];
+                        }
+                    }
+                }
+            }
+        }
+        // The lift: M on Q's blocks, by group.
+        if making.lift {
+            for (l, g) in self.lift.iter_mut() {
+                zero(l, plan.nq, n);
+                for d in g.iter_mut() {
+                    zero(d, if making.gradients { plan.nq } else { 0 }, n);
+                }
+            }
+            let sides = if making.gradients { 4 } else { 1 };
+            work += MOVED * (sides * plan.nq * n * self.lift.len()) as f64;
+            for (b, group, mine) in &grouping.lift {
+                let (lv, lg) = &mut self.lift[*group];
+                let (mv, md, width) = (&self.mv[*b], &self.md[*b], grouping.layout[*b].1);
+                for &i in mine {
+                    let (s, o) = (&grouping.zs[i], grouping.z_offset[i]);
+                    work += MOVED * (sides * plan.blocks[*b].rows.len() * s.index.len()) as f64;
+                    for (k, &row) in plan.blocks[*b].rows.iter().enumerate() {
+                        for (j, &a) in s.index.iter().enumerate() {
+                            lv.data[row * n + a] += mv.data[k * width + o + j];
+                            if making.gradients {
+                                for d in 0..3 {
+                                    lg[d].data[row * n + a] += md.data[k * 3 * width + d * width + o + j];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.work = work;
+    }
+
+    /// The leg sum wi at the point, dense: X and ∂X (`x`), its members' fixed entries at their factors, weights and
+    /// coefficients, each on its row in the sum (`Grouping::wmaps`) and its column in the block.
+    fn legs(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, wi: usize) -> f64 {
+        let s = &grouping.ws[wi];
+        let (rows, size) = (s.index.len(), plan.blocks[s.block].rows.len());
+        zero(&mut self.x, 4 * rows, size);
+        self.moving = false;
+        // X and ∂X zeroed; per entry its value (four reals' product with the coefficient, the scale and the weight) and
+        // its moving factors' gradients.
+        let mut work = MOVED * (4 * rows * size) as f64;
+        for (member, map) in &grouping.wmaps[s.at] {
+            let r = &plan.legs[*member];
+            let f = weight(r.piece);
+            let ts = &plan.terms[r.piece];
+            for e in &r.entries {
+                let (k, to) = (v.coefficients[e.coefficient as usize], map[e.row as usize]);
+                if to == u32::MAX || k == 0.0 {
+                    continue;
+                }
+                let (fi, sc) = ts[e.term as usize];
+                let (x, g) = v.factors[fi];
+                let c = e.value * k * sc * f;
+                let at = to as usize * size + e.col as usize;
+                self.x.data[at] += x * c;
+                work += 1.0 + 3.0 * REAL;
+                for (a, d) in g.iter().enumerate() {
+                    if *d != C64::ZERO {
+                        self.x.data[(a + 1) * rows * size + at] += *d * c;
+                        self.moving = true;
+                        work += 1.0;
+                    }
+                }
+            }
+        }
+        work
+    }
+
+    /// The products of the leg sum wi (made, `legs`) with its block's M, by the product kernel: [X; ∂X] M_v -- X M_v
+    /// alone where the sum does not move -- and X ∂M; every pair of the sum is a slice of them (`Grouping::z_offset`,
+    /// `element`). Returns the counted complex multiply-adds.
+    fn product(&mut self, grouping: &Grouping, wi: usize) -> f64 {
+        let s = &grouping.ws[wi];
+        let (rows, width) = (s.index.len(), grouping.layout[s.block].1);
+        let (mv, md) = (&self.mv[s.block], &self.md[s.block]);
+        let size = mv.rows;
+        let stacked = if self.moving { 4 * rows } else { rows };
+        sized(&mut self.p, stacked, width);
+        linalg::fused_product(&self.x.data[..stacked * size], &mv.data, (stacked, size, width), &mut self.p.data);
+        sized(&mut self.pd, rows, 3 * width);
+        linalg::fused_product(&self.x.data[..rows * size], &md.data, (rows, size, 3 * width), &mut self.pd.data);
+        ((stacked + 3 * rows) * size * width) as f64
+    }
+
+    /// The outputs zeroed and the direct entries put in (`contract`'s and the tables' node's, rs/fold_tabled.rs): the
+    /// spanned outputs (`Grouping::spanned`) at their coordinates, the entries no span holds one by one -- H's where
+    /// `making` asks for H, a jump's where for the model (its photon forms' where for the kicks). Each output's direct
+    /// entries come before its pairs. Returns the counted complex multiply-adds.
+    pub(crate) fn direct(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, making: Making) -> f64 {
+        let mut work = 0.0;
+        self.h.resize_with(grouping.outputs.len(), Default::default);
+        self.channels.resize_with(grouping.channel_outputs.len(), Default::default);
+        self.lift.resize_with(grouping.labels.len(), Default::default);
+        for (c, list) in self.h.iter_mut().zip(&grouping.lists) {
+            c.zeroed(list.len());
+        }
+        for (c, list) in self.channels.iter_mut().zip(&grouping.channel_lists) {
+            c.zeroed(list.len());
+        }
+        // The outputs zeroed: each element its value and three gradients.
+        work += 4.0 * MOVED * grouping.lists.iter().chain(&grouping.channel_lists).map(Vec::len).sum::<usize>() as f64;
         // A piece's terms' factors with their scales and the piece's weight, once a piece.
         let factors = |tf: &mut Vec<(C64, [C64; 3], bool)>, p: usize| {
             let w = weight(p);
@@ -1777,6 +1989,8 @@ impl Out {
                     }
                 }
             }
+            // The coordinates zeroed; per atom its factor, scale, weight and coefficient (four products with the gradients).
+            work += 4.0 * MOVED * d.basis.len() as f64 + 4.0 * d.atoms.len() as f64;
             let o = if d.h { &mut self.h[d.out] } else { &mut self.channels[d.out] };
             for (sum, b) in self.span.iter().zip(&d.basis) {
                 for (&place, z) in d.places.iter().zip(b) {
@@ -1786,11 +2000,12 @@ impl Out {
                     }
                 }
             }
-            work += (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
+            // Each coordinate an atom's value and three gradients, each place a basis vector's.
+            work += 4.0 * (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
         }
         let spanned = !grouping.spans.is_empty();
         if making.model && making.effective {
-            // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
+            // H_eff's direct slow entries.
             for p in (0..plan.hamiltonian).filter(|_| !spanned) {
                 factors(&mut self.tf, p);
                 let o = &mut self.h[grouping.h_direct[p]];
@@ -1805,40 +2020,11 @@ impl Out {
                         }
                     }
                 }
-            }
-            for pair in &grouping.h_pairs {
-                if !plan.made(grouping.ws[pair.w].block, true) {
-                    continue;
-                }
-                if self.made != pair.w {
-                    self.legs(plan, grouping, v, &weight, pair.w);
-                    work += self.product(grouping, pair.w);
-                    self.made = pair.w;
-                }
-                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
-                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
-                for i in 0..rows {
-                    let (places, conjugates) = (&pair.places[i * cols..(i + 1) * cols], &pair.conjugate_places[i * cols..(i + 1) * cols]);
-                    for (j, (&k, &kc)) in places.iter().zip(conjugates).enumerate() {
-                        let (x, dx) = products.element(i, j);
-                        let (x, dx) = (x * 0.5, dx.map(|d| d * 0.5));
-                        let (k, kc) = (k as usize, kc as usize);
-                        let out = &mut self.h[pair.out];
-                        out.value[k] += x;
-                        for a in 0..3 {
-                            out.gradient[a][k] += dx[a];
-                        }
-                        let out = &mut self.h[pair.conjugate];
-                        out.value[kc] += x.conj();
-                        for a in 0..3 {
-                            out.gradient[a][kc] += dx[a].conj();
-                        }
-                    }
-                }
+                work += direct_work(&self.tf, &plan.direct[p]);
             }
         }
         if making.model {
-            // The jumps: direct entries, then the pairs, each whole in its channel.
+            // The jumps' direct entries, each whole in its channel.
             for p in plan.hamiltonian..plan.keys.len() {
                 let (_, which) = plan.jump[p].unwrap();
                 if which == 1 && !making.kicks {
@@ -1859,107 +2045,58 @@ impl Out {
                         }
                     }
                 }
-            }
-            for pair in &grouping.j_pairs {
-                if (grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks) || !plan.made(grouping.ws[pair.w].block, true) {
-                    continue;
-                }
-                if self.made != pair.w {
-                    self.legs(plan, grouping, v, &weight, pair.w);
-                    work += self.product(grouping, pair.w);
-                    self.made = pair.w;
-                }
-                let products = Products::of(&self.p, &self.pd, self.moving, grouping, pair.w, pair.z);
-                let (rows, cols) = (grouping.ws[pair.w].index.len(), grouping.zs[pair.z].index.len());
-                let out = &mut self.channels[pair.out];
-                for i in 0..rows {
-                    for (j, &k) in pair.places[i * cols..(i + 1) * cols].iter().enumerate() {
-                        let (x, dx) = products.element(i, j);
-                        let k = k as usize;
-                        out.value[k] += x;
-                        for a in 0..3 {
-                            out.gradient[a][k] += dx[a];
-                        }
-                    }
-                }
+                work += direct_work(&self.tf, &plan.direct[p]);
             }
         }
-        // The lift: M on Q's blocks, by group.
-        if making.lift {
-            for (l, g) in self.lift.iter_mut() {
-                zero(l, plan.nq, n);
-                for d in g.iter_mut() {
-                    zero(d, if making.gradients { plan.nq } else { 0 }, n);
-                }
-            }
-            for (b, group, mine) in &grouping.lift {
-                let (lv, lg) = &mut self.lift[*group];
-                let (mv, md, width) = (&self.mv[*b], &self.md[*b], grouping.layout[*b].1);
-                for &i in mine {
-                    let (s, o) = (&grouping.zs[i], grouping.z_offset[i]);
-                    for (k, &row) in plan.blocks[*b].rows.iter().enumerate() {
-                        for (j, &a) in s.index.iter().enumerate() {
-                            lv.data[row * n + a] += mv.data[k * width + o + j];
-                            if making.gradients {
-                                for d in 0..3 {
-                                    lg[d].data[row * n + a] += md.data[k * 3 * width + d * width + o + j];
-                                }
+        work
+    }
+
+}
+
+#[cfg(test)]
+impl Out {
+    /// The lift's elements' moduli scales (the tests'): per group, of M = V Ẑ on Q × n as the lift lays it, |V| Σ_m |M̂_m|
+    /// -- the moduli of the terms each element is the sum of -- and its gradients' |V| Σ_m Σ_axis |∂M̂_m|.
+    pub(crate) fn lift_scales(plan: &Plan, grouping: &Grouping, local: &Local) -> Vec<(Mat, Mat)> {
+        let n = plan.n;
+        let mut out: Vec<(Mat, Mat)> = (0..grouping.labels.len()).map(|_| (Mat::zeros(plan.nq, n), Mat::zeros(plan.nq, n))).collect();
+        for (b, group, mine) in &grouping.lift {
+            let size = plan.blocks[*b].rows.len();
+            let vectors = &local.spectra[*b].vectors;
+            for &i in mine {
+                let s = &grouping.zs[i];
+                let cols = s.index.len();
+                let (mut z, mut dz) = (vec![0.0; size * cols], vec![0.0; size * cols]);
+                for (member, map) in &s.members {
+                    let (mb, off) = plan.place[*member];
+                    let (a, da) = (&local.m[mb], &local.dm[mb]);
+                    let total = a.cols;
+                    for k in 0..size {
+                        for &(from, to) in map {
+                            z[k * cols + to] += a.data[k * total + off + from].abs();
+                            for d in 0..3 {
+                                dz[k * cols + to] += da.data[k * 3 * total + d * total + off + from].abs();
                             }
                         }
                     }
                 }
-            }
-        }
-        self.work = work;
-    }
-
-    /// The leg sum wi at the point, dense: X and ∂X (`x`), its members' fixed entries at their factors, weights and
-    /// coefficients, each on its row in the sum (`Grouping::wmaps`) and its column in the block.
-    fn legs(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, wi: usize) {
-        let s = &grouping.ws[wi];
-        let (rows, size) = (s.index.len(), plan.blocks[s.block].rows.len());
-        zero(&mut self.x, 4 * rows, size);
-        self.moving = false;
-        for (member, map) in &grouping.wmaps[s.at] {
-            let r = &plan.legs[*member];
-            let f = weight(r.piece);
-            let ts = &plan.terms[r.piece];
-            for e in &r.entries {
-                let (k, to) = (v.coefficients[e.coefficient as usize], map[e.row as usize]);
-                if to == u32::MAX || k == 0.0 {
-                    continue;
-                }
-                let (fi, sc) = ts[e.term as usize];
-                let (x, g) = v.factors[fi];
-                let c = e.value * k * sc * f;
-                let at = to as usize * size + e.col as usize;
-                self.x.data[at] += x * c;
-                for (a, d) in g.iter().enumerate() {
-                    if *d != C64::ZERO {
-                        self.x.data[(a + 1) * rows * size + at] += *d * c;
-                        self.moving = true;
+                let (lv, lg) = &mut out[*group];
+                for (r, &row) in plan.blocks[*b].rows.iter().enumerate() {
+                    for (j, &a) in s.index.iter().enumerate() {
+                        let (mut x, mut y) = (0.0, 0.0);
+                        for k in 0..size {
+                            let v = vectors.data[r * size + k].abs();
+                            x += v * z[k * cols + j];
+                            y += v * dz[k * cols + j];
+                        }
+                        lv.data[row * n + a] += C64::real(x);
+                        lg.data[row * n + a] += C64::real(y);
                     }
                 }
             }
         }
+        out
     }
-
-    /// The products of the leg sum wi (made, `legs`) with its block's M, by the product kernel: [X; ∂X] M_v -- X M_v
-    /// alone where the sum does not move -- and X ∂M; every pair of the sum is a slice of them (`Grouping::z_offset`,
-    /// `element`). Returns the counted complex multiply-adds.
-    fn product(&mut self, grouping: &Grouping, wi: usize) -> f64 {
-        let s = &grouping.ws[wi];
-        let (rows, width) = (s.index.len(), grouping.layout[s.block].1);
-        let (mv, md) = (&self.mv[s.block], &self.md[s.block]);
-        let size = mv.rows;
-        let stacked = if self.moving { 4 * rows } else { rows };
-        sized(&mut self.p, stacked, width);
-        linalg::fused_product(&self.x.data[..stacked * size], &mv.data, (stacked, size, width), &mut self.p.data);
-        sized(&mut self.pd, rows, 3 * width);
-        linalg::fused_product(&self.x.data[..rows * size], &md.data, (rows, size, 3 * width), &mut self.pd.data);
-        ((stacked + 3 * rows) * size * width) as f64
-    }
-
 }
 
 /// A pair's slices of its leg sum's products (`Out::product`): [X; ∂X] M and X ∂M, the sum's rows, the block's width,
@@ -2632,6 +2769,7 @@ impl Grouping {
         Spanned { spans, dropped, work: [plain, work] }
     }
 
+    #[cfg(test)]
     /// The structure's sizes (a measurement's): Z sums, W sums, H pairs, jump pairs, and their products' summed
     /// rows × |B| × cols.
     pub fn sizes(&self, plan: &Plan) -> [usize; 6] {

@@ -379,7 +379,9 @@ fn r1_node_parts() {
         });
         let evaluate = least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making::node(false)));
         let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
-        let fill = least(&mut || run.fill(&mut node, &work.out, (false, true), &mut work.jumps));
+        let fill = least(&mut || {
+            run.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+        });
         let whole = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
         });
@@ -469,8 +471,12 @@ fn r2_node_cost() {
             });
             let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
             let a_contract = allocations(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
-            let fill = least(&mut || run.fill(&mut node, &work.out, (false, true), &mut work.jumps));
-            let a_fill = allocations(&mut || run.fill(&mut node, &work.out, (false, true), &mut work.jumps));
+            let fill = least(&mut || {
+            run.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+        });
+            let a_fill = allocations(&mut || {
+                run.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+            });
             let counted = work.local.work + work.out.work;
             // A middle's three nodes (the step's middle and outer nodes, h = 0.237 µs along the path) with every reading
             // of them a step makes -- the generator at each, the forces, the tones, the gradient with its slope, the

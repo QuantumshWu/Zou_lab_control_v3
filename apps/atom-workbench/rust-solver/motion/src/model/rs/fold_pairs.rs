@@ -944,13 +944,6 @@ impl Pairs {
     }
 }
 
-impl Plan {
-    /// K's states' fast parts (a check's: OLDNEW's split by them).
-    pub(crate) fn parts(&self) -> &[[i64; 2]] {
-        &self.parts
-    }
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // OLDNEW follow-up (the coordinator's 11-23 question): what a step reads of the channels -- the decay ΣL†L, the hazard
 // ⟨ψ|ΣL†L|ψ⟩ and the scattering moments Σ Im⟨u|∇u⟩, Σ Re⟨∇u|∇u⟩ -- are quadratic forms of the channels, so they can be

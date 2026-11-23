@@ -290,3 +290,277 @@ fn jumpcost() {
         eprintln!("JUMPCOST {name} {spec} tau {tau}: a step as it is {with:.1} µs, with no jump {without:.1} µs; {per:.3} jumps a step; a jump {:.1} µs (over {} states, {repeat} calls each)", if per > 0.0 { (with - without) / per } else { 0.0 }, states.len());
     }
 }
+
+/// STEP3 item 1 ("计数重写", BRIEF_STEP3): a step's counted work against its thread time, part by part. Per scene of
+/// COUNT (comma separated, `name=model@tau`; the model "ground", "P" the three-point check's choice, or "+" and explicit
+/// excited states' labels joined by "+"; the request as `stepcost`'s, or COUNT_REQ_<name> a native request's file), a
+/// walk of STEPCOST_STEPS (12) steps from trajectory STEPCOST_INDEX (3) of `r1prop::start`, with its own jumps; the
+/// profiling build's ATOM_PROF_SPLIT splits the run's blocks (`Selected::new`). Per state of the walk each part the least
+/// of STEPCOST_REPEAT (5) calls in the thread's own cycles, after one call, with the count it adds as the step counts it
+/// (`Price`):
+/// - the step whole, on the scratch its last step left, as a trajectory takes it (`step::priced`'s second attempt):
+///   `Step::work`;
+/// - the middle with its nodes (`Midway::new`, its nodes made where the picture first asks its generator): its making
+///   (`Middle::made`), its time a fresh middle's and its picture's less the picture's on the nodes made;
+/// - a node at the step's middle by its parts (`Selected::node_parts`: the point, the values, the fold, the contraction,
+///   the filling), and a jump's photon node (`Selected::photon_node`): `Node::work`;
+/// - the picture (`pictured`: the generator at the nodes, the tones, the decay laid, the preparation): the propagation's
+///   (`count::propagation` with the picture's own count) and the decay laid (`count::hazard` of no trace);
+/// - the launch, the cut's choice, the quadrature's nodes into the sums: what each adds to the picture's and the groups'
+///   counts, the quadrature's densities (`count::gathered`) with it;
+/// - the forms of the sums (their part of `count::impulse` beside the densities) and the scattered light at the middle
+///   (`Middle::scattering`'s count).
+/// - the step whole with no jump (its threshold 10⁻³⁰⁰): the jumps' part is the step's less it;
+/// - the scattered light again, each call after a step with no jump untimed: what the caches leave of it in a step.
+/// The rest is the step's less these (its jumps -- photon nodes, emission, landing, roots --, the survival's traces, the
+/// end's forms). Said per part, "COUNT-PART <scene> <part>": the count and the time a step, and their ratio (real
+/// multiply-adds a ns); "COUNT-STEP" the step's.
+#[test]
+#[ignore]
+fn count_parts() {
+    use super::super::{count, pictured, predicted, toned, Along, Sums, SUMS, TONE};
+    use crate::decide::COMPLEX;
+    use crate::linalg::C64;
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (steps, repeat, index) = (env("STEPCOST_STEPS", 12), env("STEPCOST_REPEAT", 5), env("STEPCOST_INDEX", 3) as u64);
+    let ghz: f64 = (0..5)
+        .map(|_| {
+            let (c0, clock) = (thread_cycles(), Instant::now());
+            let mut x = 0u64;
+            while clock.elapsed().as_millis() < 50 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            (thread_cycles() - c0) as f64 / clock.elapsed().as_nanos() as f64
+        })
+        .fold(0.0, crate::linalg::larger);
+    eprintln!("COUNT-RATE {ghz:.4} cycles a ns");
+    let mut least = |f: &mut dyn FnMut()| -> f64 {
+        f();
+        (0..repeat)
+            .map(|_| {
+                let c0 = thread_cycles();
+                f();
+                (thread_cycles() - c0) as f64 / (ghz * 1e3)
+            })
+            .fold(f64::INFINITY, crate::linalg::smaller)
+    };
+    let split = std::env::var("ATOM_PROF_SPLIT").unwrap_or_else(|_| "none".to_string());
+    let list = std::env::var("COUNT").expect("COUNT: name=model@tau, comma separated");
+    for entry in list.split(',') {
+        let (name, rest) = entry.split_once('=').expect("name=model@tau");
+        let (spec, tau) = rest.split_once('@').expect("name=model@tau");
+        let tau: f64 = tau.parse().unwrap();
+        let request = match std::env::var(format!("COUNT_REQ_{name}")) {
+            Ok(file) => {
+                let mut line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+                line["options"]["device"] = serde_json::json!("cpu");
+                Request::from_native(&line).unwrap()
+            }
+            Err(_) => request_of(name),
+        };
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let keep: Vec<usize> = match spec {
+            "P" => selection.keep.clone(),
+            "ground" => (0..GROUND).collect(),
+            labels => {
+                let mut keep: Vec<usize> = (0..GROUND).collect();
+                keep.extend(labels.strip_prefix('+').expect("ground, P or +labels").split('+').map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+                keep.sort_unstable();
+                keep
+            }
+        };
+        let chief = crate::solve::chief(&request);
+        // COUNT_TURN: the run made as the product makes it, its parts turned where its judgment says (the tests' runs
+        // are made unturned).
+        // COUNT_TURN=force: every pair of parts turned whatever its W (`FORCE_TURN`).
+        let turning = std::env::var("COUNT_TURN").is_ok();
+        let forced = std::env::var("COUNT_TURN").is_ok_and(|v| v == "force");
+        crate::model::selected::TURNING.with(|t| t.set(turning));
+        crate::model::selected::FORCE_TURN.with(|t| t.set(forced));
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, crate::solve::alone(chief)).unwrap();
+        crate::model::selected::TURNING.with(|t| t.set(false));
+        crate::model::selected::FORCE_TURN.with(|t| t.set(false));
+        let ground = {
+            let c = run.cluster(0);
+            c.ground == c.states.len()
+        };
+        let blocks = run.blocks().iter().map(Vec::len).collect::<Vec<_>>();
+        const PARTS: [&str; 17] = ["step", "middle", "node", "node.point", "node.values", "node.fold", "node.contract", "node.fill", "photon node", "picture", "launch", "choice", "quadrature", "forms", "scattering", "step with no jump", "scattering after a step"];
+        // Per part [count, time] summed over the walk's states.
+        let mut sum = [[0.0f64; 2]; PARTS.len()];
+        let mut t = start(&run, &request, chief, index);
+        let (mut taken, mut made, mut jumps, mut points) = (0usize, 0usize, 0usize, 0usize);
+        for _ in 0..steps {
+            let before = crate::model::selected::MADE.with(|m| m.borrow()[0]);
+            let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)) else { break };
+            made += crate::model::selected::MADE.with(|m| m.borrow()[0]) - before;
+            jumps += step.made.iter().filter(|m| m.kick.is_some()).count();
+            let mut parts = [[0.0f64; 2]; PARTS.len()];
+            // The step as a trajectory takes it: on the scratch its last step left (`step::priced`'s second attempt).
+            let mut warm = Scratch::default();
+            let _ = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut warm, &Everywhere));
+            let counted = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut warm, &Everywhere)).map_or(f64::NAN, |s| s.work);
+            parts[0] = [counted, least(&mut || {
+                std::hint::black_box(Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut warm, &Everywhere)).is_ok());
+            })];
+            // The same step with no jump (its threshold below any norm): what of the step its jumps are.
+            let mut still_t = t.clone();
+            still_t.threshold = 1e-300;
+            let plain = Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut warm, &Everywhere)).map_or(f64::NAN, |s| s.work);
+            parts[15] = [plain, least(&mut || {
+                std::hint::black_box(Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut warm, &Everywhere)).is_ok());
+            })];
+            let midway = Midway::new(&run, &t, tau).unwrap();
+            // The middle with the nodes it makes (where the picture first asks its generator): its making's count, the
+            // time of a fresh middle and its picture less the picture's on the nodes made (below).
+            let made_middle = |s: &mut Scratch| -> f64 {
+                let fresh = Midway::new(&run, &t, tau).unwrap();
+                let kappa_m = predicted(&t.forms, fresh.reached.1, tau, t.time + 0.5 * tau);
+                let along = Along::new(&fresh.generator, kappa_m, kappa_m.map(|k| fresh.hbar_over_mass * k));
+                let x = along.turned(&t.psi, -0.5 * tau, true)[..t.psi.len()].to_vec();
+                let mut st = along.middle.still();
+                let _ = pictured(&along, s, tau, Some(&x), ground, &mut st);
+                fresh.generator.made()
+            };
+            let mut s1 = Scratch::default();
+            parts[1] = [made_middle(&mut s1), least(&mut || {
+                std::hint::black_box(made_middle(&mut s1));
+            })];
+            let at = midway.reached;
+            parts[2] = [run.node(at.0, at.1, false).work, least(&mut || {
+                std::hint::black_box(run.node(at.0, at.1, false));
+            })];
+            for (k, (count, time)) in run.node_parts(at.0, at.1, &mut least).into_iter().enumerate() {
+                parts[3 + k] = [count, time];
+            }
+            parts[8] = [run.photon_node(at.0, at.1).work, least(&mut || {
+                std::hint::black_box(run.photon_node(at.0, at.1));
+            })];
+            // The step's first stretch's parts on its own picture (as `t2step_parts`).
+            let (n, h) = (t.psi.len(), 0.5 * tau);
+            let kappa_m = predicted(&t.forms, midway.reached.1, tau, t.time + h);
+            let along = Along::new(&midway.generator, kappa_m, kappa_m.map(|k| midway.hbar_over_mass * k));
+            let x = along.turned(&t.psi, -h, true)[..n].to_vec();
+            let mut s = Scratch::default();
+            let made_still = along.middle.still();
+            let mut still = made_still;
+            if pictured(&along, &mut s, tau, Some(&x), ground, &mut still).is_err() {
+                t = step.end;
+                continue;
+            }
+            let tones = s.picture.beats.len();
+            let costs = along.middle.work();
+            let toned_ = toned(along.middle, &s.picture, n, still, ground);
+            let picture_count = count::propagation(costs, still || ground, s.picture.work, toned_[0]) + count::hazard(n, 0, still, tones);
+            parts[9] = [picture_count, least(&mut || {
+                let mut st = made_still;
+                std::hint::black_box(pictured(&along, &mut s, tau, Some(&x), ground, &mut st).is_ok());
+            })];
+            parts[1][1] -= parts[9][1];
+            let mut st = made_still;
+            let _ = pictured(&along, &mut s, tau, Some(&x), ground, &mut st);
+            let slots = Sums { still, h, tones: &s.picture.beats }.count();
+            let mut sums = vec![0.0; slots * 2 * n * super::super::row(n)];
+            let w0 = s.picture.work;
+            s.picture.launch(-h, &x);
+            let launched = s.picture.work - w0;
+            parts[10] = [COMPLEX * launched, least(&mut || s.picture.launch(-h, &x))];
+            let nodes = {
+                let Scratch { picture, groups, .. } = &mut s;
+                groups.work = 0.0;
+                let w0 = picture.work;
+                groups.choose(picture, -h, h, (still, tones), &mut |_: &mut crate::spectral::Picture| false);
+                let chosen = COMPLEX * (groups.work + picture.work - w0);
+                parts[11] = [chosen, least(&mut || {
+                    std::hint::black_box(groups.choose(picture, -h, h, (still, tones), &mut |_: &mut crate::spectral::Picture| false));
+                })];
+                let grouped = groups.groups > 1;
+                groups.work = 0.0;
+                let w0 = picture.work;
+                let nodes = super::t2step::quadrature(picture, groups, still, h, -h, h, grouped, &mut sums);
+                let summed = COMPLEX * (groups.work + picture.work - w0) + count::gathered(n, nodes, still, tones);
+                parts[12] = [summed, least(&mut || {
+                    super::t2step::quadrature(picture, groups, still, h, -h, h, grouped, &mut sums);
+                })];
+                nodes
+            };
+            let size = n * n;
+            let mut wholes = vec![C64::ZERO; slots * size];
+            for j in 0..slots {
+                super::super::whole(&sums, j, n, &mut wholes[j * size..(j + 1) * size]);
+            }
+            let forms_count = COMPLEX * (if still { costs[1] } else { (2 * n * n) as f64 + 3.0 * costs[1] } + toned_[1]);
+            let picture = &s.picture;
+            parts[13] = [forms_count, least(&mut || {
+                if still {
+                    std::hint::black_box(along.middle.force(&along.path, 0.0, &wholes[..size]));
+                } else {
+                    std::hint::black_box(along.middle.nodes(&along.path, h, [&wholes[..size], &wholes[size..2 * size], &wholes[2 * size..3 * size]], None, None));
+                    for (m, tone) in picture.beats.iter().enumerate() {
+                        let at: Vec<(f64, &[C64], &[C64])> = (0..3)
+                            .map(|j| {
+                                let slot = (SUMS + TONE * m + 2 * j) * size;
+                                ([-h, 0.0, h][j], &wholes[slot..slot + size], &wholes[slot + size..slot + 2 * size])
+                            })
+                            .collect();
+                        std::hint::black_box(along.middle.tone_force(&along.path, tone.candidate, &at));
+                    }
+                }
+            })];
+            parts[14] = [along.middle.scattering(&along.path, &x).1, least(&mut || {
+                std::hint::black_box(along.middle.scattering(&along.path, &x));
+            })];
+            // The same scattered light as the step reads it, after the rest of a step (another middle's step untimed,
+            // between): what the caches hold of it then.
+            parts[16] = [parts[14][0], {
+                let mut fastest = f64::INFINITY;
+                for _ in 0..repeat {
+                    std::hint::black_box(Midway::new(&run, &still_t, tau).and_then(|m| m.attempt(&still_t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)).is_ok());
+                    let c0 = thread_cycles();
+                    std::hint::black_box(along.middle.scattering(&along.path, &x));
+                    fastest = crate::linalg::smaller(fastest, (thread_cycles() - c0) as f64 / (ghz * 1e3));
+                }
+                fastest
+            }];
+            for (s, p) in sum.iter_mut().zip(&parts) {
+                s[0] += p[0];
+                s[1] += p[1];
+            }
+            points += nodes;
+            taken += 1;
+            t = step.end;
+        }
+        let k = taken.max(1) as f64;
+        let m = made as f64 / k;
+        let label = format!("{name} {spec}(P{}) split {split}{} blocks {blocks:?} tau {tau}", keep.len(), if turning { " turning" } else { "" });
+        // The step's parts as its run takes them: the middle with its nodes, the picture, the first stretch's launch,
+        // choice, quadrature, forms, the middle's scattered light; the rest the step's less these.
+        let within = [1usize, 9, 10, 11, 12, 13, 14];
+        let rest: [f64; 2] = std::array::from_fn(|i| sum[0][i] - within.iter().map(|&p| sum[p][i]).sum::<f64>());
+        let say = |part: &str, c: f64, t: f64| eprintln!("COUNT-PART {label} {part}: {:.4e} real MA, {:.2} µs, {:.3} a ns", c / k, t / k, c / (t * 1e3));
+        for (p, name) in PARTS.iter().enumerate() {
+            say(name, sum[p][0], sum[p][1]);
+        }
+        say("rest", rest[0], rest[1]);
+        let j = jumps as f64 / k;
+        say("rest less the jumps' photon nodes", rest[0] - j * sum[8][0], rest[1] - j * sum[8][1]);
+        // The jumps: the step's less the step with no jump; the rest of a step with no jump its less the parts.
+        say("jumps", sum[0][0] - sum[15][0], sum[0][1] - sum[15][1]);
+        let plain_rest: [f64; 2] = std::array::from_fn(|i| sum[15][i] - within.iter().map(|&p| sum[p][i]).sum::<f64>());
+        say("rest of a step with no jump", plain_rest[0], plain_rest[1]);
+        eprintln!(
+            "COUNT-STEP {label}: {:.4e} real MA {:.1} µs {:.3} a ns | nodes a step {m:.2} (node {:.3} a ns) | jumps a step {:.3} | quadrature nodes {:.1} | over {taken} states",
+            sum[0][0] / k,
+            sum[0][1] / k,
+            sum[0][0] / (sum[0][1] * 1e3),
+            sum[2][0] / (sum[2][1] * 1e3),
+            jumps as f64 / k,
+            points as f64 / k
+        );
+        // COUNT_PROF: the profiling build's regions over the scene's calls (cumulative over the process).
+        if std::env::var("COUNT_PROF").is_ok() {
+            eprintln!("COUNT-PROF {label}:{}", crate::prof::report());
+        }
+    }
+}

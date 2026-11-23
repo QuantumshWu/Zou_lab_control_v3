@@ -766,6 +766,324 @@ fn the_span_s_trajectories_part() {
     }
 }
 
+/// The elements between K's fast parts within a block against their gap (STEP item 2 of 2026-11-23, a measurement:
+/// ignored, by name): on the six scenes' runs, the blocks cut by K's fast parts (F = 1 and F = 2 apart), at the centre
+/// at rest and at a moving point, the node's static slot in its frame -- per pair of parts its elements' largest
+/// Hermitian part |H_ab| and decay part |Γ_ab|/2 (the anti-Hermitian part −(i/2)Γ), the least gap |E_a − E_b| of the
+/// slot's diagonal between them (the frame's θ apart: the elements' frequency in the frame's diagonal interaction
+/// picture), the same with θ back on it, and the largest ratios; the other beats' cross elements' largest against their
+/// frequency |ω_k + E_a − E_b|. Said "CROSSGAP".
+#[test]
+#[ignore]
+fn the_cross_parts_against_their_gap() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let n = run.rs.keep.len();
+        let parts = run.rs.plan().parts().to_vec();
+        let (values, _) = run.components();
+        let cut = |a: usize| (run.block_of[a], parts[a]);
+        let mut pieces: Vec<(usize, [i64; 2])> = (0..n).map(cut).collect();
+        pieces.sort();
+        pieces.dedup();
+        eprintln!("CROSSGAP {name}: P{n}, blocks {:?}, cut by fast parts {:?}", run.blocks().iter().map(Vec::len).collect::<Vec<_>>(), pieces.iter().map(|p| (0..n).filter(|&a| cut(a) == *p).count()).collect::<Vec<_>>());
+        for (r, kappa) in [([0.0; 3], [0.0; 3]), POINTS[1]] {
+            let node = run.node(r, kappa, false);
+            let Some(stat) = node.generator.iter().find(|g| g.0 == 0).map(|g| &g.1) else { continue };
+            let e = |a: usize| stat[(a, a)].re;
+            let mut worst: std::collections::BTreeMap<((usize, [i64; 2]), (usize, [i64; 2])), [f64; 6]> = Default::default();
+            for a in 0..n {
+                for b in 0..n {
+                    if run.block_of[a] != run.block_of[b] || parts[a] == parts[b] || cut(a) > cut(b) {
+                        continue;
+                    }
+                    let h = (stat[(a, b)] + stat[(b, a)].conj()) * 0.5;
+                    let g = (stat[(a, b)] - stat[(b, a)].conj()) * 0.5;
+                    let gap = (e(a) - e(b)).abs();
+                    let w = worst.entry((cut(a), cut(b))).or_insert([0.0, 0.0, f64::INFINITY, 0.0, 0.0, f64::INFINITY]);
+                    w[5] = w[5].min((e(a) + run.theta[a] - e(b) - run.theta[b]).abs());
+                    w[0] = w[0].max(h.abs());
+                    w[1] = w[1].max(g.abs());
+                    w[2] = w[2].min(gap);
+                    w[3] = w[3].max(h.abs() / gap);
+                    w[4] = w[4].max(g.abs() / gap);
+                }
+            }
+            // Within each piece: its elements' largest off the diagonal and its diagonal's spread (the remainder's
+            // third-order scale, ‖V‖²‖G_int‖/gap²).
+            let mut inner = (0.0_f64, 0.0_f64);
+            for p in &pieces {
+                let members: Vec<usize> = (0..n).filter(|&a| cut(a) == *p).collect();
+                for &a in &members {
+                    for &b in &members {
+                        if a != b {
+                            inner.0 = inner.0.max(stat[(a, b)].abs());
+                        }
+                        inner.1 = inner.1.max((e(a) - e(b)).abs());
+                    }
+                }
+            }
+            eprintln!("CROSSGAP {name} r {r:?} κ {kappa:?}: within the pieces, the largest element off the diagonal {:.3e}, the diagonal's spread {:.3e} rad/µs", inner.0, inner.1);
+            let mut other: f64 = 0.0;
+            for (beat, m) in node.generator.iter().filter(|g| g.0 != 0) {
+                for a in 0..n {
+                    for b in 0..n {
+                        if run.block_of[a] == run.block_of[b] && parts[a] != parts[b] {
+                            other = other.max(m[(a, b)].abs() / (values[*beat] + e(a) - e(b)).abs());
+                        }
+                    }
+                }
+            }
+            for ((p, q), w) in &worst {
+                eprintln!("CROSSGAP {name} r {r:?} κ {kappa:?}: parts {p:?}–{q:?}: |H| {:.3e}, |Γ|/2 {:.3e}, gap {:.4e} rad/µs (θ back {:.4e}); |H|/gap {:.3e}, |Γ|/2/gap {:.3e}", w[0], w[1], w[2], w[5], w[3], w[4]);
+            }
+            eprintln!("CROSSGAP {name} r {r:?} κ {kappa:?}: the other beats' cross elements over their frequency, largest {other:.3e}");
+        }
+    }
+}
+
+/// The blocks cut by K's fast parts, the elements between them left out or turned (STEP item 2 of 2026-11-23, a
+/// measurement, the profiling build's: ignored, by name): on PGC3D, TET, tilt0 and tilt2 (V3E_SCENE one of them), the
+/// run whole (unturned), cut (the elements between the blocks left out, `across_pairs` at 1e-2) and as the product makes
+/// it (# The parts turned: turned where its rule says so), V3E_ATOMS atoms (4) of `starts` held from any jump, steps of τ = V3E_TAU µs (0.163) with one noise,
+/// each on its own model throughout: every 20 µs to V3E_UNTIL µs (100) the largest difference of a state's populations
+/// |ψ_a|²/‖ψ‖² from the whole run's and of κ over the largest |κ|. Said "SPLITWALK".
+#[cfg(feature = "prof")]
+#[test]
+#[ignore]
+fn the_split_s_walk() {
+    let (atoms, tau, until) = (env("V3E_ATOMS", 4.0) as u64, env("V3E_TAU", 0.163), env("V3E_UNTIL", 100.0));
+    for (name, request, keep) in scenes().into_iter().filter(|(n, ..)| ["PGC3D", "TET", "tilt0", "tilt2"].contains(n)) {
+        let whole = run_of(&request, &keep);
+        let mut cut = run_of(&request, &keep);
+        let pairs = cut.split_for_test();
+        crate::model::selected::TURNING.with(|t| t.set(true));
+        let turned = run_of(&request, &keep);
+        crate::model::selected::TURNING.with(|t| t.set(false));
+        eprintln!("SPLITWALK {name}: pairs {pairs:?}, blocks whole {:?}, cut {:?}", whole.blocks().iter().map(Vec::len).collect::<Vec<_>>(), cut.blocks().iter().map(Vec::len).collect::<Vec<_>>());
+        let from = starts(&whole, request.temperature_uk, atoms);
+        let runs = [&whole, &cut, &turned];
+        let mut walks: Vec<[Trajectory; 3]> = from
+            .iter()
+            .enumerate()
+            .map(|(i, (r, kappa, psi, _))| {
+                runs.map(|m| {
+                    let mut t = Trajectory::new(m, m.cluster(0).states[0], *r, *kappa, 97, i as u64);
+                    t.psi = psi.iter().copied().collect();
+                    t.forms = m.forms(t.cluster, &t.point(), &t.psi);
+                    t.threshold = f64::MIN_POSITIVE;
+                    t
+                })
+            })
+            .collect();
+        let mut noises: Vec<_> = (0..atoms).map(|i| crate::random::Stream::brownian(97, i, 0, 0)).collect();
+        let mut scratch: Vec<[Scratch; 3]> = (0..atoms).map(|_| Default::default()).collect();
+        let count = (until / tau).round() as usize;
+        let every = (20.0 / tau).round().max(1.0) as usize;
+        let pops = |t: &Trajectory| -> Vec<f64> {
+            let w: f64 = t.psi.iter().map(|z| z.norm_sqr()).sum();
+            t.psi.iter().map(|z| z.norm_sqr() / w).collect()
+        };
+        for k in 1..=count {
+            for (i, walk) in walks.iter_mut().enumerate() {
+                let brownian = Brownian::over(tau, &[noises[i].normals(), noises[i].normals()]);
+                for (j, &m) in runs.iter().enumerate() {
+                    walk[j] = Midway::new(m, &walk[j], tau).and_then(|s| s.attempt(&walk[j], &brownian, &[], &mut scratch[i][j], &Anywhere)).expect("a step").end;
+                }
+            }
+            if k % every == 0 || k == count {
+                let ks = walks.iter().map(|w| crate::linalg::norm3(w[0].kappa)).fold(0.0, crate::linalg::larger);
+                let apart = |j: usize| -> (f64, f64) {
+                    let p = walks.iter().map(|w| pops(&w[0]).iter().zip(pops(&w[j])).map(|(a, b)| (a - b).abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                    let q = walks.iter().map(|w| (0..3).map(|a| (w[0].kappa[a] - w[j].kappa[a]).abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger) / ks;
+                    (p, q)
+                };
+                let ((pc, kc), (pt, kt)) = (apart(1), apart(2));
+                eprintln!("SPLITWALK {name} t {:.1} µs: populations apart cut {pc:.3e}, turned {pt:.3e}; κ apart cut {kc:.3e}, turned {kt:.3e}", walks[0][0].time);
+            }
+        }
+    }
+}
+
+/// STEP3 item 2: the turn's remainder with the jumps, measured exactly (ignored; run by name). At a point at rest the
+/// atom's internal state follows the node's Lindbladian -- the jumps averaged, every jump in it --, dρ/dt = −i(Gρ − ρG†) +
+/// Σ_c L_c ρ L_c† of its static slot G and its classes' components L_c (a class, an axis and a beat each: one beat's
+/// L ρ L† is still; two beats' cross terms beat on, and the generator's other slots, a few 1e-6 of the static one on
+/// these scenes, are left out of both). The whole model's ρ_w and the turned model's ρ_t
+/// (every pair of parts turned, `FORCE_TURN`) from the chief ground state, ρ_t(0) = e^S ρ₀ e^{−S}, each by its exact
+/// propagator over 1 µs (scaling and squaring), V3E_UNTIL µs (1000): D(t) = ½‖ρ_w − e^{−S}ρ_t e^{S}‖₁ is the turn's
+/// remainder alone, the frame taken off -- against what the node books, ½(e^{2Y₃t} − 1), Y₃ its rate (`Seen`), its
+/// channels' term 4‖S‖²Σ‖L‖² and the same with ‖Σ_c L_c†L_c‖ (the largest decay) in place of Σ‖L‖². Points: the trap's
+/// centre and (0.3, −0.2, 0.4) µm.
+#[test]
+#[ignore]
+fn the_turn_s_remainder_with_jumps() {
+    let until = env("V3E_UNTIL", 1000.0) as usize;
+    let only = std::env::var("V3E_SCENE").ok();
+    for (name, request, keep) in scenes().into_iter().filter(|(n, ..)| ["PGC3D", "TET", "tilt0", "tilt2"].contains(n) && only.as_deref().is_none_or(|o| o == *n)) {
+        let whole = run_of(&request, &keep);
+        crate::model::selected::TURNING.with(|t| t.set(true));
+        crate::model::selected::FORCE_TURN.with(|t| t.set(true));
+        let turned = run_of(&request, &keep);
+        crate::model::selected::FORCE_TURN.with(|t| t.set(false));
+        crate::model::selected::TURNING.with(|t| t.set(false));
+        let n = whole.rs.keep.len();
+        let chief = crate::solve::chief(&request);
+        let c = whole.rs.keep.iter().position(|&s| s == chief).unwrap();
+        for at in [[0.0; 3], [0.3, -0.2, 0.4]] {
+            // The node's static slot and its classes' static components, dense n × n.
+            let lindblad = |node: &Node| -> (Mat, Vec<Mat>, f64) {
+                let g = node.generator.iter().find(|x| x.0 == 0).unwrap().1.clone();
+                let beats = node.generator.iter().filter(|x| x.0 != 0).map(|x| x.1.data.iter().map(|z| z.abs()).fold(0.0, crate::linalg::larger)).fold(0.0, crate::linalg::larger);
+                // Each class's axis's components of one beat summed: their L ρ L† is still (the phase cancels), and the
+                // cross terms of two beats beat on, as the generator's static slot holds Σ L†L's still part alone.
+                let mut ls = Vec::new();
+                for class in &node.classes {
+                    for axis in &class.axes {
+                        let mut by_beat: Vec<(usize, Mat)> = Vec::new();
+                        for jump in axis {
+                            let i = by_beat.iter().position(|(b, _)| *b == jump.beat).unwrap_or_else(|| {
+                                by_beat.push((jump.beat, Mat::zeros(n, n)));
+                                by_beat.len() - 1
+                            });
+                            for e in &jump.elements {
+                                by_beat[i].1.data[e.at] += e.value;
+                            }
+                        }
+                        ls.extend(by_beat.into_iter().map(|(_, l)| l));
+                    }
+                }
+                (g, ls, beats)
+            };
+            let (gw, lw, bw) = lindblad(&whole.node(at, [0.0; 3], false));
+            let (gt, lt, bt) = lindblad(&turned.node(at, [0.0; 3], false));
+            let (frame, rate, gradient) = turned.turn_seen().map_or((0.0, 0.0, 0.0), |s| s.get());
+            eprintln!("TURNREST {name} at {at:?}: the pilot's check on the nodes made so far (`turn_holds`): {}", turned.turn_holds());
+            let (_, s) = turned.unturned_at(at, [0.0; 3]).expect("a turned run");
+            // The superoperator on ρ row by row: ρ ↦ −i(Gρ − ρG†) + Σ L ρ L†, by its columns.
+            let apply = |g: &Mat, ls: &[Mat], rho: &Mat| -> Mat {
+                let gd = g.adjoint();
+                let mut out = Mat::zeros(n, n);
+                let (a, b) = (g.product(rho), rho.product(&gd));
+                for k in 0..n * n {
+                    out.data[k] = C64::new(0.0, -1.0) * (a.data[k] - b.data[k]);
+                }
+                for l in ls {
+                    let x = l.product(rho).product(&l.adjoint());
+                    for k in 0..n * n {
+                        out.data[k] += x.data[k];
+                    }
+                }
+                out
+            };
+            let superop = |g: &Mat, ls: &[Mat]| -> Mat {
+                let m = n * n;
+                let mut big = Mat::zeros(m, m);
+                for j in 0..m {
+                    let mut e = Mat::zeros(n, n);
+                    e.data[j] = C64::ONE;
+                    let col = apply(g, ls, &e);
+                    for i in 0..m {
+                        big.data[i * m + j] = col.data[i];
+                    }
+                }
+                big
+            };
+            // e^{A t} by scaling and squaring of its Taylor series to the round-off.
+            let expm = |a: &Mat, t: f64| -> Mat {
+                let m = a.rows;
+                let norm = (0..m).map(|i| (0..m).map(|j| a.data[i * m + j].abs()).sum::<f64>()).fold(0.0, crate::linalg::larger) * t;
+                let squarings = if norm > 0.5 { (norm / 0.5).log2().ceil() as i32 } else { 0 };
+                let scale = t / 2f64.powi(squarings);
+                let mut x = Mat::zeros(m, m);
+                for k in 0..m * m {
+                    x.data[k] = a.data[k] * scale;
+                }
+                let mut sum = Mat::identity(m);
+                let mut term = Mat::identity(m);
+                for k in 1..30 {
+                    term = term.product(&x);
+                    for z in term.data.iter_mut() {
+                        *z = *z * (1.0 / k as f64);
+                    }
+                    for (s, z) in sum.data.iter_mut().zip(&term.data) {
+                        *s += *z;
+                    }
+                }
+                for _ in 0..squarings {
+                    sum = sum.product(&sum);
+                }
+                sum
+            };
+            let es = {
+                let mut sm = Mat::zeros(n, n);
+                sm.data.copy_from_slice(&s);
+                expm(&sm, 1.0)
+            };
+            let ems = {
+                let mut sm = Mat::zeros(n, n);
+                for k in 0..n * n {
+                    sm.data[k] = -s[k];
+                }
+                expm(&sm, 1.0)
+            };
+            let (pw, pt) = (expm(&superop(&gw, &lw), 1.0), expm(&superop(&gt, &lt), 1.0));
+            let mut rho0 = Mat::zeros(n, n);
+            rho0[(c, c)] = C64::ONE;
+            let mut w: Vec<C64> = rho0.data.clone();
+            let mut tt: Vec<C64> = es.product(&rho0).product(&ems).data;
+            let trace_norm = |d: &Mat| -> f64 {
+                let mut e = crate::linalg::Eigen::default();
+                assert!(e.decompose(d));
+                e.values.iter().map(|z| z.re.abs()).sum::<f64>()
+            };
+            let decay = {
+                let mut lam = Mat::zeros(n, n);
+                for l in &lt {
+                    let x = l.adjoint().product(l);
+                    for k in 0..n * n {
+                        lam.data[k] += x.data[k];
+                    }
+                }
+                let mut e = crate::linalg::Eigen::default();
+                assert!(e.decompose(&lam));
+                e.values.iter().map(|z| z.re).fold(0.0, crate::linalg::larger)
+            };
+            let sn = s.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            eprintln!("TURNREST {name} at {at:?}: frame {frame:.3e}, Y3 {rate:.3e} /µs, ‖∇S‖ {gradient:.3e} /µm, ‖S‖_F {sn:.3e}; channels' term 4‖S‖²Σ‖L‖² {:.3e} /µs, with ‖ΣL†L‖ = {decay:.3e}: {:.3e} /µs; the beats' largest entry {bw:.1e} / {bt:.1e}", 4.0 * sn * sn * channels_size(&turned.node(at, [0.0; 3], false)), 4.0 * sn * sn * decay);
+            let step = |p: &Mat, v: &[C64]| -> Vec<C64> { (0..n * n).map(|i| (0..n * n).map(|j| p.data[i * n * n + j] * v[j]).sum()).collect() };
+            for t in 1..=until {
+                w = step(&pw, &w);
+                tt = step(&pt, &tt);
+                if [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].contains(&t) || t == until {
+                    let mut back = Mat::zeros(n, n);
+                    back.data.copy_from_slice(&tt);
+                    let back = ems.product(&back).product(&es);
+                    let mut d = Mat::zeros(n, n);
+                    let mut plain = Mat::zeros(n, n);
+                    for k in 0..n * n {
+                        d.data[k] = w[k] - back.data[k];
+                        plain.data[k] = w[k] - tt[k];
+                    }
+                    // Hermitian parts (the propagated ρ are, to rounding).
+                    let herm = |m: &Mat| -> Mat {
+                        let a = m.adjoint();
+                        let mut h = Mat::zeros(n, n);
+                        for k in 0..n * n {
+                            h.data[k] = (m.data[k] + a.data[k]) * 0.5;
+                        }
+                        h
+                    };
+                    let (dist, raw) = (0.5 * trace_norm(&herm(&d)), 0.5 * trace_norm(&herm(&plain)));
+                    let trace: f64 = (0..n).map(|i| w[i * n + i].re).sum();
+                    let turned_trace: f64 = (0..n).map(|i| tt[i * n + i].re).sum();
+                    let booked = 0.5 * ((2.0 * rate * t as f64).exp() - 1.0);
+                    eprintln!("TURNREST {name} at {at:?} t {t} µs: remainder D {dist:.3e} ({:.3e} /µs), with the frame {raw:.3e}; booked ½(e^{{2Y3 t}} − 1) {booked:.3e}; tr ρ_w {trace:.6}, 1 − tr ρ_t {:.3e}", dist / t as f64, 1.0 - turned_trace);
+                }
+            }
+        }
+    }
+}
+
 /// The dropped beats' Y alone (the span's taken out): the pairs the judgment dropped.
 fn plain_dropped(run: &Selected) -> f64 {
     run.judgment.pairs.iter().filter(|(slots, _)| slots.iter().all(|&k| run.judgment.tiers[k].1 == crate::model::classify::Tier::Drop)).map(|(_, y)| y).sum()
@@ -1227,6 +1545,10 @@ mod steps;
 // OLDNEW item C: the node off tables of pair products against the node (ignored, by name).
 #[path = "oldnew.rs"]
 mod oldnew;
+
+// STEP item 4: the node off the tables of pair products against the node (ignored, by name).
+#[path = "tabled.rs"]
+mod tabled;
 
 /// The selection's report (`Selected::report`): P state by state, the states folded, and the selection's notes -- the
 /// structural chain, its candidates' sizes from G up (`Selection::notes`) -- on R10_NODE, G's run.

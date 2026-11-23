@@ -34,12 +34,27 @@
 //! Work is counted, not timed (SPEC §5.1): the real multiply-adds of the engine's algorithms (`Work`), each counted where
 //! its algorithm is written; a complex multiply-add is four of them (`COMPLEX`). No unit cost is calibrated on a machine,
 //! so a request takes the same decisions on any machine and at any load.
+//!
+//! Every operation counts, a dense product's and an element-wise loop's alike -- a fold's scattered sums, a layout's
+//! copies, a search's comparisons (2026-11-23: a count of the dense products alone took tilt0's node, whose small
+//! blocks are mostly element-wise loops, at a fifth of PGC3D's work a µs of its time): a real multiply, add or
+//! multiply-add is one; a complex multiply or multiply-add four (`COMPLEX`); a complex number added into another, moved or
+//! zeroed two (`MOVED`: its two words), a real one moved or compared one; a division or a square root four
+//! (`DIVISION`: Newton's iteration on its reciprocal); an elementary function -- exp, cis, ln, a power -- sixteen
+//! (`ELEMENTARY`: its range's polynomial). What is left is how fast each kind runs, a dense product's inner step four
+//! numbers at once and a scattered sum's one: that is the machine's, not the count's.
 use crate::estimate::Spread;
 
 /// Work in real multiply-adds (module documentation, # Work).
 pub type Work = f64;
 /// A complex multiply-add a + b c: (b_r c_r − b_i c_i) and (b_r c_i + b_i c_r) are four real multiplies, each added.
 pub const COMPLEX: Work = 4.;
+/// A complex number added into another, moved or zeroed: its two words (module documentation, # Work).
+pub const MOVED: Work = 2.;
+/// A division or a square root: Newton's iteration on its reciprocal (module documentation, # Work).
+pub const DIVISION: Work = 4.;
+/// An elementary function -- exp, cis, ln, a power -- : its range's polynomial (module documentation, # Work).
+pub const ELEMENTARY: Work = 16.;
 
 /// A read (module documentation): an estimate and its statistical error.
 #[derive(Clone, Copy, Debug, PartialEq)]

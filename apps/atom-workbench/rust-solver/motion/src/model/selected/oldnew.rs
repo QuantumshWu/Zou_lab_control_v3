@@ -14,7 +14,7 @@ use crate::model::rs::fold::pairs::Pairs;
 use crate::model::rs::fold::Values;
 use crate::step::Dynamics;
 
-fn request_of(name: &str) -> Request {
+pub(super) fn request_of(name: &str) -> Request {
     let files = [("PGC3D", "PGC3D_1ms.json"), ("TET", "TET_1ms.json"), ("R4", "R4_LIN_4.json"), ("GMD1C", "GMD1C_1ms.json"), ("tilt0", "tilt0.json"), ("tilt2", "tilt2.json")];
     let file = files.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no request {name}")).1;
     let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ: the requests' folder"));
@@ -246,7 +246,7 @@ fn oldnew_pairs() {
             }
             parts_t = [parts_t[0] + pairs.parts[0], parts_t[1] + pairs.parts[1], parts_t[2] + pairs.parts[2]];
             let mut node = run.template.clone();
-            fill_t += least(&mut || run.fill(&mut node, &work.out, (kicked, true), &mut work.jumps));
+            fill_t += least(&mut || { run.fill(&mut node, &work.out, (kicked, true), &mut work.jumps); });
         }
         // The coordinator's follow-up (OLDNEW_QUAD): what a step reads of the channels off their quadratic forms'
         // tables (rs/fold_pairs.rs `Quad`), against the node's channels' own; and a jump's photon node off the tables.
@@ -341,7 +341,7 @@ fn oldnew_pairs() {
                 run.rs.evaluate(&run.scene, &work.point, &mut work.local, making);
                 work.out.contract(plan, &run.lab, &work.local, None, making);
                 let mut node = run.template.clone();
-                t_fill += least(&mut || run.fill(&mut node, &work.out, (kicked, true), &mut work.jumps));
+                t_fill += least(&mut || { run.fill(&mut node, &work.out, (kicked, true), &mut work.jumps); });
             }
             let k = taken.max(1) as f64;
             eprintln!("OLDNEW-QUADT {name}: fill (the decay from the channels, the layout) {:.1} µs; a jump's photon node: the fold's {:.1} µs", t_fill / k, t_photon_exact / k);
@@ -786,7 +786,7 @@ fn oldnew_fill() {
             work.out.contract(plan, &run.lab, &work.local, None, making);
             let out = &work.out;
             let jumps = &mut work.jumps;
-            t_whole += least(&mut || run.fill(&mut node, out, (false, true), jumps));
+            t_whole += least(&mut || { run.fill(&mut node, out, (false, true), jumps); });
             // (a) the classes zeroed and their channel elements put in.
             t_ch += least(&mut || {
                 for c in node.classes.iter_mut() {
@@ -948,7 +948,7 @@ fn oldnew_jumpnode() {
             w_co += work.out.work;
             let out = &work.out;
             let jumps = &mut work.jumps;
-            fill_ph += least(&mut || run.fill(&mut photon_node, out, (true, false), jumps));
+            fill_ph += least(&mut || { run.fill(&mut photon_node, out, (true, false), jumps); });
             ev_nk += least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, no_kicks));
             co_nk += least(&mut || work.out.contract(plan, &run.lab, &work.local, None, no_kicks));
             // The middle's photons on a full node at the point.
