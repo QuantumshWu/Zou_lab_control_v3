@@ -49,6 +49,11 @@ pub enum Purpose {
     Bridge = 5,
 }
 
+/// (Tests alone: a whole solve's streams under another seed, XOR-ed into every stream's -- OLDNEW's check that a
+/// difference between two schemes is the runs' statistics.)
+#[cfg(test)]
+pub(crate) static RUN_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A stream of uniform 32-bit words: Philox blocks at the counter (block, event, trajectory) under the key
 /// (seed, purpose), four words a block.
 #[derive(Clone, Debug)]
@@ -62,6 +67,8 @@ pub struct Stream {
 impl Stream {
     /// The stream of a purpose, a trajectory and an event of the run seeded `seed`.
     pub fn new(seed: u64, purpose: Purpose, trajectory: u64, event: u32) -> Stream {
+        #[cfg(test)]
+        let seed = seed ^ RUN_SEED.load(std::sync::atomic::Ordering::Relaxed);
         let key = [(seed as u32) ^ (purpose as u32).wrapping_mul(W0), (seed >> 32) as u32];
         Stream { key, counter: [0, event, trajectory as u32, (trajectory >> 32) as u32], block: [0; 4], used: 4 }
     }

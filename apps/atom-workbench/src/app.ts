@@ -33,10 +33,10 @@ import type {ScopeNote} from './spectroscopy.js';
 import {newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal,SolveStage} from './solver-types.js';
+import type {ApproximationLedger,Distributions,DynamicsResult,SolveStage} from './solver-types.js';
 import {SEMICLASSICAL_REGIME} from './solver-types.js';
 import {MOTION_AXES,motionRefusal,motionRequest,motionTemperatureReading,setMotionTemperature} from './motion.js';
-import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart} from './motion-chart.js';
+import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart,velocitySeries} from './motion-chart.js';
 import {keepTweezer,setTweezer,tweezerOf,tweezerRefusal} from './tweezer.js';
 import {DynamicsClient,type SolverFailureRecord} from './solver-client.js';
 import {startupScene,validateScene} from './scene-file.js';
@@ -54,7 +54,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
-import {errorPercent,exceedsNote,ledgerRows,outsideRuns,partialSentence,partialShort,resultTolerance,sampleErrors} from './accuracy.js';
+import {approximationTotal,errorPercent,exceedsNote,ledgerRows,outsideRuns,partialSentence,partialShort,resultTolerance,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -74,7 +74,7 @@ let scene=startupScene((()=>{try{return localStorage;}catch{return undefined;}})
 let populationMode:'mean'|'time'='mean',populationTimeIndex=-1,populationScale:'linear'|'log'='linear';let unbindPopulation:(()=>void)|undefined;
 /** 布居演化 with motion: what its chart shows, and the listed time (an index into the shown
  * distribution's samples) a distribution is compared at, if any. */
-type MotionView='populations'|'temperature'|'momentum'|'position';
+type MotionView='populations'|'temperature'|'velocity'|'momentum'|'position';
 let motionView:MotionView='populations',motionCompare:number|undefined;
 let spaceRenderer:ReturnType<typeof renderSpace3D>|undefined;const spaceMount=document.createElement('div');spaceMount.className='retained-space-view';
 let stateLabels:StateLabels={},dirty=false,renderCount=0;
@@ -184,7 +184,7 @@ populationScaleControl.setChoices([['linear','线性'],['log','对数']]);popula
 // With motion the chart shows the populations (with 丢失), the temperature and n̄, or the momentum or
 // position distribution.
 const motionViewControl=new Segmented(value=>{motionView=value as MotionView;update();});
-motionViewControl.setChoices([['populations','布居'],['temperature','温度与 n̄'],['momentum','动量分布'],['position','位置分布']]);motionViewControl.root.id='motion-view';motionViewControl.root.setAttribute('aria-label','运动结果');
+motionViewControl.setChoices([['populations','布居'],['temperature','温度与 n̄'],['velocity','速度与推力'],['momentum','动量分布'],['position','位置分布']]);motionViewControl.root.id='motion-view';motionViewControl.root.setAttribute('aria-label','运动结果');
 $('dynamics-commands').replaceWith(motionViewControl.root,populationScaleControl.root);
 // 方向与偏振: where the camera looks, the field animation, the reference plane and the zoom.
 let spaceView:SpaceViewName='free';
@@ -1170,12 +1170,6 @@ function solverDetails():string{
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;
 }
-/** A ledger's a-priori totals, the populations' and T's, each against its target, and whether an output's total estimated
- * error exceeds a target (`flagged`, its reason on a line below). */
-function approximationTotal(ledger:ApproximationLedger):string{
-  const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
-  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
-}
 /** A ledger's largest item -- its first --, named by its `label`, on a line of its own (none in an empty ledger). */
 function largestApproximation(ledger:ApproximationLedger):string[]{
   const [largest]=ledger.items;
@@ -1371,6 +1365,12 @@ function renderDynamics(a:Analysis):void{
     host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,marks):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,marks);
     caption(!motion?'':MOTION_AXES.map(axis=>legendEntry(AXIS_INKS[axis],`${axis} 轴`)).join('')+legendEntry(TOTAL_INK,'总温度（三轴的平均）',false,TOTAL_WIDTH)+
       '<span class="population-legend">上：温度 T = m·Var(v)/k_B，悬停读数为 T ± 标准误差；下：n̄</span>'+referenceLegend+flaggedLegend);return;
+  }
+  if(shown==='velocity'){
+    const series=motion&&velocitySeries(motion);
+    host.innerHTML=series?seriesChart(raw!.timesUs,series,d.durationUnit,marks):waiting;if(series)unbindPopulation=bindSeries(host,raw!.timesUs,series,d.durationUnit,marks);
+    caption(!motion?'':MOTION_AXES.map(axis=>legendEntry(AXIS_INKS[axis],`${axis} 轴`)).join('')+
+      '<span class="population-legend">上：仍在光阱中的原子的平均速度 ⟨v⟩；下：推力 a = d⟨v⟩/dt（平均加速度）；悬停读数为值 ± 标准误差</span>'+referenceLegend+flaggedLegend);return;
   }
   if(distribution){
     // A listed time outside the validated regime is a reference only: said in its legend.

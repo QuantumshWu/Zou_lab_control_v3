@@ -309,7 +309,8 @@ impl Scene {
         [(self.unit(tw), f, &beam.coupling), (counter, -(f + 2.0 * self.generators[carrier].frequency), &beam.counter_coupling)]
     }
 
-    /// H with every light off: the bare atom with its Zeeman shift (H0 − Σ_ω O_ω(E_ω(0))).
+    /// H with every light off: the bare atom with its Zeeman shift (H0 − Σ_ω O_ω(E_ω(0))); the tests'.
+    #[cfg(test)]
     pub fn dark(&self) -> &Mat {
         &self.base
     }
@@ -390,7 +391,9 @@ impl Scene {
             .collect()
     }
 
-    /// H at r by its terms for the momentum κ (1/µm): what the fold reads at a point of a trajectory.
+    /// H at r by its terms for the momentum κ (1/µm): what the fold reads at a point of a trajectory; the tests' (the
+    /// trajectory's fold reads `point_into`).
+    #[cfg(test)]
     pub fn point_at(&self, r: V3, kappa: V3) -> Point {
         self.point(r, &self.doppler(kappa), 1.0)
     }
@@ -417,7 +420,8 @@ impl Scene {
         Point { terms: self.terms(doppler), amplitudes: self.amplitudes(r, tweezer), rates: self.rates(doppler) }
     }
 
-    /// H's components at r for the momentum κ (1/µm).
+    /// H's components at r for the momentum κ (1/µm); the tests'.
+    #[cfg(test)]
     pub fn components_at(&self, r: V3, kappa: V3) -> Components {
         self.components(r, &self.doppler(kappa), 1.0)
     }

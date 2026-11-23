@@ -1,8 +1,8 @@
 //! The special functions more than one module takes, each written once: the incomplete gamma function's two expansions
 //! (Abramowitz & Stegun 6.5.29 and 6.5.31; Numerical Recipes §6.2, gser and gcf), each summed to the format's round-off,
 //! for the normal's tail (estimate.rs) and the lowered isothermal's momenta (ensemble.rs); and Gauss–Legendre's nodes and
-//! weights (`gauss_legendre`, O(n) to the round-off), for the ensemble's integrals over the trap (ensemble.rs), the
-//! level's share (ensemble.rs `Ensemble::beyond`) and the step's quadrature of an entire integrand (step.rs).
+//! weights (`gauss_legendre`, O(n) to the round-off), for the step's quadrature of an entire integrand (step.rs) and the
+//! tests' integrals over the trap (ensemble.rs).
 //!
 //! With P(s, x) = γ(s, x)/Γ(s) the regularized lower function and Q = 1 − P the upper one, for x > 0:
 //! - the lower one's series, e^x x^{−s} Γ(s + 1) P(s, x) = 1 + Σ_{n ≥ 1} x^n/((s + 1)…(s + n)) -- `series` is the sum from
@@ -15,6 +15,7 @@ use crate::units::UNIT_ROUNDOFF;
 use std::f64::consts::PI;
 
 /// Γ(s) at a positive multiple of ½, each one exact in the format: Γ(1) = 1 or Γ(½) = √π, then Γ(t + 1) = t Γ(t) up to s.
+#[inline]
 pub fn gamma(s: f64) -> f64 {
     let (mut g, mut t) = if (2. * s) as i64 % 2 == 0 { (1., 1.) } else { (PI.sqrt(), 0.5) };
     while t < s {
@@ -24,13 +25,25 @@ pub fn gamma(s: f64) -> f64 {
     g
 }
 
+/// ln Γ(s) at a positive multiple of ½, as `gamma` makes Γ(s), its factors' logarithms summed: finite at every s.
+pub fn ln_gamma(s: f64) -> f64 {
+    let (mut g, mut t) = if (2. * s) as i64 % 2 == 0 { (0., 1.) } else { (0.5 * PI.ln(), 0.5) };
+    while t < s {
+        g += t.ln();
+        t += 1.;
+    }
+    g
+}
+
 /// Whether the lower function's series is the expansion to take at x (module documentation): below s + 1.
+#[inline]
 pub fn by_series(s: f64, x: f64) -> bool {
     x < s + 1.
 }
 
 /// Σ_{n ≥ 1} x^n/((s + 1)…(s + n)) for x ≥ 0 (module documentation): positive terms, summed until one no longer changes
 /// the sum.
+#[inline]
 pub fn series(s: f64, x: f64) -> f64 {
     let (mut term, mut sum, mut a) = (1., 0., s);
     loop {
@@ -74,10 +87,17 @@ fn fraction(s: f64, x: f64) -> f64 {
 }
 
 /// Q(s, x), the regularized upper incomplete gamma function, for x ≥ 0 and s a positive multiple of ½ (`gamma`): one less
-/// the lower one by its series below s + 1, by its continued fraction from there on.
+/// the lower one by its series below s + 1, by its continued fraction from there on. Beyond s = 170, where Γ(s) leaves
+/// the format, the leading factor x^s e^{−x}/Γ(s) is taken in logarithms (`ln_gamma`): the χ² tails of many groups'
+/// variances (estimate.rs `Spread::interval_low`); below it the product as it always was, to the bit.
+#[inline]
 pub fn upper(s: f64, x: f64) -> f64 {
     if !(x > 0.) {
         return 1.;
+    }
+    if s > 170. {
+        let power = s * x.ln() - x;
+        return if by_series(s, x) { 1. - (power - ln_gamma(s + 1.)).exp() * (1. + series(s, x)) } else { (power - ln_gamma(s)).exp() * fraction(s, x) };
     }
     let power = (s * x.ln() - x).exp();
     if by_series(s, x) {

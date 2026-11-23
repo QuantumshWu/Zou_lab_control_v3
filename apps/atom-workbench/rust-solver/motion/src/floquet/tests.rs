@@ -1,8 +1,8 @@
-//! The scene, the frame and the assembly on a request of the reference set (refs/scenes/R4_LIN_4.json: cooling and
-//! repump beams in pairs, a tweezer on an axis of its own).
+//! The scene and the frame on a request of the reference set (refs/scenes/R4_LIN_4.json: cooling and repump beams in
+//! pairs, a tweezer on an axis of its own).
 
 use super::*;
-use crate::linalg::{C64, Mat};
+use crate::linalg::Mat;
 use crate::request::{Request, STATES};
 use crate::scene::{Components, Scene};
 
@@ -84,12 +84,12 @@ fn the_scene_s_gradients_are_its_values_derivatives() {
     }
 }
 
-/// The frame's exact split: the tweezer's co-rotating key is one tweezer frequency (n_tw = 1), its counter-rotating key
-/// −1 tweezer frequency and −2 carriers; a repump beam's key one ground hyperfine (|n_φ| = 1), a cooling beam's none. The
-/// Liouvillian is trace preserving component by component (Σ_a L_k[(a,a), x] = 0 for every column), and so is the
-/// assembled system on its population rows; the rule admits the populations at amplitude one and goes best first.
+/// The frame's exact split at the dark edge: the tweezer's co-rotating key is one tweezer frequency (n_tw = 1), its
+/// counter-rotating key −1 tweezer frequency and −2 carriers; a repump beam's key one ground hyperfine (|n_φ| = 1), a
+/// cooling beam's none; the tweezer's sector is (0, 1). (Until 2026-11-23 also the static Liouvillian's and the
+/// assembled system's trace, with the assembly, floquet/mod.rs.)
 #[test]
-fn the_dark_edge_s_lattice_and_system_keep_the_trace() {
+fn the_dark_edge_s_frame_splits_exactly() {
     let scene = Scene::new(&request("R4_LIN_4")).unwrap();
     let w = vec![0.0; scene.request.beams.len()];
     let parts = scene.components([0.0; 3], &w, 0.0);
@@ -106,43 +106,4 @@ fn the_dark_edge_s_lattice_and_system_keep_the_trace() {
     assert_eq!(frame.fast_index(&unit(id("cool-plus"))), [0, 0, 0]);
     let sectors = frame.sectors();
     assert_eq!(sectors.generators[tw], [0, 1]);
-    let liouville = Liouville::new(&frame, &reference);
-    let n = liouville.states;
-    for (key, ops) in &liouville.components {
-        let Some(l) = &ops.l else { continue };
-        let mut sums = vec![C64::ZERO; l.cols];
-        let mut size = vec![0.0f64; l.cols];
-        for a in 0..n {
-            let r = a * n + a;
-            for p in l.indptr[r]..l.indptr[r + 1] {
-                sums[l.indices[p]] += l.values[p];
-                size[l.indices[p]] += l.values[p].abs();
-            }
-        }
-        for x in 0..l.cols {
-            assert!(sums[x].abs() <= 1e-13 * crate::linalg::larger(size[x], 1.0), "{key:?} column {x}: {:e} of {:e}", sums[x].abs(), size[x]);
-        }
-    }
-    let elements = select(&liouville);
-    for a in 0..n {
-        let i = elements.order.iter().position(|y| y.m.iter().all(|&k| k == 0) && y.n == [0; 3] && y.x == a * n + a).expect("admitted");
-        assert_eq!(elements.amplitudes[i], 1.0, "a population starts at amplitude one");
-    }
-    assert!(elements.amplitudes.windows(2).all(|w| w[0] >= w[1]), "best first");
-    let system = assemble(&liouville, &elements);
-    let count = elements.order.len();
-    assert_eq!(system.matrix.rows, count + 1);
-    assert_eq!(system.harmonic.len(), count + 1);
-    let mut sums = vec![C64::ZERO; count + 1];
-    let mut size = vec![0.0f64; count + 1];
-    for r in (0..count).filter(|&i| system.trace[i] != C64::ZERO) {
-        for p in system.matrix.indptr[r]..system.matrix.indptr[r + 1] {
-            sums[system.matrix.indices[p]] += system.matrix.values[p];
-            size[system.matrix.indices[p]] += system.matrix.values[p].abs();
-        }
-    }
-    for j in 0..count {
-        assert!(sums[j].abs() <= 1e-13 * crate::linalg::larger(size[j], 1.0), "column {j}: {:e}", sums[j].abs());
-    }
-    eprintln!("R4 dark edge: {} elements, M = {}, b = {:?}, nnz {}", count, liouville.lattice.slow.len(), liouville.lattice.slow, system.matrix.values.len());
 }

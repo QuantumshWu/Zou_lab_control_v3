@@ -467,6 +467,11 @@ struct Decay {
     back: usize,
 }
 
+/// OLDNEW's check (tests alone): every run of ground states alone split by K's fast parts as it is made
+/// (`Selected::split_by_parts`), whole solves included.
+#[cfg(test)]
+pub(crate) static SPLIT_PARTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// A thread's buffers for the nodes and the readouts of one run (`Selected::node_into`, `Selected::rows`): the point,
 /// the fold's numbers, the contraction.
 #[derive(Default)]
@@ -851,6 +856,11 @@ impl Selected {
         };
         run.layout(&spherical);
         run.judge(split, (&spherical_plan, &spherical), drops);
+        // (OLDNEW's check, tests alone: a model of ground states alone split by K's fast parts within its blocks.)
+        #[cfg(test)]
+        if SPLIT_PARTS.load(std::sync::atomic::Ordering::Relaxed) && run.rs.keep.iter().all(|&s| s < GROUND) {
+            run.split_by_parts();
+        }
         run.tones();
         run.lift_tables();
         // K's fast parts turned where that costs the run the less (module documentation, # The parts turned), on the run
@@ -973,6 +983,42 @@ impl Selected {
             self.cut_parts(&pairs);
         }
         pairs
+    }
+
+    /// OLDNEW's check (tests alone): the blocks cut by K's fast parts within the judged ones (F = 1 and F = 2 apart, the
+    /// static elements between them left out of the layout as `judge` leaves a judged block's), the decay's products recut.
+    #[cfg(test)]
+    pub(crate) fn split_by_parts(&mut self) -> Vec<Vec<usize>> {
+        let n = self.rs.keep.len();
+        let parts = self.rs.plan().parts().to_vec();
+        let mut blocks: Vec<Vec<usize>> = Vec::new();
+        let mut seen: Vec<(usize, [i64; 2])> = Vec::new();
+        for a in 0..n {
+            let key = (self.block_of[a], parts[a]);
+            match seen.iter().position(|p| *p == key) {
+                Some(i) => blocks[i].push(a),
+                None => {
+                    seen.push(key);
+                    blocks.push(vec![a]);
+                }
+            }
+        }
+        self.blocks.clone_from(&blocks);
+        for (b, states) in blocks.iter().enumerate() {
+            for &st in states {
+                self.block_of[st] = b;
+            }
+        }
+        let block_of = self.block_of.clone();
+        for list in self.tables.h.iter_mut() {
+            for e in list.iter_mut().filter(|e| block_of[e.0 as usize / n] != block_of[e.0 as usize % n]) {
+                *e = (e.0, u32::MAX, u32::MAX);
+            }
+        }
+        self.decay_terms();
+        let id = self.id;
+        POOL.with(|p| p.borrow_mut().retain(|x| x.0 != id));
+        blocks
     }
 
     /// The selection's report (stderr): P by levels and state by state, the states folded, the selection's notes (its
@@ -2767,8 +2813,9 @@ impl SelectedMiddle<'_> {
         if self.nodes.borrow().iter().any(|x| x.kappa == path.kappa) { &self.model.candidates } else { &[] }
     }
 
-    /// tr(Ĝ_a σ) per axis of H_eff's gradient components at a node, each beat by its factor (none: left out).
-    fn contract(node: &Node, each: impl Fn(usize) -> Option<C64>, rho: &[C64]) -> [C64; 3] {
+    /// tr(Ĝ_a σ) per axis of H_eff's gradient components at a node, each beat by its factor (none: left out). The paths'
+    /// force reads it too (paths.rs `Form::read`).
+    pub(crate) fn contract(node: &Node, each: impl Fn(usize) -> Option<C64>, rho: &[C64]) -> [C64; 3] {
         let mut out = [C64::ZERO; 3];
         for (beat, g) in &node.gradient {
             if let Some(f) = each(*beat) {
@@ -2882,33 +2929,55 @@ fn class_photons_work(class: &Class, kicked: bool, whole: bool, n: usize) -> f64
 /// A class's photons of the state ψ at the time t (`photons`): where `whole`, u_a, ∇u_a, the photon forms' K u_a where
 /// the node holds them, its moments over ‖ψ‖² = `norm` and its wave number; else u_a alone. Returns its rate W/‖ψ‖²,
 /// the moments' weight (`Moments::of`, then `over`: the same operations either way).
+///
+/// One pass over each component's elements (`row_sums`): per row of P × P the sums of L, of ∇L and of K against ψ
+/// side by side, each in column order from zero, then f times each into its output -- the same operations, in the same
+/// order, as a pass per output, each beat's factor e^{−iνt} made once a class (until 2026-11-23: five passes a
+/// component, each row found by a division, a factor a component, every buffer cleared and grown again a class), so
+/// the same numbers to the bit. Where the class is not `whole` only u_a is
+/// made, and only its buffers are zeroed (the gradients' and the forms' are read of a class made whole alone).
 fn class_photons(class: &Class, kicked: bool, (values, t): (&[f64], f64), psi: &[C64], norm: f64, p: &mut Photons, whole: bool) -> f64 {
     let n = psi.len();
     let Photons { u, du, ku, .. } = &mut *p;
-    for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
-        v.clear();
-        v.resize(n, C64::ZERO);
+    let zeroed = |v: &mut Vec<C64>| {
+        if v.len() == n {
+            v.fill(C64::ZERO);
+        } else {
+            v.clear();
+            v.resize(n, C64::ZERO);
+        }
+    };
+    u.iter_mut().for_each(zeroed);
+    if whole {
+        ku.iter_mut().chain(du.iter_mut().flatten()).for_each(zeroed);
     }
+    // Each beat's factor once: the components share a few beats (tilt2's 246 components, its tones' few).
+    let mut turned: [(usize, C64); 32] = [(0, C64::ONE); 32];
+    let mut held = 1;
     for (a, axis) in class.axes.iter().enumerate() {
         for jump in axis {
-            let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
-            // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
-            let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
-                for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
-                    let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
-                    out[row[0].at / n] += f * z;
+            let f = match turned[..held].iter().find(|x| x.0 == jump.beat) {
+                Some(&(_, f)) => f,
+                None => {
+                    let f = C64::cis(-values[jump.beat] * t);
+                    if held < turned.len() {
+                        turned[held] = (jump.beat, f);
+                        held += 1;
+                    }
+                    f
                 }
             };
-            apply(&|e| e.value, &mut u[a]);
-            if !whole {
-                continue;
-            }
-            if kicked {
-                apply(&|e| e.kick, &mut ku[a]);
-            }
-            for (i, d) in du.iter_mut().enumerate() {
-                apply(&|e| e.gradient[i], &mut d[a]);
-            }
+            row_sums(&jump.elements, psi, |row, [zv, zk, zg0, zg1, zg2]| {
+                u[a][row] += f * zv;
+                if whole {
+                    if kicked {
+                        ku[a][row] += f * zk;
+                    }
+                    for (d, z) in du.iter_mut().zip([zg0, zg1, zg2]) {
+                        d[a][row] += f * z;
+                    }
+                }
+            }, (whole, kicked));
         }
     }
     if !whole {
@@ -2920,6 +2989,40 @@ fn class_photons(class: &Class, kicked: bool, (values, t): (&[f64], f64), psi: &
     p.wave_number = kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
     p.moments = moments.over(norm);
     p.moments.weight
+}
+
+/// A component's sums against ψ row by row (`class_photons`): its elements in their places' order (row-major), each
+/// row's run of them the sums [L ψ, K ψ, ∂₀L ψ, ∂₁L ψ, ∂₂L ψ] of that row, each from zero in column order -- K's where
+/// `kicked`, the gradients' and K's where `whole` (else zero) --, handed to `put` with the row. A row's run ends at the
+/// first element past the row's last place: no division an element.
+#[inline]
+fn row_sums(elements: &[Element], psi: &[C64], mut put: impl FnMut(usize, [C64; 5]), (whole, kicked): (bool, bool)) {
+    let n = psi.len();
+    let mut i = 0;
+    while i < elements.len() {
+        let row = elements[i].at / n;
+        let (base, end) = (row * n, (row + 1) * n);
+        let mut z = [C64::ZERO; 5];
+        if whole {
+            while let Some(e) = elements.get(i).filter(|e| e.at < end) {
+                let x = psi[e.at - base];
+                z[0] += e.value * x;
+                if kicked {
+                    z[1] += e.kick * x;
+                }
+                z[2] += e.gradient[0] * x;
+                z[3] += e.gradient[1] * x;
+                z[4] += e.gradient[2] * x;
+                i += 1;
+            }
+        } else {
+            while let Some(e) = elements.get(i).filter(|e| e.at < end) {
+                z[0] += e.value * psi[e.at - base];
+                i += 1;
+            }
+        }
+        put(row, z);
+    }
 }
 
 #[cfg(test)]

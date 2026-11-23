@@ -579,6 +579,33 @@ use crate::random::Stream;
 use crate::spectral::{Beat, Picture, Refusal};
 use crate::units::{rounding, UNIT_ROUNDOFF};
 
+/// OLDNEW's check (tests alone): the quadrature's and the cuts' tolerance in place of the unit round-off where set (its
+/// f64 bits; 0, the default, the round-off itself). No product build has it.
+#[cfg(test)]
+pub(crate) static QUAD_TOL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// OLDNEW's scheme checks (tests alone): the quadrature a fixed rule of FIXED_NODES Gauss–Legendre nodes on one panel,
+/// no cut (0, the default: the rule laid to the tolerance); THREE_NODES the generator at three nodes a step on a cluster
+/// of ground states too (false: one node, # One node a step).
+#[cfg(test)]
+pub(crate) static FIXED_NODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static THREE_NODES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The tolerance the quadrature's rule, the quotient's bandwidth and the cuts are laid to: the unit round-off (a check's
+/// own where set, tests alone: `QUAD_TOL`).
+#[inline]
+pub(crate) fn quad_tol() -> f64 {
+    #[cfg(test)]
+    {
+        let x = f64::from_bits(QUAD_TOL.load(std::sync::atomic::Ordering::Relaxed));
+        if x > 0.0 {
+            return x;
+        }
+    }
+    UNIT_ROUNDOFF
+}
+
 /// What one step needs from the model (SPEC §2.1, §1.6): defined here by its consumer, implemented by the model for its
 /// `Model` with the run's lights and the reference state. Each method is one model function; the integrator defines
 /// none of these quantities.
@@ -1306,7 +1333,7 @@ fn resolved(nu: f64, width: f64, least: usize, degree: usize, interpolated: bool
     let kappa = 0.5 * nu * width.abs();
     // A beat that is not a number would size the rule by a recurrence that stops at once: no rule is sized for it.
     assert!(!kappa.is_nan(), "a tone's frequency is not a number");
-    let (floor, within) = if interpolated { (2 * least, 0.5 * UNIT_ROUNDOFF) } else { (least, UNIT_ROUNDOFF) };
+    let (floor, within) = if interpolated { (2 * least, 0.5 * quad_tol()) } else { (least, quad_tol()) };
     if kappa <= 0.0 {
         return floor;
     }
@@ -1412,6 +1439,13 @@ fn resolved_by_recurrence(nu: f64, width: f64, least: usize, degree: usize, inte
 /// its panels' m, each m(n) made once (`fewest` is a recurrence of some κ terms; the two costs ask the same n again,
 /// and until 2026-11-21 the panels made their m once more: 2 to 3 % of a step, PGC3D, R4, tilt0).
 fn count(width: f64, bandwidth: f64, nodes: usize, degree: usize, ends: impl FnOnce() -> bool) -> (usize, usize) {
+    #[cfg(test)]
+    {
+        let m = FIXED_NODES.load(std::sync::atomic::Ordering::Relaxed);
+        if m > 0 {
+            return (1, m);
+        }
+    }
     let (n, m, _) = arranged(width, |w| fewest(bandwidth, w, nodes, degree), |m| m as f64, ends);
     (n, m)
 }
@@ -1703,6 +1737,13 @@ impl Groups {
     /// says so (`gather`).
     fn choose(&mut self, picture: &mut Picture, from: f64, h: f64, (still, tones): (bool, usize), ends: &mut dyn FnMut(&mut Picture) -> bool) -> (usize, usize) {
         self.plain();
+        #[cfg(test)]
+        {
+            let m = FIXED_NODES.load(std::sync::atomic::Ordering::Relaxed);
+            if m > 0 {
+                return (1, m);
+            }
+        }
         let n = picture.states();
         let width = h - from;
         let mut ended: Option<bool> = None;
@@ -1872,7 +1913,7 @@ impl Groups {
                     // The lemma's bound: the ends π sup|c| (sup|c| the numerator's weights over 1 − r) at the rate Ω − β.
                     let omega = gap[g * groups + q] - spanned;
                     let ends = std::f64::consts::PI * self.numerator[g * groups + q] / (1.0 - ratio_all);
-                    let small = ratio_all < 1.0 && omega > 0.0 && crate::model::classify::by_parts(ends, 0.0, C64::real(omega)) <= UNIT_ROUNDOFF * width.abs();
+                    let small = ratio_all < 1.0 && omega > 0.0 && crate::model::classify::by_parts(ends, 0.0, C64::real(omega)) <= quad_tol() * width.abs();
                     if !small {
                         linked[g] |= 1 << q;
                     }
@@ -1890,7 +1931,7 @@ impl Groups {
                 density: (0..groups).map(|g| size_of(g) * (size_of(g) + 1) / 2).sum(),
             };
             // K + 1 ≥ ln(u(1 − r)/8)/ln r, none where nothing rings between the groups.
-            let order_of = |ratio: f64| if ratio > 0.0 { linalg::larger(((0.125 * UNIT_ROUNDOFF * (1.0 - ratio)).ln() / ratio.ln()).ceil() - 1.0, 0.0) } else { 0.0 };
+            let order_of = |ratio: f64| if ratio > 0.0 { linalg::larger(((0.125 * quad_tol() * (1.0 - ratio)).ln() / ratio.ln()).ceil() - 1.0, 0.0) } else { 0.0 };
             // At the guess with the fewest labels a series of the order K holds where groups ring together, 2K + 1 (a line
             // of the labels' lattice): the least the cut can cost.
             let least = |ratio: f64| {
@@ -2236,20 +2277,20 @@ impl Groups {
             }
             let mut sum = 0.0;
             for (z, t) in next.iter_mut().zip(total.iter_mut()) {
-                if z.abs() <= 0.0625 * UNIT_ROUNDOFF {
+                if z.abs() <= 0.0625 * quad_tol() {
                     *z = C64::ZERO;
                 }
                 sum += z.abs();
                 *t += *z;
             }
             std::mem::swap(current, next);
-            if sum <= 0.125 * UNIT_ROUNDOFF {
+            if sum <= 0.125 * quad_tol() {
                 ended = true;
                 break;
             }
         }
         let r = self.ratio;
-        if !(r < 1.0 && (ended || r.powi(cut.order as i32 + 1) / (1.0 - r) <= 0.125 * UNIT_ROUNDOFF)) {
+        if !(r < 1.0 && (ended || r.powi(cut.order as i32 + 1) / (1.0 - r) <= 0.125 * quad_tol())) {
             self.work += done as f64;
             return false;
         }
@@ -3702,6 +3743,8 @@ impl<'a, D: Dynamics> Midway<'a, D> {
             let shape = self.model.cluster(cluster);
             shape.ground == shape.states.len()
         };
+        #[cfg(test)]
+        let ground = ground && !THREE_NODES.load(std::sync::atomic::Ordering::Relaxed);
         march.progress = Progress { states: n, still: generator.still(), held: ground, ..Progress::default() };
         scratch.groups.work = 0.0;
         let mut launched = Some(along.turned(&march.state.psi, march.u, true));

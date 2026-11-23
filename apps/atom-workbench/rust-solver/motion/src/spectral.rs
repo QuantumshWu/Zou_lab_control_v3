@@ -2265,7 +2265,7 @@ impl Picture {
         }
         self.rung = true;
         let mut count = (numerator.len() * 12) as f64;
-        let log = -UNIT_ROUNDOFF.ln();
+        let log = -crate::step::quad_tol().ln();
         let sums = |items: &[(f64, f64)], sigma: f64| {
             items.iter().fold([0.0; 3], |[w, w1, w2], &(p, nu)| {
                 let e = p * (sigma * nu).exp();
@@ -2284,7 +2284,7 @@ impl Picture {
             let mut above = 0.0;
             numerator.iter().find(|&&(p, _)| {
                 above += p;
-                above > UNIT_ROUNDOFF
+                above > crate::step::quad_tol()
             }).map_or(0.0, |&(_, nu)| nu)
         } else {
             // The ringing's series where it has a sum (Chernoff's bound), and the quotient as F times 1/N on the
@@ -2503,7 +2503,7 @@ impl Picture {
         let mut above = 0.0;
         let band = numerator.iter().find(|&&(p, _)| {
             above += p * inflation;
-            above > UNIT_ROUNDOFF
+            above > crate::step::quad_tol()
         }).map_or(0.0, |&(_, nu)| nu);
         if series.is_finite() && !pays((series - band) / 3.0) {
             return (f64::INFINITY, count);

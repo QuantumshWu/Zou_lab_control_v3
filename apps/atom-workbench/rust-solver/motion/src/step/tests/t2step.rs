@@ -71,8 +71,13 @@ fn models(name: &str, request: &Request) -> Vec<(String, Selected)> {
                 }
                 other => panic!("unknown model {other}"),
             };
-            let run = Selected::new(crate::scene::Scene::new(request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection.clone() }, reference).unwrap();
-            (format!("{spec}(P{})", keep.len()), run)
+            let mut run = Selected::new(crate::scene::Scene::new(request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection.clone() }, reference).unwrap();
+            // (OLDNEW: T2S_SPLIT, K split by its fast parts within its blocks.)
+            let split = std::env::var("T2S_SPLIT").is_ok();
+            if split {
+                run.split_by_parts();
+            }
+            (format!("{spec}(P{}){}", keep.len(), if split { " split" } else { "" }), run)
         })
         .collect()
 }
@@ -450,8 +455,8 @@ fn t2step_walk() {
     }
 }
 
-/// The process's CPU time so far, user and kernel (s): Windows' `GetProcessTimes`.
-fn process_seconds() -> f64 {
+/// The process's CPU time so far, user and kernel (s): Windows' `GetProcessTimes` (oldnew.rs's too).
+pub(super) fn process_seconds() -> f64 {
     #[repr(C)]
     struct FileTime {
         low: u32,

@@ -1230,6 +1230,15 @@ impl Rs {
     /// The fold's numbers at a point into a buffer (`local`'s), what `making` asks for (`Local::evaluate`).
     pub fn evaluate(&self, scene: &Scene, point: &Point, local: &mut fold::Local, making: Making) {
         self.tweezer.values_into(scene, point, &mut local.values);
+        // (OLDNEW's budget check, tests alone: the pieces' frequencies at rest for the Doppler series' truncation,
+        // rs/fold.rs `DOPPLER_ORDERS`.)
+        #[cfg(test)]
+        if fold::DOPPLER_ORDERS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            let mut rest = Point::default();
+            scene.point_into([0.0; 3], [0.0; 3], &mut rest);
+            let list: Vec<f64> = self.tweezer.source.pieces().map(|(p, _)| rest.frequency(&p.key)).collect();
+            fold::REST.with(|r| *r.borrow_mut() = list);
+        }
         local.evaluate(&self.folding.plan, making);
     }
 
