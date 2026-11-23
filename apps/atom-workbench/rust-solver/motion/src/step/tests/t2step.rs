@@ -62,6 +62,13 @@ fn models(name: &str, request: &Request) -> Vec<(String, Selected)> {
             let keep: Vec<usize> = match spec {
                 "P" => selection.keep.clone(),
                 "ground" => (0..GROUND).collect(),
+                // "+a+b": the ground states and the excited states a, b (labels).
+                other if other.starts_with('+') => {
+                    let mut keep: Vec<usize> = (0..GROUND).collect();
+                    keep.extend(other.split('+').filter(|l| !l.is_empty()).map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+                    keep.sort_unstable();
+                    keep
+                }
                 other => panic!("unknown model {other}"),
             };
             let run = Selected::new(crate::scene::Scene::new(request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection.clone() }, reference).unwrap();
@@ -624,3 +631,178 @@ fn t2step_cores() {
         }
     }
 }
+
+/// T2STEP2's local measurement (ignored): what the step does over a window W of a trajectory, against the step. Per
+/// start i (T2S2_N of them, `start`'s atoms, each its own jumps' stream) a warm-up of T2S2_WARM µs at the finest step,
+/// then from that state the window at every step τ_k = W/2^k (k = 0..T2S2_LEVELS), the same draws: the momentum's
+/// change along z, the jumps and the photons. Per step their means over the starts, and each step's against the
+/// finest's on the same starts with its standard error -- the step's local error over W, what a run adds up W by W.
+/// A step the scheme refuses is taken as two halves (as adapt.rs `halving`). T2S_SCENE's first scene, its first model
+/// (T2S_<SCENE>), T2S2_W the window (µs).
+#[test]
+#[ignore]
+fn t2step2_window() {
+    let (name, request) = scenes().remove(0);
+    let (label, run) = models(&name, &request).remove(0);
+    let chief = crate::solve::chief(&request);
+    let (n, warm, w, levels) = (env("T2S2_N", 256.0) as u64, env("T2S2_WARM", 3.0), env("T2S2_W", 2.8412272892301633), env("T2S2_LEVELS", 7.0) as usize);
+    // T2S2_DIVS: the steps W/d for the divisors d given (comma separated, the finest last) instead of the halvings.
+    let taus: Vec<f64> = match std::env::var("T2S2_DIVS") {
+        Ok(d) => d.split(',').map(|x| w / x.parse::<f64>().unwrap()).collect(),
+        Err(_) => (0..levels).map(|k| w / f64::powi(2., k as i32)).collect(),
+    };
+    let levels = taus.len();
+    let finest = taus[levels - 1];
+    fn step(run: &Selected, t: &crate::step::Trajectory, tau: f64, s: &mut Scratch, depth: u32) -> crate::step::Trajectory {
+        match Midway::new(run, t, tau).and_then(|m| m.attempt(t, &Brownian::STILL, &[], s, &Everywhere)) {
+            Ok(step) => step.end,
+            Err(e) => {
+                assert!(depth < 30, "refused down to {tau}: {e:?}");
+                let half = step(run, t, 0.5 * tau, s, depth + 1);
+                step(run, &half, 0.5 * tau, s, depth + 1)
+            }
+        }
+    }
+    let go = |t: &crate::step::Trajectory, tau: f64, length: f64| -> crate::step::Trajectory {
+        let mut s = Scratch::default();
+        let mut t = t.clone();
+        let end = t.time + length;
+        while t.time < end - 1e-9 * length && t.lost.is_none() {
+            t = step(&run, &t, crate::linalg::smaller(tau, end - t.time), &mut s, 0);
+        }
+        t
+    };
+    // Per start and step: Δκ_z, jumps, photons.
+    let rows: Vec<Vec<[f64; 3]>> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut t0 = start(&run, &request, chief, i);
+            t0 = go(&t0, finest, warm);
+            // T2S2_REST: the window from rest at the trap's centre's axis (the warmed state's internal state kept).
+            if std::env::var("T2S2_REST").is_ok() {
+                t0.kappa = [0.; 3];
+                t0.r = [0.; 3];
+            }
+            // T2S2_NOJUMP: no jump in the window (the threshold below any norm the window reaches).
+            if std::env::var("T2S2_NOJUMP").is_ok() {
+                t0.threshold = 1e-280;
+            }
+            taus.iter()
+                .map(|&tau| {
+                    let t = go(&t0, tau, w);
+                    let norm: f64 = t.psi.iter().map(|z| z.norm_sqr()).sum();
+                    let norm0: f64 = t0.psi.iter().map(|z| z.norm_sqr()).sum();
+                    let rest = if std::env::var("T2S2_NOJUMP").is_ok() { (norm / norm0).ln() } else { t.scattered[0] - t0.scattered[0] };
+                    [t.kappa[2] - t0.kappa[2], f64::from(t.jumps - t0.jumps), rest]
+                })
+                .collect()
+        })
+        .collect();
+    use rayon::prelude::*;
+    let m = n as f64;
+    println!("T2S2-WINDOW {name} {label}: {n} starts, warm-up {warm} µs at {finest:.5}, window {w:.5} µs");
+    for (k, &tau) in taus.iter().enumerate() {
+        let mean = |q: usize| rows.iter().map(|r| r[k][q]).sum::<f64>() / m;
+        let diff = |q: usize| {
+            let d: Vec<f64> = rows.iter().map(|r| r[k][q] - r[levels - 1][q]).collect();
+            let mu = d.iter().sum::<f64>() / m;
+            let sd = (d.iter().map(|x| (x - mu) * (x - mu)).sum::<f64>() / (m - 1.)).sqrt();
+            (mu, sd / m.sqrt())
+        };
+        let ((dk, sk), (dj, sj), (dn, sn)) = (diff(0), diff(1), diff(2));
+        println!(
+            "T2S2-WINDOW tau {tau:.5}: Δκ_z {:.4} /µm, jumps {:.4}, photons (ln N without jumps) {:.6} | against the finest: Δκ_z {:+.5} ± {:.5} ({:+.3} %), jumps {:+.4} ± {:.4}, photons (ln N) {:+.3e} ± {:.1e}",
+            mean(0),
+            mean(1),
+            mean(2),
+            dk,
+            sk,
+            100. * dk / rows.iter().map(|r| r[levels - 1][0]).sum::<f64>() * m,
+            dj,
+            sj,
+            dn,
+            sn
+        );
+    }
+}
+
+/// T2STEP2's single-step measurement (ignored): from T2S2_N states of a trajectory (`t2step2_window`'s warm-up, then at
+/// rest at the trap's axis: r = κ = 0), one step of each τ with no jump in it, its survival ln(‖ψ₁‖²/‖ψ₀‖²) against the
+/// exact flow's of the generator at rest held over the step, ‖e^{−iĤτ}ψ₀‖² (Ĥ the middle's at κ = v = 0, RK4 at 1e-4 µs):
+/// what the propagation alone errs by on a long step. T2S2_TAUS the steps (µs, comma separated).
+#[test]
+#[ignore]
+fn t2step2_one() {
+    use crate::linalg::{Mat, C64};
+    let (name, request) = scenes().remove(0);
+    let (label, run) = models(&name, &request).remove(0);
+    let chief = crate::solve::chief(&request);
+    let n_starts = env("T2S2_N", 16.0) as u64;
+    let taus: Vec<f64> = std::env::var("T2S2_TAUS").unwrap_or_else(|_| "0.35515,0.71031,0.94708,1.42061,2.84123".to_string()).split(',').map(|x| x.parse().unwrap()).collect();
+    let go = |t: &crate::step::Trajectory, tau: f64, length: f64| -> crate::step::Trajectory {
+        let mut s = Scratch::default();
+        let mut t = t.clone();
+        let end = t.time + length;
+        while t.time < end - 1e-9 * length {
+            t = Midway::new(&run, &t, crate::linalg::smaller(tau, end - t.time)).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut s, &Everywhere)).unwrap().end;
+        }
+        t
+    };
+    let norm = |x: &[C64]| x.iter().map(|z| z.norm_sqr()).sum::<f64>();
+    println!("T2S2-ONE {name} {label}: {n_starts} starts at rest");
+    for i in 0..n_starts {
+        let mut t0 = go(&start(&run, &request, chief, i), 0.17758, 3.0);
+        (t0.r, t0.kappa, t0.threshold) = ([0.; 3], [0.; 3], 1e-280);
+        let cells: Vec<String> = taus
+            .iter()
+            .map(|&tau| {
+                let mut s = Scratch::default();
+                let midway = Midway::new(&run, &t0, tau).unwrap();
+                // κ_m as the step predicts it, κ_h taken for the start's (at rest the reference's half-step pull apart).
+                let kappa_m = crate::step::predicted(&t0.forms, t0.kappa, tau, t0.time + 0.5 * tau);
+                let step = midway.attempt(&t0, &Brownian::STILL, &[], &mut s, &Everywhere).unwrap();
+                let engine = (norm(&step.end.psi) / norm(&t0.psi)).ln();
+                if std::env::var("T2S2_PICTURE").is_ok() {
+                    // The static group's change along the step's path at κ_m: the largest entry of Ĥ(±h) − Ĥ(0).
+                    let hm = run.hbar_over_mass();
+                    let mid = run.middle(t0.cluster, [0.; 3], t0.time + 0.5 * tau);
+                    let along = mid.path(kappa_m, kappa_m.map(|k| hm * k));
+                    let m = mid.states();
+                    let [mut a0, mut a1, mut a2] = [0, 1, 2].map(|_| Mat::zeros(m, m));
+                    mid.generator(&along, -0.5 * tau, &mut a0);
+                    mid.generator(&along, 0.0, &mut a1);
+                    mid.generator(&along, 0.5 * tau, &mut a2);
+                    let change = |x: &Mat, y: &Mat| x.data.iter().zip(&y.data).map(|(p, q)| (*p - *q).abs()).fold(0.0, f64::max);
+                    println!("T2S2-ONE start {i} tau {tau:.4}: κ_m {kappa_m:?} change {:.3e} {:.3e} | {}", change(&a0, &a1), change(&a2, &a1), crate::spectral::tests::census(&s.picture));
+                }
+                let middle = run.middle(t0.cluster, [0.; 3], t0.time + 0.5 * tau);
+                let path = middle.path([0.; 3], [0.; 3]);
+                let n = middle.states();
+                let mut h = Mat::zeros(n, n);
+                middle.generator(&path, 0.0, &mut h);
+                let slope = |y: &[C64]| -> Vec<C64> { h.apply(y).into_iter().map(|z| C64::new(z.im, -z.re)).collect() };
+                let add = |y: &[C64], k: &[C64], s: f64| -> Vec<C64> { y.iter().zip(k).map(|(y, k)| *y + *k * s).collect() };
+                let steps = (tau / 1e-4).ceil() as usize;
+                let dt = tau / steps as f64;
+                let mut x: Vec<C64> = t0.psi.iter().copied().collect();
+                for _ in 0..steps {
+                    let k1 = slope(&x);
+                    let k2 = slope(&add(&x, &k1, 0.5 * dt));
+                    let k3 = slope(&add(&x, &k2, 0.5 * dt));
+                    let k4 = slope(&add(&x, &k3, dt));
+                    x = (0..n).map(|s| x[s] + (k1[s] + k2[s] * 2.0 + k3[s] * 2.0 + k4[s]) * (dt / 6.0)).collect();
+                }
+                let exact = (norm(&x) / norm(&t0.psi)).ln();
+                // The end's direction: the excited share and the overlap with the exact flow's.
+                let e = &step.end.psi;
+                let overlap = e.iter().zip(&x).fold(C64::ZERO, |acc, (a, b)| acc + a.conj() * *b).norm_sqr() / (norm(e) * norm(&x));
+                let share = |y: &[C64]| y[n - 1].norm_sqr() / norm(y);
+                format!("{tau:.4}: {engine:.6} vs {exact:.6} ({:+.2e}) excited {:.4} vs {:.4} 1−overlap {:.1e}", engine - exact, share(e), share(&x), 1. - overlap)
+            })
+            .collect();
+        let total = norm(&t0.psi);
+        let pops: Vec<String> = t0.psi.iter().map(|z| format!("{:.2e}", z.norm_sqr() / total)).collect();
+        println!("T2S2-ONE start {i}: jumps {} norm {:.3e} populations [{}] | {}", t0.jumps, total, pops.join(" "), cells.join(" | "));
+    }
+}
+

@@ -847,6 +847,50 @@ pub struct Local {
     pub work: f64,
 }
 
+/// STEP's Doppler census (BRIEF_IMPL line STEP item 8, a prototype's measurement; tests alone): after an evaluation
+/// at a moving point, per amplitude piece of every block that holds amplitudes, the shift δ of the piece's frequency
+/// against `rest` (the same pieces' frequencies at rest, `Values::frequencies` there) and, over its columns a and its
+/// block's eigenvalues λ_k, the largest ratio |δ| / |E_a + f_rest − λ_k| at which a weight of the amplitude stands --
+/// the Doppler series Σ_j δ^j (z − λ)^{−(j+1)} converges at that ratio, its tail after the order J within
+/// ρ^{J+1}/(1 − ρ) of the leading term -- with that weight |(V⁻¹X)_k| |1/(z − λ_k)| (the term's size in M̂). Returns
+/// per piece (block, piece, |δ|, [ρ at the term, its size]) of every term, and the block's size.
+#[cfg(test)]
+impl Local {
+    pub fn doppler(&self, plan: &Plan, rest: &[f64]) -> Vec<(usize, usize, f64, Vec<(f64, f64)>)> {
+        let mut out = Vec::new();
+        for (b, batch) in plan.batches.iter().enumerate() {
+            let s = &self.spectra[b];
+            if s.centre.is_empty() || batch.amplitudes.is_empty() {
+                continue;
+            }
+            let size = plan.blocks[b].rows.len();
+            for (&i, &(off, _)) in batch.amplitudes.iter().zip(&batch.offsets) {
+                let r = &plan.amplitudes[i];
+                let delta = self.values.frequencies[r.piece] - rest[r.piece];
+                let mut terms = Vec::new();
+                for (j, &a) in r.cols.iter().enumerate() {
+                    let z = self.energies[a] + rest[r.piece];
+                    for k in 0..size {
+                        let w = C64::real(z - s.centre[k]) - s.values[k];
+                        let at = k * batch.total + off + j;
+                        let m = self.m[b].data.get(at).copied().unwrap_or(C64::ZERO);
+                        if m != C64::ZERO {
+                            terms.push((delta.abs() / w.abs(), m.abs()));
+                        }
+                    }
+                }
+                out.push((b, r.piece, delta.abs(), terms));
+            }
+        }
+        out
+    }
+
+    /// The pieces' frequencies of the last evaluation (`Values::frequencies`).
+    pub fn frequencies(&self) -> &[f64] {
+        &self.values.frequencies
+    }
+}
+
 /// out (r × c) = a b.
 fn product(a: &Mat, b: &Mat, out: &mut Mat) {
     assert_eq!(a.cols, b.rows);
@@ -1427,24 +1471,29 @@ pub fn neumann_scale(g: &Mat, z: &[f64], y: &[f64]) -> (Vec<f64>, usize) {
 // The contraction.
 
 /// What an evaluation and its contraction make (rs.rs, # Contractions): the model (H_eff and the channels, and with it
-/// K's sideband parts), the channels' photon forms, the lift, and their gradients along r. A model is made with its
-/// gradients; a readout makes the lift's values alone (`READOUT`: Q's blocks, no gradient).
+/// K's sideband parts) -- of it H_eff where `effective` --, the channels' photon forms, the lift, and their gradients
+/// along r. A model is made with its gradients; a readout makes the lift's values alone (`READOUT`: Q's blocks, no
+/// gradient); a jump's photon the channels with their gradients and photon forms alone (`PHOTONS`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Making {
     pub model: bool,
+    pub effective: bool,
     pub kicks: bool,
     pub lift: bool,
     pub gradients: bool,
 }
 
 impl Making {
-    pub const ALL: Making = Making { model: true, kicks: true, lift: true, gradients: true };
+    pub const ALL: Making = Making { model: true, effective: true, kicks: true, lift: true, gradients: true };
     /// A node's: the model with its gradients, the photon forms where `kicks`.
     pub const fn node(kicks: bool) -> Making {
-        Making { model: true, kicks, lift: false, gradients: true }
+        Making { model: true, effective: true, kicks, lift: false, gradients: true }
     }
     /// A readout's: the lift's values (model/selected.rs `Selected::rows`).
-    pub const READOUT: Making = Making { model: false, kicks: false, lift: true, gradients: false };
+    pub const READOUT: Making = Making { model: false, effective: false, kicks: false, lift: true, gradients: false };
+    /// A jump's photon's: the channels with their gradients and photon forms, no H_eff (model/selected.rs
+    /// `SelectedMiddle::emitted`).
+    pub const PHOTONS: Making = Making { model: true, effective: false, kicks: true, lift: false, gradients: true };
 }
 
 /// An output's numbers on its structural elements (`Grouping::lists`' order): values and the three gradients; and where
@@ -1606,7 +1655,7 @@ impl Out {
                 (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
             }));
         };
-        if making.model {
+        if making.model && making.effective {
             // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
             for p in 0..plan.hamiltonian {
                 factors(&mut self.tf, p);
@@ -1650,6 +1699,8 @@ impl Out {
                     }
                 }
             }
+        }
+        if making.model {
             // The jumps: direct entries, then the pairs, each whole in its channel.
             for p in plan.hamiltonian..plan.keys.len() {
                 let (_, which) = plan.jump[p].unwrap();

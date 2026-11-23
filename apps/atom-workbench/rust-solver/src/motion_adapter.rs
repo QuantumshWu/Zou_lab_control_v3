@@ -15,8 +15,11 @@
 //! `device`, `deviceNote`, `approximations`: the ledger -- `totals`, `items`, `flagged`, `note` --, and on a checkpoint
 //! `estimatedRemainingMs`), and `motion`, read by `readMotionResult` in src/solver-types.ts: per lab axis T, its standard
 //! error (null where fewer than two atoms or groups read it), the mean velocity and n̄; T_total and its standard error; the
-//! trap's frequencies; the loss; `classical`; the momentum and position distributions; the trajectories and the run's step.
-//! Every output but the loss describes the atom still held.
+//! mean velocity's standard error and target and the push (the held atoms' mean acceleration over T's window,
+//! atom_motion estimate.rs # The push) with its standard error and target, per lab axis (m/s, m/s²; null where unread,
+//! and no push at t = 0); the trap's frequencies; the loss; `classical`; the momentum and position distributions; the
+//! trajectories and the run's step. The ledger's totals hold the populations', T's, the mean velocity's (m/s) and the
+//! push's (m/s²). Every output but the loss describes the atom still held.
 use crate::{lattice_core_adapter, Device, Model, Options};
 use atom_motion::ledger::{percent, Ledger, Total};
 use atom_motion::request::{Request, STATES};
@@ -31,6 +34,12 @@ const AXES: [&str; 3] = ["x", "y", "z"];
 /// Why a request for the GPU runs on the CPU (SPEC §9).
 pub const GPU_ABSENT: &str = "GPU 计算尚未提供：本次在 CPU 上计算";
 
+/// m/s² of 1 µm/µs², the solve's unit of the push.
+const PUSH_MPS2: f64 = 1e6;
+/// A push per output and axis (µm/µs²) in m/s², none where none.
+fn in_mps2(values: &[[Option<f64>; 3]]) -> Vec<[Option<f64>; 3]> {
+    values.iter().map(|v| v.map(|x| x.map(|x| PUSH_MPS2 * x))).collect()
+}
 fn per_axis<T: serde::Serialize + Copy>(values: &[[T; 3]]) -> Value {
     json!(AXES.iter().enumerate().map(|(a, name)| (name.to_string(), json!(values.iter().map(|v| v[a]).collect::<Vec<T>>()))).collect::<serde_json::Map<String, Value>>())
 }
@@ -40,7 +49,9 @@ fn distributions(d: &[Distributions; 3], grid: &str) -> Value {
 /// The ledger in the contract's shape.
 fn approximations(ledger: &Ledger) -> Value {
     let total = |t: &Total| json!({"error": t.error, "target": t.target});
-    let mut out = json!({"totals": {"population": total(&ledger.totals.population), "temperature": total(&ledger.totals.temperature)},
+    // The push in m/s² (the solve's µm/µs², 10⁶ m/s²).
+    let push = Total { error: PUSH_MPS2 * ledger.totals.push.error, target: PUSH_MPS2 * ledger.totals.push.target };
+    let mut out = json!({"totals": {"population": total(&ledger.totals.population), "temperature": total(&ledger.totals.temperature), "velocity": total(&ledger.totals.velocity), "push": total(&push)},
         "items": ledger.items.iter().map(|i| json!({"label": i.label, "estimate": i.estimate, "action": i.action})).collect::<Vec<_>>()});
     if let Some(reason) = &ledger.flagged {
         out["flagged"] = json!(reason);
@@ -88,6 +99,8 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
         "motion": {"axis": "3d", "temperatureUK": per_axis(&solution.temperature_uk), "temperatureErrorUK": per_axis(&solution.temperature_errors_uk),
             "temperatureTotalUK": solution.temperature_total_uk, "temperatureTotalErrorUK": solution.temperature_total_errors_uk,
             "meanVelocityMps": per_axis(&solution.mean_velocity_mps), "meanOccupation": per_axis(&solution.mean_occupation),
+            "meanVelocityErrorMps": per_axis(&solution.mean_velocity_errors_mps), "meanVelocityTargetMps": per_axis(&solution.mean_velocity_targets_mps),
+            "pushMps2": per_axis(&in_mps2(&solution.push)), "pushErrorMps2": per_axis(&in_mps2(&solution.push_errors)), "pushTargetMps2": per_axis(&in_mps2(&solution.push_targets)),
             "trapFrequencyKHz": json!({"x": solution.trap_frequency_khz[0], "y": solution.trap_frequency_khz[1], "z": solution.trap_frequency_khz[2]}),
             "lossProbability": solution.loss_probability, "classical": solution.classical.iter().map(|axes| axes.iter().all(|&inside| inside)).collect::<Vec<bool>>(),
             "momentum": distributions(&solution.velocity, "velocitiesMps"), "position": distributions(&solution.position, "positionsUm"),

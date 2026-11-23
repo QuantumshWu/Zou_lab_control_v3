@@ -126,7 +126,7 @@ pub struct Cluster {
     /// beat Ω (∝ e^{iΩt}) is at Ω + θ_a − θ_b.
     pub frames: Vec<Beat>,
     /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is ψ_s = e^{iK_s·v(t − t_m)} x_s. The
-    /// trajectory's model takes none (K_s = 0: its nodes are made at the path's own points, model/selected.rs).
+    /// trajectory's model takes its time frame's spatial twin (model/selected.rs, # One cluster, one frame).
     pub waves: Vec<[f64; 3]>,
     /// The Doppler frames exactly, as integer coordinates on the light's wave vectors (`Beat`'s arithmetic).
     pub(crate) waves_exact: Vec<Beat>,

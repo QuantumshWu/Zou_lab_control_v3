@@ -4,7 +4,7 @@
 //! `select::choose`), its P PYSEL's.
 use super::*;
 use crate::step::{Brownian, Domain, Dynamics, Middle, Midway, Scratch, Trajectory};
-use rayon::prelude::*;
+
 
 /// The six scenes' own requests (V3C_REQ: scratchpad reqprec\req, as model/rs/tests.rs reads them) with PYSEL's P (the
 /// levels added to the ground states; pyexp2.status.md A).
@@ -75,7 +75,7 @@ fn the_selected_model_is_slow_in_its_frame() {
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
         let keep = run.rs.keep.clone();
         for (r, kappa) in POINTS {
-            let model = run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true });
+            let model = run.at(r, kappa, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
             let (mut elements, mut beyond) = (0, 0);
             for part in &model.effective {
                 let table = run.elements(&part.key, Of::Generator);
@@ -105,41 +105,84 @@ fn the_selected_model_is_slow_in_its_frame() {
     assert!(fast.is_empty(), "elements with a fast part in the frame: {fast:?}");
 }
 
-/// The decay is the photons' (model/selected.rs, # The generator by beats): at a moving point off the centre and at the
-/// time t = 3.7 µs, i(Ĥ − Ĥ†) of the middle's generator is Σ_class Σ_a L_a(t)†L_a(t) of the same node's photon
-/// operators, to the rounding of the products (n u max|Γ|, n the states).
+/// The decay is the photons' (model/selected.rs, # The generator by beats): at the centre at rest and at a moving point
+/// off it, at the time t = 3.7 µs, i(Ĥ − Ĥ†) of the middle's generator is Σ_class Σ_a L_a(t)†L_a(t) of the same node's
+/// photon operators but for the products of two components at a beat the model drops (model/classify.rs, # The drop
+/// tier: a beat dropped is dropped from the decay as from H, its bound booked, `Judgment::dropped`), entry by entry
+/// within the two computations' own rounding (Higham: a computed sum of K terms errs by γ_K times the sum of their
+/// moduli; units.rs `rounding`): each generator entry a ← b and b ← a by its fold's terms' moduli and count at the point
+/// (`Selected::structure_at`, the structure's rule: # The structure's rounding) -- their Hermitian parts cancel in
+/// i(Ĥ − Ĥ†) but for that rounding --, and the decay's products both ways, Σ_k (Σ_j |ℓ_j,ka|)(Σ_j |ℓ_j,kb|) of the photon
+/// components' moduli, K the generator's beats, the components and the n rows of a product. (Until 2026-11-22 the
+/// products were all taken and the allowance n u max|Γ| sixteen times over: tilt2, whose judgment drops the beats ±3ν
+/// to ±6ν of its Larmor ν = 13.19 rad/µs, read 4.3·10⁻¹³ of Γ's 2.72 -- 30 times its entries' rounding, the dropped
+/// beats' products, no rounding.)
 #[test]
 fn the_selected_decay_is_its_photons() {
     for (name, request, keep) in scenes() {
         let run = run_of(&request, &keep);
         // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
-        let keep = run.rs.keep.clone();
-        let (r, kappa) = POINTS[1];
-        let n = keep.len();
-        let middle = run.middle(0, r, 3.7);
-        let path = middle.path(kappa, [0.0; 3]);
-        let mut h = Mat::zeros(n, n);
-        middle.generator(&path, 0.0, &mut h);
-        let node = middle.node(&path, 0.0, false);
+        let n = run.rs.keep.len();
         let (values, _) = run.components();
-        let mut gamma = Mat::zeros(n, n);
-        for class in &node.classes {
-            for axis in &class.axes {
-                let mut l = Mat::zeros(n, n);
-                for jump in axis {
-                    let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * 3.7) };
-                    for e in &jump.elements {
-                        l.data[e.at] += f * e.value;
+        let dropped: Vec<f64> = run.read(|b| run.judgment.tiers.iter().filter(|t| t.1 == Tier::Drop).map(|t| b.value[t.0].abs()).collect());
+        let kept = |omega: f64| !dropped.iter().any(|&d| (omega.abs() - d).abs() <= 1e-9 * d);
+        let t = 3.7;
+        for (r, kappa) in POINTS {
+            let middle = run.middle(0, r, t);
+            let path = middle.path(kappa, [0.0; 3]);
+            let mut h = Mat::zeros(n, n);
+            middle.generator(&path, 0.0, &mut h);
+            let node = middle.node(&path, 0.0);
+            // Σ L†L of the components' products at kept beats, and the products' moduli.
+            let (mut gamma, mut products, mut terms) = (Mat::zeros(n, n), vec![0.0_f64; n * n], node.generator.len());
+            for class in &node.classes {
+                for axis in &class.axes {
+                    let components: Vec<(f64, Mat, Vec<f64>)> = axis
+                        .iter()
+                        .map(|jump| {
+                            let (omega, f) = if jump.beat == 0 { (0.0, C64::ONE) } else { (values[jump.beat], C64::cis(-values[jump.beat] * t)) };
+                            let (mut m, mut size) = (Mat::zeros(n, n), vec![0.0_f64; n * n]);
+                            for e in &jump.elements {
+                                m.data[e.at] += f * e.value;
+                                size[e.at] += e.value.abs();
+                            }
+                            (omega, m, size)
+                        })
+                        .collect();
+                    terms += axis.len() + n;
+                    for (wl, ml, sl) in &components {
+                        for (wr, mr, sr) in &components {
+                            if !kept(wr - wl) {
+                                continue;
+                            }
+                            gamma.add_scaled(C64::ONE, &ml.adjoint_product(mr));
+                            for a in 0..n {
+                                for b in 0..n {
+                                    products[a * n + b] += (0..n).map(|k| sl[k * n + a] * sr[k * n + b]).sum::<f64>();
+                                }
+                            }
+                        }
                     }
                 }
-                gamma.add_scaled(C64::ONE, &l.adjoint_product(&l));
             }
+            let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
+            let (_, scales) = run.structure_at(r, kappa);
+            let rounded = |x: usize| scales.generator.iter().map(|(s, k)| crate::units::rounding(k[x] + node.generator.len()) * s[x]).sum::<f64>();
+            let gamma_k = crate::units::rounding(terms);
+            let (mut worst, mut most) = (0.0_f64, 0.0_f64);
+            for a in 0..n {
+                for b in 0..n {
+                    let off = (decay[(a, b)] - gamma[(a, b)]).abs();
+                    let bound = rounded(a * n + b) + rounded(b * n + a) + 2.0 * gamma_k * products[a * n + b];
+                    worst = crate::linalg::larger(worst, off);
+                    if off > 0. {
+                        most = crate::linalg::larger(most, off / bound);
+                    }
+                    assert!(off <= bound, "{name} at {r:?}, {kappa:?} ({a}, {b}): {off:e} against the rounding's {bound:e}");
+                }
+            }
+            eprintln!("{name} at {r:?}, {kappa:?}: |i(H − H†) − Σ L†L| {worst:.3e} of {:.3e}, at most {most:.3} of its entry's rounding (γ_{terms}); {} beats dropped", gamma.max_abs(), dropped.len());
         }
-        let decay = Mat::from_fn(n, n, |a, b| C64::I * (h[(a, b)] - h[(b, a)].conj()));
-        let size = gamma.max_abs();
-        let worst = (0..n * n).map(|x| (decay.data[x] - gamma.data[x]).abs()).fold(0.0, crate::linalg::larger);
-        eprintln!("{name}: |i(H − H†) − Σ L†L| {worst:.3e} of {size:.3e}");
-        assert!(worst <= n as f64 * crate::units::UNIT_ROUNDOFF * size * 16.0, "{name}: {worst:e} of {size:e}");
     }
 }
 
@@ -228,7 +271,7 @@ fn the_node_is_the_model_now_in_its_frame() {
                     parts.map(|(p, x)| 64.0 * UNIT_ROUNDOFF * (1.0 + (frequency(&p.key) * t).abs() + 2.0 * theta) * x.max_abs()).sum::<f64>() + 1e-10 * scale
                 };
                 let rest = kappa == [0.0; 3];
-                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, kicks: true, lift: false, gradients: true });
+                let sum = local.contract(&|key, f| (Vec::new(), 0.0, C64::cis(-(if rest { f } else { frequency(key) }) * t)), Making { model: true, effective: true, kicks: true, lift: false, gradients: true });
                 if rest {
                     let now = local.now(t);
                     assert!(sum.effective.first().is_none_or(|p| (0..n * n).all(|x| (p.value.data[x] - now.hamiltonian.data[x]).abs() <= 1e-12 * now.hamiltonian.max_abs())), "{name}: at rest the sum is now(t)");
@@ -336,7 +379,7 @@ fn the_selected_force_at_time_zero_is_the_model_s() {
             let middle = run.middle(0, r, 0.0);
             let path = middle.path(kappa, [0.0; 3]);
             let ehrenfest = middle.force(&path, 0.0, &rho);
-            let node = middle.node(&path, 0.0, false);
+            let node = middle.node(&path, 0.0);
             let absorbed = run.read(|b| photons(&node, &b.value, 0.0, &psi, &mut Vec::new()).iter().map(|p| p.moments).collect::<Vec<_>>()).iter().fold([0.0; 3], |s, p| std::array::from_fn(|i| s[i] + p.mean[i]));
             let engine: V3 = std::array::from_fn(|i| -ehrenfest[i] + absorbed[i]);
             let model = run.rs.local(&run.scene, &run.scene.point_at(r, kappa)).now(0.0).force(&rho);
@@ -364,84 +407,6 @@ impl Domain for Anywhere {
 /// An f64 from the environment, or its default.
 fn env(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().map(|s| s.parse().unwrap()).unwrap_or(default)
-}
-
-/// The static model's mean force at a velocity (RUSTPLAN §6 C2, "the static F at the Doppler point"): the checkpoint's
-/// solve of the same model (`Rs::at` at the point and momentum, floquet's frame with its Doppler shifts, Liouville
-/// assembly, the rounding rule's elements, krylov's solve) -- its force's z component (1/µm/µs), the time-averaged
-/// mean force on the atom's path through r at the velocity of κ.
-fn static_force(run: &Selected, r: V3, kappa: V3) -> f64 {
-    let scene = &run.scene;
-    let doppler = scene.doppler(kappa);
-    let components = scene.components(r, &doppler, 1.0);
-    let frame = crate::floquet::Frame::new(scene, &Hilbert::full(scene, &components), &doppler);
-    let liouville = crate::floquet::Liouville::new(&frame, &run.rs.at(scene, &components).hilbert());
-    let elements = crate::floquet::select(&liouville);
-    let system = crate::floquet::assemble(&liouville, &elements);
-    let solved = crate::krylov::solve::solve(&system).expect("a consistent system");
-    crate::floquet::readouts(&liouville, &system, &solved.rho).force[2]
-}
-
-/// A dragged atom's mean force is the static model's (RUSTPLAN §6 C2: "轨迹平均 = 模型主方程" on the trajectory's level):
-/// tilt0 (V3C_REQ's, PYSEL's P20), its tweezer's waist DRAG_WAIST µm (1e5: its light the focus's along the drag), an
-/// atom held at the velocity v along z (its momentum set back after every step, its position pinned to z₀ + vt: the
-/// master equation's atom, infinitely heavy at exactly v), DRAG_COUNT starts spread over the pattern's period, stepped at
-/// τ = DRAG_TAU µs with no Brownian draw (the diffusion's mean is none), its force the steps' momentum's change over
-/// DRAG_WINDOW µs after DRAG_BURN µs -- against the static model's at the same starts (`static_force`, their mean), for
-/// v of DRAG_VS (m/s), within their interval at the confidence z over the velocities.
-#[test]
-#[ignore]
-fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
-    let (_, mut request, keep) = scenes().into_iter().find(|s| s.0 == "tilt0").expect("tilt0");
-    let waist = env("DRAG_WAIST", 1e5);
-    let t = request.trap_beam;
-    request.beams[t].waist = Some(waist);
-    let run = run_of(&request, &keep);
-    // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
-    let keep = run.rs.keep.clone();
-    let hm = run.hbar_over_mass();
-    let vs: Vec<f64> = std::env::var("DRAG_VS").ok().map_or(vec![-0.1, 0.0, 0.1], |s| s.split(',').map(|x| x.trim().parse().unwrap()).collect());
-    let count = env("DRAG_COUNT", 32.0) as u64;
-    let (tau, burn, window) = (env("DRAG_TAU", 0.3256), env("DRAG_BURN", 40.0), env("DRAG_WINDOW", 100.0));
-    let kz: f64 = request.beams.iter().enumerate().filter(|(l, b)| *l != t && b.direction[2].abs() > 0.5).map(|(_, b)| b.wave_number).sum();
-    let period = 2.0 * std::f64::consts::PI / kz;
-    let chief = crate::solve::chief(&request);
-    eprintln!("drag: P {}, waist {waist}, period {period:.5} µm, τ {tau}, count {count}, burn {burn}, window {window}", keep.len());
-    let mut beyond = Vec::new();
-    for &v in &vs {
-        let clock = std::time::Instant::now();
-        let kappa = [0.0, 0.0, v / hm];
-        let starts: Vec<f64> = (0..count).map(|i| period * (i as f64 + 0.5) / count as f64).collect();
-        let forces: Vec<f64> = starts.par_iter().enumerate().map(|(i, &z0)| {
-            let mut t = Trajectory::new(&run, chief, [0.0, 0.0, z0], kappa, 20261119, i as u64);
-            let mut scratch = Scratch::default();
-            let (mut made, mut from) = (0.0, None);
-            while t.time < burn + window - 1e-9 {
-                let step = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step");
-                let m = step.momentum();
-                t = step.end;
-                if from.is_some() {
-                    made += m.whole[2];
-                }
-                t.kappa = kappa;
-                t.r = [0.0, 0.0, z0 + v * t.time];
-                if from.is_none() && t.time >= burn - 1e-9 {
-                    from = Some(t.time);
-                }
-            }
-            made / (t.time - from.expect("the window"))
-        }).collect();
-        let n = forces.len() as f64;
-        let mean = forces.iter().sum::<f64>() / n;
-        let error = (forces.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
-        let model = starts.par_iter().map(|&z0| static_force(&run, [0.0, 0.0, z0], kappa)).sum::<f64>() / n;
-        let within = crate::estimate::Spread { error, groups: n }.interval_over(vs.len() as f64);
-        eprintln!("v {v:+.3} m/s: engine F_z {mean:.6e} ± {error:.2e}, static model {model:.6e}, difference {:.2e} (interval {within:.2e}), {:.1} s", mean - model, clock.elapsed().as_secs_f64());
-        if (mean - model).abs() > within {
-            beyond.push(v);
-        }
-    }
-    assert!(beyond.is_empty(), "velocities beyond the interval: {beyond:?}");
 }
 
 /// A solve's first result (`solve::solve_on` on the run), the solve stopped there (its callback's own unwind, caught
@@ -531,7 +496,7 @@ fn a_step_s_time_on_the_selected_model() {
             std::hint::black_box(local.now(0.37));
         });
         let model = least(&mut || {
-            std::hint::black_box(run.at(r, kappa, Making { model: true, kicks: false, lift: false, gradients: true }));
+            std::hint::black_box(run.at(r, kappa, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
         });
         let node = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
@@ -616,8 +581,13 @@ fn the_candidates_keys_sum_as_their_beats() {
 
 /// The readout is the lift (module documentation, # The rest of the model): `Selected::rows` on the thread's buffers,
 /// against the same populations from the model by components (`Selected::at` making the lift, each part's elements by
-/// fast index at their slow beats' phases, `rs::lifted`), on the six scenes at the centre at rest and at a moving point,
-/// a spread state, three times: the same numbers to the bit.
+/// fast index at their slow beats' phases, `rs::lifted`: (M ρ M†)_kk of the density), on the six scenes at the centre
+/// at rest and at a moving point, a spread state, three times: the same numbers within the two computations' own
+/// rounding. The readout takes |(M ψ)_k|² of the pure state (`Selected::lifted`), the other M ρ M† (Higham: a computed
+/// sum of K terms errs by γ_K times the sum of their moduli; units.rs `rounding`): per fast index and row k of Q, both
+/// within γ_{2n+6} S_k² of the exact, S_k = Σ_a |M_ka| |ψ_a| / ‖ψ‖ (each element at its phase one product more, the
+/// state over its norm one), P's rows within γ_4 |ψ_a|²/‖ψ‖²; over their sum, each row's own and its share of the sum's.
+/// (Until 2026-11-23 the readout was the density's to the bit.)
 #[test]
 fn the_readout_is_the_lift_by_fast_index() {
     for (name, request, keep) in scenes() {
@@ -626,7 +596,7 @@ fn the_readout_is_the_lift_by_fast_index() {
         let psi = spread(n);
         for (r, kappa) in POINTS {
             for t in [0.0, 0.37, -1.9] {
-                let model = run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true });
+                let model = run.at(r, kappa, Making { model: false, effective: false, kicks: false, lift: true, gradients: true });
                 let mut rho = vec![C64::ZERO; n * n];
                 crate::step::density(&psi, &mut rho);
                 let mut expected = [0.0; STATES];
@@ -654,19 +624,89 @@ fn the_readout_is_the_lift_by_fast_index() {
                         by_fast[i].1.data[x] += z * C64::cis(-slow * t);
                     }
                 }
-                for (_, m) in by_fast {
-                    let lifted = crate::model::rs::lifted(&model.states, &model.folded, &m, &rho);
+                for (_, m) in &by_fast {
+                    let lifted = crate::model::rs::lifted(&model.states, &model.folded, m, &rho);
                     for &s in &model.folded {
                         expected[s] += lifted[s];
                     }
                 }
+                // Each row's rounding before the sum (the two computations' together), and the sum's.
+                let norm = norm_sqr(&psi);
+                let mut bound = [0.0; STATES];
+                for (a, &s) in model.states.iter().enumerate() {
+                    bound[s] = 2.0 * crate::units::rounding(4) * psi[a].norm_sqr() / norm;
+                }
+                for (_, m) in &by_fast {
+                    for (k, &s) in model.folded.iter().enumerate() {
+                        let size: f64 = (0..n).map(|a| m.data[k * n + a].abs() * psi[a].abs()).sum::<f64>();
+                        bound[s] += 2.0 * crate::units::rounding(2 * n + 6) * size * size / norm;
+                    }
+                }
                 let total: f64 = expected.iter().sum();
-                let expected = expected.map(|x| x / total);
+                let spread: f64 = bound.iter().sum();
                 let rows = run.rows(&crate::model::Point { r, kappa, t }, &psi);
-                assert!(rows.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()), "{name} r {r:?} t {t}: {rows:?} against {expected:?}");
+                for s in 0..STATES {
+                    let x = expected[s] / total;
+                    let allowed = (bound[s] + x * spread) / total + 2.0 * crate::units::UNIT_ROUNDOFF * x;
+                    assert!((rows[s] - x).abs() <= allowed, "{name} r {r:?} t {t} row {s}: {} against {x}, apart {:e} beyond {allowed:e}", rows[s], (rows[s] - x).abs());
+                }
             }
         }
-        eprintln!("{name}: the readout is the lift to the bit");
+        eprintln!("{name}: the readout is the lift within its rounding");
+    }
+}
+
+/// A jump's photon's node (module documentation, # The photons; `SelectedMiddle::photon`) is the whole node's photon
+/// classes to the bit -- every element's value, gradient and photon form --, on the six scenes at the centre at rest and
+/// at a moving point, for less work.
+#[test]
+fn a_jump_s_photon_node_is_the_whole_node_s_classes() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        for (r, kappa) in POINTS {
+            let (whole, photon) = (run.node(r, kappa, true), run.photon_node(r, kappa));
+            assert_eq!(whole.classes.len(), photon.classes.len(), "{name}");
+            for (a, b) in whole.classes.iter().zip(&photon.classes) {
+                for (x, y) in a.axes.iter().flatten().zip(b.axes.iter().flatten()) {
+                    for (e, f) in x.elements.iter().zip(&y.elements) {
+                        let bits = |z: C64| (z.re.to_bits(), z.im.to_bits());
+                        assert!(bits(e.value) == bits(f.value) && bits(e.kick) == bits(f.kick) && e.gradient.iter().zip(&f.gradient).all(|(g, h)| bits(*g) == bits(*h)), "{name} r {r:?}: an element apart");
+                    }
+                }
+            }
+            eprintln!("{name} r {r:?}: the photon's node to the bit, its work {:.3e} against the whole node's {:.3e}", photon.work, whole.work);
+            assert!(photon.work < whole.work, "{name}");
+        }
+    }
+}
+
+/// The readings on the middle (module documentation, # The readings on the middle): `SelectedMiddle::readout` at the
+/// middle is the fold's readout at the point (`Selected::rows`, `READOUT`) to rounding; along the path, on a moving atom
+/// at its momentum, it differs from the fold's readout at the path's point by the second order: from s to s/2 the
+/// largest row's difference falls by 3–5 (four the second order's), on the six scenes, a spread state, both signs.
+#[test]
+fn the_readings_on_the_middle_are_the_points_to_the_second_order() {
+    for (name, request, keep) in scenes() {
+        let run = run_of(&request, &keep);
+        let psi = spread(run.rs.keep.len());
+        let (r, kappa) = POINTS[1];
+        let t = 0.37;
+        let velocity = kappa.map(|k| run.hbar_over_mass() * k);
+        let middle = run.middle(0, r, t);
+        let path = middle.path(kappa, velocity);
+        let apart = |s: f64| -> f64 {
+            let on = middle.readout(&path, s, &psi).expect("a middle reads its rows");
+            let at = run.rows(&crate::model::Point { r: std::array::from_fn(|i| r[i] + velocity[i] * s), kappa, t: t + s }, &psi);
+            on.iter().zip(&at).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max)
+        };
+        let zero = apart(0.0);
+        assert!(zero < 1e-14, "{name}: at the middle {zero:e} apart");
+        for s in [0.2, -0.2] {
+            let (whole, half) = (apart(s), apart(0.5 * s));
+            let ratio = whole / half;
+            eprintln!("{name}: s {s} apart {whole:.3e}, s/2 {half:.3e}, ratio {ratio:.2}");
+            assert!((3.0..=5.0).contains(&ratio) || whole < 1e-13, "{name} s {s}: {whole:e} against {half:e}");
+        }
     }
 }
 
@@ -728,6 +768,29 @@ fn made(request: &Request, split: bool) -> Selected {
     Selected::made(scene, selection, reference, split, &Drops::Judged).unwrap()
 }
 
+/// The explicit model a scene's blocks were accepted on (`the_exact_blocks_hold_at_every_point`), by its states' labels:
+/// R4's P20 -- the ground states, D2-1--1, D2-2 but m = 0, D2-3 -- and tilt0's P19 -- the ground states, D2-2 but
+/// m = −2, D2-3 -- (the three-point check's, printed in the gate's logs at 24ce4deb); none of another scene.
+fn explicit(name: &str, request: &Request) -> Option<Vec<usize>> {
+    let excited: &[&str] = match name {
+        "R4" => &["D2-1--1", "D2-2--2", "D2-2--1", "D2-2-1", "D2-2-2", "D2-3--3", "D2-3--2", "D2-3--1", "D2-3-0", "D2-3-1", "D2-3-2", "D2-3-3"],
+        "tilt0" => &["D2-2--1", "D2-2-0", "D2-2-1", "D2-2-2", "D2-3--3", "D2-3--2", "D2-3--1", "D2-3-0", "D2-3-1", "D2-3-2", "D2-3-3"],
+        _ => return None,
+    };
+    let mut keep: Vec<usize> = (0..GROUND).collect();
+    keep.extend(excited.iter().map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+    keep.sort_unstable();
+    Some(keep)
+}
+
+/// A request's run on the states `keep` (`made`'s, P replaced), its states in their blocks or (`split` false) one.
+fn made_split(request: &Request, keep: &[usize], split: bool) -> Selected {
+    let reference = crate::solve::alone(crate::solve::chief(request));
+    let scene = crate::scene::Scene::new(request).unwrap();
+    let selection = crate::select::choose(&scene).unwrap();
+    Selected::made(scene, Selection { keep: keep.to_vec(), ..selection }, reference, split, &Drops::Judged).unwrap()
+}
+
 /// A run's blocks said: each its ground and other states and its states' labels.
 fn said(request: &Request, run: &Selected) -> String {
     run.blocks()
@@ -783,12 +846,19 @@ fn the_structure_s_scales_bound_its_entries() {
 /// a moving point off it (`POINTS`) and at a point farther out at another speed: the model's node with the photon forms
 /// there, its every beat's H_eff and gradient, has between two blocks no element beyond the rounding of its matrix (said
 /// in units of ε times the matrix's largest entry), and the blocked node is the whole one's with those places zero, bit
-/// for bit. The blocks said per scene: R4 (R4_LIN_4) 9 + 11, tilt0 11 + 8 (the decision history's acceptance).
+/// for bit. The blocks said per scene: R4 (R4_LIN_4) 9 + 11, tilt0 11 + 8 (the decision history's acceptance), each on
+/// the explicit model the acceptance was made on, named by its states (`explicit`): the three-point check's P20 of R4
+/// and P19 of tilt0, the selection's run models until 429c36cd -- since then the selection gives the solve the full
+/// ground model G to run its pilot on (select.rs `choose`, the chain's first), one block or the ground states' own, and
+/// a test of its blocks would read nothing of the excited states' (as solve.rs `a_state_s_price_is_its_step_s_count`).
 #[test]
 fn the_exact_blocks_hold_at_every_point() {
     let points = [POINTS[0], POINTS[1], ([1.3, -0.7, 2.1], [-9.0, 4.0, 6.0])];
     for (name, request) in blocked_scenes() {
-        let (run, whole) = (made(&request, true), made(&request, false));
+        let (run, whole) = match explicit(&name, &request) {
+            Some(keep) => (made_split(&request, &keep, true), made_split(&request, &keep, false)),
+            None => (made(&request, true), made(&request, false)),
+        };
         assert_eq!(run.rs.keep, whole.rs.keep, "{name}: one P");
         let n = run.rs.keep.len();
         eprintln!("{name}: P {n}, {} blocks: {}", run.blocks().len(), said(&request, &run));
@@ -1048,6 +1118,10 @@ fn a_cross_block_element_joins_the_blocks() {
 
 #[path = "golden.rs"]
 mod golden;
+
+// STEP item 8: the Doppler series' census (ignored, by name).
+#[path = "doppler.rs"]
+mod doppler;
 
 #[path = "drops.rs"]
 mod drops;

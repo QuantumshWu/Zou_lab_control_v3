@@ -824,53 +824,29 @@ fn the_tweezer_s_channels_are_its_photons() {
 
 /// R6_RAMAN_CO and R6_RAMAN_COUNTER (a Raman pair on D1, ramanB 6834.59 MHz below ramanA, the frame's reference): the
 /// frame's ground levels apart by the pair's difference (the Raman coupling static: floquet/frame.rs `Raman`), φ =
-/// 42943 rad/µs; at the two checkpoint points the full reference certified with |ρ| ≤ 1 and the model on all 32 states
-/// against it, both solved as the selection solves them (populations by level, R, F⃗ over max(|F⃗|, kR)), within 10⁻⁶ --
-/// the fold's own fourth order in the fast (n_φ) elements, measured 2·10⁻⁸, 7·10⁻⁹, 2.8·10⁻⁷ --; the selection passes.
-/// With both ground levels in one frame (until 2026-11-20) φ was 0, the Raman elements were taken as fast (2·10⁻⁴,
-/// F⃗ 1.2·10⁻² on COUNTER), the reference's max|ρ| was 1.4·10⁸ at the centre and singular at the edge.
+/// 42943 rad/µs at both checkpoint points; the selection passes. With both ground levels in one frame (until
+/// 2026-11-20) φ was 0, the Raman elements were taken as fast (2·10⁻⁴, F⃗ 1.2·10⁻² on COUNTER), the reference's max|ρ|
+/// was 1.4·10⁸ at the centre and singular at the edge. (Until 2026-11-22 it also solved the steady state of the full
+/// reference and of the model on all 32 states at the two points by the Floquet assembly and krylov's GMRES and held
+/// them within 10⁻⁶ -- a second implementation of the master equation the engine does not use; removed with it. The
+/// model on all 32 states is the reference the selection's paths propagate, select.rs.)
 #[test]
 fn the_raman_scenes_frame_and_model() {
-    use crate::floquet::{assemble, readouts, select, Liouville};
     for name in ["R6_RAMAN_CO", "R6_RAMAN_COUNTER"] {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("refs").join("scenes").join(format!("{name}.json"));
         let line: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let scene = Scene::new(&Request::from_native(&line).unwrap()).unwrap();
         let points = crate::select::points(&scene);
-        let all: Vec<usize> = (0..STATES).collect();
-        let mut worst = [0.0_f64; 3];
         for (p, point) in points.iter().enumerate() {
             let reference = reference(&scene, point);
             let zero = vec![0.0; scene.request.beams.len()];
             let frame = Frame::new(&scene, &reference.hilbert(), &zero);
             let grounds: Vec<(String, Vec<i64>)> = [0usize, 3].iter().map(|&s| (scene.request.states[s].clone(), frame.theta[s].clone())).collect();
-            let solve = |model: &ModelAt| {
-                let liouville = Liouville::new(&frame, &model.hilbert());
-                let system = assemble(&liouville, &select(&liouville));
-                let solved = crate::krylov::solve(&system).expect("consistent");
-                let biggest = solved.rho.iter().map(|z| z.abs()).fold(0.0, crate::linalg::larger);
-                (readouts(&liouville, &system, &solved.rho), solved.route, solved.certified, biggest)
-            };
-            let (r, route, certified, biggest) = solve(&reference);
-            let model = Rs::new(&scene, &all, frame.sectors()).at(&scene, point);
-            let (m, mroute, mcertified, _) = solve(&model);
-            let pops = r.levels.iter().zip(&m.levels).map(|(a, b)| (a - b).abs()).fold(0.0, crate::linalg::larger);
-            let rate = (r.rate - m.rate).abs() / crate::linalg::larger(r.rate.abs(), f64::MIN_POSITIVE);
-            let scale = crate::linalg::larger(r.force.iter().map(|x| x * x).sum::<f64>().sqrt(), scene.generators.last().unwrap().frequency / crate::units::SPEED_OF_LIGHT * r.rate);
-            let force = (0..3).map(|i| (r.force[i] - m.force[i]).powi(2)).sum::<f64>().sqrt() / scale;
-            println!(
-                "{name} point {p}: grounds {grounds:?}, φ {:.4} rad/µs; reference {route:?} certified {certified} max|ρ| {biggest:.2e}, R {:.4e}; P 32 {mroute:?} {mcertified}: populations {pops:.2e}, R {rate:.2e}, F {force:.2e}",
-                frame.fast[0], r.rate
-            );
-            for (w, x) in worst.iter_mut().zip([pops, rate, force]) {
-                *w = crate::linalg::larger(*w, x);
-            }
+            println!("{name} point {p}: grounds {grounds:?}, φ {:.4} rad/µs", frame.fast[0]);
             assert!((frame.fast[0] - 42943.0).abs() < 1.0, "{name}: φ {}", frame.fast[0]);
-            assert!(certified && mcertified && biggest <= 1.0 + 1e-9, "{name} point {p}: the solves");
         }
         let chosen = crate::select::choose(&scene);
-        println!("{name}: P 32 against the reference at worst {worst:?}; the selection {:?}", chosen.as_ref().map(|s| s.keep.len()));
-        assert!(worst.iter().all(|&w| w <= 1e-6), "{name}: P 32 {worst:?}");
+        println!("{name}: the selection {:?}", chosen.as_ref().map(|s| s.keep.len()));
         assert!(chosen.is_ok(), "{name}: {chosen:?}");
     }
 }

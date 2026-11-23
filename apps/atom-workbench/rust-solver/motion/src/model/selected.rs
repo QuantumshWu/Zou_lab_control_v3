@@ -6,9 +6,19 @@
 //! # One cluster, one frame
 //! The trajectory's states are P, all of them one cluster (the ground states first: `Rs::keep` is sorted), in the frame
 //! θ of floquet/frame.rs chosen at the checkpoint's centre at rest: ψ_a = e^{−iθ_a t} x_a with θ_a an exact vector over
-//! the generators (the beams, the carrier) and α. No Doppler frame (K_s = 0, as onefold): at the step's outer nodes the
-//! model is taken at the path's own points, so the beams' plane waves turn with the path there and the classical
-//! centre of mass gives each key its K·v; its time phases are each beam's frequency at rest with its recoil,
+//! the generators (the beams, the carrier) and α. At the step's outer nodes the model is taken at the path's own points,
+//! so the beams' plane waves turn with the path there and the classical centre of mass gives each key its K·v; and the
+//! states are in the Doppler frame that is the time frame's spatial twin, ψ_a = e^{iK_a·v s} x_a on the path s from the
+//! middle, K_a = Σ_l (θ_a − θ_0)[l] k_l over the non-tweezer beams (the first state's K a phase of the whole state, which
+//! nothing reads; model.rs `Cluster::waves`): an element a ← b of key c turns along the path at (q_c − K_a + K_b)·v, the
+//! spatial twin of its slow remainder c − θ_a + θ_b, so that what is static in time is still along the path -- a running
+//! wave's coupling of the frame's own beam --, and only the light's pattern, two beams' (k_l − k_m)·v, is left to the
+//! nodes. The middle gives every matrix in the frame (`turns`: entry a ← b of the lab's times e^{−i(K_a − K_b)·v s},
+//! the generator with diag(K_a·v)) and reads every density of it as the lab's there (step.rs, # The kick). Until
+//! 2026-11-22 none (K = 0, as onefold): a running wave's phase along the path was the three nodes' parabola, which a step
+//! of R9_PUSH's push turned by 3.3 rad over a half step -- with the end state's held forms (step.rs, # The path's
+//! momentum) the window's momentum error 4.0 % at 2.84 µs; in the frame alone 0.45 %, with the mean state's forms
+//! 0.018 ± 0.014 % (motion3d_status/rewrite/study/B.report.md §2.1). Its time phases are each beam's frequency at rest with its recoil,
 //! f_g = ω_g − ħ|k_g|²/2m (`Scene::doppler` at κ = 0, the one Doppler shift per beam, model/rs.rs # The frequencies: the
 //! frame is made at those, its lattice holding each laser's recoil exactly), so that a node at κ = 0 is `now(t)` at
 //! every time. An element a ← b of a component of key c then holds e^{−iΩt}, Ω = (c − θ_a + θ_b)·(f, α)
@@ -47,7 +57,10 @@
 //! the largest wave number of the beams its channels' keys hold; the step carries the rest, Σ_c (1 − s_c) Σ_a
 //! Im⟨u_a|∇u_a⟩ and 2D = Σ_c [Σ_a Re⟨∇u_a|⊗|∇u_a⟩ − s_c² W_c b_c b_cᵀ] (model.rs `Moments` and
 //! `Scattering::of_moments`: the one rule). The photon's wave number is the class's rate-weighted mean of the elements' k_eg, read on the
-//! channels' photon forms (`Channel::kicks`, made at a jump's node alone): Σ_a Re⟨u_a|K_aψ⟩/W.
+//! channels' photon forms (`Channel::kicks`, made at a jump's node alone): Σ_a Re⟨u_a|K_aψ⟩/W. A jump's node is the
+//! photon classes alone (`SelectedMiddle::photon`, `Making::PHOTONS`): the channels with their gradients and photon
+//! forms, no H_eff, no generator -- the step goes on at its own nodes after the jump. Until 2026-11-23 a jump made the
+//! whole node with the photon forms (and a middle's node again where the jump fell on it).
 //!
 //! # The rest of the model
 //! The splitting's reference, the prepared wells, the loss energy and the reported trap are one potential
@@ -57,6 +70,23 @@
 //! (`Tweezer::reference` of the tweezer alone at unit amplitude). The displayed rows are P's populations with Q's lifted
 //! through M_c (`ModelAt::lift`), each fast index of the lift apart (its terms do not interfere over time), over their
 //! sum; a readout's contraction makes the lift alone.
+//!
+//! # The readings on the middle
+//! A time read inside a step reads its rows on the step's own model there (step.rs `Middle::readout`, adapt.rs # The
+//! reads), not by a fold of its own at the point: the middle's node holds the lift and its gradient along r (`Node::lift`,
+//! what the contraction makes for H_eff's gradient anyway; only the middle's node, a copy), and an element q ← a of it
+//! at the time s on the path is its first-order change there in the Doppler frame, M̃_qa(s) = M_qa + s (v·∇M_qa −
+//! i(K_q − K_a)·v M_qa), K_q of the folded state as P's (`Selected::folded_waves`), the state framed by p_a = e^{−iK_a·v s}
+//! (`turns`): the plane wave's turn of the element exact, the row's own a phase the population does not see. What is
+//! left is the light's pattern and the beams' envelopes, s²/2 d²M̃/ds² -- of the second order in τ like the read state's
+//! own (the step's constant middle along its stretch: (h² − u²)/2 of its change), read by the companion with the rows
+//! (solve.rs, # The step). Measured (tests, `the_readings_on_the_middle_are_the_points_to_the_second_order`): on an atom
+//! at 0.011 µm/µs, 0.2 µs from the middle, the rows 1.4·10⁻⁷ (PGC3D) to 1.3·10⁻⁵ (R4) from the fold's at the point,
+//! a quarter of it at half the time; GMD1C's whole solve moved its populations by 3.8·10⁻⁵ against their sample errors
+//! of 4.4·10⁻². The rows are one assembly either way (`Selected::lifted`: |(M ψ)_k|² of the pure state, each fast index
+//! apart); a trajectory's start reads at its point. Until 2026-11-23 a read made the fold at the point (`READOUT`) and
+//! took M ρ M†: 48 µs a read on PGC3D's G pinned, against a step's 310 (GMD1C's 1001 outputs 15 % of its
+//! trajectories' work, R5_PUMP's 40 %, study C §2.5); on the middle 7 µs.
 //!
 //! # Exact blocks
 //! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
@@ -145,6 +175,11 @@ pub struct Selected {
     optical: Option<f64>,
     /// The non-tweezer beams' wave vectors (the light pattern's beats along a path).
     waves: Vec<V3>,
+    /// Q's states' Doppler frame K_q = Σ_l (θ_q − θ_0)[l] k_l, as P's (`Cluster::waves`), in the fold's order of Q: a
+    /// lift's element q ← a turns along the path at (K_q − K_a)·v but for its pattern (`SelectedMiddle::readout`).
+    folded_waves: Vec<V3>,
+    /// The light's pattern the Doppler frame leaves to the step's nodes (`Selected::pattern`, 1/µm).
+    pattern: f64,
     /// The fold's grouping by the lab's frequencies (`Selected::at`), and the node's structure on it (`layout`).
     lab: Grouping,
     template: Node,
@@ -178,6 +213,11 @@ pub(crate) enum Drops {
 
 /// The runs' numbers (`Selected::id`).
 static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The nodes every run has made so far (`Selected::node_into`): the model at a point, which every trajectory's step,
+/// every path of the selection and its reference, every scan makes -- the work counter the solve's supervisor reads
+/// to tell a long computation from a stuck one (solve.rs `supervise`). Counted, never read by any result.
+pub(crate) static NODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The places of a contraction's outputs in a node (`Selected::layout`): per H output its elements (place, generator's
 /// slot, gradient's slot); per channel output its elements (place, class, axis, component, element); the decay's
@@ -238,12 +278,18 @@ struct Work {
     out: Out,
     /// The jump components on the ground rows (`GROUND` × their columns each).
     jumps: Vec<C64>,
-    /// A readout's: the density (n × n), the lift by fast index (the fast indices in the order met, each's Q × P), a
-    /// row of M ρ.
-    rho: Vec<C64>,
+    /// A readout's (`Selected::lifted`).
+    rows: Rows,
+}
+
+/// A readout's buffers (`Selected::lifted`): the state over its norm, a group's lift (Q × P), Q's amplitudes by fast
+/// index (the fast indices in the order met, each's Q).
+#[derive(Default)]
+struct Rows {
+    state: Vec<C64>,
+    group: Vec<C64>,
     fasts: Vec<usize>,
-    lifts: Vec<Vec<C64>>,
-    row: Vec<C64>,
+    amplitudes: Vec<Vec<C64>>,
 }
 
 /// A thread's buffers for a middle's readings (`SelectedMiddle`): a node's beats' phases, a tone's density and its
@@ -253,6 +299,8 @@ struct Reads {
     phases: Vec<C64>,
     sigma: Vec<C64>,
     dagger: Vec<C64>,
+    /// A density of the frame as the lab's (`SelectedMiddle::unframed`).
+    lab: Vec<C64>,
     minus: [Vec<C64>; 3],
     turned: [Vec<C64>; 3],
     photons: Vec<Photons>,
@@ -338,7 +386,9 @@ pub struct Class {
 /// The model at one point of a path in the frame (module documentation, # The nodes): the generator's components by
 /// beat, H_eff's gradient's, the photon classes and whether they hold the photon forms (a jump's node); the point and
 /// momentum it was made at; its counted work (real multiply-adds of putting the model in the frame, P × P's matrices
-/// counted whole; `Rs::at`'s own is not counted, its count not given).
+/// counted whole; `Rs::at`'s own is not counted, its count not given); and at a middle the lift by the lab's groups
+/// with its gradient (`Out::lift`: the readings on the middle, `SelectedMiddle::readout`), elsewhere none. A jump's
+/// photon's node holds the photon classes alone (`whole` false, `Making::PHOTONS`: its generator and gradient none).
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kappa: V3,
@@ -347,7 +397,9 @@ pub struct Node {
     pub gradient: Vec<(usize, [Mat; 3])>,
     pub classes: Vec<Class>,
     pub kicked: bool,
+    pub whole: bool,
     pub work: f64,
+    pub lift: Vec<(Mat, [Mat; 3])>,
 }
 
 /// A candidate tone (`step::Middle::beats`): its beat ν > 0 and the beats of its members at e^{+iνu} and e^{−iνu}.
@@ -448,7 +500,54 @@ impl Selected {
         }
         let theta = rs.keep.iter().map(|&s| frame.theta[s].iter().zip(&frame.values).map(|(&k, w)| k as f64 * w).sum()).collect();
         let n = rs.keep.len();
-        let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: vec![[0.0; 3]; n], waves_exact: vec![Beat::whole(vec![]); n], states: rs.keep.clone() };
+        // The Doppler frame (module documentation, # One cluster, one frame): each state's K_a = Σ_l (θ_a − θ_0)[l] k_l
+        // over the non-tweezer beams' generators l of its time frame, against P's first state's (a common K is a phase
+        // of the whole state, which nothing reads); exactly, as integers on the beams, and their wave vectors.
+        let beams: Vec<(usize, usize)> = scene.generators.iter().enumerate().filter_map(|(g, generator)| generator.beam.filter(|&l| l != scene.tweezer()).map(|l| (g, l))).collect();
+        let on = |s: usize| -> Vec<i64> { beams.iter().map(|&(g, _)| frame.theta[s][g] - frame.theta[rs.keep[0]][g]).collect() };
+        let wave = |on: &[i64]| -> V3 {
+            let mut k = [0.0; 3];
+            for (&c, &(_, l)) in on.iter().zip(&beams).filter(|(c, _)| **c != 0) {
+                let q = scene.geometry[l].wave_vector();
+                for a in 0..3 {
+                    k[a] += c as f64 * q[a];
+                }
+            }
+            k
+        };
+        let exact: Vec<Vec<i64>> = rs.keep.iter().map(|&s| on(s)).collect();
+        let doppler: Vec<V3> = exact.iter().map(|on| wave(on)).collect();
+        let folded_waves: Vec<V3> = rs.folded.iter().map(|&q| wave(&on(q))).collect();
+        // The light's pattern the frame leaves (`Selected::pattern`): per structural element a ← b of the generator, of
+        // the key c, its turn along the path in the frame, the spatial twin of c − θ_a + θ_b over the non-tweezer beams;
+        // where that is no rounding zero (the sum's own, units.rs `rounding`), the beams it turns with -- those of
+        // the twin's nonzero coordinates -- by their wave numbers, the largest of them over every element.
+        let pattern = {
+            let grouping = rs.folding.by_key();
+            let mut most = 0.0_f64;
+            for (key, list) in grouping.outputs.iter().map(|o| &o.0).zip(&grouping.lists) {
+                for &x in list {
+                    let (a, b) = (rs.keep[x as usize / n], rs.keep[x as usize % n]);
+                    let (mut q, mut size, mut carried) = ([0.0; 3], 0.0, 0.0_f64);
+                    for &(g, l) in &beams {
+                        let r = key.get(g).map_or(0, |&k| i64::from(k)) - frame.theta[a][g] + frame.theta[b][g];
+                        if r != 0 {
+                            let k = scene.geometry[l].wave_vector();
+                            for i in 0..3 {
+                                q[i] += r as f64 * k[i];
+                            }
+                            size += (r as f64).abs() * scene.geometry[l].wave_number;
+                            carried = larger(carried, scene.geometry[l].wave_number);
+                        }
+                    }
+                    if (0..3).map(|i| q[i] * q[i]).sum::<f64>().sqrt() > rounding(3 * beams.len()) * size {
+                        most = larger(most, carried);
+                    }
+                }
+            }
+            most
+        };
+        let cluster = Cluster { ground: GROUND, frames: vec![Beat::whole(vec![]); n], waves: doppler, waves_exact: exact.into_iter().map(Beat::whole).collect(), states: rs.keep.clone() };
         // The tweezer's unit fold's static part (`Tweezer::still`): its ground diagonal `Scene::trap_potential`'s depth, the
         // whole the other lights' smooth shifts' (`Scene::smooth`, the reported trap's).
         let unit = rs.tweezer().still();
@@ -511,8 +610,10 @@ impl Selected {
             branching,
             optical,
             waves,
+            folded_waves,
+            pattern,
             lab,
-            template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 },
+            template: Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, whole: true, work: 0.0, lift: Vec::new() },
             tables: Tables::default(),
             id: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             judgment: Judgment { tiers: Vec::new(), blocks: vec![(0..n).collect()], dropped: 0.0, pairs: Vec::new() },
@@ -562,6 +663,16 @@ impl Selected {
     }
 
     /// The run's light (the region, the beams' geometries).
+    /// The largest wave number of the light's pattern the Doppler frame leaves to the step's nodes (1/µm; module
+    /// documentation, # One cluster, one frame): of the non-tweezer beams that some element of the generator still turns
+    /// with along a path in the frame -- the beams of the spatial twin of its slow remainder, where that twin is no rounding
+    /// zero. None where the frame takes every plane wave away (a running wave's: R9_PUSH's push); every beam of a
+    /// standing wave, a lattice and six beams' cooling, whose pattern no frame removes. What the step's prior asks the
+    /// step to resolve (solve.rs `prior`).
+    pub fn pattern(&self) -> f64 {
+        self.pattern
+    }
+
     pub fn light(&self) -> &Light {
         &self.light
     }
@@ -663,7 +774,7 @@ impl Selected {
     fn layout(&mut self, spherical: &Grouping) {
         let n = self.rs.keep.len();
         let lab = &self.lab;
-        let mut template = Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, work: 0.0 };
+        let mut template = Node { kappa: [0.0; 3], at: [0.0; 3], generator: vec![(0, Mat::zeros(n, n))], gradient: Vec::new(), classes: Vec::new(), kicked: false, whole: true, work: 0.0, lift: Vec::new() };
         let mut tables = Tables::default();
         for (og, (key, _)) in lab.outputs.iter().enumerate() {
             let beats = self.elements(key, Of::Generator);
@@ -1044,12 +1155,24 @@ impl Selected {
     /// the lab's frequencies, put in the node's structure (`layout`), all in the thread's buffers.
     pub fn node(&self, at: V3, kappa: V3, kicked: bool) -> Node {
         let mut node = self.template.clone();
-        self.node_into(&mut node, at, kappa, kicked);
+        self.node_into(&mut node, at, kappa, (kicked, true), false);
         node
     }
 
-    /// The node at a point (`node`) into one of the run's layout.
-    fn node_into(&self, node: &mut Node, at: V3, kappa: V3, kicked: bool) {
+    /// A jump's photon's node at a point (`SelectedMiddle::photon`, the tests'): the photon classes alone.
+    #[cfg(test)]
+    pub(crate) fn photon_node(&self, at: V3, kappa: V3) -> Node {
+        let mut node = self.template.clone();
+        self.node_into(&mut node, at, kappa, (true, false), false);
+        node
+    }
+
+    /// The node at a point (`node`) into one of the run's layout: `kicked` with the photon forms, `whole` with the
+    /// generator (else the photon classes alone, a jump's photon's: `Making::PHOTONS`); with the lift and its gradient
+    /// where `lifted` (a middle's, `Node::lift`: copied from the contraction, which makes them for the model's gradient
+    /// anyway).
+    fn node_into(&self, node: &mut Node, at: V3, kappa: V3, (kicked, whole): (bool, bool), lifted: bool) {
+        NODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = self.id;
         WORK.with(|w| {
             let mut w = w.borrow_mut();
@@ -1058,25 +1181,39 @@ impl Selected {
             }
             let work = &mut w.as_mut().expect("the thread's buffers").1;
             self.scene.point_into(at, kappa, &mut work.point);
-            self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(kicked));
-            work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(kicked));
-            self.fill(node, &work.out, kicked, &mut work.jumps);
+            let making = if whole { Making { lift: lifted, ..Making::node(kicked) } } else { Making { lift: lifted, ..Making::PHOTONS } };
+            self.rs.evaluate(&self.scene, &work.point, &mut work.local, making);
+            work.out.contract(self.rs.plan(), &self.lab, &work.local, None, making);
+            self.fill(node, &work.out, (kicked, whole), &mut work.jumps);
             node.work = crate::decide::COMPLEX * (work.local.work + work.out.work);
+            node.lift.truncate(if lifted { work.out.lift.len() } else { 0 });
+            if lifted {
+                node.lift.resize_with(work.out.lift.len(), Default::default);
+                for ((v, g), (from, from_g)) in node.lift.iter_mut().zip(&work.out.lift) {
+                    for (m, f) in std::iter::once(v).chain(g.iter_mut()).zip(std::iter::once(from).chain(from_g)) {
+                        (m.rows, m.cols) = (f.rows, f.cols);
+                        m.data.clear();
+                        m.data.extend_from_slice(&f.data);
+                    }
+                }
+            }
         });
         node.kappa = kappa;
         node.at = at;
         node.kicked = kicked;
+        node.whole = whole;
     }
 
-    /// A middle's node at a point (`node`), made in one of the thread's pooled nodes of the run where there is one.
-    fn pooled(&self, at: V3, kappa: V3, kicked: bool) -> Rc<Node> {
+    /// A middle's node at a point (`node`), made in one of the thread's pooled nodes of the run where there is one; whole
+    /// or a photon's, with the lift where `lifted` (`node_into`).
+    fn pooled(&self, at: V3, kappa: V3, made: (bool, bool), lifted: bool) -> Rc<Node> {
         let key = self.id;
         let mut node = POOL.with(|p| {
             let mut p = p.borrow_mut();
             p.iter().position(|x| x.0 == key).map(|i| p.swap_remove(i).1)
         })
         .unwrap_or_else(|| Rc::new(self.template.clone()));
-        self.node_into(Rc::get_mut(&mut node).expect("a pooled node is no one else's"), at, kappa, kicked);
+        self.node_into(Rc::get_mut(&mut node).expect("a pooled node is no one else's"), at, kappa, made, lifted);
         node
     }
 
@@ -1164,6 +1301,12 @@ impl Selected {
     /// sum of and their count (`Out::scales`: H_eff's outputs; the decay's products ½ Σ_g |l_g| |r_g| over their landing
     /// states, each jump amplitude's |l| its sources' |u| times their channel elements' scales).
     fn structure(&self) -> (Node, Scales) {
+        self.structure_at([0.0; 3], [0.0; 3])
+    }
+
+    /// The node and its rounding scales (`structure`) at a point and momentum: what a check of the node's entries holds
+    /// them to there (tests).
+    fn structure_at(&self, at: V3, kappa: V3) -> (Node, Scales) {
         let n = self.rs.keep.len();
         let mut node = self.template.clone();
         let mut scales = Scales {
@@ -1171,11 +1314,11 @@ impl Selected {
             gradient: node.gradient.iter().map(|_| std::array::from_fn(|_| (vec![0.0; n * n], vec![0; n * n]))).collect(),
         };
         let mut work = Work::default();
-        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.scene.point_into(at, kappa, &mut work.point);
         self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
         work.out.contract(self.rs.plan(), &self.lab, &work.local, None, Making::node(false));
         work.out.scales(self.rs.plan(), &self.lab, &work.local, None);
-        self.fill(&mut node, &work.out, false, &mut work.jumps);
+        self.fill(&mut node, &work.out, (false, true), &mut work.jumps);
         for (a, t) in self.theta.iter().enumerate() {
             node.generator[0].1[(a, a)] += C64::real(*t);
         }
@@ -1285,38 +1428,16 @@ impl Selected {
         (self.tables.terms, self.tables.entries) = (terms, entries);
     }
 
-    /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places).
-    fn fill(&self, node: &mut Node, out: &Out, kicked: bool, jumps: &mut Vec<C64>) {
+    /// A node's numbers from a contraction by the lab's frequencies (`layout`'s places): its photon classes, and where
+    /// `whole` its generator and gradient.
+    fn fill(&self, node: &mut Node, out: &Out, (kicked, whole): (bool, bool), jumps: &mut Vec<C64>) {
         let n = self.rs.keep.len();
-        for (_, m) in node.generator.iter_mut() {
-            m.data.fill(C64::ZERO);
-        }
-        for (_, g) in node.gradient.iter_mut() {
-            for m in g.iter_mut() {
-                m.data.fill(C64::ZERO);
-            }
-        }
         for c in node.classes.iter_mut() {
             for axis in c.axes.iter_mut() {
                 for j in axis.iter_mut() {
                     for e in j.elements.iter_mut() {
                         (e.value, e.gradient, e.kick) = (C64::ZERO, [C64::ZERO; 3], C64::ZERO);
                     }
-                }
-            }
-        }
-        for (a, t) in self.theta.iter().enumerate() {
-            node.generator[0].1.data[a * n + a] = C64::real(-t);
-        }
-        for (list, c) in self.tables.h.iter().zip(&out.h) {
-            for (k, &(x, g, d)) in list.iter().enumerate() {
-                if g == u32::MAX {
-                    continue;
-                }
-                let x = x as usize;
-                node.generator[g as usize].1.data[x] += c.value[k];
-                for (m, dg) in node.gradient[d as usize].1.iter_mut().zip(&c.gradient) {
-                    m.data[x] += dg[k];
                 }
             }
         }
@@ -1333,6 +1454,32 @@ impl Selected {
                     }
                 } else {
                     e.kick += c.value[k];
+                }
+            }
+        }
+        if !whole {
+            return;
+        }
+        for (_, m) in node.generator.iter_mut() {
+            m.data.fill(C64::ZERO);
+        }
+        for (_, g) in node.gradient.iter_mut() {
+            for m in g.iter_mut() {
+                m.data.fill(C64::ZERO);
+            }
+        }
+        for (a, t) in self.theta.iter().enumerate() {
+            node.generator[0].1.data[a * n + a] = C64::real(-t);
+        }
+        for (list, c) in self.tables.h.iter().zip(&out.h) {
+            for (k, &(x, g, d)) in list.iter().enumerate() {
+                if g == u32::MAX {
+                    continue;
+                }
+                let x = x as usize;
+                node.generator[g as usize].1.data[x] += c.value[k];
+                for (m, dg) in node.gradient[d as usize].1.iter_mut().zip(&c.gradient) {
+                    m.data[x] += dg[k];
                 }
             }
         }
@@ -1383,7 +1530,8 @@ impl Selected {
 
     /// The 32 states' populations of a state of P at a point and time (module documentation, # The rest of the model):
     /// P's, and Q's lifted through M_c (`ModelAt::lift`) of each fast index of the lift apart, each element at its slow
-    /// beat's phase; over their sum.
+    /// beat's phase; over their sum. The lift is the fold's at the point (`READOUT`); a middle's readings take its node's
+    /// instead (`SelectedMiddle::readout`), the one assembly (`lifted`).
     fn rows(&self, at: &Point, psi: &[C64]) -> [f64; STATES] {
         let key = self.id;
         WORK.with(|w| {
@@ -1391,63 +1539,67 @@ impl Selected {
             if w.as_ref().is_none_or(|x| x.0 != key) {
                 *w = Some((key, Work::default()));
             }
-            let Work { point, local, out, rho, fasts, lifts, row, .. } = &mut w.as_mut().expect("the thread's buffers").1;
+            let Work { point, local, out, rows, .. } = &mut w.as_mut().expect("the thread's buffers").1;
             self.scene.point_into(at.r, at.kappa, point);
             self.rs.evaluate(&self.scene, point, local, Making::READOUT);
             out.contract(self.rs.plan(), &self.lab, local, None, Making::READOUT);
-            let (n, q) = (self.rs.keep.len(), self.rs.folded.len());
-            rho.clear();
-            rho.resize(n * n, C64::ZERO);
-            crate::step::density(psi, rho);
-            let mut rows = [0.0; STATES];
-            for (a, &s) in self.rs.keep.iter().enumerate() {
-                rows[s] = rho[a * n + a].re;
+            self.lifted(rows, psi, None, at.t, &mut |g, group| {
+                let m = &out.lift[g].0;
+                group.clear();
+                group.extend_from_slice(&m.data);
+                m.rows != 0
+            })
+        })
+    }
+
+    /// The rows (`rows`) of a state of P at the time t, the state framed by `turn` where the lift is the Doppler frame's
+    /// (`SelectedMiddle::readout`), each lab group's lift put by `group` (false where it has none).
+    fn lifted(&self, buffers: &mut Rows, psi: &[C64], turn: Option<&[C64; STATES]>, t: f64, group: &mut dyn FnMut(usize, &mut Vec<C64>) -> bool) -> [f64; STATES] {
+        let Rows { state, group: values, fasts, amplitudes } = buffers;
+        let n = self.rs.keep.len();
+        // The state over its norm, framed where it is the frame's.
+        let scale = 1.0 / norm_sqr(psi).sqrt();
+        state.clear();
+        state.extend(psi.iter().enumerate().map(|(a, z)| turn.map_or(*z * scale, |p| *z * scale * p[a])));
+        let mut rows = [0.0; STATES];
+        for (z, &s) in state.iter().zip(&self.rs.keep) {
+            rows[s] = z.norm_sqr();
+        }
+        // Q's amplitudes M ψ by fast index, in the order met (the groups by their keys, each element in its place),
+        // each element at its slow beat's phase at the time; a group of no amplitude none. The state is pure, so each
+        // fast index's (M ρ M†)_kk is |(M ψ)_k|².
+        fasts.clear();
+        let q = self.rs.folded.len();
+        for (g, elements) in &self.lifts {
+            if !group(*g, values) || values.iter().all(|z| *z == C64::ZERO) {
+                continue;
             }
-            // Q's amplitudes by fast index, in the order met (the groups by their keys, each element in its place),
-            // each element at its slow beat's phase at the time; a group of no amplitude none.
-            fasts.clear();
-            for (g, elements) in &self.lifts {
-                let m = &out.lift[*g].0;
-                if m.rows == 0 || m.data.iter().all(|z| *z == C64::ZERO) {
+            for (x, &(fast, slow)) in elements.iter().enumerate() {
+                let z = values[x];
+                if z == C64::ZERO {
                     continue;
                 }
-                for (x, &(fast, slow)) in elements.iter().enumerate() {
-                    let z = m.data[x];
-                    if z == C64::ZERO {
-                        continue;
+                let i = fasts.iter().position(|f| *f == fast).unwrap_or_else(|| {
+                    fasts.push(fast);
+                    if amplitudes.len() < fasts.len() {
+                        amplitudes.push(Vec::new());
                     }
-                    let i = fasts.iter().position(|f| *f == fast).unwrap_or_else(|| {
-                        fasts.push(fast);
-                        if lifts.len() < fasts.len() {
-                            lifts.push(Vec::new());
-                        }
-                        let lift = &mut lifts[fasts.len() - 1];
-                        lift.clear();
-                        lift.resize(q * n, C64::ZERO);
-                        fasts.len() - 1
-                    });
-                    lifts[i][x] += z * C64::cis(-slow * at.t);
-                }
+                    let u = &mut amplitudes[fasts.len() - 1];
+                    u.clear();
+                    u.resize(q, C64::ZERO);
+                    fasts.len() - 1
+                });
+                let z = if slow == 0.0 { z } else { z * C64::cis(-slow * t) };
+                amplitudes[i][x / n] += z * state[x % n];
             }
-            // Each fast index's (M ρ M†)_kk (`rs::lifted`, by `Mat::product`'s operations: M ρ row by row, then each
-            // diagonal entry's sum in column order).
-            for lift in &lifts[..fasts.len()] {
-                for (k, &s) in self.rs.folded.iter().enumerate() {
-                    row.clear();
-                    row.resize(n, C64::ZERO);
-                    for a in 0..n {
-                        crate::linalg::mul_add(false, row, lift[k * n + a], &rho[a * n..(a + 1) * n]);
-                    }
-                    let mut d = C64::ZERO;
-                    for (p, m) in row.iter().zip(&lift[k * n..(k + 1) * n]) {
-                        d += *p * m.conj();
-                    }
-                    rows[s] += d.re;
-                }
+        }
+        for u in &amplitudes[..fasts.len()] {
+            for (z, &s) in u.iter().zip(&self.rs.folded) {
+                rows[s] += z.norm_sqr();
             }
-            let total: f64 = rows.iter().sum();
-            rows.map(|x| x / total)
-        })
+        }
+        let total: f64 = rows.iter().sum();
+        rows.map(|x| x / total)
     }
 }
 
@@ -1504,29 +1656,52 @@ impl Drop for SelectedMiddle<'_> {
 }
 
 impl SelectedMiddle<'_> {
-    /// The node at the time s from the middle along the path, made where first asked for.
-    fn node(&self, path: &Path, s: f64, kicked: bool) -> Rc<Node> {
+    /// The node at the time s from the middle along the path, made where first asked for, without the photon forms (a
+    /// jump's are its own, `photon`); the middle's with the lift (`readout`).
+    fn node(&self, path: &Path, s: f64) -> Rc<Node> {
         let at: V3 = std::array::from_fn(|i| self.r[i] + path.velocity[i] * s);
-        let made = self.nodes.borrow().iter().position(|x| x.kappa == path.kappa && x.at == at);
-        if let Some(i) = made {
-            let node = self.nodes.borrow()[i].clone();
-            if node.kicked || !kicked {
-                return node;
-            }
-            // A jump at a node made without the photon forms: the node again with them, in its place, its work counted
-            // once.
-            let fresh = self.model.pooled(at, path.kappa, true);
-            let old = std::mem::replace(&mut self.nodes.borrow_mut()[i], fresh.clone());
-            drop(node);
-            self.model.release(old);
-            return fresh;
+        if let Some(node) = self.nodes.borrow().iter().find(|x| x.kappa == path.kappa && x.at == at) {
+            return node.clone();
         }
-        let node = self.model.pooled(at, path.kappa, kicked);
+        let node = self.model.pooled(at, path.kappa, (false, true), s == 0.0);
         self.made.set(self.made.get() + node.work);
         #[cfg(test)]
-        MADE.with(|m| m.borrow_mut()[usize::from(kicked)] += 1);
+        MADE.with(|m| m.borrow_mut()[0] += 1);
         self.nodes.borrow_mut().push(node.clone());
         node
+    }
+
+    /// The Doppler frame's turn at the time s from the middle along the path (module documentation, # One cluster, one
+    /// frame): p_a = e^{−iK_a·v s} per state, an element a ← b of the lab's matrices the frame's times p_a p_b*; none
+    /// where nothing turns -- at the middle, or where every K is zero.
+    fn turns(&self, path: &Path, s: f64) -> Option<[C64; STATES]> {
+        let waves = &self.model.cluster.waves;
+        if s == 0.0 || waves.iter().all(|k| *k == [0.0; 3]) {
+            return None;
+        }
+        let mut p = [C64::ONE; STATES];
+        for (p, k) in p.iter_mut().zip(waves) {
+            *p = C64::cis(-(0..3).map(|a| k[a] * path.velocity[a]).sum::<f64>() * s);
+        }
+        Some(p)
+    }
+
+    /// A matrix of the lab at a time into the frame there (`turns`): entry a ← b times p_a p_b*.
+    fn framed(p: &[C64], m: &mut [C64]) {
+        let n = m.len().isqrt();
+        for a in 0..n {
+            for b in 0..n {
+                m[a * n + b] *= p[a] * p[b].conj();
+            }
+        }
+    }
+
+    /// A density of the frame at a time as the lab's there (`turns`), for the lab's matrices: tr(Ĝ_frame ρ) = Σ_ab
+    /// G_ab p_a p_b* ρ_ba, so ρ_ab times p_a* p_b.
+    fn unframed(p: &[C64], rho: &[C64], out: &mut Vec<C64>) {
+        let n = rho.len().isqrt();
+        out.clear();
+        out.extend((0..n * n).map(|i| rho[i] * p[i / n].conj() * p[i % n]));
     }
 
     /// e^{−iΩ (t_m + s)} of a beat.
@@ -1560,8 +1735,8 @@ impl SelectedMiddle<'_> {
     /// A jump's photon of the state ψ at the time s from the middle, at the jump's place (module documentation,
     /// # The photons): the classes' rates, the class `draw` picks and its photon.
     fn emitted(&self, path: &Path, s: f64, psi: &[C64], draw: &mut dyn FnMut(&[f64]) -> Option<usize>) -> Option<Emitted> {
-        let node = self.node(path, s, true);
-        READS.with(|r| {
+        let node = self.photon(path, s);
+        let emitted = READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { photons: list, rates, .. } = &mut *r;
             let classes = self.model.read(|b| photons(&node, &b.value, self.t + s, psi, list));
@@ -1574,7 +1749,21 @@ impl SelectedMiddle<'_> {
             let jumps: usize = node.classes.iter().map(|c| c.axes.iter().map(Vec::len).sum::<usize>()).sum();
             let wave_number = p.wave_number.expect("a jump's node holds the photon forms");
             Some(Emitted { landing: 0, wave_number, amplitudes, kick: p.moments.kick, work: crate::decide::COMPLEX * (5 * jumps * n * n) as f64 })
-        })
+        });
+        self.model.release(node);
+        emitted
+    }
+
+    /// A jump's photon's node at the time s from the middle along the path (module documentation, # The photons): the
+    /// photon classes alone (`Making::PHOTONS`: the channels with their gradients and photon forms, no H_eff and no
+    /// generator), made for the jump, its work counted, and not kept -- nothing else reads the model at a jump's point.
+    fn photon(&self, path: &Path, s: f64) -> Rc<Node> {
+        let at: V3 = std::array::from_fn(|i| self.r[i] + path.velocity[i] * s);
+        let node = self.model.pooled(at, path.kappa, (true, false), false);
+        self.made.set(self.made.get() + node.work);
+        #[cfg(test)]
+        MADE.with(|m| m.borrow_mut()[1] += 1);
+        node
     }
 }
 
@@ -1643,7 +1832,7 @@ fn photons<'a>(node: &Node, values: &[f64], t: f64, psi: &[C64], list: &'a mut V
 impl SelectedMiddle<'_> {
     /// Every class's photon moments of the state ψ at the middle (model.rs `Moments`, over ‖ψ‖²; the tests').
     pub(crate) fn moments(&self, path: &Path, psi: &[C64]) -> Vec<Moments> {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         let mut list = Vec::new();
         self.model.read(|b| photons(&node, &b.value, self.t, psi, &mut list)).iter().map(|p| p.moments).collect()
     }
@@ -1668,13 +1857,17 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         Path { kappa, velocity }
     }
 
-    fn gauge(&self, _: &Path, rates: &mut [f64]) {
-        rates.fill(0.0);
+    /// K_a·v of each state's Doppler frame (module documentation, # One cluster, one frame).
+    fn gauge(&self, path: &Path, rates: &mut [f64]) {
+        for (rate, k) in rates.iter_mut().zip(&self.model.cluster.waves) {
+            *rate = (0..3).map(|a| k[a] * path.velocity[a]).sum();
+        }
     }
 
-    /// Ĥ(s) = Σ_k G_k(s) e^{−iΩ_k(t_m + s)} (module documentation, # The generator by beats).
+    /// Ĥ(s) = Σ_k G_k(s) e^{−iΩ_k(t_m + s)} (module documentation, # The generator by beats), in the Doppler frame with
+    /// its diag(K_a·v).
     fn generator(&self, path: &Path, s: f64, h: &mut Mat) {
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         h.data.fill(C64::ZERO);
         self.model.read(|b| {
             for (beat, g) in &node.generator {
@@ -1684,6 +1877,13 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                 }
             }
         });
+        if let Some(p) = self.turns(path, s) {
+            SelectedMiddle::framed(&p, &mut h.data);
+        }
+        let n = self.states();
+        for (a, k) in self.model.cluster.waves.iter().enumerate() {
+            h.data[a * n + a] += C64::real((0..3).map(|i| k[i] * path.velocity[i]).sum::<f64>());
+        }
     }
 
     /// Each candidate's ν and its key (module documentation, # The generator by beats): the exact vector of the beat
@@ -1700,7 +1900,7 @@ impl crate::step::Middle for SelectedMiddle<'_> {
     /// Candidate m's members at s: G_plus(s) e^{iν t_m} and G_minus(s) e^{−iν t_m} (their parts of `generator`).
     fn envelopes(&self, path: &Path, m: usize, s: f64, plus: &mut Mat, minus: &mut Mat) {
         let c = self.candidates(path)[m];
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         self.model.read(|b| {
             for (member, out) in [(c.plus, plus), (c.minus, minus)] {
                 out.data.fill(C64::ZERO);
@@ -1710,6 +1910,9 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                     for (z, x) in out.data.iter_mut().zip(&g.data) {
                         *z = f * *x;
                     }
+                }
+                if let Some(p) = self.turns(path, s) {
+                    SelectedMiddle::framed(&p, &mut out.data);
                 }
             }
         });
@@ -1721,14 +1924,21 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         let n = self.states();
         let mut out = [0.0; 3];
         for &(s, re, im) in sums {
-            let node = self.node(path, s, false);
+            let node = self.node(path, s);
             let forms = READS.with(|r| {
                 let mut r = r.borrow_mut();
-                let Reads { sigma, dagger, .. } = &mut *r;
+                let Reads { sigma, dagger, lab, .. } = &mut *r;
                 sigma.clear();
                 sigma.extend(re.iter().zip(im).map(|(r, i)| *r + C64::I * *i));
                 dagger.clear();
                 dagger.extend((0..n * n).map(|x| sigma[(x % n) * n + x / n].conj()));
+                // The frame's sums as the lab's at the node (`turns`).
+                if let Some(p) = self.turns(path, s) {
+                    for m in [&mut *sigma, &mut *dagger] {
+                        SelectedMiddle::unframed(&p, m, lab);
+                        std::mem::swap(m, lab);
+                    }
+                }
                 self.model.read(|b| {
                     let mut f = [C64::ZERO; 3];
                     for (member, rho) in [(c.plus, &*sigma), (c.minus, &*dagger)] {
@@ -1754,16 +1964,24 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         [2.0 * n * n, 6.0 * n * n]
     }
 
-    /// Re tr(Ĝ(s) ρ): H_eff's gradient at the time s, every beat at its phase.
+    /// Re tr(Ĝ(s) ρ): H_eff's gradient at the time s, every beat at its phase, on the frame's ρ there.
     fn force(&self, path: &Path, s: f64, rho: &[C64]) -> [f64; 3] {
-        let node = self.node(path, s, false);
-        let f = self.model.read(|b| SelectedMiddle::contract(&node, |beat| Some(self.phase(&b.value, beat, s)), rho));
+        let node = self.node(path, s);
+        let contract = |rho: &[C64]| self.model.read(|b| SelectedMiddle::contract(&node, |beat| Some(self.phase(&b.value, beat, s)), rho));
+        let f = match self.turns(path, s) {
+            Some(p) => READS.with(|r| {
+                let lab = &mut r.borrow_mut().lab;
+                SelectedMiddle::unframed(&p, rho, lab);
+                contract(lab)
+            }),
+            None => contract(rho),
+        };
         f.map(|z| z.re)
     }
 
     /// The gradient at the middle by its beats: Ω_m = −Ω_k with Re tr(∂H_k e^{−iΩ_k t_m} ρ).
     fn tones(&self, path: &Path, rho: &[C64], each: &mut dyn FnMut(f64, [f64; 3])) {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         for (beat, _) in &node.gradient {
             let (value, phase) = self.model.read(|b| (b.value[*beat], self.phase(&b.value, *beat, 0.0)));
             let f = SelectedMiddle::contract(&node, |k| (k == *beat).then_some(phase), rho);
@@ -1771,10 +1989,45 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         }
     }
 
+    /// The rows shown at the time s from the middle along the path (module documentation, # The readings on the
+    /// middle): the middle node's lift M and its gradient (`Node::lift`) on the step's own model there, in the Doppler
+    /// frame -- each element q ← a by its first-order change, M + s (v·∇M − i(K_q − K_a)·v M), the state framed --, the
+    /// one assembly (`Selected::lifted`).
+    fn readout(&self, path: &Path, s: f64, psi: &[C64]) -> Option<[f64; STATES]> {
+        let node = self.node(path, 0.0);
+        let model = self.model;
+        let n = self.states();
+        let v = path.velocity;
+        let along = |k: &V3| -> f64 { (0..3).map(|i| k[i] * v[i]).sum() };
+        let (rows_turn, cols_turn): (Vec<f64>, Vec<f64>) = (model.folded_waves.iter().map(along).collect(), model.cluster.waves.iter().map(along).collect());
+        let turn = self.turns(path, s);
+        let key = model.id;
+        Some(WORK.with(|w| {
+            let mut w = w.borrow_mut();
+            if w.as_ref().is_none_or(|x| x.0 != key) {
+                *w = Some((key, Work::default()));
+            }
+            let Work { rows, .. } = &mut w.as_mut().expect("the thread's buffers").1;
+            model.lifted(rows, psi, turn.as_ref(), self.t + s, &mut |g, group| {
+                let (m, [dx, dy, dz]) = &node.lift[g];
+                group.clear();
+                group.extend(m.data.iter().zip(&dx.data).zip(&dy.data).zip(&dz.data).enumerate().map(|(x, (((&z, &gx), &gy), &gz))| {
+                    if z == C64::ZERO && gx == C64::ZERO && gy == C64::ZERO && gz == C64::ZERO {
+                        return C64::ZERO;
+                    }
+                    let slope = gx * v[0] + gy * v[1] + gz * v[2];
+                    let turned = rows_turn[x / n] - cols_turn[x % n];
+                    z + (slope - C64::new(0.0, turned) * z) * s
+                }));
+                m.rows != 0
+            })
+        }))
+    }
+
     /// The light the state scatters at the middle beside the Ehrenfest force and the jumps (module documentation,
     /// # The photons).
     fn scattering(&self, path: &Path, psi: &[C64]) -> (Scattering, f64) {
-        let node = self.node(path, 0.0, false);
+        let node = self.node(path, 0.0);
         let n = self.states();
         let scattering = READS.with(|r| {
             let mut r = r.borrow_mut();
@@ -1798,8 +2051,9 @@ impl crate::step::Middle for SelectedMiddle<'_> {
         self.made.get()
     }
 
-    /// Ĝ_a(s) as matrices, and where asked their slope along the path at the middle: the envelopes' chord through the
-    /// outer nodes ±h of the step it is asked with and each beat's phase's derivative −iΩ.
+    /// Ĝ_a(s) as matrices in the frame, and where asked their slope along the path at the middle: the envelopes' chord
+    /// through the outer nodes ±h of the step it is asked with, each end in the frame there, and each beat's phase's
+    /// derivative −iΩ.
     fn gradient(&self, path: &Path, s: f64, g: &mut [Vec<C64>; 3], slope: Option<(f64, &mut [Vec<C64>; 3])>) -> f64 {
         assert!(s == 0.0 || slope.is_none(), "the gradient's slope at the middle (the step's optical sector's)");
         let n = self.states();
@@ -1822,20 +2076,29 @@ impl crate::step::Middle for SelectedMiddle<'_> {
                 }
             }
         };
-        let node = self.node(path, s, false);
+        let node = self.node(path, s);
         let (before, after) = match &slope {
-            Some((h, _)) => (Some(self.node(path, -h, false)), Some(self.node(path, *h, false))),
+            Some((h, _)) => (Some(self.node(path, -h)), Some(self.node(path, *h))),
             None => (None, None),
         };
         READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { phases, minus, turned, .. } = &mut *r;
             at(&node, s, false, phases, g);
+            if let Some(p) = self.turns(path, s) {
+                g.iter_mut().for_each(|x| SelectedMiddle::framed(&p, x));
+            }
             let mut counted = 3.0 * node.gradient.len() as f64 * (n * n) as f64;
             if let (Some((h, slope)), Some(before), Some(after)) = (slope, before, after) {
-                // The envelopes' chord at the middle's phases, and the phases' turn on the middle's envelopes.
+                // The envelopes' chord at the middle's phases, each end in the frame there, and the phases' turn on the
+                // middle's envelopes.
                 at(&before, 0.0, false, phases, minus);
                 at(&after, 0.0, false, phases, slope);
+                for (side, m) in [(-h, &mut *minus), (h, &mut *slope)] {
+                    if let Some(p) = self.turns(path, side) {
+                        m.iter_mut().for_each(|x| SelectedMiddle::framed(&p, x));
+                    }
+                }
                 for (p, m) in slope.iter_mut().zip(minus.iter()) {
                     p.iter_mut().zip(m).for_each(|(p, m)| *p = (*p - *m) / (2.0 * h));
                 }
