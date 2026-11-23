@@ -2756,6 +2756,60 @@ mod tests {
         assert_eq!(asked(&calls, "editor_facts"), refused);
     }
 
+    /// The rig with a node `switcher` open on it: a switch its board may not do, and `queries`.
+    fn switcher_rig(name: &str, queries: Value) -> (std::path::PathBuf, Workbench, Rc<RefCell<Calls>>, FakeHost) {
+        let mut catalog = catalog();
+        catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "switcher", "kind": "node", "label": "Switcher",
+            "parameters": [{"name": "switch", "type": "bool", "label": "Switch", "default": true}],
+            "node": {"node_kind": "measurement", "outputs": [], "queries": queries,
+                     "devices": [{"capability": "sequencer.streamer", "argument": "sequencer", "protected_fields": []}]}}));
+        let (root, mut wb, calls, mut host) = rig(name, catalog);
+        add_open_node(&mut wb, &mut host, json!({"type_id": "switcher"}));
+        (root, wb, calls, host)
+    }
+
+    /// The board says whether it can do the switch: not with the lanes of point 1.
+    fn switch_availability(facts: &Value) -> Result<Value, String> {
+        Ok(if facts["devices"]["sequencer"]["facts"] == trigger_lanes(1) { json!({"switch": "this board cannot"}) } else { json!({}) })
+    }
+
+    /// `admit` is asked in the same burst as availability, told the values as they then take effect.
+    /// The board changes and availability's answer turns the switch off: admit is asked again, told
+    /// the switch off, and a Start goes on it.
+    #[test]
+    fn an_availability_answer_that_switches_a_value_off_asks_admit_again() {
+        let (_root, mut wb, calls, mut host) = switcher_rig("availability", json!(["resolve_field_availability", "admit"]));
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "resolve_field_availability", switch_availability);
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "admit", |_| Ok(json!([])));
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "resolve_field_availability", switch_availability);
+        let admit = flight_of(&wb, "switcher", "admit").expect("admit asked again");
+        assert_eq!(told_to(&calls, admit)["values"]["switch"], false);
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "switcher"})).unwrap()["phase"], "checking");
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "admit", |_| Ok(json!([])));
+        assert_eq!(calls.borrow().1.last().map(|run| (run.run.clone(), run.values["switch"].clone())), Some(("switcher#1".to_owned(), json!(false))));
+    }
+
+    /// camera_measurement's shape: availability, defaults and admit. Availability's question is
+    /// refused once, so it lands after defaults (admit re-stamped meanwhile); its answer turns the
+    /// switch off: admit is asked again then, and a Start goes on it.
+    #[test]
+    fn an_availability_answer_landing_after_defaults_asks_admit_again() {
+        let (_root, mut wb, calls, mut host) = switcher_rig("availability-defaults", json!(["resolve_field_availability", "resolve_defaults", "admit"]));
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "resolve_field_availability", switch_availability);
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "resolve_defaults", |_| Ok(json!({})));
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "admit", |_| Ok(json!([])));
+        event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(1) }, &mut host);
+        let refused = flight_of(&wb, "switcher", "resolve_field_availability").unwrap();
+        event(&mut wb, Event::Unanswered { ticket: refused, error: "refused: node/switcher already has 64 queued calls".into() }, &mut host);
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "resolve_defaults", |_| Ok(json!({})));
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "resolve_field_availability", switch_availability);
+        assert!(flight_of(&wb, "switcher", "admit").is_some(), "admit asked again");
+        assert_eq!(apply(&mut wb, &mut host, "start_node", json!({"node": "switcher"})).unwrap()["phase"], "checking");
+        answer_asked(&mut wb, &mut host, &calls, "switcher", "admit", |_| Ok(json!([])));
+        assert_eq!(calls.borrow().1.last().map(|run| (run.run.clone(), run.values["switch"].clone())), Some(("switcher#1".to_owned(), json!(false))));
+    }
+
     #[test]
     fn completed_run_still_opens_first_preview() {
         let (_root,mut wb,_calls,mut host)=rig("audit-short-preview",catalog());

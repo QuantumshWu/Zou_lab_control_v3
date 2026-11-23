@@ -614,8 +614,12 @@ impl Workbench {
         let ask = node.asks.get(name);
         let newer = ask.is_some_and(|ask| ask.flying.is_some() || ask.waiting.is_some());
         let issue = match answer { Err(_) => true, Ok(Value::Array(found)) => [ADMIT, ADMIT_SOURCE].contains(&name) && !found.is_empty(), Ok(_) => false };
-        let told_other = name == ADMIT && ask.and_then(|ask| ask.told.as_ref()).is_some_and(|told| told.facts != self.admitted_facts(node));
-        (!(newer && issue) && !told_other).then_some(answer)
+        (!(newer && issue) && !(name == ADMIT && self.admitted_otherwise(node))).then_some(answer)
+    }
+
+    /// Whether `admit`'s newest answer was told other values than the draft now takes effect with.
+    fn admitted_otherwise(&self, node: &Node) -> bool {
+        node.asks.get(ADMIT).and_then(|ask| ask.told.as_ref()).is_some_and(|told| told.facts != self.admitted_facts(node))
     }
 
     /// The node's source frames `[axis_name, [labels...]]` (PLUGIN_PROTOCOL §2): what its
@@ -800,7 +804,6 @@ impl Workbench {
     /// The node's plugin answered a question (its code's answer: a failure of its code is one too).
     pub(crate) fn query_answered(&mut self, id: &str, ticket: u64, name: &str, result: Result<Value, String>, host: &mut dyn Host) {
         let mut changed = None;
-        let mut readmit = false;
         if let Ok(node) = self.node_mut(id) {
             let rechecked = node.rechecked;
             let ask = node.asks.entry(name.to_owned()).or_default();
@@ -817,11 +820,8 @@ impl Workbench {
                     ask.told = Some(asked);
                     let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
                     let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
-                    let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
                     // Its readers are told the frames, not the check: the same frames under a new one tell them nothing.
                     changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
-                    // Defaults the node fills in change what its schema admits: ask that again.
-                    readmit = name == "resolve_defaults" && fresh;
                 }
             }
         }
@@ -830,8 +830,17 @@ impl Workbench {
             let readers: Vec<String> = self.nodes.iter().filter(|node| node.draft.source_signal == signal).map(|node| node.id.clone()).collect();
             for reader in readers { self.ask_again(&reader, None); }
         }
-        if readmit { self.ask_again(id, Some(&[ADMIT])); }
+        self.readmit(id);
         self.start_checked(id, host);
+    }
+
+    /// `admit` is asked again when what it was last told is not what the draft now takes effect
+    /// with -- an answer filled in defaults, or switched off what a device cannot do -- and none of
+    /// it is in flight or waiting: after any answer, and when a Start waits.
+    fn readmit(&mut self, id: &str) {
+        let Some(node) = self.node(id) else { return };
+        let idle = node.asks.get(ADMIT).is_some_and(|ask| ask.flying.is_none() && ask.waiting.is_none());
+        if idle && self.admitted_otherwise(node) { self.ask_again(id, Some(&[ADMIT])); }
     }
 
     /// A question (a draft query, a region's) its plugin's code did not answer -- refused or expired
@@ -1272,6 +1281,7 @@ impl Workbench {
                 self.node_mut(id)?.start_after_check = Some((origin.to_owned(), acquisition, from));
                 // A Start is a boundary, as a Check is: what waits to be asked goes.
                 self.resume_asks(id);
+                self.readmit(id);
                 return Ok(json!({"node": id, "phase": "checking"}));
             }
             if let Some(first) = issues.first() {
