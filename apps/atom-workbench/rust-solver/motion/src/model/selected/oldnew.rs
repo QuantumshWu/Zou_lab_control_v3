@@ -14,7 +14,7 @@ use crate::model::rs::fold::pairs::Pairs;
 use crate::model::rs::fold::Values;
 use crate::step::Dynamics;
 
-fn request_of(name: &str) -> Request {
+pub(super) fn request_of(name: &str) -> Request {
     let files = [("PGC3D", "PGC3D_1ms.json"), ("TET", "TET_1ms.json"), ("R4", "R4_LIN_4.json"), ("GMD1C", "GMD1C_1ms.json"), ("tilt0", "tilt0.json"), ("tilt2", "tilt2.json")];
     let file = files.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no request {name}")).1;
     let dir = std::path::PathBuf::from(std::env::var("V3C_REQ").expect("V3C_REQ: the requests' folder"));

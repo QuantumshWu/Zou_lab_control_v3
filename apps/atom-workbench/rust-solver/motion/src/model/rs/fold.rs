@@ -34,6 +34,11 @@ use crate::floquet::Sectors;
 /// The folded blocks tabled in the tweezer's intensity (fold_table.rs).
 #[path = "fold_table.rs"]
 pub(crate) mod table;
+/// The node's contraction off tables of pair products (fold_tabled.rs): built and checked element by element against
+/// the node (model/selected/tabled.rs); no node of a run reads it yet (BRIEF_STEP3 item 4 (b)).
+#[cfg(test)]
+#[path = "fold_tabled.rs"]
+pub(crate) mod tabled;
 /// OLDNEW's budget check (tests alone): where above zero, every folded block's denominators taken as their Doppler
 /// series' first DOPPLER_ORDERS terms about the pieces' frequencies at rest (`REST`, put in by `Rs::evaluate`) in place
 /// of the exact reciprocal -- the series a table of pair products would hold, its tail what the budget books.
@@ -1728,18 +1733,8 @@ impl Out {
     pub fn contract(&mut self, plan: &Plan, grouping: &Grouping, local: &Local, weights: Option<&[C64]>, making: Making) {
         let n = plan.n;
         let weight = |p: usize| weights.map_or(C64::ONE, |w| w[p]);
-        let mut work = 0.0;
-        self.h.resize_with(grouping.outputs.len(), Default::default);
-        self.channels.resize_with(grouping.channel_outputs.len(), Default::default);
-        self.lift.resize_with(grouping.labels.len(), Default::default);
-        for (c, list) in self.h.iter_mut().zip(&grouping.lists) {
-            c.zeroed(list.len());
-        }
-        for (c, list) in self.channels.iter_mut().zip(&grouping.channel_lists) {
-            c.zeroed(list.len());
-        }
-        // The outputs zeroed: each element its value and three gradients.
-        work += 4.0 * MOVED * grouping.lists.iter().chain(&grouping.channel_lists).map(Vec::len).sum::<usize>() as f64;
+        let v = &local.values;
+        let mut work = self.direct(plan, grouping, v, &weight, making);
         self.made = usize::MAX;
         // The amplitudes' sums, block by block side by side, then M = V Ẑ: two products a block.
         let nb = plan.blocks.len();
@@ -1794,74 +1789,8 @@ impl Out {
                 work += (size * size * 3 * width) as f64;
             }
         }
-        let v = &local.values;
-        // A piece's terms' factors with their scales and the piece's weight, once a piece.
-        let factors = |tf: &mut Vec<(C64, [C64; 3], bool)>, p: usize| {
-            let w = weight(p);
-            tf.clear();
-            tf.extend(plan.terms[p].iter().map(|&(f, s)| {
-                let (x, g) = v.factors[f];
-                let c = s * w;
-                (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
-            }));
-        };
-        // The direct entries spanned (`Grouping::spanned`): per output its coordinates at the point -- each atom's factor,
-        // scale, weight and coefficient on its coordinates --, then the basis at them.
-        for d in &grouping.spans {
-            if (d.h && !(making.model && making.effective)) || (!d.h && (!making.model || (d.which == 1 && !making.kicks))) {
-                continue;
-            }
-            self.span.clear();
-            self.span.resize(d.basis.len(), (C64::ZERO, [C64::ZERO; 3]));
-            for (piece, term, coefficient, coords) in &d.atoms {
-                let k = v.coefficients[*coefficient];
-                if k == 0.0 {
-                    continue;
-                }
-                let (f, scale) = plan.terms[*piece][*term];
-                let (x, g) = v.factors[f];
-                let c = scale * weight(*piece) * k;
-                let (x, dx) = (x * c, g.map(|d| d * c));
-                for (sum, z) in self.span.iter_mut().zip(coords) {
-                    sum.0 += *z * x;
-                    for a in 0..3 {
-                        sum.1[a] += *z * dx[a];
-                    }
-                }
-            }
-            // The coordinates zeroed; per atom its factor, scale, weight and coefficient (four products with the gradients).
-            work += 4.0 * MOVED * d.basis.len() as f64 + 4.0 * d.atoms.len() as f64;
-            let o = if d.h { &mut self.h[d.out] } else { &mut self.channels[d.out] };
-            for (sum, b) in self.span.iter().zip(&d.basis) {
-                for (&place, z) in d.places.iter().zip(b) {
-                    o.value[place] += sum.0 * *z;
-                    for a in 0..3 {
-                        o.gradient[a][place] += sum.1[a] * *z;
-                    }
-                }
-            }
-            // Each coordinate an atom's value and three gradients, each place a basis vector's.
-            work += 4.0 * (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
-        }
-        let spanned = !grouping.spans.is_empty();
         if making.model && making.effective {
-            // H_eff: the direct slow entries, then the pairs, ½ and the conjugate.
-            for p in (0..plan.hamiltonian).filter(|_| !spanned) {
-                factors(&mut self.tf, p);
-                let o = &mut self.h[grouping.h_direct[p]];
-                for ((e, _), &k) in plan.direct[p].iter().zip(&grouping.h_direct_places[p]) {
-                    let (x, dx, moving) = self.tf[e.term as usize];
-                    let c = e.value * v.coefficients[e.coefficient as usize];
-                    let k = k as usize;
-                    o.value[k] += x * c;
-                    if moving {
-                        for (g, d) in o.gradient.iter_mut().zip(dx) {
-                            g[k] += d * c;
-                        }
-                    }
-                }
-                work += direct_work(&self.tf, &plan.direct[p]);
-            }
+            // H_eff's pairs, ½ and the conjugate.
             for pair in &grouping.h_pairs {
                 if !plan.made(grouping.ws[pair.w].block, true) {
                     continue;
@@ -1897,29 +1826,7 @@ impl Out {
             }
         }
         if making.model {
-            // The jumps: direct entries, then the pairs, each whole in its channel.
-            for p in plan.hamiltonian..plan.keys.len() {
-                let (_, which) = plan.jump[p].unwrap();
-                if which == 1 && !making.kicks {
-                    continue;
-                }
-                if spanned && which == 0 {
-                    continue;
-                }
-                factors(&mut self.tf, p);
-                for ((e, _), &(o, k)) in plan.direct[p].iter().zip(&grouping.j_direct[p - plan.hamiltonian]) {
-                    let (x, dx, moving) = self.tf[e.term as usize];
-                    let c = e.value * v.coefficients[e.coefficient as usize];
-                    let (o, k) = (&mut self.channels[o], k as usize);
-                    o.value[k] += x * c;
-                    if moving {
-                        for (g, d) in o.gradient.iter_mut().zip(dx) {
-                            g[k] += d * c;
-                        }
-                    }
-                }
-                work += direct_work(&self.tf, &plan.direct[p]);
-            }
+            // The jumps' pairs, each whole in its channel.
             for pair in &grouping.j_pairs {
                 if (grouping.ws[pair.w].jump.is_some_and(|(_, which)| which == 1) && !making.kicks) || !plan.made(grouping.ws[pair.w].block, true) {
                     continue;
@@ -2031,6 +1938,165 @@ impl Out {
         ((stacked + 3 * rows) * size * width) as f64
     }
 
+    /// The outputs zeroed and the direct entries put in (`contract`'s and the tables' node's, rs/fold_tabled.rs): the
+    /// spanned outputs (`Grouping::spanned`) at their coordinates, the entries no span holds one by one -- H's where
+    /// `making` asks for H, a jump's where for the model (its photon forms' where for the kicks). Each output's direct
+    /// entries come before its pairs. Returns the counted complex multiply-adds.
+    pub(crate) fn direct(&mut self, plan: &Plan, grouping: &Grouping, v: &Values, weight: &dyn Fn(usize) -> C64, making: Making) -> f64 {
+        let mut work = 0.0;
+        self.h.resize_with(grouping.outputs.len(), Default::default);
+        self.channels.resize_with(grouping.channel_outputs.len(), Default::default);
+        self.lift.resize_with(grouping.labels.len(), Default::default);
+        for (c, list) in self.h.iter_mut().zip(&grouping.lists) {
+            c.zeroed(list.len());
+        }
+        for (c, list) in self.channels.iter_mut().zip(&grouping.channel_lists) {
+            c.zeroed(list.len());
+        }
+        // The outputs zeroed: each element its value and three gradients.
+        work += 4.0 * MOVED * grouping.lists.iter().chain(&grouping.channel_lists).map(Vec::len).sum::<usize>() as f64;
+        // A piece's terms' factors with their scales and the piece's weight, once a piece.
+        let factors = |tf: &mut Vec<(C64, [C64; 3], bool)>, p: usize| {
+            let w = weight(p);
+            tf.clear();
+            tf.extend(plan.terms[p].iter().map(|&(f, s)| {
+                let (x, g) = v.factors[f];
+                let c = s * w;
+                (x * c, g.map(|d| d * c), g.iter().any(|d| *d != C64::ZERO))
+            }));
+        };
+        // The direct entries spanned (`Grouping::spanned`): per output its coordinates at the point -- each atom's factor,
+        // scale, weight and coefficient on its coordinates --, then the basis at them.
+        for d in &grouping.spans {
+            if (d.h && !(making.model && making.effective)) || (!d.h && (!making.model || (d.which == 1 && !making.kicks))) {
+                continue;
+            }
+            self.span.clear();
+            self.span.resize(d.basis.len(), (C64::ZERO, [C64::ZERO; 3]));
+            for (piece, term, coefficient, coords) in &d.atoms {
+                let k = v.coefficients[*coefficient];
+                if k == 0.0 {
+                    continue;
+                }
+                let (f, scale) = plan.terms[*piece][*term];
+                let (x, g) = v.factors[f];
+                let c = scale * weight(*piece) * k;
+                let (x, dx) = (x * c, g.map(|d| d * c));
+                for (sum, z) in self.span.iter_mut().zip(coords) {
+                    sum.0 += *z * x;
+                    for a in 0..3 {
+                        sum.1[a] += *z * dx[a];
+                    }
+                }
+            }
+            // The coordinates zeroed; per atom its factor, scale, weight and coefficient (four products with the gradients).
+            work += 4.0 * MOVED * d.basis.len() as f64 + 4.0 * d.atoms.len() as f64;
+            let o = if d.h { &mut self.h[d.out] } else { &mut self.channels[d.out] };
+            for (sum, b) in self.span.iter().zip(&d.basis) {
+                for (&place, z) in d.places.iter().zip(b) {
+                    o.value[place] += sum.0 * *z;
+                    for a in 0..3 {
+                        o.gradient[a][place] += sum.1[a] * *z;
+                    }
+                }
+            }
+            // Each coordinate an atom's value and three gradients, each place a basis vector's.
+            work += 4.0 * (d.atoms.len() * d.basis.len() + d.basis.len() * d.places.len()) as f64;
+        }
+        let spanned = !grouping.spans.is_empty();
+        if making.model && making.effective {
+            // H_eff's direct slow entries.
+            for p in (0..plan.hamiltonian).filter(|_| !spanned) {
+                factors(&mut self.tf, p);
+                let o = &mut self.h[grouping.h_direct[p]];
+                for ((e, _), &k) in plan.direct[p].iter().zip(&grouping.h_direct_places[p]) {
+                    let (x, dx, moving) = self.tf[e.term as usize];
+                    let c = e.value * v.coefficients[e.coefficient as usize];
+                    let k = k as usize;
+                    o.value[k] += x * c;
+                    if moving {
+                        for (g, d) in o.gradient.iter_mut().zip(dx) {
+                            g[k] += d * c;
+                        }
+                    }
+                }
+                work += direct_work(&self.tf, &plan.direct[p]);
+            }
+        }
+        if making.model {
+            // The jumps' direct entries, each whole in its channel.
+            for p in plan.hamiltonian..plan.keys.len() {
+                let (_, which) = plan.jump[p].unwrap();
+                if which == 1 && !making.kicks {
+                    continue;
+                }
+                if spanned && which == 0 {
+                    continue;
+                }
+                factors(&mut self.tf, p);
+                for ((e, _), &(o, k)) in plan.direct[p].iter().zip(&grouping.j_direct[p - plan.hamiltonian]) {
+                    let (x, dx, moving) = self.tf[e.term as usize];
+                    let c = e.value * v.coefficients[e.coefficient as usize];
+                    let (o, k) = (&mut self.channels[o], k as usize);
+                    o.value[k] += x * c;
+                    if moving {
+                        for (g, d) in o.gradient.iter_mut().zip(dx) {
+                            g[k] += d * c;
+                        }
+                    }
+                }
+                work += direct_work(&self.tf, &plan.direct[p]);
+            }
+        }
+        work
+    }
+
+}
+
+#[cfg(test)]
+impl Out {
+    /// The lift's elements' moduli scales (the tests'): per group, of M = V Ẑ on Q × n as the lift lays it, |V| Σ_m |M̂_m|
+    /// -- the moduli of the terms each element is the sum of -- and its gradients' |V| Σ_m Σ_axis |∂M̂_m|.
+    pub(crate) fn lift_scales(plan: &Plan, grouping: &Grouping, local: &Local) -> Vec<(Mat, Mat)> {
+        let n = plan.n;
+        let mut out: Vec<(Mat, Mat)> = (0..grouping.labels.len()).map(|_| (Mat::zeros(plan.nq, n), Mat::zeros(plan.nq, n))).collect();
+        for (b, group, mine) in &grouping.lift {
+            let size = plan.blocks[*b].rows.len();
+            let vectors = &local.spectra[*b].vectors;
+            for &i in mine {
+                let s = &grouping.zs[i];
+                let cols = s.index.len();
+                let (mut z, mut dz) = (vec![0.0; size * cols], vec![0.0; size * cols]);
+                for (member, map) in &s.members {
+                    let (mb, off) = plan.place[*member];
+                    let (a, da) = (&local.m[mb], &local.dm[mb]);
+                    let total = a.cols;
+                    for k in 0..size {
+                        for &(from, to) in map {
+                            z[k * cols + to] += a.data[k * total + off + from].abs();
+                            for d in 0..3 {
+                                dz[k * cols + to] += da.data[k * 3 * total + d * total + off + from].abs();
+                            }
+                        }
+                    }
+                }
+                let (lv, lg) = &mut out[*group];
+                for (r, &row) in plan.blocks[*b].rows.iter().enumerate() {
+                    for (j, &a) in s.index.iter().enumerate() {
+                        let (mut x, mut y) = (0.0, 0.0);
+                        for k in 0..size {
+                            let v = vectors.data[r * size + k].abs();
+                            x += v * z[k * cols + j];
+                            y += v * dz[k * cols + j];
+                        }
+                        lv.data[row * n + a] += C64::real(x);
+                        lg.data[row * n + a] += C64::real(y);
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// A pair's slices of its leg sum's products (`Out::product`): [X; ∂X] M and X ∂M, the sum's rows, the block's width,
