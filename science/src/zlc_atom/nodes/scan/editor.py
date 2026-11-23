@@ -24,6 +24,7 @@ from .plan import (
     DEVICE_PARAM_FAMILY,
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
+    PortGrid,
     ScanPort,
     ambiguous_api_value,
     api_overrides_from_authored,
@@ -240,17 +241,20 @@ def _api(pulse: Mapping[str, object], rows: Sequence[Mapping], text: object) -> 
         if name in scanned:
             continue
         code = bool(field.get("is_dac"))
+        # A field whose grid is whole (a count, a DAC code) is a whole-number box.
+        whole = PortGrid.of(field["grid"]).whole
+        number_of = int if whole else float
         low, high = field["limit_lo"], field["limit_hi"]
         number = overrides.get(name, authored[name][0])
         shown.append({
-            "name": name, "label": labels[name], "kind": "integer" if code else "number",
+            "name": name, "label": labels[name], "kind": "integer" if whole else "number",
             "unit": "" if code else authored[name][1], "units": [] if code else _ladder(authored[name][1]),
             "families": {} if code else _families(symbol for symbol, _decade in _ladder(authored[name][1])),
             "description": name,
-            "minimum": int(low) if code else float(low),
-            "maximum": int(high) if code else float(high),
-            "authored": int(authored[name][0]) if code else authored[name][0],
-            "value": int(number) if code else number,
+            "minimum": number_of(low),
+            "maximum": number_of(high),
+            "authored": number_of(authored[name][0]),
+            "value": number_of(number),
             "unavailable_reason": (
                 "swept by the scan plan; the value shown is kept for when its axis is taken out of the plan"
                 if name in walked and name in overrides

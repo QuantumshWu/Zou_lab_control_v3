@@ -143,6 +143,19 @@ class ScanEditorFacts(unittest.TestCase):
         fine = {**values, 'plan': json.dumps({'axes': [{'port': 'api:bracket_count:loop', 'unit': 'count', 'values': [1.4, 2.6]}]})}
         self.assertEqual(_admit_resources(fine, resources), ())
 
+    def test_a_repeat_count_is_a_whole_number_box_and_a_fraction_written_for_it_is_a_draft_issue(self):
+        resources = {SEAMLESS_PULSE_RESOURCE.field_name: REPEATS}
+        field, = scan_editor_facts({'plan': '', 'api_values': ''}, REPEATS, ())['api']['fields']
+        self.assertEqual({key: field[key] for key in ('kind', 'minimum', 'maximum', 'authored', 'value', 'unit')},
+                         {'kind': 'integer', 'minimum': 1, 'maximum': 4294967295, 'authored': 2, 'value': 2, 'unit': 'count'})
+        self.assertIsInstance(field['value'], int)
+        draft = {'plan': json.dumps({'axes': [{'port': 'manual:power', 'values': [1.0]}]}), 'repeats': 1, 'shots_per_point': 1}
+        for written, issue in (('bracket_count:loop = 2.5', "API value 'bracket_count:loop' is 2.5: bracket_count:loop takes whole numbers"),
+                               ('Loop.repeats = 2.5', "API value 'Loop.repeats' is 2.5: bracket_count:loop takes whole numbers"),
+                               ('bracket_count:loop = 3', None)):
+            issues = _admit_resources({**draft, 'api_values': written}, resources)
+            self.assertEqual(issues, () if issue is None else (issue,), written)
+
 
 if __name__ == '__main__':
     unittest.main()

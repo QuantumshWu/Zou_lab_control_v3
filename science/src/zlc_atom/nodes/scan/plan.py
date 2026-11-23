@@ -667,7 +667,8 @@ def resolve_api_overrides(
     declare.
 
     A name may be a field id or a label one field answers to; a label two
-    fields answer to is refused (:func:`ambiguous_api_value`).  A name the
+    fields answer to is refused (:func:`ambiguous_api_value`), and so is a
+    value that is not whole for a field that takes whole numbers.  A name the
     pulse does not declare -- a value kept from another pulse, or for a field
     its Subpulse file no longer offers -- is parked: applied to nothing and
     returned, so the run record names it as not applied, as the editor shows
@@ -676,6 +677,8 @@ def resolve_api_overrides(
 
     fields = pulse_description(description)["api_fields"]
     declared = {field["field_id"]: str(field["unit"]) for field in fields}
+    # A field whose grid is whole (a count, a DAC code) takes a whole number.
+    whole = {field["field_id"] for field in fields if PortGrid.of(field["grid"]).whole}
     labelled: dict[str, list[str]] = {}
     for field in fields:
         labelled.setdefault(str(field["label"]), []).append(field["field_id"])
@@ -691,6 +694,8 @@ def resolve_api_overrides(
         else:
             unapplied[name] = float(value)
             continue
+        if field_id in whole and not float(value).is_integer():
+            raise ValueError(f"API value {name!r} is {float(value):g}: {field_id} takes whole numbers")
         applied[field_id] = (float(value), declared[field_id])
     return applied, unapplied
 
