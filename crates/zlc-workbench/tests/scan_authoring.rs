@@ -18,12 +18,14 @@ fn on_ports(document: Value, mode: &str, ports: Value) -> Result<Value, String> 
 }
 
 /// A bracket's repeat count (zlc-pulse's description of it: 1..2^32-1, whole, halves to even),
-/// a duration on a 20 ns clock (at least one tick) and a device frequency on no grid.
+/// a duration on a 20 ns clock (at least one tick) and device frequencies on no grid.
 fn bench() -> Value {
     json!([
         {"port":"api:bracket_count:loop","unit":"count","lo":1.0,"hi":4294967295.0,"grid":{"step":1.0,"ties":"even"}},
         {"port":"api:duration:hold","unit":"s","lo":2e-8,"hi":85.89934590,"grid":{"step":2e-8,"ties":"away"}},
         {"port":"device:rf:frequency","unit":"Hz","lo":1e6,"hi":1e9,"grid":null},
+        {"port":"device:rf:carrier","unit":"Hz","lo":5e8,"hi":8e9,"grid":null},
+        {"port":"device:dds:frequency","unit":"MHz","lo":1.0,"hi":1000.0,"grid":null},
     ])
 }
 
@@ -242,7 +244,17 @@ fn a_linked_formula_follows_the_played_axis_onto_its_own_ports_grid() {
     // Two counts the clock makes one duration (0.051 and 0.061 us are both 3 ticks): the dataset
     // cannot tell them apart, and the plan says so.
     let compiled = on_ports(document("x / 100 + 0.021"), "preview", bench()).unwrap();
-    assert!(compiled["problem"].as_str().unwrap().contains("alternative coordinates must be unique"), "{}", compiled["problem"]);
+    let problem = compiled["problem"].as_str().unwrap();
+    assert!(problem.contains("its knob's grid made them one") && problem.contains("alternative coordinates must be unique"), "{problem}");
+    // A count following a device knob (1.0, 1.4, 1.6 MHz) by x: 1.4 is a count of 1 as well.
+    let following = json!({"axes":[{"port":"device:dds:frequency","values":[1.0, 1.4, 1.6],"unit":"MHz","link_enabled":true,"links":[
+        {"port":"api:bracket_count:loop","mode":"formula","formula":"x","unit":"count"}]}]});
+    let problem = on_ports(following, "compile", bench()).unwrap_err();
+    assert!(problem.contains("\"api:bracket_count:loop\" plays 1 count at two points of its linked group, written 1 count and 1.4 count"), "{problem}");
+    // A repeat as written is the plan's own, refused as before, its axis not called a linked one.
+    let written = json!({"axes":[{"port":"pulse:param:A","values":[1, 1]},{"port":"pulse:param:B","values":[5, 6],"coordinate_of":"pulse:param:A"}]});
+    let problem = compile(written, "compile").unwrap_err();
+    assert!(problem.contains("axis \"pulse:param:A\" of a linked group repeats a coordinate") && !problem.contains("linked axis"), "{problem}");
 }
 
 /// Points a port's grid makes one are played once (the user's choice of 2026-11-23: no
@@ -263,6 +275,35 @@ fn points_the_grid_makes_one_are_played_once() {
     let compiled = on_ports(twice, "preview", bench()).unwrap();
     assert_eq!(values(&compiled, 0), [2.0, 2.0], "the 2 written twice plays twice; 2.4 and 1.6 were 2 only on the grid");
     assert_eq!(compiled["axis_facts"][0]["played"], json!({"first":2.0,"last":2.0,"count":2,"written":4,"moved":2,"distinct":1}));
+}
+
+/// What lies on a port's grid as written, and every value of a knob without one, plays as written
+/// and is not moved, whatever binary noise a Range's arithmetic or a unit's conversion carries:
+/// a point is moved only where the decimal written is not on the grid.
+#[test]
+fn a_value_on_the_grid_or_a_knob_without_one_plays_as_written() {
+    let range = |port: &str, unit: &str, start: f64, stop: f64, count: usize| json!({"axes":[{"port":port,"values":[],
+        "range":{"start":start,"stop":stop,"count":count},"unit":unit,"mode":"range","value_text":""}]});
+    for document in [range("api:duration:hold", "us", 0.1, 1.0, 10), range("api:duration:hold", "us", 0.02, 0.2, 10),
+                     range("api:bracket_count:loop", "", 1.0, 9.0, 5), range("device:rf:carrier", "GHz", 6.734, 6.934, 11),
+                     range("device:dds:frequency", "kHz", 100.1, 200.3, 37)] {
+        let compiled = on_ports(document.clone(), "preview", bench()).unwrap();
+        let played = &compiled["axis_facts"][0]["played"];
+        assert_eq!((played["moved"].as_u64(), played["count"].clone(), played["written"].clone()), (Some(0), document["axes"][0]["range"]["count"].clone(),
+            document["axes"][0]["range"]["count"].clone()), "{document}");
+        assert_eq!(values(&compiled, 0), values(&compile(document.clone(), "compile").unwrap(), 0), "as written: {document}");
+    }
+}
+
+/// A point the grid did not move plays wherever it stands; one it moved onto another's value is
+/// dropped -- whether that other comes before it or after -- and a return to a value is kept.
+#[test]
+fn a_point_the_grid_did_not_move_always_plays() {
+    for (text, played) in [("1, 1.4, 1", vec![1.0, 1.0]), ("1.4, 1, 1", vec![1.0, 1.0]), ("1.4, 1, 2, 1", vec![1.0, 2.0, 1.0]),
+                           ("1.4, 1.2", vec![1.0]), ("1.4, 1.4", vec![1.0, 1.0])] {
+        let document = json!({"axes":[{"port":"api:bracket_count:loop","values":[],"unit":"","mode":"values","value_text":text}]});
+        assert_eq!(values(&on_ports(document, "compile", bench()).unwrap(), 0), played, "{text}");
+    }
 }
 
 #[test]

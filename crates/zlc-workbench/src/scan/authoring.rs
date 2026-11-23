@@ -6,10 +6,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 use zlc_core::decimal::Decimal;
 use zlc_core::scan::{AxisSpec, Plan, PlanSpec, Result, number_key};
-use zlc_core::units::DEFAULT_UNITS;
+use zlc_core::units::{DEFAULT_UNITS, Unit};
 use zlc_pulse::domain::{Domain, Grid, Ties};
+use zlc_pulse::exact::Decimal as Exact;
 
 const MAX_RANGE_POINTS: usize = 100_000;
 
@@ -297,35 +299,64 @@ fn ports(args: &Value) -> Result<HashMap<String, Port>> {
     }).collect()
 }
 
-/// One number in another unit, a prefix moving its decimal point (UnitRegistry::convert_decimal).
-fn convert(value: f64, source: &str, target: &str) -> Option<f64> {
-    if source == target { return Some(value); }
-    let (source, target) = (DEFAULT_UNITS.resolve(source).ok()?, DEFAULT_UNITS.resolve(target).ok()?);
-    Some(DEFAULT_UNITS.convert_decimal(&Decimal::from_repr(value)?, &source, &target).ok()?.to_f64()).filter(|v| v.is_finite())
+/// A number as the decimal it is written as: its f64::DIGITS significant digits, all a float
+/// holds faithfully, so the binary noise of a Range's or a formula's arithmetic, or of a unit's
+/// conversion, is not read as a value of its own.
+fn written(value: f64) -> String { format!("{value:.*e}", f64::DIGITS as usize - 1) }
+
+/// Where a point stands, as points are told apart: the number its written decimal is.
+fn point_key(value: f64) -> u64 { number_key(written(value).parse().expect("a written decimal is a float")) }
+
+/// How an axis's values reach its port's grid: the port's domain, and the axis's unit and the
+/// port's as the registry reads them, once for the axis (None: one unit).
+struct Reading<'a> { domain: &'a Domain, units: Option<(Arc<Unit>, Arc<Unit>)> }
+
+/// None where every value plays as written: a port without a grid, or a unit the registry
+/// cannot read (the binding refuses that by name).
+fn reading<'a>(port: &'a Port, unit: &str) -> Option<Reading<'a>> {
+    port.domain.grid?;
+    let unit = if unit.is_empty() { port.unit.as_str() } else { unit };
+    let units = if unit == port.unit { None } else { Some((DEFAULT_UNITS.resolve(unit).ok()?, DEFAULT_UNITS.resolve(&port.unit).ok()?)) };
+    Some(Reading { domain: &port.domain, units })
 }
 
-/// `value`, authored in `unit` (empty: the port's), as the port plays it, read back in `unit`.
-/// A value the port cannot read, or outside its bounds, stays as written: the binding refuses it.
-fn on_port(port: &Port, unit: &str, value: f64) -> f64 {
-    let unit = if unit.is_empty() { port.unit.as_str() } else { unit };
-    match convert(value, unit, &port.unit) {
-        Some(native) if port.domain.holds(native) => convert(port.domain.quantize(native), &port.unit, unit).unwrap_or(value),
-        _ => value,
+impl Reading<'_> {
+    /// A written decimal in the port's unit (`back`: from it), a prefix moving its decimal point
+    /// (UnitRegistry::convert_decimal).
+    fn convert(&self, text: &str, back: bool) -> Option<String> {
+        let Some((axis, port)) = &self.units else { return Some(text.to_owned()) };
+        let (source, target) = if back { (port, axis) } else { (axis, port) };
+        let converted = DEFAULT_UNITS.convert_decimal(&Decimal::parse(text)?, source, target).ok()?.to_f64();
+        converted.is_finite().then(|| written(converted))
+    }
+
+    /// `value` as the port plays it, in the axis's unit, and whether the port moved it: the
+    /// grid point of the decimal written, or the value as written where that is on the grid
+    /// already. A value outside the port's bounds stays as written: the binding refuses it.
+    fn on_port(&self, value: f64) -> (f64, bool) {
+        let Some(native) = self.convert(&written(value), false).and_then(|text| Exact::parse(&text)) else { return (value, false) };
+        if !self.domain.holds(native.to_f64()) { return (value, false); }
+        let placed = self.domain.place(&native);
+        if placed == native { return (value, false); }
+        let text = format!("{}{}e{}", if placed.negative { "-" } else { "" }, placed.mantissa.to_decimal(), placed.exponent);
+        match self.convert(&text, true).and_then(|text| text.parse::<f64>().ok()) { Some(back) => (back, true), None => (value, false) }
     }
 }
 
-/// One axis as it plays: every value as written, and those it plays (`spec.values`), each on
-/// its port's domain; `moved` of the written ones are not played as written.
-struct Played { spec: AxisSpec, written: Vec<f64>, moved: usize }
+/// One axis as it plays: the values it plays (`spec.values`), each on its port's domain, and
+/// for each of them where it stood as written (`point_key`) and whether the domain moved it;
+/// `points` were written, `moves` of them moved.
+struct Played { spec: AxisSpec, written: Vec<u64>, moved: Vec<bool>, points: usize, moves: usize }
 
 fn played(row: &Value, written: Vec<f64>, parent: Option<String>, ports: &HashMap<String, Port>) -> Result<Played> {
-    let unit = row["unit"].as_str().unwrap().trim();
-    let values: Vec<f64> = match ports.get(row["port"].as_str().unwrap()) {
-        Some(port) => written.iter().map(|value| on_port(port, unit, *value)).collect(),
-        None => written.clone(),
+    let reading = ports.get(row["port"].as_str().unwrap()).and_then(|port| reading(port, row["unit"].as_str().unwrap().trim()));
+    let (values, moved): (Vec<f64>, Vec<bool>) = match &reading {
+        Some(reading) => written.iter().map(|value| reading.on_port(*value)).unzip(),
+        None => (written.clone(), vec![false; written.len()]),
     };
-    let moved = values.iter().zip(&written).filter(|(played, written)| number_key(**played) != number_key(**written)).count();
-    Ok(Played { spec: axis(row, values, parent)?, written, moved })
+    let moves = moved.iter().filter(|moved| **moved).count();
+    Ok(Played { spec: axis(row, values, parent)?, written: written.iter().map(|value| point_key(*value)).collect(), moved,
+                points: written.len(), moves })
 }
 
 /// A row as it plays: its axis, then each linked parameter -- its formula of what the axis
@@ -345,34 +376,64 @@ fn play(row: &Value, ports: &HashMap<String, Port>) -> RowPlay {
     RowPlay { axis, links }
 }
 
-/// Points a port's grid made one: a point that plays what an earlier point of its group
-/// plays, written otherwise, is played once, at the first (the axis and every coordinate
-/// linked to it lose it together). A point written twice still plays twice.
-fn merge(plays: &mut [RowPlay]) {
-    let mut axes: Vec<&mut Played> = plays.iter_mut().flat_map(|row| row.axis.iter_mut().chain(row.links.iter_mut().flatten())).collect();
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    for (index, axis) in axes.iter().enumerate() {
+/// The plan's axes by group -- an axis with its linked parameters and coordinate_of rows --
+/// where a group's members are of one length (unequal lengths are Plan::new's to refuse).
+fn groups(plays: &mut [RowPlay]) -> Vec<Vec<&mut Played>> {
+    let mut groups: Vec<(String, Vec<&mut Played>)> = Vec::new();
+    for axis in plays.iter_mut().flat_map(|row| row.axis.iter_mut().chain(row.links.iter_mut().flatten())) {
         let key = axis.spec.coordinate_of.clone().unwrap_or_else(|| axis.spec.port.clone());
-        match groups.iter_mut().find(|(group, _)| *group == key) { Some((_, members)) => members.push(index), None => groups.push((key, vec![index])) }
+        match groups.iter_mut().find(|(group, _)| *group == key) { Some((_, members)) => members.push(axis), None => groups.push((key, vec![axis])) }
     }
-    for (_, members) in groups {
-        let length = axes[members[0]].written.len();
-        // Members of unequal lengths are Plan::new's to refuse.
-        if members.iter().any(|member| axes[*member].written.len() != length || axes[*member].spec.values.len() != length) { continue; }
-        let point = |at: usize, of: fn(&Played) -> &[f64]| -> Vec<u64> { members.iter().map(|member| number_key(of(&*axes[*member])[at])).collect() };
+    groups.into_iter().map(|(_, members)| members)
+        .filter(|members| members.iter().all(|axis| axis.spec.values.len() == members[0].spec.values.len())).collect()
+}
+
+/// Points a port's grid made one are played once. A point the grid moved (in any member of
+/// its group) is dropped where a point of the group the grid did not move plays what it plays,
+/// or where an earlier kept point written otherwise does. A point not moved always plays: a
+/// value written twice plays twice, and a return to a value is kept.
+fn merge(plays: &mut [RowPlay]) {
+    for mut members in groups(plays) {
+        let length = members[0].spec.values.len();
+        let played = |members: &[&mut Played], at: usize| -> Vec<u64> { members.iter().map(|axis| point_key(axis.spec.values[at])).collect() };
+        let written = |members: &[&mut Played], at: usize| -> Vec<u64> { members.iter().map(|axis| axis.written[at]).collect() };
+        let moved = |members: &[&mut Played], at: usize| members.iter().any(|axis| axis.moved[at]);
+        let unmoved: HashSet<Vec<u64>> = (0..length).filter(|at| !moved(&members, *at)).map(|at| played(&members, at)).collect();
         let mut first: HashMap<Vec<u64>, Vec<u64>> = HashMap::new();
-        let keep: Vec<bool> = (0..length).map(|at| {
-            let written = point(at, |axis| axis.written.as_slice());
-            *first.entry(point(at, |axis| axis.spec.values.as_slice())).or_insert_with(|| written.clone()) == written
-        }).collect();
-        for member in &members {
-            let values = &mut axes[*member].spec.values;
-            *values = values.iter().zip(&keep).filter(|(_, kept)| **kept).map(|(value, _)| *value).collect();
+        let keep: Vec<bool> = (0..length).map(|at| !moved(&members, at) || (!unmoved.contains(&played(&members, at))
+            && *first.entry(played(&members, at)).or_insert_with(|| written(&members, at)) == written(&members, at))).collect();
+        for axis in &mut members {
+            axis.spec.values = (0..length).filter(|at| keep[*at]).map(|at| axis.spec.values[at]).collect();
+            axis.written = (0..length).filter(|at| keep[*at]).map(|at| axis.written[at]).collect();
+            axis.moved = (0..length).filter(|at| keep[*at]).map(|at| axis.moved[at]).collect();
         }
     }
 }
 
-fn compile(rows: &[Value], plays: Vec<RowPlay>) -> Result<Plan> {
+/// A coordinate a grid made repeat under different points of one linked group: the dataset
+/// could not tell those points apart (a repeat as authored is Plan::new's to refuse).
+fn repeated(plays: &mut [RowPlay]) -> Option<String> {
+    for members in groups(plays).into_iter().filter(|members| members.len() > 1) {
+        let tuple = |at: usize| -> Vec<u64> { members.iter().map(|axis| point_key(axis.spec.values[at])).collect() };
+        for axis in &members {
+            let mut seen: HashMap<u64, usize> = HashMap::new();
+            for at in 0..axis.spec.values.len() {
+                let earlier = *seen.entry(point_key(axis.spec.values[at])).or_insert(at);
+                if tuple(earlier) != tuple(at) && (axis.moved[earlier] || axis.moved[at]) {
+                    let unit = if axis.spec.unit.is_empty() { String::new() } else { format!(" {}", axis.spec.unit) };
+                    let shown = |key: u64| format!("{}{unit}", f64::from_bits(key));
+                    return Some(format!("{:?} plays {} at two points of its linked group, written {} and {}: its knob's grid made \
+                        them one, and alternative coordinates must be unique", axis.spec.port, shown(point_key(axis.spec.values[at])),
+                        shown(axis.written[earlier]), shown(axis.written[at])));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn compile(rows: &[Value], mut plays: Vec<RowPlay>) -> Result<Plan> {
+    if let Some(problem) = repeated(&mut plays) { return Err(problem); }
     let mut axes = Vec::new();
     for (index, (row, play)) in rows.iter().zip(plays).enumerate() {
         let failed = |error: String| format!("scan axis {} ({:?}): {error}", index+1, row["port"].as_str().unwrap());
@@ -403,8 +464,8 @@ fn facts(row: &Value, play: &RowPlay) -> Value {
     // line) -- with how many points were written, how many of them the port moved and how many
     // distinct values play.
     let ends = |axis: &Played| { let values = &axis.spec.values;
-        json!({"first":values.first(),"last":values.last(),"count":values.len(),"written":axis.written.len(),"moved":axis.moved,
-            "distinct":values.iter().map(|value| number_key(*value)).collect::<HashSet<_>>().len()}) };
+        json!({"first":values.first(),"last":values.last(),"count":values.len(),"written":axis.points,"moved":axis.moves,
+            "distinct":values.iter().map(|value| point_key(*value)).collect::<HashSet<_>>().len()}) };
     let played = play.axis.as_ref().ok().filter(|axis| !axis.spec.values.is_empty());
     let links: Vec<Value> = play.links.iter().zip(row["links"].as_array().into_iter().flatten()).map(|(linked, link)| match linked {
         Ok(axis) => { let mut fact = ends(axis); fact["port"] = link["port"].clone(); fact["problem"] = json!(""); fact },
