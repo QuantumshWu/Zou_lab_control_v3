@@ -66,7 +66,7 @@ export class SelectionGrid {
             header.title = [spec.rowTips?.[row], this.options.labelAction?.title].filter(Boolean).join("\n");
             if (this.options.labelAction) {
                 header.classList.add("action");
-                header.addEventListener("click", () => this.rowAction(row, this.options.labelAction.value));
+                header.addEventListener("click", () => this.act(row, this.options.labelAction.value));
             }
             else if (!this.options.toggle)
                 header.addEventListener("pointerdown", event => this.headerPress(event, row, null));
@@ -92,7 +92,8 @@ export class SelectionGrid {
                     glyph.type = "button";
                     glyph.tabIndex = -1;
                     glyph.title = action.title;
-                    glyph.addEventListener("click", () => this.rowAction(row, action.value));
+                    glyph.disabled = !this.live();
+                    glyph.addEventListener("click", () => this.act(row, action.value));
                     nodes.push(glyph);
                 }
             }
@@ -119,12 +120,19 @@ export class SelectionGrid {
             cell.title = tips[name] ?? cell.querySelector(".card-name").textContent ?? "";
         }
     }
-    set disabled(disabled) { this.root.classList.toggle("disabled", disabled); }
+    /** Disabled, it takes no gesture and no row action (its ⋯ and × disabled too). */
+    set disabled(disabled) {
+        this.root.classList.toggle("disabled", disabled);
+        for (const action of this.root.querySelectorAll(".grid-action"))
+            action.disabled = disabled;
+    }
     paint() {
         for (const [name, cell] of this.cells)
             cell.classList.toggle("selected", this.selected.has(name));
     }
     live() { return !this.root.classList.contains("disabled"); }
+    act(row, value) { if (this.live())
+        this.rowAction(row, value); }
     cellPress(event, row, column) {
         if (event.button !== 0 || !this.live())
             return;

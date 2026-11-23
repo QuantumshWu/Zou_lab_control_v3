@@ -6,12 +6,12 @@
 // newest data; Direct producer opens the node that makes the signal; Save
 // figure writes the held picture and its archive (v2's inline group), and
 // asks before writing over either file.
-import { checked, command, confirmOverwrite, element, Field, form, note, PathEdit, Readout, row as settingRow, sectionTitle, Segmented, setChecked, shareLabelColumn, switchButton, wholeText, type Command } from "../fluent/index.js";
+import { assign, checked, command, confirmOverwrite, element, Field, form, note, PathEdit, Readout, row as settingRow, sectionTitle, Segmented, setChecked, shareLabelColumn, switchButton, wholeText, type Command } from "../fluent/index.js";
 import type { Panel } from "../protocol.js";
 import type { Transport } from "../transport.js";
 import type { LogicRow } from "../workbench.js";
 import type { PanelBoard, PanelView } from "./board.js";
-import { NodeEditors, READ_ONLY, editorModels } from "./node_editors/index.js";
+import { NodeEditors, READ_ONLY, editorModels, editorProblem, nodeModel } from "./node_editors/index.js";
 
 /** What the host says of an Edit's held read (state panels[].edit). */
 export type EditInfo = { panel: string; at_ms: number; revision: number; advanced: boolean; shape: number[]; status: string };
@@ -47,6 +47,8 @@ export class PanelEditView {
   /** ...but one the producer's own editor manages is drawn by that editor, read only, as its Logic
    * page draws it (v2's producer ui_contributions): a seamless scan's plan as its axis rows. */
   private producerEditors = new NodeEditors(READ_ONLY);
+  /** Why the producer's editor model could not be had for its draft, as its Logic page says it. */
+  private producerError = element("p", "field-error editor-error");
   private producerDrawn = element("div", "panel-edit-producer");
   private openProducer: Command;
   private producerNode = "";
@@ -87,7 +89,8 @@ export class PanelEditView {
     const producer = element("div", "card bordered panel-edit-card");
     const producerRow = element("div", "form-actions");
     producerRow.append(element("span", "spacer"), this.openProducer.root);
-    producer.append(sectionTitle("Direct producer"), this.producerText, this.producerForm, this.producerDrawn, producerRow);
+    this.producerError.hidden = true;
+    producer.append(sectionTitle("Direct producer"), this.producerText, this.producerForm, this.producerError, this.producerDrawn, producerRow);
     this.directory = new PathEdit(() => this.updateSave(), () => void this.chooseDirectory());
     this.autoName = switchButton(on => { setChecked(this.autoName, on); this.updateSave(); }, "Auto-name");
     setChecked(this.autoName, true);
@@ -208,9 +211,11 @@ export class PanelEditView {
     // editors that manages one draws what it manages (v2: a contribution whose managed fields meet
     // the linked ones), and the form the linked fields no editor draws.
     const linked = new Set(producer?.selector_fields ?? []);
-    const editors = this.producerEditors.reconcile(editorModels(producer?.editor_facts).filter(model => model.manages.some(name => linked.has(name))));
+    // Its model as its Logic page draws it (nodeModel): here read only in any case.
+    const model = producer ? nodeModel(producer) : { facts: null, kept: false };
+    const editors = this.producerEditors.reconcile(editorModels(model.facts).filter(item => item.manages.some(name => linked.has(name))));
     if (editors.length !== this.producerDrawn.children.length || editors.some((root, index) => this.producerDrawn.children[index] !== root)) this.producerDrawn.replaceChildren(...editors);
-    if (producer) this.producerEditors.update(producer, "Shown read only: Open producer to edit it");
+    if (producer) this.producerEditors.update(producer, "Shown read only: Open producer to edit it", model.kept);
     const drawn = new Set(this.producerEditors.models.flatMap(model => model.manages));
     const shown = (producer?.controls ?? []).filter(control => linked.has(control.name) && !drawn.has(control.name));
     for (const [name, field] of this.producerFields) if (!shown.some(control => control.name === name)) { field.root.remove(); this.producerFields.delete(name); }
@@ -222,6 +227,9 @@ export class PanelEditView {
       if (field.root.parentElement !== this.producerForm) this.producerForm.append(field.root);
     }
     this.producerForm.hidden = shown.length === 0;
+    const problem = producer ? editorProblem(producer) : "";
+    if (this.producerError.textContent !== problem) this.producerError.textContent = problem;
+    assign(this.producerError, "hidden", !problem);
     this.producerDrawn.hidden = editors.length === 0;
     // One label column down the page (v2 _share_label_column), measured when its words change: the forms'
     // labels, and the room the producer's editors keep in it (a scan's "By hand", its API values' room).

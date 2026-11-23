@@ -187,8 +187,10 @@ select:disabled::picker-icon { background: var(--placeholder); }
  * and the box's place is its place, in the same layout -- a dragged frame, a
  * scrolled form or a moved card takes it along.  A box scrolled out of sight
  * hides it.  A .drop list (a combo's) hangs below the box, or above it (.up)
- * capped at --drop-room, as combo.ts placeDrop chooses when it opens; at least
- * as wide as the box, flipped sideways to stay in the window.  A .beside popup
+ * capped at --drop-room, as combo.ts placeDrop chooses when it opens (a tree
+ * combo's list keeps its side and sets its cap again while open as its rows
+ * change: tree_combo.ts hold); at least as wide as the box, flipped sideways
+ * to stay in the window.  A .beside popup
  * (a menu, a settings popup) stands a popup gap below its command, or above it
  * where the window has no room below, its left edge on the command's. */
 .drop, .beside { position: fixed; inset: auto; position-visibility: anchors-visible; }

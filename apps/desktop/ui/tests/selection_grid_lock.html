@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Selection grid lock regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. A disabled SelectionGrid (fluent/selection_grid.ts) takes no row action: its ⋯ and ×
+// are disabled and a press on them or on a row's name says nothing. So a locked Occupancy calibrations editor
+// (node_editors/frame_claims.ts) -- under a running task, or drawn from a kept model -- writes no calibration.
+import {SelectionGrid} from '../dist/fluent/selection_grid.js';
+import {LogicEditorView,projectRow} from '../dist/views/logic.js';
+const assert=(condition,message)=>{if(!condition)throw Error(message)};
+const equal=(actual,expected,message)=>assert(JSON.stringify(actual)===JSON.stringify(expected),`${message}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+const settle=()=>new Promise(resolve=>setTimeout(resolve,20));
+const click=node=>node.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+const actions=root=>[...root.querySelectorAll('.grid-action')];
+const SPEC={rows:['a.tif','b.tif'],columns:['First','Rest','Last'],cells:[[0,0,'F'],[0,1,'R'],[0,2,'L'],[1,0,'F'],[1,1,'R'],[1,2,'L']],rowTips:['',''],mutedRows:[],narrowColumns:[]};
+try {
+ await check('a disabled grid takes no row action: its ⋯ and × disabled, a press on them or on a name says nothing',()=>{
+   const grid=new SelectionGrid({toggle:true,rowActions:[{value:'replace',glyph:'⋯',title:'Choose another file',role:'quiet'},{value:'remove',glyph:'×',title:'Remove'}],
+     labelAction:{value:'replace',title:'Click to choose another file'}});
+   const said=[];grid.rowAction=(row,value)=>said.push([row,value]);
+   document.body.append(grid.root);
+   grid.setGrid(SPEC);grid.disabled=true;
+   equal(actions(grid.root).map(node=>node.disabled),[true,true,true,true],'disabled actions');
+   for(const node of [...actions(grid.root),...grid.root.querySelectorAll('.grid-row-label')])click(node);
+   equal(said,[],'no row action');
+   // Drawn again while disabled, its new actions are disabled too.
+   grid.setGrid(SPEC);
+   equal(actions(grid.root).map(node=>node.disabled),[true,true,true,true],'drawn again: disabled actions');
+   grid.disabled=false;
+   equal(actions(grid.root).map(node=>node.disabled),[false,false,false,false],'enabled again');
+   click(actions(grid.root)[1]);click(grid.root.querySelector('.grid-row-label'));
+   equal(said,[[0,'remove'],[0,'replace']],'enabled: the actions say themselves');
+   grid.root.remove();
+ });
+ await check('a locked calibrations editor writes no calibration: under a running task, and drawn from a kept model',async()=>{
+   const facts={editor:'frame_claims',manages:['model_kind'],manages_artifacts:['calibrations'],title:'Calibrations',summary:'2 files',grid:SPEC,
+     selected:[[0,0],[1,2]],states:{},tips:{},columns:['first','rest','last'],entries:[{path:'a.tif',frames:['first']},{path:'b.tif',frames:['last']}],
+     new_frames:[],file_filter:'*.tif',problems:[],notes:[],hint:''};
+   const rowOf=(node,patch={})=>({node_id:node,name:node,type_id:'analysis.occupancy',node_kind:'analysis',draft_revision:1,values:{model_kind:'binary'},
+     controls:[{name:'model_kind',label:'Readout model',kind:'choice',value:'binary',choices:[['binary','Binary'],['poisson','Poisson']]}],
+     source_signal:'@logic/cam/frames',source_label:'frames',source_choices:[],device_keys:{},device_choices:{},device_labels:{},
+     artifact_inputs:{calibrations:[{path:'a.tif',frames:['first']},{path:'b.tif',frames:['last']}]},
+     artifact_specs:[{name:'calibrations',label:'Calibrations',file_filter:'*.tif',required:true,frame_claims:true}],
+     auto_preview:false,outputs:[],issues:[],can_start:true,can_stop:false,preview_offered:false,edited:false,state:'idle',status:'',phase:'idle',run:null,
+     editor_facts:null,editor_facts_error:null,editor_facts_pending:false,...patch});
+   let serial=0;const edits=[];
+   const intents={start(){},stop(){},remove(){},preview(){},rename:()=>++serial,editDraft:(id,change)=>{edits.push(change);return ++serial},revert:()=>++serial,
+     check(){},choose:async()=>'c.tif'};
+   const press=async root=>{for(const node of [...actions(root),...root.querySelectorAll('.frame-claims .grid-row-label')])click(node);await settle()};
+   for(const [name,rows,gate] of [
+     ['under a running task',[rowOf('task',{editor_facts:facts})],{active:true,owns:false}],
+     ['from a kept model',[rowOf('kept',{editor_facts:facts}),rowOf('kept',{draft_revision:2,editor_facts:null,editor_facts_error:'node/occupancy already has 64 queued calls'})],
+       {active:false,owns:false}]]){
+     const node=rows[0].node_id,view=new LogicEditorView(node,intents);document.body.append(view.root);
+     for(const row of rows)view.update(row,projectRow(row),gate);
+     assert(view.root.querySelector('.frame-claims .selection-grid.disabled'),`${name}: the grid locked`);
+     equal(actions(view.root).map(node=>node.disabled),[true,true,true,true],`${name}: disabled actions`);
+     edits.length=0;await press(view.root);
+     equal(edits,[],`${name}: nothing written`);
+     view.root.remove();
+   }
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+document.title='done';
+</script>

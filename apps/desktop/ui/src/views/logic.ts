@@ -6,7 +6,7 @@ import {
   shareLabelColumn, showHeld, switchButton, type FieldSpec, type PathAsk, type StatusWord, type Value,
 } from "../fluent/index.js";
 import type { LogicRow } from "../workbench.js";
-import { NodeEditors, editorModels } from "./node_editors/index.js";
+import { KEPT_LOCK, NodeEditors, editorModels, editorProblem, nodeModel } from "./node_editors/index.js";
 
 /** The held note's lines: the Task gate, then each reason several rows share. */
 const NEWLINE = "\n";
@@ -269,8 +269,10 @@ export class LogicEditorView {
       else specs.push(item);
     }
     // The node's own editors (one model, or a stack of them) draw the fields
-    // and files their models say they manage.
-    const order = this.editors.reconcile(editorModels(row.editor_facts));
+    // and files their models say they manage: the draft's model, else the node's
+    // last one of this same draft, locked (nodeModel).
+    const model = nodeModel(row);
+    const order = this.editors.reconcile(editorModels(model.facts));
     // The editors stand after the form and its error, in their models' order.
     const placed = [...this.body.children].slice(2);
     if (placed.length !== order.length || placed.some((node, index) => node !== order[index])) this.body.append(...order);
@@ -336,10 +338,10 @@ export class LogicEditorView {
     for (const [name, title] of this.groupTitles) if (!titles.has(name)) { title.remove(); this.groupTitles.delete(name); }
     // Whatever stands after the last placed row is no longer the node's.
     while (cursor) { const next: Element | null = (cursor as Element).nextElementSibling; (cursor as Element).remove(); cursor = next; }
-    const problem = row.editor_facts_error ? `The editor cannot be drawn: ${row.editor_facts_error}` : "";
+    const problem = editorProblem(row);
     if (this.editorError.textContent !== problem) this.editorError.textContent = problem;
     assign(this.editorError, "hidden", !problem);
-    if (this.editors.length) { if (this.editors.update(row, locked)) this.shareLabels(); }
+    if (this.editors.length) { if (this.editors.update(row, locked || (model.kept ? KEPT_LOCK : ""), model.kept)) this.shareLabels(); }
     else this.body.style.removeProperty("--label-width");
     const free = !takeover.active;
     assign(this.plot, "hidden", !projection.previewOffered);

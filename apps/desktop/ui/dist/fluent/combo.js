@@ -45,19 +45,23 @@ export function dropPlacement(natural, below, above) {
 /** The window a list opens in, without a scroll bar (a fixed popup's containing block). */
 const windowHeight = () => document.documentElement.clientHeight;
 const px = (value) => parseFloat(value) || 0;
-/** Which side of `box` an open `list` (a .drop popup bound to its box: fluent.css places it,
- * its CSS margins its popup gaps) drops to, as dropPlacement says from the room the window
- * leaves it when it opens: `.up` above, capped at `--drop-room` where the side is shorter
- * than the list.  Given `up`, that side (a list that grows while open stays on the side it
- * opened on), capped to it.  Returns the side. */
-export function placeDrop(list, box, up) {
-    list.classList.remove("up");
-    list.style.removeProperty("--drop-room");
+/** The room the window leaves an open `list` (a .drop popup, its CSS margins its popup gaps)
+ * above `box` (`up`) or below it, where the box stands now. */
+export function dropRoom(list, box, up) {
     const css = getComputedStyle(list);
     const margins = px(css.marginTop) + px(css.marginBottom);
+    const rect = box.getBoundingClientRect();
+    return up ? rect.top - margins : windowHeight() - rect.bottom - margins;
+}
+/** Which side of `box` an open `list` (a .drop popup bound to its box: fluent.css places it)
+ * drops to, as dropPlacement says from the room the window leaves it when it opens (dropRoom):
+ * `.up` above, capped at `--drop-room` where the side is shorter than the list.  Returns the
+ * side (a list that changes while open keeps it: TreeCombo). */
+export function placeDrop(list, box) {
+    list.classList.remove("up");
+    list.style.removeProperty("--drop-room");
     const natural = list.getBoundingClientRect().height;
-    const rect = box.getBoundingClientRect(), below = windowHeight() - rect.bottom - margins, above = rect.top - margins;
-    const drop = up === undefined ? dropPlacement(natural, below, above) : { up, height: Math.max(0, Math.min(natural, up ? above : below)) };
+    const drop = dropPlacement(natural, dropRoom(list, box, false), dropRoom(list, box, true));
     list.classList.toggle("up", drop.up);
     if (drop.height < natural)
         list.style.setProperty("--drop-room", `${drop.height}px`);

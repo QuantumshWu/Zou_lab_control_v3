@@ -1,4 +1,4 @@
-import { hintWidest, placeDrop, selectedFace } from "./combo.js";
+import { dropRoom, hintWidest, placeDrop, selectedFace } from "./combo.js";
 import { assign, element } from "./dom.js";
 import { hidePopup, isShown, showPopup } from "./popover.js";
 import { flattenTree, type FlatTreeGroup, type TreeGroup, type TreeLeaf } from "./tree_model.js";
@@ -35,14 +35,19 @@ export function choiceTree(entries: readonly TreeEntry[], current: string, unfil
     .map(heading => ({ heading, leaves: groups.get(heading)! }));
 }
 
-/** One row the open tree shows: a heading (its index in the groups), a leaf, or the none row. */
-type Row = { kind: "heading"; group: number } | { kind: "leaf"; group: number; leaf: TreeLeaf } | { kind: "none" };
+/** One row the open tree shows: a heading (its index in the groups), a leaf, or the none row;
+ * `id` says which, to find it again among the rows a change reveals. */
+type Row = ({ kind: "heading"; group: number } | { kind: "leaf"; group: number; leaf: TreeLeaf } | { kind: "none" }) & { id: string };
+type Heading = Extract<Row, { kind: "heading" }>;
+
+/** Where a row (`id`; null: the rows' own top, unscrolled) stood on the screen before the rows changed. */
+type Mark = { id: string | null; top: number };
 
 /** FluentTreeComboBox: a keyed-choice box whose drop-down is a collapsible
  * tree -- a heading per owner, its choices on its branch.  Closed, it says the
  * picked choice's `text` (or the none row's words, or its placeholder, in
- * MUTED_INK).  Open: a click anywhere on a heading opens or closes it and the
- * popup grows to show what is open; a click on a choice picks it.  The picked
+ * MUTED_INK).  Open: a click anywhere on a heading opens or closes it, the
+ * heading standing still (hold); a click on a choice picks it.  The picked
  * choice's heading is open when the popup opens, and what is open stays open.
  * Keys: ↑/↓/Home/End open it; in it ↑/↓/Home/End move, → opens a heading (or
  * goes into it), ← closes it (or goes up to it), Enter picks, Esc closes, and
@@ -65,8 +70,8 @@ export class TreeCombo {
   private cursor = -1;
   private typed = "";
   private typedAt = 0;
-  /** The side this opening chose (placeDrop): kept while a heading opens or closes. */
-  private up: boolean | undefined;
+  /** The side this opening chose (placeDrop): kept while it is open. */
+  private up = false;
 
   constructor(private changed: (key: string) => void, private placeholder = "") {
     this.blank.hidden = true;
@@ -97,6 +102,9 @@ export class TreeCombo {
   setTree(groups: readonly TreeGroup[], current: string, none: string | null = null): void {
     const signature = JSON.stringify([groups, none, this.placeholder]);
     if (signature !== this.signature) {
+      // Open, the cursor's row stands still where it is in sight, else the first row in sight.
+      const sight = this.open ? this.inSight() : [], cursor = this.rows[this.cursor]?.id;
+      const marks = this.open ? this.marks([...(cursor && sight.includes(cursor) ? [cursor] : []), ...sight]) : [];
       this.signature = signature;
       this.groups = flattenTree(groups);
       this.none = none;
@@ -106,7 +114,7 @@ export class TreeCombo {
       this.root.replaceChildren(this.face, this.blank, ...options);
       this.blank.text = none ?? this.placeholder;
       hintWidest(this.root, [this.placeholder, ...(none === null ? [] : [none]), ...options.map(option => option.text)], this.minimum);
-      if (this.open) this.render();
+      if (this.open) { this.render(); this.hold(marks); }
     }
     this.value = current;
   }
@@ -144,27 +152,24 @@ export class TreeCombo {
     if (at >= 0) this.openPath(at);
     showPopup(this.list, this.root);
     this.cursor = -1;
-    this.up = undefined;
     this.render();
+    this.up = placeDrop(this.list, this.root);
     // The picked row is the tree's selection (SELECTED) when it opens.
     this.move(this.rows.findIndex(row => this.picked(row)));
   }
 
-  /** What a row is, to find it again among the rows a toggle reveals. */
-  private identity(row: Row | undefined): string {
-    return row === undefined ? "" : row.kind === "none" ? "none" : row.kind === "heading" ? `h:${row.group}` : `l:${row.leaf.key}`;
-  }
-
-  /** The rows the tree's open headings reveal, then the popup's size and place (v2 _resize_popup_to_contents). */
+  /** The rows the tree's open headings reveal, the cursor kept on its row. */
   private render(): void {
+    const cursor = this.rows[this.cursor]?.id;
     const rows: Row[] = [];
-    if (this.none !== null) rows.push({ kind: "none" });
+    if (this.none !== null) rows.push({ kind: "none", id: "none" });
     this.groups.forEach((group, index) => {
       for (let parent = group.parent; parent !== null; parent = this.groups[parent]!.parent) if (!this.expanded.has(this.groups[parent]!.path)) return;
-      rows.push({ kind: "heading", group: index });
-      if (this.expanded.has(group.path)) for (const leaf of group.leaves) rows.push({ kind: "leaf", group: index, leaf });
+      rows.push({ kind: "heading", group: index, id: `h:${group.path}` });
+      if (this.expanded.has(group.path)) for (const leaf of group.leaves) rows.push({ kind: "leaf", group: index, leaf, id: `l:${leaf.key}` });
     });
     this.rows = rows;
+    this.cursor = rows.findIndex(row => row.id === cursor);
     this.list.replaceChildren(...rows.map((row, index) => {
       const node = element("div", `tree-row ${row.kind}`);
       node.dataset.index = String(index);
@@ -187,12 +192,47 @@ export class TreeCombo {
       return node;
     }));
     this.paintCursor();
-    this.place();
   }
 
-  /** Every row it reveals, below the box or above it, as far as the window goes on that side; the rest scrolls. */
-  private place(): void {
-    this.up = placeDrop(this.list, this.root, this.up);
+  /** The shown row `id` says, if it is shown. */
+  private node(id: string | null): Element | undefined {
+    return this.list.children[this.rows.findIndex(row => row.id === id)];
+  }
+
+  /** The rows in sight in the open list, top first. */
+  private inSight(): string[] {
+    const frame = this.list.getBoundingClientRect();
+    return this.rows.filter((_, index) => { const rect = this.list.children[index]!.getBoundingClientRect(); return rect.bottom > frame.top && rect.top < frame.bottom; })
+      .map(row => row.id);
+  }
+
+  /** Where `ids`' rows stand on the screen (an id no row has, none), then the rows' own top. */
+  private marks(ids: readonly string[]): Mark[] {
+    const marks: Mark[] = [];
+    for (const id of ids) { const node = this.node(id); if (node) marks.push({ id, top: node.getBoundingClientRect().top }); }
+    marks.push({ id: null, top: this.list.getBoundingClientRect().top - this.list.scrollTop });
+    return marks;
+  }
+
+  /** The rows changed while it is open (a heading opened or closed, a new tree): the side stays
+   * the opening's, the cap stays on (the room the window leaves that side where the box stands
+   * now: dropRoom, as a dragged frame or a resized window may have moved it), and the first of
+   * `marks` still shown stands where it stood (A), o down the rows.  Below the box the list
+   * keeps its top, as tall as its rows up to the room, and scrolls the mark back to A; above it
+   * the list keeps its bottom (B) and grows up no further than keeps the mark at A (B + o - A),
+   * the rest scrolling.  Its height is the layout's (its rows up to the cap), never measured
+   * with the cap lifted.  A side that leaves less than one row (its box carried to the window's
+   * edge) closes the list: opened again, it chooses its side afresh. */
+  private hold(marks: readonly Mark[]): void {
+    const list = this.list, css = getComputedStyle(list), room = dropRoom(list, this.root, this.up);
+    const edges = [css.borderTopWidth, css.borderBottomWidth, css.paddingTop, css.paddingBottom].reduce((sum, length) => sum + parseFloat(length), 0);
+    if (room < edges + (list.firstElementChild?.getBoundingClientRect().height ?? 0)) { hidePopup(list); return; }
+    const frame = list.getBoundingClientRect();
+    const mark = marks.find(item => item.id === null || this.node(item.id))!;
+    const node = this.node(mark.id);
+    const offset = node ? node.getBoundingClientRect().top - frame.top + list.scrollTop : 0;
+    list.style.setProperty("--drop-room", `${this.up ? Math.min(room, frame.bottom + offset - mark.top) : room}px`);
+    list.scrollTop = list.getBoundingClientRect().top + offset - mark.top;
   }
 
   private picked(row: Row): boolean { return row.kind === "leaf" ? row.leaf.key === this.current : row.kind === "none" && this.current === ""; }
@@ -212,12 +252,12 @@ export class TreeCombo {
     if (scroll) this.list.children[index]?.scrollIntoView({ block: "nearest" });
   }
 
-  /** A heading opens or closes (and the popup grows to fit); a choice is picked. */
+  /** A heading opens or closes (standing still: hold); a choice is picked. */
   private activate(index: number, pointer: boolean): void {
     const row = this.rows[index];
     if (!row) return;
     if (row.kind === "heading") {
-      this.toggle(row.group);
+      this.toggle(row);
       return;
     }
     const key = row.kind === "leaf" ? row.leaf.key : "";
@@ -227,14 +267,13 @@ export class TreeCombo {
     if (changed) this.changed(key);
   }
 
-  private toggle(group: number, open = !this.expanded.has(this.groups[group]!.path)): void {
-    const heading = this.groups[group]!.path;
+  private toggle(row: Heading, open = !this.expanded.has(this.groups[row.group]!.path)): void {
+    const heading = this.groups[row.group]!.path;
     if (open === this.expanded.has(heading)) return;
+    const marks = this.marks([row.id]);
     if (open) this.expanded.add(heading); else this.expanded.delete(heading);
-    const at = this.identity(this.rows[this.cursor]);
     this.render();
-    this.cursor = this.rows.findIndex(row => this.identity(row) === at);
-    this.paintCursor();
+    this.hold(marks);
   }
 
   private key(event: KeyboardEvent): void {
@@ -253,13 +292,13 @@ export class TreeCombo {
       case "End": this.move(last); break;
       case "ArrowRight":
         if (row?.kind === "heading") {
-          if (!this.expanded.has(this.groups[row.group]!.path)) this.toggle(row.group, true);
+          if (!this.expanded.has(this.groups[row.group]!.path)) this.toggle(row, true);
           else if (this.rows[this.cursor + 1]) this.move(this.cursor + 1);
         }
         break;
       case "ArrowLeft":
         if (row?.kind === "heading") {
-          if (this.expanded.has(this.groups[row.group]!.path)) this.toggle(row.group, false);
+          if (this.expanded.has(this.groups[row.group]!.path)) this.toggle(row, false);
           else { const parent = this.groups[row.group]!.parent; if (parent !== null) this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === parent)); }
         }
         else if (row?.kind === "leaf") this.move(this.rows.findIndex(item => item.kind === "heading" && item.group === row.group));
