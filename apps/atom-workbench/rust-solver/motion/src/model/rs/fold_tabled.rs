@@ -73,18 +73,20 @@
 //! # The pieces
 //! A piece [a, b] of s holds where its strict bound (`Piece::worst`: per table and term its value's bound over its
 //! entries' own bound c ‖D‖^p, and its slope's over theirs c p ‖D‖^p ‖K‖, the J-th weighed by the reach's ratio
-//! ρ_reach^J) is within the target: the run's budget (model/selected.rs, # The tables' budget: the rates' relative
-//! error on the values, the friction's on the slopes -- the interpolation never adds more to a node than the series'
-//! tail it is held to). The budget is weighed on the tables at s = 1: the piece that holds it is laid first, alone, to
-//! the Doppler series' tail at the tables' terms at the reach (the largest ratio of the members' shifts there to the
-//! sums' gaps at s = 1) and at one term fewer, and filled; then every piece, that one too, is laid to the budget
-//! (without a budget, the tests', every piece to the reach's tail). (Until 2026-11-23 every piece was laid to the
-//! reach's tail first, and laid again to the budget only where one was beyond it: tilt2's run on [0.06, 1] 310 pieces,
-//! 182 of them bought by the rent paid at their s, 114 MB, 2.1 s, against 56 pieces, 35 MB, 0.47 s; the walks' tables of PGC3D, TET and tilt2 8,
-//! 8, 16 pieces, 12.3, 7.0, 10.0 MB against 4, 4, 6 pieces, 6.2, 3.5, 3.8 MB, a step's time the same. A node's booked
-//! deviation on the rates is then up to ten times the budget -- PGC3D's walk 6.6e-5 against 6.5e-6, 6.1e-6 before: the
-//! pieces' bound is over each entry's own, the node's over its output's largest --, booked as it is.) Else it is
-//! halved, but where
+//! ρ_reach^J) is within the target: the run's budget in the node's measure (model/selected.rs, # The tables' budget:
+//! the rates' relative error on the values, the friction's on the slopes, each over the ratio of what a node books of
+//! the interpolation -- its bound over each output's largest element, `Interpolated::relative` -- to its piece's own
+//! worst, over each entry's own bound). The budget and the ratio are weighed on the tables at s = 1: the piece that
+//! holds it is laid first, alone, to the Doppler series' tail at the tables' terms at the reach (the largest ratio of
+//! the members' shifts there to the sums' gaps at s = 1) and at one term fewer, and filled; then every piece, that one
+//! too, is laid to the target (without a budget, the tests', every piece to the reach's tail). (Until 2026-11-23 every
+//! piece was laid to the reach's tail first, and laid again to the budget only where one was beyond it: tilt2's run on
+//! [0.06, 1] 310 pieces, 114 MB, 2.1 s, against 56 pieces, 35 MB, 0.47 s laid to the budget. Laid to the budget in the
+//! piece's own measure, a node's booked deviation on the rates reached ten times the budget -- PGC3D's walk 6.6e-5
+//! against 6.5e-6, the node's measure 20 times the piece's there --; in the node's measure 5.95e-6, the walks' tables of
+//! PGC3D, TET and tilt2 4, 4, 6 pieces, 6.2, 3.5, 3.8 MB against 5, 5, 6, 7.7, 4.4, 3.8 MB, a step's time the same;
+//! tilt2's run 56 pieces, 35 MB, 0.47 s against 89, 56 MB, 0.69 s.)
+//! Else it is halved, but where
 //! the halves' bounds no longer fall by half -- the samples' rounding reached -- the piece is taken at its bound; one
 //! s's round-off cannot halve is taken at its bound too, and where that is none no node reads it. (Until 2026-11-23 the
 //! slopes held to nothing: R4's G, ρ 0.08 thermal, laid to the reach's tail in 16 pieces, booked 14.5 % of T at its
@@ -286,16 +288,20 @@ fn bernstein(c: f64, r: f64, k: f64, half: f64, m: usize, power: i32) -> [f64; 2
 }
 
 /// A node's bound of its interpolation (`Scratch::interpolated`): per H output, per channel output and per lift group
-/// [value, gradient] on each of its elements, absolute (rad/µs, the gradient's per µm).
+/// [value, gradient, the gradient's part through the slopes' bounds E′|∇s|] on each of its elements, absolute
+/// (rad/µs, the gradient's per µm).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Interpolated {
-    pub h: Vec<[f64; 2]>,
-    pub channels: Vec<[f64; 2]>,
-    pub lift: Vec<[f64; 2]>,
+    pub h: Vec<[f64; 3]>,
+    pub channels: Vec<[f64; 3]>,
+    pub lift: Vec<[f64; 3]>,
     /// The largest over the outputs (H's, the channels', the lift's groups) of each one's bound over its largest
     /// |value| and |gradient| at the node: [values', gradients'] -- relative to the output's largest element, what the
     /// run books of it beside the Doppler series' tail.
     pub relative: [f64; 2],
+    /// The largest over the outputs of the gradient's part through the slopes' bounds over the largest |gradient|: of
+    /// `relative[1]`, what the pieces' slopes hold (model/selected.rs `Selected::budget`, the pieces' target).
+    pub slopes: f64,
 }
 
 /// T_d(x) and dT_d/dx for d = 0..=D.
@@ -1081,11 +1087,11 @@ impl Tables {
             work += 10.0 * REAL * most.len() as f64 * psi.first().and_then(|o| o.first()).map_or(0, Vec::len) as f64;
         }
         interpolated.h.clear();
-        interpolated.h.resize(grouping.outputs.len(), [0.0; 2]);
+        interpolated.h.resize(grouping.outputs.len(), [0.0; 3]);
         interpolated.channels.clear();
-        interpolated.channels.resize(grouping.channel_outputs.len(), [0.0; 2]);
+        interpolated.channels.resize(grouping.channel_outputs.len(), [0.0; 3]);
         interpolated.lift.clear();
-        interpolated.lift.resize(grouping.labels.len(), [0.0; 2]);
+        interpolated.lift.resize(grouping.labels.len(), [0.0; 3]);
         let ds_norm = (reading.ds[0] * reading.ds[0] + reading.ds[1] * reading.ds[1] + reading.ds[2] * reading.ds[2]).sqrt();
         // The Chebyshev values at s on the piece, and their slope in s.
         let p = &self.pieces[reading.piece];
@@ -1185,7 +1191,7 @@ impl Tables {
                     slopes += x * e_slope;
                 }
             }
-            let (mut bound, mut gradient_bound) = (0.0, 0.0);
+            let (mut bound, mut gradient_bound, mut slope_bound) = (0.0, 0.0, 0.0);
             for kp in 0..rw {
                 let (x, g) = tb.w.map_or((1.0, 0.0), |w| {
                     let a = phi[w][kp];
@@ -1193,6 +1199,7 @@ impl Tables {
                 });
                 bound += x * sums;
                 gradient_bound += g * sums + x * (through + slopes * ds_norm);
+                slope_bound += x * slopes * ds_norm;
             }
             work += REAL * (6 * psi.len() * rz + 10 * rw) as f64;
             match tb.target {
@@ -1204,17 +1211,20 @@ impl Tables {
                         let x = &mut interpolated.h[o];
                         x[0] += share * bound;
                         x[1] += share * gradient_bound;
+                        x[2] += share * slope_bound;
                     }
                 }
                 Target::Jump(i) => {
                     let x = &mut interpolated.channels[grouping.j_pairs[i].out];
                     x[0] += bound;
                     x[1] += gradient_bound;
+                    x[2] += slope_bound;
                 }
                 Target::Lift(l) => {
                     let x = &mut interpolated.lift[grouping.lift[l].1];
                     x[0] += bound;
                     x[1] += gradient_bound;
+                    x[2] += slope_bound;
                 }
             }
             match tb.target {
@@ -1269,8 +1279,8 @@ impl Tables {
         }
         // Each output's bound over its largest element at the node (`Interpolated::relative`): one pass over the
         // outputs' values and gradients.
-        let mut relative = [0.0f64; 2];
-        let mut over = |bound: [f64; 2], values: &mut dyn Iterator<Item = C64>, gradients: &mut dyn Iterator<Item = C64>| {
+        let (mut relative, mut through_slopes) = ([0.0f64; 2], 0.0f64);
+        let mut over = |bound: [f64; 3], values: &mut dyn Iterator<Item = C64>, gradients: &mut dyn Iterator<Item = C64>| {
             let most = values.fold(0.0f64, |m, z| m.max(z.abs()));
             let gmost = gradients.fold(0.0f64, |m, z| m.max(z.abs()));
             if most > 0.0 {
@@ -1278,24 +1288,26 @@ impl Tables {
             }
             if gmost > 0.0 {
                 relative[1] = relative[1].max(bound[1] / gmost);
+                through_slopes = through_slopes.max(bound[2] / gmost);
             }
         };
         let mut elements = 0usize;
         for (o, &b) in out.h.iter().zip(&interpolated.h).chain(out.channels.iter().zip(&interpolated.channels)) {
-            if b != [0.0; 2] {
+            if b != [0.0; 3] {
                 over(b, &mut o.value.iter().copied(), &mut o.gradient.iter().flat_map(|g| g.iter().copied()));
                 elements += o.value.len();
             }
         }
         if making.lift {
             for ((v, g), &b) in out.lift.iter().zip(&interpolated.lift) {
-                if b != [0.0; 2] {
+                if b != [0.0; 3] {
                     over(b, &mut v.data.iter().copied(), &mut g.iter().flat_map(|m| m.data.iter().copied()));
                     elements += v.data.len();
                 }
             }
         }
         interpolated.relative = relative;
+        interpolated.slopes = through_slopes;
         // Per element its modulus and its three gradients': some twelve real operations.
         work += 12.0 * REAL * elements as f64;
         out.work = work;

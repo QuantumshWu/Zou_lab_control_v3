@@ -55,7 +55,7 @@ fn compare(a: &Out, b: &Out, lift: &[(Mat, Mat)], bound: ([f64; 2], [f64; 3]), m
     let ([bv, wv], [bg, through, wg]) = bound;
     let mut w = Worst { over_scale: [[0.0; 2]; 3], over_bound: [[0.0; 2]; 3] };
     for (kind, (xs, ys), interp) in [(0usize, (&a.h, &b.h), &strict.h), (1, (&a.channels, &b.channels), &strict.channels)] {
-        for ((x, y), &[iv, ig]) in xs.iter().zip(ys.iter()).zip(interp.iter()) {
+        for ((x, y), &[iv, ig, _]) in xs.iter().zip(ys.iter()).zip(interp.iter()) {
             let top = y.scale.iter().fold(0.0, |m: f64, &x| m.max(x));
             let gtop = y.gradient_scale.iter().flat_map(|g| g.iter()).fold(0.0, |m: f64, &x| m.max(x));
             if top > 0.0 {
@@ -87,7 +87,7 @@ fn compare(a: &Out, b: &Out, lift: &[(Mat, Mat)], bound: ([f64; 2], [f64; 3]), m
         }
     }
     if making.lift {
-        for ((((xv, xg), (yv, yg)), (sv, sg)), &[iv, ig]) in a.lift.iter().zip(&b.lift).zip(lift).zip(&strict.lift) {
+        for ((((xv, xg), (yv, yg)), (sv, sg)), &[iv, ig, _]) in a.lift.iter().zip(&b.lift).zip(lift).zip(&strict.lift) {
             let top = sv.data.iter().fold(0.0, |m: f64, x| m.max(x.re));
             let gtop = sg.data.iter().fold(0.0, |m: f64, x| m.max(x.re));
             if top > 0.0 {
@@ -223,7 +223,7 @@ fn the_tabled_node_is_the_node_within_its_bounds() {
                 // output's per-element bound times the root of its elements (its Frobenius norm), each channel's ‖L‖ the
                 // node's own (its value outputs' Frobenius norms summed over its beats) plus the change.
                 let i = &scratch.interpolated;
-                let frobenius = |x: &[[f64; 2]], lists: &[Vec<u32>]| -> Vec<f64> { x.iter().zip(lists).map(|(b, l)| b[0] * (l.len() as f64).sqrt()).collect() };
+                let frobenius = |x: &[[f64; 3]], lists: &[Vec<u32>]| -> Vec<f64> { x.iter().zip(lists).map(|(b, l)| b[0] * (l.len() as f64).sqrt()).collect() };
                 let (h, channels) = (frobenius(&i.h, &run.lab.lists), frobenius(&i.channels, &run.lab.channel_lists));
                 let mut whole: std::collections::HashMap<(usize, [i64; 2]), f64> = std::collections::HashMap::new();
                 for (o, (q, fast, which, ..)) in run.lab.channel_outputs.iter().enumerate() {

@@ -115,7 +115,7 @@
 //! atom of tilt2's scout escaping to s = 0.06 took the tables to 165 pieces, 103 MB. Each piece bought by the rent paid
 //! at its own s spared few -- a piece's fill is some ten nodes of the fold: 182 of 310, 114 MB; laid to the budget 53
 //! of 56 -- and was taken out: one rent, one price.) The tables' memory is not in the price: laid to the budget they
-//! take 3.5 to 33 MB (TET's walk to tilt2's run down to s = 0.06), beside the run's own; a bound on it would be a
+//! take 3.8 to 56 MB (tilt2's walk to its run down to s = 0.06), beside the run's own; a bound on it would be a
 //! number of its own, none needed at these sizes. Bought, they are read for the kinds of
 //! node they cost less for by count (`kind`, `KINDS`:
 //! a step's node, the middle's with the lift, a jump's photon's, a whole one with the photon forms; `tables_pay`, at the
@@ -136,14 +136,18 @@
 //! there alone (until 2026-11-23 every middle's node made it).
 //!
 //! # The tables' budget
-//! A node off the tables takes the fewest of the Doppler series' terms O (of the tables' four) that hold its relative
-//! errors within the run's budget: its rates' ρ^O/(1 − ρ) and its friction's ρ^{O−1}/(1 − ρ) (ρ its reading's largest
-//! ratio of a member's shift to its gap, rs/fold_tabled.rs # The bounds); where none does, the fold's own. The budget is
+//! A node off the tables takes the fewest of the Doppler series' terms O (of the tables' four) that hold its whole
+//! deviation within the run's budget: on the rates the series' tail ρ^O/(1 − ρ), on the friction ρ^{O−1}/(1 − ρ) (ρ its
+//! reading's largest ratio of a member's shift to its gap, rs/fold_tabled.rs # The bounds), each with its
+//! interpolation's relative bound, ΔG's and the spans' parts (`Node::deviation`); where none does, the fold's own, the
+//! contractions tried counted with it. (Until 2026-11-23 the tail alone: the node's deviation reached ten times the
+//! budget where the pieces held the interpolation in their own measure.) The budget is
 //! weighed when the tables are bought (`Selected::budget`), as the drop tier weighs: of J = 1 … 4 terms at the run's
 //! thermal speed, x(J) = [ρ^J, ρ^{J−1}]/(1 − ρ), the J of least W -- the node's counted work at J terms times the
 //! account's factor with x(J) beside its errors --, its x the budget, weighed on the piece of the tables that holds
-//! s = 1, laid to the reach's tail and filled alone; every piece is then laid to it (rs/fold_tabled.rs, # The pieces:
-//! the values to the rates' budget, the slopes to the friction's). Each node's own errors -- the tail at its terms,
+//! s = 1, laid to the reach's tail and filled alone; every piece is then laid to it in the node's measure
+//! (rs/fold_tabled.rs, # The pieces: the values to the rates' budget over q, the slopes to the friction's over b --
+//! `Selected::budget`; PGC3D, TET, tilt2, GMD1C q = 20, 8, 6, 24, b = 1). Each node's own errors -- the tail at its terms,
 //! its interpolation's relative bound, ΔG's and the spans' parts (`Node::deviation`) -- are what its run books
 //! (solve.rs, # The tables' deviation). One term leaves the friction out (x_T = 1/(1 − ρ): no factor bounds it); the
 //! rule takes two on PGC3D, TET, tilt0 and tilt2 (ρ 3.1e-3 … 4.6e-3 thermal: x = 1e-5 … 2e-5 on the rates, 3e-3 …
@@ -2390,9 +2394,9 @@ impl Selected {
         let plan = self.rs.plan();
         let weighed = std::cell::Cell::new(None);
         let weigh = |t: &PairTables| {
-            let budget = self.budget(t)?;
-            weighed.set(Some(budget));
-            Some(budget.0)
+            let (budget, orders, target) = self.budget(t)?;
+            weighed.set(Some((budget, orders)));
+            Some(target)
         };
         let Some(layout) = PairTables::layout(plan, &self.lab, &rest, &self.reach(), TABLE_ORDERS, TABLE_DEGREE, low, Some(&weigh)) else {
             crate::prof::note(|| "tables: none for the plan or its budget".to_string());
@@ -2419,9 +2423,15 @@ impl Selected {
     /// at the run's thermal speed -- ρ the largest of the tables' readings at the trap's centre, the speed along each
     /// lab axis --, the relative errors x(J) = [ρ^J/(1 − ρ), ρ^{J−1}/(1 − ρ)] on the rates and on the friction, the one
     /// of least W: the node's counted work off the tables at J terms (the structure's point) times the account's factor
-    /// (`Account::factor` at the dropped terms' Y) with x(J) beside the populations' and T's errors. Its x and its J.
-    /// None where the tables do not read those points.
-    fn budget(&self, t: &PairTables) -> Option<([f64; 2], usize)> {
+    /// (`Account::factor` at the dropped terms' Y) with x(J) beside the populations' and T's errors. Its x, its J, and the
+    /// pieces' target in the node's measure (module documentation, # The tables' budget): at the same points (and at
+    /// rest), for every kind of node at J terms, the node's interpolation bound over each output's largest element
+    /// (`Interpolated::relative`, what the node books) against its piece's own (`Piece::worst`, over each entry's own
+    /// bound) -- on the values q = the values' ratio, on the gradients a part through the values' bounds (|∇φ||ψ|E,
+    /// |φ||∇ψ|E: a per unit of the piece's value worst) and one through the slopes' (`Interpolated::slopes`: b per unit of
+    /// its slope worst) --, the values' target x_pop/q, the slopes' x_T/b; q and b at least one (never looser than x in
+    /// the piece's own measure). None where the tables do not read those points.
+    fn budget(&self, t: &PairTables) -> Option<([f64; 2], usize, [f64; 2])> {
         let plan = self.rs.plan();
         let mut work = Work::default();
         let request = &self.scene.request;
@@ -2447,7 +2457,31 @@ impl Selected {
                 best = Some((w, x, j));
             }
         }
-        best.filter(|b| b.0.is_finite()).map(|b| (b.1, b.2))
+        let (_, x, j) = best.filter(|b| b.0.is_finite())?;
+        let (mut q, mut a_values, mut b_slopes) = (1.0f64, 0.0f64, 1.0f64);
+        for a in 0..4 {
+            self.scene.point_into([0.0; 3], std::array::from_fn(|i| if i == a { kappa } else { 0.0 }), &mut work.point);
+            self.rs.tweezer().values_into(&self.scene, &work.point, &mut work.local.values);
+            let reading = t.read(plan, &self.lab, &work.local.values, &mut work.pairs)?;
+            let worst = t.pieces[reading.piece].worst;
+            for &making in MAKINGS.iter() {
+                t.contract(plan, &self.lab, &work.local.values, &reading, j, making, &mut work.out, &mut work.pairs);
+                let (relative, slopes) = (work.pairs.interpolated.relative, work.pairs.interpolated.slopes);
+                if worst[0] > 0.0 {
+                    q = q.max(relative[0] / worst[0]);
+                    a_values = a_values.max((relative[1] - slopes).max(0.0) / worst[0]);
+                }
+                if worst[1] > 0.0 {
+                    b_slopes = b_slopes.max(slopes / worst[1]);
+                }
+            }
+        }
+        // The gradients' part through the values' bounds (a) is not a target of its own: where the gradients vanish -- at
+        // the trap's centre of a tweezer alone -- each output's largest gradient does, and a with it (tilt2: 1e27); the
+        // node's own rule holds it (`node_into`: its whole deviation within the budget, or more terms, or the fold).
+        let target = [x[0] / q, x[1] / b_slopes];
+        crate::prof::note(|| format!("tables' pieces: the node's measure over the piece's: values q {q:.3e}, gradients through the values a {a_values:.3e}, through the slopes b {b_slopes:.3e}; the target {target:?}"));
+        Some((x, j, target))
     }
 
     /// The run's tables as bought (the tests'), none where it has none.
@@ -2567,19 +2601,28 @@ impl Selected {
             let plan = self.rs.plan();
             let tables = self.tables_for(making, tabled);
             // Off the tables where they read the point: the source's values there, the reading, the contraction.
-            let mut read = None;
+            let (mut read, mut tried) = (None, 0.0);
             node.deviation = [0.0; 2];
             if let Some((Bought { tables: t, budget, .. }, cap)) = tables {
                 self.rs.tweezer().values_into(&self.scene, &work.point, &mut work.local.values);
-                // The fewest of the series' terms that hold the node within the budget (# The tables' budget), none where
-                // more than the kind costs less at (`Bought::caps`) would: the fold's own then.
-                let reading = t.read(plan, &self.lab, &work.local.values, &mut work.pairs);
-                if let Some((reading, orders)) = reading.and_then(|r| (1..=cap).find(|&o| r.tail(o) <= budget[0] && r.tail(o - 1) <= budget[1]).map(|o| (r, o))) {
-                    let contracted = t.contract(plan, &self.lab, &work.local.values, &reading, orders, making, &mut work.out, &mut work.pairs);
-                    let relative = work.pairs.interpolated.relative;
+                // The fewest of the series' terms that hold the node's whole deviation -- the tail at them, its
+                // interpolation's, ΔG's and the spans' parts (`Node::deviation`) -- within the budget (# The tables'
+                // budget), none where more than the kind costs less at (`Bought::caps`) would: the fold's own then, the
+                // contractions tried counted with it.
+                if let Some(reading) = t.read(plan, &self.lab, &work.local.values, &mut work.pairs) {
                     let whole = reading.moved + t.dropped;
-                    node.deviation = [reading.tail(orders) + relative[0] + whole, reading.tail(orders - 1) + relative[1] + whole];
-                    read = Some(reading.work + contracted);
+                    let mut contracted = 0.0;
+                    for orders in (1..=cap).filter(|&o| reading.tail(o) + whole <= budget[0] && reading.tail(o - 1) + whole <= budget[1]) {
+                        contracted += t.contract(plan, &self.lab, &work.local.values, &reading, orders, making, &mut work.out, &mut work.pairs);
+                        let relative = work.pairs.interpolated.relative;
+                        let deviation = [reading.tail(orders) + relative[0] + whole, reading.tail(orders - 1) + relative[1] + whole];
+                        if deviation[0] <= budget[0] && deviation[1] <= budget[1] {
+                            node.deviation = deviation;
+                            read = Some(reading.work + contracted);
+                            break;
+                        }
+                    }
+                    tried = reading.work + contracted;
                 }
             }
             if read.is_none() {
@@ -2590,7 +2633,7 @@ impl Selected {
             let turned = self.turn.as_ref().map_or(0.0, |cross| self.turned(node, cross));
             node.work = match read {
                 Some(r) => self.point_work() + COMPLEX * (self.rs.tweezer().values_work() + r + filled + turned),
-                None => self.node_work(&work.local, &work.out, filled + turned),
+                None => self.node_work(&work.local, &work.out, filled + turned) + COMPLEX * tried,
             };
             // A trajectory's node off the fold before the tables are bought: its work their rent, its s the least they
             // would cover.
