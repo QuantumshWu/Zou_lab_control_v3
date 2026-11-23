@@ -34,7 +34,12 @@ pub struct Node {
     pub type_id: String,
     pub draft: Draft,
     pub auto_preview: bool,
+    /// Counts the draft's edits: its values, devices, files, source.
     pub revision: u64,
+    /// Counts the checks of one draft: each change of the bench, each Check the operator asks for.
+    pub check: u64,
+    /// The check of the operator's last Check: nothing asked before it stands for it.
+    pub rechecked: u64,
     /// The configuration the current run, follow or pending start uses.
     pub running: Option<Draft>,
     /// The answers that configuration was started with.
@@ -53,11 +58,12 @@ pub struct Node {
     /// that preview, whatever its kind or choices became since, and a later run opens no other.
     pub preview_panels: BTreeMap<String, String>,
     pub instance: Instance,
-    /// Plugin query answers, the newest of each: name -> (draft revision, answer). What the
-    /// page draws and the issues it shows come from them, a newer draft's too until its own land.
-    pub answers: BTreeMap<String, (u64, Result<Value, String>)>,
-    /// The queries answered for this draft (a Start waits until each is).
-    pub checked: BTreeSet<String>,
+    /// Plugin query answers, the newest of each: name -> (the draft revision and check it stands
+    /// for, answer). What the page draws and the issues it shows come from them, a newer draft's
+    /// too until its own land.
+    pub answers: BTreeMap<String, (Stamp, Result<Value, String>)>,
+    /// What its plugin is asked, by kind: each draft query, each output's frames, its regions.
+    pub(crate) asks: BTreeMap<String, Ask>,
     /// The workspace resources the draft names, read at its last change: field -> resolved value.
     pub resources: Map<String, Value>,
     /// Why a named resource could not be read (Start is refused while any).
@@ -76,21 +82,52 @@ pub struct Node {
 
 /// The node editor's model (`editor_facts`).
 const EDITOR_FACTS: &str = "editor_facts";
+/// A panel's region asks its producer what it sets: one kind of question of the node.
+const SELECTION: &str = "selection_patch";
+
+/// The draft revision and check a question is asked for (`Node::revision`, `Node::check`).
+pub(crate) type Stamp = (u64, u64);
+
+/// A question to a node's plugin: the draft and check it is asked for, the query, what it is
+/// told, and what its ticket is for.
+#[derive(Clone, Debug)]
+pub(crate) struct Question { stamp: Stamp, query: String, facts: Value, purpose: Ticket }
+
+/// One kind of question of a node's plugin. One is in flight at a time: one asked meanwhile
+/// waits for it to land, the newest only, so its plugin never holds more of a node's questions
+/// than it has kinds.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Ask {
+    /// In flight: its ticket and question.
+    flying: Option<(u64, Question)>,
+    /// To ask once the one in flight lands; or not answered (refused, expired, lost), asked again
+    /// once the plugin answers anything or opens again.
+    waiting: Option<Question>,
+    /// What the answer that stands was told, and the check it was asked in.
+    told: Option<(u64, Value)>,
+}
 
 impl Node {
     /// A node on the board, drawn at once from its type's answers for its default draft (the
     /// catalogue's) until its own process answers its draft.
     pub(crate) fn new(id: String, name: String, type_id: String, draft: Draft, auto_preview: bool, descriptor: Option<&TypeDescriptor>) -> Self {
-        let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), (0, Ok(answer.clone())))).collect()).unwrap_or_default();
-        Node { id, name, type_id, draft, auto_preview, revision: 1, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
-               pending: None, preparing: None, removing: false, preview_panels: BTreeMap::new(), instance: Instance::Opening, answers, checked: BTreeSet::new(), resources: Map::new(), resource_issues: Vec::new(),
+        let answers = descriptor.map(|item| item.node().answers.iter().map(|(query, answer)| (query.clone(), ((0, 0), Ok(answer.clone())))).collect()).unwrap_or_default();
+        Node { id, name, type_id, draft, auto_preview, revision: 1, check: 0, rechecked: 0, running: None, frozen: None, run: None, error: None, follow: false, follow_attempted: None,
+               pending: None, preparing: None, removing: false, preview_panels: BTreeMap::new(), instance: Instance::Opening, answers, asks: BTreeMap::new(), resources: Map::new(), resource_issues: Vec::new(),
                missing_artifacts: Vec::new(), reading: None, start_reading: None, start_read: None, start_after_check: None }
     }
 
-    /// A new draft, or the same one asked again: its queries are outstanding until answered anew.
-    /// The page goes on drawing the newest answers meanwhile (v2 answered a draft at once), so a
-    /// field the edit did not touch keeps its value, its choices and its words.
-    fn recheck(&mut self) { self.checked.clear(); }
+    /// The draft revision and check its questions are asked for now.
+    fn stamp(&self) -> Stamp { (self.revision, self.check) }
+
+    /// Whether `name`'s answer stands for this draft and check, and it is not being asked again
+    /// (a Start waits until each is). The page goes on drawing the newest answers meanwhile (v2
+    /// answered a draft at once), so a field an edit did not touch keeps its value, its choices
+    /// and its words.
+    fn checked(&self, name: &str) -> bool {
+        self.answers.get(name).is_some_and(|(stamp, _)| *stamp == self.stamp())
+            && self.asks.get(name).is_none_or(|ask| ask.flying.is_none() && ask.waiting.is_none())
+    }
 }
 
 /// One device a run uses (v2 DeviceClaim). A declared requirement takes its device
@@ -404,7 +441,7 @@ impl Workbench {
 
     fn has_source(descriptor: &TypeDescriptor) -> bool { !descriptor.node().inputs.is_empty() }
 
-    /// Ask the node's process every draft query its type answers, for this revision.
+    /// Ask the node's process every draft query its type answers, for this revision and check.
     fn send_queries(&mut self, id: &str) { self.ask_queries(id, None) }
 
     /// Ask the draft queries (`only`: just those) for the node's current draft, once the files it
@@ -474,7 +511,7 @@ impl Workbench {
         let Some(descriptor) = self.catalog.get(&node.type_id) else { return };
         let names: Vec<String> = descriptor.node().queries.iter().filter(|name| DRAFT_QUERIES.contains(&name.as_str())).cloned().collect();
         // The facts by name; the SDK passes them to the v2 callable in its own order (PLUGIN_PROTOCOL §5).
-        let revision = node.revision;
+        let stamp = node.stamp();
         let args = json!({"values": Value::Object(node.draft.values.clone()), "devices": self.device_infos(&node.draft.device_keys),
             "resources": node.resources});
         // A node's editor offers every tunable device of the bench (v2 `tunable_devices`),
@@ -501,18 +538,55 @@ impl Workbench {
             self.node_outputs(node).into_iter().filter_map(|(signal, _)| split_signal(&signal).map(|(_, output)| output.to_owned())).collect()
         } else { Vec::new() };
         if stale { self.bundles.remove(id); self.bundles_stale = true; }
+        // (kind, query, facts): an output's frames are a kind of their own.
+        let mut questions: Vec<(String, String, Value)> = Vec::new();
         for name in names {
             if (name == ADMIT_SOURCE && !complete) || (stale && readers.contains(&name.as_str())) || only.is_some_and(|only| !only.contains(&name.as_str())) { continue; }
-            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name: query, .. } if node == id && query == &name));
-            let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: name.clone() });
             let facts = match name.as_str() { EDITOR_FACTS => &editor, ADMIT_SOURCE => &admit, ADMIT => &admitted, _ => &args };
-            self.plugins.query(&node_instance(id), ticket, &name, facts);
+            questions.push((name.clone(), name, facts.clone()));
         }
         for output in frames.into_iter().filter(|_| only.is_none()) {
-            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, name, .. } if node == id && name == &format!("{FRAMES_QUERY}:{output}")));
-            let ticket = self.ticket(Ticket::Query { node: id.to_owned(), revision, name: format!("{FRAMES_QUERY}:{output}") });
-            self.plugins.query(&node_instance(id), ticket, FRAMES_QUERY, &json!({"values": args["values"], "output_name": output, "source": source, "devices": args["devices"]}));
+            questions.push((format!("{FRAMES_QUERY}:{output}"), FRAMES_QUERY.to_owned(),
+                json!({"values": args["values"], "output_name": output, "source": source, "devices": args["devices"]})));
         }
+        for (name, query, facts) in questions {
+            let purpose = Ticket::Query { node: id.to_owned(), name: name.clone() };
+            self.ask(id, &name, Question { stamp, query, facts, purpose });
+        }
+    }
+
+    /// Ask the node's plugin `question` as its kind `name`: now when none of that kind is in
+    /// flight, else once that one lands.
+    fn ask(&mut self, id: &str, name: &str, question: Question) {
+        let Ok(node) = self.node_mut(id) else { return };
+        let ask = node.asks.entry(name.to_owned()).or_default();
+        ask.waiting = Some(question);
+        if ask.flying.is_none() { self.send_waiting(id, name); }
+    }
+
+    /// Send the question that waits to be asked as `name` -- unless the answer that stands was
+    /// told the same, asked since the operator's last Check, and is no failure: that answer then
+    /// stands for it. It waits while the node's plugin is not open.
+    fn send_waiting(&mut self, id: &str, name: &str) {
+        let Some(node) = self.nodes.iter_mut().find(|node| node.id == id && node.instance == Instance::Open) else { return };
+        let rechecked = node.rechecked;
+        let Some(ask) = node.asks.get_mut(name) else { return };
+        let Some(question) = ask.waiting.take() else { return };
+        let told = ask.told.as_ref().is_some_and(|(check, facts)| *check >= rechecked && *facts == question.facts);
+        if let Some(answer) = node.answers.get_mut(name).filter(|(_, answer)| told && answer.is_ok()) {
+            answer.0 = question.stamp;
+            return;
+        }
+        let ticket = self.ticket(question.purpose.clone());
+        self.plugins.query(&node_instance(id), ticket, &question.query, &question.facts);
+        if let Ok(node) = self.node_mut(id) { node.asks.entry(name.to_owned()).or_default().flying = Some((ticket, question)); }
+    }
+
+    /// The node's plugin answered: its queue moves, and what waits to be asked of it goes.
+    fn resume_asks(&mut self, id: &str) {
+        let Some(node) = self.node(id) else { return };
+        let waiting: Vec<String> = node.asks.iter().filter(|(_, ask)| ask.flying.is_none() && ask.waiting.is_some()).map(|(name, _)| name.clone()).collect();
+        for name in waiting { self.send_waiting(id, &name); }
     }
 
     /// The node's source frames `[axis_name, [labels...]]` (PLUGIN_PROTOCOL §2): what its
@@ -598,14 +672,8 @@ impl Workbench {
         self.bundles.get(id).is_some_and(|bundle| !bundle.members.is_empty() && bundle.members.iter().all(|(_, member)| !member["schema"].is_null()))
     }
 
-    /// The bench's devices changed: editors that offer them ask again.
-    /// The bench changed (a device opened, failed, closed, or an Apply): every draft query
-    /// reads the devices' facts (`device_infos`: whether the device a node names is open, what
-    /// it reads and tunes; an editor also every tunable device of the bench). A node that names
-    /// one, and every node with an editor, asks again under a new revision, so an answer given
-    /// before the change -- a camera not yet open when a layout loaded -- cannot stand after it.
     /// An open device says what it now states of itself (`Event::Facts`): kept with its working point, and
-    /// every draft that names devices is asked again when it differs from what was known. A change of
+    /// every draft that names devices is checked again when it differs from what was known. A change of
     /// who holds it (`held_by`: another client of a board's own pulse server; null: this application)
     /// is the Device Manager's line as well.
     pub(crate) fn device_facts(&mut self, instance: &str, facts: Value) {
@@ -620,12 +688,18 @@ impl Workbench {
         self.bench_changed();
     }
 
+    /// The bench changed (a device opened, failed, closed, its facts, or an Apply): every draft
+    /// query reads the devices' facts (`device_infos`: whether the device a node names is open,
+    /// what it reads and tunes; an editor also every tunable device of the bench). A node that
+    /// names one, and every node with an editor, checks its draft again -- the same draft, a new
+    /// check -- so an answer given before the change -- a camera not yet open when a layout
+    /// loaded -- cannot stand after it; a query the change told nothing new is not asked again.
     pub(crate) fn bench_changed(&mut self) {
         let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
-            || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == "editor_facts")))
+            || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == EDITOR_FACTS)))
             .map(|node| node.id.clone()).collect();
         for id in asking {
-            if let Ok(node) = self.node_mut(&id) { node.revision += 1; node.recheck(); }
+            if let Ok(node) = self.node_mut(&id) { node.check += 1; }
             self.send_queries(&id);
         }
     }
@@ -685,19 +759,31 @@ impl Workbench {
         })).collect())
     }
 
-    pub(crate) fn query_answered(&mut self, id: &str, revision: u64, name: &str, result: Result<Value, String>, host: &mut dyn Host) {
+    /// The node's plugin answered a question (its code's answer: a failure of its code is one too).
+    pub(crate) fn query_answered(&mut self, id: &str, ticket: u64, name: &str, result: Result<Value, String>, host: &mut dyn Host) {
         let mut changed = None;
         let mut readmit = false;
         if let Ok(node) = self.node_mut(id) {
-            if node.revision == revision {
-                node.checked.insert(name.to_owned());
-                let previous = node.answers.insert(name.to_owned(), (revision, result.clone()));
-                let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
-                let fresh = differs || previous.is_some_and(|(before, _)| before != revision);
-                // Its readers are told the frames, not the revision: the same frames under a new one tell them nothing.
-                changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
-                // Defaults the node fills in change what its schema admits: ask that again.
-                if name == "resolve_defaults" && fresh { node.checked.remove(ADMIT); readmit = true; }
+            let (stamp, rechecked) = (node.stamp(), node.rechecked);
+            let ask = node.asks.entry(name.to_owned()).or_default();
+            if let Some((_, asked)) = ask.flying.take_if(|(flying, _)| *flying == ticket) {
+                // It stands for the draft and check it was asked for when nothing was asked since; else
+                // for what was asked since, if that was told the same and it is no failure.
+                let stands = match ask.waiting.take() {
+                    None => (asked.stamp == stamp).then_some(stamp),
+                    Some(waiting) if result.is_ok() && waiting.facts == asked.facts && asked.stamp.1 >= rechecked => Some(waiting.stamp),
+                    Some(waiting) => { ask.waiting = Some(waiting); None }
+                };
+                if let Some(stands) = stands {
+                    ask.told = Some((asked.stamp.1, asked.facts));
+                    let previous = node.answers.insert(name.to_owned(), (stands, result.clone()));
+                    let differs = previous.as_ref().is_none_or(|(_, answer)| *answer != result);
+                    let fresh = differs || previous.is_some_and(|(before, _)| before != stands);
+                    // Its readers are told the frames, not the check: the same frames under a new one tell them nothing.
+                    changed = name.strip_prefix(FRAMES_QUERY).and_then(|rest| rest.strip_prefix(':')).filter(|_| differs).map(|output| signal_key(id, output));
+                    // Defaults the node fills in change what its schema admits: ask that again.
+                    readmit = name == "resolve_defaults" && fresh;
+                }
             }
         }
         // New frames of an output: the nodes reading it ask again with their new source.
@@ -706,7 +792,19 @@ impl Workbench {
             for reader in readers { self.send_queries(&reader); }
         }
         if readmit { self.ask_queries(id, Some(&[ADMIT])); }
+        self.resume_asks(id);
         self.start_checked(id, host);
+    }
+
+    /// A question its plugin's code did not answer -- refused or expired before it ran, timed out,
+    /// its channel lost: no answer, and the one that stood stands. It waits to be asked again until
+    /// the node's plugin answers anything, or opens again.
+    pub(crate) fn query_unanswered(&mut self, id: &str, ticket: u64, name: &str) {
+        let Ok(node) = self.node_mut(id) else { return };
+        let stamp = node.stamp();
+        let Some(ask) = node.asks.get_mut(name) else { return };
+        let Some((_, asked)) = ask.flying.take_if(|(flying, _)| *flying == ticket) else { return };
+        if ask.waiting.is_none() && asked.stamp == stamp { ask.waiting = Some(asked); }
     }
 
     /// A Start that waited for the draft check: now it starts, or reports why not.
@@ -830,12 +928,10 @@ impl Workbench {
             node.draft = draft;
             node.revision += 1;
             node.error = None;
-            node.recheck();
         }
         let revision = node.revision;
         if changed {
             self.release_selections(id, &moved);
-            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
             self.send_queries(id);
         }
         if changed || auto_preview.is_some() { self.board.dirty = true; }
@@ -876,18 +972,24 @@ impl Workbench {
         for ((owned, field), (owner, before)) in &self.selection_restore {
             if owned == &node.id && owner == panel { drawn_over.insert(field.clone(), before.clone()); }
         }
-        let (id, args) = (node.id.clone(), json!({"selection": selection, "draft": Value::Object(drawn_over), "context": context}));
-        self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == &id));
-        let ticket = self.ticket(Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() });
-        self.plugins.query(&node_instance(&id), ticket, "selection_patch", &args);
+        let (id, stamp, facts) = (node.id.clone(), node.stamp(), json!({"selection": selection, "draft": Value::Object(drawn_over), "context": context}));
+        let purpose = Ticket::Selection { node: id.clone(), panel: panel.to_owned(), selection: selection.clone() };
+        self.ask(&id, SELECTION, Question { stamp, query: SELECTION.to_owned(), facts, purpose });
         false
     }
 
     /// The producer's answer: the draft fields the region sets, each remembered with
     /// what it held before (once, whichever panel set it first). A region that has
-    /// changed or gone since it asked sets nothing.
-    pub(crate) fn selection_patched(&mut self, id: &str, panel: &str, selection: &Value, result: Result<Value, String>) {
-        if self.routed_selections.get(panel) != Some(selection) { return; }
+    /// changed or gone since it asked sets nothing, nor one asked about a draft edited since,
+    /// nor one another region was asked after: the region asked next is asked now.
+    pub(crate) fn selection_patched(&mut self, id: &str, ticket: u64, panel: &str, selection: &Value, result: Result<Value, String>) {
+        let Ok(node) = self.node_mut(id) else { return };
+        let revision = node.revision;
+        let Some(ask) = node.asks.get_mut(SELECTION) else { return };
+        let Some((_, asked)) = ask.flying.take_if(|(flying, _)| *flying == ticket) else { return };
+        let current = ask.waiting.is_none() && asked.stamp.0 == revision;
+        self.send_waiting(id, SELECTION);
+        if !current || self.routed_selections.get(panel) != Some(selection) { return; }
         let patch = match result {
             Ok(Value::Object(patch)) => patch,
             // The region names nothing this producer can be set from.
@@ -922,7 +1024,9 @@ impl Workbench {
     pub(crate) fn check_node(&mut self, id: &str, host: &mut dyn Host) -> Result<Value, String> {
         self.reopen_failed(id);
         let node = self.node_mut(id)?;
-        node.recheck();
+        // The operator's Check: every query is asked again, and nothing asked before stands for it.
+        node.check += 1;
+        node.rechecked = node.check;
         node.error = None;
         self.send_queries(id);
         let signals = host.signals();
@@ -938,10 +1042,8 @@ impl Workbench {
             let moved = changed_fields(&node.draft.values, &running.values);
             node.draft = running;
             node.revision += 1;
-            node.recheck();
             node.error = None;
             self.release_selections(id, &moved);
-            self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Selection { node, .. } if node == id));
             self.send_queries(id);
         }
         Ok(json!({"node": id}))
@@ -963,7 +1065,7 @@ impl Workbench {
         let answer = |name: &str| node.answers.get(name).map(|(_, answer)| answer);
         let outstanding = spec.queries.iter().filter(|name| DRAFT_QUERIES.contains(&name.as_str()))
             .filter(|name| name.as_str() != ADMIT_SOURCE || self.bundle_complete(&node.id))
-            .any(|name| !node.checked.contains(name));
+            .any(|name| !node.checked(name));
         // What the variables cannot compute from what the source published (v2: draft issues).
         if let Some(Ok(Value::Array(found))) = answer(ADMIT_SOURCE).filter(|_| self.bundle_complete(&node.id)) {
             issues.extend(found.iter().filter_map(Value::as_str).map(str::to_owned));
@@ -1527,6 +1629,9 @@ impl Workbench {
         if let Some(id) = instance.strip_prefix(NODE_INSTANCE) {
             if let Ok(node) = self.node_mut(id) {
                 node.instance = Instance::Open;
+                // Nothing is asked of an instance just opened: what was in flight was the last one's.
+                for ask in node.asks.values_mut() { ask.flying = None; }
+                self.tickets.retain(|_, ticket| !matches!(ticket, Ticket::Query { node, .. } | Ticket::Selection { node, .. } if node == id));
                 self.send_queries(id);
                 self.start_checked(id, host);
             }
@@ -1552,7 +1657,6 @@ impl Workbench {
                     let node = &mut self.nodes[index];
                     node.draft.device_keys.insert(requirement.argument.clone(), device.to_owned());
                     node.revision += 1;
-                    node.recheck();
                     changed.push(node.id.clone());
                 }
             }
@@ -1996,8 +2100,8 @@ impl Workbench {
             "device_keys": node.draft.device_keys,
             "device_choices": device_choices,
             "editor_facts_error": editor_facts.and_then(|answer| answer.as_ref().err()),
-            // The newest answer is of an older draft, and its process has been asked for this one's.
-            "editor_facts_pending": node.instance == Instance::Open && node.answers.get(EDITOR_FACTS).is_some_and(|(revision, _)| *revision != node.revision),
+            // The newest answer is not this draft's and check's, and its process is asked for theirs.
+            "editor_facts_pending": node.instance == Instance::Open && node.answers.contains_key(EDITOR_FACTS) && !node.checked(EDITOR_FACTS),
             "artifact_inputs": node.draft.artifact_inputs,
             "artifact_specs": descriptor.map(|item| item.node().artifact_inputs.iter().map(|spec| json!({"name": spec.name, "label": spec.label,
                 "file_filter": spec.file_filter, "required": spec.required.unwrap_or(true), "frame_claims": spec.frame_claims})).collect::<Vec<_>>()).unwrap_or_default(),

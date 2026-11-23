@@ -116,6 +116,10 @@ pub enum Event {
     /// that name devices are asked again.
     Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
+    /// A query its plugin's code did not answer: refused before it ran (a full queue, an instance
+    /// still releasing), expired or timed out, its channel lost. A draft query asks again later;
+    /// any other asker takes it as the failure it is.
+    Unanswered { ticket: u64, error: String },
     Log { instance: String, line: String },
     RunStarted { run: String },
     /// A Task's run directory was made (with its `start.json`) by the start, off the owner turn.
@@ -147,6 +151,7 @@ impl Event {
             }
             Event::Facts { instance, facts } => json!({"fact": "device_facts", "instance": instance, "facts": facts}),
             Event::Answered { ticket, result } => json!({"fact": "answered", "ticket": ticket, "error": failed(result)}),
+            Event::Unanswered { ticket, error } => json!({"fact": "answered", "ticket": ticket, "error": error}),
             Event::Log { instance, line } => json!({"fact": "log", "instance": instance, "line": line}),
             Event::RunStarted { run } => json!({"fact": "run_started", "run": run}),
             Event::RunDirectory { run, directory } => json!({"fact": "run_directory", "run": run, "directory": directory}),
@@ -242,7 +247,8 @@ pub type DiagnosticData = Box<dyn FnOnce() -> Vec<(String, Vec<u8>)> + Send>;
 pub(crate) enum Ticket {
     Prepare { node: String, frozen: logic::Frozen, origin: String, acquisition: Option<(String, u64, String)> },
     Discard,
-    Query { node: String, revision: u64, name: String },
+    /// One of a node's questions of its kind `name` (`logic::Ask`): what it asked is its flight's.
+    Query { node: String, name: String },
     Estimate { request: u64 },
     Fields { device: String, request: Option<u64> },
     Tune { device: String, request: u64 },
@@ -597,6 +603,7 @@ impl Workbench {
             Event::Closed { instance, error } => self.instance_closed(&instance, error, host),
             Event::Facts { instance, facts } => self.device_facts(&instance, facts),
             Event::Answered { ticket, result } => self.answered(ticket, result, host),
+            Event::Unanswered { ticket, error } => self.unanswered(ticket, error, host),
             Event::Lifecycle { current, revision, event } => {
                 if current.load(std::sync::atomic::Ordering::Acquire) == revision { self.on_event(*event, host); }
                 return;
@@ -655,7 +662,7 @@ impl Workbench {
         match purpose {
             Ticket::Prepare { node, frozen, origin, acquisition } => self.prepared(&node, ticket, frozen, origin, acquisition, result, host),
             Ticket::Discard => {},
-            Ticket::Query { node, revision, name } => self.query_answered(&node, revision, &name, result, host),
+            Ticket::Query { node, name } => self.query_answered(&node, ticket, &name, result, host),
             Ticket::Estimate { request } => self.replies.push((request, result.or_else(|error| Ok(json!({"status": "unknown", "reason": error}))))),
             Ticket::Fields { device, request } => {
                 if self.devices.get(&device).is_none_or(|live| live.fields_ticket != Some(ticket)) {
@@ -671,7 +678,7 @@ impl Workbench {
             Ticket::Discover { type_id } => self.discovered(&type_id, result),
             Ticket::Resolve { device } => self.resolved(ticket, &device, result),
             Ticket::Publish { device, published, request } => self.published(&device, published, request, result),
-            Ticket::Selection { node, panel, selection } => self.selection_patched(&node, &panel, &selection, result),
+            Ticket::Selection { node, panel, selection } => self.selection_patched(&node, ticket, &panel, &selection, result),
             Ticket::Snapshot { run, device } => self.bench_answered(&run, &device, ticket, result),
             Ticket::ApparatusRead { path, request: Some(request) } => { let loaded = self.apparatus_read(&path, result); self.replies.push((request, loaded)); }
             Ticket::ApparatusRead { path, request: None } => self.apparatus_reread(&path, result),
@@ -688,6 +695,19 @@ impl Workbench {
                 self.replies.push((request, reply));
                 if result.is_ok() { let _ = self.read_device(&device, None, false, None); }
             }
+        }
+    }
+
+    /// A query its plugin's code did not answer: a draft query waits to be asked again; any other
+    /// asker is answered with the failure.
+    fn unanswered(&mut self, ticket: u64, error: String, host: &mut dyn Host) {
+        match self.tickets.get(&ticket) {
+            Some(Ticket::Query { node, name }) => {
+                let (node, name) = (node.clone(), name.clone());
+                self.tickets.remove(&ticket);
+                self.query_unanswered(&node, ticket, &name);
+            }
+            _ => self.answered(ticket, Err(error), host),
         }
     }
 
