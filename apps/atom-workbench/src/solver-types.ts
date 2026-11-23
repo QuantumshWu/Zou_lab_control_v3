@@ -76,13 +76,16 @@ export interface LedgerTotal {error:number;target:number}
  * populations and of T, and each approximation, from the largest down -- what it is, its estimated error (its largest
  * over the outputs) and what the engine did about it; `flagged`, when present, says where an output's total error exceeds a target,
  * shown as the validated regime is (a reference only). */
-export interface ApproximationLedger {totals:{population:LedgerTotal;temperature:LedgerTotal};items:{label:string;estimate:number;action:string}[];flagged?:string;note?:string}
+export interface ApproximationLedger {totals:{population:LedgerTotal;temperature:LedgerTotal;velocity:LedgerTotal;push:LedgerTotal};items:{label:string;estimate:number;action:string}[];flagged?:string;note?:string}
 /** The motion of a motion result (ui-design.md §6.20): a single atom in the tweezer moving in 3D,
  * solved semiclassically, its series per lab axis x, y, z (motion.ts MOTION_AXES). At every sample
  * per axis the temperature T = m·Var(v)/k_B (μK) with its standard error and n̄ relative to that
  * axis's trap frequency at the trap's bottom (`trapFrequencyKHz`, ω/2π, the one the engine used), m⟨v²⟩/ħω − ½ (⟨v²⟩
  * with the mean velocity in it), both over one trap period of the axis about the sample (motion-chart.ts
- * `TEMPERATURE_WINDOW`); the total temperature (T_x + T_y + T_z)/3 with its own standard error, both the engine's; the
+ * `TEMPERATURE_WINDOW`); the total temperature (T_x + T_y + T_z)/3 with its own standard error, both the engine's; per
+ * axis the held atoms' mean velocity ⟨v⟩ (m/s) and their push -- the mean acceleration d⟨v⟩/dt over T's window (m/s²)
+ * -- each with its standard error (null as T's) and its target (the engine's, per sample: what its total error is
+ * held to); the
  * probability that the atom has left the trap by then -- its energy above the value far away, unbound, wherever it
  * is (model-notes.ts); whether the sample lies in the method's validated regime
  * (`classical`: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis; outside it the result is a reference
@@ -92,6 +95,8 @@ export interface ApproximationLedger {totals:{population:LedgerTotal;temperature
  * fallback's `deviceNote`), and its approximation ledger. */
 export interface MotionResult {
   temperatureUK:number[][];temperatureErrorUK:(number|null)[][];temperatureTotalUK:number[];temperatureTotalErrorUK:(number|null)[];
+  meanVelocityMps:number[][];meanVelocityErrorMps:(number|null)[][];meanVelocityTargetMps:number[][];
+  pushMps2:number[][];pushErrorMps2:(number|null)[][];pushTargetMps2:number[][];
   meanOccupation:number[][];trapFrequencyKHz:number[];lossProbability:number[];classical:boolean[];
   momentum:Distributions[];position:Distributions[];trajectories:number;timeStepUs:number;
   device:MotionDevice;deviceNote?:string;approximations:ApproximationLedger;
@@ -119,31 +124,32 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
     if(rows.some(row=>Math.abs(row.reduce((a,b)=>a+b,0)-1)>5e-6))invalid();
     return {grid,samples:at,probabilities:rows};
   };
-  const m=object(value,['axis','temperatureUK','temperatureErrorUK','temperatureTotalUK','temperatureTotalErrorUK','meanVelocityMps','meanOccupation','trapFrequencyKHz',
-    'lossProbability','classical','momentum','position','trajectories','timeStepUs']);
+  const m=object(value,['axis','temperatureUK','temperatureErrorUK','temperatureTotalUK','temperatureTotalErrorUK','meanVelocityMps','meanVelocityErrorMps','meanVelocityTargetMps',
+    'pushMps2','pushErrorMps2','pushTargetMps2','meanOccupation','trapFrequencyKHz','lossProbability','classical','momentum','position','trajectories','timeStepUs']);
   function perAxis<T>(v:unknown,read:(x:unknown)=>T):T[]{const o=object(v,MOTION_AXES);return MOTION_AXES.map(a=>read(o[a]));}
   if(m.axis!=='3d'||!Array.isArray(m.classical)||m.classical.length!==samples||!m.classical.every(x=>typeof x==='boolean'))invalid();
   if(!Number.isSafeInteger(m.trajectories)||!((m.trajectories as number)>0)||typeof m.timeStepUs!=='number'||!(m.timeStepUs>0))invalid();
   // The loss: from 0 to 1, never decreasing.
   const loss=series(m.lossProbability,samples,x=>x>=0&&x<=1);if(loss.some((p,i)=>i>0&&p<loss[i-1]!))invalid();
-  // The mean velocity is in the contract; no view shows it.
-  perAxis(m.meanVelocityMps,v=>series(v,samples,()=>true));
   // The device it ran on, a fallback's note, and the approximation ledger.
   const device:MotionDevice=diagnostics.device==='gpu'||diagnostics.device==='cpu'?diagnostics.device:invalid();
   const note=diagnostics.deviceNote===undefined?undefined:text(diagnostics.deviceNote);
   const ledger=object(diagnostics.approximations,['totals','items'],['flagged','note']);
-  const totals=object(ledger.totals,['population','temperature']);
+  const totals=object(ledger.totals,['population','temperature','velocity','push']);
   const total=(v:unknown):LedgerTotal=>{const t=object(v,['error','target']);return {error:size(t.error),target:size(t.target)};};
   const items=Array.isArray(ledger.items)?ledger.items.map(item=>{const i=object(item,['label','estimate','action']);return {label:text(i.label),estimate:size(i.estimate),action:text(i.action,true)};}):invalid();
   // From the largest down (rust-solver/motion/src/ledger.rs `Ledger::close`): the order the details page lists them in.
   if(items.some((item,i)=>i>0&&item.estimate>items[i-1]!.estimate))invalid();
   return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,errors),
     temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:errors(m.temperatureTotalErrorUK),
+    meanVelocityMps:perAxis(m.meanVelocityMps,v=>series(v,samples,()=>true)),meanVelocityErrorMps:perAxis(m.meanVelocityErrorMps,errors),
+    meanVelocityTargetMps:perAxis(m.meanVelocityTargetMps,v=>series(v,samples,x=>x>0)),
+    pushMps2:perAxis(m.pushMps2,v=>series(v,samples,()=>true)),pushErrorMps2:perAxis(m.pushErrorMps2,errors),pushTargetMps2:perAxis(m.pushTargetMps2,v=>series(v,samples,x=>x>0)),
     meanOccupation:perAxis(m.meanOccupation,v=>series(v,samples,()=>true)),trapFrequencyKHz:perAxis(m.trapFrequencyKHz,v=>typeof v==='number'&&Number.isFinite(v)&&v>0?v:invalid()),
     lossProbability:loss,classical:[...(m.classical as boolean[])],
     momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),
     trajectories:m.trajectories as number,timeStepUs:m.timeStepUs as number,device,...(note===undefined?{}:{deviceNote:note}),
-    approximations:{totals:{population:total(totals.population),temperature:total(totals.temperature)},items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
+    approximations:{totals:{population:total(totals.population),temperature:total(totals.temperature),velocity:total(totals.velocity),push:total(totals.push)},items,...(ledger.flagged===undefined?{}:{flagged:text(ledger.flagged)}),...(ledger.note===undefined?{}:{note:text(ledger.note)})}};
 }
 /** The steps of a motion solve's pipeline (rust-solver/motion/src/solve.rs # Steps), in their order of a new selection:
  * the model, the scout, the pilot, the selection of the model on the pilot's paths and the product. The engine sends

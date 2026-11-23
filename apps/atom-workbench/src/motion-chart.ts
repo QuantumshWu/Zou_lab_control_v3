@@ -26,8 +26,9 @@ const GRID='#e1dfdd',INK='#6a6866',LEFT=64,RIGHT=778;
 
 /** A display unit: its name and the factor from the base unit. */
 interface Unit {name:string;factor:number}
-/** Velocity units (in m/s) and length units (in μm), largest first. */
+/** Velocity units (in m/s), acceleration units (in m/s²) and length units (in μm), largest first. */
 const VELOCITY_UNITS:readonly (readonly [string,number])[]=[['m/s',1],['cm/s',1e-2],['mm/s',1e-3],['μm/s',1e-6]];
+const ACCELERATION_UNITS:readonly (readonly [string,number])[]=[['km/s²',1e3],['m/s²',1],['mm/s²',1e-3]];
 const LENGTH_UNITS:readonly (readonly [string,number])[]=[['μm',1],['nm',1e-3]];
 /** The largest of `units` in which `magnitude` (base units) reads at least 1. */
 function unitFor(units:readonly (readonly [string,number])[],magnitude:number):Unit{
@@ -49,7 +50,8 @@ const digits=(n:number)=>formatNumber(n,{digits:4});
  * per sample (`error`, base units; null where it has none), read in the cursor's readout as value ± error. */
 export interface Line {name:string;values:readonly number[];ink:string;width?:number;error?:readonly (number|null)[]}
 /** One panel: its name, its axis title, its lines and display unit; its axis runs from 0 to the top
- * of its ticks. */
+ * of its ticks, or, where a line goes below zero (a velocity, a push), from the tick below its least value to the tick
+ * above its largest, zero among them. */
 export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit}
 const along=(axis:MotionAxis)=>`（${axis} 轴）`;
 /** What a T is an average over (rust-solver/motion estimate.rs `half_window`, SPEC §1.7): the window about the output's
@@ -65,11 +67,26 @@ export function motionSeries(motion:MotionResult):[Series,Series]{
     {id:'occupation',name:'n̄',title:`平均振动量子数 n̄ = m⟨v²⟩/ħω − ½（各轴阱底处的阱频 ω/2π：${MOTION_AXES.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,
       lines:MOTION_AXES.map((axis,k)=>({name:`n̄${along(axis)}`,values:motion.meanOccupation[k]!,ink:AXIS_INKS[axis]})),unit:{name:'',factor:1}}];
 }
+/** The two panels of a motion result's velocity chart: the held atoms' mean velocity ⟨v⟩ on each axis above their push
+ * -- the mean acceleration d⟨v⟩/dt, the light's net force over the mass -- on each axis, each with its standard error
+ * per sample (the engine's, read as value ± error); each in the unit that fits its largest size. */
+export function velocitySeries(motion:MotionResult):[Series,Series]{
+  // All zero (no push): the base unit.
+  const fit=(units:readonly (readonly [string,number])[],rows:readonly (readonly number[])[])=>unitFor(units,Math.max(0,...rows.flat().map(Math.abs))||1);
+  const velocity=fit(VELOCITY_UNITS,motion.meanVelocityMps),push=fit(ACCELERATION_UNITS,motion.pushMps2);
+  return [{id:'velocity',name:'平均速度 ⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}`,unit:velocity,
+      lines:MOTION_AXES.map((axis,k)=>({name:`⟨v⟩${along(axis)}`,values:motion.meanVelocityMps[k]!,ink:AXIS_INKS[axis],error:motion.meanVelocityErrorMps[k]!}))},
+    {id:'push',name:'推力 a',title:`推力 a = d⟨v⟩/dt / ${push.name}`,unit:push,
+      lines:MOTION_AXES.map((axis,k)=>({name:`a${along(axis)}`,values:motion.pushMps2[k]!,ink:AXIS_INKS[axis],error:motion.pushErrorMps2[k]!}))}];
+}
 /** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
 interface Panel {series:Series;top:number;bottom:number;ticks:number[];y:(value:number)=>number}
 function panel(series:Series,top:number,bottom:number):Panel{
-  const factor=series.unit.factor,highest=ticks(Math.max(0,...series.lines.flatMap(l=>l.values))*factor||1).at(-1)!;
-  return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};
+  const factor=series.unit.factor,values=series.lines.flatMap(l=>l.values).map(v=>v*factor),least=Math.min(0,...values);
+  if(!(least<0)){const highest=ticks(Math.max(0,...values)||1).at(-1)!;return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};}
+  const most=Math.max(0,...values),step=niceStep(most-least,4),low=Math.floor(least/step-1e-9)*step,high=Math.ceil(most/step-1e-9)*step||step;
+  const marks=Array.from({length:Math.round((high-low)/step)+1},(_,k)=>low+k*step);
+  return {series,top,bottom,ticks:marks,y:v=>bottom-(v*factor-low)/(high-low)*(bottom-top)};
 }
 interface SeriesLayout {panels:[Panel,Panel];unit:{name:DurationUnit;factor:number};x:(t:number)=>number}
 function seriesLayout(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):SeriesLayout{
