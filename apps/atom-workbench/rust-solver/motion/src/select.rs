@@ -655,7 +655,14 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
     let (mut tried, mut products, mut counted) = (0, 0, 0.0);
     loop {
         let (runs, pairs) = refinements(setting, &own);
+        #[cfg(test)]
+        let rung = Instant::now();
         let made = family(if at.is_some() { &runs[1..] } else { &runs[..] })?;
+        #[cfg(test)]
+        if traced() {
+            let sum = |f: &dyn Fn(&crate::paths::Counts) -> f64| made.iter().flatten().map(|s| f(&s.counts)).sum::<f64>();
+            eprintln!("    [trace] family of {}: wall {:.2} s, thread s {:.2} (freeze {:.2} + propagation {:.2} + readouts {:.2})", made.len(), rung.elapsed().as_secs_f64(), sum(&|c| c.seconds()), sum(&|c| c.node_seconds), sum(&|c| c.propagation_seconds), sum(&|c| c.readout_seconds));
+        }
         tried += made.len();
         products += made.iter().map(|s| work(s)).sum::<u64>();
         counted += made.iter().flatten().map(|s| s.counts.work).sum::<f64>();
