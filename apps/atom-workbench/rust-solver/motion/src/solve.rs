@@ -2776,7 +2776,6 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
     let carried = if scouted_at > 0. && tau > 0. { tau / scouted_at } else { 1. };
     let first = first * carried;
     let domain = Domain { widest: Widest::of(request) };
-    let light = run.light();
     let centre = trap.centre;
     messages.stage(Stage { step: Step::Select, tau: None, batch: None });
     let reference = alone(chief(request));
@@ -2866,7 +2865,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // share's convention, units.rs `STEP_SHARE`); the tightest possible, 0.1, where no T is read.
         let tightest = read.estimates.iter().filter(|e| e.motion.is_some()).map(|e| e.temperature_target).fold(f64::INFINITY, crate::linalg::smaller);
         let landing_budget = 0.5 * STEP_SHARE.powi(4) * if tightest.is_finite() { tightest } else { 0.1 };
-        let paths = Paths::new(&full, centre, walked, memory, length, tau, light, landing_budget)?;
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, landing_budget)?;
         let settled = &paths.settled;
         noted(
             &mut report,
@@ -3362,7 +3361,15 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[6] as f64 * 1e-9, c[7]);
         }
         let w = weighed.swap_remove(chosen);
-        return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
+        return Ok(Some(Choice {
+            keep: w.judged.keep.clone(),
+            judged: w.judged,
+            windows: paths.windows.clone(),
+            memory,
+            #[cfg(test)]
+            length: paths.length,
+            report,
+        }));
     }
 }
 

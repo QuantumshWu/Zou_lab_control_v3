@@ -365,18 +365,14 @@ pub struct Selection {
     pub keep: Vec<usize>,
     /// The chain from the full-ground model G (first) up to the 32 states (last), each sorted.
     pub chain: Vec<Vec<usize>>,
-    /// Per state its structural amplitude (zero on the ground states).
+    /// Per state its structural amplitude (zero on the ground states; the tests').
+    #[cfg(test)]
     pub amplitudes: [f64; STATES],
     pub seconds: f64,
     pub choice: Option<std::sync::Arc<Choice>>,
 }
 
 impl Selection {
-    /// The full-ground model's states: the chain's first, the model the scout and the pilot run.
-    pub fn ground(&self) -> &[usize] {
-        &self.chain[0]
-    }
-
     /// What the report says beside the numbers (Chinese): the chain, and the choice where it was made.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = vec![format!("结构链 {} 档：{}", self.chain.len(), self.chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" → "))];
@@ -393,7 +389,14 @@ pub fn choose(scene: &Scene) -> Result<Selection, String> {
     let clock = Instant::now();
     let amplitudes = amplitudes(scene);
     let chain = chain(&amplitudes);
-    Ok(Selection { keep: chain[0].clone(), chain, amplitudes, seconds: clock.elapsed().as_secs_f64(), choice: None })
+    Ok(Selection {
+        keep: chain[0].clone(),
+        chain,
+        #[cfg(test)]
+        amplitudes,
+        seconds: clock.elapsed().as_secs_f64(),
+        choice: None,
+    })
 }
 
 /// The chain (module documentation, # The candidates) by the states' structural amplitudes: from the ground states up,
@@ -557,11 +560,6 @@ pub fn importance(scene: &Scene, places: &[(V3, [f64; GROUND])]) -> [f64; STATES
 // ---------------------------------------------------------------------------------------------------------------------
 // The paths and the candidates' judgment.
 
-/// The tweezer's intensity at a place, relative to its peak (s = |a_tw(r)|²).
-pub fn intensity(light: &Light, r: V3) -> f64 {
-    light.beams[light.frequencies[light.trap].beams[0]].amplitude_to(r, 0).value.norm_sqr()
-}
-
 //// What every candidate is judged against (module documentation, # The paths): the walks cut at L, their windows, the
 /// reference's form, the scheme's setting (`settle`), the reference's series along the walks at it, the calibration --
 /// the walk it was read along (the longest), its length and the reference's series there at the setting's runs --, the
@@ -585,31 +583,28 @@ pub struct Paths<'a> {
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
     /// none where the run is no longer than twice L.
     late: Option<(f64, Vec<(f64, f64)>, Vec<Series>)>,
-    pub least: f64,
     /// The largest bound the reference's openings book over its stretches (paths.rs, # The start).
     pub booked: f64,
     /// The reference's largest trace defect over its stretches at the setting (paths.rs `Series::trace_defect`).
     pub trace: f64,
     /// The landing check (module documentation, # The motion): per stretch -- the walks' starts, then their late
-    /// segments -- its landings with the reference's excess photons and impulse; and the check's span and the fastest
+    /// segments -- its landings with the reference's excess photons; and the check's span and the fastest
     /// excited decay (paths.rs `Form::optical`; none of a reference without excited states).
     pub landings: Vec<Vec<Landing>>,
     pub optical: Option<(f64, f64)>,
     /// The reference's counted work along its paths (paths.rs `Counts::work`; # How many paths).
     pub work: f64,
     pub seconds: f64,
-    pub products: u64,
 }
 
 /// A landing of the landing check (module documentation, # The motion): its time, the reference's landed ground state
-/// (by the request's ground states, its trace one), the reference's excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and impulse
-/// ∫(F(τ|L) − F̄)dτ (1/µm) from it (paths.rs `Form::landing`).
+/// (by the request's ground states, its trace one) and the reference's excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ from it
+/// (paths.rs `Form::landing`).
 #[derive(Clone, Debug)]
 pub struct Landing {
     pub t: f64,
     pub landed: [[C64; GROUND]; GROUND],
     pub photons: f64,
-    pub impulse: V3,
     /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch.
     pub work: f64,
     /// The excess photons' last doubling's change (paths.rs `Form::landing`): booked, not left unconverged.
@@ -645,11 +640,6 @@ impl Settled {
         let sum: f64 = self.errors.iter().sum::<f64>();
         // The trace's part decides with the knobs' and is booked on its own, over every path (`Paths::trace`).
         (sum + self.trace > TOLERANCE).then_some(sum)
-    }
-
-    /// The scheme at the setting, read at every `read`-th knot.
-    pub fn scheme(&self, read: usize) -> Scheme {
-        scheme(self.setting, read)
     }
 
     /// The ladder's second stage after its first (`settle`): the second's setting and parts, the two's work together.
@@ -788,7 +778,7 @@ impl<'a> Paths<'a> {
     /// the scheme's setting along the longest walk's [0, L] (`settle`; the first such where several are), and the
     /// reference along the walks at it -- the other walks' on the pool beside the setting's second stage, at the first
     /// stage's setting, and again where the second stage moved it.
-    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light, landing_budget: f64) -> Result<Paths<'a>, String> {
+    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, landing_budget: f64) -> Result<Paths<'a>, String> {
         let clock = Instant::now();
         let form = Form::new(reference, at);
         let length = run.min(5.0 * memory);
@@ -897,7 +887,7 @@ impl<'a> Paths<'a> {
             }
         }
         // The landing check of the reference (module documentation, # The motion): at each kept state the landing after a
-        // jump, and the reference's excess photons and impulse from it, each stretch at its own setting.
+        // jump, and the reference's excess photons from it, each stretch at its own setting.
         let knobs_of = |j: usize| (settings[j].turns, settings[j].rate, settings[j].cutoff);
         let landings: Vec<Vec<Landing>> = match optical {
             None => vec![vec![]; jobs.len()],
@@ -909,7 +899,7 @@ impl<'a> Paths<'a> {
                         .kept
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, landed)))
-                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], landing_budget).map(|(photons, impulse, spent, photons_error)| Landing { t, landed, photons, impulse, work: spent, photons_error }))
+                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], landing_budget).map(|(photons, spent, photons_error)| Landing { t, landed, photons, work: spent, photons_error }))
                         .collect()
                 })
                 .collect::<Result<_, _>>()?,
@@ -918,12 +908,10 @@ impl<'a> Paths<'a> {
         let series: Vec<Series> = (0..n).map(|_| done.next().expect("a walk")).collect();
         let late_series: Vec<Series> = done.collect();
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
-        let least = walks.iter().flat_map(|w| w.ends.iter().map(|e| intensity(light, [e[1], e[2], e[3]]))).fold(f64::INFINITY, crate::linalg::smaller);
-        let products = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.products).sum::<u64>() + settled.products;
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
         let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
+        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64() })
     }
 
     /// The stretches run at a setting of their own (`settings`), each with it: their trace beyond the tolerance at the
@@ -949,7 +937,7 @@ impl<'a> Paths<'a> {
     /// scheme's unmet sum and the openings' bound as its own, and read its windows against themselves: no number where no
     /// path read a window -- R9_PUSH's, every atom pushed out by 45 µs.)
     pub fn itself(&self, keep: Vec<usize>) -> Judged {
-        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 }
+        Judged { keep, windows: vec![], late: vec![], calibration: Calibration::default(), escape: None, statistics: None, stationary: None, work: 0.0 }
     }
 }
 
@@ -983,8 +971,6 @@ pub struct Judged {
     pub statistics: Option<[f64; 2]>,
     /// The energy rates T's error reads (`Stationary`); none where no path read past its memory time.
     pub stationary: Option<Stationary>,
-    pub seconds: f64,
-    pub products: u64,
     /// Its paths' counted work (paths.rs `Counts::work`): what more paths cost (# How many paths).
     pub work: f64,
 }
@@ -1011,7 +997,6 @@ pub struct Walked {
 
 /// `judge_on`, its walks' own kept (`Walked`).
 pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<(Judged, Walked), String> {
-    let clock = Instant::now();
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
     let scheme = |j: usize| self::scheme(paths.settings[j], 1);
@@ -1061,7 +1046,6 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
         series.push(made.swap_remove(0));
     }
     let late_series: Vec<Series> = done.map(|x| x.map(|mut x| x.swap_remove(0))).collect::<Result<_, _>>()?;
-    let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
     // photons' Mandel Q = 2 n_ex --, the reference's beside (paths.rs `Statistics`).
@@ -1083,7 +1067,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, paths.landing_budget)?;
+                        let (photons, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, paths.landing_budget)?;
                         Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], q_error: [2.0 * error, 2.0 * l.photons_error] }, spent))
                     })
                     .collect::<Result<Vec<_>, String>>()
@@ -1095,8 +1079,8 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let (landed_start, landed_late) = landed.split_at(n.min(landed.len()));
     let escape = escape_of(paths, &series, &late_series, landed_start, landed_late, hm);
     let weights: Vec<f64> = paths.walks.iter().map(|w| w.weight).collect();
-    let windows = paths::compare(&series, &paths.series, &paths.windows, labels, hm, landed_start, &weights);
-    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, labels, hm, landed_late, &weights));
+    let windows = paths::compare(&series, &paths.series, &paths.windows, hm, landed_start, &weights);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, s)| paths::compare(&late_series, s, w, hm, landed_late, &weights));
     let statistics = {
         let all: Vec<&paths::Statistics> = landed.iter().flatten().collect();
         (!all.is_empty()).then(|| [0, 1].map(|m| all.iter().map(|x| x.q[m]).sum::<f64>() / all.len() as f64))
@@ -1128,10 +1112,9 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     // error read where no refinement ran).
     let own = |f: fn(&Series) -> f64| series.iter().chain(&late_series).map(f).fold(0.0, larger);
     calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked) + paths.trace + own(Series::trace_defect);
-    let products = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.products).sum();
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
     let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum::<f64>() + landing_work.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, seconds: clock.elapsed().as_secs_f64(), products, work };
+    let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, work };
     Ok((judged, Walked { series, late: late_series, landed }))
 }
 
@@ -1141,7 +1124,6 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
 /// energy rates' difference per path and its stationary part, each landing check's Q the two models' own
 /// --; no calibration, no escape (neither is a difference of the paths' readings).
 pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walked) -> Judged {
-    let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     let weights: Vec<f64> = paths.walks.iter().map(|w| w.weight).collect();
     let paired: Vec<Vec<paths::Statistics>> = of
@@ -1152,10 +1134,10 @@ pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walk
         .collect();
     let n = paths.walks.len();
     let (landed_start, landed_late) = paired.split_at(n.min(paired.len()));
-    let windows = paths::compare(&of.series, &against.series, &paths.windows, labels, hm, landed_start, &weights);
-    let late = paths.late.as_ref().map_or(vec![], |(_, w, _)| paths::compare(&of.late, &against.late, w, labels, hm, landed_late, &weights));
+    let windows = paths::compare(&of.series, &against.series, &paths.windows, hm, landed_start, &weights);
+    let late = paths.late.as_ref().map_or(vec![], |(_, w, _)| paths::compare(&of.late, &against.late, w, hm, landed_late, &weights));
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
-    Judged { keep: model.rs.keep.clone(), windows, late, calibration: Calibration::default(), escape: None, statistics: None, stationary, seconds: 0.0, products: 0, work: 0.0 }
+    Judged { keep: model.rs.keep.clone(), windows, late, calibration: Calibration::default(), escape: None, statistics: None, stationary, work: 0.0 }
 }
 
 /// The loss's x of a candidate (module documentation, # The motion; `Judged::escape`) of its series along the walks'
@@ -1610,11 +1592,11 @@ fn pushed(w: &Window, course: &Course, a: usize, hbar_over_mass: f64) -> Option<
 #[derive(Clone, Debug)]
 pub struct Choice {
     pub keep: Vec<usize>,
-    /// The chain the choice was made on: by the importance at the pilot's states (`importance`).
-    pub chain: Vec<Vec<usize>>,
     pub judged: Judged,
     pub windows: Vec<(f64, f64)>,
     pub memory: f64,
+    /// The paths' length L (the tests' report, `select_on_the_scenes`).
+    #[cfg(test)]
     pub length: f64,
     pub report: Vec<String>,
 }

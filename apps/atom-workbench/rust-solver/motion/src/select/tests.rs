@@ -72,8 +72,6 @@ fn select_the_direct_part_by_hand() {
         escape: None,
         statistics: None,
         stationary: None,
-        seconds: 0.0,
-        products: 0,
         work: 0.0,
     };
     let windows = vec![(0.0, 10.0), (10.0, 100.0)];
@@ -94,7 +92,7 @@ fn select_the_direct_part_at_the_paths_statistics() {
         Window { from: 0.0, to: 10.0, paths, parts: vec![crate::paths::Part { from: 0.0, to: 10.0, paths, rows: rows.clone() }], rows, ..Window::default() }
     };
     let at = |w: Window, upper: bool| {
-        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, work: 0.0 };
         direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, if upper { Reach::Upper } else { Reach::Lower }).expect("the window read")
     };
     let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
@@ -128,7 +126,7 @@ fn select_the_motion_by_hand() {
         force: [even(0.0), even(0.0), even(2.0)],
         ..Window::default()
     };
-    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, seconds: 0.0, products: 0, work: 0.0 };
+    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, work: 0.0 };
     let hm = 7.3e-4;
     let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05], halves: None, push: vec![], pilot_heating: Default::default() };
     let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
