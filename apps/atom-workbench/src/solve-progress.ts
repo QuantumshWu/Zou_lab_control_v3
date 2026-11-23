@@ -3,10 +3,11 @@
 // checkpoint is drawn but its numbers, and the result is drawn once, at the end (or on 停止, the last checkpoint).
 //
 // What the course knows is what the engine sends (rust-solver/motion/src/solve.rs, # Checkpoints, # Steps):
-// - a stage as each step of its pipeline begins -- the model, the scout, the pilot, the selection, every batch of the
+// - a stage as each step of its pipeline begins -- the model, the scout, the selection, the pilot, every batch of the
 //   product -- and as the step's check moves to another rung (solver-types.ts `SolveStage`), in the order it runs
-//   them: a new selection after the pilot, and on a chosen model other than the all-ground one the model, the scout
-//   and the pilot again before the product; a selection kept for the scene first, at once;
+//   them: a new selection on the scout's paths, then the pilot on the model chosen -- on a chosen model other than the
+//   all-ground one after the model and the scout again --, then the product; where the scout's atoms leave the choice
+//   open, the pilot before the selection (on the pilot's paths); a selection kept for the scene first, at once;
 // - a checkpoint, a complete result so far, every 60 s while trajectories run and at every batch.
 // So the course is the steps as they came, each done or in progress -- a done step with the time it took, the step in
 // progress with the time it has taken so far --, the steps still to come and the result; beside them what the step in
@@ -48,9 +49,9 @@ export interface CourseView {nodes:CourseNode[];gauge?:{fraction:number;words:st
 /** Each step's name and what it does. */
 const STEPS:Record<SolveStep,{label:string;does:string}>={
   model:{label:'建模型',does:'按选定的能级折叠其余能级（还没有选定时先用全基态模型），再建初态的准备阱与初始系综'},
-  scout:{label:'侦察',does:'先导各组的第一条轨迹，在第一级时间步长和它的两倍（或一半）上跑，检查步长，按代价选先导用的一级'},
-  pilot:{label:'先导',does:'先导各组的全部轨迹，在两层步长上跑，检查时间步长，并为选态提供原子走过的路径'},
-  select:{label:'选态',does:'沿先导原子走过的路径，把各候选模型与 32 态参照比较，在误差达标的候选里选总代价最小的；同一场景只改时长或采样点时沿用之前的选择'},
+  scout:{label:'侦察',does:'先导各组的第一条轨迹，在第一级时间步长和它的两倍（或一半）上跑，检查步长，按代价选先导用的一级；这些原子走过的路径也是选态的路径'},
+  select:{label:'选态',does:'沿侦察原子走过的路径，把各候选模型与 32 态参照比较，在误差达标的候选里选总代价最小的；侦察的原子判不清时，跑完先导再沿先导原子的路径选；选中的不是全基态模型时，在它上面重新建模型、侦察；同一场景只改时长或采样点时沿用之前的选择'},
+  pilot:{label:'先导',does:'在选中的模型上跑先导各组的全部轨迹，在两层步长上跑，检查时间步长'},
   product:{label:'正式批次',does:'每批至多把轨迹数翻倍，直到布居与总温度在各分析时刻都到目标'},
 };
 
@@ -73,8 +74,8 @@ function rungWords(stages:readonly SolveStage[]):string{
 }
 
 /** A step of the course as it came: a run of stages of one step, from its first stage's arrival -- the first step's
- * from the request -- to the next step's; the step again after another (a second round's model, scout and pilot) is
- * another. Keyed by its step, the second time and on with its count. */
+ * from the request -- to the next step's; the step again after another (the model and the scout again on a chosen model
+ * other than the all-ground one) is another. Keyed by its step, the second time and on with its count. */
 interface Reached {key:string;step:SolveStep;fromMs:number;stages:SolveStage[]}
 function reached(course:Course):Reached[]{
   const steps:Reached[]=[];
