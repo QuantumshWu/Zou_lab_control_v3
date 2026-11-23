@@ -120,7 +120,9 @@
 //! through its life -- its checkpoints carry it, and whatever is made again of them (solve.rs `replay`, the selection's
 //! walks) is made on it, to the bit --, and a hand-out's trajectories all start on one, the tables being bought between
 //! hand-outs only. So a run is the same to the bit whatever its threads do. A node made outside a trajectory (a path, a
-//! judgment) is on the run's version at the time.
+//! judgment) is the fold's own: the selection measures the model's error against its reference on its paths, and
+//! the tables' own deviation is booked apart (solve.rs, # The tables' deviation) -- read off the tables there, it was
+//! measured twice (2026-11-23: R4's selection asked 64 paths of P8 against 16, 54 s against 16 s).
 //!
 //! A step reads the lift only where it reads a time (`step::Middle::reading`): its middle's node is made with the lift
 //! there alone (until 2026-11-23 every middle's node made it).
@@ -2304,9 +2306,9 @@ impl Selected {
     }
 
     /// Whether a node made here now is read off the run's tables (# The tables): the version of the trajectory being
-    /// made on this thread (`step::on_version`), else the run's own.
+    /// made on this thread (`step::on_version`); outside a trajectory (a path, a judgment) never.
     fn tabled_here(&self) -> bool {
-        crate::step::version().unwrap_or_else(|| self.version()) >= 1
+        crate::step::version().is_some_and(|v| v >= 1)
     }
 
     /// The run's version (step.rs `Dynamics::version`; # The tables): 1 once it has bought its tables, else 0.
@@ -3704,8 +3706,8 @@ impl crate::step::Dynamics for Selected {
 
     fn middle(&self, _cluster: usize, r: [f64; 3], t: f64) -> SelectedMiddle<'_> {
         let nodes = LISTS.with(|l| l.borrow_mut().pop()).unwrap_or_default();
-        // The trajectory's version where one is being made on this thread, else the run's (# The tables).
-        let tabled = crate::step::version().unwrap_or_else(|| self.version()) >= 1;
+        // The trajectory's version where one is being made on this thread; outside one the fold's own (# The tables).
+        let tabled = self.tabled_here();
         SelectedMiddle { model: self, r, t, nodes: RefCell::new(nodes), made: Cell::new(0.0), tabled, reads: Cell::new(false), deviation: Cell::new([0.0; 2]) }
     }
 
