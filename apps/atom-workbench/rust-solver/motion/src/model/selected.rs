@@ -125,11 +125,16 @@
 //! S). The state is then the turned one; what is booked (`Selected::turn_parts`): once 2‖S‖ (the frame at the start
 //! and at a reading, and 2‖S_k‖), and as a rate the remainder -- 2‖S‖²‖V‖ (the third order of e^S G e^{−S}), the
 //! rounds' residual ‖V‖(2‖G_off‖/μ)^{ROUNDS+1}, 4‖S‖²Σ‖L‖² (the channels' second order), and of the opposite beats
-//! 2‖S_k‖(‖V‖ + ‖V_k‖) + 4‖S_k‖Σ‖L‖² --, each over the reach: V's bound (H's pairs, `Out::bounds`, and the decay's
-//! products of the channels' bounds), μ the gap at the structure's point less twice the shifts' bound (the pairs' and
-//! the varying direct diagonal's, `Plan::diagonal_spread`). Which parts are turned is the drop tier's rule: in the order
-//! of ‖V‖/μ, of none and every first few pairs of parts the cut of least W, the step's counted work by the blocks'
-//! sizes (Σ n_b³) times `Account::factor_with`. Measured (STEP, 2026-11-23, `the_split_s_walk`): over 100 µs
+//! 2‖S_k‖(‖V‖ + ‖V_k‖) + 4‖S_k‖Σ‖L‖² --, of V, S, μ (the frame's diagonal gap, θ apart) and the blocks' couplings
+//! G_off at the node, Σ‖L‖² its channels' (`channels_size`). At the structure's point they are the decision's estimate:
+//! which parts are turned is the drop tier's rule on it, in the order of ‖V‖/μ, of none and every first few pairs
+//! of parts the cut of least W, the step's counted work by the blocks' sizes (Σ n_b³) times `Account::factor_with`.
+//! The booking is the nodes' own (`Seen`): every node turned notes its ‖S‖ and Y₃, and the run books
+//! D = 2 max‖S‖ + ½(e^{2 max Y₃ T} − 1) over the nodes it made -- strict at every node walked, the time's integral
+//! taken as the largest rate times T. The reach's bounds (as the drop tier's, `Out::bounds`) cannot be used here: a
+//! pair's bound sums every beam's modulus with no phase -- six beams two by two -- and the shifts' range takes the
+//! tweezer's intensity over [0, 1]; on PGC3D, TET and tilt2 they put ‖V‖ at 57–97 rad/µs against 0.1–0.3 at the
+//! structure's point, and on tilt0 the shifts above the gap: the factor unbounded, nothing ever turned (2026-11-23). Measured (STEP, 2026-11-23, `the_split_s_walk`): over 100 µs
 //! jump-free the turned state stays 1.1–2.0e-4 apart from the whole model's (the frame), the parts' elements left out
 //! (no turn) drift to 0.5–1e-3.
 //!
@@ -240,6 +245,8 @@ pub struct Selected {
     /// The parts turned (# The parts turned): the pairs of places (a, b) of one exact block in two turned ones, both
     /// ways; none where no part is turned.
     turn: Option<Vec<(usize, usize)>>,
+    /// The turned nodes' sizes (`Seen`), shared with the run's accounts.
+    seen: Arc<Seen>,
     beats: RwLock<Beats>,
     /// The candidate tones and their keys (module documentation, # The generator by beats): every node holds the
     /// layout's beats, so they are the run's, made once (`Selected::tones`).
@@ -271,12 +278,40 @@ thread_local! {
     pub(crate) static TURNING: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Σ‖L‖² of a node's channels, each class's axis's components' Frobenius norms squared, summed (a bound of Σ_c ‖L_c‖²
+/// over its jumps' components: # The parts turned).
+fn channels_size(node: &Node) -> f64 {
+    node.classes.iter().flat_map(|c| c.axes.iter()).map(|axis| axis.iter().map(|j| j.elements.iter().map(|e| e.value.norm_sqr()).sum::<f64>().sqrt()).sum::<f64>().powi(2)).sum()
+}
+
 /// Whether a run turns its parts (`TURNING` in the tests; always in the product).
 fn turning() -> bool {
     #[cfg(test)]
     return TURNING.with(|t| t.get());
     #[cfg(not(test))]
     true
+}
+
+/// A turned run's sizes over the nodes it made (module documentation, # The parts turned): the largest frame
+/// ‖S‖ + Σ‖S_k‖ and the largest remainder's rate Y₃, as the bits of nonnegative f64s (their order the numbers').
+#[derive(Debug, Default)]
+pub struct Seen {
+    frame: std::sync::atomic::AtomicU64,
+    rate: std::sync::atomic::AtomicU64,
+}
+
+impl Seen {
+    fn note(&self, frame: f64, rate: f64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.frame.fetch_max(frame.max(0.0).to_bits(), Relaxed);
+        self.rate.fetch_max(rate.max(0.0).to_bits(), Relaxed);
+    }
+
+    /// The largest frame and rate noted.
+    pub fn get(&self) -> (f64, f64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (f64::from_bits(self.frame.load(Relaxed)), f64::from_bits(self.rate.load(Relaxed)))
+    }
 }
 
 /// The runs' numbers (`Selected::id`).
@@ -707,6 +742,7 @@ impl Selected {
             blocks: vec![(0..n).collect()],
             block_of: vec![0; n],
             turn: None,
+            seen: Arc::new(Seen::default()),
             beats: RwLock::new(beats),
             candidates: Vec::new(),
             keys: Vec::new(),
@@ -1224,55 +1260,12 @@ impl Selected {
         let parts = self.rs.plan().parts().to_vec();
         let (node, _) = self.structure();
         let (_, account, _) = self.drop_sizes(&node, &[], spherical);
-        let (moduli, coefficients, norms) = self.reach_bounds();
-        let plan = self.rs.plan();
-        let ((h, channels), (shift, _)) = (Out::bounds(plan, &self.lab, &moduli, &coefficients), Out::bounds_of(plan, &self.lab, &moduli, &coefficients, &|x| x.is_some()));
-        // Per slot its places' bounds: H's (its pairs and direct entries), and the static slot's shifts (the pairs').
         let slots = self.template.generator.len();
-        let (mut bound, mut shifts) = (vec![vec![0.0_f64; n * n]; slots], vec![0.0_f64; n]);
-        for (o, list) in self.tables.h.iter().enumerate() {
-            for (k, &(x, g, _)) in list.iter().enumerate() {
-                if g != u32::MAX {
-                    bound[g as usize][x as usize] += h[o][k];
-                    if g == 0 && x as usize / n == x as usize % n {
-                        shifts[x as usize / n] += shift[o][k];
-                    }
-                }
-            }
-        }
-        // The decay's products on the static slot: ½ Σ_r B_c[r][a] B_c[r][b] of each channel's elements' bounds.
-        let mut per: HashMap<(usize, [i64; 2]), Vec<f64>> = HashMap::new();
-        for (o, list) in self.tables.channels.iter().enumerate() {
-            let (q, fast, which, ..) = &self.lab.channel_outputs[o];
-            if *which != 0 {
-                continue;
-            }
-            let m = per.entry((*q, *fast)).or_insert_with(|| vec![0.0; n * n]);
-            for (k, &(_, class, axis, jump, element)) in list.iter().enumerate() {
-                m[self.template.classes[class as usize].axes[axis as usize][jump as usize].elements[element as usize].at] += channels[o][k];
-            }
-        }
-        for m in per.values() {
-            for a in 0..n {
-                for b in 0..n {
-                    bound[0][a * n + b] += 0.5 * (0..n).map(|r| m[r * n + a] * m[r * n + b]).sum::<f64>();
-                }
-            }
-        }
-        let decay: f64 = {
-            let mut seen: Vec<f64> = Vec::new();
-            for (o, (_, _, which, ..)) in self.lab.channel_outputs.iter().enumerate() {
-                if *which == 0 && !seen.iter().any(|&x| x == norms[o]) {
-                    seen.push(norms[o]);
-                }
-            }
-            seen.iter().map(|x| x * x).sum()
-        };
+        // The decision's estimate: the structure's node's own elements (its decay's products in them), per slot.
+        let bound: Vec<Vec<f64>> = (0..slots).map(|k| node.generator[k].1.data.iter().map(|z| z.abs()).collect()).collect();
+        let decay = channels_size(&node);
         let g = &node.generator[0].1;
-        let gap = |a: usize, b: usize| -> f64 {
-            let raw = ((g[(a, a)].re - self.theta[a]) - (g[(b, b)].re - self.theta[b])).abs();
-            raw - 2.0 * (shifts[a] + shifts[b] + plan.diagonal_spread(a, b, &coefficients))
-        };
+        let gap = |a: usize, b: usize| -> f64 { ((g[(a, a)].re - self.theta[a]) - (g[(b, b)].re - self.theta[b])).abs() };
         // The pairs of parts within an exact block, by ‖V‖/μ.
         let mut pairs: Vec<([[i64; 2]; 2], f64)> = Vec::new();
         for a in 0..n {
@@ -1369,10 +1362,9 @@ impl Selected {
                 self.block_of[x] = i;
             }
         }
+        crate::prof::note(|| format!("turn: turned, the estimate's Y {rate:.3e} /µs, once {once:.3e}"));
         self.blocks.clone_from(&blocks);
         self.judgment.blocks = blocks;
-        self.judgment.dropped += rate;
-        self.judgment.once += once;
         self.turn = Some(cross);
     }
 
@@ -1483,6 +1475,25 @@ impl Selected {
             for &(a, b) in cross {
                 m[(a, b)] = C64::ZERO;
             }
+        }
+        // The node's own sizes (`Seen`): ‖S‖, ‖V‖ over the places apart, the blocks' couplings, the channels'.
+        {
+            let norm = |m: &dyn Fn(usize, usize) -> f64| cross.iter().map(|&(a, b)| m(a, b).powi(2)).sum::<f64>().sqrt();
+            let (sn, vn) = (norm(&|a, b| s[a * n + b].abs()), norm(&|a, b| g[(a, b)].abs()));
+            let mu = cross.iter().map(|&(a, b)| gap(a, b).abs()).fold(f64::INFINITY, smaller);
+            let off = blocks.iter().map(|b| b.iter().flat_map(|&x| b.iter().map(move |&y| (x, y))).filter(|(x, y)| x != y).map(|(x, y)| g[(x, y)].norm_sqr()).sum::<f64>().sqrt()).fold(0.0, larger);
+            let decay = channels_size(node);
+            let mut frame = sn;
+            let mut rate = 2.0 * sn * sn * vn + vn * (2.0 * off / mu).powi(ROUNDS as i32 + 1) + 4.0 * sn * sn * decay;
+            for (k, (_, m)) in node.generator.iter().enumerate().skip(1) {
+                let vk = norm(&|a, b| m[(a, b)].abs());
+                if vk != 0.0 {
+                    let sk = vk / (mu - values[k].abs()).max(f64::MIN_POSITIVE);
+                    frame += sk;
+                    rate += 2.0 * sk * (vn + vk) + 4.0 * sk * decay;
+                }
+            }
+            self.seen.note(frame, rate);
         }
         node.generator[0].1.add_scaled(C64::ONE, &delta);
         // The jump components: L + [S, L], [S, L]_xa = Σ_y S_xy L_ya − L_xy S_ya over the places apart.
@@ -1683,6 +1694,11 @@ impl Selected {
     /// turned), zero where no part is turned.
     pub fn dropped_once(&self) -> f64 {
         self.judgment.once
+    }
+
+    /// The turned nodes' sizes (`Seen`) the run books by, none where no part is turned.
+    pub fn turn_seen(&self) -> Option<Arc<Seen>> {
+        self.turn.as_ref().map(|_| self.seen.clone())
     }
 
     /// The candidate pairs of the drop tier with their Y (model/classify.rs, # The drop tier), the drop's account, and

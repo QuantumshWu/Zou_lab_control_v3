@@ -2420,7 +2420,7 @@ fn attempt(request: &Request, setting: &Setting, messages: &mut Messages, choosi
     let (candidates, window) = (grid(end, first_rung), plan.window);
     let mut context = Context {
         at: vec![0., end],
-        fixed: Fixed::booked(vec![[0.; 2]; 2], &[0., end], (dropped_rate(run), run.dropped_once()), Escape::new(kinetic_bound(run), hm)),
+        fixed: Fixed::booked(vec![[0.; 2]; 2], &[0., end], (dropped_rate(run), run.dropped_once()), run.turn_seen(), Escape::new(kinetic_bound(run), hm)),
         step: Bound::share(),
         checked: None,
         tau: first_rung,
@@ -4867,22 +4867,27 @@ struct Fixed {
     rate: f64,
     /// The distance booked once at every time after the start (`Selected::dropped_once`).
     once: f64,
+    /// A turned run's nodes' sizes (model/selected.rs `Seen`): their 2 max‖S‖ once and max Y₃ on the rate, read
+    /// where the accounts are made (`with`).
+    seen: Option<std::sync::Arc<crate::model::selected::Seen>>,
     escape: Escape,
 }
 impl Fixed {
     /// The model's errors `model` at the times `times`, with the bounds of the dropped terms' rate Y and of `escape`;
     /// of the motion nothing more read (`MotionError::UNREAD`).
     fn new(model: Vec<[f64; 2]>, times: &[f64], rate: f64, escape: Escape) -> Fixed {
-        Fixed::booked(model, times, (rate, 0.), escape)
+        Fixed::booked(model, times, (rate, 0.), None, escape)
     }
     /// `new` with a distance `once` booked at every time after the start beside the rate's (`Selected::dropped_once`).
-    fn booked(model: Vec<[f64; 2]>, times: &[f64], (rate, once): (f64, f64), escape: Escape) -> Fixed {
-        let dropped = times.iter().map(|&t| crate::model::classify::distance(rate, t) + if t > 0. { once } else { 0. }).collect();
-        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped, times: times.to_vec(), rate, once, escape }
+    fn booked(model: Vec<[f64; 2]>, times: &[f64], (rate, once): (f64, f64), seen: Option<std::sync::Arc<crate::model::selected::Seen>>, escape: Escape) -> Fixed {
+        let (frame, more) = seen.as_ref().map_or((0., 0.), |s| s.get());
+        let dropped = times.iter().map(|&t| crate::model::classify::distance(rate + more, t) + if t > 0. { once + 2. * frame } else { 0. }).collect();
+        Fixed { motion: vec![MotionError::UNREAD; model.len()], model, dropped, times: times.to_vec(), rate, once, seen, escape }
     }
-    /// The model's errors `model` at the times `times`, with this run's bounds.
+    /// The model's errors `model` at the times `times`, with this run's bounds (a turned run's nodes' sizes as they
+    /// stand now).
     fn with(&self, model: Vec<[f64; 2]>, times: &[f64]) -> Fixed {
-        Fixed::booked(model, times, (self.rate, self.once), self.escape)
+        Fixed::booked(model, times, (self.rate, self.once), self.seen.clone(), self.escape)
     }
     /// The model's error at its k-th time with the estimate e there: its measurement and its bounds (`bounded`), T's
     /// with the motion's part on it relative to the total T read (`MotionError::temperature`).
