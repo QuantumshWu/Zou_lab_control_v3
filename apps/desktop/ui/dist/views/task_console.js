@@ -340,7 +340,7 @@ export class TaskConsoleView {
     intents = {
         // A Start that waits for this window's edits says so at once.
         start: id => { if (this.starts.start(id))
-            this.update({ type: "state" }); },
+            this.drawStart(id); },
         stop: id => {
             this.send({ action: "stop_node", node: id }, `Stopping ${this.nameOf(id)}…`);
         },
@@ -353,6 +353,15 @@ export class TaskConsoleView {
         check: id => this.send({ action: "check_node", node: id }, "Checking files…"),
         choose: ask => this.ctx.transport.choosePath(ask),
     };
+    /** A node's row and Edit page drawn again as its Start waits or no longer does (NodeStarts). */
+    drawStart(id) {
+        const row = this.nodeRows().find(item => item.node_id === id);
+        if (!row)
+            return;
+        const takeover = this.boardState()?.active_task ?? null, gate = { active: Boolean(takeover), owns: takeover === id }, projection = this.project(row);
+        this.rows.get(id)?.update(projection, gate);
+        this.editors.get(id)?.update(row, projection, gate);
+    }
     nameOf(id) { return this.nodeRows().find(row => row.node_id === id)?.name ?? id; }
     edit(id) {
         const key = `edit:${id}`;

@@ -263,12 +263,9 @@ export class FigureViewerView {
     nodeRows() { return this.ctx.latest.viewer?.logic ?? []; }
     starts;
     nodeIntents = {
-        // A Start that waits for this window's edits says so at once, on its node's page.
-        start: id => {
-            const row = this.nodeRows().find(item => item.node_id === id);
-            if (this.starts.start(id) && row)
-                this.nodes.get(id)?.update(row, this.projection(row), FREE);
-        },
+        // A Start that waits for this window's edits says so at once.
+        start: id => { if (this.starts.start(id))
+            this.drawStart(id); },
         stop: id => { this.ctx.transport.send({ action: "stop_node", node: id }, "Stopping…"); },
         edit: id => this.tabs.setCurrent(`node:${id}`),
         remove: id => { this.ctx.transport.send({ action: "remove_node", node: id }, "Removing…"); },
@@ -279,6 +276,12 @@ export class FigureViewerView {
         check: id => { this.ctx.transport.send({ action: "check_node", node: id }, "Checking files…"); },
         choose: ask => this.ctx.transport.choosePath(ask),
     };
+    /** A node's page drawn again as its Start waits or no longer does (NodeStarts). */
+    drawStart(id) {
+        const row = this.nodeRows().find(item => item.node_id === id);
+        if (row)
+            this.nodes.get(id)?.update(row, this.projection(row), FREE);
+    }
     /** A Viewer's node as its Edit page draws it: no Plot switch here, its outputs are bound in a panel's Setting;
      * "Starting…" while its Start waits for this window's edits (NodeStarts). */
     projection(row) {
