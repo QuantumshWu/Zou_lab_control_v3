@@ -1248,16 +1248,23 @@ impl<'a> Form<'a> {
     /// interpolated linearly between the walk's knots): the excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and the excess impulse
     /// ∫(F(τ|L) − F̄)dτ (1/µm) by the trapezoid, and the stretch's counted work (`Counts::work`). Err where the state is
     /// not the form's.
-    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series) -> Result<(f64, V3, f64, f64), String> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, diffusion: Option<V3>, budget: f64) -> Result<(f64, V3, f64, f64), String> {
         let hm = self.hbar_over_mass;
-        // The Q term's share of the heating per photon of n_ex there (`Reading::heating_at`: ½ (ħ/m) Q (s b)²/λ against
-        // the heating at Poisson's count), the largest over the axes: what a change of n_ex moves in T's account.
+        // The Q term's share of the total heating per photon of n_ex there (`Reading::heating_at`: (ħ/m)/2 Q (s b)²/λ
+        // against the whole, the force correlation's 2D in it where read), summed over the axes as the total T sums them:
+        // what a change of n_ex moves in the total T's account, relative. (Against one axis's heating at Poisson's count
+        // alone, 2026-11-23, it read 0.1-1.1 on PGC3D's G and doubled every landing to the end.)
         let weight = own.readings.iter().min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs())).map_or(0.0, |x| {
             let lambda: f64 = x.rates.iter().sum();
-            let h = x.heating(hm);
-            (0..3).map(|a| if lambda > 0.0 && h[a] > 0.0 { hm * x.carried[a] * x.carried[a] / lambda / h[a] } else { 0.0 }).fold(0.0, larger)
+            let h = x.heating_at(hm, 0.0, diffusion.unwrap_or([0.0; 3]));
+            let whole: f64 = h.iter().sum();
+            if lambda > 0.0 && whole > 0.0 { 0.5 * hm * x.carried.iter().map(|c| c * c).sum::<f64>() / lambda / whole } else { 0.0 }
         });
+        // The most a part of the stretch can move n_ex: |λ(τ|L) − λ̄| at most the own run's largest rate there times its length.
+        let most = |from: f64, to: f64| own.readings.iter().filter(|x| x.t >= from && x.t <= to).map(|x| x.rates.iter().sum::<f64>()).fold(0.0, larger) * (to - from);
         let end = own.readings.last().map_or(t + span, |x| x.t);
+        // A part's change is read as Q's (2 Δn); the budget is the share of the total T's target its account may take.
         let (mut counted, mut work, mut state) = ((0.0, [0.0; 3]), 0.0, self.from_ground(landed));
         let (mut from, mut length, mut change) = (t, span, f64::INFINITY);
         loop {
@@ -1266,10 +1273,13 @@ impl<'a> Form<'a> {
             (state, work) = (last, work + spent);
             let more = part;
             counted = (counted.0 + more, std::array::from_fn(|k| counted.1[k] + impulse[k]));
-            // Doubled while the last doubling moved the Q term by more than its share of the heating (select.rs
-            // `TOLERANCE`) and the own run reads further; the last doubling's change is booked (`Landing::photons_error`).
-            let stands = from > t && 2.0 * more.abs() * weight <= crate::select::TOLERANCE;
-            change = if from > t { more.abs() } else { change };
+            // Doubled while the last doubling moved the Q term by more than its budget (`budget`: a share of the total T's
+            // relative target) and the own run reads further -- not at all where the whole rest of the run cannot move it so
+            // much (`most`, a strict bound, booked so: the reference's, whose jumps carry next to nothing of the absorbed
+            // light) --; else the last doubling's change is booked (`Landing::photons_error`).
+            let cannot = 2.0 * most(to, end) * weight <= budget;
+            let stands = (from > t && 2.0 * more.abs() * weight <= budget) || cannot;
+            change = if cannot { most(to, end) } else if from > t { more.abs() } else { change };
             if stands || !(to < end) {
                 break;
             }

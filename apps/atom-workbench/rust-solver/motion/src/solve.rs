@@ -2796,7 +2796,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         if walked.iter().all(|w| !(w.end() > 0.)) && read.counts.runaway.since == Some(0.) {
             return Ok(None);
         }
-        let paths = Paths::new(&full, centre, walked, memory, length, tau, light)?;
+        // The landing check's budget (paths.rs `Form::landing`): what it may move of the total T, relative, s⁴/2 of the
+        // tightest relative target over the outputs -- the need, ∝ 1/(target − A)², then grows by s⁴ at most (the step's
+        // share's convention, units.rs `STEP_SHARE`); the tightest possible, 0.1, where no T is read.
+        let tightest = read.estimates.iter().filter(|e| e.motion.is_some()).map(|e| e.temperature_target).fold(f64::INFINITY, crate::linalg::smaller);
+        let landing_budget = 0.5 * STEP_SHARE.powi(4) * if tightest.is_finite() { tightest } else { 0.1 };
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, light, landing_budget)?;
         let settled = &paths.settled;
         noted(
             &mut report,

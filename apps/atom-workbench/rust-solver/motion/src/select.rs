@@ -549,6 +549,9 @@ pub struct Paths<'a> {
     /// its own trace stood beyond the tolerance at it, the one the ladder along that stretch went on to (`Paths::new`);
     /// every model judged runs each stretch at its own (`judge_on`).
     pub settings: Vec<Setting>,
+    /// The landing check's budget (paths.rs `Form::landing`): the share of the total T's relative target a landing's
+    /// truncated stretch may move.
+    pub landing_budget: f64,
     series: Vec<Series>,
     calibration: (usize, f64, Vec<Series>),
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
@@ -753,7 +756,7 @@ impl<'a> Paths<'a> {
     /// the scheme's setting along the longest walk's [0, L] (`settle`; the first such where several are), and the
     /// reference along the walks at it -- the other walks' on the pool beside the setting's second stage, at the first
     /// stage's setting, and again where the second stage moved it.
-    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light) -> Result<Paths<'a>, String> {
+    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, light: &Light, landing_budget: f64) -> Result<Paths<'a>, String> {
         let clock = Instant::now();
         let form = Form::new(reference, at);
         let length = run.min(5.0 * memory);
@@ -875,10 +878,8 @@ impl<'a> Paths<'a> {
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
                         .map(|(t, v, landed)| {
-                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j]).map(|(photons, impulse, spent, photons_error)| {
-                                let (diffusion, solved) = form.diffusion(&walks[w], t, v);
-                                Landing { t, landed, photons, impulse, diffusion, work: spent + solved, photons_error }
-                            })
+                            let (diffusion, solved) = form.diffusion(&walks[w], t, v);
+                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], diffusion, landing_budget).map(|(photons, impulse, spent, photons_error)| Landing { t, landed, photons, impulse, diffusion, work: spent + solved, photons_error })
                         })
                         .collect()
                 })
@@ -893,7 +894,7 @@ impl<'a> Paths<'a> {
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
         let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
+        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, least, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64(), products })
     }
 
     /// The stretches run at a setting of their own (`settings`), each with it: their trace beyond the tolerance at the
@@ -1043,8 +1044,8 @@ pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own)?;
                         let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
+                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, mine, paths.landing_budget)?;
                         let diffusion = match (mine, l.diffusion) {
                             (Some(c), Some(r)) => [c, r],
                             _ => [[0.0; 3]; 2],
