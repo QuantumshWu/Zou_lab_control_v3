@@ -1,0 +1,122 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tree combo anchor regression tests</title>
+<link rel="stylesheet" href="../style.css">
+<script src="../dist/scale.js"></script>
+<pre id="result">pending</pre>
+<script type="module">
+// Run with tools/test_ui.ps1. An open tree combo whose rows change -- a heading opened or closed by a click or by
+// → / ←, a new tree while it is open -- keeps the side and the room it opened with, and the row the change turns on
+// (the heading; on a new tree the cursor's row, else the first row in sight) stands within a device pixel of where it
+// stood (fluent/tree_combo.ts hold): below the box or above it, scrolled or not.
+import {TreeCombo} from '../dist/fluent/tree_combo.js';
+const assert=(condition,message)=>{if(!condition)throw Error(message)};
+const results=[];
+const check=async(name,test)=>{await test();results.push(name)};
+const settle=()=>new Promise(resolve=>setTimeout(resolve));
+const view=()=>document.documentElement.clientHeight;
+const DEVICE_PX=1/devicePixelRatio;
+// The measured case: twelve headings of 4 to 6 choices each.  A choice's words start with a digit, never a heading's letter.
+const NAMES=['Alpha','Bravo','Charlie','Delta','Echo','Foxtrot','Golf','Hotel','India','Juliet','Kilo','Lima'];
+const COUNTS=Object.fromEntries(NAMES.map((heading,g)=>[heading,4+g%3]));
+/** The headings `names`, each with its choices and `more(heading)` more (a heading of a new tree has four). */
+const tree=(names=NAMES,more=()=>0)=>names.map(heading=>({heading,leaves:Array.from({length:(COUNTS[heading]??4)+more(heading)},
+  (_,i)=>({key:`${heading}-${i}`,label:`${i} of ${heading}`,text:`${heading} · ${i}`}))}));
+/** A box standing `at` from the window's top (negative: from its bottom), in a fixed host. */
+function stand(node,at){const host=document.createElement('div');host.style.cssText=`position:fixed;left:40px;width:240px;${at<0?`bottom:${-at}px`:`top:${at}px`}`;host.append(node);document.body.append(host);return host}
+const press=(combo,key)=>combo.root.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+const list=()=>document.querySelector('.tree-combo-list:popover-open');
+const row=text=>[...list().querySelectorAll('.tree-row')].find(node=>node.textContent===text);
+const top=text=>{const node=row(text);assert(node,`a row ${text}`);return node.getBoundingClientRect().top};
+const click=text=>row(text).dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0}));
+const scrolls=()=>list().scrollHeight>list().clientHeight+1;
+/** The headings wholly in sight in the open list. */
+const headingsInSight=()=>{const frame=list().getBoundingClientRect();return [...list().querySelectorAll('.tree-row.heading')]
+  .filter(node=>{const rect=node.getBoundingClientRect();return rect.top>=frame.top&&rect.bottom<=frame.bottom}).map(node=>node.textContent)};
+/** The first row in sight (tree_combo.ts inSight). */
+const firstInSight=()=>{const frame=list().getBoundingClientRect();return [...list().querySelectorAll('.tree-row')].find(node=>{const rect=node.getBoundingClientRect();return rect.bottom>frame.top&&rect.top<frame.bottom}).textContent};
+/** The list inside the window, on the side it opened on. */
+function placed(up,message){
+  const rect=list().getBoundingClientRect();
+  assert(list().classList.contains('up')===up,`${message}: opened ${up?'above':'below'}, now ${up?'below':'above'}`);
+  assert(rect.top>=-0.5&&rect.bottom<=view()+0.5,`${message}: inside the window: ${rect.top}..${rect.bottom} of ${view()}`);
+}
+/** `act` moves the row `text` by no more than a device pixel. */
+function holds(text,act,message){
+  const before=top(text);act();const moved=top(text)-before;
+  assert(Math.abs(moved)<=DEVICE_PX,`${message}: ${text} moved ${moved} px`);
+}
+const SCROLLED=250;
+/** The four cases the jump was measured in: below or above the box, the list short or scrolled by SCROLLED. */
+const CASES=[{name:'below, short',at:8,up:false,all:false},{name:'below, scrolled',at:8,up:false,all:true},
+  {name:'above, short',at:-8,up:true,all:false},{name:'above, scrolled',at:-8,up:true,all:true}];
+/** A combo standing as `place` says, open: every heading opened first (all) and the list opened again on them, scrolled. */
+async function opened(place,{current=''}={}){
+  const combo=new TreeCombo(()=>{});combo.setTree(tree(),current);const host=stand(combo.root,place.at);await settle();
+  press(combo,'ArrowDown');
+  if(place.all){for(const name of NAMES)if(!row(name).classList.contains('open'))click(name);list().hidePopover();press(combo,'ArrowDown')}
+  await settle();
+  assert(list(),`${place.name}: opened`);
+  placed(place.up,`${place.name}: opening`);
+  assert(scrolls()===place.all,`${place.name}: the list ${place.all?'does not scroll':'scrolls'} when it opens`);
+  if(place.all){list().scrollTop=SCROLLED;assert(Math.abs(list().scrollTop-SCROLLED)<=1,`${place.name}: scrolled to ${list().scrollTop}`)}
+  return {combo,done:()=>{combo.dispose();host.remove()}};
+}
+/** The heading in the middle of those in sight. */
+const middle=()=>{const names=headingsInSight();assert(names.length,'a heading in sight');return names[Math.floor(names.length/2)]};
+try {
+ await check('a clicked heading opened and closed again stands still, below or above the box, scrolled or not',async()=>{
+   for(const place of CASES){
+     const {done}=await opened(place);
+     const heading=middle();
+     holds(heading,()=>click(heading),`${place.name}, first click`);placed(place.up,`${place.name}, first click`);
+     holds(heading,()=>click(heading),`${place.name}, second click`);placed(place.up,`${place.name}, second click`);
+     done();
+   }
+ });
+ await check('→ and ← on a heading stand it still, as a click does',async()=>{
+   for(const place of CASES){
+     const {combo,done}=await opened(place);
+     const heading=middle();
+     for(const character of heading)press(combo,character);
+     assert(list().querySelector('.tree-row.current')?.textContent===heading,`${place.name}: the cursor on ${heading}`);
+     const keys=row(heading).classList.contains('open')?['ArrowLeft','ArrowRight']:['ArrowRight','ArrowLeft'];
+     for(const key of keys){holds(heading,()=>press(combo,key),`${place.name}, ${key}`);placed(place.up,`${place.name}, ${key}`)}
+     assert(list().querySelector('.tree-row.current')?.textContent===heading,`${place.name}: the cursor stayed on ${heading}`);
+     done();
+   }
+ });
+ await check('a new tree while open keeps the cursor\'s row in place: rows added after it, or before it where the list can take them',async()=>{
+   for(const place of CASES){
+     // The picked choice is the cursor's row when the list opens; scrolled, the cursor goes to a heading in sight.
+     const {combo,done}=await opened(place,{current:'Delta-1'});
+     let cursor='1 of Delta';
+     if(place.all){cursor=middle();for(const character of cursor)press(combo,character)}
+     assert(list().querySelector('.tree-row.current')?.textContent===cursor,`${place.name}: the cursor on ${cursor}`);
+     const at=NAMES.indexOf(cursor.replace(/^\d+ of /,''));
+     const kept=message=>assert(list().querySelector('.tree-row.current')?.textContent===cursor,`${message}: the cursor stayed on ${cursor}`);
+     // Rows after the cursor's heading: a heading at the end, one more choice in each heading after it.
+     holds(cursor,()=>combo.setTree(tree([...NAMES,'Mike'],heading=>NAMES.indexOf(heading)>at?1:0),combo.value),`${place.name}, rows after`);
+     placed(place.up,`${place.name}, rows after`);kept(`${place.name}, rows after`);
+     // Rows before it, where the list can take them without moving it: scrolled, or growing up above the box.
+     if(place.all||place.up){
+       holds(cursor,()=>combo.setTree(tree(['Aardvark',...NAMES,'Mike'],()=>1),combo.value),`${place.name}, rows before`);
+       placed(place.up,`${place.name}, rows before`);kept(`${place.name}, rows before`);
+     }
+     done();
+   }
+ });
+ await check('a new tree while open with no cursor keeps the first row in sight in place',async()=>{
+   for(const place of CASES.filter(place=>place.all)){
+     const {combo,done}=await opened(place);
+     assert(!list().querySelector('.tree-row.current'),`${place.name}: no cursor`);
+     const first=firstInSight();
+     holds(first,()=>combo.setTree(tree(['Aardvark',...NAMES],()=>1),''),`${place.name}, rows before`);
+     placed(place.up,`${place.name}, rows before`);
+     done();
+   }
+ });
+ document.getElementById('result').textContent=JSON.stringify({passed:true,count:results.length,tests:results,scale:devicePixelRatio,view:view()});
+} catch(error) {document.getElementById('result').textContent=JSON.stringify({passed:false,completed:results,error:String(error.stack)})}
+document.title='done';
+</script>

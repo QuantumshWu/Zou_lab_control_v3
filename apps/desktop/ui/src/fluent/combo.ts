@@ -62,19 +62,19 @@ const px = (value: string): number => parseFloat(value) || 0;
 /** Which side of `box` an open `list` (a .drop popup bound to its box: fluent.css places it,
  * its CSS margins its popup gaps) drops to, as dropPlacement says from the room the window
  * leaves it when it opens: `.up` above, capped at `--drop-room` where the side is shorter
- * than the list.  Given `up`, that side (a list that grows while open stays on the side it
- * opened on), capped to it.  Returns the side. */
-export function placeDrop(list: HTMLElement, box: Element, up?: boolean): boolean {
+ * than the list.  Returns the side and the room it leaves the list (a list that changes while
+ * open keeps both: TreeCombo). */
+export function placeDrop(list: HTMLElement, box: Element): { up: boolean; room: number } {
   list.classList.remove("up");
   list.style.removeProperty("--drop-room");
   const css = getComputedStyle(list);
   const margins = px(css.marginTop) + px(css.marginBottom);
   const natural = list.getBoundingClientRect().height;
   const rect = box.getBoundingClientRect(), below = windowHeight() - rect.bottom - margins, above = rect.top - margins;
-  const drop = up === undefined ? dropPlacement(natural, below, above) : { up, height: Math.max(0, Math.min(natural, up ? above : below)) };
+  const drop = dropPlacement(natural, below, above);
   list.classList.toggle("up", drop.up);
   if (drop.height < natural) list.style.setProperty("--drop-room", `${drop.height}px`);
-  return drop.up;
+  return { up: drop.up, room: Math.max(0, drop.up ? above : below) };
 }
 
 /** The closed box's words: the picked row's, ending in an ellipsis where the
