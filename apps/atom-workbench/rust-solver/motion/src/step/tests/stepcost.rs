@@ -10,6 +10,9 @@
 //!   photon's alone (`Selected::photon_node`, where the build has it); an
 //!   output's readout at the point (`Dynamics::readout`) and on the step's middle (`Middle::readout`, where the model
 //!   reads there). Said: their means over the walk, the jumps and the nodes a step makes, the counted work a step.
+//!   With STEPCOST_PAIRED=1 (2) also the step and the node on the same run with its direct entries one by one
+//!   (`Selected::unspanned`), timed in turn with the run's on the same states (each repeat the spanned one first (the
+//!   one by one first), the first call of each not timed: a load that comes and goes weighs on both), "STEPCOST-PAIRED".
 //!   Ignored; run by name, pinned to one performance core by the caller:
 //!   `<test exe> step::tests::stepcost::stepcost --exact --include-ignored --nocapture --test-threads 1`.
 use std::time::Instant;
@@ -108,6 +111,12 @@ fn stepcost() {
         let chief = crate::solve::chief(&request);
         let reference = crate::solve::alone(chief);
         let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..selection }, reference).unwrap();
+        let order = std::env::var("STEPCOST_PAIRED").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let paired = order > 0;
+        let mut plain = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep: keep.clone(), ..crate::select::choose(&scene).unwrap() }, reference).unwrap();
+        plain.unspanned();
+        // [step spanned, step plain, node spanned, node plain]
+        let mut pair = [0.0f64; 4];
         let mut t = start(&run, &request, chief, index);
         let domain = Everywhere;
         // [step, node, node with the photon forms, readout at the point, readout on the middle, a jump's photon's node]
@@ -125,6 +134,32 @@ fn stepcost() {
             });
             let midway = Midway::new(&run, &t, tau).unwrap();
             let at = midway.reached;
+            if paired {
+                let timed = |f: &mut dyn FnMut()| -> f64 {
+                    let c0 = thread_cycles();
+                    f();
+                    (thread_cycles() - c0) as f64 / (ghz * 1e3)
+                };
+                let mut least4 = [f64::INFINITY; 4];
+                let runs = if order == 2 { [(1, &plain), (0, &run)] } else { [(0, &run), (1, &plain)] };
+                for &(_, r) in &runs {
+                    std::hint::black_box(Midway::new(r, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).is_ok());
+                    std::hint::black_box(r.node(at.0, at.1, false));
+                }
+                for _ in 0..repeat {
+                    for &(i, r) in &runs {
+                        least4[i] = least4[i].min(timed(&mut || {
+                            std::hint::black_box(Midway::new(r, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &domain)).is_ok());
+                        }));
+                        least4[2 + i] = least4[2 + i].min(timed(&mut || {
+                            std::hint::black_box(r.node(at.0, at.1, false));
+                        }));
+                    }
+                }
+                for i in 0..4 {
+                    pair[i] += least4[i];
+                }
+            }
             sum[1] += least(&mut || {
                 std::hint::black_box(run.node(at.0, at.1, false));
             });
@@ -152,6 +187,9 @@ fn stepcost() {
             t = step.end;
         }
         let k = taken.max(1) as f64;
+        if paired {
+            eprintln!("STEPCOST-PAIRED {name} {spec} tau {tau}: a step spanned {:.1} µs, one by one {:.1} µs ({:.3}); a node spanned {:.1} µs, one by one {:.1} µs ({:.3}); over {taken} steps", pair[0] / k, pair[1] / k, pair[0] / pair[1], pair[2] / k, pair[3] / k, pair[2] / pair[3]);
+        }
         eprintln!(
             "STEPCOST {name} {spec} (P{}) tau {tau}: a step {:.1} µs | a node {:.1} µs, with the photon forms {:.1} µs, a jump's photon's {:.1} µs | an output's readout at the point {:.1} µs, on the middle {} | nodes a step {:.2} plain + {:.2} with photons, jumps a step {:.3}, counted {:.3e} real MA a step over {taken} steps",
             keep.len(),
@@ -166,5 +204,80 @@ fn stepcost() {
             jumps as f64 / k,
             work / k,
         );
+    }
+}
+
+/// A jump's cost taken apart (STEP, phase 2 item "跳变那部分的拆账"): per scene of STEPCOST (as `stepcost`) the states
+/// of a walk of STEPCOST_STEPS (12) steps, and on them each step STEPCOST_REPEAT (5) times as it is and as many with no
+/// jump (the threshold 10⁻³⁰⁰), the same fresh scratch each call: the two phases' thread cycles, the jumps the first
+/// made, and the profiling build's regions after each phase (`crate::prof::report`, cumulative: the regions' difference
+/// over the jumps is a jump's part of each). Said: "JUMPCOST <scene>" with the step as it is and with no jump (µs a step),
+/// the jumps a step, a jump's cost; "JUMPCOST-PROF <scene> <phase>" the report after the phase (built with `prof`).
+#[test]
+#[ignore]
+fn jumpcost() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|x| x.parse().ok()).unwrap_or(d);
+    let (steps, repeat, index) = (env("STEPCOST_STEPS", 12), env("STEPCOST_REPEAT", 5), env("STEPCOST_INDEX", 3) as u64);
+    let ghz: f64 = (0..5)
+        .map(|_| {
+            let (c0, clock) = (thread_cycles(), Instant::now());
+            let mut x = 0u64;
+            while clock.elapsed().as_millis() < 50 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            (thread_cycles() - c0) as f64 / clock.elapsed().as_nanos() as f64
+        })
+        .fold(0.0, crate::linalg::larger);
+    let list = std::env::var("STEPCOST").unwrap_or_else(|_| SCENES.to_string());
+    for entry in list.split(',') {
+        let (name, rest) = entry.split_once('=').expect("name=model@tau");
+        let (spec, tau) = rest.split_once('@').unwrap();
+        let tau: f64 = tau.parse().unwrap();
+        let request = request_of(name);
+        let mut keep: Vec<usize> = (0..GROUND).collect();
+        if let Some(labels) = spec.strip_prefix('+') {
+            keep.extend(labels.split('+').map(|l| request.states.iter().position(|s| s == l).unwrap_or_else(|| panic!("no state {l}"))));
+        }
+        keep.sort_unstable();
+        let scene = crate::scene::Scene::new(&request).unwrap();
+        let selection = crate::select::choose(&scene).unwrap();
+        let chief = crate::solve::chief(&request);
+        let run = Selected::new(crate::scene::Scene::new(&request).unwrap(), crate::select::Selection { keep, ..selection }, crate::solve::alone(chief)).unwrap();
+        // The walk's states.
+        let mut t = start(&run, &request, chief, index);
+        let mut states = Vec::new();
+        for _ in 0..steps {
+            let Ok(step) = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere)) else { break };
+            states.push(t.clone());
+            t = step.end;
+        }
+        let k = states.len().max(1) as f64;
+        eprintln!("JUMPCOST-PROF {name} walk:{}", crate::prof::report());
+        let phase = |label: &str, threshold: Option<f64>| -> (f64, usize) {
+            let (mut cycles, mut jumps) = (0u64, 0usize);
+            for state in &states {
+                let mut s = state.clone();
+                if let Some(theta) = threshold {
+                    s.threshold = theta;
+                }
+                for _ in 0..repeat {
+                    let c0 = thread_cycles();
+                    let step = Midway::new(&run, &s, tau).and_then(|m| m.attempt(&s, &Brownian::STILL, &[], &mut Scratch::default(), &Everywhere));
+                    cycles += thread_cycles() - c0;
+                    if let Ok(step) = step {
+                        jumps += step.made.iter().filter(|m| m.kick.is_some()).count();
+                    }
+                }
+            }
+            eprintln!("JUMPCOST-PROF {name} {label}:{}", crate::prof::report());
+            (cycles as f64 / (ghz * 1e3) / (k * repeat as f64), jumps)
+        };
+        // STEPCOST_PHASE: one phase alone ("as-is" or "no-jump"), its process's report its own (the reports are
+        // cumulative over the process, their seconds to the millisecond).
+        let only = std::env::var("STEPCOST_PHASE").ok();
+        let (with, jumps) = if only.as_deref() != Some("no-jump") { phase("as-is", None) } else { (f64::NAN, 0) };
+        let (without, _) = if only.as_deref() != Some("as-is") { phase("no-jump", Some(1e-300)) } else { (f64::NAN, 0) };
+        let per = jumps as f64 / (k * repeat as f64);
+        eprintln!("JUMPCOST {name} {spec} tau {tau}: a step as it is {with:.1} µs, with no jump {without:.1} µs; {per:.3} jumps a step; a jump {:.1} µs (over {} states, {repeat} calls each)", if per > 0.0 { (with - without) / per } else { 0.0 }, states.len());
     }
 }

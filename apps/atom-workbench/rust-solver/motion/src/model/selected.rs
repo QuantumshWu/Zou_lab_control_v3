@@ -88,6 +88,21 @@
 //! took M ρ M†: 48 µs a read on PGC3D's G pinned, against a step's 310 (GMD1C's 1001 outputs 15 % of its
 //! trajectories' work, R5_PUMP's 40 %, study C §2.5); on the middle 7 µs.
 //!
+//! # The direct entries spanned
+//! A node's direct entries -- each piece's K × K entries of H_eff and of the channels, a term's factor at the point
+//! times a fixed vector over an output's places -- are a sum over atoms (piece, term, coefficient) whose fixed vectors
+//! span few directions: six beams of one frequency are three field components. The lab's grouping holds them spanned
+//! (rs/fold.rs `Grouping::spanned`): per output an orthonormal basis of its atoms' vectors in the order of their size
+//! over the reach (‖v‖ times |scale| times the coefficient's largest, every factor at most one), each atom's
+//! coordinates on it, a residual left out where it is at most a tolerance of its kind's largest atom (H's outputs, the
+//! channels'); the photon forms' entries one by one. What a span leaves out is a bound of the generator's change over
+//! the reach -- an H output's left residuals' Σ ‖r‖b (its Frobenius norm, above its sup norm), a channel's 2‖L‖ times
+//! it and its square -- booked with the dropped beats' Y (`Judgment::dropped`, model/classify.rs # The drop tier: the
+//! solve books ½(e^{2YT} − 1)). Which tolerance is the drop tier's rule (`Selected::span_directs`): of none and of
+//! 10⁻ᵏ (k = 2 … 16), the least W -- the node's counted work times the account's factor at Y --, so the budget decides
+//! and a span that costs more than it saves is not taken. (Until 2026-11-23 the entries one by one: PGC3D's 4134
+//! direct entries, 13.5 µs of its 141 µs node; OLDNEW, motion3d_status/rewrite/impl/OLDNEW.report.md §3.1.)
+//!
 //! # Exact blocks
 //! P falls into blocks on which every matrix the integrator is handed is block-diagonal: the node's every beat of the
 //! generator -- H_eff with its decay −(i/2)ΣL†L -- and of its gradient along each lab axis. They are the run's judgment's
@@ -202,8 +217,10 @@ pub struct Selected {
     lifts: Vec<(usize, Vec<(usize, f64)>)>,
 }
 
-/// Which beats a model drops (`Selected::made`): those its judgment drops (model/classify.rs, # The drop tier), or (a
-/// check's) exactly the candidate pairs of the listed |Ω| (rad/µs, to 10⁻⁹ of it), none of an empty list.
+/// Which beats a model drops (`Selected::made`): those its judgment drops (model/classify.rs, # The drop tier), its
+/// direct entries spanned where that is the cheaper (# The direct entries spanned), or (a check's) exactly the candidate
+/// pairs of the listed |Ω| (rad/µs, to 10⁻⁹ of it), none of an empty list, and nothing else left out: the direct
+/// entries one by one.
 #[derive(Clone, Debug)]
 pub(crate) enum Drops {
     Judged,
@@ -1041,10 +1058,64 @@ impl Selected {
                 }
             }
         }
+        // The direct entries spanned where that costs the run the less (module documentation, # The direct entries
+        // spanned), what they leave out booked with the dropped beats.
+        if matches!(drops, Drops::Judged) {
+            let (_, account, nodes) = self.drop_sizes(&node, &[], spherical);
+            let base = judgment.dropped;
+            judgment.dropped += self.span_directs(&account, nodes, base);
+        }
         self.judgment = judgment;
         self.decay_terms();
         // The pooled nodes were made on the layout before.
         POOL.with(|p| p.borrow_mut().retain(|x| x.0 != self.id));
+    }
+
+    /// The direct entries spanned (module documentation, # The direct entries spanned): of the lab's grouping's spans
+    /// at the tolerances 10⁻ᵏ of each kind's largest atom (k = 2 … 16) and of none, the one of least W -- the drop
+    /// tier's rule, the node's counted work (three nodes a step, the direct part as each does it) times the account's
+    /// factor at the dropped beats' Y and the span's (`Account::factor`) --, set on the grouping. The span's Y: what it
+    /// leaves out of each output, its sup norm's bound -- an H output's the dropped part's Frobenius norm, a channel's
+    /// 2‖L‖ times it and its square, ‖L‖ the output's own bound over the reach (rs/fold.rs `Out::bounds`), the change of
+    /// LρL† and of ½{L†L, ρ} --, summed. Returns it.
+    fn span_directs(&mut self, account: &Account, nodes: f64, base: f64) -> f64 {
+        let wells = self.scene.trap_potential([0.0; 3], &self.depth);
+        let depth = wells.iter().map(|q| -q.value).fold(0.0, larger);
+        let reach = self.rs.reach(&self.scene, self.hbar_over_mass, (2.0 * depth / self.hbar_over_mass).sqrt());
+        let mut work = Work::default();
+        self.scene.point_into([0.0; 3], [0.0; 3], &mut work.point);
+        self.rs.evaluate(&self.scene, &work.point, &mut work.local, Making::node(false));
+        let plan = self.rs.plan();
+        let (_, channels) = Out::bounds(plan, &self.lab, &plan.reach(&work.local.values, &reach), &reach.coefficients);
+        let frobenius = |b: &[f64]| b.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let rate = |spanned: &crate::model::rs::fold::Spanned| -> f64 {
+            spanned.dropped.iter().map(|&(h, o, d)| if h { d } else { 2.0 * frobenius(&channels[o]) * d + d * d }).sum()
+        };
+        // The candidates: none (the entries one by one, nothing left out), then the spans at 10⁻ᵏ.
+        let plain = self.lab.spanned(plan, &reach.coefficients, 0.0).work[0];
+        let mut least = (nodes + 3.0 * crate::decide::COMPLEX * plain) * account.factor(base);
+        crate::prof::note(|| format!("span none: work {plain} W {least:.6e} (nodes {nodes:.0}, factor {:.6e})", account.factor(base)));
+        let mut best: Option<(f64, crate::model::rs::fold::Spanned)> = None;
+        for k in 2..=16 {
+            let spanned = self.lab.spanned(plan, &reach.coefficients, 10f64.powi(-k));
+            let y = rate(&spanned);
+            let w = (nodes + 3.0 * crate::decide::COMPLEX * spanned.work[1]) * account.factor(base + y);
+            crate::prof::note(|| format!("span 1e-{k}: directions {} work {} Y {y:.3e} W {w:.6e} (factor {:.6e})", spanned.spans.iter().map(|d| d.basis.len()).sum::<usize>(), spanned.work[1], account.factor(base + y)));
+            if w < least {
+                least = w;
+                best = Some((y, spanned));
+            }
+        }
+        match best {
+            Some((y, spanned)) => {
+                self.lab.spans = spanned.spans;
+                y
+            }
+            None => {
+                self.lab.spans.clear();
+                0.0
+            }
+        }
     }
 
     /// The run's judgment of its node's beats (model/classify.rs): per slot of the structure's node, before the beats
@@ -1203,6 +1274,12 @@ impl Selected {
         let mut node = self.template.clone();
         self.node_into(&mut node, at, kappa, (kicked, true), false);
         node
+    }
+
+    /// The run with its direct entries one by one (the tests'): its spans taken off (# The direct entries spanned).
+    #[cfg(test)]
+    pub(crate) fn unspanned(&mut self) {
+        self.lab.spans.clear();
     }
 
     /// A jump's photon's node at a point (`SelectedMiddle::photon`, the tests'): the photon classes alone.
@@ -1785,10 +1862,20 @@ impl SelectedMiddle<'_> {
         let emitted = READS.with(|r| {
             let mut r = r.borrow_mut();
             let Reads { photons: list, rates, .. } = &mut *r;
-            let classes = self.model.read(|b| photons(&node, &b.value, self.t + s, psi, list));
+            // Every class's rate on its amplitudes alone; the photon of the class drawn whole (`class_photons`: the
+            // same numbers as every class's whole, `photons`, to the bit).
+            let norm = norm_sqr(psi);
+            if list.len() < node.classes.len() {
+                list.resize_with(node.classes.len(), Photons::default);
+            }
             rates.clear();
-            rates.extend(classes.iter().map(|p| p.moments.weight));
+            self.model.read(|b| {
+                for (class, p) in node.classes.iter().zip(list.iter_mut()) {
+                    rates.push(class_photons(class, node.kicked, (&b.value, self.t + s), psi, norm, p, false));
+                }
+            });
             let k = draw(rates)?;
+            self.model.read(|b| class_photons(&node.classes[k], node.kicked, (&b.value, self.t + s), psi, norm, &mut list[k], true));
             let p = &list[k];
             let n = psi.len();
             let amplitudes = p.u.each_ref().map(|u| u.iter().copied().collect::<Internal>());
@@ -1834,44 +1921,57 @@ impl Default for Photons {
 /// Every class's photons of the state ψ at the time t on a node (module documentation, # The photons), into `list`
 /// (as long as it needs, never shorter): the node's classes' in their order.
 fn photons<'a>(node: &Node, values: &[f64], t: f64, psi: &[C64], list: &'a mut Vec<Photons>) -> &'a [Photons] {
-    let n = psi.len();
     let norm = norm_sqr(psi);
     if list.len() < node.classes.len() {
         list.resize_with(node.classes.len(), Photons::default);
     }
     for (class, p) in node.classes.iter().zip(list.iter_mut()) {
-        let Photons { u, du, ku, .. } = &mut *p;
-        for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
-            v.clear();
-            v.resize(n, C64::ZERO);
-        }
-        {
-            for (a, axis) in class.axes.iter().enumerate() {
-                for jump in axis {
-                    let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
-                    // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
-                    let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
-                        for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
-                            let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
-                            out[row[0].at / n] += f * z;
-                        }
-                    };
-                    apply(&|e| e.value, &mut u[a]);
-                    if node.kicked {
-                        apply(&|e| e.kick, &mut ku[a]);
-                    }
-                    for (i, d) in du.iter_mut().enumerate() {
-                        apply(&|e| e.gradient[i], &mut d[a]);
-                    }
-                }
-            }
-            let moments = Moments::of(u, du, class.absorbed);
-            let weight = moments.weight;
-            p.wave_number = node.kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
-            p.moments = moments.over(norm);
-        }
+        class_photons(class, node.kicked, (values, t), psi, norm, p, true);
     }
     &list[..node.classes.len()]
+}
+
+/// A class's photons of the state ψ at the time t (`photons`): where `whole`, u_a, ∇u_a, the photon forms' K u_a where
+/// the node holds them, its moments over ‖ψ‖² = `norm` and its wave number; else u_a alone. Returns its rate W/‖ψ‖²,
+/// the moments' weight (`Moments::of`, then `over`: the same operations either way).
+fn class_photons(class: &Class, kicked: bool, (values, t): (&[f64], f64), psi: &[C64], norm: f64, p: &mut Photons, whole: bool) -> f64 {
+    let n = psi.len();
+    let Photons { u, du, ku, .. } = &mut *p;
+    for v in u.iter_mut().chain(ku.iter_mut()).chain(du.iter_mut().flatten()) {
+        v.clear();
+        v.resize(n, C64::ZERO);
+    }
+    for (a, axis) in class.axes.iter().enumerate() {
+        for jump in axis {
+            let f = if jump.beat == 0 { C64::ONE } else { C64::cis(-values[jump.beat] * t) };
+            // out += f M ψ of the component's elements' M, row by row, each row's sum in column order.
+            let apply = |m: &dyn Fn(&Element) -> C64, out: &mut Vec<C64>| {
+                for row in jump.elements.chunk_by(|x, y| x.at / n == y.at / n) {
+                    let z: C64 = row.iter().map(|e| m(e) * psi[e.at % n]).sum();
+                    out[row[0].at / n] += f * z;
+                }
+            };
+            apply(&|e| e.value, &mut u[a]);
+            if !whole {
+                continue;
+            }
+            if kicked {
+                apply(&|e| e.kick, &mut ku[a]);
+            }
+            for (i, d) in du.iter_mut().enumerate() {
+                apply(&|e| e.gradient[i], &mut d[a]);
+            }
+        }
+    }
+    if !whole {
+        let weight: f64 = (0..3).map(|a| norm_sqr(&u[a])).sum();
+        return weight / norm;
+    }
+    let moments = Moments::of(u, du, class.absorbed);
+    let weight = moments.weight;
+    p.wave_number = kicked.then(|| if weight != 0.0 { (0..3).map(|a| inner(&u[a], &ku[a]).re).sum::<f64>() / weight } else { 0.0 });
+    p.moments = moments.over(norm);
+    p.moments.weight
 }
 
 #[cfg(test)]
