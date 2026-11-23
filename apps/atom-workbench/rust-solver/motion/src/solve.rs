@@ -2999,8 +2999,9 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             let (model_error, lower) = (unresolved(model_error, runaway), unresolved(lower, runaway));
             #[cfg(test)]
             if std::env::var_os("SEL_MOTION").is_some() {
+                let at_point = if exact { None } else { Some(point(&judged)) };
                 for (k, e) in shown_at.iter().enumerate() {
-                    eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e} (motion {:?}), lower {:.3e} / {:.3e}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), outputs[k], model_error.0[k][0], model_error.0[k][1], model_error.1[k], lower.0[k][0], lower.0[k][1], e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
+                    eprintln!("    [account] P{} t {:.2}: upper {:.3e} / {:.3e} (motion {:?}), lower {:.3e} / {:.3e} (T {:.3e}), point T {:?}; T {:?}, L {:.4}, T's target {:.3}", judged.keep.len(), outputs[k], model_error.0[k][0], model_error.0[k][1], model_error.1[k], lower.0[k][0], lower.0[k][1], lower.1[k].temperature, at_point.as_ref().map(|p| p.1[k].temperature), e.motion.map(|m| m.temperature_total), e.loss, e.temperature_target);
                 }
             }
             let (met, need, work) = asks(model_error, price, place);
@@ -3358,7 +3359,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         #[cfg(test)]
         if crate::select::traced() {
             let c: Vec<u64> = crate::paths::CHECKS.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
-            eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, diffusion {:.2} s {} (its LU {:.2} s), landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[2] as f64 * 1e-9, c[3], c[4] as f64 * 1e-9, c[6] as f64 * 1e-9, c[7]);
+            eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[6] as f64 * 1e-9, c[7]);
         }
         let w = weighed.swap_remove(chosen);
         return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));

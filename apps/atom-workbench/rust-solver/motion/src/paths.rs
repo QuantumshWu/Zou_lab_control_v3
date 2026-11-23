@@ -53,15 +53,19 @@
 //!
 //! # The motion's readings
 //! What the motion takes of the internal state, beside the rows (select.rs # The motion), each over tr ρ_P:
-//! - the heating per lab axis, H_a = (ħ/m)/2 · d⟨κ_a²⟩/dt (`Reading::heating_at`), each model's own, in the way its
-//!   trajectories take their momentum: the emitted photons' k_c² λ_c ⟨n_a²⟩ -- the dipole pattern tr G − n·Re(G)·n of a
-//!   class's Cartesian amplitudes (step.rs `Emitted`), whose ⟨n_a²⟩ λ_c = (2/5) tr G − (1/5) G_aa, G_ab = tr(J_{c,a} ρ
-//!   J_{c,b}†) --, k_c the class's photon wave number (its photon forms K = k∘L on a node at the form's point: one class
-//!   one line); what its jumps carry of the absorbed light, Σ Re tr(∂_aJ ρ ∂_aJ†) (model.rs `Moments`: a folded excited
-//!   state's absorption), and Q times the directed part a jump carries; and twice the force's correlation's diffusion
-//!   (# The landing check): an explicit excited state carries its absorbed momentum in its force ⟨∇H⟩, not in its jumps
-//!   (SAT_03's 32 states' jumps read 0.003 /µm²/µs of it, the full-ground model's 413), and a ground state's light shift
-//!   pushes it by its gradient, the dipole force, in both.
+//! - the heating per lab axis, H_a = (ħ/m)/2 · d⟨κ_a²⟩/dt of the scattered light (`Reading::heating_at`): the emitted
+//!   photons' k_c² λ_c ⟨n_a²⟩ -- the dipole pattern tr G − n·Re(G)·n of a class's Cartesian amplitudes (step.rs
+//!   `Emitted`), whose ⟨n_a²⟩ λ_c = (2/5) tr G − (1/5) G_aa, G_ab = tr(J_{c,a} ρ J_{c,b}†) --, k_c the class's photon wave
+//!   number (its photon forms K = k∘L on a node at the form's point: one class one line); and the absorbed photons'
+//!   λ ((k²)_a − k̄_a²) + λ (1 + Q) k̄_a²: their directed part k̄ counted with the photon count's Fano factor 1 + Q, Q
+//!   each model's own (# The landing check), the rest as Poisson's. The absorbed photon's k̄ and (k²) are the light's at
+//!   the place, not a model's: each beam l but the tweezer's by its share w_l ∝ (‖X_l‖² + ‖R_l‖²)|a_l(r)|², its
+//!   coupling's strength at its focus times its profile's intensity there -- the same for every model, whose own rate λ
+//!   scales it. (A model's own Σ Re tr(∂J ρ ∂J†) is no such measure: it holds what its folded jumps carry, and an
+//!   explicit excited state carries its absorbed momentum in its force, ⟨∇H⟩, nowhere in its jumps -- SAT_03's 32
+//!   states read 0.003 of it against the full-ground model's 413 /µm²/µs. From 2026-11-23 to the 23rd's evening the
+//!   jumps' own second moment stood here with the force's correlation's diffusion by the quantum regression beside it:
+//!   see # The landing check for why that diffusion is no measure of the trajectories' heating.)
 //! - the force's power per lab axis F_a v_a, v = (ħ/m)κ the path's -- in a window the force's difference against the
 //!   velocity, each relative to the cloud's mean there, what moves T (`compare`). (Its conservative part, a lattice's or a
 //!   trap's light force against the motion's oscillation, moves no energy over the motion's periods; on a window
@@ -83,15 +87,22 @@
 //! quarter of the fastest decay's time growing by 2^{1/4} a knot to the walk's own spacing -- the transient resolved
 //! where it is --, one piece a knot; the ground states' slower redistribution after the landing is outside the span.
 //!
-//! At the same times each model's force fluctuates about its mean, and the momentum diffuses by D_a = ∫₀^∞ ⟨δF_a(0)
-//! δF_a(τ)⟩ dτ: by the quantum regression theorem, at the generator frozen at the time (the atom at rest there),
-//! D_a = tr(G_a y), L y = −(½(G_a ρ + ρ G_a) − ⟨G_a⟩ρ), G_a the Hermitian part of ∂_aH (`diffusion`). For a resonant
-//! two-level cycle it is the absorbed light's momentum's shot noise with its antibunching (SAT_03's 32 states: 0.49 of
-//! Poisson's k²λ/2 on the push axis, where its Q = −0.53 gives 0.47); in a polarization gradient it is the Sisyphus
-//! heating. A model with several stationary states has no such inverse there: none is read. (The trajectories' own
-//! diffusion is the force between jumps on the state that has not jumped, of which the density matrix's regression
-//! gives the quantum one, the force as an operator: where an explicit excited state's coherence carries the force the
-//! two may differ -- the remaining question, the selection's status file.)
+//! No force correlation's diffusion is read. The quantum regression's D_a = ∫₀^∞ ⟨δF_a(0) δF_a(τ)⟩ dτ, the force as an
+//! operator, ½(G_a ρ + ρ G_a) − ⟨G_a⟩ρ its source, holds the operator's own variance ⟨G²⟩ − ⟨G⟩², which a pure state has
+//! too; the trajectories (the force ⟨ψ|∇H|ψ⟩ between jumps, select.rs # The motion) have none of it -- their force
+//! fluctuates by their jumps alone, its correlation tr(G e^{Lτ} M), M = E[⟨G⟩_ψ |ψ⟩⟨ψ|] over the conditional states,
+//! not ½{G, ρ}. The two agree on a resonant two-level cycle (SAT_03's 32 states: 0.49 of Poisson's k²λ/2 on the push
+//! axis, where its Q = −0.53 gives 0.47 -- what 1 + Q counts above), not where ground states hold long coherences
+//! under different light shifts. Read 2026-11-23 (and removed the same day): at the generator frozen at the time, the
+//! atom at rest -- an approximation none of the four allowed --, its correlation time ∫τC/∫C was 30-145 µs on PGC3D's
+//! reference against some 6 µs for its atoms to cross λ/2, 2e2-7e4 µs on GMD1C's (its dark states), and D of either
+//! sign up to 1.3e3 /µm²/µs: GMD1C's reference heated below nought, its T's relaxation none, G's T error 140 µK at
+//! 1000 µs against T 9 µK, the selection past 300 s (the release's 13 s). Run along the walk instead (the generator
+//! the atom's own as it moves, D_a = −p ∫(F(τ|ρ + X/p) − F(τ|ρ))dτ), D was of one sign and sane in size but no
+//! trajectory's: PGC3D's full-ground model read [229, 52, 69] against its reference's [56, −2, 5] /µm²/µs, a heating
+//! several times the reference's, where the two models' T from their own trajectories differ by 0.03 of T's allowance
+//! (FOLDTEMP's pair). The jumps' own share of the dipole force's fluctuation, which the trajectories do have, is not
+//! read here: select.rs # The motion, what the account leaves out.
 
 //! # The memory
 //! The path's length is set by the generator's slowest nonzero decay rate λ (`memory`): the sector Liouvillian's
@@ -377,28 +388,24 @@ pub struct Reading {
     /// Per lab axis the rate of ⟨κ_a²⟩ the emitted photons give, Σ_c k_c² ((2/5) λ_c − (1/5) tr(J_{c,a} ρ J_{c,a}†))
     /// (1/µm²/µs, over tr ρ_P; # The motion's readings).
     pub emitted: V3,
-    /// Per lab axis what the model's jumps carry of the absorbed light (# The motion's readings): their second moment's
-    /// rate Σ Re tr(∂_aJ ρ ∂_aJ†) (1/µm²/µs) -- the Kramers–Moyal coefficient of the jumps' kicks and the Brownian path
-    /// together (model.rs `Moments`) --, and the part of their mean Σ_c s_c Im tr(ρ J_c†∂_aJ_c) a jump carries (1/µm/µs;
-    /// s_c = min(1, k_c/|b_c|), `Moments::kick`), both over tr ρ_P.
-    pub absorbed: V3,
-    pub carried: V3,
+    /// The light's absorbed photon at the place per lab axis, the model's none (# The motion's readings): its mean
+    /// Σ_l w_l k_{l,a} (1/µm) and its second moment Σ_l w_l k_{l,a}² (1/µm²), w_l the beams' shares.
+    pub kick: V3,
+    pub kick2: V3,
 }
 
 impl Reading {
-    /// The heating per lab axis (rad/µs², d(E/ħ)/dt; # The motion's readings) at the photon count's Mandel Q `q` and the
-    /// force's correlation's diffusion `diffusion` (1/µm²/µs, `Form::diffusion`): (ħ/m)/2 times the rate of ⟨κ_a²⟩ --
-    /// the emitted photons', the jumps' absorbed second moment, Q times the directed part they carry, (Σ_c s b_c)_a²/λ
-    /// -- and (ħ/m) D_a.
-    pub fn heating_at(&self, hbar_over_mass: f64, q: f64, diffusion: V3) -> V3 {
+    /// The heating per lab axis (rad/µs², d(E/ħ)/dt; # The motion's readings) at the photon count's Mandel Q `q`:
+    /// (ħ/m)/2 times the rate of ⟨κ_a²⟩ the scattered light gives -- the emitted photons', and the absorbed ones'
+    /// λ ((k²)_a − k̄_a²) + λ (1 + Q) k̄_a².
+    pub fn heating_at(&self, hbar_over_mass: f64, q: f64) -> V3 {
         let lambda: f64 = self.rates.iter().sum();
-        let counted = |a: usize| if lambda > 0.0 { q * self.carried[a] * self.carried[a] / lambda } else { 0.0 };
-        std::array::from_fn(|a| 0.5 * hbar_over_mass * (self.emitted[a] + self.absorbed[a] + counted(a)) + hbar_over_mass * diffusion[a])
+        std::array::from_fn(|a| 0.5 * hbar_over_mass * (self.emitted[a] + lambda * (self.kick2[a] - self.kick[a] * self.kick[a] + (1.0 + q) * self.kick[a] * self.kick[a])))
     }
 
-    /// `heating_at` of Poisson's count and no force correlation read.
+    /// `heating_at` of Poisson's count (Q = 0).
     pub fn heating(&self, hbar_over_mass: f64) -> V3 {
-        self.heating_at(hbar_over_mass, 0.0, [0.0; 3])
+        self.heating_at(hbar_over_mass, 0.0)
     }
 
     /// The force's power per lab axis on the path (rad/µs², F_a v_a, v = (ħ/m)κ).
@@ -471,6 +478,9 @@ pub struct Form<'a> {
     classes: Vec<[i64; 2]>,
     /// Per class its photon's wave number (1/µm; # The motion's readings).
     photon: Vec<f64>,
+    /// The beams an atom absorbs from (all but the tweezer's): each its index, its wave vector (1/µm) and its coupling's
+    /// strength at its focus, ‖X_l‖²_F + ‖R_l‖²_F (# The motion's readings).
+    absorbing: Vec<(usize, V3, f64)>,
     /// A substep's remainder's counted work (real multiply-adds): ΔH's sandwich over the sector's pairs, Σ b_x b_y (b_x +
     /// b_y) complex multiply-adds, and R's places (`Counts::work`); a sandwich's alone (`sandwich`).
     product: f64,
@@ -654,6 +664,18 @@ impl<'a> Form<'a> {
                 if ll > 0.0 { lk / ll } else { largest }
             })
             .collect();
+        let absorbing = request
+            .beams
+            .iter()
+            .enumerate()
+            .filter(|&(l, _)| l != request.trap_beam)
+            .map(|(l, b)| {
+                let size = crate::linalg::norm3(b.direction);
+                let strength: f64 = b.coupling.data.iter().chain(&b.counter_coupling.data).map(|z| z.norm_sqr()).sum();
+                (l, b.direction.map(|x| b.wave_number * x / size), strength)
+            })
+            .filter(|x| x.2 > 0.0)
+            .collect();
         let sandwiched = crate::decide::COMPLEX * pairs.iter().map(|&(x, y)| (blocks[x].len() * blocks[y].len() * (blocks[x].len() + blocks[y].len())) as f64).sum::<f64>();
         let product = sandwiched + crate::decide::COMPLEX * r_places.len() as f64;
         let form = Form {
@@ -680,6 +702,7 @@ impl<'a> Form<'a> {
             states,
             classes,
             photon,
+            absorbing,
             product,
             sandwiched,
             hbar_over_mass: model.hbar_over_mass(),
@@ -987,9 +1010,9 @@ impl<'a> Form<'a> {
         // contraction (model/selected.rs `SelectedMiddle::contract`, every beat at its phase).
         let mut rates = vec![0.0; self.classes.len()];
         let mut force = crate::model::selected::SelectedMiddle::contract(node, |beat| Some(self.phase(beat, t)), &rho).map(|z| -z.re);
-        let (mut emitted, mut jumps_second, mut carried, mut mean) = ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]);
-        // The entries' pairs read (`Counts::work`: seven complex multiply-adds each -- the rate, the absorbed mean and the
-        // jumps' second moment on three axes).
+        let mut emitted = [0.0; 3];
+        // The entries' pairs read (`Counts::work`: four complex multiply-adds each -- the rate and the absorbed mean on
+        // three axes).
         let mut matched = 0usize;
         let mut entries: Vec<(usize, usize, C64, [C64; 3])> = Vec::new();
         for (c, class) in node.classes.iter().enumerate() {
@@ -1013,15 +1036,13 @@ impl<'a> Form<'a> {
                         }
                     }
                 }
-                // tr(J ρ J†) = Σ J[g,u] ρ[u,s] conj(J[g,s]); Im tr(ρ J†∇J) = Im Σ conj(J[g,u]) ∇J[g,s] ρ[s,u];
-                // tr(∂_aJ ρ ∂_aJ†) = Σ ∂_aJ[g,u] ρ[u,s] conj(∂_aJ[g,s]) -- the model's photons' moments (model.rs
-                // `Moments::of`) on ρ, read on ρ itself: through ρ's eigenvectors, each a trajectory's state read by the
-                // model's own photons, the readings took 4.7 times as long (PGC3D's paths 2026-11-23: 25.6 → 119.5 thread
-                // seconds of 282, the numbers the same).
+                // tr(J ρ J†) = Σ J[g,u] ρ[u,s] conj(J[g,s]); Im tr(ρ J†∇J) = Im Σ conj(J[g,u]) ∇J[g,s] ρ[s,u] -- the
+                // model's photons' rate and absorbed mean (model.rs `Moments::of`) on ρ, read on ρ itself: through ρ's
+                // eigenvectors, each a trajectory's state read by the model's own photons, the readings took 4.7 times as
+                // long (PGC3D's paths 2026-11-23: 25.6 → 119.5 thread seconds of 282, the numbers the same).
                 let mut rate = C64::ZERO;
                 let mut absorbed = [C64::ZERO; 3];
-                let mut second = [C64::ZERO; 3];
-                for &(g, u, z, du) in entries.iter() {
+                for &(g, u, z, _) in entries.iter() {
                     for &(g2, s, w, d) in entries.iter() {
                         if g2 != g {
                             continue;
@@ -1030,7 +1051,6 @@ impl<'a> Form<'a> {
                         rate += z * rho[u * n + s] * w.conj();
                         for a in 0..3 {
                             absorbed[a] += z.conj() * d[a] * rho[s * n + u];
-                            second[a] += du[a] * rho[u * n + s] * d[a].conj();
                         }
                     }
                 }
@@ -1038,17 +1058,8 @@ impl<'a> Form<'a> {
                 along[b] = rate.re / trace;
                 for a in 0..3 {
                     force[a] += absorbed[a].im;
-                    mean[a] += absorbed[a].im / trace;
-                    jumps_second[a] += second[a].re / trace;
                 }
             }
-            // The part of the class's absorbed mean a jump carries: the model's rule (`Moments::new`: s = min(1, k_c/|b|),
-            // b = mean/W).
-            let share = crate::model::Moments::new(along.iter().sum(), mean, [[0.0; 3]; 3], class.absorbed, n).share;
-            for a in 0..3 {
-                carried[a] += share * mean[a];
-            }
-            mean = [0.0; 3];
             // The photons' second moment per lab axis: k_c² λ_c ⟨n_a²⟩, the dipole pattern's ⟨n_a²⟩ λ = (2/5) tr G −
             // (1/5) G_aa (G_ab = tr(J_a ρ J_b†); # The motion's readings).
             let k2 = self.photon[c] * self.photon[c];
@@ -1061,10 +1072,24 @@ impl<'a> Form<'a> {
         // The reading's counted work: ρ on P, the rows (through ρ's eigenvectors where the model folds: its decomposition
         // and a readout a vector), the gradient's contractions and the entries' pairs.
         let support = if self.folds { (0..n).filter(|&a| self.block_of[a].0 != usize::MAX).count() } else { 0 };
-        counts.work += crate::decide::COMPLEX * ((n * n) as f64 + (support * support * support) as f64 + (support * n * n) as f64 + (3 * node.gradient.len() * n * n) as f64 + 7.0 * matched as f64);
+        counts.work += crate::decide::COMPLEX * ((n * n) as f64 + (support * support * support) as f64 + (support * n * n) as f64 + (3 * node.gradient.len() * n * n) as f64 + 4.0 * matched as f64);
+        // The light's absorbed photon at the place (# The motion's readings).
+        let (mut kick, mut kick2, mut weight) = ([0.0; 3], [0.0; 3], 0.0);
+        let light = self.model.light();
+        for &(l, k, strength) in &self.absorbing {
+            let w = strength * light.beams[l].amplitude_to(r, 0).value.norm_sqr();
+            weight += w;
+            for a in 0..3 {
+                kick[a] += w * k[a];
+                kick2[a] += w * k[a] * k[a];
+            }
+        }
+        if weight > 0.0 {
+            (kick, kick2) = (kick.map(|x| x / weight), kick2.map(|x| x / weight));
+        }
         counts.readouts += 1;
         counts.readout_seconds += clock.elapsed().as_secs_f64();
-        Reading { t, r, kappa, rows, rates, force, total, trace, emitted, absorbed: jumps_second, carried }
+        Reading { t, r, kappa, rows, rates, force, total, trace, emitted, kick, kick2 }
     }
 
     /// The model's readings along a path from `from` to `to` from the state `start` (module documentation): its
@@ -1167,100 +1192,6 @@ impl<'a> Form<'a> {
         v
     }
 
-    /// The force's correlation's momentum diffusion of the sector state v at the time t (# The landing check): per lab
-    /// axis D_a = ∫₀^∞ ⟨δF_a(0) δF_a(τ)⟩ dτ (1/µm²/µs) by the quantum regression at the generator frozen there --
-    /// D_a = tr(G_a y), L y = −X₀, X₀ = ½(G_a ρ + ρ G_a) − tr(G_a ρ) ρ, G_a the Hermitian part of ∂_aH(t) and ρ = v/tr v
-    /// --, solved on the trace-free part as (L + ρ tr) y = −X₀ (tr L y = 0, so tr y = −tr X₀ = 0). The model's own: an
-    /// explicit excited state's absorbed momentum fluctuates in its force ⟨∇H⟩, a folded one's in its jumps (`Reading::
-    /// absorbed`), and a ground state's light shift's gradient (the dipole force) in both. None where the frozen
-    /// generator has no such inverse (a stationary state more than one). With its counted work (real multiply-adds,
-    /// `Counts::work`): the node and its amplitudes, the dense generator column by column (a remainder's work each), its
-    /// LU (d³/3 complex multiply-adds) and per axis the two products and the solve.
-    pub fn diffusion(&self, walk: &Walk, t: f64, v: &[C64]) -> (Option<V3>, f64) {
-        #[cfg(test)]
-        let _timed = Checked::new(1);
-        let work = {
-            let (d, n) = (self.dim as f64, self.n as f64);
-            let node = self.model.node(walk.at(self.hbar_over_mass, t).0, walk.at(self.hbar_over_mass, t).1, false).work;
-            node + self.amplitudes_work() + d * self.product + crate::decide::COMPLEX * (d * d * d / 3.0 + 3.0 * (2.0 * n * n * n + 2.0 * d * d))
-        };
-        (self.diffusion_of(walk, t, v), work)
-    }
-
-    /// `diffusion`'s number alone.
-    fn diffusion_of(&self, walk: &Walk, t: f64, v: &[C64]) -> Option<V3> {
-        let (r, kappa) = walk.at(self.hbar_over_mass, t);
-        let n = self.n;
-        let d = self.dim;
-        let raw = self.density(v);
-        let trace: f64 = (0..n).map(|a| raw[a * n + a].re).sum();
-        if !(trace > 0.0) {
-            return None;
-        }
-        let rho: Vec<C64> = raw.iter().map(|z| *z * (1.0 / trace)).collect();
-        let mut on_sector = vec![C64::ZERO; d];
-        for a in 0..n {
-            for b in 0..n {
-                if let Some(p) = self.place(a, b) {
-                    on_sector[p] = rho[a * n + b];
-                }
-            }
-        }
-        let mut l = self.liouvillian(r, kappa, t);
-        for a in 0..n {
-            if let Some(p) = self.place(a, a) {
-                for i in 0..d {
-                    l[(i, p)] += on_sector[i];
-                }
-            }
-        }
-        #[cfg(test)]
-        let lu_timed = Checked::new(2);
-        let lu = crate::linalg::Lu::new(&l)?;
-        #[cfg(test)]
-        drop(lu_timed);
-        let node = self.model.node(r, kappa, false);
-        let product = |x: &[C64], y: &[C64]| -> Vec<C64> {
-            let mut out = vec![C64::ZERO; n * n];
-            for i in 0..n {
-                for k in 0..n {
-                    let z = x[i * n + k];
-                    if z != C64::ZERO {
-                        for j in 0..n {
-                            out[i * n + j] += z * y[k * n + j];
-                        }
-                    }
-                }
-            }
-            out
-        };
-        let mut out = [0.0; 3];
-        for (axis, o) in out.iter_mut().enumerate() {
-            let mut g = vec![C64::ZERO; n * n];
-            for (beat, m) in &node.gradient {
-                let f = self.phase(*beat, t);
-                for (x, y) in g.iter_mut().zip(&m[axis].data) {
-                    *x += f * *y;
-                }
-            }
-            let g: Vec<C64> = (0..n * n).map(|k| (g[k] + g[(k % n) * n + k / n].conj()) * 0.5).collect();
-            let (gr, rg) = (product(&g, &rho), product(&rho, &g));
-            let mean: f64 = (0..n).map(|a| gr[a * n + a].re).sum();
-            let mut x = vec![C64::ZERO; d];
-            for a in 0..n {
-                for b in 0..n {
-                    if let Some(p) = self.place(a, b) {
-                        x[p] = -((gr[a * n + b] + rg[a * n + b]) * 0.5 - rho[a * n + b] * mean);
-                    }
-                }
-            }
-            lu.solve(&mut x);
-            let y = self.density(&x);
-            *o = (0..n).flat_map(|a| (0..n).map(move |b| (a, b))).map(|(a, b)| (g[a * n + b] * y[b * n + a]).re).sum();
-        }
-        out.iter().all(|x| x.is_finite()).then_some(out)
-    }
-
     /// The landing check of one landing (# The landing check): from the landed ground state `landed` at the time t, the
     /// form along the walk for `span` µs at the exponential scheme's knobs `knobs` (one piece a knot), on knots that grow
     /// from a quarter of the fastest excited decay's time 1/Γ (`decay`) by 2^{1/4} a knot -- the transient resolved
@@ -1269,19 +1200,17 @@ impl<'a> Form<'a> {
     /// ∫(F(τ|L) − F̄)dτ (1/µm) by the trapezoid, and the stretch's counted work (`Counts::work`). Err where the state is
     /// not the form's.
     #[allow(clippy::too_many_arguments)]
-    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, diffusion: Option<V3>, budget: f64) -> Result<(f64, V3, f64, f64), String> {
+    pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, budget: f64) -> Result<(f64, V3, f64, f64), String> {
         #[cfg(test)]
         let _timed = Checked::new(3);
         let hm = self.hbar_over_mass;
-        // The Q term's share of the total heating per photon of n_ex there (`Reading::heating_at`: (ħ/m)/2 Q (s b)²/λ
-        // against the whole, the force correlation's 2D in it where read), summed over the axes as the total T sums them:
-        // what a change of n_ex moves in the total T's account, relative. (Against one axis's heating at Poisson's count
-        // alone, 2026-11-23, it read 0.1-1.1 on PGC3D's G and doubled every landing to the end.)
+        // The Q term's share of the total heating per unit of Q there (`Reading::heating_at`: (ħ/m)/2 λ Q k̄_a² against
+        // the whole), summed over the axes as the total T sums them: what a change of Q = 2 n_ex moves in the total T's
+        // account, relative.
         let weight = own.readings.iter().min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs())).map_or(0.0, |x| {
             let lambda: f64 = x.rates.iter().sum();
-            let h = x.heating_at(hm, 0.0, diffusion.unwrap_or([0.0; 3]));
-            let whole: f64 = h.iter().sum();
-            if lambda > 0.0 && whole > 0.0 { 0.5 * hm * x.carried.iter().map(|c| c * c).sum::<f64>() / lambda / whole } else { 0.0 }
+            let whole: f64 = x.heating(hm).iter().sum();
+            if whole > 0.0 { 0.5 * hm * lambda * x.kick.iter().map(|k| k * k).sum::<f64>() / whole } else { 0.0 }
         });
         // The most a part of the stretch can move n_ex: |λ(τ|L) − λ̄| at most the own run's largest rate there times its length.
         let most = |from: f64, to: f64| own.readings.iter().filter(|x| x.t >= from && x.t <= to).map(|x| x.rates.iter().sum::<f64>()).fold(0.0, larger) * (to - from);
@@ -2334,20 +2263,18 @@ pub struct Window {
 }
 
 /// A landing check's numbers at a time of a path (# The landing check), the candidate's first and the reference's:
-/// each one's Mandel Q of its photons from the reference's landing, and its force correlation's diffusion per lab axis
-/// at its own state (`Form::diffusion`; none read: nought).
+/// each one's Mandel Q of its photons from the reference's landing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Statistics {
     pub t: f64,
     pub q: [f64; 2],
-    pub diffusion: [V3; 2],
     /// Each model's Q's last doubling's change (`Form::landing`), booked beside its Q (`compare`).
     pub q_error: [f64; 2],
 }
 
 impl Statistics {
-    /// Nothing read: Poisson's count, no force correlation.
-    pub const NONE: Statistics = Statistics { t: 0.0, q: [0.0; 2], diffusion: [[0.0; 3]; 2], q_error: [0.0; 2] };
+    /// Nothing read: Poisson's count.
+    pub const NONE: Statistics = Statistics { t: 0.0, q: [0.0; 2], q_error: [0.0; 2] };
 
     /// A path's landing check over the window (from, to]: the mean of its landings there, else its nearest one's; none
     /// read of no landing.
@@ -2362,7 +2289,6 @@ impl Statistics {
         Statistics {
             t: at.iter().map(|x| x.t).sum::<f64>() / k,
             q: std::array::from_fn(|m| at.iter().map(|x| x.q[m]).sum::<f64>() / k),
-            diffusion: std::array::from_fn(|m| std::array::from_fn(|a| at.iter().map(|x| x.diffusion[m][a]).sum::<f64>() / k)),
             q_error: std::array::from_fn(|m| at.iter().map(|x| x.q_error[m]).sum::<f64>() / k),
         }
     }
@@ -2448,9 +2374,9 @@ pub fn compare(candidate: &[Series], reference: &[Series], windows: &[(f64, f64)
                 let (mut df2, mut f2, mut total_m, mut total_r) = (0.0, 0.0, 0.0, 0.0);
                 let mut booked = [0.0; 3];
                 for (x, y) in &pairs {
-                    let (hx, hy) = (x.heating_at(hbar_over_mass, at.q[0], at.diffusion[0]), y.heating_at(hbar_over_mass, at.q[1], at.diffusion[1]));
+                    let (hx, hy) = (x.heating_at(hbar_over_mass, at.q[0]), y.heating_at(hbar_over_mass, at.q[1]));
                     // What Q's booked change moves in each model's heating (`Statistics::q_error`).
-                    let (bx, by) = (x.heating_at(hbar_over_mass, at.q_error[0], [0.0; 3]), y.heating_at(hbar_over_mass, at.q_error[1], [0.0; 3]));
+                    let (bx, by) = (x.heating_at(hbar_over_mass, at.q_error[0]), y.heating_at(hbar_over_mass, at.q_error[1]));
                     let (px, py) = (x.heating(hbar_over_mass), y.heating(hbar_over_mass));
                     for a in 0..3 {
                         booked[a] += ((bx[a] - px[a]).abs() + (by[a] - py[a]).abs()) / q;

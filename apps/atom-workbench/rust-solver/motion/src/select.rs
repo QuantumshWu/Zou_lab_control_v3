@@ -152,12 +152,26 @@
 //!   nought), so δE_a(t) = δP_a (1 − e^{−α_a t})/α_a: δT_a = δP_a t/k_B on an axis that does not cool (α = 0: x t Ṫ of
 //!   the heating's x), δT_a/T_a = δP_a/H_a at the steady state (x_D − x_α: the heating's relative difference less the
 //!   friction's, the work's difference over the friction's power, which is H_a there).
-//! - **The photons' statistics and the force's fluctuations** (paths.rs # The landing check): at each window's last
-//!   reading that leaves it room, the reference's state mapped to its landing after a jump, each model on from there --
-//!   its Mandel Q, of the directed absorbed part its jumps carry --, and each model's force correlation's diffusion at
-//!   its own state there, in its heating (`Paths::landings`, `judge`: SAT_03's resonant two-level cycle, the reference's
-//!   Q = −0.53, the full-ground model's 0; the latter heats the push axis 2.1 times as much, Study A's prediction 2.10
-//!   of the measured 1.80 ± 0.5).
+//! - **The photons' statistics** (paths.rs # The landing check): at each window's last reading that leaves it room,
+//!   the reference's state mapped to its landing after a jump, each model on from there -- its Mandel Q, the Fano factor
+//!   1 + Q of the absorbed light's directed part in its heating (`Paths::landings`, `judge`: SAT_03's resonant
+//!   two-level cycle, the reference's Q = −0.53, the full-ground model's 0; the latter heats the push axis 2.19 times as
+//!   much, Study A's prediction 2.10 of the measured 1.80 ± 0.5).
+//! - **What the account leaves out: the dipole force's fluctuation by the jumps.** A trajectory's force between its jumps
+//!   is ⟨ψ|∇H|ψ⟩ of its own state; after a jump it is the landed state's, and the difference it makes until it is
+//!   forgotten -- per jump channel c its impulse I_c = ∫(F(τ|L_c) − F̄)dτ along the walk -- diffuses the momentum by the
+//!   jumps' statistics (Σ_c λ_c I_c² with the recoils' cross term, and where the impulses of successive jumps overlap,
+//!   the conditional states' own correlation). This is the polarization gradient's Sisyphus heating as the trajectories
+//!   have it, and two models differ in it where they fold differently the states it runs through. It is not read, in
+//!   neither model's heating: the quantum regression's diffusion stood here until 2026-11-23 and is no measure of it
+//!   (paths.rs # The landing check). Its size between models, measured on their own trajectories (Study A, forced
+//!   solves): tilt0's G+D2-3±3 against the whole D2-3 explicit, the cooling axis's T 20 % low on both seeds; R4's
+//!   G+D2-3±3 8 % low; PGC3D's G against P20 −0.03 of T's allowance. Two consequences: such a partial model's T error
+//!   on its cooling axis is not booked (the selection's status file, item 3's open question), and the heating H_a that
+//!   sets an axis's relaxation α_a = (H_a − Ė_a)/E_a lacks that part -- α reads low where the Sisyphus heating leads,
+//!   the response 1/α long, the T account's statistical end wide (R4's G open at its upper end on 88 paths, P10 chosen
+//!   where with the regression's diffusion in H the full-ground model was, 2026-11-23). Read by its own impulses per
+//!   jump channel, the next round's (with the paths' adjoint sweep).
 //! - T's rates are each path's over its whole stretches past the memory time (`Stationary`): a window shorter than the
 //!   motion's periods holds the conservative exchange, bounded over any time, which a short window's rate times an
 //!   axis's whole response would take for heating.
@@ -587,16 +601,14 @@ pub struct Paths<'a> {
 
 /// A landing of the landing check (module documentation, # The motion): its time, the reference's landed ground state
 /// (by the request's ground states, its trace one), the reference's excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ and impulse
-/// ∫(F(τ|L) − F̄)dτ (1/µm) from it (paths.rs `Form::landing`), and the reference's force correlation's diffusion at
-/// its own state there (paths.rs `Form::diffusion`; none where its frozen generator has no inverse there).
+/// ∫(F(τ|L) − F̄)dτ (1/µm) from it (paths.rs `Form::landing`).
 #[derive(Clone, Debug)]
 pub struct Landing {
     pub t: f64,
     pub landed: [[C64; GROUND]; GROUND],
     pub photons: f64,
     pub impulse: V3,
-    pub diffusion: Option<V3>,
-    /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch and the diffusion's solve.
+    /// The reference's counted work on it (`paths::Counts::work`): the landing's stretch.
     pub work: f64,
     /// The excess photons' last doubling's change (paths.rs `Form::landing`): booked, not left unconverged.
     pub photons_error: f64,
@@ -894,11 +906,8 @@ impl<'a> Paths<'a> {
                     done[j]
                         .kept
                         .iter()
-                        .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, v, landed)))
-                        .map(|(t, v, landed)| {
-                            let (diffusion, solved) = form.diffusion(&walks[w], t, v);
-                            form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], diffusion, landing_budget).map(|(photons, impulse, spent, photons_error)| Landing { t, landed, photons, impulse, diffusion, work: spent + solved, photons_error })
-                        })
+                        .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, landed)))
+                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], landing_budget).map(|(photons, impulse, spent, photons_error)| Landing { t, landed, photons, impulse, work: spent, photons_error }))
                         .collect()
                 })
                 .collect::<Result<_, _>>()?,
@@ -1010,8 +1019,6 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let n = paths.walks.len();
     let run = paths.late.as_ref().map_or(0.0, |(from, ..)| from + paths.length);
     let jobs: Vec<usize> = (0..n * (1 + usize::from(paths.late.is_some()))).collect();
-    // Each stretch's states kept at the reference's landings (the candidate's own force correlation there).
-    let keep = |j: usize| -> Vec<f64> { paths.landings.get(j).map_or(vec![], |l| l.iter().map(|x| x.t).collect()) };
     let done: Vec<Result<Vec<Series>, String>> = jobs
         .par_iter()
         .map(|&j| {
@@ -1021,16 +1028,16 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 j if j % n >= walks => Ok(vec![Series::default()]),
                 j if j == longest => {
                     let w = &paths.walks[j];
-                    form.along_family_keeping(w, &w.start, 0.0, stretch, &family, &keep(j))
+                    form.along_family_keeping(w, &w.start, 0.0, stretch, &family, &[])
                 }
                 j if j < n => {
                     let w = &paths.walks[j];
                     let reach = paths.length.min(w.end());
-                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme(j), &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme(j), &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
-                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme(j), &keep(j)) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme(j), &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
             };
             #[cfg(test)]
@@ -1055,8 +1062,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let labels = &model.scene.request.states;
     let hm = model.hbar_over_mass();
     // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
-    // photons' Mandel Q = 2 n_ex --, and its force correlation's diffusion at its own state there; the reference's beside
-    // (paths.rs `Statistics`). Where either model's frozen generator has no inverse, neither's diffusion is read there.
+    // photons' Mandel Q = 2 n_ex --, the reference's beside (paths.rs `Statistics`).
     let knobs = |j: usize| (paths.settings[j].turns, paths.settings[j].rate, paths.settings[j].cutoff);
     let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
     // The landing checks' counted work, summed on the pool (whole multiply-adds).
@@ -1075,13 +1081,8 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 }
                 list.iter()
                     .map(|l| {
-                        let (mine, solved) = own.kept.iter().find(|x| x.0 == l.t).map_or((None, 0.0), |(t, v)| form.diffusion(walk, *t, v));
-                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, mine, paths.landing_budget)?;
-                        let diffusion = match (mine, l.diffusion) {
-                            (Some(c), Some(r)) => [c, r],
-                            _ => [[0.0; 3]; 2],
-                        };
-                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], diffusion, q_error: [2.0 * error, 2.0 * l.photons_error] }, spent + solved))
+                        let (photons, _, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, paths.landing_budget)?;
+                        Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], q_error: [2.0 * error, 2.0 * l.photons_error] }, spent))
                     })
                     .collect::<Result<Vec<_>, String>>()
                     .map(|x| x.into_iter().unzip::<_, _, Vec<_>, Vec<f64>>())
@@ -1102,7 +1103,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     #[cfg(test)]
     if std::env::var_os("SEL_MOTION").is_some() {
         let m = |x: &paths::Mean| format!("{:+.3e}±{:.1e}", x.value, x.error);
-        eprintln!("    [motion] P{} landing Q (candidate, reference) mean {:?}; per stretch (t, Q, D_c, D_r) {:?}", model.rs.keep.len(), statistics, landed.iter().map(|l| l.iter().map(|x| (x.t, x.q, x.diffusion)).collect::<Vec<_>>()).collect::<Vec<_>>());
+        eprintln!("    [motion] P{} landing Q (candidate, reference) mean {:?}; per stretch (t, Q) {:?}", model.rs.keep.len(), statistics, landed.iter().map(|l| l.iter().map(|x| (x.t, x.q)).collect::<Vec<_>>()).collect::<Vec<_>>());
         for w in windows.iter().chain(&late) {
             eprintln!(
                 "    [motion] P{} ({:.2}, {:.2}] {} paths: rate {}; dP_a [{}, {}, {}]; H_a [{:.3e}, {:.3e}, {:.3e}]; dF_a [{}, {}, {}]",
@@ -1111,7 +1112,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
         }
         eprintln!("    [motion] P{} escape {:?}", model.rs.keep.len(), escape);
         if let (Some(x), Some(y)) = (series.first().and_then(|s| s.readings.get(3)), paths.series.first().and_then(|s| s.readings.get(3))) {
-            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, absorbed {:?} / {:?}, carried {:?} / {:?}, emitted {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.absorbed, y.absorbed, x.carried, y.carried, x.emitted, y.emitted, x.kappa);
+            eprintln!("    [motion] P{} reading t {:.3}: rates {:.4e} / {:.4e}, force {:?} / {:?}, kick {:?} / {:?}, kick² {:?} / {:?}, emitted {:?} / {:?}, kappa {:?}, hm {hm:e}", model.rs.keep.len(), x.t, x.rates.iter().sum::<f64>(), y.rates.iter().sum::<f64>(), x.force, y.force, x.kick, y.kick, x.kick2, y.kick2, x.emitted, y.emitted, x.kappa);
         }
     }
     // The calibration: the calibration's walk's own series at the setting along its stretch (the same scheme from the
@@ -1133,7 +1134,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
 /// A candidate's contribution against another model of the chain (the nomination's, module documentation # The
 /// candidates): its walks' paired difference to the other's (`of`, `against`: both judged on the same walks,
 /// `judge_walked`), read as a judgment is -- per window and row the paths' mean difference and its standard error, the
-/// energy rates' difference per path and its stationary part, each landing check's Q and diffusion the two models' own
+/// energy rates' difference per path and its stationary part, each landing check's Q the two models' own
 /// --; no calibration, no escape (neither is a difference of the paths' readings).
 pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walked) -> Judged {
     let labels = &model.scene.request.states;
@@ -1143,7 +1144,7 @@ pub fn contribution(paths: &Paths, model: &Selected, of: &Walked, against: &Walk
         .landed
         .iter()
         .zip(&against.landed)
-        .map(|(x, y)| x.iter().zip(y).map(|(x, y)| paths::Statistics { t: x.t, q: [x.q[0], y.q[0]], diffusion: [x.diffusion[0], y.diffusion[0]], q_error: [x.q_error[0], y.q_error[0]] }).collect())
+        .map(|(x, y)| x.iter().zip(y).map(|(x, y)| paths::Statistics { t: x.t, q: [x.q[0], y.q[0]], q_error: [x.q_error[0], y.q_error[0]] }).collect())
         .collect();
     let n = paths.walks.len();
     let (landed_start, landed_late) = paired.split_at(n.min(paired.len()));
@@ -1175,7 +1176,7 @@ fn escape_of(paths: &Paths, candidate: &[Series], late: &[Series], landed: &[Vec
                 continue;
             }
             let rate = |(x, y): &(&paths::Reading, &paths::Reading)| -> (f64, f64) {
-                let (hx, hy, wx, wy) = (x.heating_at(hm, f.q[0], f.diffusion[0]), y.heating_at(hm, f.q[1], f.diffusion[1]), x.work(hm), y.work(hm));
+                let (hx, hy, wx, wy) = (x.heating_at(hm, f.q[0]), y.heating_at(hm, f.q[1]), x.work(hm), y.work(hm));
                 ((0..3).map(|a| hx[a] - hy[a] + wx[a] - wy[a]).sum(), hy.iter().sum())
             };
             for w in pairs.windows(2) {
@@ -1436,7 +1437,7 @@ pub struct Motion {
 pub struct Stationary {
     pub rates: Vec<[f64; 3]>,
     pub heating: Vec<[f64; 3]>,
-    /// Per path the candidate's own heating (its photons', its jumps' and its force correlation's; no work).
+    /// Per path the candidate's own heating (its photons' emitted and absorbed, the latter at its Fano factor; no work).
     pub own: Vec<[f64; 3]>,
     /// Each path's weight (`paths::Walk::weight`).
     pub weights: Vec<f64>,
