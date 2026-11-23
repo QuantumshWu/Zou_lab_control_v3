@@ -3306,6 +3306,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             );
         }
         noted(&mut report, format!("选态用时 {:.1} s", clock.elapsed().as_secs_f64()));
+        // (Tests alone, the selection's trace: the landing check's parts, thread seconds and calls, `paths::CHECKS`.)
+        #[cfg(test)]
+        if crate::select::traced() {
+            let c: Vec<u64> = crate::paths::CHECKS.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("    [trace] landing checks (thread s, calls): landed {:.2} s {}, diffusion {:.2} s {} (its LU {:.2} s), landing {:.2} s {}", c[0] as f64 * 1e-9, c[1], c[2] as f64 * 1e-9, c[3], c[4] as f64 * 1e-9, c[6] as f64 * 1e-9, c[7]);
+        }
         let w = weighed.swap_remove(chosen);
         return Ok(Some(Choice { keep: w.judged.keep.clone(), chain: chain.clone(), judged: w.judged, windows: paths.windows.clone(), memory, length: paths.length, report }));
     }

@@ -285,6 +285,29 @@ pub fn pieces_in(from: f64, to: f64, pieces: f64) -> usize {
     ((x - rounding).ceil().max(1.0) as usize).next_power_of_two()
 }
 
+/// (Tests alone, OLDNEW's selection measurement: the landing check's parts' thread nanoseconds and calls -- the landed
+/// state (`landed`), the force correlation's diffusion (`diffusion`) and its LU, the landing's stretch (`landing`) --,
+/// each the pair [ns, calls] at 2i, 2i + 1; said by the selection's trace.)
+#[cfg(test)]
+pub(crate) static CHECKS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+
+/// (Tests alone: one part's call timed into `CHECKS` while it lives.)
+#[cfg(test)]
+struct Checked(usize, std::time::Instant);
+#[cfg(test)]
+impl Checked {
+    fn new(part: usize) -> Checked {
+        Checked(part, std::time::Instant::now())
+    }
+}
+#[cfg(test)]
+impl Drop for Checked {
+    fn drop(&mut self) {
+        CHECKS[2 * self.0].fetch_add(self.1.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        CHECKS[2 * self.0 + 1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The work of advancing models along paths: nodes made, exponentials and their matrix–vector products, segments,
 /// readouts (each one's readout calls), and the seconds of each part (one thread's wall time).
 #[derive(Clone, Copy, Debug, Default)]
@@ -1124,6 +1147,8 @@ impl<'a> Form<'a> {
     /// recycling's image, as the ground density matrix by the request's ground states over its trace (the jump rate on
     /// v), and that trace; none where no jump is made there.
     pub fn landed(&self, walk: &Walk, t: f64, v: &[C64]) -> Option<([[C64; GROUND]; GROUND], f64)> {
+        #[cfg(test)]
+        let _timed = Checked::new(0);
         let node = self.node_at(walk, t);
         let amps = self.amps_with(&node, false);
         let mut rt = vec![C64::ZERO; self.cols.len() * self.rows.len()];
@@ -1179,6 +1204,8 @@ impl<'a> Form<'a> {
     /// `Counts::work`): the node and its amplitudes, the dense generator column by column (a remainder's work each), its
     /// LU (d³/3 complex multiply-adds) and per axis the two products and the solve.
     pub fn diffusion(&self, walk: &Walk, t: f64, v: &[C64]) -> (Option<V3>, f64) {
+        #[cfg(test)]
+        let _timed = Checked::new(1);
         let work = {
             let (d, n) = (self.dim as f64, self.n as f64);
             let node = self.model.node(walk.at(self.hbar_over_mass, t).0, walk.at(self.hbar_over_mass, t).1, false).work;
@@ -1214,7 +1241,11 @@ impl<'a> Form<'a> {
                 }
             }
         }
+        #[cfg(test)]
+        let lu_timed = Checked::new(2);
         let lu = crate::linalg::Lu::new(&l)?;
+        #[cfg(test)]
+        drop(lu_timed);
         let node = self.model.node(r, kappa, false);
         let product = |x: &[C64], y: &[C64]| -> Vec<C64> {
             let mut out = vec![C64::ZERO; n * n];
@@ -1266,6 +1297,8 @@ impl<'a> Form<'a> {
     /// not the form's.
     #[allow(clippy::too_many_arguments)]
     pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, diffusion: Option<V3>, budget: f64) -> Result<(f64, V3, f64, f64), String> {
+        #[cfg(test)]
+        let _timed = Checked::new(3);
         let hm = self.hbar_over_mass;
         // The Q term's share of the total heating per photon of n_ex there (`Reading::heating_at`: (ħ/m)/2 Q (s b)²/λ
         // against the whole, the force correlation's 2D in it where read), summed over the axes as the total T sums them:
