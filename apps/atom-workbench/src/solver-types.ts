@@ -84,8 +84,8 @@ export interface ApproximationLedger {totals:{population:LedgerTotal;temperature
  * with the mean velocity in it), both over one trap period of the axis about the sample (motion-chart.ts
  * `TEMPERATURE_WINDOW`); the total temperature (T_x + T_y + T_z)/3 with its own standard error, both the engine's; per
  * axis the held atoms' mean velocity ⟨v⟩ (m/s) and their push -- the mean acceleration d⟨v⟩/dt over T's window (m/s²)
- * -- each with its standard error (null as T's) and its target (the engine's, per sample: what its total error is
- * held to); the
+ * -- each with its standard error and its target (the engine's, per sample: what its total error is held to), null
+ * where the engine read none (the push and its target at t = 0, which has no window); the
  * probability that the atom has left the trap by then -- its energy above the value far away, unbound, wherever it
  * is (model-notes.ts); whether the sample lies in the method's validated regime
  * (`classical`: k_B T ≥ SEMICLASSICAL_REGIME ħω on every axis; outside it the result is a reference
@@ -95,8 +95,8 @@ export interface ApproximationLedger {totals:{population:LedgerTotal;temperature
  * fallback's `deviceNote`), and its approximation ledger. */
 export interface MotionResult {
   temperatureUK:number[][];temperatureErrorUK:(number|null)[][];temperatureTotalUK:number[];temperatureTotalErrorUK:(number|null)[];
-  meanVelocityMps:number[][];meanVelocityErrorMps:(number|null)[][];meanVelocityTargetMps:number[][];
-  pushMps2:number[][];pushErrorMps2:(number|null)[][];pushTargetMps2:number[][];
+  meanVelocityMps:number[][];meanVelocityErrorMps:(number|null)[][];meanVelocityTargetMps:(number|null)[][];
+  pushMps2:(number|null)[][];pushErrorMps2:(number|null)[][];pushTargetMps2:(number|null)[][];
   meanOccupation:number[][];trapFrequencyKHz:number[];lossProbability:number[];classical:boolean[];
   momentum:Distributions[];position:Distributions[];trajectories:number;timeStepUs:number;
   device:MotionDevice;deviceNote?:string;approximations:ApproximationLedger;
@@ -111,6 +111,8 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   const series=(v:unknown,length:number,admits:(x:number)=>boolean):number[]=>{if(!Array.isArray(v)||v.length!==length||!v.every(x=>typeof x==='number'&&Number.isFinite(x)&&admits(x)))invalid();return [...(v as number[])];};
   // A temperature's standard errors: null where it has none, a sample with fewer than two atoms held (the engine's `assemble`).
   const errors=(v:unknown):(number|null)[]=>{if(!Array.isArray(v)||v.length!==samples||!v.every(x=>x===null||(typeof x==='number'&&Number.isFinite(x)&&x>=0)))invalid();return [...(v as (number|null)[])];};
+  // A reading or a target the engine may not have (null): the push and its target at t = 0; a target is positive.
+  const readings=(v:unknown,admits:(x:number)=>boolean):(number|null)[]=>{if(!Array.isArray(v)||v.length!==samples||!v.every(x=>x===null||(typeof x==='number'&&Number.isFinite(x)&&admits(x))))invalid();return [...(v as (number|null)[])];};
   const text=(v:unknown,empty=false):string=>typeof v==='string'&&(empty||v.trim()!=='')?v:invalid();
   const size=(v:unknown):number=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:invalid();
   // Distributions: on a strictly increasing grid, at increasing samples ending with the last, each a
@@ -143,8 +145,8 @@ export function readMotionResult(value:unknown,diagnostics:Record<string,unknown
   return {temperatureUK:perAxis(m.temperatureUK,v=>series(v,samples,x=>x>=0)),temperatureErrorUK:perAxis(m.temperatureErrorUK,errors),
     temperatureTotalUK:series(m.temperatureTotalUK,samples,x=>x>=0),temperatureTotalErrorUK:errors(m.temperatureTotalErrorUK),
     meanVelocityMps:perAxis(m.meanVelocityMps,v=>series(v,samples,()=>true)),meanVelocityErrorMps:perAxis(m.meanVelocityErrorMps,errors),
-    meanVelocityTargetMps:perAxis(m.meanVelocityTargetMps,v=>series(v,samples,x=>x>0)),
-    pushMps2:perAxis(m.pushMps2,v=>series(v,samples,()=>true)),pushErrorMps2:perAxis(m.pushErrorMps2,errors),pushTargetMps2:perAxis(m.pushTargetMps2,v=>series(v,samples,x=>x>0)),
+    meanVelocityTargetMps:perAxis(m.meanVelocityTargetMps,v=>readings(v,x=>x>0)),
+    pushMps2:perAxis(m.pushMps2,v=>readings(v,()=>true)),pushErrorMps2:perAxis(m.pushErrorMps2,errors),pushTargetMps2:perAxis(m.pushTargetMps2,v=>readings(v,x=>x>0)),
     meanOccupation:perAxis(m.meanOccupation,v=>series(v,samples,()=>true)),trapFrequencyKHz:perAxis(m.trapFrequencyKHz,v=>typeof v==='number'&&Number.isFinite(v)&&v>0?v:invalid()),
     lossProbability:loss,classical:[...(m.classical as boolean[])],
     momentum:perAxis(m.momentum,v=>distributions(v,'velocitiesMps')),position:perAxis(m.position,v=>distributions(v,'positionsUm')),

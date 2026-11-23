@@ -17,7 +17,7 @@ import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/d
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
-import {exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
+import {approximationTotal,exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
 import {definitionNotes,modelNotes} from '../dist/js/atom-workbench/src/model-notes.js';
 import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 import {SEMICLASSICAL_POPULATION_TARGET} from '../dist/js/atom-workbench/src/solver-types.js';
@@ -277,7 +277,12 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   assert.deepEqual([m.temperatureTotalUK,m.temperatureTotalErrorUK,m.trapFrequencyKHz,m.classical],[[31,31,31],[.9,.9,.9],[100.5,100.5,19.3],[true,true,false]]);
   // The held atoms' mean velocity and push per axis, each with its standard error and its target.
   assert.deepEqual([m.meanVelocityMps,m.meanVelocityErrorMps[2],m.meanVelocityTargetMps[0]],[[block.meanVelocityMps.x,block.meanVelocityMps.y,block.meanVelocityMps.z],[.0004,.0004,.0004],[.032,.032,.032]]);
-  assert.deepEqual([m.pushMps2,m.pushErrorMps2[2],m.pushTargetMps2[1]],[[[0,0,0],[0,0,0],[30,30,30]],[2,2,2],[6.4,6.4,6.4]]);
+  // The push and its target have none at t = 0 (no window there).
+  assert.deepEqual([m.pushMps2,m.pushErrorMps2[2],m.pushTargetMps2[1]],[[[null,0,0],[null,0,0],[null,30,30]],[null,2,2],[null,6.4,6.4]]);
+  // The details' 近似误差 line: the four totals against their targets; the velocity's and the push's {0, 0} are no account.
+  assert.equal(approximationTotal(m.approximations),'布居 0.21%（目标 5%），温度 0.3%（目标 10%），平均速度 0.0011 m/s（目标 0.032 m/s），推力 0.4 m/s²（目标 6.4 m/s²）；未超出');
+  const unbooked=readMotion(d=>{d.diagnostics.approximations.totals.velocity={error:0,target:0};d.diagnostics.approximations.totals.push={error:0,target:0};}).motion;
+  assert.equal(approximationTotal(unbooked.approximations),'布居 0.21%（目标 5%），温度 0.3%（目标 10%），平均速度无账，推力无账；未超出');
   assert.deepEqual([m.device,m.deviceNote,m.approximations],[MOTION_DIAGNOSTICS.device,MOTION_DIAGNOSTICS.deviceNote,MOTION_DIAGNOSTICS.approximations]);
   assert.equal(result.populationAccuracy.requestedTolerance,.05);assert.equal(result.mean.status,'not-requested');
   const few=readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;d.motion.temperatureTotalErrorUK[1]=null;}).motion;
@@ -292,7 +297,8 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
     ['no push',d=>{delete d.motion.pushMps2;}],['no velocity error',d=>{delete d.motion.meanVelocityErrorMps;}],['a push error below zero',d=>{d.motion.pushErrorMps2.z[1]=-1;}],
-    ['a velocity target of zero',d=>{d.motion.meanVelocityTargetMps.x[0]=0;}],['a push target short of a sample',d=>{d.motion.pushTargetMps2.y.pop();}],['a push that is no number',d=>{d.motion.pushMps2.x[2]=null;}],
+    ['a velocity target of zero',d=>{d.motion.meanVelocityTargetMps.x[0]=0;}],['a push target of zero',d=>{d.motion.pushTargetMps2.z[1]=0;}],['a push target short of a sample',d=>{d.motion.pushTargetMps2.y.pop();}],
+    ['a push that is no number',d=>{d.motion.pushMps2.x[2]='0';}],['a mean velocity that is none',d=>{d.motion.meanVelocityMps.y[1]=null;}],
     ['no push total',d=>{delete d.diagnostics.approximations.totals.push;}],['no velocity total',d=>{delete d.diagnostics.approximations.totals.velocity;}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
     ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],['items not from the largest down',d=>{d.diagnostics.approximations.items.reverse();}],
@@ -414,7 +420,12 @@ test('速度与推力: ⟨v⟩ and the push a line per axis on an axis through z
   // ⟨v⟩ at most 1.5 cm/s: in cm/s; the push 30 m/s²: in m/s².
   assert.deepEqual([velocity.unit.name,velocity.title,push.unit.name,push.title],['cm/s','平均速度 ⟨v⟩ / cm/s','m/s²','推力 a = d⟨v⟩/dt / m/s²']);
   assert.equal(lineReading(velocity.lines[2],2,velocity.unit),'1.5 ± 0.04 cm/s');assert.equal(lineReading(velocity.lines[1],1,velocity.unit),'−0.2 ± 0.04 cm/s');
-  assert.equal(lineReading(push.lines[2],1,push.unit),'30 ± 2 m/s²');
+  assert.equal(lineReading(push.lines[2],1,push.unit),'30 ± 2 m/s²');assert.equal(lineReading(push.lines[2],0,push.unit),'无读数','t = 0 has no window');
+  // The push's lines start at the first sample that has one: the polyline over samples 1 and 2 alone.
+  assert.equal([...chart.matchAll(/<polyline points="([^"]+)"[^>]*data-series-id="push-2"/g)].map(m=>m[1].split(' ').length).join(),'2');
+  // A reading missing inside the series breaks its line in two, and the axis reads the values it has.
+  const broken=velocitySeries(readMotion(d=>{d.motion.pushMps2.z=[30,null,30];}).motion)[1],three=readMotion().timesUs;
+  assert.equal([...seriesChart(three,[velocity,broken],'ms').matchAll(/data-series-id="push-2"/g)].length,2);
   // The velocity's axis runs through zero, from a tick below y's −0.2 cm/s to one above z's 1.5 cm/s; zero is a grid line, and
   // a value lies at its place on it (the panel 32 to 176): 0 at 176 − 0.5/2·144 for ticks −0.5 … 1.5.
   const ticks=[...chart.matchAll(/<text x="52" y="([\d.]+)" [^>]*>([^<]+)<\/text>/g)].map(m=>[Number(m[1]),m[2]]);

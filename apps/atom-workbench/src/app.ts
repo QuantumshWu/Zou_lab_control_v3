@@ -33,7 +33,7 @@ import type {ScopeNote} from './spectroscopy.js';
 import {newLaser,MAXIMUM_LASERS,MAXIMUM_SAMPLES,POPULATION_TOLERANCE} from './types.js';
 import {addReflection,detachReflection,reflectionOf,sourceOf} from './reflection.js';
 import type {Analysis,AxisName,Direction,DynamicsSettings,DetuningUnit,FrequencyDisplayUnit,InitialStateSpec,IntensityMode,IntensityUnit,MagneticField,MotionDevice,PowerUnit,ReferenceAxis,ReferenceFrequency,ReferenceLevel,Laser,Level,Scene,SpectralLine,TemperatureUnit,Transition,WaistUnit} from './types.js';
-import type {ApproximationLedger,Distributions,DynamicsResult,LedgerTotal,SolveStage} from './solver-types.js';
+import type {ApproximationLedger,Distributions,DynamicsResult,SolveStage} from './solver-types.js';
 import {SEMICLASSICAL_REGIME} from './solver-types.js';
 import {MOTION_AXES,motionRefusal,motionRequest,motionTemperatureReading,setMotionTemperature} from './motion.js';
 import {AXIS_INKS,MOTION_INKS,TOTAL_INK,TOTAL_WIDTH,bindDistribution,bindSeries,distributionChart,distributions,lengthText,motionSeries,rootMeanSquare,seriesChart,velocitySeries} from './motion-chart.js';
@@ -54,7 +54,7 @@ import {idMappingError} from './population-basis.js';
 import {installWindowChrome} from './window-chrome.js';
 import {formatElapsed,formatNumber,hyperfineLabel,idLabel,labelStateIds,remainingWords,signedInteger,stateLabel,subscript,withUnit} from './format.js';
 import {solverText} from './solver-words.js';
-import {errorPercent,exceedsNote,ledgerRows,outsideRuns,partialSentence,partialShort,resultTolerance,sampleErrors} from './accuracy.js';
+import {approximationTotal,errorPercent,exceedsNote,ledgerRows,outsideRuns,partialSentence,partialShort,resultTolerance,sampleErrors} from './accuracy.js';
 import {definitionNotes,modelNotes} from './model-notes.js';
 import {InlineName} from './inline-name.js';
 import {EXAMPLES,exampleScene} from './examples.js';
@@ -1169,14 +1169,6 @@ function solverDetails():string{
   ].join(''):'';
   const notes=result?[...(result.method?[`时间演化：${solverText(result.method)}`]:[]),...(result.mean.method?[`长期布居：${solverText(result.mean.method)}`]:[]),...(result.mean.reason?[solverText(result.mean.reason)]:[]),...result.assumptions.map(labelStateIds)]:[];
   return `<section class="solver-details"><h4>计算详情</h4>${error?`<p class="solver-error">${esc(solverText(error))}</p>`:''}${result?`<div class="form solver-readouts">${rows}</div>${motion?approximationLedger(motion.approximations):''}${notes.map(text=>`<p>${esc(text)}</p>`).join('')}`:'<p>没有当前参数的求解结果。</p>'}${failureRecords.length?'<button data-export-solver-failures>导出失败记录</button>':''}</section>`;
-}
-/** A ledger's a-priori totals, the populations' and T's (fractions, as percentages), the mean velocity's (m/s) and the
- * push's (m/s²), each against its target, and whether an output's total estimated error exceeds a target (`flagged`,
- * its reason on a line below). */
-function approximationTotal(ledger:ApproximationLedger):string{
-  const total=(name:string,t:LedgerTotal)=>`${name} ${errorPercent(t.error)}（目标 ${errorPercent(t.target)}）`;
-  const absolute=(name:string,t:LedgerTotal,unit:string)=>`${name} ${withUnit(t.error,unit,{digits:2})}（目标 ${withUnit(t.target,unit,{digits:2})}）`;
-  return `${total('布居',ledger.totals.population)}，${total('温度',ledger.totals.temperature)}，${absolute('平均速度',ledger.totals.velocity,'m/s')}，${absolute('推力',ledger.totals.push,'m/s²')}；${ledger.flagged?'超出目标（见下）':'未超出'}`;
 }
 /** A ledger's largest item -- its first --, named by its `label`, on a line of its own (none in an empty ledger). */
 function largestApproximation(ledger:ApproximationLedger):string[]{

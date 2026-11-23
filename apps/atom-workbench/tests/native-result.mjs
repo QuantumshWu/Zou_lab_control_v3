@@ -29,7 +29,8 @@ export function nativeResult({states,initialIndex,timesUs,tolerance=POPULATION_T
 export function entryAt(data,T=1e6){return data.meanHorizons.find(e=>e.horizonUs===T);}
 /** A contract-valid motion block on `samples` samples: per lab axis T (x, y, z: 30, 28 and 35 μK)
  * with its standard error, ⟨v⟩ (x at rest, y drifting at −2 mm/s, z pushed to +1.5 cm/s by the last
- * sample) and the push (0, 0 and 30 m/s²) with their standard errors and targets, n̄, the trap
+ * sample) and the push (0, 0 and 30 m/s²; none at t = 0, which has no window) with their standard
+ * errors and targets, n̄, the trap
  * frequency and the distributions at the first and the last sample; the total temperature (31 μK)
  * with its standard error; the loss, rising by `loss` per sample from 0; the regime per sample, the
  * last outside it. */
@@ -39,7 +40,8 @@ export function motionBlock(samples,loss=.1){
   return {axis:'3d',temperatureUK:{x:series(30),y:series(28),z:series(35)},temperatureErrorUK:axes(()=>series(1.5)),temperatureTotalUK:series(31),temperatureTotalErrorUK:series(.9),
     meanVelocityMps:{x:series(0),y:series(-.002),z:Array.from({length:samples},(_,i)=>.015*i/Math.max(1,samples-1))},
     meanVelocityErrorMps:axes(()=>series(.0004)),meanVelocityTargetMps:axes(()=>series(.032)),
-    pushMps2:{x:series(0),y:series(0),z:series(30)},pushErrorMps2:axes(()=>series(2)),pushTargetMps2:axes(()=>series(6.4)),meanOccupation:axes(()=>series(4.5)),trapFrequencyKHz:{x:100.5,y:100.5,z:19.3},lossProbability:Array.from({length:samples},(_,i)=>i*loss),
+    pushMps2:{x:[null,...series(0).slice(1)],y:[null,...series(0).slice(1)],z:[null,...series(30).slice(1)]},pushErrorMps2:axes(()=>[null,...series(2).slice(1)]),
+    pushTargetMps2:axes(()=>[null,...series(6.4).slice(1)]),meanOccupation:axes(()=>series(4.5)),trapFrequencyKHz:{x:100.5,y:100.5,z:19.3},lossProbability:Array.from({length:samples},(_,i)=>i*loss),
     classical:Array.from({length:samples},(_,i)=>i<samples-1),momentum:axes(()=>({velocitiesMps:velocities,samples:[0,samples-1],probabilities:[p,p]})),
     position:axes(()=>({positionsUm:positions,samples:[0,samples-1],probabilities:[p,p]})),trajectories:512,timeStepUs:.25};
 }
