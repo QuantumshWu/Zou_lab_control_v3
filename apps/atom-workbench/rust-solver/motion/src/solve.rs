@@ -450,15 +450,15 @@
 //!    the setting read along the longest of them, and along the scans of the trap's axes (select.rs `Paths`).
 //! 2. T's memory is not read here: the flag of its being no shorter than the run is the product's, on the run's own
 //!    trajectories at its end (`memory_at_the_end`; select.rs, ## T's memory, read on the run's own trajectories).
-//! 3. The candidates of the chain: each one's model made, its step's work a µs at the pilot's states and step
-//!    (`priced`), its judgment along the paths (select.rs `judge`), its parts at the analysis times and the looks they
-//!    leave (`looks`). A candidate whose looks that the exact model's would meet are met by its account is complete,
-//!    its work W the product's trajectories its looks need times its work over the run, and -- not G -- the scout's and
-//!    the pilot's again on it. The rest are not chosen. G is judged first; where it is not complete, the least complete
-//!    candidate (the anchor) is found by bisection (the chain nested, its error taken no less than the next's).
-//! 4. From the anchor the chain is searched upwards until a candidate's least W -- at no model error at all, at the
-//!    ladder's first rung's step, its pilot again -- is no lower than the least W found (the chain's work grows with
-//!    its states); the complete ones but G are scouted at their own step in the order of their least W while it stands
+//! 3. The candidates (select.rs # The candidates): the pilot's model judged, its parts at the analysis times and the
+//!    looks they leave (`looks`); a candidate whose looks that the exact model's would meet are met by its account is
+//!    complete, its work W the product's trajectories its looks need times its work over the run, and -- not the
+//!    pilot's -- the scout's and the pilot's again on it. Where a model with more states could work less, each addable
+//!    state's addition alone is judged on two paths, the nominees are the prefixes of their order by the misfit each
+//!    takes away per work it adds, and from the first predicted to fit each is judged on every path until one is
+//!    complete, above it while its least W -- at no model error, at the ladder's first rung's step, its pilot again --
+//!    stands below the least found.
+//! 4. The complete ones but the pilot's are scouted at their own step in the order of their least W while it stands
 //!    below the least found; P is the complete candidate of least W. The choice is kept for the scene, and said (stderr
 //!    and the ledger's items): every candidate's parts, work and fate, the stages' times.
 //! The pilot's step check is priced at no model error while the choice is not made: the error is measured on the
@@ -2645,7 +2645,7 @@ struct Weighed {
 /// every state of the atom there (a pilot's trajectory ran away at t = 0, step.rs # The domain): nothing to choose on.
 #[allow(clippy::too_many_arguments)]
 fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, first: f64, fine: &[Part], pilot: &[&Part], read: &PilotRead, numbers: &[u64], times: &[f64], messages: &mut Messages) -> Result<Option<Choice>, String> {
-    use crate::select::{direct_at, direct_bound_at, judge, Paths, WALKS};
+    use crate::select::{direct_at, direct_bound_at, judge, Paths, Reach, WALKS};
     let clock = Instant::now();
     let run = setting.run;
     let trap = setting.trap;
@@ -2672,19 +2672,15 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         .collect();
     let amplitudes = crate::select::importance(&run.scene, &places);
     let own = &run.rs.keep;
-    let mut chain: Vec<Vec<usize>> = crate::select::chain(&amplitudes).into_iter().filter(|c| own.iter().all(|s| c.contains(s))).collect();
-    if chain.first() != Some(own) {
-        chain.insert(0, own.clone());
-    }
-    let chain = &chain;
     let labels = &request.states;
-    let order: Vec<String> = chain.windows(2).map(|w| w[1].iter().filter(|s| !w[0].contains(s)).map(|&s| format!("{} {:.2e}", labels[s], amplitudes[s])).collect::<Vec<_>>().join(" + ")).collect();
-    noted(&mut report, format!("链上依次加入的激发态（先导位置上的最大一阶激发布居）：{}", order.join("；")));
+    // The excited states a candidate may add (select.rs # The candidates): those the pilot's model folds that the light
+    // excites where its atoms were (a first-order excitation of nought couples nothing there).
+    let addable: Vec<usize> = (GROUND..STATES).filter(|s| !own.contains(s) && amplitudes[*s] > 0.).collect();
     noted(
         &mut report,
         format!(
-            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；先导的模型 P{}{}；链按先导的 {} 个状态上的一阶激发，从先导的模型往上 {} 档（{}），{:.1} s",
-            times.len(), run.rs.keep.len(), if run.rs.keep.len() == GROUND { "（G）" } else { "（G 的折叠在先导起点失控，链上第一个走得动的）" }, places.len(), chain.len(), chain.iter().map(|c| c.len().to_string()).collect::<Vec<_>>().join(" "), started.elapsed().as_secs_f64()
+            "先导立定于 τ = {tau:.4} µs，{} 个分析时刻；先导的模型 P{}{}；可加回的激发态 {} 个（先导的 {} 个状态上一阶激发不为零），{:.1} s",
+            times.len(), run.rs.keep.len(), if run.rs.keep.len() == GROUND { "（G）" } else { "（G 的折叠在先导起点失控，结构链上第一个走得动的）" }, addable.len(), places.len(), started.elapsed().as_secs_f64()
         ),
     );
     // 1. The paths: the pilot's first trajectories' starts, the memory time there (the longest), the walks to L -- as
@@ -2773,23 +2769,34 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // reading of its region at the pilot's states.
         let accounts = |j: &crate::select::Judged| -> [Vec<[f64; 2]>; 2] {
             let sampled = sampled(run, pilot, &j.region);
-            [true, false].map(|upper| model_of(&|t| direct_bound_at(j, &paths.windows, t, upper), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, upper), &sampled, &read.estimates, times, optical, &context.fixed.escape))
+            [Reach::Upper, Reach::Lower].map(|reach| model_of(&|t| direct_bound_at(j, &paths.windows, t, reach), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, reach), &sampled, &read.estimates, times, optical, &context.fixed.escape))
+        };
+        // A candidate's misfit at its point estimates (the nomination's, select.rs # The candidates): its model error over
+        // its target, the largest over the times and the two kinds -- what is shown over the population target, T over its
+        // allowance there.
+        let misfit = |j: &crate::select::Judged| -> f64 {
+            let sampled = sampled(run, pilot, &j.region);
+            let point = model_of(&|t| direct_bound_at(j, &paths.windows, t, Reach::Point), &|k| crate::select::motion_at(j, &paths.windows, &course, k, hm, Reach::Point), &sampled, &read.estimates, times, optical, &context.fixed.escape);
+            (1..times.len()).map(|k| crate::linalg::larger(point[k][0] / POPULATION_TARGET, point[k][1] / read.estimates[k].temperature_target)).fold(0., crate::linalg::larger)
         };
         let account = |j: &crate::select::Judged| -> Vec<[f64; 2]> { accounts(j).into_iter().next().expect("the upper end") };
-        let mut models: Vec<Option<Selected>> = (0..chain.len()).map(|_| None).collect();
+        let make = |keep: &[usize]| -> Result<Selected, String> { Selected::new(crate::scene::Scene::new(request)?, Selection { keep: keep.to_vec(), ..run.report.clone() }, reference) };
+        // The candidates (select.rs # The candidates): the pilot's model first (place 0), the nominees above it.
+        let mut chain: Vec<Vec<usize>> = vec![own.clone()];
+        let mut models: Vec<Option<Selected>> = vec![None];
         let mut weighed: Vec<Weighed> = vec![];
-        // A candidate of the chain judged and weighed (its model made where it is not G).
-        let weigh = |place: usize, models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
+        // A candidate judged and weighed (its model made where it is not the pilot's).
+        let weigh = |place: usize, keep: &[usize], models: &mut Vec<Option<Selected>>, report: &mut Vec<String>| -> Result<Weighed, String> {
             let started = Instant::now();
             if place > 0 && models[place].is_none() {
-                models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+                models[place] = Some(make(keep)?);
             }
             let model = models[place].as_ref().unwrap_or(run);
             let price = priced(model, domain.widest, &rated, tau, place == 0);
-            // The chain's top is the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
+            // The 32 states are the reference itself: no model error at any time (`Paths::itself`), its looks the run's own
             // (`base`) -- complete by construction, whatever its atoms do (the invariant the choice stands on).
-            let exact = chain[place].len() == STATES;
-            let judged = if exact { paths.itself(chain[place].clone()) } else { judge(&paths, model, centre)? };
+            let exact = keep.len() == STATES;
+            let judged = if exact { paths.itself(keep.to_vec()) } else { judge(&paths, model, centre)? };
             let [model_error, lower] = if exact { [vec![[0.; 2]; times.len()], vec![[0.; 2]; times.len()]] } else { accounts(&judged) };
             #[cfg(test)]
             if std::env::var_os("SEL_MOTION").is_some() {
@@ -2816,60 +2823,94 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             noted(report, format!("候选 P{}：每 µs 代价 {:.3e}，{fate}，{:.1} s", judged.keep.len(), price, started.elapsed().as_secs_f64()));
             Ok(Weighed { place, judged, price, model: model_error, need, work, fate, open })
         };
-        weighed.push(weigh(0, &mut models, &mut report)?);
+        weighed.push(weigh(0, own, &mut models, &mut report)?);
         messages.alive();
-        // The least complete candidate (the anchor, its place among the weighed `anchored`), by bisection where G is not
-        // complete; the top (all 32) is complete by construction (`weigh`: the reference itself), so the bisection's upper
-        // end is complete at every turn -- weighed at last where no candidate below it is.
-        let top = chain.len() - 1;
-        let anchored = if weighed[0].work.is_some() {
-            0
-        } else {
-            let (mut lo, mut hi) = (0, top);
-            let mut at_hi: Option<usize> = None;
-            while hi - lo > 1 {
-                let mid = (lo + hi) / 2;
-                let w = weigh(mid, &mut models, &mut report)?;
-                messages.alive();
-                let complete = w.work.is_some();
-                weighed.push(w);
-                if complete {
-                    (hi, at_hi) = (mid, Some(weighed.len() - 1));
-                } else {
-                    lo = mid;
+        let mut found = weighed[0].work.unwrap_or(f64::INFINITY);
+        // A model with more states works no less a µs at the same step than the pilot's (its states more): at the ladder's
+        // first rung -- the longest its own scout may stand at --, at no model error, its pilot again, its W is no less than
+        // that bound. Where the pilot's model is complete below it, no nominee can cost less, and none is made.
+        let price_own = priced(run, domain.widest, &rated, first, true);
+        let floor = need0 * price_own * span + again(1, price_own);
+        let mut predicted: Vec<f64> = vec![f64::NAN];
+        if floor < found && !addable.is_empty() {
+            // The nomination (select.rs # The candidates): each addable state alone added to the pilot's model, judged on the
+            // first `NOMINATION_WALKS` paths at its point estimates; its contribution the misfit it takes away per work it adds
+            // a µs; the states in the order of that, those that take none away after them by their excitation; the nominees
+            // the order's prefixes, the 32 states last.
+            let clock = Instant::now();
+            let few = crate::select::NOMINATION_WALKS.min(paths.walks.len());
+            let mine = misfit(&crate::select::judge_on(&paths, run, centre, few)?);
+            let price_tau = priced(run, domain.widest, &rated, tau, true);
+            let singles: Vec<(usize, f64, f64, Selected)> = addable
+                .par_iter()
+                .map(|&e| -> Result<(usize, f64, f64, Selected), String> {
+                    let mut keep = own.clone();
+                    keep.push(e);
+                    keep.sort_unstable();
+                    let model = make(&keep)?;
+                    let price = priced(&model, domain.widest, &rated, tau, false);
+                    let taken = mine - misfit(&crate::select::judge_on(&paths, &model, centre, few)?);
+                    Ok((e, taken, price - price_tau, model))
+                })
+                .collect::<Result<_, _>>()?;
+            let mut order: Vec<usize> = (0..singles.len()).collect();
+            let score = |i: usize| if singles[i].1 > 0. { singles[i].1 / singles[i].2.max(f64::MIN_POSITIVE) } else { f64::NEG_INFINITY };
+            order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(amplitudes[singles[b].0].total_cmp(&amplitudes[singles[a].0])).then(singles[a].0.cmp(&singles[b].0)));
+            let mut singles: Vec<Option<(usize, f64, f64, Selected)>> = singles.into_iter().map(Some).collect();
+            let mut keep = own.clone();
+            let mut left = mine;
+            for (k, &i) in order.iter().enumerate() {
+                let (e, taken, _, model) = singles[i].take().expect("each single once");
+                keep.push(e);
+                keep.sort_unstable();
+                if taken > 0. {
+                    left -= taken;
                 }
+                chain.push(keep.clone());
+                // The first nominee's model is the single's own.
+                models.push(if k == 0 { Some(model) } else { None });
+                predicted.push(left);
             }
-            match at_hi {
-                Some(a) => a,
-                None => {
-                    weighed.push(weigh(hi, &mut models, &mut report)?);
-                    weighed.len() - 1
-                }
+            if chain.last().map(|c| c.len()) != Some(STATES) {
+                chain.push((0..STATES).collect());
+                models.push(None);
+                predicted.push(0.);
             }
-        };
-        debug_assert!(weighed[anchored].work.is_some(), "the anchor is complete: the chain's top is the reference itself");
-        let anchor = weighed[anchored].place;
-        // Above the anchor a candidate is chosen only where it works less than the least W found: its least -- at no model
-        // error (the run's own need), at the ladder's first rung's step (the longest its scout may stand at), its pilot
-        // again -- bounds it from below, and grows with its states (the chain's work does), so the chain is searched up from
-        // the anchor, each candidate judged and weighed, until one's least W is no lower than the least found.
-        let mut found = weighed.iter().filter_map(|w| w.work).fold(f64::INFINITY, crate::linalg::smaller);
-        for place in anchor + 1..=top {
+            noted(
+                &mut report,
+                format!(
+                    "提名（每个可加回的激发态单独加进先导的模型，在 {few} 条路径上按点估计判：去掉的失配 / 每 µs 多出的代价）：先导模型的失配 {mine:.3}；{}；{:.1} s",
+                    order.iter().map(|&i| format!("{}", labels[addable[i]])).collect::<Vec<_>>().join(" → "),
+                    clock.elapsed().as_secs_f64()
+                ),
+            );
+            messages.alive();
+        }
+        // Where nothing is complete yet, the 32 states are a candidate (complete by construction).
+        if !found.is_finite() && chain.last().map(|c| c.len()) != Some(STATES) {
+            chain.push((0..STATES).collect());
+            models.push(None);
+            predicted.push(0.);
+        }
+        // The nominees from the first one predicted to fit (its misfit, the pilot's less what its states took away alone,
+        // below one), each judged on every path, until one is complete; above it, while a nominee's least W stands below the
+        // least found (its states more, its least W no less).
+        let start = (1..chain.len()).find(|&p| predicted[p] < 1.).unwrap_or(chain.len().saturating_sub(1)).max(1);
+        for place in start..chain.len() {
             if models[place].is_none() {
-                models[place] = Some(Selected::new(crate::scene::Scene::new(request)?, Selection { keep: chain[place].clone(), ..run.report.clone() }, reference)?);
+                models[place] = Some(make(&chain[place])?);
             }
             let price = priced(models[place].as_ref().expect("its model"), domain.widest, &rated, first, false);
             let lower = need0 * price * span + again(place, price);
             if !(lower < found) {
-                noted(&mut report, format!("链上 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不搜", chain[place].len()));
+                noted(&mut report, format!("提名的 P{} 的最小 W（A = 0、第一级步长 {first:.4} µs）{lower:.3e} 已不低于已找到的最小 W {found:.3e}：再往上不判", chain[place].len()));
                 break;
             }
-            if !weighed.iter().any(|w| w.place == place) {
-                let w = weigh(place, &mut models, &mut report)?;
-                messages.alive();
-                found = found.min(w.work.unwrap_or(f64::INFINITY));
-                weighed.push(w);
-            }
+            let keep = chain[place].clone();
+            let w = weigh(place, &keep, &mut models, &mut report)?;
+            messages.alive();
+            found = found.min(w.work.unwrap_or(f64::INFINITY));
+            weighed.push(w);
         }
         // A fate open at the paths' statistics (select.rs, # How many paths): the paths doubled, up to the pilot's
         // trajectories, and every candidate judged again on them -- before any is scouted. At all of them, its upper end
@@ -2926,10 +2967,11 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             noted(&mut report, format!("P{}：{}", entry.judged.keep.len(), entry.fate));
             messages.alive();
         }
-        // P: the complete candidate of least W (the first of them where several are) -- the anchor among them, complete by
+        // P: the complete candidate of least W (the first of them where several are) -- one is complete at least, the 32 states by
         // construction; no candidate's W is ever taken back (a scout's replaces it).
         let w = |i: usize| weighed[i].work.unwrap_or(f64::INFINITY);
-        let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).fold(anchored, |best, i| if w(i).total_cmp(&w(best)).then(i.cmp(&best)).is_lt() { i } else { best });
+        let complete = (0..weighed.len()).find(|&i| weighed[i].work.is_some()).expect("a complete candidate: the 32 states are the reference itself");
+        let chosen = (0..weighed.len()).filter(|&i| weighed[i].work.is_some()).fold(complete, |best, i| if w(i).total_cmp(&w(best)).then(i.cmp(&best)).is_lt() { i } else { best });
         // Its region (`select::scan`): the scans of the trap's axes at the pilot's last T's thermal speed.
         let last = read.estimates.last().and_then(|e| e.motion).map_or(request.temperature_uk, |m| m.temperature_total);
         let speed = (KT_PER_UK * last * hm).sqrt();
@@ -2970,7 +3012,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
             // no direct part, the held atoms' bound there: `model_of`).
             let direct = times.iter().filter_map(|&t| direct_at(&w.judged, &paths.windows, t)).fold(0., crate::linalg::larger);
             // The motion's parts, each its largest over the times (select.rs, # The motion).
-            let motion_of = |k: usize| crate::select::motion_at(&w.judged, &paths.windows, &course, k, hm, true);
+            let motion_of = |k: usize| crate::select::motion_at(&w.judged, &paths.windows, &course, k, hm, Reach::Upper);
             let region = (1..times.len()).map(|k| w.model[k][0] - crate::linalg::larger(direct_at(&w.judged, &paths.windows, times[k]).unwrap_or(0.), motion_of(k).map_or(0., |m| m.loss))).fold(0., crate::linalg::larger);
             let motions: Vec<crate::select::Motion> = (1..times.len()).filter_map(motion_of).collect();
             let most = |of: &dyn Fn(&crate::select::Motion) -> f64| motions.iter().map(of).fold(0., crate::linalg::larger);

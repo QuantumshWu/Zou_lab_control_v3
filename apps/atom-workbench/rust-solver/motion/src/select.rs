@@ -14,14 +14,27 @@
 //! equation is solved for it: it is the coupling over the detuning, where the atoms are. (By the amplitude alone,
 //! |V|/|Δ + iΓ/2|, PGC3D's repumper resonant on F = 1 → F′ = 2 put F′ = 2 first, 0.27 against 0.06–0.11 for F′ = 3,
 //! while 90 % of the atoms are in F = 2: the three-point choice of 2026-11-21 kept F′ = 3 m = 0, ±1 and folded every
-//! F′ = 2 state.) The chain (`chain`) starts at the model in which every
-//! level is whole -- the 32 states, nothing folded -- and folds the excited states one at a time in increasing
-//! importance, those equal to the rounding together (a mirror pair is folded as a pair: one side kept would lose the
-//! pair's cancellation), down to the full-ground model G, every excited state folded. The chain is nested and made by the
-//! structure alone: no candidate is judged at a point, no gate is read (the three-point check, its 1 % gate, the
-//! leave-one-out and its stopping at the gate, and the fold condition s < ½ of model/reach.rs are gone: the user's of
-//! 2026-11-21, PIPELINE_V3_FINAL §二 A.6). What stays is the runaway's check of the steps (step.rs, # The domain): a fold
-//! that diverges where an atom goes scatters beyond every state of the atom there and is booked whole.
+//! F′ = 2 state.) The structural chain (`chain`) folds the excited states one at a time in increasing importance, from
+//! the 32 states down to the full-ground model G: the run starts on G, and where G's fold runs away at every pilot's start
+//! the attempt climbs it to the first model that does not (solve.rs `piloted`). It chooses nothing.
+//!
+//! The candidates the choice weighs (solve.rs `choose_on_the_pilot`, the user's of 2026-11-22, PLAN_UNIFIED §三 2) are
+//! any subset of the excited states the pilot's model folds, by what each does measured, and the verification decides:
+//! - each addable state -- one the light excites where the pilot's atoms were, its importance above nought -- alone added
+//!   to the pilot's model, judged on the first `NOMINATION_WALKS` paths (`judge_on`) at its point estimates (`Reach::Point`):
+//!   its contribution the misfit it takes away -- the model error over its target, the largest over the times and the
+//!   readings -- per work it adds a µs;
+//! - the states in the order of that (those taking none away after them, by their importance), the nominees the order's
+//!   prefixes, the 32 states last: a group is a prefix, whatever its states (no chain by structure, no bisection, no rule
+//!   of mirror pairs or of whole levels);
+//! - each nominee from the first one predicted to fit -- the pilot's misfit less what its states took away alone, below
+//!   one (the rates and the forces add over single states to 0.1–1 percentage points, the rows not: Study A §2.2) -- is
+//!   judged on every path, the next where it is not complete; above a complete one while a nominee's least W stands
+//!   below the least found.
+//! Where the pilot's model is complete and no model with more states could work less (its work a µs at the ladder's first
+//! rung no less than the pilot's model's), nothing is nominated. What stays is the runaway's check of the steps (step.rs,
+//! # The domain): a fold that diverges where an atom goes scatters beyond every state of the atom there and is booked
+//! whole.
 //!
 //! # The paths
 //! The candidates are judged along `WALKS` of the pilot's trajectories (solve.rs `walks`; P1-PATHS): each is advanced
@@ -202,6 +215,11 @@ use std::time::Instant;
 /// The points the structural amplitudes are read at: the centre (0), the edge (1), the middle (2) (module
 /// documentation, # The candidates).
 pub const POINTS: usize = 3;
+
+/// The paths a single state's addition is judged on for its nomination (module documentation, # The candidates): two,
+/// the fewest whose mean is one over paths -- the nomination reads point estimates (the rates and the forces add over
+/// single states to 0.1–1 percentage points on two paths, Study A §2.2), and every nominee is judged again on every path.
+pub const NOMINATION_WALKS: usize = 2;
 
 /// The pilot's paths a candidate is first judged on (BRIEF_P3_SELECT item 2: P1-PATHS's path-to-path spread is at most
 /// 2e-3, one or two paths reach a quarter of the target, four cover the start's draws), doubled where the judgment asks
@@ -987,6 +1005,12 @@ pub struct Judged {
 /// A candidate model judged against the reference along the paths (`Judged`): its series along the walks at the paths'
 /// setting and on the calibration's piece at the setting's two refinements, every job on the pool.
 pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> {
+    judge_on(paths, model, at, paths.walks.len())
+}
+
+/// `judge` on the paths' first `walks` walks alone (the nomination's, # The candidates): the others' series none, read in
+/// no window; the calibration where its walk is among them.
+pub fn judge_on(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<Judged, String> {
     let clock = Instant::now();
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
@@ -1005,6 +1029,7 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
             #[cfg(test)]
             let clock = Instant::now();
             let out = match j {
+                j if j % n >= walks => Ok(vec![Series::default()]),
                 j if j == longest => {
                     let w = &paths.walks[j];
                     form.along_family_keeping(w, &w.start, 0.0, stretch, &family, &keep(j))
@@ -1053,6 +1078,10 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
             .enumerate()
             .map(|(j, list)| -> Result<Vec<paths::Statistics>, String> {
                 let (walk, own) = (&paths.walks[if j < n { j } else { j - n }], own_kept(j));
+                // A stretch the candidate did not read (`judge_on`'s others): no landing check.
+                if own.readings.is_empty() {
+                    return Ok(vec![]);
+                }
                 list.iter()
                     .map(|l| {
                         let (photons, _) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own)?;
@@ -1094,7 +1123,7 @@ pub fn judge(paths: &Paths, model: &Selected, at: V3) -> Result<Judged, String> 
     // The calibration: the calibration's walk's own series at the setting along its stretch (the same scheme from the
     // same start) and its refinements, against the reference's.
     let candidate: Vec<&Series> = std::iter::once(&series[longest]).chain(&finer).collect();
-    let mut calibration = calibrate(&candidate, calibrated, &paths.settled.pairs);
+    let mut calibration = if finer.is_empty() { Calibration::default() } else { calibrate(&candidate, calibrated, &paths.settled.pairs) };
     // The ladder's top unmet, and what the openings book, the reference's and the candidate's (paths.rs, # The start);
     // the trace defects on every path, the reference's and the candidate's (paths.rs `Series::trace_defect`: the scheme's
     // error read where no refinement ran).
@@ -1292,18 +1321,32 @@ pub fn decide(r: f64, se: f64, allowance: f64) -> Option<bool> {
     }
 }
 
-/// A path mean's end (module documentation, # The direct part): |mean| + q·se, or where not `upper` |mean| − q·se (none
-/// below zero), q Student's t at the run's confidence with the `paths` read less one degrees of freedom; of fewer than
-/// two paths q is without bound (the spread unknown).
-fn end(m: &paths::Mean, paths: usize, upper: bool) -> f64 {
+/// Which end of a path mean an account reads (module documentation, # The direct part, # How many paths): its upper
+/// end (the one booked), its lower (a fate decided at both is the paths' statistics'), or the point estimate itself
+/// (the nomination's, # The candidates).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reach {
+    Upper,
+    Lower,
+    Point,
+}
+
+/// A path mean's end (module documentation, # The direct part): |mean| + q·se, |mean| − q·se (none below zero), or
+/// |mean| (`reach`), q Student's t at the run's confidence with the `paths` read less one degrees of freedom; of fewer
+/// than two paths q is without bound (the spread unknown).
+fn end(m: &paths::Mean, paths: usize, reach: Reach) -> f64 {
     let q = if paths >= 2 { crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(paths as u64 - 1)) } else { f64::INFINITY };
     let spread = if m.error == 0.0 { 0.0 } else { q * m.error.abs() };
-    if upper { m.value.abs() + spread } else { larger(m.value.abs() - spread, 0.0) }
+    match reach {
+        Reach::Upper => m.value.abs() + spread,
+        Reach::Lower => larger(m.value.abs() - spread, 0.0),
+        Reach::Point => m.value.abs(),
+    }
 }
 
 /// The direct part of a window (module documentation, # The direct part): per row its end (`end`).
-fn direct(w: &Window, upper: bool) -> Vec<f64> {
-    w.rows.iter().map(|m| end(m, w.paths, upper)).collect()
+fn direct(w: &Window, reach: Reach) -> Vec<f64> {
+    w.rows.iter().map(|m| end(m, w.paths, reach)).collect()
 }
 
 /// The windows a candidate's error at the time t > 0 is read in (module documentation, # The direct part): the time's
@@ -1330,17 +1373,17 @@ fn windows_at<'a>(judged: &'a Judged, windows: &[(f64, f64)], t: f64) -> Vec<&'a
 /// beside it. Zero at t = 0, where every model starts in the same state; none where the window it takes no path reads
 /// (`paths::Window::paths`: every path's atom lost before it) -- nothing held there on the paths to err on, no number.
 pub fn direct_at(judged: &Judged, windows: &[(f64, f64)], t: f64) -> Option<f64> {
-    direct_bound_at(judged, windows, t, true)
+    direct_bound_at(judged, windows, t, Reach::Upper)
 }
 
-/// `direct_at` at its upper end (`upper`), or its lower, each row's |mean| − q·se with the calibration beside it (# How
-/// many paths: a fate decided at both ends is the paths' statistics').
-pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, upper: bool) -> Option<f64> {
+/// `direct_at` at an end (`Reach`) of each row, the calibration beside it (# How many paths: a fate decided at both ends
+/// is the paths' statistics').
+pub fn direct_bound_at(judged: &Judged, windows: &[(f64, f64)], t: f64, reach: Reach) -> Option<f64> {
     if t <= 0.0 || judged.windows.is_empty() {
         return Some(0.0);
     }
     let read = windows_at(judged, windows, t);
-    (!read.is_empty()).then(|| read.iter().flat_map(|w| direct(w, upper)).fold(0.0, larger) + judged.calibration.rows)
+    (!read.is_empty()).then(|| read.iter().flat_map(|w| direct(w, reach)).fold(0.0, larger) + judged.calibration.rows)
 }
 
 /// The pilot's course the motion's errors are read on (module documentation, # The motion; `motion_at`): its analysis
@@ -1419,9 +1462,9 @@ impl Stationary {
 }
 
 /// A candidate's motion's errors at the course's k-th time (module documentation, # The motion), each at its window's
-/// upper end (`upper`) or its lower: none at t = 0 or of the reference itself (no windows), or where no path reads the
+/// end (`reach`): none at t = 0 or of the reference itself (no windows), or where no path reads the
 /// time's windows.
-pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: usize, hbar_over_mass: f64, upper: bool) -> Option<Motion> {
+pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: usize, hbar_over_mass: f64, reach: Reach) -> Option<Motion> {
     let t = course.times[k];
     let read = windows_at(judged, windows, t);
     if t <= 0.0 || read.is_empty() {
@@ -1430,7 +1473,7 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
     let most = |of: &dyn Fn(&Window) -> f64| read.iter().map(|w| of(w)).fold(0.0, larger);
     // The loss: x t L̇.
     let slope = course.slope(k, &|i| Some(course.loss[i])).unwrap_or(0.0);
-    let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| end(x, *n, upper)) * t * slope.abs();
+    let loss = judged.escape.as_ref().map_or(0.0, |(x, n)| end(x, *n, reach)) * t * slope.abs();
     // T per lab axis: δE_a = δP_a (1 − e^{−α t})/α, α = (H_a − Ė_a)/E_a, the rates over the paths' forgotten stretches
     // (`Stationary`, the time's own windows where none is); the total T's, the axes' mean, per path (its spread the sum's
     // own).
@@ -1451,13 +1494,13 @@ pub fn motion_at(judged: &Judged, windows: &[(f64, f64)], course: &Course, k: us
                 if alpha * t > 0.0 { -(-alpha * t).exp_m1() / alpha } else { t }
             });
             for a in 0..3 {
-                temperature[a] = end(&paths::Mean::of(&own.rates.iter().map(|r| r[a]).collect::<Vec<_>>()), paths, upper) * held[a] / kt;
+                temperature[a] = end(&paths::Mean::of(&own.rates.iter().map(|r| r[a]).collect::<Vec<_>>()), paths, reach) * held[a] / kt;
             }
             let each: Vec<f64> = own.rates.iter().map(|p| (0..3).map(|a| p[a] * held[a]).sum::<f64>() / (3.0 * kt)).collect();
-            temperature_total = end(&paths::Mean::of(&each), paths, upper);
+            temperature_total = end(&paths::Mean::of(&each), paths, reach);
         }
     }
-    let push: [f64; 3] = std::array::from_fn(|a| hbar_over_mass * most(&|w| end(&w.force[a], w.paths, upper)));
+    let push: [f64; 3] = std::array::from_fn(|a| hbar_over_mass * most(&|w| end(&w.force[a], w.paths, reach)));
     let velocity = std::array::from_fn(|a| push[a] * if course.frequencies[a] > 0.0 { t.min(1.0 / course.frequencies[a]) } else { t });
     Some(Motion { loss, temperature_total, push, velocity, temperature })
 }
@@ -1486,7 +1529,7 @@ impl Choice {
 
     /// P's motion's errors at the course's k-th time (`motion_at`, at the upper end): on the run's own pilot's course.
     pub fn motion(&self, course: &Course, k: usize, hbar_over_mass: f64) -> Option<Motion> {
-        motion_at(&self.judged, &self.windows, course, k, hbar_over_mass, true)
+        motion_at(&self.judged, &self.windows, course, k, hbar_over_mass, Reach::Upper)
     }
 }
 

@@ -91,7 +91,7 @@ fn select_the_direct_part_at_the_paths_statistics() {
     let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
     let at = |w: Window, upper: bool| {
         let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 };
-        direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, upper).expect("the window read")
+        direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, if upper { Reach::Upper } else { Reach::Lower }).expect("the window read")
     };
     let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
     assert!((q(3) - 3.31).abs() < 0.01 && (q(7) - 2.43).abs() < 0.01, "{} {}", q(3), q(7));
@@ -126,7 +126,7 @@ fn select_the_motion_by_hand() {
     let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, region: Region::NONE, seconds: 0.0, products: 0 };
     let hm = 7.3e-4;
     let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05] };
-    let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, true).expect("read");
+    let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
     let e = 10.0 * kt;
     let alpha = 0.01 / e;
     let expected = 1e-3 * (-(-alpha * 50.0).exp_m1()) / alpha / kt / 3.0;
@@ -134,10 +134,10 @@ fn select_the_motion_by_hand() {
     assert!((steady.loss - 0.1 * 50.0 * 0.002).abs() < 1e-15, "{}", steady.loss);
     assert!((steady.push[2] - hm * 2.0).abs() < 1e-18 && (steady.velocity[2] - hm * 2.0 * 20.0).abs() < 1e-15, "{:?} {:?}", steady.push, steady.velocity);
     // Heating at H: Ṫ = H/k_B, so α = 0 and the response is δP t/k_B.
-    let heated = motion_at(&judged, &[(0.0, 100.0)], &course(0.01 / kt), 1, hm, true).expect("read");
+    let heated = motion_at(&judged, &[(0.0, 100.0)], &course(0.01 / kt), 1, hm, Reach::Upper).expect("read");
     let expected = 1e-3 * 50.0 / kt / 3.0;
     assert!((heated.temperature_total - expected).abs() <= 1e-9 * expected, "{} {expected}", heated.temperature_total);
-    assert_eq!(motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 0, hm, true), None, "none at t = 0");
+    assert_eq!(motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 0, hm, Reach::Upper), None, "none at t = 0");
 }
 
 /// The flag's question by hand (`decide`): read at the end (|r| > z·se), yes; its upper end within the allowance, no;
