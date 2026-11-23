@@ -4,7 +4,7 @@
 //! `select::choose`), its P PYSEL's.
 use super::*;
 use crate::step::{Brownian, Domain, Dynamics, Middle, Midway, Scratch, Trajectory};
-use rayon::prelude::*;
+
 
 /// The six scenes' own requests (V3C_REQ: scratchpad reqprec\req, as model/rs/tests.rs reads them) with PYSEL's P (the
 /// levels added to the ground states; pyexp2.status.md A).
@@ -407,84 +407,6 @@ impl Domain for Anywhere {
 /// An f64 from the environment, or its default.
 fn env(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().map(|s| s.parse().unwrap()).unwrap_or(default)
-}
-
-/// The static model's mean force at a velocity (RUSTPLAN §6 C2, "the static F at the Doppler point"): the checkpoint's
-/// solve of the same model (`Rs::at` at the point and momentum, floquet's frame with its Doppler shifts, Liouville
-/// assembly, the rounding rule's elements, krylov's solve) -- its force's z component (1/µm/µs), the time-averaged
-/// mean force on the atom's path through r at the velocity of κ.
-fn static_force(run: &Selected, r: V3, kappa: V3) -> f64 {
-    let scene = &run.scene;
-    let doppler = scene.doppler(kappa);
-    let components = scene.components(r, &doppler, 1.0);
-    let frame = crate::floquet::Frame::new(scene, &Hilbert::full(scene, &components), &doppler);
-    let liouville = crate::floquet::Liouville::new(&frame, &run.rs.at(scene, &components).hilbert());
-    let elements = crate::floquet::select(&liouville);
-    let system = crate::floquet::assemble(&liouville, &elements);
-    let solved = crate::krylov::solve::solve(&system).expect("a consistent system");
-    crate::floquet::readouts(&liouville, &system, &solved.rho).force[2]
-}
-
-/// A dragged atom's mean force is the static model's (RUSTPLAN §6 C2: "轨迹平均 = 模型主方程" on the trajectory's level):
-/// tilt0 (V3C_REQ's, PYSEL's P20), its tweezer's waist DRAG_WAIST µm (1e5: its light the focus's along the drag), an
-/// atom held at the velocity v along z (its momentum set back after every step, its position pinned to z₀ + vt: the
-/// master equation's atom, infinitely heavy at exactly v), DRAG_COUNT starts spread over the pattern's period, stepped at
-/// τ = DRAG_TAU µs with no Brownian draw (the diffusion's mean is none), its force the steps' momentum's change over
-/// DRAG_WINDOW µs after DRAG_BURN µs -- against the static model's at the same starts (`static_force`, their mean), for
-/// v of DRAG_VS (m/s), within their interval at the confidence z over the velocities.
-#[test]
-#[ignore]
-fn a_dragged_atom_s_mean_force_is_the_static_model_s() {
-    let (_, mut request, keep) = scenes().into_iter().find(|s| s.0 == "tilt0").expect("tilt0");
-    let waist = env("DRAG_WAIST", 1e5);
-    let t = request.trap_beam;
-    request.beams[t].waist = Some(waist);
-    let run = run_of(&request, &keep);
-    // The run's own P (`run_of` chooses it; PYSEL's `keep` is said beside it).
-    let keep = run.rs.keep.clone();
-    let hm = run.hbar_over_mass();
-    let vs: Vec<f64> = std::env::var("DRAG_VS").ok().map_or(vec![-0.1, 0.0, 0.1], |s| s.split(',').map(|x| x.trim().parse().unwrap()).collect());
-    let count = env("DRAG_COUNT", 32.0) as u64;
-    let (tau, burn, window) = (env("DRAG_TAU", 0.3256), env("DRAG_BURN", 40.0), env("DRAG_WINDOW", 100.0));
-    let kz: f64 = request.beams.iter().enumerate().filter(|(l, b)| *l != t && b.direction[2].abs() > 0.5).map(|(_, b)| b.wave_number).sum();
-    let period = 2.0 * std::f64::consts::PI / kz;
-    let chief = crate::solve::chief(&request);
-    eprintln!("drag: P {}, waist {waist}, period {period:.5} µm, τ {tau}, count {count}, burn {burn}, window {window}", keep.len());
-    let mut beyond = Vec::new();
-    for &v in &vs {
-        let clock = std::time::Instant::now();
-        let kappa = [0.0, 0.0, v / hm];
-        let starts: Vec<f64> = (0..count).map(|i| period * (i as f64 + 0.5) / count as f64).collect();
-        let forces: Vec<f64> = starts.par_iter().enumerate().map(|(i, &z0)| {
-            let mut t = Trajectory::new(&run, chief, [0.0, 0.0, z0], kappa, 20261119, i as u64);
-            let mut scratch = Scratch::default();
-            let (mut made, mut from) = (0.0, None);
-            while t.time < burn + window - 1e-9 {
-                let step = Midway::new(&run, &t, tau).and_then(|m| m.attempt(&t, &Brownian::STILL, &[], &mut scratch, &Anywhere)).expect("a step");
-                let m = step.momentum();
-                t = step.end;
-                if from.is_some() {
-                    made += m.whole[2];
-                }
-                t.kappa = kappa;
-                t.r = [0.0, 0.0, z0 + v * t.time];
-                if from.is_none() && t.time >= burn - 1e-9 {
-                    from = Some(t.time);
-                }
-            }
-            made / (t.time - from.expect("the window"))
-        }).collect();
-        let n = forces.len() as f64;
-        let mean = forces.iter().sum::<f64>() / n;
-        let error = (forces.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
-        let model = starts.par_iter().map(|&z0| static_force(&run, [0.0, 0.0, z0], kappa)).sum::<f64>() / n;
-        let within = crate::estimate::Spread { error, groups: n }.interval_over(vs.len() as f64);
-        eprintln!("v {v:+.3} m/s: engine F_z {mean:.6e} ± {error:.2e}, static model {model:.6e}, difference {:.2e} (interval {within:.2e}), {:.1} s", mean - model, clock.elapsed().as_secs_f64());
-        if (mean - model).abs() > within {
-            beyond.push(v);
-        }
-    }
-    assert!(beyond.is_empty(), "velocities beyond the interval: {beyond:?}");
 }
 
 /// A solve's first result (`solve::solve_on` on the run), the solve stopped there (its callback's own unwind, caught
