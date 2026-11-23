@@ -26,37 +26,36 @@ pub struct Grid { pub step: f64, pub ties: Ties }
 /// A DAC code or a repeat count: a whole number, halves to even.
 pub const WHOLE: Grid = Grid { step: 1.0, ties: Ties::Even };
 
+/// The whole number of `step`s nearest `value`, and its sign.
+fn steps_to(step: &Decimal, ties: Ties, value: &Decimal) -> (bool, BigUint) {
+    let ratio = Ratio::of(value, step);
+    (value.negative, match ties { Ties::Away => ratio.round_half_up(), Ties::Even => ratio.round_half_even() })
+}
+
+/// The grid point `steps` steps from zero, on the side `negative` says.
+fn point(step: &Decimal, negative: bool, steps: BigUint) -> Decimal {
+    Decimal { negative, mantissa: steps, exponent: 0 }.mul(step)
+}
+
+/// The grid point at or above `value` (`up`), else at or below it.
+fn toward(step: &Decimal, value: &Decimal, up: bool) -> Decimal {
+    let ratio = Ratio::of(value, step);
+    let (whole, part) = ratio.numerator.divrem(&ratio.denominator);
+    // Up from a positive value, or down from a negative one, is away from zero.
+    let steps = if up != value.negative && !part.is_zero() { whole.add(&BigUint::from_u128(1)) } else { whole };
+    point(step, value.negative, steps)
+}
+
 impl Grid {
     /// The whole number of steps nearest `value` (`Fraction(str(step))` of them), and its sign.
-    pub fn steps(&self, value: &Decimal) -> (bool, BigUint) {
-        let ratio = Ratio::of(value, &Decimal::from_f64(self.step));
-        (value.negative, match self.ties { Ties::Away => ratio.round_half_up(), Ties::Even => ratio.round_half_even() })
-    }
-
-    /// The grid point `steps` steps from zero, on the side `negative` says.
-    fn point(&self, negative: bool, steps: BigUint) -> Decimal {
-        Decimal { negative, mantissa: steps, exponent: 0 }.mul(&Decimal::from_f64(self.step))
-    }
-
-    /// The grid point nearest an exact `value`.
-    pub fn nearest_to(&self, value: &Decimal) -> Decimal {
-        let (negative, steps) = self.steps(value);
-        self.point(negative, steps)
-    }
+    pub fn steps(&self, value: &Decimal) -> (bool, BigUint) { steps_to(&Decimal::from_f64(self.step), self.ties, value) }
 
     /// The grid point nearest `value`; a value that is not finite has none and stays as it is.
     pub fn nearest(&self, value: f64) -> f64 {
         if !value.is_finite() { return value; }
-        self.nearest_to(&Decimal::from_f64(value)).to_f64()
-    }
-
-    /// The grid point at or above `value` (`up`), else at or below it.
-    fn toward(&self, value: &Decimal, up: bool) -> Decimal {
-        let ratio = Ratio::of(value, &Decimal::from_f64(self.step));
-        let (whole, part) = ratio.numerator.divrem(&ratio.denominator);
-        // Up from a positive value, or down from a negative one, is away from zero.
-        let steps = if up != value.negative && !part.is_zero() { whole.add(&BigUint::from_u128(1)) } else { whole };
-        self.point(value.negative, steps)
+        let step = Decimal::from_f64(self.step);
+        let (negative, steps) = steps_to(&step, self.ties, &Decimal::from_f64(value));
+        point(&step, negative, steps).to_f64()
     }
 }
 
@@ -71,8 +70,8 @@ fn order(a: &Decimal, b: &Decimal) -> Ordering {
 }
 
 /// `value` within `lo..=hi`.
-fn within(value: Decimal, lo: Decimal, hi: Decimal) -> Decimal {
-    if order(&value, &lo) == Ordering::Less { lo } else if order(&value, &hi) == Ordering::Greater { hi } else { value }
+fn within(value: Decimal, lo: &Decimal, hi: &Decimal) -> Decimal {
+    if order(&value, lo) == Ordering::Less { lo.clone() } else if order(&value, hi) == Ordering::Greater { hi.clone() } else { value }
 }
 
 /// The values a field may take: `lo..=hi`, on `grid` (None: any value between).
@@ -82,21 +81,42 @@ pub struct Domain { pub lo: f64, pub hi: f64, pub grid: Option<Grid> }
 impl Domain {
     pub fn holds(&self, value: f64) -> bool { self.lo <= value && value <= self.hi }
 
+    /// The domain read once for many values ([`Places::place`]).
+    pub fn places(&self) -> Places {
+        let (lo, hi) = (Decimal::from_f64(self.lo), Decimal::from_f64(self.hi));
+        let grid = self.grid.map(|grid| (Decimal::from_f64(grid.step), grid.ties));
+        // The bounds a grid point keeps: the innermost grid points inside them, or the bounds
+        // themselves where they hold none.
+        let inner = match &grid {
+            None => (lo.clone(), hi.clone()),
+            Some((step, _)) => {
+                let (first, last) = (toward(step, &lo, true), toward(step, &hi, false));
+                if order(&first, &last) == Ordering::Greater { (lo.clone(), hi.clone()) } else { (first, last) }
+            }
+        };
+        Places { grid, lo, hi, inner }
+    }
+
+    /// `value` as the field takes it ([`Places::place`]); a value that is not finite stays as it is.
+    pub fn quantize(&self, value: f64) -> f64 {
+        if !value.is_finite() { return value; }
+        self.places().place(&Decimal::from_f64(value)).to_f64()
+    }
+}
+
+/// A domain as exact decimals: its grid's step, its bounds, and the bounds a grid point keeps.
+pub struct Places { grid: Option<(Decimal, Ties)>, lo: Decimal, hi: Decimal, inner: (Decimal, Decimal) }
+
+impl Places {
+    pub fn holds(&self, value: &Decimal) -> bool { order(value, &self.lo) != Ordering::Less && order(value, &self.hi) != Ordering::Greater }
+
     /// An exact `value` as the field takes it: the nearest grid point, kept within the bounds --
     /// where that point lies past one, the innermost grid point inside it (a domain whose
     /// bounds hold no grid point keeps the bound).
     pub fn place(&self, value: &Decimal) -> Decimal {
-        let (lo, hi) = (Decimal::from_f64(self.lo), Decimal::from_f64(self.hi));
-        let Some(grid) = self.grid else { return within(value.clone(), lo, hi) };
-        let (first, last) = (grid.toward(&lo, true), grid.toward(&hi, false));
-        let nearest = grid.nearest_to(value);
-        if order(&first, &last) == Ordering::Greater { within(nearest, lo, hi) } else { within(nearest, first, last) }
-    }
-
-    /// `value` as the field takes it ([`Domain::place`]); a value that is not finite stays as it is.
-    pub fn quantize(&self, value: f64) -> f64 {
-        if !value.is_finite() { return value; }
-        self.place(&Decimal::from_f64(value)).to_f64()
+        let Some((step, ties)) = &self.grid else { return within(value.clone(), &self.lo, &self.hi) };
+        let (negative, steps) = steps_to(step, *ties, value);
+        within(point(step, negative, steps), &self.inner.0, &self.inner.1)
     }
 }
 
