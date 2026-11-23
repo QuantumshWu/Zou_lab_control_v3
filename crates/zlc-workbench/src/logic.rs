@@ -103,7 +103,7 @@ pub(crate) struct Ask {
     /// To ask once the one in flight lands; or not answered (refused, expired, lost), asked again
     /// once the plugin answers anything or opens again.
     waiting: Option<Question>,
-    /// What the answer that stands was told, and the check it was asked in.
+    /// The check the newest answer was asked in, and what it was told.
     told: Option<(u64, Value)>,
 }
 
@@ -689,11 +689,11 @@ impl Workbench {
     }
 
     /// The bench changed (a device opened, failed, closed, its facts, or an Apply): every draft
-    /// query reads the devices' facts (`device_infos`: whether the device a node names is open,
-    /// what it reads and tunes; an editor also every tunable device of the bench). A node that
-    /// names one, and every node with an editor, checks its draft again -- the same draft, a new
-    /// check -- so an answer given before the change -- a camera not yet open when a layout
-    /// loaded -- cannot stand after it; a query the change told nothing new is not asked again.
+    /// query reads the devices' facts (`device_infos`: what the device a node names reads and
+    /// tunes; an editor also every tunable device of the bench). A node that names one, and every
+    /// node with an editor, checks its draft again: the same draft, a new check. An answer given
+    /// before the change (a camera not yet open when a layout loaded) does not stand after it; a
+    /// query the change tells nothing new is not asked again.
     pub(crate) fn bench_changed(&mut self) {
         let asking: Vec<String> = self.nodes.iter().filter(|node| !node.draft.device_keys.values().all(String::is_empty)
             || self.catalog.get(&node.type_id).is_some_and(|item| item.node().queries.iter().any(|name| name == EDITOR_FACTS)))

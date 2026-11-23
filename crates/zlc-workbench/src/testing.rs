@@ -674,7 +674,7 @@ mod tests {
     /// A producer asked again (the bench changed) that answers the same frames tells its readers
     /// nothing: they are not asked again for it.
     #[test]
-    fn the_same_frames_under_a_new_revision_do_not_ask_the_readers_again() {
+    fn the_same_frames_under_a_new_check_do_not_ask_the_readers_again() {
         let root = scratch("frames-same");
         let mut catalog = catalog();
         catalog["types"].as_array_mut().unwrap().push(json!({"type_id": "derive", "kind": "node", "label": "Derive", "parameters": [],
@@ -693,7 +693,7 @@ mod tests {
         let editors = |calls: &Rc<RefCell<Calls>>| calls.borrow().2.iter().filter(|(query, ..)| query == "editor_facts").count();
         event(&mut workbench, Event::Answered { ticket: frames(&calls), result: Ok(json!(["frame", ["0", "1"]])) }, &mut host);
         // The reader's question asked before the frames lands; the one told them goes then.
-        answer_asked(&mut workbench, &mut host, &calls, "editor_facts", Ok(json!({})));
+        answer_asked(&mut workbench, &mut host, &calls, "derive", "editor_facts", |_| Ok(json!({})));
         let told = editors(&calls);
         // Asked again (a check), it answers the same frames: the reader is not asked again.
         apply(&mut workbench, &mut host, "check_node", json!({"node": "camera_measurement"})).unwrap();
@@ -1158,13 +1158,15 @@ mod tests {
 
     fn asked(calls: &Rc<RefCell<Calls>>, name: &str) -> u64 { calls.borrow().2.iter().rev().find(|(query, ..)| query == name).unwrap().1 }
 
-    /// The plugin answers its questions of `name` as it gets them: the one in flight, then the one
-    /// that waited for it, until none is asked.
-    fn answer_asked(workbench: &mut Workbench, host: &mut FakeHost, calls: &Rc<RefCell<Calls>>, name: &str, result: Result<Value, String>) {
+    /// The plugin answers node `node`'s questions of `name` as it gets them, each from what it is
+    /// told (`answer`): the one in flight, then the one that waited for it, until none is asked.
+    fn answer_asked(workbench: &mut Workbench, host: &mut FakeHost, calls: &Rc<RefCell<Calls>>, node: &str, name: &str,
+                    answer: impl Fn(&Value) -> Result<Value, String>) {
         loop {
-            let ticket = calls.borrow().2.iter().rev().find(|(query, ..)| query == name).map(|(_, ticket, _)| *ticket);
-            let Some(ticket) = ticket.filter(|ticket| workbench.tickets.contains_key(ticket)) else { break };
-            event(workbench, Event::Answered { ticket, result: result.clone() }, host);
+            let asked = calls.borrow().2.iter().rev().find(|(query, ticket, _)| query == name
+                && matches!(workbench.tickets.get(ticket), Some(crate::Ticket::Query { node: id, .. }) if id == node)).map(|(_, ticket, facts)| (*ticket, facts.clone()));
+            let Some((ticket, facts)) = asked else { break };
+            event(workbench, Event::Answered { ticket, result: answer(&facts) }, host);
         }
     }
 
@@ -1229,7 +1231,7 @@ mod tests {
         let (_, first, args) = asked(&calls);
         assert_eq!(args["devices"]["trigger_source"]["facts"], lanes(Value::Null), "what the device states of itself reaches the draft");
         event(&mut workbench, Event::Answered { ticket: first, result: Ok(json!({})) }, &mut host);
-        answer_asked(&mut workbench, &mut host, &calls, "resolve_defaults", Ok(json!({})));
+        answer_asked(&mut workbench, &mut host, &calls, &node, "resolve_defaults", |_| Ok(json!({})));
         // The board now holds a pulse that triggers the lane three times a shot: the draft is asked again.
         event(&mut workbench, Event::Facts { instance: "sequencer".into(), facts: lanes(json!(3)) }, &mut host);
         let (_, second, args) = asked(&calls);
@@ -1273,7 +1275,9 @@ mod tests {
         assert_eq!((frames(&row)["enabled"].clone(), frames(&row).get("hidden").cloned()), (json!(true), None));
         // On again, the field shows the count the node says the lane makes; the typed 1 stays in the draft.
         apply(&mut workbench, &mut host, "edit_node", json!({"node": node, "values": {"trigger_by_channel": true}})).unwrap();
-        answer_asked(&mut workbench, &mut host, &calls, "resolve_defaults", Ok(json!({"frames_per_cycle": 3})));
+        // The plugin says the count the lane makes only of a draft that triggers by channel.
+        answer_asked(&mut workbench, &mut host, &calls, &node, "resolve_defaults",
+            |facts| Ok(if facts["values"]["trigger_by_channel"] == true { json!({"frames_per_cycle": 3}) } else { json!({}) }));
         let row = workbench.state(&host)["logic"][0].clone();
         assert_eq!((frames(&row)["value"].clone(), frames(&row)["enabled"].clone()), (json!(3), json!(false)));
         assert_eq!(workbench.node(&node).unwrap().draft.values.get("frames_per_cycle").cloned().unwrap_or(json!(1)), json!(1));
@@ -2245,22 +2249,22 @@ mod tests {
     #[test]
     fn twenty_bench_changes_ask_each_kind_once_more_with_the_last_facts() {
         let (_root, mut wb, calls, mut host) = lanes_rig("bench-storm", json!(LANES));
-        let in_flight = |wb: &Workbench| wb.tickets.values().filter(|ticket| matches!(ticket, crate::Ticket::Query { node, .. } if node == "lanes")).count();
+        // What its plugin holds: the questions sent to the node less those it answered.
+        let sent = |calls: &Rc<RefCell<Calls>>| calls.borrow().0.iter().filter(|line| line.starts_with("query node/lanes ")).count();
+        let answered = std::cell::Cell::new(0);
         let told = |calls: &Rc<RefCell<Calls>>, kind: &str| calls.borrow().2.iter().filter(|(query, ..)| query == kind).map(|(_, _, facts)| facts.clone()).collect::<Vec<_>>();
-        assert_eq!(in_flight(&wb), LANES.len());
-        let asked_before = calls.borrow().2.len();
+        assert_eq!(sent(&calls), LANES.len());
         for frames in 1..=20 {
             event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(frames) }, &mut host);
-            assert!(in_flight(&wb) <= LANES.len(), "{} in flight", in_flight(&wb));
+            assert!(sent(&calls) - answered.get() <= LANES.len(), "{} held", sent(&calls) - answered.get());
         }
-        assert_eq!(calls.borrow().2.len(), asked_before, "nothing more is asked while each kind is in flight");
-        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, kind, Ok(json!({}))); }
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| { answered.set(answered.get() + 1); Ok(json!({})) }); }
         for kind in LANES {
             let facts = told(&calls, kind);
             assert_eq!(facts.len(), 2, "{kind}: asked once, then once more");
             assert_eq!(facts[1]["devices"]["sequencer"]["facts"], trigger_lanes(20), "{kind}: with the last facts");
         }
-        assert_eq!(in_flight(&wb), 0);
+        assert_eq!(sent(&calls), answered.get(), "each question sent is answered");
         let node = wb.node("lanes").unwrap();
         assert!(wb.issues(node, &[]).is_empty(), "{:?}", wb.issues(node, &[]));
         assert_eq!(wb.node_row(node, &[])["editor_facts_pending"], false);
@@ -2272,7 +2276,7 @@ mod tests {
     #[test]
     fn a_refused_editor_question_keeps_the_model_it_had() {
         let (_root, mut wb, calls, mut host) = lanes_rig("refused-editor", json!(LANES));
-        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, kind, Ok(json!({"marker": "first"}))); }
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({"marker": "first"}))); }
         let row = |wb: &Workbench| wb.node_row(wb.node("lanes").unwrap(), &[]);
         assert_eq!((&row(&wb)["editor_facts"]["marker"], &row(&wb)["editor_facts_pending"]), (&json!("first"), &json!(false)));
         event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(3) }, &mut host);
@@ -2298,7 +2302,7 @@ mod tests {
     #[test]
     fn a_failure_of_the_plugins_code_is_its_answer() {
         let (_root, mut wb, calls, mut host) = lanes_rig("failed-editor", json!(LANES));
-        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, kind, Ok(json!({"marker": "first"}))); }
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({"marker": "first"}))); }
         event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(3) }, &mut host);
         event(&mut wb, Event::Answered { ticket: asked(&calls, "editor_facts"), result: Err("ValueError: the plan names no port".into()) }, &mut host);
         let row = wb.node_row(wb.node("lanes").unwrap(), &[]);
@@ -2313,13 +2317,13 @@ mod tests {
     #[test]
     fn a_bench_change_keeps_the_draft_revision_an_edit_moves() {
         let (_root, mut wb, calls, mut host) = lanes_rig("bench-revision", json!(LANES));
-        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, kind, Ok(json!({}))); }
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
         let revision = wb.node_row(wb.node("lanes").unwrap(), &[])["draft_revision"].as_u64().unwrap();
         event(&mut wb, Event::Facts { instance: "sequencer".into(), facts: trigger_lanes(3) }, &mut host);
         assert_eq!(wb.node_row(wb.node("lanes").unwrap(), &[])["draft_revision"], revision);
         let started = apply(&mut wb, &mut host, "start_node", json!({"node": "lanes", "expected_draft_revision": revision})).unwrap();
         assert_eq!(started["phase"], "checking", "it waits for the new check");
-        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, kind, Ok(json!({}))); }
+        for kind in LANES { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
         assert_eq!(calls.borrow().1.last().unwrap().run, "lanes#1");
         apply(&mut wb, &mut host, "edit_node", json!({"node": "lanes", "values": {"plan": "x"}, "expected_draft_revision": revision})).unwrap();
         for action in ["start_node", "edit_node"] {
@@ -2333,7 +2337,7 @@ mod tests {
     #[test]
     fn a_bench_change_that_tells_a_node_nothing_new_asks_nothing() {
         let (_root, mut wb, calls, mut host) = lanes_rig("bench-same", json!(["resolve_field_choices", "resolve_defaults"]));
-        for kind in ["resolve_field_choices", "resolve_defaults"] { answer_asked(&mut wb, &mut host, &calls, kind, Ok(json!({}))); }
+        for kind in ["resolve_field_choices", "resolve_defaults"] { answer_asked(&mut wb, &mut host, &calls, "lanes", kind, |_| Ok(json!({}))); }
         let before = calls.borrow().2.len();
         // The camera's facts change twice; the node reads only the sequencer.
         for temperature in [20, 21] {

@@ -50,7 +50,9 @@ pub trait Plugins {
     /// Open a device instance (`context.simulation` for shared-world types) or a node instance.
     fn open(&mut self, instance: &str, type_id: &str, parameters: &Value, context: &Value);
     fn close(&mut self, instance: &str);
-    /// A pure draft query answered by the node's own process (`declare_outputs`, `admit_source`, ...).
+    /// A pure draft query answered by the node's own process (`declare_outputs`, `admit_source`, ...):
+    /// its code's answer, or failure, completes as [`Event::Answered`]; a query its code did not
+    /// answer (refused, expired, timed out, lost) as [`Event::Unanswered`].
     fn query(&mut self, instance: &str, ticket: u64, name: &str, args: &Value);
     /// A standard device op (`fields`, `values`, `tune`, `snapshot`) on an open instance. `snapshot`
     /// is answered within [`SNAPSHOT_WAIT`]: a device that has not answered by then is answered as
@@ -113,7 +115,7 @@ pub enum Event {
     /// port that would not open on its way (PLUGIN_PROTOCOL §7 `serial_faults`; [`Event::met_serial_faults`]).
     SerialFaults { instance: String, faults: Vec<SerialFault>, event: Box<Event> },
     /// What an open device states of itself changed (its trigger lanes, what it holds): the drafts
-    /// that name devices are asked again.
+    /// that name devices are checked again.
     Facts { instance: String, facts: Value },
     Answered { ticket: u64, result: Result<Value, String> },
     /// A query its plugin's code did not answer: refused before it ran (a full queue, an instance
