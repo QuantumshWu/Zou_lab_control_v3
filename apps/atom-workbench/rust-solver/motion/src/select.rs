@@ -603,6 +603,10 @@ pub struct Paths<'a> {
     /// The landing check's budget (paths.rs `Form::landing`): the share of the total T's relative target a landing's
     /// truncated stretch may move.
     pub landing_budget: f64,
+    /// The landings' knobs -- the setting's rate and cutoff, the turns their transients ask (paths.rs
+    /// `Form::landing_turns`) -- and that read's last change of n_ex, booked with every landing's (`Landing::photons_error`).
+    pub landing_knobs: (f64, f64, f64),
+    pub landing_resolved: f64,
     series: Vec<Series>,
     calibration: (usize, f64, Vec<Series>),
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
@@ -919,7 +923,25 @@ impl<'a> Paths<'a> {
         let done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
         // The landing check of the reference (module documentation, # The motion): at each kept state the landing after a
         // jump, and the reference's excess photons from it.
+        // The landings' turns (paths.rs `Form::landing_turns`), read on the first landing the calibration's walk holds
+        // (else the first any stretch holds), every landing run at them and booking that read's last change.
         let knobs = (settled.setting.turns, settled.setting.rate, settled.setting.cutoff);
+        let (landing_knobs, resolved, turns_work) = match optical {
+            None => (knobs, 0.0, 0.0),
+            Some((span, decay)) => {
+                let first = std::iter::once(longest).chain(jobs.iter().copied()).find_map(|j| {
+                    let (w, ..) = stretch_of(j);
+                    done[j].kept.iter().find_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (j, w, *t, landed)))
+                });
+                match first {
+                    Some((j, w, t, landed)) => {
+                        let (turns, resolved, spent) = form.landing_turns(&walks[w], t, &landed, span, decay, knobs, &done[j], landing_budget)?;
+                        ((turns, knobs.1, knobs.2), resolved, spent)
+                    }
+                    None => (knobs, 0.0, 0.0),
+                }
+            }
+        };
         let landings: Vec<Vec<Landing>> = match optical {
             None => vec![vec![]; jobs.len()],
             Some((span, decay)) => jobs
@@ -930,7 +952,7 @@ impl<'a> Paths<'a> {
                         .kept
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, landed)))
-                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs, &done[j], landing_budget).map(|(photons, spent, photons_error)| Landing { t, landed, photons, work: spent, photons_error }))
+                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, landing_knobs, &done[j], landing_budget).map(|(photons, spent, change)| Landing { t, landed, photons, work: spent, photons_error: larger(change, resolved) }))
                         .collect()
                 })
                 .collect::<Result<_, _>>()?,
@@ -941,8 +963,8 @@ impl<'a> Paths<'a> {
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
-        let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64() })
+        let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work + turns_work;
+        Ok(Paths { landing_budget, landing_knobs, landing_resolved: resolved, walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64() })
     }
 
     /// The calibration's stretch (µs): the longest walk's [0, L], where the setting was read.
@@ -1074,7 +1096,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let hm = model.hbar_over_mass();
     // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
     // photons' Mandel Q = 2 n_ex --, the reference's beside (paths.rs `Statistics`).
-    let knobs = (paths.settled.setting.turns, paths.settled.setting.rate, paths.settled.setting.cutoff);
+    let knobs = paths.landing_knobs;
     let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
     // The landing checks' counted work, summed on the pool (whole multiply-adds).
     let landing_work = std::sync::atomic::AtomicU64::new(0);
@@ -1093,6 +1115,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 list.iter()
                     .map(|l| {
                         let (photons, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own, paths.landing_budget)?;
+                        let error = larger(error, paths.landing_resolved);
                         Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], q_error: [2.0 * error, 2.0 * l.photons_error] }, spent))
                     })
                     .collect::<Result<Vec<_>, String>>()
