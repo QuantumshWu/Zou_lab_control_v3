@@ -93,7 +93,9 @@
 //! one number of one sign. Their sizes are compared (`in_range`), and their signed difference is read as their mean
 //! squares are, on the same groups (`Levels::ordered`, estimate.rs `ordered`): where it lies clearly above the
 //! estimate itself -- d₂/d₁ outside [0, 2^{p+1}], a change of sign from one pair to the next at once, which the sizes do
-//! not see --, the order is refuted and the rung is left, as for a third level clearly beyond (`verdict`; measured, the
+//! not see --, at a look where some pair's change is not within the step's share (estimate.rs `bears`: where every
+//! change is, the rung's error is within it whatever the order), the order is refuted and the rung is left, as for a
+//! third level clearly beyond (`verdict`; measured, the
 //! window's momentum error of tilt0's G at 0.326, 0.652 and 1.304 µs d₁ = +0.63, d₂ = −2.57 %, sizes in range;
 //! R9_PUSH's at 0.71 µs on the end state's forms, d₁ = +0.056, d₂ = −0.217: B.report.md §2.1). It is the observed-order test that grid-convergence studies hold Richardson's
 //! extrapolation to (Roache's grid convergence index takes a level's error from two grids only with a safety factor
@@ -669,7 +671,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, temperature_change, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
+use crate::estimate::{self, allowance, bears, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, temperature_change, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -1580,11 +1582,12 @@ fn asks([far, near]: [f64; 2], bound: f64) -> f64 {
     if far.is_finite() && near < bound { (far - near) / (bound - near) } else { f64::INFINITY }
 }
 
-/// Whether a rung's third level, carried to its step, stands in the order's range of its own read (module
+/// Whether a rung's third level above, carried to its step, stands in the order's range of its own read (module
 /// documentation, ## The ladder; `Scouted`): under the order the two are of one mean square, the third's the own one's
 /// times (d₂/d₁)²/2^{2p}; on no look -- each quantity on each window both are read on (`Between::common`) -- the near
-/// end of one above the far end of the other (`ends`, each read with its own statistical error, at one look). A look
-/// either does not read excludes nothing.
+/// end of one above the far end of the other (`ends`, each read with its own statistical error, at one look), at a look
+/// the order bears on (estimate.rs `bears`: the two pairs' changes not all within the step's share there -- the third's
+/// pair the one above, its read uncarried from 2τ). A look either does not read excludes nothing.
 fn in_range(own: &Between, third: &Between) -> bool {
     let apart = |a: &Read, b: &Read| {
         let ([far_a, near_a], [far_b, near_b]) = (ends(a), ends(b));
@@ -1592,7 +1595,12 @@ fn in_range(own: &Between, third: &Between) -> bool {
     };
     let windows = own.common(third);
     let (own, third) = (own.on(&windows), third.on(&windows));
-    !own.reads.iter().flatten().zip(third.reads.iter().flatten()).any(|(a, b)| apart(a, b))
+    let pair = carried(&third, 2.);
+    let [sp, st] = step_bound();
+    !own.reads.iter().zip(&third.reads).zip(&pair.reads).enumerate().any(|(q, ((a, b), p))| {
+        let bound = if Quantity::of(q).shown() { sp * sp } else { st * st };
+        a.iter().zip(b).zip(p).any(|((a, b), p)| apart(a, b) && bears(&[a, p], bound))
+    })
 }
 
 /// The pairs a rung's own read could see on at the best (`blind`), where a run's trajectories can take them: none past
@@ -2234,7 +2242,8 @@ fn read_as_it_is(times: &[f64], window: f64, fine: &[&Part], coarse: &[&Part], s
 }
 
 /// Whether the order holds across three levels of the same groups (estimate.rs `ordered`), `levels` at h, 2h and 4h
-/// from the finest, at the analysis times of its two pairs together among the candidates `times`, window by window.
+/// from the finest, at the analysis times of its two pairs together among the candidates `times`, window by window, at
+/// the looks it bears on against the step's share (`step_bound`, estimate.rs `bears`).
 fn read_order(times: &[f64], window: f64, levels: [&[&Part]; 3], scales: &Scales) -> bool {
     let [a, b, c] = levels.map(reads_of);
     let mut at = analysed(times, window, &a, &b, scales);
@@ -2243,7 +2252,8 @@ fn read_order(times: &[f64], window: f64, levels: [&[&Part]; 3], scales: &Scales
     at.dedup();
     let there = |groups: &[&Group]| -> Vec<Group> { groups.iter().map(|g| g.at(&at)).collect() };
     let times: Vec<f64> = at.iter().map(|&k| times[k]).collect();
-    ordered([&there(&a), &there(&b), &there(&c)], scales, &times, &leaves(&times))
+    let [sp, st] = step_bound();
+    ordered([&there(&a), &there(&b), &there(&c)], scales, &times, &leaves(&times), [sp * sp, st * st])
 }
 
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
