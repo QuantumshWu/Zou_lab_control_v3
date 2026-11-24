@@ -48,8 +48,9 @@
 //! rows over their sum as shown. (ENGFOLD's prototype took the rates and the force over the rows' sum too; the two
 //! differ by the lifted Q population. `Reading::total` holds that sum.) tr ρ_P itself is kept by every model's exact
 //! flow -- i(H − H†) = Σ J†J --, so its departure from one along a series is the scheme's (`Series::trace_defect`): a
-//! strict lower bound of the scheme's error in the trace norm, read at no cost, and a part of the setting's error
-//! (select.rs `settle`; the readings over tr ρ_P and the rows' sum hide it).
+//! strict lower bound of the unnormalized state's error in the trace norm, read at no cost -- and no reading's error:
+//! every reading is over tr ρ_P or the rows' sum, which divides it out exactly (the flow is linear; select.rs # The
+//! paths). Reported, not counted.
 //!
 //! # The motion's readings
 //! What the motion takes of the internal state, beside the rows (select.rs # The motion), each over tr ρ_P:
@@ -428,7 +429,8 @@ pub struct Series {
 impl Series {
     /// The scheme's trace defect along the series (module documentation, # The readings): the largest |tr ρ_P − 1| over
     /// its readings -- every model's generator keeps the trace (i(H − H†) = Σ J†J), so the defect is the scheme's own,
-    /// a strict lower bound of its error in the trace norm, ‖ρ_num − ρ‖₁ ≥ |tr ρ_num − 1|; none of no reading.
+    /// a strict lower bound of its error in the trace norm, ‖ρ_num − ρ‖₁ ≥ |tr ρ_num − 1|, which the readings divide out
+    /// (select.rs # The paths); none of no reading.
     pub fn trace_defect(&self) -> f64 {
         self.readings.iter().map(|r| (r.trace - 1.0).abs()).fold(0.0, larger)
     }
