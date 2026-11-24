@@ -17,7 +17,7 @@ import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/d
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
-import {approximationTotal,exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
+import {approximationTotal,exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance,sampleBeyond,withinSentence} from '../dist/js/atom-workbench/src/accuracy.js';
 import {definitionNotes,modelNotes} from '../dist/js/atom-workbench/src/model-notes.js';
 import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 import {SEMICLASSICAL_POPULATION_TARGET} from '../dist/js/atom-workbench/src/solver-types.js';
@@ -312,19 +312,33 @@ test('a motion result is read strictly: the 3D block with the total temperature,
 });
 
 test('a motion trajectory is tested against its own target, 5 %, and every sentence about its samples names that target',()=>{
-  // A result's sample errors with the status the adapter writes for them (motion_adapter.rs).
-  const errors=values=>d=>{const a=d.populationAccuracy,worst=Math.max(...values),partial=worst>a.requestedTolerance;
-    Object.assign(a,{sampleErrors:values,estimatedMaximumError:worst,status:partial?'estimated-partial':'estimated-converged'});if(partial)a.reason='test budget';else delete a.reason;};
+  // A result's sample errors with the engine's verdict the adapter writes for them (motion_adapter.rs): the samples the
+  // statistics' evidence puts beyond (`beyond`, every one above 5 % unless said), the state partial exactly where some are.
+  const errors=(values,beyond=values.flatMap((e,i)=>e>.05?[i]:[]))=>d=>{const a=d.populationAccuracy,worst=Math.max(...values),partial=beyond.length>0;
+    Object.assign(a,{sampleErrors:values,estimatedMaximumError:worst,status:partial?'estimated-partial':'estimated-converged'});if(partial)Object.assign(a,{beyond,reason:'test budget'});else{delete a.reason;delete a.beyond;}
+    // The ledger flags exactly what the state says (ledger.rs `Ledger::close`).
+    if(partial)d.diagnostics.approximations.flagged='1 ms：布居与丢失的误差超出目标（统计按全部输出一起的证据），估计最大 6.2%';else delete d.diagnostics.approximations.flagged;};
   const initial=pgc().dynamics.initialStateId,chart=r=>populationChart(r,[initial],{[initial]:'初态'},{showTotalExcited:false});
   // 3 %: beyond the population core's ε, within the motion's own target -- nothing marked, nothing said.
   const within=readMotion(errors([0,.03,.01])),tolerance=resultTolerance(within);
   assert.equal(tolerance,SEMICLASSICAL_POPULATION_TARGET);assert.notEqual(tolerance,POPULATION_TOLERANCE);
-  assert.deepEqual(outsideRuns(within.populationAccuracy.sampleErrors,tolerance),[]);
-  assert.equal(partialSentence(within.timesUs,within.populationAccuracy.sampleErrors,'ms',tolerance),'');
+  assert.deepEqual(outsideRuns(sampleBeyond(within)),[]);
+  assert.equal(partialSentence(within.timesUs,within.populationAccuracy.sampleErrors,sampleBeyond(within),'ms',tolerance),'');
   assert.doesNotMatch(chart(within),/accuracy-band|超过/);
   // 6.2 %: marked, and the words name the 5 % it was tested against, never ε.
   const over=readMotion(errors([0,.062,.01])),limit=resultTolerance(over);
-  assert.equal(partialSentence(over.timesUs,over.populationAccuracy.sampleErrors,'ms',limit),'t ≤ 5 ms 估计误差最大 6.2%（超过 5%），其余时刻 ≤ 5%');
+  assert.equal(partialSentence(over.timesUs,over.populationAccuracy.sampleErrors,sampleBeyond(over),'ms',limit),'t ≤ 5 ms 估计误差最大 6.2%（超过 5%），其余时刻 ≤ 5%');
+  // 6.1 % judged within by the evidence: converged, read, not marked, and the estimate shown with why it stands.
+  const evident=readMotion(errors([0,.061,.01],[]));
+  assert.equal(evident.populationAccuracy.status,'estimated-converged');assert.deepEqual(outsideRuns(sampleBeyond(evident)),[]);
+  assert.equal(withinSentence(evident.populationAccuracy.sampleErrors,sampleBeyond(evident),limit),'估计误差最大 6.1%（高于 5%），按全部输出一起的统计证据在目标内');
+  assert.doesNotMatch(chart(evident),/accuracy-band|超过/);
+  // A verdict the numbers cannot carry is refused: a sample beyond whose estimate is within, or partial with none beyond.
+  assert.throws(()=>readMotion(errors([0,.03,.01],[1])),/布居精度/);
+  assert.throws(()=>readMotion(d=>{errors([0,.062,.01])(d);delete d.populationAccuracy.beyond;}),/布居精度/);
+  // ... and a state the ledger does not say: partial with no flag on what is shown, or converged with one.
+  assert.throws(()=>readMotion(d=>{errors([0,.062,.01])(d);delete d.diagnostics.approximations.flagged;}),/布居精度/);
+  assert.throws(()=>readMotion(d=>{errors([0,.03,.01])(d);d.diagnostics.approximations.flagged='1 ms：布居与丢失的误差超出目标';}),/布居精度/);
   assert.equal(exceedsNote(.062,limit),'（估计误差 6.2%，超过 5%）');assert.equal(exceedsNote(null,limit),'（估计误差 未知，超过 5%）');
   assert.match(chart(over),/超过 5%/);assert.doesNotMatch(chart(over),/超过 1%/);
   // A trajectory of the population core is tested against ε.

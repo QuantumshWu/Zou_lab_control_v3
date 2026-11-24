@@ -34,8 +34,12 @@ test('a partial trajectory is read, not rejected: where it misses ε, by how muc
     ['maximum not that of the samples',d=>{d.populationAccuracy.estimatedMaximumError=1.4*E;}],
     ['one error short',d=>{d.populationAccuracy.sampleErrors.pop();}],
     ['a negative error',d=>{d.populationAccuracy.sampleErrors[2]=-1;}],
-    ['a converged status over ε',d=>{d.populationAccuracy.status='estimated-converged';delete d.populationAccuracy.reason;}],
+    ['a converged status over ε',d=>{d.populationAccuracy.status='estimated-converged';delete d.populationAccuracy.reason;delete d.populationAccuracy.beyond;}],
     ['an unknown status',d=>{d.populationAccuracy.status='estimated-unknown';}],
+    ['partial with no sample beyond',d=>{delete d.populationAccuracy.beyond;}],
+    ['a sample beyond whose bound is within',d=>{d.populationAccuracy.beyond=[1,3];}],
+    ['a bound above ε not listed',d=>{d.populationAccuracy.beyond=[1];}],
+    ['samples beyond out of order',d=>{d.populationAccuracy.beyond=[2,1];}],
   ]){const bad=structuredClone(data);change(bad);assert.throws(()=>read(bad),/布居精度元数据/,label);}
   const converged=result({timesUs:times(3)});converged.populationAccuracy.reason='none';assert.throws(()=>read(converged),/布居精度元数据/,'a reason only when partial');
 });
@@ -70,16 +74,20 @@ test('a p̄(T) outside the tolerance is computed and shown, with its estimated e
 
 test('the status sentence says where the trajectory misses ε',()=>{
   const t=[0,.01,.021,.03,.04,.05];
-  assert.deepEqual(outsideRuns([0,1.22*E,1.04*E,.8*E,.2*E,0]),[[1,2]]);
-  assert.equal(partialSentence(t,[0,1.22*E,1.04*E,.8*E,.2*E,0],'μs'),`t ≤ 0.021 μs 估计误差最大 ${P(1.22*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
-  assert.equal(partialSentence(t,[0,0,0,1.2*E,.2*E,0],'μs'),`t = 0.03 μs 估计误差最大 ${P(1.2*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
-  assert.equal(partialSentence(t,[0,0,0,1.2*E,1.4*E,1.6*E],'μs'),`t ≥ 0.03 μs 估计误差最大 ${P(1.6*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
-  assert.equal(partialSentence(t,[0,1.2*E,0,0,1.8*E,0],'μs'),`2 段时刻（最早 t = 0.01 μs） 估计误差最大 ${P(1.8*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
-  assert.equal(partialSentence(t,[0,.2*E,.2*E,.2*E,.2*E,.2*E],'μs'),'');assert.equal(errorPercent(.0061),'0.61%');
+  // The samples marked are the solver's (`beyond`): here a bound's, every sample above ε.
+  const marks=errors=>errors.map(e=>e>E),said=(errors,short)=>short?partialShort(t,errors,marks(errors),'μs'):partialSentence(t,errors,marks(errors),'μs');
+  assert.deepEqual(outsideRuns(marks([0,1.22*E,1.04*E,.8*E,.2*E,0])),[[1,2]]);
+  assert.equal(said([0,1.22*E,1.04*E,.8*E,.2*E,0]),`t ≤ 0.021 μs 估计误差最大 ${P(1.22*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
+  assert.equal(said([0,0,0,1.2*E,.2*E,0]),`t = 0.03 μs 估计误差最大 ${P(1.2*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
+  assert.equal(said([0,0,0,1.2*E,1.4*E,1.6*E]),`t ≥ 0.03 μs 估计误差最大 ${P(1.6*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
+  assert.equal(said([0,1.2*E,0,0,1.8*E,0]),`2 段时刻（最早 t = 0.01 μs） 估计误差最大 ${P(1.8*E)}（超过 ${P(E)}），其余时刻 ≤ ${P(E)}`);
+  assert.equal(said([0,.2*E,.2*E,.2*E,.2*E,.2*E]),'');assert.equal(errorPercent(.0061),'0.61%');
+  // An estimate above ε the solver judged within (the statistics' evidence): not marked, and the rest said so.
+  assert.equal(partialSentence(t,[0,1.22*E,0,1.1*E,0,0],[false,true,false,false,false,false],'μs'),`t ≤ 0.01 μs 估计误差最大 ${P(1.22*E)}（超过 ${P(E)}），其余时刻按全部输出一起的统计证据在目标内`);
   // Beside p̄(T)'s error the status line says it short; the full sentence stays in its tooltip.
-  assert.equal(partialShort(t,[0,1.22*E,1.04*E,.8*E,.2*E,0],'μs'),`t ≤ 0.021 μs 误差最大 ${P(1.22*E)}`);
-  assert.equal(partialShort(t,[0,1.2*E,0,0,1.8*E,0],'μs'),`2 段时刻误差最大 ${P(1.8*E)}`,'several runs by their number; the band shows where');
-  assert.equal(partialShort(t,[0,.2*E,.2*E,.2*E,.2*E,.2*E],'μs'),'');
+  assert.equal(said([0,1.22*E,1.04*E,.8*E,.2*E,0],true),`t ≤ 0.021 μs 误差最大 ${P(1.22*E)}`);
+  assert.equal(said([0,1.2*E,0,0,1.8*E,0],true),`2 段时刻误差最大 ${P(1.8*E)}`,'several runs by their number; the band shows where');
+  assert.equal(said([0,.2*E,.2*E,.2*E,.2*E,.2*E],true),'');
 });
 
 test('while a solve runs the status line counts its latest estimate of the time left down',()=>{

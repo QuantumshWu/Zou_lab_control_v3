@@ -153,16 +153,21 @@ impl Ledger {
     /// has one, against T's allowance at each output, `allowed` (relative; solve.rs, # T's allowance). An output is
     /// flagged where the evidence puts it beyond its target: its account with the statistics at their least, `least`
     /// (solve.rs `Evidence`; estimate.rs, # Evidence) -- the outputs the product chases --, its parts said as they read.
-    pub fn close(&mut self, times: &[f64], (population, temperature): (&[Account], &[Option<Account>]), least: (&[Account], &[Option<Account>]), allowed: &[f64]) {
+    /// Returns the outputs flagged on what is shown: the result's state reads them (solve.rs `Solution::beyond`).
+    pub fn close(&mut self, times: &[f64], (population, temperature): (&[Account], &[Option<Account>]), least: (&[Account], &[Option<Account>]), allowed: &[f64]) -> Vec<usize> {
         self.items.sort_by(|a, b| b.estimate.total_cmp(&a.estimate));
         let populations: Vec<Option<Account>> = population.iter().map(|&a| Some(a)).collect();
         let fixed = vec![POPULATION_TARGET; times.len()];
         self.totals = Totals { population: largest(&populations, &fixed), temperature: largest(temperature, allowed), ..self.totals };
         let least_populations: Vec<Option<Account>> = least.0.iter().map(|&a| Some(a)).collect();
+        let mut shown = vec![];
         for (accounts, evidence, targets, what) in [(&populations[..], &least_populations[..], &fixed[..], "布居与丢失"), (temperature, least.1, allowed, "总温度")] {
             // Not within the target by the evidence: beyond it, or no number. The worst: of the most of its target as read.
             let beyond: Vec<usize> =
                 (0..times.len()).filter(|&k| accounts[k].is_some() && evidence[k].is_some_and(|a| !(a.total() <= targets[k]))).collect();
+            if what == "布居与丢失" {
+                shown.clone_from(&beyond);
+            }
             if let Some(&worst) = beyond.iter().max_by(|&&i, &&j| (accounts[i].unwrap().total() / targets[i]).total_cmp(&(accounts[j].unwrap().total() / targets[j]))) {
                 let a = accounts[worst].unwrap();
                 self.flag(format!(
@@ -176,6 +181,7 @@ impl Ledger {
                 ));
             }
         }
+        shown
     }
 }
 

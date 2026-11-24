@@ -9,12 +9,17 @@ export const SEMICLASSICAL_POPULATION_TARGET=0.05;
  * (rust-solver/motion units.rs `CLASSICAL`); its result marks each sample (`classical`). */
 export const SEMICLASSICAL_REGIME=4;
 /** A trajectory's estimated population error (ui-design.md §6.16). Every computed trajectory is
- * shown: 'estimated-converged' when every sample's bound is within the requested tolerance ε,
- * 'estimated-partial' otherwise -- the samples above ε are marked. */
+ * shown: 'estimated-partial' exactly where the solver judged some samples beyond the requested
+ * tolerance (`beyond`, the samples marked), 'estimated-converged' otherwise. The judgment is the
+ * solver's, not read off the errors shown: the population core's bound above ε, or the
+ * semiclassical motion's statistics' evidence over all its samples together, where a sample's
+ * estimate may read above the target and be within it by that evidence (it is shown, not marked). */
 export interface PopulationAccuracy {
   status:'estimated-converged'|'estimated-partial';requestedTolerance:number;estimatedMaximumError:number;
   /** One absolute population-error bound per sample; their maximum is estimatedMaximumError. */
   sampleErrors:number[];
+  /** The samples judged beyond the tolerance, increasing (partial only); each one's error above it. */
+  beyond?:number[];
   /** Why the solver stopped short of ε (partial only). */
   reason?:string;
   scope:{states:32;samples:number;groups:string[]};
@@ -22,25 +27,31 @@ export interface PopulationAccuracy {
 /** Explicit population-output qualification; never a density/PSD claim. `tolerance` is the
  * target the solve was run to: POPULATION_TOLERANCE, or the semiclassical 3D motion's own
  * (SEMICLASSICAL_POPULATION_TARGET), against which it reports its total estimated error per sample. */
-export function readPopulationAccuracy(value:unknown,samples:number,tolerance=POPULATION_TOLERANCE):PopulationAccuracy {
+export function readPopulationAccuracy(value:unknown,samples:number,tolerance=POPULATION_TOLERANCE,evidence=false):PopulationAccuracy {
   const invalid=():never=>{throw new Error('Invalid complete populationAccuracy contract');};
   if(!value||typeof value!=='object'||Array.isArray(value))invalid();
   const a=value as Record<string,unknown>,partial=a.status==='estimated-partial';
   // The echo is the tolerance asked for.
   if((a.status!=='estimated-converged'&&!partial)||a.requestedTolerance!==tolerance)invalid();
   const error=a.estimatedMaximumError,finite=(v:unknown):v is number=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
-  // Partial exactly when the largest bound is above it.
-  if(!finite(error)||partial!==(error>tolerance))invalid();
+  if(!finite(error))invalid();
   // The per-sample bounds: one for each sample, their maximum the trajectory's. A partial result
   // says why the solver stopped short of ε.
   const errors=a.sampleErrors;
   if(!Array.isArray(errors)||errors.length!==samples||!errors.every(finite)||Math.max(...errors)!==error)invalid();
   if(partial?typeof a.reason!=='string':a.reason!==undefined)invalid();
+  // Partial exactly where the solver lists samples beyond (increasing, each one's error above the
+  // tolerance); a bound's solver lists every sample whose bound is above it, the statistics'
+  // evidence (`evidence`: the semiclassical motion) those it puts beyond -- an estimate above the
+  // tolerance it does not list is within it by that evidence.
+  const beyond=a.beyond,index=(v:unknown):v is number=>Number.isSafeInteger(v)&&(v as number)>=0&&(v as number)<samples;
+  if(partial?!Array.isArray(beyond)||!beyond.length||!beyond.every(index)||beyond.some((k,i)=>i>0&&k<=beyond[i-1])||beyond.some(k=>!((errors as number[])[k]!>tolerance)):beyond!==undefined)invalid();
+  if(!evidence&&(errors as number[]).some((e,k)=>e>tolerance&&!(beyond as number[]|undefined)?.includes(k)))invalid();
   if(!a.scope||typeof a.scope!=='object'||Array.isArray(a.scope))invalid();
   const scope=a.scope as Record<string,unknown>,groups=scope.groups;
   if(scope.states!==32||scope.samples!==samples||!Number.isSafeInteger(samples)||samples<1||!Array.isArray(groups)||groups.length!==POPULATION_GROUPS.length||new Set(groups).size!==groups.length||groups.some(id=>typeof id!=='string'||!POPULATION_GROUPS.some(group=>group.id===id)))invalid();
   return {status:partial?'estimated-partial':'estimated-converged',requestedTolerance:tolerance,estimatedMaximumError:error as number,
-    sampleErrors:[...(errors as number[])],...(partial?{reason:a.reason as string}:{}),
+    sampleErrors:[...(errors as number[])],...(partial?{beyond:[...(beyond as number[])],reason:a.reason as string}:{}),
     scope:{states:32,samples,groups:[...(groups as string[])]}};
 }
 /** The native mean `status` values (`meanHorizons`): a computed mean p̄(T), the phase

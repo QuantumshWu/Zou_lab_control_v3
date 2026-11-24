@@ -8,6 +8,9 @@ import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from './solver-protocol
 import {readMeanDensity} from './mean-density.js';
 import {motionRequest,type MotionRequest} from './motion.js';
 
+/** The ledger's flag on what is shown beyond its target (rust-solver/motion ledger.rs `Ledger::close`): the words that say
+ * the engine's verdict a motion result's state carries. */
+const SHOWN_FLAG=/布居与丢失的误差超出目标/;
 export interface SolverFailureRecord {time:string;request:{clientId:string;sequence:number};scene:Scene;options:object;attempt:number;willRetry:boolean;error:string;status?:number;code?:string;response?:unknown;page?:string;}
 class RequestFailure extends Error {constructor(message:string,readonly status:number,readonly code:string,readonly retryable:boolean){super(message);}}
 type Job={id:number;attempt:number;scene:Scene;settings:DynamicsSettings;meanOnly:boolean;includeMean:boolean;controller:AbortController;
@@ -161,7 +164,7 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   if(timesUs.length>1&&typeof d.method!=='string')invalid('时间演化方法');
   // A motion result (semiclassical) states its own target; every other the population tolerance.
   const tolerance=motion?SEMICLASSICAL_POPULATION_TARGET:POPULATION_TOLERANCE;
-  if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length,tolerance);}catch{invalid('布居精度元数据');}
+  if(timesUs.length>1||data.populationAccuracy!==undefined)try{populationAccuracy=readPopulationAccuracy(data.populationAccuracy,timesUs.length,tolerance,!!motion);}catch{invalid('布居精度元数据');}
   if(data.progress!==undefined&&data.progress!==true)invalid('进度标记');
   // A checkpoint may carry its run's estimate of the wall time left (ms, finite, ≥ 0); a final
   // result never does.
@@ -205,6 +208,9 @@ export function normalizeDynamicsResult(data:any,scene:Scene,initial:string|Init
   let motionResult:MotionResult|undefined;
   if(motion)try{motionResult=readMotionResult(data.motion,d,timesUs);}catch{invalid('运动结果');}
   else if(data.motion!==undefined)invalid('运动结果');
+  // A motion result's state and its ledger say one verdict (the engine's: motion_adapter.rs, ledger.rs `Ledger::close`):
+  // partial exactly where the ledger flags what is shown beyond its target.
+  if(motionResult&&populationAccuracy&&(populationAccuracy.status==='estimated-partial')!==SHOWN_FLAG.test(motionResult.approximations.flagged??''))invalid('布居精度元数据');
   const assumptions=data.assumptions;
   if(!Array.isArray(assumptions)||assumptions.some((text:unknown)=>typeof text!=='string'))invalid('模型假设');
   // A motion result's rows are the held atom's internal populations: each becomes the probability

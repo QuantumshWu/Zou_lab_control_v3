@@ -2,13 +2,13 @@ import {timeDisplayUnit} from './duration.js';
 import type {DurationUnit} from './types.js';
 import {SEMICLASSICAL_REGIME,type MeanResult} from './solver-types.js';
 import {POPULATION_TOLERANCE} from './types.js';
-import {errorPercent,outsideRuns,resultTolerance,sampleErrors} from './accuracy.js';
+import {WITHIN_BY_EVIDENCE,errorPercent,outsideRuns,resultTolerance,sampleBeyond,sampleErrors} from './accuracy.js';
 import {LOSS_CURVE} from './population-selection.js';
 
 export interface PopulationPlot {timesUs:number[];populations:Record<string,number[]>;totalExcited:number[];mean?:MeanResult;
   /** Per-sample error bounds (ui-design.md §6.16): samples above the solve's tolerance (ε, or the
    * semiclassical 3D motion's own target) are drawn, marked. */
-  populationAccuracy?:{sampleErrors?:number[];requestedTolerance?:number};}
+  populationAccuracy?:{sampleErrors?:number[];requestedTolerance?:number;beyond?:number[]};}
 export interface PopulationChartOptions {scale?:'linear'|'log';viewportWidth?:number;initialId?:string;timeUnit?:DurationUnit;showTotalExcited?:boolean;
   /** The long-time column's name: p̄(T) at the T the result holds (p̄(1 s), p̄(100 ms)). */
   meanLabel?:string;
@@ -103,10 +103,10 @@ export function populationChart(result:PopulationPlot,monitoredIds:string[],labe
   const tolerance=resultTolerance(result);
   // A motion result's samples outside its validated regime: a grey band behind them.
   svg+=referenceBands(result.timesUs.map(x),options.reference,[[top,bottom]]);
-  // Samples whose estimated error exceeds the tolerance: a light band behind them (half-way to
-  // their neighbours), and their curve segments dashed and faded.
-  const errors=sampleErrors(result),runs=errors?outsideRuns(errors,tolerance):[],n=result.timesUs.length;
-  const outside=(i:number)=>!!errors&&errors[i]!>tolerance;
+  // Samples the solver judged beyond the tolerance: a light band behind them (half-way to their
+  // neighbours), and their curve segments dashed and faded.
+  const errors=sampleErrors(result),marked=sampleBeyond(result),runs=errors?outsideRuns(marked):[],n=result.timesUs.length;
+  const outside=(i:number)=>!!errors&&marked[i]===true;
   for(const [a,b] of runs){
     const from=a>0?(x(result.timesUs[a-1]!)+x(result.timesUs[a]!))/2:x(result.timesUs[a]!),to=b<n-1?(x(result.timesUs[b]!)+x(result.timesUs[b+1]!))/2:x(result.timesUs[b]!);
     const worst=Math.max(...errors!.slice(a,b+1));
@@ -135,9 +135,10 @@ export function bindPopulationChart(host:HTMLElement,result:PopulationPlot,ids:s
     cursor.style.display='';
     const mean=result.mean?.converged&&result.mean.populations?result.mean:undefined;
     const meanLabel=options.meanLabel??'p̄(T)',error=sampleErrors(result)?.[index];
-    // The sample's estimated error (an absolute bound on every population), marked when above ε.
-    const tolerance=resultTolerance(result);
-    const accuracy=error===undefined?'':`<span class="readout-error${error>tolerance?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${error>tolerance?`（超过 ${esc(errorPercent(tolerance))}）`:''}</span>`;
+    // The sample's estimated error (an absolute bound on every population), marked where the solver judged it beyond;
+    // an estimate above the tolerance judged within said so.
+    const tolerance=resultTolerance(result),beyond=sampleBeyond(result)[index]===true,high=error!==undefined&&error>tolerance&&!beyond;
+    const accuracy=error===undefined?'':`<span class="readout-error${beyond?' outside':''}" title="该时刻布居的估计误差（概率的绝对误差）">±${esc(errorPercent(error))}${beyond?`（超过 ${esc(errorPercent(tolerance))}）`:high?`（高于 ${esc(errorPercent(tolerance))}，${WITHIN_BY_EVIDENCE}）`:''}</span>`;
     const meanOutside=mean&&!mean.withinTolerance?`<p class="note wrap readout-outside">${esc(meanLabel)} 估计误差 ${esc(mean.estimatedError===null?'未知':errorPercent(mean.estimatedError))}，超过 ${esc(errorPercent(POPULATION_TOLERANCE))}。</p>`:'';
     const head=mean?`<div class="readout-row readout-head"><span></span><span>p(t)</span><span>${esc(meanLabel)}</span></div>`:'';
     const meanOf=(id:string)=>{if(id!=='__excited__')return mean?.populations?.[id]??NaN;const excited=Object.entries(mean?.populations??{}).filter(([state])=>/^(D1|D2)-/.test(state));return excited.length?excited.reduce((sum,[,p])=>sum+p,0):NaN;};

@@ -19,7 +19,7 @@ export function nativeResult({states,initialIndex,timesUs,tolerance=POPULATION_T
     return {horizonUs:T,status:'time-average',reason:'test mean',populations:row.slice(),densityReal:real.slice(),densityImag:Array(32*32).fill(0),estimatedError:e,withinTolerance:e<=tolerance};};
   return {protocol:NATIVE_PROTOCOL,modelSchema:FULL_MODEL_SCHEMA,states,timesUs,populations:timesUs.map(()=>row.slice()),
     ...(finite?{populationAccuracy:{status:Math.max(...sampleErrors)>tolerance?'estimated-partial':'estimated-converged',requestedTolerance:tolerance,estimatedMaximumError:Math.max(...sampleErrors),
-      sampleErrors:sampleErrors.slice(),...(Math.max(...sampleErrors)>tolerance?{reason:'test budget'}:{}),
+      sampleErrors:sampleErrors.slice(),...(Math.max(...sampleErrors)>tolerance?{beyond:sampleErrors.flatMap((e,i)=>e>tolerance?[i]:[]),reason:'test budget'}:{}),
       scope:{states:32,samples:timesUs.length,groups:POPULATION_GROUPS.map(group=>group.id)}}}:{}),
     ...(mean?{meanHorizons:HORIZONS.map(entry)}:{}),
     diagnostics:{traceError:0,initialStateError:0,elapsedMs:1,...(finite?{method:'test trajectory'}:{}),
