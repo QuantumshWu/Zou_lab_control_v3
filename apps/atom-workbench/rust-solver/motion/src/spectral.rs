@@ -1387,6 +1387,11 @@ impl Picture {
         self.work += (n * n * n) as f64;
         lay(&e.vectors.data, n, &mut self.right);
         lay(&e.inverse.data, n, &mut self.left);
+        // The element-wise passes about the decomposition (decide.rs, # Work): Ĥ₀ copied less its trace's share, every
+        // matrix's entries tested for the connections (the static group's, its changes' and the tones' members'), the
+        // reached components and the bounds a pass over n² each, R and R⁻¹ laid for the lanes.
+        let matrices = 1 + if still { 0 } else { 2 + 3 * 2 * self.beats.len() };
+        self.work += (crate::decide::MOVED / crate::decide::COMPLEX) * (3 * n * n) as f64 + (matrices * n * n + 3 * n * n) as f64 / crate::decide::COMPLEX;
         drop(decomposing);
         if self.moving {
             let changing = crate::prof::scope(86);
@@ -2260,7 +2265,7 @@ impl Picture {
         }
         self.rung = true;
         let mut count = (numerator.len() * 12) as f64;
-        let log = -UNIT_ROUNDOFF.ln();
+        let log = -crate::step::quad_tol().ln();
         let sums = |items: &[(f64, f64)], sigma: f64| {
             items.iter().fold([0.0; 3], |[w, w1, w2], &(p, nu)| {
                 let e = p * (sigma * nu).exp();
@@ -2279,7 +2284,7 @@ impl Picture {
             let mut above = 0.0;
             numerator.iter().find(|&&(p, _)| {
                 above += p;
-                above > UNIT_ROUNDOFF
+                above > crate::step::quad_tol()
             }).map_or(0.0, |&(_, nu)| nu)
         } else {
             // The ringing's series where it has a sum (Chernoff's bound), and the quotient as F times 1/N on the
@@ -2376,6 +2381,11 @@ impl Picture {
         let v = self.quotient_by(from, false);
         self.lambda[..n].copy_from_slice(&kept[..n]);
         v
+    }
+
+    /// The pairs `weighed_by` weighs (its count: three real operations each, step.rs `Groups::choose`).
+    pub(crate) fn weighing(&self) -> usize {
+        self.pairs.len() + self.numerated.len()
     }
 
     /// The last quotient's items (`quotient_from`) by a cut of the eigencomponents into groups (`group[a]` below `groups`;
@@ -2493,7 +2503,7 @@ impl Picture {
         let mut above = 0.0;
         let band = numerator.iter().find(|&&(p, _)| {
             above += p * inflation;
-            above > UNIT_ROUNDOFF
+            above > crate::step::quad_tol()
         }).map_or(0.0, |&(_, nu)| nu);
         if series.is_finite() && !pays((series - band) / 3.0) {
             return (f64::INFINITY, count);

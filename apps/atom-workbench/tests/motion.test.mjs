@@ -17,7 +17,7 @@ import {meanInputsKey,trajectoryInputsKey} from '../dist/js/atom-workbench/src/d
 import {plannedSolve} from '../dist/js/atom-workbench/src/solve-plan.js';
 import {DynamicsClient,normalizeDynamicsResult} from '../dist/js/atom-workbench/src/solver-client.js';
 import {solverText} from '../dist/js/atom-workbench/src/solver-words.js';
-import {exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance} from '../dist/js/atom-workbench/src/accuracy.js';
+import {approximationTotal,exceedsNote,ledgerRows,outsideRuns,partialSentence,resultTolerance,sampleBeyond,withinSentence} from '../dist/js/atom-workbench/src/accuracy.js';
 import {definitionNotes,modelNotes} from '../dist/js/atom-workbench/src/model-notes.js';
 import {POPULATION_TOLERANCE} from '../dist/js/atom-workbench/src/types.js';
 import {SEMICLASSICAL_POPULATION_TARGET} from '../dist/js/atom-workbench/src/solver-types.js';
@@ -26,11 +26,11 @@ import {FULL_MODEL_SCHEMA,HTTP_PROTOCOL,NATIVE_PROTOCOL} from '../dist/js/atom-w
 import {prepareNativeSolve} from '../scripts/native-protocol.mjs';
 import {populationChart,populationColor} from '../dist/js/atom-workbench/src/population-chart.js';
 import {LOSS_CURVE,recommendedCurves,withPopulationGroups} from '../dist/js/atom-workbench/src/population-selection.js';
-import {TEMPERATURE_WINDOW,TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart} from '../dist/js/atom-workbench/src/motion-chart.js';
+import {TEMPERATURE_WINDOW,TOTAL_INK,TOTAL_WIDTH,lineReading,motionSeries,seriesChart,velocitySeries} from '../dist/js/atom-workbench/src/motion-chart.js';
 import {MOTION_DIAGNOSTICS,motionBlock,motionResult} from './native-result.mjs';
 import {spherical} from './directions.mjs';
-import {readFileSync,readdirSync} from 'node:fs';
-import {chinese,english,filled,rustLiterals} from './rust-sentences.mjs';
+import {existsSync,readFileSync} from 'node:fs';
+import {chinese,english,filled,rustLiterals,rustModules} from './rust-sentences.mjs';
 
 const N=32,C=299792458;
 const axis=name=>({reference:{kind:'axis',axis:name},thetaDeg:0,phiDeg:0});
@@ -275,6 +275,14 @@ test('a motion result is read strictly: the 3D block with the total temperature,
   const result=readMotion(),m=result.motion,block=motionBlock(3);
   assert.deepEqual([m.temperatureUK,m.temperatureErrorUK],[[block.temperatureUK.x,block.temperatureUK.y,block.temperatureUK.z],[[1.5,1.5,1.5],[1.5,1.5,1.5],[1.5,1.5,1.5]]]);
   assert.deepEqual([m.temperatureTotalUK,m.temperatureTotalErrorUK,m.trapFrequencyKHz,m.classical],[[31,31,31],[.9,.9,.9],[100.5,100.5,19.3],[true,true,false]]);
+  // The held atoms' mean velocity and push per axis, each with its standard error and its target.
+  assert.deepEqual([m.meanVelocityMps,m.meanVelocityErrorMps[2],m.meanVelocityTargetMps[0]],[[block.meanVelocityMps.x,block.meanVelocityMps.y,block.meanVelocityMps.z],[.0004,.0004,.0004],[.032,.032,.032]]);
+  // The push and its target have none at t = 0 (no window there).
+  assert.deepEqual([m.pushMps2,m.pushErrorMps2[2],m.pushTargetMps2[1]],[[[null,0,0],[null,0,0],[null,30,30]],[null,2,2],[null,6.4,6.4]]);
+  // The details' 近似误差 line: the four totals against their targets; the velocity's and the push's {0, 0} are no account.
+  assert.equal(approximationTotal(m.approximations),'布居 0.21%（目标 5%），温度 0.3%（目标 10%），平均速度 0.0011 m/s（目标 0.032 m/s），推力 0.4 m/s²（目标 6.4 m/s²）；未超出');
+  const unbooked=readMotion(d=>{d.diagnostics.approximations.totals.velocity={error:0,target:0};d.diagnostics.approximations.totals.push={error:0,target:0};}).motion;
+  assert.equal(approximationTotal(unbooked.approximations),'布居 0.21%（目标 5%），温度 0.3%（目标 10%），平均速度无账，推力无账；未超出');
   assert.deepEqual([m.device,m.deviceNote,m.approximations],[MOTION_DIAGNOSTICS.device,MOTION_DIAGNOSTICS.deviceNote,MOTION_DIAGNOSTICS.approximations]);
   assert.equal(result.populationAccuracy.requestedTolerance,.05);assert.equal(result.mean.status,'not-requested');
   const few=readMotion(d=>{d.motion.temperatureErrorUK.x[1]=null;d.motion.temperatureTotalErrorUK[1]=null;}).motion;
@@ -288,6 +296,10 @@ test('a motion result is read strictly: the 3D block with the total temperature,
     ['a total short of a sample',d=>{d.motion.temperatureTotalUK.pop();}],['a negative total error',d=>{d.motion.temperatureTotalErrorUK[1]=-.1;}],
     ['one axis missing',d=>{delete d.motion.temperatureUK.z;}],['no regime',d=>{delete d.motion.classical;}],['no trajectories',d=>{d.motion.trajectories=0;}],
     ['a loss that decreases',d=>{d.motion.lossProbability[2]=0;}],['an unknown key',d=>{d.motion.axes=['x','y','z'];}],
+    ['no push',d=>{delete d.motion.pushMps2;}],['no velocity error',d=>{delete d.motion.meanVelocityErrorMps;}],['a push error below zero',d=>{d.motion.pushErrorMps2.z[1]=-1;}],
+    ['a velocity target of zero',d=>{d.motion.meanVelocityTargetMps.x[0]=0;}],['a push target of zero',d=>{d.motion.pushTargetMps2.z[1]=0;}],['a push target short of a sample',d=>{d.motion.pushTargetMps2.y.pop();}],
+    ['a push that is no number',d=>{d.motion.pushMps2.x[2]='0';}],['a mean velocity that is none',d=>{d.motion.meanVelocityMps.y[1]=null;}],
+    ['no push total',d=>{delete d.diagnostics.approximations.totals.push;}],['no velocity total',d=>{delete d.diagnostics.approximations.totals.velocity;}],
     ['no device',d=>{delete d.diagnostics.device;}],['another device',d=>{d.diagnostics.device='tpu';}],['an empty note',d=>{d.diagnostics.deviceNote=' ';}],
     ['no ledger',d=>{delete d.diagnostics.approximations;}],['a ledger key',d=>{d.diagnostics.approximations.total=1;}],['no totals',d=>{delete d.diagnostics.approximations.totals;}],['a negative total',d=>{d.diagnostics.approximations.totals.temperature.error=-1;}],['a negative estimate',d=>{d.diagnostics.approximations.items[0].estimate=-1;}],['items not from the largest down',d=>{d.diagnostics.approximations.items.reverse();}],
     ['an item without its action',d=>{delete d.diagnostics.approximations.items[1].action;}],['an empty flag',d=>{d.diagnostics.approximations.flagged='';}],['an empty ledger note',d=>{d.diagnostics.approximations.note='';}],
@@ -300,19 +312,33 @@ test('a motion result is read strictly: the 3D block with the total temperature,
 });
 
 test('a motion trajectory is tested against its own target, 5 %, and every sentence about its samples names that target',()=>{
-  // A result's sample errors with the status the adapter writes for them (motion_adapter.rs).
-  const errors=values=>d=>{const a=d.populationAccuracy,worst=Math.max(...values),partial=worst>a.requestedTolerance;
-    Object.assign(a,{sampleErrors:values,estimatedMaximumError:worst,status:partial?'estimated-partial':'estimated-converged'});if(partial)a.reason='test budget';else delete a.reason;};
+  // A result's sample errors with the engine's verdict the adapter writes for them (motion_adapter.rs): the samples the
+  // statistics' evidence puts beyond (`beyond`, every one above 5 % unless said), the state partial exactly where some are.
+  const errors=(values,beyond=values.flatMap((e,i)=>e>.05?[i]:[]))=>d=>{const a=d.populationAccuracy,worst=Math.max(...values),partial=beyond.length>0;
+    Object.assign(a,{sampleErrors:values,estimatedMaximumError:worst,status:partial?'estimated-partial':'estimated-converged'});if(partial)Object.assign(a,{beyond,reason:'test budget'});else{delete a.reason;delete a.beyond;}
+    // The ledger flags exactly what the state says (ledger.rs `Ledger::close`).
+    if(partial)d.diagnostics.approximations.flagged='1 ms：布居与丢失的误差超出目标（统计按全部输出一起的证据），估计最大 6.2%';else delete d.diagnostics.approximations.flagged;};
   const initial=pgc().dynamics.initialStateId,chart=r=>populationChart(r,[initial],{[initial]:'初态'},{showTotalExcited:false});
   // 3 %: beyond the population core's ε, within the motion's own target -- nothing marked, nothing said.
   const within=readMotion(errors([0,.03,.01])),tolerance=resultTolerance(within);
   assert.equal(tolerance,SEMICLASSICAL_POPULATION_TARGET);assert.notEqual(tolerance,POPULATION_TOLERANCE);
-  assert.deepEqual(outsideRuns(within.populationAccuracy.sampleErrors,tolerance),[]);
-  assert.equal(partialSentence(within.timesUs,within.populationAccuracy.sampleErrors,'ms',tolerance),'');
+  assert.deepEqual(outsideRuns(sampleBeyond(within)),[]);
+  assert.equal(partialSentence(within.timesUs,within.populationAccuracy.sampleErrors,sampleBeyond(within),'ms',tolerance),'');
   assert.doesNotMatch(chart(within),/accuracy-band|超过/);
   // 6.2 %: marked, and the words name the 5 % it was tested against, never ε.
   const over=readMotion(errors([0,.062,.01])),limit=resultTolerance(over);
-  assert.equal(partialSentence(over.timesUs,over.populationAccuracy.sampleErrors,'ms',limit),'t ≤ 5 ms 估计误差最大 6.2%（超过 5%），其余时刻 ≤ 5%');
+  assert.equal(partialSentence(over.timesUs,over.populationAccuracy.sampleErrors,sampleBeyond(over),'ms',limit),'t ≤ 5 ms 估计误差最大 6.2%（超过 5%），其余时刻 ≤ 5%');
+  // 6.1 % judged within by the evidence: converged, read, not marked, and the estimate shown with why it stands.
+  const evident=readMotion(errors([0,.061,.01],[]));
+  assert.equal(evident.populationAccuracy.status,'estimated-converged');assert.deepEqual(outsideRuns(sampleBeyond(evident)),[]);
+  assert.equal(withinSentence(evident.populationAccuracy.sampleErrors,sampleBeyond(evident),limit),'估计误差最大 6.1%（高于 5%），按全部输出一起的统计证据在目标内');
+  assert.doesNotMatch(chart(evident),/accuracy-band|超过/);
+  // A verdict the numbers cannot carry is refused: a sample beyond whose estimate is within, or partial with none beyond.
+  assert.throws(()=>readMotion(errors([0,.03,.01],[1])),/布居精度/);
+  assert.throws(()=>readMotion(d=>{errors([0,.062,.01])(d);delete d.populationAccuracy.beyond;}),/布居精度/);
+  // ... and a state the ledger does not say: partial with no flag on what is shown, or converged with one.
+  assert.throws(()=>readMotion(d=>{errors([0,.062,.01])(d);delete d.diagnostics.approximations.flagged;}),/布居精度/);
+  assert.throws(()=>readMotion(d=>{errors([0,.03,.01])(d);d.diagnostics.approximations.flagged='1 ms：布居与丢失的误差超出目标';}),/布居精度/);
   assert.equal(exceedsNote(.062,limit),'（估计误差 6.2%，超过 5%）');assert.equal(exceedsNote(null,limit),'（估计误差 未知，超过 5%）');
   assert.match(chart(over),/超过 5%/);assert.doesNotMatch(chart(over),/超过 1%/);
   // A trajectory of the population core is tested against ε.
@@ -353,7 +379,7 @@ test('the notes and the chart titles say what the engine computes: the loss, the
   assert.match(notes,/区间按组数取 Student t，组少时比两倍标准误差宽/);
   // The total T's target: its three parts weighed by the held share (solve.rs `temperature_account`, moved out of
   // `accounts` in b2dac752; SPEC §0): the model's and the statistics' here, the step's read so already (estimate.rs `between`).
-  assert.match(source('solve.rs'),/let h = 1\. - e\.loss;\s*Account \{ model: weighed\(h, model\), step: bound\.temperature \* e\.temperature_target, statistics: weighed\(h, interval\) \}/);
+  assert.match(source('solve.rs'),/let h = 1\. - e\.loss;\s*Account \{ model: weighed\(h, model\), step: step \* e\.temperature_target, statistics: weighed\(h, interval\) \}/);
   assert.match(source('estimate.rs'),/T relative to the finer level's and weighed by the\s*\/\/! finer level's held share 1 − L/);
   assert.match(notes,/按仍在光阱中的份额 1 − L 计权后与 10% 比较/);
   // A motion trajectory's sample errors are its total estimates against its own target.
@@ -399,6 +425,35 @@ test('温度与 n̄: a line per axis and the total temperature apart from them; 
   const reference=result.motion.classical.map(inside=>!inside);
   assert.deepEqual(bands(seriesChart(result.timesUs,[temperature,occupation],'ms',{reference})).map(([x,y,w,h])=>[x,x+w,y,y+h]),[[599.5,778,32,176],[599.5,778,212,300]]);
   assert.deepEqual(bands(chart),[]);
+});
+
+test('速度与推力: ⟨v⟩ and the push a line per axis on an axis through zero, each in the unit that fits it; the readout says value ± 误差',()=>{
+  const result=readMotion(),[velocity,push]=velocitySeries(result.motion),chart=seriesChart(result.timesUs,[velocity,push],'ms');
+  assert.deepEqual(velocity.lines.map(l=>[l.name,l.ink,l.width]),[['⟨v⟩（x 轴）','#517FA6',undefined],['⟨v⟩（y 轴）','#B17D4B',undefined],['⟨v⟩（z 轴）','#568C79',undefined]]);
+  assert.deepEqual(push.lines.map(l=>l.name),['a（x 轴）','a（y 轴）','a（z 轴）']);
+  // ⟨v⟩ at most 1.5 cm/s: in cm/s; the push 30 m/s²: in m/s².
+  assert.deepEqual([velocity.unit.name,velocity.title,push.unit.name,push.title],['cm/s','平均速度 ⟨v⟩ / cm/s','m/s²','推力 a = d⟨v⟩/dt / m/s²']);
+  assert.equal(lineReading(velocity.lines[2],2,velocity.unit),'1.5 ± 0.04 cm/s');assert.equal(lineReading(velocity.lines[1],1,velocity.unit),'−0.2 ± 0.04 cm/s');
+  assert.equal(lineReading(push.lines[2],1,push.unit),'30 ± 2 m/s²');assert.equal(lineReading(push.lines[2],0,push.unit),'无读数','t = 0 has no window');
+  // The push's lines start at the first sample that has one: the polyline over samples 1 and 2 alone.
+  assert.equal([...chart.matchAll(/<polyline points="([^"]+)"[^>]*data-series-id="push-2"/g)].map(m=>m[1].split(' ').length).join(),'2');
+  // A reading missing inside the series breaks its line in two, and the axis reads the values it has.
+  const broken=velocitySeries(readMotion(d=>{d.motion.pushMps2.z=[30,null,30];}).motion)[1],three=readMotion().timesUs;
+  assert.equal([...seriesChart(three,[velocity,broken],'ms').matchAll(/data-series-id="push-2"/g)].length,2);
+  // The velocity's axis runs through zero, from a tick below y's −0.2 cm/s to one above z's 1.5 cm/s; zero is a grid line, and
+  // a value lies at its place on it (the panel 32 to 176): 0 at 176 − 0.5/2·144 for ticks −0.5 … 1.5.
+  const ticks=[...chart.matchAll(/<text x="52" y="([\d.]+)" [^>]*>([^<]+)<\/text>/g)].map(m=>[Number(m[1]),m[2]]);
+  assert.deepEqual(ticks.slice(0,5).map(t=>t[1]),['−0.5','0','0.5','1','1.5']);
+  const zero=ticks.find(t=>t[1]==='0')[0]-4;assert.ok(Math.abs(zero-(176-.5/2*144))<1e-9,`${zero}`);
+  // The push's axis is the temperature's kind, from 0: no line below zero.
+  assert.deepEqual(ticks.slice(5).map(t=>t[1]),['0','10','20','30']);
+  // No velocity on the temperature's chart, no temperature here.
+  assert.doesNotMatch(chart,/温度|n̄/);
+  const few=velocitySeries(readMotion(d=>{d.motion.meanVelocityErrorMps.y[1]=null;}).motion)[0];
+  assert.equal(lineReading(few.lines[1],1,few.unit),'−0.2 cm/s（误差未知）');
+  // An atom cloud at rest with no push: both in their base units, both axes from 0.
+  const still=velocitySeries(readMotion(d=>{for(const a of ['x','y','z']){d.motion.meanVelocityMps[a].fill(0);d.motion.pushMps2[a].fill(0);}}).motion);
+  assert.deepEqual(still.map(s=>s.unit.name),['m/s','m/s²']);
 });
 
 test('the examples: three scenes of the atom moving in its designated tweezer from |2,+2⟩ at 100 μK on D2; a retro-reflection is the app\'s mirror',()=>{
@@ -451,12 +506,34 @@ test('the motion engine\'s sentences are shown in Chinese',()=>{
   const shown=text=>chinese(text)||solverText(filled(text,'10'))!==filled(text,'10');
   // The engine (rust-solver/motion/src) and its adapter: every sentence of the shipped code -- a refusal, the method,
   // the ledger's items, a flag, a note -- is shown. What an assertion says goes with a fault in the program, to no user.
+  // No user meets either of these, so neither is read:
+  // - the tests' own code: the engine's files are those its root (lib.rs) reaches by the modules its shipped code
+  //   declares (rust-sentences.mjs `rustModules`) -- a module declared under #[cfg(test)], and every file declared from
+  //   one (tests.rs, step/tests/, model/selected/tests.rs's #[path] modules, model/testing.rs, ...), is compiled in the
+  //   tests alone, as the items under #[cfg(test)] within a file are (`rustLiterals`);
+  // - the profiling feature's (prof.rs, off in every released build): its items under #[cfg(feature = "prof")]
+  //   (the regions' names, `rustLiterals`) and the text of `prof::note`, which only that feature prints.
   const ASSERTED=['assert!','assert_eq!','assert_ne!','debug_assert!','debug_assert_eq!','debug_assert_ne!','expect','unreachable!','panic!','compile_error!'];
-  const files=['src/motion_adapter.rs',...readdirSync(new URL('motion/src/',solver),{recursive:true}).map(name=>`motion/src/${name.replaceAll('\\','/')}`)
-    .filter(path=>path.endsWith('.rs')&&!path.endsWith('/tests.rs')&&path!=='motion/src/request.rs')];
-  assert.ok(files.length>20,`${files.length} files`);
+  const PROFILED=['note'];
+  const reached=[],open=['motion/src/lib.rs'];
+  while(open.length){
+    const file=open.pop();reached.push(file);
+    // A module's file: its #[path] beside the declaring file; else name.rs or name/mod.rs in the declaring file's own
+    // folder where it is lib.rs or mod.rs, in the folder of its name otherwise.
+    const dir=file.slice(0,file.lastIndexOf('/')+1),own=/\/(lib|mod)\.rs$/.test(file)?dir:file.slice(0,-3)+'/';
+    for(const {name,path} of rustModules(source(file))){
+      const found=path!==undefined?[dir+path]:[own+name+'.rs',own+name+'/mod.rs'];
+      const hit=found.find(f=>existsSync(new URL(f,solver)));
+      assert.ok(hit,`${file}: mod ${name} at ${found}`);
+      open.push(hit);
+    }
+  }
+  const files=['src/motion_adapter.rs',...reached.filter(path=>path!=='motion/src/request.rs')];
+  assert.ok(!files.some(path=>/\/tests(\.rs|\/)/.test(path)),`a test module shipped: ${files}`);
+  assert.ok(files.length>20&&files.includes('motion/src/model/rs/fold_table.rs'),`${files.length} files`);
   let sentences=0;
   for(const file of files)for(const {text,within} of rustLiterals(source(file))){
+    if(within.some(name=>PROFILED.includes(name)))continue;
     if(!chinese(text)&&!(english(text)&&!within.some(name=>ASSERTED.includes(name))))continue;
     sentences++;assert.ok(shown(text),`${file}: ${text}`);
   }

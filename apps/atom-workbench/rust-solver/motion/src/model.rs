@@ -38,51 +38,6 @@ impl Beat {
     pub fn whole(n: Vec<i64>) -> Beat {
         Beat { n, d: 1 }
     }
-    /// n/d in lowest terms, d positive (d ≠ 0).
-    fn reduced(mut n: Vec<i64>, mut d: i64) -> Beat {
-        let gcd = |mut a: i64, mut b: i64| {
-            while b != 0 {
-                (a, b) = (b, a % b);
-            }
-            a.abs()
-        };
-        let g = n.iter().fold(d, |g, &x| gcd(g, x));
-        if g > 1 {
-            n.iter_mut().for_each(|x| *x /= g);
-            d /= g;
-        }
-        if d < 0 {
-            n.iter_mut().for_each(|x| *x = -*x);
-            d = -d;
-        }
-        Beat { n, d }
-    }
-    /// self + s·other.
-    pub fn plus(&self, s: i64, other: &Beat) -> Beat {
-        if self.d == other.d {
-            return Beat::reduced(self.n.iter().zip(&other.n).map(|(&a, &b)| a + s * b).collect(), self.d);
-        }
-        Beat::reduced(self.n.iter().zip(&other.n).map(|(&a, &b)| a * other.d + s * b * self.d).collect(), self.d * other.d)
-    }
-    pub fn negated(&self) -> Beat {
-        Beat { n: self.n.iter().map(|&a| -a).collect(), d: self.d }
-    }
-    pub fn is_zero(&self) -> bool {
-        self.n.iter().all(|&a| a == 0)
-    }
-    /// The sign of its first coordinate that is not zero (zero for the zero frequency): a beat's orientation.
-    pub fn sign(&self) -> i64 {
-        self.n.iter().find(|&&x| x != 0).map_or(0, |x| x.signum())
-    }
-    /// Its value on the coordinates' values `axes`: Σ_k n_k a_k / d, from the integer numerators (never a difference of
-    /// two values).
-    pub fn value(&self, axes: &[f64]) -> f64 {
-        self.n.iter().zip(axes).map(|(&n, &a)| n as f64 * a).sum::<f64>() / self.d as f64
-    }
-    /// The size of the terms its value is the sum of, Σ_k |n_k a_k| / |d|: what the value's rounding is of.
-    pub fn size(&self, axes: &[f64]) -> f64 {
-        self.n.iter().zip(axes).map(|(&n, &a)| (n as f64 * a).abs()).sum::<f64>() / (self.d as f64).abs()
-    }
 }
 
 /// A point of a trajectory: position r (µm), momentum κ = p/ħ (1/µm), time t (µs).
@@ -126,12 +81,13 @@ pub struct Cluster {
     /// beat Ω (∝ e^{iΩt}) is at Ω + θ_a − θ_b.
     pub frames: Vec<Beat>,
     /// Each state's Doppler frame K_s (1/µm): on a path r_h + v(t − t_m) the state is ψ_s = e^{iK_s·v(t − t_m)} x_s. The
-    /// trajectory's model takes none (K_s = 0: its nodes are made at the path's own points, model/selected.rs).
+    /// trajectory's model takes its time frame's spatial twin (model/selected.rs, # One cluster, one frame).
     pub waves: Vec<[f64; 3]>,
     /// The Doppler frames exactly, as integer coordinates on the light's wave vectors (`Beat`'s arithmetic).
     pub(crate) waves_exact: Vec<Beat>,
 }
 
+#[cfg(test)]
 /// One class of photons (SPEC §1.6) of a cluster's state at a point: the photons of one frame frequency landing in one cluster,
 /// folded and explicit amplitudes added. (A class of one frequency landing in two clusters is two of these: the joint law of
 /// direction, polarization and landing is the same either way, ∝ ‖P_C Σ_a ε_a u_a‖².)
@@ -214,6 +170,7 @@ impl Moments {
 pub struct Scattering { pub force: [f64; 3], pub diffusion: [[f64; 3]; 3], pub size: f64, pub links: usize }
 
 impl Scattering {
+    #[cfg(test)]
     /// No light scattered.
     pub const NONE: Scattering = Scattering { force: [0.0; 3], diffusion: [[0.0; 3]; 3], size: 0.0, links: 0 };
 
@@ -249,6 +206,7 @@ impl Scattering {
         Scattering { force, diffusion, size: crate::linalg::largest(0.0, sizes), links }
     }
 
+    #[cfg(test)]
     /// The scattering of a state of the norm ‖ψ‖² = `norm` from its classes' photons made with their gradients
     /// (`of_moments` of their moments over the norm).
     pub fn of(photons: &[Photon], norm: f64) -> Scattering {
@@ -256,6 +214,7 @@ impl Scattering {
     }
 }
 
+#[cfg(test)]
 impl Photon {
     /// The class's rate W = Σ_a ‖u_a‖² in its state's norm (`Moments::of` sums it the same).
     pub fn weight(&self) -> f64 {

@@ -57,37 +57,46 @@ impl C64 {
     pub const ZERO: C64 = C64 { re: 0.0, im: 0.0 };
     pub const ONE: C64 = C64 { re: 1.0, im: 0.0 };
     pub const I: C64 = C64 { re: 0.0, im: 1.0 };
+    #[inline]
     pub const fn new(re: f64, im: f64) -> C64 {
         C64 { re, im }
     }
+    #[inline]
     pub const fn real(re: f64) -> C64 {
         C64 { re, im: 0.0 }
     }
+    #[inline]
     pub fn conj(self) -> C64 {
         C64 { re: self.re, im: -self.im }
     }
     /// |z|².
+    #[inline]
     pub fn norm_sqr(self) -> f64 {
         self.re * self.re + self.im * self.im
     }
     /// |z|, without overflow or underflow of the square (`hypot`).
+    #[inline]
     pub fn abs(self) -> f64 {
         hypot(self.re, self.im)
     }
     /// arg z in (−π, π].
+    #[inline]
     pub fn arg(self) -> f64 {
         self.im.atan2(self.re)
     }
     /// e^{iφ}.
+    #[inline]
     pub fn cis(phase: f64) -> C64 {
         let (s, c) = phase.sin_cos();
         C64 { re: c, im: s }
     }
     /// e^z.
+    #[inline]
     pub fn exp(self) -> C64 {
         C64::cis(self.im) * self.re.exp()
     }
     /// √z on the principal branch (Re √z ≥ 0), without cancellation.
+    #[inline]
     pub fn sqrt(self) -> C64 {
         let r = self.abs();
         if r == 0.0 {
@@ -98,13 +107,16 @@ impl C64 {
         C64 { re, im: if self.im < 0.0 { -im } else { im } }
     }
     /// 1/z.
+    #[inline]
     pub fn recip(self) -> C64 {
         C64::ONE / self
     }
     /// |re| + |im|: a norm within √2 of |z|, the one the matrix norms here bound with.
+    #[inline]
     pub fn abs1(self) -> f64 {
         self.re.abs() + self.im.abs()
     }
+    #[inline]
     pub fn is_finite(self) -> bool {
         self.re.is_finite() && self.im.is_finite()
     }
@@ -112,24 +124,28 @@ impl C64 {
 
 impl Add for C64 {
     type Output = C64;
+    #[inline]
     fn add(self, b: C64) -> C64 {
         C64 { re: self.re + b.re, im: self.im + b.im }
     }
 }
 impl Sub for C64 {
     type Output = C64;
+    #[inline]
     fn sub(self, b: C64) -> C64 {
         C64 { re: self.re - b.re, im: self.im - b.im }
     }
 }
 impl Mul for C64 {
     type Output = C64;
+    #[inline]
     fn mul(self, b: C64) -> C64 {
         C64 { re: self.re * b.re - self.im * b.im, im: self.re * b.im + self.im * b.re }
     }
 }
 impl Mul<f64> for C64 {
     type Output = C64;
+    #[inline]
     fn mul(self, s: f64) -> C64 {
         C64 { re: self.re * s, im: self.im * s }
     }
@@ -137,6 +153,7 @@ impl Mul<f64> for C64 {
 impl Div for C64 {
     /// Smith's division: no overflow of |b|² for large b.
     type Output = C64;
+    #[inline]
     fn div(self, b: C64) -> C64 {
         if b.re.abs() >= b.im.abs() {
             let (r, d) = (b.im / b.re, b.re + b.im * (b.im / b.re));
@@ -149,84 +166,64 @@ impl Div for C64 {
 }
 impl Div<f64> for C64 {
     type Output = C64;
+    #[inline]
     fn div(self, s: f64) -> C64 {
         C64 { re: self.re / s, im: self.im / s }
     }
 }
 impl Neg for C64 {
     type Output = C64;
+    #[inline]
     fn neg(self) -> C64 {
         C64 { re: -self.re, im: -self.im }
     }
 }
 impl AddAssign for C64 {
+    #[inline]
     fn add_assign(&mut self, b: C64) {
         *self = *self + b;
     }
 }
 impl SubAssign for C64 {
+    #[inline]
     fn sub_assign(&mut self, b: C64) {
         *self = *self - b;
     }
 }
 impl MulAssign for C64 {
+    #[inline]
     fn mul_assign(&mut self, b: C64) {
         *self = *self * b;
     }
 }
 impl MulAssign<f64> for C64 {
+    #[inline]
     fn mul_assign(&mut self, s: f64) {
         *self = *self * s;
     }
 }
 impl DivAssign for C64 {
+    #[inline]
     fn div_assign(&mut self, b: C64) {
         *self = *self / b;
     }
 }
 impl Sum for C64 {
+    #[inline]
     fn sum<I: Iterator<Item = C64>>(iter: I) -> C64 {
         iter.fold(C64::ZERO, |a, b| a + b)
     }
 }
 
-// The kernels below (`axpy`, `dot`, `combine`) are written once, for 256-bit vectors of reals with fused
+// The kernels below (`combine`, the products) are written once, for 256-bit vectors of reals with fused
 // multiply-add, and the whole build takes those instructions (apps/atom-workbench/.cargo/config.toml; a build that sets
 // RUSTFLAGS itself names them there): no second, scalar form and no choice at run time. Without the features a fused
 // multiply-add is a library call per number -- so such a build is refused here instead of running many times slower.
 #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
 compile_error!("atom-motion's kernels are written for AVX2 with FMA: build with -C target-feature=+avx2,+fma (apps/atom-workbench/.cargo/config.toml)");
 
-/// The reals of one vector of the split kernels' sums (`axpy`, `dot`, `combine`): their vectors' lengths are multiples
-/// of it.
+/// The reals of one vector of the split kernel's sums (`combine`): their vectors' lengths are multiples of it.
 pub const LANES: usize = 4;
-
-/// y ← y + c x on complex vectors given by their real parts and their imaginary parts apart (x: `real`, `imaginary`;
-/// y: `re`, `im`), whole vectors of `LANES`: lane by lane, two fused multiply-adds a real, no element depending on
-/// another.
-pub fn axpy(c: C64, real: &[f64], imaginary: &[f64], re: &mut [f64], im: &mut [f64]) {
-    debug_assert!(re.len() % LANES == 0 && [real.len(), imaginary.len(), im.len()] == [re.len(); 3]);
-    for (((re, im), real), imaginary) in re.chunks_exact_mut(LANES).zip(im.chunks_exact_mut(LANES)).zip(real.chunks_exact(LANES)).zip(imaginary.chunks_exact(LANES)) {
-        for l in 0..LANES {
-            re[l] = c.re.mul_add(real[l], (-c.im).mul_add(imaginary[l], re[l]));
-            im[l] = c.re.mul_add(imaginary[l], c.im.mul_add(real[l], im[l]));
-        }
-    }
-}
-
-/// Σ_i x_i y_i (no conjugate) of two complex vectors given by their real parts and their imaginary parts apart, whole
-/// vectors of `LANES`: one partial sum a lane, so the lanes add side by side.
-pub fn dot(xr: &[f64], xi: &[f64], yr: &[f64], yi: &[f64]) -> C64 {
-    debug_assert!(xr.len() % LANES == 0 && [xi.len(), yr.len(), yi.len()] == [xr.len(); 3]);
-    let (mut re, mut im) = ([0.0; LANES], [0.0; LANES]);
-    for (((xr, xi), yr), yi) in xr.chunks_exact(LANES).zip(xi.chunks_exact(LANES)).zip(yr.chunks_exact(LANES)).zip(yi.chunks_exact(LANES)) {
-        for l in 0..LANES {
-            re[l] = xr[l].mul_add(yr[l], (-xi[l]).mul_add(yi[l], re[l]));
-            im[l] = xr[l].mul_add(yi[l], xi[l].mul_add(yr[l], im[l]));
-        }
-    }
-    C64::new((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]))
-}
 
 /// Sums of complex columns laid for the lanes: per vector of `LANES` rows each column's real parts and then its imaginary
 /// parts, the columns in turn (`columns`: `count` of them; `sums`: `width`, of the same rows). The sums from `at` on, one
@@ -312,6 +309,7 @@ pub fn mul_add(subtract: bool, z: &mut [C64], f: C64, y: &[C64]) {
 
 /// out_j = 1/((c_j − w) − κ) for every j, each as the scalar form makes it -- the two differences, |z|² = re² + im², one
 /// division, the conjugate scaled -- but four numbers' squared moduli to a vector and one vector division for the four.
+#[inline]
 pub fn reciprocals(c: &[C64], w: f64, kappa: C64, out: &mut [C64]) {
     let n = c.len();
     assert!(out.len() >= n);
@@ -345,6 +343,7 @@ pub fn reciprocals(c: &[C64], w: f64, kappa: C64, out: &mut [C64]) {
 /// and back by shuffles, not through memory a lane at a time (a vector read of four numbers just written one by one waits
 /// for the writes, some twenty cycles a vector: the kernel's own work); the numbers past the whole vectors through a
 /// vector padded with zeros.
+#[inline]
 pub fn times_exp(x: &mut [C64], w: C64, z: &[C64]) {
     use std::arch::x86_64::{_mm256_movedup_pd, _mm256_permute2f128_pd, _mm256_permute4x64_pd, _mm256_unpackhi_pd, _mm256_unpacklo_pd};
     let n = x.len();
@@ -490,23 +489,21 @@ unsafe fn exp4(av: __m256d, bv: __m256d) -> (__m256d, __m256d, i32) {
 /// out (r × c) = a (r × k) b (k × c), all row by row: each entry from zero by k fused steps, b's rows in order,
 /// o.re ← x.re y.re + (−x.im y.im + o.re) and o.im ← x.re y.im + (x.im y.re + o.im) (x = a's entry, y = b's) -- two
 /// fused multiply-adds a real. Up to eight numbers of a row of out are held in registers through the k steps.
+#[inline]
 pub fn fused_product(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
     product::<false, false>(a, b, dims, out);
 }
 
 /// out (r × c) += a (r × k) b (k × c): `fused_product` with each entry's chain from out's own value.
+#[inline]
 pub fn fused_product_onto(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
     product::<false, true>(a, b, dims, out);
 }
 
 /// out (r × c) = a† b, a (k × r): `fused_product` on a's columns, each entry conjugated (no adjoint made).
+#[inline]
 pub fn adjoint_product(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
     product::<true, false>(a, b, dims, out);
-}
-
-/// out (r × c) += a† b, a (k × r).
-pub fn adjoint_product_onto(a: &[C64], b: &[C64], dims: (usize, usize, usize), out: &mut [C64]) {
-    product::<true, true>(a, b, dims, out);
 }
 
 /// The products' one kernel: out (r × c) = op(a) b, op(a) = a (r × k) or with `ADJOINT` a† of a (k × r); with `ONTO` each
@@ -564,10 +561,12 @@ fn product<const ADJOINT: bool, const ONTO: bool>(a: &[C64], b: &[C64], (r, k, c
 }
 
 /// ⟨a, b⟩ = Σ_i a_i* b_i.
+#[inline]
 pub fn inner(a: &[C64], b: &[C64]) -> C64 {
     a.iter().zip(b).map(|(x, y)| x.conj() * *y).sum()
 }
 /// ‖v‖² = Σ_i |v_i|².
+#[inline]
 pub fn norm_sqr(v: &[C64]) -> f64 {
     v.iter().map(|z| z.norm_sqr()).sum()
 }
@@ -576,6 +575,7 @@ pub fn norm_sqr(v: &[C64]) -> f64 {
 /// maximum folded with it reads a NaN as nothing -- a block of NaN as the fold's start, 0 where it starts at 0 -- and
 /// the NaN never reaches what would refuse it; this one carries it to whatever reads the maximum. ±∞ are numbers like
 /// any other. Where neither is NaN it is `f64::max` itself, to the bit.
+#[inline]
 pub fn larger(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
@@ -585,6 +585,7 @@ pub fn larger(a: f64, b: f64) -> f64 {
 }
 
 /// The smaller of a and b, and NaN where either is NaN (`larger`); where neither is, `f64::min` itself.
+#[inline]
 pub fn smaller(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
@@ -594,6 +595,7 @@ pub fn smaller(a: f64, b: f64) -> f64 {
 }
 
 /// The largest of `from` and the values, NaN where any of them is NaN (`larger`); `from` where there are none.
+#[inline]
 pub fn largest(from: f64, values: impl IntoIterator<Item = f64>) -> f64 {
     values.into_iter().fold(from, larger)
 }
@@ -626,39 +628,48 @@ pub struct Mat {
 
 impl Index<(usize, usize)> for Mat {
     type Output = C64;
+    #[inline]
     fn index(&self, (i, j): (usize, usize)) -> &C64 {
         &self.data[i * self.cols + j]
     }
 }
 impl IndexMut<(usize, usize)> for Mat {
+    #[inline]
     fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut C64 {
         &mut self.data[i * self.cols + j]
     }
 }
 
 impl Mat {
+    #[inline]
     pub fn zeros(rows: usize, cols: usize) -> Mat {
         Mat { rows, cols, data: vec![C64::ZERO; rows * cols] }
     }
+    #[inline]
     pub fn identity(n: usize) -> Mat {
         Mat::from_fn(n, n, |i, j| if i == j { C64::ONE } else { C64::ZERO })
     }
+    #[inline]
     pub fn from_fn(rows: usize, cols: usize, mut entry: impl FnMut(usize, usize) -> C64) -> Mat {
         Mat { rows, cols, data: (0..rows * cols).map(|k| entry(k / cols, k % cols)).collect() }
     }
     /// diag(d).
+    #[inline]
     pub fn diagonal(d: &[C64]) -> Mat {
         Mat::from_fn(d.len(), d.len(), |i, j| if i == j { d[i] } else { C64::ZERO })
     }
     /// The rows × cols block at the given row and column indices.
+    #[inline]
     pub fn block(&self, rows: &[usize], cols: &[usize]) -> Mat {
         Mat::from_fn(rows.len(), cols.len(), |i, j| self[(rows[i], cols[j])])
     }
     /// A†.
+    #[inline]
     pub fn adjoint(&self) -> Mat {
         Mat::from_fn(self.cols, self.rows, |i, j| self[(j, i)].conj())
     }
     /// A B (rows × cols · cols × b.cols complex multiply-adds).
+    #[inline]
     pub fn product(&self, b: &Mat) -> Mat {
         assert_eq!(self.cols, b.rows, "product of {}x{} and {}x{}", self.rows, self.cols, b.rows, b.cols);
         let mut out = Mat::zeros(self.rows, b.cols);
@@ -670,6 +681,7 @@ impl Mat {
         out
     }
     /// A† B, without forming A†.
+    #[inline]
     pub fn adjoint_product(&self, b: &Mat) -> Mat {
         assert_eq!(self.rows, b.rows, "adjoint product of {}x{} and {}x{}", self.rows, self.cols, b.rows, b.cols);
         let mut out = Mat::zeros(self.cols, b.cols);
@@ -681,37 +693,45 @@ impl Mat {
         out
     }
     /// A v.
+    #[inline]
     pub fn apply(&self, v: &[C64]) -> Vec<C64> {
         assert_eq!(self.cols, v.len());
         (0..self.rows).map(|i| self.data[i * self.cols..(i + 1) * self.cols].iter().zip(v).map(|(a, x)| *a * *x).sum()).collect()
     }
     /// z A.
+    #[inline]
     pub fn scaled(&self, z: C64) -> Mat {
         Mat { rows: self.rows, cols: self.cols, data: self.data.iter().map(|x| z * *x).collect() }
     }
     /// A ← A + z B.
+    #[inline]
     pub fn add_scaled(&mut self, z: C64, b: &Mat) {
         assert_eq!((self.rows, self.cols), (b.rows, b.cols));
         for (x, y) in self.data.iter_mut().zip(&b.data) {
             *x += z * *y;
         }
     }
+    #[inline]
     pub fn trace(&self) -> C64 {
         (0..self.rows.min(self.cols)).map(|i| self[(i, i)]).sum()
     }
     /// ‖A‖₁: the largest column sum of the entries' moduli.
+    #[inline]
     pub fn norm1(&self) -> f64 {
         (0..self.cols).map(|j| (0..self.rows).map(|i| self[(i, j)].abs()).sum::<f64>()).fold(0.0, larger)
     }
     /// The Frobenius norm √Σ|a_ij|².
+    #[inline]
     pub fn frobenius(&self) -> f64 {
         norm_sqr(&self.data).sqrt()
     }
     /// The largest entry's modulus; NaN where an entry is (`largest`), 0 of no entries.
+    #[inline]
     pub fn max_abs(&self) -> f64 {
         largest(0.0, self.data.iter().map(|z| z.abs()))
     }
     /// (A + A†)/2.
+    #[inline]
     pub fn hermitian_part(&self) -> Mat {
         Mat::from_fn(self.rows, self.cols, |i, j| (self[(i, j)] + self[(j, i)].conj()) * 0.5)
     }
@@ -782,6 +802,7 @@ pub struct Lu {
 
 impl Lu {
     /// The factorization; None when a pivot column is exactly zero, so that no factorization exists.
+    #[inline]
     pub fn new(a: &Mat) -> Option<Lu> {
         let n = a.rows;
         assert_eq!(n, a.cols, "LU of a {}x{} matrix", a.rows, a.cols);
@@ -789,6 +810,7 @@ impl Lu {
         factor(&mut lu.factors.data, &mut lu.pivots, n).then_some(lu)
     }
     /// b ← A⁻¹ b.
+    #[inline]
     pub fn solve(&self, b: &mut [C64]) {
         solve(&self.factors.data, &self.pivots, self.factors.rows, b, 1);
     }
@@ -817,15 +839,19 @@ trait Scalar: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self
 
 impl Scalar for C64 {
     const ZERO: C64 = C64::ZERO;
+    #[inline]
     fn conj(self) -> C64 {
         C64::conj(self)
     }
+    #[inline]
     fn re(self) -> f64 {
         self.re
     }
+    #[inline]
     fn norm_sqr(self) -> f64 {
         C64::norm_sqr(self)
     }
+    #[inline]
     fn abs(self) -> f64 {
         C64::abs(self)
     }
@@ -833,15 +859,19 @@ impl Scalar for C64 {
 
 impl Scalar for f64 {
     const ZERO: f64 = 0.0;
+    #[inline]
     fn conj(self) -> f64 {
         self
     }
+    #[inline]
     fn re(self) -> f64 {
         self
     }
+    #[inline]
     fn norm_sqr(self) -> f64 {
         self * self
     }
+    #[inline]
     fn abs(self) -> f64 {
         f64::abs(self)
     }
@@ -905,6 +935,7 @@ fn jacobi<S: Scalar>(a: &mut [S], u: &mut [S], n: usize) {
 }
 
 /// The eigendecomposition of the Hermitian part of h, (h + h†)/2 (`jacobi`), the eigenvalues ascending.
+#[inline]
 pub fn hermitian_eigen(h: &Mat) -> Hermitian {
     let n = h.rows;
     assert_eq!(n, h.cols, "the eigendecomposition of a {}x{} matrix", h.rows, h.cols);
@@ -941,6 +972,7 @@ pub struct Eigen {
 }
 
 /// The Givens rotation G = [[c, s], [−s*, c]] (c real) with G [x, y]ᵀ = [r, 0]ᵀ.
+#[inline]
 fn givens(x: C64, y: C64) -> (f64, C64) {
     let (ax, ay) = (x.abs(), y.abs());
     if ay == 0.0 {
@@ -979,6 +1011,7 @@ fn rotate(first: &mut [C64], second: &mut [C64], c: f64, s: C64) {
 
 /// (u, w) ← (u c + w s*, w c − u s) on the columns k and k + 1 of the first `rows` rows of the n × n matrix h (row by
 /// row), as `C64`'s operators make it: a row's two numbers in one vector.
+#[inline]
 fn turn(h: &mut [C64], n: usize, k: usize, rows: usize, c: f64, s: C64) {
     use std::arch::x86_64::{_mm256_blend_pd, _mm256_permute2f128_pd};
     assert!(k + 1 < n && rows <= n && h.len() >= n * n);
@@ -997,6 +1030,7 @@ fn turn(h: &mut [C64], n: usize, k: usize, rows: usize, c: f64, s: C64) {
 /// The eigendecomposition of a general complex matrix (`Eigen::decompose`), on memory of its own: the tests' entry (a
 /// step's picture keeps its own, spectral.rs).
 #[cfg(test)]
+#[inline]
 pub(crate) fn eigen(a: &Mat) -> Option<Eigen> {
     let mut e = Eigen::default();
     e.decompose(a).then_some(e)
@@ -1004,6 +1038,7 @@ pub(crate) fn eigen(a: &Mat) -> Option<Eigen> {
 
 impl Eigen {
     /// R column by column (its transpose row by row): a product's right factor as `combine` takes its weights.
+    #[inline]
     pub fn columns(&self) -> &[C64] {
         &self.columns[2]
     }
@@ -1309,6 +1344,7 @@ impl Chebyshev {
     /// product of n terms and two additions, on vectors of ‖v‖'s size within the part's hump, and enters the sum through
     /// a Chebyshev polynomial of X/σ; the scalar part's exponential and its product round once more. γ of that many
     /// operations (`units::rounding`).
+    #[inline]
     pub fn rounding(&self, n: usize) -> f64 {
         rounding((n + 2) * self.parts * self.terms + 2)
     }
@@ -1426,17 +1462,21 @@ pub type V3 = [f64; 3];
 /// A real 3 × 3 matrix, rows first.
 pub type M3 = [[f64; 3]; 3];
 
+#[inline]
 pub fn dot3(a: V3, b: V3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
+#[inline]
 pub fn norm3(a: V3) -> f64 {
     dot3(a, a).sqrt()
 }
+#[inline]
 pub fn cross3(a: V3, b: V3) -> V3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 /// Two unit vectors that complete the unit vector n to a right-handed orthonormal basis (e₁, e₂, n): e₁ the lab axis
 /// least along n less its part along n, normalized; e₂ = n × e₁.
+#[inline]
 pub fn perpendicular(n: V3) -> (V3, V3) {
     let least = (0..3).min_by(|&i, &j| n[i].abs().total_cmp(&n[j].abs())).unwrap();
     let mut e = [0.0; 3];
@@ -1449,6 +1489,7 @@ pub fn perpendicular(n: V3) -> (V3, V3) {
 }
 /// The eigendecomposition of a real symmetric 3 × 3 matrix (its symmetric part): eigenvalues ascending and their
 /// orthonormal eigenvectors (rows), by `jacobi` on the reals (the one implementation, on the stack).
+#[inline]
 pub fn symmetric3_eigen(m: &M3) -> (V3, [V3; 3]) {
     let mut a: [f64; 9] = std::array::from_fn(|k| 0.5 * (m[k / 3][k % 3] + m[k % 3][k / 3]));
     let mut u: [f64; 9] = std::array::from_fn(|k| if k / 3 == k % 3 { 1.0 } else { 0.0 });
@@ -1580,24 +1621,12 @@ pub(crate) mod tests {
         out
     }
 
-    /// The split kernels (`axpy`, `dot`, `combine`) are the complex sums they stand for, to the rounding of a sum of
-    /// their length; and their pace (printed: ns a complex multiply-add on spans of 28, a five-state cluster's places;
-    /// `combine`'s on five columns of 16 rows, a five-state cluster's jumps on its state).
+    /// The split kernel (`combine`) is the complex sums it stands for, to the rounding of a sum of its length; and its
+    /// pace (printed: ns a complex multiply-add on five columns of 16 rows, a five-state cluster's jumps on its state).
     #[test]
     fn the_split_kernels_are_their_complex_sums() {
         let mut s = Stream::new(11, Purpose::Initial, 0, 0);
-        let n = 28;
         let mut draw = |count: usize| -> Vec<f64> { (0..count).map(|_| s.uniform() - 0.5).collect() };
-        let (xr, xi, yr, yi) = (draw(n), draw(n), draw(n), draw(n));
-        let c = C64::new(0.3, -0.7);
-        let (x, y): (Vec<C64>, Vec<C64>) = ((0..n).map(|i| C64::new(xr[i], xi[i])).collect(), (0..n).map(|i| C64::new(yr[i], yi[i])).collect());
-        let (mut re, mut im) = (yr.clone(), yi.clone());
-        axpy(c, &xr, &xi, &mut re, &mut im);
-        for i in 0..n {
-            assert!((C64::new(re[i], im[i]) - (y[i] + c * x[i])).abs() <= rounding(3) * (y[i].abs() + c.abs() * x[i].abs()), "axpy at {i}");
-        }
-        let (sum, size): (C64, f64) = ((0..n).map(|i| x[i] * y[i]).sum(), (0..n).map(|i| x[i].abs() * y[i].abs()).sum());
-        assert!((dot(&xr, &xi, &yr, &yi) - sum).abs() <= rounding(2 * n) * size, "dot");
         // `combine`: two of three sums of five columns on sixteen rows, the middle one left as it is; alone and onto
         // what the sums hold.
         let (rows, count, width) = (16, 5, 3);
@@ -1624,21 +1653,10 @@ pub(crate) mod tests {
         let rounds = 200_000;
         let started = std::time::Instant::now();
         for _ in 0..rounds {
-            axpy(std::hint::black_box(c), std::hint::black_box(&xr), &xi, &mut re, &mut im);
-        }
-        let first = started.elapsed().as_secs_f64() * 1e9 / (rounds * n) as f64;
-        let started = std::time::Instant::now();
-        let mut total = C64::ZERO;
-        for _ in 0..rounds {
-            total += dot(std::hint::black_box(&xr), &xi, &yr, &yi);
-        }
-        let second = started.elapsed().as_secs_f64() * 1e9 / (rounds * n) as f64;
-        let started = std::time::Instant::now();
-        for _ in 0..rounds {
             combine(false, std::hint::black_box(&weights[..count]), count, std::hint::black_box(&columns), &mut sums, 1, 0);
         }
-        std::hint::black_box((total, re, im, sums));
-        eprintln!("axpy {first:.3} ns, dot {second:.3} ns, combine {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * rows * count) as f64);
+        std::hint::black_box(sums);
+        eprintln!("combine {:.3} ns a complex multiply-add", started.elapsed().as_secs_f64() * 1e9 / (rounds * rows * count) as f64);
     }
 
     /// The interleaved kernels (`mul_add`, `fused_product`, `rotate`, `turn`) and `hypot` are their scalar forms bit for

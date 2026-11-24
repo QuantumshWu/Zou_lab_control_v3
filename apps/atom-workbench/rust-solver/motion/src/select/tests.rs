@@ -55,7 +55,8 @@ fn select_the_middle_point_leaves_a_node() {
 
 /// A window of every row's error `row` (no spread over the paths).
 fn window(from: f64, to: f64, row: f64) -> Window {
-    Window { from, to, paths: 4, rows: vec![Mean { value: row, error: 0.0 }; STATES], ..Window::default() }
+    let rows = vec![Mean { value: row, error: 0.0 }; STATES];
+    Window { from, to, paths: 4, parts: vec![crate::paths::Part { from, to, paths: 4, rows: rows.clone() }], rows, ..Window::default() }
 }
 
 /// The direct part by hand (module documentation, # The direct part): the start's windows to L = 100 µs, a late segment
@@ -68,9 +69,10 @@ fn select_the_direct_part_by_hand() {
         windows: vec![window(0.0, 10.0, 4e-3), window(10.0, 100.0, 1e-3)],
         late: vec![window(900.0, 910.0, 9e-3), window(910.0, 1000.0, 2e-3)],
         calibration: Calibration { rows: 1e-5, rate: 0.0 },
-        region: Region::NONE,
-        seconds: 0.0,
-        products: 0,
+        escape: None,
+        statistics: None,
+        stationary: None,
+        work: 0.0,
     };
     let windows = vec![(0.0, 10.0), (10.0, 100.0)];
     let at = |t: f64| direct_at(&judged, &windows, t).expect("every window read");
@@ -85,10 +87,13 @@ fn select_the_direct_part_by_hand() {
 /// one path's spread is unknown: its upper end without bound, its lower nothing; the calibration beside both ends.
 #[test]
 fn select_the_direct_part_at_the_paths_statistics() {
-    let spread = |paths: usize, value: f64, error: f64| Window { from: 0.0, to: 10.0, paths, rows: vec![Mean { value, error }; STATES], ..Window::default() };
+    let spread = |paths: usize, value: f64, error: f64| {
+        let rows = vec![Mean { value, error }; STATES];
+        Window { from: 0.0, to: 10.0, paths, parts: vec![crate::paths::Part { from: 0.0, to: 10.0, paths, rows: rows.clone() }], rows, ..Window::default() }
+    };
     let at = |w: Window, upper: bool| {
-        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, region: Region::NONE, seconds: 0.0, products: 0 };
-        direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, upper).expect("the window read")
+        let judged = Judged { keep: vec![], windows: vec![w], late: vec![], calibration: Calibration { rows: 1e-5, rate: 0.0 }, escape: None, statistics: None, stationary: None, work: 0.0 };
+        direct_bound_at(&judged, &[(0.0, 10.0)], 5.0, if upper { Reach::Upper } else { Reach::Lower }).expect("the window read")
     };
     let q = |freedom: u64| crate::estimate::quantile(crate::estimate::tail_among(1.0), Some(freedom));
     assert!((q(3) - 3.31).abs() < 0.01 && (q(7) - 2.43).abs() < 0.01, "{} {}", q(3), q(7));
@@ -98,6 +103,44 @@ fn select_the_direct_part_at_the_paths_statistics() {
     assert!((at(spread(8, 5e-3, 1e-3), true) - (5e-3 + q(7) * 1e-3 + 1e-5)).abs() < 1e-15);
     assert_eq!(at(spread(1, 5e-3, f64::INFINITY), true), f64::INFINITY);
     assert_eq!(at(spread(1, 5e-3, f64::INFINITY), false), 1e-5);
+}
+
+/// The motion's errors by hand (module documentation, # The motion; `motion_at`), every path alike (no spread): one
+/// window to 100 µs, the reference's heating H = 0.01 rad/µs² on every axis and the candidate's energy rate's
+/// difference δP = 0.001 on x alone, the force's difference 2 on z; the escape's x = 0.1; at t = 50 µs a loss rising by
+/// 0.002/µs, T = 10 µK on every axis. An axis's kinetic energy is E = k_B T/2 (one degree of freedom); one at its steady
+/// state (Ṫ = 0) relaxes at α = H/E: its δT/T = δP/H = 0.1 at long times, so the total's error is 0.1 × 10/3 µK there; an
+/// axis heating at H (Ṫ = 2H/k_B: α = 0) takes δT = 2 δP t/k_B; the loss L(t(1 + x)) − L(t) = 0.01 on the course's
+/// line; the push (ħ/m)·2, the mean velocity that over min(t, 1/ω).
+#[test]
+fn select_the_motion_by_hand() {
+    let kt = crate::units::KT_PER_UK;
+    let even = |x: f64| Mean { value: x, error: 0.0 };
+    let window = Window {
+        from: 0.0,
+        to: 100.0,
+        paths: 4,
+        heating: [even(0.01); 3],
+        energy_rate: [even(1e-3), even(0.0), even(0.0)],
+        energy_rates: (0..4).map(|k| (k, [1e-3, 0.0, 0.0], [0.01; 3], [0.01; 3])).collect(),
+        force: [even(0.0), even(0.0), even(2.0)],
+        ..Window::default()
+    };
+    let judged = Judged { keep: vec![], windows: vec![window], late: vec![], calibration: Calibration::default(), escape: Some((even(0.1), 4)), statistics: None, stationary: None, work: 0.0 };
+    let hm = 7.3e-4;
+    let course = |rise: f64| Course { times: vec![0.0, 50.0, 100.0], loss: vec![0.0, 0.1, 0.2], temperature: vec![Some([10.0; 3]), Some([10.0 + 50.0 * rise; 3]), Some([10.0 + 100.0 * rise; 3])], frequencies: [0.1, 0.1, 0.05], halves: None, push: vec![], pilot_heating: Default::default() };
+    let steady = motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 1, hm, Reach::Upper).expect("read");
+    let e = 0.5 * 10.0 * kt;
+    let alpha = 0.01 / e;
+    let expected = 1e-3 * (-(-alpha * 50.0).exp_m1()) / alpha * 2.0 / kt / 3.0;
+    assert!((steady.temperature_total - expected).abs() <= 1e-12 * expected, "{} {expected}", steady.temperature_total);
+    assert!((steady.loss - 0.1 * 50.0 * 0.002).abs() < 1e-15, "{}", steady.loss);
+    assert!((steady.push[2] - hm * 2.0).abs() < 1e-18 && (steady.velocity[2] - hm * 2.0 * 20.0).abs() < 1e-15, "{:?} {:?}", steady.push, steady.velocity);
+    // Heating at H: Ṫ = 2H/k_B, so α = 0 and the response is 2 δP t/k_B.
+    let heated = motion_at(&judged, &[(0.0, 100.0)], &course(0.02 / kt), 1, hm, Reach::Upper).expect("read");
+    let expected = 1e-3 * 50.0 * 2.0 / kt / 3.0;
+    assert!((heated.temperature_total - expected).abs() <= 1e-9 * expected, "{} {expected}", heated.temperature_total);
+    assert_eq!(motion_at(&judged, &[(0.0, 100.0)], &course(0.0), 0, hm, Reach::Upper), None, "none at t = 0");
 }
 
 /// The flag's question by hand (`decide`): read at the end (|r| > z·se), yes; its upper end within the allowance, no;
@@ -114,25 +157,42 @@ fn select_the_memory_flag_by_hand() {
 /// setting stopped at `FINEST` -- book their whole sum.
 #[test]
 fn select_the_ladder_top_by_hand() {
-    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, seconds: 0.0 };
+    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, motion: [0.0; KNOBS], runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, work: 0.0, seconds: 0.0 };
     assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE, 0.0]).unmet(), None);
     assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0, 0.0]).unmet(), Some(1.5 * TOLERANCE));
 }
 
-/// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 substeps a µs a piece a step): off the
-/// floor the pieces' part is read against the setting itself; where twice the pieces raise the run's rate to its floor
-/// at twice the setting's, against the twice-substepped run; where they raise it to less than twice, against the
-/// setting's pieces at the raised rate, one run more.
+/// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 a µs, one a step; a rate's, one
+/// substep a piece of the step's pieces): off the floor the pieces' part is read against the setting itself; where
+/// twice the pieces raise the run's rate to its floor at twice the setting's, against the twice-substepped run; where
+/// they raise it to less than twice, against the setting's pieces at the raised rate, one run more.
 #[test]
 fn select_the_refinements_by_hand() {
-    let own = |s: Setting| Setting { rate: larger(s.rate, s.pieces as f64 / 0.5), ..s };
-    let at = |o: f64, r: f64, p: usize| Setting { turns: o, rate: r, pieces: p, cutoff: 50.0 };
-    let (runs, pairs) = refinements(at(32.0, 16.0, 2), &own);
-    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 2), at(64.0, 16.0, 2), at(32.0, 32.0, 2), at(32.0, 16.0, 4)], [(0, 1), (0, 2), (0, 3), (0, 0)]));
-    let (runs, pairs) = refinements(at(32.0, 8.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 4), at(64.0, 8.0, 4), at(32.0, 16.0, 4), at(32.0, 16.0, 8)], [(0, 1), (0, 2), (2, 3), (0, 0)]));
-    let (runs, pairs) = refinements(at(1.0, 10.0, 4), &own);
-    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 4), at(2.0, 10.0, 4), at(1.0, 20.0, 4), at(1.0, 16.0, 8), at(1.0, 16.0, 4)], [(0, 1), (0, 2), (4, 3), (0, 0)]));
+    let own = |s: Setting| {
+        let pieces = larger(s.pieces, 1.0 / 0.5);
+        Setting { rate: larger(s.rate, crate::paths::pieces_in(0.0, 0.5, pieces) as f64 / 0.5), pieces, ..s }
+    };
+    let at = |o: f64, r: f64, p: f64| Setting { turns: o, rate: r, pieces: p, cutoff: 50.0 };
+    let (runs, pairs) = refinements(at(32.0, 16.0, 4.0), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 16.0, 4.0), at(64.0, 16.0, 4.0), at(32.0, 32.0, 4.0), at(32.0, 16.0, 8.0)], [(0, 1), (0, 2), (0, 3), (0, 0)]));
+    let (runs, pairs) = refinements(at(32.0, 8.0, 8.0), &own);
+    assert_eq!((runs, pairs), (vec![at(32.0, 8.0, 8.0), at(64.0, 8.0, 8.0), at(32.0, 16.0, 8.0), at(32.0, 16.0, 16.0)], [(0, 1), (0, 2), (2, 3), (0, 0)]));
+    let (runs, pairs) = refinements(at(1.0, 10.0, 8.0), &own);
+    assert_eq!((runs, pairs), (vec![at(1.0, 10.0, 8.0), at(2.0, 10.0, 8.0), at(1.0, 20.0, 8.0), at(1.0, 16.0, 16.0), at(1.0, 16.0, 8.0)], [(0, 1), (0, 2), (4, 3), (0, 0)]));
+    // Below the floor the knob is the floor (one piece a step), and a piece's count is the least power of two keeping
+    // it within the knob's length, whatever the step -- a step's interval late in a run the step to its ends' rounding
+    // (PGC3D's at 1000 µs: one step past the ends' sum read 2e-13 of the step over it).
+    assert_eq!(own(at(1.0, 8.0, 1.0)), at(1.0, 8.0, 2.0));
+    let p = crate::paths::pieces_in;
+    assert_eq!([p(0.0, 0.5, 2.0), p(0.0, 6.06, 1.0), p(0.0, 0.1185, 1.0), p(0.0, 0.3, 0.0), p(0.0, 0.5, 4.0 + 1e-9)], [1, 8, 1, 1, 4]);
+    let tau = 0.4741346189956611;
+    let ends: Vec<f64> = (0..=2110).scan(0.0, |t, k| {
+        let now = *t;
+        *t += tau;
+        Some(if k == 0 { 0.0 } else { now })
+    }).collect();
+    assert!(ends.windows(2).any(|w| w[1] - w[0] > tau), "some interval read past the step");
+    assert!(ends.windows(2).all(|w| p(w[0], w[1], 2.0 / tau) == 2), "every step's interval two pieces at two a step");
 }
 
 /// The selection's chain on every reference scene (the coordinator's check before the merge; ignored; refs/scenes/*.json
@@ -325,6 +385,11 @@ fn select_on_the_scenes() {
         if std::env::var("SELECT_SOLVE").is_ok() {
             let solved = crate::solve::solve(&request, &mut |_| {});
             eprintln!("{name}: solved in {:.1} s: {}", clock.elapsed().as_secs_f64(), if solved.is_ok() { "ok" } else { "an error" });
+            // The product's totals (ledger.rs `Totals`): the mean velocity's and the push's an account where the model's
+            // error on them is booked (the selection's `Motion`), none ({0, 0}) where it is not.
+            if let Ok(s) = &solved {
+                eprintln!("{name}: totals {:?}", s.approximations.totals);
+            }
             continue;
         }
         let run = crate::solve::chosen(&request, crate::solve::alone(crate::solve::chief(&request))).unwrap();
@@ -337,7 +402,7 @@ fn select_on_the_scenes() {
             let parts: Vec<serde_json::Value> = choice.windows.iter().map(|&(_, t)| serde_json::json!({"t": t, "direct": choice.at(t)})).collect();
             let doc = serde_json::json!({
                 "scene": name, "keep": choice.keep, "labels": choice.keep.iter().map(|&s| request.states[s].clone()).collect::<Vec<_>>(),
-                "memory": choice.memory, "length": choice.length, "region": [choice.judged.region.intensity, choice.judged.region.error, choice.judged.region.largest],
+                "memory": choice.memory, "length": choice.length,
                 "calibration": [choice.judged.calibration.rows, choice.judged.calibration.rate],
                 "parts": parts, "report": choice.report,
             });
@@ -347,185 +412,3 @@ fn select_on_the_scenes() {
     }
 }
 
-/// The paths' work, measured (module documentation, # The paths): on the scene `SELECT_SCENES` (one), G's pilot's
-/// walks -- read from `SELECT_WALKS` where that file is, else the solve run up to the selection's stage (stopped there)
-/// and its walks written to it --; the reference's `Paths` to a run of `SELECT_UPTO` µs at the most, each job's work and
-/// the pool's threads; and Lawson at the substeps a µs `SELECT_RATES` (comma-separated, increasing): on the
-/// calibration's piece the reference's rows against the converged scheme's and the calibration (`calibrate`) of G,
-/// along every walk's first `SELECT_SPAN` µs the reference's rows against the last rate's, and the seconds.
-#[test]
-#[ignore]
-fn select_paths_cost() {
-    use crate::paths::{Form, Scheme, Series, Walk};
-    let name = std::env::var("SELECT_SCENES").expect("SELECT_SCENES: one scene");
-    let six = std::env::var("V3D_REQ").ok().map(std::path::PathBuf::from);
-    let request = scene_request(&name, six.as_deref());
-    let file = std::path::PathBuf::from(std::env::var("SELECT_WALKS").expect("SELECT_WALKS: the walks' file"));
-    let length = request.times_us.last().copied().unwrap();
-    let reference = crate::solve::alone(crate::solve::chief(&request));
-    if std::env::var("SELECT_SHAPE").is_ok() {
-        let g = crate::solve::run_of(&request, reference).unwrap();
-        let centre = crate::solve::reported(&g, &reference).unwrap().centre;
-        let full = Selected::new(crate::scene::Scene::new(&request).unwrap(), Selection { keep: (0..STATES).collect(), ..g.report.clone() }, reference).unwrap();
-        eprintln!("{name}: reference {}", Form::new(&full, centre).shape());
-        eprintln!("{name}: G {}", Form::new(&g, centre).shape());
-        return;
-    }
-    let walks: Vec<Walk> = if file.exists() {
-        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        doc["walks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|w| Walk {
-                index: w["index"].as_u64().unwrap(),
-                start: w["start"].as_array().unwrap().iter().map(|x| (x[0].as_u64().unwrap() as usize, C64::new(x[1].as_f64().unwrap(), x[2].as_f64().unwrap()))).collect(),
-                ends: serde_json::from_value(w["ends"].clone()).unwrap(),
-            })
-            .collect()
-    } else {
-        let clock = Instant::now();
-        crate::paths::WALKS.with(|w| *w.borrow_mut() = Some((WALKS, length, vec![])));
-        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::solve::solve(&request, &mut |m| {
-                if let crate::solve::Message::Stage(s) = m {
-                    assert!(s.step != crate::solve::Step::Select, "stopped at the selection");
-                }
-            })
-        }));
-        assert!(stopped.is_err(), "the solve stopped at the selection");
-        let walks = crate::paths::WALKS.with(|w| w.borrow_mut().take().unwrap().2);
-        let doc = serde_json::json!({"walks": walks.iter().map(|w| serde_json::json!({
-            "index": w.index, "start": w.start.iter().map(|(s, z)| serde_json::json!([s, z.re, z.im])).collect::<Vec<_>>(), "ends": w.ends,
-        })).collect::<Vec<_>>()});
-        std::fs::write(&file, serde_json::to_string(&doc).unwrap()).unwrap();
-        eprintln!("{name}: the pilot's walks in {:.1} s, written", clock.elapsed().as_secs_f64());
-        walks
-    };
-    let g = crate::solve::run_of(&request, reference).unwrap();
-    let centre = crate::solve::reported(&g, &reference).unwrap().centre;
-    let form = Form::new(&g, centre);
-    let memory = walks.iter().filter_map(|w| crate::paths::memory(&form, [w.ends[0][1], w.ends[0][2], w.ends[0][3]], [w.ends[0][4], w.ends[0][5], w.ends[0][6]], w.ends[0][0])).map(|m| m.time).fold(0.0, larger);
-    let tau = walks[0].ends[1][0] - walks[0].ends[0][0];
-    let upto: f64 = std::env::var("SELECT_UPTO").map_or(length, |x| x.parse().unwrap());
-    let run = length.min(upto);
-    eprintln!("{name}: {} walks to {:?} µs, τ {tau:.4} µs, τ_mem {memory:.3} µs, run {length} µs (measured to {run}); pool {} threads", walks.len(), walks.iter().map(|w| w.end()).collect::<Vec<_>>(), rayon::current_num_threads());
-    let full = Selected::new(crate::scene::Scene::new(&request).unwrap(), Selection { keep: (0..STATES).collect(), ..g.report.clone() }, reference).unwrap();
-    let light = g.light();
-    if let Ok(probe) = std::env::var("SELECT_PROBE") {
-        // Lawson on walk `SELECT_WALK` (0)'s first `probe` µs at the settings `SELECT_GRID` ("rate/pieces", comma-
-        // separated, the finest last), the reference and G: seconds and counts; the reference's rows and G's fold
-        // error against the finest's; `SELECT_SPARSE` set, the converged scheme too.
-        let probe: f64 = probe.parse().unwrap();
-        let k: usize = std::env::var("SELECT_WALK").map_or(0, |x| x.parse().unwrap());
-        // `SELECT_STILL`: the walk held at its first place at rest (the same knots).
-        let still: Walk = {
-            let w = &walks[k];
-            let e0 = w.ends[0];
-            Walk { index: w.index, start: w.start.clone(), ends: w.ends.iter().map(|e| [e[0], e0[1], e0[2], e0[3], 0.0, 0.0, 0.0]).collect() }
-        };
-        let w = if std::env::var("SELECT_STILL").is_ok() { &still } else { &walks[k] };
-        let to = probe.min(w.end());
-        // A setting "the opening's substeps a turn/the run's a µs/pieces"; a rate "sN" is N substeps a piece (N × pieces /
-        // τ a µs).
-        let grid: Vec<Setting> = std::env::var("SELECT_GRID").map_or(vec![COARSEST], |x| {
-            x.split(',')
-                .map(|g| {
-                    let p: Vec<&str> = g.split('/').collect();
-                    let pieces: usize = p[2].parse().unwrap();
-                    let rate = match p[1].strip_prefix('s') { Some(n) => n.parse::<f64>().unwrap() * pieces as f64 / tau, None => p[1].parse().unwrap() };
-                    Setting { turns: p[0].parse().unwrap(), rate, pieces, cutoff: p.get(3).map_or(f64::INFINITY, |x| x.parse().unwrap()) }
-                })
-                .collect()
-        });
-        let (fr, fg) = (Form::new(&full, centre), Form::new(&g, centre));
-        eprintln!("walk {k} to {to} µs: reference {}; G {}", fr.shape(), fg.shape());
-        let mut schemes: Vec<Scheme> = grid.iter().map(|&s| scheme(s, 1)).collect();
-        // `SELECT_SPARSE` = 2: the converged scheme at twice its nodes and half its turn first (its own check), compared
-        // against it.
-        if std::env::var("SELECT_SPARSE").is_ok_and(|x| x == "2") {
-            schemes.push(Scheme::Sparse { nodes: 8, turn: std::f64::consts::PI, read: 1 });
-        }
-        if std::env::var("SELECT_SPARSE").is_ok() {
-            schemes.push(Scheme::sparse(4));
-        }
-        // `SELECT_FROM`: every scheme from the converged scheme's state at the first knot at or past it (the start's
-        // transient left behind).
-        let from: f64 = std::env::var("SELECT_FROM").map_or(0.0, |x| { let x: f64 = x.parse().unwrap(); w.ends.iter().map(|e| e[0]).find(|&t| t >= x).unwrap() });
-        let states = (from > 0.0).then(|| (fr.along(w, &w.start, 0.0, from, Scheme::sparse(4)).unwrap().state, fg.along(w, &w.start, 0.0, from, Scheme::sparse(4)).unwrap().state));
-        let runs: Vec<(Series, Series)> = schemes
-            .iter()
-            .map(|&scheme| {
-                match &states {
-                    Some((x, y)) => (fr.along_from(w, x.clone(), from, to, scheme).unwrap(), fg.along_from(w, y.clone(), from, to, scheme).unwrap()),
-                    None => (fr.along(w, &w.start, 0.0, to, scheme).unwrap(), fg.along(w, &w.start, 0.0, to, scheme).unwrap()),
-                }
-            })
-            .collect();
-        let finest = grid.len() - 1;
-        let at = |s: &Series, t: f64| s.readings.iter().find(|r| r.t == t).map(|r| r.rows);
-        let sparse = (runs.len() > grid.len()).then(|| runs.last().unwrap());
-        let against = |a: &Series, b: &Series, fa: &Series, fb: &Series| -> (f64, f64) {
-            let (mut rows, mut fold) = (0.0_f64, 0.0_f64);
-            for x in &a.readings {
-                let (Some(y), Some(u), Some(v)) = (at(fa, x.t), at(b, x.t), at(fb, x.t)) else { continue };
-                for q in 0..STATES {
-                    rows = rows.max((x.rows[q] - y[q]).abs());
-                    fold = fold.max(((u[q] - x.rows[q]) - (v[q] - y[q])).abs());
-                }
-            }
-            (rows, fold)
-        };
-        for (scheme, (a, b)) in schemes.iter().zip(&runs) {
-            if let Some((sa, sb)) = sparse {
-                let (rows, fold) = against(a, b, sa, sb);
-                // Where the reference's rows differ most, and at the first readings.
-                let mut worst = (0.0_f64, 0.0_f64, 0usize);
-                for x in &a.readings {
-                    let Some(y) = at(sa, x.t) else { continue };
-                    for q in 0..STATES {
-                        if (x.rows[q] - y[q]).abs() > worst.0 {
-                            worst = ((x.rows[q] - y[q]).abs(), x.t, q);
-                        }
-                    }
-                }
-                let first: Vec<String> = a.readings.iter().take(std::env::var("SELECT_FIRST").map_or(6, |x| x.parse().unwrap())).filter_map(|x| at(sa, x.t).map(|y| format!("{:.3}:{:.1e}", x.t, (0..STATES).map(|q| (x.rows[q] - y[q]).abs()).fold(0.0, f64::max)))).collect();
-                eprintln!("  {scheme:?} vs the converged scheme: reference's rows {rows:.2e} (at {:.3} µs, row {}), G's fold error {fold:.2e}; condition {:.1e}; first readings {first:?}", worst.1, worst.2, a.counts.condition);
-            }
-            let (fa, fb) = &runs[finest];
-            let (mut rows, mut fold) = (0.0_f64, 0.0_f64);
-            for x in &a.readings {
-                let (Some(y), Some(u), Some(v)) = (at(fa, x.t), at(b, x.t), at(fb, x.t)) else { continue };
-                for q in 0..STATES {
-                    rows = rows.max((x.rows[q] - y[q]).abs());
-                    fold = fold.max(((u[q] - x.rows[q]) - (v[q] - y[q])).abs());
-                }
-            }
-            let (c, d) = (&a.counts, &b.counts);
-            eprintln!(
-                "  {scheme:?}: reference {:.3} s (nodes {:.3} + propagation {:.3} + readouts {:.3}; {} nodes, {} segments, {} products), G {:.3} s; vs the finest: reference's rows {rows:.2e}, G's fold error {fold:.2e}",
-                c.seconds(), c.node_seconds, c.propagation_seconds, c.readout_seconds, c.nodes, c.segments, c.products, d.seconds()
-            );
-        }
-        return;
-    }
-    let paths = Paths::new(&full, centre, walks.clone(), memory, run, tau, light).unwrap();
-    let say = |what: &str, s: &Series| {
-        let c = &s.counts;
-        eprintln!(
-            "  {what}: {:.1} µs, {:.2} s (nodes {:.2} + propagation {:.2} + readouts {:.2}); {} nodes, {} segments, {} products, {} readouts",
-            c.time, c.seconds(), c.node_seconds, c.propagation_seconds, c.readout_seconds, c.nodes, c.segments, c.products, c.readouts
-        );
-    };
-    let jobs: f64 = paths.series.iter().chain(paths.late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.seconds()).sum();
-    eprintln!("{name}: Paths L {:.1} µs, {} windows, late {:?}: {:.1} s wall, {jobs:.1} s over the walks' jobs; settled {:?}", paths.length, paths.windows.len(), paths.late_from(), paths.seconds, paths.settled);
-    for (k, s) in paths.series.iter().enumerate() {
-        say(&format!("walk {k} start"), s);
-    }
-    for (k, s) in paths.late.iter().flat_map(|l| l.2.iter()).enumerate() {
-        say(&format!("walk {k} late"), s);
-    }
-    let clock = Instant::now();
-    let judged = judge(&paths, &g, centre).unwrap();
-    eprintln!("{name}: G judged in {:.1} s ({:.1} s wall): calibration {:?}", judged.seconds, clock.elapsed().as_secs_f64(), judged.calibration);
-}

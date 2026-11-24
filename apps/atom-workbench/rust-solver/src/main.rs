@@ -370,6 +370,12 @@ mod tests {
         let errors: Vec<f64> = accuracy["sampleErrors"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
         assert_eq!(accuracy["estimatedMaximumError"].as_f64().unwrap(), errors.iter().fold(0., |a: f64, &b| a.max(b)));
         assert_eq!(accuracy["requestedTolerance"], json!(atom_motion::solve::POPULATION_TARGET));
+        // The state is the engine's verdict, with the samples it puts beyond (each one's estimate above the target) and
+        // why; none where it is converged, whatever the largest estimate reads.
+        let beyond: Vec<usize> = accuracy["beyond"].as_array().map_or(vec![], |b| b.iter().map(|x| x.as_u64().unwrap() as usize).collect());
+        assert_eq!(accuracy["status"] == json!("estimated-partial"), !beyond.is_empty(), "{accuracy}");
+        assert_eq!(accuracy["reason"].is_string(), !beyond.is_empty(), "{accuracy}");
+        assert!(beyond.iter().all(|&k| errors[k] > atom_motion::solve::POPULATION_TARGET), "{accuracy}");
         assert_eq!((result["diagnostics"]["device"].clone(), result["diagnostics"]["deviceNote"].clone()), (json!("cpu"), json!(motion_adapter::GPU_ABSENT)));
         let ledger = &result["diagnostics"]["approximations"];
         assert!(ledger["totals"]["population"]["target"].is_number() && ledger["items"].is_array());

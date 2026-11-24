@@ -26,8 +26,9 @@ const GRID='#e1dfdd',INK='#6a6866',LEFT=64,RIGHT=778;
 
 /** A display unit: its name and the factor from the base unit. */
 interface Unit {name:string;factor:number}
-/** Velocity units (in m/s) and length units (in μm), largest first. */
+/** Velocity units (in m/s), acceleration units (in m/s²) and length units (in μm), largest first. */
 const VELOCITY_UNITS:readonly (readonly [string,number])[]=[['m/s',1],['cm/s',1e-2],['mm/s',1e-3],['μm/s',1e-6]];
+const ACCELERATION_UNITS:readonly (readonly [string,number])[]=[['km/s²',1e3],['m/s²',1],['mm/s²',1e-3]];
 const LENGTH_UNITS:readonly (readonly [string,number])[]=[['μm',1],['nm',1e-3]];
 /** The largest of `units` in which `magnitude` (base units) reads at least 1. */
 function unitFor(units:readonly (readonly [string,number])[],magnitude:number):Unit{
@@ -47,9 +48,15 @@ const digits=(n:number)=>formatNumber(n,{digits:4});
 
 /** A line of a panel: its name, its values (base units), its ink and width; with its standard error
  * per sample (`error`, base units; null where it has none), read in the cursor's readout as value ± error. */
-export interface Line {name:string;values:readonly number[];ink:string;width?:number;error?:readonly (number|null)[]}
+export interface Line {name:string;values:readonly (number|null)[];ink:string;width?:number;error?:readonly (number|null)[]}
+/** A line's runs of samples it has a value at, as [first, last] sample indices: drawn apart, a sample it has none at
+ * (the push at t = 0, which has no window; a reading the engine could not make) a gap between them. */
+function runs(values:readonly (number|null)[]):[number,number][]{
+  const out:[number,number][]=[];values.forEach((v,i)=>{if(v===null)return;const last=out.at(-1);if(last&&last[1]===i-1)last[1]=i;else out.push([i,i]);});return out;
+}
 /** One panel: its name, its axis title, its lines and display unit; its axis runs from 0 to the top
- * of its ticks. */
+ * of its ticks, or, where a line goes below zero (a velocity, a push), from the tick below its least value to the tick
+ * above its largest, zero among them. */
 export interface Series {id:string;name:string;title:string;lines:Line[];unit:Unit}
 const along=(axis:MotionAxis)=>`（${axis} 轴）`;
 /** What a T is an average over (rust-solver/motion estimate.rs `half_window`, SPEC §1.7): the window about the output's
@@ -65,11 +72,26 @@ export function motionSeries(motion:MotionResult):[Series,Series]{
     {id:'occupation',name:'n̄',title:`平均振动量子数 n̄ = m⟨v²⟩/ħω − ½（各轴阱底处的阱频 ω/2π：${MOTION_AXES.map((axis,k)=>`${axis} ${digits(motion.trapFrequencyKHz[k]!)}`).join('、')} kHz）`,
       lines:MOTION_AXES.map((axis,k)=>({name:`n̄${along(axis)}`,values:motion.meanOccupation[k]!,ink:AXIS_INKS[axis]})),unit:{name:'',factor:1}}];
 }
+/** The two panels of a motion result's velocity chart: the held atoms' mean velocity ⟨v⟩ on each axis above their push
+ * -- the mean acceleration d⟨v⟩/dt, the light's net force over the mass -- on each axis, each with its standard error
+ * per sample (the engine's, read as value ± error); each in the unit that fits its largest size. */
+export function velocitySeries(motion:MotionResult):[Series,Series]{
+  // All zero (no push): the base unit.
+  const fit=(units:readonly (readonly [string,number])[],rows:readonly (readonly (number|null)[])[])=>unitFor(units,Math.max(0,...rows.flat().filter((v):v is number=>v!==null).map(Math.abs))||1);
+  const velocity=fit(VELOCITY_UNITS,motion.meanVelocityMps),push=fit(ACCELERATION_UNITS,motion.pushMps2);
+  return [{id:'velocity',name:'平均速度 ⟨v⟩',title:`平均速度 ⟨v⟩ / ${velocity.name}`,unit:velocity,
+      lines:MOTION_AXES.map((axis,k)=>({name:`⟨v⟩${along(axis)}`,values:motion.meanVelocityMps[k]!,ink:AXIS_INKS[axis],error:motion.meanVelocityErrorMps[k]!}))},
+    {id:'push',name:'推力 a',title:`推力 a = d⟨v⟩/dt / ${push.name}`,unit:push,
+      lines:MOTION_AXES.map((axis,k)=>({name:`a${along(axis)}`,values:motion.pushMps2[k]!,ink:AXIS_INKS[axis],error:motion.pushErrorMps2[k]!}))}];
+}
 /** A panel: its series, its vertical span and ticks (display units), and where a value goes. */
 interface Panel {series:Series;top:number;bottom:number;ticks:number[];y:(value:number)=>number}
 function panel(series:Series,top:number,bottom:number):Panel{
-  const factor=series.unit.factor,highest=ticks(Math.max(0,...series.lines.flatMap(l=>l.values))*factor||1).at(-1)!;
-  return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};
+  const factor=series.unit.factor,values=series.lines.flatMap(l=>l.values).filter((v):v is number=>v!==null).map(v=>v*factor),least=Math.min(0,...values);
+  if(!(least<0)){const highest=ticks(Math.max(0,...values)||1).at(-1)!;return {series,top,bottom,ticks:ticks(highest),y:v=>bottom-v*factor/highest*(bottom-top)};}
+  const most=Math.max(0,...values),step=niceStep(most-least,4),low=Math.floor(least/step-1e-9)*step,high=Math.ceil(most/step-1e-9)*step||step;
+  const marks=Array.from({length:Math.round((high-low)/step)+1},(_,k)=>low+k*step);
+  return {series,top,bottom,ticks:marks,y:v=>bottom-(v*factor-low)/(high-low)*(bottom-top)};
 }
 interface SeriesLayout {panels:[Panel,Panel];unit:{name:DurationUnit;factor:number};x:(t:number)=>number}
 function seriesLayout(timesUs:readonly number[],series:readonly [Series,Series],timeUnit?:DurationUnit):SeriesLayout{
@@ -91,7 +113,7 @@ export function seriesChart(timesUs:readonly number[],series:readonly [Series,Se
   for(const p of g.panels)for(const v of p.ticks){const y=p.y(v/p.series.unit.factor);body+=line(LEFT,y,RIGHT,y,`stroke="${GRID}"`)+text(LEFT-12,y+4,digits(v),'text-anchor="end"');}
   for(let i=0;i<=4;i++){const t=timesUs[0]!+(timesUs.at(-1)!-timesUs[0]!)*i/4;body+=text(g.x(t),g.panels[1].bottom+24,digits(t*g.unit.factor),'text-anchor="middle"');}
   body+=text(LEFT,19,g.panels[0].series.title)+text(LEFT,g.panels[1].top-8,g.panels[1].series.title)+text(RIGHT,g.panels[1].bottom+47,`t / ${g.unit.name}`,'text-anchor="end"');
-  g.panels.forEach(p=>p.series.lines.forEach((l,k)=>{body+=polyline(xs,l.values.map(p.y),l.ink,`data-series-id="${p.series.id}-${k}"`,l.width);}));
+  g.panels.forEach(p=>p.series.lines.forEach((l,k)=>{for(const [a,b] of runs(l.values))body+=polyline(xs.slice(a,b+1),l.values.slice(a,b+1).map(v=>p.y(v!)),l.ink,`data-series-id="${p.series.id}-${k}"`,l.width);}));
   return svg('motion-series-svg',`${series.map(s=>s.name).join('与')}随时间的变化。移动指针读取采样值，方向键逐点查看。`,body+'<g class="motion-cursor" pointer-events="none" style="display:none"></g>');
 }
 
@@ -160,7 +182,8 @@ const mark=(name:string,attrs:Record<string,string>)=>{const node=document.creat
  * (T ± 误差), in the panel's unit; a line of errors with none at the sample says so (a T carried over a
  * sample with fewer than two atoms held). */
 export function lineReading(l:Line,i:number,unit:Unit):string{
-  const value=formatNumber(l.values[i]!*unit.factor,{digits:4}),error=l.error?.[i],name=unit.name?` ${unit.name}`:'';
+  const v=l.values[i];if(v==null)return '无读数';
+  const value=formatNumber(v*unit.factor,{digits:4}),error=l.error?.[i],name=unit.name?` ${unit.name}`:'';
   return error==null?`${value}${name}${l.error?'（误差未知）':''}`:`${value} ± ${formatNumber(error*unit.factor,{digits:2})}${name}`;
 }
 /** The time cursor of a series chart: every line of both panels at the sample, one outside the
@@ -171,7 +194,7 @@ export function bindSeries(host:HTMLElement,timesUs:readonly number[],series:rea
   const unbind=bindCursor(host,svg,timesUs.length,i=>g.x(timesUs[i]!),(i,cursor)=>{
     const xx=g.x(timesUs[i]!);
     cursor.append(mark('line',{x1:String(xx),x2:String(xx),y1:String(g.panels[0].top),y2:String(g.panels[1].bottom),stroke:'#a19f9d','stroke-width':'1'}),
-      ...g.panels.flatMap(p=>p.series.lines.map(l=>mark('circle',{cx:String(xx),cy:String(p.y(l.values[i]!)),r:'3',fill:l.ink,stroke:'white','stroke-width':'1.5'}))));
+      ...g.panels.flatMap(p=>p.series.lines.filter(l=>l.values[i]!=null).map(l=>mark('circle',{cx:String(xx),cy:String(p.y(l.values[i]!)),r:'3',fill:l.ink,stroke:'white','stroke-width':'1.5'}))));
     card.innerHTML=`<div class="readout-time">t = ${esc(digits(timesUs[i]!*g.unit.factor))} ${esc(g.unit.name)}${sampleMark(!!marks.reference?.[i])}</div>`+g.panels.flatMap(p=>p.series.lines.map(l=>
       `<div class="readout-row two"><span class="readout-name" style="color:${l.ink}">${esc(l.name)}</span><span>${esc(lineReading(l,i,p.series.unit))}</span></div>`)).join('');
     placeCard(host,svg,card,xx);

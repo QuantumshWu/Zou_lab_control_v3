@@ -151,6 +151,9 @@ pub struct Judgment {
     /// The drop tier's candidate pairs: per pair its slots and Y, the bound of its slots' sup norms over the reach
     /// (# The drop tier); none where the node holds no beat but the static one.
     pub pairs: Vec<(Vec<usize>, f64)>,
+    /// A trace distance booked once, at every time after the start, beside ½(e^{2Yt} − 1): the frame of the parts turned
+    /// (model/selected.rs, # The parts turned, 2‖S‖); zero where none is.
+    pub once: f64,
 }
 
 /// The trace distance by which dropped terms of the rate Y (1/µs) may move the state after a time t (µs), strict
@@ -185,7 +188,7 @@ impl Account {
     fn temperature_moved(&self, d: f64) -> f64 {
         use crate::estimate::{Estimate, Motion, Spread};
         let unread = Spread::UNREAD;
-        let motion = Motion { temperature: [self.floor; 3], temperature_errors: [unread; 3], temperature_total: self.floor, temperature_total_error: unread, occupation: [0.0; 3], mean_velocity: [0.0; 3], mean_speed: [0.0; 3] };
+        let motion = Motion { temperature: [self.floor; 3], temperature_errors: [unread; 3], temperature_total: self.floor, temperature_total_error: unread, occupation: [0.0; 3], mean_velocity: [0.0; 3], mean_velocity_errors: [unread; 3], push: [0.0; 3], push_errors: [unread; 3], mean_speed: [0.0; 3] };
         let at = Estimate {
             trajectories: 0.0,
             held: 1.0,
@@ -198,6 +201,8 @@ impl Account {
             uncounted: 0.0,
             temperature_target: crate::units::TEMPERATURE_TARGET,
             unresolved: 0.0,
+            scale: self.floor,
+            deviated: [0.0; 2],
         };
         at.moved(if d < 1.0 { d / (1.0 - d) } else { 1.0 }, &self.escape)
     }
@@ -207,10 +212,21 @@ impl Account {
     /// `TEMPERATURE_TARGET` of T and at least T_sc), E = 1, A the measured relative error over `TEMPERATURE_TARGET` plus
     /// the drop's bound (`temperature_moved`). Unbounded where an A reaches its E, or is not a number.
     pub fn factor(&self, rate: f64) -> f64 {
+        self.factor_with(rate, 0.0, 0.0)
+    }
+
+    /// `factor` with a frame's part beside the rate's (model/selected.rs, # The parts turned): the distance `once` it puts
+    /// the state at as it is read, on the populations; and on T the frame's moving each atom's velocity by at most
+    /// `velocity` (µm/µs; ħ/m times its ‖∇S‖) -- `estimate::frame_temperature`, in units of T's allowance at its largest
+    /// over T, at T = T_sc/ε_T (below it the allowance is at least T_sc and the part grows with T, above it at least
+    /// ε_T T and the part over it falls): the part there over T_sc.
+    pub fn factor_with(&self, rate: f64, once: f64, velocity: f64) -> f64 {
         use crate::units::{ORDER, POPULATION_TARGET, TEMPERATURE_TARGET};
         let d = self.distance(rate);
+        let at = self.floor / TEMPERATURE_TARGET;
+        let frame = crate::estimate::frame_temperature(at, velocity, self.escape.mass) * at / self.floor;
         let power = 1.0 + 1.0 / (2.0 * ORDER as f64);
-        let room = [POPULATION_TARGET.powi(2) - (self.populations + d).powi(2), 1.0 - (self.temperature / TEMPERATURE_TARGET + self.temperature_moved(d)).powi(2)];
+        let room = [POPULATION_TARGET.powi(2) - (self.populations + d + once).powi(2), 1.0 - (self.temperature / TEMPERATURE_TARGET + self.temperature_moved(d) + frame).powi(2)];
         room.iter().map(|&r| if r > 0.0 { r.powf(-power) } else { f64::INFINITY }).fold(0.0, crate::linalg::larger)
     }
 }
@@ -233,7 +249,7 @@ impl Judgment {
                 (*beat, if k == 0 || held(m, &scales.generator[k]) || moving { Tier::Keep } else { Tier::Zero })
             })
             .collect();
-        let mut judgment = Judgment { tiers, blocks: Vec::new(), dropped: 0.0, pairs: Vec::new() };
+        let mut judgment = Judgment { tiers, blocks: Vec::new(), dropped: 0.0, pairs: Vec::new(), once: 0.0 };
         judgment.blocks = judgment.joined(node, scales);
         judgment
     }

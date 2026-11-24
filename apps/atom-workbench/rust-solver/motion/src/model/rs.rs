@@ -82,9 +82,13 @@ pub mod spectrum;
 
 use crate::floquet::{Hilbert, Lift, Part, Sectors};
 use crate::model::classify::input;
-use crate::linalg::{C64, Mat, V3};
+use crate::linalg::{C64, Mat};
+#[cfg(test)]
+use crate::linalg::V3;
 use crate::request::STATES;
-use crate::scene::{self, Components, Jumps, Key, Point, Scene};
+use crate::scene::{self, Components, Key, Point, Scene};
+#[cfg(test)]
+use crate::scene::Jumps;
 use crate::units::UNIT_ROUNDOFF;
 pub use fold::{Making, Piece, Source, SourceChannel, Term, Values};
 
@@ -379,13 +383,12 @@ impl Split {
     }
 }
 
-/// The factor a term takes at a point: the scene's (of the beams' amplitudes, scene.rs `Factor`), the tweezer's
-/// intensity |a_tw|², or a fixed number with a fixed gradient (a check's).
+/// The factor a term takes at a point: the scene's (of the beams' amplitudes, scene.rs `Factor`) or the tweezer's
+/// intensity |a_tw|².
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Factor {
     Scene(scene::Factor),
     Power,
-    Fixed(C64, [C64; 3]),
 }
 
 impl Factor {
@@ -395,7 +398,6 @@ impl Factor {
             Factor::Scene(scene::Factor::Beam(l)) => Factor::Scene(scene::Factor::Conjugate(l)),
             Factor::Scene(scene::Factor::Conjugate(l)) => Factor::Scene(scene::Factor::Beam(l)),
             Factor::Scene(scene::Factor::Product(l, m)) => Factor::Scene(scene::Factor::Product(m, l)),
-            Factor::Fixed(v, g) => Factor::Fixed(v.conj(), g.map(C64::conj)),
             other => other,
         }
     }
@@ -407,7 +409,6 @@ impl Factor {
             Factor::Scene(scene::Factor::One) => false,
             Factor::Scene(scene::Factor::Product(l, m)) if l == m => scene.is_none_or(|s| s.geometry[l].waist.is_some()),
             Factor::Scene(_) | Factor::Power => true,
-            Factor::Fixed(_, g) => g.iter().any(|d| *d != C64::ZERO),
         }
     }
 
@@ -422,7 +423,6 @@ impl Factor {
                 let t = &a[tweezer];
                 (C64::real(t.value.norm_sqr()), std::array::from_fn(|i| C64::real(2.0 * (t.value.conj() * t.gradient[i]).re)))
             }
-            Factor::Fixed(v, g) => (v, g),
         }
     }
 }
@@ -493,6 +493,7 @@ pub struct Folding {
     pub plan: fold::Plan,
     keys: Vec<Key>,
     by_key: fold::Grouping,
+    #[cfg(test)]
     one: fold::Grouping,
 }
 
@@ -504,8 +505,15 @@ impl Folding {
         let plan = fold::Plan::new(&splits, keep, &folded, source, sectors, axes, groups);
         let keys: Vec<Key> = source.pieces().map(|(p, _)| p.key.clone()).collect();
         let by_key = fold::Grouping::new(&plan, &keys);
+        #[cfg(test)]
         let one = fold::Grouping::new(&plan, &vec![Vec::new(); keys.len()]);
-        Folding { plan, keys, by_key, one }
+        Folding {
+            plan,
+            keys,
+            by_key,
+            #[cfg(test)]
+            one,
+        }
     }
 
     /// The keys of the fold's pieces (`Source::pieces`' order).
@@ -513,6 +521,12 @@ impl Folding {
         &self.keys
     }
 
+    /// The fold's outputs by their exact keys, each with its structural elements (model/selected.rs `Selected::pattern`).
+    pub fn by_key(&self) -> &fold::Grouping {
+        &self.by_key
+    }
+
+    #[cfg(test)]
     /// The fold at the values (`At`).
     pub fn at(&self, values: &Values) -> At<'_> {
         let mut local = fold::Local::default();
@@ -522,6 +536,7 @@ impl Folding {
     }
 }
 
+#[cfg(test)]
 /// The fold at a point (`Rs::local`): its numbers (rs/fold.rs `Local`) on the fold's structure, read by contractions.
 #[derive(Clone, Debug)]
 pub struct At<'a> {
@@ -529,10 +544,12 @@ pub struct At<'a> {
     pub local: fold::Local,
 }
 
+#[cfg(test)]
 /// A contraction's grouping of the components: of a component's key and frequency its group's key, its frequency and
 /// the weight it enters with.
 pub type Grouping<'a> = &'a dyn Fn(&Key, f64) -> (Key, f64, C64);
 
+#[cfg(test)]
 impl At<'_> {
     /// The contraction by a grouping given as a function (a check's: its grouping made here).
     pub fn contract(&self, group: Grouping, making: Making) -> ModelAt {
@@ -566,15 +583,16 @@ impl At<'_> {
     /// The model's value at the time t (the trajectory's): one group, each component at its phase e^{−if_c t}: H_eff(t)
     /// with its gradient, each channel's L(t) with its gradient, and the lift M(t) on Q (|Q| × n).
     pub fn now(&self, t: f64) -> Now {
-        Now::of(self.at_time(t, Making { model: true, kicks: false, lift: true, gradients: true }))
+        Now::of(self.at_time(t, Making { model: true, effective: true, kicks: false, lift: true, gradients: true }))
     }
 
     /// The channels' photons' forms at the time t (`now`'s channels' kicks: k∘L per element, folded alike).
     pub fn kicks(&self, t: f64) -> Vec<Moment> {
-        moments(&self.at_time(t, Making { model: true, kicks: true, lift: false, gradients: true }), true)
+        moments(&self.at_time(t, Making { model: true, effective: true, kicks: true, lift: false, gradients: true }), true)
     }
 }
 
+#[cfg(test)]
 /// A contraction's outputs as a model by its outputs' keys (each part's frequency its pieces' sum), the parts in key
 /// order, nothing that is zero.
 pub fn model_of(plan: &fold::Plan, grouping: &fold::Grouping, out: &fold::Out, frequencies: &[f64], making: Making) -> ModelAt {
@@ -623,6 +641,7 @@ pub fn model_of(plan: &fold::Plan, grouping: &fold::Grouping, out: &fold::Out, f
     }
 }
 
+#[cfg(test)]
 /// A jump channel's value at a time: its emission, its fast index, L(t) and ∂L(t) (n × n).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Moment {
@@ -632,6 +651,7 @@ pub struct Moment {
     pub gradient: [Mat; 3],
 }
 
+#[cfg(test)]
 /// The model's value at a time t (`At::now`): H_eff(t) and ∂H_eff(t) (n × n), the channels L(t), the lift M(t) on Q.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Now {
@@ -643,6 +663,7 @@ pub struct Now {
     pub lift: Mat,
 }
 
+#[cfg(test)]
 /// The 32 states' populations of ρ (n × n, row-major, on the model's `states`) with the `folded` states' lifted through
 /// M (|Q| × n): the model's ρ_aa, Q's (M ρ M†)_kk. The one readout of a fold's populations.
 pub fn lifted(states: &[usize], folded: &[usize], lift: &Mat, rho: &[C64]) -> [f64; STATES] {
@@ -658,6 +679,7 @@ pub fn lifted(states: &[usize], folded: &[usize], lift: &Mat, rho: &[C64]) -> [f
     out
 }
 
+#[cfg(test)]
 /// A one-group contraction's channels (`At::now`) as moments: their parts', or their photons' forms' (`kicks`).
 fn moments(model: &ModelAt, kicks: bool) -> Vec<Moment> {
     let n = model.states.len();
@@ -672,6 +694,7 @@ fn moments(model: &ModelAt, kicks: bool) -> Vec<Moment> {
         .collect()
 }
 
+#[cfg(test)]
 impl Now {
     /// The value of a one-group contraction (`At::now`): its one part of each quantity, zero where it has none.
     fn of(model: ModelAt) -> Now {
@@ -725,6 +748,7 @@ impl ModelAt {
 // ---------------------------------------------------------------------------------------------------------------------
 // The emission, the tweezer's fold, the reference and the model.
 
+#[cfg(test)]
 /// The request's Cartesian emission as fixed matrices: C_a, k∘C_a (the photons' forms), and Σ_a C_a†C_a (scene.rs
 /// `Jumps::decay`, the one decay).
 pub fn emission(jumps: &Jumps) -> ([Mat; 3], [Mat; 3], Mat) {
@@ -977,6 +1001,26 @@ impl Tweezer {
         v.frequencies.extend(self.source.pieces().map(|(p, _)| point.frequency(&p.key)));
     }
 
+    /// `values_into`'s counted work (complex multiply-adds; decide.rs, # Work): per factor its value and gradient -- a
+    /// beam's or its conjugate's four numbers moved, a product's value and its gradient's two products an axis, the
+    /// tweezer's intensity |a|² and its gradient --, the tweezer's Doppler powers, and per piece its key's frequency
+    /// (a real multiply-add a generator).
+    pub fn values_work(&self) -> f64 {
+        let moved = crate::decide::MOVED / crate::decide::COMPLEX;
+        let factors: f64 = self
+            .factors
+            .0
+            .iter()
+            .map(|f| match f {
+                Factor::Scene(scene::Factor::Product(..)) => 7.0,
+                Factor::Power => 4.0,
+                _ => 4.0 * moved,
+            })
+            .sum();
+        let pieces: usize = self.source.pieces().map(|(p, _)| p.key.len()).sum();
+        factors + (2 * ORDERS) as f64 / crate::decide::COMPLEX + pieces as f64 / crate::decide::COMPLEX
+    }
+
     /// The unit fold's static part on the 32 states at rest (rad/µs at the tweezer's focus intensity): its ground
     /// diagonal the tweezer's ground shift (`Scene::trap_potential`'s depth), its excited block the tweezer's shifts of
     /// the excited states (`Scene::smooth`).
@@ -1173,6 +1217,7 @@ impl Rs {
         &self.folding.plan
     }
 
+    #[cfg(test)]
     /// The fold at a point (scene.rs `Point`: `Scene::point_at` on a trajectory, `Scene::components(..).point` at the
     /// checkpoint's): the full reference there folded on P at its static part. Its contractions: `At::now` (the value at
     /// a time) and `At::components`.
@@ -1227,6 +1272,7 @@ impl Rs {
         Folding::new(&self.tweezer.library, &self.tweezer.spherical, &self.keep, &self.sectors, MODEL, &self.tweezer.groups).plan
     }
 
+    #[cfg(test)]
     /// The model by frequency components for the scene's components at a point (the checkpoint's).
     pub fn at(&self, scene: &Scene, components: &Components) -> ModelAt {
         self.local(scene, &components.point).components()

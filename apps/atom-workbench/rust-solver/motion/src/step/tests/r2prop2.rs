@@ -125,7 +125,7 @@ fn loaded(words: &str) -> Trajectory {
     let booked = [g(), g(), g()];
     let (ftime, held) = (g(), [g(), g(), g()]);
     let tones = (0..g() as usize).map(|_| (g(), std::array::from_fn(|_| C64::new(g(), g())))).collect();
-    Trajectory { r, kappa, psi, cluster, time, threshold, jumps, scattered, lost: (is_lost == 1.0).then_some(lost), unresolved: unresolved == 1.0, seed, index, work, jumped, pending, booked, forms: crate::step::Forms { time: ftime, held, tones } }
+    Trajectory { r, kappa, psi, cluster, time, threshold, jumps, scattered, lost: (is_lost == 1.0).then_some(lost), unresolved: unresolved == 1.0, seed, index, work, jumped, pending, booked, forms: crate::step::Forms { time: ftime, held, tones }, version: 0, deviated: [0.0; 2] }
 }
 
 /// The states of R2PROP2_STATES (a folder): the file of a scene and τ.

@@ -19,7 +19,7 @@ export function nativeResult({states,initialIndex,timesUs,tolerance=POPULATION_T
     return {horizonUs:T,status:'time-average',reason:'test mean',populations:row.slice(),densityReal:real.slice(),densityImag:Array(32*32).fill(0),estimatedError:e,withinTolerance:e<=tolerance};};
   return {protocol:NATIVE_PROTOCOL,modelSchema:FULL_MODEL_SCHEMA,states,timesUs,populations:timesUs.map(()=>row.slice()),
     ...(finite?{populationAccuracy:{status:Math.max(...sampleErrors)>tolerance?'estimated-partial':'estimated-converged',requestedTolerance:tolerance,estimatedMaximumError:Math.max(...sampleErrors),
-      sampleErrors:sampleErrors.slice(),...(Math.max(...sampleErrors)>tolerance?{reason:'test budget'}:{}),
+      sampleErrors:sampleErrors.slice(),...(Math.max(...sampleErrors)>tolerance?{beyond:sampleErrors.flatMap((e,i)=>e>tolerance?[i]:[]),reason:'test budget'}:{}),
       scope:{states:32,samples:timesUs.length,groups:POPULATION_GROUPS.map(group=>group.id)}}}:{}),
     ...(mean?{meanHorizons:HORIZONS.map(entry)}:{}),
     diagnostics:{traceError:0,initialStateError:0,elapsedMs:1,...(finite?{method:'test trajectory'}:{}),
@@ -28,21 +28,27 @@ export function nativeResult({states,initialIndex,timesUs,tolerance=POPULATION_T
 /** A result's mean at T (the scene's default, 1 s, unless said). */
 export function entryAt(data,T=1e6){return data.meanHorizons.find(e=>e.horizonUs===T);}
 /** A contract-valid motion block on `samples` samples: per lab axis T (x, y, z: 30, 28 and 35 μK)
- * with its standard error, ⟨v⟩, n̄, the trap frequency and the distributions at the first and the
- * last sample; the total temperature (31 μK) with its standard error; the loss, rising by `loss`
- * per sample from 0; the regime per sample, the last outside it. */
+ * with its standard error, ⟨v⟩ (x at rest, y drifting at −2 mm/s, z pushed to +1.5 cm/s by the last
+ * sample) and the push (0, 0 and 30 m/s²; none at t = 0, which has no window) with their standard
+ * errors and targets, n̄, the trap
+ * frequency and the distributions at the first and the last sample; the total temperature (31 μK)
+ * with its standard error; the loss, rising by `loss` per sample from 0; the regime per sample, the
+ * last outside it. */
 export function motionBlock(samples,loss=.1){
   const velocities=[-.1,-.05,0,.05,.1],positions=[-.4,-.2,0,.2,.4],p=[.1,.2,.4,.2,.1],series=value=>Array(samples).fill(value);
   const axes=make=>({x:make(),y:make(),z:make()});
   return {axis:'3d',temperatureUK:{x:series(30),y:series(28),z:series(35)},temperatureErrorUK:axes(()=>series(1.5)),temperatureTotalUK:series(31),temperatureTotalErrorUK:series(.9),
-    meanVelocityMps:axes(()=>series(0)),meanOccupation:axes(()=>series(4.5)),trapFrequencyKHz:{x:100.5,y:100.5,z:19.3},lossProbability:Array.from({length:samples},(_,i)=>i*loss),
+    meanVelocityMps:{x:series(0),y:series(-.002),z:Array.from({length:samples},(_,i)=>.015*i/Math.max(1,samples-1))},
+    meanVelocityErrorMps:axes(()=>series(.0004)),meanVelocityTargetMps:axes(()=>series(.032)),
+    pushMps2:{x:[null,...series(0).slice(1)],y:[null,...series(0).slice(1)],z:[null,...series(30).slice(1)]},pushErrorMps2:axes(()=>[null,...series(2).slice(1)]),
+    pushTargetMps2:axes(()=>[null,...series(6.4).slice(1)]),meanOccupation:axes(()=>series(4.5)),trapFrequencyKHz:{x:100.5,y:100.5,z:19.3},lossProbability:Array.from({length:samples},(_,i)=>i*loss),
     classical:Array.from({length:samples},(_,i)=>i<samples-1),momentum:axes(()=>({velocitiesMps:velocities,samples:[0,samples-1],probabilities:[p,p]})),
     position:axes(()=>({positionsUm:positions,samples:[0,samples-1],probabilities:[p,p]})),trajectories:512,timeStepUs:.25};
 }
 /** The motion entries of a motion result's diagnostics: the device used, a fallback's note and the
  * approximation ledger. */
 export const MOTION_DIAGNOSTICS={device:'cpu',deviceNote:'GPU 计算尚未提供：本次在 CPU 上计算',
-  approximations:{totals:{population:{error:.0021,target:.05},temperature:{error:.003,target:.1}},items:[{label:'谐振近似',estimate:.0012,action:'计入预算'},{label:'一阶多普勒',estimate:.0009,action:'计入预算'}]}};
+  approximations:{totals:{population:{error:.0021,target:.05},temperature:{error:.003,target:.1},velocity:{error:.0011,target:.032},push:{error:.4,target:6.4}},items:[{label:'谐振近似',estimate:.0012,action:'计入预算'},{label:'一阶多普勒',estimate:.0009,action:'计入预算'}]}};
 /** A motion result over timesUs: the held atom in its initial state, at the method's own target. */
 export function motionResult({states,initialIndex,timesUs,block=motionBlock(timesUs.length),diagnostics=MOTION_DIAGNOSTICS}){
   const data=nativeResult({states,initialIndex,timesUs,mean:false,tolerance:SEMICLASSICAL_POPULATION_TARGET});

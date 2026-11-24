@@ -182,7 +182,7 @@ impl Parts {
                 parts.f.data[at] += z;
                 Small::Own(f)
             } else {
-                return Err(format!("a varying factor ({f}) other than the tweezer's intensity and the beams' own"));
+                return Err(format!("随位置变化的因子（{f}）既不是光镊光强，也不是各光束自己的光强"));
             };
             let i = parts.smalls.iter().position(|x| x.0 == small).unwrap_or_else(|| {
                 parts.smalls.push((small, Mat::zeros(n, n)));
@@ -273,7 +273,7 @@ fn clusters(parts: &Parts) -> Result<Vec<Cluster>, String> {
         for k in 0..=intervals {
             let s = k as f64 / intervals as f64;
             if !sp.decompose(&parts.at(s)) {
-                return Err(format!("no spectrum at s = {s}"));
+                return Err(format!("s = {s} 处得不到谱"));
             }
             let state = states_of(&sp);
             // Each state's eigenvalue (its eigenpair's).
@@ -304,7 +304,7 @@ fn clusters(parts: &Parts) -> Result<Vec<Cluster>, String> {
             spectrum_before = Some(now);
         }
         if intervals >= 1 << 12 {
-            return Err("the eigenvalues move more than τ/2 between the points of every grid".into());
+            return Err("每一种网格的相邻点之间本征值都移动超过 τ/2".into());
         }
         if !(fastest > 0.5 * tau) {
             let mut by: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
@@ -362,9 +362,9 @@ fn sample(parts: &Parts, clusters: &[Cluster], s: f64) -> Result<Sample, String>
     let g = parts.at(s);
     let mut sp = Spectrum::default();
     if !sp.decompose(&g) {
-        return Err(format!("no spectrum at s = {s}"));
+        return Err(format!("s = {s} 处得不到谱"));
     }
-    let of = assigned(&sp, clusters).ok_or_else(|| format!("the clusters' eigenpairs do not match their states at s = {s}"))?;
+    let of = assigned(&sp, clusters).ok_or_else(|| format!("s = {s} 处各簇的本征对与它们的态对不上"))?;
     let mut w = Mat::zeros(n, n);
     let mut wt = Mat::zeros(n, n);
     let (va, via) = (moduli(&sp.vectors), moduli(&sp.inverse));
@@ -387,7 +387,7 @@ fn sample(parts: &Parts, clusters: &[Cluster], s: f64) -> Result<Sample, String>
             }
         }
         p_scale = p_moduli.iter().copied().fold(p_scale, linalg::larger);
-        let lu = Lu::new(&p.block(&cl.states, &cl.states)).ok_or_else(|| format!("P_c[c, c] singular at s = {s}"))?;
+        let lu = Lu::new(&p.block(&cl.states, &cl.states)).ok_or_else(|| format!("s = {s} 处 P_c[c, c] 奇异"))?;
         for (j, &st) in cl.states.iter().enumerate() {
             for i in 0..n {
                 w[(i, cl.at + j)] = p[(i, st)];
@@ -631,7 +631,7 @@ impl Fitting<'_> {
         }
         let m = 0.5 * (a + b);
         if depth >= 20 || !(a < m && m < b) {
-            return Err(format!("[{a:.6}, {b:.6}]: no convergence (tail {:.1e} of its floor, quantity {})", fit.tail, fit.worst));
+            return Err(format!("[{a:.6}, {b:.6}]：不收敛（尾部为下限的 {:.1e}，量 {}）", fit.tail, fit.worst));
         }
         let (left, right) = (self.fit(a, m)?, self.fit(m, b)?);
         if !(linalg::larger(left.tail, right.tail) < 0.5 * fit.tail) {
@@ -657,7 +657,7 @@ impl BlockTable {
         let made = {
             let mut sp = Spectrum::default();
             if !sp.decompose(&parts.at(0.5)) {
-                return Err("no spectrum at s = ½".into());
+                return Err("s = ½ 处得不到谱".into());
             }
             let factors = plan.blocks[b].varying.len();
             plan.blocks[b].rest.len() as f64 + sp.work + 2.0 * factors as f64 * (n * n * n) as f64
@@ -673,7 +673,7 @@ impl BlockTable {
                 let block = Mat { rows: m, cols: m, data: half.main[r.0..r.1].to_vec() };
                 let mut sp = Spectrum::default();
                 if !sp.decompose(&block) {
-                    return Err("a cluster's block has no spectrum at s = ½".into());
+                    return Err("s = ½ 处有一簇的块得不到谱".into());
                 }
                 work += sp.work;
             }
@@ -690,7 +690,7 @@ impl BlockTable {
         let decompositions = decompositions + 2.0 * owns as f64 * (n * n * n) as f64;
         let pays = |d: usize| tabled_work(n, squares, active, d, d, decompositions) < made;
         if !pays(0) {
-            return Err(format!("does not pay: {:.0} against {made:.0} at degree 0", tabled_work(n, squares, active, 0, 0, decompositions)));
+            return Err(format!("不划算：0 阶时 {:.0} 对 {made:.0}", tabled_work(n, squares, active, 0, 0, decompositions)));
         }
         let b_floor = half.floors[2..2 + clusters.len()].iter().copied().fold(f64::INFINITY, linalg::smaller);
         let relative = if half.gap.is_finite() { b_floor / half.gap } else { f64::INFINITY };
@@ -711,7 +711,7 @@ impl BlockTable {
                     // jumps): not tabled.
                     let top = samples.iter().flat_map(|x| x.main[lo..hi].iter().map(|z| z.abs())).fold(0.0, linalg::larger);
                     if height > UNIT_ROUNDOFF.sqrt() * top {
-                        return Err(format!("[{a:.6}, {bb:.6}]: quantity {q}'s plateau at {:.1e} of its largest entry", height / top));
+                        return Err(format!("[{a:.6}, {bb:.6}]：量 {q} 停在其最大元的 {:.1e}", height / top));
                     }
                     floors[q] = linalg::larger(floors[q], height);
                 }
@@ -748,7 +748,7 @@ impl BlockTable {
         let e = pieces.iter().map(|p| p.small_degree).max().unwrap_or(0);
         let off = tabled_work(n, squares, active, d, e, decompositions);
         if !(off < made) {
-            return Err(format!("does not pay: {off:.0} against {made:.0} (degree {d}, small {e})"));
+            return Err(format!("不划算：{off:.0} 对 {made:.0}（{d} 阶，小量 {e}）"));
         }
         let smalls = parts.smalls.iter().map(|(c, _)| *c).collect();
         Ok(BlockTable { size: n, clusters, squares, smalls, pieces, relative, work: (off, made) })

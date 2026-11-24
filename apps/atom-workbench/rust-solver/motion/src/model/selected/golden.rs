@@ -119,7 +119,7 @@ fn r1_golden_dump() {
             doc["node"][point] = node(&run, &made);
             doc["node"][point]["r"] = json!(r);
             doc["node"][point]["kappa"] = json!(kappa);
-            doc["lift"][point] = model(&run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true }));
+            doc["lift"][point] = model(&run.at(r, kappa, Making { model: false, effective: false, kicks: false, lift: true, gradients: true }));
         }
         std::fs::write(dir.join(format!("{name}.json")), serde_json::to_string(&doc).unwrap()).unwrap();
         eprintln!("{name}: written");
@@ -314,7 +314,7 @@ fn r1_against_golden() {
         for (point, r, kappa) in nodes(&run) {
             let made = run.node(r, kappa, true);
             let (d, beats, golden_beats) = nodes_apart(&node(&run, &made), &golden["node"][point]);
-            let lift = models(&model(&run.at(r, kappa, Making { model: false, kicks: false, lift: true, gradients: true })), &golden["lift"][point]);
+            let lift = models(&model(&run.at(r, kappa, Making { model: false, effective: false, kicks: false, lift: true, gradients: true })), &golden["lift"][point]);
             eprintln!(
                 "R1GOLD {name} node {point}: generator {:.1} ∇H {:.1} L {:.1} ∇L {:.1} K {:.1} lift {:.1} (ε·max); beats {beats} (golden {golden_beats})",
                 d[0].ratio(),
@@ -367,8 +367,8 @@ fn r1_node_parts() {
         let mut work = Work::default();
         let mut node = run.template.clone();
         run.scene.point_into(r, kappa, &mut work.point);
-        run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
-        work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true });
+        run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
+        work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
         let point = least(&mut || {
             run.scene.point_into(r, kappa, &mut work.point);
         });
@@ -378,8 +378,10 @@ fn r1_node_parts() {
             work.local.values = v;
         });
         let evaluate = least(&mut || run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making::node(false)));
-        let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true }));
-        let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps));
+        let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
+        let fill = least(&mut || {
+            run.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+        });
         let whole = least(&mut || {
             std::hint::black_box(run.node(r, kappa, false));
         });
@@ -457,20 +459,24 @@ fn r2_node_cost() {
             let mut work = Work::default();
             let mut node = run.template.clone();
             run.scene.point_into(r, kappa, &mut work.point);
-            run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
-            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true });
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
+            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
             let evaluate = least(&mut || {
                 run.scene.point_into(r, kappa, &mut work.point);
-                run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
             });
             let a_evaluate = allocations(&mut || {
                 run.scene.point_into(r, kappa, &mut work.point);
-                run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
+                run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
             });
-            let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true }));
-            let a_contract = allocations(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true }));
-            let fill = least(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps));
-            let a_fill = allocations(&mut || run.fill(&mut node, &work.out, false, &mut work.jumps));
+            let contract = least(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
+            let a_contract = allocations(&mut || work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true }));
+            let fill = least(&mut || {
+            run.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+        });
+            let a_fill = allocations(&mut || {
+                run.fill(&mut node, &work.out, (false, true), &mut work.jumps);
+            });
             let counted = work.local.work + work.out.work;
             // A middle's three nodes (the step's middle and outer nodes, h = 0.237 µs along the path) with every reading
             // of them a step makes -- the generator at each, the forces, the tones, the gradient with its slope, the
@@ -540,9 +546,9 @@ fn r1_tones() {
             let mut bare = run.template.clone();
             let mut work = Work::default();
             run.scene.point_into(r, kappa, &mut work.point);
-            run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, kicks: false, lift: false, gradients: true });
-            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, kicks: false, lift: false, gradients: true });
-            run.fill(&mut bare, &work.out, false, &mut work.jumps);
+            run.rs.evaluate(&run.scene, &work.point, &mut work.local, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
+            work.out.contract(run.rs.plan(), &run.lab, &work.local, None, Making { model: true, effective: true, kicks: false, lift: false, gradients: true });
+            run.fill(&mut bare, &work.out, (false, true), &mut work.jumps);
             let (values, exact) = run.components();
             for (k, ((beat, g), (_, gb))) in full.generator.iter().zip(&bare.generator).enumerate() {
                 let total = g.max_abs();
@@ -552,7 +558,7 @@ fn r1_tones() {
             }
             let middle = run.middle(0, r, 0.0);
             let path = middle.path(kappa, [0.0; 3]);
-            let _ = middle.node(&path, 0.0, false);
+            let _ = middle.node(&path, 0.0);
             let (mut beats, mut keys) = (vec![], vec![]);
             middle.beats(&path, &mut beats, &mut keys);
             eprintln!("R1TONE {name} {point}: {} candidate tones {:?} (n {n})", beats.len(), beats);

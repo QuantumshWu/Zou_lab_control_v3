@@ -32,7 +32,8 @@
 //!   (at most 10 s, 2 to 2000 samples: a longer or denser grid is refused
 //!   with the reason) has >= 2 projected rows and `populationAccuracy`: `status`
 //!   (`estimated-converged` when every sample's estimate is within the
-//!   tolerance, else `estimated-partial` with its `reason`), `sampleErrors`
+//!   tolerance, else `estimated-partial` with `beyond`, the samples whose
+//!   estimate is above it, and its `reason`), `sampleErrors`
 //!   (per sample, an absolute population error: the sample's change since
 //!   the previous checkpoint plus the change of its projection onto the
 //!   probability simplex; an estimate, not a bound),
@@ -405,11 +406,13 @@ fn result(model:&Model,options:&Options,request:&Prepared,trajectory:Option<(&An
             "preparationMs":{"source":prepared.timing[0],"plan":prepared.timing[1],"fold":prepared.timing[2],"floquetKernels":prepared.timing[3]}}});
     if let Some((answer,solution))=trajectory{
         let estimated=answer.sample_errors.iter().fold(0_f64,|a,&b|a.max(b));
-        // Converged: every sample's estimate within the tolerance.
+        // Converged: every sample's estimate within the tolerance -- its bound is the verdict, the samples beyond it are
+        // those whose bound is above the tolerance (`beyond`, the contract's: the result's state reads it).
         let converged=estimated<=POPULATION_TOLERANCE;
+        let beyond:Vec<usize>=answer.sample_errors.iter().enumerate().filter(|(_,&e)|e>POPULATION_TOLERANCE).map(|(i,_)|i).collect();
         result["populationAccuracy"]=json!({"status":if converged{"estimated-converged"}else{"estimated-partial"},"requestedTolerance":POPULATION_TOLERANCE,
             "sampleErrors":answer.sample_errors,"estimatedMaximumError":estimated,"scope":{"states":32,"samples":options.samples,"groups":request.names}});
-        if !converged{result["populationAccuracy"]["reason"]=json!(solution.and_then(|s|s.reason.clone())
+        if !converged{result["populationAccuracy"]["beyond"]=json!(beyond);result["populationAccuracy"]["reason"]=json!(solution.and_then(|s|s.reason.clone())
             .unwrap_or_else(||format!("Checkpoint at {} solves: the error estimate is {estimated:.2e} against the tolerance {POPULATION_TOLERANCE:e}; the run continues",answer.solves)));}
         result["diagnostics"]["method"]=json!(METHOD);
         if let Some(s)=solution{result["diagnostics"]["lattice"]=lattice_json(prepared,Some(s));}
