@@ -68,11 +68,8 @@
 //! (Richardson's 2^p/(2^p − 1), p = 2: the amplitudes' linear interpolation at one piece an interval, R's at the substep's
 //! middle -- paths.rs # The nodes, # The substeps; a rate no lower than one substep a piece, so
 //! that where twice the pieces raise a rate to that floor the pieces' part is read at the raised rates,
-//! `refinements`), and beside them the trace's part, the setting's own run's trace defect (paths.rs
-//! `Series::trace_defect`: every model's flow keeps tr ρ_P, so its departure is a strict lower bound of the scheme's
-//! error -- one the knobs' parts cannot see, the rows read over their sum); from
-//! the coarsest (`COARSEST`), the knob of the largest part is doubled -- where the trace's is the largest, the knob whose
-//! refinement lowers it most -- while the parts' sum is beyond `TOLERANCE` -- s⁴
+//! `refinements`); from
+//! the coarsest (`COARSEST`), the knob of the largest part is doubled while the parts' sum is beyond `TOLERANCE` -- s⁴
 //! of the population target, the share the numerical tolerances inside a step take of theirs (units.rs `QUADRATURE`)
 //! --, to `FINEST` at the most (a bound on the work, not on the accuracy: stopped there short of the tolerance, the
 //! setting is said not converged and the reference's parts are booked whole in every candidate's A,
@@ -82,13 +79,7 @@
 //! hundreds of µs of them, which no short piece holds). The ladder climbs first on its first `CALIBRATION` µs, where a
 //! run costs a fraction of the whole length's, and goes on from there over the whole stretch, where it stops: the
 //! first piece decides nothing, it only starts the second stage near its end (a setting that meets the tolerance there
-//! is checked there in one round of the refinements, the setting's own run being the path's). The trace is read on
-//! every path, not on the calibration's alone: where another stretch's defect is beyond the tolerance at the setting,
-//! the ladder goes on along that stretch alone from the setting, and that stretch is run at what it ends at -- its own run
-//! there the stretch's --, every other stretch at its own, every model judged likewise (`Paths::settings`, `judge_on`);
-//! what defect is left at the ladder's top is booked in every candidate's A, the reference's largest over the paths
-//! beside the candidate's own (`Paths::trace`, `judge`). (Until 2026-11-22 the trace was read nowhere: the reference's
-//! fell to 1.6e-5 on SAT_03's first 5 µs and drifted to 0.55 along S1's paths, 1.04 along tilt0's -- Study A §2.6.)
+//! is checked there in one round of the refinements, the setting's own run being the path's).
 //! Every path and every candidate take that setting. The same refinements of each candidate along the same stretch give its
 //! calibration (`Calibration`): the change of its rows' difference to the reference, read alike, booked beside the
 //! direct part. (Until 2026-11-22 the setting was fixed at
@@ -98,6 +89,38 @@
 //! converge to the same limit: H exact in each piece's eigenbasis as the pieces shorten, the exponential Runge–Kutta
 //! as the substeps do. Until SELCOST the substeps were Lawson's, whose rate had to resolve the detunings, paths.rs #
 //! The substeps.)
+//!
+//! What the setting is held to is what the judgment reads (module documentation, # The motion): the displayed rows,
+//! each knob's part the largest change of a row, against `TOLERANCE`; and the motion's readings -- the photon rate,
+//! which the heating and the energy rates of the loss's x scale with, and the force --, each knob's part the largest
+//! change of each over its own largest size along the stretch, against `MOTION_TOLERANCE`, s⁴ of T's target as the
+//! rows' is of the population target (`motion_change`). The setting stands where both sums are within; else the knob
+//! doubled is the one of the most error per work -- each part over its tolerance, over the counted work of the run at
+//! that knob's doubling, the setting the next family runs at (the cutoff where its bound is the largest part: raising it
+//! runs nothing until then). The knobs interact: a longer piece leaves more of H's change to the substeps, so on
+//! R2_RECOIL at one piece a µs doubling the substeps from 64 to 128 moved the rate's part 1.96e-2 → 2.8e-3, and at two
+//! pieces it read 2.7e-4; the largest part alone went up the substeps to 128 (the paths 105 s). (Until SEL the motion
+//! was not judged on the paths, and the rows alone held the setting: on R2_RECOIL at 8 substeps a µs and four pieces the
+//! rows' parts were 1.8e-4 while the photon rate moved 3.1e-2 on doubling the substeps.)
+//!
+//! The trace is no part of the setting's error, nor of a candidate's A: every reading is over the state's own size --
+//! the rows over their sum, the rates, the force, the heating and a landing over tr ρ_P (paths.rs # The readings) --
+//! and the flow is linear, so a run's error δ = ρ_num − ρ reaches them only through δ⊥ = δ − (tr δ)ρ, its traceless
+//! part: ρ_num / tr ρ_num = ρ + δ⊥ / (1 + tr δ). The trace defect tr δ (paths.rs `Series::trace_defect`) is the part
+//! the readings divide out; what reaches them is read as their own changes, above. Measured (REGRESS, 2026-11-23, the
+//! reference along the longest path; the eigenvector conditions 1.3–1.8, the defect smooth and falling with the
+//! substeps at order 2–2.5, no rounding; extrapolated to zero substeps the model's own leak below 1e-8 a µs): on S1's
+//! closed cycle at its 0.105 µs step tr δ −0.227, +0.023, −0.0041, −0.00075 at 9.6, 19, 38, 76 substeps a µs while the
+//! photon rate moved 2.6e-4 to 1.4e-3 on any knob's doubling at the first (the population the recycling's quadrature
+//! misses on the cycle returns to the state it left: a scaling); on R2_RECOIL tr δ 4.0e-2, 2.0e-2, 6.0e-3, 2.2e-3 at
+//! 8, 16, 32, 64 a µs, the rate's change on doubling the substeps 3.1e-2, 1.3e-2, 2.1e-3, 4.2e-4 -- the defect
+//! tracked the rates there, and the rates are what is held -- the trace is not their cause: given back at every substep
+//! as the recycling lands it (a test, not kept), the trace stood at 3e-3 and the rate's changes were 2.76e-1, 1.80e-1,
+//! 3.31e-2 at 8, 16, 32 a µs and one piece against 2.72e-1, 1.85e-1, 3.40e-2 without. Counted as a part, the trace drove S1's substeps from 9.6
+//! to 76 a µs (its paths 169 s), and booked in every A it moved the choice. It is reported (the choice's paths line).
+//! (From 2026-11-22 to 11-23 it was a part, read on every path, a stretch beyond the tolerance climbing alone; before
+//! that it was read nowhere, and SAT_03's opening at |Im μ| had let the reference's trace fall to 1.6e-5 -- the
+//! opening's rate is |μ| since, paths.rs # The start.)
 //!
 //! The reference is the 32-state model itself (B.8), not a whole-level base: under P1's scheme its path cost 10–20 % more
 //! than the base's (P1 R2.3), and with it nothing remains of a base's own error to check request by request.
@@ -240,7 +263,7 @@ use crate::paths::{self, Form, Scheme, Series, Walk, Window};
 use crate::request::{GROUND, STATES};
 use crate::scene::{Components, Scene};
 use crate::step::Dynamics;
-use crate::units::{CONFIDENCE, POPULATION_TARGET, STEP_SHARE};
+use crate::units::{CONFIDENCE, POPULATION_TARGET, STEP_SHARE, TEMPERATURE_TARGET};
 use rayon::prelude::*;
 use std::time::Instant;
 
@@ -263,6 +286,12 @@ pub const WALKS: usize = 4;
 /// reference may take from the scheme's setting on the calibration's piece -- s⁴ of the population target, as the
 /// numerical tolerances inside a step take s⁴ of theirs (units.rs `QUADRATURE`): 2.0e-3 at p = 2.
 pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * POPULATION_TARGET;
+
+/// The paths' scheme's tolerance on the motion's readings (module documentation, # The paths): the largest change of
+/// the photon rate and of the force over their largest sizes along the stretch the reference may take from the scheme's
+/// setting -- s⁴ of T's relative target, as `TOLERANCE` is of the population target and the landing check's budget of
+/// T's (solve.rs `choose_on_the_pilot`): 4.0e-3 at p = 2.
+pub const MOTION_TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * TEMPERATURE_TARGET;
 
 /// A setting of the paths' scheme (module documentation, # The paths): the substeps a turn of the fastest coherence over
 /// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a µs (each knot interval in
@@ -571,13 +600,13 @@ pub struct Paths<'a> {
     pub windows: Vec<(f64, f64)>,
     pub reference: Form<'a>,
     pub settled: Settled,
-    /// Per stretch -- the walks' starts, then their late segments -- the setting it is run at: the settled one, or where
-    /// its own trace stood beyond the tolerance at it, the one the ladder along that stretch went on to (`Paths::new`);
-    /// every model judged runs each stretch at its own (`judge_on`).
-    pub settings: Vec<Setting>,
     /// The landing check's budget (paths.rs `Form::landing`): the share of the total T's relative target a landing's
     /// truncated stretch may move.
     pub landing_budget: f64,
+    /// The landings' knobs -- the setting's rate and cutoff, the turns their transients ask (paths.rs
+    /// `Form::landing_turns`) -- and that read's last change of n_ex, booked with every landing's (`Landing::photons_error`).
+    pub landing_knobs: (f64, f64, f64),
+    pub landing_resolved: f64,
     series: Vec<Series>,
     calibration: (usize, f64, Vec<Series>),
     /// The late segment (module documentation, # The paths): its start, its windows and the reference's series there;
@@ -585,7 +614,8 @@ pub struct Paths<'a> {
     late: Option<(f64, Vec<(f64, f64)>, Vec<Series>)>,
     /// The largest bound the reference's openings book over its stretches (paths.rs, # The start).
     pub booked: f64,
-    /// The reference's largest trace defect over its stretches at the setting (paths.rs `Series::trace_defect`).
+    /// The reference's largest trace defect over its stretches at the setting (paths.rs `Series::trace_defect`): reported,
+    /// no part of any error (module documentation, # The paths).
     pub trace: f64,
     /// The landing check (module documentation, # The motion): per stretch -- the walks' starts, then their late
     /// segments -- its landings with the reference's excess photons; and the check's span and the fastest
@@ -620,9 +650,8 @@ pub struct Settled {
     pub setting: Setting,
     pub opening: f64,
     pub errors: [f64; KNOBS],
-    /// The setting's trace defect along the stretch (paths.rs `Series::trace_defect`, the models' largest): a part of
-    /// its error beside the knobs' (module documentation, # The paths).
-    pub trace: f64,
+    /// The motion's readings' parts per knob (`motion_change`; none of the cutoff), against `MOTION_TOLERANCE`.
+    pub motion: [f64; KNOBS],
     pub runs: Vec<Setting>,
     pub pairs: [(usize, usize); KNOBS],
     pub tried: usize,
@@ -637,9 +666,15 @@ impl Settled {
     /// converged): their sum, booked in every candidate's A beside its own calibration (`judge`, `Paths::itself`); none
     /// where the parts met the tolerance.
     pub fn unmet(&self) -> Option<f64> {
-        let sum: f64 = self.errors.iter().sum::<f64>();
-        // The trace's part decides with the knobs' and is booked on its own, over every path (`Paths::trace`).
-        (sum + self.trace > TOLERANCE).then_some(sum)
+        let sum: f64 = self.errors.iter().sum();
+        (sum > TOLERANCE).then_some(sum)
+    }
+
+    /// Where the setting stopped at `FINEST` with the motion's readings' parts beyond `MOTION_TOLERANCE`: their sum,
+    /// said in the choice's report (`FINEST` is a bound on the work no scene has reached); none where they met it.
+    pub fn motion_unmet(&self) -> Option<f64> {
+        let sum: f64 = self.motion.iter().sum();
+        (sum > MOTION_TOLERANCE).then_some(sum)
     }
 
     /// The ladder's second stage after its first (`settle`): the second's setting and parts, the two's work together.
@@ -667,16 +702,15 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 
 
 /// `settle`'s ladder along the walk's stretch of `piece` µs from `begin` (from the walk's own start state there) from the
-/// setting `from` (raised to its own floors: one piece a step, one substep a piece), its runs keeping their states at the times `keep` (the landing
-/// check's, where the stretch's own run at the setting it ends on is kept as the stretch's: `Paths::new`).
+/// setting `from` (raised to its own floors: one piece a step, one substep a piece).
 #[allow(clippy::too_many_arguments)]
-fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting, keep: &[f64]) -> Result<(Settled, Vec<Vec<Series>>), String> {
+fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting) -> Result<(Settled, Vec<Vec<Series>>), String> {
     let clock = Instant::now();
     // A family of settings' runs, each model's (paths.rs `Form::along_family`: each node made once for them all): per
     // setting the models' series.
     let family = |settings: &[Setting]| -> Result<Vec<Vec<Series>>, String> {
         let schemes: Vec<Scheme> = settings.iter().map(|&s| scheme(s, 1)).collect();
-        let made: Vec<Vec<Series>> = forms.par_iter().map(|f| f.along_family_keeping(walk, &walk.start, begin, begin + piece, &schemes, keep)).collect::<Result<_, _>>()?;
+        let made: Vec<Vec<Series>> = forms.par_iter().map(|f| f.along_family_keeping(walk, &walk.start, begin, begin + piece, &schemes, &[])).collect::<Result<_, _>>()?;
         let mut made: Vec<std::vec::IntoIter<Series>> = made.into_iter().map(Vec::into_iter).collect();
         Ok(settings.iter().map(|_| made.iter_mut().map(|x| x.next().expect("a member's series")).collect()).collect())
     };
@@ -715,28 +749,32 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
         let mut errors = pairs.map(|(i, j)| RICHARDSON * change(&series[i], &series[j]));
         // The cutoff's part: what the setting's openings book.
         errors[RUN_KNOBS] = booked(setting)?;
-        // The trace's part: the setting's own run's defect, the models' largest (paths.rs `Series::trace_defect`: a strict
-        // lower bound of its error, which the rows' normalization hides from the knobs' parts).
-        let defect = |i: usize| series[i].iter().map(Series::trace_defect).fold(0.0, larger);
-        let trace = defect(0);
+        // The motion's readings' parts (module documentation, # The paths): the photon rate's and the force's changes,
+        // each over its largest size along the stretch; none of the cutoff, whose bound is a row's.
+        let mut motion = pairs.map(|(i, j)| RICHARDSON * motion_change(&series[i][0], &series[j][0]));
+        motion[RUN_KNOBS] = 0.0;
         #[cfg(test)]
         if traced() {
-            eprintln!("    [trace] settle {setting:?}: parts {:?}, trace {trace:.2e}", errors.map(|e| format!("{e:.2e}")));
+            eprintln!("    [trace] settle {setting:?}: parts {:?}, motion {:?}, trace {:.2e}", errors.map(|e| format!("{e:.2e}")), motion.map(|e| format!("{e:.2e}")), series[0].iter().map(Series::trace_defect).fold(0.0, larger));
         }
         let open: [bool; KNOBS] = std::array::from_fn(|k| setting.open(k));
-        if errors.iter().sum::<f64>() + trace <= TOLERANCE || !open.iter().any(|&o| o) {
+        if (errors.iter().sum::<f64>() <= TOLERANCE && motion.iter().sum::<f64>() <= MOTION_TOLERANCE) || !open.iter().any(|&o| o) {
             let opening = series[0][0].counts.opening;
-            return Ok((Settled { setting, opening, errors, trace, runs, pairs, tried, products, work: counted, seconds: clock.elapsed().as_secs_f64() }, series));
+            return Ok((Settled { setting, opening, errors, motion, runs, pairs, tried, products, work: counted, seconds: clock.elapsed().as_secs_f64() }, series));
         }
-        // The knob of the largest part; where the trace's is the largest, the run's knob whose doubling lowers it most.
-        let largest = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| errors[a].total_cmp(&errors[b])).expect("an open knob");
-        let k = if trace > errors[largest] { (0..RUN_KNOBS).filter(|&k| open[k]).min_by(|&a, &b| defect(1 + a).total_cmp(&defect(1 + b))).unwrap_or(largest) } else { largest };
+        // The knob to double (module documentation, # The paths): each part over its tolerance; the cutoff where its bound
+        // is the largest (raising it runs nothing until the next family), else the run knob of the most error per the
+        // work of the run at its doubling -- the next family runs at that setting.
+        let part = |k: usize| larger(errors[k] / TOLERANCE, motion[k] / MOTION_TOLERANCE);
+        let largest = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| part(a).total_cmp(&part(b))).expect("an open knob");
+        let cost = |k: usize| larger(series[1 + k].iter().map(|s| s.counts.work).sum::<f64>(), f64::MIN_POSITIVE);
+        let k = if largest == RUN_KNOBS { largest } else { (0..RUN_KNOBS).filter(|&k| open[k]).max_by(|&a, &b| (part(a) / cost(a)).total_cmp(&(part(b) / cost(b)))).unwrap_or(largest) };
         if k < RUN_KNOBS {
             setting = runs[1 + k];
             at = series.into_iter().nth(1 + k);
         } else {
             // The cutoff's part is the setting's own bound: raised while it stays the largest, and the setting run once.
-            let others = errors[..RUN_KNOBS].iter().copied().fold(0.0, larger);
+            let others = (0..RUN_KNOBS).map(part).fold(0.0, larger) * TOLERANCE;
             loop {
                 setting = setting.doubled(k);
                 if !(setting.open(k) && booked(setting)? > others) {
@@ -764,6 +802,26 @@ fn change(a: &[Series], b: &[Series]) -> f64 {
         };
         for k in 0..STATES {
             e = larger(e, ((u[k] - x.rows[k]) - (v[k] - y[k])).abs());
+        }
+    }
+    e
+}
+
+/// The largest change between two runs of one model along one path of the motion's readings (module documentation,
+/// # The paths), at the times both read: of the photon rate (all classes) and of the force (any axis), each over its
+/// largest size along the second run -- a reading near nought anywhere moves the motion by that size, not by its own.
+fn motion_change(a: &Series, b: &Series) -> f64 {
+    let rate = |r: &paths::Reading| r.rates.iter().sum::<f64>();
+    let force = |r: &paths::Reading| r.force.iter().fold(0.0, |m: f64, f| larger(m, f.abs()));
+    let (rates, forces) = b.readings.iter().fold((0.0, 0.0), |(r, f), y| (larger(r, rate(y)), larger(f, force(y))));
+    let mut e = 0.0;
+    for x in &a.readings {
+        let Some(y) = b.readings.iter().find(|y| y.t == x.t) else { continue };
+        if rates > 0.0 {
+            e = larger(e, (rate(x) - rate(y)).abs() / rates);
+        }
+        if forces > 0.0 {
+            e = larger(e, (0..3).map(|k| (x.force[k] - y.force[k]).abs()).fold(0.0, larger) / forces);
         }
     }
     e
@@ -847,9 +905,9 @@ impl<'a> Paths<'a> {
         };
         // The setting (`settle`): its first stage, then its second beside the other walks at the first stage's setting.
         let piece = CALIBRATION.min(stretch);
-        let (first, at) = ladder(&[&form], &walks[longest], 0.0, piece, step, &starts, COARSEST, &[])?;
-        let (mut settled, calibrated, done) = if stretch > piece {
-            let (whole, done) = rayon::join(|| ladder(&[&form], &walks[longest], 0.0, stretch, step, &starts, first.setting, &[]), || others(first.setting));
+        let (first, at) = ladder(&[&form], &walks[longest], 0.0, piece, step, &starts, COARSEST)?;
+        let (settled, calibrated, done) = if stretch > piece {
+            let (whole, done) = rayon::join(|| ladder(&[&form], &walks[longest], 0.0, stretch, step, &starts, first.setting), || others(first.setting));
             let (whole, at) = whole?;
             let done = if whole.setting == first.setting { done } else { others(whole.setting) };
             (whole.after(&first), at, done)
@@ -862,33 +920,28 @@ impl<'a> Paths<'a> {
         if traced() {
             eprintln!("    [trace] reference jobs: {:.2} s wall on {} threads; freezes' parts (nodes, amplitudes, eigen, weights, R and ΔH) {:.2?} s", pool.elapsed().as_secs_f64(), rayon::current_num_threads(), crate::paths::freeze_parts());
         }
-        let mut done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
-        // The trace on every path, not the calibration's alone (module documentation, # The paths): a stretch whose defect
-        // is beyond the tolerance at the setting is not converged there -- the ladder goes on along that stretch alone from
-        // the setting, and its own run at the setting the ladder ends on (its landing states kept) is the stretch's; the
-        // other stretches keep theirs, each judged model runs each stretch at its own (`judge_on`). Each such stretch
-        // climbs once, the worst first. (Until 2026-11-23 every stretch and the calibration were run again at the raised
-        // setting: PGC3D's eight, 86 thread seconds, for one late stretch's trace 2.83e-3 at 8 substeps a µs.)
-        let mut settings = vec![settled.setting; jobs.len()];
-        let mut climbed: Vec<usize> = vec![];
-        loop {
-            let worst = jobs.iter().zip(&done).filter(|(j, _)| !climbed.contains(j)).map(|(&j, s)| (j, s.trace_defect())).fold((longest, 0.0), |a, b| if b.1 > a.1 { b } else { a });
-            if !(worst.1 > TOLERANCE) || worst.0 == longest {
-                break;
-            }
-            let j = worst.0;
-            climbed.push(j);
-            let (w, from, to) = stretch_of(j);
-            let (again, mut runs) = ladder(&[&form], &walks[w], from, to - from, step, &starts, settings[j], &keeps[j])?;
-            (settled.tried, settled.products, settled.work, settled.seconds) = (settled.tried + again.tried, settled.products + again.products, settled.work + again.work, settled.seconds + again.seconds);
-            if again.setting != settings[j] {
-                settings[j] = again.setting;
-                done[j] = runs.swap_remove(0).swap_remove(0);
-            }
-        }
+        let done: Vec<Series> = done.into_iter().collect::<Result<_, _>>()?;
         // The landing check of the reference (module documentation, # The motion): at each kept state the landing after a
-        // jump, and the reference's excess photons from it, each stretch at its own setting.
-        let knobs_of = |j: usize| (settings[j].turns, settings[j].rate, settings[j].cutoff);
+        // jump, and the reference's excess photons from it.
+        // The landings' turns (paths.rs `Form::landing_turns`), read on the first landing the calibration's walk holds
+        // (else the first any stretch holds), every landing run at them and booking that read's last change.
+        let knobs = (settled.setting.turns, settled.setting.rate, settled.setting.cutoff);
+        let (landing_knobs, resolved, turns_work) = match optical {
+            None => (knobs, 0.0, 0.0),
+            Some((span, decay)) => {
+                let first = std::iter::once(longest).chain(jobs.iter().copied()).find_map(|j| {
+                    let (w, ..) = stretch_of(j);
+                    done[j].kept.iter().find_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (j, w, *t, landed)))
+                });
+                match first {
+                    Some((j, w, t, landed)) => {
+                        let (turns, resolved, spent) = form.landing_turns(&walks[w], t, &landed, span, decay, knobs, &done[j], landing_budget)?;
+                        ((turns, knobs.1, knobs.2), resolved, spent)
+                    }
+                    None => (knobs, 0.0, 0.0),
+                }
+            }
+        };
         let landings: Vec<Vec<Landing>> = match optical {
             None => vec![vec![]; jobs.len()],
             Some((span, decay)) => jobs
@@ -899,7 +952,7 @@ impl<'a> Paths<'a> {
                         .kept
                         .iter()
                         .filter_map(|(t, v)| form.landed(&walks[w], *t, v).map(|(landed, _)| (*t, landed)))
-                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, knobs_of(j), &done[j], landing_budget).map(|(photons, spent, photons_error)| Landing { t, landed, photons, work: spent, photons_error }))
+                        .map(|(t, landed)| form.landing(&walks[w], t, &landed, span, decay, landing_knobs, &done[j], landing_budget).map(|(photons, spent, change)| Landing { t, landed, photons, work: spent, photons_error: larger(change, resolved) }))
                         .collect()
                 })
                 .collect::<Result<_, _>>()?,
@@ -910,14 +963,8 @@ impl<'a> Paths<'a> {
         let late = late_from.map(|from| (from, windows.iter().map(|&(a, b)| (from + a, from + b)).collect(), late_series));
         let booked = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.booked).fold(0.0, larger);
         let trace = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(Series::trace_defect).fold(0.0, larger);
-        let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work;
-        Ok(Paths { landing_budget, walks, length, memory, windows, reference: form, settled, settings, series, calibration: (longest, stretch, calibrated), late, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64() })
-    }
-
-    /// The stretches run at a setting of their own (`settings`), each with it: their trace beyond the tolerance at the
-    /// settled one.
-    pub fn raised(&self) -> Vec<(usize, Setting)> {
-        self.settings.iter().copied().enumerate().filter(|(_, s)| *s != self.settled.setting).collect()
+        let work = series.iter().chain(late.iter().flat_map(|l| l.2.iter())).map(|s| s.counts.work).sum::<f64>() + landings.iter().flatten().map(|l| l.work).sum::<f64>() + settled.work + turns_work;
+        Ok(Paths { landing_budget, landing_knobs, landing_resolved: resolved, walks, length, memory, windows, reference: form, settled, series, calibration: (longest, stretch, calibrated), late, booked, trace, landings, optical, work, seconds: clock.elapsed().as_secs_f64() })
     }
 
     /// The calibration's stretch (µs): the longest walk's [0, L], where the setting was read.
@@ -999,7 +1046,7 @@ pub struct Walked {
 pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Result<(Judged, Walked), String> {
     let form = Form::new(model, at);
     let (longest, stretch, ref calibrated) = paths.calibration;
-    let scheme = |j: usize| self::scheme(paths.settings[j], 1);
+    let scheme = self::scheme(paths.settled.setting, 1);
     // The calibration's walk along its stretch: the setting's own run and its refinements, one family (the setting's own
     // the walk's series).
     let family: Vec<Scheme> = paths.settled.runs.iter().map(|&s| self::scheme(s, 1)).collect();
@@ -1020,11 +1067,11 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 j if j < n => {
                     let w = &paths.walks[j];
                     let reach = paths.length.min(w.end());
-                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme(j), &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if reach > 0.0 { form.along_keeping(w, &w.start, 0.0, reach, scheme, &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
                 j => {
                     let (w, from) = (&paths.walks[j - n], paths.late.as_ref().expect("a late segment").0);
-                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme(j), &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
+                    (if from < w.end() { form.along_keeping(w, &w.start, from, run.min(w.end()), scheme, &[]) } else { Ok(Series::default()) }).map(|s| vec![s])
                 }
             };
             #[cfg(test)]
@@ -1049,7 +1096,7 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     let hm = model.hbar_over_mass();
     // The landing check (module documentation, # The motion): the candidate from each of the reference's landings -- its
     // photons' Mandel Q = 2 n_ex --, the reference's beside (paths.rs `Statistics`).
-    let knobs = |j: usize| (paths.settings[j].turns, paths.settings[j].rate, paths.settings[j].cutoff);
+    let knobs = paths.landing_knobs;
     let own_kept = |j: usize| -> &Series { if j < n { &series[j] } else { &late_series[j - n] } };
     // The landing checks' counted work, summed on the pool (whole multiply-adds).
     let landing_work = std::sync::atomic::AtomicU64::new(0);
@@ -1067,7 +1114,8 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
                 }
                 list.iter()
                     .map(|l| {
-                        let (photons, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs(j), own, paths.landing_budget)?;
+                        let (photons, spent, error) = form.landing(walk, l.t, &l.landed, span, decay, knobs, own, paths.landing_budget)?;
+                        let error = larger(error, paths.landing_resolved);
                         Ok((paths::Statistics { t: l.t, q: [2.0 * photons, 2.0 * l.photons], q_error: [2.0 * error, 2.0 * l.photons_error] }, spent))
                     })
                     .collect::<Result<Vec<_>, String>>()
@@ -1107,11 +1155,10 @@ pub fn judge_walked(paths: &Paths, model: &Selected, at: V3, walks: usize) -> Re
     // same start) and its refinements, against the reference's.
     let candidate: Vec<&Series> = std::iter::once(&series[longest]).chain(&finer).collect();
     let mut calibration = if finer.is_empty() { Calibration::default() } else { calibrate(&candidate, calibrated, &paths.settled.pairs) };
-    // The ladder's top unmet, and what the openings book, the reference's and the candidate's (paths.rs, # The start);
-    // the trace defects on every path, the reference's and the candidate's (paths.rs `Series::trace_defect`: the scheme's
-    // error read where no refinement ran).
+    // The ladder's top unmet, and what the openings book, the reference's and the candidate's (paths.rs, # The start).
+    // No trace defect: the readings divide it out (module documentation, # The paths).
     let own = |f: fn(&Series) -> f64| series.iter().chain(&late_series).map(f).fold(0.0, larger);
-    calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked) + paths.trace + own(Series::trace_defect);
+    calibration.rows += paths.settled.unmet().unwrap_or(0.0) + paths.booked + own(|s| s.counts.booked);
     let stationary = Stationary::of(&windows, &late, paths.memory, paths.late_from(), &weights);
     let work = series.iter().chain(&late_series).chain(&finer).map(|s| s.counts.work).sum::<f64>() + landing_work.load(std::sync::atomic::Ordering::Relaxed) as f64;
     let judged = Judged { keep: model.rs.keep.clone(), windows, late, calibration, escape, statistics, stationary, work };

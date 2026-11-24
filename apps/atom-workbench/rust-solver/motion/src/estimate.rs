@@ -186,11 +186,23 @@
 //! as 1/G, the second is the floor's own scatter and falls as 1/G²; the jackknife counts the second twice
 //! (2(G − 1)/(G − 2) times: Efron and Stein), so it is high where there is no error, and never low.
 //!
+//! M̂ is a difference of sums that cancel -- (Σ_i x_ik)² less Σ_i x_ik², each x_ik itself G times the whole less G − 1
+//! times the rest --, so it is known to their rounding, not to zero (`mean_squares`). To the first order in the unit
+//! roundoff u, with γ_n = nu/(1 − nu) (units.rs `rounding`; a sum's rounding at most γ_n of its terms' moduli): a value
+//! over its unit and its product and difference into x_ik err by γ_3 of A_ik = G|e_k| + (G − 1)|e_k^{(−i)}|; the sums
+//! over the groups, the square and the difference -- with a group left out, two more each -- by γ_{G+5} of (Σ_i A_ik)²
+//! twice over; the weights and the sum over the window's K times by γ_K of what they sum. So each estimate, the whole's
+//! and every one without a group, lies within 3γ_{G+K+6} Σ_k w_k (Σ_i A_ik)² of its exact value, and one within that is
+//! none: it reads zero, as one whose values are all zero does. (Read as they came, S1's rows that one group of eleven
+//! held at 10⁻⁷⁵ to 10⁻¹¹⁴ and the rest at none -- whose exact estimate is zero: a product of two groups' values -- read
+//! 10⁻¹⁶⁴ to 10⁻²²² ± 0, the rounding of the cancellation; motion3d_status/rewrite/impl/REGRESS2.status.md.)
+//!
 //! Nothing is assumed of how an error is carried from a step to an output: the two ensembles are carried by the
 //! dynamics itself. Three levels test the order the read stands on (`ordered`: solve.rs, ## Two levels, three levels):
 //! the rung's two estimates of its own error, of the pairs (h, 2h) and (2h, 4h) carried to h, are of one sign and apart
 //! by no more than the estimate wherever the order holds -- a sign that changes from one pair to the next, which the
-//! sizes alone do not see, refutes it. Against the signed mean, for an error constant in time: where the noise has K' independent
+//! sizes alone do not see, refutes it, at a look the order bears on: one where some pair's change is not within the
+//! step's share, so that without the order the rung's error there is not bounded within it (`bears`). Against the signed mean, for an error constant in time: where the noise has K' independent
 //! stretches over the run and σ at an output, the mean resolves t σ/√K' and the mean square's rms √(t·SE) about
 //! (2/K')^{1/4} √t σ -- the same at one stretch, K'^{1/4} more at many; the mean's noise is the noise's slowest mode,
 //! which the mean square weighs as one mode among K'.
@@ -243,7 +255,7 @@ use crate::analysis::Reading;
 use crate::decide::{richardson, Read};
 use crate::request::STATES;
 use crate::special::upper;
-use crate::units::{CONFIDENCE, KT_PER_UK, ORDER, SUB_DOPPLER_RECOILS, TEMPERATURE_TARGET, UNIT_ROUNDOFF};
+use crate::units::{rounding, CONFIDENCE, KT_PER_UK, ORDER, SUB_DOPPLER_RECOILS, TEMPERATURE_TARGET, UNIT_ROUNDOFF};
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use std::collections::VecDeque;
@@ -1392,14 +1404,49 @@ pub fn leaves(times: &[f64]) -> Vec<[usize; 2]> {
 /// Per window and quantity, on the windows `windows` of the times `times` (`between`): the mean square of e₁ − e₂ and
 /// of e₁ by the same estimator on the same groups, and the order is not shown where on some look the first's near
 /// end lies above the second's far end among all the looks that read -- each with its own statistical error, no
-/// threshold of its own. A look either does not read excludes nothing.
-pub fn ordered<G: Borrow<Group> + Sync>(levels: [&[G]; 3], scales: &Scales, times: &[f64], windows: &[[usize; 2]]) -> bool {
+/// threshold of its own -- on a look the order bears on (`bears`, of the two pairs' reads, e₁'s and e(2h)'s, against
+/// the square of the step's share there, `bound`: on what is shown, and on T, the velocity and the push). A look either
+/// does not read excludes nothing.
+pub fn ordered<G: Borrow<Group> + Sync>(levels: [&[G]; 3], scales: &Scales, times: &[f64], windows: &[[usize; 2]], bound: [f64; 2]) -> bool {
     assert!(levels[0].len() == levels[1].len() && levels[1].len() == levels[2].len(), "the three levels hold the same groups");
     let own = mean_squares(&levels[..2], scales, times, windows, &step_error);
+    let upper = mean_squares(&levels[1..], scales, times, windows, &step_error);
     let apart = mean_squares(&levels, scales, times, windows, &order_difference);
-    let pairs: Vec<(&Read, &Read)> = own.reads.iter().flatten().zip(apart.reads.iter().flatten()).filter(|(a, b)| !a.value.is_nan() && !b.value.is_nan()).collect();
-    let looks = pairs.len() as f64;
-    pairs.iter().all(|(own, apart)| !(apart.least(looks) > own.most(looks)))
+    // Each look that reads: its own read, the pair above's (uncarried), their difference's, and its share's square.
+    let looks: Vec<(usize, usize, Read, Read, Read, f64)> = (0..STEPPED)
+        .flat_map(|q| (0..windows.len()).map(move |w| (q, w)))
+        .map(|(q, w)| (q, w, own.reads[q][w], upper.reads[q][w], apart.reads[q][w], if Quantity::of(q).shown() { bound[0] } else { bound[1] }))
+        .filter(|(_, _, own, _, apart, _)| !own.value.is_nan() && !apart.value.is_nan())
+        .collect();
+    let count = looks.len() as f64;
+    let apart_on = |(_, _, own, _, apart, _): &&(usize, usize, Read, Read, Read, f64)| apart.least(count) > own.most(count);
+    let refuting: Vec<&(usize, usize, Read, Read, Read, f64)> = looks.iter().filter(|look| apart_on(look) && bears(&[&look.2, &look.3], look.5)).collect();
+    // (The profiling build's: the looks that refute the order, by quantity and window, and those apart on which the
+    // order does not bear.)
+    crate::prof::note(|| {
+        let lift = 0.5_f64.powi(2 * ORDER);
+        let shown: Vec<String> = refuting.iter().take(8).map(|(q, w, o, u, a, b)| format!("{:?} [{:.1}, {:.1}] e1 {:.3e}±{:.2e} e2 {:.3e}±{:.2e} e1-e2 {:.3e}±{:.2e} share² {b:.3e}", Quantity::of(*q), own.windows[*w][0], own.windows[*w][1], o.value, o.spread.error, lift * u.value, lift * u.spread.error, a.value, a.spread.error)).collect();
+        format!("ladder order looks {count} groups {} refuted on {}, apart but not bearing on {}: {}", levels[0].len(), refuting.len(), looks.iter().filter(|look| apart_on(look)).count() - refuting.len(), shown.join("; "))
+    });
+    refuting.is_empty()
+}
+
+/// Whether the order bears on a rung's verdict at a look (solve.rs, ## Two levels, three levels): whether the levels'
+/// own differences are not all within the square of the step's share `bound` there, their far ends at one look --
+/// `reads` the pairs' reads, each of its finer level's error and uncarried (`between`: e = d/(2^p − 1), so d's mean
+/// square is (2^p − 1)² times the read's, value and spread). The order is what lets e(h) be read as d/(2^p − 1), the
+/// change d = Q(2h) − Q(h) lowered (2^p − 1) times; without it, a scheme of the first order at the least across the
+/// halving -- e(2h) at least twice e(h) where the two share a sign, of any size where they do not -- errs at h by no
+/// more than the change itself, |e(h)| ≤ |d|, and the pair above's d₂ bounds e(2h), and so e(h), alike where the finer
+/// pair does not move. So where every pair's d is within the share, the rung's error is within it at that look whatever
+/// the order: its holding or not changes no verdict there, and a quantity whose differences lie tens of orders below
+/// its share decides no step by how they scale (S1's rows at 10⁻⁷⁵ to 10⁻¹¹⁴ of a probability left 0.837, 0.419 and
+/// 0.209 µs on their order alone, every read within: motion3d_status/rewrite/impl/REGRESS2.status.md). What three
+/// levels cannot tell -- an error the same at all three -- they cannot tell here either. A read that is no number, or
+/// whose spread is unread, is within nothing: the order bears there.
+pub fn bears(reads: &[&Read], bound: f64) -> bool {
+    let differences = (2_f64.powi(ORDER) - 1.).powi(2);
+    reads.iter().any(|read| !(differences * read.most(1.) <= bound))
 }
 
 /// The mean squares of a per-time quantity of some levels of the same groups (`between`, `ordered`): `value` of the
@@ -1439,6 +1486,9 @@ fn mean_squares<G: Borrow<Group> + Sync>(levels: &[&[G]], scales: &Scales, times
             }
         };
         let (mut whole, mut without, mut own, mut weight, mut holding) = (0., vec![0.; groups], vec![0.; groups], 0., f64::INFINITY);
+        // What the estimates cancel (module documentation, # The step's error: its rounding): Σ_k w_k A_k², A_k the
+        // magnitudes the groups' values are made of at the time; and the times read.
+        let (mut cancelled, mut read_times) = (0., 0usize);
         for k in (a..=b).filter(|&k| k > 0) {
             let j = &each[k];
             if !(stepped(&j.full, q) && j.leave.iter().all(|l| stepped(l, q))) {
@@ -1447,20 +1497,30 @@ fn mean_squares<G: Borrow<Group> + Sync>(levels: &[&[G]], scales: &Scales, times
             let w = 0.5 * (times[(k + 1).min(b)] - times[k.saturating_sub(1).max(a)]);
             let u = unit(j, times[k]);
             let full = value(&j.full, q) / u;
-            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| *x = g * full - (g - 1.) * value(rest, q) / u);
+            let mut magnitude = 0.;
+            own.iter_mut().zip(&j.leave).for_each(|(x, rest)| {
+                let rest = value(rest, q) / u;
+                *x = g * full - (g - 1.) * rest;
+                magnitude += g * full.abs() + (g - 1.) * rest.abs();
+            });
             let (sum, squares) = own.iter().fold((0., 0.), |(s, q), x| (s + x, q + x * x));
             whole += w * (sum * sum - squares);
             without.iter_mut().zip(&own).for_each(|(o, x)| *o += w * ((sum - x).powi(2) - (squares - x * x)));
             weight += w;
             holding = crate::linalg::smaller(holding, j.holding);
+            cancelled += w * magnitude * magnitude;
+            read_times += 1;
         }
         if weight == 0. {
             return unread;
         }
+        // An estimate within its own rounding is none: zero, as one whose values are all zero reads.
+        let floor = 3. * rounding(groups + read_times + 6) * cancelled;
+        let rounded = |x: f64| if x.abs() <= floor { 0. } else { x };
         let read = if Quantity::of(q).shown() { g } else { holding };
         Read {
-            value: if groups >= 2 { whole / (weight * g * (g - 1.)) } else { f64::NAN },
-            spread: if groups >= 3 { spread(without.iter().map(|w| w / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
+            value: if groups >= 2 { rounded(whole) / (weight * g * (g - 1.)) } else { f64::NAN },
+            spread: if groups >= 3 { spread(without.iter().map(|w| rounded(*w) / (weight * (g - 1.) * (g - 2.))), read) } else { Spread::UNREAD },
         }
     };
     Between { windows: spans, reads: (0..STEPPED).map(|q| windows.iter().map(|w| size(q, w)).collect()).collect() }
@@ -1496,6 +1556,7 @@ pub fn readings<G: Borrow<Group> + Sync>(fine: &[G], coarse: &[G], k: usize, sca
 mod tests {
     use super::*;
     use crate::ensemble::GROUP;
+    use crate::units::{POPULATION_TARGET, STEP_SHARE};
 
     /// A uniform deviate in (0, 1) from a splitmix64 state (the tests' own stream).
     fn uniform(state: &mut u64) -> f64 {
@@ -1570,8 +1631,69 @@ mod tests {
     fn the_order_across_three_levels_is_refuted_by_a_change_of_sign() {
         let level = |c: usize| -> Vec<Group> { (0..3).map(|_| showing(&[c, c], &[1., 1.])).collect() };
         let times = [0., 1., 2.];
-        let read = |c: usize| ordered([&level(3), &level(4), &level(c)], &UNIT, &times, &leaves(&times));
+        let read = |c: usize| ordered([&level(3), &level(4), &level(c)], &UNIT, &times, &leaves(&times), SHARES);
         assert_eq!((read(8), read(0), read(6)), (true, false, true));
+    }
+
+    /// The squares of the step's shares the reads are held to (solve.rs `step_bound`): on what is shown, and on T.
+    const SHARES: [f64; 2] = [(STEP_SHARE * POPULATION_TARGET) * (STEP_SHARE * POPULATION_TARGET), STEP_SHARE * STEP_SHARE];
+
+    /// A group of `GROUP` atoms at t = 0 and at the outputs after it: at output k its first `counts[k]` atoms show state
+    /// 0 at the population `size` (the rest of each in state 1), the others state 1.
+    fn holding(counts: &[usize], size: f64) -> Group {
+        let mut g = Group::new(counts.len() + 1);
+        for i in 0..GROUP as usize {
+            let fates: Vec<Fate> = std::iter::once(Fate::Held(atom(0, 0., 1.)))
+                .chain(counts.iter().map(|&c| {
+                    let mut held = atom(1, 0., 1.);
+                    if i < c {
+                        (held.rows[0], held.rows[1]) = (size, 1. - size);
+                    }
+                    Fate::Held(held)
+                }))
+                .collect();
+            g.add(&fates);
+        }
+        g
+    }
+
+    /// The order bears where the levels' changes are not within the step's share (`bears`): the levels of
+    /// `the_order_across_three_levels_is_refuted_by_a_change_of_sign` (every read exact), the row shown at a population s.
+    /// At s = 1 its change of sign refutes the order -- its changes a twenty-fourth of an atom against a share of 0.022 --;
+    /// at s = 10⁻⁸⁰ the same change of sign, every change some 78 orders below the share, is no verdict's: the order
+    /// holds there; and so on any share above the changes' (10⁻¹⁵⁵ of a probability's square: d₁'s mean square 1.6·10⁻¹⁶²),
+    /// and not on one below them (10⁻¹⁷⁰), as at s = 1.
+    #[test]
+    fn the_order_bears_where_the_changes_are_not_within_the_share() {
+        let level = |c: usize, size: f64| -> Vec<Group> { (0..3).map(|_| holding(&[c, c], size)).collect() };
+        let times = [0., 1., 2.];
+        let read = |size: f64, shares: [f64; 2]| ordered([&level(3, size), &level(4, size), &level(0, size)], &UNIT, &times, &leaves(&times), shares);
+        assert_eq!((read(1., SHARES), read(1e-80, SHARES)), (false, true));
+        assert_eq!((read(1e-80, [1e-155, 1e-155]), read(1e-80, [1e-170, 1e-170])), (true, false));
+        // The reads themselves are the same at either size, but for the size's square: nothing in them is rounded away.
+        let own = |size: f64| between(&level(3, size), &level(4, size), &UNIT, &times, &leaves(&times)).of(Quantity::Shown(0))[1].value;
+        assert!((own(1e-80) / own(1.) / 1e-160 - 1.).abs() < 1e-12, "{} {}", own(1e-80), own(1.));
+    }
+
+    /// A mean square within its own rounding reads zero (module documentation, # The step's error): eleven groups, a row
+    /// that one group holds at a population and the others at none at both levels -- the exact estimate, a mean product of
+    /// two different groups' values, is zero; computed, each other group's own value, G times the whole less G − 1 times
+    /// the rest, is the rounding of that difference. It reads zero, value and spread, at every size (as S1's rows at
+    /// 10⁻⁷⁵ to 10⁻¹¹⁴ did not: 10⁻¹⁶⁴ ± 0); two groups that hold it read their product, at its size.
+    #[test]
+    fn a_mean_square_within_its_rounding_reads_zero() {
+        let times = [0., 1.];
+        let levels = |held: usize, sizes: [f64; 2]| -> [Vec<Group>; 2] { sizes.map(|size| (0..11).map(|i| holding(&[if i < held { 3 } else { 0 }], size)).collect()) };
+        for size in [1e-87 / 3., 0.1, 1. / 3.] {
+            let [fine, coarse] = levels(1, [size, 7. * size / 5.]);
+            let read = between(&fine, &coarse, &UNIT, &times, &leaves(&times)).of(Quantity::Shown(0))[0];
+            assert!(read.value == 0. && read.spread.error == 0., "{size}: {read:?}");
+            let [fine, coarse] = levels(2, [size, 7. * size / 5.]);
+            let read = between(&fine, &coarse, &UNIT, &times, &leaves(&times)).of(Quantity::Shown(0))[0];
+            // Two groups' values x each: their product's mean over the 110 ordered pairs, 2x²/110.
+            let x = 11. * 3. / 8. * (2. * size / 5.) / 11. / 3.;
+            assert!((read.value / (2. * x * x / 110.) - 1.).abs() < 1e-9, "{size}: {read:?} against {}", 2. * x * x / 110.);
+        }
     }
 
     /// The step's size (`between`) against synthetic levels: 11 groups of 8 atoms, 8 outputs after t = 0; at each an

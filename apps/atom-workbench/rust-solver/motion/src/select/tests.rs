@@ -157,12 +157,9 @@ fn select_the_memory_flag_by_hand() {
 /// setting stopped at `FINEST` -- book their whole sum.
 #[test]
 fn select_the_ladder_top_by_hand() {
-    let settled = |errors: [f64; KNOBS], trace: f64| Settled { setting: FINEST, opening: 1.0, errors, trace, runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, work: 0.0, seconds: 0.0 };
-    assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE, 0.0], 0.0).unmet(), None);
-    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0, 0.0], 0.0).unmet(), Some(1.5 * TOLERANCE));
-    // The trace's part decides with the knobs' (beyond the tolerance together) and is booked on its own (`Paths::trace`).
-    assert_eq!(settled([0.25 * TOLERANCE, 0.25 * TOLERANCE, 0.0, 0.0], 0.75 * TOLERANCE).unmet(), Some(0.5 * TOLERANCE));
-    assert_eq!(settled([0.25 * TOLERANCE, 0.25 * TOLERANCE, 0.0, 0.0], 0.25 * TOLERANCE).unmet(), None);
+    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, motion: [0.0; KNOBS], runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, work: 0.0, seconds: 0.0 };
+    assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE, 0.0]).unmet(), None);
+    assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0, 0.0]).unmet(), Some(1.5 * TOLERANCE));
 }
 
 /// The refinements by hand (`refinements`), a step of 0.5 µs (a piece's floor: 2 a µs, one a step; a rate's, one

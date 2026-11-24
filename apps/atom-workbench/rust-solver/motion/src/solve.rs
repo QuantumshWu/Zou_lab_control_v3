@@ -93,7 +93,9 @@
 //! one number of one sign. Their sizes are compared (`in_range`), and their signed difference is read as their mean
 //! squares are, on the same groups (`Levels::ordered`, estimate.rs `ordered`): where it lies clearly above the
 //! estimate itself -- d₂/d₁ outside [0, 2^{p+1}], a change of sign from one pair to the next at once, which the sizes do
-//! not see --, the order is refuted and the rung is left, as for a third level clearly beyond (`verdict`; measured, the
+//! not see --, at a look where some pair's change is not within the step's share (estimate.rs `bears`: where every
+//! change is, the rung's error is within it whatever the order), the order is refuted and the rung is left, as for a
+//! third level clearly beyond (`verdict`; measured, the
 //! window's momentum error of tilt0's G at 0.326, 0.652 and 1.304 µs d₁ = +0.63, d₂ = −2.57 %, sizes in range;
 //! R9_PUSH's at 0.71 µs on the end state's forms, d₁ = +0.056, d₂ = −0.217: B.report.md §2.1). It is the observed-order test that grid-convergence studies hold Richardson's
 //! extrapolation to (Roache's grid convergence index takes a level's error from two grids only with a safety factor
@@ -669,7 +671,7 @@ use crate::adapt;
 use crate::analysis::analysis_times;
 use crate::decide::{Outcome, Read};
 use crate::ensemble::{Ensemble, Start, Well, GROUP};
-use crate::estimate::{self, allowance, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, temperature_change, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
+use crate::estimate::{self, allowance, bears, between, draws_for, half_window, leaves, ordered, push_target, readings, semiclassical, summarize, temperature_change, velocity_target, Between, Escape, Estimate, Fate, Group, Held, Local, MotionError, Quantity, Scales, Shapes, Spread, NO_SHAPE, SHAPE};
 use crate::field::{Geometry, Light};
 use crate::ledger::{percent, significant, span, when, Account, Ledger};
 use crate::linalg::{symmetric3_eigen, V3};
@@ -1580,11 +1582,12 @@ fn asks([far, near]: [f64; 2], bound: f64) -> f64 {
     if far.is_finite() && near < bound { (far - near) / (bound - near) } else { f64::INFINITY }
 }
 
-/// Whether a rung's third level, carried to its step, stands in the order's range of its own read (module
+/// Whether a rung's third level above, carried to its step, stands in the order's range of its own read (module
 /// documentation, ## The ladder; `Scouted`): under the order the two are of one mean square, the third's the own one's
 /// times (d₂/d₁)²/2^{2p}; on no look -- each quantity on each window both are read on (`Between::common`) -- the near
-/// end of one above the far end of the other (`ends`, each read with its own statistical error, at one look). A look
-/// either does not read excludes nothing.
+/// end of one above the far end of the other (`ends`, each read with its own statistical error, at one look), at a look
+/// the order bears on (estimate.rs `bears`: the two pairs' changes not all within the step's share there -- the third's
+/// pair the one above, its read uncarried from 2τ). A look either does not read excludes nothing.
 fn in_range(own: &Between, third: &Between) -> bool {
     let apart = |a: &Read, b: &Read| {
         let ([far_a, near_a], [far_b, near_b]) = (ends(a), ends(b));
@@ -1592,7 +1595,12 @@ fn in_range(own: &Between, third: &Between) -> bool {
     };
     let windows = own.common(third);
     let (own, third) = (own.on(&windows), third.on(&windows));
-    !own.reads.iter().flatten().zip(third.reads.iter().flatten()).any(|(a, b)| apart(a, b))
+    let pair = carried(&third, 2.);
+    let [sp, st] = step_bound();
+    !own.reads.iter().zip(&third.reads).zip(&pair.reads).enumerate().any(|(q, ((a, b), p))| {
+        let bound = if Quantity::of(q).shown() { sp * sp } else { st * st };
+        a.iter().zip(b).zip(p).any(|((a, b), p)| apart(a, b) && bears(&[a, p], bound))
+    })
 }
 
 /// The pairs a rung's own read could see on at the best (`blind`), where a run's trajectories can take them: none past
@@ -2234,7 +2242,8 @@ fn read_as_it_is(times: &[f64], window: f64, fine: &[&Part], coarse: &[&Part], s
 }
 
 /// Whether the order holds across three levels of the same groups (estimate.rs `ordered`), `levels` at h, 2h and 4h
-/// from the finest, at the analysis times of its two pairs together among the candidates `times`, window by window.
+/// from the finest, at the analysis times of its two pairs together among the candidates `times`, window by window, at
+/// the looks it bears on against the step's share (`step_bound`, estimate.rs `bears`).
 fn read_order(times: &[f64], window: f64, levels: [&[&Part]; 3], scales: &Scales) -> bool {
     let [a, b, c] = levels.map(reads_of);
     let mut at = analysed(times, window, &a, &b, scales);
@@ -2243,7 +2252,8 @@ fn read_order(times: &[f64], window: f64, levels: [&[&Part]; 3], scales: &Scales
     at.dedup();
     let there = |groups: &[&Group]| -> Vec<Group> { groups.iter().map(|g| g.at(&at)).collect() };
     let times: Vec<f64> = at.iter().map(|&k| times[k]).collect();
-    ordered([&there(&a), &there(&b), &there(&c)], scales, &times, &leaves(&times))
+    let [sp, st] = step_bound();
+    ordered([&there(&a), &there(&b), &there(&c)], scales, &times, &leaves(&times), [sp * sp, st * st])
 }
 
 /// Whether a lab axis's temperature (µK) lies in the validated regime of that axis's frequency (rad/µs), k_BT ≥
@@ -2911,16 +2921,12 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         noted(
             &mut report,
             format!(
-                "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快的模（转动加衰减）每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每 µs {:.1} 段（每步 {} 段；按误差定：参照的误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e} + 迹偏差 {:.1e}（最长一条路径全长 {:.1} µs 上，先在前 {} µs 上爬梯；迹偏差每条路径都查），容差 {:.1e}{}；试了 {} 种设置，{:.1} s）；参照沿全部路径的最大迹偏差 {:.1e}（记进每个候选的 A）{}；参照 32 态 {:.1} s",
+                "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快的模（转动加衰减）每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每 µs {:.1} 段（每步 {} 段；按误差定：参照的行误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e}，容差 {:.1e}；光子率与力的误差（各按沿路径的最大值）开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}（最长一条路径全长 {:.1} µs 上，先在前 {} µs 上爬梯）{}{}；试了 {} 种设置，{:.1} s）；参照沿全部路径的最大迹偏差 {:.1e}（读数都除以迹：只报告，不计入）；参照 32 态 {:.1} s",
                 paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
-                settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, crate::paths::pieces_in(0.0, tau, settled.setting.pieces), settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], settled.trace, paths.calibrated_over(), crate::select::CALIBRATION, crate::select::TOLERANCE,
-                settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各旋钮误差之和 {e:.1e} 照实记进每个候选的 A")), settled.tried, settled.seconds, paths.trace,
-                {
-                    let raised = paths.raised();
-                    let n = paths.walks.len();
-                    if raised.is_empty() { String::new() } else { format!("；{} 段在定下的设置上迹偏差超容差，各沿自己那段再爬梯、按自己的设置跑（{}），别的段不重跑", raised.len(), raised.iter().map(|(j, s)| format!("路径 {} {}：其后每 µs {:.1} 个、每 µs {:.1} 段", j % n, if *j < n { "起点段" } else { "运行末段" }, s.rate, s.pieces)).collect::<Vec<_>>().join("；")) }
-                },
-                paths.seconds
+                settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, crate::paths::pieces_in(0.0, tau, settled.setting.pieces), settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], crate::select::TOLERANCE,
+                settled.motion[0], settled.motion[1], settled.motion[2], crate::select::MOTION_TOLERANCE, paths.calibrated_over(), crate::select::CALIBRATION,
+                settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各旋钮的行误差之和 {e:.1e} 照实记进每个候选的 A")),
+                settled.motion_unmet().map_or(String::new(), |e| format!("；到顶未收敛：光子率与力的误差之和 {e:.1e}")), settled.tried, settled.seconds, paths.trace, paths.seconds
             ),
         );
         // The pilot's estimates at the request's outputs (T's drift at the end below; the candidates weighed there, 3.).

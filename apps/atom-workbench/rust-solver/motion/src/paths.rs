@@ -48,8 +48,9 @@
 //! rows over their sum as shown. (ENGFOLD's prototype took the rates and the force over the rows' sum too; the two
 //! differ by the lifted Q population. `Reading::total` holds that sum.) tr ρ_P itself is kept by every model's exact
 //! flow -- i(H − H†) = Σ J†J --, so its departure from one along a series is the scheme's (`Series::trace_defect`): a
-//! strict lower bound of the scheme's error in the trace norm, read at no cost, and a part of the setting's error
-//! (select.rs `settle`; the readings over tr ρ_P and the rows' sum hide it).
+//! strict lower bound of the unnormalized state's error in the trace norm, read at no cost -- and no reading's error:
+//! every reading is over tr ρ_P or the rows' sum, which divides it out exactly (the flow is linear; select.rs # The
+//! paths). Reported, not counted.
 //!
 //! # The motion's readings
 //! What the motion takes of the internal state, beside the rows (select.rs # The motion), each over tr ρ_P:
@@ -428,7 +429,8 @@ pub struct Series {
 impl Series {
     /// The scheme's trace defect along the series (module documentation, # The readings): the largest |tr ρ_P − 1| over
     /// its readings -- every model's generator keeps the trace (i(H − H†) = Σ J†J), so the defect is the scheme's own,
-    /// a strict lower bound of its error in the trace norm, ‖ρ_num − ρ‖₁ ≥ |tr ρ_num − 1|; none of no reading.
+    /// a strict lower bound of its error in the trace norm, ‖ρ_num − ρ‖₁ ≥ |tr ρ_num − 1|, which the readings divide out
+    /// (select.rs # The paths); none of no reading.
     pub fn trace_defect(&self) -> f64 {
         self.readings.iter().map(|r| (r.trace - 1.0).abs()).fold(0.0, larger)
     }
@@ -1193,15 +1195,7 @@ impl<'a> Form<'a> {
     pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, budget: f64) -> Result<(f64, f64, f64), String> {
         #[cfg(test)]
         let _timed = Checked::new(3);
-        let hm = self.hbar_over_mass;
-        // The Q term's share of the total heating per unit of Q there (`Reading::heating_at`: (ħ/m)/2 λ Q k̄_a² against
-        // the whole), summed over the axes as the total T sums them: what a change of Q = 2 n_ex moves in the total T's
-        // account, relative.
-        let weight = own.readings.iter().min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs())).map_or(0.0, |x| {
-            let lambda: f64 = x.rates.iter().sum();
-            let whole: f64 = x.heating(hm).iter().sum();
-            if whole > 0.0 { 0.5 * hm * lambda * x.kick.iter().map(|k| k * k).sum::<f64>() / whole } else { 0.0 }
-        });
+        let weight = self.landing_weight(t, own);
         // The most a part of the stretch can move n_ex: |λ(τ|L) − λ̄| at most the own run's largest rate there times its length.
         let most = |from: f64, to: f64| own.readings.iter().filter(|x| x.t >= from && x.t <= to).map(|x| x.rates.iter().sum::<f64>()).fold(0.0, larger) * (to - from);
         let end = own.readings.last().map_or(t + span, |x| x.t);
@@ -1227,6 +1221,46 @@ impl<'a> Form<'a> {
             (from, length) = (to, to - t);
         }
         Ok((counted, work, if change.is_finite() { change } else { 0.0 }))
+    }
+
+    /// The turns the landings' transients ask (# The landing check), read on one landing: a landing starts from a ground
+    /// state the light drives hard, its opening (# The start) resolved by the setting's turns, which the setting's ladder
+    /// read on the walks' own starts, where no such transient is (select.rs # The paths). From the knobs' `knobs` turns,
+    /// the landing's first part -- the transient's; the later parts run at the walk's spacing past it -- is run at twice
+    /// the turns while the last doubling moved the Q term (2 Δn times its weight in the total T's account) by more than
+    /// the budget: the turns, the last doubling's change of n_ex (booked with every landing's) and the counted work.
+    /// Nothing is held where the Q term moves nothing of T's account (weight 0). One landing reads them for all, as the
+    /// calibration's walk reads the setting for every path. (R9_PUSH's reference at 32 substeps a µs and 16 pieces read
+    /// Q −1573 at one substep a turn, −0.061 at two, its rows and rates the same within 4e-3: REGRESS, 2026-11-23.)
+    #[allow(clippy::too_many_arguments)]
+    pub fn landing_turns(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, budget: f64) -> Result<(f64, f64, f64), String> {
+        let weight = self.landing_weight(t, own);
+        let (mut turns, rate, cutoff) = knobs;
+        let end = own.readings.last().map_or(t + span, |x| x.t);
+        let first = (t + span).min(end);
+        let (mut photons, mut work, _) = self.landing_part(walk, t, t, first, self.from_ground(landed), decay, (turns, rate, cutoff), own)?;
+        let mut resolved = 0.0;
+        while weight > 0.0 && turns < crate::select::FINEST.turns {
+            let (finer, spent, _) = self.landing_part(walk, t, t, first, self.from_ground(landed), decay, (2.0 * turns, rate, cutoff), own)?;
+            (turns, work, resolved) = (2.0 * turns, work + spent, (finer - photons).abs());
+            photons = finer;
+            if 2.0 * resolved * weight <= budget {
+                break;
+            }
+        }
+        Ok((turns, resolved, work))
+    }
+
+    /// The Q term's share of the total heating per unit of Q at the time t on the own run `own` (`Reading::heating_at`:
+    /// (ħ/m)/2 λ Q k̄_a² against the whole), summed over the axes as the total T sums them: what a change of Q = 2 n_ex
+    /// moves in the total T's account, relative (`landing`, `landing_turns`).
+    fn landing_weight(&self, t: f64, own: &Series) -> f64 {
+        let hm = self.hbar_over_mass;
+        own.readings.iter().min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs())).map_or(0.0, |x| {
+            let lambda: f64 = x.rates.iter().sum();
+            let whole: f64 = x.heating(hm).iter().sum();
+            if whole > 0.0 { 0.5 * hm * lambda * x.kick.iter().map(|k| k * k).sum::<f64>() / whole } else { 0.0 }
+        })
     }
 
     /// A part [from, to] of a landing's stretch from t (`landing`): from the state `state` there, its excess photons over
