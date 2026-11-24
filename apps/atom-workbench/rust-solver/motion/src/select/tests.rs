@@ -157,7 +157,7 @@ fn select_the_memory_flag_by_hand() {
 /// setting stopped at `FINEST` -- book their whole sum.
 #[test]
 fn select_the_ladder_top_by_hand() {
-    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, motion: [0.0; KNOBS], motion_tolerance: crate::select::motion_tolerance(0.1), runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, work: 0.0, seconds: 0.0 };
+    let settled = |errors: [f64; KNOBS]| Settled { setting: FINEST, opening: 1.0, errors, motion: [0.0; KNOBS], runs: vec![FINEST], pairs: [(0, 0); KNOBS], tried: 1, products: 0, work: 0.0, seconds: 0.0 };
     assert_eq!(settled([0.25 * TOLERANCE, 0.5 * TOLERANCE, 0.125 * TOLERANCE, 0.0]).unmet(), None);
     assert_eq!(settled([TOLERANCE, 0.5 * TOLERANCE, 0.0, 0.0]).unmet(), Some(1.5 * TOLERANCE));
 }

@@ -93,9 +93,8 @@
 //! What the setting is held to is what the judgment reads (module documentation, # The motion): the displayed rows,
 //! each knob's part the largest change of a row, against `TOLERANCE`; and the motion's readings -- the photon rate,
 //! which the heating and the energy rates of the loss's x scale with, and the force --, each knob's part the largest
-//! change of each over its own largest size along the stretch, against s⁴ of T's relative allowance √(ε_T² + (T_sc/T)²)
-//! at the run's tightest output, T at its upper end, as the rows' is s⁴ of the population target (`motion_change`,
-//! `motion_tolerance`: R2_RECOIL's T 41.7 µK, T_sc 10.9 µK, 1.1e-2). The setting stands where both sums are within; else the knob
+//! change of each over its own largest size along the stretch, against `MOTION_TOLERANCE`, s⁴ of T's target as the
+//! rows' is of the population target (`motion_change`). The setting stands where both sums are within; else the knob
 //! doubled is the one of the most error per work -- each part over its tolerance, over the counted work of the run at
 //! that knob's doubling, the setting the next family runs at (the cutoff where its bound is the largest part: raising it
 //! runs nothing until then). The knobs interact: a longer piece leaves more of H's change to the substeps, so on
@@ -290,14 +289,9 @@ pub const TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * P
 
 /// The paths' scheme's tolerance on the motion's readings (module documentation, # The paths): the largest change of
 /// the photon rate and of the force over their largest sizes along the stretch the reference may take from the scheme's
-/// setting, at T's relative allowance `allowance` (estimate.rs `allowance`, √(ε_T² + (T_sc/T)²): the run's tightest over
-/// its outputs, solve.rs `choose_on_the_pilot`) -- s⁴ of it, as `TOLERANCE` is s⁴ of the population target. A relative
-/// change ε of the rate moves the heating by ε of itself and T by at most ε T (the heated part of T is at most T; where
-/// heating and cooling balance, T scales with the heating), so ε ≤ s⁴ δT/T at every output holds T's share. At least s⁴
-/// ε_T = 4.0e-3 at p = 2: the allowance is never below ε_T.
-pub fn motion_tolerance(allowance: f64) -> f64 {
-    STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * if allowance.is_finite() { larger(allowance, TEMPERATURE_TARGET) } else { TEMPERATURE_TARGET }
-}
+/// setting -- s⁴ of T's relative target, as `TOLERANCE` is of the population target and the landing check's budget of
+/// T's (solve.rs `choose_on_the_pilot`): 4.0e-3 at p = 2.
+pub const MOTION_TOLERANCE: f64 = STEP_SHARE * STEP_SHARE * STEP_SHARE * STEP_SHARE * TEMPERATURE_TARGET;
 
 /// A setting of the paths' scheme (module documentation, # The paths): the substeps a turn of the fastest coherence over
 /// a stretch's opening, the substeps a µs after it (paths.rs, # The start), and the pieces a µs (each knot interval in
@@ -652,10 +646,8 @@ pub struct Settled {
     pub setting: Setting,
     pub opening: f64,
     pub errors: [f64; KNOBS],
-    /// The motion's readings' parts per knob (`motion_change`; none of the cutoff), and their tolerance
-    /// (`motion_tolerance`).
+    /// The motion's readings' parts per knob (`motion_change`; none of the cutoff), against `MOTION_TOLERANCE`.
     pub motion: [f64; KNOBS],
-    pub motion_tolerance: f64,
     pub runs: Vec<Setting>,
     pub pairs: [(usize, usize); KNOBS],
     pub tried: usize,
@@ -674,11 +666,11 @@ impl Settled {
         (sum > TOLERANCE).then_some(sum)
     }
 
-    /// Where the setting stopped at `FINEST` with the motion's readings' parts beyond their tolerance: their sum,
+    /// Where the setting stopped at `FINEST` with the motion's readings' parts beyond `MOTION_TOLERANCE`: their sum,
     /// said in the choice's report (`FINEST` is a bound on the work no scene has reached); none where they met it.
     pub fn motion_unmet(&self) -> Option<f64> {
         let sum: f64 = self.motion.iter().sum();
-        (sum > self.motion_tolerance).then_some(sum)
+        (sum > MOTION_TOLERANCE).then_some(sum)
     }
 
     /// The ladder's second stage after its first (`settle`): the second's setting and parts, the two's work together.
@@ -706,10 +698,9 @@ fn refinements(setting: Setting, own: &dyn Fn(Setting) -> Setting) -> (Vec<Setti
 
 
 /// `settle`'s ladder along the walk's stretch of `piece` µs from `begin` (from the walk's own start state there) from the
-/// setting `from` (raised to its own floors: one piece a step, one substep a piece), the motion's readings held to
-/// `motion_tolerance`.
+/// setting `from` (raised to its own floors: one piece a step, one substep a piece).
 #[allow(clippy::too_many_arguments)]
-fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting, motion_tolerance: f64) -> Result<(Settled, Vec<Vec<Series>>), String> {
+fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, starts: &[(&Walk, f64)], from: Setting) -> Result<(Settled, Vec<Vec<Series>>), String> {
     let clock = Instant::now();
     // A family of settings' runs, each model's (paths.rs `Form::along_family`: each node made once for them all): per
     // setting the models' series.
@@ -763,14 +754,14 @@ fn ladder(forms: &[&Form], walk: &Walk, begin: f64, piece: f64, step: f64, start
             eprintln!("    [trace] settle {setting:?}: parts {:?}, motion {:?}, trace {:.2e}", errors.map(|e| format!("{e:.2e}")), motion.map(|e| format!("{e:.2e}")), series[0].iter().map(Series::trace_defect).fold(0.0, larger));
         }
         let open: [bool; KNOBS] = std::array::from_fn(|k| setting.open(k));
-        if (errors.iter().sum::<f64>() <= TOLERANCE && motion.iter().sum::<f64>() <= motion_tolerance) || !open.iter().any(|&o| o) {
+        if (errors.iter().sum::<f64>() <= TOLERANCE && motion.iter().sum::<f64>() <= MOTION_TOLERANCE) || !open.iter().any(|&o| o) {
             let opening = series[0][0].counts.opening;
-            return Ok((Settled { setting, opening, errors, motion, motion_tolerance, runs, pairs, tried, products, work: counted, seconds: clock.elapsed().as_secs_f64() }, series));
+            return Ok((Settled { setting, opening, errors, motion, runs, pairs, tried, products, work: counted, seconds: clock.elapsed().as_secs_f64() }, series));
         }
         // The knob to double (module documentation, # The paths): each part over its tolerance; the cutoff where its bound
         // is the largest (raising it runs nothing until the next family), else the run knob of the most error per the
         // work of the run at its doubling -- the next family runs at that setting.
-        let part = |k: usize| larger(errors[k] / TOLERANCE, motion[k] / motion_tolerance);
+        let part = |k: usize| larger(errors[k] / TOLERANCE, motion[k] / MOTION_TOLERANCE);
         let largest = (0..KNOBS).filter(|&k| open[k]).max_by(|&a, &b| part(a).total_cmp(&part(b))).expect("an open knob");
         let cost = |k: usize| larger(series[1 + k].iter().map(|s| s.counts.work).sum::<f64>(), f64::MIN_POSITIVE);
         let k = if largest == RUN_KNOBS { largest } else { (0..RUN_KNOBS).filter(|&k| open[k]).max_by(|&a, &b| (part(a) / cost(a)).total_cmp(&(part(b) / cost(b)))).unwrap_or(largest) };
@@ -841,8 +832,7 @@ impl<'a> Paths<'a> {
     /// the scheme's setting along the longest walk's [0, L] (`settle`; the first such where several are), and the
     /// reference along the walks at it -- the other walks' on the pool beside the setting's second stage, at the first
     /// stage's setting, and again where the second stage moved it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, landing_budget: f64, motion_tolerance: f64) -> Result<Paths<'a>, String> {
+    pub fn new(reference: &'a Selected, at: V3, walks: Vec<Walk>, memory: f64, run: f64, step: f64, landing_budget: f64) -> Result<Paths<'a>, String> {
         let clock = Instant::now();
         let form = Form::new(reference, at);
         let length = run.min(5.0 * memory);
@@ -911,9 +901,9 @@ impl<'a> Paths<'a> {
         };
         // The setting (`settle`): its first stage, then its second beside the other walks at the first stage's setting.
         let piece = CALIBRATION.min(stretch);
-        let (first, at) = ladder(&[&form], &walks[longest], 0.0, piece, step, &starts, COARSEST, motion_tolerance)?;
+        let (first, at) = ladder(&[&form], &walks[longest], 0.0, piece, step, &starts, COARSEST)?;
         let (settled, calibrated, done) = if stretch > piece {
-            let (whole, done) = rayon::join(|| ladder(&[&form], &walks[longest], 0.0, stretch, step, &starts, first.setting, motion_tolerance), || others(first.setting));
+            let (whole, done) = rayon::join(|| ladder(&[&form], &walks[longest], 0.0, stretch, step, &starts, first.setting), || others(first.setting));
             let (whole, at) = whole?;
             let done = if whole.setting == first.setting { done } else { others(whole.setting) };
             (whole.after(&first), at, done)
