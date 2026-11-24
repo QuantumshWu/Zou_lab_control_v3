@@ -10,7 +10,9 @@
 //! # Result contract
 //! `states`, `timesUs`, `populations` (the held atom's, each row projected onto the probability simplex as the population
 //! core's are), `populationAccuracy` against the method's own target (`POPULATION_TARGET`: each sample's total estimated
-//! error, the solve's `estimated_errors`, grown by its row's projection; `reason` where some sample exceeds it),
+//! error, the solve's `estimated_errors`, grown by its row's projection; its state the engine's verdict, `beyond` the
+//! samples the statistics' evidence over all the outputs together puts beyond the target, with `reason`, where there is
+//! one -- an output's estimate may read above the target and be within it by that evidence, and is not marked),
 //! `diagnostics` (`engine`, `traceError` and `initialStateError` of the rows before the projection, `elapsedMs`, `method`,
 //! `device`, `deviceNote`, `approximations`: the ledger -- `totals`, `items`, `flagged`, `note` --, and on a checkpoint
 //! `estimatedRemainingMs`), and `motion`, read by `readMotionResult` in src/solver-types.ts: per lab axis T, its standard
@@ -21,7 +23,7 @@
 //! trajectories and the run's step. The ledger's totals hold the populations', T's, the mean velocity's (m/s) and the
 //! push's (m/s²). Every output but the loss describes the atom still held.
 use crate::{lattice_core_adapter, Device, Model, Options};
-use atom_motion::ledger::{percent, Ledger, Total};
+use atom_motion::ledger::{Ledger, Total};
 use atom_motion::request::{Request, STATES};
 use atom_motion::solve::{self as engine, Distributions, Message, Solution, Stage, Step, POPULATION_TARGET};
 use atom_population_core::lattice::accuracy;
@@ -89,7 +91,10 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
         })
         .collect();
     let estimated = errors.iter().fold(0_f64, |a, &b| a.max(b));
-    let converged = estimated <= POPULATION_TARGET;
+    // The state is the engine's verdict (solve.rs `Solution::beyond`, the stop's and the ledger's one test: by the
+    // statistics' evidence over all the outputs together), not the largest error as shown: an output whose estimate reads
+    // above the target can be within it by that evidence, and one beyond it is flagged in the ledger.
+    let converged = solution.beyond.is_empty();
     let mut result = json!({"states": request.states, "timesUs": times, "populations": populations,
         "populationAccuracy": {"status": if converged {"estimated-converged"} else {"estimated-partial"}, "requestedTolerance": POPULATION_TARGET,
             "sampleErrors": errors, "estimatedMaximumError": estimated,
@@ -109,10 +114,8 @@ fn result(request: &Request, initial: &[f64], solution: &Solution, groups: &[lat
         result["diagnostics"]["deviceNote"] = json!(GPU_ABSENT);
     }
     if !converged {
-        result["populationAccuracy"]["reason"] = json!(solution
-            .reason
-            .clone()
-            .unwrap_or_else(|| format!("估计误差 {}，超过目标 {}（含把布居的负值去掉、总和归一所作的改动）", percent(estimated), percent(POPULATION_TARGET))));
+        result["populationAccuracy"]["beyond"] = json!(solution.beyond);
+        result["populationAccuracy"]["reason"] = json!(solution.reason.clone().ok_or("引擎判出有输出超出目标，却没有说明原因（引擎的缺陷）")?);
     }
     if let Some(remaining) = remaining {
         result["progress"] = json!(true);
