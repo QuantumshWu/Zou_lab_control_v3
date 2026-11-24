@@ -2916,7 +2916,11 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
         // share's convention, units.rs `STEP_SHARE`); the tightest possible, 0.1, where no T is read.
         let tightest = read.estimates.iter().filter(|e| e.motion.is_some()).map(|e| e.temperature_target).fold(f64::INFINITY, crate::linalg::smaller);
         let landing_budget = 0.5 * STEP_SHARE.powi(4) * if tightest.is_finite() { tightest } else { 0.1 };
-        let paths = Paths::new(&full, centre, walked, memory, length, tau, landing_budget)?;
+        // The paths' tolerance on the motion's readings (select.rs `motion_tolerance`): s⁴ of T's relative allowance at
+        // the tightest output, T at its upper end (its point plus the confidence's multiple of its spread: the allowance
+        // falls as T grows); ε_T's where no T is read.
+        let upper = read.estimates.iter().filter_map(|e| e.motion.map(|m| allowance(m.temperature_total + CONFIDENCE * m.temperature_total_error.error, e.scale))).fold(f64::INFINITY, crate::linalg::smaller);
+        let paths = Paths::new(&full, centre, walked, memory, length, tau, landing_budget, crate::select::motion_tolerance(upper))?;
         let settled = &paths.settled;
         noted(
             &mut report,
@@ -2924,7 +2928,7 @@ fn choose_on_the_pilot(request: &Request, setting: &Setting, context: &Context, 
                 "路径：{} 条先导路径，L = {:.1} µs（τ_mem {:.3} µs，各路径起点上最长），{} 个窗{}；格式 指数 Runge–Kutta：开头（{:.2} µs，起点的光学相干衰减到舍入）最快的模（转动加衰减）每转 {} 个子步（只分辨到 {:.0} rad/µs，更快的按严格界记账）、其后每 µs {:.1} 个，每 µs {:.1} 段（每步 {} 段；按误差定：参照的行误差 开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e} + 开头记账 {:.1e}，容差 {:.1e}；光子率与力的误差（各按沿路径的最大值）开头子步 {:.1e} + 其后子步 {:.1e} + 分段 {:.1e}，容差 {:.1e}（最长一条路径全长 {:.1} µs 上，先在前 {} µs 上爬梯）{}{}；试了 {} 种设置，{:.1} s）；参照沿全部路径的最大迹偏差 {:.1e}（读数都除以迹：只报告，不计入）；参照 32 态 {:.1} s",
                 paths.walks.len(), paths.length, memory, paths.windows.len(), paths.late_from().map_or(String::new(), |f| format!("，另有运行末的一段 [{f:.0}, {length}] µs")),
                 settled.opening, settled.setting.turns, settled.setting.cutoff, settled.setting.rate, settled.setting.pieces, crate::paths::pieces_in(0.0, tau, settled.setting.pieces), settled.errors[0], settled.errors[1], settled.errors[2], settled.errors[3], crate::select::TOLERANCE,
-                settled.motion[0], settled.motion[1], settled.motion[2], crate::select::MOTION_TOLERANCE, paths.calibrated_over(), crate::select::CALIBRATION,
+                settled.motion[0], settled.motion[1], settled.motion[2], settled.motion_tolerance, paths.calibrated_over(), crate::select::CALIBRATION,
                 settled.unmet().map_or(String::new(), |e| format!("；到顶未收敛：各旋钮的行误差之和 {e:.1e} 照实记进每个候选的 A")),
                 settled.motion_unmet().map_or(String::new(), |e| format!("；到顶未收敛：光子率与力的误差之和 {e:.1e}")), settled.tried, settled.seconds, paths.trace, paths.seconds
             ),
