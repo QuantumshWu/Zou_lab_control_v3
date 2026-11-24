@@ -271,6 +271,15 @@ fn oldnew_solve() {
     }
     eprintln!("OLDNEW-FLAG {name}: {}", ledger.flagged.as_deref().unwrap_or("(none)"));
     eprintln!(
+        "OLDNEW-STATUS {name}: {} (beyond {:?}; the largest shown error {:.4e} against {}), reason {:?}, the population flagged {}",
+        if solution.beyond.is_empty() { "converged" } else { "partial" },
+        solution.beyond,
+        solution.estimated_errors.iter().copied().fold(0.0, f64::max),
+        crate::units::POPULATION_TARGET,
+        solution.reason,
+        ledger.flagged.as_deref().is_some_and(|f| f.contains("布居与丢失"))
+    );
+    eprintln!(
         "OLDNEW-ERRORS {name}: the shown error at the outputs, its largest {:.4e} at output {}, mean {:.4e}; T's error bars at the end {:?}",
         solution.estimated_errors.iter().copied().fold(0.0, f64::max),
         solution.estimated_errors.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |x| x.0),
