@@ -1189,6 +1189,13 @@ impl<'a> Form<'a> {
     /// interpolated linearly between the walk's knots): the excess photons n_ex = ∫(λ(τ|L) − λ̄)dτ by the trapezoid, the
     /// stretch's counted work (`Counts::work`) and the last doubling's change of n_ex (booked). Err where the state is not
     /// the form's.
+    ///
+    /// The landing's transient is an opening (# The start) from the landed state, resolved by the setting's turns -- which
+    /// the setting's ladder read on the walks' own starts, where the start holds no such transient (select.rs # The
+    /// paths) --; so the check holds them itself on its first part, where the transient is (the later parts run at the
+    /// walk's spacing, past it): the turns doubled while the last doubling moved the Q term by more than the budget, that
+    /// doubling's change booked with the span's. (R9_PUSH's reference at one substep a turn read Q −1573, at two −0.061,
+    /// its rows and rates the same within 4e-3: REGRESS, 2026-11-23.)
     #[allow(clippy::too_many_arguments)]
     pub fn landing(&self, walk: &Walk, t: f64, landed: &[[C64; GROUND]; GROUND], span: f64, decay: f64, knobs: (f64, f64, f64), own: &Series, budget: f64) -> Result<(f64, f64, f64), String> {
         #[cfg(test)]
@@ -1205,28 +1212,42 @@ impl<'a> Form<'a> {
         // The most a part of the stretch can move n_ex: |λ(τ|L) − λ̄| at most the own run's largest rate there times its length.
         let most = |from: f64, to: f64| own.readings.iter().filter(|x| x.t >= from && x.t <= to).map(|x| x.rates.iter().sum::<f64>()).fold(0.0, larger) * (to - from);
         let end = own.readings.last().map_or(t + span, |x| x.t);
+        // The first part at the turns its transient asks (where the Q term moves T's account at all).
+        let (mut turns, rate, cutoff) = knobs;
+        let first = (t + span).min(end);
+        let (mut more, mut work, mut state) = self.landing_part(walk, t, t, first, self.from_ground(landed), decay, (turns, rate, cutoff), own)?;
+        let mut resolved = 0.0;
+        while weight > 0.0 && turns < crate::select::FINEST.turns {
+            turns *= 2.0;
+            let (finer, spent, last) = self.landing_part(walk, t, t, first, self.from_ground(landed), decay, (turns, rate, cutoff), own)?;
+            let moved = (finer - more).abs();
+            (more, work, state, resolved) = (finer, work + spent, last, moved);
+            if 2.0 * moved * weight <= budget {
+                break;
+            }
+        }
+        let knobs = (turns, rate, cutoff);
         // A part's change is read as Q's (2 Δn); the budget is the share of the total T's target its account may take.
-        let (mut counted, mut work, mut state) = (0.0, 0.0, self.from_ground(landed));
-        let (mut from, mut length, mut change) = (t, span, f64::INFINITY);
+        let mut counted = more;
+        let (mut from, mut length, mut change) = (first, first - t, f64::INFINITY);
         loop {
-            let to = (from + length).min(end);
-            let (part, spent, last) = self.landing_part(walk, t, from, to, state, decay, knobs, own)?;
-            (state, work) = (last, work + spent);
-            let more = part;
-            counted += more;
             // Doubled while the last doubling moved the Q term by more than its budget (`budget`: a share of the total T's
             // relative target) and the own run reads further -- not at all where the whole rest of the run cannot move it so
             // much (`most`, a strict bound, booked so: the reference's, whose jumps carry next to nothing of the absorbed
             // light) --; else the last doubling's change is booked (`Landing::photons_error`).
-            let cannot = 2.0 * most(to, end) * weight <= budget;
-            let stands = (from > t && 2.0 * more.abs() * weight <= budget) || cannot;
-            change = if cannot { most(to, end) } else if from > t { more.abs() } else { change };
-            if stands || !(to < end) {
+            let cannot = 2.0 * most(from, end) * weight <= budget;
+            let stands = (from > first && 2.0 * more.abs() * weight <= budget) || cannot;
+            change = if cannot { most(from, end) } else if from > first { more.abs() } else { change };
+            if stands || !(from < end) {
                 break;
             }
+            let to = (from + length).min(end);
+            let (part, spent, last) = self.landing_part(walk, t, from, to, state, decay, knobs, own)?;
+            (state, work, more) = (last, work + spent, part);
+            counted += more;
             (from, length) = (to, to - t);
         }
-        Ok((counted, work, if change.is_finite() { change } else { 0.0 }))
+        Ok((counted, work, larger(if change.is_finite() { change } else { 0.0 }, resolved)))
     }
 
     /// A part [from, to] of a landing's stretch from t (`landing`): from the state `state` there, its excess photons over
